@@ -1274,7 +1274,7 @@ grant execute on function identity.clinician_signup_open(),
   to hid_identity_runtime, hid_schema_test_runtime;
 grant execute on function identity.admin_list_clinician_applications(text, timestamptz, uuid, integer),
   identity.admin_get_clinician_application(uuid),
-  identity.admin_clinician_application_account(uuid),
+  identity.admin_clinician_application_attest_precheck(uuid, bigint),
   identity.admin_clinician_application_prior(text, text, character),
   identity.admin_attest_clinician_application(uuid, bigint, timestamptz, text, jsonb, uuid, text, text, character),
   identity.admin_approve_clinician_application(uuid, bigint, text, text, character),

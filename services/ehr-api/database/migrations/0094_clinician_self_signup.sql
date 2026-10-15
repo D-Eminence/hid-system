@@ -2414,9 +2414,15 @@ begin
 end
 $$;
 
--- The applicant account of an application, for Identity's authenticator check
--- before step 1.
-create function identity.admin_clinician_application_account(requested_application_id uuid)
+-- The step-1 pre-check, before Identity checks the applicant's live code: it
+-- refuses whatever step 1 (C20) would refuse, in C20's order and with C20's
+-- markers, so a call that would be refused anyway never reaches the
+-- applicant's authenticator or failure budget (a wrong code counts against
+-- the applicant). It names the applicant's account otherwise. A read only:
+-- Identity calls it again after taking both account locks, and C20 checks
+-- everything again under them.
+create function identity.admin_clinician_application_attest_precheck(requested_application_id uuid,
+  expected_version bigint)
 returns uuid
 language plpgsql
 stable
@@ -2425,14 +2431,39 @@ set search_path = pg_catalog, identity, auth, platform, audit, pg_temp
 as $$
 declare
   actor_account uuid := identity.workforce_command_actor();
-  applicant uuid;
+  application identity.clinician_applications%rowtype;
+  facility_row identity.facilities%rowtype;
 begin
-  select application.account_id into applicant from identity.clinician_applications application
-   where application.id = requested_application_id;
-  if applicant is null then
+  if requested_application_id is null or expected_version is null then
+    raise exception using errcode = '22023', message = 'CLINICIAN_APPLICATION_COMMAND_INVALID';
+  end if;
+  perform identity.workforce_require_assurance(actor_account);
+  select * into application from identity.clinician_applications row_read where row_read.id = requested_application_id;
+  if not found then
     raise exception using errcode = 'P0002', message = 'CLINICIAN_APPLICATION_NOT_FOUND';
   end if;
-  return applicant;
+  if application.account_id = actor_account then
+    raise exception using errcode = '42501', message = 'WORKFORCE_SELF_CHANGE_DENIED';
+  end if;
+  if application.row_version <> expected_version then
+    raise exception using errcode = '40001', message = 'ADMIN_VERSION_CONFLICT';
+  end if;
+  if identity.clinician_application_displayed_state(application.state, application.expires_at) <> 'submitted' then
+    raise exception using errcode = '23514', message = 'CLINICIAN_APPLICATION_STATE_INVALID';
+  end if;
+  if identity.clinician_application_identity_refused(application.account_id) then
+    raise exception using errcode = '23514', message = 'CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE';
+  end if;
+  select * into facility_row from identity.facilities facility where facility.id = application.facility_id;
+  if facility_row.lifecycle_status <> 'verified' or not facility_row.active
+     or not exists (select 1 from identity.organizations organization
+                     where organization.id = facility_row.organization_id and organization.active) then
+    raise exception using errcode = '23514', message = 'WORKFORCE_FACILITY_NOT_VERIFIED';
+  end if;
+  if identity.workforce_works_at(actor_account, facility_row.id) then
+    raise exception using errcode = '42501', message = 'WORKFORCE_FACILITY_CONFLICT';
+  end if;
+  return application.account_id;
 end
 $$;
 
@@ -2860,7 +2891,7 @@ revoke all on function identity.clinician_signup_open(),
   identity.prune_clinician_application_artifacts(),
   identity.admin_list_clinician_applications(text, timestamptz, uuid, integer),
   identity.admin_get_clinician_application(uuid),
-  identity.admin_clinician_application_account(uuid),
+  identity.admin_clinician_application_attest_precheck(uuid, bigint),
   identity.admin_clinician_application_prior(text, text, character),
   identity.admin_attest_clinician_application(uuid, bigint, timestamptz, text, jsonb, uuid, text, text, character),
   identity.admin_approve_clinician_application(uuid, bigint, text, text, character),

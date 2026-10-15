@@ -52,7 +52,10 @@ interface AuditEvent { action: string; resourceType: string; resourceId: string;
  * approver is not the step-1 administrator; the grant is pinned to step 1's
  * attestation). Step 1 also verifies a live code from the applicant's own
  * authenticator in that transaction; a refused code is committed (it counts
- * against the applicant's 0088 failure budget) and then answered. A new
+ * against the applicant's 0088 failure budget) and then answered. So before
+ * the code, step 1 refuses whatever it would refuse anyway (the pre-check),
+ * and, under both account locks, answers a concurrent request with the same
+ * Idempotency-Key from its stored answer and checks the application again. A new
  * command (not a replay) writes its platform-scoped audit events in the same
  * transaction.
  */
@@ -133,24 +136,23 @@ export class ClinicianApplicationAdminService {
     const outcome = await this.database.withTransaction(context, async (client) => {
       try {
         await requirePlatformAssurance(client, context, action);
-        const prior = (await client.query<{ prior: Record<string, unknown> | null }>(
-          'select identity.admin_clinician_application_prior($1, $2, $3) as prior',
-          ['workforce.clinician-application.attest', idempotencyKey, digest])).rows[0]?.prior;
-        if (prior) {
-          return { kind: 'answered', answer: this.attestAnswer({ application_id: String(prior.applicationId),
-            state: String(prior.state), attestation_id: String(prior.attestationId),
-            valid_until: String(prior.validUntil), application_version: Number(prior.applicationVersion),
-            account_id: String(prior.accountId), facility_id: String(prior.facilityId),
-            role_code: String(prior.roleCode), replayed: true }) } as const;
-        }
-        const applicant = (await client.query<{ account_id: string | null }>(
-          'select identity.admin_clinician_application_account($1)::text as account_id', [applicationId]))
-          .rows[0]?.account_id;
-        if (!applicant) throw this.unavailable();
+        const replay = await this.attestReplay(client, idempotencyKey, digest);
+        if (replay) return replay;
+        // Whatever step 1 would refuse is refused here, before the applicant's
+        // code is checked: a wrong code counts against the applicant.
+        const applicant = await this.attestPrecheck(client, applicationId, expectedVersion);
         if (applicant === context.actor.accountId) {
           throw new DomainProblem(403, 'WORKFORCE_SELF_CHANGE_DENIED',
             'Administrators cannot provision their own facility access');
         }
+        // Under both account locks, again: a request with this key that
+        // committed while this one waited is answered from its stored answer,
+        // and an application that changed meanwhile is refused, before any code.
+        await this.mfa.lockApplicantReview(client, { applicantAccountId: applicant,
+          actorAccountId: context.actor.accountId! });
+        const concurrent = await this.attestReplay(client, idempotencyKey, digest);
+        if (concurrent) return concurrent;
+        await this.attestPrecheck(client, applicationId, expectedVersion);
         const confirmation = await this.mfa.confirmApplicantFactor(client,
           { applicantAccountId: applicant, actorAccountId: context.actor.accountId! }, input.authenticatorCode, event);
         if (confirmation.kind !== 'confirmed') return { kind: 'refused', refusal: confirmation.kind } as const;
@@ -232,6 +234,28 @@ export class ClinicianApplicationAdminService {
           version: Number(row.application_version), replayed: row.replayed };
       } catch (error) { throw adminCommandError(error); }
     });
+  }
+
+  /** C19: the stored answer of an earlier step 1 with this key, as a replay. */
+  private async attestReplay(client: PoolClient, idempotencyKey: string, digest: string) {
+    const prior = (await client.query<{ prior: Record<string, unknown> | null }>(
+      'select identity.admin_clinician_application_prior($1, $2, $3) as prior',
+      ['workforce.clinician-application.attest', idempotencyKey, digest])).rows[0]?.prior;
+    if (!prior) return null;
+    return { kind: 'answered', answer: this.attestAnswer({ application_id: String(prior.applicationId),
+      state: String(prior.state), attestation_id: String(prior.attestationId),
+      valid_until: String(prior.validUntil), application_version: Number(prior.applicationVersion),
+      account_id: String(prior.accountId), facility_id: String(prior.facilityId),
+      role_code: String(prior.roleCode), replayed: true }) } as const;
+  }
+
+  /** The step-1 pre-check: C20's refusals before any code is checked; the applicant's account otherwise. */
+  private async attestPrecheck(client: PoolClient, applicationId: string, expectedVersion: number): Promise<string> {
+    const applicant = (await client.query<{ account_id: string | null }>(
+      'select identity.admin_clinician_application_attest_precheck($1, $2)::text as account_id',
+      [applicationId, expectedVersion])).rows[0]?.account_id;
+    if (!applicant) throw this.unavailable();
+    return applicant;
   }
 
   private attestAnswer(row: AttestRow) {

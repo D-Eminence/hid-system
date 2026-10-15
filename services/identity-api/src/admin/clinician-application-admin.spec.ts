@@ -77,7 +77,8 @@ function harness(commands: Record<string, Command>, confirmation: unknown = { ki
     return result;
   }) };
   const audit = { recordWithClient: jest.fn(async (_client: unknown, _event: unknown) => { order.push('audit'); }) };
-  const mfa = { confirmApplicantFactor: jest.fn(async () => { order.push('confirm'); return confirmation; }) };
+  const mfa = { confirmApplicantFactor: jest.fn(async () => { order.push('confirm'); return confirmation; }),
+    lockApplicantReview: jest.fn(async () => { order.push('lock'); }) };
   const service = new ClinicianApplicationAdminService(database as unknown as DatabaseService,
     audit as unknown as AuditService, mfa as unknown as MfaService);
   return { service, order, statements, audit, mfa, transactions };
@@ -175,19 +176,28 @@ describe('the command DTOs', () => {
 describe('step 1 (attest)', () => {
   const commands = (prior: unknown = null) => ({
     'admin_clinician_application_prior': rows({ prior }),
-    'admin_clinician_application_account': rows({ account_id: APPLICANT }),
+    'admin_clinician_application_attest_precheck': rows({ account_id: APPLICANT }),
     'admin_attest_clinician_application': rows(attestRow),
   });
+  const stored = { applicationId: APPLICATION, state: 'under_review', attestationId: ATTESTATION,
+    validUntil: '2027-06-30T22:59:59+00:00', applicationVersion: 4, accountId: APPLICANT, facilityId: FACILITY,
+    roleCode: 'doctor' };
+  const marked = (message: string) => () => { throw Object.assign(new Error(message), { code: 'P0001' }); };
 
-  it('checks the session, probes for a replay, confirms the live code, attests and audits twice, in one transaction', async () => {
+  it('checks the session, probes for a replay, pre-checks, takes both account locks, probes and pre-checks again, confirms the live code, attests and audits twice, in one transaction', async () => {
     const h = harness(commands());
     const answer = await h.service.attest(context, APPLICATION, 3, attestInput, KEY, event);
     expect(answer).toEqual({ applicationId: APPLICATION, state: 'under_review', attestationId: ATTESTATION,
       attestedRoles: ['doctor'], verificationMethod: 'manual_review', validUntil: '2027-06-30T22:59:59.000Z',
       version: 4, replayed: false });
-    expect(h.order).toEqual(['assurance', 'admin_clinician_application_prior', 'admin_clinician_application_account',
-      'confirm', 'admin_attest_clinician_application', 'audit', 'audit']);
+    expect(h.order).toEqual(['assurance', 'admin_clinician_application_prior',
+      'admin_clinician_application_attest_precheck', 'lock', 'admin_clinician_application_prior',
+      'admin_clinician_application_attest_precheck', 'confirm', 'admin_attest_clinician_application', 'audit', 'audit']);
     expect(h.transactions).toHaveLength(1);
+    expect(h.mfa.lockApplicantReview).toHaveBeenCalledWith(expect.anything(),
+      { applicantAccountId: APPLICANT, actorAccountId: context.actor.accountId });
+    expect(h.statements.filter(({ sql }) => sql.includes('admin_clinician_application_attest_precheck'))
+      .map(({ values }) => values)).toEqual([[APPLICATION, 3], [APPLICATION, 3]]);
     expect(h.mfa.confirmApplicantFactor).toHaveBeenCalledWith(expect.anything(),
       { applicantAccountId: APPLICANT, actorAccountId: context.actor.accountId }, '123456', event);
     const { authenticatorCode: _code, ...withoutCode } = attestInput;
@@ -211,9 +221,7 @@ describe('step 1 (attest)', () => {
   });
 
   it('answers a replay from the stored answer without checking a code or auditing', async () => {
-    const h = harness(commands({ applicationId: APPLICATION, state: 'under_review', attestationId: ATTESTATION,
-      validUntil: '2027-06-30T22:59:59+00:00', applicationVersion: 4, accountId: APPLICANT, facilityId: FACILITY,
-      roleCode: 'doctor' }));
+    const h = harness(commands(stored));
     const answer = await h.service.attest(context, APPLICATION, 3, { ...attestInput, authenticatorCode: '999999' }, KEY, event);
     expect(answer).toMatchObject({ applicationId: APPLICATION, replayed: true, version: 4, attestedRoles: ['doctor'] });
     expect(h.order).toEqual(['assurance', 'admin_clinician_application_prior']);
@@ -233,6 +241,51 @@ describe('step 1 (attest)', () => {
     expect(h.transactions).toEqual([{ settled: true }]);
     expect(h.order).not.toContain('admin_attest_clinician_application');
     expect(h.audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['WORKFORCE_FACILITY_CONFLICT', 403, 'WORKFORCE_FACILITY_CONFLICT'],
+    ['CLINICIAN_APPLICATION_STATE_INVALID', 409, 'CLINICIAN_APPLICATION_STATE_INVALID'],
+    ['ADMIN_VERSION_CONFLICT', 409, 'VERSION_CONFLICT'],
+    ['CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE', 409, 'CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE'],
+    ['WORKFORCE_SELF_CHANGE_DENIED', 403, 'WORKFORCE_SELF_CHANGE_DENIED'],
+    ['WORKFORCE_FACILITY_NOT_VERIFIED', 409, 'WORKFORCE_FACILITY_NOT_VERIFIED'],
+    ['CLINICIAN_APPLICATION_NOT_FOUND', 404, 'CLINICIAN_APPLICATION_NOT_FOUND'],
+  ])('refuses %s from the pre-check before any lock or code, so no failure is counted', async (message, status, code) => {
+    const h = harness({ ...commands(), 'admin_clinician_application_attest_precheck': marked(message) });
+    const problem = await refusal(h.service.attest(context, APPLICATION, 3, attestInput, KEY, event));
+    expect([problem.getStatus(), problem.code]).toEqual([status, code]);
+    expect(h.mfa.lockApplicantReview).not.toHaveBeenCalled();
+    expect(h.mfa.confirmApplicantFactor).not.toHaveBeenCalled();
+    expect(h.order).not.toContain('admin_attest_clinician_application');
+  });
+
+  it('refuses, under the locks and before any code, an application that changed while it waited', async () => {
+    let prechecks = 0;
+    const h = harness({ ...commands(), 'admin_clinician_application_attest_precheck': () => {
+      prechecks += 1;
+      if (prechecks === 1) return { rows: [{ account_id: APPLICANT }], rowCount: 1 };
+      throw Object.assign(new Error('CLINICIAN_APPLICATION_STATE_INVALID'), { code: 'P0001' });
+    } });
+    const problem = await refusal(h.service.attest(context, APPLICATION, 3, attestInput, KEY, event));
+    expect([problem.getStatus(), problem.code]).toEqual([409, 'CLINICIAN_APPLICATION_STATE_INVALID']);
+    expect(h.mfa.lockApplicantReview).toHaveBeenCalledTimes(1);
+    expect(h.mfa.confirmApplicantFactor).not.toHaveBeenCalled();
+  });
+
+  it('answers a concurrent request with the same key from its stored answer once it holds the locks, checking no code', async () => {
+    let probes = 0;
+    const h = harness({ ...commands(), 'admin_clinician_application_prior': () => {
+      probes += 1;
+      return { rows: [{ prior: probes === 1 ? null : stored }], rowCount: 1 };
+    } });
+    const answer = await h.service.attest(context, APPLICATION, 3, attestInput, KEY, event);
+    expect(answer).toMatchObject({ applicationId: APPLICATION, attestationId: ATTESTATION, replayed: true, version: 4 });
+    expect(h.order).toEqual(['assurance', 'admin_clinician_application_prior',
+      'admin_clinician_application_attest_precheck', 'lock', 'admin_clinician_application_prior']);
+    expect(h.mfa.confirmApplicantFactor).not.toHaveBeenCalled();
+    expect(h.audit.recordWithClient).not.toHaveBeenCalled();
+    expect(h.transactions).toEqual([{ settled: true }]);
   });
 
   it('refuses the applicant reviewing their own application before checking any code', async () => {

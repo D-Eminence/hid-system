@@ -640,6 +640,23 @@ export class MfaService {
   }
 
   /**
+   * The account locks of a step-1 review (ADR-064): the applicant's and the
+   * administrator's account rows (auth.lock_account_sessions), in id order
+   * (0073), as confirmApplicantFactor and the step-1 command take them. The
+   * review service takes them before it looks again for a stored answer under
+   * its Idempotency-Key and re-checks the application, so a request that
+   * waited for a concurrent one with the same key answers that one's result
+   * and never checks the applicant's code. Taking them again later in the
+   * same transaction does not wait.
+   */
+  async lockApplicantReview(client: PoolClient,
+    accounts: { applicantAccountId: string; actorAccountId: string }): Promise<void> {
+    for (const accountId of [...new Set([accounts.applicantAccountId, accounts.actorAccountId])].sort()) {
+      await client.query('select auth.lock_account_sessions($1)', [accountId]);
+    }
+  }
+
+  /**
    * Step 1 of a clinician application review (ADR-064): during the identity
    * call the applicant reads a current code from their authenticator and a
    * Super Admin types it. It is checked against the applicant's active
@@ -652,9 +669,7 @@ export class MfaService {
   async confirmApplicantFactor(client: PoolClient, accounts: { applicantAccountId: string; actorAccountId: string },
     code: string, event: SessionEventMetadata): Promise<ApplicantFactorConfirmation> {
     this.protector.assertConfigured();
-    for (const accountId of [...new Set([accounts.applicantAccountId, accounts.actorAccountId])].sort()) {
-      await client.query('select auth.lock_account_sessions($1)', [accountId]);
-    }
+    await this.lockApplicantReview(client, accounts);
     const factor = await this.lockActiveFactor(client, accounts.applicantAccountId);
     if (!factor || !factor.enrollment_proof) return { kind: 'no_factor' };
     if (await this.blocked(client, accounts.applicantAccountId, event, 'staff')) return { kind: 'rate_limited' };
