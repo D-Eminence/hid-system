@@ -297,10 +297,12 @@ The executable covers:
    `holder_method`, and that a new enrollment defaults to `verify_holder`;
    and since 0094 that the upgraded bootstrap grants the Identity runtime the
    facility list, the in-person check command and the two designation
-   commands, and no privilege on the designation, its events, the checks,
-   the participation and attestation helpers or `auth.staff_session_is_mfa`,
-   and that the permission is held by `clinician`, `doctor` and `nurse`
-   only), then
+   commands (the designation read and the designation change), and no
+   privilege on the designation, its events, the checks, the participation
+   and attestation helpers or `auth.staff_session_is_mfa`, and that the
+   permission is held by `clinician`, `doctor` and `nurse` only; the
+   bootstrap's own `runtime-roles.integration.sql` checks the 0093 and 0094
+   grants for every runtime role), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

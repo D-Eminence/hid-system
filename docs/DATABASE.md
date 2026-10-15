@@ -4161,7 +4161,10 @@ of this enrollment and NIN digest, of the current desk code, recorded in the
 last 10 minutes, with no proof outcome, and not used by another enrollment
 (`23514 PATIENT_HOLDER_PROOF_INVALID` otherwise). The verifying staff member
 must still hold the permission and the attested grant at a participating
-facility (`42501 ASSISTED_REGISTRATION_NOT_AUTHORIZED`). Then, as in 0093:
+facility (`42501 ASSISTED_REGISTRATION_NOT_AUTHORIZED`): through
+`auth.membership_has_permission` an active account, staff record and
+membership, and through `identity.assisted_registration_actor_attested` the
+attested role. Then, as in 0093:
 the existing-Health-ID check (it writes `existing_identity` on the check),
 supersession (an in-person proof removes a phone-proven enrollment:
 `contested`), and the proof: `verify_contact`, the desk code cleared, any
@@ -4172,7 +4175,8 @@ phone-only.
 **Activation (replaced, same signature).** A `facility_in_person` proof
 needs its matched check of the same enrollment with proof outcome
 `verified`, and the verifying staff member still authorized at a
-participating facility. `nin_verified_at` is the check's time.
+participating facility, by the same two checks as the proof.
+`nin_verified_at` is the check's time.
 
 **Grants.** `runtime-grants.sql` grants the Identity runtime (and the
 schema-test runtime) `EXECUTE` on the facility list, the staff command and
@@ -4188,8 +4192,9 @@ timeout rolls 0094 back whole; it can be run again.
 
 **Review query.** Release checklist §10, "In-person checks per staff member
 and facility (0094)": per facility and staff member over 7 days, the
-checks by outcome and proof outcome, read in a read-only transaction as
-`system:auth`. Ids and counts only.
+checks by outcome and proof outcome, run by the migration administrator in
+a read-only transaction as `system:auth`. No runtime or monitoring role can
+read the checks. Ids and counts only.
 
 Tests:
 
@@ -4197,20 +4202,40 @@ Tests:
   the catalogue (definer, search path, grants, forced row-level security);
   direct DML refused for every runtime role; designations (permission,
   step-up, version 0, idempotency, inactive facility refused, append-only
-  events); the facility list; `auth.staff_session_is_mfa`; the staff command
-  refused without MFA assurance, at another facility, at an undesignated
-  facility, without the permission, for `org_admin`, for a legacy nurse, for
-  a lapsed attestation, and in system context; replay, key reuse and the
-  staff audit row; both budgets over 24 hours; append-only checks; the
-  proof's in-person method (no check, a code with a check, not matched,
-  another enrollment's check, a check naming another enrollment with this
-  NIN and desk code, another NIN, a wrong token, a new desk code, older
-  than 10 minutes, a suspended designation, a revoked role); a proof
-  (`verify_contact`, desk code cleared, open holder code closed, a
-  phone-proven enrollment displaced as `contested`); a phone proof answered
-  `facility_conflict`; a second in-person proof superseding the first; an
-  existing Health ID; activation after an in-person proof and refused after
-  the designation is suspended or the role revoked; the desk-code checks.
+  events); the facility list; `auth.staff_session_is_mfa` (false for
+  another account's assured session, a revoked or expired session, a session
+  without assurance, a platform session, no session, an old token version,
+  and a session whose factor was revoked after it was assured); the staff
+  command refused without MFA assurance, at another facility, at an
+  undesignated facility, without the permission, for `org_admin`, for a
+  legacy nurse, for a lapsed attestation, for another account's assured
+  session, a revoked or expired session or a revoked factor, for a
+  deactivated membership that keeps its role and attested grant, and in
+  system context; replay, key reuse and the staff audit row; both budgets
+  over 24 hours; append-only checks; the proof's in-person method (no check,
+  a code with a check, not matched, another enrollment's check, a check
+  naming another enrollment with this NIN and desk code, another NIN, a
+  wrong token, a new desk code, older than 10 minutes, a suspended
+  designation, a revoked role, the verifier's account locked or membership
+  deactivated after the check, and the attested role revoked while a legacy
+  role keeps the permission); a proof (`verify_contact`, desk code cleared,
+  open holder code closed, a phone-proven enrollment displaced as
+  `contested`); a phone proof answered `facility_conflict`; a second
+  in-person proof superseding the first; an existing Health ID; activation
+  after an in-person proof and refused after the designation is suspended,
+  the role revoked, the verifier's account disabled, its membership
+  deactivated, or the attested role revoked while a legacy role keeps the
+  permission; the desk-code checks. Fixture assertions show that each
+  verifier case leaves only one of the two checks able to refuse.
+- `runtime-roles.integration.sql` (the bootstrap and `db:verify-roles`):
+  the 0093 holder commands and the four 0094 commands are executable by the
+  Identity runtime only, not `PUBLIC` or another runtime; the participation,
+  attestation and staff-session helpers and the check guard by no role but
+  their owner; no runtime role has a privilege on the holder events, the
+  designations, their events or the checks; the runtime inserts only an
+  enrollment's start columns, never writes its holder columns, and updates
+  the desk-code columns; the permission is held by doctor, clinician and
+  nurse only.
 - `public-patient-holder-proof.integration.sql`: an in-person proof without
   a check is `23514 PATIENT_HOLDER_PROOF_INVALID`; one with a code is
   `22023`.
@@ -4227,7 +4252,23 @@ Tests:
   own refusal, which the suite tells apart); activation without the
   designation re-check; the designation command without step-up; the checks
   table without forced row-level security; the facility budget ignored; the
-  facility list for any caller. Fourteen in all.
+  facility list for any caller. Fourteen in all. After review, nine more,
+  each of which the earlier suite let through: `auth.staff_session_is_mfa`
+  without the revoked-session check, the expiry checks, the active-factor
+  check or the actor's own account; the staff command without
+  `auth.membership_has_permission`; the proof and activation each without
+  `auth.membership_has_permission` or without the attested re-check. All
+  nine are killed, and the four session mutants are killed again by the
+  staff-command cases alone. Twenty-three in all.
+- Grant mutants of `runtime-roles.integration.sql` (local evidence), each a
+  grant or revoke inside a rolled-back transaction on the bootstrapped
+  database: `EXECUTE` on `auth.staff_session_is_mfa` or the participation
+  helper given to a runtime, `EXECUTE` on the check command or the holder
+  proof taken from the Identity runtime, the designation read given to the
+  EHR runtime, `SELECT` on the designation events or a holder-events column
+  given to the Identity runtime, `UPDATE (holder_method)` given and
+  `UPDATE (desk_code_salt)` taken. The earlier file passes all nine; the new
+  one fails each.
 - Identity mutants: the staff route without its enabled guard, the service
   without its route check, a desk code issued with the route closed, and a
   mismatch treated as a match (refused by the type check) are killed by the

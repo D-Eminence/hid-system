@@ -122,9 +122,10 @@ separate deployment authorization. None of them has been run.
   participating facility; a doctor, clinician or nurse with MFA and an
   attested grant checks one original photo ID and records the outcome; the
   patient finishes on their own device. A NIN alone still never creates a
-  Health ID. Production now runs the online route only with the facility
-  route on. Both routes stay off until the operator steps (release
-  checklist P23 to P32).
+  Health ID. Production now needs the facility flag with the online route,
+  and Identity opens the online route in production only while at least
+  one facility takes part. Both routes stay off until the operator steps
+  (release checklist P23 to P32).
 - **Launch consequence (open for the owner to confirm).** With N1 as decided
   and facility-assisted registration out of scope (N2(d), D17), no new
   patient can get a Health ID in production at launch (N2(d) is revised

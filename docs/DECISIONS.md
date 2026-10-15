@@ -4524,8 +4524,11 @@ Decision:
   holder route. Production refuses the online route until the facility route
   ships (ADR-063), in Identity and in infrastructure:
   `ASSISTED_REGISTRATION_ENABLED` has no effect before then, so it cannot
-  stand in for that route. ADR-063 replaces this refusal with a check for an
-  open facility route. Production also refuses the signed-in NIN binding.
+  stand in for that route. ADR-063 (BRANCH:launch/facility-assisted-registration)
+  replaces this refusal: production needs `ASSISTED_REGISTRATION_ENABLED`
+  with the online flag, and Identity opens the online route in production
+  only while at least one facility takes part. Production also refuses the
+  signed-in NIN binding.
   These rules replace the earlier blanket production refusal of NIN-only
   enrollment, because activation now requires the proof in the database.
   Enabling a flag is an operator step.
@@ -4657,9 +4660,10 @@ Decision:
   the enrollment the code names and a blind compare in system context, the
   staff command, then the holder proof in system context.
 - Blind compare. Names are normalized (NFKD, combining marks dropped, upper
-  case, only A-Z and single spaces). First and last name match the record's
-  in either order. The date of birth is compared only when the record has
-  one. The answer per field is `match`, `no_match` or `not_in_record`. Staff
+  case, only A-Z and single spaces). Hyphens and apostrophes are removed but
+  a space is kept, so "Synthetic-Okafor" and "Synthetic Okafor" do not
+  match. First and last name match the record's in either order. The date
+  of birth is compared only when the record has one. The answer per field is `match`, `no_match` or `not_in_record`. Staff
   never see the NIN, a registry value, the contact, the Health ID or the
   missing profile fields. The typed values are never stored.
 - `identity.record_assisted_verification` (staff context) records every
@@ -4683,10 +4687,15 @@ Decision:
   reference, never the Health ID or the person.
 - One verifying staff member at launch. A second approver and a notice to
   the registry phone after activation are owner decisions, not built.
-- Production runs the online route only with the facility route
-  (`NIN_HOLDER_SMS_ENABLED` needs `ASSISTED_REGISTRATION_ENABLED`), in
-  Identity, in `infra/aws` and in `verify-synth`. This replaces ADR-062's
-  refusal.
+- In production the online route runs only while the facility route is
+  open. The Identity environment, `infra/aws` and `verify-synth` refuse
+  `NIN_HOLDER_SMS_ENABLED` without `ASSISTED_REGISTRATION_ENABLED`. Identity
+  also closes the online route in production (availability, start,
+  progress, the code send and the code check) while no facility takes part,
+  so suspending the last designation closes both routes. Staging and
+  development keep the flag alone. This replaces ADR-062's refusal.
+- The patient may start, or start again, at the facility: a registration
+  lasts 24 hours.
 - Operators review checks per staff member and per facility from the
   verification rows (`DATABASE.md`, "Facility-assisted registration
   (0094)").
@@ -4710,6 +4719,24 @@ Residual risks:
 - One staff member can approve an impostor with a forged or borrowed photo
   ID. The attestations, the audit row, the budgets and the review query
   bound and expose this; they do not prevent it.
+- HID checks only what staff type against the record. No document data is
+  captured, and the photo-ID check is the staff member's own attestation.
+  With a record that has no date of birth (the shape the owner reported for
+  production QoreID: name, NIN and reference only), the system checks the
+  two names only. One staff member who knows a NIN holder's name can then
+  create that holder's Health ID with no document, starting the
+  registration on their own phone.
+- The per-field `422` results let a staff member who holds a live desk code,
+  including one they issued on their own phone, test guesses of the
+  record's names and date of birth within the budgets (20 checks a day per
+  staff member, 100 per facility). Each guess is a check with an audit row
+  and appears in the review query.
+- Identity reads the enrollment and runs the blind compare before the staff
+  command authorizes the actor in SQL. An actor the command refuses always
+  gets `403` with no field results, but the time to answer can differ.
+- These rest on the existing mitigations: the budgets, the staff audit row,
+  the weekly review query (release checklist §10) and the sign-off of the
+  procedure (P29). A second approver stays an owner decision.
 - Minors at a facility are not refused (owner decision).
 - A NIN-keyed duplicate is refused; a legacy patient without a recorded NIN
   can still get a second Health ID (ADR-062, open owner decision).

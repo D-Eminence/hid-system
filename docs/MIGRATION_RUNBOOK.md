@@ -586,9 +586,13 @@ continuity with synthetic or authorized minimum-necessary identifiers.
    Run it straight after 0093. After `0094`, likewise: it grants the
    Identity runtime the facility list, the in-person check command and the
    two designation commands, and adds the desk-code columns to its `UPDATE`
-   list. Until it runs the facility route fails. No facility is designated
-   and `ASSISTED_REGISTRATION_ENABLED` stays off until release checklist P29
-   to P32.
+   list. Until it runs the facility route fails. From this change
+   `db:verify-roles` also checks the 0093 and 0094 grants: the commands for
+   the Identity runtime only, the helpers for no runtime role, and no
+   runtime privilege on the holder events, the designations, their events
+   or the checks. No facility is designated and
+   `ASSISTED_REGISTRATION_ENABLED` stays off until release checklist P29 to
+   P32.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts. A migrated staff account signs in with
    its password, then enrols an authenticator with the code emailed to it
