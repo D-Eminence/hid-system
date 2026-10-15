@@ -320,4 +320,65 @@ begin
 end
 $$;
 
+-- Exercise both sides of standard consent using the actual production runtime
+-- role, rather than the migration owner or a broadly privileged test role.
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','staff:pin-integration',true),
+ set_config('app.membership_id','b4000000-0000-4000-8000-000000000001',true),
+ set_config('app.facility_id','b1000000-0000-4000-8000-000000000002',true),
+ set_config('app.correlation_id','standard-consent-runtime-regression',true),
+ set_config('app.purpose_of_use','direct-care',true);
+do $$
+declare requested record; approved record; denied record; count_rows integer;
+begin
+ if current_user<>'hid_identity_api_runtime' then raise exception 'Actual Identity runtime role required'; end if;
+ select * into requested from identity.create_access_request('HID-PNABCD66','read_records','Synthetic runtime consent test',15);
+ if requested.request_status<>'pending' then raise exception 'Expected pending patient approval'; end if;
+ select count(*) into count_rows from identity.list_my_staff_access_requests('pending')
+  where access_request_id=requested.access_request_id;
+ if count_rows<>1 then raise exception 'Staff request list is unavailable'; end if;
+ begin
+  perform identity.approve_access_request(requested.access_request_id);
+  raise exception 'Staff approved their own patient request';
+ exception when insufficient_privilege then null; end;
+ perform set_config('app.actor_subject','patient:pin-integration',true);
+ perform set_config('app.membership_id','',true);perform set_config('app.facility_id','',true);
+ select count(*) into count_rows from identity.list_my_access_requests()
+  where access_request_id=requested.access_request_id;
+ if count_rows<>0 then raise exception 'Another patient saw this access request'; end if;
+ begin
+  perform identity.approve_access_request(requested.access_request_id);
+  raise exception 'Another patient approved this access request';
+ exception when no_data_found then null; end;
+ perform set_config('app.actor_subject','patient:pin-audit-failure',true);
+ select count(*) into count_rows from identity.list_my_access_requests()
+  where access_request_id=requested.access_request_id;
+ if count_rows<>1 then raise exception 'Patient cannot see own access request'; end if;
+ select * into approved from identity.approve_access_request(requested.access_request_id);
+ if approved.status<>'approved' or approved.replayed then raise exception 'Patient approval failed'; end if;
+ if not identity.has_active_consent_grant('b5000000-0000-4000-8000-000000000002','staff:pin-integration',
+  'b4000000-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000002','read_records','direct-care',clock_timestamp()) then
+  raise exception 'Patient-approved grant did not authorize the exact direct-care context';
+ end if;
+ select * into approved from identity.approve_access_request(requested.access_request_id);
+ if not approved.replayed then raise exception 'Approval replay is not idempotent'; end if;
+ perform set_config('app.actor_subject','staff:pin-integration',true);
+ perform set_config('app.membership_id','b4000000-0000-4000-8000-000000000001',true);
+ perform set_config('app.facility_id','b1000000-0000-4000-8000-000000000002',true);
+ perform identity.close_own_consent_grant(approved.consent_grant_id,'Synthetic clinician closed access');
+ if identity.has_active_consent_grant('b5000000-0000-4000-8000-000000000002','staff:pin-integration',
+  'b4000000-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000002','read_records','direct-care',clock_timestamp()) then
+  raise exception 'Closed consent remained usable';
+ end if;
+ select * into requested from identity.create_access_request('HID-PNABCD66','read_records','Synthetic runtime denial test',15);
+ perform set_config('app.actor_subject','patient:pin-audit-failure',true);
+ perform set_config('app.membership_id','',true);perform set_config('app.facility_id','',true);
+ select * into denied from identity.deny_access_request(requested.access_request_id,'Synthetic patient denial');
+ if denied.status<>'denied' or denied.replayed then raise exception 'Patient denial failed'; end if;
+ select * into denied from identity.deny_access_request(requested.access_request_id,'Synthetic patient denial');
+ if not denied.replayed then raise exception 'Denial replay is not idempotent'; end if;
+end;
+$$;
+reset role;
+
 rollback;

@@ -758,6 +758,12 @@ alter default privileges in schema integration revoke all on functions from publ
 
 -- Patient self-service is an Identity-owned authorization boundary; EHR only
 -- evaluates the private context established after that service authorization.
+-- Both sides of standard consent remain permission/context checked inside the
+-- named functions. Other services and PUBLIC receive no execution authority.
+grant execute on function identity.list_my_staff_access_requests(text),
+  identity.list_my_access_requests(), identity.approve_access_request(uuid),
+  identity.deny_access_request(uuid,text) to hid_identity_runtime;
+
 grant execute on function identity.current_patient_account(text),
   identity.patient_self_profile(text,uuid), identity.authorize_patient_self(text,uuid),
   identity.patient_self_access_history(text,uuid)

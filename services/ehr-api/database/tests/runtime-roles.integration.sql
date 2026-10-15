@@ -447,6 +447,33 @@ begin
 end
 $$;
 
+do $$
+declare signature text; role_name text;
+begin
+  if not exists (select 1 from identity.purpose_of_use_codes where code='direct-care' and active) then
+    raise exception 'Standard direct-care reference is missing';
+  end if;
+  foreach signature in array array[
+    'identity.list_my_staff_access_requests(text)', 'identity.list_my_access_requests()',
+    'identity.approve_access_request(uuid)', 'identity.deny_access_request(uuid,text)'
+  ] loop
+    if not has_function_privilege('hid_identity_api_runtime',signature,'EXECUTE') then
+      raise exception 'Identity runtime cannot execute %', signature;
+    end if;
+    foreach role_name in array array['hid_ehr_api_runtime','hid_lab_api_runtime','hid_pharmacy_api_runtime'] loop
+      if has_function_privilege(role_name,signature,'EXECUTE') then
+        raise exception 'Unrelated service % can execute %', role_name, signature;
+      end if;
+    end loop;
+    if exists (select 1 from pg_proc p,
+      lateral aclexplode(coalesce(p.proacl,acldefault('f',p.proowner))) acl
+      where p.oid=signature::regprocedure and acl.grantee=0 and acl.privilege_type='EXECUTE') then
+      raise exception 'PUBLIC can execute %', signature;
+    end if;
+  end loop;
+end;
+$$;
+
 select
   rolname,
   rolcanlogin,
