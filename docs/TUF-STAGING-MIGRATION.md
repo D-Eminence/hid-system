@@ -238,6 +238,17 @@ The executable covers:
    0090's `encounter-retraction.integration.sql` needs the merge change in the
    release checklist §2 (the nurse role's `ehr.document.write` inside its
    rollback-only transaction); without it the rehearsal fails on that suite.
+   With 0092 (BRANCH:launch/patient-self-enrollment, ADR-061): the additional
+   suites include `public-patient-enrollment-self-reported.integration.sql`
+   (a NIN record without a date of birth or gender activates with the values
+   the patient enters, from 1900-01-01 to today, a value the record gives is
+   refused, a record date that is not on the calendar is refused as an invalid
+   identity, the authoritative profile is unchanged and the audit event names
+   the entered fields), and
+   `patient_enrollment_runtime` also requires a complete record's progress to
+   list `requiredProfileFields: []` and refuse an entered date of birth, and
+   runs a name-only record from start to sign-in with the date of birth and
+   gender entered at activation.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
@@ -248,8 +259,10 @@ The executable covers:
    lab-ordering write permission; since 0090, that the retraction,
    closed-record, retracted-vital-correction and retracted-document triggers
    and the vital status are installed and the upgraded
-   role bootstrap grants the EHR runtime the permission decision they use; and since 0091 no Lab, Pharmacy, OCR or
-   Outreach permission, break-glass or document upload), then
+   role bootstrap grants the EHR runtime the permission decision they use; since 0091 no Lab, Pharmacy, OCR or
+   Outreach permission, break-glass or document upload; and since 0092 that
+   the 7-argument enrollment activation command is gone and the upgraded role
+   bootstrap grants the Identity runtime, and not `PUBLIC`, the new one), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

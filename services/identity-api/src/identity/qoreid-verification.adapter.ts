@@ -5,6 +5,7 @@ import {
   QOREID_PROVIDER,
   type QoreIdNinClaims,
   type QoreIdNinEnrollmentBinding,
+  type QoreIdNinGender,
   type QoreIdVerificationResult,
   type VerificationState,
 } from './qoreid-verification.types';
@@ -391,9 +392,15 @@ export class QoreIdVerificationAdapter {
     const nin = bio?.nin;
     const firstName = this.safeName(bio?.firstname);
     const lastName = this.safeName(bio?.lastname);
-    const dateOfBirth = this.dateOfBirth(bio?.birthdate);
-    const gender = this.gender(bio?.gender);
-    if (nin !== submittedNin || !firstName || !lastName || !dateOfBirth || !gender) {
+    // QoreID may return only the name, the NIN and its reference (ADR-061). A
+    // birth date or gender it does not give is left out, and the patient
+    // enters it at activation; one it gives must still parse.
+    const birthdateGiven = !this.blank(bio?.birthdate);
+    const genderGiven = !this.blank(bio?.gender);
+    const dateOfBirth = birthdateGiven ? this.dateOfBirth(bio?.birthdate) : undefined;
+    const gender = genderGiven ? this.gender(bio?.gender) : undefined;
+    if (nin !== submittedNin || !firstName || !lastName
+      || (birthdateGiven && !dateOfBirth) || (genderGiven && !gender)) {
       throw this.invalidProviderResponse();
     }
     const rawMiddleName = bio?.middlename;
@@ -407,7 +414,9 @@ export class QoreIdVerificationAdapter {
     if ((rawMiddleName !== undefined && rawMiddleName !== null && rawMiddleName !== '' && !middleName)
       || (bio?.phone !== undefined && !phoneNumber)
       || (bio?.photo !== undefined && !photo)) throw this.invalidProviderResponse();
-    return { nin, firstName, lastName, dateOfBirth, gender,
+    return { nin, firstName, lastName,
+      ...(dateOfBirth ? { dateOfBirth } : {}),
+      ...(gender ? { gender } : {}),
       ...(middleName ? { middleName } : {}),
       ...(phoneNumber ? { phoneNumber } : {}),
       ...(residence ? { address: residence.address1, residence } : {}),
@@ -428,7 +437,12 @@ export class QoreIdVerificationAdapter {
       ...(state ? { state } : {}) };
   }
 
-  private gender(value: unknown): QoreIdNinEnrollmentBinding['gender'] | undefined {
+  /** Absent, null or the empty string: the record does not give the field. */
+  private blank(value: unknown): boolean {
+    return value === undefined || value === null || value === '';
+  }
+
+  private gender(value: unknown): QoreIdNinGender | undefined {
     if (typeof value !== 'string') return undefined;
     const normalized = value.trim().toLowerCase();
     if (normalized === 'm' || normalized === 'male') return 'male';

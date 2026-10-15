@@ -1071,6 +1071,9 @@ grant execute on function identity.submit_self_service_organization_application(
 
 -- Public patient enrollment persists only encrypted pending evidence. Its
 -- activation command performs the canonical account/patient writes atomically.
+-- 0092 dropped and recreated the command with the two self-reported profile
+-- arguments (ADR-061); a dropped function loses its grants, so this file, run
+-- after every migration, grants the new signature.
 grant select, insert, update, delete on identity.public_patient_enrollments,
   identity.public_patient_enrollment_otps,
   identity.public_patient_enrollment_rates to hid_identity_runtime, hid_schema_test_runtime;
@@ -1079,7 +1082,7 @@ grant execute on function identity.public_patient_nin_already_bound(char),
   identity.public_patient_enrollment_ready(),
   identity.public_patient_contact_already_bound(text,char),
   identity.prune_expired_public_patient_enrollments(),
-  identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char)
+  identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char,date,text)
   to hid_identity_runtime, hid_schema_test_runtime;
 -- Each QoreID NIN lookup of public enrollment is charged, before any account
 -- exists, through the network and platform quota command (0085); the runtime

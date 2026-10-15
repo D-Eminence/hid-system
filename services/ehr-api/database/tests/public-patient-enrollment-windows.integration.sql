@@ -140,16 +140,18 @@ begin
 end $$;
 reset role;
 
--- The function keeps its 0058 signature, owner-only definition and grants.
+-- The function has its 0092 signature (0085's arguments and the two
+-- self-reported profile fields of ADR-061, which default to null so that the
+-- 7-argument calls above still resolve), owner-only definition and grants.
 do $$ begin
   if not has_function_privilege('hid_identity_runtime',
-       'identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char)', 'EXECUTE')
+       'identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char,date,text)', 'EXECUTE')
      or has_function_privilege('public',
-       'identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char)', 'EXECUTE')
+       'identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char,date,text)', 'EXECUTE')
      or has_function_privilege('hid_ehr_runtime',
-       'identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char)', 'EXECUTE')
+       'identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char,date,text)', 'EXECUTE')
      or not (select prosecdef from pg_proc
-       where oid = 'identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char)'::regprocedure) then
+       where oid = 'identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char,date,text)'::regprocedure) then
     raise exception 'The activation command lost its signature, definer rights or grants';
   end if;
 end $$;

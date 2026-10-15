@@ -3752,3 +3752,100 @@ Tests:
   additional suites again with every schema, table and function owned by a
   `NOSUPERUSER NOBYPASSRLS` role (the rehearsal's P8 owner check, which now
   counts `ehr.patient_self_context` among its 9 definer commands).
+
+## Self-reported enrollment profile (0092)
+
+`0092_patient_self_reported_enrollment_profile.sql`
+(BRANCH:launch/patient-self-enrollment, ADR-061) lets public patient
+enrollment activate a NIN record without a date of birth or gender. QoreID
+may return only the name, the NIN and its reference. Before 0092 the
+activation command required both in the profile JSON, which must hash to the
+enrollment's `profile_sha256`, so the Identity API could not add them, and
+such a record could not enroll.
+
+**Activation command.** `identity.activate_public_patient_enrollment` is
+dropped and created again with two more arguments:
+
+```
+identity.activate_public_patient_enrollment(
+  uuid, char(64), text, text, text, text, char(64),
+  requested_date_of_birth date default null,
+  requested_gender text default null)
+```
+
+Both default to null, so a 7-argument call (the Identity build before this
+change, the SQL suites) resolves to it and behaves as before for a complete
+record. The 7-argument function no longer exists on its own. Owner,
+`SECURITY DEFINER`, `search_path`, result columns, revoke from `PUBLIC`, the
+replay branch (which ignores the new arguments) and every other check are
+0085's. Only the profile check changes:
+
+- `nin`, `firstName`, `lastName` and `providerReference` are checked as
+  before;
+- a non-null `dateOfBirth` in the profile must be `YYYY-MM-DD`, a calendar
+  date, from 1900-01-01 to `current_date`, and `requested_date_of_birth` must
+  be null; without one, `requested_date_of_birth` must be given and in the
+  same range;
+- a non-null `gender` in the profile must be `female`, `male`, `intersex`,
+  `other` or `unknown`, and `requested_gender` must be null; without one,
+  `requested_gender` must be given and in that list;
+- any failure raises `23514` `PATIENT_IDENTITY_INVALID` before any write.
+  Identity checks the same rules first (`400` answers) and maps a database
+  refusal to `409 ENROLLMENT_STAGE_INVALID`.
+
+`identity.patients.dob` and `gender` take the profile's value or the entered
+one. A value the NIN record gives can never be replaced.
+
+**Provenance.** `identity.patient_authoritative_profiles` still stores the
+enrollment's profile ciphertext and hash, exactly what QoreID returned. A
+value in `identity.patients` that the authoritative profile lacks was
+entered by the patient. The activation audit event
+(`identity.public-patient-enrollment.activated`) gains
+`details.selfReportedFields`: a JSON array of the field names taken from the
+request (`["dateOfBirth", "gender"]`, one of them, or `[]`), never their
+values.
+
+**Grants.** Dropping a function drops its grants. `runtime-grants.sql`
+grants `EXECUTE` on the new signature to `hid_identity_runtime` and
+`hid_schema_test_runtime`; the role bootstrap runs it after every migration,
+as after 0058 dropped the 6-argument form. Between 0092 and the bootstrap no
+runtime can activate an enrollment (`403 ENROLLMENT_DENIED`). The rehearsal's
+upgrade from the 0028 baseline checks that the upgraded bootstrap grants the
+new signature to the Identity runtime and not to `PUBLIC`.
+
+**Locks.** `DROP FUNCTION` and `CREATE FUNCTION` take no table lock. An
+activation in flight keeps the definition it started with; one that starts
+after 0092 commits and before the bootstrap is refused as above.
+
+Tests:
+
+- `public-patient-enrollment-self-reported.integration.sql` (new,
+  rollback-only): a profile without a date of birth or gender activates with
+  both entered and stores them, with `selfReportedFields` `["dateOfBirth",
+  "gender"]` and the authoritative profile unchanged; a replay with other
+  values answers the same HID and changes nothing; a profile with a date of
+  birth but no gender takes only the gender (`["gender"]`); a profile with a
+  gender but no date of birth takes only the date, 1900-01-01
+  (`["dateOfBirth"]`); a profile without either activates with today's date;
+  a complete profile activates with the 7-argument call (`[]`). Refused with
+  `PATIENT_IDENTITY_INVALID`: the 7-argument call, a date alone and a gender
+  alone for a profile without either, a date tomorrow, a date before 1900, a
+  gender outside the list or empty, and any entered value where the profile
+  has one. A profile date of birth that is not on the calendar (`2020-02-30`,
+  `0000-01-01`) is refused with `23514` `PATIENT_IDENTITY_INVALID`, not a
+  `22008` cast error, and changes nothing. The new signature is `SECURITY DEFINER` with 0085's search path,
+  result and owner and two defaults, executable by the Identity runtime and
+  not by `PUBLIC` or the EHR runtime, and the 7-argument signature is gone.
+  On 0091 it fails at its first 9-argument call; five mutants of the 0092
+  body (an entered date or gender accepted over the profile's, no
+  `selfReportedFields`, a future date accepted, the profile date stored
+  instead of the entered one) each make it fail, and so do four more added
+  after review (1900-01-01 refused, today refused, the guarded cast removed,
+  a gender-only profile refused), which the first version of the suite
+  passed.
+- `public-patient-enrollment-windows.integration.sql` names the new
+  signature in its privilege check; its 7-argument calls are unchanged.
+- All 48 SQL suites pass on a database built from empty to 0092 and
+  bootstrapped, and the 47 additional suites again with every schema, table
+  and function owned by a `NOSUPERUSER NOBYPASSRLS` role (local evidence,
+  release checklist §8).

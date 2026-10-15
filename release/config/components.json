@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0091",
-    "count": 91,
+    "last": "0092",
+    "count": 92,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -461,6 +461,10 @@
       {
         "name": "0091_launch_module_withdrawal_and_patient_access_transparency.sql",
         "sha256": "ddf4ae3a333f8345de9a7da37b73e91318279b06caaee9b866b1b5150f279f94"
+      },
+      {
+        "name": "0092_patient_self_reported_enrollment_profile.sql",
+        "sha256": "66e1d84b871b7a52b57aac2cdb4a2e9cdcef518b7ebe40f97192c1857dbcabe7"
       }
     ]
   },

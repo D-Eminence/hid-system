@@ -203,6 +203,9 @@ PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/public-patient-enrollment-windows.integration.sql" >/dev/null
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+  -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/public-patient-enrollment-self-reported.integration.sql" >/dev/null
+PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+  "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/public-patient-nin-quota.integration.sql" >/dev/null
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
@@ -458,4 +461,4 @@ acceptance_postgresql_version="$(PGSSLMODE=verify-full PGSSLROOTCERT="$acceptanc
 acceptance_started=false
 rm -rf -- "$acceptance_root"
 trap - EXIT INT TERM
-printf '{"status":"passed","postgresql":"%s","migrations":"0001-0091","pending":0,"tls":"verify-full","nonOwnerLogins":8,"crossDomainDenials":8,"apiHealth":6,"apiSigterm":6,"databaseFailureReadiness":"failed-closed","temporaryClusterRemoved":true}\n' "$acceptance_postgresql_version"
+printf '{"status":"passed","postgresql":"%s","migrations":"0001-0092","pending":0,"tls":"verify-full","nonOwnerLogins":8,"crossDomainDenials":8,"apiHealth":6,"apiSigterm":6,"databaseFailureReadiness":"failed-closed","temporaryClusterRemoved":true}\n' "$acceptance_postgresql_version"

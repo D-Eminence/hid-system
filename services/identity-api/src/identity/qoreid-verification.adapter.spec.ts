@@ -412,6 +412,42 @@ describe('QoreID verification adapter', () => {
     expect(result.ninEnrollmentBinding).not.toHaveProperty('photo');
   });
 
+  // ADR-061: QoreID may return only the name, the NIN and its reference. A
+  // missing birth date or gender is left out of the binding, never null; the
+  // patient enters it at activation.
+  it.each([
+    ['absent', {}],
+    ['null', { birthdate: null, gender: null }],
+    ['empty', { birthdate: '', gender: '' }],
+  ] as const)('accepts a record whose birth date and gender are %s, leaving both out', async (_label, fields) => {
+    const payload = { ...sandboxNinOnlySuccess, nin: {
+      nin: fixtureNin, firstname: 'Fixture', lastname: 'Person', ...fields,
+    } };
+    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(payload));
+    const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
+      fetch as unknown as typeof globalThis.fetch);
+    const result = await adapter.verifyNinEnrollment(fixtureNin);
+    expect(result).toMatchObject({ state: 'verified', providerReference: '48291' });
+    expect(result.ninEnrollmentBinding).toEqual({ nin: fixtureNin, firstName: 'Fixture', lastName: 'Person' });
+  });
+
+  it('keeps the birth date when only the gender is missing, and the gender when only the birth date is', async () => {
+    for (const [fields, expected] of [
+      [{ birthdate: '01-01-1990' }, { dateOfBirth: '1990-01-01' }],
+      [{ gender: 'M' }, { gender: 'male' }],
+    ] as const) {
+      const payload = { ...sandboxNinOnlySuccess, nin: {
+        nin: fixtureNin, firstname: 'Fixture', lastname: 'Person', ...fields,
+      } };
+      const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(payload));
+      const adapter = new QoreIdVerificationAdapter(enrollmentConfiguration,
+        fetch as unknown as typeof globalThis.fetch);
+      const result = await adapter.verifyNinEnrollment(fixtureNin);
+      expect(result.ninEnrollmentBinding).toEqual({ nin: fixtureNin, firstName: 'Fixture',
+        lastName: 'Person', ...expected });
+    }
+  });
+
   it.each([null, ''])('accepts a blank optional middle name: %j', async (middlename) => {
     const payload = { ...sandboxNinOnlySuccess, nin: { ...sandboxNinOnlySuccess.nin, middlename } };
     const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(payload));
@@ -439,8 +475,14 @@ describe('QoreID verification adapter', () => {
       { ...full, nin: { ...full.nin, nin: undefined } },
       { ...full, nin: { ...full.nin, firstname: undefined } },
       { ...full, nin: { ...full.nin, lastname: undefined } },
-      { ...full, nin: { ...full.nin, birthdate: undefined } },
-      { ...full, nin: { ...full.nin, gender: undefined } },
+      // A birth date or gender the record does carry must be well formed (ADR-061).
+      { ...full, nin: { ...full.nin, birthdate: '1990/01/01' } },
+      { ...full, nin: { ...full.nin, birthdate: '31-02-1990' } },
+      { ...full, nin: { ...full.nin, birthdate: 19900101 } },
+      { ...full, nin: { ...full.nin, birthdate: ' ' } },
+      { ...full, nin: { ...full.nin, gender: 'X' } },
+      { ...full, nin: { ...full.nin, gender: 1 } },
+      { ...full, nin: { ...full.nin, gender: ' ' } },
       { ...full, nin: { ...full.nin, middlename: 123 } },
       { ...full, nin: { ...full.nin, middlename: 'Bad\nName' } },
       { ...full, nin: { ...full.nin, phone: '' } },

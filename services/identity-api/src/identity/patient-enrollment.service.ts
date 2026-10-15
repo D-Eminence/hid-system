@@ -16,6 +16,7 @@ import { createContactLookupHmac } from './contact-lookup';
 import { PUBLIC_PATIENT_IDENTITY_PROVIDER, type PublicPatientIdentityProvider,
   type VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
 import { quotaNetwork } from './provider-enrollment.service';
+import type { QoreIdNinGender } from './qoreid-verification.types';
 
 interface EnrollmentRow extends QueryResultRow {
   id: string; nin_lookup_hmac: string; request_hmac: string; token_hmac: string;
@@ -33,6 +34,21 @@ interface ChallengeRow extends QueryResultRow {
   recipient_hmac: string; delivery_outcome: string;
 }
 type ContactChannel = 'phone' | 'email';
+/**
+ * The profile fields a NIN record may lack (ADR-061): QoreID may return only
+ * the name, the NIN and its reference. The patient enters a missing one at
+ * activation; one the record gives can never be replaced.
+ */
+export type EnrollmentProfileField = 'dateOfBirth' | 'gender';
+const PROFILE_FIELDS: readonly EnrollmentProfileField[] = ['dateOfBirth', 'gender'];
+const PROFILE_FIELD_NAMES: Record<EnrollmentProfileField, string> = {
+  dateOfBirth: 'date of birth', gender: 'gender' };
+const GENDERS: readonly QoreIdNinGender[] = ['female', 'male', 'intersex', 'other', 'unknown'];
+/** What activation may carry for the fields the NIN record lacks. */
+export interface SelfReportedProfile {
+  dateOfBirth?: string;
+  gender?: QoreIdNinGender;
+}
 const localOtpKey = randomBytes(32);
 const ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;
 /**
@@ -187,7 +203,8 @@ export class PatientEnrollmentService {
     } catch (error) { throw this.mapDatabaseError(error); }
     return { cookie: `${id}.${token}`, progress: { stage: 'verify_contact' as const,
       expiresAt: new Date(Date.now() + ENROLLMENT_TTL_MS).toISOString(),
-      googleOnboardingRequired: Boolean(googleCookie) } };
+      googleOnboardingRequired: Boolean(googleCookie),
+      requiredProfileFields: this.missingProfileFields(verified) } };
   }
 
   async current(cookie: string | undefined, correlationId: string) {
@@ -321,6 +338,8 @@ export class PatientEnrollmentService {
         await consumeRateLimit(client, 'recipient', failureBucket, this.contactFailureWindow());
         return false;
       }
+      // Read before anything changes: unreadable evidence leaves the code unspent.
+      const requiredProfileFields = this.requiredProfileFields(row);
       await client.query(
         `update identity.public_patient_enrollment_otps set verified_at=clock_timestamp(),
            consumed_at=clock_timestamp() where id=$1`, [challenge.id]);
@@ -329,14 +348,14 @@ export class PatientEnrollmentService {
            contact_verified_at=clock_timestamp(), verified_challenge_id=$2,
            updated_at=clock_timestamp(), row_version=row_version+1 where id=$1`,
         [row.id, challenge.id]);
-      return true;
+      return { requiredProfileFields };
     });
     if (!result) throw this.invalidCode();
-    return { stage: 'set_password' as const };
+    return { stage: 'set_password' as const, requiredProfileFields: result.requiredProfileFields };
   }
 
   async activate(cookie: string | undefined, password: string, correlationId: string,
-    googleCookie?: string) {
+    googleCookie?: string, profile: SelfReportedProfile = {}) {
     if (typeof password !== 'string' || password.length < 12 || password.length > 256) {
       throw new DomainProblem(400, 'PASSWORD_INVALID', 'Password must be 12–256 characters');
     }
@@ -365,6 +384,11 @@ export class PatientEnrollmentService {
         this.env.OTP_RATE_MAX_REQUESTS * 3));
     if (limited) throw this.rateLimited();
     const profileJson = this.decrypt(row.id, 'profile', row.profile_ciphertext);
+    // A first activation enters what the NIN record lacks, and nothing it has
+    // (ADR-061), checked before argon2id. A replay ignores the fields: the
+    // command returns the stored HID and changes nothing.
+    const selfReported = row.state === 'active' ? { dateOfBirth: null, gender: null }
+      : this.selfReportedProfile(this.parseProfile(profileJson), profile);
     const contact = this.decrypt(row.id, 'contact', row.contact_ciphertext);
     const contactLookupHmac = createContactLookupHmac(row.contact_channel!, contact);
     // Two first activations that race still hash twice; the command lets one
@@ -378,8 +402,9 @@ export class PatientEnrollmentService {
         const result = await this.database.withSystemTransaction(correlationId, async (client) => {
           const activated = await client.query<{ patient_id: string; hid_code: string;
             account_id: string; replayed: boolean }>(
-            'select * from identity.activate_public_patient_enrollment($1,$2,$3,$4,$5,$6,$7)',
-            [row.id, tokenHmac, profileJson, contact, hid, hash, contactLookupHmac]);
+            'select * from identity.activate_public_patient_enrollment($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+            [row.id, tokenHmac, profileJson, contact, hid, hash, contactLookupHmac,
+              selfReported.dateOfBirth, selfReported.gender]);
           if (!activated.rows[0]) throw new DomainProblem(503, 'ENROLLMENT_ACTIVATION_UNAVAILABLE',
             'Health ID activation is unavailable');
           await this.google.consumePendingInTransaction(client, googleCookie, row.id,
@@ -426,7 +451,8 @@ export class PatientEnrollmentService {
       return { stage: 'active' as const, hidCode: result.rows[0].hid_code, ...googleProgress };
     }
     const base = { stage: row.state, expiresAt: row.expires_at.toISOString(),
-      ...(row.contact_channel ? { contactChannel: row.contact_channel } : {}), ...googleProgress };
+      ...(row.contact_channel ? { contactChannel: row.contact_channel } : {}), ...googleProgress,
+      requiredProfileFields: this.requiredProfileFields(row) };
     if (row.state === 'set_password') return base;
     const active = await this.database.withSystemTransaction(correlationId, (client) =>
       client.query<ChallengeRow>(
@@ -514,12 +540,16 @@ export class PatientEnrollmentService {
       && identity.address === residence.address1
       && validText(residence.town, 120) && validText(residence.lga, 120)
       && validText(residence.state, 120));
+    // A NIN record may lack a date of birth or gender (ADR-061); one it gives
+    // must be valid exactly as before.
     const date = typeof identity.dateOfBirth === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(identity.dateOfBirth)
       ? new Date(`${identity.dateOfBirth}T00:00:00Z`) : new Date(NaN);
+    const validDate = identity.dateOfBirth === undefined || (Number.isFinite(date.getTime())
+      && date.toISOString().slice(0, 10) === identity.dateOfBirth
+      && date.getUTCFullYear() >= 1900 && date.getTime() <= Date.now());
+    const validGender = identity.gender === undefined || GENDERS.includes(identity.gender);
     if (identity.nin !== nin || !validName(identity.firstName) || !validName(identity.lastName)
-      || !Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== identity.dateOfBirth
-      || date.getUTCFullYear() < 1900 || date.getTime() > Date.now()
-      || !['female', 'male', 'intersex', 'other', 'unknown'].includes(identity.gender)
+      || !validDate || !validGender
       || typeof identity.providerReference !== 'string'
       || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,254}$/.test(identity.providerReference)
       || !validText(identity.middleName, 100) || !validText(identity.phoneNumber, 30)
@@ -530,6 +560,67 @@ export class PatientEnrollmentService {
         'External verification returned an invalid response');
     }
     return identity;
+  }
+
+  /** The fields the NIN record lacks, in a fixed order; never a profile value. */
+  private missingProfileFields(profile: Partial<Record<EnrollmentProfileField, unknown>>): EnrollmentProfileField[] {
+    return PROFILE_FIELDS.filter((field) => profile[field] === undefined || profile[field] === null);
+  }
+
+  /** The stored profile's missing fields, for a progress answer before activation. */
+  private requiredProfileFields(row: EnrollmentRow) {
+    return this.missingProfileFields(this.parseProfile(this.decrypt(row.id, 'profile', row.profile_ciphertext)));
+  }
+
+  private parseProfile(profileJson: string): Record<string, unknown> {
+    try {
+      const profile: unknown = JSON.parse(profileJson);
+      if (typeof profile === 'object' && profile !== null && !Array.isArray(profile)) {
+        return profile as Record<string, unknown>;
+      }
+    } catch { /* answered below */ }
+    throw new DomainProblem(503, 'ENROLLMENT_EVIDENCE_UNAVAILABLE', 'Enrollment evidence is unavailable');
+  }
+
+  /**
+   * What a first activation passes as the command's $8 and $9 (ADR-061): the
+   * entered value of each field the NIN record lacks, null for each it gives.
+   * A field the record gives may not be sent; each one it lacks must be.
+   */
+  private selfReportedProfile(profile: Record<string, unknown>, input: SelfReportedProfile) {
+    const missing = this.missingProfileFields(profile);
+    const supplied = PROFILE_FIELDS.filter((field) => input[field] !== undefined && input[field] !== null);
+    const named = (fields: readonly EnrollmentProfileField[]) =>
+      fields.map((field) => PROFILE_FIELD_NAMES[field]).join(' and ');
+    const recorded = supplied.filter((field) => !missing.includes(field));
+    if (recorded.length) {
+      throw new DomainProblem(400, 'ENROLLMENT_PROFILE_FIELD_VERIFIED',
+        `Your ${named(recorded)} ${recorded.length > 1 ? 'come' : 'comes'} from your NIN record and cannot be changed here`);
+    }
+    const absent = missing.filter((field) => !supplied.includes(field));
+    if (absent.length) {
+      throw new DomainProblem(400, 'ENROLLMENT_PROFILE_REQUIRED', `Enter your ${named(absent)}`);
+    }
+    const dateOfBirth = missing.includes('dateOfBirth') ? input.dateOfBirth ?? null : null;
+    const gender = missing.includes('gender') ? input.gender ?? null : null;
+    if (dateOfBirth !== null && !this.realDateOfBirth(dateOfBirth)) {
+      throw new DomainProblem(400, 'DATE_OF_BIRTH_INVALID',
+        'Enter a real date of birth. It cannot be before 1 January 1900 or in the future.');
+    }
+    // The request pipe already refuses any other gender; this keeps the
+    // service closed when it is called without it.
+    if (gender !== null && !GENDERS.includes(gender)) {
+      throw new DomainProblem(400, 'VALIDATION_FAILED', 'One or more request fields are invalid.');
+    }
+    return { dateOfBirth, gender };
+  }
+
+  /** A YYYY-MM-DD calendar date from 1900-01-01 to today (UTC), as 0092 checks it. */
+  private realDateOfBirth(value: unknown): value is string {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+    const date = new Date(`${value}T00:00:00Z`);
+    return Number.isFinite(date.getTime()) && date.toISOString().slice(0, 10) === value
+      && value >= '1900-01-01' && value <= new Date().toISOString().slice(0, 10);
   }
 
   private normalizeContact(channel: ContactChannel, value: string) {
