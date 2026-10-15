@@ -1236,6 +1236,14 @@ revoke all on identity.staff_credential_attestations, identity.workforce_members
 -- trigger function runs only as its trigger.
 revoke all on function notification.on_identity_pin_outbox_created() from public;
 
+-- Break-glass at launch, with limits (0093, D9, ADR-058 addendum). 0093
+-- creates no object and changes no database grant: it inserts the
+-- identity.break-glass.write rows of doctor, clinician and nurse into
+-- auth.role_permissions and the emergency purpose of use. The Identity
+-- runtime's EXECUTE on identity.activate_break_glass and its read of the
+-- vocabulary are above and unchanged. The role assertions
+-- (runtime-roles.integration.sql) now require exactly those three holders.
+
 -- End the temporary memberships granted after the role check above. A
 -- creator's ADMIN OPTION, which PostgreSQL 16 gives a CREATEROLE
 -- administrator in every role it creates, is a separate grant and stays; it
