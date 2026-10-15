@@ -1084,6 +1084,9 @@ update identity.public_patient_enrollment_otps set purpose = 'contact'
   where id = 'b9310000-0000-4000-8000-000000000083';
 update identity.public_patient_enrollment_otps set purpose = 'nin_holder'
   where id = 'b9320000-0000-4000-8000-000000000084';
+-- Deferred again, as in production, so an activation that is not refused
+-- completes and reports itself rather than tripping a foreign key early.
+set constraints all deferred;
 set local role hid_identity_api_runtime;
 select set_config('app.actor_subject','system:auth',true);
 select set_config('app.correlation_id','public-patient-holder-0003',true);

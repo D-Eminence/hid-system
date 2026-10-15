@@ -242,11 +242,15 @@ describe('explicitly deferred staging NIN', () => {
     expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
-  it('keeps the staff NIN provider unavailable in production with QoreID and the holder routes enabled', async () => {
-    Object.assign(process.env, qoreIdAndHolderRoutes, { HID_DEPLOYMENT_ENV: 'production', NIN_PROVIDER_MODE: 'unavailable',
-      CORS_ORIGINS: 'https://www.healthidentitydirectory.com' });
+  // Production refuses the online route until the facility route ships
+  // (ADR-063), so this is the most production accepts: QoreID, NIN-only
+  // enrollment and the facility flag.
+  it('keeps the staff NIN provider unavailable in production with QoreID and NIN-only enrollment enabled', async () => {
+    Object.assign(process.env, qoreIdAndHolderRoutes, { NIN_HOLDER_SMS_ENABLED: 'false', HID_DEPLOYMENT_ENV: 'production',
+      NIN_PROVIDER_MODE: 'unavailable', CORS_ORIGINS: 'https://www.healthidentitydirectory.com' });
     resetEnvironmentForTests();
-    expect(getEnvironment()).toMatchObject({ QOREID_ENABLED: true, NIN_HOLDER_SMS_ENABLED: true, NIN_PROVIDER_MODE: 'unavailable' });
+    expect(getEnvironment()).toMatchObject({ QOREID_ENABLED: true, QOREID_NIN_ONLY_ENROLLMENT_ENABLED: true,
+      ASSISTED_REGISTRATION_ENABLED: true, NIN_PROVIDER_MODE: 'unavailable' });
     const module = await startModule();
     const provider = module.get<NinVerificationProvider>(NIN_VERIFICATION_PROVIDER);
     expect(provider).toBeInstanceOf(UnavailableNinVerificationProvider);

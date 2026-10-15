@@ -261,7 +261,10 @@ export class PatientEnrollmentService {
    * verify_holder, with the online route on and a usable registry phone of an
    * adult; every other refusal has one text. The send and failure budgets are
    * checked here only, by identity.record_public_patient_holder_send under
-   * the NIN lock; one enrollment sends at most three codes.
+   * the NIN lock, after the new code is stored: the command counts its
+   * attempts with those left on the NIN's other open codes. A spent budget
+   * rolls back the code and the recipient. One enrollment sends at most
+   * three codes.
    */
   async sendHolderCode(cookie: string | undefined, remoteIp: string | undefined, correlationId: string) {
     this.assertConfigured();
@@ -298,12 +301,6 @@ export class PatientEnrollmentService {
       await client.query(
         `update identity.public_patient_enrollments set holder_recipient_hmac=$2,
            updated_at=clock_timestamp(), row_version=row_version+1 where id=$1`, [row.id, recipientHmac]);
-      const allowed = await client.query<{ allowed: boolean }>(
-        'select identity.record_public_patient_holder_send($1,$2,$3,$4,$5,$6) as allowed',
-        [row.id, row.token_hmac, ninDigest, this.env.NIN_HOLDER_SMS_DAILY_MAX,
-          this.env.NIN_HOLDER_FAILURES_DAILY_MAX, this.env.NIN_HOLDER_FAILURES_MONTHLY_MAX]);
-      // A spent budget rolls back the recipient write as well.
-      if (allowed.rows[0]?.allowed !== true) throw this.holderRouteLimited();
       if (active) await client.query(
         `update identity.public_patient_enrollment_otps set invalidated_at=clock_timestamp(),
            invalidation_reason='resend' where id=$1`, [active.id]);
@@ -315,6 +312,12 @@ export class PatientEnrollmentService {
          values($1,$2,$3,'phone','nin_holder',$4,$5,clock_timestamp()+($6*interval '1 second'),$7,$8)`,
         [challengeId, row.id, recipientHmac, verifierHmac, this.env.OTP_HMAC_KEY_VERSION,
           this.env.OTP_EXPIRY_SECONDS, this.env.OTP_MAX_ATTEMPTS, ipHmac]);
+      const allowed = await client.query<{ allowed: boolean }>(
+        'select identity.record_public_patient_holder_send($1,$2,$3,$4,$5,$6) as allowed',
+        [row.id, row.token_hmac, ninDigest, this.env.NIN_HOLDER_SMS_DAILY_MAX,
+          this.env.NIN_HOLDER_FAILURES_DAILY_MAX, this.env.NIN_HOLDER_FAILURES_MONTHLY_MAX]);
+      // A spent budget rolls back the new code, the resend and the recipient write.
+      if (allowed.rows[0]?.allowed !== true) throw this.holderRouteLimited();
       return row.id;
     });
     const delivered = await this.notification.deliver({ challengeId, recipient: phone, code,
@@ -1016,7 +1019,8 @@ export class PatientEnrollmentService {
     'Too many enrollment requests; try again later'); }
   private ninAlreadyRegistered() { return new DomainProblem(409, 'NIN_ALREADY_REGISTERED',
     NIN_ALREADY_REGISTERED_DETAIL); }
-  private holderRouteUnavailable(status: 409 | 503) { return new DomainProblem(status,
+  /** A fixed patient sentence, shown as sent even with the 503 (ADR-062). */
+  private holderRouteUnavailable(status: 409 | 503) { return new PublicDetailProblem(status,
     'NIN_HOLDER_ROUTE_UNAVAILABLE', HOLDER_ROUTE_UNAVAILABLE); }
   private holderRouteLimited() { return new DomainProblem(429, 'NIN_HOLDER_ROUTE_LIMITED', HOLDER_ROUTE_LIMITED); }
   private unavailable() { return new DomainProblem(503, 'ENROLLMENT_UNAVAILABLE',

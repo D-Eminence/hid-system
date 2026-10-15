@@ -26,12 +26,15 @@
 --    below. No runtime role has a table privilege on it.
 -- 5. Commands (SECURITY DEFINER, system:auth only):
 --    identity.record_public_patient_holder_send, ..._failure and ..._proof.
+--    A send counts the attempts left on the NIN's open holder codes with its
+--    wrong codes, so the failure budgets bound the codes anyone can try.
 --    The proof command is the only writer of holder_method, holder_verified_at,
 --    holder_challenge_id and holder_verification_id after this migration; the
 --    role bootstrap grants the Identity runtime INSERT and UPDATE on the other
 --    enrollment columns only.
 -- 6. identity.prune_expired_public_patient_enrollments also prunes holder
---    events (send and failure after 31 days, proof after 366 days).
+--    events (send and failure after 31 days, proof after 366 days), and
+--    locks the enrollments it removes before their codes, as the proof does.
 -- 7. identity.activate_public_patient_enrollment (0092's 9-argument command,
 --    same signature, owner, search_path and grants) takes the NIN lock before
 --    the row lock and requires the holder proof.
@@ -175,9 +178,14 @@ comment on table identity.public_patient_holder_events is
   'Append-only holder budget events (ADR-062): keyed digests of the NIN and the registry phone, never a NIN, phone or code. Written and counted only by the holder commands.';
 
 -- 5a. A holder code send: checks the send and failure budgets and records the
--- send. Returns false, recording nothing, when a budget is spent. The caller
--- holds the enrollment row (taken after the NIN lock) and has stored
--- holder_recipient_hmac on it in the same transaction.
+-- send. Returns false, recording nothing, when a budget is spent; the caller
+-- then rolls back the code it stored. The caller holds the NIN advisory lock
+-- (0092's key) and then the enrollment row, has stored holder_recipient_hmac
+-- on the enrollment, has closed the enrollment's earlier holder code and has
+-- stored the new one, unsent, in the same transaction. The failure budgets
+-- count the wrong codes already made with the attempts left on every open
+-- holder code of the NIN, the new one included, so the NIN never has more
+-- wrong codes in reach than its daily and monthly budgets.
 create function identity.record_public_patient_holder_send(
   requested_enrollment_id uuid, requested_token_hmac char(64), requested_nin_digest char(64),
   sms_daily_limit integer, failures_daily_limit integer, failures_monthly_limit integer
@@ -187,6 +195,7 @@ set search_path = pg_catalog, identity, platform, public, pg_temp
 as $$
 declare
   enrollment identity.public_patient_enrollments%rowtype;
+  attempts_in_reach bigint;
 begin
   if platform.current_actor_subject() is distinct from 'system:auth'
     or platform.current_correlation_id() is null
@@ -205,17 +214,35 @@ begin
     or enrollment.holder_recipient_hmac is null then
     raise exception using errcode = '42501', message = 'PATIENT_ENROLLMENT_DENIED';
   end if;
+  -- The code being sent: the enrollment's one open code (0051 allows no
+  -- other), a holder code to the registry phone, unused and unexpired.
+  if not exists (select 1 from identity.public_patient_enrollment_otps code
+    where code.enrollment_id = enrollment.id and code.consumed_at is null and code.invalidated_at is null
+      and code.purpose = 'nin_holder' and code.channel = 'phone'
+      and code.recipient_hmac = enrollment.holder_recipient_hmac
+      and code.verified_at is null and code.failed_attempts = 0
+      and code.expires_at > clock_timestamp()) then
+    raise exception using errcode = '55000', message = 'PATIENT_HOLDER_CODE_REQUIRED';
+  end if;
   perform pg_advisory_xact_lock(hashtextextended('patient-holder-nin:' || requested_nin_digest, 0));
   perform pg_advisory_xact_lock(hashtextextended('patient-holder-phone:' || enrollment.holder_recipient_hmac, 0));
+  -- Counted under the holder NIN lock, so a concurrent send of the NIN that
+  -- committed first is seen with its code.
+  select coalesce(sum(greatest(code.max_attempts - code.failed_attempts, 0)), 0) into attempts_in_reach
+    from identity.public_patient_enrollment_otps code
+    join identity.public_patient_enrollments other on other.id = code.enrollment_id
+   where other.nin_lookup_hmac = enrollment.nin_lookup_hmac
+     and code.purpose = 'nin_holder' and code.consumed_at is null and code.invalidated_at is null
+     and code.verified_at is null and code.expires_at > clock_timestamp();
   if (select count(*) from identity.public_patient_holder_events event
       where event.kind = 'send' and event.phone_digest = enrollment.holder_recipient_hmac
         and event.occurred_at > clock_timestamp() - interval '24 hours') >= sms_daily_limit
     or (select count(*) from identity.public_patient_holder_events event
       where event.kind = 'failure' and event.nin_digest = requested_nin_digest
-        and event.occurred_at > clock_timestamp() - interval '24 hours') >= failures_daily_limit
+        and event.occurred_at > clock_timestamp() - interval '24 hours') + attempts_in_reach > failures_daily_limit
     or (select count(*) from identity.public_patient_holder_events event
       where event.kind = 'failure' and event.nin_digest = requested_nin_digest
-        and event.occurred_at > clock_timestamp() - interval '30 days') >= failures_monthly_limit then
+        and event.occurred_at > clock_timestamp() - interval '30 days') + attempts_in_reach > failures_monthly_limit then
     return false;
   end if;
   insert into identity.public_patient_holder_events(kind, nin_digest, phone_digest, method)
@@ -228,7 +255,8 @@ revoke all on function identity.record_public_patient_holder_send(uuid,char,char
 
 -- 5b. A wrong holder code: records a failure for the NIN. When a failure
 -- budget is reached, writes the route-closed audit event once per window.
--- The caller has counted the attempt on the challenge.
+-- The caller holds the NIN advisory lock and then the enrollment row, and
+-- has counted the attempt on the challenge.
 create function identity.record_public_patient_holder_failure(
   requested_enrollment_id uuid, requested_token_hmac char(64), requested_challenge_id uuid,
   requested_nin_digest char(64), failures_daily_limit integer, failures_monthly_limit integer
@@ -445,8 +473,7 @@ begin
   values (platform.current_correlation_id(), 'system',
     'identity.public-patient-enrollment.holder-verified', 'public-patient-enrollment',
     enrollment.id::text, 'success', 'patient-self', 'application', 'identity-api',
-    jsonb_build_object('method', requested_method, 'ninDigest', requested_nin_digest,
-      'phoneDigest', enrollment.holder_recipient_hmac));
+    jsonb_build_object('method', requested_method, 'ninDigest', requested_nin_digest));
   return 'verified';
 end
 $$;
@@ -454,21 +481,30 @@ revoke all on function identity.record_public_patient_holder_proof(uuid,char,tex
   from public;
 
 -- 6. Retention: holder events outlive their enrollments for their windows.
+-- The prune locks the expired enrollments before it deletes their codes, the
+-- order of the holder proof, and skips any another transaction holds: a
+-- proof holds every unfinished enrollment of its NIN, an expired one
+-- included, before it deletes their codes. The next prune removes a skipped one.
 create or replace function identity.prune_expired_public_patient_enrollments()
 returns integer language plpgsql security definer
 set search_path = pg_catalog, identity, platform, public, pg_temp
 as $$
-declare removed integer;
+declare
+  removed integer;
+  expired uuid[];
 begin
   if platform.current_actor_subject() <> 'system:auth' then
     raise exception using errcode='42501', message='PATIENT_ENROLLMENT_DENIED';
   end if;
+  select coalesce(array_agg(locked.id), '{}') into expired
+    from (select enrollment.id from identity.public_patient_enrollments enrollment
+           where enrollment.state <> 'active' and enrollment.expires_at <= clock_timestamp()
+           order by enrollment.id
+           for update skip locked) locked;
   delete from identity.public_patient_enrollment_otps challenge
-    using identity.public_patient_enrollments enrollment
-    where challenge.enrollment_id=enrollment.id and enrollment.state <> 'active'
-      and enrollment.expires_at <= clock_timestamp();
-  delete from identity.public_patient_enrollments
-    where state <> 'active' and expires_at <= clock_timestamp();
+    where challenge.enrollment_id = any(expired);
+  delete from identity.public_patient_enrollments enrollment
+    where enrollment.id = any(expired);
   get diagnostics removed = row_count;
   delete from identity.public_patient_enrollment_rates
     where window_started_at < clock_timestamp() - interval '48 hours';

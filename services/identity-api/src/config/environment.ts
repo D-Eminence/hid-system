@@ -139,7 +139,9 @@ const environmentSchema = z.object({
   // Holder budgets (ADR-062), counted from identity.public_patient_holder_events
   // over sliding windows: codes sent to one registry phone in 24 hours; wrong
   // codes for one NIN in 24 hours and in 30 days (both checked before a code
-  // is sent); other NINs one registry phone may prove in 365 days.
+  // is sent, counting the attempts left on the NIN's open codes with the new
+  // code's, so the daily budget cannot be below OTP_MAX_ATTEMPTS); other NINs
+  // one registry phone may prove in 365 days.
   NIN_HOLDER_SMS_DAILY_MAX: z.coerce.number().int().min(1).max(50).default(5),
   NIN_HOLDER_FAILURES_DAILY_MAX: z.coerce.number().int().min(1).max(100).default(10),
   NIN_HOLDER_FAILURES_MONTHLY_MAX: z.coerce.number().int().min(1).max(1000).default(30),
@@ -249,14 +251,21 @@ const environmentSchema = z.object({
     context.addIssue({ code: 'custom', path: ['NIN_HOLDER_FAILURES_MONTHLY_MAX'],
       message: 'The monthly holder failure budget cannot be below the daily one' });
   }
+  if (environment.NIN_HOLDER_FAILURES_DAILY_MAX < environment.OTP_MAX_ATTEMPTS) {
+    context.addIssue({ code: 'custom', path: ['NIN_HOLDER_FAILURES_DAILY_MAX'],
+      message: 'The daily holder failure budget cannot be below OTP_MAX_ATTEMPTS: no code could be sent' });
+  }
   const productionProfile = environment.HID_DEPLOYMENT_ENV === 'production'
     || (environment.NODE_ENV === 'production' && environment.HID_DEPLOYMENT_ENV !== 'staging');
-  // Anyone who knows a NIN can spend its failure budget and close the online
-  // route for its holder; the facility route is the remedy, so production
-  // has it whenever the online route is on.
-  if (productionProfile && environment.NIN_HOLDER_SMS_ENABLED && !environment.ASSISTED_REGISTRATION_ENABLED) {
+  // Anyone who knows a NIN can spend its budgets and close the online route
+  // for its holder, and a person without a usable registry phone has no
+  // online route at all; the facility route (0094, ADR-063) is the remedy.
+  // ASSISTED_REGISTRATION_ENABLED has no effect before it ships, so the
+  // online route stays refused in production until then; ADR-063 replaces
+  // this with a check for the facility route itself.
+  if (productionProfile && environment.NIN_HOLDER_SMS_ENABLED) {
     context.addIssue({ code: 'custom', path: ['NIN_HOLDER_SMS_ENABLED'],
-      message: 'The online NIN holder route requires ASSISTED_REGISTRATION_ENABLED in production' });
+      message: 'The online NIN holder route is refused in production until the facility route ships (ADR-063)' });
   }
   if (productionProfile && environment.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED) {
     context.addIssue({ code: 'custom', path: ['QOREID_PATIENT_SELF_NIN_BINDING_ENABLED'],
