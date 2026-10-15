@@ -116,8 +116,10 @@ describe('refusal order on the intake routes', () => {
     const origin = await request(app.getHttpServer()).post(`${BASE}/email-code`).set('Origin', 'https://evil.example')
       .set('Cookie', 'hid_access=session').send(start);
     expect([origin.status, origin.body.code]).toEqual([403, 'ORIGIN_DENIED']);
+    // A signed-in browser whose access cookie expired still sends the CSRF
+    // cookie here (path '/'); the refresh cookie (path '/api/v1/auth') never.
     for (const signedIn of [{ Cookie: 'hid_access=session' }, { Cookie: 'hid_access_refresh=refresh' },
-      { Authorization: 'Bearer token' }] as Record<string, string>[]) {
+      { Cookie: 'hid_access_csrf=csrf' }, { Authorization: 'Bearer token' }] as Record<string, string>[]) {
       const refused = await post('/email-code', start, signedIn);
       expect([refused.status, refused.body.code]).toEqual([409, 'CLINICIAN_APPLICATION_REQUIRES_SIGN_OUT']);
     }

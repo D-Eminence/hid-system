@@ -16,13 +16,18 @@ export function assertAllowedOrigin(request: HidRequest, allowedOrigins: Readonl
 }
 
 /**
- * The request carries no HID session: no session or refresh cookie and no
- * Authorization header. A flow that creates an account refuses a signed-in
- * browser with its own 409 code.
+ * The request carries no HID session: no access, CSRF or refresh cookie and
+ * no Authorization header. A flow that creates an account refuses a
+ * signed-in browser with its own 409 code. On these routes the browser sends
+ * the access and CSRF cookies (path '/') but never the refresh cookie (path
+ * '/api/v1/auth'); once the access cookie expires (15 minutes), the CSRF
+ * cookie, which lives as long as the refresh session, is the sign of a live
+ * sign-in. The refresh cookie still counts where a client sends it.
  */
 export function assertAccountless(request: HidRequest, authCookieName: string, refusal: { code: string; detail: string }): void {
   const authCookie = (request.header('cookie') ?? '').split(';').some((part) =>
     part.trim().startsWith(`${authCookieName}=`)
+    || part.trim().startsWith(`${authCookieName}_csrf=`)
     || part.trim().startsWith(`${authCookieName}_refresh=`));
   if (authCookie || request.header('authorization')) {
     throw new DomainProblem(409, refusal.code, refusal.detail);
