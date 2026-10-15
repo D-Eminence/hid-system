@@ -1502,7 +1502,8 @@ contact or a password, the patient now proves that they hold the NIN. In
 this change the only route is online: a code sent by SMS to the phone the NIN
 record lists. A facility route is planned (`facility.available` stays
 `false`). No Health ID can be activated without a holder proof; the database
-refuses it.
+refuses it. BRANCH:launch/facility-assisted-registration (0094, ADR-063)
+adds the facility route: see "Facility-assisted registration" below.
 
 - `POST /api/v1/identity/patient-enrollments` answers
   `200 { "stage": "verify_holder", "expiresAt", "googleOnboardingRequired", "online": { "available": boolean }, "facility": { "available": false } }`.
@@ -1521,7 +1522,9 @@ refuses it.
   `503 PATIENT_REGISTRATION_NOT_OPEN`. Staging cannot open the online route
   (it sends email only), production refuses it until the facility route
   ships (ADR-063), and the facility route is not built: with this change
-  every start on staging and production answers this way.
+  every start on staging and production answers this way. From 0094
+  production runs the online route only with the facility route on, and the
+  facility route is open only while a facility is designated.
 - A QoreID lookup that fails with `502`, `503` or `504` keeps its code and
   shows one fixed `detail`: "We could not check your NIN now. Try again
   later."
@@ -1572,8 +1575,9 @@ refuses it.
 - `GET /api/v1/identity/patient-enrollments/availability` now answers
   `200 { "open": boolean, "online": boolean, "facility": boolean }`.
   `online` is `NIN_HOLDER_SMS_ENABLED`. `facility` is `false` in this
-  change. `open` is `true` only when the gate is open and a holder route is
-  on.
+  change; from 0094 it is `ASSISTED_REGISTRATION_ENABLED` with at least one
+  participating facility. `open` is `true` only when the gate is open and a
+  holder route is on.
 - The two `503` refusals of this change, `NIN_HOLDER_ROUTE_UNAVAILABLE` and
   `QOREID_PATIENT_NIN_BINDING_DISABLED`, carry their own fixed `detail`
   (not the generic 5xx text), safe to show as sent.
@@ -1610,6 +1614,84 @@ Health-id 077b85c does not know the holder step. On 0093 it cannot
 register a new patient: its start expects `verify_contact` and its contact
 step is refused `409 ENROLLMENT_STAGE_INVALID`. It fails closed; sign-in is
 unchanged (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3).
+
+Facility-assisted registration (ADR-063,
+BRANCH:launch/facility-assisted-registration, migration 0094; not deployed).
+A patient without a usable registry phone proves at a participating
+facility that they hold the NIN. They start on their own device, show a
+desk code at the desk, and a staff member checks one original photo ID.
+The patient finishes on their own device. Every flag is off and no facility
+is designated, so the route is closed until an operator opens it.
+
+- `GET /api/v1/identity/patient-enrollments/participating-facilities`
+  (new). Public, no input, no audit row, `Cache-Control: public,
+  max-age=300`. Answers `200 { "facilities": [{ "name", "addressLine"?,
+  "town", "lga", "state", "hours"? }], "whatToBring": [three fixed
+  lines] }`. No ids. The list is empty while `ASSISTED_REGISTRATION_ENABLED`
+  is false. The three lines: "Your own phone with this registration open";
+  "One original photo ID: national ID card, international passport,
+  driver's licence or voter's card"; "A phone number or email that can
+  receive codes now".
+- `POST /api/v1/identity/patient-enrollments/facility-code` (new). The
+  enrollment cookie, an approved `Origin`, no HID session, no body. At
+  `verify_holder` it answers the holder progress with
+  `facility: { "available": true, "deskCode", "deskCodeExpiresAt" }`. The
+  code is 10 Crockford base32 characters (50 bits). A new code replaces the
+  last one; five per enrollment; it expires with the enrollment.
+  `GET .../current` shows the same code to the cookie holder only. The
+  database keeps only the code's keyed digest.
+- `POST /api/v1/identity/assisted-verifications` (new, staff). A staff
+  session with MFA, the `X-Facility-ID` facility, `Origin` and the CSRF
+  token, the permission `identity.patient.assisted_registration` (doctor,
+  clinician, nurse) and `Idempotency-Key`. Body `{ "deskCode", "method":
+  "government_photo_id_in_person", "documentType": "national_id_card" |
+  "international_passport" | "drivers_licence" | "voters_card",
+  "document": { "firstName", "lastName", "dateOfBirth"? },
+  "attestations": { "patientPresent", "originalDocumentSeen",
+  "photoMatchesPerson", "codeShownOnPatientsOwnDevice", "patientConsents" }
+  }`, each attestation `true`. Order: the guard, then
+  `503 ASSISTED_REGISTRATION_DISABLED` while the route is off (before the
+  body is read), then the body (`400`). The same key replays the stored
+  outcome.
+- A match answers `200 { "outcome": "verified" }` and moves the patient's
+  enrollment to `verify_contact`. Names match in either order, ignoring
+  case, accents, hyphens and spaces. The date of birth is compared only when
+  the record has one. Staff never see the NIN, a registry value, the
+  contact, the Health ID or the missing profile fields.
+- `422 ASSISTED_VERIFICATION_NOT_MATCHED` carries
+  `fields: { "firstName", "lastName", "dateOfBirth" }`, each `match`,
+  `no_match` or `not_in_record`; never a registry value.
+- Admin: `GET /api/v1/admin/facilities/:facilityId/assisted-registration`
+  (`platform.facility.read`) answers `{ facilityId, designated, status,
+  addressLine, town, lga, state, hours, reason, version, updatedAt }`,
+  version `0` without a designation. `POST` the same path
+  (`platform.facility.manage`, step-up, reason, `Idempotency-Key`,
+  `If-Match` with the version, `0` to create) with `{ status: active |
+  suspended, addressLine?, town, lga, state, hours?, reason }` answers
+  `201 { facilityId, status, version, replayed }`.
+- Budgets: 20 checks per staff member and 100 per facility in 24 hours,
+  every outcome counted (`ASSISTED_VERIFICATION_STAFF_DAILY_MAX`,
+  `ASSISTED_VERIFICATION_FACILITY_DAILY_MAX`).
+
+| Route | Status and code | When | Next step |
+| --- | --- | --- | --- |
+| `POST .../facility-code` | `409 ASSISTED_REGISTRATION_UNAVAILABLE` | The facility route is closed (flag off or no participating facility) | Use the online route, or try later |
+| `POST .../facility-code` | `409 ENROLLMENT_STAGE_INVALID` | The holder step is done | Continue with the contact step |
+| `POST .../facility-code` | `429 ASSISTED_DESK_CODE_LIMITED` | Five codes were issued for this enrollment | Start again |
+| `POST .../assisted-verifications` | `503 ASSISTED_REGISTRATION_DISABLED` | The route is off | None; the route is closed |
+| `POST .../assisted-verifications` | `400 DESK_CODE_INVALID` | The code is not 10 Crockford characters | Ask the patient for the code again |
+| `POST .../assisted-verifications` | `404 DESK_CODE_NOT_FOUND` | No enrollment waits for this code | Ask the patient to show the code on their phone again |
+| `POST .../assisted-verifications` | `422 ASSISTED_VERIFICATION_NOT_MATCHED` | A field differs from the NIN record | Check the document; do not register |
+| `POST .../assisted-verifications` | `403 ASSISTED_REGISTRATION_NOT_AUTHORIZED` | No MFA session in SQL, no attested grant, or the facility does not take part | Ask a platform administrator |
+| `POST .../assisted-verifications` | `409 NIN_ALREADY_REGISTERED` | The NIN already has a Health ID | Direct the patient to account recovery; if they never registered, Health ID support with the reference in `detail` |
+| `POST .../assisted-verifications` | `409 ASSISTED_VERIFICATION_STALE` | The check can no longer prove the enrollment (another proof came first, or a new desk code) | Ask for a new desk code and check again |
+| `POST .../assisted-verifications` | `409 IDEMPOTENCY_KEY_REUSED` | The key was used for another request | Use a new key |
+| `POST .../assisted-verifications` | `429 ASSISTED_VERIFICATION_LIMITED` | A staff or facility budget is spent | Try again later |
+| `POST .../assisted-verifications` | `503 ASSISTED_VERIFICATION_UNAVAILABLE` | The check could not be recorded | Try again |
+| `POST /admin/facilities/:id/assisted-registration` | `409 FACILITY_NOT_ACTIVE` | Making an inactive facility or organization active | Verify the facility first |
+
+Health-id 077b85c has none of these screens (facility list, desk code,
+staff check, designation). It cannot use the facility route.
 
 ### HID Resolution
 

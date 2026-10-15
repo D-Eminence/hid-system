@@ -267,6 +267,16 @@ The executable covers:
    runs `upgrade/0093-public-patient-holder-backfill.sql` (rollback-only):
    enrollments at `verify_contact`, `set_password` and `active`, then 0093 and
    its backfill.
+   With 0094 (BRANCH:launch/facility-assisted-registration, ADR-063): the
+   additional suites include `facility-assisted-registration.integration.sql`
+   (designations, the facility list, the staff command and its refusals,
+   budgets and audit, the in-person proof and activation), run in both
+   passes. `assisted_registration_runtime` runs
+   `verify-assisted-registration-runtime.mjs` after the patient enrollment
+   verifier: a platform designation with step-up, the desk code, staff
+   signed in with an authenticator, refused staff, a mismatch, a match,
+   activation and sign-in, an existing Health ID, a race with a phone proof,
+   both budgets and a suspension, as `hid_identity_api_runtime`.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
@@ -284,7 +294,13 @@ The executable covers:
    since 0093 that the upgraded bootstrap grants the Identity runtime the
    three holder commands, no privilege on the holder events, no table-level
    `INSERT` or `UPDATE` on the enrollment table and no `UPDATE` of
-   `holder_method`, and that a new enrollment defaults to `verify_holder`), then
+   `holder_method`, and that a new enrollment defaults to `verify_holder`;
+   and since 0094 that the upgraded bootstrap grants the Identity runtime the
+   facility list, the in-person check command and the two designation
+   commands, and no privilege on the designation, its events, the checks,
+   the participation and attestation helpers or `auth.staff_session_is_mfa`,
+   and that the permission is held by `clinician`, `doctor` and `nurse`
+   only), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

@@ -116,9 +116,19 @@ separate deployment authorization. None of them has been run.
   off; enabling one is an operator step after the release checklist P-rows
   (DEP-1, P18, the facility designation). The history above is kept as
   decided.
+- **Update of 2026-10-15 (ADR-063; BRANCH:launch/facility-assisted-registration,
+  migration 0094; not merged or deployed).** The facility route is built. A
+  patient starts on their own device and shows a desk code at a
+  participating facility; a doctor, clinician or nurse with MFA and an
+  attested grant checks one original photo ID and records the outcome; the
+  patient finishes on their own device. A NIN alone still never creates a
+  Health ID. Production now runs the online route only with the facility
+  route on. Both routes stay off until the operator steps (release
+  checklist P23 to P32).
 - **Launch consequence (open for the owner to confirm).** With N1 as decided
   and facility-assisted registration out of scope (N2(d), D17), no new
-  patient can get a Health ID in production at launch; legacy-migrated
+  patient can get a Health ID in production at launch (N2(d) is revised
+  below: the facility route is built and off by default); legacy-migrated
   patients sign in. The owner confirms launching with registration closed,
   or prioritises ENR-4 step 2 (the registry-phone code), which needs a QoreID
   contract that exposes the registry phone (DEP-1, unconfirmed).
@@ -154,6 +164,18 @@ separate deployment authorization. None of them has been run.
     activation command refuses it as well (0085).
   - (d) Facility-assisted registration is out of launch scope (D17); walk-in
     patients self-enroll.
+  - (d) revised 2026-10-15 (ADR-063, BRANCH:launch/facility-assisted-registration,
+    0094): facility-assisted registration is in launch scope as the
+    in-person holder route of N1, off by default. It is not staff-led
+    enrollment: the patient registers on their own device, and staff only
+    record an in-person check of one original photo ID. It opens only with
+    `ASSISTED_REGISTRATION_ENABLED` and a designated facility, after the
+    procedure sign-off, the staff MFA screens (FE-2) and attested clinical
+    grants (FE-3 or a written procedure) (release checklist P29 to P32).
+    One staff member verifies; a second approver, a notice to the registry
+    phone, refusing minors at a facility, facility-assisted recovery and a
+    contested-identity review are owner decisions, not built. D17's other
+    modules stay off.
 - **Implemented now.** D-Eminence/hid-system#50 expires the enrollment cookie
   at every sign-in, refresh and sign-out, and limits activation per
   enrollment. D-Eminence/hid-system#68 implements (b) and (c)

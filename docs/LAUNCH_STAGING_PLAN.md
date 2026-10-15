@@ -12,7 +12,7 @@ Nothing in this plan has been run on staging or production. Every step that touc
 |---|---|
 | Identity API: patient sign-in (HIDCode and password), staff sign-in with a password and an authenticator (0088), platform administration, consent and access requests, patient self-service | Lab API, Pharmacy API, OCR API and worker, Outreach API, notification worker |
 | EHR API: encounters, notes, diagnoses, vitals, prescriptions recorded in the EHR, the patient's own records | Document uploads (`uploads_enabled` off), break-glass (`break_glass_enabled` off, no role holds `identity.break-glass.write`), the Outreach portal |
-| Notification API (SES email, Termii SMS after P18), event dispatcher, gateway | Google sign-in (P19), facility-assisted registration, NIN-only self-enrollment in production (until N1) |
+| Notification API (SES email, Termii SMS after P18), event dispatcher, gateway | Google sign-in (P19), facility-assisted registration (built in BRANCH:launch/facility-assisted-registration, off until P29 to P32 and a designation), NIN-only self-enrollment in production (until N1) |
 
 Re-enabling an off module takes its own reviewed migration (ADR-058). It is never a hand-made grant.
 
@@ -31,16 +31,17 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
   - D-Eminence/hid-system#79: Turnstile contract.
 - **Merged, not deployed:** D-Eminence/hid-system#82 adds 0092: a NIN record without a date of birth or gender can enroll. The steps in §3 count 0092.
 - **Pending, not merged:** BRANCH:launch/nin-ownership-proof adds 0093: a Health ID needs a proof that the person holds the NIN, a code to the phone the NIN record lists (ADR-062). Every new flag is off. The online route stays closed on staging, which sends email only, and production refuses it until the facility route ships (ADR-063). So with 0093 alone public patient enrollment is fully closed on staging: every start answers `503 PATIENT_REGISTRATION_NOT_OPEN`, and the staging acceptance rows that need a working start wait for the facility route (release checklist §7). The steps in §3 count 0093.
+- **Pending, not merged:** BRANCH:launch/facility-assisted-registration, stacked on the branch above, adds 0094: the facility route (ADR-063). A patient starts on their own device, shows a desk code at a participating facility, and a staff member with MFA and an attested clinical grant checks one original photo ID. The route stays closed until `ASSISTED_REGISTRATION_ENABLED` is on and a facility is designated (release checklist P29 to P32). Production then accepts the online route only with the facility route on. On staging the facility route can open the acceptance rows that need a working start (S4v). The steps in §3 count 0094.
 
 ## 3. Staging, in order
 
-1. **Preflight for staging.** Release checklist §4 lists P1 to P28.
+1. **Preflight for staging.** Release checklist §4 lists P1 to P32.
    - Run against staging: the database, secret and artefact rows, P1 to P5 and P8 to P14. P11 and P12 run again after the migration.
    - P22 (staff enrolment before clinical roles) applies to every environment that enables clinical roles.
-   - Production gates: P6 (two Super Admins), P7 (the staging acceptance passed) and P15 to P21; P28 (no active public enrollment) before 0093; P23 to P27 before any NIN holder route or the signed-in NIN binding is enabled.
-2. **Rehearse on a restored staging snapshot (S1).** Run `db:plan`, `db:dry-run` and `db:migrate` to 0093 in an isolated copy, then the bootstrap, `db:verify-roles` and `db:verify-logins` (S2).
+   - Production gates: P6 (two Super Admins), P7 (the staging acceptance passed) and P15 to P21; P28 (no active public enrollment) before 0093; P23 to P27 before any NIN holder route or the signed-in NIN binding is enabled; P29 to P32 before the facility route is enabled.
+2. **Rehearse on a restored staging snapshot (S1).** Run `db:plan`, `db:dry-run` and `db:migrate` to 0094 in an isolated copy, then the bootstrap, `db:verify-roles` and `db:verify-logins` (S2).
 3. **Migrate staging.** Follow release checklist §5 in ledger order.
-   - Each migration has its lock window: steps 2 to 17 for 0067 to 0084, 18 to 26 for 0085 to 0093, the estimate check at 27 and the role bootstrap at 28.
+   - Each migration has its lock window: steps 2 to 17 for 0067 to 0084, 18 to 27 for 0085 to 0094, the estimate check at 28 and the role bootstrap at 29.
    - Run the bootstrap after the last migration and before any new build starts.
 4. **Deploy in the order of release checklist §6.**
    - Identity and EHR builds go out only after their migrations and the bootstrap.

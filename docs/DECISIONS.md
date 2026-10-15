@@ -4444,7 +4444,9 @@ Related: ADR-048; ADR-057; `PHASE_3_LAUNCH_DECISIONS.md` N1;
 
 Status: Proposed for source implementation
 (BRANCH:launch/nin-ownership-proof, migration 0093). Not merged or deployed.
-Every new flag is off.
+Every new flag is off. ADR-063 (BRANCH:launch/facility-assisted-registration,
+0094) builds the facility route and replaces the production refusal of the
+online route below.
 
 Date: 2026-10-15
 
@@ -4590,6 +4592,135 @@ Residual risks:
   means, when it was captured, whether a SIM change is flagged, and whether
   HID may text it.
 
-Related: ADR-048; ADR-061; ADR-063 (planned);
+Related: ADR-048; ADR-061; ADR-063;
 `PHASE_3_LAUNCH_DECISIONS.md` N1; `QOREID_VERIFICATION_CONTRACT.md`;
 `INTERFACE_CONTRACT.md`; `DATABASE.md`, "NIN holder proof (0093)".
+
+# ADR-063: Facility-assisted registration
+
+Status: Proposed for source implementation
+(BRANCH:launch/facility-assisted-registration, migration 0094, stacked on
+BRANCH:launch/nin-ownership-proof). Not merged or deployed. Every flag is
+off and no facility is designated.
+
+Date: 2026-10-15
+
+Context:
+
+- ADR-062 requires a proof that the person holds the NIN before any Health
+  ID. Its online route needs a usable registry phone of an adult. A patient
+  without one (lost SIM, changed number, no linked phone) has no route.
+- Anyone who knows a NIN can spend its online budgets and close the online
+  route for its holder. The in-person route is the remedy, so ADR-062 kept
+  the online route off in production until this route exists.
+- QoreID offers HID no document, face-match or in-person product. The
+  in-person check is done by a person at a facility, with an original photo
+  ID, and recorded by HID.
+
+Decision:
+
+- Participating facilities. The platform designates a facility
+  (`identity.facility_assisted_registration`, append-only events, FORCE row
+  level security). Only `identity.admin_set_facility_assisted_registration`
+  writes it: `platform.facility.manage`, a fresh step-up, a reason, the
+  expected version (0 creates) and an idempotency key, through
+  `POST /admin/facilities/:id/assisted-registration`. A facility takes part
+  while its designation is active, the facility is verified and active, and
+  its organization is active. Only an active facility can be made active.
+- Public list. `GET /identity/patient-enrollments/participating-facilities`
+  lists facilities by name and location only (no ids), with three fixed
+  "what to bring" lines. Public, unaudited, cacheable for five minutes.
+  Empty while `ASSISTED_REGISTRATION_ENABLED` is false.
+- The patient starts on their own device, as online. At the desk the device
+  shows a desk code (`POST .../facility-code`): 10 Crockford base32
+  characters, 50 bits. The database keeps only its keyed digest
+  (`patient-enrollment-desk-code`), a random salt and an issue count. The
+  code is derived from the cookie token and the salt, so only the cookie
+  holder can be shown it again. A new code replaces the last one; five per
+  enrollment; it expires with the enrollment.
+- Who may check. The permission `identity.patient.assisted_registration` on
+  doctor, clinician and nurse; not org_admin, admin or receptionist. The
+  staff member also needs a role grant at that facility backed by a current
+  credential attestation (0087; legacy and onboarding roles never qualify),
+  a staff session with MFA assurance (checked in SQL by
+  `auth.staff_session_is_mfa` as well as by the guard), and a participating
+  facility.
+- The approved procedure (pending owner and legal sign-off): one method,
+  `government_photo_id_in_person`; one original photo ID of four types
+  (national ID card, international passport, driver's licence, voter's
+  card; no NIN slip); five attestations, each true (patient present,
+  original seen, photo matches the person, code shown on the patient's own
+  device, patient consents).
+- The staff check, `POST /identity/assisted-verifications`, in this order:
+  the guard (staff session with MFA, Origin and CSRF, facility, permission),
+  the route switch (503 before the body is read), the body (400), a read of
+  the enrollment the code names and a blind compare in system context, the
+  staff command, then the holder proof in system context.
+- Blind compare. Names are normalized (NFKD, combining marks dropped, upper
+  case, only A-Z and single spaces). First and last name match the record's
+  in either order. The date of birth is compared only when the record has
+  one. The answer per field is `match`, `no_match` or `not_in_record`. Staff
+  never see the NIN, a registry value, the contact, the Health ID or the
+  missing profile fields. The typed values are never stored.
+- `identity.record_assisted_verification` (staff context) records every
+  check, matched, not matched or code not found, in
+  `identity.assisted_registration_verifications`: digests and per-field
+  outcomes only. It charges two sliding 24-hour budgets, every outcome
+  counted: 20 checks per staff member across facilities, 100 per facility
+  (`ASSISTED_VERIFICATION_STAFF_DAILY_MAX`,
+  `ASSISTED_VERIFICATION_FACILITY_DAILY_MAX`). It writes a staff audit row
+  {method, documentType, outcome, ninDigest}. The same idempotency key
+  replays the stored outcome.
+- The holder proof accepts `facility_in_person` for a matched check of the
+  same enrollment and its current desk code, under 10 minutes old, not used
+  by another enrollment, by a staff member still authorized at a
+  participating facility. It clears the desk code and closes any open
+  registry-phone code. It writes the proof outcome on the check once.
+  Activation re-checks the check, the designation and the staff member, and
+  records the NIN as verified at the time of the check.
+- A NIN that already has a Health ID is answered to staff only after a
+  match: `409 NIN_ALREADY_REGISTERED` with a staff text and the check's
+  reference, never the Health ID or the person.
+- One verifying staff member at launch. A second approver and a notice to
+  the registry phone after activation are owner decisions, not built.
+- Production runs the online route only with the facility route
+  (`NIN_HOLDER_SMS_ENABLED` needs `ASSISTED_REGISTRATION_ENABLED`), in
+  Identity, in `infra/aws` and in `verify-synth`. This replaces ADR-062's
+  refusal.
+- Operators review checks per staff member and per facility from the
+  verification rows (`DATABASE.md`, "Facility-assisted registration
+  (0094)").
+
+Consequences:
+
+- A patient without a usable registry phone can register, at a
+  participating facility, after one in-person check.
+- With every flag off and no designation the facility route stays closed:
+  availability answers `facility: false`, the list is empty, a desk code is
+  `409 ASSISTED_REGISTRATION_UNAVAILABLE` and the staff check
+  `503 ASSISTED_REGISTRATION_DISABLED`.
+- Health-id 077b85c has none of the new screens (facility list, desk code,
+  staff check, designation); it cannot use the route.
+- The facility route needs the staff MFA sign-in (FE-2) and attested
+  clinical grants (FE-3 or a written procedure) before it can be switched
+  on.
+
+Residual risks:
+
+- One staff member can approve an impostor with a forged or borrowed photo
+  ID. The attestations, the audit row, the budgets and the review query
+  bound and expose this; they do not prevent it.
+- Minors at a facility are not refused (owner decision).
+- A NIN-keyed duplicate is refused; a legacy patient without a recorded NIN
+  can still get a second Health ID (ADR-062, open owner decision).
+- Facility-assisted account recovery and a contested-identity review are
+  owner decisions and are not built.
+- A registry-phone proof recorded before the in-person check removes the
+  desk code's enrollment: the staff check then answers `404` or `409
+  ASSISTED_VERIFICATION_STALE` and the patient continues on the proven
+  enrollment. An in-person proof displaces a phone proof (contested).
+
+Related: ADR-062; ADR-054 (staff MFA); ADR-049 (workforce provisioning);
+`PHASE_3_LAUNCH_DECISIONS.md` N2(d) and D17; `INTERFACE_CONTRACT.md`,
+"Facility-assisted registration"; `DATABASE.md`, "Facility-assisted
+registration (0094)".

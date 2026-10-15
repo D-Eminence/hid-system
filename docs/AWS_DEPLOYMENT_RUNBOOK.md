@@ -35,6 +35,15 @@ NIN-only enrollment without a holder route, the online route on staging
 the signed-in NIN binding in production. Enabling any of them is an operator
 step after the release checklist P23 to P27.
 
+Facility route (ADR-063, BRANCH:launch/facility-assisted-registration):
+with it, synthesis accepts `HID_NIN_HOLDER_SMS_ENABLED=true` in production
+only with `HID_ASSISTED_REGISTRATION_ENABLED=true`, and `verify-synth`
+checks the same. The flag alone opens nothing: the route opens while a
+facility is designated through the admin API. The in-person budgets
+(`ASSISTED_VERIFICATION_STAFF_DAILY_MAX`, `_FACILITY_DAILY_MAX`) keep
+Identity's defaults (20 and 100); they are not synth inputs. Enabling the
+facility route is an operator step after release checklist P29 to P32.
+
 ## Staging email acceptance profile
 
 Staging selects `NOTIFICATION_DELIVERY_PROFILE=email-only`. Its Notification API
