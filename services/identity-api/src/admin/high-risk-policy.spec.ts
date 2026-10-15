@@ -7,6 +7,7 @@ import { HIGH_RISK_ACTION, PLATFORM_SCOPE, REQUIRED_PERMISSIONS } from '../commo
 import { AdminOrganizationApplicationsController } from '../identity/organization-applications.controller';
 import { IntegrationAdminController } from '../integrations/integration-admin.controller';
 import { AdminController } from './admin.controller';
+import { AdminClinicianApplicationsController } from './clinician-application-admin.controller';
 import { PLATFORM_ACTION_POLICIES, platformActionPolicy, requiresTwoPersonApproval, type PlatformAction } from './high-risk-policy';
 import { PlatformSecurityController } from './platform-security.controller';
 import { WorkforceAdminController } from './workforce-admin.controller';
@@ -16,7 +17,7 @@ interface PlatformRoute { controller: string; handler: string; method: RequestMe
 
 const controllers = [AdminController, PlatformSecurityController, IntegrationAdminController,
   AdminOrganizationApplicationsController, AdminDemoRequestsController, PlatformAuthController,
-  WorkforceAdminController];
+  WorkforceAdminController, AdminClinicianApplicationsController];
 
 function platformRoutes(): PlatformRoute[] {
   const routes: PlatformRoute[] = [];
@@ -81,6 +82,8 @@ describe('central high-risk platform policy', () => {
     ['platform.integration.credential-reference', 'critical'], ['platform.principals.export', 'critical'],
     ['platform.workforce.attach', 'critical'], ['platform.workforce.attest', 'critical'],
     ['platform.workforce.role.change', 'critical'], ['platform.workforce.membership.end', 'critical'],
+    ['platform.clinician-application.attest', 'critical'], ['platform.clinician-application.approve', 'critical'],
+    ['platform.clinician-application.reject', 'high'],
     ['platform.facility.status', 'high'], ['platform.pricing.product', 'high'], ['platform.pricing.price', 'high'],
     ['platform.integration.configure', 'high'], ['platform.integration.test', 'high'],
     ['platform.organization-application.verify-cac', 'high'], ['platform.organization-application.approve', 'high'],
@@ -113,6 +116,30 @@ describe('central high-risk platform policy', () => {
     // attestation reviewer, which the SQL command enforces.
     expect(PLATFORM_ACTION_POLICIES['platform.workforce.role.change'].approval).toBe('independent-attestation');
     expect(requiresTwoPersonApproval('platform.workforce.role.change')).toBe(false);
+  });
+
+  it('guards the clinician application review with the workforce permission, a version, a key and a reason (ADR-064)', () => {
+    // The list route is the controller path itself (@Get() records '/').
+    const review = routes.filter((route) => route.path.startsWith('admin/clinician-applications/'));
+    expect(review.map((route) => `${route.method === RequestMethod.GET ? 'GET' : 'POST'} ${route.path}`).sort())
+      .toEqual(['GET admin/clinician-applications//', 'GET admin/clinician-applications/:applicationId',
+        'POST admin/clinician-applications/:applicationId/approve', 'POST admin/clinician-applications/:applicationId/attest',
+        'POST admin/clinician-applications/:applicationId/reject'].sort());
+    for (const route of review) expect(route.permissions).toEqual(['platform.workforce.manage']);
+    expect(Object.fromEntries(review.filter((route) => route.action).map((route) => [route.handler, route.action])))
+      .toEqual({ attest: 'platform.clinician-application.attest', approve: 'platform.clinician-application.approve',
+        reject: 'platform.clinician-application.reject' });
+    for (const action of ['platform.clinician-application.attest', 'platform.clinician-application.approve',
+      'platform.clinician-application.reject'] as const) {
+      expect(PLATFORM_ACTION_POLICIES[action]).toMatchObject({ permissions: ['platform.workforce.manage'], stepUp: true,
+        reason: true, ifMatch: true, idempotencyKey: true });
+    }
+    // Step 2's second person is step 1's administrator; the SQL wrapper, the
+    // table CHECK and the pinned grant enforce it, so it is one step here.
+    expect(PLATFORM_ACTION_POLICIES['platform.clinician-application.approve'].approval).toBe('independent-attestation');
+    expect(PLATFORM_ACTION_POLICIES['platform.clinician-application.attest'].approval).toBe('none');
+    expect(PLATFORM_ACTION_POLICIES['platform.clinician-application.reject'].approval).toBe('none');
+    expect(requiresTwoPersonApproval('platform.clinician-application.approve')).toBe(false);
   });
 
   it('requires two-person approval for Super Admin grants and MFA resets only', () => {
