@@ -35,7 +35,7 @@ const assurance = { accountId: '40000000-0000-4000-8000-0000000000e9', subject: 
   factorId: '41000000-0000-4000-8000-0000000000e9', method: 'totp' as const };
 const event = { correlationId: '01J5A2C3D4E5F6G7H8J9K0MNE9', sourceIp: '192.0.2.90' };
 
-function harness(resolve: jest.Mock) {
+function harness(resolve: jest.Mock, resolvePlatform: jest.Mock = jest.fn()) {
   const statements: string[] = [];
   const client = { query: jest.fn(async (sql: string) => {
     statements.push(String(sql));
@@ -44,7 +44,7 @@ function harness(resolve: jest.Mock) {
   }) } as unknown as PoolClient;
   const database = { query: jest.fn(), withSystemTransaction: jest.fn() };
   const service = new TokenService(database as unknown as DatabaseService,
-    { resolve } as unknown as CurrentStaffContextService, { resolve: jest.fn() } as never);
+    { resolve, resolvePlatform } as unknown as CurrentStaffContextService, { resolve: jest.fn() } as never);
   return { service, client, statements };
 }
 
@@ -71,10 +71,18 @@ describe('staff session issuance re-checks eligibility', () => {
     expect(error.message).toBe('Staff account or facility membership is inactive');
   });
 
-  it('refuses a platform session the same way it always did (the resolver is not consulted)', async () => {
+  it('issues a platform session from the platform resolver alone (the staff resolver is not consulted)', async () => {
     const resolve = jest.fn();
-    const { service, client } = harness(resolve);
-    await service.issuePlatformSession(client, assurance, event).catch(() => undefined);
+    const resolvePlatform = jest.fn().mockResolvedValue({ kind: 'platform', id: assurance.accountId,
+      subject: assurance.subject, accountId: assurance.accountId, roles: [], permissions: [],
+      platformRoles: ['platform_super_admin'], platformPermissions: ['platform.admin.access'], facilityIds: [],
+      facilities: [], authenticationMethod: 'local' });
+    const { service, client, statements } = harness(resolve, resolvePlatform);
+    const issued = await service.issuePlatformSession(client, assurance, event);
+    expect(resolvePlatform).toHaveBeenCalledWith(assurance.subject, undefined, client);
     expect(resolve).not.toHaveBeenCalled();
+    expect(issued.actor).toMatchObject({ kind: 'platform', accountId: assurance.accountId });
+    expect(statements.some((sql) => sql.includes('insert into auth.sessions'))).toBe(true);
+    expect(statements.some((sql) => sql.includes('insert into auth.session_assurance'))).toBe(true);
   });
 });
