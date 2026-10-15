@@ -170,6 +170,16 @@ begin
     valid_until, facility, open_limit, platform_limit);
   return created;
 end $$;
+-- The submit probe with a submission's details (P1's at X by default).
+create function pg_temp.ca_probe(session_hmac text, email_hmac text, key text, sha text,
+  email text default 'doctor1@ca.invalid', valid_until date default null,
+  facility uuid default 'ca110000-0000-4000-8000-00000000000a', open_limit integer default 30,
+  role_code text default 'doctor', regulator text default 'MDCN', licence text default 'MDCN/12345',
+  full_name text default 'Doctor One') returns text language plpgsql as $$
+begin
+  return identity.clinician_application_submit_probe(session_hmac, email_hmac, key, sha, email, full_name, role_code,
+    regulator, licence, coalesce(valid_until, (select licence_400 from ca_dates)), facility, open_limit);
+end $$;
 create function pg_temp.ca_account(email text) returns uuid language sql as $$
   select id from auth.accounts where lower(email) = lower($1) and status <> 'deleted'
 $$;
@@ -236,7 +246,8 @@ begin
 end $$;
 grant execute on function pg_temp.ca_h(text), pg_temp.ca_system(text), pg_temp.ca_as(text),
   pg_temp.ca_refused(text, text), pg_temp.ca_refused_with(text, text, text), pg_temp.ca_draft(text, text),
-  pg_temp.ca_submit(text, text, text, text, text, text, date, uuid, integer, integer), pg_temp.ca_account(text),
+  pg_temp.ca_submit(text, text, text, text, text, text, date, uuid, integer, integer),
+  pg_temp.ca_probe(text, text, text, text, text, date, uuid, integer, text, text, text, text), pg_temp.ca_account(text),
   pg_temp.ca_application(text, uuid) to public;
 
 create temporary table ca_dates on commit drop as
@@ -258,7 +269,8 @@ begin
     'identity.verify_clinician_application_signup_code(uuid,character,text,character,character)',
     'identity.verify_clinician_application_status_code(uuid,character,character,character)',
     'identity.clinician_application_session(character)',
-    'identity.clinician_application_submit_probe(character,character,text,character)',
+    'identity.clinician_application_submit_probe(character,character,text,character,text,text,text,text,text,date,uuid,integer)',
+    'identity.count_clinician_application_submit_attempt(character)',
     'identity.search_clinician_application_facilities(character,text)',
     'identity.submit_clinician_application(character,character,text,character,text,character,text,text,text,text,text,date,uuid,integer,integer)',
     'identity.bind_clinician_application_mfa_challenge(character,uuid)',
@@ -825,20 +837,87 @@ select pg_temp.ca_system('submit');
 -- password: 'new' for a live draft of the address; no draft, another
 -- address or an account capability is refused as the submission would be.
 do $$ begin
-  if identity.clinician_application_submit_probe(pg_temp.ca_h('session:p1'), pg_temp.ca_h('email:doctor1@ca.invalid'),
+  if pg_temp.ca_probe(pg_temp.ca_h('session:p1'), pg_temp.ca_h('email:doctor1@ca.invalid'),
        'clinician-suite-key-p1', pg_temp.ca_h('sha:p1')) <> 'new' then
     raise exception 'the submit probe did not accept a live draft';
   end if;
 end $$;
-select pg_temp.ca_refused($c$select identity.clinician_application_submit_probe(pg_temp.ca_h('session:none'),
+select pg_temp.ca_refused($c$select pg_temp.ca_probe(pg_temp.ca_h('session:none'),
   pg_temp.ca_h('email:doctor1@ca.invalid'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1'))$c$,
   'CLINICIAN_APPLICATION_SESSION_INVALID');
-select pg_temp.ca_refused($c$select identity.clinician_application_submit_probe(pg_temp.ca_h('session:p1'),
+select pg_temp.ca_refused($c$select pg_temp.ca_probe(pg_temp.ca_h('session:p1'),
   pg_temp.ca_h('email:other@ca.invalid'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1'))$c$,
   'CLINICIAN_APPLICATION_SESSION_INVALID');
-select pg_temp.ca_refused($c$select identity.clinician_application_submit_probe('not-a-digest',
+select pg_temp.ca_refused($c$select pg_temp.ca_probe('not-a-digest',
   pg_temp.ca_h('email:doctor1@ca.invalid'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1'))$c$,
   'CLINICIAN_APPLICATION_SESSION_INVALID');
+-- For a live draft, the probe also answers C8's refusals that need no
+-- password (with C8's marker, not raised), so Identity charges the quota and
+-- answers them without an argon2id hash: details C8 refuses, a facility that
+-- is not available (a full one and an address in use are below).
+do $$
+declare
+  probe record;
+  outcome text;
+begin
+  for probe in
+    select * from (values
+      ((clock_timestamp() at time zone 'Africa/Lagos')::date, null::text, null::text, null::text, null::text, null::uuid,
+        null::integer, null::text, 'CLINICIAN_APPLICATION_INVALID'),
+      (((clock_timestamp() at time zone 'Africa/Lagos')::date + interval '5 years' + interval '1 day')::date, null, null,
+        null, null, null, null, null, 'CLINICIAN_APPLICATION_INVALID'),
+      (null, 'doctor', 'NMCN', null, null, null, null, null, 'CLINICIAN_APPLICATION_INVALID'),
+      (null, 'clinician', 'MDCN', null, null, null, null, null, 'CLINICIAN_APPLICATION_INVALID'),
+      (null, null, null, 'M', null, null, null, null, 'CLINICIAN_APPLICATION_INVALID'),
+      (null, null, null, 'MDCN', null, null, null, null, 'CLINICIAN_APPLICATION_INVALID'),
+      (null, null, null, null, ' ', null, null, null, 'CLINICIAN_APPLICATION_INVALID'),
+      (null, null, null, null, null, null, 0, null, 'CLINICIAN_APPLICATION_INVALID'),
+      (null, null, null, null, null, null, null, 'short-key', 'CLINICIAN_APPLICATION_INVALID'),
+      (null, null, null, null, null, 'ca110000-0000-4000-8000-00000000000c'::uuid, null, null,
+        'CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE'),
+      (null, null, null, null, null, 'ca110000-0000-4000-8000-00000000000e'::uuid, null, null,
+        'CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE'),
+      (null, null, null, null, null, 'ca110000-0000-4000-8000-0000000000ff'::uuid, null, null,
+        'CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE'),
+      (null, null, null, null, null, null, null, null, 'new')
+    ) cases(valid_until, role_code, regulator, licence, full_name, facility, open_limit, key, expected)
+  loop
+    outcome := pg_temp.ca_probe(pg_temp.ca_h('session:p1'), pg_temp.ca_h('email:doctor1@ca.invalid'),
+      coalesce(probe.key, 'clinician-suite-key-p1'), pg_temp.ca_h('sha:p1'), 'doctor1@ca.invalid', probe.valid_until,
+      coalesce(probe.facility, 'ca110000-0000-4000-8000-00000000000a'), coalesce(probe.open_limit, 30),
+      coalesce(probe.role_code, 'doctor'), coalesce(probe.regulator, 'MDCN'), coalesce(probe.licence, 'MDCN/12345'),
+      coalesce(probe.full_name, 'Doctor One'));
+    if outcome is distinct from probe.expected then
+      raise exception 'the submit probe answered % for %, not %', outcome, row_to_json(probe), probe.expected;
+    end if;
+  end loop;
+end $$;
+-- A draft's password hashes are bounded: Identity counts each submission it
+-- will hash (after the charge, never a refusal or a replay) and a draft
+-- allows five; after them the draft can no longer submit, from any network
+-- (401: verify the address again). Only a live, unspent draft counts.
+select pg_temp.ca_draft('hashes', 'hashes@ca.invalid');
+do $$ begin
+  for attempt in 1..5 loop
+    perform identity.count_clinician_application_submit_attempt(pg_temp.ca_h('session:hashes'));
+  end loop;
+end $$;
+select pg_temp.ca_refused($c$select identity.count_clinician_application_submit_attempt(pg_temp.ca_h('session:hashes'))$c$,
+  'CLINICIAN_APPLICATION_SESSION_INVALID');
+select pg_temp.ca_refused($c$select pg_temp.ca_probe(pg_temp.ca_h('session:hashes'), pg_temp.ca_h('email:hashes@ca.invalid'),
+  'clinician-suite-key-hashes', pg_temp.ca_h('sha:hashes'), 'hashes@ca.invalid')$c$, 'CLINICIAN_APPLICATION_SESSION_INVALID');
+select pg_temp.ca_refused($c$select identity.count_clinician_application_submit_attempt(pg_temp.ca_h('session:none'))$c$,
+  'CLINICIAN_APPLICATION_SESSION_INVALID');
+select pg_temp.ca_refused($c$select identity.count_clinician_application_submit_attempt('not-a-digest')$c$,
+  'CLINICIAN_APPLICATION_SESSION_INVALID');
+reset role;
+do $$ begin
+  if (select submit_attempts from identity.clinician_application_sessions
+       where token_hmac = pg_temp.ca_h('session:hashes')) <> 5 then
+    raise exception 'a draft did not count five password hashes';
+  end if;
+end $$;
+set local role hid_identity_api_runtime;
 -- Only doctor with MDCN and nurse with NMCN; an argon2id hash with the
 -- Identity parameters; a licence date after today (Lagos) and within five years.
 select pg_temp.ca_refused(format($c$select pg_temp.ca_submit('p1', 'doctor1@ca.invalid', 'Doctor One', %L, %L, 'MDCN/12345',
@@ -982,18 +1061,22 @@ begin
     raise exception 'a submission replay was not answered with the same application: %', row_to_json(replay);
   end if;
   -- The spent draft: the same key and request probe as a replay; any other is refused.
-  if identity.clinician_application_submit_probe(pg_temp.ca_h('session:p1'), pg_temp.ca_h('email:doctor1@ca.invalid'),
+  if pg_temp.ca_probe(pg_temp.ca_h('session:p1'), pg_temp.ca_h('email:doctor1@ca.invalid'),
        'clinician-suite-key-p1', pg_temp.ca_h('sha:p1')) <> 'replay' then
     raise exception 'the submit probe did not recognise a replay';
   end if;
 end $$;
-select pg_temp.ca_refused($c$select identity.clinician_application_submit_probe(pg_temp.ca_h('session:p1'),
+select pg_temp.ca_refused($c$select pg_temp.ca_probe(pg_temp.ca_h('session:p1'),
   pg_temp.ca_h('email:doctor1@ca.invalid'), 'clinician-suite-key-p1-other', pg_temp.ca_h('sha:p1'))$c$,
   'CLINICIAN_APPLICATION_SESSION_INVALID');
-select pg_temp.ca_refused($c$select identity.clinician_application_submit_probe(pg_temp.ca_h('session:p1'),
+select pg_temp.ca_refused($c$select pg_temp.ca_probe(pg_temp.ca_h('session:p1'),
   pg_temp.ca_h('email:doctor1@ca.invalid'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1-other'))$c$,
   'CLINICIAN_APPLICATION_SESSION_INVALID');
-select pg_temp.ca_refused($c$select identity.clinician_application_submit_probe(pg_temp.ca_h('session:p1-account'),
+select pg_temp.ca_refused($c$select identity.count_clinician_application_submit_attempt(pg_temp.ca_h('session:p1'))$c$,
+  'CLINICIAN_APPLICATION_SESSION_INVALID');
+select pg_temp.ca_refused($c$select identity.count_clinician_application_submit_attempt(pg_temp.ca_h('session:p1-account'))$c$,
+  'CLINICIAN_APPLICATION_SESSION_INVALID');
+select pg_temp.ca_refused($c$select pg_temp.ca_probe(pg_temp.ca_h('session:p1-account'),
   pg_temp.ca_h('email:doctor1@ca.invalid'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1'))$c$,
   'CLINICIAN_APPLICATION_SESSION_INVALID');
 select pg_temp.ca_refused($c$select * from identity.submit_clinician_application(pg_temp.ca_h('session:p1'),
@@ -1019,7 +1102,7 @@ update identity.clinician_application_sessions set created_at = created_at - int
   expires_at = expires_at - interval '61 minutes' where token_hmac = pg_temp.ca_h('session:p1');
 set local role hid_identity_api_runtime;
 select pg_temp.ca_system('submit-late');
-select pg_temp.ca_refused($c$select identity.clinician_application_submit_probe(pg_temp.ca_h('session:p1'),
+select pg_temp.ca_refused($c$select pg_temp.ca_probe(pg_temp.ca_h('session:p1'),
   pg_temp.ca_h('email:doctor1@ca.invalid'), 'clinician-suite-key-p1', pg_temp.ca_h('sha:p1'))$c$,
   'CLINICIAN_APPLICATION_SESSION_INVALID');
 select pg_temp.ca_refused($c$select * from identity.submit_clinician_application(pg_temp.ca_h('session:p1'),
@@ -1035,6 +1118,15 @@ insert into auth.accounts (id, subject, email, status) values
   ('ca200000-0000-4000-8000-000000000099', 'synthetic:ca:race', 'RACE@ca.invalid', 'active');
 set local role hid_identity_api_runtime;
 select pg_temp.ca_system('submit-race');
+do $$ begin
+  if pg_temp.ca_probe(pg_temp.ca_h('session:race'), pg_temp.ca_h('email:race@ca.invalid'), 'clinician-suite-key-race',
+       pg_temp.ca_h('sha:race'), 'race@ca.invalid') <> 'CLINICIAN_EMAIL_IN_USE'
+     or pg_temp.ca_probe(pg_temp.ca_h('session:busy'), pg_temp.ca_h('email:busy@ca.invalid'), 'clinician-suite-key-busy',
+       pg_temp.ca_h('sha:busy'), 'busy@ca.invalid', null, 'ca110000-0000-4000-8000-00000000000a', 1)
+       <> 'CLINICIAN_APPLICATION_FACILITY_BUSY' then
+    raise exception 'the submit probe did not answer an address in use or a full facility as C8 does';
+  end if;
+end $$;
 select pg_temp.ca_refused($c$select pg_temp.ca_submit('race', 'race@ca.invalid', 'Race Applicant', 'doctor', 'MDCN', 'MDCN/7001',
   (select licence_400 from ca_dates), 'ca110000-0000-4000-8000-00000000000a')$c$, 'CLINICIAN_EMAIL_IN_USE');
 select pg_temp.ca_refused($c$select pg_temp.ca_submit('busy', 'busy@ca.invalid', 'Busy Applicant', 'doctor', 'MDCN', 'MDCN/7002',

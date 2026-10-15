@@ -141,6 +141,15 @@ try {
   const argon2 = require('argon2');
   const password = 'Synthetic-Clinician-Runtime-Password-2026';
   const passwordHash = await argon2.hash(password, { type: argon2.argon2id });
+  // Counts the argon2id hashes P4 runs of the applicants' password: it hashes
+  // only a submission the database may create, never a refusal or a replay.
+  const passwordHashing = load('auth/password-hash.ts');
+  const hashAccountPassword = passwordHashing.hashAccountPassword;
+  let passwordHashes = 0;
+  passwordHashing.hashAccountPassword = (value) => {
+    if (value === password) passwordHashes += 1;
+    return hashAccountPassword(value);
+  };
   const ids = { org: randomUUID(), x: randomUUID(), y: randomUUID(), pending: randomUUID() };
   await owner.query("insert into identity.organizations (id, name, slug) values ($1, 'Clinician Runtime Health', $2)",
     [ids.org, `clinician-runtime-${ids.org.slice(0, 8)}`]);
@@ -496,9 +505,18 @@ try {
   'CLINICIAN_APPLICATION_SESSION_INVALID');
   assert.deepEqual([await submitCharges(), await platformCreated()], [chargesBefore, createdBefore],
     'a forged capability charged the submit quota');
+  // C8's refusals that need no password are answered before argon2id runs
+  // and leave the draft usable: a licence date out of range, an unknown facility.
+  const hashesBefore = passwordHashes;
+  expectStatus(await call('post', '', { cookie: draft, network: enumeration, headers: { 'Idempotency-Key': key('far') },
+    body: { ...signup, licenceValidUntil: '2099-12-31' } }), 400, 'CLINICIAN_APPLICATION_INVALID');
+  expectStatus(await call('post', '', { cookie: draft, network: enumeration, headers: { 'Idempotency-Key': key('nowhere') },
+    body: { ...signup, facilityId: randomUUID() } }), 409, 'CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE');
+  assert.equal(passwordHashes, hashesBefore, 'a submission refused without its password was hashed');
   const submitted = await call('post', '', { cookie: draft, network: enumeration, headers: { 'Idempotency-Key': submitKey },
     body: signup });
   expectStatus(submitted, 201);
+  assert.equal(passwordHashes, hashesBefore + 1, 'the created submission was not hashed once');
   assert.equal(await platformCreated(), createdBefore + 1, 'the platform did not count the created application');
   assert.equal(submitted.body.state, 'awaiting_authenticator');
   assert.deepEqual([submitted.body.next, submitted.body.authenticator.purpose, submitted.body.replayed],
@@ -519,6 +537,7 @@ try {
     body: signup });
   expectStatus(replay, 201);
   assert.deepEqual([replay.body.applicationId, replay.body.replayed], [submitted.body.applicationId, true]);
+  assert.equal(passwordHashes, hashesBefore + 1, 'a replay hashed the password again');
   assert.equal(await platformCreated(), createdBefore + 1, 'a replay counted against the platform\'s daily cap');
   const capability = capabilityOf(replay, 1800);
   expectStatus(await call('post', '', { cookie: draft, network: enumeration, headers: { 'Idempotency-Key': key('other') },
@@ -527,6 +546,7 @@ try {
   expectStatus(await call('post', '/authenticator/email-code', { cookie: firstCapability, network: enumeration }), 401,
     'MFA_CHALLENGE_INVALID');
   checks.push('a forged capability on submit or apply-again is 401 before the submit quota is charged (no counter moves); the platform\'s daily cap counts the created application once, not its replay');
+  checks.push('a submission with a licence date out of range (400 CLINICIAN_APPLICATION_INVALID) or an unknown facility (409 CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE) is refused without hashing the password and leaves the draft usable; the created submission hashes it once and its replay not again');
   checks.push('submit (Idempotency-Key) creates an active account (subject workforce:<id>, verified email, argon2id 64 MiB/3/1), a pending staff record with the licence, no membership and no session, and answers awaiting_authenticator with the enrolment next; the capability rotates (30 minutes); the same key replays the same application with a fresh capability (the earlier challenge is superseded); another key on a spent draft is 401');
 
   // 7. No sign-in before approval.
@@ -960,6 +980,42 @@ try {
     `a sign-up and an apply-again at a facility's last slot: ${JSON.stringify(lastOpen.map((response) => response.body))}`);
   assert.equal(lastOpen.find((response) => response.status === 409).body.code, 'CLINICIAN_APPLICATION_FACILITY_BUSY');
   assert.equal(await crowdedOpen(), openLimit, 'a facility holds more open applications than its cap');
+  //   A draft hashes at most five submissions: six submissions of one draft
+  //   (other keys, other networks), held at the draft row so that all pass
+  //   the probe together; five hash, the sixth is 401 before hashing, and
+  //   one application is created.
+  const budgetEmail = `clinician-budget-${randomUUID().slice(0, 8)}@example.invalid`;
+  const budgetDraft = await draftFor(budgetEmail, newNetwork());
+  const budgetDigest = applications.hmac('session', budgetDraft.cookie.split('=')[1]);
+  const hashesBeforeBudget = passwordHashes;
+  const draftHolder = await owner.connect();
+  let budgeted;
+  try {
+    await draftHolder.query('begin');
+    await draftHolder.query('select 1 from identity.clinician_application_sessions where token_hmac = $1 for update',
+      [budgetDigest]);
+    const pending = Promise.all([1, 2, 3, 4, 5, 6].map((attempt) => call('post', '', { cookie: budgetDraft.cookie,
+      network: newNetwork(), headers: { 'Idempotency-Key': key(`budget-${attempt}`) },
+      body: { ...details(ids.y, { licenceNumber: 'MDCN/R/40009' }), email: budgetEmail,
+        fullName: 'Runtime Budget Clinician', password } })));
+    for (let waited = 0; ; waited += 1) {
+      const waiting = await count(`select count(*)::int as n from pg_stat_activity where datname = current_database()
+        and backend_type = 'client backend' and wait_event_type = 'Lock' and pid <> pg_backend_pid()`);
+      if (waiting >= 6) break;
+      assert(waited < 800, 'the six submissions did not all wait at the draft');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    await draftHolder.query('commit');
+    budgeted = await pending;
+  } finally {
+    await draftHolder.query('rollback').catch(() => undefined);
+    draftHolder.release();
+  }
+  assert.deepEqual(budgeted.map((response) => response.status).sort(), [201, 401, 401, 401, 401, 401],
+    `six submissions of one draft: ${JSON.stringify(budgeted.map((response) => response.body))}`);
+  assert(budgeted.filter((response) => response.status === 401)
+    .every((response) => response.body.code === 'CLINICIAN_APPLICATION_SESSION_INVALID'));
+  assert.equal(passwordHashes - hashesBeforeBudget, 5, 'a draft hashed more than five submissions');
   //   Withdraw against approve: one wins, and the result is consistent.
   const torn = await applicant('torn', ids.x, 'MDCN/R/40006');
   await platform.stepUp(adminA);
@@ -977,7 +1033,7 @@ try {
   } else {
     assert.deepEqual([withdrawRace.status, approveRace.status, tornState, tornMemberships], [409, 201, 'approved', 1]);
   }
-  checks.push('races: a double-clicked submit yields one account and application (201 and 201 replayed); two concurrent starts for one address send one code; two Super Admins approving at once yield one 201 and one 409, beside the applicant\'s sign-in, with no deadlock; a double-submitted step 1 that waits for the applicant\'s account yields one attestation and its replay (201 and 201 replayed), with no failure counted; two sign-ups held before they count at the platform\'s last daily slot yield one 201 and one 429 (nothing created, the count ends at the cap); a sign-up and an apply-again held before they count at a facility\'s last open slot yield one 201 and one 409 CLINICIAN_APPLICATION_FACILITY_BUSY (the facility ends at its cap); withdraw against approve leaves either a withdrawn application and no membership or an approved one with its membership');
+  checks.push('races: a double-clicked submit yields one account and application (201 and 201 replayed); two concurrent starts for one address send one code; two Super Admins approving at once yield one 201 and one 409, beside the applicant\'s sign-in, with no deadlock; a double-submitted step 1 that waits for the applicant\'s account yields one attestation and its replay (201 and 201 replayed), with no failure counted; two sign-ups held before they count at the platform\'s last daily slot yield one 201 and one 429 (nothing created, the count ends at the cap); a sign-up and an apply-again held before they count at a facility\'s last open slot yield one 201 and one 409 CLINICIAN_APPLICATION_FACILITY_BUSY (the facility ends at its cap); six submissions of one draft held together hash the password five times, one is created and five are 401; withdraw against approve leaves either a withdrawn application and no membership or an approved one with its membership');
 
   // 16. Faults are 503, never 401.
   await owner.query('revoke execute on function identity.current_clinician_applications(character) from hid_identity_runtime');
