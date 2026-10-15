@@ -138,7 +138,7 @@ describe('PatientEnrollmentController', () => {
       request('hid_enrollment=opaque-value'), response as unknown as Response))
       .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST' });
     expect(service.activate).toHaveBeenCalledWith('opaque-value', 'a-strong-test-password',
-      correlationId, undefined);
+      correlationId, undefined, {});
     // The response that carries the HID expires the cookie on its path (N2(b)):
     // a lost response can still be replayed with the cookie, for 15 minutes.
     expect(response.clearCookie).toHaveBeenCalledTimes(1);
@@ -152,6 +152,21 @@ describe('PatientEnrollmentController', () => {
     await expect(controller.activate({ password: 'a-strong-test-password' },
       request('hid_enrollment=opaque-value'), response as unknown as Response)).rejects.toThrow('activation failed');
     expect(response.clearCookie).not.toHaveBeenCalled();
+  });
+
+  // ADR-061: the fields a NIN record did not provide reach the service as
+  // sent; the service decides whether each is required or refused.
+  it('passes a self-reported date of birth and gender to the activation, and nothing else', async () => {
+    const body = { password: 'a-strong-test-password', dateOfBirth: '1990-01-02', gender: 'female' as const };
+    const response = { clearCookie: jest.fn() };
+    await controller.activate(body, request('hid_enrollment=opaque-value'), response as unknown as Response);
+    expect(service.activate).toHaveBeenLastCalledWith('opaque-value', 'a-strong-test-password',
+      correlationId, undefined, { dateOfBirth: '1990-01-02', gender: 'female' });
+    const genderOnly = { password: 'a-strong-test-password', gender: 'unknown' as const };
+    await controller.activate(genderOnly, request('hid_enrollment=opaque-value'), response as unknown as Response);
+    expect(service.activate).toHaveBeenLastCalledWith('opaque-value', 'a-strong-test-password',
+      correlationId, undefined, { gender: 'unknown' });
+    expect(service.activate.mock.calls.at(-1)?.[4]).not.toHaveProperty('dateOfBirth');
   });
 
   it('binds pending Google proof to enrollment and clears it only after successful activation', async () => {
@@ -170,7 +185,7 @@ describe('PatientEnrollmentController', () => {
     await controller.activate({ password: 'a-strong-test-password' }, request(cookie),
       response as unknown as Response);
     expect(service.activate).toHaveBeenCalledWith('opaque-value', 'a-strong-test-password',
-      correlationId, pending);
+      correlationId, pending, {});
     expect(response.clearCookie).toHaveBeenCalledWith('hid_access_google_onboarding', {
       secure: true, sameSite: 'strict', httpOnly: true, path: '/api/v1',
     });

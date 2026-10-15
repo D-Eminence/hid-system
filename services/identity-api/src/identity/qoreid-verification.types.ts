@@ -31,10 +31,19 @@ export interface QoreIdNinBinding {
   dateOfBirth: string;
 }
 
-/** Server-only registry identity for a new, still-pending patient enrollment. */
-export interface QoreIdNinEnrollmentBinding extends QoreIdNinBinding {
+export type QoreIdNinGender = 'female' | 'male' | 'intersex' | 'other' | 'unknown';
+
+/**
+ * Server-only registry identity for a new, still-pending patient enrollment.
+ * QoreID may return only the name, the NIN and its reference (ADR-061): a
+ * date of birth or gender the record lacks is left out, never null, and the
+ * patient enters it at activation. Unlike QoreIdNinBinding, which compares
+ * the signed-in patient's claims, nothing here requires a date of birth.
+ */
+export interface QoreIdNinEnrollmentBinding extends Omit<QoreIdNinBinding, 'dateOfBirth'> {
   nin: string;
-  gender: 'female' | 'male' | 'intersex' | 'other' | 'unknown';
+  dateOfBirth?: string;
+  gender?: QoreIdNinGender;
   middleName?: string;
   phoneNumber?: string;
   photo?: string;
