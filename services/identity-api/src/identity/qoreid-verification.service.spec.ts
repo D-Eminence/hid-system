@@ -3,7 +3,7 @@ import type { HidRequest } from '../common/request-context';
 import * as environment from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
-import { DomainProblem } from '../common/problem';
+import { DomainProblem, PublicDetailProblem } from '../common/problem';
 import type { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
 import type { NinIdentifierProtector } from './nin-identifier-protector';
 import { QoreIdVerificationService } from './qoreid-verification.service';
@@ -74,6 +74,7 @@ describe('QoreID verification service', () => {
     const refusal = await service.verifyPatientNin(patientRequest, '12345678901').catch((error: unknown) => error);
     expect(refusal).toMatchObject({ status: 503, code: 'QOREID_PATIENT_NIN_BINDING_DISABLED',
       message: 'Verifying a NIN from your account is not available' });
+    expect(refusal).toBeInstanceOf(PublicDetailProblem);
     expect(provider.verifyNin).not.toHaveBeenCalled();
     expect(integrations.assertAvailable).not.toHaveBeenCalled();
     expect(integrations.consumePatientQuota).not.toHaveBeenCalled();

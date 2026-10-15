@@ -130,6 +130,8 @@ const SEND_BUDGET = '90000000012';
 const FAILURE_BUDGET = '90000000013';
 const SUPERSEDED = '90000000014';
 const RACING = '90000000015';
+const OPEN_CODES = '90000000016';
+const PRUNE_RACE = '90000000017';
 const seventeenYearsAgo = (() => {
   const date = new Date(); date.setUTCFullYear(date.getUTCFullYear() - 17);
   return `${String(date.getUTCDate()).padStart(2, '0')}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${date.getUTCFullYear()}`;
@@ -148,6 +150,8 @@ const people = new Map([
   [FAILURE_BUDGET, { firstname: 'Kemi', lastname: 'Synthetic', birthdate: '07-08-1985', gender: 'F', phone: '+2348031110013' }],
   [SUPERSEDED, { firstname: 'Lara', lastname: 'Synthetic', birthdate: '08-09-1986', gender: 'F', phone: '+2348031110014' }],
   [RACING, { firstname: 'Musa', lastname: 'Synthetic', birthdate: '09-10-1987', gender: 'M', phone: '+2348031110015' }],
+  [OPEN_CODES, { firstname: 'Ngozi', lastname: 'Synthetic', birthdate: '10-11-1988', gender: 'F', phone: '+2348031110016' }],
+  [PRUNE_RACE, { firstname: 'Obi', lastname: 'Synthetic', birthdate: '11-12-1989', gender: 'M', phone: '+2348031110017' }],
 ]);
 // The registry phone as Identity normalizes it: the holder code's recipient.
 const holderPhone = nin => `+234803111${nin.slice(-4)}`;
@@ -1083,7 +1087,26 @@ try {
   expectProblem(await sendHolder(budgetF.cookie, '198.51.100.115'), 429, 'NIN_HOLDER_ROUTE_LIMITED');
   assert.equal(deliveries.length, holderDeliveriesBefore, 'a spent failure budget must send nothing');
   expectProblem(await verifyHolder(budgetF.cookie, sentF.body.challengeId, codeF.code, '198.51.100.115'), 200);
-  check('the holder budgets are checked at send only: an enrollment\'s fourth code, a sixth send to one registry phone in 24 hours (across the NIN\'s enrollments) and a send after the NIN\'s tenth failure of the day are 429 NIN_HOLDER_ROUTE_LIMITED with one text, sending and storing nothing; the closed route is audited with its window; a code issued before still proves the holder');
+  // The attempts left on the NIN's open codes count before a code is sent:
+  // two enrollments of one NIN with an open code each (five attempts each)
+  // fill the daily failure budget of ten, so a third enrollment gets no code
+  // until one of those is spent or expires.
+  const open1 = await startNin(OPEN_CODES, '198.51.100.116');
+  expectProblem(await sendHolder(open1.cookie, '198.51.100.116'), 200);
+  const open2 = await startNin(OPEN_CODES, '198.51.100.117');
+  expectProblem(await sendHolder(open2.cookie, '198.51.100.117'), 200);
+  const open3 = await startNin(OPEN_CODES, '198.51.100.118');
+  holderDeliveriesBefore = deliveries.length;
+  const inReach = await sendHolder(open3.cookie, '198.51.100.118');
+  expectProblem(inReach, 429, 'NIN_HOLDER_ROUTE_LIMITED');
+  assert.equal(inReach.body.detail, routeLimited);
+  assert.equal(deliveries.length, holderDeliveriesBefore, 'a third open code of one NIN must not be sent');
+  assert.equal(await count(`select count(*) from identity.public_patient_enrollment_otps where enrollment_id = $1`,
+    [open3.id]), 0, 'a send refused for the attempts in reach must store no code');
+  await owner.query(`update identity.public_patient_enrollment_otps set expires_at = clock_timestamp() - interval '1 second'
+    where enrollment_id = $1 and purpose = 'nin_holder'`, [open1.id]);
+  expectProblem(await sendHolder(open3.cookie, '198.51.100.118'), 200);
+  check('the holder budgets are checked at send only: an enrollment\'s fourth code, a sixth send to one registry phone in 24 hours (across the NIN\'s enrollments), a send after the NIN\'s tenth failure of the day and a third open code of one NIN (its attempts would pass the daily failure budget of ten) are 429 NIN_HOLDER_ROUTE_LIMITED with one text, sending and storing nothing; once an open code expires the code is sent; the closed route is audited with its window; a code issued before still proves the holder');
 
   // 14d. A later proof supersedes an earlier registry-phone proof of the same
   // NIN, and two proofs that race on one NIN finish one after the other under
@@ -1109,12 +1132,15 @@ try {
       from identity.public_patient_enrollments where id = $1`, [enrollmentId]);
     return client;
   };
-  const releaseWhenWaiting = async (client, waiters) => {
+  const waitFor = async (waiting, waiters, label) => {
     const deadline = Date.now() + 20_000;
-    while (await ninLockWaiters() < waiters) {
-      assert(Date.now() < deadline, `${waiters} requests did not wait on the NIN lock`);
+    while (await waiting() < waiters) {
+      assert(Date.now() < deadline, `${waiters} requests did not wait on ${label}`);
       await new Promise(resolveWait => setTimeout(resolveWait, 25));
     }
+  };
+  const releaseWhenWaiting = async (client, waiters) => {
+    await waitFor(ninLockWaiters, waiters, 'the NIN lock');
     await client.query('commit');
     client.release();
   };
@@ -1139,46 +1165,115 @@ try {
   'one proven enrollment of the NIN must remain');
   check('a later registry-phone proof deletes an earlier proven enrollment of the NIN (audited superseded with its method); two correct holder codes for one NIN that wait on the NIN lock together finish in turn: one answers verify_contact, the other 404 ENROLLMENT_NOT_FOUND, and one proven enrollment remains');
 
-  // 14e. A holder proof racing an activation of the same NIN: either the
-  // activation wins and the proof then finds the Health ID (409, enrollment
-  // gone), or the proof wins and removes the waiting enrollment, whose
-  // activation then creates nothing. Never two patients, never a deadlock.
+  // 14e. A holder proof racing an activation of the same NIN. The two queue
+  // on the NIN lock in a set order, and PostgreSQL grants it in that order,
+  // so each outcome runs every time: a proof first removes the waiting
+  // enrollment, whose activation then creates nothing; an activation first
+  // makes the Health ID, and the proof then finds it (409, cookie expired,
+  // enrollment gone). Never two patients, never a deadlock.
+  const readyToActivate = async (enrollment, network) => {
+    const email = `patient-r-${randomUUID().slice(0, 8)}@example.invalid`;
+    const contact = await post('/identity/patient-enrollments/contact', { channel: 'email', contact: email },
+      { cookie: enrollment.cookie, network });
+    expectProblem(contact, 200);
+    expectProblem(await post('/identity/patient-enrollments/contact/verify', { challengeId: contact.body.challengeId,
+      code: lastCode('SIGNUP_VERIFY', email).code }, { cookie: enrollment.cookie, network }), 200);
+  };
+  const activateRacing = (enrollment, network) => post('/identity/patient-enrollments/activate',
+    { password: 'Synthetic-Patient-Pass-R5' }, { cookie: enrollment.cookie, network });
+  // Sends the first request, waits until it waits on the NIN lock, then the second.
+  const raceInOrder = async (lockOf, first, second) => {
+    const locked = await holdNinLock(lockOf);
+    const firstCall = first().then(response => response);
+    await waitFor(ninLockWaiters, 1, 'the NIN lock');
+    const secondCall = second().then(response => response);
+    await releaseWhenWaiting(locked, 2);
+    return Promise.all([firstCall, secondCall]);
+  };
+  const racingPatients = () => count('select count(*) from identity.patients where source_system = $1',
+    ['hid-public-qoreid-enrollment']);
+  const racingStates = async () => (await owner.query(`select id::text, state from identity.public_patient_enrollments
+    where nin_last4 = '0015' order by id`)).rows;
+  // The proof first.
   const racingA = await startNin(RACING, '198.51.100.130');
   await proveHolder(racingA.cookie, RACING, { network: '198.51.100.130' });
-  const emailR = `patient-r-${randomUUID().slice(0, 8)}@example.invalid`;
-  const contactR = await post('/identity/patient-enrollments/contact', { channel: 'email', contact: emailR },
-    { cookie: racingA.cookie, network: '198.51.100.130' });
-  expectProblem(contactR, 200);
-  expectProblem(await post('/identity/patient-enrollments/contact/verify', { challengeId: contactR.body.challengeId,
-    code: lastCode('SIGNUP_VERIFY', emailR).code }, { cookie: racingA.cookie, network: '198.51.100.130' }), 200);
+  await readyToActivate(racingA, '198.51.100.130');
   const racingB = await startNin(RACING, '198.51.100.131');
   expectProblem(await sendHolder(racingB.cookie, '198.51.100.131'), 200);
-  const racingCode = lastCode('NIN_HOLDER_VERIFY', holderPhone(RACING));
-  const patientsBeforeRace = await count('select count(*) from identity.patients where source_system = $1',
-    ['hid-public-qoreid-enrollment']);
-  const lockedActivation = await holdNinLock(racingA.id);
-  const racing = [post('/identity/patient-enrollments/activate', { password: 'Synthetic-Patient-Pass-R5' },
-    { cookie: racingA.cookie, network: '198.51.100.130' }),
-  verifyHolder(racingB.cookie, racingCode.challengeId, racingCode.code, '198.51.100.131')].map(call => call.then(response => response));
-  await releaseWhenWaiting(lockedActivation, 2);
-  const [raceActivation, raceProof] = await Promise.all(racing);
-  const patientsAfterRace = await count('select count(*) from identity.patients where source_system = $1',
-    ['hid-public-qoreid-enrollment']);
-  if (raceActivation.status === 200) {
-    expectProblem(raceProof, 409, 'NIN_ALREADY_REGISTERED');
-    expiresEnrollmentCookie(raceProof, 'a proof after a racing activation');
-    assert.equal(patientsAfterRace, patientsBeforeRace + 1);
-    assert.deepEqual((await owner.query(`select state from identity.public_patient_enrollments where nin_last4 = '0015'`))
-      .rows, [{ state: 'active' }]);
-  } else {
-    expectProblem(raceProof, 200);
-    assert([403, 404].includes(raceActivation.status), `the losing activation: ${raceActivation.status} ${JSON.stringify(raceActivation.body)}`);
-    assert(!('hidCode' in raceActivation.body));
-    assert.equal(patientsAfterRace, patientsBeforeRace, 'the losing activation must create no patient');
-    assert.deepEqual((await owner.query(`select state from identity.public_patient_enrollments where nin_last4 = '0015'`))
-      .rows, [{ state: 'verify_contact' }]);
+  const racingCodeB = lastCode('NIN_HOLDER_VERIFY', holderPhone(RACING));
+  let patientsBeforeRace = await racingPatients();
+  const [proofFirst, activationSecond] = await raceInOrder(racingA.id,
+    () => verifyHolder(racingB.cookie, racingCodeB.challengeId, racingCodeB.code, '198.51.100.131'),
+    () => activateRacing(racingA, '198.51.100.130'));
+  expectProblem(proofFirst, 200);
+  assert.deepEqual(proofFirst.body, { stage: 'verify_contact', requiredProfileFields: [] });
+  assert([403, 404].includes(activationSecond.status),
+    `the activation after the proof: ${activationSecond.status} ${JSON.stringify(activationSecond.body)}`);
+  assert(!('hidCode' in activationSecond.body));
+  assert.equal(await racingPatients(), patientsBeforeRace, 'the activation after the proof must create no patient');
+  assert.deepEqual(await racingStates(), [{ id: racingB.id, state: 'verify_contact' }]);
+  // The activation first: B, now proven, activates while C's proof waits.
+  await readyToActivate(racingB, '198.51.100.131');
+  const racingC = await startNin(RACING, '198.51.100.132');
+  expectProblem(await sendHolder(racingC.cookie, '198.51.100.132'), 200);
+  const racingCodeC = lastCode('NIN_HOLDER_VERIFY', holderPhone(RACING));
+  patientsBeforeRace = await racingPatients();
+  const [activationFirst, proofSecond] = await raceInOrder(racingB.id,
+    () => activateRacing(racingB, '198.51.100.131'),
+    () => verifyHolder(racingC.cookie, racingCodeC.challengeId, racingCodeC.code, '198.51.100.132'));
+  expectProblem(activationFirst, 200);
+  assert.match(String(activationFirst.body.hidCode), /^HID-/);
+  expectProblem(proofSecond, 409, 'NIN_ALREADY_REGISTERED');
+  assert.equal(proofSecond.body.detail, 'This NIN already has a Health ID. Use account recovery to sign in.');
+  assert(!JSON.stringify(proofSecond.body).includes(activationFirst.body.hidCode), 'the 409 must not name the HID');
+  expiresEnrollmentCookie(proofSecond, 'a proof after a racing activation');
+  assert.equal(await racingPatients(), patientsBeforeRace + 1);
+  assert.deepEqual(await racingStates(), [{ id: racingB.id, state: 'active' }]);
+  check('a holder proof and an activation of one NIN queued on the NIN lock finish in turn in either order, without a deadlock and with at most one patient: the proof first removes the waiting enrollment, whose activation then creates nothing (403 or 404); the activation first makes the Health ID, and the proof then answers 409 NIN_ALREADY_REGISTERED with the recovery text and no HID, expires the cookie and removes its enrollment');
+
+  // 14f. The prune at every start and a holder proof take enrollment rows
+  // before their codes (ADR-062). A proof holds every unfinished enrollment
+  // of its NIN, an expired one included, before it deletes their codes; a
+  // prune that holds such a code (as one that has begun deleting it would)
+  // skips the enrollment rather than wait for it, so neither is aborted for
+  // a deadlock (40P01, which Identity would answer 503).
+  const expiredP = await startNin(PRUNE_RACE, '198.51.100.140');
+  expectProblem(await sendHolder(expiredP.cookie, '198.51.100.140'), 200);
+  const liveP = await startNin(PRUNE_RACE, '198.51.100.141');
+  expectProblem(await sendHolder(liveP.cookie, '198.51.100.141'), 200);
+  const liveCode = lastCode('NIN_HOLDER_VERIFY', holderPhone(PRUNE_RACE));
+  assert.equal((await owner.query(`update identity.public_patient_enrollments
+    set expires_at = clock_timestamp() - interval '1 second' where id = $1`, [expiredP.id])).rowCount, 1);
+  const lockWaiters = () => count(`select count(*) from pg_stat_activity
+    where datname = current_database() and wait_event_type = 'Lock'`);
+  const pruner = await owner.connect();
+  let pruned;
+  try {
+    await pruner.query('begin');
+    await pruner.query("set local statement_timeout = '15s'");
+    await pruner.query(`select id from identity.public_patient_enrollment_otps where enrollment_id = $1 for update`,
+      [expiredP.id]);
+    const waitingProof = verifyHolder(liveP.cookie, liveCode.challengeId, liveCode.code, '198.51.100.141')
+      .then(response => response);
+    await waitFor(lockWaiters, 1, 'the expired enrollment\'s code');
+    await pruner.query("select set_config('app.actor_subject', 'system:auth', true)");
+    pruned = await pruner.query('select identity.prune_expired_public_patient_enrollments() as removed')
+      .catch(error => error);
+    await pruner.query(pruned instanceof Error ? 'rollback' : 'commit');
+    const proved = await waitingProof;
+    assert(!(pruned instanceof Error), `the prune beside a proof must not fail: ${pruned?.code} ${pruned?.message}`);
+    expectProblem(proved, 200);
+    assert.deepEqual(proved.body, { stage: 'verify_contact', requiredProfileFields: [] });
+  } finally {
+    // A no-op after the commit or rollback above; ends the transaction if a step failed first.
+    await pruner.query('rollback').catch(() => undefined);
+    pruner.release();
   }
-  check(`a holder proof and an activation of one NIN that wait on the NIN lock together finish in turn, without a deadlock and with at most one patient (this run: ${raceActivation.status === 200 ? 'the activation won and the proof answered 409 NIN_ALREADY_REGISTERED' : 'the proof won and the activation created nothing'})`);
+  assert.deepEqual((await owner.query(`select id::text, state from identity.public_patient_enrollments
+    where nin_last4 = '0017'`)).rows, [{ id: liveP.id, state: 'verify_contact' }]);
+  assert.equal(await count(`select count(*) from identity.public_patient_enrollment_otps where enrollment_id = $1`,
+    [expiredP.id]), 0);
+  check('the prune at every start and a holder proof take enrollment rows before their codes: while a proof holds an expired enrollment of its NIN and waits for that enrollment\'s code, a prune holding the code skips the enrollment instead of waiting for it, neither is aborted for a deadlock, and the proof answers verify_contact after removing the expired enrollment');
 
   // 15. The enrollment gate comes before any registration lookup (ENR-4): while
   // QoreID is paused or NIN-only enrollment is switched off, a bound NIN (A), a
@@ -1357,8 +1452,14 @@ try {
     assert.match(String(response.headers['cache-control']), /no-store/, `${label}: a refusal is not cacheable`);
     return response.body.detail;
   };
-  // The default setting.
-  process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'false'; resetEnvironmentForTests();
+  // Every flag at its default: no online route, no facility route and
+  // NIN-only enrollment off. The not-open refusal comes before the QoreID gate.
+  Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false', NIN_HOLDER_SMS_ENABLED: 'false' });
+  delete process.env.ASSISTED_REGISTRATION_ENABLED; resetEnvironmentForTests();
+  await expectAvailability(false, 'every flag at its default', {}, false);
+  assert.equal(await closedStart('PATIENT_REGISTRATION_NOT_OPEN', 'every flag at its default'), NOT_OPEN);
+  // NIN-only enrollment off with the online route on.
+  process.env.NIN_HOLDER_SMS_ENABLED = 'true'; resetEnvironmentForTests();
   await expectAvailability(false, 'NIN-only enrollment off');
   assert.equal(await closedStart('QOREID_NIN_ONLY_DISABLED', 'NIN-only enrollment off'), NOT_OPEN);
   // No holder route: the online route off and no facility route yet (ADR-062).
@@ -1384,7 +1485,7 @@ try {
   assert.equal(await enrollmentRows(), enrollmentsBeforeAvailability);
   assert.equal(await rateTotal(), ratesBeforeAvailability, 'availability and a closed start must charge no rate bucket');
   assert.equal(await availabilityAudit(), 0, 'an availability read must write no audit row');
-  check('GET /identity/patient-enrollments/availability answers 200 { open, online, facility } (facility false) to every caller the route sees (no Origin, the allowed Origin, a signed-in caller; the route itself does not refuse a foreign Origin, which the CORS middleware of main.ts, not mounted here, refuses first when deployed) with Cache-Control public, max-age=30, no cookie and no audit row: open with QoreID, NIN-only enrollment and the online holder route on, closed with NIN-only enrollment off (the default), with no holder route (online false), with QoreID disabled or QoreID paused at runtime; while it is closed by a flag, start answers 503 QOREID_NIN_ONLY_DISABLED, PATIENT_REGISTRATION_NOT_OPEN or QOREID_DISABLED with the registration-not-open detail, and nothing is looked up, charged or stored');
+  check('GET /identity/patient-enrollments/availability answers 200 { open, online, facility } (facility false) to every caller the route sees (no Origin, the allowed Origin, a signed-in caller; the route itself does not refuse a foreign Origin, which the CORS middleware of main.ts, not mounted here, refuses first when deployed) with Cache-Control public, max-age=30, no cookie and no audit row: open with QoreID, NIN-only enrollment and the online holder route on, closed with every flag at its default (start answers 503 PATIENT_REGISTRATION_NOT_OPEN before the QoreID gate), with NIN-only enrollment off, with no holder route (online false), with QoreID disabled or QoreID paused at runtime; while it is closed by a flag, start answers 503 PATIENT_REGISTRATION_NOT_OPEN, QOREID_NIN_ONLY_DISABLED or QOREID_DISABLED with the registration-not-open detail, and nothing is looked up, charged or stored');
   process.stdout.write(JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: runtimeRole,
     qoreid: 'local stub behind the real adapter; no QoreID call', turnstile: 'local Siteverify stub',
     notification: 'local stub; no delivery', nin_lookups: ninLookups.length, deliveries: deliveries.length,

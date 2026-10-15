@@ -6,8 +6,11 @@ const PLACEHOLDER_HASH = `$argon2id$v=19$m=65536,t=3,p=1$${'e'.repeat(22)}$${'f'
 jest.mock('argon2', () => ({ argon2id: 2, hash: jest.fn() }));
 
 import * as argon2 from 'argon2';
+import type { ArgumentsHost } from '@nestjs/common';
+import type { Response } from 'express';
 import type { PoolClient } from 'pg';
-import { DomainProblem, PublicDetailProblem } from '../common/problem';
+import { DomainProblem, ProblemDetailsFilter, PublicDetailProblem } from '../common/problem';
+import type { HidRequest } from '../common/request-context';
 import * as environment from '../config/environment';
 import { getEnvironment, resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
@@ -34,6 +37,18 @@ const identity = {
 };
 
 type RecordedQuery = { sql: string; values: readonly unknown[] };
+/** The problem body Identity sends for an error, through its own filter. */
+function answered(error: unknown): { status: number; code: string; detail: string } {
+  const response = { status: jest.fn().mockReturnThis(), type: jest.fn().mockReturnThis(),
+    json: jest.fn().mockReturnThis() };
+  const host = { switchToHttp: () => ({
+    getRequest: () => ({ correlationId, method: 'POST',
+      route: { path: '/identity/patient-enrollments/holder' } } as unknown as HidRequest),
+    getResponse: () => response as unknown as Response,
+  }) } as unknown as ArgumentsHost;
+  new ProblemDetailsFilter().catch(error, host);
+  return response.json.mock.calls[0]?.[0];
+}
 /** `auth.otp_rate_limits` rows by `scope:bucket`; fixtures given one map share the table. */
 type OtpRateRow = { request_count: number; window_started_at: Date; blocked_until: Date | null };
 
@@ -221,8 +236,12 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
     }
     return { rows: [], rowCount: 0 };
   }) } as unknown as PoolClient;
+  // A failed transaction rolls back the codes it stored, as PostgreSQL does.
   const database = { withSystemTransaction: jest.fn(async (_correlation: string,
-    work: (client: PoolClient) => Promise<unknown>) => work(client)) } as unknown as DatabaseService;
+    work: (client: PoolClient) => Promise<unknown>) => {
+    const stored = challenges.length;
+    try { return await work(client); } catch (error) { challenges.splice(stored); throw error; }
+  }) } as unknown as DatabaseService;
   const provider = { assertAvailable: jest.fn().mockResolvedValue(undefined),
     isAvailable: jest.fn().mockResolvedValue(true), verifyNin: jest.fn().mockResolvedValue(identity) };
   const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'test_sms' }) };
@@ -1637,6 +1656,35 @@ describe('PatientEnrollmentService', () => {
         .rejects.toMatchObject({ status: 429, code: 'NIN_HOLDER_ROUTE_LIMITED',
           message: 'Use a participating facility to register.' });
       expect(f.notification.deliver).toHaveBeenCalledTimes(3);
+    });
+
+    it('answers a 503 holder refusal with its fixed patient text through the problem filter', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      Object.assign(process.env, { NIN_HOLDER_SMS_ENABLED: 'false', ASSISTED_REGISTRATION_ENABLED: 'true' });
+      resetEnvironmentForTests();
+      const off = fixture();
+      off.enrollments.set(String(f.enrollment!.id), f.enrollment!);
+      const send = await off.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId)
+        .catch((error) => error);
+      const verify = await off.service.verifyHolderCode(started.cookie, '00000000-0000-4000-8000-000000000000',
+        '000000', correlationId).catch((error) => error);
+      for (const refusal of [send, verify]) {
+        expect(refusal).toBeInstanceOf(PublicDetailProblem);
+        expect(answered(refusal)).toMatchObject({ status: 503, code: 'NIN_HOLDER_ROUTE_UNAVAILABLE',
+          detail: routeUnavailable });
+      }
+    });
+
+    it('stores the new code before the send command, so the database counts its attempts', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      const sql = holderSql(f);
+      const stored = sql.findIndex((statement) => statement.includes('insert into identity.public_patient_enrollment_otps'));
+      const counted = sql.findIndex((statement) => statement.includes('identity.record_public_patient_holder_send'));
+      expect(stored).toBeGreaterThanOrEqual(0);
+      expect(counted).toBeGreaterThan(stored);
     });
 
     it('sends nothing when a send or failure budget is spent', async () => {

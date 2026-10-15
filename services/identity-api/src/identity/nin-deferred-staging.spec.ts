@@ -203,6 +203,8 @@ describe('explicitly deferred staging NIN', () => {
       .set('authorization', 'Bearer synthetic-token').send({ nin: '12345678901' });
     expect(bindingOff.status).toBe(503);
     expect(bindingOff.body.code).toBe('QOREID_PATIENT_NIN_BINDING_DISABLED');
+    // A fixed sentence the client may show as it is, not the generic 5xx text.
+    expect(bindingOff.body.detail).toBe('Verifying a NIN from your account is not available');
     expect(JSON.stringify(bindingOff.body)).not.toContain('12345678901');
     expect(database.withSystemTransaction).not.toHaveBeenCalled();
     expect(globalThis.fetch).not.toHaveBeenCalled();

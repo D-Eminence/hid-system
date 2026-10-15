@@ -1289,13 +1289,18 @@ test('NIN-only enrollment and the NIN holder routes are explicit synth inputs th
   assert.throws(() => environmentConfig('staging', 'economy', 'true', undefined, { ninHolderSmsEnabled: 'true' }),
     /HID_NIN_HOLDER_SMS_ENABLED=true is refused on staging/);
   // Production: the blanket NIN-only refusal is replaced by the route rules.
-  assert.throws(() => environmentConfig('production', undefined, 'true', undefined,
-    { ...productionTopic, qoreIdNinOnlyEnrollmentEnabled: 'true', ninHolderSmsEnabled: 'true' }),
-  /HID_NIN_HOLDER_SMS_ENABLED=true requires HID_ASSISTED_REGISTRATION_ENABLED=true in production/);
-  const bothRoutes = environmentConfig('production', undefined, 'true', undefined, { ...productionTopic,
-    qoreIdNinOnlyEnrollmentEnabled: 'true', ninHolderSmsEnabled: 'true', assistedRegistrationEnabled: 'true' });
-  assert.deepEqual([bothRoutes.qoreIdNinOnlyEnrollmentEnabled, bothRoutes.ninHolderSmsEnabled,
-    bothRoutes.assistedRegistrationEnabled], [true, true, true]);
+  // The online route stays refused in production until the facility route
+  // ships (ADR-063): HID_ASSISTED_REGISTRATION_ENABLED has no effect before
+  // 0094, so it cannot stand in for that route.
+  for (const routes of [{ ninHolderSmsEnabled: 'true' }, { ninHolderSmsEnabled: 'true', assistedRegistrationEnabled: 'true' }]) {
+    assert.throws(() => environmentConfig('production', undefined, 'true', undefined,
+      { ...productionTopic, qoreIdNinOnlyEnrollmentEnabled: 'true', ...routes }),
+    /HID_NIN_HOLDER_SMS_ENABLED=true is refused in production until the facility route ships/);
+  }
+  const facilityFlag = environmentConfig('production', undefined, 'true', undefined, { ...productionTopic,
+    qoreIdNinOnlyEnrollmentEnabled: 'true', assistedRegistrationEnabled: 'true' });
+  assert.deepEqual([facilityFlag.qoreIdNinOnlyEnrollmentEnabled, facilityFlag.ninHolderSmsEnabled,
+    facilityFlag.assistedRegistrationEnabled], [true, false, true]);
   assert.throws(() => environmentConfig('production', undefined, 'true', undefined,
     { ...productionTopic, qoreIdPatientSelfNinBindingEnabled: 'true' }),
   /HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED=true is refused in production/);
@@ -1305,7 +1310,9 @@ test('NIN-only enrollment and the NIN holder routes are explicit synth inputs th
   const productionConfiguration = environmentConfig('production', undefined, 'true', undefined, productionTopic);
   for (const [label, change, message] of [
     ['online route without the facility route', { ninHolderSmsEnabled: true },
-      /HID_NIN_HOLDER_SMS_ENABLED=true requires HID_ASSISTED_REGISTRATION_ENABLED=true in production/],
+      /HID_NIN_HOLDER_SMS_ENABLED=true is refused in production until the facility route ships/],
+    ['online route with only the facility flag', { ninHolderSmsEnabled: true, assistedRegistrationEnabled: true },
+      /HID_NIN_HOLDER_SMS_ENABLED=true is refused in production until the facility route ships/],
     ['signed-in NIN binding', { qoreIdPatientSelfNinBindingEnabled: true },
       /HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED=true is refused in production/],
     ['NIN-only enrollment without a route', { qoreIdNinOnlyEnrollmentEnabled: true },

@@ -6,8 +6,10 @@ begin;
 -- identity.record_public_patient_holder_proof, the only writer of the holder
 -- columns. This suite checks the schema rules, the runtime's column
 -- privileges, the send, failure and proof commands (budgets, supersession,
--- the existing-Health-ID answer after proof), retention, activation's holder
--- check and the lock order the commands keep. Two-connection races run in
+-- the existing-Health-ID answer after proof), the refusals each command makes
+-- on its own (Identity filters most of them first; these are the database's
+-- defence against a runtime bug), retention, activation's holder check and
+-- the lock order the commands and the prune keep. Two-connection races run in
 -- services/identity-api/scripts/verify-patient-enrollment-runtime.mjs.
 -- Fixture ciphertext bytes, digests and an inert Argon2-shaped hash; every
 -- row rolls back. Every NIN, name and contact here is invented.
@@ -38,6 +40,37 @@ returns void language sql as $$
   select requested_kind, requested_nin, requested_phone, requested_method, clock_timestamp() - requested_age
     from generate_series(1, requested_count);
 $$;
+-- What Identity does before it asks for a send: closes the enrollment's open
+-- holder code and stores the new one, unsent.
+create function pg_temp.open_holder_code(requested_enrollment uuid, requested_recipient char(64))
+returns void language sql as $$
+  update identity.public_patient_enrollment_otps set invalidated_at = clock_timestamp(), invalidation_reason = 'resend'
+   where enrollment_id = requested_enrollment and purpose = 'nin_holder'
+     and consumed_at is null and invalidated_at is null;
+  insert into identity.public_patient_enrollment_otps (id, enrollment_id, recipient_hmac, channel, purpose,
+    verifier_hmac, verifier_key_version, expires_at, max_attempts)
+  values (gen_random_uuid(), requested_enrollment, requested_recipient, 'phone', 'nin_holder', repeat('ab',32),
+    'fixture', clock_timestamp() + interval '5 minutes', 5);
+$$;
+-- Runs one statement as the current role and requires its exact refusal.
+-- The refused statement's work is rolled back with its subtransaction.
+create function pg_temp.expect_refusal(statement text, expected_state text, expected_message text, label text)
+returns void language plpgsql as $$
+declare
+  state text;
+  message text;
+begin
+  begin
+    execute statement;
+  exception when others then
+    get stacked diagnostics state = returned_sqlstate, message = message_text;
+    if state <> expected_state or message <> expected_message then
+      raise exception '%: refused with % % instead of % %', label, state, message, expected_state, expected_message;
+    end if;
+    return;
+  end;
+  raise exception '%: was not refused', label;
+end $$;
 
 -- 1. Catalog contract: the commands are security definer with a fixed search
 -- path, owned with the activation command, executable by the Identity
@@ -82,6 +115,17 @@ begin
       raise exception '% must take the NIN advisory lock before the enrollment row lock', command;
     end if;
   end loop;
+  -- The prune locks the expired enrollments it removes, skipping any another
+  -- transaction holds, before it deletes their codes: the order of the proof
+  -- (enrollment rows, then their codes), so the two never deadlock.
+  definition := regexp_replace(lower(pg_get_functiondef(
+    'identity.prune_expired_public_patient_enrollments()'::regprocedure)), '\s+', ' ', 'g');
+  row_lock := position('for update skip locked' in definition);
+  if row_lock = 0
+     or row_lock > position('delete from identity.public_patient_enrollment_otps' in definition)
+     or row_lock > position('delete from identity.public_patient_enrollments' in definition) then
+    raise exception 'The prune must lock expired enrollments, skipping locked ones, before it deletes their codes';
+  end if;
 end $$;
 
 -- 2. Schema rules, as the owner: a contact step, a password step or an
@@ -278,9 +322,14 @@ begin
       and details = jsonb_build_object('count', 1, 'methods', '["unproven"]'::jsonb, 'ninDigest', repeat('d1',32))) <> 1
      or (select count(*) from audit.events where action = 'identity.public-patient-enrollment.holder-verified'
       and resource_id = 'b9300000-0000-4000-8000-000000000001'
-      and details = jsonb_build_object('method', 'registry_phone_otp', 'ninDigest', repeat('d1',32),
-        'phoneDigest', repeat('c1',32))) <> 1 then
+      and details = jsonb_build_object('method', 'registry_phone_otp', 'ninDigest', repeat('d1',32))) <> 1 then
     raise exception 'A holder proof or its supersession was not audited';
+  end if;
+  -- The append-only audit log never keeps the registry phone's digest: it
+  -- would link the NINs one phone proved beyond the holder events' 366 days.
+  if exists (select 1 from audit.events where action like 'identity.public-patient-enrollment.%'
+      and details ? 'phoneDigest') then
+    raise exception 'A holder audit event recorded the registry phone digest';
   end if;
   if (select count(*) from identity.public_patient_holder_events where kind = 'proof'
       and nin_digest = repeat('d1',32) and phone_digest = repeat('c1',32) and method = 'registry_phone_otp') <> 1 then
@@ -449,11 +498,15 @@ end $$;
 -- 5. Budgets. Sends per registry phone in 24 hours; failures per NIN in 24
 -- hours and in 30 days, checked at send; distinct NINs proved per phone in
 -- 365 days, checked at proof. Each holds well past the 48-hour rate table.
+-- Identity stores the enrollment's one open code before it asks for a send,
+-- so a send counts that code's attempts with every other open code of the
+-- NIN: a NIN never has more wrong codes left to try than its budgets allow.
 select pg_temp.seed_enrollment('b9300000-0000-4000-8000-000000000051', repeat('51',32), repeat('05',32),
   repeat('c5',32), 'holder-budget-001', '{"nin":"12345679305"}');
 -- Four sends in the last day and twenty older ones: under a daily limit of 5.
 select pg_temp.seed_events('send', repeat('d5',32), repeat('c5',32), 4, interval '23 hours');
 select pg_temp.seed_events('send', repeat('d6',32), repeat('c5',32), 20, interval '25 hours');
+select pg_temp.open_holder_code('b9300000-0000-4000-8000-000000000051', repeat('c5',32));
 set local role hid_identity_api_runtime;
 select set_config('app.actor_subject','system:auth',true);
 do $$
@@ -462,6 +515,13 @@ begin
       repeat('d5',32), 5, 10, 30) then
     raise exception 'A fifth send in 24 hours was refused';
   end if;
+end $$;
+reset role;
+select pg_temp.open_holder_code('b9300000-0000-4000-8000-000000000051', repeat('c5',32));
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+do $$
+begin
   if identity.record_public_patient_holder_send('b9300000-0000-4000-8000-000000000051', repeat('05',32),
       repeat('d5',32), 5, 10, 30) then
     raise exception 'A sixth send in 24 hours to one registry phone was allowed';
@@ -490,9 +550,11 @@ end $$;
 -- days, all older than 48 hours, still close it.
 select pg_temp.seed_enrollment('b9300000-0000-4000-8000-000000000052', repeat('52',32), repeat('06',32),
   repeat('c6',32), 'holder-budget-002', '{"nin":"12345679306"}');
+select pg_temp.open_holder_code('b9300000-0000-4000-8000-000000000052', repeat('c6',32));
 select pg_temp.seed_events('failure', repeat('d7',32), repeat('c6',32), 10, interval '1 hour');
 select pg_temp.seed_enrollment('b9300000-0000-4000-8000-000000000053', repeat('53',32), repeat('07',32),
   repeat('c7',32), 'holder-budget-003', '{"nin":"12345679307"}');
+select pg_temp.open_holder_code('b9300000-0000-4000-8000-000000000053', repeat('c7',32));
 select pg_temp.seed_events('failure', repeat('d8',32), repeat('c7',32), 20, interval '49 hours');
 select pg_temp.seed_events('failure', repeat('d8',32), repeat('c7',32), 10, interval '29 days');
 select pg_temp.seed_events('failure', repeat('d8',32), repeat('c7',32), 40, interval '31 days');
@@ -508,16 +570,139 @@ begin
       repeat('d8',32), 5, 10, 30) then
     raise exception 'A NIN with thirty failures in 30 days, all older than 48 hours, got another code';
   end if;
-  -- Ten failures 29 days old are within the monthly window but not the daily one.
+  -- Ten failures 29 days old are within the monthly window but not the daily
+  -- one: with the new code's five attempts, 35 fit a monthly limit of 35.
   if not identity.record_public_patient_holder_send('b9300000-0000-4000-8000-000000000053', repeat('07',32),
-      repeat('d8',32), 5, 10, 31) then
+      repeat('d8',32), 5, 10, 35) then
     raise exception 'Failures older than 24 hours counted against the daily budget';
   end if;
 end $$;
 reset role;
 
+-- The attempts left on the NIN's open codes count before a new code is sent:
+-- two enrollments of one NIN with an open code each use the daily budget of
+-- ten, so a third enrollment gets no code until those expire or are spent.
+select pg_temp.seed_enrollment(('b9300000-0000-4000-8000-00000000005' || n)::uuid, repeat('56',32),
+  repeat('5' || n, 32), repeat('cb',32), 'holder-open-00' || n, '{"nin":"12345679310"}')
+  from unnest(array['6', '7', '8']) n;
+select pg_temp.open_holder_code('b9300000-0000-4000-8000-000000000056', repeat('cb',32));
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+do $$
+begin
+  if not identity.record_public_patient_holder_send('b9300000-0000-4000-8000-000000000056', repeat('56',32),
+      repeat('db',32), 5, 10, 30) then
+    raise exception 'The first open code of a NIN was refused';
+  end if;
+end $$;
+reset role;
+select pg_temp.open_holder_code('b9300000-0000-4000-8000-000000000057', repeat('cb',32));
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+do $$
+begin
+  if not identity.record_public_patient_holder_send('b9300000-0000-4000-8000-000000000057', repeat('57',32),
+      repeat('db',32), 5, 10, 30) then
+    raise exception 'A second open code of a NIN, within ten attempts, was refused';
+  end if;
+end $$;
+reset role;
+select pg_temp.open_holder_code('b9300000-0000-4000-8000-000000000058', repeat('cb',32));
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+do $$
+begin
+  if identity.record_public_patient_holder_send('b9300000-0000-4000-8000-000000000058', repeat('58',32),
+      repeat('db',32), 5, 10, 30) then
+    raise exception 'A third open code put fifteen attempts in reach of a daily budget of ten';
+  end if;
+end $$;
+reset role;
+-- Wrong codes already made count with the new code's attempts: five
+-- failures today and a new code fit ten; a sixth failure does not.
+select pg_temp.seed_enrollment('b9300000-0000-4000-8000-000000000059', repeat('59',32), repeat('5a',32),
+  repeat('cc',32), 'holder-open-004', '{"nin":"12345679311"}');
+select pg_temp.seed_events('failure', repeat('dc',32), repeat('cc',32), 5, interval '1 hour');
+select pg_temp.open_holder_code('b9300000-0000-4000-8000-000000000059', repeat('cc',32));
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+do $$
+begin
+  if not identity.record_public_patient_holder_send('b9300000-0000-4000-8000-000000000059', repeat('5a',32),
+      repeat('dc',32), 5, 10, 30) then
+    raise exception 'Five failures and a new five-attempt code were refused under a daily budget of ten';
+  end if;
+end $$;
+reset role;
+select pg_temp.seed_events('failure', repeat('dc',32), repeat('cc',32), 1, interval '1 hour');
+select pg_temp.open_holder_code('b9300000-0000-4000-8000-000000000059', repeat('cc',32));
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+do $$
+begin
+  if identity.record_public_patient_holder_send('b9300000-0000-4000-8000-000000000059', repeat('5a',32),
+      repeat('dc',32), 5, 10, 30) then
+    raise exception 'Six failures and a new five-attempt code passed a daily budget of ten';
+  end if;
+end $$;
+reset role;
+-- The same over 30 days: 25 failures and a new code fit thirty; 26 do not.
+select pg_temp.seed_enrollment('b9300000-0000-4000-8000-00000000005a', repeat('5b',32), repeat('5c',32),
+  repeat('cd',32), 'holder-open-005', '{"nin":"12345679312"}');
+select pg_temp.seed_events('failure', repeat('dd',32), repeat('cd',32), 25, interval '3 days');
+select pg_temp.open_holder_code('b9300000-0000-4000-8000-00000000005a', repeat('cd',32));
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+do $$
+begin
+  if not identity.record_public_patient_holder_send('b9300000-0000-4000-8000-00000000005a', repeat('5c',32),
+      repeat('dd',32), 5, 10, 30) then
+    raise exception 'Twenty-five failures this month and a new code were refused under a monthly budget of thirty';
+  end if;
+end $$;
+reset role;
+select pg_temp.seed_events('failure', repeat('dd',32), repeat('cd',32), 1, interval '3 days');
+select pg_temp.open_holder_code('b9300000-0000-4000-8000-00000000005a', repeat('cd',32));
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+do $$
+begin
+  if identity.record_public_patient_holder_send('b9300000-0000-4000-8000-00000000005a', repeat('5c',32),
+      repeat('dd',32), 5, 10, 30) then
+    raise exception 'Twenty-six failures this month and a new code passed a monthly budget of thirty';
+  end if;
+end $$;
+reset role;
+do $$
+begin
+  if (select count(*) from identity.public_patient_holder_events where kind = 'send'
+      and nin_digest in (repeat('db',32), repeat('dc',32), repeat('dd',32))) <> 4 then
+    raise exception 'A send refused for the attempts in reach was recorded';
+  end if;
+end $$;
+-- A send needs the enrollment's open code (0051 allows one per enrollment),
+-- unused and addressed to the registry phone: none, or one to another phone,
+-- is a caller error.
+select pg_temp.seed_enrollment('b9300000-0000-4000-8000-00000000005b', repeat('5d',32), repeat('5e',32),
+  repeat('ce',32), 'holder-open-006', '{"nin":"12345679313"}');
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+select pg_temp.expect_refusal($sql$select identity.record_public_patient_holder_send(
+  'b9300000-0000-4000-8000-00000000005b', repeat('5e',32), repeat('de',32), 5, 10, 30)$sql$,
+  '55000', 'PATIENT_HOLDER_CODE_REQUIRED', 'A send without a stored code');
+reset role;
+select pg_temp.open_holder_code('b9300000-0000-4000-8000-00000000005b', repeat('cf',32));
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+select pg_temp.expect_refusal($sql$select identity.record_public_patient_holder_send(
+  'b9300000-0000-4000-8000-00000000005b', repeat('5e',32), repeat('de',32), 5, 10, 30)$sql$,
+  '55000', 'PATIENT_HOLDER_CODE_REQUIRED', 'A send whose open code goes to another phone');
+reset role;
+
 -- The failure command records each wrong code and audits the closing of the
 -- route once, when a budget is reached.
+update identity.public_patient_enrollment_otps set invalidated_at = clock_timestamp(), invalidation_reason = 'resend'
+  where enrollment_id = 'b9300000-0000-4000-8000-000000000051' and consumed_at is null and invalidated_at is null;
 select pg_temp.seed_holder_code('b9310000-0000-4000-8000-000000000054', 'b9300000-0000-4000-8000-000000000051',
   repeat('c5',32));
 select pg_temp.seed_events('failure', repeat('d9',32), repeat('c5',32), 8, interval '2 hours');
@@ -592,6 +777,133 @@ begin
   if identity.record_public_patient_holder_proof('b9300000-0000-4000-8000-000000000055', repeat('08',32),
       'registry_phone_otp', 'b9310000-0000-4000-8000-000000000055', null, repeat('da',32), 5) <> 'verified' then
     raise exception 'A proof older than a year still counted against the registry phone';
+  end if;
+end $$;
+reset role;
+
+-- 5b. What each command refuses on its own. Identity checks most of these
+-- before it calls a command; the database refuses them again, so a runtime
+-- bug cannot pass a spent, exhausted or misaddressed code, an expired or
+-- proven enrollment, or another actor. Each refusal has its exact SQLSTATE
+-- and message and changes nothing.
+-- One NIN: enrollments A1 to A5 each hold a code in one refused state (0051
+-- allows one open code per enrollment); R1 holds a valid code (r6).
+select pg_temp.seed_enrollment(('b9300000-0000-4000-8000-0000000000a' || n)::uuid, repeat('a9',32),
+  repeat('a8',32), repeat('a7',32), 'holder-refuse-a0' || n, '{"nin":"12345679314"}')
+  from generate_series(1, 5) n;
+select pg_temp.seed_enrollment('b9300000-0000-4000-8000-000000000091', repeat('a9',32), repeat('a8',32),
+  repeat('a7',32), 'holder-refuse-001', '{"nin":"12345679314"}');
+insert into identity.public_patient_enrollment_otps (id, enrollment_id, recipient_hmac, channel, purpose,
+  verifier_hmac, verifier_key_version, expires_at, max_attempts, failed_attempts, delivery_outcome,
+  verified_at, invalidated_at, invalidation_reason)
+values
+  ('b9350000-0000-4000-8000-000000000001', 'b9300000-0000-4000-8000-0000000000a1', repeat('a7',32), 'phone',
+   'nin_holder', repeat('ab',32), 'fixture', clock_timestamp() + interval '5 minutes', 5, 0, 'accepted',
+   null, clock_timestamp(), 'resend'),
+  ('b9350000-0000-4000-8000-000000000002', 'b9300000-0000-4000-8000-0000000000a2', repeat('a7',32), 'phone',
+   'nin_holder', repeat('ab',32), 'fixture', clock_timestamp() + interval '5 minutes', 5, 5, 'accepted',
+   null, null, null),
+  ('b9350000-0000-4000-8000-000000000003', 'b9300000-0000-4000-8000-0000000000a3', repeat('a7',32), 'phone',
+   'nin_holder', repeat('ab',32), 'fixture', clock_timestamp() + interval '5 minutes', 5, 0, 'definitive_failure',
+   null, null, null),
+  ('b9350000-0000-4000-8000-000000000004', 'b9300000-0000-4000-8000-0000000000a4', repeat('a7',32), 'phone',
+   'nin_holder', repeat('ab',32), 'fixture', clock_timestamp() + interval '5 minutes', 5, 0, 'accepted',
+   clock_timestamp(), null, null),
+  ('b9350000-0000-4000-8000-000000000005', 'b9300000-0000-4000-8000-0000000000a5', repeat('a5',32), 'phone',
+   'nin_holder', repeat('ab',32), 'fixture', clock_timestamp() + interval '5 minutes', 5, 0, 'accepted',
+   null, null, null),
+  ('b9350000-0000-4000-8000-000000000006', 'b9300000-0000-4000-8000-000000000091', repeat('a7',32), 'phone',
+   'nin_holder', repeat('ab',32), 'fixture', clock_timestamp() + interval '5 minutes', 5, 0, 'accepted',
+   null, null, null);
+-- R2 has expired with a valid open code; R3 has no holder recipient yet.
+select pg_temp.seed_enrollment('b9300000-0000-4000-8000-000000000092', repeat('b9',32), repeat('b8',32),
+  repeat('b7',32), 'holder-refuse-002', '{"nin":"12345679315"}');
+select pg_temp.seed_holder_code('b9350000-0000-4000-8000-000000000007', 'b9300000-0000-4000-8000-000000000092',
+  repeat('b7',32));
+update identity.public_patient_enrollments set expires_at = clock_timestamp() - interval '1 second'
+  where id = 'b9300000-0000-4000-8000-000000000092';
+select pg_temp.seed_enrollment('b9300000-0000-4000-8000-000000000093', repeat('c9',32), repeat('c8',32),
+  null, 'holder-refuse-003', '{"nin":"12345679316"}');
+select pg_temp.seed_holder_code('b9350000-0000-4000-8000-000000000008', 'b9300000-0000-4000-8000-000000000093',
+  repeat('ca',32));
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+select pg_temp.expect_refusal(format($sql$select identity.record_public_patient_holder_proof(
+    %L, repeat('a8',32), 'registry_phone_otp', %L, null, repeat('a6',32), 5)$sql$,
+    'b9300000-0000-4000-8000-0000000000a' || refused.n, 'b9350000-0000-4000-8000-00000000000' || refused.n),
+    '23514', 'PATIENT_HOLDER_PROOF_INVALID', 'A proof with ' || refused.label)
+  from (values (1, 'a code closed by a resend'), (2, 'a code whose attempts are spent'),
+    (3, 'a code whose delivery definitively failed'), (4, 'a code already verified'),
+    (5, 'a code sent to another phone')) refused(n, label);
+select pg_temp.expect_refusal($sql$select identity.record_public_patient_holder_proof(
+    'b9300000-0000-4000-8000-000000000092', repeat('b8',32), 'registry_phone_otp',
+    'b9350000-0000-4000-8000-000000000007', null, repeat('b6',32), 5)$sql$,
+  '42501', 'PATIENT_ENROLLMENT_DENIED', 'A proof of an expired enrollment');
+-- Sends: an expired enrollment, a proven one, one without a recipient.
+select pg_temp.expect_refusal($sql$select identity.record_public_patient_holder_send(
+    'b9300000-0000-4000-8000-000000000092', repeat('b8',32), repeat('b6',32), 5, 10, 30)$sql$,
+  '42501', 'PATIENT_ENROLLMENT_DENIED', 'A send for an expired enrollment');
+select pg_temp.expect_refusal($sql$select identity.record_public_patient_holder_send(
+    'b9300000-0000-4000-8000-000000000003', repeat('03',32), repeat('d1',32), 5, 10, 30)$sql$,
+  '42501', 'PATIENT_ENROLLMENT_DENIED', 'A send for a proven enrollment');
+select pg_temp.expect_refusal($sql$select identity.record_public_patient_holder_send(
+    'b9300000-0000-4000-8000-000000000093', repeat('c8',32), repeat('c6',32), 5, 10, 30)$sql$,
+  '42501', 'PATIENT_ENROLLMENT_DENIED', 'A send for an enrollment without a holder recipient');
+-- Failures: a contact code, and a proven enrollment's spent holder code.
+select pg_temp.expect_refusal($sql$select identity.record_public_patient_holder_failure(
+    'b9300000-0000-4000-8000-0000000000f1', repeat('f2',32), 'b9310000-0000-4000-8000-0000000000c1',
+    repeat('df',32), 10, 30)$sql$,
+  '42501', 'PATIENT_ENROLLMENT_DENIED', 'A failure counted on a contact code');
+select pg_temp.expect_refusal($sql$select identity.record_public_patient_holder_failure(
+    'b9300000-0000-4000-8000-000000000003', repeat('03',32), 'b9310000-0000-4000-8000-000000000003',
+    repeat('d1',32), 10, 30)$sql$,
+  '42501', 'PATIENT_ENROLLMENT_DENIED', 'A failure counted on a proven enrollment');
+-- Another actor runs none of the commands.
+select set_config('app.actor_subject','patient:b9340000-0000-4000-8000-0000000000aa',true);
+select pg_temp.expect_refusal(refused.statement, '42501', 'PATIENT_ENROLLMENT_DENIED', refused.label)
+  from (values
+    ($sql$select identity.record_public_patient_holder_proof('b9300000-0000-4000-8000-000000000091', repeat('a8',32),
+      'registry_phone_otp', 'b9350000-0000-4000-8000-000000000006', null, repeat('a6',32), 5)$sql$,
+     'A proof by another actor'),
+    ($sql$select identity.record_public_patient_holder_send('b9300000-0000-4000-8000-000000000056', repeat('56',32),
+      repeat('db',32), 5, 10, 30)$sql$, 'A send by another actor'),
+    ($sql$select identity.record_public_patient_holder_failure('b9300000-0000-4000-8000-000000000091', repeat('a8',32),
+      'b9350000-0000-4000-8000-000000000006', repeat('a6',32), 10, 30)$sql$, 'A failure by another actor')
+  ) refused(statement, label);
+select set_config('app.actor_subject','system:auth',true);
+reset role;
+-- While identity reconciliation is open, no proof is recorded.
+savepoint holder_readiness;
+insert into migration.runs (id, source_system, source_snapshot, mode, status, started_by)
+values ('b9360000-0000-4000-8000-000000000001', 'legacy_identity', 'holder-readiness-fixture', 'stage', 'running',
+  'synthetic-test');
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+select pg_temp.expect_refusal($sql$select identity.record_public_patient_holder_proof(
+    'b9300000-0000-4000-8000-000000000091', repeat('a8',32), 'registry_phone_otp',
+    'b9350000-0000-4000-8000-000000000006', null, repeat('a6',32), 5)$sql$,
+  '55000', 'PATIENT_ENROLLMENT_RECONCILIATION_REQUIRED', 'A proof while reconciliation is open');
+reset role;
+rollback to savepoint holder_readiness;
+do $$
+begin
+  if (select state from identity.public_patient_enrollments where id = 'b9300000-0000-4000-8000-000000000091')
+       <> 'verify_holder'
+     or exists (select 1 from identity.public_patient_enrollment_otps
+       where enrollment_id = 'b9300000-0000-4000-8000-000000000091' and consumed_at is not null)
+     or exists (select 1 from identity.public_patient_holder_events
+       where nin_digest in (repeat('a6',32), repeat('b6',32), repeat('c6',32), repeat('df',32))) then
+    raise exception 'A refused holder command changed an enrollment, spent a code or counted an event';
+  end if;
+end $$;
+-- The refused codes stay usable once valid: r6 still proves R1.
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+do $$
+begin
+  if identity.record_public_patient_holder_proof('b9300000-0000-4000-8000-000000000091', repeat('a8',32),
+      'registry_phone_otp', 'b9350000-0000-4000-8000-000000000006', null, repeat('a6',32), 5) <> 'verified' then
+    raise exception 'A valid code was refused after the refusals around it';
   end if;
 end $$;
 reset role;
@@ -720,6 +1032,79 @@ begin
   end if;
   if (select count(*) from identity.patients where hid_code like 'HID-ABCDEFG%' and source_system = 'hid-public-qoreid-enrollment') <> 1 then
     raise exception 'A refused activation created a patient';
+  end if;
+end $$;
+
+-- H1 to H4: activation re-reads both codes. Each enrollment is proved through
+-- the command and given a verified contact (H4 a phone), then one code is
+-- changed: H1 the holder code is no longer consumed, H2 it was closed by a
+-- resend, H3 it is re-purposed as a contact code, H4 the contact code is
+-- re-purposed as a holder code.
+select pg_temp.seed_enrollment(('b9300000-0000-4000-8000-00000000008' || n)::uuid, repeat('4' || n, 32),
+  repeat('6' || n, 32), repeat('3' || n, 32), 'holder-h-00' || n,
+  '{"nin":"12345679301","firstName":"Gift","lastName":"Sample","dateOfBirth":"1991-02-03","gender":"female","providerReference":"holder-h-00' || n || '"}')
+  from generate_series(1, 4) n;
+select pg_temp.seed_holder_code(('b9310000-0000-4000-8000-00000000008' || n)::uuid,
+  ('b9300000-0000-4000-8000-00000000008' || n)::uuid, repeat('3' || n, 32))
+  from generate_series(1, 4) n;
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+do $$
+declare
+  n integer;
+begin
+  for n in 1..4 loop
+    if identity.record_public_patient_holder_proof(('b9300000-0000-4000-8000-00000000008' || n)::uuid,
+        repeat('6' || n, 32)::char(64), 'registry_phone_otp', ('b9310000-0000-4000-8000-00000000008' || n)::uuid,
+        null, repeat('2' || n, 32)::char(64), 5) <> 'verified' then
+      raise exception 'Fixture proof H% failed', n;
+    end if;
+  end loop;
+end $$;
+reset role;
+insert into identity.public_patient_enrollment_otps (id, enrollment_id, recipient_hmac, channel, purpose,
+  verifier_hmac, verifier_key_version, created_at, expires_at, max_attempts, delivery_outcome, verified_at, consumed_at)
+select ('b9320000-0000-4000-8000-00000000008' || n)::uuid, ('b9300000-0000-4000-8000-00000000008' || n)::uuid,
+  repeat('1' || n, 32), case when n = 4 then 'phone' else 'email' end, 'contact', repeat('ab',32), 'fixture',
+  clock_timestamp(), clock_timestamp() + interval '5 minutes', 5, 'accepted', clock_timestamp(), clock_timestamp()
+  from generate_series(1, 4) n;
+update identity.public_patient_enrollments enrollment
+   set state = 'set_password', contact_channel = case when n = 4 then 'phone' else 'email' end,
+       contact_hmac = repeat('1' || n, 32), contact_lookup_hmac = repeat('0' || n, 32),
+       contact_ciphertext = decode(repeat('d' || n, 32), 'hex'), contact_verified_at = clock_timestamp(),
+       verified_challenge_id = ('b9320000-0000-4000-8000-00000000008' || n)::uuid
+  from generate_series(1, 4) n
+ where enrollment.id = ('b9300000-0000-4000-8000-00000000008' || n)::uuid;
+update identity.public_patient_enrollment_otps set consumed_at = null
+  where id = 'b9310000-0000-4000-8000-000000000081';
+update identity.public_patient_enrollment_otps set consumed_at = null, invalidated_at = clock_timestamp(),
+    invalidation_reason = 'resend'
+  where id = 'b9310000-0000-4000-8000-000000000082';
+update identity.public_patient_enrollment_otps set purpose = 'contact'
+  where id = 'b9310000-0000-4000-8000-000000000083';
+update identity.public_patient_enrollment_otps set purpose = 'nin_holder'
+  where id = 'b9320000-0000-4000-8000-000000000084';
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject','system:auth',true);
+select set_config('app.correlation_id','public-patient-holder-0003',true);
+select pg_temp.expect_refusal(format($sql$select identity.activate_public_patient_enrollment(%L::uuid,
+    repeat(%L, 32)::char(64),
+    %L, %L, 'HID-ABCDEFHK',
+    '$argon2id$v=19$m=65536,t=3,p=1$fixture-salt$fixture-password-digest-not-an-operational-secret',
+    repeat(%L, 32)::char(64))$sql$,
+    'b9300000-0000-4000-8000-00000000008' || n, '6' || n,
+    '{"nin":"12345679301","firstName":"Gift","lastName":"Sample","dateOfBirth":"1991-02-03","gender":"female","providerReference":"holder-h-00' || n || '"}',
+    case when n = 4 then '+2348030000084' else 'gift-h' || n || '@example.invalid' end, '0' || n),
+  '23514', case when n = 4 then 'PATIENT_CONTACT_NOT_VERIFIED' else 'PATIENT_HOLDER_PROOF_INVALID' end,
+  'Activation case H' || n)
+  from generate_series(1, 4) n;
+reset role;
+do $$
+begin
+  if exists (select 1 from identity.public_patient_enrollments
+      where id::text like 'b9300000-0000-4000-8000-00000000008_' and state <> 'set_password')
+     or exists (select 1 from identity.patients where hid_code = 'HID-ABCDEFHK') then
+    raise exception 'A refused activation changed an enrollment or created a patient';
   end if;
 end $$;
 
