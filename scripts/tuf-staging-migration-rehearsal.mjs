@@ -358,19 +358,26 @@ try {
         has_function_privilege('hid_identity_runtime', 'identity.list_participating_facilities()', 'execute') as list,
         has_function_privilege('hid_identity_runtime', 'identity.admin_set_facility_assisted_registration(uuid,bigint,'
           || 'text,text,text,text,text,text,text,text,char)', 'execute') as designate,
+        has_function_privilege('hid_identity_runtime', 'identity.admin_facility_assisted_registration(uuid)', 'execute')
+          as designation_read,
         has_function_privilege('public', 'identity.record_assisted_verification(uuid,char,char,text,text,text,text,text,'
           || 'text,char,char,integer,integer)', 'execute') as public_record,
         has_function_privilege('hid_identity_runtime', 'auth.staff_session_is_mfa()', 'execute') as staff_mfa,
         has_function_privilege('hid_identity_runtime', 'identity.assisted_registration_actor_attested(text,uuid,uuid)',
           'execute') as attested,
+        has_function_privilege('hid_identity_runtime', 'identity.facility_assisted_registration_participating(uuid)',
+          'execute') as participating,
         has_table_privilege('hid_identity_runtime', 'identity.assisted_registration_verifications',
           'select,insert,update,delete') as checks,
         has_table_privilege('hid_identity_runtime', 'identity.facility_assisted_registration',
           'select,insert,update,delete') as designations,
+        has_table_privilege('hid_identity_runtime', 'identity.facility_assisted_registration_events',
+          'select,insert,update,delete') as designation_events,
         (select array_agg(role_code::text order by role_code) from auth.role_permissions
           where permission_code = 'identity.patient.assisted_registration') as holders`)).rows[0],
-    { record: true, list: true, designate: true, public_record: false, staff_mfa: false, attested: false,
-      checks: false, designations: false, holders: ['clinician', 'doctor', 'nurse'] },
+    { record: true, list: true, designate: true, designation_read: true, public_record: false, staff_mfa: false,
+      attested: false, participating: false, checks: false, designations: false, designation_events: false,
+      holders: ['clinician', 'doctor', 'nurse'] },
     'The upgraded role bootstrap must give the Identity runtime the 0094 commands and no assisted-registration table');
     await client.query('begin');
     try {

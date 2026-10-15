@@ -112,10 +112,12 @@ insert into identity.facilities (id, organization_id, name, code, timezone, acti
 --   16 nurse at A on a current attestation, whose session has no MFA assurance
 --   17 doctor at A whose attestation has lapsed
 --   18 clinician at A on a current attestation
+--   19 nurse at A on a current attestation, whose MFA factor is revoked after
+--      its session was assured
 insert into auth.accounts (id, subject, email, status, password_hash, password_algorithm)
 select ('f9420000-0000-4000-8000-0000000000' || n)::uuid, 'synthetic:far:' || n, 'far' || n || '@example.invalid',
   'active', 'synthetic-hash', 'argon2id'
-from unnest(array['01', '02', '11', '12', '13', '14', '15', '16', '17', '18']) n;
+from unnest(array['01', '02', '11', '12', '13', '14', '15', '16', '17', '18', '19']) n;
 insert into auth.account_roles (id, account_id, role_code, scope_type, grant_reason) values
   ('f9450000-0000-4000-8000-0000000000f1', 'f9420000-0000-4000-8000-000000000001', 'platform_super_admin', 'platform', 'Synthetic assisted suite role'),
   ('f9450000-0000-4000-8000-0000000000f2', 'f9420000-0000-4000-8000-000000000002', 'support_admin', 'platform', 'Synthetic assisted suite role');
@@ -123,7 +125,7 @@ insert into identity.staff (id, account_id, full_name, email, verification_statu
 select ('f9430000-0000-4000-8000-0000000000' || n)::uuid, ('f9420000-0000-4000-8000-0000000000' || n)::uuid,
   'Assisted Suite ' || n, 'far' || n || '@example.invalid', 'verified', role_name
 from (values ('11', 'nurse'), ('12', 'nurse'), ('13', 'org_admin'), ('14', 'receptionist'), ('15', 'nurse'),
-  ('16', 'nurse'), ('17', 'doctor'), ('18', 'clinician')) staff_rows(n, role_name);
+  ('16', 'nurse'), ('17', 'doctor'), ('18', 'clinician'), ('19', 'nurse')) staff_rows(n, role_name);
 -- Memberships and facility roles: id suffix = account; 11 also has b1 at B.
 insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
   membership_role, app_role, is_primary, active)
@@ -139,14 +141,15 @@ from (values
   ('f9440000-0000-4000-8000-000000000015', '15', 'f9410000-0000-4000-8000-00000000000c', 'nurse', true),
   ('f9440000-0000-4000-8000-000000000016', '16', 'f9410000-0000-4000-8000-00000000000a', 'nurse', true),
   ('f9440000-0000-4000-8000-000000000017', '17', 'f9410000-0000-4000-8000-00000000000a', 'doctor', true),
-  ('f9440000-0000-4000-8000-000000000018', '18', 'f9410000-0000-4000-8000-00000000000a', 'clinician', true))
+  ('f9440000-0000-4000-8000-000000000018', '18', 'f9410000-0000-4000-8000-00000000000a', 'clinician', true),
+  ('f9440000-0000-4000-8000-000000000019', '19', 'f9410000-0000-4000-8000-00000000000a', 'nurse', true))
   membership_rows(membership_id, n, facility, role_name, primary_membership);
 insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
 select ('f9450000-0000-4000-8000-' || substr(membership.id::text, 25))::uuid, membership.account_id,
   membership.membership_role, 'facility', membership.id, membership.facility_id, 'Synthetic assisted suite role'
 from identity.staff_facility_memberships membership
 where membership.organization_id = 'f9400000-0000-4000-8000-000000000001';
--- Credential attestations by 01 (current for 11, 15, 16, 18; lapsed for 17)
+-- Credential attestations by 01 (current for 11, 15, 16, 18, 19; lapsed for 17)
 -- and the workforce grants that rest on them (none for 12, 13, 14).
 insert into identity.staff_credential_attestations (id, staff_id, account_id, attested_roles, credential_reference,
   issuing_authority, verification_method, evidence_reference, valid_until, reviewer_account_id, reason,
@@ -157,7 +160,7 @@ select ('f9460000-0000-4000-8000-0000000000' || n)::uuid, ('f9430000-0000-4000-8
   'Synthetic attestation for the assisted suite', 'assisted-suite-attestation', recorded_at
 from (values ('11', 'nurse', now() + interval '1 year', now()), ('15', 'nurse', now() + interval '1 year', now()),
   ('16', 'nurse', now() + interval '1 year', now()), ('18', 'clinician', now() + interval '1 year', now()),
-  ('17', 'doctor', now() - interval '1 day', now() - interval '2 years'))
+  ('19', 'nurse', now() + interval '1 year', now()), ('17', 'doctor', now() - interval '1 day', now() - interval '2 years'))
   attestation_rows(n, role_name, valid_until, recorded_at);
 insert into identity.workforce_role_grants (account_role_id, attestation_id, account_id, membership_id, facility_id,
   role_code, granted_by, correlation_id)
@@ -166,38 +169,42 @@ select assignment.id, ('f9460000-0000-4000-8000-0000000000' || right(assignment.
   'f9420000-0000-4000-8000-000000000001', 'assisted-suite-grant'
 from auth.account_roles assignment
 where assignment.scope_type = 'facility'
-  and right(assignment.account_id::text, 2) in ('11', '15', '16', '17', '18')
+  and right(assignment.account_id::text, 2) in ('11', '15', '16', '17', '18', '19')
   and assignment.account_id::text like 'f9420000-%';
 
--- MFA: staff factors enrolled with a staff proof for 11 to 18, a platform
+-- MFA: staff factors enrolled with a staff proof for 11 to 19, a platform
 -- factor for 01 and 02; staff sessions for every staff account, assurance on
--- all but 16's; platform sessions with a fresh step-up for 01 and 02.
+-- all but 16's; platform sessions with a fresh step-up for 01 and 02. 19's
+-- factor is then revoked by the governed reset, its session left in place.
 insert into auth.mfa_login_challenges (id, account_id, purpose, token_sha256, account_token_version, created_at,
     expires_at, max_attempts, session_kind, proof_method, proof_verified_at)
 select ('f9480000-0000-4000-8000-0000000000' || n)::uuid, ('f9420000-0000-4000-8000-0000000000' || n)::uuid,
   'enroll', repeat(n, 32), 1, now(), now() + interval '9 minutes', 5, 'staff', 'provider_activation', clock_timestamp()
-from unnest(array['11', '12', '13', '14', '15', '16', '17', '18']) n;
+from unnest(array['11', '12', '13', '14', '15', '16', '17', '18', '19']) n;
 insert into auth.mfa_factors (id, account_id, status, secret_ciphertext, secret_key_version, activated_at,
     last_used_step, enrollment_proof, enrollment_challenge_id)
 select ('f9470000-0000-4000-8000-0000000000' || n)::uuid, ('f9420000-0000-4000-8000-0000000000' || n)::uuid,
   'active', gen_random_bytes(49), 'suite-v1', now(), 1,
   case when n not in ('01', '02') then 'provider_activation' end,
   case when n not in ('01', '02') then ('f9480000-0000-4000-8000-0000000000' || n)::uuid end
-from unnest(array['01', '02', '11', '12', '13', '14', '15', '16', '17', '18']) n;
+from unnest(array['01', '02', '11', '12', '13', '14', '15', '16', '17', '18', '19']) n;
 insert into auth.sessions (id, account_id, family_id, refresh_token_sha256, access_jti, account_token_version,
     authentication_method, issued_at, expires_at, absolute_expires_at, session_kind)
 select ('f9490000-0000-4000-8000-0000000000' || n)::uuid, ('f9420000-0000-4000-8000-0000000000' || n)::uuid,
   ('f9490000-0000-4000-8000-0000000000' || n)::uuid, repeat(n, 32), gen_random_uuid(), 1, 'password', now(),
   now() + case when n in ('01', '02') then interval '15 minutes' else interval '1 hour' end, now() + interval '8 hours',
   case when n in ('01', '02') then 'platform' else 'staff' end
-from unnest(array['01', '02', '11', '12', '13', '14', '15', '16', '17', '18']) n;
+from unnest(array['01', '02', '11', '12', '13', '14', '15', '16', '17', '18', '19']) n;
 insert into auth.session_assurance (family_id, account_id, mfa_factor_id, mfa_method, mfa_verified_at)
 select ('f9490000-0000-4000-8000-0000000000' || n)::uuid, ('f9420000-0000-4000-8000-0000000000' || n)::uuid,
   ('f9470000-0000-4000-8000-0000000000' || n)::uuid, 'totp', clock_timestamp()
-from unnest(array['01', '02', '11', '12', '13', '14', '15', '17', '18']) n;
+from unnest(array['01', '02', '11', '12', '13', '14', '15', '17', '18', '19']) n;
 update auth.session_assurance set step_up_at = clock_timestamp(), step_up_count = step_up_count + 1,
   row_version = row_version + 1
 where family_id in ('f9490000-0000-4000-8000-000000000001', 'f9490000-0000-4000-8000-000000000002');
+update auth.mfa_factors set status = 'revoked', revoked_at = clock_timestamp(), revocation_reason = 'admin_reset',
+  row_version = row_version + 1
+where id = 'f9470000-0000-4000-8000-000000000019';
 
 -- 1. Catalog contract.
 do $$
@@ -414,8 +421,24 @@ begin
   perform pg_temp.as_staff('11', 'f9410000-0000-4000-8000-00000000000a', 'f9440000-0000-4000-8000-000000000011',
     'f9490000-0000-4000-8000-000000000011');
   if not auth.staff_session_is_mfa() then raise exception 'A live staff session with MFA was not assured'; end if;
-  perform set_config('app.session_id', 'f9490000-0000-4000-8000-000000000016', true);
-  if auth.staff_session_is_mfa() then raise exception 'Another account''s session was assured'; end if;
+  -- 18's session is a live staff session with MFA assurance, but not 11's.
+  perform set_config('app.session_id', 'f9490000-0000-4000-8000-000000000018', true);
+  if auth.staff_session_is_mfa() then raise exception 'Another account''s assured session was assured'; end if;
+  perform set_config('app.session_id', 'f9490000-0000-4000-8000-000000000011', true);
+  update auth.sessions set revoked_at = clock_timestamp(), revocation_reason = 'Synthetic revocation in the suite'
+   where id = 'f9490000-0000-4000-8000-000000000011';
+  if auth.staff_session_is_mfa() then raise exception 'A revoked staff session was assured'; end if;
+  update auth.sessions set revoked_at = null, revocation_reason = null where id = 'f9490000-0000-4000-8000-000000000011';
+  update auth.sessions set issued_at = clock_timestamp() - interval '2 hours',
+      expires_at = clock_timestamp() - interval '1 minute'
+   where id = 'f9490000-0000-4000-8000-000000000011';
+  if auth.staff_session_is_mfa() then raise exception 'An expired staff session was assured'; end if;
+  update auth.sessions set issued_at = now(), expires_at = now() + interval '1 hour'
+   where id = 'f9490000-0000-4000-8000-000000000011';
+  if not auth.staff_session_is_mfa() then raise exception 'The restored staff session was not assured'; end if;
+  perform pg_temp.as_staff('19', 'f9410000-0000-4000-8000-00000000000a', 'f9440000-0000-4000-8000-000000000019',
+    'f9490000-0000-4000-8000-000000000019');
+  if auth.staff_session_is_mfa() then raise exception 'A session assured by a revoked factor was assured'; end if;
   perform pg_temp.as_staff('16', 'f9410000-0000-4000-8000-00000000000a', 'f9440000-0000-4000-8000-000000000016',
     'f9490000-0000-4000-8000-000000000016');
   if auth.staff_session_is_mfa() then raise exception 'A staff session without MFA assurance was assured'; end if;
@@ -470,6 +493,54 @@ select pg_temp.as_staff('17', 'f9410000-0000-4000-8000-00000000000a', 'f9440000-
 select pg_temp.expect_refusal($sql$select * from pg_temp.record_check('mutant-lapsed', null, null, 'none-7', 'code_not_found')
   as (id uuid, outcome text, replayed boolean, proof text)$sql$,
   '42501', 'ASSISTED_REGISTRATION_NOT_AUTHORIZED', 'a doctor whose attestation lapsed');
+-- The staff session itself: another account's assured session, a revoked or
+-- expired session, and a session whose factor was revoked after it was
+-- assured. Only auth.staff_session_is_mfa refuses these.
+select pg_temp.as_staff('11', 'f9410000-0000-4000-8000-00000000000a', 'f9440000-0000-4000-8000-000000000011',
+  'f9490000-0000-4000-8000-000000000018');
+select pg_temp.expect_refusal($sql$select * from pg_temp.record_check('mutant-other-session', null, null, 'none-12', 'code_not_found')
+  as (id uuid, outcome text, replayed boolean, proof text)$sql$,
+  '42501', 'ASSISTED_REGISTRATION_NOT_AUTHORIZED', 'another account''s assured session');
+select pg_temp.as_staff('19', 'f9410000-0000-4000-8000-00000000000a', 'f9440000-0000-4000-8000-000000000019',
+  'f9490000-0000-4000-8000-000000000019');
+select pg_temp.expect_refusal($sql$select * from pg_temp.record_check('mutant-revoked-factor', null, null, 'none-13', 'code_not_found')
+  as (id uuid, outcome text, replayed boolean, proof text)$sql$,
+  '42501', 'ASSISTED_REGISTRATION_NOT_AUTHORIZED', 'a session whose MFA factor was revoked');
+reset role;
+update auth.sessions set revoked_at = clock_timestamp(), revocation_reason = 'Synthetic revocation in the suite'
+ where id = 'f9490000-0000-4000-8000-000000000011';
+set local role hid_identity_api_runtime;
+select pg_temp.as_staff('11', 'f9410000-0000-4000-8000-00000000000a', 'f9440000-0000-4000-8000-000000000011',
+  'f9490000-0000-4000-8000-000000000011');
+select pg_temp.expect_refusal($sql$select * from pg_temp.record_check('mutant-revoked-session', null, null, 'none-14', 'code_not_found')
+  as (id uuid, outcome text, replayed boolean, proof text)$sql$,
+  '42501', 'ASSISTED_REGISTRATION_NOT_AUTHORIZED', 'a revoked staff session');
+reset role;
+update auth.sessions set revoked_at = null, revocation_reason = null where id = 'f9490000-0000-4000-8000-000000000011';
+update auth.sessions set issued_at = clock_timestamp() - interval '2 hours',
+    expires_at = clock_timestamp() - interval '1 minute'
+ where id = 'f9490000-0000-4000-8000-000000000011';
+set local role hid_identity_api_runtime;
+select pg_temp.as_staff('11', 'f9410000-0000-4000-8000-00000000000a', 'f9440000-0000-4000-8000-000000000011',
+  'f9490000-0000-4000-8000-000000000011');
+select pg_temp.expect_refusal($sql$select * from pg_temp.record_check('mutant-expired-session', null, null, 'none-15', 'code_not_found')
+  as (id uuid, outcome text, replayed boolean, proof text)$sql$,
+  '42501', 'ASSISTED_REGISTRATION_NOT_AUTHORIZED', 'an expired staff session');
+reset role;
+update auth.sessions set issued_at = now(), expires_at = now() + interval '1 hour'
+ where id = 'f9490000-0000-4000-8000-000000000011';
+-- A deactivated membership keeps its role and attested grant: only
+-- auth.membership_has_permission refuses it.
+update identity.staff_facility_memberships set active = false where id = 'f9440000-0000-4000-8000-000000000011';
+set local role hid_identity_api_runtime;
+select pg_temp.as_staff('11', 'f9410000-0000-4000-8000-00000000000a', 'f9440000-0000-4000-8000-000000000011',
+  'f9490000-0000-4000-8000-000000000011');
+select pg_temp.expect_refusal($sql$select * from pg_temp.record_check('mutant-inactive-membership', null, null, 'none-16', 'code_not_found')
+  as (id uuid, outcome text, replayed boolean, proof text)$sql$,
+  '42501', 'ASSISTED_REGISTRATION_NOT_AUTHORIZED', 'a deactivated membership with its role and grant in place');
+reset role;
+update identity.staff_facility_memberships set active = true where id = 'f9440000-0000-4000-8000-000000000011';
+set local role hid_identity_api_runtime;
 select pg_temp.as_system('assisted-suite-system-0003');
 select pg_temp.expect_refusal($sql$select * from pg_temp.record_check('mutant-system', null, null, 'none-8', 'code_not_found')
   as (id uuid, outcome text, replayed boolean, proof text)$sql$,
@@ -488,7 +559,8 @@ do $$
 begin
   if (select count(*) from identity.assisted_registration_verifications where request_key_hmac in (
       select encode(public.digest('key:mutant-' || label, 'sha256'), 'hex') from unnest(array['mfa', 'wrong-facility',
-        'undesignated', 'receptionist', 'org-admin', 'legacy', 'lapsed', 'system']) label)) <> 0 then
+        'undesignated', 'receptionist', 'org-admin', 'legacy', 'lapsed', 'other-session', 'revoked-factor',
+        'revoked-session', 'expired-session', 'inactive-membership', 'system']) label)) <> 0 then
     raise exception 'A refused actor recorded a check';
   end if;
 end $$;
@@ -731,6 +803,61 @@ select pg_temp.expect_refusal(format($sql$select identity.record_public_patient_
 reset role;
 update auth.account_roles set revoked_at = null, revoked_by = null, revocation_reason = null
  where id = 'f9450000-0000-4000-8000-000000000018';
+-- The verifying account locked, or its membership deactivated, after the
+-- check. The role and its attested grant stay, so only
+-- auth.membership_has_permission refuses.
+update auth.accounts set status = 'locked' where id = 'f9420000-0000-4000-8000-000000000018';
+do $$
+begin
+  if not identity.assisted_registration_actor_attested('synthetic:far:18', 'f9440000-0000-4000-8000-000000000018',
+      'f9410000-0000-4000-8000-00000000000a') then
+    raise exception 'Fixture: locking the account must leave the attested grant in place';
+  end if;
+end $$;
+set local role hid_identity_api_runtime;
+select pg_temp.as_system('assisted-suite-system-0017');
+select pg_temp.expect_refusal(format($sql$select identity.record_public_patient_holder_proof(
+  'f94a0000-0000-4000-8000-000000000002', repeat('b2',32), 'facility_in_person', null, %L::uuid,
+  repeat('c2',32), 5)$sql$, current_setting('suite.check_e2')),
+  '42501', 'ASSISTED_REGISTRATION_NOT_AUTHORIZED', 'a verifying account locked after the check');
+reset role;
+update auth.accounts set status = 'active' where id = 'f9420000-0000-4000-8000-000000000018';
+update identity.staff_facility_memberships set active = false where id = 'f9440000-0000-4000-8000-000000000018';
+set local role hid_identity_api_runtime;
+select pg_temp.as_system('assisted-suite-system-0018');
+select pg_temp.expect_refusal(format($sql$select identity.record_public_patient_holder_proof(
+  'f94a0000-0000-4000-8000-000000000002', repeat('b2',32), 'facility_in_person', null, %L::uuid,
+  repeat('c2',32), 5)$sql$, current_setting('suite.check_e2')),
+  '42501', 'ASSISTED_REGISTRATION_NOT_AUTHORIZED', 'a verifying membership deactivated after the check');
+reset role;
+update identity.staff_facility_memberships set active = true where id = 'f9440000-0000-4000-8000-000000000018';
+-- Only the attested role revoked after the check: a legacy role at the same
+-- membership, with no workforce grant, still carries the permission, so only
+-- identity.assisted_registration_actor_attested refuses.
+insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+values ('f9450000-0000-4000-8000-0000000002a8', 'f9420000-0000-4000-8000-000000000018', 'nurse', 'facility',
+  'f9440000-0000-4000-8000-000000000018', 'f9410000-0000-4000-8000-00000000000a',
+  'Synthetic legacy role without a workforce grant');
+update auth.account_roles set revoked_at = clock_timestamp(), revoked_by = 'f9420000-0000-4000-8000-000000000001',
+  revocation_reason = 'Synthetic revocation of the attested role' where id = 'f9450000-0000-4000-8000-000000000018';
+do $$
+begin
+  if not auth.membership_has_permission('synthetic:far:18', 'f9440000-0000-4000-8000-000000000018',
+      'f9410000-0000-4000-8000-00000000000a', 'identity.patient.assisted_registration') then
+    raise exception 'Fixture: the legacy role must keep the permission';
+  end if;
+end $$;
+set local role hid_identity_api_runtime;
+select pg_temp.as_system('assisted-suite-system-0019');
+select pg_temp.expect_refusal(format($sql$select identity.record_public_patient_holder_proof(
+  'f94a0000-0000-4000-8000-000000000002', repeat('b2',32), 'facility_in_person', null, %L::uuid,
+  repeat('c2',32), 5)$sql$, current_setting('suite.check_e2')),
+  '42501', 'ASSISTED_REGISTRATION_NOT_AUTHORIZED', 'the attested role revoked, a legacy role left');
+reset role;
+update auth.account_roles set revoked_at = null, revoked_by = null, revocation_reason = null
+ where id = 'f9450000-0000-4000-8000-000000000018';
+update auth.account_roles set revoked_at = clock_timestamp(), revoked_by = 'f9420000-0000-4000-8000-000000000001',
+  revocation_reason = 'Synthetic end of the legacy role' where id = 'f9450000-0000-4000-8000-0000000002a8';
 do $$
 begin
   if (select state from identity.public_patient_enrollments where id = 'f94a0000-0000-4000-8000-000000000002')
@@ -901,24 +1028,27 @@ begin
   end if;
 end $$;
 
--- 10. Activation after an in-person proof. F1 activates; F2 and F3 are
--- refused when the designation or the verifying membership no longer holds.
+-- 10. Activation after an in-person proof. F1 activates; F2 to F6 are
+-- refused when the designation or the verifying staff member no longer
+-- holds: F2 the designation suspended, F3 the role revoked, F4 the account
+-- disabled, F5 the membership deactivated, F6 only the attested role revoked
+-- while a legacy role keeps the permission.
 select pg_temp.seed_enrollment(('f94a0000-0000-4000-8000-00000000007' || n)::uuid, repeat('7' || n, 32),
   repeat('8' || n, 32), 'assisted-ref-07' || n, 'desk-07' || n, '947' || n)
-  from generate_series(1, 3) n;
+  from generate_series(1, 6) n;
 set local role hid_identity_api_runtime;
 select pg_temp.as_staff('11', 'f9410000-0000-4000-8000-00000000000a', 'f9440000-0000-4000-8000-000000000011',
   'f9490000-0000-4000-8000-000000000011');
 select set_config('suite.check_f' || n, (select id::text from pg_temp.record_check('check-f' || n,
   ('f94a0000-0000-4000-8000-00000000007' || n)::uuid, repeat('9' || n, 32)::char(64), 'desk-07' || n, 'matched')
   as (id uuid, outcome text, replayed boolean, proof text)), true)
-  from generate_series(1, 3) n;
+  from generate_series(1, 6) n;
 select pg_temp.as_system('assisted-suite-system-0013');
 do $$
 declare
   n integer;
 begin
-  for n in 1..3 loop
+  for n in 1..6 loop
     if identity.record_public_patient_holder_proof(('f94a0000-0000-4000-8000-00000000007' || n)::uuid,
         repeat('8' || n, 32)::char(64), 'facility_in_person', null,
         current_setting('suite.check_f' || n)::uuid, repeat('9' || n, 32)::char(64), 5) <> 'verified' then
@@ -932,13 +1062,13 @@ insert into identity.public_patient_enrollment_otps (id, enrollment_id, recipien
 select ('f94b0000-0000-4000-8000-00000000007' || n)::uuid, ('f94a0000-0000-4000-8000-00000000007' || n)::uuid,
   repeat('a' || n, 32), 'email', 'contact', repeat('ab',32), 'fixture', clock_timestamp(),
   clock_timestamp() + interval '5 minutes', 5, 'accepted', clock_timestamp(), clock_timestamp()
-  from generate_series(1, 3) n;
+  from generate_series(1, 6) n;
 update identity.public_patient_enrollments enrollment
    set state = 'set_password', contact_channel = 'email', contact_hmac = repeat('a' || n, 32),
        contact_lookup_hmac = repeat('b' || n, 32), contact_ciphertext = decode(repeat('d' || n, 32), 'hex'),
        contact_verified_at = clock_timestamp(),
        verified_challenge_id = ('f94b0000-0000-4000-8000-00000000007' || n)::uuid
-  from generate_series(1, 3) n
+  from generate_series(1, 6) n
  where enrollment.id = ('f94a0000-0000-4000-8000-00000000007' || n)::uuid;
 -- F2: the designation of A is suspended before activation; F3: the verifying
 -- nurse's role at A is revoked before activation. Each is restored after.
@@ -969,6 +1099,67 @@ select pg_temp.expect_refusal(format($sql$select identity.activate_public_patien
 reset role;
 update auth.account_roles set revoked_at = null, revoked_by = null, revocation_reason = null
  where id = 'f9450000-0000-4000-8000-000000000011';
+-- F4 and F5: the verifying account disabled, or its membership deactivated,
+-- after the proof. The role and its attested grant stay, so only
+-- auth.membership_has_permission refuses.
+update auth.accounts set status = 'disabled' where id = 'f9420000-0000-4000-8000-000000000011';
+do $$
+begin
+  if not identity.assisted_registration_actor_attested('synthetic:far:11', 'f9440000-0000-4000-8000-000000000011',
+      'f9410000-0000-4000-8000-00000000000a') then
+    raise exception 'Fixture: disabling the account must leave the attested grant in place';
+  end if;
+end $$;
+set local role hid_identity_api_runtime;
+select pg_temp.as_system('assisted-suite-system-0020');
+select pg_temp.expect_refusal(format($sql$select identity.activate_public_patient_enrollment(
+  'f94a0000-0000-4000-8000-000000000074', repeat('84',32)::char(64),
+  '{"nin":"12345679474","firstName":"Ada","lastName":"Synthetic","dateOfBirth":"1990-01-02","gender":"female","providerReference":"assisted-ref-074"}',
+  'ada4@example.invalid', 'HID-ASSTFAH2', %L, repeat('b4',32)::char(64))$sql$,
+  '$argon2id$v=19$m=65536,t=3,p=1$fixture-salt$fixture-password-digest-not-an-operational-secret'),
+  '23514', 'PATIENT_HOLDER_PROOF_INVALID', 'activation after the verifying account was disabled');
+reset role;
+update auth.accounts set status = 'active' where id = 'f9420000-0000-4000-8000-000000000011';
+update identity.staff_facility_memberships set active = false where id = 'f9440000-0000-4000-8000-000000000011';
+set local role hid_identity_api_runtime;
+select pg_temp.as_system('assisted-suite-system-0021');
+select pg_temp.expect_refusal(format($sql$select identity.activate_public_patient_enrollment(
+  'f94a0000-0000-4000-8000-000000000075', repeat('85',32)::char(64),
+  '{"nin":"12345679475","firstName":"Ada","lastName":"Synthetic","dateOfBirth":"1990-01-02","gender":"female","providerReference":"assisted-ref-075"}',
+  'ada5@example.invalid', 'HID-ASSTFAJ2', %L, repeat('b5',32)::char(64))$sql$,
+  '$argon2id$v=19$m=65536,t=3,p=1$fixture-salt$fixture-password-digest-not-an-operational-secret'),
+  '23514', 'PATIENT_HOLDER_PROOF_INVALID', 'activation after the verifying membership was deactivated');
+reset role;
+update identity.staff_facility_memberships set active = true where id = 'f9440000-0000-4000-8000-000000000011';
+-- F6: only the attested role revoked after the proof. A legacy role at the
+-- same membership, with no workforce grant, keeps the permission, so only
+-- identity.assisted_registration_actor_attested refuses.
+insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+values ('f9450000-0000-4000-8000-0000000002a1', 'f9420000-0000-4000-8000-000000000011', 'clinician', 'facility',
+  'f9440000-0000-4000-8000-000000000011', 'f9410000-0000-4000-8000-00000000000a',
+  'Synthetic legacy role without a workforce grant');
+update auth.account_roles set revoked_at = clock_timestamp(), revoked_by = 'f9420000-0000-4000-8000-000000000001',
+  revocation_reason = 'Synthetic revocation of the attested role' where id = 'f9450000-0000-4000-8000-000000000011';
+do $$
+begin
+  if not auth.membership_has_permission('synthetic:far:11', 'f9440000-0000-4000-8000-000000000011',
+      'f9410000-0000-4000-8000-00000000000a', 'identity.patient.assisted_registration') then
+    raise exception 'Fixture: the legacy role must keep the permission';
+  end if;
+end $$;
+set local role hid_identity_api_runtime;
+select pg_temp.as_system('assisted-suite-system-0022');
+select pg_temp.expect_refusal(format($sql$select identity.activate_public_patient_enrollment(
+  'f94a0000-0000-4000-8000-000000000076', repeat('86',32)::char(64),
+  '{"nin":"12345679476","firstName":"Ada","lastName":"Synthetic","dateOfBirth":"1990-01-02","gender":"female","providerReference":"assisted-ref-076"}',
+  'ada6@example.invalid', 'HID-ASSTFAK2', %L, repeat('b6',32)::char(64))$sql$,
+  '$argon2id$v=19$m=65536,t=3,p=1$fixture-salt$fixture-password-digest-not-an-operational-secret'),
+  '23514', 'PATIENT_HOLDER_PROOF_INVALID', 'activation after the attested role was revoked, a legacy role left');
+reset role;
+update auth.account_roles set revoked_at = null, revoked_by = null, revocation_reason = null
+ where id = 'f9450000-0000-4000-8000-000000000011';
+update auth.account_roles set revoked_at = clock_timestamp(), revoked_by = 'f9420000-0000-4000-8000-000000000001',
+  revocation_reason = 'Synthetic end of the legacy role' where id = 'f9450000-0000-4000-8000-0000000002a1';
 set local role hid_identity_api_runtime;
 select pg_temp.as_system('assisted-suite-system-0016');
 do $$

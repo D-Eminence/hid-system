@@ -1019,27 +1019,38 @@ describe('PatientEnrollmentService', () => {
   // the load balancer, inside TRUST_PROXY_CIDRS, and shared by every client.
   describe('client network', () => {
     const vpc = '10.40.0.0/16';
+    // A production profile the environment accepts: the online holder route
+    // with the facility route on (ADR-063), and a facility taking part.
+    const participatingRead = 'select exists(select 1 from identity.list_participating_facilities()) as open';
     function inProduction() {
       const base = getEnvironment();
-      jest.spyOn(environment, 'getEnvironment').mockReturnValue({ ...base, NODE_ENV: 'production', TRUST_PROXY_CIDRS: vpc });
+      jest.spyOn(environment, 'getEnvironment').mockReturnValue({ ...base, NODE_ENV: 'production', TRUST_PROXY_CIDRS: vpc,
+        ASSISTED_REGISTRATION_ENABLED: true });
+    }
+    function productionFixture() {
+      const f = fixture();
+      f.participating = [{ name: 'Synthetic Clinic', address_line: null, town: 'Ikeja', lga: 'Ikeja', state: 'Lagos',
+        hours: null }];
+      return f;
     }
     const ipBuckets = (queries: RecordedQuery[]) => rateLookups(queries)
       .filter(({ scope }) => scope === 'ip').map(({ bucket }) => String(bucket));
 
-    it('in production, refuses a start whose client address is missing or one of our proxies, before any database work', async () => {
+    it('in production, refuses a start whose client address is missing or one of our proxies, before any database work but the route read', async () => {
       inProduction();
-      const f = fixture();
+      const f = productionFixture();
       for (const remoteIp of [undefined, 'not-an-address', '10.40.1.10', '::ffff:10.40.200.3']) {
         await expect(f.service.start(nin, requestKey, remoteIp, correlationId))
           .rejects.toMatchObject({ status: 503, code: 'ENROLLMENT_RATE_LIMIT_UNAVAILABLE' });
       }
-      expect(f.queries).toEqual([]);
+      // Only whether a facility takes part is read, once per start; nothing is charged or written.
+      expect(f.queries.map(({ sql }) => sql)).toEqual(Array(4).fill(participatingRead));
       expect(f.provider.verifyNin).not.toHaveBeenCalled();
     });
 
     it('in production, refuses a contact step from one of our proxies before charging or sending', async () => {
       inProduction();
-      const f = fixture();
+      const f = productionFixture();
       const started = await f.service.start(nin, requestKey, '198.51.100.40', correlationId);
       f.queries.length = 0;
       await expect(f.service.startContact(started.cookie, 'email', 'patient@example.test', '10.40.1.10', correlationId))
@@ -1053,7 +1064,7 @@ describe('PatientEnrollmentService', () => {
       const buckets: string[] = [];
       for (const remoteIp of ['198.51.100.1', '198.51.100.2', '2001:db8:1:2::10', '2001:db8:1:2:abcd::99',
         '2001:db8:1:3::10']) {
-        const f = fixture();
+        const f = productionFixture();
         await f.service.start(nin, requestKey, remoteIp, correlationId);
         buckets.push(...ipBuckets(f.queries));
       }
@@ -1890,6 +1901,41 @@ describe('PatientEnrollmentService', () => {
       off.participating = [clinic];
       await expect(off.service.availability()).resolves.toEqual({ open: true, online: true, facility: false });
       expect(off.queries.filter(({ sql }) => sql.includes('list_participating_facilities'))).toEqual([]);
+    });
+
+    // ADR-062 refused production's online route without a remedy for a
+    // person whose online route someone else closed, or who has no usable
+    // registry phone. In production it runs only while the facility route is
+    // open: with both flags on, at least one facility must take part.
+    it('in production runs the online route only while a facility takes part', async () => {
+      Object.assign(process.env, { NIN_HOLDER_SMS_ENABLED: 'true', ASSISTED_REGISTRATION_ENABLED: 'true' });
+      resetEnvironmentForTests();
+      const base = getEnvironment();
+      jest.spyOn(environment, 'getEnvironment').mockReturnValue({ ...base, HID_DEPLOYMENT_ENV: 'production' });
+      const f = fixture();
+      f.participating = [clinic];
+      await expect(f.service.availability()).resolves.toEqual({ open: true, online: true, facility: true });
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      expect(started.progress).toMatchObject({ online: { available: true }, facility: { available: true } });
+      const sent = await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      f.notification.deliver.mockClear();
+      const holderCalls = f.holderCalls.length;
+      // Every designation suspended: the online route closes with the facility route.
+      f.participating = [];
+      await expect(f.service.availability()).resolves.toEqual({ open: false, online: false, facility: false });
+      await expect(f.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ stage: 'verify_holder', online: { available: false }, facility: { available: false } });
+      await expect(f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 503, code: 'NIN_HOLDER_ROUTE_UNAVAILABLE' });
+      await expect(f.service.verifyHolderCode(started.cookie, sent.challengeId, '000000', correlationId))
+        .rejects.toMatchObject({ status: 503, code: 'NIN_HOLDER_ROUTE_UNAVAILABLE' });
+      await expect(f.service.start(nin, '0d3a6f43-5f0a-4f4b-9a37-2c1f3c8f6b21', '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 503, code: 'PATIENT_REGISTRATION_NOT_OPEN' });
+      expect(f.notification.deliver).not.toHaveBeenCalled();
+      expect(f.holderCalls).toHaveLength(holderCalls);
+      // Staging and development keep the flag alone.
+      jest.spyOn(environment, 'getEnvironment').mockReturnValue({ ...base, HID_DEPLOYMENT_ENV: 'staging' });
+      await expect(f.service.availability()).resolves.toEqual({ open: true, online: true, facility: false });
     });
 
     it('lists participating facilities by name and location only, with what to bring', async () => {
