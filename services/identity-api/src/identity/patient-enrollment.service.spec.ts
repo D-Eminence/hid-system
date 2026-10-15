@@ -38,6 +38,15 @@ const identity = {
 };
 
 type RecordedQuery = { sql: string; values: readonly unknown[] };
+/**
+ * JSON of an answer without its random fields, for "no registry value"
+ * checks: a random UUID, cookie token or digest can hold any four digits
+ * (a challenge id `…a011990b…` once matched `1990`). Each test asserts the
+ * random fields on their own.
+ */
+function withoutRandom(value: unknown, ...randomKeys: string[]): string {
+  return JSON.stringify(value, (key, field: unknown) => (randomKeys.includes(key) ? undefined : field));
+}
 /** The problem body Identity sends for an error, through its own filter. */
 function answered(error: unknown): { status: number; code: string; detail: string } {
   const response = { status: jest.fn().mockReturnThis(), type: jest.fn().mockReturnThis(),
@@ -398,7 +407,7 @@ describe('PatientEnrollmentService', () => {
     expect(JSON.stringify(f.queries.map(({ values }) => values.map((value) => Buffer.isBuffer(value)
       ? value.toString('hex') : value)))).not.toContain(nin);
     expect((insert.values[4] as Buffer).toString('utf8')).not.toContain('Amina');
-    expect(JSON.stringify(result)).not.toMatch(/08076543210|7654|3210|Amina|Okafor/);
+    expect(withoutRandom(result, 'cookie')).not.toMatch(/08076543210|7654|3210|Amina|Okafor/);
   });
 
   it('replays the same idempotency key without another provider call; another key starts another enrollment', async () => {
@@ -1620,7 +1629,8 @@ describe('PatientEnrollmentService', () => {
         googleOnboardingRequired: false, facility: { available: false },
         online: { available: true, challengeId: sent.challengeId, expiresInSeconds: expect.any(Number),
           resendAfterSeconds: expect.any(Number) } });
-      expect(JSON.stringify(progress)).not.toMatch(/0807|3210|\+234|Amina|Okafor|1990|requiredProfileFields|masked/);
+      expect(withoutRandom(progress, 'challengeId'))
+        .not.toMatch(/0807|3210|\+234|Amina|Okafor|1990|requiredProfileFields|masked/);
     });
 
     it('sends a six-digit code by SMS to the normalized registry phone, storing only digests', async () => {
@@ -2020,7 +2030,7 @@ describe('PatientEnrollmentService', () => {
       expect(mismatch.enrollment?.result).toEqual({ matched: false, firstName: 'match', lastName: 'match',
         dateOfBirth: 'no_match' });
       // Nothing of the record is returned, only the comparison.
-      expect(JSON.stringify(mismatch)).not.toMatch(/Amina|Okafor|1990|12345678901/);
+      expect(withoutRandom(mismatch, 'deskCodeHmac', 'id')).not.toMatch(/Amina|Okafor|1990|12345678901/);
       await expect(f.service.deskLookup('0000000000', { firstName: 'Amina', lastName: 'Okafor' }, correlationId))
         .resolves.toEqual({ deskCodeHmac: keyed('patient-enrollment-desk-code', '0000000000'), enrollment: null });
     });
