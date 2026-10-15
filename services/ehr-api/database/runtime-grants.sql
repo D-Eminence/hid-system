@@ -1291,7 +1291,7 @@ revoke all on identity.facility_assisted_registration, identity.facility_assiste
 -- vocabulary are above and unchanged. The role assertions
 -- (runtime-roles.integration.sql) now require exactly those three holders.
 
--- Clinician self sign-up (0094, ADR-064). The Identity runtime runs the
+-- Clinician self sign-up (0096, ADR-064). The Identity runtime runs the
 -- public, capability and system commands in its system context (each checks
 -- the system:auth subject, a correlation id and no signed-in account), and the
 -- schema test runtime may too. Only the Identity runtime runs the platform

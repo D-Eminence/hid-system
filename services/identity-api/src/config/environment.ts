@@ -179,7 +179,7 @@ const environmentSchema = z.object({
   // Clinician self sign-up (ADR-064): per-operation limits charged, before
   // anything else is written, to the client network (an IPv4 address or an
   // IPv6 /64) per hour and per day and to one platform-wide daily cap
-  // (`platform.consume_clinician_application_quota`, 0094). A network's
+  // (`platform.consume_clinician_application_quota`, 0096). A network's
   // hourly limit may not exceed its daily one.
   CLINICIAN_APPLICATION_SIGNUP_NETWORK_HOURLY_LIMIT: z.coerce.number().int().min(1).max(200).default(20),
   CLINICIAN_APPLICATION_SIGNUP_NETWORK_DAILY_LIMIT: z.coerce.number().int().min(1).max(2000).default(60),

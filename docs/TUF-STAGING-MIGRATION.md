@@ -299,7 +299,7 @@ The executable covers:
    again as the administrator in rolled-back transactions is refused
    (`55000 BREAK_GLASS_CONTROL_ON`) with the control on and is a no-op with it
    off.
-   With 0094 (clinician self sign-up, ADR-064): the additional suites include
+   With 0096 (clinician self sign-up, ADR-064): the additional suites include
    `clinician-applications.integration.sql`, the role assertions cover the
    new commands and keep `identity.workforce_change_role` from every runtime,
    and P11's read-only check expects `clinician_signup_enabled` off.
@@ -339,13 +339,13 @@ The executable covers:
    faults (a revoked grant, a missing function) answered `503`, never
    `401`. The non-superuser check gains an upgrade stage
    (`clinician_signup_upgrade_path`): on a second database it migrates
-   through 0093 with `apply-migrations.mjs --through`, runs the previous
+   through 0095 with `apply-migrations.mjs --through`, runs the previous
    release's control-owner bootstrap block so `platform.control_enabled` is
    owned by `hid_platform_control_reader` and the administrator holds only
-   its ADMIN OPTION, applies 0094 as that administrator, bootstraps and
+   its ADMIN OPTION, applies 0096 as that administrator, bootstraps and
    verifies, and requires the function's owner unchanged, no INHERIT or SET
    membership left, and the control read `false` by the runtime logins.
-   Before that, on the same database, 0094 runs in a rolled-back
+   Before that, on the same database, 0096 runs in a rolled-back
    transaction as an administrator named `HidAdmin` (a name that needs
    quoting) that still owns the function, and must apply with no membership
    taken (`clinician_signup_quoted_owner`).

@@ -1925,7 +1925,7 @@ is designated, so the route is closed until an operator opens it.
 Health-id 55a50b0 has none of these screens (facility list, desk code,
 staff check, designation). It cannot use the facility route.
 
-### Clinician self sign-up (ADR-064, migration 0094)
+### Clinician self sign-up (ADR-064, migration 0096)
 
 A doctor (MDCN) or a nurse or midwife (NMCN) applies to work at one verified
 facility; two platform administrators verify and grant later (§19, Clinician
@@ -3422,7 +3422,7 @@ new membership starts pending.
 | `409 WORKFORCE_ACCOUNT_INELIGIBLE`, `WORKFORCE_STAFF_INELIGIBLE` | The account is disabled, locked, deleted or a patient's own account, the staff record is inactive, or its verification status cannot be attested or granted |
 | `409 WORKFORCE_EMAIL_IN_USE` | A new identity's email is already used by an account or staff record |
 
-### Clinician applications (ADR-064, migration 0094)
+### Clinician applications (ADR-064, migration 0096)
 
 The verification queue of clinician self sign-up. Every route needs an
 MFA-verified platform session and `platform.workforce.manage`

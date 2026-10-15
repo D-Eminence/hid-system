@@ -6,7 +6,7 @@ begin;
 -- The launch database starts with the controls of the modules that are off at
 -- launch turned off (0091, decision D17, ADR-058): document uploads, the
 -- Outreach portal and break-glass. 0039 seeded all three on, and before 0091
--- only an operator's audited change (P11) turned them off. 0094 (ADR-064)
+-- only an operator's audited change (P11) turned them off. 0096 (ADR-064)
 -- seeds clinician self sign-up off. The other three controls keep their
 -- seeded launch state.
 do $$

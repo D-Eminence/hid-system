@@ -262,7 +262,7 @@ do $$ begin
   -- MFA state changes only in the 0069/0070 functions and guards: no OTP,
   -- recovery or patient command touches a factor. auth.staff_session_is_mfa
   -- (0094) reads a factor's status, as platform_step_up_is_fresh does.
-  -- Clinician self sign-up (0094, ADR-064) reads factors in exactly these
+  -- Clinician self sign-up (0096, ADR-064) reads factors in exactly these
   -- functions (the stage of an application capability, whether step 1
   -- confirmed the applicant's own staff-proven factor in this transaction,
   -- whether it is still the active one at step 2, and the administrator's

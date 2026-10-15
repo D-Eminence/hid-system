@@ -1,11 +1,11 @@
 import { DomainProblem } from '../common/problem';
 
-/** Maps governed SQL command errors (0027, 0068-0070, 0087, 0094) to stable API problems. */
+/** Maps governed SQL command errors (0027, 0068-0070, 0087, 0094, 0096) to stable API problems. */
 export function adminCommandError(error: unknown): Error {
   if (error instanceof DomainProblem) return error;
   const message = typeof error === 'object' && error && 'message' in error ? String(error.message) : '';
   const problems: readonly [string, number, string, string][] = [
-    // Clinician application review (ADR-064, 0094). Before the generic
+    // Clinician application review (ADR-064, 0096). Before the generic
     // NOT_FOUND and *_INVALID fallbacks below, which these would also match.
     ['CLINICIAN_APPLICATION_COMMAND_INVALID', 400, 'CLINICIAN_APPLICATION_COMMAND_INVALID', 'The application command is invalid'],
     ['CLINICIAN_APPLICATION_SECOND_ADMIN_REQUIRED', 403, 'CLINICIAN_APPLICATION_SECOND_ADMIN_REQUIRED', 'A different Super Admin must approve an application you verified'],

@@ -155,9 +155,9 @@ application is created), and the sign-up hashes a password only for a
 submission the database may create, at most five per verified email draft,
 so its argon2id work is bounded platform-wide. The
 standard, the reviewer list and the register source are owner decisions
-(release checklist P25). Residual risks: the manual identity check (a
+(release checklist P35). Residual risks: the manual identity check (a
 deepfaked call, a forged ID) and, once break-glass is on, emergency reads by
-an approved fraudster at their facility; P25 requires a daily review of
+an approved fraudster at their facility; P35 requires a daily review of
 break-glass use by accounts approved in the last 90 days.
 
 ## 6. NIN Security

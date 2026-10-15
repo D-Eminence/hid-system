@@ -4967,10 +4967,11 @@ registration (0094)".
 
 Status: Proposed; needs owner approval (owner decision 2 of 2026-10-14,
 "self sign-up + admin approval"; launch decision CLIN-SIGNUP; migration
-0094). Not merged or deployed; the numbers may move when the launch branches
-merge. It extends ADR-049. It does not supersede ADR-049 and does not change
-ADR-054, ADR-059 or NO-MEMBERSHIP-SIGN-IN. Three points are implemented with
-the design default and stay open for the owner (release checklist P25):
+0096, numbered after main's 0093 and 0094 and break-glass's 0095; built as
+0094). Not merged or deployed. It extends ADR-049. It does not supersede
+ADR-049 and does not change ADR-054, ADR-059 or NO-MEMBERSHIP-SIGN-IN. Three
+points are implemented with the design default and stay open for the owner
+(release checklist P35):
 the step-1 identity-assurance standard and the reviewer list; the service
 level stated to applicants (the default is a 30-day expiry with no promise);
 and the licence register check's source (the default is a manual check of
@@ -5040,7 +5041,7 @@ Decision:
   alone never enrols a clinician's factor.
 - Intake starts closed. The platform control `clinician_signup_enabled` is
   seeded off; an administrator opens it with the audited
-  `POST /admin/controls` after release gate P25. Intake also closes while
+  `POST /admin/controls` after release gate P35. Intake also closes while
   `provider_portal_enabled` is off or `maintenance_mode` is on. While the
   control or the provider portal is off, the intake routes (the sign-up
   start and its verify, facility search, submit and apply-again) answer
@@ -5051,7 +5052,7 @@ Decision:
   availability and session end answers `503 PLATFORM_MAINTENANCE` (the
   generic maintenance answer, not the sentence). Availability answers
   `{ open: false }` in all three cases. The status page and the admin queue work
-  whatever the control's state (maintenance aside). 0094 replaces
+  whatever the control's state (maintenance aside). 0096 replaces
   `platform.control_enabled` while preserving its technical owner
   (`hid_platform_control_reader`) by taking that role's membership only for
   its own transaction, and fails closed when it cannot.
@@ -5146,7 +5147,7 @@ Alternatives not taken:
   no mapped regulator.
 - A break-glass probation for self-signed-up clinicians: the approval
   assurance here exceeds a 0087 grant; a daily review of break-glass use by
-  recent approvals is required instead (P25).
+  recent approvals is required instead (P35).
 - An environment flag instead of a control: switching it off would need a
   redeploy.
 
@@ -5159,9 +5160,9 @@ Consequences:
   proof).
 - Identity confirmation rests on the reviewer's call and photo-ID check;
   that checklist and the employment channels need product and legal
-  approval before the control opens (P25). Uploads are off, so evidence stays
+  approval before the control opens (P35). Uploads are off, so evidence stays
   outside the platform and is named by reference.
-- Approved clinicians can use break-glass once it is on; P25 requires the
+- Approved clinicians can use break-glass once it is on; P35 requires the
   break-glass decision and a daily review of break-glass use by accounts
   approved through an application in the last 90 days.
 - Rejected, withdrawn and expired applicants keep an active account with no
@@ -5187,4 +5188,4 @@ Related: ADR-049, ADR-054, ADR-057, ADR-058, ADR-059;
 `PHASE_3_LAUNCH_DECISIONS.md` (D14, NO-MEMBERSHIP-SIGN-IN, CLIN-SIGNUP);
 `INTERFACE_CONTRACT.md` (Turnstile verification; Clinician self sign-up;
 §19 Clinician applications); `DATABASE.md` (Clinician self sign-up
-applications (0094)); release checklist §1-§3, §5, §8, P11, P22, P25, S4y.
+applications (0096)); release checklist §1-§3, §5, §8, P11, P22, P35, S4x.

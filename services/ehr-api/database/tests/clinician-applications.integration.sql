@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Clinician self sign-up with two-admin approval (0094, ADR-064, owner
+-- Clinician self sign-up with two-admin approval (0096, ADR-064, owner
 -- decision 2 of 2026-10-14). Rollback-only; synthetic data only. Every
 -- public, capability and system command runs as hid_identity_api_runtime in
 -- Identity's system context, and every administration command as that role
@@ -357,7 +357,7 @@ begin
          and relation.relrowsecurity) <> 4
      or not (select relrowsecurity and relforcerowsecurity from pg_class
               where oid = 'platform.clinician_application_quota_counters'::regclass) then
-    raise exception 'row-level security is not enabled as 0094 requires';
+    raise exception 'row-level security is not enabled as 0096 requires';
   end if;
   if not exists (select 1 from auth.role_permissions where role_code = 'platform_super_admin'
       and permission_code = 'platform.workforce.manage')
@@ -371,7 +371,7 @@ begin
          <> 'hid_platform_control_reader') then
     raise exception 'platform.control_enabled lost its technical owner or its PUBLIC execute grant';
   end if;
-  -- Every 0094 definer has a fixed search path and no other setting.
+  -- Every 0096 definer has a fixed search path and no other setting.
   if exists (select 1 from pg_proc proc join pg_namespace namespace_row on namespace_row.oid = proc.pronamespace
               where (proc.proname like '%clinician%' or proc.proname in ('workforce_change_role', 'workforce_attestation_usable'))
                 and proc.prosecdef
@@ -389,7 +389,7 @@ declare
 begin
   select * into control from platform.control_settings where control_key = 'clinician_signup_enabled';
   if control.enabled is distinct from false or control.row_version <> 1 or control.updated_by is not null
-     or control.reason <> 'Off until an administrator opens clinician self sign-up (0094, ADR-064)' then
+     or control.reason <> 'Off until an administrator opens clinician self sign-up (0096, ADR-064)' then
     raise exception 'clinician_signup_enabled is not seeded off: %', row_to_json(control);
   end if;
   select count(*) into keys from pg_constraint

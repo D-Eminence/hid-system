@@ -352,7 +352,7 @@ try {
     `P10 check: ${p10.join('; ')}`);
   // After 0095, clinician self sign-up's migration and the bootstrap: the four
   // launch controls off (break-glass until the operator turns it on, P11;
-  // clinician sign-up until P25), no healthcare-operations purpose, no
+  // clinician sign-up until P35), no healthcare-operations purpose, no
   // permission 0084 or 0091 withdrew, break-glass granted to exactly the three
   // roles 0095 names, and no control event.
   const p11 = await checklistCheck('P11 check (read-only)');

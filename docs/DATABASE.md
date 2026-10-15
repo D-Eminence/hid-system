@@ -4420,13 +4420,13 @@ Tests:
   and function owned by a `NOSUPERUSER NOBYPASSRLS` role; the full rehearsal
   passes on 0095 (local evidence, release checklist §8).
 
-## Clinician self sign-up applications (0094)
+## Clinician self sign-up applications (0096)
 
-`0094_clinician_self_signup.sql` (owner decision 2 of 2026-10-14; ADR-064,
+`0096_clinician_self_signup.sql` (owner decision 2 of 2026-10-14; ADR-064,
 CLIN-SIGNUP) lets a doctor (MDCN) or a nurse or midwife (NMCN) apply to one
 verified facility and puts the application in front of two platform
 administrators. It extends 0087 (ADR-049) and uses 0088's staff MFA tables
-as they are. 0001 through 0093 are unchanged. One transaction; forward-only.
+as they are. 0001 through 0095 are unchanged. One transaction; forward-only.
 
 **Control.** `clinician_signup_enabled` joins `platform.control_settings`,
 seeded `false` with version 1 (ADR-058). The 0039 key CHECK is replaced
@@ -4435,7 +4435,7 @@ with seven keys; `platform.admin_set_control` (0071's body) takes the key;
 `platform.control_enabled` is replaced with 0040's body plus the key. That
 function's technical owner is `hid_platform_control_reader` once the role
 bootstrap ran (0083); a runner that is neither its owner nor holds its
-privileges (RDS) cannot replace it, so 0094 grants itself the role (`INHERIT
+privileges (RDS) cannot replace it, so 0096 grants itself the role (`INHERIT
 TRUE, SET FALSE`, with the ADMIN OPTION its creator holds from the bootstrap),
 replaces the function, revokes the membership, and fails if the owner changed
 or a membership is left (it fails closed, rolled back whole, without the
@@ -4590,7 +4590,7 @@ then the capability or 0088 challenge, then the application; a command that
 reads a capability before it knows the account reads it again after the
 account lock. Submit and apply-again then take the facility's advisory lock
 (`clinician-application-facility:<id>`) before they count its open
-applications, and the platform's submit counter row last. 0094 itself takes `ACCESS EXCLUSIVE` on
+applications, and the platform's submit counter row last. 0096 itself takes `ACCESS EXCLUSIVE` on
 `platform.control_settings`, then `SHARE ROW EXCLUSIVE` on `auth.accounts`,
 `identity.facilities`, `identity.staff`, `identity.staff_facility_memberships`
 and `identity.staff_credential_attestations` for its foreign keys, under the

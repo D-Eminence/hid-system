@@ -95,7 +95,7 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0095",
+    "last": "0096",
     "count": 96,
     "files": [
       {
@@ -471,16 +471,16 @@
         "sha256": "ab163a3ddbbf9d9da1a326de7a6cb7a7d31412dc0de4e1a536ea9f5b33eae594"
       },
       {
-        "name": "0094_clinician_self_signup.sql",
-        "sha256": "4dd29ff814af54e5fef4fc45d124c8e9eca9e59ade6865715da7d88668c9ed60"
-      },
-      {
         "name": "0094_facility_assisted_registration.sql",
         "sha256": "322f2baa20fbe68764cfed4fd54a278653a367f213aa4fc0418d2b26c4a0aae8"
       },
       {
         "name": "0095_break_glass_launch_with_limits.sql",
         "sha256": "02db04c8f4baface75ba6b09db6a9089ed4654f493ae4b9394330ccdd67d48fb"
+      },
+      {
+        "name": "0096_clinician_self_signup.sql",
+        "sha256": "7a8e6bb6c3ba5598da73582d4aecddd3d0ef064c01316ccbe4ee48914822887b"
       }
     ]
   },

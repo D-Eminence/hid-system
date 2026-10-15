@@ -1,7 +1,7 @@
 -- Clinician self sign-up with two-admin approval (owner decision 2 of
 -- 2026-10-14, "self sign-up + admin approval"; ADR-064, decision row
--- CLIN-SIGNUP, release rows P25 and S4y). Applied migrations 0001 through
--- 0093 are immutable. This extends ADR-049 (0087); it changes neither
+-- CLIN-SIGNUP, release rows P35 and S4x). Applied migrations 0001 through
+-- 0095 are immutable. This extends ADR-049 (0087); it changes neither
 -- NO-MEMBERSHIP-SIGN-IN nor staff MFA (ADR-054, 0088, P22).
 --
 -- A doctor (MDCN) or a nurse or midwife (NMCN) creates a Health ID account
@@ -44,7 +44,7 @@
 --
 -- Intake starts closed: the platform control clinician_signup_enabled is
 -- seeded off and is opened by an operator through POST /admin/controls after
--- release gate P25. Intake is also closed while provider_portal_enabled is off
+-- release gate P35. Intake is also closed while provider_portal_enabled is off
 -- or maintenance_mode is on.
 --
 -- platform.control_enabled keeps its technical owner. The role bootstrap
@@ -57,10 +57,10 @@
 -- left. It needs the ADMIN OPTION the role's creator holds.
 --
 -- Lock order. Each lock is held until commit; each statement waits at most the
--- runner's 5 s lock_timeout. A timeout or a deadlock rolls 0094 back whole and
+-- runner's 5 s lock_timeout. A timeout or a deadlock rolls 0096 back whole and
 -- it can be run again.
 -- 1. platform.control_settings ACCESS EXCLUSIVE (section 1), first, as 0091
---    and the role bootstrap take it. No outbox table is locked, so 0094 cannot
+--    and the role bootstrap take it. No outbox table is locked, so 0096 cannot
 --    deadlock with a break-glass activation.
 -- 2. The function replacements (no table lock; the temporary membership
 --    touches only pg_auth_members).
@@ -99,7 +99,7 @@ begin
     end if;
   end loop;
   if matched <> 1 then
-    raise exception '0094 expected one control_key check on platform.control_settings with the six 0039 keys, found %',
+    raise exception '0096 expected one control_key check on platform.control_settings with the six 0039 keys, found %',
       matched;
   end if;
   execute format('alter table platform.control_settings drop constraint %I', constraint_name);
@@ -124,14 +124,14 @@ declare
 begin
   select pg_get_userbyid(proc.proowner) into owner_name
     from pg_proc proc where proc.oid = 'platform.control_enabled(text)'::regprocedure;
-  perform set_config('hid.m0094_control_owner', owner_name, true);
-  perform set_config('hid.m0094_owner_grant', '', true);
+  perform set_config('hid.m0096_control_owner', owner_name, true);
+  perform set_config('hid.m0096_owner_grant', '', true);
   if owner_name <> current_user and not pg_has_role(current_user, owner_name, 'USAGE') then
     if not pg_has_role(current_user, owner_name, 'MEMBER WITH ADMIN OPTION') then
-      raise exception '0094 needs ADMIN OPTION on % to replace platform.control_enabled', owner_name;
+      raise exception '0096 needs ADMIN OPTION on % to replace platform.control_enabled', owner_name;
     end if;
     execute format('grant %I to current_user with inherit true, set false', owner_name);
-    perform set_config('hid.m0094_owner_grant', owner_name, true);
+    perform set_config('hid.m0096_owner_grant', owner_name, true);
   end if;
 end
 $$;
@@ -168,14 +168,14 @@ $$;
 
 do $$
 declare
-  granted text := nullif(current_setting('hid.m0094_owner_grant', true), '');
+  granted text := nullif(current_setting('hid.m0096_owner_grant', true), '');
 begin
   if granted is not null then
     execute format('revoke %I from current_user', granted);
   end if;
   if (select pg_get_userbyid(proc.proowner) from pg_proc proc
         where proc.oid = 'platform.control_enabled(text)'::regprocedure)
-       <> current_setting('hid.m0094_control_owner')
+       <> current_setting('hid.m0096_control_owner')
      or exists (
        select 1 from pg_auth_members membership
         where membership.member = (select role_row.oid from pg_roles role_row where role_row.rolname = current_user)
@@ -183,7 +183,7 @@ begin
                                     where proc.oid = 'platform.control_enabled(text)'::regprocedure)
           and membership.roleid <> (select role_row.oid from pg_roles role_row where role_row.rolname = current_user)
           and (membership.inherit_option or membership.set_option)) then
-    raise exception '0094 changed the owner of platform.control_enabled or left a temporary membership';
+    raise exception '0096 changed the owner of platform.control_enabled or left a temporary membership';
   end if;
 end
 $$;
@@ -227,7 +227,7 @@ end $$;
 alter table platform.control_settings no force row level security;
 insert into platform.control_settings (control_key, enabled, reason, updated_by)
 values ('clinician_signup_enabled', false,
-  'Off until an administrator opens clinician self sign-up (0094, ADR-064)', null)
+  'Off until an administrator opens clinician self sign-up (0096, ADR-064)', null)
 on conflict do nothing;
 alter table platform.control_settings force row level security;
 
@@ -349,7 +349,7 @@ create index clinician_applications_facility_open_idx on identity.clinician_appl
   where state in ('awaiting_authenticator', 'submitted', 'under_review');
 alter table identity.clinician_applications enable row level security;
 comment on table identity.clinician_applications is
-  'Clinician self sign-up applications (0094, ADR-064). Written only by the clinician application commands; no runtime role reads it directly. A step-1 attestation is reserved for its application until approval.';
+  'Clinician self sign-up applications (0096, ADR-064). Written only by the clinician application commands; no runtime role reads it directly. A step-1 attestation is reserved for its application until approval.';
 
 -- Only the state machine's transitions; identity, licence, facility and dates
 -- never change; every recorded decision column is final.
@@ -421,7 +421,7 @@ create index clinician_application_challenges_email_idx
 create index clinician_application_challenges_expiry_idx on identity.clinician_application_challenges (expires_at);
 alter table identity.clinician_application_challenges enable row level security;
 comment on table identity.clinician_application_challenges is
-  'Email-code challenges of clinician sign-up and of the application status page (0094). A status challenge for an ineligible address is a decoy (no account) that can never verify.';
+  'Email-code challenges of clinician sign-up and of the application status page (0096). A status challenge for an ineligible address is a decoy (no account) that can never verify.';
 
 -- Application capabilities: a draft (a verified email, before submission) or
 -- an account capability (an applicant reading or changing their own
@@ -467,7 +467,7 @@ create index clinician_application_sessions_challenge_idx on identity.clinician_
   where challenge_id is not null;
 alter table identity.clinician_application_sessions enable row level security;
 comment on table identity.clinician_application_sessions is
-  'Clinician application capabilities (0094): a 60-minute draft after a verified sign-up email, or a 30-minute account capability. Only the keyed digest of the httpOnly cookie token is stored. Not a session.';
+  'Clinician application capabilities (0096): a 60-minute draft after a verified sign-up email, or a 30-minute account capability. Only the keyed digest of the httpOnly cookie token is stored. Not a session.';
 
 -- Idempotency of applying to another facility (per account and key).
 create table identity.clinician_application_idempotency (
@@ -1193,7 +1193,7 @@ $$;
 revoke all on function identity.workforce_change_role(uuid, uuid, bigint, text, text, text, text, character, uuid)
   from public;
 comment on function identity.workforce_change_role(uuid, uuid, bigint, text, text, text, text, character, uuid) is
-  '0094: the body of 0087''s identity.admin_change_workforce_role with exactly three insertions: the pinned attestation parameter, and in the chosen-attestation query and the second-person probe the reservation (identity.workforce_attestation_usable, bound to the target account and the facility) and the pin. Internal; granted to no runtime.';
+  '0096: the body of 0087''s identity.admin_change_workforce_role with exactly three insertions: the pinned attestation parameter, and in the chosen-attestation query and the second-person probe the reservation (identity.workforce_attestation_usable, bound to the target account and the facility) and the pin. Internal; granted to no runtime.';
 
 -- The 0087 command keeps its signature, result, owner and grants; it is the
 -- workforce_change_role with no pin, so an application's step-1 attestation

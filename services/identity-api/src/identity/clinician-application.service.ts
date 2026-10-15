@@ -109,7 +109,7 @@ const CONFLICTS: Readonly<Record<string, string>> = Object.freeze({
  * the 0088 challenge that capability drives is derived here and never leaves
  * Identity, so no value captured from these routes works at /auth/mfa/*.
  *
- * The database commands (0094) hold every rule; this service adds the gate
+ * The database commands (0096) hold every rule; this service adds the gate
  * and quota order, the keyed digests, the delivery after the response and
  * the HTTP answers. Nothing it logs carries an email, a name, a licence, a
  * search, a code or a token.

@@ -14,13 +14,13 @@ Nothing in this plan has been run on staging or production. Every step that touc
 | EHR API: encounters, notes, diagnoses, vitals, prescriptions recorded in the EHR, the patient's own records | Document uploads (`uploads_enabled` off), the Outreach portal |
 | Notification API (SES email, Termii SMS after P18), event dispatcher, gateway | Google sign-in (P19), facility-assisted registration (D-Eminence/hid-system#85, off until P29 to P33 and a designation), NIN-only self-enrollment in production (until N1) |
 | Break-glass permitted with limits (D9, 0095); on only after the P11 operator step: doctors, clinicians and nurses hold `identity.break-glass.write` and `emergency` is seeded; an operator turns `break_glass_enabled` on after staff MFA ships (P11), and break-glass answers `423 BREAK_GLASS_DISABLED` until then (0095 refuses to run while the control is on). Read only, facility-local emergency summary, no chart, vitals as first recorded, grants not listed after a reload; document reads under emergency unchanged until N3 decides them (none exist at launch) | |
-| | Clinician self sign-up (doctors with MDCN, nurses with NMCN; ADR-064, 0094): built, off at launch (`clinician_signup_enabled` seeded off); an operator opens it only after release gate P25. Applying grants nothing; two different Super Admins verify and grant every clinical role; the status page and the admin queue work while intake is closed |
+| | Clinician self sign-up (doctors with MDCN, nurses with NMCN; ADR-064, 0096): built, off at launch (`clinician_signup_enabled` seeded off); an operator opens it only after release gate P35. Applying grants nothing; two different Super Admins verify and grant every clinical role; the status page and the admin queue work while intake is closed |
 
 Re-enabling an off module takes its own reviewed migration (ADR-058). It is never a hand-made grant. Break-glass came back that way: 0095 grants the permission again and seeds the purpose, and only its platform control is left to the operator (ADR-058 addendum).
 
 ## 2. What `main` contains
 
-- **Migrations:** 0001 to 0094 on `main`; 0095 (break-glass at launch, with limits) on branch `claude/break-glass-launch` (D-Eminence/hid-system#83), not merged; 0094 (clinician self sign-up, ADR-064; renumbered at merge) on branch `claude/clinician-self-signup`, not merged.
+- **Migrations:** 0001 to 0094 on `main`; 0095 (break-glass at launch, with limits) on branch `claude/break-glass-launch` (D-Eminence/hid-system#83), not merged; 0096 (clinician self sign-up, ADR-064; numbered after 0095) on branch `claude/clinician-self-signup`, not merged.
 - **Launch PRs merged to `main`:**
   - D-Eminence/hid-system#63 to #67: non-superuser database chain, EHR clinical safety, edge and gateway, launch configuration, launch frontend hosts.
   - D-Eminence/hid-system#68 to #71: enrollment gate, recovery and search, workforce provisioning, staff MFA.
@@ -37,14 +37,14 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
 
 ## 3. Staging, in order
 
-1. **Preflight for staging.** Release checklist §4 lists P1 to P34, and P25 for clinician self sign-up (0094).
+1. **Preflight for staging.** Release checklist §4 lists P1 to P35 (P35 for clinician self sign-up, 0096).
    - Run against staging: the database, secret and artefact rows, P1 to P5 and P8 to P14. P11 and P12 run again after the migration.
    - P22 (staff enrolment before clinical roles) applies to every environment that enables clinical roles.
-   - Production gates: P6 (two Super Admins), P7 (the staging acceptance passed) and P15 to P21; P28 (no active public enrollment) before 0093; P23 to P27 before any NIN holder route or the signed-in NIN binding is enabled, and P33 before either holder route; P29 to P33 before the facility route is enabled; P34 before self-sign-up opens. P25 gates opening clinician intake, not deploying 0094 (intake starts closed).
-2. **Rehearse on a restored staging snapshot (S1).** Run `db:plan`, `db:dry-run` and `db:migrate` to 0094 (0095 once break-glass is merged, and clinician self sign-up's 0094 once merged) in an isolated copy, then the bootstrap, `db:verify-roles` and `db:verify-logins` (S2).
+   - Production gates: P6 (two Super Admins), P7 (the staging acceptance passed) and P15 to P21; P28 (no active public enrollment) before 0093; P23 to P27 before any NIN holder route or the signed-in NIN binding is enabled, and P33 before either holder route; P29 to P33 before the facility route is enabled; P34 before self-sign-up opens. P35 gates opening clinician intake, not deploying 0096 (intake starts closed).
+2. **Rehearse on a restored staging snapshot (S1).** Run `db:plan`, `db:dry-run` and `db:migrate` to 0094 (0095 and 0096 once break-glass and clinician self sign-up are merged) in an isolated copy, then the bootstrap, `db:verify-roles` and `db:verify-logins` (S2).
 3. **Migrate staging.** Follow release checklist §5 in ledger order.
-   - Each migration has its lock window: steps 2 to 17 for 0067 to 0084, 18 to 28 for 0085 to 0095, 28a for clinician self sign-up's 0094, the estimate check at 29 and the role bootstrap at 30. 0095 refuses to run while `break_glass_enabled` is on (step 28): if the restored copy has it on, set it off with `POST /admin/controls` first.
-   - 0094 (step 28a) runs off-peak as the bootstrap's administrator, which needs the ADMIN OPTION on `hid_platform_control_reader` (it fails closed without it, `MIGRATION_RUNBOOK.md` §6.1); after the bootstrap, check that `platform.control_enabled` is still owned by `hid_platform_control_reader` and that P11 reads `clinician_signup_enabled` `false`.
+   - Each migration has its lock window: steps 2 to 17 for 0067 to 0084, 18 to 28 for 0085 to 0095, 28a for 0096 (clinician self sign-up), the estimate check at 29 and the role bootstrap at 30. 0095 refuses to run while `break_glass_enabled` is on (step 28): if the restored copy has it on, set it off with `POST /admin/controls` first.
+   - 0096 (step 28a) runs off-peak as the bootstrap's administrator, which needs the ADMIN OPTION on `hid_platform_control_reader` (it fails closed without it, `MIGRATION_RUNBOOK.md` §6.1); after the bootstrap, check that `platform.control_enabled` is still owned by `hid_platform_control_reader` and that P11 reads `clinician_signup_enabled` `false`.
    - Run the bootstrap after the last migration and before any new build starts.
 4. **Deploy in the order of release checklist §6.**
    - Identity and EHR builds go out only after their migrations and the bootstrap.
@@ -55,7 +55,7 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
    - Identity runtime verifiers against staging: S3.
    - Browser checks with real authenticators: S4 and S4a.
    - Launch rows: S4d, S4e, S4f, S4g, S4i, S4j, S4k, S4l, S4m, S4n, S4o, S4p, S4q, S4r, S4s, S4t, and S4w (break-glass) after FE-2 ships and P11's operator step.
-   - If 0094 is released: S4y (clinician self sign-up) after FE-2 and the Health-id clinician pages ship, with the control opened on staging by an operator through the admin console and closed again after the row.
+   - If 0096 is released: S4x (clinician self sign-up) after FE-2 and the Health-id clinician pages ship, with the control opened on staging by an operator through the admin console and closed again after the row.
    - Rollback drill: S6.
    - S4b, S4c and S4h apply only once their module is re-enabled.
    - The provider-portal browser rows (S4a, S4e, S4j, S4o, S4q) need a Health-id build that signs staff in with an authenticator (FE-2, §7). Health-id `82b474e` cannot sign staff in once 0088 is applied, so until FE-2 ships these rows run as scripted API requests and the browser part waits.
@@ -134,13 +134,13 @@ None of these can be done from the repository. Each needs its owner and, where i
 8. N1: QoreID holder confirmation and DPO sign-off before NIN-only self-enrollment opens in production. Until then, enrollment answers "not open" (FE-4).
 9. The clinical owner's review of open records of closed encounters (P12) and staff MFA enrolment before clinical roles (P22).
 10. Break-glass on (D9, ADR-058 addendum): after 0095 and once staff MFA has shipped (FE-2 deployed, P22 done), a platform administrator turns `break_glass_enabled` on with `POST /admin/controls`, then P10 and P11 again (P11 operator step). Production configuration: no change in this repository does it. Before rolling Identity back past the staff MFA build (0088) or Health-id past FE-2, the administrator sets `break_glass_enabled` off with `POST /admin/controls` and confirms it with P11; it is turned on again only once the MFA builds are back (release checklist §9).
-11. Clinician self sign-up open (CLIN-SIGNUP, ADR-064): after 0094, and only once every P25 condition holds (the step-1 standard and reviewer list approved, two or three MFA-enrolled Super Admins who do not work at the reviewed facilities, email with `OTP_HMAC_KEY_B64`, the www Turnstile keys, FE-2 and the Health-id clinician pages live, the break-glass review staffed, the fraud runbook entry, S4y passed), a platform administrator sets `clinician_signup_enabled` to `true` with `POST /admin/controls` and attaches the control event. Until then intake answers `503 CLINICIAN_SIGNUP_CLOSED`. Kill switch: the same command with `false`.
+11. Clinician self sign-up open (CLIN-SIGNUP, ADR-064): after 0096, and only once every P35 condition holds (the step-1 standard and reviewer list approved, two or three MFA-enrolled Super Admins who do not work at the reviewed facilities, email with `OTP_HMAC_KEY_B64`, the www Turnstile keys, FE-2 and the Health-id clinician pages live, the break-glass review staffed, the fraud runbook entry, S4x passed), a platform administrator sets `clinician_signup_enabled` to `true` with `POST /admin/controls` and attaches the control event. Until then intake answers `503 CLINICIAN_SIGNUP_CLOSED`. Kill switch: the same command with `false`.
 
 ## 8. Evidence levels
 
 | Level | State |
 |---|---|
-| Committed and merged to `main` | Every change above, through D-Eminence/hid-system#79; 0095 (break-glass) and 0094 (clinician self sign-up) are on branches |
+| Committed and merged to `main` | Every change above, through D-Eminence/hid-system#79; 0095 (break-glass) and 0096 (clinician self sign-up) are on branches |
 | Checks run locally | Unit and SQL suites, runtime verifiers over HTTP against PostgreSQL 16 as the runtime roles, and the full workspace gates with the synthetic 0028 to 0091 migration rehearsal on each PR head (each PR's evidence) |
 | CI | Green on each merged PR's head (each PR) |
 | Staging-verified | None yet |
