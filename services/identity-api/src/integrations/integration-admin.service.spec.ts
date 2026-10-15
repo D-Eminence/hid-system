@@ -65,7 +65,9 @@ describe('IntegrationAdminService', () => {
     QOREID_NIN_ONLY_ENROLLMENT_ENABLED: process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED,
     NIN_HOLDER_SMS_ENABLED: process.env.NIN_HOLDER_SMS_ENABLED,
     QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: process.env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED,
-    ASSISTED_REGISTRATION_ENABLED: process.env.ASSISTED_REGISTRATION_ENABLED };
+    ASSISTED_REGISTRATION_ENABLED: process.env.ASSISTED_REGISTRATION_ENABLED,
+    NIN_LOOKUP_HMAC_KEY_B64: process.env.NIN_LOOKUP_HMAC_KEY_B64,
+    NIN_ENCRYPTION_KEY_B64: process.env.NIN_ENCRYPTION_KEY_B64 };
 
   beforeEach(() => {
     Object.assign(process.env, {
@@ -77,6 +79,9 @@ describe('IntegrationAdminService', () => {
       QOREID_CLIENT_SECRET: 'test-client-secret',
       QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false', QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'true',
       NIN_HOLDER_SMS_ENABLED: 'false', ASSISTED_REGISTRATION_ENABLED: 'false',
+      // The keys a start needs before it reads a NIN (ENROLLMENT_CONFIGURATION_UNAVAILABLE).
+      NIN_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 1).toString('base64'),
+      NIN_ENCRYPTION_KEY_B64: Buffer.alloc(32, 2).toString('base64'),
     });
     environment.resetEnvironmentForTests();
   });
@@ -256,6 +261,35 @@ describe('IntegrationAdminService', () => {
     inProduction({ QOREID_ENABLED: false });
     const off = harness(listRows, true);
     expect(enrollmentGate(await off.service.list(context))).toMatchObject({ state: 'closed' });
+  });
+
+  // Without the enrollment keys availability answers open:false and a start
+  // 503 ENROLLMENT_CONFIGURATION_UNAVAILABLE, whatever the routes say.
+  it.each(['NIN_LOOKUP_HMAC_KEY_B64', 'NIN_ENCRYPTION_KEY_B64'])(
+    'keeps NIN-only enrollment closed without %s, even with both routes open', async (key) => {
+      Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true',
+        ASSISTED_REGISTRATION_ENABLED: 'true', QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'false' });
+      delete process.env[key];
+      environment.resetEnvironmentForTests();
+      const { service } = harness(listRows, true);
+      const result = await service.list(context);
+      expect(enrollmentGate(result)).toMatchObject({ state: 'closed',
+        detail: expect.stringMatching(
+          /Open holder routes: online and facility\. The enrollment keys are not configured\.$/) });
+      expect(result.items[0]?.activeCapabilities).toEqual(['provider_cac']);
+    });
+
+  it('needs the OTP key too where NODE_ENV is production, as a start does', async () => {
+    Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', ASSISTED_REGISTRATION_ENABLED: 'true' });
+    environment.resetEnvironmentForTests();
+    inProduction({ NODE_ENV: 'production', OTP_HMAC_KEY_B64: undefined });
+    const { service } = harness(listRows, true);
+    expect(enrollmentGate(await service.list(context))).toMatchObject({ state: 'closed',
+      detail: expect.stringMatching(/Open holder routes: facility\. The enrollment keys are not configured\.$/) });
+    jest.restoreAllMocks();
+    inProduction({ NODE_ENV: 'production', OTP_HMAC_KEY_B64: Buffer.alloc(32, 3).toString('base64') });
+    expect(enrollmentGate(await service.list(context))).toMatchObject({ state: 'open',
+      detail: expect.stringMatching(/Open holder routes: facility\.$/) });
   });
 
   it('shows the gate closed, and still lists and pauses, when the holder routes cannot be read', async () => {
