@@ -4743,9 +4743,14 @@ Decision:
   government photo ID, during which the applicant reads a current code from
   their authenticator, which Identity verifies against the applicant's own
   factor (before that code is checked, step 1 refuses whatever it would
-  refuse anyway, an insider's call included, so no such call counts against
+  refuse anyway: the request's own fields, the application's version, state,
+  identity refusal and facility, an insider's or the applicant's own call,
+  the end of the licence, a reused inner key, and an applicant account or
+  staff record 0087's attestation refuses; so no such call counts against
   the applicant's failure budget, and a concurrent duplicate is answered
-  from the first one's result); confirms employment through a channel
+  from the first one's result; only the staff-proven factor itself is found
+  after the code, and a missing one is never counted); confirms employment
+  through a channel
   independent of the facility
   administrator's account (the facility's phone number from a public record,
   or an in-person visit); and records the 0087 credential attestation for
@@ -4784,7 +4789,15 @@ Decision:
   capability before they charge the submit quota, and the platform's daily
   submit cap counts created applications, not attempts, refusals or
   replays (review fix: a forged cookie could otherwise use up the cap with
-  no email or account). Applicants' wrong authenticator codes count against
+  no email or account). Both caps hold under concurrency: the platform's is
+  checked and counted in one statement under its counter's row lock where
+  the application is created, and a facility's open applications are
+  counted under a per-facility lock (review fix: concurrent submissions
+  could pass either). Submit hashes the password (argon2id) only for a
+  submission the database may create: its cheap refusals are answered
+  first, a replay is not hashed, and a draft has at most five hashed
+  submissions (review fix: one draft could otherwise make the service hash
+  without bound from many networks). Applicants' wrong authenticator codes count against
   the account's 0088 budget and a per-address bucket of the applicants' own,
   never staff sign-in's per-address bucket (review fix: throwaway
   applicants could otherwise block staff sign-in from a shared address).
@@ -4834,7 +4847,10 @@ Consequences:
   membership, plus their application rows; a retention period is a legal
   follow-up.
 - A wrong step-1 code counts against the applicant's authenticator budget;
-  a step-1 call that would be refused anyway does not.
+  a step-1 call that would be refused anyway does not (the pre-check takes
+  the request's fields for that).
+- A refusal at the platform's daily cap inside the creating transaction
+  rolls back with it and is not audited; the early check's refusals are.
 - An approved clinician whose authenticator was reset, and whose membership
   has since ended, cannot set one up through the status page and needs HID
   support (the conservative side of the staff-sign-in-only rule).

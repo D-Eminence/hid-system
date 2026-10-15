@@ -4039,16 +4039,21 @@ commands below read or write them):
   and its challenge, consumed by submit with its idempotency key, request
   digest and stored answer) or an `account` capability (30 minutes, the
   account, the stage `enrolment_required`, `authenticator_required` or
-  `ready`, and the 0088 challenge it drives), an end time and a search count
-  (at most 30).
+  `ready`, and the 0088 challenge it drives), an end time, a search count
+  (at most 30) and, for a draft, the number of submissions Identity hashed a
+  password for (`submit_attempts`, at most five).
 - `identity.clinician_application_idempotency`: apply-again keys per account.
 - `platform.clinician_application_quota_counters`: per-operation network
   (hour, day) and platform (day) counters, as 0085's (forced RLS with
   permissive policies for the definer owner). The platform's `submit` day
   counter counts created applications: `consume_clinician_application_quota`
-  only checks it, and `platform.count_clinician_application_submission`
-  (internal) adds one in the submit and apply-again commands for each
-  application they create, never for a refusal or a replay.
+  only checks it (an early refusal), and
+  `platform.count_clinician_application_submission(limit)` (internal) adds
+  one in the submit and apply-again commands for each application they
+  create, never for a refusal or a replay, in one conditional upsert under
+  the counter row's lock: at the limit it raises `P4290
+  CLINICIAN_APPLICATION_QUOTA_EXCEEDED` and the creation rolls back, so
+  concurrent creations never pass the cap.
 
 **Reserved attestations.** `identity.workforce_attestation_usable(attestation,
 pin, account, facility)` is false for an attestation whose application is not
@@ -4081,13 +4086,22 @@ application or an active or pending membership),
 `identity.clinician_application_session` (an account capability at its
 effective stage; `23514 CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE` when its
 account is disabled or inactive),
-`identity.clinician_application_submit_probe` (before the submit quota: `new`
-for a live draft of the address, `replay` for one this key and request spent,
-else `42501 CLINICIAN_APPLICATION_SESSION_INVALID`),
+`identity.clinician_application_submit_probe` (before the submit quota and
+the password hash, with the submission's details: `replay` for a draft this
+key and request spent; for a live unspent draft of the address C8's first
+refusal that needs no password, as its marker
+(`CLINICIAN_APPLICATION_INVALID`, `..._FACILITY_UNAVAILABLE`,
+`..._FACILITY_BUSY`, `CLINICIAN_EMAIL_IN_USE`), else `new`; anything else,
+and a draft with five hashed submissions, `42501
+CLINICIAN_APPLICATION_SESSION_INVALID`),
+`identity.count_clinician_application_submit_attempt` (after the charge,
+one submission Identity will hash against its draft's five),
 `identity.search_clinician_application_facilities`,
 `identity.submit_clinician_application` (an active account `workforce:<id>`
 with an argon2id password and verified email, a pending staff record with the
-licence, the application; no membership, role or session),
+licence, the application; no membership, role or session; it counts the
+facility's open applications under the facility's lock and the application
+against the platform's daily limit it is passed),
 `identity.bind_clinician_application_mfa_challenge` (`42501
 CLINICIAN_APPLICATION_AUTHENTICATOR_READY` on a `ready` capability; no
 enrolment challenge for an account that re-enrols only at staff sign-in,
@@ -4096,7 +4110,8 @@ enrolment challenge for an account that re-enrols only at staff sign-in,
 account's active staff-proven one and used in this transaction; no enrolment
 for an account that re-enrols only at staff sign-in),
 `identity.current_clinician_applications`,
-`identity.withdraw_clinician_application`, `identity.file_clinician_application`,
+`identity.withdraw_clinician_application`, `identity.file_clinician_application`
+(the same facility lock and platform count as submit),
 `identity.end_clinician_application_session`,
 `identity.expire_clinician_applications` (SKIP LOCKED) and
 `identity.prune_clinician_application_artifacts`. The administration ones
@@ -4104,9 +4119,12 @@ for an account that re-enrols only at staff sign-in),
 (`platform.workforce.manage`, MFA, and a step-up for the commands):
 `identity.admin_list_clinician_applications`,
 `identity.admin_get_clinician_application`,
-`identity.admin_clinician_application_attest_precheck` (step 1's refusals,
-in its order and with its markers, before Identity checks the applicant's
-code; the applicant's account otherwise),
+`identity.admin_clinician_application_attest_precheck` (given the request's
+fields: everything step 1 refuses before it checks the factor the code
+proves, in its order and with its and 0087's markers, before Identity checks
+the applicant's code: the fields, the application, the end of the licence, a
+key used for a generic 0087 attestation, the applicant account and staff
+record; the applicant's account otherwise),
 `identity.admin_clinician_application_prior`,
 `identity.admin_attest_clinician_application` (0087's attestation for exactly
 the requested role, capped at the end of the licence's expiry date in
@@ -4121,14 +4139,18 @@ attestation, in one transaction) and `identity.admin_reject_clinician_applicatio
 commands), `identity.clinician_application_effective_stage` (an
 `enrolment_required` capability is `authenticator_required` once the account
 holds an active factor), `identity.clinician_application_account_usable`
-(active and not disabled) and `identity.clinician_application_staff_enrolment_only`
+(active and not disabled), `identity.clinician_application_staff_enrolment_only`
 (an approved clinician application, or an active or pending staff membership)
-are granted to no runtime.
+and `identity.clinician_application_licence_valid` (the licence details the
+submit, apply-again and probe commands check alike) are granted to no
+runtime.
 
 **Lock order.** Accounts first (in id order when two are involved, 0073),
 then the capability or 0088 challenge, then the application; a command that
 reads a capability before it knows the account reads it again after the
-account lock. 0094 itself takes `ACCESS EXCLUSIVE` on
+account lock. Submit and apply-again then take the facility's advisory lock
+(`clinician-application-facility:<id>`) before they count its open
+applications, and the platform's submit counter row last. 0094 itself takes `ACCESS EXCLUSIVE` on
 `platform.control_settings`, then `SHARE ROW EXCLUSIVE` on `auth.accounts`,
 `identity.facilities`, `identity.staff`, `identity.staff_facility_memberships`
 and `identity.staff_credential_attestations` for its foreign keys, under the

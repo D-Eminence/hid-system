@@ -141,9 +141,15 @@ independent of the facility administrator (the facility's public phone number
 or a visit); step 2 grants the role pinned to step 1's attestation. Until its
 application is approved, that attestation supports no other grant (the pin
 is bound to the application's own account and facility). Step 1 refuses
-whatever it would refuse anyway before it checks the applicant's code, so no
+whatever it would refuse anyway before it checks the applicant's code (the
+request's own fields, the application, an insider or the applicant, a reused
+key, an applicant account or staff record that cannot be attested), so no
 administrator, an insider included, can spend an applicant's failure budget
-that way. The
+that way. The sign-up's own limits hold under concurrency (the platform's
+daily cap and a facility's 30 open slots are counted under locks where the
+application is created), and the sign-up hashes a password only for a
+submission the database may create, at most five per verified email draft,
+so its argon2id work is bounded platform-wide. The
 standard, the reviewer list and the register source are owner decisions
 (release checklist P25). Residual risks: the manual identity check (a
 deepfaked call, a forged ID) and, once break-glass is on, emergency reads by

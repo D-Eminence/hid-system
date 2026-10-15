@@ -1684,27 +1684,34 @@ counts as none. Every
 answer that carries data has `Cache-Control: no-store`; no route sets a
 session cookie.
 
-**Refusal order.** (1) the body: `400 VALIDATION_FAILED`; (2) the `Origin`
-is one of `CORS_ORIGINS`: else `403 ORIGIN_DENIED` (not on the two `GET`s);
-(3) on the signed-out routes (P1 email-code, P2 its verify, P4 submit, and P3
-search with a draft) no `hid_access`, `hid_access_csrf` or
-`hid_access_refresh` cookie and no `Authorization` header: else `409
+**Refusal order.** (1) the body: `400 VALIDATION_FAILED`, and on P4 and P14
+the body's own checks, `400 PASSWORD_INVALID` (P4) and `400
+CLINICIAN_APPLICATION_INVALID` for a profession and regulator that do not
+pair; (2) the `Origin` is one of `CORS_ORIGINS`: else `403 ORIGIN_DENIED`
+(not on the two `GET`s); (3) on the signed-out routes (P1 email-code, P2 its
+verify, P4 submit) no `hid_access`, `hid_access_csrf` or `hid_access_refresh`
+cookie and no `Authorization` header: else `409
 CLINICIAN_APPLICATION_REQUIRES_SIGN_OUT` (the CSRF cookie lives as long as
 the refresh session, so a browser whose 15-minute access cookie has expired
 still counts as signed in); (4) Turnstile where the route has it (Turnstile
 verification, above); (5) the gate: production without `OTP_HMAC_KEY_B64` is
-`503 CLINICIAN_APPLICATION_UNAVAILABLE`; on the intake routes (P1, P2, P3
-with any capability, P4 and P14) a closed intake (`clinician_signup_enabled`
-off, or `provider_portal_enabled` off) is `503 CLINICIAN_SIGNUP_CLOSED` with
-the fixed detail "Clinician sign-up is not open yet. If you already have a
-Health ID provider account, sign in." (a `PublicDetailProblem`, ADR-057);
-with both on, maintenance is `503 PLATFORM_MAINTENANCE` on every route but
-availability (`open: false`) and session end; (6) on P4 and P14, the
-capability: a forged, unknown, expired or spent capability is `401
-CLINICIAN_APPLICATION_SESSION_INVALID`, and on P14 one that still needs the
-authenticator is `403 CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED`, before
-anything is charged (P4 also before the password is hashed); (7) the quota;
-(8) the command. A fault is never a `401` (ADR-059): a missing grant or
+`503 CLINICIAN_APPLICATION_UNAVAILABLE`; on the intake routes (P1, P2, P3,
+P4 and P14, whatever capability cookie is sent or missing) a closed intake
+(`clinician_signup_enabled` off, or `provider_portal_enabled` off) is `503
+CLINICIAN_SIGNUP_CLOSED` with the fixed detail "Clinician sign-up is not
+open yet. If you already have a Health ID provider account, sign in." (a
+`PublicDetailProblem`, ADR-057); with both on, maintenance is `503
+PLATFORM_MAINTENANCE` on every route but availability (`open: false`) and
+session end; (6) on P3, P4 and P14, the capability: a missing, malformed,
+forged, unknown, expired or spent capability is `401
+CLINICIAN_APPLICATION_SESSION_INVALID`, on P14 one that still needs the
+authenticator is `403 CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED`, and on
+P3 a draft in a signed-in browser (the rule of (3); P3 needs the capability
+to know it is a draft) is `409 CLINICIAN_APPLICATION_REQUIRES_SIGN_OUT`, all
+before anything is charged (P4 also before the password is hashed); (7) the
+quota; (8) the command. On the other capability routes (P5-P13) a missing or
+malformed cookie is `401 CLINICIAN_APPLICATION_SESSION_INVALID` at once,
+without a database read; a well-formed one is checked after maintenance. A fault is never a `401` (ADR-059): a missing grant or
 function, or any database fault on these routes (P5-P8 included), is `503
 CLINICIAN_APPLICATION_UNAVAILABLE`.
 
@@ -1714,7 +1721,7 @@ CLINICIAN_APPLICATION_UNAVAILABLE`.
 | `POST .../email-code` (P1) | `{ email, turnstileAction: 'clinician-application', turnstileToken }` | `202 { accepted: true, challengeId, expiresInSeconds: 600, resendAfterSeconds: 60 }`, the same for every address; the code is delivered after the answer |
 | `POST .../email-code/verify` (P2) | `{ challengeId, email, code }` | `200 { verified: true, expiresAt }` and a draft cookie. `401 CLINICIAN_APPLICATION_CODE_INVALID` ("The code is wrong or has expired.") for a wrong, expired, spent or invalidated code; the fifth wrong code invalidates the challenge. Only after a correct code: `409 CLINICIAN_EMAIL_IN_USE` ("This email address already has a Health ID account. Sign in, reset your password, or use a different email address for your clinician account.") |
 | `POST .../facility-search` (P3) | `{ query }` (3-80 characters); a draft or a `ready` capability | `200 { facilities: [{ facilityId, name, organizationName }] }`, at most 10, verified and active facilities of active organizations matching the facility or organization name (`%` and `_` match literally). 30 searches per capability, then `429 CLINICIAN_APPLICATION_RATE_LIMITED` with `Retry-After: 3600` |
-| `POST .../` (P4, submit) | `Idempotency-Key` (16-128 URL-safe characters; else `400 IDEMPOTENCY_KEY_REQUIRED`); `{ email, fullName (2-200), password (12-256, else `400 PASSWORD_INVALID`), profession: 'doctor' \| 'nurse', regulator: 'MDCN' \| 'NMCN', licenceNumber, licenceValidUntil (YYYY-MM-DD, after today and within five years, Africa/Lagos), facilityId, declarations: { accurate: true, verificationConsent: true } }`; a draft | `201 { applicationId, state, submittedAt, expiresAt, facility: { id, name }, profession, version, replayed, next: 'authenticator', authenticator: { purpose: 'enroll' \| 'verify', expiresAt } \| null }` and an account capability at the account's current stage (`enrolment_required` on a first submit). `state` is `awaiting_authenticator` on a first submit; a replay answers the application's current state and version. `authenticator` is null only when the account's challenge budget is spent (use P9). The licence number is upper-cased with single spaces and must match `^[A-Z0-9][A-Z0-9/. -]{1,98}[A-Z0-9]$`. `400 CLINICIAN_APPLICATION_INVALID`: a doctor without MDCN or a nurse without NMCN, a licence number or date out of range. `401 CLINICIAN_APPLICATION_SESSION_INVALID`: no live draft of this address (before anything is charged). `409 CLINICIAN_EMAIL_IN_USE` (the address was taken after its code was verified), `409 CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE` (not verified and active in an active organization), `409 CLINICIAN_APPLICATION_FACILITY_BUSY` (30 open applications at the facility), `409 CLINICIAN_APPLICATION_REQUIRES_SIGN_OUT`. The same key and body with the same (spent, unexpired) draft replays the application with `replayed: true` and a fresh capability; anything else on a spent draft is `401 CLINICIAN_APPLICATION_SESSION_INVALID` |
+| `POST .../` (P4, submit) | `Idempotency-Key` (16-128 URL-safe characters; else `400 IDEMPOTENCY_KEY_REQUIRED`); `{ email, fullName (2-200), password (12-256, else `400 PASSWORD_INVALID`), profession: 'doctor' \| 'nurse', regulator: 'MDCN' \| 'NMCN', licenceNumber, licenceValidUntil (YYYY-MM-DD, after today and within five years, Africa/Lagos), facilityId, declarations: { accurate: true, verificationConsent: true } }`; a draft | `201 { applicationId, state, submittedAt, expiresAt, facility: { id, name }, profession, version, replayed, next: 'authenticator', authenticator: { purpose: 'enroll' \| 'verify', expiresAt } \| null }` and an account capability at the account's current stage (`enrolment_required` on a first submit). `state` is `awaiting_authenticator` on a first submit; a replay answers the application's current state and version. `authenticator` is null only when the account's challenge budget is spent (use P9). The licence number is upper-cased with single spaces and must match `^[A-Z0-9][A-Z0-9/. -]{1,98}[A-Z0-9]$`. `400 CLINICIAN_APPLICATION_INVALID`: a doctor without MDCN or a nurse without NMCN, a licence number or date out of range. `401 CLINICIAN_APPLICATION_SESSION_INVALID`: no live draft of this address (before anything is charged), or a draft that has already had five submissions hashed (verify the address again). `409 CLINICIAN_EMAIL_IN_USE` (the address was taken after its code was verified), `409 CLINICIAN_APPLICATION_FACILITY_UNAVAILABLE` (not verified and active in an active organization), `409 CLINICIAN_APPLICATION_FACILITY_BUSY` (30 open applications at the facility), `409 CLINICIAN_APPLICATION_REQUIRES_SIGN_OUT`, `429 CLINICIAN_APPLICATION_RATE_LIMITED` also when the platform's daily cap is reached while the application is being created (nothing is created). These `400` and `409` refusals are answered after the quota is charged and without hashing the password; the draft stays usable. The same key and body with the same (spent, unexpired) draft replays the application with `replayed: true` and a fresh capability (the password is not hashed again); anything else on a spent draft is `401 CLINICIAN_APPLICATION_SESSION_INVALID` |
 | `POST .../authenticator/email-code` (P5) | an account capability at `enrolment_required` | `200 { accepted: true, channel: 'email', expiresAt }` (the 0088 enrolment proof, a second code to the same address) |
 | `POST .../authenticator/start` (P6) | `{ emailCode }` | `200 { secret, otpauthUri, algorithm, digits, periodSeconds, expiresAt }`, once |
 | `POST .../authenticator/activate` (P7) | `{ code }` (the first TOTP code) | `200 { recoveryCodes, account, stage: 'ready', applications, canApply, applyRefusal }` (ten recovery codes, shown once); the account's applications awaiting the authenticator are submitted for review. No session |
@@ -1760,7 +1767,10 @@ per-network (hourly or daily) or platform (daily) quota of the email-code,
 status-code, search or submit operation is spent (bounded settings
 `CLINICIAN_APPLICATION_{SIGNUP,STATUS,SEARCH,SUBMIT}_{NETWORK_HOURLY,NETWORK_DAILY,PLATFORM_DAILY}_LIMIT`;
 the platform's daily submit limit counts created applications, never a
-refused or replayed submission);
+refused or replayed submission, and is enforced where the application is
+created, so concurrent submissions never go past it: the one that would is
+`429` and creates nothing; a facility's open applications are counted in
+turn, so concurrent submissions never take more than its 30 open slots);
 an address gets at most one code a minute, five an hour and fifteen a day per
 purpose (over it the start answers the same `202` and sends nothing). The
 0088 answers keep their codes and statuses: `401 MFA_CHALLENGE_INVALID`
@@ -3195,8 +3205,19 @@ POST /api/v1/admin/clinician-applications/:applicationId/reject
   applicant's staff-proven factor in the same transaction; it is never
   stored, audited or part of the request digest, so a replay needs no new
   code. Before the code is checked, step 1 refuses whatever it would refuse
-  anyway (version, state or overdue, identity refusal, facility, insider,
-  self), so such a call never counts against the applicant; and a request
+  anyway: the request's own fields (`400
+  CLINICIAN_APPLICATION_COMMAND_INVALID`: a `validUntil` not in the future,
+  over three years or past the end of the licence's expiry date, a checklist
+  not exactly as specified, a blank evidence reference or reason), the
+  version, the state or overdue, an identity refusal, the facility, an
+  insider, self, an `Idempotency-Key` already used for a generic
+  credential attestation (`409 IDEMPOTENCY_CONFLICT`), and an applicant
+  account or staff record the attestation cannot be recorded for (`409
+  WORKFORCE_ACCOUNT_INELIGIBLE`: disabled, locked, not active or no active
+  staff record; `409 WORKFORCE_STAFF_INELIGIBLE`; `404
+  WORKFORCE_STAFF_NOT_FOUND`), so such a call never counts against the
+  applicant (only a missing or changed staff-proven factor is found after
+  the code, and that one is never counted); and a request
   that waited for a concurrent one with the same `Idempotency-Key` answers
   that one's result (`replayed: true`) without checking a code. A refused
   code is committed against the applicant's 0088 failure budget (and the
