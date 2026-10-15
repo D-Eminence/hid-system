@@ -211,10 +211,14 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
   }
 
   /**
-   * P4: the sign-up. The quota is charged and committed before the password
-   * is hashed; then one transaction creates the account, the pending staff
-   * record and the application (C8), opens the 0088 enrolment challenge on a
-   * token derived from the next capability, and binds it (C9).
+   * P4: the sign-up. The draft is checked first (a live draft of this
+   * address, or one this key and request already spent), so a forged or
+   * spent capability is refused before anything is charged or hashed; then
+   * the quota is charged and committed, and the password hashed; then one
+   * transaction creates the account, the pending staff record and the
+   * application (C8, which counts it against the platform's daily cap),
+   * opens the 0088 enrolment challenge on a token derived from the next
+   * capability, and binds it (C9).
    */
   async submit(token: string | undefined, idempotencyKey: string, input: SubmitClinicianApplicationDto,
     request: ClinicianRequest) {
@@ -222,10 +226,15 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
     this.assertPairing(input);
     const sessionHmac = this.sessionHmac(token);
     const networkDigest = this.networkDigest(request.ip);
-    await this.chargeQuota(networkDigest, 'submit', request);
-    const passwordHash = await hashAccountPassword(input.password);
     const { password: _password, ...withoutPassword } = input;
     const digest = requestDigest('clinician-application.submit', withoutPassword);
+    await this.chargeQuota(networkDigest, 'submit', request, async (client) => {
+      const outcome = (await client.query<{ outcome: string }>(
+        'select identity.clinician_application_submit_probe($1,$2,$3,$4) as outcome',
+        [sessionHmac, this.hmac('email', input.email), idempotencyKey, digest])).rows[0]?.outcome;
+      if (outcome !== 'new' && outcome !== 'replay') throw this.unavailable();
+    });
+    const passwordHash = await hashAccountPassword(input.password);
     const next = this.newToken();
     const result = await this.run(request, async (client) => {
       const row = (await client.query<{
@@ -350,13 +359,21 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
     });
   }
 
-  /** P14: a ready account applies to another facility (C13); the quota is the submit one. */
+  /**
+   * P14: a ready account applies to another facility (C13); the quota is the
+   * submit one, charged only once the capability is a live account
+   * capability at ready.
+   */
   async apply(token: string | undefined, idempotencyKey: string, input: ClinicianApplicationDetailsDto,
     request: ClinicianRequest): Promise<ClinicianApplicationView & { replayed: boolean }> {
     this.assertPairing(input);
     const sessionHmac = this.sessionHmac(token);
     const networkDigest = this.networkDigest(request.ip);
-    await this.chargeQuota(networkDigest, 'submit', request);
+    await this.chargeQuota(networkDigest, 'submit', request, async (client) => {
+      const capability = await this.capability(client, token!, sessionHmac);
+      if (capability.kind !== 'account') throw this.sessionInvalid();
+      if (capability.stage !== 'ready') throw this.authenticatorRequired();
+    });
     const digest = requestDigest('clinician-application.apply', input);
     return this.run(request, async (client) => {
       const row = (await client.query<{ application: ClinicianApplicationView; replayed: boolean }>(
@@ -496,10 +513,16 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
     if (row.maintenance) throw this.maintenance();
   }
 
-  /** Charges a network's quota in its own transaction (the gate first), so a refusal and a charge both commit. */
-  private async chargeQuota(networkDigest: string, operation: QuotaOperation, request: ClinicianRequest) {
+  /**
+   * Charges a network's quota in its own transaction (the gate first), so a
+   * refusal and a charge both commit. `precheck` runs after the gate and
+   * before the charge (a read): a request it refuses charges nothing.
+   */
+  private async chargeQuota(networkDigest: string, operation: QuotaOperation, request: ClinicianRequest,
+    precheck?: (client: PoolClient) => Promise<void>) {
     const allowed = await this.run(request, async (client) => {
       await this.gate(client, 'intake');
+      await precheck?.(client);
       return this.quota(client, networkDigest, operation);
     });
     if (!allowed) throw this.rateLimited(QUOTA_RETRY_AFTER_SECONDS);
@@ -596,10 +619,7 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
     }
     if (code === '42501') {
       if (message === 'CLINICIAN_APPLICATION_SESSION_INVALID') return this.sessionInvalid();
-      if (message === 'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED') {
-        return new DomainProblem(403, 'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED',
-          'Verify your authenticator to continue');
-      }
+      if (message === 'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED') return this.authenticatorRequired();
       // A live capability at the wrong stage is never the 401 of an ended one.
       if (message === 'CLINICIAN_APPLICATION_AUTHENTICATOR_READY') return this.authenticatorReadyProblem();
       if (message === 'CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED') return this.staffSignInRequired();
@@ -659,6 +679,10 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
   private sessionInvalid(): DomainProblem {
     return new DomainProblem(401, 'CLINICIAN_APPLICATION_SESSION_INVALID',
       'Your application session has ended. Verify your email address again to continue.');
+  }
+
+  private authenticatorRequired(): DomainProblem {
+    return new DomainProblem(403, 'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED', 'Verify your authenticator to continue');
   }
 
   private authenticatorReadyProblem(): DomainProblem {

@@ -1280,7 +1280,11 @@ $$;
 -- C2. Per-network and platform quotas of the public operations: 0085's
 -- algorithm per operation. A denial returns false with every counter
 -- unchanged; it is audited (with the success of every operation but the
--- facility search).
+-- facility search). The platform's daily submit cap is the exception: it
+-- counts created applications (C8 and C13 add one each through
+-- platform.count_clinician_application_submission), not attempts, so a
+-- submission refused after the charge, a forged or spent capability, or a
+-- replay never uses it; C2 only refuses once the day's count reaches it.
 create function platform.consume_clinician_application_quota(
   requested_network_digest char(64),
   requested_operation text,
@@ -1326,6 +1330,16 @@ begin
           date_trunc('day', statement_timestamp()), platform_daily_limit)
       ) as limits(limit_name, scope, scope_key, bucket_period, bucket_start, max_attempts)
     loop
+      if quota.scope = 'platform' and requested_operation = 'submit' then
+        if coalesce((select counter.attempt_count from platform.clinician_application_quota_counters counter
+              where counter.scope = 'platform' and counter.operation = 'submit' and counter.scope_key = 'all'
+                and counter.bucket_period = 'day' and counter.bucket_start = quota.bucket_start), 0)
+           >= quota.max_attempts then
+          exhausted_limit := quota.limit_name;
+          raise exception using errcode = 'P4290', message = 'CLINICIAN_APPLICATION_QUOTA_EXCEEDED';
+        end if;
+        continue;
+      end if;
       insert into platform.clinician_application_quota_counters as counter
         (scope, operation, scope_key, bucket_period, bucket_start, attempt_count)
       values (quota.scope, requested_operation, quota.scope_key, quota.bucket_period, quota.bucket_start, 1)
@@ -1352,6 +1366,23 @@ begin
   return exhausted_limit is null;
 end
 $$;
+
+-- One created clinician application, counted against the platform's daily
+-- submit cap (C2 checks the count; C8 and C13 call this once per application
+-- they create, never for a refusal or a replay). Internal.
+create function platform.count_clinician_application_submission()
+returns void
+language sql
+security definer
+set search_path = pg_catalog, identity, auth, platform, audit, pg_temp
+as $$
+  insert into platform.clinician_application_quota_counters as counter
+    (scope, operation, scope_key, bucket_period, bucket_start, attempt_count)
+  values ('platform', 'submit', 'all', 'day', date_trunc('day', statement_timestamp()), 1)
+  on conflict (scope, operation, scope_key, bucket_period, bucket_start)
+  do update set attempt_count = counter.attempt_count + 1, updated_at = clock_timestamp()
+$$;
+revoke all on function platform.count_clinician_application_submission() from public;
 
 -- C3. Starts an email-code challenge of sign-up or of the status page. Every
 -- address gets a row; a status challenge for an address that is not an
@@ -1613,6 +1644,44 @@ begin
 end
 $$;
 
+-- The submit's capability check, before Identity charges the submit quota and
+-- hashes the password (P4): 'new' for a live, unconsumed draft of this
+-- address, 'replay' for a live draft that this key and request already
+-- consumed; anything else is CLINICIAN_APPLICATION_SESSION_INVALID, as C8
+-- would answer. A read only; C8 checks everything again.
+create function identity.clinician_application_submit_probe(requested_session_hmac char(64),
+  requested_email_hmac char(64), requested_idempotency_key text, requested_sha256 char(64))
+returns text
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, identity, auth, platform, audit, pg_temp
+as $$
+declare
+  draft identity.clinician_application_sessions%rowtype;
+begin
+  perform identity.clinician_application_require_system();
+  if requested_session_hmac is not null and requested_session_hmac ~ '^[0-9a-f]{64}$' then
+    select * into draft from identity.clinician_application_sessions capability
+     where capability.token_hmac = requested_session_hmac;
+  end if;
+  if draft.id is null or draft.kind <> 'draft' or draft.ended_at is not null
+     or draft.expires_at <= clock_timestamp() then
+    raise exception using errcode = '42501', message = 'CLINICIAN_APPLICATION_SESSION_INVALID';
+  end if;
+  if draft.consumed_at is not null then
+    if draft.submit_idempotency_key = requested_idempotency_key and draft.submit_sha256 = requested_sha256 then
+      return 'replay';
+    end if;
+    raise exception using errcode = '42501', message = 'CLINICIAN_APPLICATION_SESSION_INVALID';
+  end if;
+  if draft.email_hmac is distinct from requested_email_hmac then
+    raise exception using errcode = '42501', message = 'CLINICIAN_APPLICATION_SESSION_INVALID';
+  end if;
+  return 'new';
+end
+$$;
+
 -- C7. Facility search: a live unconsumed draft or a ready account capability,
 -- 30 searches each; only verified, active facilities of active organizations.
 create function identity.search_clinician_application_facilities(requested_session_hmac char(64),
@@ -1810,6 +1879,7 @@ begin
   insert into identity.clinician_application_sessions (id, token_hmac, kind, account_id, stage, created_at, expires_at)
   values (gen_random_uuid(), requested_next_session_hmac, 'account', new_account, 'enrolment_required', now_value,
     now_value + interval '30 minutes');
+  perform platform.count_clinician_application_submission();
   return query select created.id, new_account, created.state, created.submitted_at, created.expires_at,
     facility_row.id, facility_row.name, created.row_version, 'enrolment_required'::text, false;
 end
@@ -2140,6 +2210,7 @@ begin
   insert into identity.clinician_application_idempotency (account_id, idempotency_key, request_sha256, response)
   values (capability.account_id, requested_idempotency_key, requested_sha256,
     jsonb_build_object('applicationId', created.id));
+  perform platform.count_clinician_application_submission();
   return query select identity.clinician_application_view(created), false;
 end
 $$;
@@ -2968,6 +3039,7 @@ revoke all on function identity.clinician_signup_open(),
   identity.verify_clinician_application_signup_code(uuid, character, text, character, character),
   identity.verify_clinician_application_status_code(uuid, character, character, character),
   identity.clinician_application_session(character),
+  identity.clinician_application_submit_probe(character, character, text, character),
   identity.search_clinician_application_facilities(character, text),
   identity.submit_clinician_application(character, character, text, character, text, character, text, text, text,
     text, text, date, uuid, integer),

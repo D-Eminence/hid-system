@@ -3,6 +3,7 @@ import { Logger } from '@nestjs/common';
 import { createHmac } from 'node:crypto';
 import type { MfaService } from '../auth/mfa/mfa.service';
 import type { NotificationOtpClient } from '../auth/notification-otp.client';
+import * as passwordHash from '../auth/password-hash';
 import { requestDigest } from '../common/idempotency';
 import { DomainProblem, PublicDetailProblem, RetryAfterProblem } from '../common/problem';
 import * as environment from '../config/environment';
@@ -64,6 +65,7 @@ function harness(overrides: Record<string, Handler> = {}): Harness {
     'clinician_application_session(': () => ({ rows: [{ kind: 'account', stage: 'enrolment_required',
       account_id: accountId, mfa_challenge_id: mfaChallengeId, expires_at: new Date('2026-10-15T10:30:00Z') }] }),
     'bind_clinician_application_mfa_challenge': () => ({ rows: [] }),
+    'clinician_application_submit_probe': () => ({ rows: [{ outcome: 'new' }] }),
     ...overrides,
   }));
   const client = { query: jest.fn(async (sql: string, values: unknown[] = []) => {
@@ -283,13 +285,17 @@ describe('the submit', () => {
     facility_id: submitInput.facilityId, facility_name: 'Synthetic Clinic', application_version: '1',
     session_stage: 'enrolment_required', replayed: false };
 
-  it('charges the quota in its own transaction, hashes with argon2id, and opens the enrolment in the submit transaction', async () => {
+  it('checks the draft, then charges the quota in its own transaction, hashes with argon2id, and opens the enrolment in the submit transaction', async () => {
     const h = harness({ 'submit_clinician_application': () => ({ rows: [row] }) });
     const result = await h.service.submit(TOKEN, 'clinician-submit-0000000001', submitInput, request);
     expect(h.transactions).toEqual([{ committed: true }, { committed: true }]);
     expect(h.calls.filter(({ transaction }) => transaction === 0).map(({ sql }) => sql))
-      .toEqual([expect.stringContaining('platform.control_enabled'), expect.stringContaining('consume_clinician_application_quota')]);
-    expect(h.calls[1]!.values).toEqual([expected('ip', '203.0.113.71'), 'submit', 5, 10, 200]);
+      .toEqual([expect.stringContaining('platform.control_enabled'), expect.stringContaining('clinician_application_submit_probe'),
+        expect.stringContaining('consume_clinician_application_quota')]);
+    const { password: _unused, ...unhashed } = submitInput;
+    expect(h.calls[1]!.values).toEqual([expected('session', TOKEN), expected('email', email), 'clinician-submit-0000000001',
+      requestDigest('clinician-application.submit', unhashed)]);
+    expect(h.calls[2]!.values).toEqual([expected('ip', '203.0.113.71'), 'submit', 5, 10, 200]);
     const submit = h.calls.find(({ sql }) => sql.includes('submit_clinician_application'))!;
     expect(submit.transaction).toBe(1);
     const values = submit.values as unknown[];
@@ -330,12 +336,64 @@ describe('the submit', () => {
     expect(h.calls).toEqual([]);
   });
 
+  it('refuses a forged or spent draft with 401 before the quota is charged or the password hashed', async () => {
+    const hashing = jest.spyOn(passwordHash, 'hashAccountPassword');
+    const h = harness({ 'clinician_application_submit_probe': () => {
+      throw Object.assign(new Error('CLINICIAN_APPLICATION_SESSION_INVALID'), { code: '42501' });
+    } });
+    const problem = await refusal(h.service.submit('F'.repeat(43), 'clinician-submit-0000000001', submitInput, request));
+    expect([problem.getStatus(), problem.code]).toEqual([401, 'CLINICIAN_APPLICATION_SESSION_INVALID']);
+    expect(indexOf(h, 'consume_clinician_application_quota')).toBe(-1);
+    expect(indexOf(h, 'submit_clinician_application(')).toBe(-1);
+    expect(hashing).not.toHaveBeenCalled();
+  });
+
+  it('charges a replay of a spent draft (same key and request) and lets C8 answer it', async () => {
+    const h = harness({ 'clinician_application_submit_probe': () => ({ rows: [{ outcome: 'replay' }] }),
+      'submit_clinician_application': () => ({ rows: [{ ...row, replayed: true }] }) });
+    const result = await h.service.submit(TOKEN, 'clinician-submit-0000000001', submitInput, request);
+    expect(result.answer.replayed).toBe(true);
+    expect(indexOf(h, 'consume_clinician_application_quota')).toBeGreaterThan(indexOf(h, 'clinician_application_submit_probe'));
+  });
+
   it('still answers the application when the account challenge budget is spent (P9 opens it later)', async () => {
     const h = harness({ 'submit_clinician_application': () => ({ rows: [row] }) });
     h.mfa.openApplicantChallenge!.mockResolvedValue({ kind: 'rate_limited' });
     const result = await h.service.submit(TOKEN, 'clinician-submit-0000000001', submitInput, request);
     expect(result.answer.authenticator).toBeNull();
     expect(indexOf(h, 'bind_clinician_application_mfa_challenge')).toBe(-1);
+  });
+});
+
+describe('applying again (P14)', () => {
+  const details = { profession: 'doctor', regulator: 'MDCN', licenceNumber: 'MDCN/12345', licenceValidUntil: '2027-06-30',
+    facilityId: submitInput.facilityId, declarations: { accurate: true, verificationConsent: true } } as const;
+
+  it.each([
+    ['an unknown capability', () => { throw Object.assign(new Error('CLINICIAN_APPLICATION_SESSION_INVALID'), { code: '42501' }); },
+      401, 'CLINICIAN_APPLICATION_SESSION_INVALID'],
+    ['a draft', () => ({ rows: [{ kind: 'draft', stage: null, account_id: null, mfa_challenge_id: null,
+      expires_at: new Date() }] }), 401, 'CLINICIAN_APPLICATION_SESSION_INVALID'],
+    ['a capability that needs the authenticator', () => ({ rows: [{ kind: 'account', stage: 'authenticator_required',
+      account_id: accountId, mfa_challenge_id: null, expires_at: new Date() }] }), 403,
+    'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED'],
+  ] as const)('refuses %s before the submit quota is charged', async (_label, session, status, code) => {
+    const h = harness({ 'clinician_application_session(': session });
+    const problem = await refusal(h.service.apply(TOKEN, 'clinician-apply-00000000001', details as never, request));
+    expect([problem.getStatus(), problem.code]).toEqual([status, code]);
+    expect(indexOf(h, 'consume_clinician_application_quota')).toBe(-1);
+    expect(indexOf(h, 'file_clinician_application')).toBe(-1);
+  });
+
+  it('charges the quota for a ready capability, then files the application', async () => {
+    const h = harness({ 'clinician_application_session(': () => ({ rows: [{ kind: 'account', stage: 'ready',
+      account_id: accountId, mfa_challenge_id: null, expires_at: new Date() }] }),
+    'file_clinician_application': () => ({ rows: [{ application: { applicationId: 'a2', state: 'submitted' },
+      replayed: false }] }) });
+    await expect(h.service.apply(TOKEN, 'clinician-apply-00000000001', details as never, request))
+      .resolves.toEqual({ applicationId: 'a2', state: 'submitted', replayed: false });
+    expect(indexOf(h, 'clinician_application_session(')).toBeLessThan(indexOf(h, 'consume_clinician_application_quota'));
+    expect(indexOf(h, 'consume_clinician_application_quota')).toBeLessThan(indexOf(h, 'file_clinician_application'));
   });
 });
 
