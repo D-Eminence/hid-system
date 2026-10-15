@@ -427,6 +427,16 @@ describe('the authenticator steps', () => {
       { recoveryCode: 'abcd-efgh-jk' }]);
   });
 
+  it('starts the enrolment in the applicant mode, so a wrong emailed proof counts in the applicants\' bucket', async () => {
+    const h = harness();
+    h.mfa.startEnrollment!.mockResolvedValue({ secret: 'S', otpauthUri: 'otpauth://x', algorithm: 'SHA1', digits: 6,
+      periodSeconds: 30, expiresAt: new Date('2026-10-15T10:10:00Z') });
+    await h.service.startAuthenticator(TOKEN, '246810', request);
+    expect(h.mfa.startEnrollment).toHaveBeenCalledWith(h.service.derivedChallengeToken(TOKEN, mfaChallengeId),
+      expect.objectContaining({ correlationId: request.correlationId }), 'staff', { emailCode: '246810' },
+      { applicant: true });
+  });
+
   it('refuses a draft, a ready capability and an unbound one with their own codes', async () => {
     for (const [capability, status, code] of [
       [{ kind: 'draft', stage: null, account_id: null, mfa_challenge_id: null }, 401, 'CLINICIAN_APPLICATION_SESSION_INVALID'],

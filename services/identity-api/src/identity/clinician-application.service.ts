@@ -283,7 +283,8 @@ export class ClinicianApplicationService implements BeforeApplicationShutdown {
   /** P6: verifies the emailed proof and returns the new TOTP secret, once. */
   async startAuthenticator(token: string | undefined, emailCode: string, request: ClinicianRequest) {
     const derived = await this.authenticatorToken(token, request);
-    const enrollment = await this.mfa.startEnrollment(derived, this.event(request), 'staff', { emailCode });
+    const enrollment = await this.mfa.startEnrollment(derived, this.event(request), 'staff', { emailCode },
+      { applicant: true });
     return { ...enrollment, expiresAt: enrollment.expiresAt.toISOString() };
   }
 

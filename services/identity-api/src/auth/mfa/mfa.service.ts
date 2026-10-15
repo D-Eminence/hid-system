@@ -133,18 +133,30 @@ interface FactorRow {
 /** The fifth failed second-factor attempt within 15 minutes blocks the account for 15 minutes. */
 const FAILURE_PER_ACCOUNT: RateLimitWindow = { windowSeconds: 900, maxRequests: 4 };
 /**
+ * The per-address failure bucket a second-factor check charges and reads: a
+ * sign-in's own, or the clinician applicants' (ADR-064), whose challenges are
+ * staff challenges but whose accounts anyone can create while intake is open.
+ */
+type FailureScope = MfaSessionKind | 'applicant';
+/**
  * Failed second-factor attempts per source address, in a bucket of each
- * sign-in's own (IP_BUCKET). Platform sign-in, used by a handful of
+ * scope's own (IP_BUCKET). Platform sign-in, used by a handful of
  * administrators, blocks the address at the 20th failure in 15 minutes.
  * Staff sign-in serves every clinician behind a facility's address, so its
  * bucket blocks at the 100th: mistyped codes at a shift change, or the
- * failure budgets of a few accounts, never lock a facility out.
+ * failure budgets of a few staff accounts, never lock a facility out. The
+ * applicant modes (the application capability's enrolment and verification,
+ * and step 1 of a review) neither charge nor read the staff bucket: applicant
+ * accounts need no staff credential, so throwaway applicants must not be able
+ * to block staff sign-in from an address they share with a facility. Their
+ * own bucket has the staff limit; the account's budget stays shared.
  */
-const FAILURE_PER_IP: Record<MfaSessionKind, RateLimitWindow> = {
+const FAILURE_PER_IP: Record<FailureScope, RateLimitWindow> = {
   platform: { windowSeconds: 900, maxRequests: 19 },
   staff: { windowSeconds: 900, maxRequests: 99 },
+  applicant: { windowSeconds: 900, maxRequests: 99 },
 };
-const IP_BUCKET: Record<MfaSessionKind, string> = { platform: 'ip', staff: 'staff-ip' };
+const IP_BUCKET: Record<FailureScope, string> = { platform: 'ip', staff: 'staff-ip', applicant: 'applicant-ip' };
 /** Enrollment starts and recovery-code regenerations: five per 15 minutes. */
 const REQUESTS_PER_ACCOUNT: RateLimitWindow = { windowSeconds: 900, maxRequests: 5 };
 /**
@@ -316,10 +328,11 @@ export class MfaService {
     if (Boolean(input.code) === Boolean(input.recoveryCode)) {
       throw new DomainProblem(400, 'MFA_CODE_REQUIRED', 'Provide either an authenticator code or a recovery code');
     }
+    const scope: FailureScope = options ? 'applicant' : kind;
     const outcome = await this.database.withSystemTransaction(event.correlationId, async (client) => {
       const challenge = await this.lockChallenge(client, token, 'verify', kind);
       if (!challenge) return { kind: 'invalid' } as const;
-      if (await this.blocked(client, challenge.account_id, event, kind)) return { kind: 'rate_limited' } as const;
+      if (await this.blocked(client, challenge.account_id, event, scope)) return { kind: 'rate_limited' } as const;
       const factor = await this.lockActiveFactor(client, challenge.account_id);
       if (!factor) return { kind: 'invalid' } as const;
       if (kind === 'staff' && !factor.enrollment_proof) return { kind: 'unproven' } as const;
@@ -332,7 +345,7 @@ export class MfaService {
         method = 'recovery_code';
         accepted = await this.consumeRecoveryCode(client, challenge.account_id, input.recoveryCode!);
       }
-      if (!accepted) return this.recordChallengeFailure(client, challenge, event, kind);
+      if (!accepted) return this.recordChallengeFailure(client, challenge, event, kind, scope);
       await client.query(
         `update auth.mfa_login_challenges set consumed_at = clock_timestamp(), row_version = row_version + 1
           where id = $1`, [challenge.id]);
@@ -442,13 +455,17 @@ export class MfaService {
    * counted as a failed attempt) or the provider activation; the factor
    * records it. A platform enrolment records none, so it is refused for an
    * account with an eligible staff membership, which enrols at staff sign-in
-   * instead and then uses that factor for both.
+   * instead and then uses that factor for both. A clinician applicant's
+   * enrolment (`applicant`, ADR-064) charges a wrong email code to the
+   * applicants' per-address bucket, not staff sign-in's.
    */
   async startEnrollment(token: string, event: SessionEventMetadata, kind: MfaSessionKind = 'platform',
-    proof: { emailCode?: string } = {}): Promise<{
+    proof: { emailCode?: string } = {}, origin: { applicant?: boolean } = {}): Promise<{
     secret: string; otpauthUri: string; algorithm: 'SHA1'; digits: number; periodSeconds: number; expiresAt: Date;
   }> {
     this.protector.assertConfigured();
+    if (origin.applicant && kind !== 'staff') throw new Error('Only a staff enrolment serves a clinician applicant');
+    const scope: FailureScope = origin.applicant ? 'applicant' : kind;
     const outcome = await this.database.withSystemTransaction(event.correlationId, async (client) => {
       const challenge = await this.lockChallenge(client, token, 'enroll', kind);
       if (!challenge) return { kind: 'invalid' } as const;
@@ -458,8 +475,10 @@ export class MfaService {
       }
       if (kind === 'staff' && !challenge.proof_verified_at) {
         if (!proof.emailCode || challenge.proof_method !== 'email_code') return { kind: 'proof_required' } as const;
-        if (await this.blocked(client, challenge.account_id, event, kind)) return { kind: 'rate_limited' } as const;
-        if (!this.proofMatches(challenge, proof.emailCode)) return this.recordChallengeFailure(client, challenge, event, kind);
+        if (await this.blocked(client, challenge.account_id, event, scope)) return { kind: 'rate_limited' } as const;
+        if (!this.proofMatches(challenge, proof.emailCode)) {
+          return this.recordChallengeFailure(client, challenge, event, kind, scope);
+        }
         await client.query(
           `update auth.mfa_login_challenges set proof_verified_at = clock_timestamp(), row_version = row_version + 1
             where id = $1`, [challenge.id]);
@@ -532,11 +551,12 @@ export class MfaService {
     this.protector.assertConfigured();
     if (options && kind !== 'staff') throw new Error('Only a staff enrolment can be activated without a session');
     const recoveryCodes = this.newRecoveryCodes();
+    const scope: FailureScope = options ? 'applicant' : kind;
     const outcome = await this.database.withSystemTransaction(event.correlationId, async (client) => {
       const challenge = await this.lockChallenge(client, token, 'enroll', kind);
       if (!challenge) return { kind: 'invalid' } as const;
       if (kind === 'staff' && !challenge.proof_verified_at) return { kind: 'proof_required' } as const;
-      if (await this.blocked(client, challenge.account_id, event, kind)) return { kind: 'rate_limited' } as const;
+      if (await this.blocked(client, challenge.account_id, event, scope)) return { kind: 'rate_limited' } as const;
       // A staff enrolment activates only the factor its own proven challenge created.
       const factor = (await client.query<FactorRow>(
         `select id::text, secret_ciphertext, secret_key_version, last_used_step::text, enrollment_proof
@@ -548,7 +568,7 @@ export class MfaService {
       )).rows[0];
       if (!factor) return { kind: 'invalid' } as const;
       const step = this.matchStep(challenge.account_id, factor, code);
-      if (step === null) return this.recordChallengeFailure(client, challenge, event, kind);
+      if (step === null) return this.recordChallengeFailure(client, challenge, event, kind, scope);
       const activated = await client.query(
         `update auth.mfa_factors set status = 'active', activated_at = clock_timestamp(),
             last_used_step = $2, last_used_at = clock_timestamp(), row_version = row_version + 1
@@ -672,9 +692,9 @@ export class MfaService {
     await this.lockApplicantReview(client, accounts);
     const factor = await this.lockActiveFactor(client, accounts.applicantAccountId);
     if (!factor || !factor.enrollment_proof) return { kind: 'no_factor' };
-    if (await this.blocked(client, accounts.applicantAccountId, event, 'staff')) return { kind: 'rate_limited' };
+    if (await this.blocked(client, accounts.applicantAccountId, event, 'applicant')) return { kind: 'rate_limited' };
     if (!/^[0-9]{6}$/.test(code) || !(await this.acceptTotp(client, accounts.applicantAccountId, factor, code))) {
-      await this.recordFactorFailure(client, accounts.applicantAccountId, event, 'mfa_failed', 'staff');
+      await this.recordFactorFailure(client, accounts.applicantAccountId, event, 'mfa_failed', 'applicant');
       return { kind: 'invalid' };
     }
     await this.sessionEvent(client, 'mfa_verified', 'success', accounts.applicantAccountId, event,
@@ -967,24 +987,24 @@ export class MfaService {
     }
   }
 
-  /** The account's failure budget (shared by both sign-ins) or the sign-in's own per-IP budget is used up. */
+  /** The account's failure budget (shared by every scope) or the scope's own per-IP budget is used up. */
   private async blocked(client: PoolClient, accountId: string, event: SessionEventMetadata,
-    kind: MfaSessionKind): Promise<boolean> {
+    scope: FailureScope): Promise<boolean> {
     const blocked = await rateLimitBlocked(client, 'mfa_failure_account', this.protector.rateBucket('account', accountId))
-      || await rateLimitBlocked(client, 'mfa_failure_ip', this.ipBucket(kind, event));
+      || await rateLimitBlocked(client, 'mfa_failure_ip', this.ipBucket(scope, event));
     if (blocked) await this.sessionEvent(client, 'mfa_rate_limited', 'denied', accountId, event, {});
     return blocked;
   }
 
   private async recordFactorFailure(client: PoolClient, accountId: string, event: SessionEventMetadata,
-    eventType: 'mfa_failed' | 'step_up_failed', kind: MfaSessionKind, sessionId?: string): Promise<void> {
+    eventType: 'mfa_failed' | 'step_up_failed', scope: FailureScope, sessionId?: string): Promise<void> {
     await consumeRateLimit(client, 'mfa_failure_account', this.protector.rateBucket('account', accountId), FAILURE_PER_ACCOUNT);
-    await consumeRateLimit(client, 'mfa_failure_ip', this.ipBucket(kind, event), FAILURE_PER_IP[kind]);
+    await consumeRateLimit(client, 'mfa_failure_ip', this.ipBucket(scope, event), FAILURE_PER_IP[scope]);
     await this.sessionEvent(client, eventType, 'denied', accountId, event, {}, sessionId);
   }
 
-  private ipBucket(kind: MfaSessionKind, event: SessionEventMetadata): string {
-    return this.protector.rateBucket(IP_BUCKET[kind], event.sourceIp ?? 'unavailable');
+  private ipBucket(scope: FailureScope, event: SessionEventMetadata): string {
+    return this.protector.rateBucket(IP_BUCKET[scope], event.sourceIp ?? 'unavailable');
   }
 
   /**
@@ -1012,7 +1032,7 @@ export class MfaService {
   }
 
   private async recordChallengeFailure(client: PoolClient, challenge: ChallengeRow,
-    event: SessionEventMetadata, kind: MfaSessionKind): Promise<{ kind: 'failed' }> {
+    event: SessionEventMetadata, kind: MfaSessionKind, scope: FailureScope = kind): Promise<{ kind: 'failed' }> {
     await client.query(
       `update auth.mfa_login_challenges
           set failed_attempts = failed_attempts + 1,
@@ -1022,7 +1042,7 @@ export class MfaService {
         where id = $1`,
       [challenge.id],
     );
-    await this.recordFactorFailure(client, challenge.account_id, event, 'mfa_failed', kind);
+    await this.recordFactorFailure(client, challenge.account_id, event, 'mfa_failed', scope);
     await this.audit.recordWithClient(client, { ...this.authAudit(kind, challenge, undefined, event,
       `${AUDIT_PREFIX[kind]}.mfa.failed`, {}), outcome: 'denied' });
     return { kind: 'failed' };

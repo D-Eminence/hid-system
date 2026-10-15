@@ -324,3 +324,51 @@ describe('step 1 confirms the applicant\'s authenticator (confirmApplicantFactor
     }
   });
 });
+
+describe('applicant failures have their own per-address bucket (not staff sign-in\'s)', () => {
+  const failureBuckets = (statements: Statement[]) => statements
+    .filter(({ sql }) => sql.includes('insert into auth.otp_rate_limits')).map(({ values }) => values.slice(0, 2));
+  const ipBucket = (h: ReturnType<typeof harness>, name: string) => h.protector.rateBucket(name, event.sourceIp);
+
+  it('counts a wrong applicant code, emailed proof or activation code in the applicants\' bucket only', async () => {
+    const verify = harness({ enrolled: true });
+    await verify.service.completeLogin(TOKEN, { code: '000000' }, event, 'staff', { issue: 'none', onVerified: jest.fn() })
+      .catch(() => undefined);
+    const start = harness();
+    await start.service.startEnrollment(TOKEN, event, 'staff', { emailCode: '000000' }, { applicant: true })
+      .catch(() => undefined);
+    const activate = harness({ proofVerified: true });
+    await activate.service.activateEnrollment(TOKEN, '000000', event, 'staff', { issue: 'none', onActivated: jest.fn() })
+      .catch(() => undefined);
+    const review = harness({ enrolled: true });
+    await review.service.confirmApplicantFactor(review.client, { applicantAccountId: ACCOUNT, actorAccountId: ADMIN },
+      '000000', event);
+    for (const h of [verify, start, activate, review]) {
+      const counted = failureBuckets(h.statements);
+      expect(counted).toContainEqual(['mfa_failure_ip', ipBucket(h, 'applicant-ip')]);
+      expect(counted).not.toContainEqual(['mfa_failure_ip', ipBucket(h, 'staff-ip')]);
+      expect(counted).toContainEqual(['mfa_failure_account', h.protector.rateBucket('account', ACCOUNT)]);
+    }
+  });
+
+  it('leaves staff sign-in from an address unblocked when the applicants\' bucket of that address is spent', async () => {
+    const probe = harness();
+    const staff = harness({ enrolled: true, blockedBuckets: [ipBucket(probe, 'applicant-ip')] });
+    const refused = await staff.service.completeLogin(TOKEN, { code: '000000' }, event, 'staff')
+      .then(() => undefined, (error: unknown) => error);
+    // A wrong code is checked and counted in the staff bucket, not refused as rate limited.
+    expect((refused as DomainProblem).code).toBe('MFA_INVALID_CODE');
+    expect(failureBuckets(staff.statements)).toContainEqual(['mfa_failure_ip', ipBucket(staff, 'staff-ip')]);
+    const applicant = harness({ enrolled: true, blockedBuckets: [ipBucket(probe, 'applicant-ip')] });
+    const limited = await applicant.service.completeLogin(TOKEN, { code: totp(SECRET, NOW) }, event, 'staff',
+      { issue: 'none', onVerified: jest.fn() }).then(() => undefined, (error: unknown) => error);
+    expect((limited as DomainProblem).code).toBe('MFA_RATE_LIMITED');
+  });
+
+  it('lets an applicant verify while staff sign-in\'s bucket of the address is spent', async () => {
+    const probe = harness();
+    const { service } = harness({ enrolled: true, blockedBuckets: [ipBucket(probe, 'staff-ip')] });
+    await expect(service.completeLogin(TOKEN, { code: totp(SECRET, NOW) }, event, 'staff',
+      { issue: 'none', onVerified: jest.fn().mockResolvedValue('ready') })).resolves.toMatchObject({ result: 'ready' });
+  });
+});
