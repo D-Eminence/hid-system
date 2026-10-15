@@ -277,7 +277,7 @@ begin
   foreach signature in array array[
     'identity.admin_list_clinician_applications(text,timestamptz,uuid,integer)',
     'identity.admin_get_clinician_application(uuid)',
-    'identity.admin_clinician_application_account(uuid)',
+    'identity.admin_clinician_application_attest_precheck(uuid,bigint)',
     'identity.admin_clinician_application_prior(text,text,character)',
     'identity.admin_attest_clinician_application(uuid,bigint,timestamptz,text,jsonb,uuid,text,text,character)',
     'identity.admin_approve_clinician_application(uuid,bigint,text,text,character)',
@@ -1496,6 +1496,34 @@ select pg_temp.ca_refused(format($c$select * from identity.admin_attest_clinicia
   'Synthetic ticket HID-VER-1002', pg_temp.ca_checklist(), 'ca240000-0000-4000-8000-000000000011', 'Synthetic own step 1',
   'clinician-suite-own-attest', repeat('a', 64))$c$, (pg_temp.ca_application('super-t@ca.invalid',
   'ca110000-0000-4000-8000-00000000000b')).id), 'WORKFORCE_SELF_CHANGE_DENIED');
+-- The step-1 pre-check (before Identity checks the applicant's code): it
+-- refuses whatever step 1 would refuse, so a refused call never reaches the
+-- applicant's authenticator or failure budget, and otherwise names the
+-- applicant's account.
+select pg_temp.ca_refused(format($c$select identity.admin_clinician_application_attest_precheck(%L, 1)$c$,
+  (pg_temp.ca_application('super-t@ca.invalid', 'ca110000-0000-4000-8000-00000000000b')).id), 'WORKFORCE_SELF_CHANGE_DENIED');
+select pg_temp.ca_as('c');
+select pg_temp.ca_refused($c$select identity.admin_clinician_application_attest_precheck((select p1x from ca_step), 2)$c$,
+  'WORKFORCE_FACILITY_CONFLICT');
+select pg_temp.ca_as('n');
+select pg_temp.ca_refused($c$select identity.admin_clinician_application_attest_precheck((select p1x from ca_step), 2)$c$,
+  'ADMIN_MFA_REQUIRED');
+select pg_temp.ca_as('a');
+select pg_temp.ca_refused($c$select identity.admin_clinician_application_attest_precheck((select p1x from ca_step), 1)$c$,
+  'ADMIN_VERSION_CONFLICT');
+select pg_temp.ca_refused($c$select identity.admin_clinician_application_attest_precheck(
+  'ca999999-0000-4000-8000-000000000001', 1)$c$, 'CLINICIAN_APPLICATION_NOT_FOUND');
+-- P3's application is overdue (shown as expired).
+select pg_temp.ca_refused(format($c$select identity.admin_clinician_application_attest_precheck(%L, %s)$c$,
+  (pg_temp.ca_application('doctor3@ca.invalid', 'ca110000-0000-4000-8000-00000000000d')).id,
+  pg_temp.ca_version((pg_temp.ca_application('doctor3@ca.invalid', 'ca110000-0000-4000-8000-00000000000d')).id)),
+  'CLINICIAN_APPLICATION_STATE_INVALID');
+do $$ begin
+  if identity.admin_clinician_application_attest_precheck((select p1x from ca_step), 2)
+       <> pg_temp.ca_account('doctor1@ca.invalid') then
+    raise exception 'the step-1 pre-check did not name the applicant''s account';
+  end if;
+end $$;
 -- The checklist exactly as specified.
 select pg_temp.ca_refused(format($c$select pg_temp.ca_p1_attest('a', 2, (select p1_licence_end from ca_step), %L,
   'ca240000-0000-4000-8000-0000000000f1', 'clinician-suite-p1-attest-4')$c$, checklist), 'CLINICIAN_APPLICATION_COMMAND_INVALID')
@@ -1552,9 +1580,8 @@ begin
   if identity.admin_clinician_application_prior('workforce.clinician-application.attest', 'clinician-suite-p1-attest-ok',
        pg_temp.ca_h('p1-attest:ok'))->>'attestationId' <> result.attestation_id::text
      or identity.admin_clinician_application_prior('workforce.clinician-application.attest', 'clinician-suite-unused-key',
-       pg_temp.ca_h('p1-attest:ok')) is not null
-     or identity.admin_clinician_application_account((select p1x from ca_step)) <> pg_temp.ca_account('doctor1@ca.invalid') then
-    raise exception 'the prior probe or the account lookup is wrong';
+       pg_temp.ca_h('p1-attest:ok')) is not null then
+    raise exception 'the prior probe is wrong';
   end if;
 end $$;
 select pg_temp.ca_refused($c$select identity.admin_clinician_application_prior('workforce.clinician-application.attest',
@@ -1563,6 +1590,9 @@ select pg_temp.ca_refused($c$select identity.admin_clinician_application_prior('
   'clinician-suite-p1-attest-ok', repeat('b', 64))$c$, 'CLINICIAN_APPLICATION_COMMAND_INVALID');
 select pg_temp.ca_refused($c$select pg_temp.ca_p1_attest('a', 3, (select p1_licence_end from ca_step),
   pg_temp.ca_checklist(), 'ca240000-0000-4000-8000-0000000000f1', 'clinician-suite-p1-attest-again')$c$,
+  'CLINICIAN_APPLICATION_STATE_INVALID');
+select pg_temp.ca_as('a');
+select pg_temp.ca_refused($c$select identity.admin_clinician_application_attest_precheck((select p1x from ca_step), 3)$c$,
   'CLINICIAN_APPLICATION_STATE_INVALID');
 -- A key already used for a generic 0087 attestation cannot carry step 1.
 select * from identity.admin_record_credential_attestation('ca200000-0000-4000-8000-000000000009', 1, array['nurse'],
@@ -2017,6 +2047,11 @@ select * from pg_temp.ca_reject('a', (pg_temp.ca_application('doctor1@ca.invalid
   account_id uuid, facility_id uuid, further_applications_blocked boolean, application_version bigint, replayed boolean);
 select pg_temp.ca_refused(format($c$select pg_temp.ca_attest('b', %L, now() + interval '100 days', 'p1-y')$c$,
   (pg_temp.ca_application('doctor1@ca.invalid', 'ca110000-0000-4000-8000-00000000000b')).id),
+  'CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE');
+select pg_temp.ca_as('b');
+select pg_temp.ca_refused(format($c$select identity.admin_clinician_application_attest_precheck(%L, %s)$c$,
+  (pg_temp.ca_application('doctor1@ca.invalid', 'ca110000-0000-4000-8000-00000000000b')).id,
+  pg_temp.ca_version((pg_temp.ca_application('doctor1@ca.invalid', 'ca110000-0000-4000-8000-00000000000b')).id)),
   'CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE');
 select pg_temp.ca_system('p1-blocked');
 select pg_temp.ca_refused($c$select pg_temp.ca_file('p1-u2', 'p1-account', 'ca110000-0000-4000-8000-00000000000f')$c$,

@@ -327,13 +327,17 @@ try {
     expectStatus(response, 200);
     return response.body;
   };
+  const attestBody = (applicantCode, validDays = 365) => ({
+    validUntil: new Date(Date.now() + validDays * 86_400_000).toISOString(),
+    evidenceReference: 'Verification ticket CLIN-RUNTIME', checklist: { registerChecked: true,
+      licenceCurrentUntilRecorded: true, identityMethod: 'video_call_photo_id', identityConfirmed: true,
+      employmentChannel: 'facility_public_phone', employmentConfirmed: true },
+    authenticatorCode: applicantCode, reason: 'Licence, identity and employment verified' });
   const attest = async (admin, id, applicantCode, { validDays = 365, version } = {}) => platform.command(admin,
-    `${ADMIN}/${id}/attest`, { validUntil: new Date(Date.now() + validDays * 86_400_000).toISOString(),
-      evidenceReference: 'Verification ticket CLIN-RUNTIME', checklist: { registerChecked: true,
-        licenceCurrentUntilRecorded: true, identityMethod: 'video_call_photo_id', identityConfirmed: true,
-        employmentChannel: 'facility_public_phone', employmentConfirmed: true },
-      authenticatorCode: applicantCode, reason: 'Licence, identity and employment verified' },
+    `${ADMIN}/${id}/attest`, attestBody(applicantCode, validDays),
     { 'If-Match': String(version ?? (await detail(admin, id)).version), 'Idempotency-Key': key('attest') });
+  const factorFailures = async (accountId) => count(`select count(*)::int as n from auth.session_events
+    where account_id = $1 and event_type = 'mfa_failed'`, [accountId]);
   const approve = async (admin, id, version) => platform.command(admin, `${ADMIN}/${id}/approve`,
     { reason: 'Second Super Admin review complete' },
     { 'If-Match': String(version ?? (await detail(admin, id)).version), 'Idempotency-Key': key('approve') });
@@ -607,6 +611,15 @@ try {
   // Super Admin C has not stepped up in this sign-in yet (A has, to change the controls).
   expectStatus(await attest(adminC, freshApplication, code(freshFactor)), 403, 'STEP_UP_REQUIRED');
   await platform.stepUp(adminA);
+  // Whatever step 1 would refuse is refused before the applicant's code is
+  // checked, so it never counts against the applicant's failure budget: an
+  // insider at the facility, and a stale version.
+  await platform.stepUp(adminInsider);
+  const failuresBeforeRefusals = await factorFailures(freshAccount.id);
+  expectStatus(await attest(adminInsider, freshApplication, '000000'), 403, 'WORKFORCE_FACILITY_CONFLICT');
+  expectStatus(await attest(adminA, freshApplication, '000000', { version: 1 }), 409, 'VERSION_CONFLICT');
+  assert.equal(await factorFailures(freshAccount.id), failuresBeforeRefusals,
+    'a step 1 refused anyway counted a failure against the applicant');
   const failuresBeforeReview = await count(`select count(*)::int as n from auth.session_events where account_id = $1
     and event_type = 'mfa_failed'`, [freshAccount.id]);
   expectStatus(await attest(adminA, freshApplication, '000000'), 403, 'CLINICIAN_APPLICATION_AUTHENTICATOR_CODE_INVALID');
@@ -624,6 +637,12 @@ try {
   expectStatus(approved, 201);
   assert.deepEqual([approved.body.state, approved.body.roleCode, approved.body.attestationId],
     ['approved', 'doctor', attested.body.attestationId]);
+  // Step 1 on the approved application: its own refusal, no failure counted
+  // (no Super Admin can spend an approved clinician's failure budget).
+  const failuresAfterApproval = await factorFailures(freshAccount.id);
+  expectStatus(await attest(adminA, freshApplication, '000000'), 409, 'CLINICIAN_APPLICATION_STATE_INVALID');
+  assert.equal(await factorFailures(freshAccount.id), failuresAfterApproval,
+    'step 1 on an approved application counted a failure against the clinician');
   const trail = (await owner.query(`select action, access_scope from audit.events
     where action in ('admin.clinician-application.attested', 'admin.workforce.credential.attested',
       'admin.clinician-application.approved', 'admin.workforce.membership.attached', 'admin.workforce.role.granted')
@@ -633,7 +652,7 @@ try {
     'admin.workforce.credential.attested', 'admin.clinician-application.approved', 'admin.workforce.membership.attached',
     'admin.workforce.role.granted']);
   assert(trail.every(row => row.access_scope === 'platform'));
-  checks.push('the queue needs platform.workforce.manage (a support admin is 403) and lists the application with its authenticator ready; step 1 needs a fresh step-up, refuses a wrong applicant code (403, counted against the applicant) and records the attestation on the applicant\'s live code; the same Super Admin cannot approve (403 SECOND_ADMIN_REQUIRED), an insider is 403 WORKFORCE_FACILITY_CONFLICT, a second Super Admin approves on step 1\'s attestation; five platform-scoped audit events');
+  checks.push('the queue needs platform.workforce.manage (a support admin is 403) and lists the application with its authenticator ready; step 1 needs a fresh step-up, refuses an insider (403 WORKFORCE_FACILITY_CONFLICT), a stale version (409) and an approved application (409 STATE_INVALID) before the applicant\'s code is checked, so none counts a failure, refuses a wrong applicant code (403, counted against the applicant) and records the attestation on the applicant\'s live code; the same Super Admin cannot approve (403 SECOND_ADMIN_REQUIRED), an insider is 403 WORKFORCE_FACILITY_CONFLICT, a second Super Admin approves on step 1\'s attestation; five platform-scoped audit events');
 
   // 11. The first staff sign-in after approval.
   const firstStep = await staff.passwordStep(fresh);
@@ -777,6 +796,42 @@ try {
   assert([200, 403].includes(racedLogin.status), `sign-in beside an approval: ${racedLogin.status}`);
   assert.equal(await count(`select count(*)::int as n from identity.staff_facility_memberships
     where account_id = $1 and facility_id = $2`, [contested.accountId, ids.x]), 1);
+  //   A double-submitted step 1 (one Idempotency-Key, one code) while the
+  //   first is still running: both requests wait for the applicant's account
+  //   row, which another transaction holds; then one attests and the other
+  //   answers the first answer (replayed), and no failure is counted.
+  const doubleAttest = await applicant('double-attest', ids.y, 'MDCN/R/40007');
+  await platform.stepUp(adminA);
+  const doubleAttestVersion = (await detail(adminA, doubleAttest.applicationId)).version;
+  const doubleAttestBody = attestBody(code(doubleAttest));
+  const doubleAttestKey = key('attest-double');
+  const failuresBeforeDouble = await factorFailures(doubleAttest.accountId);
+  const accountHolder = await owner.connect();
+  let doubleAttests;
+  try {
+    await accountHolder.query('begin');
+    await accountHolder.query('select 1 from auth.accounts where id = $1 for update', [doubleAttest.accountId]);
+    const pending = Promise.all([0, 1].map(() => platform.command(adminA, `${ADMIN}/${doubleAttest.applicationId}/attest`,
+      doubleAttestBody, { 'If-Match': String(doubleAttestVersion), 'Idempotency-Key': doubleAttestKey })));
+    for (let waited = 0; ; waited += 1) {
+      const waiting = await count(`select count(*)::int as n from pg_stat_activity where datname = current_database()
+        and backend_type = 'client backend' and wait_event_type = 'Lock' and pid <> pg_backend_pid()`);
+      if (waiting >= 2) break;
+      assert(waited < 400, 'the two step-1 requests did not both wait for the account lock');
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    await accountHolder.query('commit');
+    doubleAttests = await pending;
+  } finally {
+    await accountHolder.query('rollback').catch(() => undefined);
+    accountHolder.release();
+  }
+  assert.deepEqual(doubleAttests.map((response) => response.status), [201, 201],
+    `a double-submitted step 1: ${JSON.stringify(doubleAttests.map((response) => response.body))}`);
+  assert.deepEqual(doubleAttests.map((response) => response.body.replayed).sort(), [false, true]);
+  assert.equal(doubleAttests[0].body.attestationId, doubleAttests[1].body.attestationId);
+  assert.equal(await factorFailures(doubleAttest.accountId), failuresBeforeDouble,
+    'a replayed step 1 counted a failure against the applicant');
   //   Withdraw against approve: one wins, and the result is consistent.
   const torn = await applicant('torn', ids.x, 'MDCN/R/40006');
   await platform.stepUp(adminA);
@@ -794,7 +849,7 @@ try {
   } else {
     assert.deepEqual([withdrawRace.status, approveRace.status, tornState, tornMemberships], [409, 201, 'approved', 1]);
   }
-  checks.push('races: a double-clicked submit yields one account and application (201 and 201 replayed); two concurrent starts for one address send one code; two Super Admins approving at once yield one 201 and one 409, beside the applicant\'s sign-in, with no deadlock; withdraw against approve leaves either a withdrawn application and no membership or an approved one with its membership');
+  checks.push('races: a double-clicked submit yields one account and application (201 and 201 replayed); two concurrent starts for one address send one code; two Super Admins approving at once yield one 201 and one 409, beside the applicant\'s sign-in, with no deadlock; a double-submitted step 1 that waits for the applicant\'s account yields one attestation and its replay (201 and 201 replayed), with no failure counted; withdraw against approve leaves either a withdrawn application and no membership or an approved one with its membership');
 
   // 16. Faults are 503, never 401.
   await owner.query('revoke execute on function identity.current_clinician_applications(character) from hid_identity_runtime');
