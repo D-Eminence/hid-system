@@ -53,7 +53,8 @@ interface AuditEvent { action: string; resourceType: string; resourceId: string;
  * attestation). Step 1 also verifies a live code from the applicant's own
  * authenticator in that transaction; a refused code is committed (it counts
  * against the applicant's 0088 failure budget) and then answered. So before
- * the code, step 1 refuses whatever it would refuse anyway (the pre-check),
+ * the code, step 1 refuses whatever it would refuse anyway (the pre-check:
+ * the request's fields, the application, the key, the applicant account),
  * and, under both account locks, answers a concurrent request with the same
  * Idempotency-Key from its stored answer and checks the application again. A new
  * command (not a replay) writes its platform-scoped audit events in the same
@@ -139,8 +140,10 @@ export class ClinicianApplicationAdminService {
         const replay = await this.attestReplay(client, idempotencyKey, digest);
         if (replay) return replay;
         // Whatever step 1 would refuse is refused here, before the applicant's
-        // code is checked: a wrong code counts against the applicant.
-        const applicant = await this.attestPrecheck(client, applicationId, expectedVersion);
+        // code is checked (the request's own fields included): a wrong code
+        // counts against the applicant.
+        const applicant = await this.attestPrecheck(client, applicationId, expectedVersion, validUntil, input,
+          idempotencyKey);
         if (applicant === context.actor.accountId) {
           throw new DomainProblem(403, 'WORKFORCE_SELF_CHANGE_DENIED',
             'Administrators cannot provision their own facility access');
@@ -152,7 +155,7 @@ export class ClinicianApplicationAdminService {
           actorAccountId: context.actor.accountId! });
         const concurrent = await this.attestReplay(client, idempotencyKey, digest);
         if (concurrent) return concurrent;
-        await this.attestPrecheck(client, applicationId, expectedVersion);
+        await this.attestPrecheck(client, applicationId, expectedVersion, validUntil, input, idempotencyKey);
         const confirmation = await this.mfa.confirmApplicantFactor(client,
           { applicantAccountId: applicant, actorAccountId: context.actor.accountId! }, input.authenticatorCode, event);
         if (confirmation.kind !== 'confirmed') return { kind: 'refused', refusal: confirmation.kind } as const;
@@ -249,11 +252,18 @@ export class ClinicianApplicationAdminService {
       role_code: String(prior.roleCode), replayed: true }) } as const;
   }
 
-  /** The step-1 pre-check: C20's refusals before any code is checked; the applicant's account otherwise. */
-  private async attestPrecheck(client: PoolClient, applicationId: string, expectedVersion: number): Promise<string> {
+  /**
+   * The step-1 pre-check: everything C20 refuses before it checks the factor
+   * the code proves (the request's fields as C20 gets them, the application,
+   * the key, the applicant account and staff record), before any code is
+   * checked; the applicant's account otherwise.
+   */
+  private async attestPrecheck(client: PoolClient, applicationId: string, expectedVersion: number, validUntil: Date,
+    input: AttestClinicianApplicationDto, idempotencyKey: string): Promise<string> {
     const applicant = (await client.query<{ account_id: string | null }>(
-      'select identity.admin_clinician_application_attest_precheck($1, $2)::text as account_id',
-      [applicationId, expectedVersion])).rows[0]?.account_id;
+      'select identity.admin_clinician_application_attest_precheck($1, $2, $3, $4, $5, $6, $7)::text as account_id',
+      [applicationId, expectedVersion, validUntil.toISOString(), input.evidenceReference, JSON.stringify(input.checklist),
+        input.reason.trim(), idempotencyKey])).rows[0]?.account_id;
     if (!applicant) throw this.unavailable();
     return applicant;
   }

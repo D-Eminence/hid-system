@@ -197,7 +197,8 @@ describe('step 1 (attest)', () => {
     expect(h.mfa.lockApplicantReview).toHaveBeenCalledWith(expect.anything(),
       { applicantAccountId: APPLICANT, actorAccountId: context.actor.accountId });
     expect(h.statements.filter(({ sql }) => sql.includes('admin_clinician_application_attest_precheck'))
-      .map(({ values }) => values)).toEqual([[APPLICATION, 3], [APPLICATION, 3]]);
+      .map(({ values }) => values)).toEqual(Array(2).fill([APPLICATION, 3, '2027-06-30T22:59:59.000Z',
+      'Review ticket CLIN-0001', JSON.stringify(checklist), 'Licence and identity verified', KEY]));
     expect(h.mfa.confirmApplicantFactor).toHaveBeenCalledWith(expect.anything(),
       { applicantAccountId: APPLICANT, actorAccountId: context.actor.accountId }, '123456', event);
     const { authenticatorCode: _code, ...withoutCode } = attestInput;
@@ -251,6 +252,13 @@ describe('step 1 (attest)', () => {
     ['WORKFORCE_SELF_CHANGE_DENIED', 403, 'WORKFORCE_SELF_CHANGE_DENIED'],
     ['WORKFORCE_FACILITY_NOT_VERIFIED', 409, 'WORKFORCE_FACILITY_NOT_VERIFIED'],
     ['CLINICIAN_APPLICATION_NOT_FOUND', 404, 'CLINICIAN_APPLICATION_NOT_FOUND'],
+    // What C20 refused only after the code: the request's own fields, a key
+    // used for a generic 0087 attestation, the applicant account and staff record.
+    ['CLINICIAN_APPLICATION_COMMAND_INVALID', 400, 'CLINICIAN_APPLICATION_COMMAND_INVALID'],
+    ['ADMIN_IDEMPOTENCY_CONFLICT', 409, 'IDEMPOTENCY_CONFLICT'],
+    ['WORKFORCE_ACCOUNT_INELIGIBLE', 409, 'WORKFORCE_ACCOUNT_INELIGIBLE'],
+    ['WORKFORCE_STAFF_INELIGIBLE', 409, 'WORKFORCE_STAFF_INELIGIBLE'],
+    ['WORKFORCE_STAFF_NOT_FOUND', 404, 'WORKFORCE_STAFF_NOT_FOUND'],
   ])('refuses %s from the pre-check before any lock or code, so no failure is counted', async (message, status, code) => {
     const h = harness({ ...commands(), 'admin_clinician_application_attest_precheck': marked(message) });
     const problem = await refusal(h.service.attest(context, APPLICATION, 3, attestInput, KEY, event));
@@ -258,6 +266,16 @@ describe('step 1 (attest)', () => {
     expect(h.mfa.lockApplicantReview).not.toHaveBeenCalled();
     expect(h.mfa.confirmApplicantFactor).not.toHaveBeenCalled();
     expect(h.order).not.toContain('admin_attest_clinician_application');
+  });
+
+  it('pre-checks the reason as step 1 gets it (trimmed), so a blank one is refused before the code', async () => {
+    const h = harness(commands());
+    await h.service.attest(context, APPLICATION, 3, { ...attestInput, reason: '   Licence and identity verified   ' },
+      KEY, event);
+    const prechecked = h.statements.filter(({ sql }) => sql.includes('admin_clinician_application_attest_precheck'));
+    const attest = h.statements.find(({ sql }) => sql.includes('admin_attest_clinician_application'))!;
+    expect(prechecked.map(({ values }) => values[5])).toEqual(['Licence and identity verified', 'Licence and identity verified']);
+    expect(attest.values[6]).toBe('Licence and identity verified');
   });
 
   it('refuses, under the locks and before any code, an application that changed while it waited', async () => {

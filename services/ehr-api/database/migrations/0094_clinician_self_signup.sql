@@ -2686,14 +2686,20 @@ end
 $$;
 
 -- The step-1 pre-check, before Identity checks the applicant's live code: it
--- refuses whatever step 1 (C20) would refuse, in C20's order and with C20's
--- markers, so a call that would be refused anyway never reaches the
--- applicant's authenticator or failure budget (a wrong code counts against
--- the applicant). It names the applicant's account otherwise. A read only:
--- Identity calls it again after taking both account locks, and C20 checks
--- everything again under them.
+-- refuses whatever step 1 (C20) would refuse before it checks the factor the
+-- code proves, in C20's order and with C20's and 0087's markers, so a call
+-- that would be refused anyway never reaches the applicant's authenticator
+-- or failure budget (a wrong code counts against the applicant). That is the
+-- request's own fields (validity, evidence reference, checklist, reason),
+-- the application (version, state, identity refusal, facility, insider,
+-- self, the end of the licence), a key already used for a generic 0087
+-- attestation, and the applicant account and staff record 0087's
+-- attestation would refuse. It names the applicant's account otherwise. A
+-- read only: Identity calls it again after taking both account locks, and
+-- C20 checks everything again under them.
 create function identity.admin_clinician_application_attest_precheck(requested_application_id uuid,
-  expected_version bigint)
+  expected_version bigint, requested_valid_until timestamptz, requested_evidence_reference text,
+  requested_checklist jsonb, requested_reason text, requested_idempotency_key text)
 returns uuid
 language plpgsql
 stable
@@ -2704,8 +2710,26 @@ declare
   actor_account uuid := identity.workforce_command_actor();
   application identity.clinician_applications%rowtype;
   facility_row identity.facilities%rowtype;
+  target auth.accounts%rowtype;
+  target_staff identity.staff%rowtype;
 begin
-  if requested_application_id is null or expected_version is null then
+  -- C20's own checks of the request (all but the factor and the request digest).
+  if requested_application_id is null or expected_version is null
+     or requested_checklist is null or jsonb_typeof(requested_checklist) <> 'object'
+     or (select count(*) from jsonb_object_keys(requested_checklist)) <> 6
+     or requested_checklist->'registerChecked' is distinct from 'true'::jsonb
+     or requested_checklist->'licenceCurrentUntilRecorded' is distinct from 'true'::jsonb
+     or requested_checklist->'identityConfirmed' is distinct from 'true'::jsonb
+     or requested_checklist->'employmentConfirmed' is distinct from 'true'::jsonb
+     or coalesce(requested_checklist->>'identityMethod', '') not in ('video_call_photo_id', 'in_person_photo_id')
+     or jsonb_typeof(requested_checklist->'identityMethod') is distinct from 'string'
+     or coalesce(requested_checklist->>'employmentChannel', '') not in ('facility_public_phone', 'in_person_visit')
+     or jsonb_typeof(requested_checklist->'employmentChannel') is distinct from 'string'
+     or requested_evidence_reference is null or length(btrim(requested_evidence_reference)) not between 8 and 500
+     or requested_reason is null or length(btrim(requested_reason)) not between 8 and 500
+     or requested_valid_until is null or requested_valid_until <= clock_timestamp()
+     or requested_valid_until > clock_timestamp() + interval '3 years'
+     or requested_idempotency_key is null then
     raise exception using errcode = '22023', message = 'CLINICIAN_APPLICATION_COMMAND_INVALID';
   end if;
   perform identity.workforce_require_assurance(actor_account);
@@ -2733,6 +2757,26 @@ begin
   end if;
   if identity.workforce_works_at(actor_account, facility_row.id) then
     raise exception using errcode = '42501', message = 'WORKFORCE_FACILITY_CONFLICT';
+  end if;
+  if requested_valid_until > (application.licence_valid_until + 1)::timestamp at time zone 'Africa/Lagos' then
+    raise exception using errcode = '22023', message = 'CLINICIAN_APPLICATION_COMMAND_INVALID';
+  end if;
+  perform identity.clinician_application_inner_key_free(actor_account, array['workforce.credential.attest'],
+    requested_idempotency_key);
+  -- 0087's attestation of the applicant (identity.admin_record_credential_attestation).
+  select * into target from auth.accounts account_row where account_row.id = application.account_id;
+  if not found then
+    raise exception using errcode = 'P0002', message = 'WORKFORCE_ACCOUNT_NOT_FOUND';
+  end if;
+  select * into target_staff from identity.staff staff_row where staff_row.account_id = target.id;
+  if not found then
+    raise exception using errcode = 'P0002', message = 'WORKFORCE_STAFF_NOT_FOUND';
+  end if;
+  if not target_staff.active or not identity.workforce_target_eligible(target) then
+    raise exception using errcode = '23514', message = 'WORKFORCE_ACCOUNT_INELIGIBLE';
+  end if;
+  if lower(btrim(target_staff.verification_status)) not in ('pending', 'verified', 'approved', 'active') then
+    raise exception using errcode = '23514', message = 'WORKFORCE_STAFF_INELIGIBLE';
   end if;
   return application.account_id;
 end
@@ -3165,7 +3209,7 @@ revoke all on function identity.clinician_signup_open(),
   identity.prune_clinician_application_artifacts(),
   identity.admin_list_clinician_applications(text, timestamptz, uuid, integer),
   identity.admin_get_clinician_application(uuid),
-  identity.admin_clinician_application_attest_precheck(uuid, bigint),
+  identity.admin_clinician_application_attest_precheck(uuid, bigint, timestamptz, text, jsonb, text, text),
   identity.admin_clinician_application_prior(text, text, character),
   identity.admin_attest_clinician_application(uuid, bigint, timestamptz, text, jsonb, uuid, text, text, character),
   identity.admin_approve_clinician_application(uuid, bigint, text, text, character),

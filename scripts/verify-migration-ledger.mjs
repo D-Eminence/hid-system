@@ -105,7 +105,7 @@ const acceptedMigrations = new Map([
   ['0091_launch_module_withdrawal_and_patient_access_transparency.sql', 'ddf4ae3a333f8345de9a7da37b73e91318279b06caaee9b866b1b5150f279f94'],
   ['0092_patient_self_reported_enrollment_profile.sql', '66e1d84b871b7a52b57aac2cdb4a2e9cdcef518b7ebe40f97192c1857dbcabe7'],
   ['0093_break_glass_launch_with_limits.sql', 'e5072a02fa90dc3e894dab3f6a78d7b1d1058719f93a2ac6e26cf67996e5fbee'],
-  ['0094_clinician_self_signup.sql', '6b04c558f3388cbcc5ca6a4af9a647d7236abe7b6eec4e92ac2c28a77aaf0bc8'],
+  ['0094_clinician_self_signup.sql', '4dd29ff814af54e5fef4fc45d124c8e9eca9e59ade6865715da7d88668c9ed60'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))
