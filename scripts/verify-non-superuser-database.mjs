@@ -37,7 +37,10 @@
 //   replaces the function under a membership it takes and revokes in its own
 //   transaction), the bootstrap again and db:verify-roles; the function keeps
 //   its owner, the administrator keeps no INHERIT or SET membership, and the
-//   guards' logins read the new control as off;
+//   guards' logins read the new control as off; before that, the same
+//   migration run on that database, in a rolled-back transaction, as an
+//   administrator whose name needs quoting and which still owns the function
+//   (a chain migrated before its first bootstrap);
 // - the platform-control-owner and function-parameter-settings suites.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -429,6 +432,46 @@ try {
   assert.equal(psql('upgrade database before the upgrade', admin,
     'select count(*) || \':\' || max(version) from migration.schema_migrations', 0, upgrade).stdout.trim(),
   `${files.indexOf(signupMigration)}:${previousHead}`);
+  // A chain migrated before its first role bootstrap: the migration
+  // administrator still owns platform.control_enabled when this migration
+  // runs, and nothing requires that administrator's name to be lower case. The
+  // migration must take the owner-is-current-user path with a name that needs
+  // quoting (a regrole cast would quote it, so the owner would not compare
+  // equal and the membership probe would name a role that does not exist). It
+  // runs here as such an administrator, which owns the function and holds the
+  // administrator's privileges, in a transaction that is rolled back.
+  const quotedAdministrator = 'HidAdmin';
+  const signupSql = await readFile(join(service, 'database/migrations', signupMigration), 'utf8');
+  const quotedRun = await (async () => {
+    const client = new Client({ host: temporary, user: superuser, database: upgrade });
+    await client.connect();
+    try {
+      await client.query('begin');
+      await client.query(`create role "${quotedAdministrator}" nologin nosuperuser nobypassrls`);
+      await client.query(`grant ${admin} to "${quotedAdministrator}" with inherit true`);
+      await client.query(`alter function platform.control_enabled(text) owner to "${quotedAdministrator}"`);
+      await client.query(`set local role "${quotedAdministrator}"`);
+      await client.query(signupSql);
+      const owner = (await client.query(`select pg_get_userbyid(proowner) as owner from pg_proc
+        where oid = 'platform.control_enabled(text)'::regprocedure`)).rows[0].owner;
+      const memberships = Number((await client.query(`select count(*) as n from pg_auth_members
+        where member = (select oid from pg_roles where rolname = $1) and roleid <> (select oid from pg_roles
+          where rolname = $2)`, [quotedAdministrator, admin])).rows[0].n);
+      return { applied: true, owner, memberships };
+    } catch (error) {
+      return { applied: false, code: error.code, message: error.message };
+    } finally {
+      await client.query('rollback').catch(() => undefined);
+      await client.end().catch(() => undefined);
+    }
+  })();
+  assert.deepEqual(quotedRun, { applied: true, owner: quotedAdministrator, memberships: 0 },
+    `${signupMigration} as an administrator whose name needs quoting: ${JSON.stringify(quotedRun)}`);
+  assert.equal(psql('the quoted administrator was rolled back', superuser,
+    `select count(*) from pg_roles where rolname = '${quotedAdministrator}'`, 0, upgrade).stdout.trim(), '0');
+  evidence.steps.clinician_signup_quoted_owner = { database: upgrade, migrated_through: previousHead,
+    run_as: quotedAdministrator, owner_before: quotedAdministrator, applied: 'rolled back',
+    owner_after: quotedRun.owner, temporary_memberships_left: quotedRun.memberships };
   // The previous release's bootstrap left platform.control_enabled to its
   // technical owner. This release's bootstrap cannot run before this
   // migration (it grants the new commands), so the previous one's P8-CONTROL

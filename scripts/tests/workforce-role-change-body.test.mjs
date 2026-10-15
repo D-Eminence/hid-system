@@ -6,7 +6,8 @@
 // 0087 text: the 0087 body with exactly three documented insertions is the new
 // body, whitespace aside.
 //   (i)   a ninth parameter, pinned_attestation_id uuid;
-//   (ii)  in the chosen-attestation query, the reservation and the pin;
+//   (ii)  in the chosen-attestation query, the reservation (bound to the
+//         target account and the facility) and the pin;
 //   (iii) the same two predicates in the second-person probe.
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync } from 'node:fs';
@@ -34,8 +35,10 @@ function definition(source, name) {
 }
 const normalized = (text) => text.replace(/\s+/g, ' ').trim();
 
-const reservation = 'and identity.workforce_attestation_usable(attestation.id, pinned_attestation_id) '
-  + 'and (pinned_attestation_id is null or attestation.id = pinned_attestation_id)';
+// The reservation is bound to the grant's own account and facility: a pin
+// unlocks an attestation only for its own application there.
+const reservation = 'and identity.workforce_attestation_usable(attestation.id, pinned_attestation_id, target.id, '
+  + 'facility_row.id) and (pinned_attestation_id is null or attestation.id = pinned_attestation_id)';
 
 test('workforce_change_role is the 0087 grant body with exactly the reservation and the pin added', () => {
   const original = definition(governed, 'identity.admin_change_workforce_role');

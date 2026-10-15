@@ -291,7 +291,7 @@ begin
   end loop;
   foreach signature in array array[
     'identity.workforce_change_role(uuid,uuid,bigint,text,text,text,text,character,uuid)',
-    'identity.workforce_attestation_usable(uuid,uuid)', 'identity.clinician_licence_key(text,text)',
+    'identity.workforce_attestation_usable(uuid,uuid,uuid,uuid)', 'identity.clinician_licence_key(text,text)',
     'identity.guard_clinician_application_change()', 'identity.clinician_application_view(identity.clinician_applications)',
     'identity.clinician_intake_require_open()', 'identity.clinician_application_require_not_maintenance()',
     'identity.clinician_application_require_system()', 'identity.clinician_application_audit(text,text,text,text,jsonb)',
@@ -1808,6 +1808,43 @@ select pg_temp.ca_refused(format($c$select * from identity.workforce_change_role
   (select id from identity.staff_facility_memberships where account_id = pg_temp.ca_account('doctor9@ca.invalid')
      and facility_id = 'ca110000-0000-4000-8000-00000000000f'), current_setting('ca_suite.p9_y_attestation')),
   'WORKFORCE_ATTESTATION_REQUIRED');
+-- Nor while that application is under review and not overdue: the pin
+-- unlocks the attestation only for its own application's account and
+-- facility. P2's Y attestation, pinned on a membership D attaches for P2 at U
+-- (rolled back afterwards: P2 keeps its one membership).
+savepoint ca_pin_unbound;
+select pg_temp.ca_as('d');
+select * from identity.admin_attach_workforce_member('ca110000-0000-4000-8000-00000000000f',
+  pg_temp.ca_account('nurse2@ca.invalid'), null, null, 'Synthetic generic attach of P2 at U', 'clinician-suite-attach-p2-u',
+  repeat('d', 64));
+select pg_temp.ca_as('b');
+do $$ begin
+  if (pg_temp.ca_application('nurse2@ca.invalid', 'ca110000-0000-4000-8000-00000000000b')).state <> 'under_review'
+     or (pg_temp.ca_application('nurse2@ca.invalid', 'ca110000-0000-4000-8000-00000000000b')).expires_at <= clock_timestamp() then
+    raise exception 'the pinned case needs P2''s Y application under review and not overdue';
+  end if;
+end $$;
+select pg_temp.ca_refused(format($c$select * from identity.workforce_change_role(%L, 'ca110000-0000-4000-8000-00000000000f', 1,
+  'nurse', 'grant', 'Synthetic pinned grant of P2 at U', 'clinician-suite-grant-p2-pin', repeat('f', 64), %L)$c$,
+  (select id from identity.staff_facility_memberships where account_id = pg_temp.ca_account('nurse2@ca.invalid')
+     and facility_id = 'ca110000-0000-4000-8000-00000000000f'),
+  (pg_temp.ca_application('nurse2@ca.invalid', 'ca110000-0000-4000-8000-00000000000b')).attestation_id),
+  'WORKFORCE_ATTESTATION_REQUIRED');
+-- The reservation itself: the pin unlocks only its own application's account and facility.
+do $$
+declare
+  attestation uuid := (pg_temp.ca_application('nurse2@ca.invalid', 'ca110000-0000-4000-8000-00000000000b')).attestation_id;
+  account uuid := pg_temp.ca_account('nurse2@ca.invalid');
+begin
+  if not identity.workforce_attestation_usable(attestation, attestation, account, 'ca110000-0000-4000-8000-00000000000b')
+     or identity.workforce_attestation_usable(attestation, attestation, account, 'ca110000-0000-4000-8000-00000000000f')
+     or identity.workforce_attestation_usable(attestation, attestation, pg_temp.ca_account('doctor9@ca.invalid'),
+       'ca110000-0000-4000-8000-00000000000b')
+     or identity.workforce_attestation_usable(attestation, null, account, 'ca110000-0000-4000-8000-00000000000b') then
+    raise exception 'a pin unlocked a reserved attestation outside its own application';
+  end if;
+end $$;
+rollback to savepoint ca_pin_unbound;
 -- After approval an attestation behaves as any 0087 one: the generic grant at U
 -- rests on P9's approved W attestation, not the longer rejected Y one.
 set local role hid_identity_api_runtime;
