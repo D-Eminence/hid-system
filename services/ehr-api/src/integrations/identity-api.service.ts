@@ -61,6 +61,12 @@ export class IdentityApiService {
     purpose: 'direct-care' | 'emergency' | 'healthcare-operations',
     context: DataAccessContext,
   ) {
+    // Same-origin browser GETs need not carry Origin or CSRF. Delegate their
+    // direct-care reads to the existing workload-authenticated read endpoint,
+    // which independently checks staff membership, permission and consent.
+    if (scope === 'read_records' && purpose === 'direct-care') {
+      return this.staffRecordRead(patientId, context);
+    }
     return this.translate(this.client.authorizePatient(patientId, scope, purpose, {
       correlationId: context.correlationId,
       facilityId: context.facilityId,
