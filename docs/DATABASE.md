@@ -4411,3 +4411,7 @@ Tests:
   runs 0095's SQL again as that administrator in rolled-back transactions:
   refused (`55000 BREAK_GLASS_CONTROL_ON`) with the control on, a no-op with
   it off.
+- All 52 SQL suites pass on a database built from empty to 0095 and
+  bootstrapped, and the 50 additional suites again with every schema, table
+  and function owned by a `NOSUPERUSER NOBYPASSRLS` role; the full rehearsal
+  passes on 0095 (local evidence, release checklist §8).
