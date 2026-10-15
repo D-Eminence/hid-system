@@ -44,6 +44,8 @@ interface Options {
   inactive?: boolean;
   bucketCounts?: Record<string, number>;
   blockedBuckets?: string[];
+  /** Rows the factor's last-step UPDATE changes (0 when a concurrent use advanced it first). */
+  stepAdvanced?: number;
 }
 
 useTestEnvironment({ MFA_SECRET_KEY_B64: Buffer.alloc(32, 0x5a).toString('base64'), MFA_KEY_VERSION: 'applicant-v1' });
@@ -82,6 +84,7 @@ function harness(options: Options = {}) {
         : { rowCount: 1, rows: [{ request_count: counted, window_started_at: new Date(), blocked_until: null }] };
     }
     if (sql.includes('count(*)::text as remaining')) return { rowCount: 1, rows: [{ remaining: '9' }] };
+    if (sql.includes('set last_used_step = $2')) return { rowCount: options.stepAdvanced ?? 1, rows: [] };
     return { rowCount: 1, rows: [] };
   };
   const client = { query: jest.fn(async (sql: string, values: unknown[] = []) => {
@@ -287,10 +290,27 @@ describe('step 1 confirms the applicant\'s authenticator (confirmApplicantFactor
     }
   });
 
-  it('does not accept a code of a time step already used', async () => {
-    const { service, client } = harness({ enrolled: true, lastUsedStep: Math.floor(NOW / 30_000) + 1 });
+  it('does not accept a code of a time step already used, the code\'s own step included', async () => {
+    // The boundary: the same code read twice at step 1 (its step is the last used one).
+    for (const lastUsedStep of [Math.floor(NOW / 30_000), Math.floor(NOW / 30_000) + 1]) {
+      const { service, statements, client } = harness({ enrolled: true, lastUsedStep });
+      expect(await service.confirmApplicantFactor(client, { applicantAccountId: ACCOUNT, actorAccountId: ADMIN },
+        totp(SECRET, NOW), event)).toEqual({ kind: 'invalid' });
+      expect(writes(statements, /set last_used_step/)).toHaveLength(0);
+    }
+    // One step earlier was used: the code's step is accepted, once.
+    const { service, client } = harness({ enrolled: true, lastUsedStep: Math.floor(NOW / 30_000) - 1 });
+    expect(await service.confirmApplicantFactor(client, { applicantAccountId: ACCOUNT, actorAccountId: ADMIN },
+      totp(SECRET, NOW), event)).toEqual({ kind: 'confirmed', factorId: FACTOR });
+  });
+
+  it('does not accept a code whose step a concurrent use advanced first (the guarded UPDATE changed no row)', async () => {
+    const { service, statements, client } = harness({ enrolled: true, stepAdvanced: 0 });
     expect(await service.confirmApplicantFactor(client, { applicantAccountId: ACCOUNT, actorAccountId: ADMIN },
       totp(SECRET, NOW), event)).toEqual({ kind: 'invalid' });
+    const advance = writes(statements, /set last_used_step = \$2/)[0];
+    expect(advance?.sql).toContain('(last_used_step is null or last_used_step < $2)');
+    expect(sessionEvents(statements)).toContainEqual(expect.objectContaining({ eventType: 'mfa_failed' }));
   });
 
   it('counts a wrong code, or a recovery code, against the applicant', async () => {
