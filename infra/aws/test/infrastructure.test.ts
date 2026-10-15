@@ -1289,14 +1289,15 @@ test('NIN-only enrollment and the NIN holder routes are explicit synth inputs th
   assert.throws(() => environmentConfig('staging', 'economy', 'true', undefined, { ninHolderSmsEnabled: 'true' }),
     /HID_NIN_HOLDER_SMS_ENABLED=true is refused on staging/);
   // Production: the blanket NIN-only refusal is replaced by the route rules.
-  // The online route stays refused in production until the facility route
-  // ships (ADR-063): HID_ASSISTED_REGISTRATION_ENABLED has no effect before
-  // 0094, so it cannot stand in for that route.
-  for (const routes of [{ ninHolderSmsEnabled: 'true' }, { ninHolderSmsEnabled: 'true', assistedRegistrationEnabled: 'true' }]) {
-    assert.throws(() => environmentConfig('production', undefined, 'true', undefined,
-      { ...productionTopic, qoreIdNinOnlyEnrollmentEnabled: 'true', ...routes }),
-    /HID_NIN_HOLDER_SMS_ENABLED=true is refused in production until the facility route ships/);
-  }
+  // The online route needs the facility route (ADR-063), the remedy when
+  // someone who knows a NIN closes its online route.
+  assert.throws(() => environmentConfig('production', undefined, 'true', undefined,
+    { ...productionTopic, qoreIdNinOnlyEnrollmentEnabled: 'true', ninHolderSmsEnabled: 'true' }),
+  /HID_NIN_HOLDER_SMS_ENABLED=true needs HID_ASSISTED_REGISTRATION_ENABLED=true in production/);
+  const bothRoutes = environmentConfig('production', undefined, 'true', undefined, { ...productionTopic,
+    qoreIdNinOnlyEnrollmentEnabled: 'true', ninHolderSmsEnabled: 'true', assistedRegistrationEnabled: 'true' });
+  assert.deepEqual([bothRoutes.qoreIdNinOnlyEnrollmentEnabled, bothRoutes.ninHolderSmsEnabled,
+    bothRoutes.assistedRegistrationEnabled], [true, true, true]);
   const facilityFlag = environmentConfig('production', undefined, 'true', undefined, { ...productionTopic,
     qoreIdNinOnlyEnrollmentEnabled: 'true', assistedRegistrationEnabled: 'true' });
   assert.deepEqual([facilityFlag.qoreIdNinOnlyEnrollmentEnabled, facilityFlag.ninHolderSmsEnabled,
@@ -1310,9 +1311,7 @@ test('NIN-only enrollment and the NIN holder routes are explicit synth inputs th
   const productionConfiguration = environmentConfig('production', undefined, 'true', undefined, productionTopic);
   for (const [label, change, message] of [
     ['online route without the facility route', { ninHolderSmsEnabled: true },
-      /HID_NIN_HOLDER_SMS_ENABLED=true is refused in production until the facility route ships/],
-    ['online route with only the facility flag', { ninHolderSmsEnabled: true, assistedRegistrationEnabled: true },
-      /HID_NIN_HOLDER_SMS_ENABLED=true is refused in production until the facility route ships/],
+      /HID_NIN_HOLDER_SMS_ENABLED=true needs HID_ASSISTED_REGISTRATION_ENABLED=true in production/],
     ['signed-in NIN binding', { qoreIdPatientSelfNinBindingEnabled: true },
       /HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED=true is refused in production/],
     ['NIN-only enrollment without a route', { qoreIdNinOnlyEnrollmentEnabled: true },
@@ -1321,6 +1320,12 @@ test('NIN-only enrollment and the NIN holder routes are explicit synth inputs th
     assert.throws(() => new HidRegionalStack(new App(), `Holder${label.replace(/[^A-Za-z]/g, '')}`, {
       configuration: { ...productionConfiguration, ...change } }), message, label);
   }
+  // The regional stack accepts both routes in production.
+  const bothTemplate = Template.fromStack(new HidRegionalStack(new App(), 'HolderBothRoutesProduction', {
+    configuration: { ...productionConfiguration, qoreIdNinOnlyEnrollmentEnabled: true, ninHolderSmsEnabled: true,
+      assistedRegistrationEnabled: true } })).toJSON() as typeof regional;
+  assert.equal(containerOf(bothTemplate, 'identity-api').environment.NIN_HOLDER_SMS_ENABLED, 'true');
+  assert.equal(containerOf(bothTemplate, 'identity-api').environment.ASSISTED_REGISTRATION_ENABLED, 'true');
   const enabled = environmentConfig('staging', 'economy', 'true', undefined,
     { qoreIdNinOnlyEnrollmentEnabled: 'true', assistedRegistrationEnabled: 'true' });
   assert.deepEqual([enabled.qoreIdNinOnlyEnrollmentEnabled, enabled.assistedRegistrationEnabled], [true, true]);
