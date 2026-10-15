@@ -3,7 +3,6 @@ import type { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
 import type { PlatformAccessContext } from '../common/request-context';
 import * as environment from '../config/environment';
-import { getEnvironment, resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { QoreIdVerificationAdapter } from '../identity/qoreid-verification.adapter';
 import { IntegrationAdminService } from './integration-admin.service';
@@ -79,7 +78,7 @@ describe('IntegrationAdminService', () => {
       QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false', QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'true',
       NIN_HOLDER_SMS_ENABLED: 'false', ASSISTED_REGISTRATION_ENABLED: 'false',
     });
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
   });
 
   afterEach(() => {
@@ -88,7 +87,7 @@ describe('IntegrationAdminService', () => {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
   });
 
   it('returns capability state and masked credential metadata without exposing deployment secrets', async () => {
@@ -122,7 +121,7 @@ describe('IntegrationAdminService', () => {
   it('shows the NIN-only gate separately from configured CAC Basic V2', async () => {
     Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true',
       QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'true' });
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     const { service } = harness(listRows);
     const result = await service.list(context);
     expect(result.items[0]).toMatchObject({
@@ -140,7 +139,7 @@ describe('IntegrationAdminService', () => {
   it('keeps the existing-patient NIN binding closed until its own gate is on', async () => {
     Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true',
       QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'false' });
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     const { service } = harness(listRows);
     const result = await service.list(context);
     expect(result.items[0]?.operationGates).toEqual(expect.arrayContaining([
@@ -152,7 +151,7 @@ describe('IntegrationAdminService', () => {
   it('keeps NIN-only enrollment closed without the online holder route, as long as no facility route exists', async () => {
     Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'false',
       ASSISTED_REGISTRATION_ENABLED: 'true' });
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     const { service, database, systemClient } = harness(listRows);
     const result = await service.list(context);
     expect(result.items[0]?.operationGates).toEqual(expect.arrayContaining([
@@ -165,8 +164,8 @@ describe('IntegrationAdminService', () => {
   });
 
   // The status reads the routes the enrollment service opens (ADR-062, ADR-063).
-  function inProduction(overrides: Partial<ReturnType<typeof getEnvironment>> = {}) {
-    const base = getEnvironment();
+  function inProduction(overrides: Partial<ReturnType<typeof environment.getEnvironment>> = {}) {
+    const base = environment.getEnvironment();
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({ ...base, HID_DEPLOYMENT_ENV: 'production',
       QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: false, ...overrides });
   }
@@ -176,7 +175,7 @@ describe('IntegrationAdminService', () => {
   it('opens NIN-only enrollment through the facility route alone', async () => {
     Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'false',
       ASSISTED_REGISTRATION_ENABLED: 'true', QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'false' });
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     const { service, database, systemClient } = harness(listRows, true);
     const result = await service.list(context);
     expect(enrollmentGate(result)).toEqual({ operation: 'patient_nin_enrollment', state: 'open',
@@ -188,7 +187,7 @@ describe('IntegrationAdminService', () => {
 
   it('opens the facility route alone in production too', async () => {
     Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', ASSISTED_REGISTRATION_ENABLED: 'true' });
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     inProduction();
     const { service } = harness(listRows, true);
     expect(enrollmentGate(await service.list(context))).toMatchObject({ state: 'open' });
@@ -197,7 +196,7 @@ describe('IntegrationAdminService', () => {
   it('keeps NIN-only enrollment closed in production while the online route waits for a facility', async () => {
     Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true',
       ASSISTED_REGISTRATION_ENABLED: 'true' });
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     inProduction();
     const { service } = harness(listRows, false);
     const result = await service.list(context);
@@ -208,7 +207,7 @@ describe('IntegrationAdminService', () => {
 
   it('opens the online route alone outside production without a facility read', async () => {
     Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true' });
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     const { service, database } = harness(listRows);
     expect(enrollmentGate(await service.list(context))).toMatchObject({ state: 'open',
       detail: expect.stringMatching(/Open holder routes: online\.$/) });
@@ -218,7 +217,7 @@ describe('IntegrationAdminService', () => {
   it('names both routes when both are open', async () => {
     Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true',
       ASSISTED_REGISTRATION_ENABLED: 'true' });
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     inProduction();
     const { service } = harness(listRows, true);
     expect(enrollmentGate(await service.list(context))).toMatchObject({ state: 'open',
@@ -228,7 +227,7 @@ describe('IntegrationAdminService', () => {
   it('keeps NIN-only enrollment closed while its own flag is off, whatever the routes', async () => {
     Object.assign(process.env, { NIN_HOLDER_SMS_ENABLED: 'true', ASSISTED_REGISTRATION_ENABLED: 'true',
       QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'false' });
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     const { service } = harness(listRows, true);
     const result = await service.list(context);
     expect(enrollmentGate(result)).toMatchObject({ state: 'closed',
@@ -238,7 +237,7 @@ describe('IntegrationAdminService', () => {
 
   it('keeps every flag off closed without a facility read', async () => {
     Object.assign(process.env, { QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'false' });
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     const { service, database } = harness(listRows);
     expect(enrollmentGate(await service.list(context))).toMatchObject({ state: 'closed',
       detail: expect.stringMatching(/No holder route is open\.$/) });
@@ -248,7 +247,7 @@ describe('IntegrationAdminService', () => {
   it('keeps NIN-only enrollment closed while the QoreID gate is closed, even with routes open', async () => {
     Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true',
       ASSISTED_REGISTRATION_ENABLED: 'true' });
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     const paused = harness((sql) => sql.includes('admin_list_integration_providers')
       ? { rows: [{ ...qoreidRow, enabled: false }] } : { rows: [] }, true);
     const pausedResult = await paused.service.list(context);
@@ -262,7 +261,7 @@ describe('IntegrationAdminService', () => {
   it('shows the gate closed, and still lists and pauses, when the holder routes cannot be read', async () => {
     Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true',
       ASSISTED_REGISTRATION_ENABLED: 'true' });
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     const { service } = harness((sql) => sql.includes('admin_set_integration_provider')
       ? { rows: [{ provider: 'qoreid', enabled: false, configuration: {}, row_version: '4', replayed: false }] }
       : listRows(sql), new Error('connection terminated: private detail'));
@@ -276,7 +275,7 @@ describe('IntegrationAdminService', () => {
 
   it('reads the holder routes only after the platform read authorizes the caller', async () => {
     Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', ASSISTED_REGISTRATION_ENABLED: 'true' });
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     const denied = harness(async () => { throw new Error('ADMIN_PERMISSION_DENIED private role detail'); }, true);
     await expect(denied.service.list(context)).rejects.toMatchObject({ code: 'PERMISSION_DENIED', status: 403 });
     expect(denied.database.withSystemTransaction).not.toHaveBeenCalled();
@@ -295,7 +294,7 @@ describe('IntegrationAdminService', () => {
 
   it('distinguishes configured credentials from a closed deployment gate', async () => {
     process.env.QOREID_ENABLED = 'false';
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     const { service } = harness((sql) => sql.includes('admin_list_integration_providers')
       ? { rows: [{ ...qoreidRow, enabled: false }] } : { rows: [] });
     const result = await service.list(context);
@@ -362,7 +361,7 @@ describe('IntegrationAdminService', () => {
   it('does not enable QoreID while deployment credentials are unavailable', async () => {
     process.env.QOREID_ENABLED = 'false';
     delete process.env.QOREID_CLIENT_SECRET;
-    resetEnvironmentForTests();
+    environment.resetEnvironmentForTests();
     const { service, client } = harness(listRows);
     await expect(service.changeProvider(context, 'qoreid', 3, 'enable', 'Resume service', undefined,
       'enable-qoreid-0001')).rejects.toMatchObject({
