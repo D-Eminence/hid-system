@@ -4148,7 +4148,7 @@ Related: ADR-041 (P8 owners); ADR-045 (Outreach campaign governance);
 module set, patient self-service, document upload completion);
 `DATABASE.md` (0091); release checklist §1, §2, §3, P10, P11, §5, §8, §9.
 
-## ADR-058 addendum: break-glass is on at launch, with limits (0093)
+## ADR-058 addendum: break-glass permitted at launch with limits (0093); on only after the P11 operator step
 
 Status: Decided by the owner on 2026-10-14 (D9, "turn on with limits").
 Source implementation proposed (migration 0093, branch
@@ -4185,18 +4185,36 @@ Decision:
   permission 0084 or 0091 withdrew still stops the bootstrap.
 - The control stays the operator's. 0093 leaves `break_glass_enabled` as 0091
   left it (off where still seeded; a migration has no actor for a control
-  event). A platform administrator turns it on with the audited
+  event), and refuses to run while it is on (`55000 BREAK_GLASS_CONTROL_ON`,
+  nothing changed): 0091 kept a value an administrator had set, and granting
+  the permission with the control on would make break-glass live at 0093's
+  commit, before staff MFA. The administrator sets it off with
+  `POST /admin/controls` and `migrate` runs again. Before the first role
+  bootstrap the migration administrator cannot read the control (forced
+  row-level security, `PLATFORM_CONTROL_UNAVAILABLE`); no runtime role exists
+  then, so the control is as 0091 left it, and 0093 goes on. A platform
+  administrator turns it on with the audited
   `POST /admin/controls` (MFA platform session, TOTP step-up, reason,
   `If-Match`) once staff MFA has shipped: Identity runs with 0088 in that
   environment and Health-id signs staff in with an authenticator (FE-2), so
   every session that can activate break-glass is MFA-verified (ADR-054), and
   P22 is done. Until then activation answers `423 BREAK_GLASS_DISABLED` and
-  writes nothing (release checklist P11).
+  writes no grant and no `identity.break-glass.*` audit row, only the
+  request's own `api.identity.break-glass.command` failure row (release
+  checklist P11).
 - Limits, unchanged here and accepted for launch:
   - the emergency summary covers the activating facility only, and the chart
     routes stay closed to the emergency purpose: break-glass cannot open the
     full chart, and an emergency room that never treated the patient sees an
     empty summary (Health-id hand-off B1);
+  - the document list and download are not chart routes and take the
+    emergency purpose as before, so a break-glass grant reads the activating
+    facility's document metadata and files, as the release checklist has
+    recorded since D-Eminence/hid-system#52. Whether it should is N3's open
+    question (Health-id hand-off B1(c)); this addendum does not decide it.
+    Uploads are off at launch and no import writes EHR documents, so a
+    launch database holds none; the reviewed migration that grants
+    `ehr.document.write` again must decide it first;
   - the summary's vitals are as first recorded; corrections are not applied
     (D8; hand-off A11(a));
   - the clinician's access-request list leaves break-glass grants out (0074),
@@ -4222,6 +4240,12 @@ Alternatives not taken:
   Identity checks it in the activation transaction, and only the Identity
   runtime may execute the command. It would be defence in depth for a later
   change, not part of this decision.
+- Refusing the emergency purpose on the document routes now: it would decide
+  N3's document question, which the owner has not decided, and N3's proposed
+  default keeps today's reads; no document exists at launch.
+- Checking the control only in the release checklist before 0093: 0093's own
+  precondition also covers a database the checklist does not reach (a
+  long-lived development or pre-launch copy).
 
 Consequences:
 
@@ -4240,10 +4264,19 @@ Consequences:
   control (or by deactivating `emergency`); taking the permission away again
   is a new reviewed migration, never a hand-made delete, which would stop the
   next bootstrap.
+- The control must follow staff MFA in rollbacks too: before Identity is
+  rolled back past the staff MFA build (0088's Identity) or Health-id past
+  its staff authenticator sign-in (FE-2), a platform administrator sets
+  `break_glass_enabled` off with `POST /admin/controls` and confirms it with
+  P11, and turns it on again only once the MFA builds are back (release
+  checklist §9).
 - Evidence is local and synthetic: the rollback-only suite
-  `break-glass-launch.integration.sql`, the role assertions, and the
-  patient-safety runtime verifier over HTTP with the control off, on and off
-  again (release checklist §8). Nothing has been run on staging or production.
+  `break-glass-launch.integration.sql` (which sets the control itself through
+  the administrator command, so it does not depend on the environment's
+  control), the role assertions, 0093's precondition run again by
+  `verify-non-superuser-database.mjs`, and the patient-safety runtime verifier
+  over HTTP with the control off, on and off again (release checklist §8).
+  Nothing has been run on staging or production.
 
 Related: ADR-054 (staff MFA); ADR-058; `PHASE_3_LAUNCH_DECISIONS.md` (D9, N3);
 `INTERFACE_CONTRACT.md` (break-glass, launch module set); `DATABASE.md`

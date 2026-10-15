@@ -251,7 +251,10 @@ The executable covers:
    With 0093 (break-glass at launch, with limits; ADR-058 addendum): the role
    assertions require exactly doctor, clinician and nurse to hold
    `identity.break-glass.write`; the additional suites include
-   `break-glass-launch.integration.sql`, and `schema`, `emergency` and
+   `break-glass-launch.integration.sql` (which sets `break_glass_enabled`
+   itself through the administrator command inside its transaction, so it
+   passes whatever the restored control holds, and needs an active
+   `emergency` and no `healthcare-operations` row), and `schema`, `emergency` and
    `emergency-contacts` rely on the migrated grant; `patient_safety_runtime`
    no longer inserts the `emergency` code or grants the permission, requires
    both from the migrations, and drives `POST /identity/break-glass` over
@@ -260,7 +263,13 @@ The executable covers:
    off, `201` and an unextended replay once its copy turns the control on
    (as P11's operator step would), `423` again once it is off, and `403
    PERMISSION_DENIED` for an org admin; and the non-superuser check's P10 and
-   P11 expect `emergency` and the three break-glass holders.
+   P11 expect `emergency` and the three break-glass holders. The
+   non-superuser check also confirms 0093's precondition: before the first
+   bootstrap the administrator cannot read the control
+   (`PLATFORM_CONTROL_UNAVAILABLE`) and 0093 applies; after it, 0093's SQL run
+   again as the administrator in rolled-back transactions is refused
+   (`55000 BREAK_GLASS_CONTROL_ON`) with the control on and is a no-op with it
+   off.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,

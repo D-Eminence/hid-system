@@ -819,22 +819,32 @@ It also requires an active `emergency` purpose of use, which 0093 seeds (0082
 seeded only `direct-care`); without it, on a database before 0093 or after an
 operator deactivates the code, activation also returns
 `423 BREAK_GLASS_DISABLED` ("Emergency access is not enabled on this
-platform"), where it returned `400 INVALID_CONSENT_COMMAND`. Break-glass is on
-at launch with limits (decision D9, owner decision of 2026-10-14, ADR-058
-addendum): 0091 withdrew `identity.break-glass.write` from every role, and
-0093 grants it again to exactly doctor, clinician and nurse, its holders
-before 0091, and seeds `emergency`. Every other role gets `403
-PERMISSION_DENIED` before the control or purpose check. `break_glass_enabled`
-is not changed by 0093 and starts false (0091): until an operator turns it on
+platform"), where it returned `400 INVALID_CONSENT_COMMAND`. Break-glass is
+permitted at launch with limits (decision D9, owner decision of 2026-10-14,
+ADR-058 addendum) and on only after the P11 operator step: 0091 withdrew
+`identity.break-glass.write` from every role, and 0093 grants it again to
+exactly doctor, clinician and nurse, its holders before 0091, and seeds
+`emergency`. Every other role gets `403 PERMISSION_DENIED` before the control
+or purpose check. `break_glass_enabled` is not changed by 0093 (which refuses
+to run while it is on) and starts false (0091): until an operator turns it on
 with `POST /admin/controls`, after staff MFA ships (release checklist P11),
 activation answers `423 BREAK_GLASS_DISABLED` ("Emergency access is currently
-disabled by the platform administrator") and writes nothing. Health-id
+disabled by the platform administrator") and writes no grant and no
+`identity.break-glass.*` audit row (the request's own
+`api.identity.break-glass.command` failure row is written). Health-id
 `077b85c` enables its Emergency method for a role holding the permissions and
 shows a refusal as an error. The limits stay: the summary covers the activating
 facility only and the chart routes stay closed to the emergency purpose, its
 vitals are as first recorded, and the clinician's access-request list leaves
 break-glass grants out, so after a reload a grant is found again only by
-activating again (a replay returns the same grant, unextended).
+activating again (a replay returns the same grant, unextended). The document
+routes are not chart routes: `GET /api/v1/ehr/documents` and
+`GET /api/v1/ehr/documents/:id/download` take `X-Purpose-Of-Use: emergency`
+as before, so a break-glass grant lists and downloads the activating
+facility's documents for a reader holding `ehr.document.read`. EHR document
+reads under emergency are unchanged until N3 decides them (Health-id hand-off
+B1(c)); uploads are off at launch, so none exists then, and that decision
+comes before uploads do.
 The summary's sections, the read permission each needs, its limits and audit
 counts are in §11, "Record summaries".
 
@@ -1713,10 +1723,11 @@ All writes require:
 
 Lab, Pharmacy, OCR and Outreach are off at launch (decision D17), and so are
 document uploads; EHR prescriptions and lab requests are records only.
-Break-glass (D9) is on with limits since 0093: doctor, clinician and nurse
-hold `identity.break-glass.write` again, the `emergency` purpose is seeded,
-and `break_glass_enabled` stays off until an operator turns it on after staff
-MFA ships (ADR-058 addendum; "Patient sessions and self service", above). Since 0091
+Break-glass (D9) is permitted with limits since 0093 and on only after the
+P11 operator step: doctor, clinician and nurse hold
+`identity.break-glass.write` again, the `emergency` purpose is seeded, and
+`break_glass_enabled` stays off until an operator turns it on after staff MFA
+ships (ADR-058 addendum; "Patient sessions and self service", above). Since 0091
 no role holds any `lab.*`, `pharmacy.*`, `ocr.*` or `outreach.*` permission or
 `ehr.document.write` (ADR-058): the staff session's and staff context's
 permission lists no longer carry them, every route that needs one answers
