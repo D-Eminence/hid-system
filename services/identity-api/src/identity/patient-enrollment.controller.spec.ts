@@ -3,7 +3,8 @@ jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }
 import { RequestMethod } from '@nestjs/common';
 import { METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import type { Response } from 'express';
-import { NO_AUDIT, PUBLIC_ROUTE } from '../common/decorators';
+import { AUDIT_ACTION, NO_AUDIT, PUBLIC_ROUTE } from '../common/decorators';
+import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { TurnstileService } from '../auth/turnstile.service';
@@ -29,6 +30,7 @@ describe('PatientEnrollmentController', () => {
   let service: {
     start: jest.Mock; current: jest.Mock; startContact: jest.Mock;
     verifyContact: jest.Mock; activate: jest.Mock; bindGoogle: jest.Mock; availability: jest.Mock;
+    sendHolderCode: jest.Mock; verifyHolderCode: jest.Mock;
   };
   let turnstile: { verify: jest.Mock };
   let google: { onboardingStatus: jest.Mock; onboardingCookieName: string };
@@ -47,7 +49,9 @@ describe('PatientEnrollmentController', () => {
       progress: { stage: 'verify_contact' } }), current: jest.fn(), startContact: jest.fn(),
       verifyContact: jest.fn(), bindGoogle: jest.fn().mockResolvedValue({ bound: true }),
       activate: jest.fn().mockResolvedValue({ stage: 'active', hidCode: 'HID-TEST' }),
-      availability: jest.fn().mockResolvedValue({ open: false }) };
+      availability: jest.fn().mockResolvedValue({ open: false, online: false, facility: false }),
+      sendHolderCode: jest.fn().mockResolvedValue({ challengeId: 'c', expiresInSeconds: 300, resendAfterSeconds: 60 }),
+      verifyHolderCode: jest.fn().mockResolvedValue({ stage: 'verify_contact', requiredProfileFields: [] }) };
     turnstile = { verify: jest.fn().mockResolvedValue(undefined) };
     google = { onboardingStatus: jest.fn().mockResolvedValue({
       stage: 'GOOGLE_AUTHENTICATED_PENDING_IDENTITY' }),
@@ -73,10 +77,10 @@ describe('PatientEnrollmentController', () => {
     // per anonymous read, as for GET /commercial/pricing.
     expect(Reflect.getMetadata(NO_AUDIT, route)).toBe(true);
 
-    for (const open of [false, true]) {
-      service.availability = jest.fn().mockResolvedValue({ open });
+    for (const answer of [{ open: false, online: false, facility: false }, { open: true, online: true, facility: false }]) {
+      service.availability = jest.fn().mockResolvedValue(answer);
       const response = { setHeader: jest.fn(), removeHeader: jest.fn() };
-      await expect(controller.availability(response as unknown as Response)).resolves.toEqual({ open });
+      await expect(controller.availability(response as unknown as Response)).resolves.toEqual(answer);
       expect(response.setHeader).toHaveBeenCalledWith('Cache-Control', 'public, max-age=30');
       for (const name of ['Pragma', 'Expires', 'Surrogate-Control']) {
         expect(response.removeHeader).toHaveBeenCalledWith(name);
@@ -128,6 +132,70 @@ describe('PatientEnrollmentController', () => {
     expect(service.startContact).toHaveBeenCalledWith('opaque-value', 'phone', '08012345678',
       '203.0.113.10', correlationId);
     expect(service.verifyContact).toHaveBeenCalledWith('opaque-value', challenge, '123456', correlationId);
+  });
+
+  // ADR-062: the holder step. No body for the send: the recipient is the
+  // registry phone, never a value the caller gives.
+  it('serves the holder routes as accountless, Origin-checked, audited POSTs', () => {
+    for (const [method, path, action] of [['holder', 'holder', 'identity.patient-enrollment.holder'],
+      ['verifyHolder', 'holder/verify', 'identity.patient-enrollment.holder-verify']] as const) {
+      const route = PatientEnrollmentController.prototype[method];
+      expect(Reflect.getMetadata(PATH_METADATA, route)).toBe(path);
+      expect(Reflect.getMetadata(METHOD_METADATA, route)).toBe(RequestMethod.POST);
+      expect(Reflect.getMetadata(NO_AUDIT, route)).toBeUndefined();
+      expect(Reflect.getMetadata(AUDIT_ACTION, route)).toBe(action);
+    }
+    expect(PatientEnrollmentController.prototype.holder.length).toBe(1);
+  });
+
+  it('passes only the scoped cookie value to the holder send and verify', async () => {
+    const challenge = '6ec117dd-68b0-402a-91a0-c2cf311dcaf7';
+    const cookie = 'other=value; hid_enrollment=opaque-value; session=unrelated';
+    await controller.holder(request(cookie));
+    expect(service.sendHolderCode).toHaveBeenCalledWith('opaque-value', '203.0.113.10', correlationId);
+    const response = { clearCookie: jest.fn() };
+    await expect(controller.verifyHolder({ challengeId: challenge, code: '123456' }, request(cookie),
+      response as unknown as Response)).resolves.toEqual({ stage: 'verify_contact', requiredProfileFields: [] });
+    expect(service.verifyHolderCode).toHaveBeenCalledWith('opaque-value', challenge, '123456', correlationId);
+    expect(response.clearCookie).not.toHaveBeenCalled();
+  });
+
+  it('refuses the holder routes from an unapproved origin or with an HID session, before the service', async () => {
+    const challenge = '6ec117dd-68b0-402a-91a0-c2cf311dcaf7';
+    const response = { clearCookie: jest.fn() } as unknown as Response;
+    const holder = async (incoming: HidRequest) => controller.holder(incoming);
+    await expect(holder(request('hid_enrollment=v', 'https://attacker.example')))
+      .rejects.toMatchObject({ code: 'ORIGIN_DENIED' });
+    await expect(controller.verifyHolder({ challengeId: challenge, code: '123456' },
+      request('hid_enrollment=v', 'https://attacker.example'), response)).rejects.toMatchObject({ code: 'ORIGIN_DENIED' });
+    await expect(holder(request('hid_enrollment=v; hid_access=session-token')))
+      .rejects.toMatchObject({ status: 409 });
+    await expect(controller.verifyHolder({ challengeId: challenge, code: '123456' },
+      request('hid_enrollment=v', origin, 'Bearer token'), response)).rejects.toMatchObject({ status: 409 });
+    expect(service.sendHolderCode).not.toHaveBeenCalled();
+    expect(service.verifyHolderCode).not.toHaveBeenCalled();
+  });
+
+  it('expires the enrollment cookie when a correct code shows the NIN already has a Health ID, and only then', async () => {
+    const challenge = '6ec117dd-68b0-402a-91a0-c2cf311dcaf7';
+    const response = { clearCookie: jest.fn() };
+    service.verifyHolderCode.mockRejectedValueOnce(new DomainProblem(409, 'NIN_ALREADY_REGISTERED',
+      'This NIN already has a Health ID. Use account recovery to sign in.'));
+    await expect(controller.verifyHolder({ challengeId: challenge, code: '123456' },
+      request('hid_enrollment=opaque-value'), response as unknown as Response))
+      .rejects.toMatchObject({ status: 409, code: 'NIN_ALREADY_REGISTERED' });
+    expect(response.clearCookie).toHaveBeenCalledWith('hid_enrollment', {
+      secure: true, sameSite: 'strict', httpOnly: true, path: '/api/v1/identity/patient-enrollments',
+    });
+    for (const refusal of [new DomainProblem(422, 'OTP_INVALID', 'The verification code is invalid or expired'),
+      new DomainProblem(409, 'NIN_HOLDER_PROOF_CONFLICT', 'Registration for this NIN is in progress at a facility.'),
+      new DomainProblem(429, 'NIN_HOLDER_ROUTE_LIMITED', 'Use a participating facility to register.')]) {
+      response.clearCookie.mockClear();
+      service.verifyHolderCode.mockRejectedValueOnce(refusal);
+      await expect(controller.verifyHolder({ challengeId: challenge, code: '123456' },
+        request('hid_enrollment=opaque-value'), response as unknown as Response)).rejects.toBe(refusal);
+      expect(response.clearCookie).not.toHaveBeenCalled();
+    }
   });
 
   it('rejects duplicate enrollment cookies and expires the enrollment cookie in a successful activation response', async () => {

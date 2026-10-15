@@ -47,7 +47,8 @@ export class NotificationOtpClient {
     challengeId: string;
     recipient: string;
     code: string;
-    purpose: RecoveryOtpPurpose | 'SIGNUP_VERIFY' | 'EMAIL_VERIFY' | 'EMERGENCY_CONTACT_VERIFY' | 'LOGIN_STEP_UP';
+    purpose: RecoveryOtpPurpose | 'SIGNUP_VERIFY' | 'EMAIL_VERIFY' | 'EMERGENCY_CONTACT_VERIFY' | 'LOGIN_STEP_UP'
+      | 'NIN_HOLDER_VERIFY';
     channel?: 'email' | 'sms';
     correlationId: string;
   }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string }> {

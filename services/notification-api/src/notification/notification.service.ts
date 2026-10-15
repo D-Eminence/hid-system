@@ -94,6 +94,10 @@ export class NotificationService {
   }
 
   private async deliver(message: OtpMessage, rawPlan?: unknown): Promise<DeliveryResult> {
+    // ADR-062: a NIN holder code goes only to the registry phone, by SMS.
+    if (message.purpose === 'NIN_HOLDER_VERIFY' && message.channel !== 'sms') {
+      throw new BadRequestException('A NIN holder code is delivered by SMS only');
+    }
     if (this.environment.NOTIFICATION_DELIVERY_PROFILE === 'email-only' && message.channel !== 'email') {
       throw new BadRequestException('This delivery profile supports email OTP only');
     }

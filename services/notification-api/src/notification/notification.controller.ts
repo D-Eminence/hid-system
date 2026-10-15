@@ -22,6 +22,10 @@ export class NotificationController {
       throw new BadRequestException('Recipient does not match the selected channel');
     }
     if (input.purpose === OtpPurpose.EMERGENCY_CONTACT_VERIFY) this.assertEmergencyContactDelivery(input.channel);
+    // ADR-062: a NIN holder code goes to the registry phone by SMS, never by another channel.
+    if (input.purpose === OtpPurpose.NIN_HOLDER_VERIFY && input.channel !== 'sms') {
+      throw new BadRequestException('A NIN holder code is delivered by SMS only');
+    }
     // The response requestId is also the correlation id of the PHI-free
     // notification.otp.outcome log line.
     const requestId = randomUUID();

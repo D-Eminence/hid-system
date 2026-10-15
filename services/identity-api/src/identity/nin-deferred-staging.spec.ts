@@ -16,7 +16,8 @@ import { IdentityModule } from './identity.module';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
 import { NIN_VERIFICATION_PROVIDER, type NinVerificationProvider } from './nin.types';
-import { DeferredNinVerificationProvider, DeterministicTestNinVerificationProvider } from './nin-verification.provider';
+import { DeferredNinVerificationProvider, DeterministicTestNinVerificationProvider,
+  UnavailableNinVerificationProvider } from './nin-verification.provider';
 
 // Provider tests use a trusted synthetic request context; capabilities boundary
 // tests use the actual SecurityGuard with synthetic token verification. No
@@ -196,6 +197,19 @@ describe('explicitly deferred staging NIN', () => {
     expect(invalid.status).toBe(400);
     expect(database.withSystemTransaction).not.toHaveBeenCalled();
 
+    // ADR-062: the signed-in binding proves no holder, so it is off by
+    // default and refused before any database access or lookup.
+    const bindingOff = await request(app!.getHttpServer()).post('/api/v1/identity/me/verification/nin')
+      .set('authorization', 'Bearer synthetic-token').send({ nin: '12345678901' });
+    expect(bindingOff.status).toBe(503);
+    expect(bindingOff.body.code).toBe('QOREID_PATIENT_NIN_BINDING_DISABLED');
+    // A fixed sentence the client may show as it is, not the generic 5xx text.
+    expect(bindingOff.body.detail).toBe('Verifying a NIN from your account is not available');
+    expect(JSON.stringify(bindingOff.body)).not.toContain('12345678901');
+    expect(database.withSystemTransaction).not.toHaveBeenCalled();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+
+    process.env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED = 'true'; resetEnvironmentForTests();
     const disabled = await request(app!.getHttpServer()).post('/api/v1/identity/me/verification/nin')
       .set('authorization', 'Bearer synthetic-token').send({ nin: '12345678901' });
     expect(disabled.status).toBe(503);
@@ -203,6 +217,47 @@ describe('explicitly deferred staging NIN', () => {
     expect(JSON.stringify(disabled.body)).not.toContain('12345678901');
     expect(globalThis.fetch).not.toHaveBeenCalled();
     expect(query.mock.calls[1]?.[1]).not.toContain('12345678901');
+  });
+
+  // ADR-062 (item 13): QoreID and the NIN holder routes serve only public
+  // patient enrollment. The governed staff NIN routes stay closed with them on.
+  const qoreIdAndHolderRoutes = {
+    QOREID_ENABLED: 'true', QOREID_CLIENT_ID: 'synthetic-client', QOREID_CLIENT_SECRET: randomBytes(16).toString('hex'),
+    QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true', ASSISTED_REGISTRATION_ENABLED: 'true',
+  };
+
+  it('keeps the staff NIN resolve route closed in staging with QoreID and the holder routes enabled', async () => {
+    Object.assign(process.env, qoreIdAndHolderRoutes, { NIN_HOLDER_SMS_ENABLED: 'false' });
+    resetEnvironmentForTests();
+    expect(getEnvironment()).toMatchObject({ QOREID_ENABLED: true, QOREID_NIN_ONLY_ENROLLMENT_ENABLED: true });
+    const module = await startModule();
+    const lookup = jest.spyOn(module.get(NinIdentifierProtector), 'lookup');
+    const response = await request(app!.getHttpServer()).post('/api/v1/identity/nin/resolve')
+      .set('idempotency-key', `deferred:${randomUUID()}`)
+      .send({ nin: '12345678901', firstName: 'Synthetic', lastName: 'Patient', dateOfBirth: '1990-01-02', purpose: 'healthcare-operations' });
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('NIN_PROVIDER_DEFERRED');
+    expect(lookup).not.toHaveBeenCalled();
+    expect(database.withTransaction).not.toHaveBeenCalled();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+  });
+
+  // Production refuses the online route until the facility route ships
+  // (ADR-063), so this is the most production accepts: QoreID, NIN-only
+  // enrollment and the facility flag.
+  it('keeps the staff NIN provider unavailable in production with QoreID and NIN-only enrollment enabled', async () => {
+    Object.assign(process.env, qoreIdAndHolderRoutes, { NIN_HOLDER_SMS_ENABLED: 'false', HID_DEPLOYMENT_ENV: 'production',
+      NIN_PROVIDER_MODE: 'unavailable', CORS_ORIGINS: 'https://www.healthidentitydirectory.com' });
+    resetEnvironmentForTests();
+    expect(getEnvironment()).toMatchObject({ QOREID_ENABLED: true, QOREID_NIN_ONLY_ENROLLMENT_ENABLED: true,
+      ASSISTED_REGISTRATION_ENABLED: true, NIN_PROVIDER_MODE: 'unavailable' });
+    const module = await startModule();
+    const provider = module.get<NinVerificationProvider>(NIN_VERIFICATION_PROVIDER);
+    expect(provider).toBeInstanceOf(UnavailableNinVerificationProvider);
+    await expect(provider.verify({ nin: '12345678901', correlationId: randomUUID(),
+      claimedDemographics: { firstName: 'Synthetic', lastName: 'Patient', dateOfBirth: '1990-01-02' } }))
+      .rejects.toMatchObject({ status: 503, code: 'NIN_PROVIDER_UNAVAILABLE' });
+    expect(globalThis.fetch).not.toHaveBeenCalled();
   });
 
   it('does not let a facility actor verify an organization without organization.manage', async () => {

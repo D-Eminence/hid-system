@@ -51,7 +51,10 @@ describe('IntegrationAdminService', () => {
     AUTH_LOGIN_PEPPER: process.env.AUTH_LOGIN_PEPPER,
     QOREID_ENABLED: process.env.QOREID_ENABLED, QOREID_CLIENT_ID: process.env.QOREID_CLIENT_ID,
     QOREID_CLIENT_SECRET: process.env.QOREID_CLIENT_SECRET,
-    QOREID_NIN_ONLY_ENROLLMENT_ENABLED: process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED };
+    QOREID_NIN_ONLY_ENROLLMENT_ENABLED: process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED,
+    NIN_HOLDER_SMS_ENABLED: process.env.NIN_HOLDER_SMS_ENABLED,
+    QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: process.env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED,
+    ASSISTED_REGISTRATION_ENABLED: process.env.ASSISTED_REGISTRATION_ENABLED };
 
   beforeEach(() => {
     Object.assign(process.env, {
@@ -61,7 +64,7 @@ describe('IntegrationAdminService', () => {
       AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
       QOREID_ENABLED: 'true', QOREID_CLIENT_ID: 'test-client-id',
       QOREID_CLIENT_SECRET: 'test-client-secret',
-      QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false',
+      QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false', QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'true',
     });
     resetEnvironmentForTests();
   });
@@ -103,7 +106,8 @@ describe('IntegrationAdminService', () => {
   });
 
   it('shows the NIN-only gate separately from configured CAC Basic V2', async () => {
-    process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'true';
+    Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true',
+      QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'true' });
     resetEnvironmentForTests();
     const { service } = harness(listRows);
     const result = await service.list(context);
@@ -115,6 +119,31 @@ describe('IntegrationAdminService', () => {
         { operation: 'provider_cac', state: 'open' },
       ],
     });
+  });
+
+  // ADR-062: the signed-in NIN binding has its own gate, and NIN-only
+  // enrollment opens only with a route to prove the NIN holder.
+  it('keeps the existing-patient NIN binding closed until its own gate is on', async () => {
+    Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'true',
+      QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'false' });
+    resetEnvironmentForTests();
+    const { service } = harness(listRows);
+    const result = await service.list(context);
+    expect(result.items[0]?.operationGates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: 'existing_patient_nin', state: 'closed' }),
+      expect.objectContaining({ operation: 'patient_nin_enrollment', state: 'open' }),
+    ]));
+  });
+
+  it('keeps NIN-only enrollment closed without the online holder route, as long as no facility route exists', async () => {
+    Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true', NIN_HOLDER_SMS_ENABLED: 'false',
+      ASSISTED_REGISTRATION_ENABLED: 'true' });
+    resetEnvironmentForTests();
+    const { service } = harness(listRows);
+    const result = await service.list(context);
+    expect(result.items[0]?.operationGates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: 'patient_nin_enrollment', state: 'closed' }),
+    ]));
   });
 
   it('distinguishes configured credentials from a closed deployment gate', async () => {

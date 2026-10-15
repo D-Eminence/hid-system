@@ -1422,10 +1422,11 @@ D-Eminence/hid-system#68; no migration; not deployed):
   `detail` "New Health ID registration is not open yet. If you already have a
   Health ID, sign in." Before, Identity replaced it with the generic 5xx
   detail (section 6), so a client calling Identity directly got "The
-  service could not complete the request.". Production keeps NIN-only
-  enrollment off until the N1 holder step ships
-  (`PHASE_3_LAUNCH_DECISIONS.md`), so in production Identity answers every
-  start this way. `503 INTEGRATION_PAUSED` (a runtime pause) and
+  service could not complete the request.". Production kept NIN-only
+  enrollment off until the N1 holder step (`PHASE_3_LAUNCH_DECISIONS.md`).
+  From 0093 (ADR-062) a start with no holder route open answers
+  `503 PATIENT_REGISTRATION_NOT_OPEN` with the same detail before these
+  gates, which with every flag at its default is every start. `503 INTEGRATION_PAUSED` (a runtime pause) and
   `503 ENROLLMENT_CONFIGURATION_UNAVAILABLE` keep the generic detail. A
   patient on Health-id sees neither detail yet: the gateway, on this branch
   and on main (#65), replaces every upstream `502/503/504` with
@@ -1443,7 +1444,7 @@ D-Eminence/hid-system#68; no migration; not deployed):
   the HID for 15 minutes only.
 
 A NIN record without a date of birth or gender (ADR-061,
-BRANCH:launch/patient-self-enrollment, migration 0092; not deployed). QoreID
+D-Eminence/hid-system#82, migration 0092; merged to main, not deployed). QoreID
 may return only the name, the NIN and its reference. Before this change such
 a record could not enroll: start answered
 `502 QOREID_PROVIDER_RESPONSE_INVALID`. Now the patient enters what the
@@ -1488,11 +1489,127 @@ record lacks when they set their password:
   never their values (`[]` for a complete record).
 - Production still refuses NIN-only enrollment by configuration
   (`QOREID_NIN_ONLY_ENROLLMENT_ENABLED`); this change does not lift it
-  (`PHASE_3_LAUNCH_DECISIONS.md` N1).
+  (`PHASE_3_LAUNCH_DECISIONS.md` N1). 0093 replaces that refusal with the
+  holder route rules below (ADR-062).
 - Health-id 077b85c sends only the password. A complete record keeps
   working unchanged. A record without a date of birth or gender gets
   `400 ENROLLMENT_PROFILE_REQUIRED` and cannot activate until Health-id asks
   for the fields (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3).
+
+The NIN holder step (ADR-062, BRANCH:launch/nin-ownership-proof, migration
+0093; not deployed). A NIN lookup proves only that the NIN exists. Before a
+contact or a password, the patient now proves that they hold the NIN. In
+this change the only route is online: a code sent by SMS to the phone the NIN
+record lists. A facility route is planned (`facility.available` stays
+`false`). No Health ID can be activated without a holder proof; the database
+refuses it.
+
+- `POST /api/v1/identity/patient-enrollments` answers
+  `200 { "stage": "verify_holder", "expiresAt", "googleOnboardingRequired", "online": { "available": boolean }, "facility": { "available": false } }`.
+  It never answers `409 NIN_ALREADY_REGISTERED` and never reads whether the
+  NIN is bound or pending. A start with another `Idempotency-Key` for the
+  same NIN is a new enrollment with its own cookie. The same key resumes as
+  before; the same key for another NIN is `409 IDEMPOTENCY_KEY_REUSED`.
+  Before the holder proof no progress answer carries `requiredProfileFields`,
+  a masked digit or any registry value.
+- The order at start is: `503 PATIENT_REGISTRATION_NOT_OPEN` with the
+  not-open detail when no holder route is open, then the QoreID gate, then
+  `Idempotency-Key`, the network rate limit, readiness, a same-key resume,
+  the QoreID lookup and the new enrollment. A missing key is now refused
+  after the gate, so a closed gate answers first. With every flag at its
+  default no holder route is open, so every start answers
+  `503 PATIENT_REGISTRATION_NOT_OPEN`. Staging cannot open the online route
+  (it sends email only), production refuses it until the facility route
+  ships (ADR-063), and the facility route is not built: with this change
+  every start on staging and production answers this way.
+- A QoreID lookup that fails with `502`, `503` or `504` keeps its code and
+  shows one fixed `detail`: "We could not check your NIN now. Try again
+  later."
+- `online.available` is `false` while `NIN_HOLDER_SMS_ENABLED` is off, when
+  the record has no phone or one Identity cannot use, and when the record's
+  date of birth shows an age under 18. A record without a date of birth is
+  treated as an adult; its patient enters a date at activation, and an
+  under-18 date is not refused there (an owner decision, ADR-062). Before any
+  proof this tells a caller one fact about the record: usable phone and not
+  shown under 18, or not. Identity accepts `0` + 10 digits,
+  `234` + 10 digits and `+234` + 10 digits, with spaces, hyphens or
+  brackets. It never returns or logs the phone.
+- `POST /api/v1/identity/patient-enrollments/holder` (new). The enrollment
+  cookie, an approved `Origin`, no HID session and no body (a body is
+  ignored). It sends a six-digit code by SMS to the record's phone and
+  answers `200 { "challengeId", "expiresInSeconds", "resendAfterSeconds" }`.
+  Then `GET .../current` shows `online.challengeId`, `expiresInSeconds` and
+  `resendAfterSeconds`. One code is open at a time. A resend inside the
+  cooldown is `429 OTP_RESEND_COOLDOWN`. One enrollment sends at most three
+  codes.
+- `POST /api/v1/identity/patient-enrollments/holder/verify` (new). Body
+  `{ "challengeId": uuid v4, "code": six digits }`. Readiness is checked
+  first. A code allows five attempts and is used once. A correct code answers
+  `200 { "stage": "verify_contact", "requiredProfileFields": [...] }`. Only
+  then does Identity say whether the NIN already has a Health ID: if it
+  does, the answer is `409 NIN_ALREADY_REGISTERED`, the enrollment is
+  deleted and its cookie is expired with the answer.
+- A correct code removes the NIN's other unfinished enrollments: every
+  unproven one, and any one proven by an earlier code. A later proof wins.
+- Budgets, checked when a code is sent: five sends to one phone in 24 hours
+  (`NIN_HOLDER_SMS_DAILY_MAX`), ten wrong codes for one NIN in 24 hours and
+  thirty in 30 days (`NIN_HOLDER_FAILURES_DAILY_MAX`,
+  `NIN_HOLDER_FAILURES_MONTHLY_MAX`). A code is sent only while the NIN's
+  wrong codes plus the attempts left on all its open codes, the new one
+  included, stay within both, so a NIN never has more wrong codes in reach
+  than its budgets, across any number of enrollments: with the defaults, two
+  enrollments of one NIN with an open code each leave a third without a
+  code until one is spent or expires. One phone proves at most five
+  different NINs in a year (`NIN_HOLDER_DISTINCT_NINS_MAX`), checked at the
+  proof. A code already sent keeps its five attempts.
+- The contact step (`POST .../contact`) and activation answer
+  `409 ENROLLMENT_STAGE_INVALID` before the holder proof. A first activation
+  without a valid holder proof is refused by the database and answered
+  `409 ENROLLMENT_HOLDER_PROOF_REQUIRED`.
+- A NIN that becomes bound while an enrollment waits for its password
+  answers `409 NIN_ALREADY_REGISTERED` at activation with the recovery
+  text. No answer says "pending" or names a Health ID, patient or contact.
+- `GET /api/v1/identity/patient-enrollments/availability` now answers
+  `200 { "open": boolean, "online": boolean, "facility": boolean }`.
+  `online` is `NIN_HOLDER_SMS_ENABLED`. `facility` is `false` in this
+  change. `open` is `true` only when the gate is open and a holder route is
+  on.
+- The two `503` refusals of this change, `NIN_HOLDER_ROUTE_UNAVAILABLE` and
+  `QOREID_PATIENT_NIN_BINDING_DISABLED`, carry their own fixed `detail`
+  (not the generic 5xx text), safe to show as sent.
+- `POST /api/v1/identity/me/verification/nin` (the signed-in "Verify NIN")
+  answers `503 QOREID_PATIENT_NIN_BINDING_DISABLED` ("Verifying a NIN from
+  your account is not available") while
+  `QOREID_PATIENT_SELF_NIN_BINDING_ENABLED` is off, the default. It is
+  refused before any lookup, quota charge or evidence row. Production
+  refuses the flag.
+
+| Route | Status and code | When | The patient's next step |
+| --- | --- | --- | --- |
+| `POST .../patient-enrollments` | `503 PATIENT_REGISTRATION_NOT_OPEN` | No holder route is on | Try later, or sign in if they have a Health ID |
+| `POST .../patient-enrollments` | `502`, `503` or `504` (QoreID code kept) | The NIN lookup could not be completed | Try again later |
+| `POST .../holder` | `409 NIN_HOLDER_ROUTE_UNAVAILABLE` | No usable phone on the record, an age under 18, or not at the holder step | Register at a participating facility |
+| `POST .../holder` | `503 NIN_HOLDER_ROUTE_UNAVAILABLE` | The online route is off | Register at a participating facility |
+| `POST .../holder` | `429 OTP_RESEND_COOLDOWN` | A code was sent less than `resendAfterSeconds` ago | Wait, then ask again |
+| `POST .../holder` | `429 NIN_HOLDER_ROUTE_LIMITED` | A send or failure budget is spent, or three codes were sent | Register at a participating facility |
+| `POST .../holder` | `429 ENROLLMENT_RATE_LIMITED` | The network's request budget is spent | Try again later |
+| `POST .../holder` | `503 OTP_DELIVERY_UNAVAILABLE` | The SMS provider refused the code | Try again later; the attempt counts toward the phone's five sends a day and the enrollment's three codes |
+| `POST .../holder/verify` | `422 OTP_INVALID` | Wrong, expired, used or closed code | Check the code, or ask for a new one |
+| `POST .../holder/verify` | `409 NIN_ALREADY_REGISTERED` | The NIN already has a Health ID | Use account recovery to sign in. If they never registered, contact Health ID support quoting the `correlationId` |
+| `POST .../holder/verify` | `409 NIN_HOLDER_PROOF_CONFLICT` | An in-person proof of this NIN is open at a facility | Finish at the facility |
+| `POST .../holder/verify` | `429 NIN_HOLDER_ROUTE_LIMITED` | The phone already proved five other NINs this year | Register at a participating facility |
+| `POST .../holder/verify` | `503 ENROLLMENT_RECONCILIATION_REQUIRED` | Enrollment is paused for reconciliation | Try again later |
+| `POST .../holder/verify` | `503 NIN_HOLDER_ROUTE_UNAVAILABLE` | The online route was turned off after the code was sent | Register at a participating facility, or try again later |
+| `POST .../holder`, `/holder/verify` | `404 ENROLLMENT_NOT_FOUND` | No, a forged or a removed enrollment cookie (for example after a later proof of the same NIN) | Start again |
+| `POST .../contact`, `/activate` | `409 ENROLLMENT_STAGE_INVALID` | The holder step is not done | Prove the NIN with the code first |
+| `POST .../activate` | `409 ENROLLMENT_HOLDER_PROOF_REQUIRED` | The database finds no valid holder proof | Start again |
+| `POST .../activate` | `409 NIN_ALREADY_REGISTERED` | The NIN was bound since the holder proof | Use account recovery to sign in. If they never registered, contact Health ID support quoting the `correlationId` |
+| `POST /identity/me/verification/nin` | `503 QOREID_PATIENT_NIN_BINDING_DISABLED` | The signed-in binding is off | None; the route is closed |
+
+Health-id 077b85c does not know the holder step. On 0093 it cannot
+register a new patient: its start expects `verify_contact` and its contact
+step is refused `409 ENROLLMENT_STAGE_INVALID`. It fails closed; sign-in is
+unchanged (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §3).
 
 ### HID Resolution
 

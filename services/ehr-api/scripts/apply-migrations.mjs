@@ -25,6 +25,10 @@ if (configuredNodeEnvironment !== 'production') loadLocalEnvironment(localEnviro
 const migrationDirectory = path.resolve(scriptDirectory, '../database/migrations');
 const dryRun = process.argv.includes('--dry-run');
 const planOnly = process.argv.includes('--plan');
+// Stops after the named migration (a rehearsal builds a database at an
+// earlier version to test the next migration's upgrade). Never used to deploy.
+const throughArgument = process.argv.find((argument) => argument.startsWith('--through='));
+const through = throughArgument?.slice('--through='.length);
 const databaseUrl = process.env.DATABASE_URL;
 
 if (!databaseUrl) {
@@ -113,7 +117,17 @@ async function main() {
       }
     }
 
-    const pending = orderMigrations(migrations).filter((migration) => !applied.has(migration.version));
+    let ordered = orderMigrations(migrations);
+    if (through !== undefined) {
+      const last = ordered.findIndex((migration) => migration.version === through);
+      if (last < 0) throw new Error(`--through names no migration: ${through}`);
+      ordered = ordered.slice(0, last + 1);
+      const allowed = new Set(ordered.map((migration) => migration.version));
+      if ([...applied.keys()].some((version) => !allowed.has(version))) {
+        throw new Error(`The database already has a migration after ${through}`);
+      }
+    }
+    const pending = ordered.filter((migration) => !applied.has(migration.version));
     process.stdout.write(`${pending.length} pending migration(s)\n`);
     for (const migration of pending) {
       process.stdout.write(`${migration.version} ${migration.checksum}\n`);

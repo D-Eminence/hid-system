@@ -25,6 +25,16 @@ and CAC outcomes plus timeout/401/5xx privacy behavior before considering any
 production change. This repository change did not activate or deploy QoreID.
 See [QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).
 
+NIN holder routes (ADR-062, BRANCH:launch/nin-ownership-proof): the synth
+inputs `HID_NIN_HOLDER_SMS_ENABLED`, `HID_ASSISTED_REGISTRATION_ENABLED` and
+`HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED` all default to `false` and set
+the Identity variables of the same names without `HID_`. Synthesis refuses
+NIN-only enrollment without a holder route, the online route on staging
+(email only), the online route in production until the facility route ships
+(ADR-063; `HID_ASSISTED_REGISTRATION_ENABLED` has no effect before then), and
+the signed-in NIN binding in production. Enabling any of them is an operator
+step after the release checklist P23 to P27.
+
 ## Staging email acceptance profile
 
 Staging selects `NOTIFICATION_DELIVERY_PROFILE=email-only`. Its Notification API
@@ -47,7 +57,11 @@ refuses the `full` and `email-only` profiles, any WhatsApp configuration and a
 local service token. The Notification Worker (Novu) is off in production
 (`HID_NOTIFICATION_WORKER_ENABLED` is fixed to `false`) and reads no
 `novuApiKey`. Every OTP send writes one PHI-free `notification.otp.outcome` log
-line, and `OtpDefinitiveFailures` alarms on its `definitive_failure` count.
+line, and `OtpDefinitiveFailures` alarms on its `definitive_failure` count. The NIN holder code (ADR-062, purpose `NIN_HOLDER_VERIFY`) goes by SMS
+only, through Termii, and counts there too. Before `NIN_HOLDER_SMS_ENABLED`
+is set, add the holder SMS volume and failure ratio alerts of the release
+checklist §10; Termii's sender ID (P18) and QoreID's written confirmation of
+`nin.phone` (P23) come first.
 When the fallback ran, the line also names the primary provider and its safe
 code (`primaryProvider`, `primarySafeCode`); read those for why SES or Termii
 failed. Migration 0047 seeds Brevo as an enabled email and SMS fallback, and

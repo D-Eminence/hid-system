@@ -71,9 +71,22 @@ export interface HidEnvironmentConfig {
   readonly enabledApiRoutes: readonly ApiRouteModule[];
   // Identity's QOREID_NIN_ONLY_ENROLLMENT_ENABLED. Synth input
   // HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED, default false, refused unless
-  // QoreID is enabled, and refused in production until the change that ships
-  // the registry-phone holder step (N1) lifts this refusal and Identity's.
+  // QoreID is enabled and a route to prove that a person holds the NIN is on
+  // (ADR-062): the online route or the facility route below.
   readonly qoreIdNinOnlyEnrollmentEnabled: boolean;
+  // Identity's NIN_HOLDER_SMS_ENABLED (ADR-062): a one-time code to the phone
+  // a NIN record lists. Synth input HID_NIN_HOLDER_SMS_ENABLED, default false;
+  // refused on staging (its notification-api sends email only) and in
+  // production until the facility route ships (ADR-063).
+  readonly ninHolderSmsEnabled: boolean;
+  // Identity's ASSISTED_REGISTRATION_ENABLED (ADR-062, used from 0094). Synth
+  // input HID_ASSISTED_REGISTRATION_ENABLED, default false.
+  readonly assistedRegistrationEnabled: boolean;
+  // Identity's QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: the signed-in NIN
+  // binding on a name and date-of-birth match. Synth input
+  // HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED, default false, refused in
+  // production until the owner decides whether N1 covers it.
+  readonly qoreIdPatientSelfNinBindingEnabled: boolean;
   // Whether the Novu notification worker may run. Synth input
   // HID_NOTIFICATION_WORKER_ENABLED; production is fixed to false (D17)
   // until a Novu account and region are approved.
@@ -88,6 +101,9 @@ export interface HidEnvironmentConfig {
 /** Synth inputs beyond the environment, staging mode, QoreID and route switches. */
 export interface SynthOptions {
   readonly qoreIdNinOnlyEnrollmentEnabled?: string;
+  readonly ninHolderSmsEnabled?: string;
+  readonly assistedRegistrationEnabled?: string;
+  readonly qoreIdPatientSelfNinBindingEnabled?: string;
   readonly notificationWorkerEnabled?: string;
   readonly operationalAlarmTopicArn?: string;
 }
@@ -265,6 +281,41 @@ export function workloadEnabled(configuration: Pick<HidEnvironmentConfig, 'enabl
   return routeModule === undefined || configuration.enabledApiRoutes.includes(routeModule);
 }
 
+/**
+ * CFG-PROD, N1, ADR-062: a NIN lookup proves that a NIN exists, not that the
+ * person holds it. NIN-only enrollment needs a route to prove that (the
+ * activation command requires the proof); staging sends no SMS; production
+ * refuses the online route until the facility route ships (ADR-063), the
+ * remedy when someone who knows a NIN closes its online route and the only
+ * route for a person without a usable registry phone:
+ * HID_ASSISTED_REGISTRATION_ENABLED has no effect before then, so it cannot
+ * stand in for it. The signed-in NIN binding has no holder proof and stays
+ * off in production. The regional stack repeats this for a configuration
+ * not built by environmentConfig.
+ */
+export function assertNinOwnershipRoutes(configuration: {
+  readonly name: EnvironmentName; readonly qoreIdNinOnlyEnrollmentEnabled: boolean;
+  readonly ninHolderSmsEnabled: boolean; readonly assistedRegistrationEnabled: boolean;
+  readonly qoreIdPatientSelfNinBindingEnabled: boolean;
+}): void {
+  if (configuration.qoreIdNinOnlyEnrollmentEnabled
+    && !configuration.ninHolderSmsEnabled && !configuration.assistedRegistrationEnabled) {
+    throw new Error('HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true requires HID_NIN_HOLDER_SMS_ENABLED=true or '
+      + 'HID_ASSISTED_REGISTRATION_ENABLED=true (ADR-062)');
+  }
+  if (configuration.name === 'staging' && configuration.ninHolderSmsEnabled) {
+    throw new Error('HID_NIN_HOLDER_SMS_ENABLED=true is refused on staging: its notification-api sends email only');
+  }
+  if (configuration.name === 'production' && configuration.ninHolderSmsEnabled) {
+    throw new Error('HID_NIN_HOLDER_SMS_ENABLED=true is refused in production until the facility route ships '
+      + '(ADR-062, ADR-063)');
+  }
+  if (configuration.name === 'production' && configuration.qoreIdPatientSelfNinBindingEnabled) {
+    throw new Error('HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED=true is refused in production until the owner '
+      + 'decides whether N1 covers the signed-in NIN binding');
+  }
+}
+
 function booleanInput(variable: string, value: string | undefined, fallback: 'true' | 'false'): boolean {
   const input = value ?? fallback;
   if (!['true', 'false'].includes(input)) throw new Error(`${variable} must be true or false when supplied`);
@@ -315,13 +366,13 @@ export function environmentConfig(
   if (qoreIdNinOnlyEnrollmentEnabled && !qoreIdEnabled) {
     throw new Error('HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true requires HID_QOREID_ENABLED=true');
   }
-  // CFG-PROD, N1: NIN-only enrollment proves that a NIN exists, not that the
-  // caller holds it. Deny by default in production, independent of Identity's
-  // own refusal, until the registry-phone holder step ships.
-  if (qoreIdNinOnlyEnrollmentEnabled && name === 'production') {
-    throw new Error('HID_QOREID_NIN_ONLY_ENROLLMENT_ENABLED=true is refused in production until NIN-only enrollment '
-      + 'proves that the caller holds the registry phone (N1)');
-  }
+  const ninHolderSmsEnabled = booleanInput('HID_NIN_HOLDER_SMS_ENABLED', options.ninHolderSmsEnabled, 'false');
+  const assistedRegistrationEnabled = booleanInput('HID_ASSISTED_REGISTRATION_ENABLED',
+    options.assistedRegistrationEnabled, 'false');
+  const qoreIdPatientSelfNinBindingEnabled = booleanInput('HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED',
+    options.qoreIdPatientSelfNinBindingEnabled, 'false');
+  assertNinOwnershipRoutes({ name, qoreIdNinOnlyEnrollmentEnabled, ninHolderSmsEnabled,
+    assistedRegistrationEnabled, qoreIdPatientSelfNinBindingEnabled });
   const notificationWorkerEnabled = booleanInput('HID_NOTIFICATION_WORKER_ENABLED', options.notificationWorkerEnabled,
     name === 'production' ? 'false' : 'true');
   if (name === 'production' && notificationWorkerEnabled) {
@@ -335,6 +386,9 @@ export function environmentConfig(
     qoreIdEnabled,
     enabledApiRoutes: enabledApiRoutes(name, enabledApiRoutesValue),
     qoreIdNinOnlyEnrollmentEnabled,
+    ninHolderSmsEnabled,
+    assistedRegistrationEnabled,
+    qoreIdPatientSelfNinBindingEnabled,
     notificationWorkerEnabled,
     ...(topic ? { operationalAlarmTopicArn: topic.arn } : {}),
   };

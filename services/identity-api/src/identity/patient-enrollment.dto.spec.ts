@@ -1,6 +1,7 @@
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
-import { ActivatePatientEnrollmentDto, StartPatientEnrollmentDto } from './dto/patient-enrollment.dto';
+import { ActivatePatientEnrollmentDto, StartPatientEnrollmentDto,
+  VerifyPatientEnrollmentHolderDto } from './dto/patient-enrollment.dto';
 
 describe('Patient enrollment request contract', () => {
   const options = { whitelist: true, forbidNonWhitelisted: true };
@@ -25,6 +26,20 @@ describe('Patient enrollment request contract', () => {
       });
       expect(await validate(input, options)).not.toHaveLength(0);
     }
+  });
+
+  // ADR-062: the holder code check takes the challenge and the code, nothing
+  // else; the phone is never a value the caller gives.
+  it('accepts a holder code check with a v4 challenge id and six digits only', async () => {
+    const challengeId = '6ec117dd-68b0-402a-91a0-c2cf311dcaf7';
+    const errors = async (body: Record<string, unknown>) => (await validate(
+      plainToInstance(VerifyPatientEnrollmentHolderDto, body), options)).map(({ property }) => property).sort();
+    expect(await errors({ challengeId, code: '012345' })).toEqual([]);
+    expect(await errors({ challengeId, code: '12345' })).toEqual(['code']);
+    expect(await errors({ challengeId, code: '1234567' })).toEqual(['code']);
+    expect(await errors({ challengeId, code: 123456 })).toEqual(['code']);
+    expect(await errors({ challengeId: 'not-a-uuid', code: '123456' })).toEqual(['challengeId']);
+    expect(await errors({ challengeId, code: '123456', phone: '08031234567' })).toEqual(['phone']);
   });
 
   // ADR-061: a NIN record without a date of birth or gender asks the patient
