@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0095",
-    "count": 95,
+    "last": "0096",
+    "count": 96,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -477,6 +477,10 @@
       {
         "name": "0095_notification_verified_recipient.sql",
         "sha256": "dfe23d2d07ecf859f173ad67123581ed67ec4a954c416f5bf8afac9713da12ff"
+      },
+      {
+        "name": "0096_patient_record_release.sql",
+        "sha256": "06c534de5228b42fec9238fc0bafc46557dbf703820115e96ea6b598689473b2"
       }
     ]
   },

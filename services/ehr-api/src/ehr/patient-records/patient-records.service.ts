@@ -1,24 +1,15 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../../audit/audit.service';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext, HidRequest } from '../../common/request-context';
 import { DatabaseService } from '../../database/database.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
+import { STORAGE_PROVIDER, StoredObjectIntegrityError, type StorageProvider } from '../../storage/storage.types';
 import { ClinicalRepository } from '../shared/clinical.repository';
+import { PatientRecordRelease } from './patient-release';
 
-/**
- * Categories released to the patient (INTERFACE_CONTRACT.md, "Patient sessions and self service"):
- * completed encounters and the current signed/amended note revisions of completed encounters, the
- * only categories with patient-self row-level security policies (migrations 0030 and 0084). The
- * service defines the release set itself, so a later policy cannot widen the patient response on
- * its own.
- */
-export const PATIENT_RELEASED = ['encounters', 'notes'] as const;
-/** Not released to the patient until the release decision; returned empty and named as withheld. */
-export const PATIENT_WITHHELD = ['vitals', 'diagnoses', 'prescriptions', 'labRequests', 'documents'] as const;
-
-/** Rows each summary section shows at most, newest first. */
+/** Rows each emergency summary section shows at most, newest first. */
 export const SECTION_LIMITS = {
   encounters: 50, notes: 50, vitals: 100, diagnoses: 100, prescriptions: 100, labRequests: 100, documents: 100,
 } as const;
@@ -48,12 +39,116 @@ const EMERGENCY_COUNT_KEYS: Readonly<Record<EmergencyCategory, string>> = {
 
 interface SectionRows { rows: QueryResultRow[]; truncated: boolean }
 
+/** The stored document a patient download signs, as its read names the columns. */
+interface PatientDocumentRow extends QueryResultRow {
+  id: string;
+  storageBucket: string;
+  storageKey: string;
+  objectVersionId: string;
+  sha256Hex: string;
+  sizeBytes: string;
+  mediaType: string;
+  fileName: string;
+}
+
+const DOCUMENT_NOT_AVAILABLE = () =>
+  new DomainProblem(404, 'DOCUMENT_NOT_AVAILABLE', 'The document is not available');
+
 @Injectable()
 export class PatientRecordsService {
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityApiService,
-    private readonly audit: AuditService, private readonly clinical: ClinicalRepository) {}
+    private readonly audit: AuditService, private readonly clinical: ClinicalRepository,
+    private readonly release: PatientRecordRelease,
+    @Inject(STORAGE_PROVIDER) private readonly storage: StorageProvider) {}
 
+  /**
+   * The patient's own summary: the release set (PatientRecordRelease), read in
+   * the patient-self transaction Identity authorized for this session, with
+   * its counts-only audit in the same transaction.
+   */
   async self(request: HidRequest) {
+    const { actor, authorization } = await this.authorizeOwnSession(request);
+    return this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
+      const value = await this.release.read(client, authorization.patientId);
+      await this.audit.recordWithClient(client, {
+        correlationId: request.correlationId, actorType: 'patient', actorSubject: actor.subject,
+        actorAccountId: actor.accountId, patientId: authorization.patientId,
+        action: 'ehr.patient.self.records.read', resourceType: 'patient-record-summary', outcome: 'success',
+        purposeOfUse: 'patient-self', details: this.release.auditDetails(value),
+      });
+      return value;
+    });
+  }
+
+  /**
+   * A 60 s attachment URL for one of the patient's released documents (D7:
+   * documents only with a patient download route). Every document the
+   * patient may not download (documents not released, unknown, another
+   * patient's, not attached to a completed encounter, not uploaded, not
+   * scanned clean, restricted or internal, or in another bucket) answers the
+   * same 404, so the route tells nothing about what exists. The audit row
+   * commits before the stored object is checked and a URL is signed; a
+   * failure after it is audited by the interceptor.
+   */
+  async downloadOwnDocument(request: HidRequest, documentId: string) {
+    const actor = request.actor;
+    if (actor?.kind !== 'patient' || !actor.patientId || !actor.sessionId) {
+      throw new DomainProblem(403, 'PATIENT_SESSION_REQUIRED', 'An active patient session is required');
+    }
+    if (!this.release.releases('documents')) throw DOCUMENT_NOT_AVAILABLE();
+    const { authorization } = await this.authorizeOwnSession(request);
+    const document = await this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
+      // The documents policies admit a row only once the release set is bound.
+      await this.release.bind(client);
+      const result = await client.query<PatientDocumentRow>(
+        `select d.id,d.storage_bucket as "storageBucket",d.storage_key as "storageKey",
+           d.object_version_id as "objectVersionId",d.sha256_hex as "sha256Hex",d.size_bytes as "sizeBytes",
+           coalesce(d.detected_media_type,d.declared_media_type) as "mediaType",d.original_file_name as "fileName"
+         from ehr.documents_effective d
+         join ehr.encounters e on e.id=d.encounter_id and e.patient_id=d.patient_id and e.facility_id=d.facility_id
+         where d.id=$1 and d.patient_id=$2 and d.status='available' and d.scan_status='clean'
+           and d.classification='phi' and e.status='completed'`,
+        [documentId, authorization.patientId],
+      );
+      const row = result.rows[0];
+      if (!row?.objectVersionId) throw DOCUMENT_NOT_AVAILABLE();
+      if (row.storageBucket !== this.storageBucket()) throw DOCUMENT_NOT_AVAILABLE();
+      await this.audit.recordWithClient(client, {
+        correlationId: request.correlationId, actorType: 'patient', actorSubject: actor.subject,
+        actorAccountId: actor.accountId, patientId: authorization.patientId,
+        action: 'ehr.patient.self.document.download', resourceType: 'document', resourceId: row.id,
+        outcome: 'success', purposeOfUse: 'patient-self',
+        details: { mediaType: row.mediaType, sizeBytes: Number(row.sizeBytes) },
+      });
+      return row;
+    });
+    let stored;
+    try {
+      stored = await this.storage.inspectVersion(document.storageKey, document.objectVersionId);
+    } catch (error) {
+      if (error instanceof StoredObjectIntegrityError) {
+        throw new DomainProblem(503, 'DOCUMENT_INTEGRITY_UNAVAILABLE', 'The document cannot be verified');
+      }
+      throw new DomainProblem(503, 'DOCUMENT_STORAGE_UNAVAILABLE', 'Document storage is unavailable');
+    }
+    if (stored.versionId !== document.objectVersionId || stored.sha256Hex !== document.sha256Hex
+      || stored.sizeBytes !== Number(document.sizeBytes)) {
+      throw new DomainProblem(503, 'DOCUMENT_INTEGRITY_UNAVAILABLE', 'The document cannot be verified');
+    }
+    try {
+      return await this.storage.createDownload(document.storageKey, document.objectVersionId,
+        { fileName: document.fileName, mediaType: document.mediaType });
+    } catch {
+      throw new DomainProblem(503, 'DOCUMENT_STORAGE_UNAVAILABLE', 'Document storage is unavailable');
+    }
+  }
+
+  /**
+   * The patient-self authorization of this request's own session: Identity
+   * confirms it (cookie or bearer, ehr-api workload) and it must still name
+   * the same patient, account, subject and session.
+   */
+  private async authorizeOwnSession(request: HidRequest) {
     const actor = request.actor;
     if (actor?.kind !== 'patient' || !actor.patientId || !actor.sessionId) {
       throw new DomainProblem(403, 'PATIENT_SESSION_REQUIRED', 'An active patient session is required');
@@ -63,20 +158,16 @@ export class PatientRecordsService {
       || authorization.subject !== actor.subject || authorization.sessionId !== actor.sessionId) {
       throw new DomainProblem(403, 'PATIENT_ACCESS_DENIED', 'Patient authorization changed');
     }
-    return this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
-      const value = await this.readSelf(client, authorization.patientId);
-      await this.audit.recordWithClient(client, {
-        correlationId: request.correlationId, actorType: 'patient', actorSubject: actor.subject,
-        actorAccountId: actor.accountId, patientId: authorization.patientId,
-        action: 'ehr.patient.self.records.read', resourceType: 'patient-record-summary', outcome: 'success',
-        purposeOfUse: 'patient-self', details: {
-          encounterCount: value.encounters.length,
-          noteCount: value.notes.length,
-          withheldCategories: value.withheld,
-        },
-      });
-      return value;
-    });
+    return { actor, authorization };
+  }
+
+  /** The configured bucket; storage that is not configured is unavailable, not a missing document. */
+  private storageBucket(): string {
+    try {
+      return this.storage.bucket();
+    } catch {
+      throw new DomainProblem(503, 'DOCUMENT_STORAGE_UNAVAILABLE', 'Document storage is unavailable');
+    }
   }
 
   emergency(patientId: string, context: DataAccessContext) {
@@ -102,27 +193,6 @@ export class PatientRecordsService {
       details.withheldCategories = value.withheld;
       return { value, details };
     });
-  }
-
-  /** The patient's own summary: the released categories only; the others are named as withheld. */
-  private async readSelf(client: PoolClient, patientId: string) {
-    const values = [patientId];
-    const encounters = await this.section(client, 'encounters', encountersSql(''), values);
-    const notes = await this.section(client, 'notes', notesSql('', "e.status='completed'"), values);
-    return {
-      encounters: encounters.rows,
-      notes: notes.rows,
-      vitals: [],
-      diagnoses: [],
-      prescriptions: [],
-      labRequests: [],
-      documents: [],
-      released: [...PATIENT_RELEASED],
-      withheld: [...PATIENT_WITHHELD],
-      limits: { encounters: SECTION_LIMITS.encounters, notes: SECTION_LIMITS.notes },
-      truncated: { encounters: encounters.truncated, notes: notes.truncated },
-      limit: SUMMARY_LIMIT,
-    };
   }
 
   /**

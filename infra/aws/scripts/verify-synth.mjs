@@ -421,6 +421,30 @@ if (environment === 'production') {
   assert.equal(patientSelfNinBinding, 'false', 'production identity-api must not enable the signed-in NIN binding')
 }
 
+// Patient record release (owner decision 4 of 2026-10-16, D7): ehr-api's
+// category flags are the explicit synth inputs, false by default, and only
+// staging may set one. Production releases no Lab result while Lab is off at
+// launch (D17) and no other category until the clinical owner signs it off
+// (P36); the development stack's ehr-api runs in the production profile.
+const ehrApis = resources('AWS::ECS::TaskDefinition')
+  .filter(task => String(task.Properties.Family).endsWith('-ehr-api'))
+  .flatMap(task => task.Properties.ContainerDefinitions).filter(container => container.Name === 'ehr-api')
+assert.equal(ehrApis.length, 1)
+for (const [flag, input] of [['EHR_PATIENT_RELEASE_VITALS', 'HID_EHR_PATIENT_RELEASE_VITALS'],
+  ['EHR_PATIENT_RELEASE_DIAGNOSES', 'HID_EHR_PATIENT_RELEASE_DIAGNOSES'],
+  ['EHR_PATIENT_RELEASE_PRESCRIPTIONS', 'HID_EHR_PATIENT_RELEASE_PRESCRIPTIONS'],
+  ['EHR_PATIENT_RELEASE_LAB_RESULTS', 'HID_EHR_PATIENT_RELEASE_LAB_RESULTS'],
+  ['EHR_PATIENT_RELEASE_DOCUMENTS', 'HID_EHR_PATIENT_RELEASE_DOCUMENTS']]) {
+  assert.equal(ehrApis[0].Environment.find(entry => entry.Name === flag)?.Value, process.env[input] ?? 'false', flag)
+}
+if (environment !== 'staging') {
+  for (const flag of ['EHR_PATIENT_RELEASE_VITALS', 'EHR_PATIENT_RELEASE_DIAGNOSES', 'EHR_PATIENT_RELEASE_PRESCRIPTIONS',
+    'EHR_PATIENT_RELEASE_LAB_RESULTS', 'EHR_PATIENT_RELEASE_DOCUMENTS']) {
+    assert.equal(ehrApis[0].Environment.find(entry => entry.Name === flag)?.Value, 'false',
+      `${environment} ehr-api must not release ${flag} to patients outside staging (D17, P36)`)
+  }
+}
+
 assert.equal(regional.Parameters.OriginDomainName, undefined)
 if (asleep) {
   assert.equal(regional.Parameters[contract.secret], undefined)

@@ -18,6 +18,11 @@ const configuration = environmentConfig(
     notificationWorkerEnabled: process.env.HID_NOTIFICATION_WORKER_ENABLED,
     novuSubscriberSyncEnabled: process.env.HID_NOVU_SUBSCRIBER_SYNC_ENABLED,
     operationalAlarmTopicArn: process.env.HID_OPERATIONAL_ALARM_TOPIC_ARN,
+    patientReleaseVitals: process.env.HID_EHR_PATIENT_RELEASE_VITALS,
+    patientReleaseDiagnoses: process.env.HID_EHR_PATIENT_RELEASE_DIAGNOSES,
+    patientReleasePrescriptions: process.env.HID_EHR_PATIENT_RELEASE_PRESCRIPTIONS,
+    patientReleaseLabResults: process.env.HID_EHR_PATIENT_RELEASE_LAB_RESULTS,
+    patientReleaseDocuments: process.env.HID_EHR_PATIENT_RELEASE_DOCUMENTS,
   },
 );
 const regionalEnvironment = externalAwsEnvironment(process.env.HID_AWS_ACCOUNT, process.env.HID_AWS_REGION);

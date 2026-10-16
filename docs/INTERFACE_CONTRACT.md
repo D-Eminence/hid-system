@@ -113,7 +113,7 @@ open product decision.
 ### Notification worker to Novu
 
 No HID route changes. The worker calls Novu as below (ADR-064, migration
-0095, number provisional).
+0095).
 
 - Main's trigger: `POST {NOVU_API_URL}/v1/events/trigger` with
   `idempotency-key: <event id>` and the body `{"name": <workflow>, "to":
@@ -834,7 +834,13 @@ returns at most 50 completed encounters and 50 current signed/amended note
 revisions of completed encounters (since 0084), after fresh Identity
 authorization through the EHR workload caller.
 It names the other five record categories as withheld from the patient, not as
-absent (§11, "Record summaries"). Only a patient session may use it: EHR's
+absent (§11, "Record summaries"). Since the patient record release (0096,
+owner decision 4 of 2026-10-16, D7) a deployment may also release vitals,
+diagnoses, prescriptions, Lab results and documents, one flag per category,
+each off by default and refused in the production profile until its P36
+sign-off; with every flag off the response is exactly the one above. `GET /api/v1/ehr/me/documents/:documentId/download` returns a 60 s
+attachment URL for one released document (§11, "Patient document
+download"). Only a patient session may use either route: EHR's
 guard answers any other session `403 PATIENT_SESSION_REQUIRED` before the
 handler runs and records `auth.authorization.denied` (§7). Before
 D-Eminence/hid-system#74 a staff session there got `503 DEPENDENCY_UNAVAILABLE` and nothing was
@@ -1328,7 +1334,8 @@ boundary below).
 EHR and OCR authenticate every request through that service session, then
 their guards (`RemoteSecurityGuard`) bind the facility named by
 `X-Facility-ID` on every route that is not marked facility-optional (only
-EHR's `GET /api/v1/ehr/me/records` is). A missing or malformed header is
+EHR's patient-only routes are: `GET /api/v1/ehr/me/records` and, since the
+patient record release, `GET /api/v1/ehr/me/documents/:documentId/download`). A missing or malformed header is
 `400 FACILITY_REQUIRED`. A facility where the actor has no active membership,
 such as a stale tab after the membership ended, is
 `403 FACILITY_ACCESS_DENIED`. Before binding, EHR also applies the runtime
@@ -1353,7 +1360,8 @@ A refusal keeps its own status and code. If its audit row cannot be written,
 the request fails closed with `503 DEPENDENCY_UNAVAILABLE`. Since
 D-Eminence/hid-system#74 each EHR refusal row carries `details.status` and `details.code`,
 the status and code answered, next to `method` and `route`. A route marked
-patient-only (EHR's `GET /api/v1/ehr/me/records`) refuses any other session
+patient-only (EHR's `GET /api/v1/ehr/me/records` and `GET
+/api/v1/ehr/me/documents/:documentId/download`) refuses any other session
 with `403 PATIENT_SESSION_REQUIRED` before a facility is bound.
 
 EHR's request audit (`api.<method>.<route>` on `http-request`) records a failed
@@ -2317,7 +2325,9 @@ within its millisecond (earlier in that millisecond, or tied with a lower
 Two read-only summaries return the same seven arrays, each newest first:
 `encounters` (completed), `notes` (signed or amended, with the current
 revision's content; which encounters' notes depends on the summary, below),
-`vitals`, `diagnoses`, `prescriptions`, `labRequests` and `documents`.
+`vitals`, `diagnoses`, `prescriptions`, `labRequests` and `documents`. The
+patient summary adds an eighth, `labResults`, only where Lab results are
+released to patients (below); the emergency summary never has it.
 
 - `GET /api/v1/ehr/me/records`: the patient's own records, from every facility.
 - `GET /api/v1/ehr/patients/:patientId/emergency-records`: the break-glass
@@ -2333,16 +2343,79 @@ Both also return:
 | `truncated` | per released section, `true` when more rows exist than its limit; the section then holds the newest `limits[section]` rows |
 | `limit` | `50`, the smallest section limit, kept for existing clients; read `limits` and `truncated` instead |
 
-**Patient summary.** Only encounters and notes are released to the patient:
-`released` is `["encounters","notes"]` and `withheld` is
-`["vitals","diagnoses","prescriptions","labRequests","documents"]`. A note is
-released only once its encounter is completed (decision D7, since 0084): the
-notes of an encounter in progress, on hold, cancelled or entered in error are
-not returned, whatever the note's own status, and row-level security refuses
-them to the patient's session as well. Which other
-categories are released, and on which conditions, is an open product decision;
-this is the current default. The audit event `ehr.patient.self.records.read`
-records `encounterCount`, `noteCount` and `withheldCategories`.
+**Patient summary.** Encounters and notes are always released to the
+patient. A note is released only once its encounter is completed (decision
+D7, since 0084): the notes of an encounter in progress, on hold, cancelled or
+entered in error are not returned, whatever the note's own status, and
+row-level security refuses them to the patient's session as well.
+
+Since the patient record release (owner decision 4 of 2026-10-16, D7, ADR-065,
+migration 0096) the patient may also see vitals, diagnoses, prescriptions,
+Lab results and documents. Each category is released only when its own
+ehr-api flag is on, and every flag is off by default:
+`EHR_PATIENT_RELEASE_VITALS`, `EHR_PATIENT_RELEASE_DIAGNOSES`,
+`EHR_PATIENT_RELEASE_PRESCRIPTIONS`, `EHR_PATIENT_RELEASE_LAB_RESULTS` and
+`EHR_PATIENT_RELEASE_DOCUMENTS` (synth inputs `HID_EHR_PATIENT_RELEASE_*`).
+The production profile refuses every one of them: Lab results while Lab is
+off at launch (D17), the others until the clinical owner signs off each
+category and its wording (release checklist P36); staging may set them.
+Lab requests (orders, which carry the clinician's clinical information) are
+never released. Every released item belongs to a completed encounter, matched
+on patient and facility. The database follows the flags: its policies admit a
+category's rows to the patient's transaction only when EHR names that
+category as released in it, so with a flag off neither EHR nor the database
+releases the category. Row-level security restricts rows, not columns: within
+a released category the fields below are what EHR selects, and it is EHR that
+leaves out the clinician's notes, storage locations and staff identities.
+
+| Category | Released | Never released |
+|---|---|---|
+| `vitals` | `status` `final` and never corrected (`current_correction_no` 0), as first recorded, with the emergency summary's fields | a corrected vital, while D8 (correction semantics) is open; a vital entered in error |
+| `diagnoses` | `verificationStatus` `confirmed`: `id`, `encounterId`, `facilityId`, `codeSystem`, `code`, `display`, `clinicalStatus`, `verificationStatus`, `onsetAt`, `abatementAt` | unconfirmed, provisional, differential, refuted and entered-in-error diagnoses; the clinician's `notes` (never returned) |
+| `prescriptions` | `status` `active`, `on_hold` or `completed`, with the emergency summary's fields | drafts, cancelled and entered-in-error prescriptions |
+| `labResults` | per Lab result, its latest released revision that was not invalidated, of an order still active, on hold or completed: `id` (Lab result), `encounterId` (source EHR encounter), `sourceEhrOrderId`, `facilityId` (ordering facility), `test` `{codeSystem, code, name}`, `version`, `revisionKind` (`original`, `correction` or `amendment`), `resultType`, `numericValue` (number or `null`), `textValue`, `unit`, `referenceRange`, `abnormalFlag`, `releasedAt` | unverified or unreleased revisions (a newer correction that is not released leaves the earlier released value, as for clinicians, D11); a result whose latest released revision was entered in error (Lab's staff view shows it marked, the patient does not see it); results of a cancelled or entered-in-error order; correction and release reasons and staff identities |
+| `documents` | `classification` `phi`, uploaded, attached to an encounter, and `status` `available` (the latest scan of the exact stored object version and SHA-256 is clean): `id`, `encounterId`, `facilityId`, `fileName`, `mediaType`, `sizeBytes`, `classification`, `status`, `scanStatus`, `createdAt` | restricted or internal documents, documents attached to no encounter, rejected, not yet scanned, initiated or entered-in-error documents; the storage location (the download route signs a URL) |
+
+`released` lists `encounters`, `notes` and then each released category in
+the order `vitals`, `diagnoses`, `prescriptions`, `labResults`, `documents`.
+`withheld` lists the other categories of `vitals`, `diagnoses`,
+`prescriptions`, `labRequests` and `documents`; it always holds
+`labRequests`. The `labResults` array and name appear only when Lab results
+are released, so with every flag off the response is exactly
+`released: ["encounters","notes"]` and `withheld:
+["vitals","diagnoses","prescriptions","labRequests","documents"]`, as before
+the release. `limits` and `truncated` cover the released sections (100 rows
+each beyond encounters and notes). A released item that is later entered in
+error, refuted, invalidated or retracted with its encounter disappears from
+the summary without a marker.
+
+If the database refuses a released category's read (for example the role
+bootstrap did not run after migration 0096) or the read passes the
+database statement timeout, the summary answers `503
+PATIENT_RECORDS_UNAVAILABLE`, discloses nothing and records no success. The
+audit event `ehr.patient.self.records.read` records `encounterCount`,
+`noteCount`, the count of each further category read (`vitalCount`,
+`diagnosisCount`, `prescriptionCount`, `labResultCount`, `documentCount`) and
+`withheldCategories`; counts only.
+
+**Patient document download.** `GET
+/api/v1/ehr/me/documents/:documentId/download` (patient sessions only,
+facility-optional) answers `200 { url, expiresInSeconds: 60 }`: a URL for the
+exact stored object version, served as an attachment with `Cache-Control:
+private, no-store`. Every document the patient may not download answers the
+same `404 DOCUMENT_NOT_AVAILABLE`: documents are not released, the document
+is unknown or another patient's, it is not an available PHI document of a
+completed encounter, or it is held in another bucket. A malformed id is
+`400`. The audit event `ehr.patient.self.document.download` (resource type
+`document`, the document id, `details.mediaType` and `details.sizeBytes`
+only) commits before the stored object is checked; then the object's
+version, size, SHA-256 and encryption are read back (HEAD with checksum
+mode) and must match the record, else `503 DOCUMENT_INTEGRITY_UNAVAILABLE`
+and no URL is signed; an object store that cannot be read is `503
+DOCUMENT_STORAGE_UNAVAILABLE`. Identity's answers are as for the summary
+(`403 PATIENT_ACCESS_DENIED`, `503 IDENTITY_SERVICE_AUTH_UNAVAILABLE`,
+`503 IDENTITY_SERVICE_UNAVAILABLE`). Caregivers and other delegates have no
+access to either route (no delegated-access model exists, ADR-018).
 
 **Emergency summary.** Of the seven categories it returns those the reader
 holds the read permission for, pending a decision on the break-glass scope.

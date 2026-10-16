@@ -277,7 +277,7 @@ The executable covers:
    signed in with an authenticator, refused staff, a mismatch, a match,
    activation and sign-in, an existing Health ID, a race with a phone proof,
    both budgets and a suspension, as `hid_identity_api_runtime`.
-   With 0095 (ADR-064, number provisional): the additional suites include
+   With 0095 (ADR-064): the additional suites include
    `notification-verified-recipient.integration.sql` (the claim-bound
    recipient answers, its refusals and catalogue), run in both passes, and
    `scripts/verify-non-superuser-database.mjs` calls the lookup as the
@@ -290,6 +290,23 @@ The executable covers:
    deleted, a suspended or a deletion-due login whose email is cleared first,
    an event retried while the patient goes withheld, eligible, withheld, and
    two concurrent events with the login deleted between them.
+   With 0096 (the patient record release, ADR-065): the additional suites
+   include `patient-record-release.integration.sql` (the database following
+   `app.patient_release` category by category, the released rows of each
+   table and of the released Lab results view across every withheld state,
+   unbound contexts, an expired authorization and a consented staff context,
+   the Lab and Identity runtimes refused the view, each policy's and the
+   view's own conditions, the section indexes, the exact policy inventory),
+   run in both passes.
+   `patient_record_release_runtime` runs
+   `verify-patient-record-release-runtime.mjs` after the delegated cookie
+   read verifier: with every flag off the summary is unchanged; with the
+   flags on, the released sets, the counts-only audit, the document download
+   and its refusals, a staff session refused, Identity refusing lab-api,
+   the runtime's privileges, and the database following the flags in the
+   EHR's own patient-self transaction (nothing new without the release
+   binding; only vitals with only that flag on), as `hid_ehr_api_runtime`
+   against a real Identity child.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
@@ -315,7 +332,13 @@ The executable covers:
    and attestation helpers or `auth.staff_session_is_mfa`, and that the
    permission is held by `clinician`, `doctor` and `nurse` only; the
    bootstrap's own `runtime-roles.integration.sql` checks the 0093 and 0094
-   grants for every runtime role), then
+   grants for every runtime role; and since 0096
+   (`patient_record_release_grants`) that the upgraded bootstrap makes
+   `hid_lab_release_reader` the owner of `ehr.patient_released_lab_results`,
+   grants `SELECT` on it to the EHR runtime and not to the Lab runtimes,
+   gives neither the Lab runtime nor the view's owner `ehr.patient_self_context`
+   or the Lab runtime `USAGE` on `ehr`, and keeps `ehr.patient_self_context`
+   executable by exactly the EHR runtime and the test role), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

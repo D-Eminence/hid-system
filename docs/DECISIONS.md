@@ -4358,7 +4358,7 @@ Consequences:
   that ADR-052 also forbids; this is a separate choice.
 - The FCM adapter stays for a future native app.
 - The Novu subscriber sync of draft D-Eminence/hid-system#8 is ported as
-  ADR-064 (migration 0095, number provisional); it does not touch devices or
+  ADR-064 (migration 0095, D-Eminence/hid-system#90); it does not touch devices or
   push.
 
 Open for the owner: approve web push as a patient channel; the ADR-052
@@ -4764,11 +4764,9 @@ registration (0094)".
 
 # ADR-064: Novu receives the patient's verified login email, behind a flag; the in-app notice never depends on it
 
-Status: Proposed in source (branch `launch/novu-verified-email`, migration
-0095). Not merged, not deployed. `NOVU_SUBSCRIBER_SYNC` is off by default
-and refused in production. The numbers 0095, ADR-064, P35 and S4w are
-provisional: another open change also uses 0095, and the final numbers are
-assigned at merge.
+Status: Merged (D-Eminence/hid-system#90, migration 0095), not deployed.
+`NOVU_SUBSCRIBER_SYNC` is off by default and refused in production. Its
+numbers 0095, ADR-064, P35 and S4w are final.
 
 Date: 2026-10-16
 
@@ -4974,3 +4972,190 @@ Related: ADR-053 and D17 (the worker is off in production); ADR-058
 (NOTIF-PIN-NOTICE); ADR-060; `PHASE_3_LAUNCH_DECISIONS.md` NOTIF-PIN-NOTICE;
 `INTERFACE_CONTRACT.md`, "Notification worker to Novu"; `DATABASE.md`,
 "Notification verified recipient (0095)"; release checklist P35 and S4w.
+
+# ADR-065: Patient record release
+
+Status: Accepted in source (migration 0096). Not merged, not deployed. Every
+release flag is off, and the production profile refuses each of them.
+
+Date: 2026-10-16
+
+Context:
+
+- Since 0084 a patient sees only their completed encounters and the signed or
+  amended notes of those encounters; the summary names vitals, diagnoses,
+  prescriptions, lab requests and documents as withheld. D7 proposed the
+  rules for releasing more and left the categories to the owner.
+- On 2026-10-16 the owner approved (decision 4) that patients see their
+  diagnoses, prescriptions, Lab results, vitals and documents as well.
+- The PR #8 branch released these through new patient-self policies on each
+  table and a patient-self route in lab-api. On main the patient-self context
+  is bound to the patient's live session (0091, PSELF-RLS) and only the EHR
+  runtime may evaluate it; Lab is off at launch (launch module set D17) and
+  lab-api never receives patient credentials or patient-self context. Lab's
+  released results live in Lab's tables, which the EHR runtime cannot read.
+
+Decision:
+
+- One release set in EHR. `PatientRecordRelease`
+  (`services/ehr-api/src/ehr/patient-records/patient-release.ts`) is the
+  single service function that decides and reads what a patient sees: the
+  always released encounters and notes, plus each approved category whose
+  flag is on. Later features that show a patient their records (imported
+  records, record chat) use it and do not define their own.
+- One flag per category, all off by default: `EHR_PATIENT_RELEASE_VITALS`,
+  `EHR_PATIENT_RELEASE_DIAGNOSES`, `EHR_PATIENT_RELEASE_PRESCRIPTIONS`,
+  `EHR_PATIENT_RELEASE_LAB_RESULTS` and `EHR_PATIENT_RELEASE_DOCUMENTS`
+  (synth inputs `HID_EHR_PATIENT_RELEASE_*`). With every flag off the
+  summary is byte-for-byte what it was. The EHR production profile refuses
+  every one of them, as `HID_NOTIFICATION_WORKER_ENABLED` is fixed false in
+  production: Lab results while Lab is off at launch (D17), and the other
+  four until the clinical owner signs off each category and its wording
+  (release checklist P36), since no clinician-review gate or sensitivity
+  classification is built. `infra/aws` (`environmentConfig` and the regional
+  stack) and `verify-synth` refuse every input outside staging; the AWS
+  development stack runs ehr-api in the production profile
+  (`HID_DEPLOYMENT_ENV=production`), so it opts in to nothing. Staging and a
+  local run with `HID_DEPLOYMENT_ENV=development` may opt in. A reviewed
+  change that records a category's P36 sign-off lifts that category's
+  refusal. EHR also refuses documents without S3 storage.
+- D7's rules, as adopted by the owner: only items of a completed encounter;
+  never a draft, an unconfirmed or refuted diagnosis or anything entered in
+  error; documents only once a patient download route exists; the categories
+  are the owner's (diagnoses, prescriptions, Lab results, vitals and
+  documents). Every further rule this change builds is a proposed default
+  (below), not part of D7.
+- D8 interim: a corrected vital is withheld from the patient (shown to
+  clinicians as today) until D8 decides what a correction means.
+- The database follows the flags. 0096 adds five PUBLIC patient-release
+  policies (vitals, diagnoses, prescriptions, documents and their scan
+  events) and the Lab view below, each gated by
+  `ehr.patient_self_context(patient_id)` and by its category in the
+  transaction-local `app.patient_release`. Only `PatientRecordRelease.bind`
+  sets it, to the categories whose flag is on, inside main's patient-self
+  transaction (session-bound context, `@PatientOnly` route, Identity's fresh
+  patient-self authorization through the EHR workload, delegated cookie reads
+  unchanged, the audit event `ehr.patient.self.records.read` with counts
+  only); `DatabaseService.withPatientTransaction` starts it empty. So the two
+  layers of main's model hold per category: with a flag off, neither the
+  service nor the database releases that category, and an EHR build that
+  never sets it (every earlier build, including one from before
+  D-Eminence/hid-system#52) reads nothing new.
+- Rows, not columns. Row-level security cannot restrict columns, as for
+  encounters and notes since 0030: within a released category the database
+  admits whole rows, and the service's `SELECT` lists are what withhold the
+  diagnosis `notes`, a document's storage location and staff columns and a
+  scan event's staff columns (the download needs the storage location to sign
+  its URL). This is accepted: it is main's model for every patient-self read,
+  and a column-restricting view per table would duplicate
+  `ehr.documents_effective`. The Lab view restricts columns as well.
+- Lab results without Lab. The EHR patient transaction reads
+  `ehr.patient_released_lab_results`, a `security_barrier` view over Lab's
+  release tables owned by the technical role `hid_lab_release_reader`
+  (NOLOGIN, no member, no schema `USAGE`, column `SELECT` only on what the
+  view reads, one `for select ... using (true)` policy on each table it
+  reads, no privilege on the view itself). Functions in a view run as its
+  caller: the view's patient-self condition and the encounters' policies are
+  evaluated by the EHR runtime under the patient's binding, and the owner can
+  evaluate neither. That patient-self condition is what keeps a consented
+  staff context from reading released Lab values outside lab-api's checks
+  and audit. Only the EHR runtime and the test role may select the view.
+  Options considered:
+  - lab-api reads with patient-self context (the PR #8 route): rejected; it
+    would grant `ehr.patient_self_context` (or a Lab twin) to a Lab role and
+    send patient credentials to lab-api, which D17 and PSELF-RLS exclude, and
+    it needs Lab running.
+  - A workload-asserted Lab route (EHR names the patient to lab-api):
+    rejected; nothing in Lab's transaction binds the patient to a live
+    patient session, so lab-api would trust EHR's word for the patient.
+  - Copy released results into an EHR table: rejected; a second copy to keep
+    in step with corrections and invalidations, and a writer for it.
+  - Two security definers (an EHR function calling a Lab-owned one): rejected;
+    it needs cross-owner `EXECUTE` and a definer that trusts its caller's
+    patient argument.
+  - The caller-evaluated view owned by a technical role: chosen. It needs no
+    new `EXECUTE` and no Lab runtime privilege, and works on RDS, where the
+    owner of the Lab tables does not bypass `FORCE ROW LEVEL SECURITY`.
+- Each section reads through an index in its own order (vitals, diagnoses,
+  prescriptions; Lab results through the view's), so it stops after the rows
+  it shows; a statement timeout of any released section, which the documents
+  section can still reach for a patient with thousands of documents, answers
+  `503 PATIENT_RECORDS_UNAVAILABLE`.
+- Patient document download. `GET /api/v1/ehr/me/documents/:documentId/download`
+  (`@PatientOnly`, facility-optional) re-checks the release conditions in the
+  patient transaction, audits `ehr.patient.self.document.download` (media
+  type and size only) before anything is signed, reads back the exact
+  version's size, SHA-256 and encryption, and signs a 60 s attachment URL with
+  `Cache-Control: private, no-store`. Every refusal is the same `404
+  DOCUMENT_NOT_AVAILABLE`. The staff download route is unchanged.
+- No caregiver, guardian or other delegated access (ADR-018 requires an
+  explicit delegated-access model, which does not exist).
+
+Proposed defaults (open owner questions; the safest default is built):
+
+- Every release flag stays off in production, and the production profile
+  refuses it, until the clinical owner signs off that category and its
+  wording (release checklist P36). No delay or clinician-review gate and no
+  sensitivity classification is built. Lab results are refused in production
+  until Lab is re-enabled as well.
+- Corrected vitals are withheld while D8 is open.
+- Cancelled prescriptions are not shown; only active, on hold and completed.
+- Clinician free text stays withheld (diagnosis `notes`, Lab correction and
+  release reasons), and so do staff identities.
+- An item entered in error, refuted, invalidated or retracted after release
+  disappears without a "withdrawn" marker or inbox notice.
+- Restricted and internal documents, and documents attached to no
+  encounter, are never released.
+- A Lab result needs its source encounter completed as well as its release.
+- A released Lab result is shown only while its source EHR order is active,
+  on hold or completed: once the order is cancelled or entered in error the
+  patient no longer sees it. This departs from D10, where Lab refuses work on
+  a cancelled order but its released results stay in Lab's released history
+  for staff; for the patient a cancelled order's result is withheld until the
+  owner decides otherwise.
+- Lab requests are never released.
+- No caregiver, guardian or proxy access.
+- Each new category returns at most 100 rows, newest first, with
+  `truncated`; the audit records counts only.
+- The migration, ADR and checklist numbers are assigned at merge.
+- The EHR task role's `s3:GetObject`, `s3:GetObjectVersion` and `kms:Decrypt`
+  via S3 cover `HeadObject` with checksum mode on SSE-KMS objects; staging
+  check S4x confirms it before documents are released.
+
+Consequences:
+
+- With every flag off nothing changes for patients, staff or Health-id, and
+  the database refuses the new categories to the patient as before 0096.
+- A deployment can release each category on its own, once its P36 sign-off
+  lifts its production refusal. The database admits at most the rows the
+  0096 rules allow for the categories the transaction names; a wrong
+  `SELECT` list in EHR could still return a column of a released row that
+  the service means to withhold (rows, not columns).
+- The role bootstrap must run after 0096: until it does, a configured Lab
+  results section answers `503 PATIENT_RECORDS_UNAVAILABLE` and discloses
+  nothing.
+- Rolling the EHR API back to any earlier build on a database with 0096
+  releases nothing new: no earlier build sets `app.patient_release`.
+- Health-id renders none of the new sections or the download; the flags stay
+  off until it does (P36).
+
+Residual risks:
+
+- A released abnormal result or a sensitive diagnosis reaches the patient
+  without a clinician's explanation (no review gate; P36 sign-off).
+- A withdrawn item vanishes silently; a patient who saw it is not told why.
+- A staging database built from the PR #8 branch may hold its permissive
+  patient-self policies, which would widen the release whatever
+  `app.patient_release` says; the SQL suite's exact policy inventory fails on
+  them (P36 preflight).
+- The view's owner reads Lab's release tables unfiltered; it is safe only
+  while it has no login, no member and no other privilege, which
+  `runtime-roles.integration.sql` asserts.
+- `app.patient_release` is set by the EHR runtime itself, like the rest of
+  the patient-self binding, so it guards against a wrong flag check or query
+  in EHR and against older builds, not against code running as the EHR
+  runtime.
+
+Related: ADR-018; ADR-058 (PSELF-RLS); `PHASE_3_LAUNCH_DECISIONS.md` D7, D8
+and D17; `INTERFACE_CONTRACT.md`, "Record summaries" and "Patient document
+download"; `DATABASE.md`, "Patient record release (0096)".
