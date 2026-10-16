@@ -19,7 +19,9 @@ receives no device token; no push is sent (`WEB_PUSH_PROPOSAL.md`, ADR-060,
 proposed). The worker is off in production (D17). With `NOVU_SUBSCRIBER_SYNC=email`
 (ADR-064, migration 0095, off by default, refused in production) the worker also
 reads the patient's verified login email through a function bound to its live inbox
-claim and sets or clears it on the Novu subscriber before the unchanged trigger.
+claim and sets or clears it on the Novu subscriber before main's trigger, or before
+a trigger that clears the email itself when the clear is not confirmed; a lost claim
+sends no trigger.
 Authentication OTP is explicitly excluded and uses
 Identity -> workload-authenticated Notification API -> SES/Termii/Meta with
 bounded Brevo fallback. The generic inbox remains available for future

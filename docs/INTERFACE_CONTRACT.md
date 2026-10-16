@@ -115,43 +115,66 @@ open product decision.
 No HID route changes. The worker calls Novu as below (ADR-064, migration
 0095, number provisional).
 
-- Always, as on main: `POST {NOVU_API_URL}/v1/events/trigger` with
+- Main's trigger: `POST {NOVU_API_URL}/v1/events/trigger` with
   `idempotency-key: <event id>` and the body `{"name": <workflow>, "to":
   {"subscriberId": <canonical patient UUID>}, "payload": {"message": "You have
   a new update in HID. Sign in securely to view it."}}`. With
   `NOVU_SUBSCRIBER_SYNC=disabled` (the default, and the only value production
-  accepts) this is the only call.
+  accepts) this is the only call, for every event, as on main. With
+  `NOVU_SUBSCRIBER_SYNC=email` it is sent after the subscriber call below,
+  except in two cases: when a clear is not confirmed the worker sends the
+  email-withheld trigger instead, and when the claim is lost (55000) it sends
+  no trigger at all.
 - With `NOVU_SUBSCRIBER_SYNC=email` the worker first asks the database,
   through `integration.notification_recipient_for_claim(event, claim token,
   patient)`, for its live claim's answer: `email` with the verified login
   email, or `withhold`. Names are never part of the answer or of any call.
+  Each subscriber key below includes the attempt's claim token (unique per
+  attempt), because Novu answers a seen idempotency key from its cache for
+  24 hours, success or error, without processing it again; a retry of the
+  event is therefore a new request. The key holds neither the token nor the
+  address.
   - `email`: `POST /v2/subscribers` with exactly `{"subscriberId": <patient
     UUID>, "email": <address>}` and `idempotency-key` = lowercase hex
-    sha256(`hid-novu-subscriber-email-v1` U+001F event id U+001F
-    sha256(address)); then main's trigger, whatever the subscriber call
-    answered.
-  - `withhold` (opted out, a login that is not active or is deleted, a patient
-    who is not active, no verified email, no login, a phone-only login, or a
-    lookup that failed): `PATCH /v2/subscribers/{patient UUID}` with exactly
-    `{"email": null}` and `idempotency-key` = sha256(`hid-novu-subscriber-email-clear-v1`
-    U+001F event id). After a `2xx` or `404` (no such subscriber), main's
-    trigger. Otherwise the trigger with `"to": {"subscriberId": <patient UUID>,
-    "email": null}`, the same workflow and message, and `idempotency-key` =
-    sha256(`hid-novu-trigger-email-withheld-v1` U+001F event id).
+    sha256(`hid-novu-subscriber-email-v1` U+001F event id U+001F claim token
+    U+001F sha256(address)). Then the worker asks the database again under
+    the same claim. If it answers the same address, main's trigger follows,
+    whatever the subscriber call answered. Any other answer (withheld,
+    another address or a failed lookup) is handled as `withhold` below, so
+    an upsert that reached Novu after another event's clear is cleared again.
+  - `withhold` (opted out; a login that is not active, is suspended
+    (`disabled_until` ahead), is due for deletion or is deleted; a patient
+    who is not active; no verified email; no login; a phone-only login; no
+    outbox envelope bound to the claim (`unbound`); or a lookup that failed):
+    `PATCH /v2/subscribers/{patient UUID}` with exactly `{"email": null}` and
+    `idempotency-key` = sha256(`hid-novu-subscriber-email-clear-v1` U+001F
+    event id U+001F claim token). After a `2xx` or `404` (no such
+    subscriber), main's trigger. Otherwise the email-withheld trigger: `"to":
+    {"subscriberId": <patient UUID>, "email": null}`, the same workflow and
+    message, and `idempotency-key` = sha256(`hid-novu-trigger-email-withheld-v1`
+    U+001F event id).
+  - A claim lost at the first lookup sends nothing. A claim lost at the
+    second lookup, after a sync, sends the clear above and nothing else. In
+    both cases the message is neither completed, failed nor acknowledged.
   - Each call has a 5-second timeout. A subscriber call answering `2xx` is
     confirmed; `408`, `409`, `429`, `5xx`, a timeout or no answer is unknown;
     any other `4xx` is refused. No subscriber answer decides whether the
     trigger is sent: the inbox outcome is the trigger's, as on main (accepted
     completes; `408`, `429`, `5xx` or no answer retries; another `4xx` is
     terminal).
-- The worker writes one stdout line per flag-on event:
+- The worker writes one stdout line per flag-on event attempt:
   `{"event":"notification.worker.outcome","eventType":...,"correlationId":...,
-  "recipient":"email|withhold|unbound|lookup_failed|claim_lost",
+  "recipient":"email|withhold|unbound|lookup_failed|withdrawn|claim_lost",
   "subscriber":"synced|sync_failed|cleared|clear_failed|not_run",
   "subscriberCode"?,"trigger":"standard|email_withheld|not_sent",
   "triggerOutcome"?,"triggerCode"?,"inbox":"processed|retry_scheduled|failed_terminal|claim_lost"}`.
-  It never holds the address, the patient, the event id or a key; a
-  correlation id outside the outbox's own pattern is written as `invalid`.
+  `withdrawn` means the first lookup answered `email` and the second did not
+  confirm it, so the email was cleared. It never holds the address, the
+  patient, the event id or a key; a correlation id outside the outbox's own
+  pattern is written as `invalid`.
+- Turning the flag off does not clear what it synced: main's trigger then
+  goes to subscribers that may still hold an address. Release checklist §9
+  clears them before the flag is turned off or the worker is rolled back.
 
 ### Turnstile verification
 

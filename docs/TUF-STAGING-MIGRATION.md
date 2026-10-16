@@ -284,9 +284,12 @@ The executable covers:
    RDS-like worker login. `notification_worker_runtime` runs
    `services/notification-worker/scripts/verify-notification-worker-runtime.mjs`
    after the Pharmacy, Lab, OCR and Outreach verifiers: the real worker as
-   `hid_notification_worker` against a fake Novu, flag off and on, a failed
-   subscriber call that still sends the in-app trigger, and an opt-out or a
-   deleted login whose email is cleared first.
+   `hid_notification_worker` against a fake Novu that replays a seen
+   idempotency key's answer as Novu does: flag off and on, a failed
+   subscriber call that still sends the in-app trigger, an opt-out, a
+   deleted, a suspended or a deletion-due login whose email is cleared first,
+   an event retried while the patient goes withheld, eligible, withheld, and
+   two concurrent events with the login deleted between them.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,

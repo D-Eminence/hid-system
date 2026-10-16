@@ -148,10 +148,14 @@ With `NOVU_SUBSCRIBER_SYNC=email` (staging only, `HID_NOVU_SUBSCRIBER_SYNC_ENABL
 after release checklist P35; ADR-064) the worker sets the subscriber's email
 itself before each trigger, and only to the patient's verified login email: no
 name, telephone number or anything else. For every patient who may not be
-emailed (notifications off, a login that is not active or deleted, no verified
-email) it clears the subscriber's email first, so a manual mapping of such a
-patient is removed by the next event. The trigger itself is unchanged. Neither
-mode is evidence of production subscriber provisioning, which stays refused.
+emailed (notifications off, a login that is not active, is suspended, is due
+for deletion or is deleted, no verified email) it clears the subscriber's email
+first, so a manual mapping of such a patient is removed by the next event. The
+trigger body is main's, except that a clear Novu does not confirm is followed by
+a trigger that carries `email: null` itself. Turning the flag off does not
+clear what it set: clear every synced and hand-mapped subscriber first (release
+checklist §9). Neither mode is evidence of production subscriber provisioning,
+which stays refused.
 [Novu email delivery model](https://docs.novu.co/platform/integrations/email)
 
 **Choose and record the delivery channel before testing:**

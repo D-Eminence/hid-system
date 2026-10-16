@@ -4788,6 +4788,11 @@ Context:
 - A review of the first design found two failure modes this ADR closes: a
   failed subscriber call could make in-app safety notices terminal, and an
   opt-out did not hold once an email had been synced.
+- A review of the second design found three more, also closed below: the
+  lookup emailed suspended logins and logins whose deletion was due; a
+  retried event's clear could be answered from Novu's idempotency replay
+  cache without being applied; and an upsert could reach Novu after a later
+  event's clear when the login was deleted or disabled in between.
 
 Decision:
 
@@ -4815,24 +4820,44 @@ Decision:
   patient). It belongs to `hid_event_delivery_commands`, moved in main's
   CREATE window, and only the worker executes it. It reads the patient and
   login through the private helper `integration.notification_recipient_state`,
-  owned by the migration administrator (the owner of both tables, which
-  needs no BYPASSRLS because `identity.patients` does not force row-level
-  security) and executable only by the technical owner. The answer is
+  owned by the migration administrator (the owner of the three tables it
+  reads, `identity.patients`, `auth.accounts` and
+  `identity.patient_account_deletion_requests`, which needs no BYPASSRLS
+  because none of them forces row-level security) and executable only by
+  the technical owner. The answer is
   `('email', address)` or `('withhold', null)`; no row when the claim binds
   no envelope.
 - Eligible for email: an active patient with notifications on, whose login
-  is active with a verified, non-blank email. Everyone else is withheld: a
-  phone-only login, an unverified or blank email, no login, a login that is
-  pending_reset, locked, disabled or deleted, a patient who is not active,
-  notifications off.
+  is usable as main's `identity.current_patient_account` defines it (0064:
+  status active, no suspension ahead in `disabled_until`, no confirmed
+  deletion whose `scheduled_for` has passed) and has a verified, non-blank
+  email. Everyone else is withheld: a phone-only login, an unverified or
+  blank email, no login, a login that is pending_reset, locked, disabled,
+  deleted, suspended or due for deletion, a patient who is not active,
+  notifications off. A deletion confirmed but not yet due keeps the email,
+  as the login itself stays usable until then.
+- Keys. Novu answers a seen idempotency key from its cache for 24 hours,
+  success or error, without processing the request again. So both
+  subscriber keys include the attempt's inbox claim token (unique per
+  attempt, hashed, never sent): a retried event clears or sets the email
+  again instead of receiving the first attempt's cached answer. Setting or
+  clearing an email is idempotent, so nothing is lost. Main's trigger key
+  (the event id) and the email-withheld trigger key stay per event: they
+  dedupe the in-app notice.
 - Eligible: `POST /v2/subscribers` (Novu upserts) with exactly
   `{subscriberId, email}` and the idempotency key
-  sha256("hid-novu-subscriber-email-v1", event id, sha256(email)), then
-  main's trigger, whatever the sync answered.
+  sha256("hid-novu-subscriber-email-v1", event id, claim token,
+  sha256(email)). Then the worker asks the lookup again under the same
+  claim. If it answers the same address, main's trigger follows, whatever
+  the sync answered. Otherwise (withheld, another address or a failed
+  lookup) the event is handled as withheld below, so an upsert that reached
+  Novu after a concurrent event's clear (the login deleted, disabled,
+  locked or reset in between) is cleared again before this trigger. A claim
+  lost at the second lookup clears the email and stops.
 - Withheld: `PATCH /v2/subscribers/{subscriberId}` with `{"email": null}`
   (the field is nullable; 404 means Novu has no such subscriber, so no
-  email) and the key sha256("hid-novu-subscriber-email-clear-v1", event id),
-  then main's trigger once the clear is confirmed. When it is not
+  email) and the key sha256("hid-novu-subscriber-email-clear-v1", event id,
+  claim token), then main's trigger once the clear is confirmed. When it is not
   confirmed (timeout, 408, 409, 429, 5xx or a refusal), the worker sends
   instead the trigger that clears the email itself: main's workflow and
   message to `{subscriberId, email: null}` under its own key
@@ -4855,7 +4880,7 @@ Decision:
   `notification.delivery_attempts` (`novu-subscriber-email-v1` or
   `novu-subscriber-email-clear-v1`, channel `email`, outcome and fixed safe
   code, no address and nothing derived from it); a row that cannot be
-  written never holds back the trigger. Each flag-on event writes one
+  written never holds back the trigger. Each flag-on event attempt writes one
   `notification.worker.outcome` stdout line with the event type, the
   correlation id (only in the outbox's own shape, otherwise `invalid`) and
   fixed codes only.
@@ -4871,8 +4896,20 @@ Proposed defaults (owner questions answered with the safest choice):
   (`PHASE_3_PATIENT_SAFETY.md`).
 - The Novu subscriber is not deleted when a login is deleted. That needs an
   event from the account deletion and a Novu delete call; it is a follow-up,
-  not built. Until then the next event for a deleted login clears its email
-  at Novu, and a request to erase it is handled in the Novu dashboard.
+  not built, and it is required before the production refusal is lifted
+  (staging uses synthetic patients only, S4w). Until then, while
+  `NOVU_SUBSCRIBER_SYNC=email` stays on, the next event for a deleted login
+  clears its email at Novu, and a request to erase it is handled in the
+  Novu dashboard.
+- Suspended logins and logins whose deletion is due are withheld as main
+  withholds them from sign-in; no new state is added for them.
+- A claim lost after a sync: the worker clears the email it may have set and
+  stops. The worker that now holds the event decides for itself, so an
+  eligible patient misses at most this attempt's email.
+- Turning the flag off or rolling the worker back is a reviewed operation:
+  every subscriber with a `novu-subscriber-email-v1` disclosure row has its
+  email cleared or the subscriber deleted at Novu first (release checklist
+  §9).
 - A failed sync skips the email for that event only. Novu then emails at
   most the address an earlier sync of the same account stored: no route on
   main changes a login's email, so that is the same verified address.
@@ -4885,16 +4922,22 @@ Proposed defaults (owner questions answered with the safest choice):
   `identity.patients` ever forces row-level security (the owner pass of the
   new suite would fail first).
 - Production refuses the flag unconditionally. Lifting it is a reviewed
-  change after P35, not a setting.
+  change after P35 and the subscriber deletion follow-up, not a setting.
 
 Consequences:
 
-- With the flag off the worker behaves exactly as on main; 0095 only adds
-  two functions and their grants.
+- With the flag off the worker runs main's code path: no lookup, no
+  subscriber call, main's trigger. 0095 only adds two functions and their
+  grants. That is main's behaviour only if the flag was never on: emails it
+  synced stay on the Novu subscribers, and main's trigger can then email
+  them, opted-out and deleted patients included. Release checklist §9 clears
+  them before the flag is turned off.
 - With the flag on in staging, a verified-email patient's notice can arrive
   by email as well as in-app, once the staging workflow has an Email step
   (S4w); phone-only patients see no change.
-- Every flag-on event makes one extra Novu call (sync or clear).
+- Every flag-on event makes one extra Novu call (sync or clear), two when a
+  second lookup after a sync withdraws it (sync, then clear), and one extra
+  lookup after every sync.
 - Health-id needs no API change. Before the flag is set where Health-id
   serves real patients, its privacy notice must name the processor and the
   data, and the account deletion screen must say that email updates stop and
@@ -4906,9 +4949,21 @@ Residual risks:
   upsert, the nullable email on PATCH and on the trigger's `to`, and the
   order of the trigger's subscriber update before the Email step. S4w
   confirms them on staging before the flag is set anywhere.
-- An event resolved as eligible just before an opt-out can sync after a
-  later event's clear and before its trigger. No route on main writes
-  `notifications_enabled`, so the window needs an imported value change.
+- Concurrency. Main routes change eligibility while events are in flight:
+  account deletion (0064, at `scheduled_for` and at finalization), and the
+  administrator's disable, lock and reset (0068), besides an imported
+  `notifications_enabled`. The second lookup after a sync closes the window
+  for every upsert Novu applies before answering. It stays open for an
+  upsert whose answer never arrives (timeout) and that Novu applies only
+  after this worker's second lookup and a later event's clear: the address
+  then stays at Novu, unused by HID triggers while the flag stays on (every
+  later event for that patient clears first), until the deletion follow-up
+  or a manual deletion.
+- Retries reuse nothing at Novu for subscriber calls (per-attempt keys).
+  Main's trigger key is the event id, as on main: a retried trigger whose
+  first attempt Novu processed is answered from the cache and sends no
+  second notice.
+- Flag off after on: see Consequences; the §9 step is manual.
 - The key protects personal data now: Novu's API key has full
   administrative access to the subscribers.
 - The region (US or EU), the data processing agreement and the NDPA

@@ -4310,14 +4310,22 @@ text)`.
 
 - `integration.notification_recipient_state(uuid)` (private helper, `sql`,
   `stable`). Owner: the migration administrator, which owns
-  `identity.patients` (row-level security enabled, not forced) and
-  `auth.accounts` (none), so it reads them without `BYPASSRLS`. One row:
-  `('email', btrim(email))` when the patient is `active` with
-  `notifications_enabled`, and the login is `active` with
-  `email_verified_at` set and a non-blank email; otherwise `('withhold',
-  null)` (phone-only, unverified or blank email, no login, `pending_reset`,
-  `locked`, `disabled` or `deleted` login, a patient that is `inactive`,
-  `merged`, `deceased` or `deleted`, notifications off).
+  `identity.patients` (row-level security enabled, not forced),
+  `auth.accounts` and `identity.patient_account_deletion_requests` (none),
+  so it reads them without `BYPASSRLS`. One row: `('email', btrim(email))`
+  when the patient is `active` with `notifications_enabled`, and the login
+  is usable as main's `identity.current_patient_account` (0064) defines it:
+  `active`, `disabled_until` null or passed, and no `pending` deletion
+  request whose `scheduled_for` has passed (the test of
+  `identity.patient_account_deletion_due`, inlined so the helper needs no
+  `EXECUTE` on it); and the login has `email_verified_at` set and a
+  non-blank email. Otherwise `('withhold', null)`: phone-only, unverified
+  or blank email, no login, a `pending_reset`, `locked`, `disabled` or
+  `deleted` login, a suspended login (`disabled_until` ahead, which a banned
+  legacy login imports), a login whose confirmed deletion is due but not yet
+  finalized, a patient that is `inactive`, `merged`, `deceased` or
+  `deleted`, notifications off. A deletion confirmed but not yet due keeps
+  `email`, as the login stays usable until `scheduled_for`.
 - `integration.notification_recipient_for_claim(uuid, uuid, uuid)` (event,
   claim token, patient). Owner: `hid_event_delivery_commands`, moved in
   `runtime-grants.sql`'s integration CREATE window. Steps:
@@ -4338,34 +4346,47 @@ only, beside its two existing private helpers. No table or column grant to
 any runtime or to the technical owner. The worker login keeps no `USAGE` on
 `identity` or `auth`.
 
-**Callers.** The worker calls the claim function once per claimed event with
-`NOVU_SUBSCRIBER_SYNC=email`, and checks at startup that it exists and is
+**Callers.** With `NOVU_SUBSCRIBER_SYNC=email` the worker calls the claim
+function once per claimed event, and a second time under the same claim
+after it has synced an email: unless the second answer is the same address,
+it clears the email again before the trigger (an event handled meanwhile,
+after a deletion or a disable, may have cleared it before the sync landed at
+Novu; ADR-064). It checks at startup that the function exists and is
 executable (`has_function_privilege(current_user, ...)`). It records each
 Novu subscriber call in `notification.delivery_attempts` (existing table,
 existing grant): workflow `novu-subscriber-email-v1` or
 `novu-subscriber-email-clear-v1`, channel `email`, the outcome and a fixed
-safe code, one row per attempt; no address and nothing derived from one.
+safe code, at most one row of each per attempt; no address and nothing
+derived from one. The patients whose address may be at Novu are those with a
+`novu-subscriber-email-v1` row (joined to `integration.outbox_envelopes` by
+event id for the patient); release checklist §9 uses them before the flag is
+turned off.
 
 **Tests.**
 
 - `notification-verified-recipient.integration.sql` (new, rollback-only;
   run as the superuser and again with every schema, table and
   administrator-owned function moved to a `NOSUPERUSER NOBYPASSRLS NOLOGIN`
-  owner): fixtures A to I (verified; phone-only; unverified; deleted login;
+  owner): fixtures A to R (verified; phone-only; unverified; deleted login;
   deceased; opted out, for an ordinary and a safety event; no login;
-  locked; blank email), each with an Identity outbox event claimed as
-  `hid_notification_worker`. Only A answers `email`. A claim names no other
+  locked; blank email; suspended; deletion due; deletion confirmed, not yet
+  due; suspension ended; disabled; `pending_reset`; inactive patient; merged
+  patient), each with an Identity outbox event claimed as
+  `hid_notification_worker`. A, L and M answer `email`, every other fixture
+  `withhold`. A claim names no other
   patient; a claim with another correlation id and an event without a
   workflow bind nothing; a random token, another event's token and an
   expired lease are 55000; a disabled consumer and one rebound to the test
   role are 42501; the Identity, dispatcher and notification API runtimes
   cannot execute the claim function; the worker cannot execute the helper or
-  read either table; catalogue checks (owners, security, search path,
-  result, `PUBLIC`); the lookup changes no claim.
+  read any of the three tables; catalogue checks (owners, security, search
+  path, result, `PUBLIC`; the helper's owner owns the three tables and none
+  forces row-level security); the lookup changes no claim.
 - `runtime-roles.integration.sql`: the exact ACLs (the worker on the claim
   function, the technical owner on the helper, besides their owners), the
   owners, `SECURITY DEFINER` and the search path, and no table or column
-  privilege on `identity.patients` or `auth.accounts` for the worker, the
+  privilege on `identity.patients`, `auth.accounts` or
+  `identity.patient_account_deletion_requests` for the worker, the
   notification aggregates, the dispatcher or the technical owner.
 - `scripts/verify-non-superuser-database.mjs`: after the non-superuser chain
   to 0095, the RDS-like worker login claims two Identity events and gets
@@ -4374,11 +4395,16 @@ safe code, one row per attempt; no address and nothing derived from one.
   and the dispatcher login at the function.
 - `services/notification-worker/scripts/verify-notification-worker-runtime.mjs`
   (rehearsal `notification_worker_runtime`): the real worker as
-  `hid_notification_worker` against a fake Novu.
+  `hid_notification_worker` against a fake Novu that applies Novu's replay
+  rule for a seen idempotency key, including a suspended and a deletion-due
+  login, one event retried while the patient goes withheld, eligible,
+  withheld, and two concurrent events with the login deleted between them.
 - Mutants (local evidence): the helper ignoring `notifications_enabled` is
   killed by the suite (fixture F answers `email`); `EXECUTE` on the claim
   function given to `hid_notification_runtime` is killed by
-  `db:verify-roles`.
+  `db:verify-roles`. The first 0095 helper, which ignored `disabled_until`
+  and due deletions, fails the suite at fixtures J and K and the runtime
+  verifier at its suspended-login step.
 - All 52 SQL suites pass on a database built from empty to 0095 and
   bootstrapped (0 pending on a rerun), and the 50 additional suites again
   with the non-superuser owner (local evidence, release checklist §8).
