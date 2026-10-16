@@ -18,6 +18,11 @@ interface SubscriberDelivery {
   trigger: 'standard' | 'email_withheld';
 }
 const LOGGABLE_CODE = /^[A-Z][A-Z0-9_]{1,79}$/;
+// The outbox's own correlation id shape (identity.outbox_events and
+// notification.delivery_attempts); anything else is reported as invalid.
+const LOGGABLE_CORRELATION = /^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
+const correlation = (event: HidEventEnvelope) =>
+  LOGGABLE_CORRELATION.test(event.correlationId) ? event.correlationId : 'invalid';
 
 export class NotificationWorker {
   private stopping = false;
@@ -104,7 +109,7 @@ export class NotificationWorker {
       recipient = await this.repository.resolveRecipient(event, claimToken);
     } catch (error) {
       if (error instanceof ClaimLostError) {
-        this.write({ event: 'notification.worker.outcome', eventType: event.type, correlationId: event.correlationId,
+        this.write({ event: 'notification.worker.outcome', eventType: event.type, correlationId: correlation(event),
           recipient: 'claim_lost', subscriber: 'not_run', trigger: 'not_sent', inbox: 'claim_lost' });
         return null;
       }
@@ -149,7 +154,7 @@ export class NotificationWorker {
   private report(event: HidEventEnvelope, sync: SubscriberDelivery, inbox: 'processed' | 'retry_scheduled' | 'failed_terminal'): void {
     const triggerCode: { triggerCode?: string } = sync.result.outcome !== 'accepted' && sync.result.safeCode
       && LOGGABLE_CODE.test(sync.result.safeCode) ? { triggerCode: sync.result.safeCode } : {};
-    this.write({ event: 'notification.worker.outcome', eventType: event.type, correlationId: event.correlationId,
+    this.write({ event: 'notification.worker.outcome', eventType: event.type, correlationId: correlation(event),
       recipient: sync.recipient, subscriber: sync.subscriber,
       ...(sync.subscriberCode ? { subscriberCode: sync.subscriberCode } : {}),
       trigger: sync.trigger, triggerOutcome: sync.result.outcome, ...triggerCode, inbox });

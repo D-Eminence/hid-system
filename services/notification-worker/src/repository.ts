@@ -142,13 +142,15 @@ export class NotificationRepository {
    * migration or its grants fails its rollout instead of handling events.
    */
   async verifySubscriberSyncPrivilege(): Promise<void> {
-    const result = await this.pool.query<{ executable: boolean | null }>(
-      `select has_function_privilege(current_user,
-         to_regprocedure('integration.notification_recipient_for_claim(uuid,uuid,uuid)'), 'EXECUTE') as executable`,
-    );
-    if (result.rows[0]?.executable !== true) {
+    try {
+      const result = await this.pool.query<{ executable: boolean | null }>(
+        `select has_function_privilege(current_user,
+           to_regprocedure('integration.notification_recipient_for_claim(uuid,uuid,uuid)'), 'EXECUTE') as executable`,
+      );
+      if (result.rows[0]?.executable !== true) throw new Error('NOTIFICATION_RECIPIENT_LOOKUP_NOT_EXECUTABLE');
+    } catch (error) {
       await this.pool.end().catch(() => undefined);
-      throw new Error('NOTIFICATION_RECIPIENT_LOOKUP_NOT_EXECUTABLE');
+      throw error;
     }
   }
 
