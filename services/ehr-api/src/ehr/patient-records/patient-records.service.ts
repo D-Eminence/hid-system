@@ -146,9 +146,11 @@ export class PatientRecordsService {
   /**
    * The patient-self authorization of this request's own session: Identity
    * confirms it (cookie or bearer, ehr-api workload) and it must still name
-   * the same patient, account, subject and session.
+   * the same patient, account, subject and session. The one patient-self
+   * authorization every patient reader uses (the summary, the document
+   * download and record chat, before and after its model call).
    */
-  private async authorizeOwnSession(request: HidRequest) {
+  async authorizeOwnSession(request: HidRequest) {
     const actor = request.actor;
     if (actor?.kind !== 'patient' || !actor.patientId || !actor.sessionId) {
       throw new DomainProblem(403, 'PATIENT_SESSION_REQUIRED', 'An active patient session is required');

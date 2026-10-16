@@ -44,6 +44,90 @@ export function isProductionProfile(environment: { HID_DEPLOYMENT_ENV?: string; 
     || (environment.NODE_ENV === 'production' && environment.HID_DEPLOYMENT_ENV !== 'staging');
 }
 
+/** The processor's first-party API origin, the only one production may name. */
+export const RECORD_CHAT_FIRST_PARTY_ORIGIN = 'https://api.anthropic.com';
+/** A model id's shape only; the Models API readiness check proves it exists and fits. */
+const MODEL_ID_SHAPE = /^[a-z0-9][a-z0-9._:@-]{0,99}$/;
+/** An accepted ADR and the date of its acceptance, for example ADR-123@2026-10-16. */
+const PROCESSING_APPROVAL = /^ADR-(\d{3})@(\d{4})-(\d{2})-(\d{2})$/;
+const NOTICE_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+
+interface RecordChatSettings {
+  NODE_ENV: string;
+  RECORD_CHAT_PATIENT_ENABLED: boolean;
+  RECORD_CHAT_MODEL_ID?: string;
+  RECORD_CHAT_ANTHROPIC_API_KEY?: string;
+  RECORD_CHAT_API_BASE_URL?: string;
+  RECORD_CHAT_INFERENCE_GEO?: string;
+  RECORD_CHAT_PROCESSING_APPROVAL?: string;
+  RECORD_CHAT_AUDIT_DIGEST_KEY_B64?: string;
+  RECORD_CHAT_NOTICE_VERSION?: string;
+  RECORD_CHAT_DAILY_TOKEN_BUDGET?: number;
+}
+
+/** Whether a processing approval names an ADR and a real calendar date that is not in the future. */
+function validProcessingApproval(value: string | undefined): boolean {
+  const match = value ? PROCESSING_APPROVAL.exec(value) : null;
+  if (!match) return false;
+  const [, , year, month, day] = match;
+  const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+  return date.getUTCFullYear() === Number(year) && date.getUTCMonth() === Number(month) - 1
+    && date.getUTCDate() === Number(day) && date.getTime() <= Date.now();
+}
+
+/** Exactly 32 bytes in canonical base64. */
+function validDigestKey(value: string | undefined): boolean {
+  if (!value || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) return false;
+  const decoded = Buffer.from(value, 'base64');
+  return decoded.length === 32 && decoded.toString('base64') === value;
+}
+
+/**
+ * Record chat's configuration rules. With the flag off nothing is required
+ * and nothing is sent. With it on, every setting the request needs must be
+ * present; nothing has a default model. NODE_ENV=production (every deployed
+ * environment, staging included) also needs the recorded external-processing
+ * approval (the accepted record chat ADR and its date) and the first-party
+ * API origin.
+ */
+export function recordChatIssues(environment: RecordChatSettings): Array<{ path: string[]; message: string }> {
+  if (!environment.RECORD_CHAT_PATIENT_ENABLED) return [];
+  const issues: Array<{ path: string[]; message: string }> = [];
+  const refuse = (key: keyof RecordChatSettings, message: string) => issues.push({ path: [key], message });
+  if (!environment.RECORD_CHAT_MODEL_ID || !MODEL_ID_SHAPE.test(environment.RECORD_CHAT_MODEL_ID)) {
+    refuse('RECORD_CHAT_MODEL_ID', 'Record chat needs RECORD_CHAT_MODEL_ID, the configured model id (there is no default)');
+  }
+  const apiKey = environment.RECORD_CHAT_ANTHROPIC_API_KEY;
+  if (!apiKey || apiKey.length < 20 || /\s/.test(apiKey)) {
+    refuse('RECORD_CHAT_ANTHROPIC_API_KEY', 'Record chat needs its API key from the secret store');
+  }
+  if (!environment.RECORD_CHAT_INFERENCE_GEO) {
+    refuse('RECORD_CHAT_INFERENCE_GEO', 'Record chat needs RECORD_CHAT_INFERENCE_GEO (us or global)');
+  }
+  if (!validDigestKey(environment.RECORD_CHAT_AUDIT_DIGEST_KEY_B64)) {
+    refuse('RECORD_CHAT_AUDIT_DIGEST_KEY_B64', 'Record chat needs a 32-byte base64 audit digest key');
+  }
+  if (!environment.RECORD_CHAT_NOTICE_VERSION || !NOTICE_VERSION.test(environment.RECORD_CHAT_NOTICE_VERSION)) {
+    refuse('RECORD_CHAT_NOTICE_VERSION', 'Record chat needs the notice version patients acknowledge (1-40 characters)');
+  }
+  if (environment.RECORD_CHAT_DAILY_TOKEN_BUDGET === undefined) {
+    refuse('RECORD_CHAT_DAILY_TOKEN_BUDGET', 'Record chat needs a daily token budget');
+  }
+  const baseUrl = environment.RECORD_CHAT_API_BASE_URL;
+  if (environment.NODE_ENV === 'production') {
+    if (!validProcessingApproval(environment.RECORD_CHAT_PROCESSING_APPROVAL)) {
+      refuse('RECORD_CHAT_PROCESSING_APPROVAL', 'Record chat requires the recorded external-processing approval: '
+        + 'the accepted record chat ADR and its date (ADR-NNN@YYYY-MM-DD, not in the future)');
+    }
+    if (baseUrl !== undefined && baseUrl !== RECORD_CHAT_FIRST_PARTY_ORIGIN) {
+      refuse('RECORD_CHAT_API_BASE_URL', `Production record chat may only reach ${RECORD_CHAT_FIRST_PARTY_ORIGIN}`);
+    }
+  } else if (baseUrl !== undefined && environment.NODE_ENV !== 'test' && new URL(baseUrl).protocol !== 'https:') {
+    refuse('RECORD_CHAT_API_BASE_URL', 'RECORD_CHAT_API_BASE_URL must use HTTPS outside tests');
+  }
+  return issues;
+}
+
 const environmentSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -102,6 +186,25 @@ const environmentSchema = z
     EHR_PATIENT_RELEASE_PRESCRIPTIONS: booleanString,
     EHR_PATIENT_RELEASE_LAB_RESULTS: booleanString,
     EHR_PATIENT_RELEASE_DOCUMENTS: booleanString,
+    // Patient record chat (owner decision 1 of 2026-10-16): a patient's
+    // question about their own released records, answered by the Claude API.
+    // Off by default. Nothing below has a model default: the model id comes
+    // only from RECORD_CHAT_MODEL_ID in the deployment's configuration.
+    RECORD_CHAT_PATIENT_ENABLED: booleanString,
+    RECORD_CHAT_MODEL_ID: optionalString,
+    RECORD_CHAT_ANTHROPIC_API_KEY: optionalString,
+    RECORD_CHAT_API_BASE_URL: optionalUrl,
+    RECORD_CHAT_INFERENCE_GEO: z.preprocess(emptyToUndefined, z.enum(['us', 'global']).optional()),
+    RECORD_CHAT_PROCESSING_APPROVAL: optionalString,
+    RECORD_CHAT_AUDIT_DIGEST_KEY_B64: optionalString,
+    RECORD_CHAT_NOTICE_VERSION: optionalString,
+    RECORD_CHAT_MAX_OUTPUT_TOKENS: z.coerce.number().int().min(1024).max(16_000).default(4096),
+    RECORD_CHAT_EFFORT: z.preprocess(emptyToUndefined, z.enum(['low', 'medium', 'high']).optional()),
+    RECORD_CHAT_DEADLINE_MS: z.coerce.number().int().min(5000).max(25_000).default(25_000),
+    RECORD_CHAT_MAX_RETRIES: z.coerce.number().int().min(0).max(1).default(0),
+    RECORD_CHAT_MAX_EVIDENCE_CHARS: z.coerce.number().int().min(4000).max(90_000).default(40_000),
+    RECORD_CHAT_DAILY_TOKEN_BUDGET: z.preprocess(emptyToUndefined,
+      z.coerce.number().int().min(1).max(20_000_000).optional()),
   })
   .superRefine((environment, context) => {
     // D17: Lab is not routed at launch and every Lab permission is withdrawn
@@ -126,6 +229,7 @@ const environmentSchema = z
           + 'ADR-064)' });
       }
     }
+    for (const issue of recordChatIssues(environment)) context.addIssue({ code: 'custom', ...issue });
     if (environment.EHR_PATIENT_RELEASE_DOCUMENTS && environment.STORAGE_MODE !== 's3') {
       context.addIssue({ code: 'custom', path: ['EHR_PATIENT_RELEASE_DOCUMENTS'],
         message: 'Releasing documents to patients needs S3 storage for their download' });
@@ -263,11 +367,22 @@ let cachedEnvironment: Environment | undefined;
 export function getEnvironment(): Environment {
   if (cachedEnvironment) return cachedEnvironment;
   const result = environmentSchema.safeParse(process.env);
-  if (!result.success) {
-    const details = result.error.issues
-      .map((issue) => `${issue.path.join('.') || 'environment'}: ${issue.message}`)
-      .join('; ');
-    throw new Error(`Invalid server configuration: ${details}`);
+  const issues = result.success ? [] : result.error.issues
+    .map((issue) => `${issue.path.join('.') || 'environment'}: ${issue.message}`);
+  // The Anthropic SDK reads ANTHROPIC_* variables (a key, a token, a profile,
+  // workload identity federation, a base URL, extra headers, a log level).
+  // Record chat passes every option explicitly, and refuses to start beside
+  // any of them, so no ambient credential, endpoint or header is ever used.
+  const chatEnabled = result.success ? result.data.RECORD_CHAT_PATIENT_ENABLED
+    : process.env.RECORD_CHAT_PATIENT_ENABLED === 'true';
+  if (chatEnabled) {
+    for (const name of Object.keys(process.env).filter((key) => key.startsWith('ANTHROPIC_')).sort()) {
+      issues.push(`${name}: Ambient ANTHROPIC_* variables are refused while record chat is enabled; `
+        + 'record chat takes its credential and endpoint only from RECORD_CHAT_* settings');
+    }
+  }
+  if (!result.success || issues.length > 0) {
+    throw new Error(`Invalid server configuration: ${issues.join('; ')}`);
   }
   cachedEnvironment = result.data;
   return result.data;
