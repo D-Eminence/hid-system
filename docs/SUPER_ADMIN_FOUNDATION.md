@@ -109,9 +109,12 @@ distinct version-4 account UUIDs separated by commas;
 `PLATFORM_ADMIN_ACCOUNT_ID` (one account) remains for development: it is
 refused together with it, and refused alone when `NODE_ENV` is `production`,
 as the migration task runs in every AWS environment, because one Super Admin
-alone could never add a second or approve a clinician application. Each account must exist already, active and with a
-password credential (Stage 2A: no staff/facility tuple; each administrator
-enrols an authenticator at first platform sign-in).
+alone could never add a second or approve a clinician application. Each account must exist already, active,
+with an email address and a password credential: platform sign-in is by email
+and password and finds the account by its email alone, so an account without
+one (a phone-only patient account, for instance) is refused (Stage 2A: no
+staff/facility tuple; each administrator enrols an authenticator at first
+platform sign-in).
 
 It runs only with an explicitly injected database-administrator connection,
 serializes with an advisory transaction lock, requires migration `0027`, and
@@ -119,8 +122,9 @@ refuses to run if any active legacy or current Super Admin exists, so it can
 never add an administrator to a live set. In one transaction it creates one
 explicit assignment per account, increments each account's version, and writes
 one system audit event `admin.platform-role.bootstrap` per account whose
-`details.bootstrapAccounts` names the whole set. A repeated, ineligible or
-fourth account grants nothing. It has no email inference, developer bypass,
+`details.bootstrapAccounts` names the whole set. A repeated, ineligible (not
+active, or without an email address or password) or fourth account grants
+nothing. It has no email inference, developer bypass,
 reusable login shortcut, or repeat-success path.
 
 ## Implemented API surface

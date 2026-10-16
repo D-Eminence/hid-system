@@ -529,7 +529,7 @@ aws ecs run-task --cluster hid-production --launch-type FARGATE \
 | `db:migrate` | `["scripts/apply-migrations.mjs"]` | none |
 | `db:bootstrap` | `["scripts/bootstrap-database-roles.mjs"]` | none |
 | `db:verify-roles` | `["scripts/bootstrap-database-roles.mjs","--verify-only"]` | none |
-| `admin:bootstrap` (P6) | `["scripts/bootstrap-platform-admin.mjs"]` | `PLATFORM_ADMIN_ACCOUNT_IDS` (two or three distinct account UUIDs, comma-separated), `PLATFORM_ADMIN_BOOTSTRAP_REASON` |
+| `admin:bootstrap` (P6) | `["scripts/bootstrap-platform-admin.mjs"]` | `PLATFORM_ADMIN_ACCOUNT_IDS` (two or three distinct account UUIDs, comma-separated, each an active account with an email address and a password), `PLATFORM_ADMIN_BOOTSTRAP_REASON` |
 
 Wait for the task to stop, then require exit code `0` and read
 `/hid/<environment>/database-migration`. Never pass a database URL, password or
@@ -538,7 +538,8 @@ description and in CloudTrail. The account IDs and reason of
 `admin:bootstrap` are not secret. Run `admin:bootstrap` once, with every
 initial Super Admin in `PLATFORM_ADMIN_ACCOUNT_IDS`: it refuses to run again
 once one is active, and afterwards a Super Admin is added only by a two-person
-approval (`SUPER_ADMIN_FOUNDATION.md`). The task runs with
+approval (`SUPER_ADMIN_FOUNDATION.md`). Platform sign-in is by email and
+password, so it refuses an account without an email address or password. The task runs with
 `NODE_ENV=production`, so the development-only one-account form
 `PLATFORM_ADMIN_ACCOUNT_ID` is refused.
 

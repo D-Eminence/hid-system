@@ -55,8 +55,11 @@ export function bootstrapInput(environment) {
  * Grants platform_super_admin to every account, all or none, in one
  * transaction on a connected client. Refuses, and grants nothing, before
  * migration 0027, while any platform Super Admin (or legacy platform admin)
- * is active, or when an account is not active or has no password: platform
- * sign-in (0069) is password and TOTP, enrolled at the first sign-in.
+ * is active, or when an account is not active or has no email address or no
+ * password: platform sign-in (0069) is email, password and TOTP, enrolled at
+ * the first sign-in, and finds the account by its email alone, so a
+ * phone-only account seeded here could never sign in, yet would count as
+ * active and stop every later run.
  */
 export async function bootstrapPlatformAdmins(client, { accountIds, reason }) {
   await client.query('begin');
@@ -90,6 +93,7 @@ export async function bootstrapPlatformAdmins(client, { accountIds, reason }) {
        where account.id = any($1::uuid[]) and account.status = 'active'
          and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
          and account.password_hash is not null
+         and account.email is not null and btrim(account.email) <> ''
        order by account.id
        for update`,
       [accountIds],
@@ -97,7 +101,8 @@ export async function bootstrapPlatformAdmins(client, { accountIds, reason }) {
     const found = new Set(eligible.rows.map((row) => String(row.id).toLowerCase()));
     const ineligible = accountIds.filter((id) => !found.has(id));
     if (ineligible.length > 0) {
-      throw new Error(`Bootstrap refused: account ${ineligible.join(', ')} is not active or has no password credential`);
+      throw new Error(`Bootstrap refused: account ${ineligible.join(', ')} is not active or has no email address and `
+        + 'password credential; platform sign-in is by email and password');
     }
 
     for (const accountId of accountIds) {
