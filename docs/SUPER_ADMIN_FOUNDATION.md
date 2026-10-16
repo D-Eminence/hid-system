@@ -132,24 +132,41 @@ reusable login shortcut, or repeat-success path.
 A new database has no account: no migration seeds one, and no service runs
 while the database is provisioned, so the bootstrap is no step of the
 provisioning order (`AWS_DEPLOYMENT_RUNBOOK.md` §4) and runs only once the
-accounts it names exist. In production they come from the HID 1.0 promotion
-(`AWS_DEPLOYMENT_RUNBOOK.md` §6, `MIGRATION_RUNBOOK.md`). It creates each
-HID 1.0 user's account with the HID 1.0 auth user UUID as its account ID, its
-email and its HID 1.0 password (bcrypt, upgraded to Argon2id at the first
-sign-in). The account is active only with an email confirmed in HID 1.0;
-otherwise it is `pending_reset`, which the bootstrap refuses. A HID 1.0
-`platform_admin` membership is held with `privileged_role_requires_reapproval`
-and grants no platform role, so the bootstrap's check for an active Super
-Admin still passes, and the bootstrap is the re-approval.
+accounts it names exist.
 
-So, after the promotion, name two or three promoted accounts of the
-governance owners, each active with an email address and a password. Take
-each UUID from that person's HID 1.0 auth user ID in the approved read-only
-HID 1.0 source (the promotion keeps it unchanged); never guess a UUID from an
-email or a name. A governance owner without such a HID 1.0 account has no
-supported route to a password account yet: that is open question
-SUPERADMIN-ACCOUNTS (`PHASE_3_LAUNCH_DECISIONS.md`), and until it is decided
-the initial set is chosen among the promoted accounts.
+The HID 1.0 promotion (`MIGRATION_RUNBOOK.md` §7 and §8) would create them.
+It creates each HID 1.0 user's account with the HID 1.0 auth user UUID as its
+account ID, its email and its HID 1.0 password (bcrypt, upgraded to Argon2id
+at the first sign-in). The account is active only with an email confirmed in
+HID 1.0; otherwise it is `pending_reset`, which the bootstrap refuses. A
+HID 1.0 `platform_admin` membership is held with
+`privileged_role_requires_reapproval` and grants no platform role, so the
+bootstrap's check for an active Super Admin still passes, and the bootstrap is
+the re-approval.
+
+But the promotion has no AWS execution path yet (`AWS_DEPLOYMENT_RUNBOOK.md`
+§6). RDS accepts connections only from the service tasks and the migration
+security group. The migration task maps only the migration administrator's
+URL, as `DATABASE_URL` and `DATABASE_ADMIN_URL`; its security group reaches
+only RDS, the AWS endpoints and Amazon S3, and its image holds no HID 1.0
+export. So `migration:stage` can read neither the HID 1.0 source
+(`LEGACY_DATABASE_URL`) nor an export (`MIGRATION_FIXTURE_PATH`), and
+`migration:promote` refuses to start without
+`MIGRATION_FIELD_ENCRYPTION_KEY_B64`, `MIGRATION_LOOKUP_HMAC_KEY_B64` and
+`CONTACT_LOOKUP_HMAC_KEY_B64`: secrets that no task maps and that are never
+passed as RunTask overrides. No other route makes a platform-only password
+account (`PHASE_3_LAUNCH_DECISIONS.md`, SUPERADMIN-ACCOUNTS). So no supported
+production route to the first Super Admin accounts exists today, for any
+governance owner, with or without a HID 1.0 account. Open question
+SUPERADMIN-ACCOUNTS blocks P6 until a reviewed path is decided and built.
+Never open RDS to another network or pass a key as an override to get around
+this.
+
+Once a reviewed path exists, name two or three accounts of the governance
+owners, each active with an email address and a password. For a promoted
+account, take each UUID from that person's HID 1.0 auth user ID in the
+approved read-only HID 1.0 source (the promotion keeps it unchanged); never
+guess a UUID from an email or a name.
 
 ## Implemented API surface
 

@@ -536,8 +536,11 @@ Wait for the task to stop, then require exit code `0` and read
 other secret as an override: RunTask overrides are kept in the task
 description and in CloudTrail. The account IDs and reason of
 `admin:bootstrap` are not secret. Run `admin:bootstrap` only once the accounts
-it names exist: on a new database, after the HID 1.0 promotion of §6
-(`SUPER_ADMIN_FOUNDATION.md`, Where the accounts come from). Run it once, with every
+it names exist: on a new database, after the HID 1.0 promotion of §6. That
+promotion has no AWS execution path yet, so no supported production route to
+these accounts exists today, and P6 waits on open question
+SUPERADMIN-ACCOUNTS (`SUPER_ADMIN_FOUNDATION.md`, Where the accounts come
+from). Run it once, with every
 initial Super Admin in `PLATFORM_ADMIN_ACCOUNT_IDS`: it refuses to run again
 once one is active, and afterwards a Super Admin is added only by a two-person
 approval (`SUPER_ADMIN_FOUNDATION.md`). Platform sign-in is by email and
@@ -578,10 +581,13 @@ aws ecs run-task --cluster hid-production --launch-type FARGATE \
 
 `admin:bootstrap` (P6) is no step of this order and runs as the migration task
 only once the accounts it names exist, each active with an email address and a
-password: a new database has none, and the run is refused. They come from the
-HID 1.0 promotion of §6, which keeps each HID 1.0 user's UUID, email and
-password and grants no platform role (`SUPER_ADMIN_FOUNDATION.md`, Where the
-accounts come from).
+password: a new database has none, and the run is refused. The HID 1.0
+promotion of §6 would create them (it keeps each HID 1.0 user's UUID, email
+and password and grants no platform role), but it has no AWS execution path
+yet. So no supported production route to these accounts exists today, for any
+owner, and P6 is blocked by open question SUPERADMIN-ACCOUNTS
+(`SUPER_ADMIN_FOUNDATION.md`, Where the accounts come from). Neither one-shot
+task creates a Health ID account.
 
 Before step 1 write the secrets. The migration secret's `url` and each runtime
 secret's URL name a lowercase LOGIN (letters, digits and `_`) with a password
@@ -698,6 +704,23 @@ MIGRATION_FIXTURE_PATH=test/fixtures/legacy-identity.sample.json \
   npm --prefix services/ehr-api run migration:stage:dry-run
 ```
 
+The stage and promote commands (`MIGRATION_RUNBOOK.md` §7 and §8) have no AWS
+execution path yet. RDS accepts connections only from the service tasks and
+the migration security group (§4). The migration task maps only the migration
+administrator's URL, as `DATABASE_URL` and `DATABASE_ADMIN_URL`; its security
+group reaches only RDS, the AWS endpoints and Amazon S3, its root filesystem is
+read-only, and its image holds no HID 1.0 export. So `migration:stage` can
+read neither the HID 1.0 source (`LEGACY_DATABASE_URL`) nor an export
+(`MIGRATION_FIXTURE_PATH`). `migration:promote` refuses to start without
+`MIGRATION_FIELD_ENCRYPTION_KEY_B64`, `MIGRATION_LOOKUP_HMAC_KEY_B64` and
+`CONTACT_LOOKUP_HMAC_KEY_B64`; no task maps them, and a secret is never a
+RunTask override (§4). Never open RDS to another network or pass a key as an
+override to get around this. A reviewed path, such as a one-shot legacy
+migration task that maps these keys from Secrets Manager and reads the source
+through a private S3 export, is part of open question SUPERADMIN-ACCOUNTS
+(`PHASE_3_LAUNCH_DECISIONS.md`), which blocks P6 until it is decided and
+built. The steps below apply once such a path exists.
+
 For real migration, preserve source and destination UUID/HID mappings,
 checksums, conflicts, batch checkpoints, and reconciliation output. Copy legacy
 objects through a controlled private export/import using opaque PHI-free S3
@@ -711,9 +734,9 @@ rollback/PITR decision point. Do not trust a raw HID 1.0 session token: the
 issuer/signature/audience/expiry contract is not proven. Use local/OIDC login
 or the six-digit contact-OTP fallback mapped to the existing patient.
 
-The promotion creates each HID 1.0 user's account with the HID 1.0 auth user
-UUID, email and password, active once the email was confirmed in HID 1.0, and
-holds a HID 1.0 `platform_admin` membership
+Once it can run, the promotion creates each HID 1.0 user's account with the
+HID 1.0 auth user UUID, email and password, active once the email was
+confirmed in HID 1.0, and holds a HID 1.0 `platform_admin` membership
 (`privileged_role_requires_reapproval`) without granting any platform role.
 After it, seed the initial Super Admins with one `admin:bootstrap` run (§4,
 P6) naming two or three of those accounts, each active with an email address

@@ -612,9 +612,20 @@ separate one-shot provisioning task (`hid-<environment>-database-provisioning`,
 the same image and security group), which maps exactly the master's username
 and password, the administrator's URL and the ten runtime URLs, and whose
 default command only verifies (`AWS_DEPLOYMENT_RUNBOOK.md` §4, Running the
-provisioning task).
+provisioning task). The HID 1.0 stage and promotion (§7, §8) have no AWS
+execution path yet: neither task maps the HID 1.0 source or the promotion's
+keys, and the migration security group reaches only RDS, the AWS endpoints and
+Amazon S3 (`AWS_DEPLOYMENT_RUNBOOK.md` §6). So no supported production route
+to the accounts `admin:bootstrap` names exists today, and open question
+SUPERADMIN-ACCOUNTS (`PHASE_3_LAUNCH_DECISIONS.md`) blocks P6.
 
 ## 7. Stage a controlled snapshot
+
+These commands, and the promotion of §8, have no AWS execution path yet
+(`AWS_DEPLOYMENT_RUNBOOK.md` §6): no task maps `LEGACY_DATABASE_URL` or the
+promotion's keys, the migration security group cannot reach the HID 1.0
+source, and a secret is never a RunTask override. Building a reviewed path is
+part of open question SUPERADMIN-ACCOUNTS (`PHASE_3_LAUNCH_DECISIONS.md`).
 
 First perform a real-source dry run with a read-only credential:
 
