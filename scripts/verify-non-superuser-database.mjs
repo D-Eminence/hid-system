@@ -44,9 +44,13 @@
 //   migration run on that database, in a rolled-back transaction, as an
 //   administrator whose name needs quoting and which still owns the function
 //   (a chain migrated before its first bootstrap);
+// - admin:bootstrap seeding two or three distinct first Super Admins in one
+//   audited transaction, and refusing a repeated, ineligible or fourth
+//   account, both forms at once, and any run once a Super Admin is active;
 // - the platform-control-owner and function-parameter-settings suites.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { basename, join, resolve } from 'node:path';
@@ -548,6 +552,64 @@ try {
     before_upgrade: 'the previous bootstrap\'s P8-CONTROL statements (owner transfer, reader policy and column grant)',
     control_owner: { before: ownerBefore, after: ownerAfter },
     administrator_inherit_or_set_memberships_after: 0, control_read_as: upgradeReads };
+
+  // P6, P35(2) (admin:bootstrap): the first Super Admins, as RDS runs the
+  // bootstrap, as the migration administrator, on the main database, where no
+  // Super Admin exists yet. A Super Admin grant needs a second Super Admin's
+  // decision (0070) and a clinician application a second Super Admin's
+  // approval (0096), so the one-time bootstrap seeds two or three distinct
+  // accounts in one audited transaction. It refuses a repeated, ineligible or
+  // fourth account and both forms at once, granting nothing, and every run
+  // once a Super Admin is active.
+  const bootstrapAccounts = Object.fromEntries(['a', 'b', 'c', 'd', 'none'].map((label) => [label, randomUUID()]));
+  psql('create the synthetic bootstrap accounts', admin, Object.entries(bootstrapAccounts).map(([label, id]) =>
+    `insert into auth.accounts (id, subject, email, display_name, status, password_hash, password_algorithm)
+       values ('${id}', 'synthetic:platform-bootstrap:${label}', 'platform-bootstrap-${label}@example.invalid',
+         'Platform Bootstrap ${label}', 'active', ${label === 'none' ? 'null, null' : "'synthetic-hash', 'argon2id'"});`)
+    .join(' '));
+  const adminBootstrap = (label, environment, expected = 0) => run(label, process.execPath,
+    [join(service, 'scripts/bootstrap-platform-admin.mjs')], { DATABASE_ADMIN_URL: url(admin),
+      PLATFORM_ADMIN_BOOTSTRAP_REASON: 'Initial platform governance set (synthetic)', ...environment }, expected);
+  const superAdminGrants = () => psql('active Super Admin grants', admin,
+    `select count(*) || ':' || count(distinct account_id) from auth.account_roles
+      where role_code = 'platform_super_admin' and scope_type = 'platform' and revoked_at is null`).stdout.trim();
+  const { a, b, c, d, none } = bootstrapAccounts;
+  const bootstrapRefusals = {
+    repeated: [`${a},${a}`, /two or three distinct accounts/],
+    fourth: [`${a},${b},${c},${d}`, /two or three/],
+    ineligible: [`${a},${none}`, new RegExp(`account ${none} is not active or has no password credential`)],
+  };
+  for (const [label, [ids, message]] of Object.entries(bootstrapRefusals)) {
+    assert.match(adminBootstrap(`admin:bootstrap refuses a ${label} account`, { PLATFORM_ADMIN_ACCOUNT_IDS: ids },
+      'failure').output, message);
+    assert.equal(superAdminGrants(), '0:0', `a refused bootstrap (${label}) granted nothing`);
+  }
+  assert.match(adminBootstrap('admin:bootstrap refuses both forms', { PLATFORM_ADMIN_ACCOUNT_IDS: `${a},${b}`,
+    PLATFORM_ADMIN_ACCOUNT_ID: c }, 'failure').output, /not both/);
+  const seeded = adminBootstrap('admin:bootstrap seeds three Super Admins', { PLATFORM_ADMIN_ACCOUNT_IDS: `${a},${b},${c}` });
+  assert.match(seeded.stdout, new RegExp(`Platform Super Admin bootstrap completed for accounts ${a}, ${b}, ${c}`));
+  assert.equal(superAdminGrants(), '3:3');
+  const seededRows = psql('the seeded grants, their audit and the clinician approval permission', admin,
+    `select assignment.account_id || '|' || (assignment.granted_by is null) || '|' || assignment.grant_reason || '|'
+        || auth.account_has_platform_permission(assignment.account_id, 'platform.workforce.manage') || '|'
+        || (select count(*) from audit.events event where event.action = 'admin.platform-role.bootstrap'
+              and event.resource_id = assignment.account_id::text and event.actor_type = 'system'
+              and event.details->>'roleCode' = 'platform_super_admin'
+              and event.details->'bootstrapAccounts' = to_jsonb(array['${a}', '${b}', '${c}']::text[]))
+       from auth.account_roles assignment
+      where assignment.role_code = 'platform_super_admin' and assignment.revoked_at is null
+      order by assignment.account_id`).stdout.trim().split('\n');
+  assert.deepEqual(seededRows, [a, b, c].sort().map((id) =>
+    `${id}|true|Initial platform governance set (synthetic)|true|1`));
+  for (const [label, environment] of [['one more account', { PLATFORM_ADMIN_ACCOUNT_ID: d }],
+    ['another set', { PLATFORM_ADMIN_ACCOUNT_IDS: `${d},${b}` }]]) {
+    assert.match(adminBootstrap(`admin:bootstrap refuses ${label} once Super Admins are active`, environment,
+      'failure').output, /Bootstrap refused: an active platform Super Admin already exists/);
+  }
+  assert.equal(superAdminGrants(), '3:3');
+  evidence.steps.platform_admin_bootstrap = { run_as: admin, seeded: 3, distinct: 3,
+    each_holds: 'platform.workforce.manage', audit_events: 3,
+    refused: [...Object.keys(bootstrapRefusals), 'both forms', 'one more account', 'another set'] };
 
   for (const name of ['platform-control-owner.integration.sql', 'function-parameter-settings.integration.sql']) {
     suite(name, superuser);
