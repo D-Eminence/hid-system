@@ -16,6 +16,7 @@ const configuration = environmentConfig(
     assistedRegistrationEnabled: process.env.HID_ASSISTED_REGISTRATION_ENABLED,
     qoreIdPatientSelfNinBindingEnabled: process.env.HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED,
     notificationWorkerEnabled: process.env.HID_NOTIFICATION_WORKER_ENABLED,
+    novuSubscriberSyncEnabled: process.env.HID_NOVU_SUBSCRIBER_SYNC_ENABLED,
     operationalAlarmTopicArn: process.env.HID_OPERATIONAL_ALARM_TOPIC_ARN,
   },
 );
