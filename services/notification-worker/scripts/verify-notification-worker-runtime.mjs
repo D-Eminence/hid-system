@@ -106,7 +106,7 @@ try {
     const config = readConfig({ NODE_ENV: 'test', HID_DEPLOYMENT_ENV: 'development', NOTIFICATION_WORKER_ENABLED: 'true',
       NOTIFICATION_WORKER_ID: `notification-verifier-${sync}`, NOTIFICATION_WORKER_DATABASE_URL: database.url(RUNTIME_ROLE),
       NOTIFICATION_WORKER_QUEUE_URL: 'https://sqs.example.invalid/000000000000/hid-verifier-notifications',
-      NOVU_MODE: 'live', NOVU_API_URL: novu.url, NOVU_API_KEY: 'public-synthetic-novu-verifier-key',
+      NOVU_MODE: 'live', NOVU_API_URL: novu.url, NOVU_API_KEY: 'example-novu-verifier-key',
       NOVU_SUBSCRIBER_SYNC: sync });
     const repository = new NotificationRepository(config);
     if (sync === 'email') await repository.verifySubscriberSyncPrivilege();
