@@ -93,9 +93,10 @@ const environmentSchema = z
     AWS_ACCESS_KEY_ID: optionalString,
     AWS_SECRET_ACCESS_KEY: optionalString,
     AWS_SESSION_TOKEN: optionalString,
-    // Patient record release (owner decision 4 of 2026-10-16, D7): what the
-    // patient's own summary releases beyond encounters and notes, one flag per
-    // category, each off by default. Lab requests (orders) are never released.
+    // Patient record release (owner decision 4 of 2026-10-16, D7, ADR-064):
+    // what the patient's own summary releases beyond encounters and notes, one
+    // flag per category, each off by default and refused in the production
+    // profile (below). Lab requests (orders) are never released.
     EHR_PATIENT_RELEASE_VITALS: booleanString,
     EHR_PATIENT_RELEASE_DIAGNOSES: booleanString,
     EHR_PATIENT_RELEASE_PRESCRIPTIONS: booleanString,
@@ -109,6 +110,21 @@ const environmentSchema = z
     if (environment.EHR_PATIENT_RELEASE_LAB_RESULTS && isProductionProfile(environment)) {
       context.addIssue({ code: 'custom', path: ['EHR_PATIENT_RELEASE_LAB_RESULTS'],
         message: 'Lab results are not released to patients while Lab is off at launch (D17)' });
+    }
+    // ADR-064: no clinician-review gate or sensitivity classification is
+    // built, so the production profile releases none of the EHR categories
+    // until the clinical owner signs off each category and its wording
+    // (release checklist P35). Each refusal is removed only by a reviewed
+    // change that records that sign-off; staging and a local development run
+    // may opt in. The AWS development stack runs in the production profile.
+    for (const [flag, category] of [['EHR_PATIENT_RELEASE_VITALS', 'Vitals'],
+      ['EHR_PATIENT_RELEASE_DIAGNOSES', 'Diagnoses'], ['EHR_PATIENT_RELEASE_PRESCRIPTIONS', 'Prescriptions'],
+      ['EHR_PATIENT_RELEASE_DOCUMENTS', 'Documents']] as const) {
+      if (environment[flag] && isProductionProfile(environment)) {
+        context.addIssue({ code: 'custom', path: [flag], message: `${category} released to patients are refused in the `
+          + 'production profile until the clinical owner signs off the category and its wording (release checklist P35, '
+          + 'ADR-064)' });
+      }
     }
     if (environment.EHR_PATIENT_RELEASE_DOCUMENTS && environment.STORAGE_MODE !== 's3') {
       context.addIssue({ code: 'custom', path: ['EHR_PATIENT_RELEASE_DOCUMENTS'],

@@ -95,8 +95,9 @@ export interface HidEnvironmentConfig {
   // ehr-api's EHR_PATIENT_RELEASE_* flags (owner decision 4 of 2026-10-16,
   // D7): what a patient's own summary releases beyond encounters and notes.
   // Synth inputs HID_EHR_PATIENT_RELEASE_VITALS, _DIAGNOSES, _PRESCRIPTIONS,
-  // _LAB_RESULTS and _DOCUMENTS, each default false. Production refuses Lab
-  // results while Lab is off at launch (D17).
+  // _LAB_RESULTS and _DOCUMENTS, each default false and refused outside
+  // staging: Lab results while Lab is off at launch (D17), the others until
+  // the clinical owner signs them off (P35, ADR-064).
   readonly patientRecordRelease: PatientRecordRelease;
   // The exact ARN of the operator-created, KMS-encrypted SNS topic
   // hid-<env>-operational-alerts that every alarm notifies (D4, ADR-053).
@@ -336,17 +337,33 @@ export function assertNinOwnershipRoutes(configuration: {
   }
 }
 
+const PATIENT_RELEASE_INPUTS: ReadonlyArray<readonly [keyof PatientRecordRelease, string, string]> = [
+  ['vitals', 'HID_EHR_PATIENT_RELEASE_VITALS', 'the clinical owner has not signed off the category (P35, ADR-064)'],
+  ['diagnoses', 'HID_EHR_PATIENT_RELEASE_DIAGNOSES', 'the clinical owner has not signed off the category (P35, ADR-064)'],
+  ['prescriptions', 'HID_EHR_PATIENT_RELEASE_PRESCRIPTIONS',
+    'the clinical owner has not signed off the category (P35, ADR-064)'],
+  ['labResults', 'HID_EHR_PATIENT_RELEASE_LAB_RESULTS', 'Lab is off at launch (D17)'],
+  ['documents', 'HID_EHR_PATIENT_RELEASE_DOCUMENTS', 'the clinical owner has not signed off the category (P35, ADR-064)'],
+];
+
 /**
- * D17: Lab is not routed at launch and every Lab permission is withdrawn
- * (0091 section 2), so production releases no Lab result to a patient. The
- * regional stack repeats this for a configuration not built by
- * environmentConfig; ehr-api refuses the same at start.
+ * Only staging may release a patient record category. Production refuses
+ * Lab results while Lab is not routed and every Lab permission is withdrawn
+ * (D17, 0091 section 2), and every other category until the clinical owner
+ * signs it off (release checklist P35, ADR-064); a reviewed change that
+ * records the sign-off lifts one refusal. The development stack runs ehr-api
+ * in the production profile (HID_DEPLOYMENT_ENV=production), where ehr-api
+ * refuses every flag at start, so it is refused here as well. The regional
+ * stack repeats this for a configuration not built by environmentConfig.
  */
 export function assertPatientRecordRelease(configuration: {
   readonly name: EnvironmentName; readonly patientRecordRelease: PatientRecordRelease;
 }): void {
-  if (configuration.name === 'production' && configuration.patientRecordRelease.labResults) {
-    throw new Error('HID_EHR_PATIENT_RELEASE_LAB_RESULTS=true is refused in production: Lab is off at launch (D17)');
+  if (configuration.name === 'staging') return;
+  for (const [category, variable, reason] of PATIENT_RELEASE_INPUTS) {
+    if (configuration.patientRecordRelease[category]) {
+      throw new Error(`${variable}=true is refused outside staging (${configuration.name}): ${reason}`);
+    }
   }
 }
 

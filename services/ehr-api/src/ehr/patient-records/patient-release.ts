@@ -8,9 +8,13 @@ import type { Environment } from '../../config/environment';
  * definition of what a patient may see of their record: the patient summary
  * reads it, and every later patient-facing reader (record chat, imported
  * records) must read through PatientRecordRelease.read and never with its own
- * SQL. Row-level security (0030, 0084 and the patient record release
- * migration) admits the same rows again, so neither a later policy nor a
- * configuration can widen the response on its own.
+ * SQL. It also tells the database its release set (bind): the patient record
+ * release migration's policies and Lab view admit a category only in a
+ * transaction whose app.patient_release names it, so with a flag off the
+ * database refuses that category as well, and an EHR build that never binds
+ * reads nothing beyond encounters and notes. Row-level security (0030, 0084,
+ * 0095) restricts rows, not columns: the SELECT lists below are what keep the
+ * diagnosis notes, storage locations and staff identities out.
  *
  * Always released: completed encounters and the current signed or amended
  * notes of completed encounters. Released when its flag is on: final vitals
@@ -57,8 +61,15 @@ const COUNT_KEYS: Readonly<Record<ReleasedSection, string>> = {
   prescriptions: 'prescriptionCount', labResults: 'labResultCount', documents: 'documentCount',
 };
 
-/** Database refusals of a released read: a privilege, a relation or a function that is not there. */
-const REFUSED_READ = new Set(['42501', '42P01', '42883', '42703']);
+/**
+ * Database refusals of a released read: a privilege, a relation, a function or
+ * a column that is not there, or the pool's statement timeout (a patient with
+ * very many rows in a section that cannot stop early, such as documents).
+ */
+const REFUSED_READ = new Set(['42501', '42P01', '42883', '42703', '57014']);
+
+/** Names the transaction's release set for the release policies and the Lab view (0095). */
+const RELEASE_BINDING = "select set_config('app.patient_release',$1,true)";
 
 /** A released Lab result revision, as Lab's own API names its fields. */
 export interface PatientLabResult {
@@ -99,6 +110,8 @@ interface SectionRows<Row> { rows: Row[]; truncated: boolean }
 
 export class PatientRecordRelease {
   private readonly categories: ReadonlySet<PatientReleasable>;
+  /** The database's form of the release set: the released categories, in release order. */
+  private readonly setting: string;
 
   constructor(categories: Iterable<PatientReleasable>) {
     const configured = [...categories];
@@ -111,6 +124,16 @@ export class PatientRecordRelease {
       }
     }
     this.categories = new Set(configured);
+    this.setting = PATIENT_RELEASABLE.filter((category) => this.categories.has(category)).join(',');
+  }
+
+  /**
+   * Tells the database, for the rest of this patient-self transaction, which
+   * categories it releases (app.patient_release, transaction-local). Every
+   * patient read of a releasable category runs after it; read() calls it first.
+   */
+  async bind(client: PoolClient): Promise<void> {
+    await client.query(RELEASE_BINDING, [this.setting]);
   }
 
   /** Whether this deployment releases the category to the patient. */
@@ -122,11 +145,12 @@ export class PatientRecordRelease {
    * The patient's released records. Run it only inside a patient-self
    * transaction bound to this patient (DatabaseService.withPatientTransaction
    * after IdentityApiService.authorizeSelf): row-level security admits the
-   * rows of that binding only. A configured category's read that the
-   * database refuses is 503 PATIENT_RECORDS_UNAVAILABLE, and nothing is
-   * returned.
+   * rows of that binding, and of the categories bind() names, only. A
+   * configured category's read that the database refuses or times out is 503
+   * PATIENT_RECORDS_UNAVAILABLE, and nothing is returned.
    */
   async read(client: PoolClient, patientId: string): Promise<PatientReleasedRecords> {
+    await this.bind(client);
     const values = [patientId];
     const encounters = await section(client, 'encounters', patientEncountersSql(), values);
     const notes = await section(client, 'notes', patientNotesSql(), values);
@@ -224,7 +248,9 @@ export function patientNotesSql(): string {
 /**
  * Each releasable category's read, repeating the release policy's predicates
  * as defense in depth. Every statement names the patient as $1 and nothing
- * else: the patient's summary spans facilities.
+ * else: the patient's summary spans facilities. Vitals, diagnoses and
+ * prescriptions are ordered as their 0095 index is, so each stops after the
+ * rows it shows.
  */
 const PATIENT_SQL: Readonly<Record<PatientReleasable, string>> = {
   // As first recorded: a vital with a correction is withheld until D8 decides

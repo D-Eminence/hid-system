@@ -107,6 +107,11 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
     }
   }
 
+  /**
+   * A patient-self transaction bound to Identity's fresh authorization. It
+   * releases no record category to the database (app.patient_release empty)
+   * until PatientRecordRelease.bind names the configured ones (0095).
+   */
   async withPatientTransaction<Result>(
     context: { subject: string; accountId: string; sessionId: string; patientId: string; expiresAt: string },
     correlationId: string,
@@ -121,7 +126,8 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
         set_config('app.account_id',$2,true),set_config('app.session_id',$3,true),
         set_config('app.patient_id',$4,true),set_config('app.correlation_id',$5,true),
         set_config('app.self_authorized_until',$6,true),set_config('app.purpose_of_use','patient-self',true),
-        set_config('app.facility_id','',true),set_config('app.membership_id','',true)`,
+        set_config('app.facility_id','',true),set_config('app.membership_id','',true),
+        set_config('app.patient_release','',true)`,
       [context.subject,context.accountId,context.sessionId,context.patientId,correlationId,context.expiresAt]);
       const result = await operation(client);
       await client.query('COMMIT');
