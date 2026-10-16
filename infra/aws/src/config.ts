@@ -92,6 +92,11 @@ export interface HidEnvironmentConfig {
   // HID_NOTIFICATION_WORKER_ENABLED; production is fixed to false (D17)
   // until a Novu account and region are approved.
   readonly notificationWorkerEnabled: boolean;
+  // Whether the notification worker gives Novu the patient's verified login
+  // email (NOVU_SUBSCRIBER_SYNC=email, ADR-064). Synth input
+  // HID_NOVU_SUBSCRIBER_SYNC_ENABLED, default false; staging only, with the
+  // worker enabled, after the release checklist's approvals.
+  readonly novuSubscriberSyncEnabled: boolean;
   // ehr-api's EHR_PATIENT_RELEASE_* flags (owner decision 4 of 2026-10-16,
   // D7): what a patient's own summary releases beyond encounters and notes.
   // Synth inputs HID_EHR_PATIENT_RELEASE_VITALS, _DIAGNOSES, _PRESCRIPTIONS,
@@ -127,6 +132,7 @@ export interface SynthOptions {
   readonly assistedRegistrationEnabled?: string;
   readonly qoreIdPatientSelfNinBindingEnabled?: string;
   readonly notificationWorkerEnabled?: string;
+  readonly novuSubscriberSyncEnabled?: string;
   readonly operationalAlarmTopicArn?: string;
 }
 
@@ -430,6 +436,15 @@ export function environmentConfig(
     throw new Error('HID_NOTIFICATION_WORKER_ENABLED is fixed to false in production (the launch module set, D17): '
       + 'the notification worker needs an approved Novu account and region and its own decision');
   }
+  const novuSubscriberSyncEnabled = booleanInput('HID_NOVU_SUBSCRIBER_SYNC_ENABLED', options.novuSubscriberSyncEnabled,
+    'false');
+  if (novuSubscriberSyncEnabled && name !== 'staging') {
+    throw new Error('HID_NOVU_SUBSCRIBER_SYNC_ENABLED may be true only in staging (ADR-064): production refuses Novu '
+      + 'subscriber email sync until its approvals are recorded, and the worker refuses it outside staging');
+  }
+  if (novuSubscriberSyncEnabled && !notificationWorkerEnabled) {
+    throw new Error('HID_NOVU_SUBSCRIBER_SYNC_ENABLED=true requires HID_NOTIFICATION_WORKER_ENABLED=true');
+  }
   const patientRecordRelease: PatientRecordRelease = {
     vitals: booleanInput('HID_EHR_PATIENT_RELEASE_VITALS', options.patientReleaseVitals, 'false'),
     diagnoses: booleanInput('HID_EHR_PATIENT_RELEASE_DIAGNOSES', options.patientReleaseDiagnoses, 'false'),
@@ -449,6 +464,7 @@ export function environmentConfig(
     assistedRegistrationEnabled,
     qoreIdPatientSelfNinBindingEnabled,
     notificationWorkerEnabled,
+    novuSubscriberSyncEnabled,
     patientRecordRelease,
     ...(topic ? { operationalAlarmTopicArn: topic.arn } : {}),
   };

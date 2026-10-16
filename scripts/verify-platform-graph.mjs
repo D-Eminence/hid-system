@@ -302,7 +302,9 @@ assert.deepEqual(dispatcherIam.Statement[0].Action.sort(),
 assert.doesNotMatch(dispatcherIam.Statement[0].Resource, /\*/,
   'Event dispatcher IAM example must bind an exact event bus ARN')
 
-const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:939d6f1671529d230f50b563578e9b5d206af58f038b10ebd7e1233023d4e167'
+// The `nonroot` variant (default user 65532, RF-004), so a stage that omits
+// USER still does not run as root.
+const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:ec2313763dd43931543bd03830466e0c409ce73a487e8d46f10db72d3b816c1c'
 const dockerContracts = new Map([
   ['identity-api', 'CMD ["dist/main.js"]'],
   ['ehr-api', 'CMD ["dist/main.js"]'],

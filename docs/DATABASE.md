@@ -194,7 +194,7 @@ The reviewed role model is:
 | `hid_outreach_runtime` | Temporary registration, mapping, immutable history, idempotency, and outbox | None | No Identity, EHR, Lab, Pharmacy, or OCR mutation privilege. |
 | `hid_outreach_api_runtime` | Extracted Outreach API aggregate | None | Composes Outreach persistence and append-only audit only. |
 | `hid_event_dispatcher` | Event transport command surface | None | No direct table access; executes only lease-bound claim/result/status functions. |
-| `hid_event_delivery_commands` | Technical security-definer owner | None | Never inherited; reads five domain outboxes through exact RLS policies and mutates only `integration` delivery/inbox state. |
+| `hid_event_delivery_commands` | Technical security-definer owner | None | Never inherited; reads five domain outboxes through exact RLS policies and mutates only `integration` delivery/inbox state. Since 0095 it also owns the notification worker's claim-bound recipient lookup and executes its private helper, which the migration administrator owns; it holds no privilege on `identity.patients` or `auth.accounts`. |
 | `hid_ocr_queue_metrics` | Technical security-definer owner | None | Never inherited; owns `ocr.worker_queue_metrics()` and reads only `ocr.jobs.status` and `queued_at` through one exact RLS policy (0075). |
 | `hid_platform_control_reader` | Technical security-definer owner | None | Never inherited; owns `platform.control_enabled(text)` and reads only `platform.control_settings.control_key` and `enabled` through one exact RLS policy (launch; role bootstrap only). |
 | `hid_migration_admin` | Migration and provisioning administration | Environment-specific | Never inherited by an application runtime login. |
@@ -904,7 +904,9 @@ attempts are separate in `integration.outbox_delivery_state` and
 the dispatcher authority. The generic inbox uses
 `integration.inbox_messages` primary key `(consumer_name,event_id)` plus an
 administrator-owned consumer/database-role binding. Exact command and failure
-semantics are in `EVENT_DELIVERY_ARCHITECTURE.md`.
+semantics are in `EVENT_DELIVERY_ARCHITECTURE.md`. A consumer may learn a
+contact only through a function bound to its live inbox claim, as the
+notification worker's verified recipient lookup is (0095).
 
 Events carry identifiers, classification, and minimal payloads, not complete
 clinical records. Consumers retrieve necessary detail through authorized APIs.
@@ -4292,6 +4294,127 @@ Tests:
   bootstrapped, and the 49 additional suites again with every schema, table
   and function owned by a `NOSUPERUSER NOBYPASSRLS` role (local evidence,
   release checklist §8).
+
+## Notification verified recipient (0095)
+
+`0095_notification_verified_recipient.sql` (ADR-064; the number is
+provisional, assigned at merge) lets the notification worker learn a
+patient's verified login email for the event it holds a live inbox claim
+on, and never a name. The worker uses it only with
+`NOVU_SUBSCRIBER_SYNC=email` (off by default, refused in production). No
+table, column, policy or role changes.
+
+**Guard.** The migration first refuses (55000
+`BRANCH_0063_NOTIFICATION_RECIPIENT_PRESENT`) a database that already has
+`integration.verified_notification_recipient(uuid)` or the claim function,
+the shape of the D-Eminence/hid-system#8 branch's 0063, whose functions
+return names. Such a database is rebuilt or reconciled first. Both functions
+are plain `CREATE`.
+
+**Functions.** Both are `SECURITY DEFINER` with `search_path = pg_catalog,
+pg_temp`, revoked from `PUBLIC`, and return `TABLE(delivery text, email
+text)`.
+
+- `integration.notification_recipient_state(uuid)` (private helper, `sql`,
+  `stable`). Owner: the migration administrator, which owns
+  `identity.patients` (row-level security enabled, not forced),
+  `auth.accounts` and `identity.patient_account_deletion_requests` (none),
+  so it reads them without `BYPASSRLS`. One row: `('email', btrim(email))`
+  when the patient is `active` with `notifications_enabled`, and the login
+  is usable as main's `identity.current_patient_account` (0064) defines it:
+  `active`, `disabled_until` null or passed, and no `pending` deletion
+  request whose `scheduled_for` has passed (the test of
+  `identity.patient_account_deletion_due`, inlined so the helper needs no
+  `EXECUTE` on it); and the login has `email_verified_at` set and a
+  non-blank email. Otherwise `('withhold', null)`: phone-only, unverified
+  or blank email, no login, a `pending_reset`, `locked`, `disabled` or
+  `deleted` login, a suspended login (`disabled_until` ahead, which a banned
+  legacy login imports), a login whose confirmed deletion is due but not yet
+  finalized, a patient that is `inactive`, `merged`, `deceased` or
+  `deleted`, notifications off. A deletion confirmed but not yet due keeps
+  `email`, as the login stays usable until `scheduled_for`.
+- `integration.notification_recipient_for_claim(uuid, uuid, uuid)` (event,
+  claim token, patient). Owner: `hid_event_delivery_commands`, moved in
+  `runtime-grants.sql`'s integration CREATE window. Steps:
+  `integration.assert_inbox_consumer_authorized('notification-worker-v1')`
+  (42501 for a disabled consumer or a session user outside its role); the
+  consumer row must still name `hid_notification_worker` (42501 `Notification
+  consumer authorization required`); the inbox row must be `processing` with
+  this token and an unexpired lease (55000 `Inbox claim is stale or not
+  owned`, as `complete_inbox_message`); then the helper's answer for the
+  `integration.outbox_envelopes` row with the claim's event id, producer,
+  type, version and correlation id, a notification workflow type and the
+  given patient. No row when the claim binds no such envelope. It writes
+  nothing.
+
+**Grants** (`runtime-grants.sql`). `EXECUTE` on the claim function to
+`hid_notification_worker` only; on the helper to `hid_event_delivery_commands`
+only, beside its two existing private helpers. No table or column grant to
+any runtime or to the technical owner. The worker login keeps no `USAGE` on
+`identity` or `auth`.
+
+**Callers.** With `NOVU_SUBSCRIBER_SYNC=email` the worker calls the claim
+function once per claimed event, and a second time under the same claim
+after it has synced an email: unless the second answer is the same address,
+it clears the email again before the trigger (an event handled meanwhile,
+after a deletion or a disable, may have cleared it before the sync landed at
+Novu; ADR-064). It checks at startup that the function exists and is
+executable (`has_function_privilege(current_user, ...)`). It records each
+Novu subscriber call in `notification.delivery_attempts` (existing table,
+existing grant): workflow `novu-subscriber-email-v1` or
+`novu-subscriber-email-clear-v1`, channel `email`, the outcome and a fixed
+safe code, at most one row of each per attempt; no address and nothing
+derived from one. The patients whose address may be at Novu are those with a
+`novu-subscriber-email-v1` row (joined to `integration.outbox_envelopes` by
+event id for the patient); release checklist §9 uses them before the flag is
+turned off.
+
+**Tests.**
+
+- `notification-verified-recipient.integration.sql` (new, rollback-only;
+  run as the superuser and again with every schema, table and
+  administrator-owned function moved to a `NOSUPERUSER NOBYPASSRLS NOLOGIN`
+  owner): fixtures A to R (verified; phone-only; unverified; deleted login;
+  deceased; opted out, for an ordinary and a safety event; no login;
+  locked; blank email; suspended; deletion due; deletion confirmed, not yet
+  due; suspension ended; disabled; `pending_reset`; inactive patient; merged
+  patient), each with an Identity outbox event claimed as
+  `hid_notification_worker`. A, L and M answer `email`, every other fixture
+  `withhold`. A claim names no other
+  patient; a claim with another correlation id and an event without a
+  workflow bind nothing; a random token, another event's token and an
+  expired lease are 55000; a disabled consumer and one rebound to the test
+  role are 42501; the Identity, dispatcher and notification API runtimes
+  cannot execute the claim function; the worker cannot execute the helper or
+  read any of the three tables; catalogue checks (owners, security, search
+  path, result, `PUBLIC`; the helper's owner owns the three tables and none
+  forces row-level security); the lookup changes no claim.
+- `runtime-roles.integration.sql`: the exact ACLs (the worker on the claim
+  function, the technical owner on the helper, besides their owners), the
+  owners, `SECURITY DEFINER` and the search path, and no table or column
+  privilege on `identity.patients`, `auth.accounts` or
+  `identity.patient_account_deletion_requests` for the worker, the
+  notification aggregates, the dispatcher or the technical owner.
+- `scripts/verify-non-superuser-database.mjs`: after the non-superuser chain
+  to 0095, the RDS-like worker login claims two Identity events and gets
+  `email` for the verified patient and `withhold` for the phone-only one;
+  it is refused `identity`; the Identity login is refused at `integration`
+  and the dispatcher login at the function.
+- `services/notification-worker/scripts/verify-notification-worker-runtime.mjs`
+  (rehearsal `notification_worker_runtime`): the real worker as
+  `hid_notification_worker` against a fake Novu that applies Novu's replay
+  rule for a seen idempotency key, including a suspended and a deletion-due
+  login, one event retried while the patient goes withheld, eligible,
+  withheld, and two concurrent events with the login deleted between them.
+- Mutants (local evidence): the helper ignoring `notifications_enabled` is
+  killed by the suite (fixture F answers `email`); `EXECUTE` on the claim
+  function given to `hid_notification_runtime` is killed by
+  `db:verify-roles`. The first 0095 helper, which ignored `disabled_until`
+  and due deletions, fails the suite at fixtures J and K and the runtime
+  verifier at its suspended-login step.
+- All 52 SQL suites pass on a database built from empty to 0095 and
+  bootstrapped (0 pending on a rerun), and the 50 additional suites again
+  with the non-superuser owner (local evidence, release checklist §8).
 
 ## Patient record release (0095)
 

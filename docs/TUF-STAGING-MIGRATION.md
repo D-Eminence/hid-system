@@ -277,6 +277,19 @@ The executable covers:
    signed in with an authenticator, refused staff, a mismatch, a match,
    activation and sign-in, an existing Health ID, a race with a phone proof,
    both budgets and a suspension, as `hid_identity_api_runtime`.
+   With 0095 (ADR-064, number provisional): the additional suites include
+   `notification-verified-recipient.integration.sql` (the claim-bound
+   recipient answers, its refusals and catalogue), run in both passes, and
+   `scripts/verify-non-superuser-database.mjs` calls the lookup as the
+   RDS-like worker login. `notification_worker_runtime` runs
+   `services/notification-worker/scripts/verify-notification-worker-runtime.mjs`
+   after the Pharmacy, Lab, OCR and Outreach verifiers: the real worker as
+   `hid_notification_worker` against a fake Novu that replays a seen
+   idempotency key's answer as Novu does: flag off and on, a failed
+   subscriber call that still sends the in-app trigger, an opt-out, a
+   deleted, a suspended or a deletion-due login whose email is cleared first,
+   an event retried while the patient goes withheld, eligible, withheld, and
+   two concurrent events with the login deleted between them.
    With 0095 (the patient record release, ADR-064): the additional suites
    include `patient-record-release.integration.sql` (the database following
    `app.patient_release` category by category, the released rows of each

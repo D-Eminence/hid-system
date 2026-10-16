@@ -37,9 +37,9 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
 ## 3. Staging, in order
 
 1. **Preflight for staging.** Release checklist §4 lists P1 to P35.
-   - Run against staging: the database, secret and artefact rows, P1 to P5 and P8 to P14. P11 and P12 run again after the migration.
+   - Run against staging: the database, secret and artefact rows, P1 to P5 and P8 to P14. P11 and P12 run again after the migration. P35 before `HID_NOVU_SUBSCRIBER_SYNC_ENABLED` is set in staging (ADR-064); until then the flag stays false.
    - P22 (staff enrolment before clinical roles) applies to every environment that enables clinical roles.
-   - Production gates: P6 (two Super Admins), P7 (the staging acceptance passed) and P15 to P21; P28 (no active public enrollment) before 0093; P23 to P27 before any NIN holder route or the signed-in NIN binding is enabled, and P33 before either holder route; P29 to P33 before the facility route is enabled; P34 before self-sign-up opens; P35 before any patient record release flag is set.
+   - Production gates: P6 (two Super Admins), P7 (the staging acceptance passed) and P15 to P21; P28 (no active public enrollment) before 0093; P23 to P27 before any NIN holder route or the signed-in NIN binding is enabled, and P33 before either holder route; P29 to P33 before the facility route is enabled; P34 before self-sign-up opens; P35 before any patient record release flag is set. Production refuses Novu subscriber email sync (ADR-064) whatever P35 says; lifting that is a reviewed change, not a gate.
 2. **Rehearse on a restored staging snapshot (S1).** Run `db:plan`, `db:dry-run` and `db:migrate` to 0095 in an isolated copy, then the bootstrap, `db:verify-roles` and `db:verify-logins` (S2).
 3. **Migrate staging.** Follow release checklist §5 in ledger order.
    - Each migration has its lock window: steps 2 to 17 for 0067 to 0084, 18 to 28 for 0085 to 0095, the estimate check at 29 and the role bootstrap at 30.

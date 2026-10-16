@@ -975,7 +975,11 @@ export class HidRegionalStack extends Stack {
           NOTIFICATION_WORKER_DATABASE_POOL_MAX: String(workloads[name].databaseConnectionsPerTask),
           NOTIFICATION_WORKER_QUEUE_URL: this.notificationQueue.queueUrl,
           ...(this.configuration.name === 'staging' ? { NOVU_API_URL: this.parameter('StagingNovuApiUrl').valueAsString } : {}),
-          NOVU_MODE: 'live', AWS_REGION: Aws.REGION };
+          NOVU_MODE: 'live', AWS_REGION: Aws.REGION,
+          // ADR-064: the verified login email reaches Novu only when staging
+          // opts in; the worker itself refuses it for a production deployment.
+          HID_DEPLOYMENT_ENV: this.configuration.name,
+          NOVU_SUBSCRIBER_SYNC: this.configuration.novuSubscriberSyncEnabled ? 'email' : 'disabled' };
       case 'ocr-worker':
         return { NODE_ENV: 'production', OCR_PROVIDER: 'textract', OCR_WORKER_SUBJECT: subjects.ocr,
           OCR_WORKER_DATABASE_SSL: 'true', OCR_WORKER_DATABASE_SSL_ROOT_CERT_BASE64: this.parameter('RdsCaBundleBase64').valueAsString,
