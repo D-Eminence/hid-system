@@ -9,8 +9,8 @@ import { redactIdentifiers } from './identifiers';
  * PatientRecordRelease.read, the patient's own release set, so it can hold
  * nothing the patient does not already see, and only the categories whose
  * release flags are on. Per kind, only the fields listed in EXTRACT_FIELDS
- * leave the system; every free-text value is passed through
- * redactIdentifiers. No name, Health ID, NIN, date of birth, contact detail,
+ * leave the system; every string value (free text, codes, units, routes and
+ * enumerated statuses alike) is passed through redactIdentifiers. No name, Health ID, NIN, date of birth, contact detail,
  * staff or facility name, file name, storage location or internal id is ever
  * included: records are numbered (ref), facilities are ordinals (F1, F2) and
  * every timestamp is cut to its calendar date (UTC).
@@ -147,9 +147,10 @@ function text(value: unknown): string | null {
   return redacted === '' ? null : redacted;
 }
 
+/** A number as it is; any other value as redacted text (codes, units and routes are free-length columns too). */
 function scalar(value: unknown): string | number | null {
   if (value === null || value === undefined || value === '') return null;
-  return typeof value === 'number' ? value : String(value);
+  return typeof value === 'number' ? value : text(value);
 }
 
 function sha256(value: string): string {
@@ -365,6 +366,15 @@ export function releasedBindings(records: PatientReleasedRecords): Map<string, s
 
 export function bindingKey(binding: { kind: string; id: string }): string {
   return `${binding.kind}:${binding.id}`;
+}
+
+/**
+ * Whether every record an exchange cites is still released with the content
+ * it was answered from (same key and same hash). An exchange that fails this
+ * is never sent again as context, replayed or shown in the history.
+ */
+export function bindingsStillReleased(bindings: readonly SourceBinding[], released: ReadonlyMap<string, string>): boolean {
+  return bindings.every((binding) => released.get(bindingKey(binding)) === binding.hash);
 }
 
 /**

@@ -425,8 +425,9 @@ describe('PatientRecordChatService', () => {
 
   it('reads the history newest first without any call, leaving out exchanges whose records are no longer released', async () => {
     const reply = { status: 'answered', answer: ANSWER_TEXT, blocks: [], sources: [], coverage: {} };
+    const hash = await currentVitalHash();
     const chat = setup({ config: { ...enabled, patientEnabled: false }, history: [
-      { id: 'message-2', question: QUESTION, reply, sourceBindings: [{ kind: 'vital', id: VITAL, hash: 'h' }],
+      { id: 'message-2', question: QUESTION, reply, sourceBindings: [{ kind: 'vital', id: VITAL, hash }],
         createdAt: new Date('2026-10-16T12:00:00Z') },
       { id: 'message-1', question: QUESTION, reply, sourceBindings: [{ kind: 'diagnosis', id: 'gone', hash: 'h' }],
         createdAt: new Date('2026-10-15T12:00:00Z') }] });

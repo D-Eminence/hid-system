@@ -395,7 +395,12 @@ export function assertPatientRecordRelease(configuration: {
 /** The model id's shape only, as ehr-api checks it; the Models API proves it exists at the first question. */
 const RECORD_CHAT_MODEL_ID = /^[a-z0-9][a-z0-9._:@-]{0,99}$/;
 const RECORD_CHAT_NOTICE_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
-/** The accepted record chat ADR and its date, as ehr-api checks it: ADR-NNN@YYYY-MM-DD, a real date not in the future. */
+/**
+ * The operator's attestation of the external-processing approval, as ehr-api
+ * checks it: ADR-NNN@YYYY-MM-DD, a real date not in the future, naming the ADR
+ * that records the processing agreement, geography, retention and quotas. Only
+ * the form is checked; the release checklist (P36) checks what it names.
+ */
 const RECORD_CHAT_APPROVAL = /^ADR-(\d{3})@(\d{4})-(\d{2})-(\d{2})$/;
 
 function validRecordChatApproval(value: string | undefined): boolean {
@@ -434,7 +439,8 @@ export function assertRecordChat(configuration: {
   }
   if (!validRecordChatApproval(chat.processingApproval)) {
     throw new Error(`HID_RECORD_CHAT_PATIENT_ENABLED=true needs HID_RECORD_CHAT_PROCESSING_APPROVAL in ${configuration.name}: `
-      + 'the accepted record chat ADR and its date (ADR-NNN@YYYY-MM-DD, not in the future)');
+      + 'the ADR that records the processing agreement, geography, retention and quotas, and its acceptance date '
+      + '(ADR-NNN@YYYY-MM-DD, not in the future)');
   }
   if (configuration.natGateways < 1) {
     throw new Error('HID_RECORD_CHAT_PATIENT_ENABLED=true needs NAT egress to reach the processor; '

@@ -48,7 +48,13 @@ export function isProductionProfile(environment: { HID_DEPLOYMENT_ENV?: string; 
 export const RECORD_CHAT_FIRST_PARTY_ORIGIN = 'https://api.anthropic.com';
 /** A model id's shape only; the Models API readiness check proves it exists and fits. */
 const MODEL_ID_SHAPE = /^[a-z0-9][a-z0-9._:@-]{0,99}$/;
-/** An accepted ADR and the date of its acceptance, for example ADR-123@2026-10-16. */
+/**
+ * The operator's attestation of the external-processing approval: the ADR
+ * that records the processing agreement and transfer mechanism, the inference
+ * geography, the retention of the chat history and the quotas, and the date it
+ * was accepted, for example ADR-123@2026-10-16. Only its form is checked here;
+ * the release checklist (P36) checks what it names. ADR-065 is not that ADR.
+ */
 const PROCESSING_APPROVAL = /^ADR-(\d{3})@(\d{4})-(\d{2})-(\d{2})$/;
 const NOTICE_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
 
@@ -86,8 +92,8 @@ function validDigestKey(value: string | undefined): boolean {
  * Record chat's configuration rules. With the flag off nothing is required
  * and nothing is sent. With it on, every setting the request needs must be
  * present; nothing has a default model. NODE_ENV=production (every deployed
- * environment, staging included) also needs the recorded external-processing
- * approval (the accepted record chat ADR and its date) and the first-party
+ * environment, staging included) also needs the operator's attestation of the
+ * external-processing approval (PROCESSING_APPROVAL above) and the first-party
  * API origin.
  */
 export function recordChatIssues(environment: RecordChatSettings): Array<{ path: string[]; message: string }> {
@@ -117,7 +123,8 @@ export function recordChatIssues(environment: RecordChatSettings): Array<{ path:
   if (environment.NODE_ENV === 'production') {
     if (!validProcessingApproval(environment.RECORD_CHAT_PROCESSING_APPROVAL)) {
       refuse('RECORD_CHAT_PROCESSING_APPROVAL', 'Record chat requires the recorded external-processing approval: '
-        + 'the accepted record chat ADR and its date (ADR-NNN@YYYY-MM-DD, not in the future)');
+        + 'the ADR that records the processing agreement, geography, retention and quotas, and its acceptance date '
+        + '(ADR-NNN@YYYY-MM-DD, not in the future)');
     }
     if (baseUrl !== undefined && baseUrl !== RECORD_CHAT_FIRST_PARTY_ORIGIN) {
       refuse('RECORD_CHAT_API_BASE_URL', `Production record chat may only reach ${RECORD_CHAT_FIRST_PARTY_ORIGIN}`);
@@ -201,7 +208,9 @@ const environmentSchema = z
     RECORD_CHAT_MAX_OUTPUT_TOKENS: z.coerce.number().int().min(1024).max(16_000).default(4096),
     RECORD_CHAT_EFFORT: z.preprocess(emptyToUndefined, z.enum(['low', 'medium', 'high']).optional()),
     RECORD_CHAT_DEADLINE_MS: z.coerce.number().int().min(5000).max(25_000).default(25_000),
-    RECORD_CHAT_MAX_RETRIES: z.coerce.number().int().min(0).max(1).default(0),
+    // Always 0, as QOREID_MAX_RETRIES: a retry would send the same PHI again
+    // under the one disclosure audit row written before the request (ADR-065).
+    RECORD_CHAT_MAX_RETRIES: z.coerce.number().int().min(0).max(0).default(0),
     RECORD_CHAT_MAX_EVIDENCE_CHARS: z.coerce.number().int().min(4000).max(90_000).default(40_000),
     RECORD_CHAT_DAILY_TOKEN_BUDGET: z.preprocess(emptyToUndefined,
       z.coerce.number().int().min(1).max(20_000_000).optional()),

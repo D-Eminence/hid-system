@@ -13,7 +13,7 @@ export const DISCLOSURE_DETAIL_KEYS = ['processor', 'model', 'inferenceGeo', 'au
 export const ANSWER_DETAIL_KEYS = ['processor', 'model', 'status', 'reason', 'stopReason', 'refusalCategory',
   'citationsValid', 'citedSourceCount', 'inputTokens', 'outputTokens', 'cacheReadTokens', 'cacheWriteTokens',
   'servedGeo', 'processorMessageId', 'durationMs'] as const;
-export const HISTORY_DETAIL_KEYS = ['exchangeCount', 'hiddenCount', 'deletedCount'] as const;
+export const HISTORY_DETAIL_KEYS = ['exchangeCount', 'hiddenCount', 'deletedCount', 'reason'] as const;
 
 type DetailKey = (typeof DISCLOSURE_DETAIL_KEYS)[number] | (typeof ANSWER_DETAIL_KEYS)[number]
   | (typeof HISTORY_DETAIL_KEYS)[number];

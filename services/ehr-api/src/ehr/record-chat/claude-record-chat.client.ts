@@ -123,6 +123,15 @@ export function processorFailure(error: unknown, outputTooLarge = false): Record
   return new RecordChatProcessorError('processor_error');
 }
 
+/** The geographies and refusal categories kept in audit rows; any other value is recorded as 'other'. */
+const KNOWN_GEOS = new Set(['us', 'global']);
+const KNOWN_REFUSAL_CATEGORIES = new Set(['cyber', 'bio', 'frontier_llm', 'reasoning_extraction', 'general_harms']);
+
+function known(value: unknown, allowed: ReadonlySet<string>): string | null {
+  if (value === null || value === undefined) return null;
+  return typeof value === 'string' && allowed.has(value) ? value : 'other';
+}
+
 function usageOf(message: Anthropic.Message): ProcessorUsage {
   const usage = message.usage;
   return {
@@ -130,7 +139,7 @@ function usageOf(message: Anthropic.Message): ProcessorUsage {
     outputTokens: usage?.output_tokens ?? 0,
     cacheReadTokens: usage?.cache_read_input_tokens ?? 0,
     cacheWriteTokens: usage?.cache_creation_input_tokens ?? 0,
-    servedGeo: usage?.inference_geo ?? null,
+    servedGeo: known(usage?.inference_geo, KNOWN_GEOS),
   };
 }
 
@@ -220,8 +229,8 @@ export class ClaudeRecordChatClient implements RecordChatProcessor {
       return { kind: 'answer', text, stopReason: 'end_turn', processorMessageId, usage };
     }
     if (message.stop_reason === 'refusal') {
-      return { kind: 'refusal', stopReason: 'refusal', refusalCategory: message.stop_details?.category ?? null,
-        processorMessageId, usage };
+      return { kind: 'refusal', stopReason: 'refusal',
+        refusalCategory: known(message.stop_details?.category, KNOWN_REFUSAL_CATEGORIES), processorMessageId, usage };
     }
     return { kind: 'incomplete', stopReason: String(message.stop_reason ?? 'unknown').slice(0, 64), processorMessageId,
       usage };

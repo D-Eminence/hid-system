@@ -8,13 +8,13 @@ import type { HidRequest } from '../../common/request-context';
 import { DatabaseService } from '../../database/database.service';
 import { PATIENT_ALWAYS_RELEASED, PATIENT_RELEASABLE, PatientRecordRelease } from '../patient-records/patient-release';
 import { PatientRecordsService } from '../patient-records/patient-records.service';
-import { joinBlocks, validateAnswer, type AnswerBlock } from './answer-validator';
+import { hasUnsafeCharacter, joinBlocks, validateAnswer, type AnswerBlock } from './answer-validator';
 import {
   RECORD_CHAT_PROCESSOR, RecordChatProcessorError, processorFailure, type ProcessorResult, type RecordChatProcessor,
 } from './claude-record-chat.client';
 import {
-  EXTRACT_LIMITS, bindingKey, buildPatientExtract, releasedBindings, userTurnBlocks, type ChatCoverage, type ChatSource,
-  type PatientExtract, type PriorTurn, type SourceBinding,
+  EXTRACT_LIMITS, bindingsStillReleased, buildPatientExtract, releasedBindings, userTurnBlocks,
+  type ChatCoverage, type ChatSource, type PatientExtract, type PriorTurn, type SourceBinding,
 } from './evidence-extract';
 import {
   ANSWER_DETAIL_KEYS, DISCLOSURE_DETAIL_KEYS, HISTORY_DETAIL_KEYS, auditDetails, disclosureDigest,
@@ -26,15 +26,19 @@ import { PATIENT_SYSTEM_PROMPT } from './system-prompt';
  * Patient record chat (owner decision 1 of 2026-10-16; POST /ehr/me/chat and
  * the patient's own history). The order of one question:
  * 1. The deploy flag (503 RECORD_CHAT_DISABLED, nothing read), the platform
- *    kill switch record_chat_enabled (503 RECORD_CHAT_PAUSED), the notice
- *    version (428), the Idempotency-Key and a process-local cap of four
- *    calls in flight.
+ *    kill switch record_chat_enabled (503 RECORD_CHAT_PAUSED), the question
+ *    (1 to 1000 characters, no NUL, other control character or lone
+ *    surrogate), the notice version (428), the Idempotency-Key and a
+ *    process-local cap of four calls in flight.
  * 2. Identity's patient-self authorization of this request's own session.
  * 3. One patient-self transaction: an idempotent replay answers the stored
- *    reply; otherwise the history cap, the released records
- *    (PatientRecordRelease.read, the only evidence source), the extract, the
- *    lease and quotas (ehr.reserve_record_chat) and the disclosure audit row
- *    naming the processor commit together. Any failure there means no call.
+ *    reply while every record it cites is still released unchanged (409
+ *    CHAT_SOURCES_CHANGED otherwise); else the history cap, the released
+ *    records (PatientRecordRelease.read, the only evidence source), the
+ *    extract, the earlier exchanges still bound to released records, the
+ *    lease, quotas and kill switch again (ehr.reserve_record_chat) and the
+ *    disclosure audit row naming the processor commit together. Any failure
+ *    there means no call.
  * 4. One Messages API request.
  * 5. Identity's authorization again: a change discards the answer.
  * 6. A second patient-self transaction: the answer is validated, the cited
@@ -42,8 +46,11 @@ import { PATIENT_SYSTEM_PROMPT } from './system-prompt';
  *    one changed or is gone), the exchange is stored (409
  *    CHAT_CONVERSATION_CHANGED when the history was cleared meanwhile), the
  *    lease is settled with the processor's usage and the answer audit row is
- *    written.
- * The history stays readable and deletable while chat is off.
+ *    written. If that transaction fails, a short fallback transaction settles
+ *    the lease as failed with the known usage and writes the answer audit row
+ *    (save_failed), and the answer is 503 RECORD_CHAT_UNAVAILABLE.
+ * The history stays readable and deletable while chat is off, unless a legal
+ * hold keeps it (409 CHAT_HISTORY_ON_HOLD).
  */
 export const HISTORY_LIMIT = 50;
 export const PRIOR_TURNS = 4;
@@ -97,6 +104,9 @@ interface MessageRow extends QueryResultRow {
 
 const sha256 = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
 
+/** A legal hold placed between the check and the delete kept the history; the transaction rolls back. */
+class HistoryHeld extends Error {}
+
 function databaseCode(error: unknown): string | undefined {
   const code = (error as { code?: unknown } | null)?.code;
   return typeof code === 'string' ? code : undefined;
@@ -130,8 +140,9 @@ export class PatientRecordChatService {
     await this.requireControl();
     const config = enabledRecordChatConfig(this.config);
     const question = typeof body.question === 'string' ? body.question.trim() : '';
-    if (!question || question.length > MAX_QUESTION_LENGTH) {
-      throw new DomainProblem(400, 'INVALID_QUESTION', 'The question must hold 1 to 1000 characters');
+    if (!question || question.length > MAX_QUESTION_LENGTH || hasUnsafeCharacter(question)) {
+      throw new DomainProblem(400, 'INVALID_QUESTION',
+        'The question must hold 1 to 1000 characters and no control characters');
     }
     if (body.noticeVersion !== config.noticeVersion) {
       throw new DomainProblem(428, 'CHAT_NOTICE_REQUIRED', 'The current record chat notice must be acknowledged');
@@ -165,12 +176,11 @@ export class PatientRecordChatService {
         if (replay.requestSha256 !== requestSha256) {
           throw new DomainProblem(409, 'IDEMPOTENCY_KEY_REUSED', 'This Idempotency-Key was used for another question');
         }
-        // A stored answer is shown again only while every record it cites is still released.
-        if (replay.sourceBindings.length > 0) {
-          const visible = releasedBindings(await this.release.read(client, patientId));
-          if (replay.sourceBindings.some((binding) => !visible.has(bindingKey(binding)))) {
-            throw new DomainProblem(409, 'CHAT_SOURCES_CHANGED', 'A record this answer cites is no longer available');
-          }
+        // A stored answer is shown again only while every record it cites is
+        // still released with the content it was answered from.
+        if (replay.sourceBindings.length > 0
+          && !bindingsStillReleased(replay.sourceBindings, releasedBindings(await this.release.read(client, patientId)))) {
+          throw new DomainProblem(409, 'CHAT_SOURCES_CHANGED', 'A record this answer cites changed or is no longer available');
         }
         await this.audit.recordWithClient(client, { ...auditBase, action: 'ehr.record-chat.replay', outcome: 'success',
           resourceId: replay.id, details: {} });
@@ -184,10 +194,17 @@ export class PatientRecordChatService {
       }
       const released = await this.release.read(client, patientId);
       const extract = buildPatientExtract(released, question, { ...EXTRACT_LIMITS, maxTotalChars: config.maxEvidenceChars });
-      const prior = await client.query<{ id: string; question: string; answer: string }>(
-        `select id, question, reply->>'answer' as answer from ehr.patient_chat_messages
-          where patient_id=$1 order by created_at desc, id desc limit ${PRIOR_TURNS}`, [patientId]);
-      const priorTurns: PriorTurn[] = [...prior.rows].reverse().map((row) => ({ question: row.question, answer: row.answer }));
+      // Earlier exchanges are context, never evidence, and are sent only
+      // while every record they cite is still released with the content they
+      // were answered from: an answer about a retracted, amended or withdrawn
+      // record never reaches the processor again. The newest four that pass.
+      const visible = releasedBindings(released);
+      const prior = await client.query<{ id: string; question: string; answer: string; sourceBindings: SourceBinding[] }>(
+        `select id, question, reply->>'answer' as answer, source_bindings as "sourceBindings"
+           from ehr.patient_chat_messages where patient_id=$1 order by created_at desc, id desc limit ${HISTORY_LIMIT}`,
+        [patientId]);
+      const priorRows = prior.rows.filter((row) => bindingsStillReleased(row.sourceBindings, visible)).slice(0, PRIOR_TURNS);
+      const priorTurns: PriorTurn[] = [...priorRows].reverse().map((row) => ({ question: row.question, answer: row.answer }));
       const conversationId = await this.conversation(client, patientId);
       const messageId = randomUUID();
       const userBlocks = userTurnBlocks(extract, priorTurns, question);
@@ -217,9 +234,9 @@ export class PatientRecordChatService {
           maxOutputTokens: config.maxOutputTokens,
           disclosureDigest: disclosureDigest(config.auditDigestKey, { messageId, model: config.modelId,
             inferenceGeo: config.inferenceGeo, bindings: extract.bindings, questionSha256: sha256(question),
-            priorMessageIds: prior.rows.map((row) => row.id) }),
+            priorMessageIds: priorRows.map((row) => row.id) }),
         }) });
-      return { prepared: { conversationId, messageId, reservationId, extract, priorMessageIds: prior.rows.map((row) => row.id),
+      return { prepared: { conversationId, messageId, reservationId, extract, priorMessageIds: priorRows.map((row) => row.id),
         userBlocks } satisfies Prepared };
     });
     if ('replay' in first && first.replay) return this.replayed(first.replay);
@@ -259,7 +276,7 @@ export class PatientRecordChatService {
         if (failure || !result) {
           await this.settle(client, prepared.reservationId, null, 'failed',
             failure && ['timeout', 'output_too_large', 'processor_error'].includes(failure.reason)
-              ? (await this.reservedTokens(prepared)) : 0);
+              ? this.reservedTokens(prepared) : 0);
           await this.audit.recordWithClient(client, { ...answerBase, outcome: 'failure', details: auditDetails(
             ANSWER_DETAIL_KEYS, { processor: this.processor.processor, model: config.modelId,
               reason: failure?.reason ?? 'processor_error', durationMs }) });
@@ -268,7 +285,7 @@ export class PatientRecordChatService {
         const { reply, reason, citationsValid, bindings } = this.reply(result, prepared.extract);
         if (bindings.length > 0) {
           const current = releasedBindings(await this.release.read(client, patientId));
-          if (bindings.some((binding) => current.get(bindingKey(binding)) !== binding.hash)) {
+          if (!bindingsStillReleased(bindings, current)) {
             await this.settle(client, prepared.reservationId, result, 'sources_changed');
             await this.audit.recordWithClient(client, { ...answerBase, outcome: 'denied', details: auditDetails(
               ANSWER_DETAIL_KEYS, { processor: this.processor.processor, model: config.modelId, status: reply.status,
@@ -297,6 +314,19 @@ export class PatientRecordChatService {
             reason, refusalCategory: result.kind === 'refusal' ? result.refusalCategory : undefined, citationsValid,
             citedSourceCount: reply.sources.length, durationMs, ...usageDetails }) });
         return { kind: 'saved' as const, reply, createdAt };
+      }).catch(async (): Promise<never> => {
+        // The transaction rolled back whole. The disclosure is already
+        // audited, so the lease is settled and the outcome audited in a short
+        // fallback transaction; if that fails too, the lease expires and is
+        // charged its estimate. Nothing from the model is kept.
+        await this.database.withPatientTransaction(second.authorization, request.correlationId, async (client) => {
+          await this.settle(client, prepared.reservationId, result ?? null, 'failed',
+            result ? 0 : this.reservedTokens(prepared));
+          await this.audit.recordWithClient(client, { ...answerBase, outcome: 'failure', details: auditDetails(
+            ANSWER_DETAIL_KEYS, { processor: this.processor.processor, model: config.modelId, reason: 'save_failed',
+              durationMs, ...usageDetails }) });
+        }).catch(() => undefined);
+        throw new DomainProblem(503, 'RECORD_CHAT_UNAVAILABLE', 'Record chat is temporarily unavailable');
       });
     if (outcome.kind === 'failed') {
       throw new DomainProblem(503, 'RECORD_CHAT_UNAVAILABLE', 'Record chat is temporarily unavailable');
@@ -309,7 +339,11 @@ export class PatientRecordChatService {
       processor: this.processor.processor, createdAt: outcome.createdAt.toISOString(), idempotentReplay: false };
   }
 
-  /** The patient's own exchanges, newest first; an exchange citing a record no longer released is left out. */
+  /**
+   * The patient's own exchanges, newest first. An exchange is left out while a
+   * record it cites is no longer released or no longer has the content it was
+   * answered from (an amendment, a correction or a retraction).
+   */
   async history(request: HidRequest) {
     const { actor, authorization } = await this.records.authorizeOwnSession(request);
     return this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
@@ -320,7 +354,7 @@ export class PatientRecordChatService {
            from ehr.patient_chat_messages where patient_id=$1
           order by created_at desc, id desc limit ${HISTORY_LIMIT}`, [authorization.patientId])).rows : [];
       const visible = rows.length ? releasedBindings(await this.release.read(client, authorization.patientId)) : new Map();
-      const exchanges = rows.filter((row) => row.sourceBindings.every((binding) => visible.has(bindingKey(binding))))
+      const exchanges = rows.filter((row) => bindingsStillReleased(row.sourceBindings, visible))
         .map((row) => ({ messageId: row.id, question: row.question, reply: { status: row.reply.status,
           answer: row.reply.answer, blocks: row.reply.blocks, sources: row.reply.sources },
         createdAt: new Date(row.createdAt).toISOString() }));
@@ -333,20 +367,53 @@ export class PatientRecordChatService {
     });
   }
 
-  /** Deletes the patient's whole conversation and its exchanges; idempotent. */
+  /**
+   * Deletes the patient's whole conversation and its exchanges; idempotent.
+   * While an active legal hold names the patient or the account
+   * (platform.legal_holds), nothing is deleted: 409 CHAT_HISTORY_ON_HOLD,
+   * audited. The delete policies enforce the same rule in the database.
+   */
   async clear(request: HidRequest) {
     const { actor, authorization } = await this.records.authorizeOwnSession(request);
-    return this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
-      const counted = await client.query<{ count: string }>(
-        'select count(*)::text as count from ehr.patient_chat_messages where patient_id=$1', [authorization.patientId]);
-      await client.query('delete from ehr.patient_chat_conversations where patient_id=$1', [authorization.patientId]);
-      const deletedCount = Number(counted.rows[0]?.count ?? 0);
-      await this.audit.recordWithClient(client, { correlationId: request.correlationId, actorType: 'patient',
-        actorSubject: actor.subject, actorAccountId: actor.accountId, patientId: authorization.patientId,
-        action: 'ehr.record-chat.history.clear', resourceType: 'patient-record-chat-history', outcome: 'success',
-        purposeOfUse: 'patient-self', details: auditDetails(HISTORY_DETAIL_KEYS, { deletedCount }) });
-      return { cleared: true, deletedCount };
-    });
+    const patientId = authorization.patientId;
+    const auditBase = { correlationId: request.correlationId, actorType: 'patient' as const, actorSubject: actor.subject,
+      actorAccountId: actor.accountId, patientId, action: 'ehr.record-chat.history.clear',
+      resourceType: 'patient-record-chat-history', purposeOfUse: 'patient-self' };
+    const held = auditDetails(HISTORY_DETAIL_KEYS, { reason: 'legal_hold' });
+    let cleared: { held: true } | { held: false; deletedCount: number };
+    try {
+      cleared = await this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
+        const hold = await client.query<{ held: boolean }>('select ehr.record_chat_history_on_hold($1) as held',
+          [patientId]);
+        if (hold.rows[0]?.held !== false) {
+          await this.audit.recordWithClient(client, { ...auditBase, outcome: 'denied', details: held });
+          return { held: true as const };
+        }
+        // One statement, one snapshot: the exchanges and the conversation go
+        // together, the count is of the exchanges this statement deleted, and
+        // a hold placed since the check keeps every row (the delete policies).
+        const deleted = await client.query<{ count: string; existing: number; deleted: number }>(
+          `with deleted_messages as (delete from ehr.patient_chat_messages where patient_id=$1 returning 1),
+                deleted_conversation as (delete from ehr.patient_chat_conversations where patient_id=$1 returning 1)
+           select (select count(*) from deleted_messages)::text as count,
+                  (select count(*) from ehr.patient_chat_conversations where patient_id=$1)::int as existing,
+                  (select count(*) from deleted_conversation)::int as deleted`, [patientId]);
+        const row = deleted.rows[0];
+        if (row && row.deleted < row.existing) throw new HistoryHeld();
+        const deletedCount = Number(row?.count ?? 0);
+        await this.audit.recordWithClient(client, { ...auditBase, outcome: 'success',
+          details: auditDetails(HISTORY_DETAIL_KEYS, { deletedCount }) });
+        return { held: false as const, deletedCount };
+      });
+    } catch (error) {
+      if (!(error instanceof HistoryHeld)) throw error;
+      await this.audit.record({ ...auditBase, outcome: 'denied', details: held });
+      cleared = { held: true };
+    }
+    if (cleared.held) {
+      throw new DomainProblem(409, 'CHAT_HISTORY_ON_HOLD', 'A legal hold keeps the record chat history; it cannot be deleted now');
+    }
+    return { cleared: true, deletedCount: cleared.deletedCount };
   }
 
   /** The reply for the processor's result; nothing from the model is kept unless it validates. */
@@ -429,6 +496,12 @@ export class PatientRecordChatService {
         throw new DomainProblem(503, 'RECORD_CHAT_BUDGET_EXHAUSTED', 'Record chat is unavailable until tomorrow');
       }
       if (code === '42501') throw new DomainProblem(403, 'PATIENT_ACCESS_DENIED', 'Patient authorization changed');
+      // The kill switch, read again in this transaction, or its row missing.
+      if (code === '55000') {
+        throw (error as { message?: unknown }).message === 'RECORD_CHAT_PAUSED'
+          ? new DomainProblem(503, 'RECORD_CHAT_PAUSED', 'Record chat is paused')
+          : new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
+      }
       throw error;
     }
   }
@@ -442,7 +515,7 @@ export class PatientRecordChatService {
   }
 
   /** What a failed call is charged when its usage is unknown: the input it may have consumed. */
-  private async reservedTokens(prepared: Prepared): Promise<number> {
+  private reservedTokens(prepared: Prepared): number {
     return Math.ceil((PATIENT_SYSTEM_PROMPT.length + prepared.userBlocks.join('').length) / 3);
   }
 

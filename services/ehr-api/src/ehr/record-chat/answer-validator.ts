@@ -54,6 +54,21 @@ const answerSchema = z.strictObject({
 });
 
 const REFERENCE_MARKER = /\[\s*\d+(?:\s*[,–-]\s*\d+)*\s*\]/;
+// A NUL, any other C0 control but tab, line feed and carriage return, DEL, a
+// C1 control, or a lone surrogate half.
+// eslint-disable-next-line no-control-regex
+const UNSAFE_CHARACTER = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]|[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/;
+
+/**
+ * Whether the text holds a character record chat never stores or shows: a NUL
+ * (PostgreSQL text refuses it), a lone surrogate (jsonb refuses it), or a
+ * control character a terminal or log viewer could act on. A question holding
+ * one is refused before anything is read; model text holding one fails
+ * validation, so a database error after the call cannot come from either.
+ */
+export function hasUnsafeCharacter(text: string): boolean {
+  return UNSAFE_CHARACTER.test(text);
+}
 const MARKUP = /<\/?[a-z!][^>]*>|```|\*\*|__|^\s{0,3}#{1,6}\s|\[[^\]]*\]\([^)]*\)/im;
 
 /** The joined plain-text answer, as stored and shown. */
@@ -66,8 +81,8 @@ export function joinBlocks(blocks: readonly AnswerBlock[]): string {
  * most 2,000 characters, a record block cites at least one supplied source
  * and only supplied sources (1..sourceCount), an explanation or safety block
  * cites none, an answered reply has a record block and a no-evidence reply
- * none, no bracketed reference markers, links, markup or identifier patterns,
- * and at most 4,000 characters in all. On any failure nothing from the model
+ * none, no bracketed reference markers, links, markup, identifier patterns or
+ * unsafe characters (hasUnsafeCharacter), and at most 4,000 characters in all. On any failure nothing from the model
  * is kept.
  */
 export function validateAnswer(raw: string, sourceCount: number): ValidatedAnswer {
@@ -90,7 +105,8 @@ export function validateAnswer(raw: string, sourceCount: number): ValidatedAnswe
     } else if (block.references.length > 0) {
       return { ok: false, reason: 'citations_invalid' };
     }
-    if (REFERENCE_MARKER.test(block.text) || MARKUP.test(block.text) || containsIdentifier(block.text)) {
+    if (REFERENCE_MARKER.test(block.text) || MARKUP.test(block.text) || containsIdentifier(block.text)
+      || hasUnsafeCharacter(block.text)) {
       return { ok: false, reason: 'content_invalid' };
     }
   }
