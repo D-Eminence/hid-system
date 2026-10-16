@@ -87,6 +87,18 @@ interface ImportedRecordRow {
  */
 const REFUSED_READ = new Set(['42501', '42P01', '42883', '42703', '57014']);
 
+/**
+ * A database refusal of the read or of the staff decision as 503
+ * IMPORTED_HISTORY_UNAVAILABLE (nothing is returned); any other error as it is.
+ */
+export function refusedImportedHistoryRead(error: unknown): unknown {
+  const code = (error as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && REFUSED_READ.has(code)) {
+    return new DomainProblem(503, 'IMPORTED_HISTORY_UNAVAILABLE', 'Imported medical history is unavailable');
+  }
+  return error;
+}
+
 /** A legacy text field: the string the legacy row holds, or null for anything else. */
 const text = (alias: string, field: string) =>
   `case when jsonb_typeof(${alias}.source_payload->'${field}')='string' then ${alias}.source_payload->>'${field}' end`;
@@ -126,7 +138,8 @@ export function importedHistorySql(withCursor: boolean): string {
 /**
  * Reads one page of the patient's imported history in the caller's
  * transaction. A read the database refuses or times out is 503
- * IMPORTED_HISTORY_UNAVAILABLE, and nothing is returned.
+ * IMPORTED_HISTORY_UNAVAILABLE, and nothing is returned. A staff transaction
+ * has bound the patient first (ImportedHistoryService.staff).
  */
 export async function readImportedHistory(client: PoolClient, patientId: string, cursor: TimelineCursor | undefined,
   list: string = IMPORTED_HISTORY_LISTS.self): Promise<ImportedHistoryPage> {
@@ -135,11 +148,7 @@ export async function readImportedHistory(client: PoolClient, patientId: string,
   try {
     rows = (await client.query<ImportedRecordRow>(importedHistorySql(Boolean(cursor)), values)).rows;
   } catch (error) {
-    const code = (error as { code?: unknown } | null)?.code;
-    if (typeof code === 'string' && REFUSED_READ.has(code)) {
-      throw new DomainProblem(503, 'IMPORTED_HISTORY_UNAVAILABLE', 'Imported medical history is unavailable');
-    }
-    throw error;
+    throw refusedImportedHistoryRead(error);
   }
   const scope: TimelineScope = { list, patientId };
   const page = timelinePage(rows, IMPORTED_HISTORY_LIMITS.records, scope);

@@ -14,6 +14,7 @@ import {
   type ImportedHistoryPage,
   importedHistoryAuditCounts,
   readImportedHistory,
+  refusedImportedHistoryRead,
 } from './imported-history.query';
 
 export { IMPORTED_HISTORY_LIMITS } from './imported-history.query';
@@ -73,7 +74,8 @@ export class ImportedHistoryService {
    * GET /ehr/patients/:patientId/imported-history for direct care. A patient
    * who has not shared their imported history (or has none) answers
    * `shared: false` with nothing in it; a break-glass authorization is
-   * refused with 403 BREAK_GLASS_EXCLUDED.
+   * refused with 403 BREAK_GLASS_EXCLUDED. A decision or read the database
+   * refuses or times out answers 503 IMPORTED_HISTORY_UNAVAILABLE.
    */
   async staff(patientId: string, context: DataAccessContext, cursorValue?: string): Promise<StaffImportedHistoryResponse> {
     const cursor = decodeTimelineCursor(cursorValue, { list: IMPORTED_HISTORY_LISTS.staff, patientId });
@@ -81,11 +83,20 @@ export class ImportedHistoryService {
       action: 'ehr.imported-history.read', resourceType: 'imported-medical-history',
       excludeBreakGlass: { code: 'BREAK_GLASS_EXCLUDED' },
     }, async (client) => {
-      // The same decision the staff policies apply to every imported row,
-      // asked once so that "not shared" is an answer rather than an empty page.
-      const decision = await client.query<{ shared: boolean }>(
-        'select ehr.imported_history_staff_read_allowed($1) as shared', [patientId]);
-      const shared = decision.rows[0]?.shared === true;
+      // The decision the staff policies apply, asked once so that "not
+      // shared" is an answer rather than an empty page, in the statement that
+      // binds the patient the policies compare each row with (0096): the
+      // policies then decide once per statement, not once per row, and admit
+      // no other patient's rows in this transaction.
+      let shared: boolean;
+      try {
+        const decision = await client.query<{ shared: boolean }>(
+          "select ehr.imported_history_staff_read_allowed($1::uuid) as shared, "
+          + "set_config('app.imported_history_patient', $1::uuid::text, true) as bound", [patientId]);
+        shared = decision.rows[0]?.shared === true;
+      } catch (error) {
+        throw refusedImportedHistoryRead(error);
+      }
       const page: ImportedHistoryPage = shared
         ? await readImportedHistory(client, patientId, cursor, IMPORTED_HISTORY_LISTS.staff)
         : { records: [], truncated: { records: false }, nextCursor: null };

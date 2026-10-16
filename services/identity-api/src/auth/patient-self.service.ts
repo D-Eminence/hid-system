@@ -4,6 +4,7 @@ import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { requireNoRecentRecoveryHold, requireRecentPatientAuthentication } from './recent-authentication';
+import { requireImportedHistorySharingEnabled } from './imported-history-sharing.guard';
 
 export function requirePatient(actor: ActorContext | undefined): ActorContext & { patientId: string; sessionId: string } {
   if (actor?.kind !== 'patient' || !actor.patientId || !actor.sessionId) {
@@ -116,17 +117,20 @@ export class PatientSelfService {
 
   /**
    * Turns sharing of the imported history on or off. Turning it on discloses
-   * more, so it needs a recent sign-in and no recent account recovery, as an
-   * Access PIN does; turning it off is always allowed. A repeat changes
-   * nothing (changed: false). The command records the change with its
-   * session and correlation id; the audit row commits with it.
+   * more, so it needs the sharing switch, a recent sign-in and no recent
+   * account recovery, as an Access PIN does; turning it off is always
+   * allowed, also while the switch is off, because the stored choice keeps
+   * deciding the staff read (ADR-065). A repeat changes nothing (changed:
+   * false). The command records the change with its session and correlation
+   * id; the audit row commits with it.
    */
   async setImportedHistorySharing(request: HidRequest, shared: boolean):
     Promise<{ shared: boolean; changed: boolean; updatedAt: Date | string | null }> {
     const actor = requirePatient(request.actor);
+    if (shared) requireImportedHistorySharingEnabled();
     return this.database.withSystemTransaction(request.correlationId, async (client) => {
       if (shared) {
-        await requireNoRecentRecoveryHold(client, actor.accountId, 'sharing imported medical history');
+        await requireNoRecentRecoveryHold(client, actor.accountId, 'imported medical history sharing changes');
         await requireRecentPatientAuthentication(client, actor, 'Sign in again before sharing your imported medical history');
       }
       await client.query("select set_config('app.actor_subject',$1,true)", [actor.subject]);

@@ -54,14 +54,14 @@ export class PatientSelfController {
   }
 
   // The patient's choice to share imported legacy history with staff they
-  // consent to (ADR-065), behind its own switch.
+  // consent to (ADR-065). Reading it and turning it on need its own switch;
+  // turning it off is always allowed (the service decides by the choice).
   @Get('me/imported-history-sharing')
   @UseGuards(ImportedHistorySharingEnabledGuard)
   importedHistorySharing(@Req() request: HidRequest) { return this.self.importedHistorySharing(request); }
 
   @Post('me/imported-history-sharing')
   @HttpCode(200)
-  @UseGuards(ImportedHistorySharingEnabledGuard)
   @AuditAction('identity.patient.imported-history-sharing.change.command')
   setImportedHistorySharing(@Req() request: HidRequest, @Body() input: ImportedHistorySharingDto) {
     return this.self.setImportedHistorySharing(request, input.shared);
