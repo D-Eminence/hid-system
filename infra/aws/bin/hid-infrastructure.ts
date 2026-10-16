@@ -22,6 +22,9 @@ const configuration = environmentConfig(
     patientReleasePrescriptions: process.env.HID_EHR_PATIENT_RELEASE_PRESCRIPTIONS,
     patientReleaseLabResults: process.env.HID_EHR_PATIENT_RELEASE_LAB_RESULTS,
     patientReleaseDocuments: process.env.HID_EHR_PATIENT_RELEASE_DOCUMENTS,
+    importedHistoryPatientRead: process.env.HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY,
+    importedHistoryStaffRead: process.env.HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED,
+    importedHistorySharing: process.env.HID_IMPORTED_HISTORY_SHARING_ENABLED,
   },
 );
 const regionalEnvironment = externalAwsEnvironment(process.env.HID_AWS_ACCOUNT, process.env.HID_AWS_REGION);

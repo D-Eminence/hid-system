@@ -99,6 +99,14 @@ export interface HidEnvironmentConfig {
   // staging: Lab results while Lab is off at launch (D17), the others until
   // the clinical owner signs them off (P35, ADR-064).
   readonly patientRecordRelease: PatientRecordRelease;
+  // Imported legacy medical history (owner decision 3 of 2026-10-16,
+  // ADR-065): ehr-api's EHR_PATIENT_RELEASE_IMPORTED_HISTORY (the patient's
+  // own read) and EHR_STAFF_IMPORTED_HISTORY_ENABLED (the staff read), and
+  // identity-api's IMPORTED_HISTORY_SHARING_ENABLED (the patient's sharing
+  // choice). Synth inputs HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY,
+  // HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED and HID_IMPORTED_HISTORY_SHARING_ENABLED,
+  // each default false and refused outside staging until the P36 sign-off.
+  readonly importedHistory: ImportedHistory;
   // The exact ARN of the operator-created, KMS-encrypted SNS topic
   // hid-<env>-operational-alerts that every alarm notifies (D4, ADR-053).
   // Synth input HID_OPERATIONAL_ALARM_TOPIC_ARN; the regional stack requires
@@ -115,8 +123,18 @@ export interface PatientRecordRelease {
   readonly documents: boolean;
 }
 
+/** The imported legacy medical history switches (ADR-065). */
+export interface ImportedHistory {
+  readonly patientRead: boolean;
+  readonly staffRead: boolean;
+  readonly sharing: boolean;
+}
+
 /** Synth inputs beyond the environment, staging mode, QoreID and route switches. */
 export interface SynthOptions {
+  readonly importedHistoryPatientRead?: string;
+  readonly importedHistoryStaffRead?: string;
+  readonly importedHistorySharing?: string;
   readonly patientReleaseVitals?: string;
   readonly patientReleaseDiagnoses?: string;
   readonly patientReleasePrescriptions?: string;
@@ -367,6 +385,33 @@ export function assertPatientRecordRelease(configuration: {
   }
 }
 
+const IMPORTED_HISTORY_INPUTS: ReadonlyArray<readonly [keyof ImportedHistory, string]> = [
+  ['patientRead', 'HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY'],
+  ['staffRead', 'HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED'],
+  ['sharing', 'HID_IMPORTED_HISTORY_SHARING_ENABLED'],
+];
+
+/**
+ * Only staging may show imported legacy medical history (ADR-065). Production
+ * refuses each switch until the DPO and the owner sign off the legacy data's
+ * provenance, scope and retention and Health-id renders it (release checklist
+ * P36); the development stack runs its services in the production profile,
+ * where ehr-api and identity-api refuse them at start, so it is refused here
+ * as well. The regional stack repeats this for a configuration not built by
+ * environmentConfig.
+ */
+export function assertImportedHistory(configuration: {
+  readonly name: EnvironmentName; readonly importedHistory: ImportedHistory;
+}): void {
+  if (configuration.name === 'staging') return;
+  for (const [flag, variable] of IMPORTED_HISTORY_INPUTS) {
+    if (configuration.importedHistory[flag]) {
+      throw new Error(`${variable}=true is refused outside staging (${configuration.name}): the DPO and the owner `
+        + 'have not signed off the legacy data (P36, ADR-065)');
+    }
+  }
+}
+
 function booleanInput(variable: string, value: string | undefined, fallback: 'true' | 'false'): boolean {
   const input = value ?? fallback;
   if (!['true', 'false'].includes(input)) throw new Error(`${variable} must be true or false when supplied`);
@@ -438,6 +483,12 @@ export function environmentConfig(
     documents: booleanInput('HID_EHR_PATIENT_RELEASE_DOCUMENTS', options.patientReleaseDocuments, 'false'),
   };
   assertPatientRecordRelease({ name, patientRecordRelease });
+  const importedHistory: ImportedHistory = {
+    patientRead: booleanInput('HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY', options.importedHistoryPatientRead, 'false'),
+    staffRead: booleanInput('HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED', options.importedHistoryStaffRead, 'false'),
+    sharing: booleanInput('HID_IMPORTED_HISTORY_SHARING_ENABLED', options.importedHistorySharing, 'false'),
+  };
+  assertImportedHistory({ name, importedHistory });
   const topic = operationalAlarmTopic(name, options.operationalAlarmTopicArn);
   return {
     ...environmentIdentity[name], ...profiles[profile],
@@ -450,6 +501,7 @@ export function environmentConfig(
     qoreIdPatientSelfNinBindingEnabled,
     notificationWorkerEnabled,
     patientRecordRelease,
+    importedHistory,
     ...(topic ? { operationalAlarmTopicArn: topic.arn } : {}),
   };
 }
