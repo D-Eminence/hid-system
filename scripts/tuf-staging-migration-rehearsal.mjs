@@ -538,6 +538,13 @@ try {
     'exact-role staff MFA sign-in, enrolment proof, unassured-session refusal, recovery and reset HTTP workflow',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-staff-mfa-runtime.mjs')],
     workflowEnvironment));
+  // Owner decision 2 (ADR-066, 0098): clinician self sign-up with the
+  // authenticator before review and two different Super Admins; nothing the
+  // applicant's browser holds works at /auth/mfa/*.
+  evidence.checks.clinician_application_runtime = JSON.parse(command(
+    'exact-role clinician self sign-up, authenticator before review, two-admin approval and first staff sign-in HTTP workflow',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-clinician-application-runtime.mjs')],
+    workflowEnvironment));
   // Phase 4 Stage 9: the commands whose row locks their runtime roles could not
   // take, each through its real API as its runtime role, with concurrency,
   // replay, denial and rollback cases.

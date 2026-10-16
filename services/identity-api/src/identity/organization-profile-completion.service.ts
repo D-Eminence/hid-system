@@ -2,7 +2,7 @@ import { type BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/comm
 import { createHmac, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import type { QueryResultRow } from 'pg';
 import { NotificationOtpClient } from '../auth/notification-otp.client';
-import * as argon2 from 'argon2';
+import { assertPasswordLength, hashAccountPassword } from '../auth/password-hash';
 import { AFTER_RESPONSE_SHUTDOWN_GRACE_MS, AfterResponseTasks } from '../common/after-response-tasks';
 import { publicClientNetwork } from '../common/client-network';
 import { DomainProblem } from '../common/problem';
@@ -139,16 +139,9 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
   }
 
   async activate(token: string | undefined, password: string, correlationId: string) {
-    if (typeof password !== 'string' || password.length < 12 || password.length > 256) {
-      throw new DomainProblem(400, 'PASSWORD_INVALID', 'Password must be 12–256 characters');
-    }
+    assertPasswordLength(password);
     const sessionHash = this.sessionHash(token);
-    const passwordHash = await argon2.hash(password, {
-      type: argon2.argon2id,
-      memoryCost: 65_536,
-      timeCost: 3,
-      parallelism: 1,
-    });
+    const passwordHash = await hashAccountPassword(password);
     try {
       const result = await this.database.withSystemTransaction(correlationId, (client) =>
         client.query<{

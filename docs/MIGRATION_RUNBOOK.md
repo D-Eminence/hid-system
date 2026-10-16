@@ -94,6 +94,7 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0095_notification_verified_recipient.sql` | Notification verified recipient (ADR-064; D-Eminence/hid-system#90). Refuses (`55000 BRANCH_0063_NOTIFICATION_RECIPIENT_PRESENT`) a database that ran the D-Eminence/hid-system#8 branch's 0063: rebuild or reconcile it first. Creates `integration.notification_recipient_state(uuid)` (private, owned by the migration administrator; reads `identity.patients`, `auth.accounts` and `identity.patient_account_deletion_requests` as their owner, and withholds a login main would not let sign in: not active, suspended by `disabled_until` or with a deletion due) and `integration.notification_recipient_for_claim(uuid,uuid,uuid)` (the worker's claim-bound lookup: the verified login email or `withhold`, never a name). No table lock, no row change, no window. Run the role bootstrap after it: it moves the claim function to `hid_event_delivery_commands` and grants it to `hid_notification_worker` only, and the helper to the technical owner only. A worker with `NOVU_SUBSCRIBER_SYNC=email` refuses to start until then; with the flag off nothing changes |
 | `database/migrations/0096_patient_record_release.sql` | Patient record release (owner decision 4 of 2026-10-16, ADR-065, D7; numbered after 0095). Adds five PUBLIC `SELECT` policies gated by `ehr.patient_self_context`, a completed encounter and the row's category in the transaction-local `app.patient_release` (which only the EHR build of this change sets, to the categories whose flag is on): final, never corrected vitals; confirmed diagnoses; active, on hold and completed prescriptions; uploaded PHI documents attached to an encounter, and their scan events. Creates the `security_barrier` view `ehr.patient_released_lab_results` (each Lab result's latest released, not invalidated revision of an order still open or completed, of a completed encounter, when `app.patient_release` names `labResults`; no reasons or staff identities), revoked from `PUBLIC`, and the indexes `lab_result_releases_patient_idx`, `vitals_patient_release_idx`, `diagnoses_patient_release_idx` and `prescriptions_patient_release_idx`. The role bootstrap creates its owner, the technical role `hid_lab_release_reader` (`NOLOGIN`, column `SELECT` and one `using (true)` policy per table it reads, no privilege on the view itself), and grants `SELECT` on it to the EHR runtime and the test role only. `ehr.patient_self_context`'s grants are unchanged and no Lab role gains a privilege. Changes no row; brief `ACCESS EXCLUSIVE` on the five EHR tables and `SHARE` on `lab.result_releases`, `ehr.vitals`, `ehr.diagnoses` and `ehr.prescriptions` while their indexes build, to the commit (release checklist §5 step 29). Every EHR release flag stays off, and the production profile refuses it, until release checklist P36. |
 | `database/migrations/0097_break_glass_launch_with_limits.sql` | Break-glass at launch, with limits (decision D9 as the owner decided it on 2026-10-14; ADR-058 addendum; branch `claude/break-glass-launch`, D-Eminence/hid-system#83; numbered after 0096). Inserts `identity.break-glass.write` for doctor, clinician and nurse into `auth.role_permissions` (the roles 0010 granted it to before 0091 withdrew it; no other role, no other withdrawn permission) and `emergency` ("Emergency treatment", active, `hid`) into `identity.purpose_of_use_codes`, both `ON CONFLICT DO NOTHING`, so an operator's earlier row is kept. First it refuses to run while `break_glass_enabled` is on (`55000 BREAK_GLASS_CONTROL_ON`, nothing changed): 0091 kept a value an administrator had set, and the grant would make break-glass live at once; set the control off with `POST /admin/controls` and run `migrate` again. Before the first role bootstrap a non-superuser administrator cannot read the control (`PLATFORM_CONTROL_UNAVAILABLE`), which 0097 takes as off. `ACCESS SHARE` on `platform.control_settings` (that read, first), `ROW EXCLUSIVE` on the two tables and `FOR KEY SHARE` on the referenced role and permission rows; at most four rows, no scan, no window. No object, function, policy or database grant changes, and `break_glass_enabled` is not changed (off since 0091): break-glass answers `423 BREAK_GLASS_DISABLED` until a platform administrator turns the control on with `POST /admin/controls` after staff MFA ships (`PHASE_4_STAGE_5_RELEASE_READINESS.md` P11). Run `db:bootstrap` and `db:verify-roles` of the same release after it: their role assertions require exactly the three holders, so an earlier release's bootstrap refuses a database holding 0097, and this release's bootstrap refuses one without it. From its commit, doctors', clinicians' and nurses' sessions list the permission on their next request (every build); Identity and EHR builds are unchanged by it (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §3, §5, §9) |
+| `database/migrations/0098_clinician_self_signup.sql` | Clinician self sign-up with two-admin approval (owner decision 2 of 2026-10-14; ADR-066, CLIN-SIGNUP; branch `claude/clinician-self-signup`). Adds the control `clinician_signup_enabled` (seeded off), the application, challenge, capability, idempotency and quota tables (RLS, no runtime privilege), the reserved-attestation predicate, the internal pinned grant `identity.workforce_change_role` (0087's body plus the pin; `identity.admin_change_workforce_role` delegates with no pin) and the public and administration commands (`DATABASE.md`, "Clinician self sign-up applications (0098)"). It replaces `platform.control_enabled` (0040's body plus the key) while keeping its technical owner `hid_platform_control_reader`: a runner that does not own it grants itself that role (`INHERIT`, no `SET`) for the transaction with the ADMIN OPTION it holds as the role's creator (the bootstrap's administrator), revokes it, and fails closed if it cannot or if the owner would change (§6.1). Locks, in order, under the runner's 5 s lock timeout: `ACCESS EXCLUSIVE` on `platform.control_settings` (every guard's control read waits), then `SHARE ROW EXCLUSIVE` on `auth.accounts`, `identity.facilities`, `identity.staff`, `identity.staff_facility_memberships` and `identity.staff_credential_attestations` (the new foreign keys; writes to them wait). A transaction that holds a row lock on one of those and then reads a control can deadlock with it; PostgreSQL aborts one, and an aborted 0098 rolls back whole and is run again. Run it off-peak. Run `db:bootstrap` and `db:verify-roles` of the same release after it: the bootstrap grants the new commands. An older Identity runs on it unchanged; the new Identity on a database without it answers the new routes 503 (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, P37) |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles. Runs as a superuser or as the non-superuser administrator that created the roles (RDS); checks the roles' attributes instead of re-asserting them (§6) |
 | `database/runtime-login-assertions.sql` and `scripts/verify-runtime-logins.mjs` | `npm run db:verify-logins`: checks each runtime credential's own LOGIN, connected with that credential's URL (§6) |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
@@ -299,6 +300,21 @@ in-body option and update its pinned checksum in
 after which local and development databases are rebuilt. That exception is
 not made in this repository.
 
+0098 replaces `platform.control_enabled`, which the role bootstrap gave to
+`hid_platform_control_reader` (0083). The migration administrator neither owns
+it nor holds that role's privileges, so 0098 grants itself the role for its
+own transaction only (`grant hid_platform_control_reader to current_user with
+inherit true, set false`, which needs the ADMIN OPTION the administrator holds
+as the role's creator), replaces the function, revokes the membership, and
+raises if the function's owner changed or a membership is left; nothing is
+kept on failure. An administrator without that ADMIN OPTION (one that did not
+run the bootstrap) gets `0098 needs ADMIN OPTION on hid_platform_control_reader to replace platform.control_enabled` and the run
+stops at 0097; run it as the bootstrap's administrator. Check afterwards:
+`select proowner::regrole from pg_proc where oid =
+'platform.control_enabled(text)'::regprocedure` is `hid_platform_control_reader`.
+`apply-migrations.mjs --through <file>` plans, dry-runs or applies up to and
+including one migration (the non-superuser verifier's upgrade stage uses it).
+
 ### 6.2 Role bootstrap
 
 As the same migration administrator. It must be the role that creates the HID
@@ -403,7 +419,7 @@ the rotated credentials). Clear the variables afterwards. In production every
 service that connects to the database also refuses to start over a superuser,
 `BYPASSRLS` or owner connection.
 
-Confirm the candidate ledger reaches `0097`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0098`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 After the legacy import, record (read-only, counts only, no identifiers) how
 many imported patient accounts have `email_verified_at` null and no verified
@@ -482,6 +498,86 @@ select enrolled.actor_account_id as account_id, enrolled.occurred_at as enrolled
  order by enrolled.occurred_at desc;
 rollback;
 ```
+
+After 0098 (ADR-066), an account that holds an approved clinician
+application, or an active or pending staff membership, cannot set up an
+authenticator through the application status page (0098 refuses the
+enrolment and audits `identity.clinician-application.status-code-verified`
+as denied), so a re-enrolment after a reset goes through staff sign-in and
+the query above lists it when it follows a recovery.
+
+After 0098 (ADR-066), query (4) of P22: every approved clinician application
+must still rest on a staff-proven authenticator. Expected: no rows, or each
+one reviewed:
+
+```sql
+begin transaction isolation level repeatable read read only;
+set local row_security = off;
+select application.id, application.account_id, application.approved_at
+  from identity.clinician_applications application
+ where application.state = 'approved'
+   and not exists (select 1 from auth.mfa_factors factor
+     where factor.id = application.factor_id and factor.status = 'active'
+       and factor.enrollment_proof is not null)
+ order by application.approved_at;
+rollback;
+```
+
+While `break_glass_enabled` is on, review daily (P37) the break-glass
+activations of accounts approved through a clinician application in the last
+90 days:
+
+```sql
+begin transaction isolation level repeatable read read only;
+set local row_security = off;
+select activation.actor_account_id, activation.occurred_at, activation.resource_id,
+       application.facility_id, application.approved_at
+  from audit.events activation
+  join identity.clinician_applications application
+    on application.account_id = activation.actor_account_id
+   and application.state = 'approved'
+   and application.approved_at > now() - interval '90 days'
+ where activation.action = 'identity.break-glass.activate'
+   and activation.occurred_at > now() - interval '7 days'
+ order by activation.occurred_at desc;
+rollback;
+```
+
+While `ASSISTED_REGISTRATION_ENABLED` is on and a facility is designated
+(ADR-063, P30), review daily (P37) the in-person checks of accounts approved
+through a clinician application in the last 90 days: the approved grant rests
+on a current attestation, which is all the in-person check requires (P32).
+Confirm each check with the facility (the staff member was on duty and the
+patient was there). The checks force row-level security, so the query reads
+them as the `system:auth` actor, set in this read-only transaction only
+(`row_security = off` fails for the migration administrator). It returns ids,
+never a name, document, NIN or contact. For the fraud runbook entry (P37 (6)),
+run it for the one account (`verification.staff_account_id`) without the
+seven-day bound: a check with `proof_outcome` `verified` proved the enrollment
+`enrollment_id`, and the Health ID it created
+(`identity.patient_identifiers.public_enrollment_id`) cannot be undone by any
+route yet (ADR-063's contested-identity review is not built).
+
+```sql
+begin transaction isolation level repeatable read read only;
+set local statement_timeout = '120s';
+set local lock_timeout = '5s';
+select set_config('app.actor_subject', 'system:auth', true);
+select verification.id as verification_id, verification.staff_account_id,
+       verification.facility_id, verification.verified_at, verification.outcome,
+       verification.proof_outcome, verification.enrollment_id, approval.approved_at
+  from identity.assisted_registration_verifications verification
+  join lateral (select max(application.approved_at) as approved_at
+                  from identity.clinician_applications application
+                 where application.account_id = verification.staff_account_id
+                   and application.state = 'approved'
+                   and application.approved_at > now() - interval '90 days') approval
+    on approval.approved_at is not null
+ where verification.verified_at > now() - interval '7 days'
+ order by verification.verified_at desc;
+rollback;
+```
+
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task. The
 migration image also carries `scripts/bootstrap-database-roles.mjs` and
@@ -570,7 +666,7 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify the ledger at `0097`, runtime grants (`db:verify-roles`) and logins
+6. Verify the ledger at `0098`, runtime grants (`db:verify-roles`) and logins
    (`db:verify-logins`), RLS and purpose/deny behavior, and list the
    purpose-of-use codes (release checklist P10; after `0097` `direct-care` and
    `emergency`). After `0097`, confirm the
@@ -613,6 +709,12 @@ continuity with synthetic or authorized minimum-necessary identifiers.
    (and the test role). Until it runs, a configured Lab results section
    answers `503`. Run the P36 policy check before any
    `EHR_PATIENT_RELEASE_*` flag is set.
+   After `0098`, likewise: it grants the Identity runtime the clinician
+   application commands and keeps their helpers and tables from every
+   runtime; until it runs the clinician routes answer `503`. 0098 also needs
+   the bootstrap's administrator (the ADMIN OPTION on
+   `hid_platform_control_reader`, §6.1). `clinician_signup_enabled` stays off
+   until release checklist P37.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts. A migrated staff account signs in with
    its password, then enrols an authenticator with the code emailed to it

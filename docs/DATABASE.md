@@ -4741,3 +4741,197 @@ Tests:
   bootstrapped, and the 52 additional suites again with every schema, table
   and function owned by a `NOSUPERUSER NOBYPASSRLS` role; the full rehearsal
   passes on 0097 (local evidence, release checklist §8).
+
+## Clinician self sign-up applications (0098)
+
+`0098_clinician_self_signup.sql` (owner decision 2 of 2026-10-14; ADR-066,
+CLIN-SIGNUP) lets a doctor (MDCN) or a nurse or midwife (NMCN) apply to one
+verified facility and puts the application in front of two platform
+administrators. It extends 0087 (ADR-049) and uses 0088's staff MFA tables
+as they are. 0001 through 0097 are unchanged. One transaction; forward-only.
+
+**Control.** `clinician_signup_enabled` joins `platform.control_settings`,
+seeded `false` with version 1 (ADR-058). The 0039 key CHECK is replaced
+(found by its definition, exactly one) by `control_settings_control_key_check`
+with seven keys; `platform.admin_set_control` (0071's body) takes the key;
+`platform.control_enabled` is replaced with 0040's body plus the key. That
+function's technical owner is `hid_platform_control_reader` once the role
+bootstrap ran (0083); a runner that is neither its owner nor holds its
+privileges (RDS) cannot replace it, so 0098 grants itself the role (`INHERIT
+TRUE, SET FALSE`, with the ADMIN OPTION its creator holds from the bootstrap),
+replaces the function, revokes the membership, and fails if the owner changed
+or a membership is left (it fails closed, rolled back whole, without the
+ADMIN OPTION). It reads the owner's plain name (`pg_get_userbyid`, not a
+`regrole` cast, which quotes a name that needs quoting), so a runner that
+still owns the function under such a name takes the owner path.
+`scripts/verify-non-superuser-database.mjs` proves this on the upgrade path
+(`clinician_signup_upgrade_path`) and, rolled back, for an administrator named
+`HidAdmin` that owns the function (`clinician_signup_quoted_owner`).
+
+**Tables** (RLS enabled; no runtime privilege; only the SECURITY DEFINER
+commands below read or write them):
+
+- `identity.clinician_applications`: one per application. The account, its
+  pending staff record (FK `(staff_id, account_id)`), the facility, the
+  requested role and regulator (only `doctor`/`MDCN` and `nurse`/`NMCN`), the
+  licence number and its canonical key (`identity.clinician_licence_key`:
+  regulator plus the upper-cased alphanumerics, `MDCN:12345` for
+  `MDCN/12345` and `mdcn 12345`), the licence expiry, the name, the state
+  (`awaiting_authenticator`, `submitted`, `under_review`, `approved`,
+  `rejected`, `withdrawn`, `expired`), `expires_at = submitted_at + 30 days`
+  (CHECK), the step-1 fields (`attested_by`, `attested_at`,
+  `attestation_id` with FK `(attestation_id, account_id)`, the checklist
+  object, `factor_id`, `factor_confirmed_at`), the step-2 fields
+  (`approved_by`, `approved_at`, `membership_id`), the decision (`decided_by`,
+  `decided_at`, `decision_code` from nine, `decision_reason`), and
+  `row_version`. CHECKs: the pairs, the lifecycle truth table, the
+  attestation and approval pairing, and the two-person rule
+  `approved_by <> attested_by`. One open application per account and facility
+  (partial unique index). The trigger `clinician_applications_guard` refuses
+  a delete, a change to an immutable column, a second write of a set-once
+  column, any transition but the state machine's, and a `row_version` not
+  incremented by one (`55000 CLINICIAN_APPLICATION_IMMUTABLE`).
+- `identity.clinician_application_challenges`: email-code challenges
+  (`signup` or `status`): the keyed email digest, the account for a status
+  challenge of an eligible applicant (none for a decoy, which never
+  verifies), the keyed code digest, ten minutes, at most five failures, and
+  consumed and invalidated times.
+- `identity.clinician_application_sessions`: application capabilities. Only
+  the keyed token digest is stored. A `draft` (60 minutes, the email digest
+  and its challenge, consumed by submit with its idempotency key, request
+  digest and stored answer) or an `account` capability (30 minutes, the
+  account, the stage `enrolment_required`, `authenticator_required` or
+  `ready`, and the 0088 challenge it drives), an end time, a search count
+  (at most 30) and, for a draft, the number of submissions Identity hashed a
+  password for (`submit_attempts`, at most five).
+- `identity.clinician_application_idempotency`: apply-again keys per account.
+- `platform.clinician_application_quota_counters`: per-operation network
+  (hour, day) and platform (day) counters, as 0085's (forced RLS with
+  permissive policies for the definer owner). The platform's `submit` day
+  counter counts created applications: `consume_clinician_application_quota`
+  only checks it (an early refusal), and
+  `platform.count_clinician_application_submission(limit)` (internal) adds
+  one in the submit and apply-again commands for each application they
+  create, never for a refusal or a replay, in one conditional upsert under
+  the counter row's lock: at the limit it raises `P4290
+  CLINICIAN_APPLICATION_QUOTA_EXCEEDED` and the creation rolls back, so
+  concurrent creations never pass the cap.
+
+**Reserved attestations.** `identity.workforce_attestation_usable(attestation,
+pin, account, facility)` is false for an attestation whose application is not
+approved, except that application's own pinned step 2: the pin names the
+attestation, the grant is for the application's account at its facility,
+and the application is under review and not overdue (computed at read time;
+a null pin never unlocks). 0087's
+`identity.admin_change_workforce_role` keeps its signature, result, owner and
+grants and delegates to the internal `identity.workforce_change_role` (no
+runtime may execute it), whose body is 0087's with exactly the pin parameter
+and the reservation and pin predicates in the chosen-attestation query and the
+second-person probe (`scripts/tests/workforce-role-change-body.test.mjs`).
+`identity.admin_workforce_profile` adds `clinicianApplication` and
+`usableForGrant` to each attestation. `auth.facility_role_is_effective` is
+not changed, nor is 0094's `identity.assisted_registration_actor_attested`:
+an approved application's grant, pinned to its attestation, qualifies for the
+in-person check (ADR-063) as any 0087 grant does (ADR-066, release checklist
+P32), and `MIGRATION_RUNBOOK.md` §6 reviews such checks daily (P37).
+
+**Commands** (SECURITY DEFINER, `search_path = pg_catalog, identity, auth,
+platform, audit, pg_temp`, revoked from PUBLIC). The public ones need the
+`system:auth` context Identity sets (`42501
+CLINICIAN_APPLICATION_PERMISSION_DENIED` otherwise) and are granted to
+`hid_identity_runtime` and `hid_schema_test_runtime`:
+`identity.clinician_signup_open`, `platform.consume_clinician_application_quota`,
+`identity.begin_clinician_application_challenge` (an advisory lock per
+address and purpose; cooldowns of one a minute, five an hour, fifteen a day),
+`identity.invalidate_clinician_application_challenge`,
+`identity.verify_clinician_application_signup_code`,
+`identity.verify_clinician_application_status_code` (`staff_sign_in_required`,
+nothing opened, when the account has no factor and holds an approved
+application or an active or pending membership),
+`identity.clinician_application_session` (an account capability at its
+effective stage; `23514 CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE` when its
+account is disabled or inactive),
+`identity.clinician_application_submit_probe` (before the submit quota and
+the password hash, with the submission's details: `replay` for a draft this
+key and request spent; for a live unspent draft of the address C8's first
+refusal that needs no password, as its marker
+(`CLINICIAN_APPLICATION_INVALID`, `..._FACILITY_UNAVAILABLE`,
+`..._FACILITY_BUSY`, `CLINICIAN_EMAIL_IN_USE`), else `new`; anything else,
+and a draft with five hashed submissions, `42501
+CLINICIAN_APPLICATION_SESSION_INVALID`),
+`identity.count_clinician_application_submit_attempt` (after the charge,
+one submission Identity will hash against its draft's five),
+`identity.search_clinician_application_facilities`,
+`identity.submit_clinician_application` (an active account `workforce:<id>`
+with an argon2id password and verified email, a pending staff record with the
+licence, the application; no membership, role or session; it counts the
+facility's open applications under the facility's lock and the application
+against the platform's daily limit it is passed),
+`identity.bind_clinician_application_mfa_challenge` (`42501
+CLINICIAN_APPLICATION_AUTHENTICATOR_READY` on a `ready` capability; no
+enrolment challenge for an account that re-enrols only at staff sign-in,
+`42501 CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED`),
+`identity.clinician_application_authenticator_ready` (the factor must be the
+account's active staff-proven one and used in this transaction; no enrolment
+for an account that re-enrols only at staff sign-in),
+`identity.current_clinician_applications`,
+`identity.withdraw_clinician_application`, `identity.file_clinician_application`
+(the same facility lock and platform count as submit),
+`identity.end_clinician_application_session`,
+`identity.expire_clinician_applications` (SKIP LOCKED) and
+`identity.prune_clinician_application_artifacts`. The administration ones
+(`hid_identity_runtime` only) start with `identity.workforce_command_actor()`
+(`platform.workforce.manage`, MFA, and a step-up for the commands):
+`identity.admin_list_clinician_applications`,
+`identity.admin_get_clinician_application`,
+`identity.admin_clinician_application_attest_precheck` (given the request's
+fields: everything step 1 refuses before it checks the factor the code
+proves, in its order and with its and 0087's markers, before Identity checks
+the applicant's code: the fields, the application, the end of the licence, a
+key used for a generic 0087 attestation, the applicant account and staff
+record; the applicant's account otherwise),
+`identity.admin_clinician_application_prior`,
+`identity.admin_attest_clinician_application` (0087's attestation for exactly
+the requested role, capped at the end of the licence's expiry date in
+Africa/Lagos and three years; the staff record becomes verified),
+`identity.admin_approve_clinician_application` (a different administrator;
+refused after an `identity_not_confirmed` rejection of any of the account's
+applications; 0087's attach by account id and the grant pinned to the step-1
+attestation, in one transaction) and `identity.admin_reject_clinician_application`.
+
+**Capability checks.** The internal helpers
+`identity.clinician_application_account_session` (used by the capability
+commands), `identity.clinician_application_effective_stage` (an
+`enrolment_required` capability is `authenticator_required` once the account
+holds an active factor), `identity.clinician_application_account_usable`
+(active and not disabled), `identity.clinician_application_staff_enrolment_only`
+(an approved clinician application, or an active or pending staff membership)
+and `identity.clinician_application_licence_valid` (the licence details the
+submit, apply-again and probe commands check alike) are granted to no
+runtime.
+
+**Lock order.** Accounts first (in id order when two are involved, 0073),
+then the capability or 0088 challenge, then the application; a command that
+reads a capability before it knows the account reads it again after the
+account lock. Submit and apply-again then take the facility's advisory lock
+(`clinician-application-facility:<id>`) before they count its open
+applications, and the platform's submit counter row last. 0098 itself takes `ACCESS EXCLUSIVE` on
+`platform.control_settings`, then `SHARE ROW EXCLUSIVE` on `auth.accounts`,
+`identity.facilities`, `identity.staff`, `identity.staff_facility_memberships`
+and `identity.staff_credential_attestations` for its foreign keys, under the
+runner's 5 s lock timeout; run it off-peak (it is re-runnable).
+
+**Audit.** In the commands, as `system:auth` with the application's
+provenance: `identity.clinician-application.quota` (success and denied; the
+search only when denied), `.email-verified`, `.status-code-verified` (denied
+with `refusal: staff_sign_in_required` for a refused re-enrolment),
+`.submitted`, `.authenticator-ready`, `.authenticator.verified`,
+`.withdrawn`, `.expired`. No detail carries an email, a name, a licence
+number, a code or a token.
+
+Tests: `clinician-applications.integration.sql` (rollback-only; run from an
+empty database and under the NOSUPERUSER owner of the rehearsal),
+`workforce-role-change-body.test.mjs`, the platform-controls,
+platform-control-owner, platform-mfa-approval, runtime-roles and
+workforce-provisioning suites, `verify-non-superuser-database.mjs` and
+`verify-clinician-application-runtime.mjs` (release checklist §8).

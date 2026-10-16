@@ -29,9 +29,24 @@
 // - the release checklist's read-only P10, P11 and P35 checks, taken from
 //   docs/PHASE_4_STAGE_5_RELEASE_READINESS.md, as the administrator, as an
 //   operator runs them on RDS;
+// - the daily reviews of P37 (break-glass use and in-person checks by
+//   accounts approved through a clinician application), taken from
+//   docs/MIGRATION_RUNBOOK.md §6, as the administrator;
 // - break-glass's migration (0097) run again as the administrator in
 //   rolled-back transactions: refused while break_glass_enabled is on, a
 //   no-op while it is off;
+// - the upgrade path of clinician self sign-up (ADR-066): a second database
+//   migrated through the migration before it, where the previous release's
+//   bootstrap statements for platform.control_enabled (P8-CONTROL) give the
+//   function its technical owner, then that
+//   migration applied as the administrator without SET ON PARAMETER (it
+//   replaces the function under a membership it takes and revokes in its own
+//   transaction), the bootstrap again and db:verify-roles; the function keeps
+//   its owner, the administrator keeps no INHERIT or SET membership, and the
+//   guards' logins read the new control as off; before that, the same
+//   migration run on that database, in a rolled-back transaction, as an
+//   administrator whose name needs quoting and which still owns the function
+//   (a chain migrated before its first bootstrap);
 // - the platform-control-owner and function-parameter-settings suites.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -87,13 +102,13 @@ function run(label, executable, args, environment = {}, expected = 0) {
   return { stdout: result.stdout ?? '', output };
 }
 
-function url(user) {
-  return `postgresql://${user}@localhost/${database}?host=${encodeURIComponent(temporary)}`;
+function url(user, db = database) {
+  return `postgresql://${user}@localhost/${db}?host=${encodeURIComponent(temporary)}`;
 }
 
-function psql(label, user, sql, expected = 0) {
+function psql(label, user, sql, expected = 0, db = database) {
   return run(label, join(pgBindir, 'psql'),
-    ['-X', '-At', '-v', 'ON_ERROR_STOP=1', '-h', temporary, '-U', user, '-d', database, '-c', sql], {}, expected);
+    ['-X', '-At', '-v', 'ON_ERROR_STOP=1', '-h', temporary, '-U', user, '-d', db, '-c', sql], {}, expected);
 }
 
 function suite(name, user) {
@@ -101,14 +116,14 @@ function suite(name, user) {
     '-U', user, '-d', database, '-f', join(service, 'database/tests', name)]);
 }
 
-function migrate(label, expected = 0) {
-  return run(label, process.execPath, [join(service, 'scripts/apply-migrations.mjs')],
-    { DATABASE_URL: url(admin) }, expected);
+function migrate(label, expected = 0, db = database, flags = []) {
+  return run(label, process.execPath, [join(service, 'scripts/apply-migrations.mjs'), ...flags],
+    { DATABASE_URL: url(admin, db) }, expected);
 }
 
-function bootstrap(label, flags = []) {
+function bootstrap(label, flags = [], db = database) {
   return run(label, process.execPath, [join(service, 'scripts/bootstrap-database-roles.mjs'), ...flags],
-    { DATABASE_ADMIN_URL: url(admin) }).stdout.trim();
+    { DATABASE_ADMIN_URL: url(admin, db) }).stdout.trim();
 }
 
 function verifyLogins(label, urls, expected = 0, flags = []) {
@@ -311,10 +326,11 @@ try {
     controls[credential] = psql(`platform controls as ${credential}`, logins[credential][0],
       `select platform.control_enabled('patient_portal_enabled') || ',' || platform.control_enabled('provider_portal_enabled')
          || ',' || platform.control_enabled('maintenance_mode') || ',' || platform.control_enabled('uploads_enabled')
-         || ',' || platform.control_enabled('outreach_portal_enabled') || ',' || platform.control_enabled('break_glass_enabled');
+         || ',' || platform.control_enabled('outreach_portal_enabled') || ',' || platform.control_enabled('break_glass_enabled')
+         || ',' || platform.control_enabled('clinician_signup_enabled');
        select platform.require_control_enabled('patient_portal_enabled')`)
       .stdout.trim().split('\n')[0];
-    assert.equal(controls[credential], 'true,true,false,false,false,false');
+    assert.equal(controls[credential], 'true,true,false,false,false,false,false');
   }
   evidence.steps.platform_controls = { read_as: controls, owner: psql('control owner', superuser,
     `select proowner::regrole from pg_proc where oid = 'platform.control_enabled(text)'::regprocedure`).stdout.trim() };
@@ -340,12 +356,14 @@ try {
   assert.deepEqual(p10.map((line) => line.split('|').slice(0, 4).join('|')),
     ['break_glass_enabled|f', 'direct-care|Direct patient care|t|hid', 'emergency|Emergency treatment|t|hid'],
     `P10 check: ${p10.join('; ')}`);
-  // After 0097 and the bootstrap: the three launch controls off (break-glass
-  // until the operator turns it on, P11), no healthcare-operations purpose, no
+  // After 0097, clinician self sign-up's migration and the bootstrap: the four
+  // launch controls off (break-glass until the operator turns it on, P11;
+  // clinician sign-up until P37), no healthcare-operations purpose, no
   // permission 0084 or 0091 withdrew, break-glass granted to exactly the three
   // roles 0097 names, and no control event.
   const p11 = await checklistCheck('P11 check (read-only)');
-  assert.deepEqual(p11, ['break_glass_enabled|f', 'outreach_portal_enabled|f', 'uploads_enabled|f',
+  assert.deepEqual(p11, ['break_glass_enabled|f', 'clinician_signup_enabled|f', 'outreach_portal_enabled|f',
+    'uploads_enabled|f',
     'clinician|identity.break-glass.write', 'doctor|identity.break-glass.write', 'nurse|identity.break-glass.write'],
   `P11 check: ${p11.join('; ')}`);
   // P35 (ADR-064): the owners and the only executors of 0095's two functions.
@@ -409,6 +427,31 @@ try {
   evidence.steps.notification_recipient = { run_as: worker, answers: { verified: 'email', phone_only: 'withhold' },
     direct_patient_read: /permission denied for \S+ \S+/.exec(workerDirect.output)[0], refused: refusedLogins };
 
+  // P37's daily reviews of recent clinician approvals (ADR-066), as the
+  // operator runs them: MIGRATION_RUNBOOK.md §6's read-only SQL, as the
+  // migration administrator. The in-person checks force row-level security,
+  // so a review that set row_security off would fail here; the administrator
+  // reads them as the system actor. No application is approved on this
+  // database, so each review answers no rows.
+  const runbook = await readFile(join(repository, 'docs/MIGRATION_RUNBOOK.md'), 'utf8');
+  const runbookCheck = async (name, lead) => {
+    const start = runbook.search(new RegExp(lead.split(' ')
+      .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+')));
+    assert.notEqual(start, -1, `MIGRATION_RUNBOOK.md has no "${lead}"`);
+    const block = /\n```sql\n([\s\S]*?)\n```/.exec(runbook.slice(start));
+    assert(block, `MIGRATION_RUNBOOK.md has no SQL block after "${lead}"`);
+    const file = join(temporary, `${name}-review.sql`);
+    await writeFile(file, `${block[1]}\n`, { mode: 0o600 });
+    return run(`runbook ${name} review as the migration administrator`, join(pgBindir, 'psql'),
+      ['-X', '-q', '-At', '-F', '|', '-v', 'ON_ERROR_STOP=1', '-h', temporary, '-U', admin, '-d', database, '-f', file])
+      .stdout.trim().split('\n').filter((line) => line && line !== 'system:auth');
+  };
+  const breakGlassReview = await runbookCheck('break-glass', 'review daily (P37) the break-glass activations');
+  const inPersonReview = await runbookCheck('in-person', 'review daily (P37) the in-person checks');
+  assert.deepEqual([breakGlassReview, inPersonReview], [[], []],
+    `P37 reviews: ${JSON.stringify({ breakGlassReview, inPersonReview })}`);
+  evidence.steps.runbook_recent_approval_reviews = { run_as: admin, break_glass_rows: 0, in_person_check_rows: 0 };
+
   // Break-glass's migration (0097, D9, ADR-058 addendum) refuses to run while
   // break_glass_enabled is on: 0091 turned the control off only where 0039's
   // seed was untouched, and granting the permission with the control on would
@@ -457,6 +500,115 @@ try {
   assert.match(claim.output, /Authorized OCR workload context is required/);
   assert.doesNotMatch(claim.output, /permission denied to set parameter/);
   evidence.steps.ocr_claim = { refused_by: 'body authorization check', parameter_privilege_needed: false };
+
+  // The upgrade path of clinician self sign-up (ADR-066, P1 of its design): on
+  // RDS platform.control_enabled already belongs to hid_platform_control_reader
+  // when the migration runs, and the administrator holds only the creator's
+  // ADMIN OPTION in that role. The main database above was migrated whole
+  // before its first bootstrap, when the administrator still owned the
+  // function, so it never exercised that path.
+  const signupMigration = files.find((name) => /^\d{4}_clinician_self_signup\.sql$/.test(name));
+  assert(signupMigration, 'the clinician self sign-up migration is missing');
+  const previousHead = files[files.indexOf(signupMigration) - 1];
+  const upgrade = 'hid_non_superuser_upgrade';
+  run('create the upgrade database', join(pgBindir, 'psql'), ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-h', temporary,
+    '-U', superuser, '-d', 'postgres', '-c', `create database ${upgrade} owner ${admin}`]);
+  psql('grant SET ON PARAMETER for the run through the previous head', superuser,
+    `grant set on parameter plpgsql.variable_conflict to ${admin}`);
+  migrate(`migrate the upgrade database through ${previousHead}`, 0, upgrade, ['--through', previousHead]);
+  psql('revoke SET ON PARAMETER before the upgrade', superuser,
+    `revoke set on parameter plpgsql.variable_conflict from ${admin}`);
+  assert.equal(psql('upgrade database before the upgrade', admin,
+    'select count(*) || \':\' || max(version) from migration.schema_migrations', 0, upgrade).stdout.trim(),
+  `${files.indexOf(signupMigration)}:${previousHead}`);
+  // A chain migrated before its first role bootstrap: the migration
+  // administrator still owns platform.control_enabled when this migration
+  // runs, and nothing requires that administrator's name to be lower case. The
+  // migration must take the owner-is-current-user path with a name that needs
+  // quoting (a regrole cast would quote it, so the owner would not compare
+  // equal and the membership probe would name a role that does not exist). It
+  // runs here as such an administrator, which owns the function and holds the
+  // administrator's privileges, in a transaction that is rolled back.
+  const quotedAdministrator = 'HidAdmin';
+  const signupSql = await readFile(join(service, 'database/migrations', signupMigration), 'utf8');
+  const quotedRun = await (async () => {
+    const client = new Client({ host: temporary, user: superuser, database: upgrade });
+    await client.connect();
+    try {
+      await client.query('begin');
+      await client.query(`create role "${quotedAdministrator}" nologin nosuperuser nobypassrls`);
+      await client.query(`grant ${admin} to "${quotedAdministrator}" with inherit true`);
+      await client.query(`alter function platform.control_enabled(text) owner to "${quotedAdministrator}"`);
+      await client.query(`set local role "${quotedAdministrator}"`);
+      await client.query(signupSql);
+      const owner = (await client.query(`select pg_get_userbyid(proowner) as owner from pg_proc
+        where oid = 'platform.control_enabled(text)'::regprocedure`)).rows[0].owner;
+      const memberships = Number((await client.query(`select count(*) as n from pg_auth_members
+        where member = (select oid from pg_roles where rolname = $1) and roleid <> (select oid from pg_roles
+          where rolname = $2)`, [quotedAdministrator, admin])).rows[0].n);
+      return { applied: true, owner, memberships };
+    } catch (error) {
+      return { applied: false, code: error.code, message: error.message };
+    } finally {
+      await client.query('rollback').catch(() => undefined);
+      await client.end().catch(() => undefined);
+    }
+  })();
+  assert.deepEqual(quotedRun, { applied: true, owner: quotedAdministrator, memberships: 0 },
+    `${signupMigration} as an administrator whose name needs quoting: ${JSON.stringify(quotedRun)}`);
+  assert.equal(psql('the quoted administrator was rolled back', superuser,
+    `select count(*) from pg_roles where rolname = '${quotedAdministrator}'`, 0, upgrade).stdout.trim(), '0');
+  evidence.steps.clinician_signup_quoted_owner = { database: upgrade, migrated_through: previousHead,
+    run_as: quotedAdministrator, owner_before: quotedAdministrator, applied: 'rolled back',
+    owner_after: quotedRun.owner, temporary_memberships_left: quotedRun.memberships };
+  // The previous release's bootstrap left platform.control_enabled to its
+  // technical owner. This release's bootstrap cannot run before this
+  // migration (it grants the new commands), so the previous one's P8-CONTROL
+  // statements, which this release does not change, run here as it ran them:
+  // in one transaction, under a temporary membership revoked at its end.
+  const grantsSql = await readFile(join(service, 'database/runtime-grants.sql'), 'utf8');
+  const controlStart = grantsSql.indexOf('-- Launch (P8-CONTROL)');
+  const controlEndMarker = 'revoke create on schema platform from hid_platform_control_reader;';
+  const controlEnd = grantsSql.indexOf(controlEndMarker, controlStart);
+  assert(controlStart > 0 && controlEnd > controlStart, 'runtime-grants.sql has no P8-CONTROL block');
+  const previousBootstrap = join(temporary, 'previous-control-bootstrap.sql');
+  await writeFile(previousBootstrap, ["set createrole_self_grant = '';",
+    'grant hid_platform_control_reader to current_user with inherit true, set true;',
+    grantsSql.slice(controlStart, controlEnd + controlEndMarker.length),
+    'revoke hid_platform_control_reader from current_user;', ''].join('\n'), { mode: 0o600 });
+  run('the previous bootstrap of platform.control_enabled', join(pgBindir, 'psql'), ['-X', '-q', '-1', '-v',
+    'ON_ERROR_STOP=1', '-h', temporary, '-U', admin, '-d', upgrade, '-f', previousBootstrap]);
+  const ownerBefore = psql('control owner before the upgrade', superuser,
+    `select proowner::regrole from pg_proc where oid = 'platform.control_enabled(text)'::regprocedure`, 0, upgrade).stdout.trim();
+  assert.equal(ownerBefore, 'hid_platform_control_reader');
+  assert.equal(psql('the administrator lacks the owner\'s privileges', superuser,
+    `select pg_has_role('${admin}', 'hid_platform_control_reader', 'USAGE') || ',' ||
+       pg_has_role('${admin}', 'hid_platform_control_reader', 'MEMBER WITH ADMIN OPTION')`, 0, upgrade).stdout.trim(),
+  'false,true');
+  const upgraded = migrate(`apply ${signupMigration} as the administrator`, 0, upgrade);
+  assert.match(upgraded.stdout, new RegExp(`Applied ${signupMigration.replace('.', '\\.')}`));
+  assert.equal(bootstrap('role bootstrap after the upgrade', [], upgrade), 'Runtime database roles provisioned and verified');
+  assert.equal(bootstrap('db:verify-roles after the upgrade', ['--verify-only'], upgrade),
+    'Runtime database role verification passed');
+  const ownerAfter = psql('control owner after the upgrade', superuser,
+    `select proowner::regrole from pg_proc where oid = 'platform.control_enabled(text)'::regprocedure`, 0, upgrade).stdout.trim();
+  assert.equal(ownerAfter, 'hid_platform_control_reader');
+  assert.equal(psql('no membership left after the upgrade', superuser,
+    `select count(*) from pg_auth_members m join pg_roles r on r.oid = m.roleid
+      where r.rolname like 'hid\\_%' and m.member = '${admin}'::regrole
+        and (m.inherit_option or m.set_option)`).stdout.trim(), '0');
+  const upgradeReads = {};
+  for (const credential of ['identity-api', 'ehr-api', 'outreach-api']) {
+    upgradeReads[credential] = psql(`clinician sign-up control as ${credential} after the upgrade`, logins[credential][0],
+      `select platform.control_enabled('clinician_signup_enabled') || ',' || platform.control_enabled('provider_portal_enabled')`,
+      0, upgrade).stdout.trim();
+    assert.equal(upgradeReads[credential], 'false,true');
+  }
+  evidence.steps.clinician_signup_upgrade_path = { database: upgrade, migrated_through: previousHead,
+    applied: signupMigration, run_as: admin, set_on_parameter: 'not held for the upgrade',
+    before_upgrade: 'the previous bootstrap\'s P8-CONTROL statements (owner transfer, reader policy and column grant)',
+    control_owner: { before: ownerBefore, after: ownerAfter },
+    administrator_inherit_or_set_memberships_after: 0, control_read_as: upgradeReads };
 
   for (const name of ['platform-control-owner.integration.sql', 'function-parameter-settings.integration.sql']) {
     suite(name, superuser);
