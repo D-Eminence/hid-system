@@ -253,7 +253,8 @@ try {
   assert.equal(unverified, '55000:IMPORTED_HISTORY_PARENT_NOT_VERIFIED');
   assert.deepEqual(await importedSnapshot(), afterApply);
 
-  // 6. Afterwards: forced row-level security, no membership left, no runtime import.
+  // 6. Afterwards: forced row-level security, no membership left, no runtime import
+  // (a superuser, such as the TUF rehearsal's own hid_rehearsal_admin, is no runtime role).
   const state = (await client.query(`select
       (select bool_and(relforcerowsecurity) from pg_class where oid in ('ehr.imported_medical_records'::regclass,
         'ehr.imported_medical_record_versions'::regclass, 'ehr.imported_medical_record_files'::regclass)) as forced,
@@ -261,6 +262,7 @@ try {
         'hid_imported_history_importer'::regrole)
         and member = (select oid from pg_roles where rolname = current_user) and (inherit_option or set_option)) as memberships,
       (select count(*)::int from pg_roles runtime where runtime.rolname like 'hid\\_%' and runtime.rolname <> 'hid_migration_admin'
+        and not runtime.rolsuper
         and runtime.oid <> (select proowner from pg_proc
           where oid = 'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb)'::regprocedure)
         and has_function_privilege(runtime.oid, 'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb)', 'EXECUTE'))
