@@ -292,7 +292,7 @@ test('an existing runtime LOGIN that is a member of another role is refused befo
   }
 });
 
-// The role bootstrap (runtime-grants.sql) creates 25 NOLOGIN group roles and
+// The role bootstrap (runtime-grants.sql) creates 26 NOLOGIN group roles and
 // skips any that already exists, then requires ADMIN OPTION on each, which in
 // PostgreSQL 16 no role holds on itself. A migration administrator named after
 // one of them (hid_migration_admin is one) is created, migrates every

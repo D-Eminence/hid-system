@@ -257,7 +257,7 @@ owns every schema and object the migrations create. In AWS the one-shot
 provisioning task creates it (`--administrator`, which also records the I3
 probe) and makes the master's other statements below
 (`AWS_DEPLOYMENT_RUNBOOK.md` §4, Running the provisioning task). Its name must
-not be one of the 25 group roles that `runtime-grants.sql` creates, such as
+not be one of the 26 group roles that `runtime-grants.sql` creates, such as
 `hid_migration_admin`: the role bootstrap skips a role that exists and then
 needs `ADMIN OPTION` on it, which no role holds on itself, so §6.2 would stop
 after every migration had been applied as that LOGIN. The provisioning task

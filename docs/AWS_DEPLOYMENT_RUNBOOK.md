@@ -669,7 +669,7 @@ Before step 1 write the secrets. The migration secret's `url` and each runtime
 secret's URL name a lowercase LOGIN (letters, digits and `_`) with a password
 of 16 to 1024 printable ASCII characters without spaces, all on the same host,
 port and database. No LOGIN, the migration administrator included, is named
-after one of the 25 HID group roles that `runtime-grants.sql` creates (such as
+after one of the 26 HID group roles that `runtime-grants.sql` creates (such as
 `hid_migration_admin`; use, for example, `hid_deploy_admin`): the role
 bootstrap of step 5 cannot run as such an administrator. Each runtime LOGIN is
 distinct and is not the master or the administrator. No URL sets `user`, `password`,
