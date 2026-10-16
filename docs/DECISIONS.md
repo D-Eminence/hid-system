@@ -5858,9 +5858,10 @@ Context:
   Textract OCR. The owner did not approve any of them (decision of
   2026-10-16), and none is built.
 - On 2026-10-16 the owner also approved (decision 3) that patients and staff
-  see imported legacy records. Imported history is a separate change and is
-  not on this change's base, so it is not chat evidence here (Proposed
-  defaults).
+  see imported legacy records. Imported legacy medical history (0099,
+  ADR-067) is on this change's base: `PatientRecordRelease` reads it only
+  through `readImportedHistory`, on its own patient route, behind its own
+  switches and P38's sign-off. It is not chat evidence (Proposed defaults).
 - On main the patient sees their records only through `PatientRecordRelease`
   (ADR-064), inside the patient-self transaction bound to their own live
   session (0091, PSELF-RLS). Main's security model (runtime roles, grants,
@@ -5873,8 +5874,11 @@ Decision:
   records with `PatientRecordRelease.read` in that patient-self transaction:
   encounters and completed encounters' notes always, and each other category
   only while its release flag is on (ADR-064). Lab requests, other
-  patients' and staff-only data are never read; imported legacy records are
-  not read in this change (Proposed defaults). There is no
+  patients' and staff-only data are never read, and neither is the imported
+  legacy history (0099, ADR-067): `PatientRecordRelease.read` has no
+  imported section, so chat never reads, extracts or sends it, even while
+  `EHR_PATIENT_RELEASE_IMPORTED_HISTORY` is on and the patient-self binding
+  names the category (Proposed defaults). There is no
   embedding, vector store, chunking, OCR or semantic retrieval: a
   deterministic selection takes up to 40 released records, those sharing
   terms with the question first and then the newest, within a character
@@ -6119,10 +6123,16 @@ under release checklist P36 (4) to (6)):
   is an open owner and DPO question (P36 (4)); the patient's own access to
   the note does not answer it, since the processor is a third party.
 - Facilities are sent as ordinals only.
-- Imported legacy records (owner decision 3) are not chat evidence in this
-  change: imported history is a separate change, not on this change's base.
-  Adding them is a later change behind its own flag, reading them only
-  through the imported-history read the patient already sees.
+- The imported legacy medical history (owner decision 3; 0099, ADR-067) is
+  never chat evidence and never reaches the processor, with every imported
+  history switch on or off: chat reads only `PatientRecordRelease.read`,
+  never `readImportedHistory`, its extract has no imported source kind, and
+  no chat statement names an imported table or the category
+  (`patient-record-chat.service.spec.ts` and `evidence-extract.spec.ts`).
+  Sending it would be a later change behind its own flag, with the owner's
+  and the DPO's sign-off for legacy data reaching the processor (P38 covers
+  its display only), reading it only through the imported-history read the
+  patient already sees.
 - Staff chat, its audience and its permission are a later change.
 
 Deviation from the design:

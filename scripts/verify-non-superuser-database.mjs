@@ -698,16 +698,41 @@ try {
   assert.deepEqual(p35, [`integration.notification_recipient_state(uuid)|${admin}|t|hid_event_delivery_commands`,
     'integration.notification_recipient_for_claim(uuid,uuid,uuid)|hid_event_delivery_commands|t|hid_notification_worker'],
   `P35 check: ${p35.join('; ')}`);
-  // P36 (patient record chat): the kill switch is off and the two limit
-  // commands and the legal hold check are security definer with a pinned
-  // search path, as the operator checks before any record chat flag is set.
-  const p36 = await checklistCheck('P36 check (read-only)');
+  // P36 (the patient record release, ADR-065): exactly the policies that call
+  // ehr.patient_self_context, record chat's six on its own history among
+  // them, and the released Lab results view with its exact ACL.
+  const p36Release = await checklistCheck('P36 check (read-only), before setting a patient release flag');
+  assert.deepEqual(p36Release, [
+    'ehr.clinical_note_revisions|note_revisions_patient_self_read|f',
+    'ehr.clinical_notes|clinical_notes_patient_self_read|f',
+    'ehr.diagnoses|diagnoses_patient_release_read|t',
+    'ehr.document_scan_events|document_scan_events_patient_release_read|t',
+    'ehr.documents|documents_patient_release_read|t',
+    'ehr.encounters|encounters_patient_self_read|f',
+    'ehr.imported_medical_record_files|imported_history_patient_self_read|t',
+    'ehr.imported_medical_record_versions|imported_history_patient_self_read|t',
+    'ehr.imported_medical_records|imported_history_patient_self_read|t',
+    'ehr.patient_chat_conversations|patient_chat_conversations_self_delete|f',
+    'ehr.patient_chat_conversations|patient_chat_conversations_self_insert|',
+    'ehr.patient_chat_conversations|patient_chat_conversations_self_read|f',
+    'ehr.patient_chat_messages|patient_chat_messages_self_delete|f',
+    'ehr.patient_chat_messages|patient_chat_messages_self_insert|',
+    'ehr.patient_chat_messages|patient_chat_messages_self_read|f',
+    'ehr.prescriptions|prescriptions_patient_release_read|t',
+    'ehr.vitals|vitals_patient_release_read|t',
+    'patient_released_lab_results|hid_lab_release_reader|{hid_ehr_runtime=r/hid_lab_release_reader,'
+      + 'hid_schema_test_runtime=r/hid_lab_release_reader}|{security_barrier=true}|t'],
+  `P36 release check: ${p36Release.join('; ')}`);
+  // Patient record chat: the kill switch is off and the two limit commands
+  // and the legal hold check are security definer with a pinned search path,
+  // as the operator checks before any record chat flag is set.
+  const p36 = await checklistCheck('P36 check (read-only), after the patient record chat migration');
   assert.deepEqual(p36, ['record_chat_enabled|f',
     'record_chat_history_on_hold|t|{"search_path=pg_catalog, pg_temp"}',
     'reserve_record_chat|t|{"search_path=pg_catalog, pg_temp"}',
     'settle_record_chat|t|{"search_path=pg_catalog, pg_temp"}'], `P36 check: ${p36.join('; ')}`);
   evidence.steps.release_checklist_checks = { run_as: admin, p10: p10.map((line) => line.split('|').slice(0, 4).join('|')),
-    p11, p35, p36 };
+    p11, p35, p36_release: p36Release.length, p36 };
 
   // 0095 (ADR-064): the worker login claims an Identity event and learns the
   // patient's verified login email through the claim, as the real login of
