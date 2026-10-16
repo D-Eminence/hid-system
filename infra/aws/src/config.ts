@@ -99,6 +99,15 @@ export interface HidEnvironmentConfig {
   // staging: Lab results while Lab is off at launch (D17), the others until
   // the clinical owner signs them off (P35, ADR-064).
   readonly patientRecordRelease: PatientRecordRelease;
+  // ehr-api's patient record chat (owner decision 1 of 2026-10-16):
+  // a patient's question about their own released records, answered through
+  // the Claude API. Synth input HID_RECORD_CHAT_PATIENT_ENABLED, default
+  // false. Turned on, it needs the model id (HID_RECORD_CHAT_MODEL_ID, no
+  // default), the inference geography, the notice version, the daily token
+  // budget and the recorded external-processing approval (every deployed
+  // ehr-api runs NODE_ENV=production), NAT egress, and the RecordChatSecretArn
+  // parameter; turned off, ehr-api receives the false flag and nothing else.
+  readonly recordChat: RecordChatSettings;
   // The exact ARN of the operator-created, KMS-encrypted SNS topic
   // hid-<env>-operational-alerts that every alarm notifies (D4, ADR-053).
   // Synth input HID_OPERATIONAL_ALARM_TOPIC_ARN; the regional stack requires
@@ -115,8 +124,24 @@ export interface PatientRecordRelease {
   readonly documents: boolean;
 }
 
+/** Patient record chat's synth settings; with patientEnabled false nothing else is set. */
+export interface RecordChatSettings {
+  readonly patientEnabled: boolean;
+  readonly modelId?: string;
+  readonly inferenceGeo?: 'us' | 'global';
+  readonly noticeVersion?: string;
+  readonly dailyTokenBudget?: number;
+  readonly processingApproval?: string;
+}
+
 /** Synth inputs beyond the environment, staging mode, QoreID and route switches. */
 export interface SynthOptions {
+  readonly recordChatPatientEnabled?: string;
+  readonly recordChatModelId?: string;
+  readonly recordChatInferenceGeo?: string;
+  readonly recordChatNoticeVersion?: string;
+  readonly recordChatDailyTokenBudget?: string;
+  readonly recordChatProcessingApproval?: string;
   readonly patientReleaseVitals?: string;
   readonly patientReleaseDiagnoses?: string;
   readonly patientReleasePrescriptions?: string;
@@ -367,6 +392,79 @@ export function assertPatientRecordRelease(configuration: {
   }
 }
 
+/** The model id's shape only, as ehr-api checks it; the Models API proves it exists at the first question. */
+const RECORD_CHAT_MODEL_ID = /^[a-z0-9][a-z0-9._:@-]{0,99}$/;
+const RECORD_CHAT_NOTICE_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
+/** The accepted record chat ADR and its date, as ehr-api checks it: ADR-NNN@YYYY-MM-DD, a real date not in the future. */
+const RECORD_CHAT_APPROVAL = /^ADR-(\d{3})@(\d{4})-(\d{2})-(\d{2})$/;
+
+function validRecordChatApproval(value: string | undefined): boolean {
+  const match = value ? RECORD_CHAT_APPROVAL.exec(value) : null;
+  if (!match) return false;
+  const [, , year, month, day] = match.map(Number);
+  const date = new Date(Date.UTC(year!, month! - 1, day!));
+  return date.getUTCFullYear() === year && date.getUTCMonth() === month! - 1 && date.getUTCDate() === day
+    && date.getTime() <= Date.now();
+}
+
+/**
+ * Patient record chat (owner decision 1 of 2026-10-16). With the flag on every setting ehr-api
+ * needs is required, and so is the recorded external-processing approval:
+ * every deployed ehr-api runs NODE_ENV=production, where ehr-api refuses to
+ * start without it. The sleep profile has no NAT gateway, so ehr-api could
+ * not reach the processor. The regional stack repeats this for a
+ * configuration not built by environmentConfig.
+ */
+export function assertRecordChat(configuration: {
+  readonly name: EnvironmentName; readonly natGateways: number; readonly recordChat: RecordChatSettings;
+}): void {
+  const chat = configuration.recordChat;
+  if (!chat.patientEnabled) return;
+  if (!chat.modelId || !RECORD_CHAT_MODEL_ID.test(chat.modelId)) {
+    throw new Error('HID_RECORD_CHAT_PATIENT_ENABLED=true needs HID_RECORD_CHAT_MODEL_ID, the model id (there is no default)');
+  }
+  if (chat.inferenceGeo !== 'us' && chat.inferenceGeo !== 'global') {
+    throw new Error('HID_RECORD_CHAT_PATIENT_ENABLED=true needs HID_RECORD_CHAT_INFERENCE_GEO, us or global');
+  }
+  if (!chat.noticeVersion || !RECORD_CHAT_NOTICE_VERSION.test(chat.noticeVersion)) {
+    throw new Error('HID_RECORD_CHAT_PATIENT_ENABLED=true needs HID_RECORD_CHAT_NOTICE_VERSION (1-40 characters)');
+  }
+  if (!Number.isInteger(chat.dailyTokenBudget) || chat.dailyTokenBudget! < 1 || chat.dailyTokenBudget! > 20_000_000) {
+    throw new Error('HID_RECORD_CHAT_PATIENT_ENABLED=true needs HID_RECORD_CHAT_DAILY_TOKEN_BUDGET, 1 to 20000000 tokens');
+  }
+  if (!validRecordChatApproval(chat.processingApproval)) {
+    throw new Error(`HID_RECORD_CHAT_PATIENT_ENABLED=true needs HID_RECORD_CHAT_PROCESSING_APPROVAL in ${configuration.name}: `
+      + 'the accepted record chat ADR and its date (ADR-NNN@YYYY-MM-DD, not in the future)');
+  }
+  if (configuration.natGateways < 1) {
+    throw new Error('HID_RECORD_CHAT_PATIENT_ENABLED=true needs NAT egress to reach the processor; '
+      + 'this profile has no NAT gateway');
+  }
+}
+
+function recordChatSettings(options: SynthOptions): RecordChatSettings {
+  const patientEnabled = booleanInput('HID_RECORD_CHAT_PATIENT_ENABLED', options.recordChatPatientEnabled, 'false');
+  // Off is always allowed: the other settings are then neither checked nor passed on.
+  if (!patientEnabled) return { patientEnabled };
+  const budget = options.recordChatDailyTokenBudget;
+  if (budget !== undefined && !/^[1-9]\d{0,7}$/.test(budget)) {
+    throw new Error('HID_RECORD_CHAT_DAILY_TOKEN_BUDGET must be a whole number of tokens, 1 to 20000000');
+  }
+  const geo = options.recordChatInferenceGeo;
+  if (geo !== undefined && geo !== 'us' && geo !== 'global') {
+    throw new Error('HID_RECORD_CHAT_INFERENCE_GEO must be us or global');
+  }
+  return {
+    patientEnabled,
+    ...(options.recordChatModelId !== undefined ? { modelId: options.recordChatModelId } : {}),
+    ...(geo !== undefined ? { inferenceGeo: geo } : {}),
+    ...(options.recordChatNoticeVersion !== undefined ? { noticeVersion: options.recordChatNoticeVersion } : {}),
+    ...(budget !== undefined ? { dailyTokenBudget: Number(budget) } : {}),
+    ...(options.recordChatProcessingApproval !== undefined
+      ? { processingApproval: options.recordChatProcessingApproval } : {}),
+  };
+}
+
 function booleanInput(variable: string, value: string | undefined, fallback: 'true' | 'false'): boolean {
   const input = value ?? fallback;
   if (!['true', 'false'].includes(input)) throw new Error(`${variable} must be true or false when supplied`);
@@ -438,6 +536,8 @@ export function environmentConfig(
     documents: booleanInput('HID_EHR_PATIENT_RELEASE_DOCUMENTS', options.patientReleaseDocuments, 'false'),
   };
   assertPatientRecordRelease({ name, patientRecordRelease });
+  const recordChat = recordChatSettings(options);
+  assertRecordChat({ name, natGateways: profiles[profile].natGateways, recordChat });
   const topic = operationalAlarmTopic(name, options.operationalAlarmTopicArn);
   return {
     ...environmentIdentity[name], ...profiles[profile],
@@ -450,6 +550,7 @@ export function environmentConfig(
     qoreIdPatientSelfNinBindingEnabled,
     notificationWorkerEnabled,
     patientRecordRelease,
+    recordChat,
     ...(topic ? { operationalAlarmTopicArn: topic.arn } : {}),
   };
 }

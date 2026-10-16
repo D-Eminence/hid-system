@@ -435,6 +435,26 @@ if (environment !== 'staging') {
   }
 }
 
+// Patient record chat (owner decision 1 of 2026-10-16): off unless HID_RECORD_CHAT_PATIENT_ENABLED
+// is true. Off, ehr-api receives the false flag and nothing else of record
+// chat, and no task reads the record chat secret. No task receives an
+// ANTHROPIC_* variable: ehr-api refuses to start beside one.
+const recordChatEnabled = (process.env.HID_RECORD_CHAT_PATIENT_ENABLED ?? 'false') === 'true'
+assert.equal(ehrApis[0].Environment.find(entry => entry.Name === 'RECORD_CHAT_PATIENT_ENABLED')?.Value,
+  String(recordChatEnabled), 'RECORD_CHAT_PATIENT_ENABLED')
+assert.deepEqual((ehrApis[0].Secrets ?? []).map(entry => entry.Name).filter(name => name.startsWith('RECORD_CHAT_')).sort(),
+  recordChatEnabled ? ['RECORD_CHAT_ANTHROPIC_API_KEY', 'RECORD_CHAT_AUDIT_DIGEST_KEY_B64'] : [])
+assert.equal(Boolean(regional.Parameters.RecordChatSecretArn), recordChatEnabled, 'RecordChatSecretArn')
+if (!recordChatEnabled) {
+  assert.deepEqual(ehrApis[0].Environment.map(entry => entry.Name)
+    .filter(name => name.startsWith('RECORD_CHAT_') && name !== 'RECORD_CHAT_PATIENT_ENABLED'), [])
+}
+for (const container of resources('AWS::ECS::TaskDefinition').flatMap(task => task.Properties.ContainerDefinitions)) {
+  const names = [...(container.Environment ?? []), ...(container.Secrets ?? [])].map(entry => entry.Name)
+  assert.deepEqual(names.filter(name => name.startsWith('ANTHROPIC_')), [], container.Name)
+  if (container.Name !== 'ehr-api') assert.deepEqual(names.filter(name => name.startsWith('RECORD_CHAT_')), [], container.Name)
+}
+
 assert.equal(regional.Parameters.OriginDomainName, undefined)
 if (asleep) {
   assert.equal(regional.Parameters[contract.secret], undefined)

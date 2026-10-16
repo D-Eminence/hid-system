@@ -22,6 +22,12 @@ const configuration = environmentConfig(
     patientReleasePrescriptions: process.env.HID_EHR_PATIENT_RELEASE_PRESCRIPTIONS,
     patientReleaseLabResults: process.env.HID_EHR_PATIENT_RELEASE_LAB_RESULTS,
     patientReleaseDocuments: process.env.HID_EHR_PATIENT_RELEASE_DOCUMENTS,
+    recordChatPatientEnabled: process.env.HID_RECORD_CHAT_PATIENT_ENABLED,
+    recordChatModelId: process.env.HID_RECORD_CHAT_MODEL_ID,
+    recordChatInferenceGeo: process.env.HID_RECORD_CHAT_INFERENCE_GEO,
+    recordChatNoticeVersion: process.env.HID_RECORD_CHAT_NOTICE_VERSION,
+    recordChatDailyTokenBudget: process.env.HID_RECORD_CHAT_DAILY_TOKEN_BUDGET,
+    recordChatProcessingApproval: process.env.HID_RECORD_CHAT_PROCESSING_APPROVAL,
   },
 );
 const regionalEnvironment = externalAwsEnvironment(process.env.HID_AWS_ACCOUNT, process.env.HID_AWS_REGION);
