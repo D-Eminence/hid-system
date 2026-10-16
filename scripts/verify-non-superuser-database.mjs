@@ -26,7 +26,7 @@
 // - the notification worker's claim-bound recipient lookup (0095, ADR-064) as
 //   the worker login, which reads no patient or login table, and its refusal
 //   for the Identity and dispatcher logins;
-// - the release checklist's read-only P10 and P11 checks, taken from
+// - the release checklist's read-only P10, P11 and P35 checks, taken from
 //   docs/PHASE_4_STAGE_5_RELEASE_READINESS.md, as the administrator, as an
 //   operator runs them on RDS;
 // - the platform-control-owner and function-parameter-settings suites.
@@ -335,8 +335,13 @@ try {
   const p11 = await checklistCheck('P11 check (read-only)');
   assert.deepEqual(p11, ['break_glass_enabled|f', 'outreach_portal_enabled|f', 'uploads_enabled|f'],
     `P11 check: ${p11.join('; ')}`);
+  // P35 (ADR-064): the owners and the only executors of 0095's two functions.
+  const p35 = await checklistCheck('P35 check (read-only)');
+  assert.deepEqual(p35, [`integration.notification_recipient_state(uuid)|${admin}|t|hid_event_delivery_commands`,
+    'integration.notification_recipient_for_claim(uuid,uuid,uuid)|hid_event_delivery_commands|t|hid_notification_worker'],
+  `P35 check: ${p35.join('; ')}`);
   evidence.steps.release_checklist_checks = { run_as: admin, p10: p10.map((line) => line.split('|').slice(0, 4).join('|')),
-    p11 };
+    p11, p35 };
 
   // 0095 (ADR-064): the worker login claims an Identity event and learns the
   // patient's verified login email through the claim, as the real login of
