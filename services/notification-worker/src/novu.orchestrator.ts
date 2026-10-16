@@ -6,9 +6,10 @@ import type { HidEventEnvelope, OrchestrationResult, SubscriberOperationResult }
 export interface NotificationOrchestrator {
   trigger(event: HidEventEnvelope): Promise<OrchestrationResult>;
   readiness(): Promise<void>;
-  // NOVU_SUBSCRIBER_SYNC=email only (ADR-064).
-  syncSubscriberEmail(subscriberId: string, email: string, eventId: string): Promise<SubscriberOperationResult>;
-  clearSubscriberEmail(subscriberId: string, eventId: string): Promise<SubscriberOperationResult>;
+  // NOVU_SUBSCRIBER_SYNC=email only (ADR-064). claimToken is the inbox claim
+  // of this attempt, so each attempt's subscriber call has its own key.
+  syncSubscriberEmail(subscriberId: string, email: string, eventId: string, claimToken: string): Promise<SubscriberOperationResult>;
+  clearSubscriberEmail(subscriberId: string, eventId: string, claimToken: string): Promise<SubscriberOperationResult>;
   triggerWithEmailWithheld(event: HidEventEnvelope): Promise<OrchestrationResult>;
 }
 
@@ -60,23 +61,30 @@ export class NovuOrchestrator implements NotificationOrchestrator {
 
   /**
    * Creates or updates the Novu subscriber with exactly its id and the
-   * verified login email (POST /v2/subscribers upserts). The idempotency key
-   * is bound to the body through the email's digest, so a retry after an
-   * email change is a new request, never a 422; it holds no email.
+   * verified login email (POST /v2/subscribers upserts). Novu answers a seen
+   * idempotency key from its cache for 24 hours without processing it again,
+   * so the key is bound to this attempt (the claim token, unique per attempt)
+   * and to the body (the email's digest): a retry of the event is a new
+   * request. Setting an email is idempotent, so nothing is lost. The key holds
+   * neither the email nor the token.
    */
-  async syncSubscriberEmail(subscriberId: string, email: string, eventId: string): Promise<SubscriberOperationResult> {
+  async syncSubscriberEmail(subscriberId: string, email: string, eventId: string,
+    claimToken: string): Promise<SubscriberOperationResult> {
     return this.subscriberRequest('POST', '/v2/subscribers',
-      sha256(`hid-novu-subscriber-email-v1\u001f${eventId}\u001f${sha256(email)}`), { subscriberId, email }, false);
+      sha256(`hid-novu-subscriber-email-v1\u001f${eventId}\u001f${claimToken}\u001f${sha256(email)}`),
+      { subscriberId, email }, false);
   }
 
   /**
    * Sets the Novu subscriber's email to null (PATCH /v2/subscribers/{id}; the
    * email is nullable), so a trigger cannot email an address synced earlier.
-   * A subscriber Novu does not have (404) holds no email: confirmed.
+   * Keyed by the event and this attempt's claim token, so a retry clears again
+   * instead of receiving the first attempt's cached answer. A subscriber Novu
+   * does not have (404) holds no email: confirmed.
    */
-  async clearSubscriberEmail(subscriberId: string, eventId: string): Promise<SubscriberOperationResult> {
+  async clearSubscriberEmail(subscriberId: string, eventId: string, claimToken: string): Promise<SubscriberOperationResult> {
     return this.subscriberRequest('PATCH', `/v2/subscribers/${encodeURIComponent(subscriberId)}`,
-      sha256(`hid-novu-subscriber-email-clear-v1\u001f${eventId}`), { email: null }, true);
+      sha256(`hid-novu-subscriber-email-clear-v1\u001f${eventId}\u001f${claimToken}`), { email: null }, true);
   }
 
   /**

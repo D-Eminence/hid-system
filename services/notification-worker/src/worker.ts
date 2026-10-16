@@ -12,7 +12,8 @@ import type { HidEventEnvelope, OrchestrationResult, RecipientDelivery, Subscrib
  */
 interface SubscriberDelivery {
   result: OrchestrationResult;
-  recipient: 'email' | 'withhold' | 'unbound' | 'lookup_failed';
+  // withdrawn: eligible at the first lookup, not confirmed by the second.
+  recipient: 'email' | 'withhold' | 'unbound' | 'lookup_failed' | 'withdrawn';
   subscriber: 'synced' | 'sync_failed' | 'cleared' | 'clear_failed';
   subscriberCode?: string;
   trigger: 'standard' | 'email_withheld';
@@ -94,41 +95,74 @@ export class NotificationWorker {
   /**
    * The subscriber step and the trigger, or null when the claim was lost.
    * The in-app trigger never depends on a subscriber call:
-   * - a verified login email is synced, and main's trigger follows whatever
-   *   the sync answers (a failed sync only means this event may not email);
+   * - a verified login email is synced, and the recipient is then asked again
+   *   under the same claim. Only the same address keeps the sync: main's
+   *   trigger follows whatever the sync answered (a failed sync only means
+   *   this event may not email). Any other second answer (withheld, another
+   *   address or a failed lookup) means an event handled meanwhile may have
+   *   cleared the email before this upsert landed at Novu, so the email is
+   *   cleared again, as for a withheld recipient;
    * - every other recipient, a lookup that fails included, has its Novu email
    *   cleared first; main's trigger follows a confirmed clear, and otherwise
    *   the trigger that clears the email in the same request, so the opt-out
    *   holds after an earlier sync and safety notices still go in-app.
+   * Both subscriber calls are keyed by this attempt's claim token.
    */
   private async deliverWithSubscriberEmail(event: HidEventEnvelope, claimToken: string,
     attemptCount: number): Promise<SubscriberDelivery | null> {
     const patientId = event.context.patientId!;
-    let recipient: RecipientDelivery | undefined;
-    try {
-      recipient = await this.repository.resolveRecipient(event, claimToken);
-    } catch (error) {
-      if (error instanceof ClaimLostError) {
-        this.write({ event: 'notification.worker.outcome', eventType: event.type, correlationId: correlation(event),
-          recipient: 'claim_lost', subscriber: 'not_run', trigger: 'not_sent', inbox: 'claim_lost' });
-        return null;
-      }
+    const first = await this.lookup(event, claimToken);
+    if (first === 'claim_lost') {
+      this.reportClaimLost(event, 'not_run');
+      return null;
     }
-    if (recipient?.delivery === 'email') {
-      const synced = await this.orchestrator.syncSubscriberEmail(patientId, recipient.email, event.id);
-      await this.record(event, 'email', synced, attemptCount);
+    if (first?.delivery !== 'email') {
+      return this.withhold(event, claimToken, attemptCount,
+        first === undefined ? 'lookup_failed' : first.bound ? 'withhold' : 'unbound');
+    }
+    const synced = await this.orchestrator.syncSubscriberEmail(patientId, first.email, event.id, claimToken);
+    await this.record(event, 'email', synced, attemptCount);
+    const second = await this.lookup(event, claimToken);
+    if (second === 'claim_lost') {
+      // Another worker holds the event now and decides for itself; the
+      // address this attempt may have set is cleared, failing safe.
+      const cleared = await this.orchestrator.clearSubscriberEmail(patientId, event.id, claimToken);
+      await this.record(event, 'clear', cleared, attemptCount);
+      this.reportClaimLost(event, cleared.outcome === 'confirmed' ? 'cleared' : 'clear_failed');
+      return null;
+    }
+    if (second?.delivery === 'email' && second.email === first.email) {
       return { result: await this.orchestrator.trigger(event), recipient: 'email',
         subscriber: synced.outcome === 'confirmed' ? 'synced' : 'sync_failed', ...this.code(synced), trigger: 'standard' };
     }
-    const cleared = await this.orchestrator.clearSubscriberEmail(patientId, event.id);
+    return this.withhold(event, claimToken, attemptCount, 'withdrawn');
+  }
+
+  /** Clear the Novu email, then main's trigger if confirmed, else the trigger that clears the email itself. */
+  private async withhold(event: HidEventEnvelope, claimToken: string, attemptCount: number,
+    recipient: SubscriberDelivery['recipient']): Promise<SubscriberDelivery> {
+    const cleared = await this.orchestrator.clearSubscriberEmail(event.context.patientId!, event.id, claimToken);
     await this.record(event, 'clear', cleared, attemptCount);
     const confirmed = cleared.outcome === 'confirmed';
     return {
       result: confirmed ? await this.orchestrator.trigger(event) : await this.orchestrator.triggerWithEmailWithheld(event),
-      recipient: recipient === undefined ? 'lookup_failed' : recipient.bound ? 'withhold' : 'unbound',
-      subscriber: confirmed ? 'cleared' : 'clear_failed', ...(confirmed ? {} : this.code(cleared)),
+      recipient, subscriber: confirmed ? 'cleared' : 'clear_failed', ...(confirmed ? {} : this.code(cleared)),
       trigger: confirmed ? 'standard' : 'email_withheld',
     };
+  }
+
+  /** The claim-bound recipient answer; undefined when the lookup failed, 'claim_lost' on 55000. */
+  private async lookup(event: HidEventEnvelope, claimToken: string): Promise<RecipientDelivery | undefined | 'claim_lost'> {
+    try {
+      return await this.repository.resolveRecipient(event, claimToken);
+    } catch (error) {
+      return error instanceof ClaimLostError ? 'claim_lost' : undefined;
+    }
+  }
+
+  private reportClaimLost(event: HidEventEnvelope, subscriber: 'not_run' | 'cleared' | 'clear_failed'): void {
+    this.write({ event: 'notification.worker.outcome', eventType: event.type, correlationId: correlation(event),
+      recipient: 'claim_lost', subscriber, trigger: 'not_sent', inbox: 'claim_lost' });
   }
 
   /** A disclosure row that cannot be written never holds back the in-app trigger. */
