@@ -392,7 +392,9 @@ const IMPORTED_HISTORY_INPUTS: ReadonlyArray<readonly [keyof ImportedHistory, st
 ];
 
 /**
- * Only staging may show imported legacy medical history (ADR-065). Production
+ * Only staging may show imported legacy medical history (ADR-065), and there
+ * the staff read needs the sharing route and the sharing route the patient's
+ * own read. Production
  * refuses each switch until the DPO and the owner sign off the legacy data's
  * provenance, scope and retention and Health-id renders it (release checklist
  * P36); the development stack runs its services in the production profile,
@@ -403,12 +405,25 @@ const IMPORTED_HISTORY_INPUTS: ReadonlyArray<readonly [keyof ImportedHistory, st
 export function assertImportedHistory(configuration: {
   readonly name: EnvironmentName; readonly importedHistory: ImportedHistory;
 }): void {
-  if (configuration.name === 'staging') return;
-  for (const [flag, variable] of IMPORTED_HISTORY_INPUTS) {
-    if (configuration.importedHistory[flag]) {
-      throw new Error(`${variable}=true is refused outside staging (${configuration.name}): the DPO and the owner `
-        + 'have not signed off the legacy data (P36, ADR-065)');
+  if (configuration.name !== 'staging') {
+    for (const [flag, variable] of IMPORTED_HISTORY_INPUTS) {
+      if (configuration.importedHistory[flag]) {
+        throw new Error(`${variable}=true is refused outside staging (${configuration.name}): the DPO and the owner `
+          + 'have not signed off the legacy data (P36, ADR-065)');
+      }
     }
+  }
+  // A patient shares only what they can see themselves, and staff read only
+  // while patients can choose and withdraw through the sharing route: the
+  // switches go on patient read first and off staff read first (ADR-065).
+  const { patientRead, staffRead, sharing } = configuration.importedHistory;
+  if (sharing && !patientRead) {
+    throw new Error('HID_IMPORTED_HISTORY_SHARING_ENABLED=true needs HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY=true: '
+      + 'a patient may share only the imported history they can see (ADR-065)');
+  }
+  if (staffRead && !sharing) {
+    throw new Error('HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED=true needs HID_IMPORTED_HISTORY_SHARING_ENABLED=true: '
+      + 'staff read imported history only while patients can choose and withdraw (ADR-065)');
   }
 }
 
