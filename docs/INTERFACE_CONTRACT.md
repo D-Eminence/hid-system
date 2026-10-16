@@ -770,8 +770,8 @@ It names the other five record categories as withheld from the patient, not as
 absent (§11, "Record summaries"). Since the patient record release (0095,
 owner decision 4 of 2026-10-16, D7) a deployment may also release vitals,
 diagnoses, prescriptions, Lab results and documents, one flag per category,
-each off by default; with every flag off the response is exactly the one
-above. `GET /api/v1/ehr/me/documents/:documentId/download` returns a 60 s
+each off by default and refused in the production profile until its P35
+sign-off; with every flag off the response is exactly the one above. `GET /api/v1/ehr/me/documents/:documentId/download` returns a 60 s
 attachment URL for one released document (§11, "Patient document
 download"). Only a patient session may use either route: EHR's
 guard answers any other session `403 PATIENT_SESSION_REQUIRED` before the
@@ -2289,10 +2289,17 @@ ehr-api flag is on, and every flag is off by default:
 `EHR_PATIENT_RELEASE_VITALS`, `EHR_PATIENT_RELEASE_DIAGNOSES`,
 `EHR_PATIENT_RELEASE_PRESCRIPTIONS`, `EHR_PATIENT_RELEASE_LAB_RESULTS` and
 `EHR_PATIENT_RELEASE_DOCUMENTS` (synth inputs `HID_EHR_PATIENT_RELEASE_*`).
-The production profile refuses Lab results while Lab is off at launch (D17).
+The production profile refuses every one of them: Lab results while Lab is
+off at launch (D17), the others until the clinical owner signs off each
+category and its wording (release checklist P35); staging may set them.
 Lab requests (orders, which carry the clinician's clinical information) are
 never released. Every released item belongs to a completed encounter, matched
-on patient and facility, and row-level security admits the same rows again:
+on patient and facility. The database follows the flags: its policies admit a
+category's rows to the patient's transaction only when EHR names that
+category as released in it, so with a flag off neither EHR nor the database
+releases the category. Row-level security restricts rows, not columns: within
+a released category the fields below are what EHR selects, and it is EHR that
+leaves out the clinician's notes, storage locations and staff identities.
 
 | Category | Released | Never released |
 |---|---|---|
@@ -2316,7 +2323,8 @@ error, refuted, invalidated or retracted with its encounter disappears from
 the summary without a marker.
 
 If the database refuses a released category's read (for example the role
-bootstrap did not run after migration 0095) the summary answers `503
+bootstrap did not run after migration 0095) or the read passes the
+database statement timeout, the summary answers `503
 PATIENT_RECORDS_UNAVAILABLE`, discloses nothing and records no success. The
 audit event `ehr.patient.self.records.read` records `encounterCount`,
 `noteCount`, the count of each further category read (`vitalCount`,

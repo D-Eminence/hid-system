@@ -278,17 +278,22 @@ The executable covers:
    activation and sign-in, an existing Health ID, a race with a phone proof,
    both budgets and a suspension, as `hid_identity_api_runtime`.
    With 0095 (the patient record release, ADR-064): the additional suites
-   include `patient-record-release.integration.sql` (the released rows of
-   each table and of the released Lab results view across every withheld
-   state, unbound and staff contexts, the Lab and Identity runtimes refused
-   the view, the exact policy inventory), run in both passes.
+   include `patient-record-release.integration.sql` (the database following
+   `app.patient_release` category by category, the released rows of each
+   table and of the released Lab results view across every withheld state,
+   unbound contexts, an expired authorization and a consented staff context,
+   the Lab and Identity runtimes refused the view, each policy's and the
+   view's own conditions, the section indexes, the exact policy inventory),
+   run in both passes.
    `patient_record_release_runtime` runs
    `verify-patient-record-release-runtime.mjs` after the delegated cookie
    read verifier: with every flag off the summary is unchanged; with the
    flags on, the released sets, the counts-only audit, the document download
-   and its refusals, a staff session refused, Identity refusing lab-api, and
-   the runtime's privileges, as `hid_ehr_api_runtime` against a real
-   Identity child.
+   and its refusals, a staff session refused, Identity refusing lab-api,
+   the runtime's privileges, and the database following the flags in the
+   EHR's own patient-self transaction (nothing new without the release
+   binding; only vitals with only that flag on), as `hid_ehr_api_runtime`
+   against a real Identity child.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
