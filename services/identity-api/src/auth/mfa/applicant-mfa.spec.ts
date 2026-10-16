@@ -13,7 +13,7 @@ import { MfaService, type MfaNoticeSink } from './mfa.service';
 import { totp } from './totp';
 
 /**
- * The authenticator of a clinician applicant (ADR-064). Identity drives a
+ * The authenticator of a clinician applicant (ADR-066). Identity drives a
  * 0088 staff challenge for the applicant's application capability: it opens
  * the challenge with a token it derives itself and never gives the browser,
  * runs the unchanged 0088 enrolment and verification on it, and issues no
@@ -115,7 +115,7 @@ const writes = (statements: Statement[], pattern: RegExp) => statements.filter((
 const sessionEvents = (statements: Statement[]) => statements.filter(({ sql }) => sql === 'session event')
   .map(({ values }) => values[0] as { eventType: string; details: Record<string, unknown> });
 
-describe('a clinician applicant\'s 0088 challenge (ADR-064)', () => {
+describe('a clinician applicant\'s 0088 challenge (ADR-066)', () => {
   it('opens a staff enrolment challenge with the given id and token, after the account lock, superseding the account\'s live staff challenges', async () => {
     const { service, statements, client, protector } = harness();
     const opened = await service.openApplicantChallenge(client, ACCOUNT, { id: NEW_CHALLENGE, token: TOKEN }, event);

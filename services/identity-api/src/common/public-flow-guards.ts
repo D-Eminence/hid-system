@@ -3,7 +3,7 @@ import type { HidRequest } from './request-context';
 
 /**
  * Checks shared by the accountless public flows (provider self-enrollment,
- * clinician self sign-up, ADR-064). The security guard does not run on their
+ * clinician self sign-up, ADR-066). The security guard does not run on their
  * @Public routes, so each route makes them itself.
  */
 

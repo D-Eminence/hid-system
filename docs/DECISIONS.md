@@ -3235,7 +3235,7 @@ step-up and two-person elevation); `INTERFACE_CONTRACT.md` §19 (Workforce
 provisioning) and the auth session contract (Staff facility binding);
 `DATABASE.md` (Governed workforce provisioning (0087)); release checklist §2,
 §5, §8 and §9; `PHASE_3_LAUNCH_DECISIONS.md` D14 and N5.
-Extended by ADR-064 (clinician self sign-up with two-admin approval;
+Extended by ADR-066 (clinician self sign-up with two-admin approval;
 reserved attestations; grants pinned to the step-1 attestation).
 # ADR-052: Health-id Is the Single Launch Frontend; Only Its Hosts Are Deployed
 
@@ -3664,7 +3664,7 @@ Consequences:
   an out-of-band code issued by the provisioning administrator), existing
   clinical accounts enrol before clinical roles are enabled and operators
   review enrolments that followed a recovery (release checklist P22).
-- Self-signed-up clinicians (ADR-064) enrol before review, and step 1 of
+- Self-signed-up clinicians (ADR-066) enrol before review, and step 1 of
   their review confirms the authenticator outside the mailbox: the applicant
   reads a live code to the reviewing Super Admin during the identity call.
 - Evidence is local and synthetic: unit specs, `staff-mfa.integration.sql`,
@@ -3735,7 +3735,7 @@ bypass):
   masking. It takes only a fixed sentence written for the person using the
   client, never a message built from an error or from request data; any
   new use needs its own decision.
-  ADR-064 adds `503 CLINICIAN_SIGNUP_CLOSED` ("Clinician sign-up is not open
+  ADR-066 adds `503 CLINICIAN_SIGNUP_CLOSED` ("Clinician sign-up is not open
   yet. If you already have a Health ID provider account, sign in.").
 
 Consequences:
@@ -5366,15 +5366,16 @@ Related: ADR-018; ADR-058 (PSELF-RLS); `PHASE_3_LAUNCH_DECISIONS.md` D7, D8
 and D17; `INTERFACE_CONTRACT.md`, "Record summaries" and "Patient document
 download"; `DATABASE.md`, "Patient record release (0096)".
 
-# ADR-064: Doctors and Nurses Apply by Themselves; They Set Up an Authenticator Before Review, and Two Platform Administrators Still Verify and Grant Every Clinical Role
+# ADR-066: Doctors and Nurses Apply by Themselves; They Set Up an Authenticator Before Review, and Two Platform Administrators Still Verify and Grant Every Clinical Role
 
 Status: Proposed; needs owner approval (owner decision 2 of 2026-10-14,
 "self sign-up + admin approval"; launch decision CLIN-SIGNUP; migration
-0096, numbered after main's 0093 and 0094 and break-glass's 0095; built as
-0094). Not merged or deployed. It extends ADR-049. It does not supersede
+0098, numbered after main's 0093 to 0096 and break-glass's 0097; built as
+0094, then merged as 0096 under ADR-064 until main took 0095, 0096, ADR-064
+and ADR-065). Not merged or deployed. It extends ADR-049. It does not supersede
 ADR-049 and does not change ADR-054, ADR-059 or NO-MEMBERSHIP-SIGN-IN. Three
 points are implemented with the design default and stay open for the owner
-(release checklist P35):
+(release checklist P37):
 the step-1 identity-assurance standard and the reviewer list; the service
 level stated to applicants (the default is a 30-day expiry with no promise);
 and the licence register check's source (the default is a manual check of
@@ -5400,7 +5401,7 @@ Context:
   `WORKFORCE_ROLE_CONFLICT`; anti-enumeration; ADR-057 (a new
   `PublicDetailProblem` needs a decision); ADR-058 (off starts off in the
   database).
-- With 0095, doctor, clinician and nurse hold `identity.break-glass.write`
+- With 0097, doctor, clinician and nurse hold `identity.break-glass.write`
   again: once `break_glass_enabled` is on, any approved clinician can make
   emergency reads at their facility.
 - With 0094 (ADR-063), doctor, clinician and nurse hold
@@ -5451,7 +5452,7 @@ Decision:
   alone never enrols a clinician's factor.
 - Intake starts closed. The platform control `clinician_signup_enabled` is
   seeded off; an administrator opens it with the audited
-  `POST /admin/controls` after release gate P35. Intake also closes while
+  `POST /admin/controls` after release gate P37. Intake also closes while
   `provider_portal_enabled` is off or `maintenance_mode` is on. While the
   control or the provider portal is off, the intake routes (the sign-up
   start and its verify, facility search, submit and apply-again) answer
@@ -5462,7 +5463,7 @@ Decision:
   availability and session end answers `503 PLATFORM_MAINTENANCE` (the
   generic maintenance answer, not the sentence). Availability answers
   `{ open: false }` in all three cases. The status page and the admin queue work
-  whatever the control's state (maintenance aside). 0096 replaces
+  whatever the control's state (maintenance aside). 0098 replaces
   `platform.control_enabled` while preserving its technical owner
   (`hid_platform_control_reader`) by taking that role's membership only for
   its own transaction, and fails closed when it cannot.
@@ -5559,8 +5560,8 @@ Alternatives not taken:
   in-person checks until it ends: the approval assurance here exceeds a 0087
   grant, and a 0087-provisioned clinician already holds both; a daily review
   of break-glass use and of in-person checks by recent approvals is required
-  instead (P35). Excluding application-approved grants from the in-person
-  check's authorization for a period stays open to the owner (P32, P35).
+  instead (P37). Excluding application-approved grants from the in-person
+  check's authorization for a period stays open to the owner (P32, P37).
 - An environment flag instead of a control: switching it off would need a
   redeploy.
 
@@ -5573,14 +5574,14 @@ Consequences:
   proof).
 - Identity confirmation rests on the reviewer's call and photo-ID check;
   that checklist and the employment channels need product and legal
-  approval before the control opens (P35). Uploads are off, so evidence stays
+  approval before the control opens (P37). Uploads are off, so evidence stays
   outside the platform and is named by reference.
 - Approved clinicians can use break-glass once it is on, and run in-person
   checks (ADR-063) at their facility once it is designated and
   `ASSISTED_REGISTRATION_ENABLED` is on. An account approved on a forged
   identity could then read another person's emergency summary or create
   another person's Health ID, within ADR-063's budgets (20 checks a day per
-  staff member, 100 per facility). P35 requires the break-glass decision and
+  staff member, 100 per facility). P37 requires the break-glass decision and
   a daily review of break-glass use and of in-person checks by accounts
   approved through an application in the last 90 days
   (`MIGRATION_RUNBOOK.md` §6). Its fraud runbook entry lists the in-person
@@ -5600,9 +5601,9 @@ Consequences:
   support (the conservative side of the staff-sign-in-only rule).
 - No notice sink is bound: applicants learn decisions from the status page
   and facilities are not notified.
-- Merged with main's 0093 and 0094 (D-Eminence/hid-system#84 and #85),
-  break-glass's 0095 (#83) and the launch alignment fixes (#80), the
-  migration is 0096 and holds to #80's A17, A21 and A23: every refusal's
+- Merged with main's 0093 to 0096 (D-Eminence/hid-system#84, #85, #90 and
+  #91), break-glass's 0097 (#83) and the launch alignment fixes (#80), the
+  migration is 0098 and holds to #80's A17, A21 and A23: every refusal's
   audit row records its status and code; a rate-limit `429` that means "try
   again later" carries `Retry-After` (86400 for the quotas, 900 for the
   authenticator budgets), while a capability's spent search budget, which
@@ -5621,5 +5622,5 @@ Related: ADR-049, ADR-054, ADR-057, ADR-058, ADR-059, ADR-063;
 `PHASE_3_LAUNCH_DECISIONS.md` (D14, NO-MEMBERSHIP-SIGN-IN, CLIN-SIGNUP);
 `INTERFACE_CONTRACT.md` (Turnstile verification; Clinician self sign-up;
 §19 Clinician applications); `DATABASE.md` (Clinician self sign-up
-applications (0096)); release checklist §1-§3, §5, §8, P11, P22, P32, P35,
-S4x.
+applications (0098)); release checklist §1-§3, §5, §8, P11, P22, P32, P37,
+S4z.

@@ -312,7 +312,7 @@ describe('Public patient enrollment QoreID lookup quota', () => {
   });
 });
 
-describe('Clinician self sign-up limits (ADR-064)', () => {
+describe('Clinician self sign-up limits (ADR-066)', () => {
   const original = { ...process.env };
   const operations = ['SIGNUP', 'STATUS', 'SEARCH', 'SUBMIT'] as const;
   const keys = [

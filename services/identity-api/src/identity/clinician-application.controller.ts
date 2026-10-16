@@ -16,7 +16,7 @@ import { ClinicianApplicationDetailsDto, ClinicianApplicationEmailCodeDto, Clini
   VerifyClinicianApplicationCodeDto } from './dto/clinician-application.dto';
 
 /**
- * Clinician self sign-up and its status page (ADR-064). Public: the security
+ * Clinician self sign-up and its status page (ADR-066). Public: the security
  * guard does not run here, so each route checks its Origin itself, and the
  * intake routes (P1-P4) refuse a signed-in browser. The browser holds only
  * the application capability cookie; no route sets or reads a session cookie

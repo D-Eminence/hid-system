@@ -59,7 +59,7 @@ export function eligibleStaffMembershipJoins(account: string, statuses: string):
  * The account has no eligible staff membership (or is inactive): no row of
  * the eligible membership joins. Answered as before (401) everywhere it was;
  * staff-session issuance answers it 403 NO_ACTIVE_FACILITY_MEMBERSHIP
- * (TokenService, ADR-064).
+ * (TokenService, ADR-066).
  */
 export class StaffMembershipInactiveError extends UnauthorizedException {
   constructor() {

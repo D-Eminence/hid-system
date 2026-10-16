@@ -293,7 +293,7 @@ own attempt and rate limits: the MFA steps (`/auth/mfa/*`,
 current steps, provider enrollment verify and activate, organization
 completion verify and profile, the clinician application steps after an
 email-code start (code verification, facility search, submit, the
-authenticator steps, current, withdraw, apply again and session end; ADR-064),
+authenticator steps, current, withdraw, apply again and session end; ADR-066),
 `GET /auth/google/nonce`, and refresh, session and logout.
 `GET /identity/patient-enrollments/availability` and
 `GET /identity/clinician-applications/availability` are public reads with no
@@ -391,7 +391,7 @@ platform challenge by no staff step. Refusals:
 | Code | When |
 |---|---|
 | `403 STAFF_MFA_FACTOR_UNPROVEN` | `POST /auth/login` with the right password, but the account's authenticator was enrolled at platform sign-in on the password alone (before 0088, or before the account held a staff membership), so it records no staff proof. No challenge or cookie is issued; a denied `login_failed` session event (reason `staff_mfa_factor_unproven`) is recorded. The remedy is a two-person MFA reset (0070), after which the account enrols at staff sign-in; the new factor then verifies platform sign-in too. The same answer at `/auth/mfa/verify` if such a factor is met there |
-| `403 NO_ACTIVE_FACILITY_MEMBERSHIP` | Also at `/auth/mfa/verify` and `/auth/mfa/enroll/activate` since ADR-064: issuing a staff session re-checks eligibility, so a membership that ended between the two steps gets this answer and no session. `POST /auth/login` with the right password of an active, enabled account that has a staff record or a facility membership but no membership eligible for staff sign-in: every one ended, suspended or held, the staff record not active or its verification not accepted, or the organization or facility not active (`eligibleStaffMembershipJoins`). Launch decision NO-MEMBERSHIP-SIGN-IN, owner default (a), ADR-059. No challenge or cookie and no session. A denied `login_failed` session event (reason `no_active_membership`) is recorded. It is not counted as a failed sign-in. Like any right password it ends the account's own failure window (SIGNIN-LOCKOUT); the window of the identifier typed is unchanged. The detail asks the user to contact their organization administrator. Checked before the factor, so it answers the same with or without an authenticator. An account with neither (a patient or a platform-only account) keeps the uniform `401` |
+| `403 NO_ACTIVE_FACILITY_MEMBERSHIP` | Also at `/auth/mfa/verify` and `/auth/mfa/enroll/activate` since ADR-066: issuing a staff session re-checks eligibility, so a membership that ended between the two steps gets this answer and no session. `POST /auth/login` with the right password of an active, enabled account that has a staff record or a facility membership but no membership eligible for staff sign-in: every one ended, suspended or held, the staff record not active or its verification not accepted, or the organization or facility not active (`eligibleStaffMembershipJoins`). Launch decision NO-MEMBERSHIP-SIGN-IN, owner default (a), ADR-059. No challenge or cookie and no session. A denied `login_failed` session event (reason `no_active_membership`) is recorded. It is not counted as a failed sign-in. Like any right password it ends the account's own failure window (SIGNIN-LOCKOUT); the window of the identifier typed is unchanged. The detail asks the user to contact their organization administrator. Checked before the factor, so it answers the same with or without an authenticator. An account with neither (a patient or a platform-only account) keeps the uniform `401` |
 | `401 MFA_INVALID_CODE` | A wrong, reused (the same 30-second step twice) or already used code; a wrong email code. Each counts against the challenge (five attempts), the account's MFA failure budget and the source address's staff budget |
 | `429 MFA_RATE_LIMITED` | A failure budget is spent, and while it is every code is refused, a correct one too, until its 15-minute window passes: the account's (the fifth failed code within 15 minutes, staff and platform together), or the source address's staff budget (the 100th failed staff code from one address within 15 minutes; it is the staff sign-in's own, apart from platform sign-in's per-address budget of 20, and sized for a facility whose staff share one address). Also more than five enrolment-code sends or enrolment starts in 15 minutes. Since this change (A21) it carries `Retry-After: 900`, the whole window, whichever budget refused (§6) |
 | `403 MFA_ENROLLMENT_PROOF_REQUIRED` | Enrolment start or activation without a verified proof (no email code, and the challenge was not opened by provider activation). No factor is created |
@@ -693,7 +693,7 @@ the status and code too (never `422 ASSISTED_VERIFICATION_NOT_MATCHED`'s
 on `/identity/assisted-verifications` comes from a route guard, which runs
 after `SecurityGuard` has passed and before the request audit, so the
 switched-off route is answered without an audit row. The clinician
-application routes of 0096 do the same: the public routes
+application routes of 0098 do the same: the public routes
 (`/identity/clinician-applications/*`, whose `SecurityGuard` does not run)
 write a request-audit failure row for every refusal, with the status and
 code and never the email, name, licence, code or detail (their successes
@@ -1297,7 +1297,7 @@ unchanged. `field` is a DTO property name, or the unknown key the client
 sent; `messages` are the validators' own and never contain a submitted
 value. Identity's nested bodies are the in-person check (ADR-063:
 `document.dateOfBirth`, `attestations.patientConsents`) and clinician self
-sign-up's (ADR-064, 0096): the submit and apply-again `declarations`
+sign-up's (ADR-066, 0098): the submit and apply-again `declarations`
 (`declarations.accurate`, `declarations.verificationConsent`) and step 1's
 `checklist` (`checklist.identityMethod`); an unknown nested key is named
 the same way (`declarations.extra`). Lab, Pharmacy, OCR and Outreach, off
@@ -1329,8 +1329,8 @@ a fixed sentence written for the person using the client, which keeps its
 `502`, `503` or `504`; and, from 0094
 (D-Eminence/hid-system#85),
 `503 ASSISTED_REGISTRATION_DISABLED` and
-`503 ASSISTED_VERIFICATION_UNAVAILABLE`; and, from 0096 (clinician self
-sign-up, ADR-064), `503 CLINICIAN_SIGNUP_CLOSED` ("Clinician sign-up is not
+`503 ASSISTED_VERIFICATION_UNAVAILABLE`; and, from 0098 (clinician self
+sign-up, ADR-066), `503 CLINICIAN_SIGNUP_CLOSED` ("Clinician sign-up is not
 open yet. If you already have a Health ID provider account, sign in.").
 
 A problem may carry an optional `fields` member: an object of field names to
@@ -1353,7 +1353,7 @@ whichever bucket refused, never the time left in a bucket:
 | `429 MFA_RATE_LIMITED` | platform and staff sign-in, enrolment and its email code, step-up and recovery-code regeneration | 900, the length of every MFA window |
 | `429 PATIENT_LOOKUP_RATE_LIMITED` | `POST /api/v1/identity/patient-lookup` | `PATIENT_LOOKUP_RATE_WINDOW_SECONDS` (default 300) |
 | `429 ACCESS_REQUEST_RATE_LIMITED` | `POST /api/v1/identity/access-requests` | `ACCESS_REQUEST_RATE_WINDOW_SECONDS` (default 900) |
-| `429 CLINICIAN_APPLICATION_RATE_LIMITED` | clinician self sign-up (ADR-064, 0096): a per-network (hourly or daily) or platform (daily) quota of the email-code, status-code, search, submit or apply-again operation, and the platform's daily submit cap reached while P4 or P14 creates the application | 86400, the longest quota window, an upper bound whichever window refused (the quotas are counted in SQL; RETRY-AFTER-SQL) |
+| `429 CLINICIAN_APPLICATION_RATE_LIMITED` | clinician self sign-up (ADR-066, 0098): a per-network (hourly or daily) or platform (daily) quota of the email-code, status-code, search, submit or apply-again operation, and the platform's daily submit cap reached while P4 or P14 creates the application | 86400, the longest quota window, an upper bound whichever window refused (the quotas are counted in SQL; RETRY-AFTER-SQL) |
 | `429 MFA_RATE_LIMITED` | clinician self sign-up's authenticator steps (P5-P9: the account's 0088 budgets and the applicants' own per-address bucket) | 900 |
 | `429 CLINICIAN_APPLICATION_AUTHENTICATOR_RATE_LIMITED` | admin step 1, the applicant's authenticator code (`POST /api/v1/admin/clinician-applications/:applicationId/attest`) | 900 |
 
@@ -1375,7 +1375,7 @@ SQL over 24 hours, 30 days or a year (a bound kept for a NIN would also tell
 of other people's attempts on it); `ASSISTED_DESK_CODE_LIMITED` (0094) is
 the enrollment's five desk codes, which never come back, so the patient
 starts again. For the same reason clinician self sign-up's
-`CLINICIAN_APPLICATION_SEARCH_LIMITED` (0096, P3) carries none: a
+`CLINICIAN_APPLICATION_SEARCH_LIMITED` (0098, P3) carries none: a
 capability's 30 searches never come back, and the applicant verifies the
 address again. EHR, Lab, Pharmacy, OCR and Outreach set none; EHR has no
 rate limit of its own and answers no `429` itself, on the patient routes of
@@ -2031,7 +2031,7 @@ is designated, so the route is closed until an operator opens it.
 Health-id 55a50b0 has none of these screens (facility list, desk code,
 staff check, designation). It cannot use the facility route.
 
-### Clinician self sign-up (ADR-064, migration 0096)
+### Clinician self sign-up (ADR-066, migration 0098)
 
 A doctor (MDCN) or a nurse or midwife (NMCN) applies to work at one verified
 facility; two platform administrators verify and grant later (§19, Clinician
@@ -3596,7 +3596,7 @@ new membership starts pending.
 | `403 WORKFORCE_FACILITY_CONFLICT` | The caller has an active membership at the facility (its `org_admin` included) and attaches or grants there |
 | `403 WORKFORCE_SECOND_PERSON_REQUIRED` | The only current attestation for the role was recorded by the caller |
 | `404 WORKFORCE_ACCOUNT_NOT_FOUND`, `WORKFORCE_STAFF_NOT_FOUND`, `WORKFORCE_FACILITY_NOT_FOUND`, `WORKFORCE_MEMBERSHIP_NOT_FOUND` | The named record does not exist |
-| `409 WORKFORCE_ATTESTATION_REQUIRED` | No current attestation for the role by an independent reviewer. An attestation recorded by step 1 of a clinician application (ADR-064) supports no grant here until its application is approved, also once the application is rejected, withdrawn or overdue; the profile's attestations carry `clinicianApplication: { id, state } \| null` and `usableForGrant` |
+| `409 WORKFORCE_ATTESTATION_REQUIRED` | No current attestation for the role by an independent reviewer. An attestation recorded by step 1 of a clinician application (ADR-066) supports no grant here until its application is approved, also once the application is rejected, withdrawn or overdue; the profile's attestations carry `clinicianApplication: { id, state } \| null` and `usableForGrant` |
 | `409 WORKFORCE_ROLE_CONFLICT` | The membership holds `org_admin` or `admin`; an administering membership stays non-clinical |
 | `409 WORKFORCE_ROLE_ALREADY_ACTIVE`, `WORKFORCE_ROLE_NOT_ACTIVE` | Granting a held role that is not due for renewal (its attestation is current and no current attestation lasts longer, or it was not granted on an attestation), or revoking one the membership does not hold |
 | `409 WORKFORCE_MEMBERSHIP_EXISTS` | The account already has an active or pending membership at the facility |
@@ -3606,7 +3606,7 @@ new membership starts pending.
 | `409 WORKFORCE_ACCOUNT_INELIGIBLE`, `WORKFORCE_STAFF_INELIGIBLE` | The account is disabled, locked, deleted or a patient's own account, the staff record is inactive, or its verification status cannot be attested or granted |
 | `409 WORKFORCE_EMAIL_IN_USE` | A new identity's email is already used by an account or staff record |
 
-### Clinician applications (ADR-064, migration 0096)
+### Clinician applications (ADR-066, migration 0098)
 
 The verification queue of clinician self sign-up. Every route needs an
 MFA-verified platform session and `platform.workforce.manage`

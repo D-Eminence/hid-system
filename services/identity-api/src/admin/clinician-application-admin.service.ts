@@ -45,7 +45,7 @@ interface AuditEvent { action: string; resourceType: string; resourceId: string;
 
 /**
  * The verification queue and the two-administrator review of clinician
- * applications (ADR-064). Every command runs in one platform transaction that
+ * applications (ADR-066). Every command runs in one platform transaction that
  * re-checks the session and step-up for its action, then calls its SECURITY
  * DEFINER command, which repeats the permission, MFA, step-up, version,
  * reason and idempotency checks and enforces the two-person rule (the

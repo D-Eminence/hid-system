@@ -538,7 +538,7 @@ try {
     'exact-role staff MFA sign-in, enrolment proof, unassured-session refusal, recovery and reset HTTP workflow',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-staff-mfa-runtime.mjs')],
     workflowEnvironment));
-  // Owner decision 2 (ADR-064, 0096): clinician self sign-up with the
+  // Owner decision 2 (ADR-066, 0098): clinician self sign-up with the
   // authenticator before review and two different Super Admins; nothing the
   // applicant's browser holds works at /auth/mfa/*.
   evidence.checks.clinician_application_runtime = JSON.parse(command(

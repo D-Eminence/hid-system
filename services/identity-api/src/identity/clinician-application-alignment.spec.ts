@@ -14,7 +14,7 @@ import { ClinicianApplicationController } from './clinician-application.controll
 import { ClinicianApplicationDetailsDto, SubmitClinicianApplicationDto } from './dto/clinician-application.dto';
 
 /**
- * Clinician self sign-up (ADR-064) held to the launch alignment rules of
+ * Clinician self sign-up (ADR-066) held to the launch alignment rules of
  * D-Eminence/hid-system#80 once both are merged: A23 (a refused nested field
  * is named by its dotted path, with the validator's message and never the
  * submitted value) on the three nested bodies, P4, P14 and step 1, and A17

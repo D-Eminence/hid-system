@@ -3,7 +3,7 @@ import { Equals, IsEmail, IsIn, IsISO8601, IsObject, IsOptional, IsString, IsUUI
   MinLength, ValidateNested } from 'class-validator';
 
 /**
- * Clinician self sign-up (ADR-064). The service and the database check again
+ * Clinician self sign-up (ADR-066). The service and the database check again
  * what the DTOs check here; the regulator must pair with the profession (a
  * mismatch is 400 CLINICIAN_APPLICATION_INVALID from the service), and the
  * password length is the service's 400 PASSWORD_INVALID.

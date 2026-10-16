@@ -383,7 +383,7 @@ begin
          and role_code <> 'platform_super_admin') then
     raise exception 'workforce provisioning privileges are inconsistent';
   end if;
-  -- Clinician self sign-up (0096, ADR-064): the public, capability and system
+  -- Clinician self sign-up (0098, ADR-066): the public, capability and system
   -- commands are executable by the Identity runtime (and the schema test
   -- runtime) only; the administration commands by the Identity runtime only;
   -- the internal helpers, the pinned 0087 grant and the guard by no runtime;

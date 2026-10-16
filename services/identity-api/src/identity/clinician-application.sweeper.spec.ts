@@ -3,7 +3,7 @@ import * as environment from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import { ClinicianApplicationSweeper } from './clinician-application.sweeper';
 
-/** The clinician application sweep (ADR-064): C15 then C16, never under test, logging only the SQLSTATE. */
+/** The clinician application sweep (ADR-066): C15 then C16, never under test, logging only the SQLSTATE. */
 describe('ClinicianApplicationSweeper', () => {
   afterEach(() => jest.restoreAllMocks());
 

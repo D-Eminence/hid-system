@@ -9,7 +9,7 @@ import { ApproveClinicianApplicationDto, AttestClinicianApplicationDto, ListClin
   RejectClinicianApplicationDto } from './dto/clinician-application-command.dto';
 
 /**
- * The clinician verification queue (ADR-064). Every route needs
+ * The clinician verification queue (ADR-066). Every route needs
  * platform.workforce.manage on an MFA-verified platform session; the three
  * commands also need a TOTP step-up from the last five minutes, If-Match with
  * the application version, an Idempotency-Key and a reason. Step 1 (attest)

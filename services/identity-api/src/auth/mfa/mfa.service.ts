@@ -68,7 +68,7 @@ export interface MfaNoticeSink {
 export const MFA_NOTICE_SINK = Symbol('MFA_NOTICE_SINK');
 
 /**
- * A clinician applicant's 0088 staff challenge (ADR-064). Identity opens it
+ * A clinician applicant's 0088 staff challenge (ADR-066). Identity opens it
  * for the application capability with a token it derives itself and never
  * sends to the browser, so it can be presented at no /auth/mfa route, and it
  * never yields a session.
@@ -104,7 +104,7 @@ export type ApplicantFactorConfirmation =
   | { kind: 'confirmed'; factorId: string }
   | { kind: 'invalid' } | { kind: 'rate_limited' } | { kind: 'no_factor' };
 
-/** The origin recorded on the 0088 session events and audit of a clinician application (ADR-064). */
+/** The origin recorded on the 0088 session events and audit of a clinician application (ADR-066). */
 const APPLICANT_ORIGIN = 'clinician_application';
 
 interface ChallengeRow {
@@ -134,7 +134,7 @@ interface FactorRow {
 const FAILURE_PER_ACCOUNT: RateLimitWindow = { windowSeconds: 900, maxRequests: 4 };
 /**
  * The per-address failure bucket a second-factor check charges and reads: a
- * sign-in's own, or the clinician applicants' (ADR-064), whose challenges are
+ * sign-in's own, or the clinician applicants' (ADR-066), whose challenges are
  * staff challenges but whose accounts anyone can create while intake is open.
  */
 type FailureScope = MfaSessionKind | 'applicant';
@@ -312,7 +312,7 @@ export class MfaService {
 
   /**
    * Second-factor step of sign-in: a TOTP code or one unused recovery code.
-   * With `options` (a clinician applicant's challenge, ADR-064) no session is
+   * With `options` (a clinician applicant's challenge, ADR-066) no session is
    * issued: the code is checked and the challenge consumed exactly as for a
    * sign-in, then `onVerified` runs in the same transaction.
    */
@@ -456,7 +456,7 @@ export class MfaService {
    * records it. A platform enrolment records none, so it is refused for an
    * account with an eligible staff membership, which enrols at staff sign-in
    * instead and then uses that factor for both. A clinician applicant's
-   * enrolment (`applicant`, ADR-064) charges a wrong email code to the
+   * enrolment (`applicant`, ADR-066) charges a wrong email code to the
    * applicants' per-address bucket, not staff sign-in's.
    */
   async startEnrollment(token: string, event: SessionEventMetadata, kind: MfaSessionKind = 'platform',
@@ -536,7 +536,7 @@ export class MfaService {
   /**
    * Confirms enrollment with a first TOTP code, activates the factor, issues
    * one-time recovery codes (returned once) and opens the platform or staff
-   * session. With `options` (a clinician applicant's challenge, ADR-064) no
+   * session. With `options` (a clinician applicant's challenge, ADR-066) no
    * session is issued: the factor, its recovery codes and the enrolment audit
    * are written exactly as for a sign-in, then `onActivated` runs in the same
    * transaction.
@@ -620,7 +620,7 @@ export class MfaService {
 
   /**
    * Opens the 0088 staff challenge a clinician application capability drives
-   * (ADR-064), inside the caller's transaction and after the account lock, as
+   * (ADR-066), inside the caller's transaction and after the account lock, as
    * the password step opens one: an enrolment challenge for an account with
    * no factor, a verification challenge for one with a staff-proven factor.
    * There is no password step: the capability was opened by an emailed code.
@@ -660,7 +660,7 @@ export class MfaService {
   }
 
   /**
-   * The account locks of a step-1 review (ADR-064): the applicant's and the
+   * The account locks of a step-1 review (ADR-066): the applicant's and the
    * administrator's account rows (auth.lock_account_sessions), in id order
    * (0073), as confirmApplicantFactor and the step-1 command take them. The
    * review service takes them before it looks again for a stored answer under
@@ -677,7 +677,7 @@ export class MfaService {
   }
 
   /**
-   * Step 1 of a clinician application review (ADR-064): during the identity
+   * Step 1 of a clinician application review (ADR-066): during the identity
    * call the applicant reads a current code from their authenticator and a
    * Super Admin types it. It is checked against the applicant's active
    * staff-proven factor and accepted once (the factor's last step advances),
@@ -875,7 +875,7 @@ export class MfaService {
 
   /**
    * Supersedes the account's live challenges of this sign-in kind and inserts
-   * a new one (the password step's, and a clinician applicant's, ADR-064).
+   * a new one (the password step's, and a clinician applicant's, ADR-066).
    * Only the token's digest is stored.
    */
   private async insertChallenge(client: PoolClient, challenge: { id: string; accountId: string;

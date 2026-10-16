@@ -263,7 +263,7 @@ describe('the workforce sign-in route', () => {
   });
 });
 
-describe('the clinician application routes (ADR-064)', () => {
+describe('the clinician application routes (ADR-066)', () => {
   // Both actions belong to the main site only: a product host (where a staff
   // member signs in) never presents them, so a token from one is refused
   // before Cloudflare is called.

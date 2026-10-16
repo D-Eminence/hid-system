@@ -119,7 +119,7 @@ describe('central high-risk platform policy', () => {
     expect(requiresTwoPersonApproval('platform.workforce.role.change')).toBe(false);
   });
 
-  it('guards the clinician application review with the workforce permission, a version, a key and a reason (ADR-064)', () => {
+  it('guards the clinician application review with the workforce permission, a version, a key and a reason (ADR-066)', () => {
     // The list route is the controller path itself (@Get() records '/').
     const review = routes.filter((route) => route.path.startsWith('admin/clinician-applications/'));
     expect(review.map((route) => `${route.method === RequestMethod.GET ? 'GET' : 'POST'} ${route.path}`).sort())

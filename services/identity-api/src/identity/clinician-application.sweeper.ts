@@ -9,7 +9,7 @@ const EXPIRE_BATCH = 50;
 /**
  * Records due clinician applications as expired (C15) and prunes stale
  * capabilities, challenges, idempotency rows and quota counters (C16), every
- * CLINICIAN_APPLICATION_SWEEP_SECONDS (ADR-064). Not security-critical: the
+ * CLINICIAN_APPLICATION_SWEEP_SECONDS (ADR-066). Not security-critical: the
  * reservation, the refusals and the views all compute expiry when they read,
  * so nothing waits for this. Several replicas are safe (SKIP LOCKED). It
  * logs only the SQLSTATE of a failure, and does not run under NODE_ENV=test.

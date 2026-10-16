@@ -29,13 +29,13 @@
 // - the release checklist's read-only P10, P11 and P35 checks, taken from
 //   docs/PHASE_4_STAGE_5_RELEASE_READINESS.md, as the administrator, as an
 //   operator runs them on RDS;
-// - the daily reviews of P35 (break-glass use and in-person checks by
+// - the daily reviews of P37 (break-glass use and in-person checks by
 //   accounts approved through a clinician application), taken from
 //   docs/MIGRATION_RUNBOOK.md §6, as the administrator;
 // - break-glass's migration (0097) run again as the administrator in
 //   rolled-back transactions: refused while break_glass_enabled is on, a
 //   no-op while it is off;
-// - the upgrade path of clinician self sign-up (ADR-064): a second database
+// - the upgrade path of clinician self sign-up (ADR-066): a second database
 //   migrated through the migration before it, where the previous release's
 //   bootstrap statements for platform.control_enabled (P8-CONTROL) give the
 //   function its technical owner, then that
@@ -358,7 +358,7 @@ try {
     `P10 check: ${p10.join('; ')}`);
   // After 0097, clinician self sign-up's migration and the bootstrap: the four
   // launch controls off (break-glass until the operator turns it on, P11;
-  // clinician sign-up until P35), no healthcare-operations purpose, no
+  // clinician sign-up until P37), no healthcare-operations purpose, no
   // permission 0084 or 0091 withdrew, break-glass granted to exactly the three
   // roles 0097 names, and no control event.
   const p11 = await checklistCheck('P11 check (read-only)');
@@ -427,7 +427,7 @@ try {
   evidence.steps.notification_recipient = { run_as: worker, answers: { verified: 'email', phone_only: 'withhold' },
     direct_patient_read: /permission denied for \S+ \S+/.exec(workerDirect.output)[0], refused: refusedLogins };
 
-  // P35's daily reviews of recent clinician approvals (ADR-064), as the
+  // P37's daily reviews of recent clinician approvals (ADR-066), as the
   // operator runs them: MIGRATION_RUNBOOK.md §6's read-only SQL, as the
   // migration administrator. The in-person checks force row-level security,
   // so a review that set row_security off would fail here; the administrator
@@ -446,10 +446,10 @@ try {
       ['-X', '-q', '-At', '-F', '|', '-v', 'ON_ERROR_STOP=1', '-h', temporary, '-U', admin, '-d', database, '-f', file])
       .stdout.trim().split('\n').filter((line) => line && line !== 'system:auth');
   };
-  const breakGlassReview = await runbookCheck('break-glass', 'review daily (P35) the break-glass activations');
-  const inPersonReview = await runbookCheck('in-person', 'review daily (P35) the in-person checks');
+  const breakGlassReview = await runbookCheck('break-glass', 'review daily (P37) the break-glass activations');
+  const inPersonReview = await runbookCheck('in-person', 'review daily (P37) the in-person checks');
   assert.deepEqual([breakGlassReview, inPersonReview], [[], []],
-    `P35 reviews: ${JSON.stringify({ breakGlassReview, inPersonReview })}`);
+    `P37 reviews: ${JSON.stringify({ breakGlassReview, inPersonReview })}`);
   evidence.steps.runbook_recent_approval_reviews = { run_as: admin, break_glass_rows: 0, in_person_check_rows: 0 };
 
   // Break-glass's migration (0097, D9, ADR-058 addendum) refuses to run while
@@ -501,7 +501,7 @@ try {
   assert.doesNotMatch(claim.output, /permission denied to set parameter/);
   evidence.steps.ocr_claim = { refused_by: 'body authorization check', parameter_privilege_needed: false };
 
-  // The upgrade path of clinician self sign-up (ADR-064, P1 of its design): on
+  // The upgrade path of clinician self sign-up (ADR-066, P1 of its design): on
   // RDS platform.control_enabled already belongs to hid_platform_control_reader
   // when the migration runs, and the administrator holds only the creator's
   // ADMIN OPTION in that role. The main database above was migrated whole

@@ -21,7 +21,7 @@ import { type CurrentStaffContextService, StaffMembershipInactiveError } from '.
 import { TokenService } from './token.service';
 
 /**
- * Staff-session issuance re-checks eligibility (ADR-064, defence in depth). A
+ * Staff-session issuance re-checks eligibility (ADR-066, defence in depth). A
  * staff session is issued only for an account the staff resolver finds an
  * eligible membership for. One whose membership ended between the password
  * step and the code step, or a clinician applicant whose application is not
