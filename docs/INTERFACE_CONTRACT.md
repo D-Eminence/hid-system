@@ -1300,8 +1300,12 @@ value. Identity's nested bodies are the in-person check (ADR-063:
 sign-up's (ADR-064, 0096): the submit and apply-again `declarations`
 (`declarations.accurate`, `declarations.verificationConsent`) and step 1's
 `checklist` (`checklist.identityMethod`); an unknown nested key is named
-the same way (`declarations.extra`). Lab, Pharmacy, OCR and Outreach, off at launch (D17), still name only
-the top-level property.
+the same way (`declarations.extra`). Lab, Pharmacy, OCR and Outreach, off
+at launch (D17), still name only the top-level property. The patient routes
+of the patient record release (`GET /api/v1/ehr/me/records` and
+`/ehr/me/documents/:documentId/download`, 0096) take no body; a malformed
+document id is the UUID pipe's `400 BAD_REQUEST` with no `errors`, as on
+every EHR route with an id, so no `VALIDATION_FAILED` answer arises there.
 
 Do not leak:
 
@@ -1373,8 +1377,9 @@ the enrollment's five desk codes, which never come back, so the patient
 starts again. For the same reason clinician self sign-up's
 `CLINICIAN_APPLICATION_SEARCH_LIMITED` (0096, P3) carries none: a
 capability's 30 searches never come back, and the applicant verifies the
-address again. EHR, Lab,
-Pharmacy, OCR and Outreach set none. Identity's CORS policy exposes
+address again. EHR, Lab, Pharmacy, OCR and Outreach set none; EHR has no
+rate limit of its own and answers no `429` itself, on the patient routes of
+the patient record release (0096) as on its other routes. Identity's CORS policy exposes
 `retry-after` to allowed origins. Before this change no answer carried the
 header and CORS did not expose it.
 
@@ -1572,10 +1577,16 @@ open (AUDIT-OUTCOME, `PHASE_3_LAUNCH_DECISIONS.md` §2). In both services
 every request-audit row of a patient session records purpose `patient-self`,
 whatever `purpose` query parameter or `X-Purpose-Of-Use` header the client
 sends, as the patient's own service events already did
-(`identity.patient.self.*`, `ehr.patient.self.records.read`); before this
-change a patient's request rows recorded the client's value, so a patient's
-own approval sent with `direct-care` read as direct care. A staff request
-keeps the purpose it declares.
+(`identity.patient.self.*`, `ehr.patient.self.records.read` and, since 0096,
+`ehr.patient.self.document.download`); before this change a patient's request
+rows recorded the client's value, so a patient's own approval sent with
+`direct-care` read as direct care. A staff request keeps the purpose it
+declares. The patient document download (0096) is audited by the request
+audit on failure only: each refusal's row records its status and code
+(`404 DOCUMENT_NOT_AVAILABLE`, `503 DOCUMENT_INTEGRITY_UNAVAILABLE`,
+`503 DOCUMENT_STORAGE_UNAVAILABLE`, `403 PATIENT_ACCESS_DENIED`, a malformed
+id's `400 BAD_REQUEST`) with purpose `patient-self`; a signed download is
+recorded by its own `ehr.patient.self.document.download` row.
 
 ## 8. Identity Resolution
 
@@ -2716,7 +2727,7 @@ leaves out the clinician's notes, storage locations and staff identities.
 | `diagnoses` | `verificationStatus` `confirmed`: `id`, `encounterId`, `facilityId`, `codeSystem`, `code`, `display`, `clinicalStatus`, `verificationStatus`, `onsetAt`, `abatementAt` | unconfirmed, provisional, differential, refuted and entered-in-error diagnoses; the clinician's `notes` (never returned) |
 | `prescriptions` | `status` `active`, `on_hold` or `completed`, with the emergency summary's fields | drafts, cancelled and entered-in-error prescriptions |
 | `labResults` | per Lab result, its latest released revision that was not invalidated, of an order still active, on hold or completed: `id` (Lab result), `encounterId` (source EHR encounter), `sourceEhrOrderId`, `facilityId` (ordering facility), `test` `{codeSystem, code, name}`, `version`, `revisionKind` (`original`, `correction` or `amendment`), `resultType`, `numericValue` (number or `null`), `textValue`, `unit`, `referenceRange`, `abnormalFlag`, `releasedAt` | unverified or unreleased revisions (a newer correction that is not released leaves the earlier released value, as for clinicians, D11); a result whose latest released revision was entered in error (Lab's staff view shows it marked, the patient does not see it); results of a cancelled or entered-in-error order; correction and release reasons and staff identities |
-| `documents` | `classification` `phi`, uploaded, attached to an encounter, and `status` `available` (the latest scan of the exact stored object version and SHA-256 is clean): `id`, `encounterId`, `facilityId`, `fileName`, `mediaType`, `sizeBytes`, `classification`, `status`, `scanStatus`, `createdAt` | restricted or internal documents, documents attached to no encounter, rejected, not yet scanned, initiated or entered-in-error documents; the storage location (the download route signs a URL) |
+| `documents` | `classification` `phi`, uploaded, attached to an encounter, and `status` `available` (the latest scan of the exact stored object version and SHA-256 is clean): `id`, `encounterId`, `facilityId`, `fileName`, `mediaType`, `sizeBytes` (a JSON integer, as on every document answer, A15), `classification`, `status`, `scanStatus`, `createdAt` | restricted or internal documents, documents attached to no encounter, rejected, not yet scanned, initiated or entered-in-error documents; the storage location (the download route signs a URL) |
 
 `released` lists `encounters`, `notes` and then each released category in
 the order `vitals`, `diagnoses`, `prescriptions`, `labResults`, `documents`.
@@ -2747,8 +2758,11 @@ exact stored object version, served as an attachment with `Cache-Control:
 private, no-store`. Every document the patient may not download answers the
 same `404 DOCUMENT_NOT_AVAILABLE`: documents are not released, the document
 is unknown or another patient's, it is not an available PHI document of a
-completed encounter, or it is held in another bucket. A malformed id is
-`400`. The audit event `ehr.patient.self.document.download` (resource type
+completed encounter, or it is held in another bucket. The staff download
+answers the same code `409` for a document that exists but is not available
+(A15); the patient route answers `404` for every case, so it does not say
+whether the document exists. A malformed id is the UUID pipe's
+`400 BAD_REQUEST`. The audit event `ehr.patient.self.document.download` (resource type
 `document`, the document id, `details.mediaType` and `details.sizeBytes`
 only) commits before the stored object is checked; then the object's
 version, size, SHA-256 and encryption are read back (HEAD with checksum
@@ -3150,6 +3164,14 @@ Each document route answers the route checks first, as every EHR route does
 - `GET /api/v1/ehr/internal/ocr/documents/:documentId/source`: `404
   NOT_FOUND` and `403 CONSENT_REQUIRED`, which OCR passes through with its
   status and code.
+- The patient routes of the patient record release (0096, ADR-065; §11,
+  "Record summaries" and "Patient document download") follow the same rules:
+  `GET /api/v1/ehr/me/records` returns each released document's `sizeBytes`
+  as a JSON integer, and `GET /api/v1/ehr/me/documents/:documentId/download`
+  answers its own codes (`404 DOCUMENT_NOT_AVAILABLE`,
+  `503 DOCUMENT_INTEGRITY_UNAVAILABLE`, `503 DOCUMENT_STORAGE_UNAVAILABLE`).
+  Until the merge of 0096 into this change the released documents' `sizeBytes`
+  was the text PostgreSQL returns for a `bigint`.
 
 Until this change (A15) the key refusal and the disabled control answered
 `409 CONFLICT` (the key's detail was "A valid Idempotency-Key header is
