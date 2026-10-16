@@ -53,16 +53,15 @@ const SENT_FIELDS = {
 
 /**
  * A copy of the owned synthetic rehearsal database, on the rehearsal's private
- * socket-only cluster, dropped by close(). A developer's own disposable
- * cluster under /tmp/pgtmp- is admitted only with
- * HID_VERIFIER_LOCAL_CLUSTER=1, which the rehearsal never sets. `url(role)`
- * connects as the rehearsal admin and starts every session as `role`, as a
- * login of that role would.
+ * socket-only cluster, dropped by close(). Only the rehearsal's own socket is
+ * accepted, as in the other runtime verifiers; a developer's own cluster is
+ * reached only through an untracked copy of this file. `url(role)` connects
+ * as the rehearsal admin and starts every session as `role`, as a login of
+ * that role would.
  */
 async function disposableDatabase(require) {
   const socket = process.env.PGHOST;
-  const localCluster = process.env.HID_VERIFIER_LOCAL_CLUSTER === '1' && socket?.startsWith('/tmp/pgtmp-');
-  assert(process.env.NODE_ENV === 'test' && (socket?.startsWith('/tmp/hid-tuf-migration.') || localCluster)
+  assert(process.env.NODE_ENV === 'test' && socket?.startsWith('/tmp/hid-tuf-migration.')
     && process.env.PGDATABASE === 'hid_rehearsal' && process.env.PGUSER,
   'Only the owned synthetic rehearsal is supported');
   const { Client, Pool } = require('pg');

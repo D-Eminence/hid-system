@@ -431,8 +431,9 @@ The executable covers:
    session, the hourly quota, the audit rows and a late settlement racing the
    next reservation (two runtime connections; the lease counted once), as
    `hid_ehr_api_runtime` against a real Identity child. The verifier accepts
-   only the rehearsal's own socket; a developer's cluster under `/tmp/pgtmp-`
-   needs `HID_VERIFIER_LOCAL_CLUSTER=1`, which the rehearsal never sets.
+   only the rehearsal's own socket, as every runtime verifier does
+   (`scripts/tests/runtime-verifier-socket-guard.test.mjs`); a developer's
+   own cluster is reached only through an untracked copy.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
