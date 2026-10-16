@@ -18,6 +18,16 @@ describe('Patient read transaction boundary', () => {
       'patient-transaction-test', jest.fn())).rejects.toThrow('Patient authorization is stale');
     expect(connect).not.toHaveBeenCalled();
   });
+  it('binds the patient-self context with no record category released to the database', async () => {
+    const { service, query } = setup();
+    await service.withPatientTransaction(fresh(), 'patient-transaction-test', async () => undefined);
+    const [begin, binding] = query.mock.calls as Array<[string, unknown[]]>;
+    expect(begin).toEqual(['BEGIN']);
+    // The patient record release policies admit a category only when the transaction names
+    // it; only PatientRecordRelease names any, so nothing earlier can leak in.
+    expect(String(binding?.[0]).replace(/\s+/g, '')).toContain("set_config('app.patient_release','',true)");
+    expect(String(binding?.[0]).replace(/\s+/g, '')).toContain("set_config('app.purpose_of_use','patient-self',true)");
+  });
   it('rolls back and releases the clinical read when durable audit fails before serialization', async () => {
     const { service, query, release } = setup();
     await expect(service.withPatientTransaction(fresh(), 'patient-transaction-test', async (client: PoolClient) => {

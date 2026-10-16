@@ -210,10 +210,10 @@ through NAT); the allowlist in code is the SSRF control.
    artefact verifier and S4l together.
 3. Decide whether iOS matters now; it would also need a manifest.
 4. DPO review of the subscription data (the endpoint identifies a browser).
-5. Take the next free migration number when the work starts. Draft
-   D-Eminence/hid-system#8 touches the notification worker and Novu, not
-   devices or push; its own migration numbers collide with `main` and must
-   be renumbered whatever happens here.
+5. Take the next free migration number when the work starts. The Novu
+   subscriber sync of draft D-Eminence/hid-system#8 is ported as ADR-064
+   (migration 0095, D-Eminence/hid-system#90); it touches the notification worker
+   and Novu, not devices or push.
 
 None of this is a launch blocker, and none of it should displace launch
 work.

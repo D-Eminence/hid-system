@@ -277,7 +277,37 @@ The executable covers:
    signed in with an authenticator, refused staff, a mismatch, a match,
    activation and sign-in, an existing Health ID, a race with a phone proof,
    both budgets and a suspension, as `hid_identity_api_runtime`.
-   With 0095 (break-glass at launch, with limits; ADR-058 addendum): the role
+   With 0095 (ADR-064): the additional suites include
+   `notification-verified-recipient.integration.sql` (the claim-bound
+   recipient answers, its refusals and catalogue), run in both passes, and
+   `scripts/verify-non-superuser-database.mjs` calls the lookup as the
+   RDS-like worker login. `notification_worker_runtime` runs
+   `services/notification-worker/scripts/verify-notification-worker-runtime.mjs`
+   after the Pharmacy, Lab, OCR and Outreach verifiers: the real worker as
+   `hid_notification_worker` against a fake Novu that replays a seen
+   idempotency key's answer as Novu does: flag off and on, a failed
+   subscriber call that still sends the in-app trigger, an opt-out, a
+   deleted, a suspended or a deletion-due login whose email is cleared first,
+   an event retried while the patient goes withheld, eligible, withheld, and
+   two concurrent events with the login deleted between them.
+   With 0096 (the patient record release, ADR-065): the additional suites
+   include `patient-record-release.integration.sql` (the database following
+   `app.patient_release` category by category, the released rows of each
+   table and of the released Lab results view across every withheld state,
+   unbound contexts, an expired authorization and a consented staff context,
+   the Lab and Identity runtimes refused the view, each policy's and the
+   view's own conditions, the section indexes, the exact policy inventory),
+   run in both passes.
+   `patient_record_release_runtime` runs
+   `verify-patient-record-release-runtime.mjs` after the delegated cookie
+   read verifier: with every flag off the summary is unchanged; with the
+   flags on, the released sets, the counts-only audit, the document download
+   and its refusals, a staff session refused, Identity refusing lab-api,
+   the runtime's privileges, and the database following the flags in the
+   EHR's own patient-self transaction (nothing new without the release
+   binding; only vitals with only that flag on), as `hid_ehr_api_runtime`
+   against a real Identity child.
+   With 0097 (break-glass at launch, with limits; ADR-058 addendum): the role
    assertions require exactly doctor, clinician and nurse to hold
    `identity.break-glass.write`; the additional suites include
    `break-glass-launch.integration.sql` (which sets `break_glass_enabled`
@@ -293,9 +323,9 @@ The executable covers:
    (as P11's operator step would), `423` again once it is off, and `403
    PERMISSION_DENIED` for an org admin; and the non-superuser check's P10 and
    P11 expect `emergency` and the three break-glass holders. The
-   non-superuser check also confirms 0095's precondition: before the first
+   non-superuser check also confirms 0097's precondition: before the first
    bootstrap the administrator cannot read the control
-   (`PLATFORM_CONTROL_UNAVAILABLE`) and 0095 applies; after it, 0095's SQL run
+   (`PLATFORM_CONTROL_UNAVAILABLE`) and 0097 applies; after it, 0097's SQL run
    again as the administrator in rolled-back transactions is refused
    (`55000 BREAK_GLASS_CONTROL_ON`) with the control on and is a no-op with it
    off.
@@ -379,9 +409,16 @@ The executable covers:
    and attestation helpers or `auth.staff_session_is_mfa`, and that the
    permission is held by `clinician`, `doctor` and `nurse` only; the
    bootstrap's own `runtime-roles.integration.sql` checks the 0093 and 0094
-   grants for every runtime role; and since 0095 break-glass
-   held by exactly doctor, clinician and nurse, exactly the `direct-care` and
-   `emergency` purposes, and `break_glass_enabled` still off), then
+   grants for every runtime role; and since 0096
+   (`patient_record_release_grants`) that the upgraded bootstrap makes
+   `hid_lab_release_reader` the owner of `ehr.patient_released_lab_results`,
+   grants `SELECT` on it to the EHR runtime and not to the Lab runtimes,
+   gives neither the Lab runtime nor the view's owner `ehr.patient_self_context`
+   or the Lab runtime `USAGE` on `ehr`, and keeps `ehr.patient_self_context`
+   executable by exactly the EHR runtime and the test role; and since 0097
+   break-glass held by exactly doctor, clinician and nurse, exactly the
+   `direct-care` and `emergency` purposes, and `break_glass_enabled` still
+   off), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

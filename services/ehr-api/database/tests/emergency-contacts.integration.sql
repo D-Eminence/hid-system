@@ -39,7 +39,7 @@ insert into identity.staff_facility_memberships (id, staff_id, account_id, organ
 insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason) values
   ('e1700000-0000-4000-8000-000000000001', 'e1100000-0000-4000-8000-000000000003', 'doctor', 'facility',
    'e1600000-0000-4000-8000-000000000001', 'e1400000-0000-4000-8000-000000000002', 'Contact fixture role');
--- Break-glass is on at launch with limits (D9): 0095 grants
+-- Break-glass is on at launch with limits (D9): 0097 grants
 -- identity.break-glass.write to the doctor role (with clinician and nurse)
 -- again and seeds the emergency purpose, and this suite relies on the grant.
 insert into identity.purpose_of_use_codes (code, display, source_system) values

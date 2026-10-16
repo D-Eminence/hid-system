@@ -3878,8 +3878,9 @@ Decision:
    `API_ORIGIN_CLIENT_RATE_LIMIT` (and `API_ORIGIN_EDGE_RATE_LIMIT`), which are
    code constants.
 8. **Gateway runtime check in CI.** `scripts/verify-gateway-runtime.mjs
-   --pinned-image` runs the shipped configuration under the nginx of the image
-   `gateway/Dockerfile` pins by digest; it is the `gateway-runtime` step of
+   --built-image` builds `gateway/Dockerfile` (no push) and runs the shipped
+   configuration under the nginx of that image, which is the base the
+   Dockerfile pins by digest plus its own layers (RF-008); it is the `gateway-runtime` step of
    `release/scripts/run-workspace-gates.mjs`, which the required workspace
    job of `tuf-local-gates.yml` runs, so the pass-through, body bound, header
    strips and both logs are checked against real nginx on every change, not
@@ -4130,6 +4131,9 @@ Decision:
 - The patient is told in the app when their PIN is used: an inbox item per
   new PIN grant, written in the PIN transaction, without the notification
   worker. SMS and email notices wait for an approved notification channel.
+  (Amended by ADR-064: email through Novu is approved, behind
+  `NOVU_SUBSCRIBER_SYNC`, off by default and refused in production; the
+  inbox item is unchanged.)
 - Pending access requests do not yet lapse (ACCESS-REQ-STALE): deferred.
   A lapse needs request creation (0086), which reuses a pending request, the
   approval command and both lists to change together, beyond this change's
@@ -4217,15 +4221,16 @@ records the refusal with `details.code` `UPLOADS_DISABLED` and outcome
 `423` is reached only once a reviewed migration grants the permission again
 while the control is still off.
 
-## ADR-058 addendum: break-glass permitted at launch with limits (0095); on only after the P11 operator step
+## ADR-058 addendum: break-glass permitted at launch with limits (0097); on only after the P11 operator step
 
 Status: Decided by the owner on 2026-10-14 (D9, "turn on with limits").
-Source implementation proposed (migration 0095, branch
+Source implementation proposed (migration 0097, branch
 `claude/break-glass-launch`, D-Eminence/hid-system#83); not merged or
-deployed. Written as 0092 and then 0093, it is numbered 0095, after 0093 and
-0094 of D-Eminence/hid-system#84 and #85 (ADR-062, ADR-063), which change
-neither the break-glass permission, the purpose-of-use vocabulary nor the
-platform controls. The platform control is
+deployed. Written as 0092, then 0093, then 0095, it is numbered 0097, after
+0093 and 0094 of D-Eminence/hid-system#84 and #85 (ADR-062, ADR-063) and
+0095 and 0096 of D-Eminence/hid-system#90 and #91 (ADR-064, ADR-065), which
+change neither the break-glass permission, the purpose-of-use vocabulary nor
+the platform controls. The platform control is
 production configuration and is not changed here: it is an operator step.
 
 Date: 2026-10-14
@@ -4245,7 +4250,7 @@ is unaffected.
 
 Decision:
 
-- 0095 grants `identity.break-glass.write` to exactly the roles that held it
+- 0097 grants `identity.break-glass.write` to exactly the roles that held it
   before 0091: doctor, clinician and nurse (0010; no other migration granted
   it to another role). It seeds `emergency` ("Emergency treatment", active,
   source `hid`) with `ON CONFLICT (code) DO NOTHING`, as 0082 seeded
@@ -4256,16 +4261,16 @@ Decision:
 - The role assertions change with it: exactly those three roles hold
   `identity.break-glass.write`. Any other holder, a missing one, or any other
   permission 0084 or 0091 withdrew still stops the bootstrap.
-- The control stays the operator's. 0095 leaves `break_glass_enabled` as 0091
+- The control stays the operator's. 0097 leaves `break_glass_enabled` as 0091
   left it (off where still seeded; a migration has no actor for a control
   event), and refuses to run while it is on (`55000 BREAK_GLASS_CONTROL_ON`,
   nothing changed): 0091 kept a value an administrator had set, and granting
-  the permission with the control on would make break-glass live at 0095's
+  the permission with the control on would make break-glass live at 0097's
   commit, before staff MFA. The administrator sets it off with
   `POST /admin/controls` and `migrate` runs again. Before the first role
   bootstrap the migration administrator cannot read the control (forced
   row-level security, `PLATFORM_CONTROL_UNAVAILABLE`); no runtime role exists
-  then, so the control is as 0091 left it, and 0095 goes on. A platform
+  then, so the control is as 0091 left it, and 0097 goes on. A platform
   administrator turns it on with the audited
   `POST /admin/controls` (MFA platform session, TOTP step-up, reason,
   `If-Match`) once staff MFA has shipped: Identity runs with 0088 in that
@@ -4316,13 +4321,13 @@ Alternatives not taken:
 - Refusing the emergency purpose on the document routes now: it would decide
   N3's document question, which the owner has not decided, and N3's proposed
   default keeps today's reads; no document exists at launch.
-- Checking the control only in the release checklist before 0095: 0095's own
+- Checking the control only in the release checklist before 0097: 0097's own
   precondition also covers a database the checklist does not reach (a
   long-lived development or pre-launch copy).
 
 Consequences:
 
-- From 0095's commit, doctors', clinicians' and nurses' sessions list
+- From 0097's commit, doctors', clinicians' and nurses' sessions list
   `identity.break-glass.write` on their next request (Identity reads
   permissions per request), and Health-id `077b85c` enables its Emergency
   method for them. While the control is off the activation answers
@@ -4332,7 +4337,7 @@ Consequences:
 - After the operator step, activation is live: grant, audit, emergency-contact
   alert intent (delivered only where emergency-contact delivery is enabled)
   and inbox item, and the summary as above.
-- An earlier release's bootstrap refuses a database that holds 0095 (its
+- An earlier release's bootstrap refuses a database that holds 0097 (its
   assertion forbids the permission). Break-glass is turned off again with the
   control (or by deactivating `emergency`); taking the permission away again
   is a new reviewed migration, never a hand-made delete, which would stop the
@@ -4346,15 +4351,15 @@ Consequences:
 - Evidence is local and synthetic: the rollback-only suite
   `break-glass-launch.integration.sql` (which sets the control itself through
   the administrator command, so it does not depend on the environment's
-  control), the role assertions, 0095's precondition run again by
+  control), the role assertions, 0097's precondition run again by
   `verify-non-superuser-database.mjs`, and the patient-safety runtime verifier
   over HTTP with the control off, on and off again (release checklist §8).
   Nothing has been run on staging or production.
 
 Related: ADR-054 (staff MFA); ADR-058; `PHASE_3_LAUNCH_DECISIONS.md` (D9, N3);
 `INTERFACE_CONTRACT.md` (break-glass, launch module set); `DATABASE.md`
-("Break-glass at launch, with limits (0095)"); release checklist §1, §2, §3,
-P10, P11, §5, S4w, §8, §9, §10.
+("Break-glass at launch, with limits (0097)"); release checklist §1, §2, §3,
+P10, P11, §5, S4y, §8, §9, §10.
 
 # ADR-059: A Fault Is Never a Sign-Out; Refusals Carry Their Own Codes
 
@@ -4558,9 +4563,9 @@ Consequences:
 - iOS delivers web push only to Home-Screen web apps, which need a manifest
   that ADR-052 also forbids; this is a separate choice.
 - The FCM adapter stays for a future native app.
-- Draft D-Eminence/hid-system#8 (Novu subscriber sync) does not touch devices
-  or push; the migration takes the next free number on `main` when the work
-  starts.
+- The Novu subscriber sync of draft D-Eminence/hid-system#8 is ported as
+  ADR-064 (migration 0095, D-Eminence/hid-system#90); it does not touch devices or
+  push.
 
 Open for the owner: approve web push as a patient channel; the ADR-052
 amendment; iOS; DPO review of subscription data (an endpoint identifies a
@@ -4962,6 +4967,404 @@ Related: ADR-062; ADR-054 (staff MFA); ADR-049 (workforce provisioning);
 `PHASE_3_LAUNCH_DECISIONS.md` N2(d) and D17; `INTERFACE_CONTRACT.md`,
 "Facility-assisted registration"; `DATABASE.md`, "Facility-assisted
 registration (0094)".
+
+# ADR-064: Novu receives the patient's verified login email, behind a flag; the in-app notice never depends on it
+
+Status: Merged (D-Eminence/hid-system#90, migration 0095), not deployed.
+`NOVU_SUBSCRIBER_SYNC` is off by default and refused in production. Its
+numbers 0095, ADR-064, P35 and S4w are final.
+
+Date: 2026-10-16
+
+Context:
+
+- Main's notification worker triggers Novu by `subscriberId` (the canonical
+  patient UUID) with a generic sign-in message and gives Novu no contact.
+  An email reaches a patient only if someone maps the subscriber's email by
+  hand (`STAGING_PROVIDER_ACCOUNTS.md`).
+- Owner decision 2 of 2026-10-16: Novu may receive the patient's verified
+  email.
+- The draft D-Eminence/hid-system#8 did this on an old base. It sent names,
+  read `identity.patients` and `auth.accounts` from the worker's pool, made
+  every phone-only patient's event terminal, and suppressed every event,
+  safety notices included, for an opted-out patient. None of that is ported.
+- Main's worker login holds no Identity or Auth table privilege, and is no
+  member of the event-delivery technical owner (`runtime-roles.integration.sql`).
+- A review of the first design found two failure modes this ADR closes: a
+  failed subscriber call could make in-app safety notices terminal, and an
+  opt-out did not hold once an email had been synced.
+- A review of the second design found three more, also closed below: the
+  lookup emailed suspended logins and logins whose deletion was due; a
+  retried event's clear could be answered from Novu's idempotency replay
+  cache without being applied; and an upsert could reach Novu after a later
+  event's clear when the login was deleted or disabled in between.
+
+Decision:
+
+- Flag. The worker setting `NOVU_SUBSCRIBER_SYNC=disabled|email`, default
+  `disabled`. With `disabled` the worker is main's exactly: no lookup, no
+  subscriber call, main's trigger body and idempotency key, no new output.
+  `email` is refused for a production deployment (`HID_DEPLOYMENT_ENV`,
+  new in the worker and defaulting to `production`, or `NODE_ENV=production`
+  without `HID_DEPLOYMENT_ENV=staging`), as notification-api refuses
+  `EMERGENCY_CONTACT_DELIVERY_ENABLED`. It needs the live orchestrator, and
+  under `NODE_ENV=production` an approved Novu region origin
+  (`https://api.novu.co` or `https://eu.api.novu.co`). The synth input
+  `HID_NOVU_SUBSCRIBER_SYNC_ENABLED` (default `false`) may be `true` only in
+  staging, with the worker enabled.
+- Data. Novu receives the `subscriberId` it already receives and, for an
+  eligible patient, the verified login email (`auth.accounts.email`). No
+  name, phone, NIN, clinical value or reason. The trigger payload is
+  unchanged.
+- Lookup (0095). `integration.notification_recipient_for_claim(event,
+  claim token, patient)` checks the inbox consumer as main's inbox commands
+  do (`integration.assert_inbox_consumer_authorized`), requires the
+  consumer row bound to `hid_notification_worker`, the worker's live claim
+  (55000 otherwise) and an outbox envelope that matches the claim
+  (producer, type, version, correlation, a workflow event type and the
+  patient). It belongs to `hid_event_delivery_commands`, moved in main's
+  CREATE window, and only the worker executes it. It reads the patient and
+  login through the private helper `integration.notification_recipient_state`,
+  owned by the migration administrator (the owner of the three tables it
+  reads, `identity.patients`, `auth.accounts` and
+  `identity.patient_account_deletion_requests`, which needs no BYPASSRLS
+  because none of them forces row-level security) and executable only by
+  the technical owner. The answer is
+  `('email', address)` or `('withhold', null)`; no row when the claim binds
+  no envelope.
+- Eligible for email: an active patient with notifications on, whose login
+  is usable as main's `identity.current_patient_account` defines it (0064:
+  status active, no suspension ahead in `disabled_until`, no confirmed
+  deletion whose `scheduled_for` has passed) and has a verified, non-blank
+  email. Everyone else is withheld: a phone-only login, an unverified or
+  blank email, no login, a login that is pending_reset, locked, disabled,
+  deleted, suspended or due for deletion, a patient who is not active,
+  notifications off. A deletion confirmed but not yet due keeps the email,
+  as the login itself stays usable until then.
+- Keys. Novu answers a seen idempotency key from its cache for 24 hours,
+  success or error, without processing the request again. So both
+  subscriber keys include the attempt's inbox claim token (unique per
+  attempt, hashed, never sent): a retried event clears or sets the email
+  again instead of receiving the first attempt's cached answer. Setting or
+  clearing an email is idempotent, so nothing is lost. Main's trigger key
+  (the event id) and the email-withheld trigger key stay per event: they
+  dedupe the in-app notice.
+- Eligible: `POST /v2/subscribers` (Novu upserts) with exactly
+  `{subscriberId, email}` and the idempotency key
+  sha256("hid-novu-subscriber-email-v1", event id, claim token,
+  sha256(email)). Then the worker asks the lookup again under the same
+  claim. If it answers the same address, main's trigger follows, whatever
+  the sync answered. Otherwise (withheld, another address or a failed
+  lookup) the event is handled as withheld below, so an upsert that reached
+  Novu after a concurrent event's clear (the login deleted, disabled,
+  locked or reset in between) is cleared again before this trigger. A claim
+  lost at the second lookup clears the email and stops.
+- Withheld: `PATCH /v2/subscribers/{subscriberId}` with `{"email": null}`
+  (the field is nullable; 404 means Novu has no such subscriber, so no
+  email) and the key sha256("hid-novu-subscriber-email-clear-v1", event id,
+  claim token), then main's trigger once the clear is confirmed. When it is not
+  confirmed (timeout, 408, 409, 429, 5xx or a refusal), the worker sends
+  instead the trigger that clears the email itself: main's workflow and
+  message to `{subscriberId, email: null}` under its own key
+  (`hid-novu-trigger-email-withheld-v1`). Novu's trigger creates or
+  updates the subscriber it names (the `to` fields are nullable), so the
+  email is cleared by the same request that sends the in-app notice; S4w
+  confirms on staging that the update comes before the Email step.
+- The in-app notice never depends on a subscriber call. No subscriber
+  answer decides whether a trigger is sent, delays it or fails the event:
+  the inbox outcome is the trigger's own outcome, handled as main handles
+  it (accepted completes; unknown retries; a definitive failure is
+  terminal). Safety notices (`EmergencyAccessActivated`,
+  `PatientAccessPinVerified`) go in-app for every patient.
+- A recipient lookup that fails is handled as withheld (clear, then the
+  trigger), so it neither retries the event nor emails. A claim lost to
+  another worker (55000) stops without failing or acknowledging the message.
+- Startup: with the flag on, the worker refuses to start unless the lookup
+  exists and its login may execute it, after main's runtime-role guard.
+- Records: each subscriber call writes one PHI-free row per attempt in
+  `notification.delivery_attempts` (`novu-subscriber-email-v1` or
+  `novu-subscriber-email-clear-v1`, channel `email`, outcome and fixed safe
+  code, no address and nothing derived from it); a row that cannot be
+  written never holds back the trigger. Each flag-on event attempt writes one
+  `notification.worker.outcome` stdout line with the event type, the
+  correlation id (only in the outbox's own shape, otherwise `invalid`) and
+  fixed codes only.
+
+Proposed defaults (owner questions answered with the safest choice):
+
+- Safety notices to an opted-out patient: in-app only, no email. Emailing
+  them would need a per-workflow rule that the shared `patient-update-v1`
+  workflow cannot express.
+- Deleted logins and patients who are not active keep main's in-app
+  trigger: no new suppression. Their Novu email is cleared before it.
+  Suppressing the trigger itself stays the F4 decision
+  (`PHASE_3_PATIENT_SAFETY.md`).
+- The Novu subscriber is not deleted when a login is deleted. That needs an
+  event from the account deletion and a Novu delete call; it is a follow-up,
+  not built, and it is required before the production refusal is lifted
+  (staging uses synthetic patients only, S4w). Until then, while
+  `NOVU_SUBSCRIBER_SYNC=email` stays on, the next event for a deleted login
+  clears its email at Novu, and a request to erase it is handled in the
+  Novu dashboard.
+- Suspended logins and logins whose deletion is due are withheld as main
+  withholds them from sign-in; no new state is added for them.
+- A claim lost after a sync: the worker clears the email it may have set and
+  stops. The worker that now holds the event decides for itself, so an
+  eligible patient misses at most this attempt's email.
+- Turning the flag off or rolling the worker back is a reviewed operation:
+  every subscriber with a `novu-subscriber-email-v1` disclosure row has its
+  email cleared or the subscriber deleted at Novu first (release checklist
+  §9).
+- A failed sync skips the email for that event only. Novu then emails at
+  most the address an earlier sync of the same account stored: no route on
+  main changes a login's email, so that is the same verified address.
+- Phone-only patients get main's in-app trigger and one clear call per
+  event, which keeps the opt-out true even after a manual staging mapping.
+- The disclosure rows are kept (an auditable record that an address was
+  given to Novu for an event), with the log line.
+- The helper stays with the migration administrator and only the technical
+  owner executes it; a dedicated NOLOGIN reader is the fallback if
+  `identity.patients` ever forces row-level security (the owner pass of the
+  new suite would fail first).
+- Production refuses the flag unconditionally. Lifting it is a reviewed
+  change after P35 and the subscriber deletion follow-up, not a setting.
+
+Consequences:
+
+- With the flag off the worker runs main's code path: no lookup, no
+  subscriber call, main's trigger. 0095 only adds two functions and their
+  grants. That is main's behaviour only if the flag was never on: emails it
+  synced stay on the Novu subscribers, and main's trigger can then email
+  them, opted-out and deleted patients included. Release checklist §9 clears
+  them before the flag is turned off.
+- With the flag on in staging, a verified-email patient's notice can arrive
+  by email as well as in-app, once the staging workflow has an Email step
+  (S4w); phone-only patients see no change.
+- Every flag-on event makes one extra Novu call (sync or clear), two when a
+  second lookup after a sync withdraws it (sync, then clear), and one extra
+  lookup after every sync.
+- Health-id needs no API change. Before the flag is set where Health-id
+  serves real patients, its privacy notice must name the processor and the
+  data, and the account deletion screen must say that email updates stop and
+  that the provider may keep the address until it is removed on request.
+
+Residual risks:
+
+- Novu semantics are taken from its API reference, not from a call: the
+  upsert, the nullable email on PATCH and on the trigger's `to`, and the
+  order of the trigger's subscriber update before the Email step. S4w
+  confirms them on staging before the flag is set anywhere.
+- Concurrency. Main routes change eligibility while events are in flight:
+  account deletion (0064, at `scheduled_for` and at finalization), and the
+  administrator's disable, lock and reset (0068), besides an imported
+  `notifications_enabled`. The second lookup after a sync closes the window
+  for every upsert Novu applies before answering. It stays open for an
+  upsert whose answer never arrives (timeout) and that Novu applies only
+  after this worker's second lookup and a later event's clear: the address
+  then stays at Novu, unused by HID triggers while the flag stays on (every
+  later event for that patient clears first), until the deletion follow-up
+  or a manual deletion.
+- Retries reuse nothing at Novu for subscriber calls (per-attempt keys).
+  Main's trigger key is the event id, as on main: a retried trigger whose
+  first attempt Novu processed is answered from the cache and sends no
+  second notice.
+- Flag off after on: see Consequences; the §9 step is manual.
+- The key protects personal data now: Novu's API key has full
+  administrative access to the subscribers.
+- The region (US or EU), the data processing agreement and the NDPA
+  transfer basis are not decided; P35 needs them before any non-local use.
+
+Related: ADR-053 and D17 (the worker is off in production); ADR-058
+(NOTIF-PIN-NOTICE); ADR-060; `PHASE_3_LAUNCH_DECISIONS.md` NOTIF-PIN-NOTICE;
+`INTERFACE_CONTRACT.md`, "Notification worker to Novu"; `DATABASE.md`,
+"Notification verified recipient (0095)"; release checklist P35 and S4w.
+
+# ADR-065: Patient record release
+
+Status: Accepted in source (migration 0096). Not merged, not deployed. Every
+release flag is off, and the production profile refuses each of them.
+
+Date: 2026-10-16
+
+Context:
+
+- Since 0084 a patient sees only their completed encounters and the signed or
+  amended notes of those encounters; the summary names vitals, diagnoses,
+  prescriptions, lab requests and documents as withheld. D7 proposed the
+  rules for releasing more and left the categories to the owner.
+- On 2026-10-16 the owner approved (decision 4) that patients see their
+  diagnoses, prescriptions, Lab results, vitals and documents as well.
+- The PR #8 branch released these through new patient-self policies on each
+  table and a patient-self route in lab-api. On main the patient-self context
+  is bound to the patient's live session (0091, PSELF-RLS) and only the EHR
+  runtime may evaluate it; Lab is off at launch (launch module set D17) and
+  lab-api never receives patient credentials or patient-self context. Lab's
+  released results live in Lab's tables, which the EHR runtime cannot read.
+
+Decision:
+
+- One release set in EHR. `PatientRecordRelease`
+  (`services/ehr-api/src/ehr/patient-records/patient-release.ts`) is the
+  single service function that decides and reads what a patient sees: the
+  always released encounters and notes, plus each approved category whose
+  flag is on. Later features that show a patient their records (imported
+  records, record chat) use it and do not define their own.
+- One flag per category, all off by default: `EHR_PATIENT_RELEASE_VITALS`,
+  `EHR_PATIENT_RELEASE_DIAGNOSES`, `EHR_PATIENT_RELEASE_PRESCRIPTIONS`,
+  `EHR_PATIENT_RELEASE_LAB_RESULTS` and `EHR_PATIENT_RELEASE_DOCUMENTS`
+  (synth inputs `HID_EHR_PATIENT_RELEASE_*`). With every flag off the
+  summary is byte-for-byte what it was. The EHR production profile refuses
+  every one of them, as `HID_NOTIFICATION_WORKER_ENABLED` is fixed false in
+  production: Lab results while Lab is off at launch (D17), and the other
+  four until the clinical owner signs off each category and its wording
+  (release checklist P36), since no clinician-review gate or sensitivity
+  classification is built. `infra/aws` (`environmentConfig` and the regional
+  stack) and `verify-synth` refuse every input outside staging; the AWS
+  development stack runs ehr-api in the production profile
+  (`HID_DEPLOYMENT_ENV=production`), so it opts in to nothing. Staging and a
+  local run with `HID_DEPLOYMENT_ENV=development` may opt in. A reviewed
+  change that records a category's P36 sign-off lifts that category's
+  refusal. EHR also refuses documents without S3 storage.
+- D7's rules, as adopted by the owner: only items of a completed encounter;
+  never a draft, an unconfirmed or refuted diagnosis or anything entered in
+  error; documents only once a patient download route exists; the categories
+  are the owner's (diagnoses, prescriptions, Lab results, vitals and
+  documents). Every further rule this change builds is a proposed default
+  (below), not part of D7.
+- D8 interim: a corrected vital is withheld from the patient (shown to
+  clinicians as today) until D8 decides what a correction means.
+- The database follows the flags. 0096 adds five PUBLIC patient-release
+  policies (vitals, diagnoses, prescriptions, documents and their scan
+  events) and the Lab view below, each gated by
+  `ehr.patient_self_context(patient_id)` and by its category in the
+  transaction-local `app.patient_release`. Only `PatientRecordRelease.bind`
+  sets it, to the categories whose flag is on, inside main's patient-self
+  transaction (session-bound context, `@PatientOnly` route, Identity's fresh
+  patient-self authorization through the EHR workload, delegated cookie reads
+  unchanged, the audit event `ehr.patient.self.records.read` with counts
+  only); `DatabaseService.withPatientTransaction` starts it empty. So the two
+  layers of main's model hold per category: with a flag off, neither the
+  service nor the database releases that category, and an EHR build that
+  never sets it (every earlier build, including one from before
+  D-Eminence/hid-system#52) reads nothing new.
+- Rows, not columns. Row-level security cannot restrict columns, as for
+  encounters and notes since 0030: within a released category the database
+  admits whole rows, and the service's `SELECT` lists are what withhold the
+  diagnosis `notes`, a document's storage location and staff columns and a
+  scan event's staff columns (the download needs the storage location to sign
+  its URL). This is accepted: it is main's model for every patient-self read,
+  and a column-restricting view per table would duplicate
+  `ehr.documents_effective`. The Lab view restricts columns as well.
+- Lab results without Lab. The EHR patient transaction reads
+  `ehr.patient_released_lab_results`, a `security_barrier` view over Lab's
+  release tables owned by the technical role `hid_lab_release_reader`
+  (NOLOGIN, no member, no schema `USAGE`, column `SELECT` only on what the
+  view reads, one `for select ... using (true)` policy on each table it
+  reads, no privilege on the view itself). Functions in a view run as its
+  caller: the view's patient-self condition and the encounters' policies are
+  evaluated by the EHR runtime under the patient's binding, and the owner can
+  evaluate neither. That patient-self condition is what keeps a consented
+  staff context from reading released Lab values outside lab-api's checks
+  and audit. Only the EHR runtime and the test role may select the view.
+  Options considered:
+  - lab-api reads with patient-self context (the PR #8 route): rejected; it
+    would grant `ehr.patient_self_context` (or a Lab twin) to a Lab role and
+    send patient credentials to lab-api, which D17 and PSELF-RLS exclude, and
+    it needs Lab running.
+  - A workload-asserted Lab route (EHR names the patient to lab-api):
+    rejected; nothing in Lab's transaction binds the patient to a live
+    patient session, so lab-api would trust EHR's word for the patient.
+  - Copy released results into an EHR table: rejected; a second copy to keep
+    in step with corrections and invalidations, and a writer for it.
+  - Two security definers (an EHR function calling a Lab-owned one): rejected;
+    it needs cross-owner `EXECUTE` and a definer that trusts its caller's
+    patient argument.
+  - The caller-evaluated view owned by a technical role: chosen. It needs no
+    new `EXECUTE` and no Lab runtime privilege, and works on RDS, where the
+    owner of the Lab tables does not bypass `FORCE ROW LEVEL SECURITY`.
+- Each section reads through an index in its own order (vitals, diagnoses,
+  prescriptions; Lab results through the view's), so it stops after the rows
+  it shows; a statement timeout of any released section, which the documents
+  section can still reach for a patient with thousands of documents, answers
+  `503 PATIENT_RECORDS_UNAVAILABLE`.
+- Patient document download. `GET /api/v1/ehr/me/documents/:documentId/download`
+  (`@PatientOnly`, facility-optional) re-checks the release conditions in the
+  patient transaction, audits `ehr.patient.self.document.download` (media
+  type and size only) before anything is signed, reads back the exact
+  version's size, SHA-256 and encryption, and signs a 60 s attachment URL with
+  `Cache-Control: private, no-store`. Every refusal is the same `404
+  DOCUMENT_NOT_AVAILABLE`. The staff download route is unchanged.
+- No caregiver, guardian or other delegated access (ADR-018 requires an
+  explicit delegated-access model, which does not exist).
+
+Proposed defaults (open owner questions; the safest default is built):
+
+- Every release flag stays off in production, and the production profile
+  refuses it, until the clinical owner signs off that category and its
+  wording (release checklist P36). No delay or clinician-review gate and no
+  sensitivity classification is built. Lab results are refused in production
+  until Lab is re-enabled as well.
+- Corrected vitals are withheld while D8 is open.
+- Cancelled prescriptions are not shown; only active, on hold and completed.
+- Clinician free text stays withheld (diagnosis `notes`, Lab correction and
+  release reasons), and so do staff identities.
+- An item entered in error, refuted, invalidated or retracted after release
+  disappears without a "withdrawn" marker or inbox notice.
+- Restricted and internal documents, and documents attached to no
+  encounter, are never released.
+- A Lab result needs its source encounter completed as well as its release.
+- A released Lab result is shown only while its source EHR order is active,
+  on hold or completed: once the order is cancelled or entered in error the
+  patient no longer sees it. This departs from D10, where Lab refuses work on
+  a cancelled order but its released results stay in Lab's released history
+  for staff; for the patient a cancelled order's result is withheld until the
+  owner decides otherwise.
+- Lab requests are never released.
+- No caregiver, guardian or proxy access.
+- Each new category returns at most 100 rows, newest first, with
+  `truncated`; the audit records counts only.
+- The migration, ADR and checklist numbers are assigned at merge.
+- The EHR task role's `s3:GetObject`, `s3:GetObjectVersion` and `kms:Decrypt`
+  via S3 cover `HeadObject` with checksum mode on SSE-KMS objects; staging
+  check S4x confirms it before documents are released.
+
+Consequences:
+
+- With every flag off nothing changes for patients, staff or Health-id, and
+  the database refuses the new categories to the patient as before 0096.
+- A deployment can release each category on its own, once its P36 sign-off
+  lifts its production refusal. The database admits at most the rows the
+  0096 rules allow for the categories the transaction names; a wrong
+  `SELECT` list in EHR could still return a column of a released row that
+  the service means to withhold (rows, not columns).
+- The role bootstrap must run after 0096: until it does, a configured Lab
+  results section answers `503 PATIENT_RECORDS_UNAVAILABLE` and discloses
+  nothing.
+- Rolling the EHR API back to any earlier build on a database with 0096
+  releases nothing new: no earlier build sets `app.patient_release`.
+- Health-id renders none of the new sections or the download; the flags stay
+  off until it does (P36).
+
+Residual risks:
+
+- A released abnormal result or a sensitive diagnosis reaches the patient
+  without a clinician's explanation (no review gate; P36 sign-off).
+- A withdrawn item vanishes silently; a patient who saw it is not told why.
+- A staging database built from the PR #8 branch may hold its permissive
+  patient-self policies, which would widen the release whatever
+  `app.patient_release` says; the SQL suite's exact policy inventory fails on
+  them (P36 preflight).
+- The view's owner reads Lab's release tables unfiltered; it is safe only
+  while it has no login, no member and no other privilege, which
+  `runtime-roles.integration.sql` asserts.
+- `app.patient_release` is set by the EHR runtime itself, like the rest of
+  the patient-self binding, so it guards against a wrong flag check or query
+  in EHR and against older builds, not against code running as the EHR
+  runtime.
+
+Related: ADR-018; ADR-058 (PSELF-RLS); `PHASE_3_LAUNCH_DECISIONS.md` D7, D8
+and D17; `INTERFACE_CONTRACT.md`, "Record summaries" and "Patient document
+download"; `DATABASE.md`, "Patient record release (0096)".
 
 # ADR-064: Doctors and Nurses Apply by Themselves; They Set Up an Authenticator Before Review, and Two Platform Administrators Still Verify and Grant Every Clinical Role
 

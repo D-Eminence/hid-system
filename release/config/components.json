@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0096",
-    "count": 96,
+    "last": "0097",
+    "count": 97,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -475,8 +475,16 @@
         "sha256": "322f2baa20fbe68764cfed4fd54a278653a367f213aa4fc0418d2b26c4a0aae8"
       },
       {
-        "name": "0095_break_glass_launch_with_limits.sql",
-        "sha256": "02db04c8f4baface75ba6b09db6a9089ed4654f493ae4b9394330ccdd67d48fb"
+        "name": "0095_notification_verified_recipient.sql",
+        "sha256": "dfe23d2d07ecf859f173ad67123581ed67ec4a954c416f5bf8afac9713da12ff"
+      },
+      {
+        "name": "0096_patient_record_release.sql",
+        "sha256": "06c534de5228b42fec9238fc0bafc46557dbf703820115e96ea6b598689473b2"
+      },
+      {
+        "name": "0097_break_glass_launch_with_limits.sql",
+        "sha256": "6b176cd8e30f9e94e53cd5b06cae3f514bb7b9b51443028dfec7f4cf3e4b27d4"
       },
       {
         "name": "0096_clinician_self_signup.sql",

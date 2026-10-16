@@ -26,3 +26,21 @@ export interface ClaimedInbox {
   claimToken?: string;
   attemptCount: number;
 }
+
+/**
+ * The claim-bound recipient answer (0095, ADR-064). It never carries a name.
+ * `withhold` covers every patient who may not be emailed; `bound` is false
+ * when the claim bound no outbox event of that patient.
+ */
+export type RecipientDelivery =
+  | { delivery: 'email'; email: string }
+  | { delivery: 'withhold'; bound: boolean };
+
+/** The outcome of a Novu subscriber call: confirmed, rejected (4xx) or unknown. */
+export interface SubscriberOperationResult {
+  outcome: 'confirmed' | 'rejected' | 'unknown';
+  provider: 'novu';
+  safeCode?: string;
+}
+
+export type SubscriberOperation = 'email' | 'clear';

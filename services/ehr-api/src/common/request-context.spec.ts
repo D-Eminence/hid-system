@@ -127,7 +127,7 @@ describe('EHR header-purpose routes refuse a missing purpose before any work', (
     }
   });
 
-  // Break-glass at launch (0095, D9): the chart routes accept only direct-care,
+  // Break-glass at launch (0097, D9): the chart routes accept only direct-care,
   // but the document list and download keep taking the emergency purpose, so
   // a break-glass grant reads the activating facility's documents as before.
   // Whether it should is open (N3, Health-id hand-off B1(c)); this pins the
