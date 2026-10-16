@@ -579,10 +579,19 @@ try {
   for (const key of addedControls) {
     assert.equal(controlsAfter[key].enabled, false, `the latest migration added ${key} on`);
   }
-  // As a guard reads them: platform.control_enabled as the Identity runtime.
+  const rdsBootstrap = [bootstrap('role bootstrap after the latest migration on the RDS path', [], rds),
+    bootstrap('db:verify-roles after the latest migration on the RDS path', ['--verify-only'], rds)];
+  assert.deepEqual(rdsBootstrap, ['Runtime database roles provisioned and verified',
+    'Runtime database role verification passed']);
+  // As a guard reads them once the bootstrap has granted the runtime its
+  // schema access: platform.control_enabled as the Identity runtime, each
+  // control as stored, the opened clinician sign-up included.
+  assert.deepEqual(controlRows('control rows after the bootstrap on the RDS path'), controlsAfter,
+    'the role bootstrap changed a control row');
   const guardReads = psql('controls read as the Identity runtime after the latest migration', superuser,
     `set role hid_identity_api_runtime; select string_agg(key || '=' || platform.control_enabled(key), ','
-       order by key) from unnest(array['${Object.keys(controlsAfter).join("', '")}']) key`, 0, rds).stdout.trim();
+       order by key) from unnest(array['${Object.keys(controlsAfter).join("', '")}']) key`, 0, rds)
+    .stdout.trim().split('\n').at(-1);
   assert.equal(guardReads, Object.keys(controlsAfter).sort()
     .map((key) => `${key}=${controlsAfter[key].enabled ? 'true' : 'false'}`).join(','));
   psql('clinician sign-up closed again after the check', superuser,
@@ -592,10 +601,6 @@ try {
       where control_key = 'clinician_signup_enabled'`, 0, rds);
   assert.deepEqual(controlRows('control rows after the check')?.clinician_signup_enabled,
     seededControls.clinician_signup_enabled);
-  const rdsBootstrap = [bootstrap('role bootstrap after the latest migration on the RDS path', [], rds),
-    bootstrap('db:verify-roles after the latest migration on the RDS path', ['--verify-only'], rds)];
-  assert.deepEqual(rdsBootstrap, ['Runtime database roles provisioned and verified',
-    'Runtime database role verification passed']);
   evidence.steps.latest_migration_after_bootstrap = { database: rds, through: files.at(-2), migration: files.at(-1),
     technical_objects_transferred: transferred.length, control_enabled: ownersAfter.control_enabled.split('|')[0],
     acl_unchanged: true, inherit_or_set_memberships: ownersAfter.inherit_or_set_memberships, bootstrap: rdsBootstrap,
@@ -657,7 +662,7 @@ try {
       .stdout.trim().split('\n')[0];
     // The last two are clinician self sign-up's intake control and patient
     // record chat's kill switch, each seeded off by its migration.
-    assert.equal(controls[credential], 'true,true,false,false,false,false,false');
+    assert.equal(controls[credential], 'true,true,false,false,false,false,false,false');
   }
   evidence.steps.platform_controls = { read_as: controls, owner: psql('control owner', superuser,
     `select proowner::regrole from pg_proc where oid = 'platform.control_enabled(text)'::regprocedure`).stdout.trim() };
