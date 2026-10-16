@@ -16,7 +16,8 @@ export function corsOptions(corsOrigins: string): CorsOptions {
       else callback(new DomainProblem(403, 'ORIGIN_DENIED', 'Request origin is not allowed'), false);
     },
     credentials: true,
-    methods: ['GET', 'POST', 'PATCH', 'OPTIONS'],
+    // DELETE: the patient's record chat history (DELETE /ehr/me/chat/history).
+    methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: [
       'authorization',
       'content-type',
@@ -27,7 +28,8 @@ export function corsOptions(corsOrigins: string): CorsOptions {
       'x-facility-id',
       'x-purpose-of-use',
     ],
-    exposedHeaders: ['etag', 'location', 'x-correlation-id', 'x-csrf-token'],
+    // retry-after: record chat's 429 answers name when to try again.
+    exposedHeaders: ['etag', 'location', 'retry-after', 'x-correlation-id', 'x-csrf-token'],
     maxAge: 600,
   };
 }
