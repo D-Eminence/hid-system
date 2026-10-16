@@ -512,7 +512,10 @@ RDS accepts connections only from the service tasks and from the migration
 security group, which the one-shot migration task and the one-shot
 provisioning task use, so every `npm run db:*` and `admin:bootstrap` step
 above runs as one of them. The migration task's image is distroless: no shell and no npm, and its entrypoint
-is `/nodejs/bin/node`, so a command override names the script. The task maps
+is `/nodejs/bin/node`, so a command override names the script. Both tasks run
+it as the image's own user, UID/GID 65532 (neither task definition sets one),
+from `/app/services/ehr-api` with a read-only root filesystem; no step writes
+a file. The task maps
 the migration administrator's `url` as both `DATABASE_URL` and
 `DATABASE_ADMIN_URL`; its security group reaches only RDS, the AWS endpoints
 and Amazon S3. Run it from the stack outputs `MigrationTaskDefinitionArn`,
