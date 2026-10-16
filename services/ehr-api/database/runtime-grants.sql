@@ -817,6 +817,11 @@ grant select (id, patient_id, facility_id, status) on ehr.encounters to hid_lab_
 grant create on schema ehr to hid_lab_release_reader;
 alter view ehr.patient_released_lab_results owner to hid_lab_release_reader;
 revoke create on schema ehr from hid_lab_release_reader;
+-- The migration's REVOKE ... FROM PUBLIC leaves an explicit entry of the
+-- view's owner, which the transfer hands to hid_lab_release_reader; remove it
+-- now, so the first run already leaves the ACL that every later run does
+-- (the owner needs no privilege on its own view).
+revoke all on ehr.patient_released_lab_results from hid_lab_release_reader;
 grant select on ehr.patient_released_lab_results to hid_ehr_runtime, hid_schema_test_runtime;
 
 grant usage on schema platform,identity,lab to hid_lab_runtime;
