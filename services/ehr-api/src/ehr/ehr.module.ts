@@ -9,6 +9,9 @@ import { OcrIntegrationModule } from './ocr-integration/ocr-integration.module';
 import { PatientRecordsController } from './patient-records/patient-records.controller';
 import { PatientRecordsService } from './patient-records/patient-records.service';
 import { ClinicalInfrastructureModule } from './shared/clinical-infrastructure.module';
+import { getEnvironment } from '../config/environment';
+import { StorageModule } from '../storage/storage.module';
+import { configuredPatientRelease, PatientRecordRelease } from './patient-records/patient-release';
 
 @Module({
   imports: [
@@ -20,8 +23,15 @@ import { ClinicalInfrastructureModule } from './shared/clinical-infrastructure.m
     DiagnosesModule,
     PrescriptionsModule,
     LabRequestsModule,
+    StorageModule,
   ],
   controllers: [PatientRecordsController],
-  providers: [PatientRecordsService],
+  providers: [
+    PatientRecordsService,
+    // The patient record release this deployment configures (one flag per
+    // category, default off): the single release set every patient reader uses.
+    { provide: PatientRecordRelease, useFactory: () => new PatientRecordRelease(configuredPatientRelease(getEnvironment())) },
+  ],
+  exports: [PatientRecordRelease],
 })
 export class EhrModule {}

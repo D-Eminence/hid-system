@@ -25,7 +25,7 @@ describe('S3 document storage: exact version inspection and attachment downloads
   const original = { ...process.env };
   let send: jest.SpyInstance;
 
-  function provider(kms: string | undefined = KMS_KEY): S3StorageProvider {
+  function provider(kms: string | null = KMS_KEY): S3StorageProvider {
     for (const key of Object.keys(process.env)) if (!(key in original)) delete process.env[key];
     Object.assign(process.env, original, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://ehr:test@localhost/hid',
       CORS_ORIGINS: 'http://127.0.0.1', STORAGE_MODE: 's3', S3_BUCKET: 'synthetic-bucket', S3_REGION: 'eu-west-1' });
@@ -68,7 +68,7 @@ describe('S3 document storage: exact version inspection and attachment downloads
   });
 
   it('requires AES256 encryption when no KMS key is configured', async () => {
-    const storage = provider(undefined);
+    const storage = provider(null);
     send.mockResolvedValue(head({ ServerSideEncryption: 'AES256', SSEKMSKeyId: undefined }));
     await expect(storage.inspectVersion('synthetic/report.pdf', 'object-version-1')).resolves.toMatchObject({
       versionId: 'object-version-1' });

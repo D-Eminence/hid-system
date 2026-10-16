@@ -355,7 +355,8 @@ describe('Patient-only routes refuse a staff session in the guard (A9-EHR)', () 
   ])('answers a staff session on the patient document download %s 403 PATIENT_SESSION_REQUIRED, recorded', async (_case, headers) => {
     const response = await probeAt(DOWNLOAD, headers);
     expect(response).toEqual({ status: 403, code: 'PATIENT_SESSION_REQUIRED' });
-    expect(rows).toEqual([refusedBeforeFacility(staff, 'staff', 403, 'PATIENT_SESSION_REQUIRED', DOWNLOAD)]);
+    expect(rows).toEqual([refusedBeforeFacility(staff, 'staff', 403, 'PATIENT_SESSION_REQUIRED',
+      '/api/v1/ehr/me/documents/:documentId/download')]);
     expect(records.downloadOwnDocument).not.toHaveBeenCalled();
   });
 

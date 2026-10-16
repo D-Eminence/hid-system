@@ -411,6 +411,25 @@ if (environment === 'production') {
   assert.equal(patientSelfNinBinding, 'false', 'production identity-api must not enable the signed-in NIN binding')
 }
 
+// Patient record release (owner decision 4 of 2026-10-16, D7): ehr-api's
+// category flags are the explicit synth inputs, false by default, and
+// production never releases Lab results while Lab is off at launch (D17).
+const ehrApis = resources('AWS::ECS::TaskDefinition')
+  .filter(task => String(task.Properties.Family).endsWith('-ehr-api'))
+  .flatMap(task => task.Properties.ContainerDefinitions).filter(container => container.Name === 'ehr-api')
+assert.equal(ehrApis.length, 1)
+for (const [flag, input] of [['EHR_PATIENT_RELEASE_VITALS', 'HID_EHR_PATIENT_RELEASE_VITALS'],
+  ['EHR_PATIENT_RELEASE_DIAGNOSES', 'HID_EHR_PATIENT_RELEASE_DIAGNOSES'],
+  ['EHR_PATIENT_RELEASE_PRESCRIPTIONS', 'HID_EHR_PATIENT_RELEASE_PRESCRIPTIONS'],
+  ['EHR_PATIENT_RELEASE_LAB_RESULTS', 'HID_EHR_PATIENT_RELEASE_LAB_RESULTS'],
+  ['EHR_PATIENT_RELEASE_DOCUMENTS', 'HID_EHR_PATIENT_RELEASE_DOCUMENTS']]) {
+  assert.equal(ehrApis[0].Environment.find(entry => entry.Name === flag)?.Value, process.env[input] ?? 'false', flag)
+}
+if (environment === 'production') {
+  assert.equal(ehrApis[0].Environment.find(entry => entry.Name === 'EHR_PATIENT_RELEASE_LAB_RESULTS')?.Value, 'false',
+    'production ehr-api must not release Lab results to patients (D17)')
+}
+
 assert.equal(regional.Parameters.OriginDomainName, undefined)
 if (asleep) {
   assert.equal(regional.Parameters[contract.secret], undefined)

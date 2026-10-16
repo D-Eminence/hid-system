@@ -92,6 +92,12 @@ export interface HidEnvironmentConfig {
   // HID_NOTIFICATION_WORKER_ENABLED; production is fixed to false (D17)
   // until a Novu account and region are approved.
   readonly notificationWorkerEnabled: boolean;
+  // ehr-api's EHR_PATIENT_RELEASE_* flags (owner decision 4 of 2026-10-16,
+  // D7): what a patient's own summary releases beyond encounters and notes.
+  // Synth inputs HID_EHR_PATIENT_RELEASE_VITALS, _DIAGNOSES, _PRESCRIPTIONS,
+  // _LAB_RESULTS and _DOCUMENTS, each default false. Production refuses Lab
+  // results while Lab is off at launch (D17).
+  readonly patientRecordRelease: PatientRecordRelease;
   // The exact ARN of the operator-created, KMS-encrypted SNS topic
   // hid-<env>-operational-alerts that every alarm notifies (D4, ADR-053).
   // Synth input HID_OPERATIONAL_ALARM_TOPIC_ARN; the regional stack requires
@@ -99,8 +105,22 @@ export interface HidEnvironmentConfig {
   readonly operationalAlarmTopicArn?: string;
 }
 
+/** The patient record release categories, one flag each. */
+export interface PatientRecordRelease {
+  readonly vitals: boolean;
+  readonly diagnoses: boolean;
+  readonly prescriptions: boolean;
+  readonly labResults: boolean;
+  readonly documents: boolean;
+}
+
 /** Synth inputs beyond the environment, staging mode, QoreID and route switches. */
 export interface SynthOptions {
+  readonly patientReleaseVitals?: string;
+  readonly patientReleaseDiagnoses?: string;
+  readonly patientReleasePrescriptions?: string;
+  readonly patientReleaseLabResults?: string;
+  readonly patientReleaseDocuments?: string;
   readonly qoreIdNinOnlyEnrollmentEnabled?: string;
   readonly ninHolderSmsEnabled?: string;
   readonly assistedRegistrationEnabled?: string;
@@ -316,6 +336,20 @@ export function assertNinOwnershipRoutes(configuration: {
   }
 }
 
+/**
+ * D17: Lab is not routed at launch and every Lab permission is withdrawn
+ * (0091 section 2), so production releases no Lab result to a patient. The
+ * regional stack repeats this for a configuration not built by
+ * environmentConfig; ehr-api refuses the same at start.
+ */
+export function assertPatientRecordRelease(configuration: {
+  readonly name: EnvironmentName; readonly patientRecordRelease: PatientRecordRelease;
+}): void {
+  if (configuration.name === 'production' && configuration.patientRecordRelease.labResults) {
+    throw new Error('HID_EHR_PATIENT_RELEASE_LAB_RESULTS=true is refused in production: Lab is off at launch (D17)');
+  }
+}
+
 function booleanInput(variable: string, value: string | undefined, fallback: 'true' | 'false'): boolean {
   const input = value ?? fallback;
   if (!['true', 'false'].includes(input)) throw new Error(`${variable} must be true or false when supplied`);
@@ -379,6 +413,14 @@ export function environmentConfig(
     throw new Error('HID_NOTIFICATION_WORKER_ENABLED is fixed to false in production (the launch module set, D17): '
       + 'the notification worker needs an approved Novu account and region and its own decision');
   }
+  const patientRecordRelease: PatientRecordRelease = {
+    vitals: booleanInput('HID_EHR_PATIENT_RELEASE_VITALS', options.patientReleaseVitals, 'false'),
+    diagnoses: booleanInput('HID_EHR_PATIENT_RELEASE_DIAGNOSES', options.patientReleaseDiagnoses, 'false'),
+    prescriptions: booleanInput('HID_EHR_PATIENT_RELEASE_PRESCRIPTIONS', options.patientReleasePrescriptions, 'false'),
+    labResults: booleanInput('HID_EHR_PATIENT_RELEASE_LAB_RESULTS', options.patientReleaseLabResults, 'false'),
+    documents: booleanInput('HID_EHR_PATIENT_RELEASE_DOCUMENTS', options.patientReleaseDocuments, 'false'),
+  };
+  assertPatientRecordRelease({ name, patientRecordRelease });
   const topic = operationalAlarmTopic(name, options.operationalAlarmTopicArn);
   return {
     ...environmentIdentity[name], ...profiles[profile],
@@ -390,6 +432,7 @@ export function environmentConfig(
     assistedRegistrationEnabled,
     qoreIdPatientSelfNinBindingEnabled,
     notificationWorkerEnabled,
+    patientRecordRelease,
     ...(topic ? { operationalAlarmTopicArn: topic.arn } : {}),
   };
 }
