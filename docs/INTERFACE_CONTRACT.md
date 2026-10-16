@@ -2393,7 +2393,8 @@ default: `RECORD_CHAT_PATIENT_ENABLED` (synth input
 (`@PatientOnly`, facility-optional): a staff session answers `403
 PATIENT_SESSION_REQUIRED`, audited, before the handler. Responses are
 `Cache-Control: private, no-store`. Cookie writes need `Origin` and
-`X-CSRF-Token` as every patient write does.
+`X-CSRF-Token` as every patient write does. EHR's CORS allows `DELETE` and
+exposes `Retry-After` to the allowed origins.
 
 - `GET /api/v1/ehr/me/chat/availability`: `{ available: false }` while the
   flag or the control is off (or the control cannot be read); otherwise
