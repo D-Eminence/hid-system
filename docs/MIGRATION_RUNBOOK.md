@@ -575,10 +575,18 @@ select verification.id as verification_id, verification.staff_account_id,
 rollback;
 ```
 
-The one-shot ECS migration task defaults to `--plan`; never turn it into a
-service or place administrator credentials in a steady-state task. The
-migration image also carries `scripts/bootstrap-database-roles.mjs` and
-`scripts/verify-runtime-logins.mjs`.
+The one-shot ECS migration task defaults to `scripts/apply-migrations.mjs
+--plan` (its image's entrypoint is `/nodejs/bin/node`, so an override names the
+script: `["scripts/apply-migrations.mjs"]` applies); never turn it into a
+service or place administrator credentials in a steady-state task. It maps the
+migration administrator as both `DATABASE_URL` and `DATABASE_ADMIN_URL`, so the
+role bootstrap (`["scripts/bootstrap-database-roles.mjs"]`, with
+`--verify-only` for `db:verify-roles`) and `admin:bootstrap`
+(`["scripts/bootstrap-platform-admin.mjs"]`) run in it; the overrides are in
+`AWS_DEPLOYMENT_RUNBOOK.md` §4. The migration image also carries
+`scripts/verify-runtime-logins.mjs`, but the task maps no runtime URL: the RDS
+master's statements, the runtime LOGINs and `db:verify-logins` need the
+approved temporary operator session that section describes.
 
 ## 7. Stage a controlled snapshot
 

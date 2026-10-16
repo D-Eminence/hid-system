@@ -432,11 +432,14 @@ export class HidRegionalStack extends Stack {
     databaseSecurityGroup.addIngressRule(migration.securityGroup, ec2.Port.tcp(5432), 'Migration administrator only');
     if (this.configuration.interfaceEndpoints.length > 0) {
       endpointSecurityGroup.addIngressRule(migration.securityGroup, ec2.Port.tcp(443), 'Migration image, logs, and secret endpoints');
-      if (this.configuration.name === 'staging' && this.configuration.runtimeIngressEnabled) {
+      // On Fargate the task's own interface pulls the image, reads the secret
+      // and writes logs, so wherever the task can run it needs these; sleep
+      // keeps them closed.
+      if (this.configuration.runtimeIngressEnabled) {
         migration.securityGroup.addEgressRule(endpointSecurityGroup, ec2.Port.tcp(443),
-          'Staging migration image, logs, and secret endpoints');
+          'Migration image, logs, and secret endpoints');
         migration.securityGroup.addEgressRule(ec2.Peer.prefixList(this.parameter('S3PrefixListId').valueAsString),
-          ec2.Port.tcp(443), 'Staging migration ECR image layers through Amazon S3');
+          ec2.Port.tcp(443), 'Migration ECR image layers through Amazon S3');
       }
     }
 
@@ -1210,12 +1213,19 @@ export class HidRegionalStack extends Stack {
     });
     this.tagService(taskDefinition, 'database-migration');
     this.tagService(logGroup, 'database-migration');
+    // One deployment-only administrator: apply-migrations reads DATABASE_URL;
+    // the role bootstrap (db:bootstrap, db:verify-roles) and admin:bootstrap
+    // read DATABASE_ADMIN_URL (MIGRATION_RUNBOOK.md §6.2).
+    const migrationAdministrator = ecs.Secret.fromSecretsManager(runtimeSecrets.migrationDatabase!, 'url');
     taskDefinition.addContainer('MigrationContainer', {
       containerName: 'database-migration',
       image: ecs.ContainerImage.fromRegistry(this.parameter('MigrationImageUri').valueAsString),
-      command: ['--plan'],
+      // The image's entrypoint is /nodejs/bin/node and `command` replaces its
+      // CMD, so the command names the script. Other runs override it
+      // (AWS_DEPLOYMENT_RUNBOOK.md §6).
+      command: ['scripts/apply-migrations.mjs', '--plan'],
       environment: { NODE_ENV: 'production', DATABASE_SSL: 'true', DATABASE_SSL_ROOT_CERT_BASE64: this.parameter('RdsCaBundleBase64').valueAsString },
-      secrets: { DATABASE_URL: ecs.Secret.fromSecretsManager(runtimeSecrets.migrationDatabase!, 'url') },
+      secrets: { DATABASE_URL: migrationAdministrator, DATABASE_ADMIN_URL: migrationAdministrator },
       logging: ecs.LogDrivers.awsLogs({ logGroup, streamPrefix: 'migration' }),
       readonlyRootFilesystem: true,
     });

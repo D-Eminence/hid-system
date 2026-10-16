@@ -472,6 +472,47 @@ secret's own URL and refuses a superuser, `BYPASSRLS`, owner or
 migration-administrator login, an extra role and a shared login. In production
 each service also refuses to start over such a connection.
 
+### Running the migration task
+
+RDS accepts connections only from the service tasks and the one-shot
+migration task, so every `npm run db:*` and `admin:bootstrap` step above runs
+as that task. Its image is distroless: no shell and no npm, and its entrypoint
+is `/nodejs/bin/node`, so a command override names the script. The task maps
+the migration administrator's `url` as both `DATABASE_URL` and
+`DATABASE_ADMIN_URL`; its security group reaches only RDS, the AWS endpoints
+and Amazon S3. Run it from the stack outputs `MigrationTaskDefinitionArn`,
+`ApplicationSubnetIds` and `MigrationSecurityGroupId`:
+
+```bash
+aws ecs run-task --cluster hid-production --launch-type FARGATE \
+  --task-definition <MigrationTaskDefinitionArn> \
+  --network-configuration 'awsvpcConfiguration={subnets=[<ApplicationSubnetIds>],securityGroups=[<MigrationSecurityGroupId>],assignPublicIp=DISABLED}' \
+  --overrides '{"containerOverrides":[{"name":"database-migration","command":["scripts/apply-migrations.mjs","--dry-run"]}]}'
+```
+
+| Step | `command` override | `environment` override |
+| --- | --- | --- |
+| `db:plan` (P1) | none: the default is `scripts/apply-migrations.mjs --plan` | none |
+| `db:dry-run` | `["scripts/apply-migrations.mjs","--dry-run"]` | none |
+| `db:migrate` | `["scripts/apply-migrations.mjs"]` | none |
+| `db:bootstrap` | `["scripts/bootstrap-database-roles.mjs"]` | none |
+| `db:verify-roles` | `["scripts/bootstrap-database-roles.mjs","--verify-only"]` | none |
+| `admin:bootstrap` (P6) | `["scripts/bootstrap-platform-admin.mjs"]` | `PLATFORM_ADMIN_ACCOUNT_ID`, `PLATFORM_ADMIN_BOOTSTRAP_REASON` |
+
+Wait for the task to stop, then require exit code `0` and read
+`/hid/<environment>/database-migration`. Never pass a database URL, password or
+other secret as an override: RunTask overrides are kept in the task
+description and in CloudTrail. The account IDs and reason of
+`admin:bootstrap` are not secret.
+
+The repository provides no SQL console inside the VPC. The RDS master's
+statements (creating the migration administrator, and the `SET ON PARAMETER`
+grant and revoke of `MIGRATION_RUNBOOK.md` §6.1), creating the runtime LOGINs
+(§6.3) and `db:verify-logins`, which needs every runtime URL, need an approved,
+temporary operator session that reaches RDS from the application subnets with
+the migration security group. Record who opened it and when, and close it
+afterwards. Never add the master or a runtime URL to the migration task.
+
 ## 5. Guarded staging operations
 
 The following commands are the only current repository runtime staging-mode
@@ -521,8 +562,9 @@ Never run any of these commands for production.
 ## 6. Migrate identity and data
 
 Never edit migrations `0001`–`0028`. Apply all 34 ledger migrations through
-`0034` using the one-shot migration task. First record snapshot/PITR readiness
-and run `--plan`.
+`0034` using the one-shot migration task (§4, Running the migration task).
+First record snapshot/PITR readiness and run the plan (the task's default
+command).
 Exercise the offline fixture path before using an approved read-only HID 1.0
 source:
 

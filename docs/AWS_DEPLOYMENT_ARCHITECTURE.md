@@ -460,7 +460,12 @@ verification evidence and security-definer commands without adding raw NIN/CAC
 or provider-response storage.
 Migration is a controlled ECS RunTask operation: snapshot/PITR gate, plan,
 fixture/source dry run, apply once, reconciliation, runtime-role verification,
-then progressive service rollout.
+then progressive service rollout. The task maps the migration administrator as
+`DATABASE_URL` and `DATABASE_ADMIN_URL` (migrations, role bootstrap and the
+first Super Admins), and wherever it can run (not sleep) its security group
+reaches RDS, the AWS endpoints and Amazon S3 on 443, which it needs to pull its
+image, read its secret and log. Command overrides are in
+`AWS_DEPLOYMENT_RUNBOOK.md` §4.
 
 Every ECS image parameter must be `repository@sha256:<digest>`. The release
 gate requires all twelve component records, SBOMs, vulnerability decisions,
