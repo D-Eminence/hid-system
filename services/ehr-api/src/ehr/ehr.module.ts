@@ -31,7 +31,7 @@ import { configuredPatientRelease, PatientRecordRelease } from './patient-record
   controllers: [PatientRecordsController, ImportedHistoryController],
   providers: [
     PatientRecordsService,
-    // Imported legacy medical history (ADR-065): the patient's own read is a
+    // Imported legacy medical history (ADR-066): the patient's own read is a
     // category of the release set below; the staff read has its own switch.
     ImportedHistoryService,
     StaffImportedHistoryEnabledGuard,

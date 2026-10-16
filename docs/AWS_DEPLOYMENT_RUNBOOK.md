@@ -45,7 +45,7 @@ keeps the online route closed while no facility takes part. The in-person budget
 Identity's defaults (20 and 100); they are not synth inputs. Enabling the
 facility route is an operator step after release checklist P29 to P33.
 
-Imported legacy medical history (ADR-065, migration 0096): the synth inputs
+Imported legacy medical history (ADR-066, migration 0097): the synth inputs
 `HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY` and
 `HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED` set ehr-api's
 `EHR_PATIENT_RELEASE_IMPORTED_HISTORY` and `EHR_STAFF_IMPORTED_HISTORY_ENABLED`,
@@ -53,7 +53,7 @@ and `HID_IMPORTED_HISTORY_SHARING_ENABLED` sets identity-api's
 `IMPORTED_HISTORY_SHARING_ENABLED`. Each defaults to `false`; synthesis and
 `verify-synth` refuse any of them outside staging, and in staging the sharing
 switch without the patient read and the staff read without the sharing
-switch. Set them on staging only after release checklist P36 (1), the written
+switch. Set them on staging only after release checklist P37 (1), the written
 sign-off, in the order patient read, sharing, staff read, and turn them off in
 reverse. The EHR and Identity production profiles refuse them as well.
 

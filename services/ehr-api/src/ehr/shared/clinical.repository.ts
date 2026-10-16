@@ -15,7 +15,7 @@ export interface SemanticEvent {
   breakGlassOnly?: boolean;
   /**
    * A break-glass authorization may never run it (imported legacy history,
-   * ADR-065): refused with 403 and this code, audited denied, before any
+   * ADR-066): refused with 403 and this code, audited denied, before any
    * transaction.
    */
   excludeBreakGlass?: { code: string };

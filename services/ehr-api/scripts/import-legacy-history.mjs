@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Imports the legacy medical history (owner decision 3 of 2026-10-16,
-// ADR-065) from main's sealed staging pipeline, through
+// ADR-066) from main's sealed staging pipeline, through
 // ehr.import_legacy_medical_history and nothing else:
 //
 //   1. stage-legacy-identity.mjs, promote-legacy-identity.mjs and
@@ -16,7 +16,7 @@
 // It runs on staging, or on an owned disposable rehearsal database, never in
 // production (an operator-declared HID_DEPLOYMENT_ENV check, not one the
 // database enforces), and only after the DPO and the owner have signed off
-// the import (release checklist P36). It prints counts and the receipt id only: never an
+// the import (release checklist P37). It prints counts and the receipt id only: never an
 // identifier of a patient, a record or any content. Synthetic fixtures only
 // in every test and rehearsal.
 import { resolve } from 'node:path';
@@ -105,7 +105,7 @@ async function main() {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
   main().catch((error) => {
-    // A refusal is its code; the command's refusal is its code too (0096
+    // A refusal is its code; the command's refusal is its code too (0097
     // raises 55000 or 22023 with a code as its message); any other database
     // error is its SQLSTATE only, since its text may name a row.
     const message = typeof error?.message === 'string' ? error.message : String(error);

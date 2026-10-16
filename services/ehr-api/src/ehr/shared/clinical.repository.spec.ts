@@ -144,7 +144,7 @@ describe('ClinicalRepository translates the 0090 guards', () => {
   });
 });
 
-describe('ClinicalRepository excludes break-glass from a read that may never use it (imported history, ADR-065)', () => {
+describe('ClinicalRepository excludes break-glass from a read that may never use it (imported history, ADR-066)', () => {
   function breakGlassRepository(breakGlass: boolean) {
     const built = repositoryWith();
     const identity = { authorize: jest.fn(async () => ({ allowed: true, breakGlass })) };

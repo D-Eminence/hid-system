@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-065):
+// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066):
 // the import, end to end, on an owned disposable database migrated to the
 // latest migration and bootstrapped, as its migration administrator (a
 // PostgreSQL superuser in the rehearsal, a NOSUPERUSER NOBYPASSRLS CREATEROLE

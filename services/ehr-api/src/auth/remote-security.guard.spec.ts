@@ -118,7 +118,7 @@ let liveActor: IdentityActorContext | undefined;
 let identityRefusal: unknown;
 /** The patient records service behind GET /ehr/me/records: it refuses a non-patient itself, as the real one does. */
 let records: { self: jest.Mock; emergency: jest.Mock; downloadOwnDocument: jest.Mock };
-/** The imported history service behind GET /ehr/me/imported-history (ADR-065). */
+/** The imported history service behind GET /ehr/me/imported-history (ADR-066). */
 let imported: { self: jest.Mock; staff: jest.Mock };
 
 beforeEach(async () => {
@@ -374,7 +374,7 @@ describe('Patient-only routes refuse a staff session in the guard (A9-EHR)', () 
     expect(records.downloadOwnDocument).toHaveBeenCalledTimes(1);
   });
 
-  // The patient's imported legacy history (ADR-065) is patient-only too.
+  // The patient's imported legacy history (ADR-066) is patient-only too.
   it.each([
     ['without X-Facility-ID', {}],
     ['with the staff member\'s own facility', { 'X-Facility-ID': DEFAULT_FACILITY.id }],

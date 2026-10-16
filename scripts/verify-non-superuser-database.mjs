@@ -29,7 +29,7 @@
 // - the release checklist's read-only P10, P11 and P35 checks, taken from
 //   docs/PHASE_4_STAGE_5_RELEASE_READINESS.md, as the administrator, as an
 //   operator runs them on RDS;
-// - the imported legacy history import (ADR-065) as the administrator: main's
+// - the imported legacy history import (ADR-066) as the administrator: main's
 //   stage, promote and reconcile of a synthetic source, a sealed history run,
 //   and the importer's in-transaction membership in hid_migration_admin;
 // - the platform-control-owner and function-parameter-settings suites.
@@ -406,7 +406,7 @@ try {
   assert.doesNotMatch(claim.output, /permission denied to set parameter/);
   evidence.steps.ocr_claim = { refused_by: 'body authorization check', parameter_privilege_needed: false };
 
-  // ADR-065: the importer as the administrator, who is not a superuser: its
+  // ADR-066: the importer as the administrator, who is not a superuser: its
   // in-transaction membership in hid_migration_admin (held through the ADMIN
   // OPTION of the roles it created) runs the import command, and is gone after.
   const imported = JSON.parse(run('imported history import as the administrator', process.execPath,

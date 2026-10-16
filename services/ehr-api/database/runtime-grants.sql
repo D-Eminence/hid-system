@@ -232,9 +232,9 @@ comment on role hid_platform_control_reader is
 comment on role hid_lab_release_reader is
   'Technical owner of the view ehr.patient_released_lab_results; reads released Lab result columns and source EHR order status; cannot evaluate patient-self; never granted to a runtime login.';
 comment on role hid_imported_history_commands is
-  'Technical owner of the imported history staff read decision and the patient''s two sharing commands (ADR-065); reads the patient''s account, the login''s status and the sharing choice, writes only the sharing choice and its log; never granted to a runtime login.';
+  'Technical owner of the imported history staff read decision and the patient''s two sharing commands (ADR-066); reads the patient''s account, the login''s status and the sharing choice, writes only the sharing choice and its log; never granted to a runtime login.';
 comment on role hid_imported_history_importer is
-  'Technical owner of ehr.import_legacy_medical_history (ADR-065); reads the sealed migration ledger and inserts only imported history and its receipt; executable by hid_migration_admin only; never granted to a runtime login.';
+  'Technical owner of ehr.import_legacy_medical_history (ADR-066); reads the sealed migration ledger and inserts only imported history and its receipt; executable by hid_migration_admin only; never granted to a runtime login.';
 comment on role hid_event_dispatcher is
   'Transport dispatcher command role with no direct domain or integration table privileges.';
 comment on role hid_notification_runtime is
@@ -852,8 +852,8 @@ revoke create on schema ehr from hid_lab_release_reader;
 revoke all on ehr.patient_released_lab_results from hid_lab_release_reader;
 grant select on ehr.patient_released_lab_results to hid_ehr_runtime, hid_schema_test_runtime;
 
--- Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-065,
--- 0096). Two NOLOGIN technical owners, so that no definer relies on its owner
+-- Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066,
+-- 0097). Two NOLOGIN technical owners, so that no definer relies on its owner
 -- bypassing row-level security (identity.patients has it enabled, the five
 -- new tables force it), and none is a member of any role or has a member:
 -- - hid_imported_history_commands owns the staff read decision
@@ -983,12 +983,12 @@ alter function identity.set_my_imported_history_sharing(text, uuid, boolean) own
 revoke create on schema ehr, identity from hid_imported_history_commands;
 -- No owner keeps an EXECUTE entry on its own function (none calls another),
 -- so the first run leaves the same ACL as a rerun, whose REVOKE ALL above
--- removes the entry the ownership transfer carried over (P36).
+-- removes the entry the ownership transfer carried over (P37).
 revoke all on function ehr.imported_history_staff_read_allowed(uuid),
   identity.my_imported_history_sharing(text, uuid),
   identity.set_my_imported_history_sharing(text, uuid, boolean) from public, hid_imported_history_commands;
 grant execute on function ehr.imported_history_staff_read_allowed(uuid) to hid_ehr_runtime, hid_schema_test_runtime;
--- The staff policies' binding (0096) runs as its caller and asks the decision above.
+-- The staff policies' binding (0097) runs as its caller and asks the decision above.
 revoke all on function ehr.imported_history_staff_patient() from public;
 grant execute on function ehr.imported_history_staff_patient() to hid_ehr_runtime, hid_schema_test_runtime;
 grant execute on function identity.my_imported_history_sharing(text, uuid),

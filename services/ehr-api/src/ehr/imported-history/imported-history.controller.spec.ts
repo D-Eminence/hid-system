@@ -5,7 +5,7 @@ import { getEnvironment, resetEnvironmentForTests } from '../../config/environme
 import { ImportedHistoryController } from './imported-history.controller';
 import { StaffImportedHistoryEnabledGuard } from './imported-history-enabled.guard';
 
-// The imported history routes (owner decision 3 of 2026-10-16, ADR-065).
+// The imported history routes (owner decision 3 of 2026-10-16, ADR-066).
 describe('ImportedHistoryController', () => {
   const reflector = new Reflector();
   const patientId = '30000000-0000-4000-8000-000000000001';

@@ -105,12 +105,12 @@ export interface HidEnvironmentConfig {
   // the clinical owner signs them off (P36, ADR-065).
   readonly patientRecordRelease: PatientRecordRelease;
   // Imported legacy medical history (owner decision 3 of 2026-10-16,
-  // ADR-065): ehr-api's EHR_PATIENT_RELEASE_IMPORTED_HISTORY (the patient's
+  // ADR-066): ehr-api's EHR_PATIENT_RELEASE_IMPORTED_HISTORY (the patient's
   // own read) and EHR_STAFF_IMPORTED_HISTORY_ENABLED (the staff read), and
   // identity-api's IMPORTED_HISTORY_SHARING_ENABLED (the patient's sharing
   // choice). Synth inputs HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY,
   // HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED and HID_IMPORTED_HISTORY_SHARING_ENABLED,
-  // each default false and refused outside staging until the P36 sign-off.
+  // each default false and refused outside staging until the P37 sign-off.
   readonly importedHistory: ImportedHistory;
   // The exact ARN of the operator-created, KMS-encrypted SNS topic
   // hid-<env>-operational-alerts that every alarm notifies (D4, ADR-053).
@@ -128,7 +128,7 @@ export interface PatientRecordRelease {
   readonly documents: boolean;
 }
 
-/** The imported legacy medical history switches (ADR-065). */
+/** The imported legacy medical history switches (ADR-066). */
 export interface ImportedHistory {
   readonly patientRead: boolean;
   readonly staffRead: boolean;
@@ -398,12 +398,12 @@ const IMPORTED_HISTORY_INPUTS: ReadonlyArray<readonly [keyof ImportedHistory, st
 ];
 
 /**
- * Only staging may show imported legacy medical history (ADR-065), and there
+ * Only staging may show imported legacy medical history (ADR-066), and there
  * the staff read needs the sharing route and the sharing route the patient's
  * own read. Production
  * refuses each switch until the DPO and the owner sign off the legacy data's
  * provenance, scope and retention and Health-id renders it (release checklist
- * P36); the development stack runs its services in the production profile,
+ * P37); the development stack runs its services in the production profile,
  * where ehr-api and identity-api refuse them at start, so it is refused here
  * as well. The regional stack repeats this for a configuration not built by
  * environmentConfig.
@@ -415,21 +415,21 @@ export function assertImportedHistory(configuration: {
     for (const [flag, variable] of IMPORTED_HISTORY_INPUTS) {
       if (configuration.importedHistory[flag]) {
         throw new Error(`${variable}=true is refused outside staging (${configuration.name}): the DPO and the owner `
-          + 'have not signed off the legacy data (P36, ADR-065)');
+          + 'have not signed off the legacy data (P37, ADR-066)');
       }
     }
   }
   // A patient shares only what they can see themselves, and staff read only
   // while patients can choose and withdraw through the sharing route: the
-  // switches go on patient read first and off staff read first (ADR-065).
+  // switches go on patient read first and off staff read first (ADR-066).
   const { patientRead, staffRead, sharing } = configuration.importedHistory;
   if (sharing && !patientRead) {
     throw new Error('HID_IMPORTED_HISTORY_SHARING_ENABLED=true needs HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY=true: '
-      + 'a patient may share only the imported history they can see (ADR-065)');
+      + 'a patient may share only the imported history they can see (ADR-066)');
   }
   if (staffRead && !sharing) {
     throw new Error('HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED=true needs HID_IMPORTED_HISTORY_SHARING_ENABLED=true: '
-      + 'staff read imported history only while patients can choose and withdraw (ADR-065)');
+      + 'staff read imported history only while patients can choose and withdraw (ADR-066)');
   }
 }
 

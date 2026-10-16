@@ -1014,8 +1014,8 @@ begin
 end
 $$;
 
--- Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-065,
--- 0096). Two NOLOGIN technical owners, created by the role bootstrap:
+-- Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066,
+-- 0097). Two NOLOGIN technical owners, created by the role bootstrap:
 -- hid_imported_history_commands owns the staff read helper and the patient's
 -- two sharing commands and reads exactly what they need (the patient's
 -- account, the login's status, the sharing row) through column grants and
@@ -1054,7 +1054,7 @@ begin
     raise exception 'the imported history technical owners must own exactly their pinned security-definer commands and nothing else';
   end if;
   -- The bootstrap leaves no owner entry on their functions, on its first run
-  -- as on a rerun, so that every run leaves the same ACL (P36).
+  -- as on a rerun, so that every run leaves the same ACL (P37).
   if exists (select 1 from pg_proc proc, aclexplode(proc.proacl) privilege
               where proc.proowner in (commands, importer) and privilege.grantee = proc.proowner) then
     raise exception 'the imported history technical owners must hold no EXECUTE entry on their own functions';

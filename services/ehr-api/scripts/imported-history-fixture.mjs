@@ -1,5 +1,5 @@
 // Invented data only: no row here was extracted from any customer system.
-// The synthetic legacy history (owner decision 3 of 2026-10-16, ADR-065) that
+// The synthetic legacy history (owner decision 3 of 2026-10-16, ADR-066) that
 // the importer tests and rehearsals stage and import. Identifiers are in the
 // e7 range, which no other suite or fixture uses.
 import { createHash } from 'node:crypto';

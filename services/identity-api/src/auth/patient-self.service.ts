@@ -91,7 +91,7 @@ export class PatientSelfService {
 
   /**
    * The patient's choice to share their imported legacy history with staff
-   * they consent to (ADR-065), read through the session-bound command and
+   * they consent to (ADR-066), read through the session-bound command and
    * audited in the same transaction. No choice recorded reads as not shared.
    */
   async importedHistorySharing(request: HidRequest): Promise<{ shared: boolean; updatedAt: Date | string | null }> {
@@ -120,7 +120,7 @@ export class PatientSelfService {
    * more, so it needs the sharing switch, a recent sign-in and no recent
    * account recovery, as an Access PIN does; turning it off is always
    * allowed, also while the switch is off, because the stored choice keeps
-   * deciding the staff read (ADR-065). A repeat changes nothing (changed:
+   * deciding the staff read (ADR-066). A repeat changes nothing (changed:
    * false). The command records the change with its session and correlation
    * id; the audit row commits with it.
    */

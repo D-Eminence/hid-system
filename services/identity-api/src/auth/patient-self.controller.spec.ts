@@ -43,7 +43,7 @@ describe('Patient-self authorization is for the EHR service only (D17)', () => {
   });
 });
 
-// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-065):
+// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066):
 // the patient's sharing choice, on the patient-only controller, behind its
 // own switch (off by default), answered before the body is read.
 describe('Patient imported history sharing routes', () => {
@@ -70,7 +70,7 @@ describe('Patient imported history sharing routes', () => {
     expect(reflector.get(PATIENT_ONLY, PatientSelfController)).toBe(true);
     expect(Reflect.getMetadata('__guards__', prototype.importedHistorySharing as object))
       .toEqual([ImportedHistorySharingEnabledGuard]);
-    // Turning sharing off is always allowed (ADR-065): the change route has
+    // Turning sharing off is always allowed (ADR-066): the change route has
     // no switch guard, and the service refuses only turning it on while the
     // switch is off.
     expect(Reflect.getMetadata('__guards__', prototype.setImportedHistorySharing as object)).toBeUndefined();

@@ -17,7 +17,7 @@ const operator = process.env.MIGRATION_OPERATOR;
 const dryRun = process.argv.includes('--dry-run');
 // --scope=identity (the default) stages main's identity categories, exactly as
 // before. --scope=imported-history stages only the legacy medical history
-// (ADR-065) into its own sealed run of the same source snapshot, of source
+// (ADR-066) into its own sealed run of the same source snapshot, of source
 // system legacy_imported_history, which only ehr.import_legacy_medical_history
 // reads: main's crosswalk gate does not count it (a staged legacy_identity run
 // closes patient enrollment), and main's promoter and reconciler never take it.
@@ -168,7 +168,7 @@ const entities = [
 
 export const MIGRATION_ENTITY_TYPES = Object.freeze(entities.map((entity) => entity.type));
 
-// The legacy medical history (owner decision 3 of 2026-10-16, ADR-065): every
+// The legacy medical history (owner decision 3 of 2026-10-16, ADR-066): every
 // record, every version and the metadata of every file, as the legacy tables
 // hold them. No category is optional: a history without one is refused.
 const historyEntities = [

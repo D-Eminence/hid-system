@@ -1317,7 +1317,7 @@ test('patient record release categories are explicit synth inputs that default t
   }
 });
 
-test('imported history flags are explicit synth inputs that default to false; only staging may set them (ADR-065, P36)', () => {
+test('imported history flags are explicit synth inputs that default to false; only staging may set them (ADR-066, P37)', () => {
   const productionTopic = { operationalAlarmTopicArn: productionTopicArn };
   const none = { patientRead: false, staffRead: false, sharing: false };
   assert.deepEqual(environmentConfig('production').importedHistory, none);
@@ -1336,7 +1336,7 @@ test('imported history flags are explicit synth inputs that default to false; on
       /must be true or false/, input);
   }
   // Production refuses every imported history flag until the DPO and the owner
-  // sign off the legacy data and Health-id renders it (P36); the development
+  // sign off the legacy data and Health-id renders it (P37); the development
   // stack runs its services in the production profile, so it refuses them too.
   const productionConfiguration = environmentConfig('production', undefined, undefined, undefined, productionTopic);
   const developmentConfiguration = environmentConfig('development');
@@ -1367,7 +1367,7 @@ test('imported history flags are explicit synth inputs that default to false; on
   assert.doesNotMatch(JSON.stringify(containerOf(template, 'ehr-api')), /IMPORTED_HISTORY_SHARING/);
 });
 
-test('in staging the imported history switches depend on each other: staff read needs sharing, sharing needs the patient read (ADR-065)', () => {
+test('in staging the imported history switches depend on each other: staff read needs sharing, sharing needs the patient read (ADR-066)', () => {
   // A patient may share only what they can see themselves, and staff read
   // only while patients can still choose (and withdraw) through the sharing
   // route, so the switches go on patient read first and off staff read first.

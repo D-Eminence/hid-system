@@ -1,9 +1,9 @@
 // The import of the legacy medical history (owner decision 3 of 2026-10-16,
-// ADR-065), without the database: what import-legacy-history.mjs checks
+// ADR-066), without the database: what import-legacy-history.mjs checks
 // before it asks ehr.import_legacy_medical_history to import, the transaction
 // it runs that command in, and the deployment check both CLIs of the history
 // pipeline make first. The command repeats every check of the runs and of
-// each row's content and bindings itself (0096), with the same codes; it
+// each row's content and bindings itself (0097), with the same codes; it
 // does not recompute the stager's checksums (ROW_TAMPERED, SEAL_MISMATCH,
 // PARENT_SEAL_MISMATCH are this module's alone) but takes only rows equal to
 // the sealed rows, whose seal the database's triggers keep. This module
@@ -33,13 +33,13 @@ export const IMPORTED_HISTORY_SOURCE_SYSTEM = 'legacy_imported_history';
  * (NODE_ENV test on a local Unix-socket cluster, reading a synthetic fixture
  * when `syntheticSourceOnly`), never in production. HID_DEPLOYMENT_ENV is the
  * operator's declaration of where the command runs; the database does not
- * enforce it (ADR-065, P36). Checked before anything is read or connected.
+ * enforce it (ADR-066, P37). Checked before anything is read or connected.
  * @param {string} what what is refused, for the message
  * @param {{ syntheticSourceOnly?: boolean, environment?: NodeJS.ProcessEnv }} [options]
  */
 export function requireStagingOrRehearsal(what, { syntheticSourceOnly = false, environment = process.env } = {}) {
   const deployment = environment.HID_DEPLOYMENT_ENV ?? '';
-  if (deployment === 'production') throw new Error(`${what} is refused in production (ADR-065)`);
+  if (deployment === 'production') throw new Error(`${what} is refused in production (ADR-066)`);
   if (deployment === 'staging') return;
   let socket;
   try {

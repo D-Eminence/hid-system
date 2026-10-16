@@ -1,5 +1,5 @@
--- Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-065).
--- Applied migrations 0001 through 0095 are immutable.
+-- Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066).
+-- Applied migrations 0001 through 0096 are immutable.
 --
 -- Patients and staff may see the medical history imported from the legacy
 -- system: its records, every version of each and the metadata of their
@@ -12,7 +12,7 @@
 --    55000 IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT before anything is
 --    created, and nothing in it changes. Rebuilding such a staging database
 --    from main is a proposed default that needs the owner's and the DPO's
---    written approval first (ADR-065, release checklist P36).
+--    written approval first (ADR-066, release checklist P37).
 --
 -- 1. Three append-only tables, ehr.imported_medical_records, their versions
 --    and their files, each keeping the legacy row as staged (source_payload,
@@ -49,7 +49,7 @@
 --      statement (an InitPlan), not once per row: a page at the caps asks it
 --      three times, not about 2,200. When all hold, the patient's whole
 --      imported history is disclosed as one unit: it has no source facility
---      or encounter that a facility-bound consent could narrow (ADR-065).
+--      or encounter that a facility-bound consent could narrow (ADR-066).
 --    No policy admits an INSERT, UPDATE or DELETE by any role named here;
 --    the technical owners' policies are created by the role bootstrap
 --    (runtime-grants.sql), where those roles exist.
@@ -103,13 +103,13 @@
 -- 5. The permission ehr.imported-history.read, held by doctor, clinician and
 --    nurse (the roles that read notes); the staff route needs it as well.
 --
--- Not included (ADR-065): imported attachments, scan evidence, downloads and
+-- Not included (ADR-066): imported attachments, scan evidence, downloads and
 -- health profiles; the imported inbox; the imported customer configuration
 -- archive and any administrator read of it; a staff historical inbox; and
 -- any change to the patient summary, the emergency (break-glass) summary or
 -- any other route. This migration moves no data: the import command runs
 -- only when an operator runs it, on staging, after the DPO and the owner have
--- signed off (release checklist P36).
+-- signed off (release checklist P37).
 --
 -- Locks: creating the foreign keys takes SHARE ROW EXCLUSIVE on
 -- identity.patients, auth.accounts and migration.runs, creating the seal
@@ -117,7 +117,7 @@
 -- and the permission rows take row locks on auth.permissions and
 -- auth.role_permissions, until the migration commits; everything else
 -- creates new objects. Each waits at
--- most the runner's 5 s lock timeout; a timeout rolls 0096 back whole, and it
+-- most the runner's 5 s lock timeout; a timeout rolls 0097 back whole, and it
 -- can be run again.
 
 -- 0. A database built from the PR #8 branch is refused, unchanged.
@@ -139,7 +139,7 @@ begin
      or exists (select 1 from migration.schema_migrations
                  where version in ('0061_imported_medical_records.sql', '0062_customer_history_access.sql')) then
     raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT',
-      detail = 'This database holds imported history objects of the PR #8 branch; it may be rebuilt from main only with the approval release checklist P36 names (ADR-065).';
+      detail = 'This database holds imported history objects of the PR #8 branch; it may be rebuilt from main only with the approval release checklist P37 names (ADR-066).';
   end if;
 end
 $$;
@@ -273,7 +273,7 @@ as $$
 $$;
 revoke all on function ehr.imported_history_staff_read_allowed(uuid) from public;
 comment on function ehr.imported_history_staff_read_allowed(uuid) is
-  'True only for direct care with a standard consent at the selected facility, the membership holding ehr.imported-history.read, the patient''s sharing choice and a login that is not deleted (ADR-065). Never true under break-glass. Owned by hid_imported_history_commands.';
+  'True only for direct care with a standard consent at the selected facility, the membership holding ehr.imported-history.read, the patient''s sharing choice and a login that is not deleted (ADR-066). Never true under break-glass. Owned by hid_imported_history_commands.';
 
 -- The one patient a staff transaction may read imported history of: the
 -- patient it names in app.imported_history_patient (ImportedHistoryService
@@ -296,7 +296,7 @@ as $$
 $$;
 revoke all on function ehr.imported_history_staff_patient() from public;
 comment on function ehr.imported_history_staff_patient() is
-  'The patient named in app.imported_history_patient when ehr.imported_history_staff_read_allowed allows it, else null; the staff policies compare each row with it once per statement (ADR-065).';
+  'The patient named in app.imported_history_patient when ehr.imported_history_staff_read_allowed allows it, else null; the staff policies compare each row with it once per statement (ADR-066).';
 
 -- 3. The read policies of the imported tables.
 create policy imported_history_patient_self_read on ehr.imported_medical_records for select
@@ -404,9 +404,9 @@ $$;
 revoke all on function identity.my_imported_history_sharing(text, uuid),
   identity.set_my_imported_history_sharing(text, uuid, boolean) from public;
 comment on function identity.my_imported_history_sharing(text, uuid) is
-  'The session patient''s choice to share imported legacy history with the facilities they approve (off when never made), through identity.patient_self_session; 42501 otherwise (ADR-065).';
+  'The session patient''s choice to share imported legacy history with the facilities they approve (off when never made), through identity.patient_self_session; 42501 otherwise (ADR-066).';
 comment on function identity.set_my_imported_history_sharing(text, uuid, boolean) is
-  'Sets the session patient''s imported history sharing choice and records the change with its session and correlation id; a repeat changes nothing; 42501 for anything but a live patient session of the acting subject (ADR-065).';
+  'Sets the session patient''s imported history sharing choice and records the change with its session and correlation id; a repeat changes nothing; 42501 for anything but a live patient session of the acting subject (ADR-066).';
 
 -- 4c. The import command.
 create function ehr.import_legacy_medical_history(parent_run uuid, history_run uuid, operator text, supplied jsonb)
@@ -768,7 +768,7 @@ end
 $$;
 revoke all on function ehr.import_legacy_medical_history(uuid, uuid, text, jsonb) from public;
 comment on function ehr.import_legacy_medical_history(uuid, uuid, text, jsonb) is
-  'Imports a sealed legacy_imported_history staging run of a verified legacy identity run, accepting only rows equal to their sealed staging rows and ISO 8601 timestamps with an offset; inserts once, refuses a stored row that differs, records a receipt run (ADR-065). Owned by hid_imported_history_importer; executable by hid_migration_admin only.';
+  'Imports a sealed legacy_imported_history staging run of a verified legacy identity run, accepting only rows equal to their sealed staging rows and ISO 8601 timestamps with an offset; inserts once, refuses a stored row that differs, records a receipt run (ADR-066). Owned by hid_imported_history_importer; executable by hid_migration_admin only.';
 
 -- 6. The history run's own seal (0033's guards, for legacy_imported_history).
 create function migration.guard_imported_history_source_row_insert()
@@ -839,7 +839,7 @@ revoke all on function migration.guard_imported_history_source_row_insert(),
 -- 5. The permission.
 insert into auth.permissions (code, description) values
   ('ehr.imported-history.read',
-   'Read a patient''s imported legacy medical history for direct care, with consent and the patient''s sharing choice (ADR-065)')
+   'Read a patient''s imported legacy medical history for direct care, with consent and the patient''s sharing choice (ADR-066)')
 on conflict (code) do update set description = excluded.description, active = true;
 insert into auth.role_permissions (role_code, permission_code) values
   ('doctor', 'ehr.imported-history.read'),
@@ -848,12 +848,12 @@ insert into auth.role_permissions (role_code, permission_code) values
 on conflict (role_code, permission_code) do nothing;
 
 comment on table ehr.imported_medical_records is
-  'Imported legacy medical records as the legacy system held them (no encounter, facility or signature is made up); read by the patient through patient-self and by staff only for direct care with consent and the patient''s sharing choice; written only by ehr.import_legacy_medical_history (ADR-065).';
+  'Imported legacy medical records as the legacy system held them (no encounter, facility or signature is made up); read by the patient through patient-self and by staff only for direct care with consent and the patient''s sharing choice; written only by ehr.import_legacy_medical_history (ADR-066).';
 comment on table ehr.imported_medical_record_versions is
-  'Every version of each imported legacy record, as staged (ADR-065).';
+  'Every version of each imported legacy record, as staged (ADR-066).';
 comment on table ehr.imported_medical_record_files is
-  'Metadata of the files of imported legacy records only; no object is bound, scanned or downloadable (ADR-065).';
+  'Metadata of the files of imported legacy records only; no object is bound, scanned or downloadable (ADR-066).';
 comment on table identity.imported_history_sharing is
-  'The patient''s choice to share imported legacy history with the facilities they approve; no row means not shared (ADR-065).';
+  'The patient''s choice to share imported legacy history with the facilities they approve; no row means not shared (ADR-066).';
 comment on table identity.imported_history_sharing_events is
-  'Append-only log of each change of the patient''s imported history sharing choice (ADR-065).';
+  'Append-only log of each change of the patient''s imported history sharing choice (ADR-066).';
