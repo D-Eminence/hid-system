@@ -572,9 +572,17 @@ account to exist:
    changes no account, so a mistyped address can still be replaced (below).
    The recovery start answers an address without an account exactly as any
    other, so a code that never arrives is the only sign of a mistyped address.
-3. Once every code has arrived, each person starts the reset again (a code
-   lasts `OTP_EXPIRY_SECONDS`, 300 seconds by default), enters the code and
-   sets their own password. Nobody else ever knows it.
+3. Once every code has arrived, each person enters the code from step 2 on the
+   same page and sets their own password. Nobody else ever knows it. A code
+   lasts `OTP_EXPIRY_SECONDS` (300 seconds by default), and entering
+   it changes no account until the password is set. Only a person whose
+   code has expired starts the reset again, and not within
+   `OTP_RESEND_COOLDOWN_SECONDS` (60 seconds) of their last start, which
+   returns the same challenge and sends no new code. Recovery starts are
+   limited per client network (`OTP_RATE_MAX_REQUESTS`, 5 by default, per
+   `OTP_RATE_WINDOW_SECONDS`, 900 seconds, for one IPv4 address or IPv6 /64),
+   so people on one network space their starts; `429 OTP_RATE_LIMITED` means
+   waiting the `Retry-After`, not a mistyped address.
 4. Each person signs in at `https://admin.healthidentitydirectory.com` with
    that password and enrols an authenticator app (TOTP) at the first sign-in;
    the platform enrolment needs no emailed code. Then check P6.
@@ -810,7 +818,11 @@ accounts in `PLATFORM_ADMIN_ACCOUNT_IDS`, each active with an email address and
 a password: that run is their re-approval (`SUPER_ADMIN_FOUNDATION.md`, Where
 the accounts come from). Once Super Admins exist, the bootstrap refuses, and a
 held HID 1.0 administrator whose address no seeded account has is re-approved
-by the two-person approval instead. An account seeded by email keeps its
+by the two-person approval instead. A HID 1.0 administrator who already holds a Super Admin account seeded by
+email under another address is not re-approved: that HID 1.0 account keeps
+no platform role. Two-person approval (0070) and clinician approval (0096)
+separate accounts, not people, so each person holds at most one Super Admin
+account. An account seeded by email keeps its
 address under `accounts_email_ci_uq` (every status but `deleted`), and the
 promotion inserts an account only when its ID is new, so promoting a HID 1.0
 user with a seeded address, in any letter case, is a conflict that blocks the

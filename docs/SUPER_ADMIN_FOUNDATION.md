@@ -187,10 +187,18 @@ not the operator who runs the task, and not another Super Admin. In order
    address can still be replaced (below). The recovery start answers an
    address without an account exactly as any other, so a code that never
    arrives is the only sign of a mistyped address.
-4. Once every code has arrived, each person starts the reset again (a code
-   lasts `OTP_EXPIRY_SECONDS`, 300 seconds by default), enters the code and
-   sets their own password. Completing the recovery turns `pending_reset` into
-   `active` (0086).
+4. Once every code has arrived, each person enters the code from step 3 on the
+   same page and sets their own password. Completing the recovery turns
+   `pending_reset` into `active` (0086). A code lasts `OTP_EXPIRY_SECONDS`
+   (300 seconds by default), and entering
+   it changes no account until the password is set. Only a person whose
+   code has expired starts the reset again, and not within
+   `OTP_RESEND_COOLDOWN_SECONDS` (60 seconds) of their last start, which
+   returns the same challenge and sends no new code. Recovery starts are
+   limited per client network (`OTP_RATE_MAX_REQUESTS`, 5 by default, per
+   `OTP_RATE_WINDOW_SECONDS`, 900 seconds, for one IPv4 address or IPv6 /64),
+   so people on one network space their starts; `429 OTP_RATE_LIMITED` means
+   waiting the `Retry-After`, not a mistyped address.
 5. Each person signs in at the admin site with that password and enrols an
    authenticator app (TOTP) at the first sign-in; a platform enrolment needs no
    emailed code. An account that is also an eligible staff member would enrol
@@ -244,6 +252,12 @@ is seeded with an address that no HID 1.0 auth user has. If a governance
 owner's seeded address is nevertheless their HID 1.0 address, record it:
 resolving that conflict needs an owner decision, and the promotion path still
 to be designed must handle it.
+
+A HID 1.0 administrator who already holds a Super Admin account seeded by
+email under another address is not re-approved: that HID 1.0 account keeps
+no platform role. Two-person approval (0070) and clinician approval (0096)
+separate accounts, not people, so each person holds at most one Super Admin
+account.
 
 But the promotion has no AWS execution path yet (`AWS_DEPLOYMENT_RUNBOOK.md`
 §6). RDS accepts connections only from the service tasks and the migration
