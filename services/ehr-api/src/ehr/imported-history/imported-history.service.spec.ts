@@ -41,10 +41,13 @@ function recordRow(n: number, versions = 1, files = 0) {
 }
 
 function setup(categories: PatientReleaseCategory[] = ['importedHistory'],
-  options: { records?: unknown[]; shared?: boolean; auditFails?: boolean; queryError?: unknown } = {}) {
+  options: { records?: unknown[]; shared?: boolean; auditFails?: boolean; queryError?: unknown; decisionError?: unknown } = {}) {
   const query = jest.fn(async (sql: string, _values?: unknown[]) => {
     if (/set_config\('app\.patient_release'/.test(sql)) return { rows: [{}] };
-    if (/imported_history_staff_read_allowed/.test(sql)) return { rows: [{ shared: options.shared ?? false }] };
+    if (/imported_history_staff_read_allowed/.test(sql)) {
+      if (options.decisionError) throw options.decisionError;
+      return { rows: [{ shared: options.shared ?? false, bound: _values?.[0] }] };
+    }
     if (/from ehr\.imported_medical_records/.test(sql)) {
       if (options.queryError) throw options.queryError;
       return { rows: options.records ?? [recordRow(1, 2, 1), recordRow(2)] };
@@ -71,6 +74,9 @@ function setup(categories: PatientReleaseCategory[] = ['importedHistory'],
     release);
   return { service, query, transaction, authorizeSelf, run, recorded, audit };
 }
+
+const STAFF_DECISION = "select ehr.imported_history_staff_read_allowed($1::uuid) as shared, "
+  + "set_config('app.imported_history_patient', $1::uuid::text, true) as bound";
 
 const statements = (query: jest.Mock) => (query.mock.calls as unknown as QueryCall[]).map(([sql]) =>
   String(sql).replace(/\s+/g, ' ').trim());
@@ -194,7 +200,33 @@ describe('ImportedHistoryService.staff: direct care, standard consent and the pa
     const value = await service.staff(patientId, staffContext);
     expect(value).toEqual({ shared: false, records: [], healthProfile: null, limits: IMPORTED_HISTORY_LIMITS,
       truncated: { records: false }, nextCursor: null, provenance: 'legacy-import' });
-    expect(statements(query)).toEqual(['select ehr.imported_history_staff_read_allowed($1) as shared']);
+    // One statement decides and binds the patient the staff policies compare
+    // with (ADR-065): the decision runs once per statement, not per row.
+    expect(statements(query)).toEqual([STAFF_DECISION]);
+    expect(query.mock.calls[0]?.[1]).toEqual([patientId]);
+  });
+
+  it('binds the patient before the page is read, so the staff policies admit only that patient\'s rows', async () => {
+    const { service, query } = setup([], { shared: true });
+    await service.staff(patientId, staffContext);
+    const sql = statements(query);
+    expect(sql[0]).toBe(STAFF_DECISION);
+    expect(sql[1]).toMatch(/from ehr\.imported_medical_records r where r\.patient_id=\$1/);
+    expect(sql).toHaveLength(2);
+  });
+
+  it.each(['42501', '42P01', '42883', '42703', '57014'])(
+    'answers 503 IMPORTED_HISTORY_UNAVAILABLE when the database refuses the staff decision (%s)', async (code) => {
+      const { service, query } = setup([], { decisionError: Object.assign(new Error('refused'), { code }) });
+      await expect(service.staff(patientId, staffContext)).rejects.toMatchObject({ status: 503,
+        code: 'IMPORTED_HISTORY_UNAVAILABLE' });
+      expect(statements(query)).toEqual([STAFF_DECISION]);
+    });
+
+  it('leaves any other database error of the staff decision to the request pipeline', async () => {
+    const failure = Object.assign(new Error('unexpected'), { code: '40001' });
+    const { service } = setup([], { decisionError: failure });
+    await expect(service.staff(patientId, staffContext)).rejects.toBe(failure);
   });
 
   it('reads the shared history and records counts and the choice in the audit details', async () => {

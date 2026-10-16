@@ -14,6 +14,16 @@
 // row-level security, the administrator holds no membership in
 // hid_migration_admin, and no runtime role can run the import. Prints its
 // evidence as JSON.
+//
+// Patient enrollment stays open throughout, on this one database: main's
+// pipeline is completed first (the NIN crosswalk attestation, the contact
+// lookup rekey and the identity mapping rows the crosswalk gate requires, which
+// no main script writes and which this rehearsal inserts as
+// progressive-patient-nin.integration.sql does), so that
+// identity.public_patient_enrollment_ready() is true before the history is
+// staged, and it must still be true once the history run is sealed and once it
+// is imported: the history run's source system is legacy_imported_history,
+// which main's crosswalk gate does not count.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -74,6 +84,18 @@ const importedCounts = async () => ({
     (select count(*)::int from ehr.imported_medical_record_files) as files`))[0],
   receipts: await count("select count(*) n from migration.runs where source_system = 'legacy_imported_history'"),
 });
+/** Main's enrollment gate, as Identity asks it before any public enrollment, in a transaction that is rolled back. */
+const enrollmentReady = async () => {
+  await client.query('begin');
+  try {
+    await client.query("select set_config('app.actor_subject', 'system:auth', true)");
+    const { rows } = await client.query(`select identity.public_patient_enrollment_ready() as enrollment,
+      identity.legacy_nin_crosswalk_ready() as crosswalk, identity.patient_contact_lookup_ready() as contacts`);
+    return rows[0];
+  } finally {
+    await client.query('rollback');
+  }
+};
 const importedSnapshot = async () => ({
   ...(await asImporter(`select
     (select coalesce(md5(string_agg(to_jsonb(t)::text, ',' order by id)), '') from ehr.imported_medical_records t) records,
@@ -100,25 +122,60 @@ try {
   run('stage the synthetic identity source', 'stage-legacy-identity.mjs', legacy);
   run('promote the synthetic identity source', 'promote-legacy-identity.mjs', legacy);
   run('reconcile the synthetic identity source', 'reconcile-legacy-identity.mjs', legacy);
-  const parent = (await client.query(`select mode, status, source_checksum_sha256 from migration.runs where id = $1`,
-    [historyIds.parentRun])).rows[0];
+  const parent = (await client.query(`select mode, status, source_snapshot, source_checksum_sha256 from migration.runs
+    where id = $1`, [historyIds.parentRun])).rows[0];
   assert.deepEqual([parent.mode, parent.status], ['reconcile', 'verified']);
-  // The history of the same source snapshot, in its own sealed run.
+  // The rest of main's pipeline, so that enrollment is open before the
+  // history: every staged patient's NIN disposition (synthetic: none has a
+  // NIN), the contact lookup rekey, and the identity mapping rows.
+  const patients = (await client.query(`select source_pk from migration.source_rows where run_id = $1
+    and entity_type = 'patients' order by source_pk`, [historyIds.parentRun])).rows;
+  const attestationPath = join(directory, 'attestation.json');
+  writeFileSync(attestationPath, JSON.stringify({ runId: historyIds.parentRun, sourceSnapshot: parent.source_snapshot,
+    sourceChecksumSha256: parent.source_checksum_sha256.trim(), evidenceReference: 'synthetic-rehearsal-inventory',
+    attestedBy: operator, attestedAt: '2026-01-02T00:00:00.000Z', patients: patients.map(({ source_pk: patientId }) =>
+      ({ patientId, ninStatus: 'absent', evidenceReference: 'synthetic-rehearsal-patient' })) }), { mode: 0o600 });
+  // Public test vectors, never operational secrets.
+  run('import the synthetic NIN crosswalk', 'import-legacy-nin-crosswalk.mjs', { DATABASE_URL: databaseUrl,
+    LEGACY_NIN_ATTESTATION_PATH: attestationPath, MIGRATION_RUN_ID: historyIds.parentRun, MIGRATION_OPERATOR: operator,
+    NIN_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 0x55).toString('base64') }, ['--apply']);
+  run('rekey the synthetic contact lookups', 'rekey-patient-contact-lookups.mjs', { DATABASE_URL: databaseUrl,
+    MIGRATION_OPERATOR: operator, MIGRATION_SNAPSHOT_ID: snapshot,
+    NIN_ENCRYPTION_KEY_B64: Buffer.alloc(32, 0x66).toString('base64'),
+    OTP_HMAC_KEY_B64: Buffer.alloc(32, 0x77).toString('base64') }, ['--apply']);
+  await client.query(`insert into migration.legacy_identity_mappings(run_id, source_system, source_auth_user_id,
+      source_patient_id, legacy_hid_code, canonical_patient_id, canonical_account_id, migration_status,
+      source_checksum_sha256, source_version, migrated_at, reconciled_at, reconciliation_result)
+    select source.run_id, 'legacy_identity', patient.account_id::text, patient.id::text, patient.hid_code, patient.id,
+      patient.account_id, 'reconciled', trim(source.payload_sha256), 'synthetic-rehearsal-v1', clock_timestamp(),
+      clock_timestamp(), 'matched'
+      from identity.patients patient
+      join migration.source_rows source on source.run_id = $1 and source.entity_type = 'patients'
+       and source.source_pk = patient.id::text
+     where patient.source_system = 'legacy_identity'`, [historyIds.parentRun]);
+  const beforeHistory = await enrollmentReady();
+  assert.deepEqual(beforeHistory, { enrollment: true, crosswalk: true, contacts: true },
+    'main\'s pipeline did not leave enrollment open');
+  // The history of the same source snapshot, in its own sealed run, which
+  // leaves enrollment open.
   run('stage the synthetic history', 'stage-legacy-identity.mjs', { ...legacy, MIGRATION_FIXTURE_PATH: historyPath,
     MIGRATION_RUN_ID: historyIds.historyRun }, ['--scope=imported-history']);
-  const history = (await client.query(`select mode, status, source_counts from migration.runs where id = $1`,
-    [historyIds.historyRun])).rows[0];
-  assert.deepEqual([history.mode, history.status, history.source_counts], ['stage', 'staged',
-    { medical_records: 3, medical_record_versions: 4, medical_record_files: 1 }]);
-  // Main's promoter refuses the history run: it is never an identity run.
+  const afterHistoryStaged = await enrollmentReady();
+  assert.deepEqual(afterHistoryStaged, beforeHistory, 'staging the history closed patient enrollment');
+  const history = (await client.query(`select source_system, mode, status, source_counts from migration.runs
+    where id = $1`, [historyIds.historyRun])).rows[0];
+  assert.deepEqual([history.source_system, history.mode, history.status, history.source_counts],
+    ['legacy_imported_history', 'stage', 'staged',
+      { medical_records: 3, medical_record_versions: 4, medical_record_files: 1 }]);
+  // Main's promoter refuses the history run, which is never an identity run,
+  // and leaves it as it was.
   run('promotion refuses the history run', 'promote-legacy-identity.mjs', { ...legacy,
     MIGRATION_RUN_ID: historyIds.historyRun }, [], 'failure');
-  evidence.steps.pipeline = { parent: 'staged, promoted and reconciled (verified)', history: 'staged and sealed',
-    promotion_of_history_run: 'refused' };
-  // The promoter's refusal blocked that run; a fresh history run of the same snapshot is staged.
-  const freshHistoryRun = 'e7000000-0000-4000-8000-000000000004';
-  run('stage the synthetic history again', 'stage-legacy-identity.mjs', { ...legacy, MIGRATION_FIXTURE_PATH: historyPath,
-    MIGRATION_RUN_ID: freshHistoryRun }, ['--scope=imported-history']);
+  assert.equal((await client.query('select status from migration.runs where id = $1', [historyIds.historyRun])).rows[0]
+    .status, 'staged', 'the promoter changed the history run');
+  evidence.steps.pipeline = { parent: 'staged, promoted and reconciled (verified); NIN crosswalk attested; contacts rekeyed',
+    history: 'staged and sealed (legacy_imported_history)', promotion_of_history_run: 'refused, run unchanged' };
+  const freshHistoryRun = historyIds.historyRun;
 
   const importer = { DATABASE_URL: databaseUrl, MIGRATION_PARENT_RUN_ID: historyIds.parentRun,
     MIGRATION_HISTORY_RUN_ID: freshHistoryRun, MIGRATION_PARENT_SOURCE_CHECKSUM: parent.source_checksum_sha256.trim(),
@@ -210,6 +267,10 @@ try {
         as runtime_importers,
       (select rolsuper from pg_roles where rolname = current_user) as superuser`)).rows[0];
   assert.deepEqual([state.forced, state.memberships, state.runtime_importers], [true, 0, 0]);
+  const afterImport = await enrollmentReady();
+  assert.deepEqual(afterImport, beforeHistory, 'importing the history closed patient enrollment');
+  evidence.steps.enrollment = { before_history: beforeHistory.enrollment, history_staged: afterHistoryStaged.enrollment,
+    after_import: afterImport.enrollment };
   evidence.steps.import = { dry_run: 'rolled back', apply: applied.counts, repeated_apply: 'unchanged',
     changed_history: 'refused (IMPORTED_HISTORY_DIFFERS)', command_refusals: Object.keys(refusals),
     unverified_parent: 'refused', force_row_level_security: state.forced, administrator_memberships_left: 0,

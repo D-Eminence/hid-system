@@ -15,8 +15,11 @@
 // break-glass grant opens the emergency summary, which holds no imported
 // key, and never the imported history; a revoked consent is refused at the
 // next request; staff sessions are refused the patient's routes; and with
-// each flag off its routes answer 503 and the database admits no imported
-// row to the patient. Synthetic accounts and records only.
+// each EHR flag off its routes answer 503 and the database admits no imported
+// row to the patient. With Identity's sharing switch off, the patient can
+// still turn sharing off (never on, and the read of the choice answers 503),
+// and the staff read then answers shared: false at the next request.
+// Synthetic accounts and records only.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -162,7 +165,8 @@ if (process.argv[2] === '--identity-child') {
     // exists only in this copy (break-glass is off at launch, D9).
     await database.fixture(async (client) => {
       await client.query(`insert into migration.runs(id,source_system,source_snapshot,mode,status,started_by)
-        values($1,'legacy_identity','synthetic-imported-runtime','stage','staged','imported-history-runtime')`, [ids.run]);
+        values($1,'legacy_imported_history','synthetic-imported-runtime','stage','staged','imported-history-runtime')`,
+      [ids.run]);
       const records = [[ids.records[0], ids.patient, ids.patientAccount, 'patient-provided', ids.versions[1], 3],
         [ids.records[1], ids.patient, ids.doctorAccount, 'provider-authored', ids.versions[2], 2],
         [ids.records[2], ids.other, ids.otherAccount, 'patient-provided', ids.versions[3], 1],
@@ -432,17 +436,40 @@ if (process.argv[2] === '--identity-child') {
       role: 'hid_ehr_api_runtime' }, 'with the flag off the database admitted an imported row');
     checks.push('with both EHR flags off, GET /ehr/me/imported-history and the staff route answer 503 IMPORTED_HISTORY_DISABLED and the release binding admits no imported row');
 
-    // 11. The sharing switch off: Identity answers 503 before the body.
+    // 11. The sharing switch off while the staff read is on (a setting the
+    //     synth inputs refuse, ADR-065): the stored choice still holds, so
+    //     the patient can always turn sharing off, never on, and the staff
+    //     read answers shared: false at the next request.
     await ehr.close();
     ehr = undefined;
     await stopIdentity(identity);
     identity = await startIdentity(false);
+    ehr = await bootEhr(EHR_FLAGS);
+    await database.fixture((client) => client.query(`insert into identity.consent_grants(id,patient_id,staff_id,account_id,
+      membership_id,facility_id,scope,purpose_of_use,status,reason,starts_at,expires_at)
+      values($1,$2,$3,$4,$5,$6,'read_records','direct-care','active','Synthetic imported consent again',
+        clock_timestamp()-interval '1 minute',clock_timestamp()+interval '30 days')`,
+    [id(), ids.patient, ids.doctor, ids.doctorAccount, ids.membership, ids.facility]));
     const offSharing = await call(identity.base, 'GET', sharingPath, { cookie: patient.cookie });
     assert.deepEqual([offSharing.status, offSharing.body?.code], [503, 'IMPORTED_HISTORY_SHARING_DISABLED']);
-    const offSet = await call(identity.base, 'POST', sharingPath, { cookie: patient.cookie, origin: ORIGIN,
+    const offOn = await call(identity.base, 'POST', sharingPath, { cookie: patient.cookie, origin: ORIGIN,
+      'x-csrf-token': patient.csrf }, { shared: true });
+    assert.deepEqual([offOn.status, offOn.body?.code], [503, 'IMPORTED_HISTORY_SHARING_DISABLED']);
+    const storedChoice = await staffRead(ids.patient);
+    assert.deepEqual([storedChoice.status, storedChoice.body?.shared], [200, true], JSON.stringify(storedChoice.body));
+    const offOff = await call(identity.base, 'POST', sharingPath, { cookie: patient.cookie, origin: ORIGIN,
       'x-csrf-token': patient.csrf }, { shared: false });
-    assert.deepEqual([offSet.status, offSet.body?.code], [503, 'IMPORTED_HISTORY_SHARING_DISABLED']);
-    checks.push('with the sharing switch off, both sharing routes answer 503 IMPORTED_HISTORY_SHARING_DISABLED');
+    assert.equal(offOff.status, 200, JSON.stringify(offOff.body));
+    assert.deepEqual([offOff.body.shared, offOff.body.changed], [false, true]);
+    const offOffAgain = await call(identity.base, 'POST', sharingPath, { cookie: patient.cookie, origin: ORIGIN,
+      'x-csrf-token': patient.csrf }, { shared: false });
+    assert.deepEqual([offOffAgain.status, offOffAgain.body?.shared, offOffAgain.body?.changed], [200, false, false]);
+    const withdrawn = await staffRead(ids.patient);
+    assert.deepEqual([withdrawn.status, withdrawn.body?.shared, withdrawn.body?.records], [200, false, []]);
+    const withdrawal = await owner.query(`select shared, row_version from identity.imported_history_sharing_events
+      where patient_id=$1 order by row_version`, [ids.patient]);
+    assert.deepEqual(withdrawal.rows.map((row) => [row.shared, Number(row.row_version)]), [[true, 1], [false, 2]]);
+    checks.push('with the sharing switch off and the staff read on, the stored choice still holds; reading the choice and turning sharing on answer 503 IMPORTED_HISTORY_SHARING_DISABLED, turning it off answers 200 (changed, then unchanged) and is recorded, and the staff read answers shared: false at the next request');
 
     process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only',
       roles: ['hid_ehr_api_runtime', 'hid_identity_api_runtime'], checks })}\n`);

@@ -100,6 +100,13 @@ describe('Patient self service', () => {
 // the patient's own choice to share it with the facilities they approve,
 // through session-bound database commands, audited in the same transaction.
 describe('Patient imported history sharing', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const environment = require('../config/environment') as typeof import('../config/environment');
+  const sharingSwitch = (enabled: boolean) => jest.spyOn(environment, 'getEnvironment').mockReturnValue(
+    { IMPORTED_HISTORY_SHARING_ENABLED: enabled } as ReturnType<typeof environment.getEnvironment>);
+  beforeEach(() => { sharingSwitch(true); });
+  afterEach(() => { jest.restoreAllMocks(); });
+
   /** Answers the sharing transaction by statement. */
   function sharingStatements(query: jest.Mock, options: { held?: boolean; recent?: boolean; refused?: boolean;
     row?: Record<string, unknown> } = {}) {
@@ -150,6 +157,35 @@ describe('Patient imported history sharing', () => {
     await expect(service.setImportedHistorySharing(request, true)).rejects.toMatchObject({ status: 403, code });
     expect(index(query, 'set_my_imported_history_sharing')).toBe(-1);
     expect(record).not.toHaveBeenCalled();
+  });
+
+  it('names the held change in a sentence the client may show', async () => {
+    const { service, query } = setup(null);
+    sharingStatements(query, { held: true });
+    const refusal = await service.setImportedHistorySharing(request, true).catch((error: unknown) => error);
+    expect(refusal).toMatchObject({ status: 403, code: 'PATIENT_RECENT_RECOVERY_HOLD' });
+    expect((refusal as Error).message).toMatch(/; imported medical history sharing changes are available again once that period ends$/);
+  });
+
+  it('refuses to turn sharing on while the sharing switch is off, before any transaction', async () => {
+    sharingSwitch(false);
+    const { service, transaction, record } = setup(null);
+    await expect(service.setImportedHistorySharing(request, true)).rejects.toMatchObject({ status: 503,
+      code: 'IMPORTED_HISTORY_SHARING_DISABLED' });
+    expect(transaction).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it('turns sharing off while the sharing switch is off: withdrawing is always allowed', async () => {
+    sharingSwitch(false);
+    const { service, query, record } = setup(null);
+    sharingStatements(query, { held: true, recent: false, row: { shared: false, changed: true, updatedAt: null } });
+    await expect(service.setImportedHistorySharing(request, false)).resolves.toEqual({ shared: false, changed: true,
+      updatedAt: null });
+    const command = index(query, 'identity.set_my_imported_history_sharing($1,$2,$3)');
+    expect(query.mock.calls[command]?.[1]).toEqual(['patient-subject', 'session-id', false]);
+    expect(record).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: 'identity.patient.self.imported-history-sharing.change', details: { shared: false, changed: true } }));
   });
 
   it('turns sharing off without the recovery hold or recent sign-in checks', async () => {

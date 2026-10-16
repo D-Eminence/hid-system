@@ -43,7 +43,7 @@ function input({ history = syntheticHistoryFixture(identity), parentChanges = {}
     parent: { id: historyIds.parentRun, source_system: 'legacy_identity', mode: 'reconcile', status: 'verified',
       source_snapshot: snapshot, source_checksum_sha256: parentSeal.overallChecksum,
       target_checksum_sha256: 'f'.repeat(64), conflicts: 0, ...parentChanges },
-    history: { id: historyIds.historyRun, source_system: 'legacy_identity', mode: 'stage', status: 'staged',
+    history: { id: historyIds.historyRun, source_system: 'legacy_imported_history', mode: 'stage', status: 'staged',
       source_snapshot: snapshot, source_counts: historySeal.counts, source_checksum_sha256: historySeal.overallChecksum,
       conflicts: 0, ...historyChanges },
     parentChecksum: parentSeal.overallChecksum,
@@ -94,7 +94,11 @@ test('refuses a parent run that is not the verified, reconciled legacy identity 
 });
 
 test('refuses a history run that is not a sealed staging run of the same source snapshot', () => {
-  for (const [changes, code] of [[{ mode: 'promote' }, 'IMPORTED_HISTORY_RUN_NOT_SEALED'],
+  // A history run of source system legacy_identity would close patient
+  // enrollment (main's crosswalk gate counts every staged legacy identity
+  // run), so the history scope stages legacy_imported_history and nothing else.
+  for (const [changes, code] of [[{ source_system: 'legacy_identity' }, 'IMPORTED_HISTORY_RUN_NOT_SEALED'],
+    [{ mode: 'promote' }, 'IMPORTED_HISTORY_RUN_NOT_SEALED'],
     [{ status: 'running' }, 'IMPORTED_HISTORY_RUN_NOT_SEALED'], [{ source_checksum_sha256: null }, 'IMPORTED_HISTORY_RUN_NOT_SEALED'],
     [{ conflicts: 2 }, 'IMPORTED_HISTORY_RUN_NOT_SEALED'], [{ source_snapshot: 'another-snapshot' }, 'IMPORTED_HISTORY_SNAPSHOT_MISMATCH'],
     [{ source_checksum_sha256: 'b'.repeat(64) }, 'IMPORTED_HISTORY_SEAL_MISMATCH']]) {
@@ -167,7 +171,7 @@ test('the stager seals the history scope as the importer recomputes it, and leav
     const history = syntheticHistoryFixture(identity);
     writeFileSync(historyPath, JSON.stringify(history), { mode: 0o600 });
     const environment = { PATH: process.env.PATH, MIGRATION_FIXTURE_PATH: historyPath,
-      MIGRATION_SNAPSHOT_ID: snapshot, MIGRATION_OPERATOR: 'imported-history-test' };
+      MIGRATION_SNAPSHOT_ID: snapshot, MIGRATION_OPERATOR: 'imported-history-test', HID_DEPLOYMENT_ENV: 'staging' };
     const output = execFileSync(process.execPath, [join(here, 'stage-legacy-identity.mjs'), '--dry-run',
       '--scope=imported-history'], { env: environment, encoding: 'utf8' });
     const sealed = stagedRows(history, IMPORTED_HISTORY_ENTITY_TYPES);
@@ -241,4 +245,81 @@ test('the command line refuses production, unknown operations and conflicting mo
     assert.match(result.stderr, message, label);
     assert.doesNotMatch(result.stderr, /ECONNREFUSED|connect/, `${label} tried to connect`);
   }
+});
+
+test('the stager refuses the history scope in production and outside staging or a rehearsal, before it reads or connects', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'hid-imported-history-stager-'));
+  try {
+    const historyPath = join(directory, 'history.json');
+    writeFileSync(historyPath, JSON.stringify(syntheticHistoryFixture(identity)), { mode: 0o600 });
+    const script = join(here, 'stage-legacy-identity.mjs');
+    // Nothing listens on either URL: a connection attempt would fail with a different error.
+    const base = { PATH: process.env.PATH, DATABASE_URL: 'postgresql://nobody@127.0.0.1:9/none',
+      MIGRATION_SNAPSHOT_ID: snapshot, MIGRATION_OPERATOR: 'imported-history-test' };
+    const legacySource = { LEGACY_DATABASE_URL: 'postgresql://nobody@127.0.0.1:9/legacy' };
+    for (const [label, environment, args, message] of [
+      ['production', { ...base, ...legacySource, HID_DEPLOYMENT_ENV: 'production' }, ['--scope=imported-history'],
+        /refused in production/],
+      ['a production dry run', { ...base, ...legacySource, HID_DEPLOYMENT_ENV: 'production', DATABASE_URL: '' },
+        ['--dry-run', '--scope=imported-history'], /refused in production/],
+      ['production with a test runtime', { ...base, MIGRATION_FIXTURE_PATH: historyPath, HID_DEPLOYMENT_ENV: 'production',
+        NODE_ENV: 'test', DATABASE_URL: 'postgresql://nobody@localhost/none?host=%2Ftmp%2Fnone' }, ['--scope=imported-history'],
+      /refused in production/],
+      ['no deployment profile', { ...base, ...legacySource }, ['--scope=imported-history'], /staging or an owned rehearsal/],
+      ['a development profile', { ...base, ...legacySource, HID_DEPLOYMENT_ENV: 'development' }, ['--scope=imported-history'],
+        /staging or an owned rehearsal/],
+      ['a test runtime reading a legacy database', { ...base, ...legacySource, NODE_ENV: 'test',
+        DATABASE_URL: 'postgresql://nobody@localhost/none?host=%2Ftmp%2Fnone' }, ['--scope=imported-history'],
+      /staging or an owned rehearsal/],
+      ['a test runtime on a TCP database', { ...base, MIGRATION_FIXTURE_PATH: historyPath, NODE_ENV: 'test' },
+        ['--scope=imported-history'], /staging or an owned rehearsal/],
+    ]) {
+      const result = spawnSync(process.execPath, [script, ...args], { env: environment, encoding: 'utf8' });
+      assert.notEqual(result.status, 0, label);
+      assert.match(result.stderr, message, label);
+      assert.doesNotMatch(result.stderr, /ECONNREFUSED|ENOENT|connect/, `${label} tried to connect`);
+      assert.doesNotMatch(result.stdout, /medical_records:/, `${label} read the history`);
+    }
+    // The identity scope is main's and is unchanged: its dry run of the sample
+    // fixture still runs without a deployment profile.
+    const identityRun = spawnSync(process.execPath, [script, '--dry-run'], { env: { PATH: process.env.PATH,
+      MIGRATION_FIXTURE_PATH: join(here, '../test/fixtures/legacy-identity.sample.json'), MIGRATION_SNAPSHOT_ID: snapshot,
+      MIGRATION_OPERATOR: 'imported-history-test' }, encoding: 'utf8' });
+    assert.equal(identityRun.status, 0, identityRun.stderr);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test('the checks grow linearly with the history: 4 times the versions take well under 8 times as long', () => {
+  // N records of the patient, 4 versions each, all written by the patient.
+  const scaled = (records) => {
+    const history = { medical_records: [], medical_record_versions: [], medical_record_files: [] };
+    const id = (kind, n, last = 0) => `${kind}${n.toString(16).padStart(6, '0')}-0000-4000-8000-${String(last).padStart(12, '0')}`;
+    for (let n = 1; n <= records; n += 1) {
+      history.medical_records.push({ source_pk: id('e8', n), payload: { id: id('e8', n), patient_id: identity.patient,
+        current_version_id: id('e9', n, 4), title: 'Synthetic scaled history', category: 'history', info_type: 'text',
+        created_by_user_profile_id: historyIds.patientProfile, created_by_staff_account_id: null,
+        created_at: '2025-04-01T08:00:00.000Z', updated_at: '2025-04-01T08:00:00.000Z' } });
+      for (let v = 1; v <= 4; v += 1) {
+        history.medical_record_versions.push({ source_pk: id('e9', n, v), payload: { id: id('e9', n, v), record_id: id('e8', n),
+          version_no: v, created_by_user_profile_id: historyIds.patientProfile, created_by_staff_account_id: null,
+          record: 'Invented scaled content', notes: null, structured_data: null, transcription_text: null,
+          created_at: '2025-04-01T08:00:00.000Z' } });
+      }
+    }
+    return input({ history });
+  };
+  const timed = (records) => {
+    const prepared = scaled(records);
+    const started = process.hrtime.bigint();
+    const result = prepareImportedHistory(prepared);
+    const elapsed = Number(process.hrtime.bigint() - started) / 1e6;
+    assert.equal(result.versions.length, records * 4);
+    return elapsed;
+  };
+  timed(200);
+  const small = timed(1_000);
+  const large = timed(4_000);
+  assert.ok(large < 8 * Math.max(small, 5), `4 000 versions took ${small.toFixed(0)} ms, 16 000 took ${large.toFixed(0)} ms`);
 });

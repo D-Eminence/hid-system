@@ -12,7 +12,12 @@
 -- consent of the selected membership, no deny directive); the membership's
 -- role holds ehr.imported-history.read; the patient has chosen to share
 -- imported history (identity.imported_history_sharing, off by default); and
--- the patient's login is not deleted. Break-glass never discloses it: an
+-- the patient's login is not deleted. The staff policies decide once per
+-- statement, for the one patient the staff transaction names in
+-- app.imported_history_patient (ehr.imported_history_staff_patient(), whose
+-- decision is evaluated as an InitPlan, not per row): a binding is only the
+-- request, never the permission, and a transaction bound to one patient reads
+-- no other patient's rows. Break-glass never discloses it: an
 -- active break-glass grant with purpose emergency reads nothing, although
 -- ehr.context_allows admits it. The staff helper, the two sharing commands
 -- and the import command are SECURITY DEFINER functions owned by NOLOGIN
@@ -161,8 +166,12 @@ language sql as $$
     set_config('app.facility_id',facility,true), set_config('app.membership_id',membership,true),
     set_config('app.correlation_id','imported-history-integration-0001',true),
     set_config('app.purpose_of_use',purpose,true),
-    set_config('app.patient_id','',true), set_config('app.patient_release','',true);
+    set_config('app.patient_id','',true), set_config('app.patient_release','',true),
+    set_config('app.imported_history_patient','e3200000-0000-4000-8000-000000000001',true);
 $$;
+-- The patient the staff read names, as ImportedHistoryService.staff binds it.
+create function pg_temp.bind_staff_patient(patient text) returns void
+language sql as $$ select set_config('app.imported_history_patient', patient, true); $$;
 create function pg_temp.bind_receptionist(purpose text) returns void
 language sql as $$
   select pg_temp.bind_staff('e3600000-0000-4000-8000-000000000003','e3400000-0000-4000-8000-000000000002',purpose),
@@ -202,10 +211,26 @@ select pg_temp.imported_record('staff: consent and sharing disclose the whole hi
 select pg_temp.imported_record('staff helper per patient', 'A:true,B:false,C:false,D:false,E:false',
   (select string_agg(chr(64+n)||':'||ehr.imported_history_staff_read_allowed(
      ('e3200000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid), ',' order by n) from generate_series(1,5) n));
+select pg_temp.bind_staff_patient('e3200000-0000-4000-8000-000000000002');
 select pg_temp.imported_record('staff: consent without sharing reads nothing (B)', '0',
   (select count(*)::text from ehr.imported_medical_records where patient_id = 'e3200000-0000-4000-8000-000000000002'));
+select pg_temp.imported_record('staff bound to B reads none of A''s shared rows', '|0|0', pg_temp.imported_visible());
+select pg_temp.bind_staff_patient('e3200000-0000-4000-8000-000000000003');
 select pg_temp.imported_record('staff: a deleted login with sharing on reads nothing (C)', '0',
   (select count(*)::text from ehr.imported_medical_records where patient_id = 'e3200000-0000-4000-8000-000000000003'));
+select pg_temp.bind_staff_patient('e3200000-0000-4000-8000-000000000004');
+select pg_temp.imported_record('staff bound to D (shares, no standard consent) reads nothing', '|0|0',
+  pg_temp.imported_visible());
+-- A binding is the request, never the permission: no binding, a malformed
+-- one and an upper-case spelling read nothing, and none is an error.
+select pg_temp.bind_staff_patient('');
+select pg_temp.imported_record('staff with no patient bound reads nothing', '|0|0', pg_temp.imported_visible());
+select pg_temp.bind_staff_patient('not-a-patient');
+select pg_temp.imported_record('staff with a malformed binding reads nothing', '|0|0', pg_temp.imported_visible());
+select pg_temp.bind_staff_patient('E3200000-0000-4000-8000-000000000001');
+select pg_temp.imported_record('staff with an upper-case binding reads nothing', '|0|0', pg_temp.imported_visible());
+select pg_temp.bind_staff_patient('e3200000-0000-4000-8000-000000000001');
+select pg_temp.imported_record('staff bound to A again reads A''s history', '01,02|3|1', pg_temp.imported_visible());
 select pg_temp.imported_record('staff helper with no patient', 'false',
   ehr.imported_history_staff_read_allowed(null)::text);
 -- Every purpose but direct-care reads nothing.
@@ -578,11 +603,18 @@ select pg_temp.imported_record('patient-self policies follow the release set and
   (select string_agg((pg_get_expr(polqual, polrelid) like '%''importedHistory''::text = ANY (string_to_array(current_setting(''app.patient_release''::text, true), '',''::text))%'
      and pg_get_expr(polqual, polrelid) like '%ehr.patient_self_context(patient_id)%')::text, ':' order by polrelid::regclass::text)
      from pg_policy where polname = 'imported_history_patient_self_read'));
-select pg_temp.imported_record('staff policies call the staff helper', 'true:true:true',
-  (select string_agg((pg_get_expr(polqual, polrelid) = 'ehr.imported_history_staff_read_allowed(patient_id)')::text, ':'
+select pg_temp.imported_record('staff policies compare with the patient decided once per statement', 'true:true:true',
+  (select string_agg((pg_get_expr(polqual, polrelid)
+       = '(patient_id = ( SELECT ehr.imported_history_staff_patient() AS imported_history_staff_patient))')::text, ':'
      order by polrelid::regclass::text) from pg_policy where polname = 'imported_history_staff_read'));
+select pg_temp.imported_record('the staff binding function: invoker, stable, pinned, run by the EHR runtime and the test role',
+  'false:s:{"search_path=pg_catalog, pg_temp"}:hid_ehr_runtime|hid_schema_test_runtime',
+  (select proc.prosecdef::text || ':' || proc.provolatile::text || ':' || proc.proconfig::text || ':'
+     || (select string_agg(privilege.grantee::regrole::text, '|' order by privilege.grantee::regrole::text)
+           from aclexplode(proc.proacl) privilege where privilege.grantee <> proc.proowner)
+     from pg_proc proc where proc.oid = to_regprocedure('ehr.imported_history_staff_patient()')));
 select pg_temp.imported_record('function owners, definer and pinned search_path',
-  'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb):hid_imported_history_importer:true:{"search_path=pg_catalog, pg_temp"},'
+  'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb):hid_imported_history_importer:true:{"search_path=pg_catalog, pg_temp",TimeZone=UTC},'
   || 'ehr.imported_history_staff_read_allowed(uuid):hid_imported_history_commands:true:{"search_path=pg_catalog, pg_temp"},'
   || 'identity.my_imported_history_sharing(text,uuid):hid_imported_history_commands:true:{"search_path=pg_catalog, pg_temp"},'
   || 'identity.set_my_imported_history_sharing(text,uuid,boolean):hid_imported_history_commands:true:{"search_path=pg_catalog, pg_temp"}',
@@ -608,6 +640,13 @@ select pg_temp.imported_record('EXECUTE holders of the new functions',
         'identity.set_my_imported_history_sharing(text,uuid,boolean)'::regprocedure,
         'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb)'::regprocedure)
       group by proc.oid) holders));
+select pg_temp.imported_record('no technical owner keeps an EXECUTE entry on its own function', '0',
+  (select count(*)::text from pg_proc proc, aclexplode(proc.proacl) privilege
+    where proc.oid in ('ehr.imported_history_staff_read_allowed(uuid)'::regprocedure,
+      'identity.my_imported_history_sharing(text,uuid)'::regprocedure,
+      'identity.set_my_imported_history_sharing(text,uuid,boolean)'::regprocedure,
+      'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb)'::regprocedure)
+      and privilege.grantee = proc.proowner));
 select pg_temp.imported_record('PUBLIC executes none of the new functions', 'f,f,f,f',
   concat_ws(',', has_function_privilege('public','ehr.imported_history_staff_read_allowed(uuid)','EXECUTE'),
     has_function_privilege('public','identity.my_imported_history_sharing(text,uuid)','EXECUTE'),
@@ -635,6 +674,94 @@ select pg_temp.imported_record('triggers of the imported tables: immutability on
 select pg_temp.imported_record('the permission and the roles that hold it', 'clinician,doctor,nurse',
   (select string_agg(role_code, ',' order by role_code) from auth.role_permissions
     where permission_code = 'ehr.imported-history.read'));
+
+-- 8. A staff page at the page caps (51 records, each with 21 versions and 21
+--    files; the read takes one more of each than it shows) asks the staff
+--    decision once per policy, not once per row, as the EHR runtime. The
+--    page is the EHR's own query (imported-history.query.ts) for patient A.
+set local session_replication_role = replica;
+insert into ehr.imported_medical_records(id,patient_id,author_account_id,origin,current_version_id,source_run_id,
+  source_payload,source_sha256,source_created_at,source_updated_at)
+select ('e3a00000-0000-4000-8000-'||lpad(r::text,12,'0'))::uuid,'e3200000-0000-4000-8000-000000000001',
+  'e3100000-0000-4000-8000-000000000001','patient-provided',('e3b00000-0000-4000-8000-'||lpad((r*100+1)::text,12,'0'))::uuid,
+  'e3700000-0000-4000-8000-000000000001',jsonb_build_object('title','Synthetic capped history '||r),repeat('c',64),
+  clock_timestamp()-r*interval '1 second',clock_timestamp()-r*interval '1 second'
+from generate_series(1,51) r;
+insert into ehr.imported_medical_record_versions(id,record_id,patient_id,version_no,author_account_id,origin,
+  source_payload,source_sha256,source_created_at)
+select ('e3b00000-0000-4000-8000-'||lpad((r*100+v)::text,12,'0'))::uuid,('e3a00000-0000-4000-8000-'||lpad(r::text,12,'0'))::uuid,
+  'e3200000-0000-4000-8000-000000000001',v,'e3100000-0000-4000-8000-000000000001','patient-provided',
+  jsonb_build_object('record','Invented capped content '||v),repeat('d',64),clock_timestamp()-interval '30 days'
+from generate_series(1,51) r, generate_series(1,21) v;
+insert into ehr.imported_medical_record_files(id,record_id,patient_id,record_version_id,uploader_account_id,
+  source_payload,source_sha256,source_created_at)
+select ('e3c00000-0000-4000-8000-'||lpad((r*100+f)::text,12,'0'))::uuid,('e3a00000-0000-4000-8000-'||lpad(r::text,12,'0'))::uuid,
+  'e3200000-0000-4000-8000-000000000001',null,'e3100000-0000-4000-8000-000000000001',
+  jsonb_build_object('original_file_name','synthetic-capped.txt','mime_type','text/plain','size_bytes',19),repeat('e',64),
+  clock_timestamp()-interval '30 days'+f*interval '1 second'
+from generate_series(1,51) r, generate_series(1,21) f;
+set local session_replication_role = origin;
+-- The same statement as importedHistorySql(false), for patient A.
+create function pg_temp.imported_page() returns text
+language sql as $$
+  select count(*) || ':' || sum(json_array_length(coalesce(versions, '[]'))) || ':' || sum(json_array_length(coalesce(files, '[]')))
+  from (
+    select r.id,
+      (select json_agg(json_build_object('id',v.id,'versionNo',v.version_no) order by v.version_no desc)
+         from (select * from ehr.imported_medical_record_versions version_row
+                where version_row.record_id=r.id and version_row.patient_id=r.patient_id
+                order by version_row.version_no desc limit 21) v) as versions,
+      (select json_agg(json_build_object('id',f.id) order by f.source_created_at,f.id)
+         from (select * from ehr.imported_medical_record_files file_row
+                where file_row.record_id=r.id and file_row.patient_id=r.patient_id
+                order by file_row.source_created_at,file_row.id limit 21) f) as files
+      from ehr.imported_medical_records r
+     where r.patient_id='e3200000-0000-4000-8000-000000000001'
+     order by r.source_created_at desc,r.id desc
+     limit 51) page;
+$$;
+-- Calls of the decision are counted where the session may count them (a
+-- superuser sets track_functions); the time is measured everywhere.
+do $$
+declare
+  counting boolean := (select rolsuper from pg_roles where rolname = session_user);
+  calls_before bigint := 0;
+  calls bigint;
+  started timestamptz;
+  staff_ms double precision;
+  self_ms double precision;
+  staff_page text;
+  self_page text;
+begin
+  if counting then
+    set local track_functions = 'all';
+    calls_before := coalesce(pg_stat_get_xact_function_calls('ehr.imported_history_staff_read_allowed(uuid)'::regprocedure), 0);
+  end if;
+  set local role hid_ehr_api_runtime;
+  perform pg_temp.bind_staff('e3600000-0000-4000-8000-000000000001','e3400000-0000-4000-8000-000000000002','direct-care');
+  started := clock_timestamp();
+  staff_page := pg_temp.imported_page();
+  staff_ms := extract(epoch from clock_timestamp() - started) * 1000;
+  reset role;
+  if counting then
+    calls := coalesce(pg_stat_get_xact_function_calls('ehr.imported_history_staff_read_allowed(uuid)'::regprocedure), 0)
+      - calls_before;
+  end if;
+  set local role hid_ehr_api_runtime;
+  perform pg_temp.bind_self(1, 'importedHistory');
+  started := clock_timestamp();
+  self_page := pg_temp.imported_page();
+  self_ms := extract(epoch from clock_timestamp() - started) * 1000;
+  reset role;
+  perform pg_temp.imported_record('staff page at the caps reads 51 records, 21 versions and 21 files of each',
+    '51:1071:1071', staff_page);
+  perform pg_temp.imported_record('patient page at the caps reads the same', '51:1071:1071', self_page);
+  perform pg_temp.imported_record('staff page at the caps asks the decision once per policy',
+    'true', case when counting then (calls between 1 and 6)::text else 'true' end);
+  perform pg_temp.imported_record('staff page at the caps takes under 3 s', 'true', (staff_ms < 3000)::text);
+  raise notice 'imported history page at the caps: staff % ms (% decisions), patient-self % ms',
+    round(staff_ms::numeric), coalesce(calls::text, 'not counted'), round(self_ms::numeric);
+end $$;
 
 do $$
 declare

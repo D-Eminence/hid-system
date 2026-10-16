@@ -66,11 +66,14 @@ describe('Patient imported history sharing routes', () => {
   const reflector = new Reflector();
   const prototype = PatientSelfController.prototype as unknown as Record<string, object>;
 
-  it('serves both routes on the patient-only controller behind the sharing switch', () => {
+  it('serves both routes on the patient-only controller; only the read is behind the sharing switch', () => {
     expect(reflector.get(PATIENT_ONLY, PatientSelfController)).toBe(true);
-    for (const name of ['importedHistorySharing', 'setImportedHistorySharing']) {
-      expect(Reflect.getMetadata('__guards__', prototype[name] as object)).toEqual([ImportedHistorySharingEnabledGuard]);
-    }
+    expect(Reflect.getMetadata('__guards__', prototype.importedHistorySharing as object))
+      .toEqual([ImportedHistorySharingEnabledGuard]);
+    // Turning sharing off is always allowed (ADR-065): the change route has
+    // no switch guard, and the service refuses only turning it on while the
+    // switch is off.
+    expect(Reflect.getMetadata('__guards__', prototype.setImportedHistorySharing as object)).toBeUndefined();
     expect(reflector.get(AUDIT_ACTION, prototype.setImportedHistorySharing as () => unknown))
       .toBe('identity.patient.imported-history-sharing.change.command');
     expect(Reflect.getMetadata('__httpCode__', prototype.setImportedHistorySharing as object)).toBe(200);

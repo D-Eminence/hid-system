@@ -1046,10 +1046,30 @@ begin
      or (select coalesce(array_agg(replace(oid::regprocedure::text, ' ', '')), '{}') from pg_proc where proowner = importer)
      is distinct from array['ehr.import_legacy_medical_history(uuid,uuid,text,jsonb)']
      or exists (select 1 from pg_proc where proowner in (commands, importer) and (not prosecdef
-          or proconfig is distinct from array['search_path=pg_catalog, pg_temp']))
+          or proconfig is distinct from case when proowner = importer
+            then array['search_path=pg_catalog, pg_temp', 'TimeZone=UTC']
+            else array['search_path=pg_catalog, pg_temp'] end))
      or exists (select 1 from pg_class where relowner in (commands, importer))
      or exists (select 1 from pg_namespace where nspowner in (commands, importer)) then
     raise exception 'the imported history technical owners must own exactly their pinned security-definer commands and nothing else';
+  end if;
+  -- The bootstrap leaves no owner entry on their functions, on its first run
+  -- as on a rerun, so that every run leaves the same ACL (P36).
+  if exists (select 1 from pg_proc proc, aclexplode(proc.proacl) privilege
+              where proc.proowner in (commands, importer) and privilege.grantee = proc.proowner) then
+    raise exception 'the imported history technical owners must hold no EXECUTE entry on their own functions';
+  end if;
+  -- The staff policies' binding function runs as its caller: only the EHR
+  -- runtime and the test role may run it, and it pins its search path.
+  if to_regprocedure('ehr.imported_history_staff_patient()') is null then
+    raise exception 'ehr.imported_history_staff_patient() is missing';
+  end if;
+  if (select prosecdef or provolatile <> 's' or proconfig is distinct from array['search_path=pg_catalog, pg_temp']
+           from pg_proc where oid = to_regprocedure('ehr.imported_history_staff_patient()'))
+     or exists (select 1 from unnest(every_role) runtime(role_name)
+                 where has_function_privilege(runtime.role_name, 'ehr.imported_history_staff_patient()', 'EXECUTE')
+                       <> (runtime.role_name in ('hid_ehr_runtime', 'hid_ehr_api_runtime', 'hid_schema_test_runtime'))) then
+    raise exception 'ehr.imported_history_staff_patient() must be a pinned invoker function that only the EHR runtime and the test role run';
   end if;
   if (select coalesce(array_agg(relation.oid::regclass::text || ':' || privilege.privilege_type
           order by relation.oid::regclass::text, privilege.privilege_type), '{}')

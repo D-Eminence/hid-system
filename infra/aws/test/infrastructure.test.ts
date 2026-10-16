@@ -1367,6 +1367,28 @@ test('imported history flags are explicit synth inputs that default to false; on
   assert.doesNotMatch(JSON.stringify(containerOf(template, 'ehr-api')), /IMPORTED_HISTORY_SHARING/);
 });
 
+test('in staging the imported history switches depend on each other: staff read needs sharing, sharing needs the patient read (ADR-065)', () => {
+  // A patient may share only what they can see themselves, and staff read
+  // only while patients can still choose (and withdraw) through the sharing
+  // route, so the switches go on patient read first and off staff read first.
+  const staging = (inputs: Record<string, string>) => environmentConfig('staging', 'economy', undefined, undefined, inputs);
+  assert.throws(() => staging({ importedHistorySharing: 'true' }),
+    /HID_IMPORTED_HISTORY_SHARING_ENABLED=true needs HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY=true/);
+  assert.throws(() => staging({ importedHistoryPatientRead: 'true', importedHistoryStaffRead: 'true' }),
+    /HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED=true needs HID_IMPORTED_HISTORY_SHARING_ENABLED=true/);
+  assert.throws(() => staging({ importedHistoryStaffRead: 'true', importedHistorySharing: 'true' }),
+    /HID_IMPORTED_HISTORY_SHARING_ENABLED=true needs HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY=true/);
+  assert.deepEqual(staging({ importedHistoryPatientRead: 'true' }).importedHistory,
+    { patientRead: true, staffRead: false, sharing: false });
+  assert.deepEqual(staging({ importedHistoryPatientRead: 'true', importedHistorySharing: 'true' }).importedHistory,
+    { patientRead: true, staffRead: false, sharing: true });
+  // The regional stack repeats the rule for a configuration not built by environmentConfig.
+  const configuration = staging({});
+  assert.throws(() => new HidRegionalStack(new App(), 'ImportedHistoryStaffWithoutSharing', { configuration: {
+    ...configuration, importedHistory: { patientRead: true, staffRead: true, sharing: false } } }),
+  /HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED=true needs HID_IMPORTED_HISTORY_SHARING_ENABLED=true/);
+});
+
 test('NIN-only enrollment and the NIN holder routes are explicit synth inputs that default to false (ADR-062)', () => {
   const productionTopic = { operationalAlarmTopicArn: 'arn:aws:sns:eu-west-1:000000000000:hid-production-operational-alerts' };
   const production = environmentConfig('production');
