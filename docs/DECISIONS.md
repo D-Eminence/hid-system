@@ -4358,7 +4358,7 @@ Consequences:
   that ADR-052 also forbids; this is a separate choice.
 - The FCM adapter stays for a future native app.
 - The Novu subscriber sync of draft D-Eminence/hid-system#8 is ported as
-  ADR-064 (migration 0095, number provisional); it does not touch devices or
+  ADR-064 (migration 0095, D-Eminence/hid-system#90); it does not touch devices or
   push.
 
 Open for the owner: approve web push as a patient channel; the ADR-052
@@ -4764,11 +4764,9 @@ registration (0094)".
 
 # ADR-064: Novu receives the patient's verified login email, behind a flag; the in-app notice never depends on it
 
-Status: Proposed in source (branch `launch/novu-verified-email`, migration
-0095). Not merged, not deployed. `NOVU_SUBSCRIBER_SYNC` is off by default
-and refused in production. The numbers 0095, ADR-064, P35 and S4w are
-provisional: another open change also uses 0095, and the final numbers are
-assigned at merge.
+Status: Merged (D-Eminence/hid-system#90, migration 0095), not deployed.
+`NOVU_SUBSCRIBER_SYNC` is off by default and refused in production. Its
+numbers 0095, ADR-064, P35 and S4w are final.
 
 Date: 2026-10-16
 

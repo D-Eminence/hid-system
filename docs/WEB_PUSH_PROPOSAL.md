@@ -212,7 +212,7 @@ through NAT); the allowlist in code is the SSRF control.
 4. DPO review of the subscription data (the endpoint identifies a browser).
 5. Take the next free migration number when the work starts. The Novu
    subscriber sync of draft D-Eminence/hid-system#8 is ported as ADR-064
-   (migration 0095, number provisional); it touches the notification worker
+   (migration 0095, D-Eminence/hid-system#90); it touches the notification worker
    and Novu, not devices or push.
 
 None of this is a launch blocker, and none of it should displace launch

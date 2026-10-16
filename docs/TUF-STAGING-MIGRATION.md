@@ -277,7 +277,7 @@ The executable covers:
    signed in with an authenticator, refused staff, a mismatch, a match,
    activation and sign-in, an existing Health ID, a race with a phone proof,
    both budgets and a suspension, as `hid_identity_api_runtime`.
-   With 0095 (ADR-064, number provisional): the additional suites include
+   With 0095 (ADR-064): the additional suites include
    `notification-verified-recipient.integration.sql` (the claim-bound
    recipient answers, its refusals and catalogue), run in both passes, and
    `scripts/verify-non-superuser-database.mjs` calls the lookup as the

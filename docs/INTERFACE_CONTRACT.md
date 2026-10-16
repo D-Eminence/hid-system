@@ -113,7 +113,7 @@ open product decision.
 ### Notification worker to Novu
 
 No HID route changes. The worker calls Novu as below (ADR-064, migration
-0095, number provisional).
+0095).
 
 - Main's trigger: `POST {NOVU_API_URL}/v1/events/trigger` with
   `idempotency-key: <event id>` and the body `{"name": <workflow>, "to":
