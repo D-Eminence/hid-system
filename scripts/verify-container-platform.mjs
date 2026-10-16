@@ -22,7 +22,9 @@ const backends = [
 const apps = ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin']
 const bases = { web: '/', ehr: '/ehr/', lab: '/lab/', pharmacy: '/pharmacy/',
   ocr: '/migrate/', outreach: '/outreach/', admin: '/admin/' }
-const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:55e7cd155c86d8956af63fec0a9d0790dd6d0ba98c7d38e63c0866557ee7aff8'
+// The `nonroot` variant (default user 65532, RF-004), so a stage that omits
+// USER still does not run as root.
+const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:ec2313763dd43931543bd03830466e0c409ce73a487e8d46f10db72d3b816c1c'
 const unprivilegedNginxRuntime = 'nginxinc/nginx-unprivileged@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3'
 
 const textExtensions = new Set([
