@@ -72,7 +72,7 @@ describe('record chat evidence extract', () => {
     expect(categories).not.toContain('labRequests');
   });
 
-  // The imported legacy history (0097) is a release category of its own,
+  // The imported legacy history (0099) is a release category of its own,
   // read only through its own route: it is never evidence (the record chat
   // ADR, Proposed defaults). The extract is built from the summary sections
   // only, so even records that carried it would not send it.

@@ -5836,9 +5836,9 @@ Related: ADR-018; ADR-058 (PSELF-RLS); ADR-065 (one release set); ADR-056
 `DATABASE.md`, "Imported legacy medical history (0099)"; release checklist
 P38 and S4aa.
 
-# ADR-065: Patient record chat through the Claude API
+# ADR-068: Patient record chat through the Claude API
 
-Status: Accepted in source (migration 0096). Not merged, not deployed. Off:
+Status: Accepted in source (migration 0100). Not merged, not deployed. Off:
 the EHR flag `RECORD_CHAT_PATIENT_ENABLED` defaults to false, the platform
 control `record_chat_enabled` is seeded false, and every deployed ehr-api
 refuses the flag without the operator's attestation of a processing approval.
@@ -5863,7 +5863,7 @@ Context:
   through `readImportedHistory`, on its own patient route, behind its own
   switches and P38's sign-off. It is not chat evidence (Proposed defaults).
 - On main the patient sees their records only through `PatientRecordRelease`
-  (ADR-064), inside the patient-self transaction bound to their own live
+  (ADR-065), inside the patient-self transaction bound to their own live
   session (0091, PSELF-RLS). Main's security model (runtime roles, grants,
   row-level security, audit, platform kill switches, rate limits) applies
   unchanged.
@@ -5873,7 +5873,7 @@ Decision:
 - **Evidence: the release set only.** Each question reads the patient's
   records with `PatientRecordRelease.read` in that patient-self transaction:
   encounters and completed encounters' notes always, and each other category
-  only while its release flag is on (ADR-064). Lab requests, other
+  only while its release flag is on (ADR-065). Lab requests, other
   patients' and staff-only data are never read, and neither is the imported
   legacy history (0099, ADR-067): `PatientRecordRelease.read` has no
   imported section, so chat never reads, extracts or sends it, even while
@@ -6040,8 +6040,8 @@ Decision:
   transfer mechanism and the processor's retention terms, the inference
   geography, the retention of the chat history and the quotas, and that
   ADR's acceptance date. This ADR records none of these as decided, so
-  `ADR-065@2026-10-16` does not satisfy release checklist P36 (1). The value
-  is not bound to the model id: P36 (5) requires the evaluation sign-off
+  `ADR-068@2026-10-16` does not satisfy release checklist P39 (1). The value
+  is not bound to the model id: P39 (5) requires the evaluation sign-off
   again before every change of `RECORD_CHAT_MODEL_ID`.
 - **The history.** One conversation per patient, its exchanges (question,
   validated reply, the cited records' bindings), at most 50; `GET
@@ -6067,7 +6067,7 @@ Decision:
 
 Proposed defaults (open owner questions; the safest default is built; none
 is an owner decision until the owner, and where named the DPO, signs it off
-under release checklist P36 (4) to (6)):
+under release checklist P39 (4) to (6)):
 
 - Retention of the chat history: no expiry, no automatic purge and no
   retention class; the patient deletes it, and at most 50 exchanges are kept
@@ -6077,20 +6077,20 @@ under release checklist P36 (4) to (6)):
   and answers, not a clinical record, outside 0064's record-class model.
   The patient deletes it without a governed case (`DATABASE.md` §3.5 governs
   erasure of governed records); legal holds still apply, so an active hold
-  on the patient or the account keeps it. Owner and DPO sign-off (P36 (4)).
+  on the patient or the account keeps it. Owner and DPO sign-off (P39 (4)).
 - Account deletion (0064) does not touch the chat history: it stays with the
   patient record, as clinical records do, and no live patient session can
   then read or delete it, so it has no retention end. Clearing it in the
   account-deletion flow is an open owner question and would be a later
-  change with its own test (P36 (4)).
+  change with its own test (P39 (4)).
 - The processing approval is required in every deployed environment,
   staging with synthetic data included; it is an operator's attestation
   naming an ADR other than this one ("The production gate"), recorded before
-  any flag is set (P36 (1)).
+  any flag is set (P39 (1)).
 - No flag is set until the processing agreement names its NDPA cross-border
   transfer mechanism (neither `us` nor `global` keeps processing in Nigeria)
   and the processor's retention terms (zero data retention or the standard
-  period), recorded in the approval ADR (P36 (1)). Prompt caching of the
+  period), recorded in the approval ADR (P39 (1)). Prompt caching of the
   PHI-free system prompt only stays the default; no record text is cached
   on purpose.
 - The inference geography has no default: the owner chooses `us` or
@@ -6098,10 +6098,10 @@ under release checklist P36 (4) to (6)):
 - A dedicated Anthropic workspace holds the record chat API key, with its
   allowed inference geographies pinned to the configured value, its data
   retention set per the processing agreement, and a monthly spend limit as a
-  backstop to the daily token budget (P36 (6)).
+  backstop to the daily token budget (P39 (6)).
 - A named clinical safety owner signs off an answer-quality and safety
   evaluation of the configured model on synthetic records before the first
-  enablement and again before every change of `RECORD_CHAT_MODEL_ID` (P36
+  enablement and again before every change of `RECORD_CHAT_MODEL_ID` (P39
   (5)); who owns the evaluation set is the owner's decision.
 - Quotas: 10 questions an hour and 30 a day per patient account, one at a
   time; four calls in flight per EHR process; the daily token budget is
@@ -6110,7 +6110,7 @@ under release checklist P36 (4) to (6)):
   with every question (`428 CHAT_NOTICE_REQUIRED` otherwise); the notice's
   wording is the owner's and Health-id's. The acknowledgement stands in for
   consent pending the DPO's ruling on whether explicit opt-in consent is
-  required (P36 (4)).
+  required (P39 (4)).
 - No retries (enforced: the setting accepts only 0), a 25 s deadline, a
   4,096-token output cap, no effort setting unless configured, no thinking
   parameter, no fallback model, and prompt caching of the system prompt
@@ -6120,7 +6120,7 @@ under release checklist P36 (4) to (6)):
 - Names, and identifiers in forms the pattern filter does not match, inside
   free text (note text, titles, instructions, prior turns, the question) are
   not removed. Whether that is acceptable for disclosure to the processor
-  is an open owner and DPO question (P36 (4)); the patient's own access to
+  is an open owner and DPO question (P39 (4)); the patient's own access to
   the note does not answer it, since the processor is a third party.
 - Facilities are sent as ordinals only.
 - The imported legacy medical history (owner decision 3; 0099, ADR-067) is
@@ -6170,8 +6170,8 @@ Consequences:
   ADR (not this one), the sign-offs of the proposed defaults, the model
   evaluation and the workspace settings, the secret (`RecordChatSecretArn`:
   `anthropicApiKey`, `auditDigestKeyB64`), the synth inputs, the Health-id
-  screens and notice, and then the platform control (release checklist P36,
-  S4x).
+  screens and notice, and then the platform control (release checklist P39,
+  S4ab).
 - The eighth platform control means any later migration that names the
   control keys starts from eight; this one starts from the seven of 0039 and
   clinician self sign-up (0098), keeps each of them and its value, and
@@ -6198,6 +6198,6 @@ Residual risks:
   is unreachable through the product until the owner decides (Proposed
   defaults).
 
-Related: ADR-018; ADR-058 (PSELF-RLS); ADR-064 (patient record release);
+Related: ADR-018; ADR-058 (PSELF-RLS); ADR-065 (patient record release);
 `INTERFACE_CONTRACT.md` §11, "Patient record chat"; `DATABASE.md`, "Patient
-record chat"; release checklist P36 and S4x.
+record chat"; release checklist P39 and S4ab.

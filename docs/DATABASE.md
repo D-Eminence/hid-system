@@ -423,14 +423,14 @@ excluded from a combined patient timeline rather than guessed.
 - Erasure requests create a governed case and record-class decision.
 - Legal hold overrides lifecycle deletion.
 - One patient-initiated deletion exists outside that model: patient record
-  chat's history (0096, ADR-065) is a patient-owned, non-authoritative copy
+  chat's history (0100, ADR-068) is a patient-owned, non-authoritative copy
   of questions and answers with no record class, and the patient deletes it
   with `DELETE /api/v1/ehr/me/chat/history` without a governed case. Legal
   hold still overrides it: while an active `platform.legal_holds` row names
   the patient or the patient's account, the delete policies keep every row
   and the route answers `409 CHAT_HISTORY_ON_HOLD`. That this deletion needs
   no governed case is a proposed default awaiting owner and DPO sign-off
-  (release checklist P36).
+  (release checklist P39).
 - An S3 deletion is driven by an approved durable database transition; the
   workflow must not leave database metadata and object state silently divergent.
 
@@ -5168,12 +5168,12 @@ branch-shaped 0098 database and leaves it unchanged.
 `verify-imported-history-runtime.mjs` checks the routes over HTTP as the EHR
 and Identity runtime roles.
 
-## Patient record chat (0096)
+## Patient record chat (0100)
 
-Owner decision 1 of 2026-10-16 (ADR-065): a signed-in patient asks a
+Owner decision 1 of 2026-10-16 (ADR-068): a signed-in patient asks a
 question about their own released records and the Claude API answers it.
 The EHR service reads the records only through `PatientRecordRelease`
-(ADR-064) in the patient's own patient-self transaction; this migration adds
+(ADR-065) in the patient's own patient-self transaction; this migration adds
 the history, the limits and the kill switch. Every gate is off.
 
 **The kill switch.** The platform control `record_chat_enabled`, seeded
@@ -5213,7 +5213,7 @@ retention class; the patient deletes the history (`DELETE
 the conversation and counts the exchanges deleted), and EHR stores at most
 50 exchanges. Account deletion (0064) does not touch the history: it stays
 with the patient record, which no live patient session can then reach, until
-the owner decides (ADR-065, proposed defaults).
+the owner decides (ADR-068, proposed defaults).
 
 `ehr.record_chat_history_on_hold(patient)` (`SECURITY DEFINER`, `STABLE`,
 owned by the migration administrator, `search_path = pg_catalog, pg_temp`,

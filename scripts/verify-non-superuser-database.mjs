@@ -35,7 +35,7 @@
 // - the notification worker's claim-bound recipient lookup (0095, ADR-064) as
 //   the worker login, which reads no patient or login table, and its refusal
 //   for the Identity and dispatcher logins;
-// - the release checklist's read-only P10, P11, P35 and P36 checks, taken from
+// - the release checklist's read-only P10, P11, P35, P36 and P39 checks, taken from
 //   docs/PHASE_4_STAGE_5_RELEASE_READINESS.md, as the administrator, as an
 //   operator runs them on RDS;
 // - the daily reviews of P37 (break-glass use and in-person checks by
@@ -723,16 +723,17 @@ try {
     'patient_released_lab_results|hid_lab_release_reader|{hid_ehr_runtime=r/hid_lab_release_reader,'
       + 'hid_schema_test_runtime=r/hid_lab_release_reader}|{security_barrier=true}|t'],
   `P36 release check: ${p36Release.join('; ')}`);
-  // Patient record chat: the kill switch is off and the two limit commands
-  // and the legal hold check are security definer with a pinned search path,
-  // as the operator checks before any record chat flag is set.
-  const p36 = await checklistCheck('P36 check (read-only), after the patient record chat migration');
-  assert.deepEqual(p36, ['record_chat_enabled|f',
+  // P39 (patient record chat, ADR-068): the kill switch is off and the two
+  // limit commands and the legal hold check are security definer with a
+  // pinned search path, as the operator checks before any record chat flag
+  // is set.
+  const p39 = await checklistCheck('P39 check (read-only)');
+  assert.deepEqual(p39, ['record_chat_enabled|f',
     'record_chat_history_on_hold|t|{"search_path=pg_catalog, pg_temp"}',
     'reserve_record_chat|t|{"search_path=pg_catalog, pg_temp"}',
-    'settle_record_chat|t|{"search_path=pg_catalog, pg_temp"}'], `P36 check: ${p36.join('; ')}`);
+    'settle_record_chat|t|{"search_path=pg_catalog, pg_temp"}'], `P39 check: ${p39.join('; ')}`);
   evidence.steps.release_checklist_checks = { run_as: admin, p10: p10.map((line) => line.split('|').slice(0, 4).join('|')),
-    p11, p35, p36_release: p36Release.length, p36 };
+    p11, p35, p36: p36Release.length, p39 };
 
   // 0095 (ADR-064): the worker login claims an Identity event and learns the
   // patient's verified login email through the claim, as the real login of

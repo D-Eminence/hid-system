@@ -85,6 +85,20 @@ switch. Set them on staging only after release checklist P38 (1), the written
 sign-off, in the order patient read, sharing, staff read, and turn them off in
 reverse. The EHR and Identity production profiles refuse them as well.
 
+Patient record chat (ADR-068, migration 0100): the synth input
+`HID_RECORD_CHAT_PATIENT_ENABLED` sets ehr-api's `RECORD_CHAT_PATIENT_ENABLED`
+and defaults to `false`; off, ehr-api receives the false flag and nothing else
+of record chat and no task references the `RecordChatSecretArn` secret. Turned
+on, synthesis needs `HID_RECORD_CHAT_MODEL_ID` (no default),
+`HID_RECORD_CHAT_INFERENCE_GEO` (`us` or `global`),
+`HID_RECORD_CHAT_NOTICE_VERSION`, `HID_RECORD_CHAT_DAILY_TOKEN_BUDGET` (1 to
+20,000,000), `HID_RECORD_CHAT_PROCESSING_APPROVAL` (`ADR-NNN@YYYY-MM-DD`, checked
+for form only), a profile with NAT egress and the `RecordChatSecretArn`
+parameter (`anthropicApiKey`, `auditDigestKeyB64`; `AWS_IAM_MATRIX.md`). No
+task receives an `ANTHROPIC_*` variable. Set it only after release checklist
+P39, and turn chat off at once with the platform control `record_chat_enabled`
+(`POST /api/v1/admin/controls`).
+
 ## Staging email acceptance profile
 
 Staging selects `NOTIFICATION_DELIVERY_PROFILE=email-only`. Its Notification API

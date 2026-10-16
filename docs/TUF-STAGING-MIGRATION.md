@@ -414,7 +414,7 @@ The executable covers:
    pass (`verify-non-superuser-database.mjs`, step `imported_history_import`)
    runs the same rehearsal as the `NOSUPERUSER NOBYPASSRLS CREATEROLE`
    administrator and checks that no `hid_migration_admin` membership is left.
-   With 0096 (patient record chat, ADR-065): the additional suites include
+   With 0100 (patient record chat, ADR-068): the additional suites include
    `patient-record-chat.integration.sql` (the patient's own history under
    patient-self row-level security against every other context, the legal
    hold that keeps it, the limit commands' quotas, leases and budget, their
@@ -468,11 +468,12 @@ The executable covers:
    executable by exactly the EHR runtime and the test role; since 0097
    break-glass held by exactly doctor, clinician and nurse, exactly the
    `direct-care` and `emergency` purposes, and `break_glass_enabled` still
-   off; and since 0096
+   off; and since 0100
    (`record_chat_grants`) that the upgraded bootstrap gives the EHR runtime
    the chat history without `UPDATE`, the two chat commands and the legal
-   hold check (none of them to `PUBLIC`), no runtime
-   the limit tables, and that `record_chat_enabled` is off), then
+   hold check (none of them to `PUBLIC`), no runtime a privilege on
+   the limit tables, and that `record_chat_enabled` and
+   `clinician_signup_enabled` are off), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

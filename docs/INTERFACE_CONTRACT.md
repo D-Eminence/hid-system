@@ -920,7 +920,7 @@ diagnoses, prescriptions, Lab results and documents, one flag per category,
 each off by default and refused in the production profile until its P36
 sign-off; with every flag off the response is exactly the one above. `GET /api/v1/ehr/me/documents/:documentId/download` returns a 60 s
 attachment URL for one released document (§11, "Patient document
-download"). Patient record chat (ADR-065, off by default) adds four more
+download"). Patient record chat (ADR-068, off by default) adds four more
 patient-only EHR routes, `GET /api/v1/ehr/me/chat/availability`, `POST
 /api/v1/ehr/me/chat` and `GET` and `DELETE /api/v1/ehr/me/chat/history`
 (§11, "Patient record chat"). Only a patient session may use these routes:
@@ -2909,7 +2909,7 @@ with its session and correlation id.
 ### Patient record chat
 
 A signed-in patient asks a question about their own released records and the
-Claude API answers it (owner decision 1 of 2026-10-16, ADR-065). Off by
+Claude API answers it (owner decision 1 of 2026-10-16, ADR-068). Off by
 default: `RECORD_CHAT_PATIENT_ENABLED` (synth input
 `HID_RECORD_CHAT_PATIENT_ENABLED`) and the platform control
 `record_chat_enabled` (seeded false). Every route is patient-only
@@ -2954,7 +2954,7 @@ exposes `Retry-After` to the allowed origins.
     IDEMPOTENCY_KEY_REUSED`; ask again with a new key.
   - The earlier exchanges sent with a question as context are the newest
     four whose every cited record is still released with the same content
-    (ADR-065).
+    (ADR-068).
 - `GET /api/v1/ehr/me/chat/history`: `{ conversationId: uuid | null,
   exchanges, limit: 50 }` (`conversationId` is null until the first
   question), newest first, each `{ messageId, question, reply: { status,
@@ -2995,7 +2995,7 @@ Identity's patient-self authorization (its answers as for the summary).
 | `503 PATIENT_RECORDS_UNAVAILABLE` | a released category could not be read |
 
 What the request to the processor holds, field by field, and what it never
-holds, is ADR-065's "What leaves the system". Audit events (details are
+holds, is ADR-068's "What leaves the system". Audit events (details are
 codes, counts and digests only; no question, answer or record text):
 `ehr.record-chat.disclosure` (before every request: processor, model,
 inference geography, counts, notice version, reservation, disclosure

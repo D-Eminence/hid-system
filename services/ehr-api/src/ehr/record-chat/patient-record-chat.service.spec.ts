@@ -67,7 +67,7 @@ interface Options {
 function setup(options: Options = {}) {
   const events: string[] = [];
   const violations: string[] = [];
-  // Statements that name the imported legacy history (0097's tables or its
+  // Statements that name the imported legacy history (0099's tables or its
   // binding): record chat must never run one.
   const importedReads: string[] = [];
   let inRelease = false;
