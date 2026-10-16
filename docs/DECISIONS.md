@@ -4087,6 +4087,9 @@ Decision:
 - The patient is told in the app when their PIN is used: an inbox item per
   new PIN grant, written in the PIN transaction, without the notification
   worker. SMS and email notices wait for an approved notification channel.
+  (Amended by ADR-064: email through Novu is approved, behind
+  `NOVU_SUBSCRIBER_SYNC`, off by default and refused in production; the
+  inbox item is unchanged.)
 - Pending access requests do not yet lapse (ACCESS-REQ-STALE): deferred.
   A lapse needs request creation (0086), which reuses a pending request, the
   approval command and both lists to change together, beyond this change's
@@ -4353,9 +4356,9 @@ Consequences:
 - iOS delivers web push only to Home-Screen web apps, which need a manifest
   that ADR-052 also forbids; this is a separate choice.
 - The FCM adapter stays for a future native app.
-- Draft D-Eminence/hid-system#8 (Novu subscriber sync) does not touch devices
-  or push; the migration takes the next free number on `main` when the work
-  starts.
+- The Novu subscriber sync of draft D-Eminence/hid-system#8 is ported as
+  ADR-064 (migration 0095, number provisional); it does not touch devices or
+  push.
 
 Open for the owner: approve web push as a patient channel; the ADR-052
 amendment; iOS; DPO review of subscription data (an endpoint identifies a
@@ -4757,3 +4760,160 @@ Related: ADR-062; ADR-054 (staff MFA); ADR-049 (workforce provisioning);
 `PHASE_3_LAUNCH_DECISIONS.md` N2(d) and D17; `INTERFACE_CONTRACT.md`,
 "Facility-assisted registration"; `DATABASE.md`, "Facility-assisted
 registration (0094)".
+
+# ADR-064: Novu receives the patient's verified login email, behind a flag; the in-app notice never depends on it
+
+Status: Proposed in source (branch `launch/novu-verified-email`, migration
+0095). Not merged, not deployed. `NOVU_SUBSCRIBER_SYNC` is off by default
+and refused in production. The numbers 0095, ADR-064, P35 and S4w are
+provisional: another open change also uses 0095, and the final numbers are
+assigned at merge.
+
+Date: 2026-10-16
+
+Context:
+
+- Main's notification worker triggers Novu by `subscriberId` (the canonical
+  patient UUID) with a generic sign-in message and gives Novu no contact.
+  An email reaches a patient only if someone maps the subscriber's email by
+  hand (`STAGING_PROVIDER_ACCOUNTS.md`).
+- Owner decision 2 of 2026-10-16: Novu may receive the patient's verified
+  email.
+- The draft D-Eminence/hid-system#8 did this on an old base. It sent names,
+  read `identity.patients` and `auth.accounts` from the worker's pool, made
+  every phone-only patient's event terminal, and suppressed every event,
+  safety notices included, for an opted-out patient. None of that is ported.
+- Main's worker login holds no Identity or Auth table privilege, and is no
+  member of the event-delivery technical owner (`runtime-roles.integration.sql`).
+- A review of the first design found two failure modes this ADR closes: a
+  failed subscriber call could make in-app safety notices terminal, and an
+  opt-out did not hold once an email had been synced.
+
+Decision:
+
+- Flag. The worker setting `NOVU_SUBSCRIBER_SYNC=disabled|email`, default
+  `disabled`. With `disabled` the worker is main's exactly: no lookup, no
+  subscriber call, main's trigger body and idempotency key, no new output.
+  `email` is refused for a production deployment (`HID_DEPLOYMENT_ENV`,
+  new in the worker and defaulting to `production`, or `NODE_ENV=production`
+  without `HID_DEPLOYMENT_ENV=staging`), as notification-api refuses
+  `EMERGENCY_CONTACT_DELIVERY_ENABLED`. It needs the live orchestrator, and
+  under `NODE_ENV=production` an approved Novu region origin
+  (`https://api.novu.co` or `https://eu.api.novu.co`). The synth input
+  `HID_NOVU_SUBSCRIBER_SYNC_ENABLED` (default `false`) may be `true` only in
+  staging, with the worker enabled.
+- Data. Novu receives the `subscriberId` it already receives and, for an
+  eligible patient, the verified login email (`auth.accounts.email`). No
+  name, phone, NIN, clinical value or reason. The trigger payload is
+  unchanged.
+- Lookup (0095). `integration.notification_recipient_for_claim(event,
+  claim token, patient)` checks the inbox consumer as main's inbox commands
+  do (`integration.assert_inbox_consumer_authorized`), requires the
+  consumer row bound to `hid_notification_worker`, the worker's live claim
+  (55000 otherwise) and an outbox envelope that matches the claim
+  (producer, type, version, correlation, a workflow event type and the
+  patient). It belongs to `hid_event_delivery_commands`, moved in main's
+  CREATE window, and only the worker executes it. It reads the patient and
+  login through the private helper `integration.notification_recipient_state`,
+  owned by the migration administrator (the owner of both tables, which
+  needs no BYPASSRLS because `identity.patients` does not force row-level
+  security) and executable only by the technical owner. The answer is
+  `('email', address)` or `('withhold', null)`; no row when the claim binds
+  no envelope.
+- Eligible for email: an active patient with notifications on, whose login
+  is active with a verified, non-blank email. Everyone else is withheld: a
+  phone-only login, an unverified or blank email, no login, a login that is
+  pending_reset, locked, disabled or deleted, a patient who is not active,
+  notifications off.
+- Eligible: `POST /v2/subscribers` (Novu upserts) with exactly
+  `{subscriberId, email}` and the idempotency key
+  sha256("hid-novu-subscriber-email-v1", event id, sha256(email)), then
+  main's trigger, whatever the sync answered.
+- Withheld: `PATCH /v2/subscribers/{subscriberId}` with `{"email": null}`
+  (the field is nullable; 404 means Novu has no such subscriber, so no
+  email) and the key sha256("hid-novu-subscriber-email-clear-v1", event id),
+  then main's trigger once the clear is confirmed. When it is not
+  confirmed (timeout, 408, 409, 429, 5xx or a refusal), the worker sends
+  instead the trigger that clears the email itself: main's workflow and
+  message to `{subscriberId, email: null}` under its own key
+  (`hid-novu-trigger-email-withheld-v1`). Novu's trigger creates or
+  updates the subscriber it names (the `to` fields are nullable), so the
+  email is cleared by the same request that sends the in-app notice; S4w
+  confirms on staging that the update comes before the Email step.
+- The in-app notice never depends on a subscriber call. No subscriber
+  answer decides whether a trigger is sent, delays it or fails the event:
+  the inbox outcome is the trigger's own outcome, handled as main handles
+  it (accepted completes; unknown retries; a definitive failure is
+  terminal). Safety notices (`EmergencyAccessActivated`,
+  `PatientAccessPinVerified`) go in-app for every patient.
+- A recipient lookup that fails is handled as withheld (clear, then the
+  trigger), so it neither retries the event nor emails. A claim lost to
+  another worker (55000) stops without failing or acknowledging the message.
+- Startup: with the flag on, the worker refuses to start unless the lookup
+  exists and its login may execute it, after main's runtime-role guard.
+- Records: each subscriber call writes one PHI-free row per attempt in
+  `notification.delivery_attempts` (`novu-subscriber-email-v1` or
+  `novu-subscriber-email-clear-v1`, channel `email`, outcome and fixed safe
+  code, no address and nothing derived from it); a row that cannot be
+  written never holds back the trigger. Each flag-on event writes one
+  `notification.worker.outcome` stdout line with the event type, the
+  correlation id and fixed codes only.
+
+Proposed defaults (owner questions answered with the safest choice):
+
+- Safety notices to an opted-out patient: in-app only, no email. Emailing
+  them would need a per-workflow rule that the shared `patient-update-v1`
+  workflow cannot express.
+- Deleted logins and patients who are not active keep main's in-app
+  trigger: no new suppression. Their Novu email is cleared before it.
+  Suppressing the trigger itself stays the F4 decision
+  (`PHASE_3_PATIENT_SAFETY.md`).
+- The Novu subscriber is not deleted when a login is deleted. That needs an
+  event from the account deletion and a Novu delete call; it is a follow-up,
+  not built. Until then the next event for a deleted login clears its email
+  at Novu, and a request to erase it is handled in the Novu dashboard.
+- A failed sync skips the email for that event only. Novu then emails at
+  most the address an earlier sync of the same account stored: no route on
+  main changes a login's email, so that is the same verified address.
+- Phone-only patients get main's in-app trigger and one clear call per
+  event, which keeps the opt-out true even after a manual staging mapping.
+- The disclosure rows are kept (an auditable record that an address was
+  given to Novu for an event), with the log line.
+- The helper stays with the migration administrator and only the technical
+  owner executes it; a dedicated NOLOGIN reader is the fallback if
+  `identity.patients` ever forces row-level security (the owner pass of the
+  new suite would fail first).
+- Production refuses the flag unconditionally. Lifting it is a reviewed
+  change after P35, not a setting.
+
+Consequences:
+
+- With the flag off the worker behaves exactly as on main; 0095 only adds
+  two functions and their grants.
+- With the flag on in staging, a verified-email patient's notice can arrive
+  by email as well as in-app, once the staging workflow has an Email step
+  (S4w); phone-only patients see no change.
+- Every flag-on event makes one extra Novu call (sync or clear).
+- Health-id needs no API change. Before the flag is set where Health-id
+  serves real patients, its privacy notice must name the processor and the
+  data, and the account deletion screen must say that email updates stop and
+  that the provider may keep the address until it is removed on request.
+
+Residual risks:
+
+- Novu semantics are taken from its API reference, not from a call: the
+  upsert, the nullable email on PATCH and on the trigger's `to`, and the
+  order of the trigger's subscriber update before the Email step. S4w
+  confirms them on staging before the flag is set anywhere.
+- An event resolved as eligible just before an opt-out can sync after a
+  later event's clear and before its trigger. No route on main writes
+  `notifications_enabled`, so the window needs an imported value change.
+- The key protects personal data now: Novu's API key has full
+  administrative access to the subscribers.
+- The region (US or EU), the data processing agreement and the NDPA
+  transfer basis are not decided; P35 needs them before any non-local use.
+
+Related: ADR-053 and D17 (the worker is off in production); ADR-058
+(NOTIF-PIN-NOTICE); ADR-060; `PHASE_3_LAUNCH_DECISIONS.md` NOTIF-PIN-NOTICE;
+`INTERFACE_CONTRACT.md`, "Notification worker to Novu"; `DATABASE.md`,
+"Notification verified recipient (0095)"; release checklist P35 and S4w.

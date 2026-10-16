@@ -521,7 +521,12 @@ module set").
   and review access (CONSENT-GRANTEE), and the history says when it is
   truncated. The patient is told in the app inbox each time their PIN is used
   (NOTIF-PIN-NOTICE); SMS and email notices wait for an approved notification
-  channel.
+  channel. Owner decision 2 of 2026-10-16 approves email through Novu: with
+  `NOVU_SUBSCRIBER_SYNC=email` the worker gives Novu the patient's verified
+  login email for patients who may be emailed, and clears it for every other
+  patient before the in-app trigger (ADR-064, migration 0095, number
+  provisional). Off by default and refused in production; staging needs
+  release checklist P35 and S4w first. SMS still waits.
 - **Deferred.** Pending access requests do not lapse yet (ACCESS-REQ-STALE,
   default 7 days when done): request creation reuses a pending request, so a
   lapse needs 0086's creation command, the approval and both lists changed
@@ -736,3 +741,4 @@ for each merged change and its evidence. Pull requests from this review:
 | ENR-1, ENR-4 step 2 (a NIN alone created a Health ID; start told anyone whether a NIN had one; the signed-in binding proves no holder) | D-Eminence/hid-system#84, migration 0093, ADR-062 | merged to main, not deployed; every new flag off (N1, update of 2026-10-15); the Health-id change is listed in the release checklist §3, "Health-id alignment" |
 | FAC-2, REG-1 (no holder route for a patient without a usable registry phone; production refused the online route) | D-Eminence/hid-system#85, migration 0094, ADR-063 | merged to main, not deployed; every flag off and no facility designated (N1 update of 2026-10-15, N2(d)); release checklist P29 to P33; the Health-id screens are listed in the release checklist §3, "Health-id alignment" |
 | Provider self-sign-up answered a taken administrator email `503` and a sparse CAC record `502` | D-Eminence/hid-system#81, no migration | merged to main, not deployed; Health-id copy and the support contact are open (release checklist §3; §2 SUPPORT-CONTACT) |
+| NOTIF-PIN-NOTICE email part (owner decision 2 of 2026-10-16: Novu may receive the patient's verified email) | launch/novu-verified-email, migration 0095 (number provisional), ADR-064 | in source, not merged; `NOVU_SUBSCRIBER_SYNC` off by default and refused in production; staging needs release checklist P35 and S4w; Novu subscriber deletion at account deletion is a follow-up |

@@ -93,7 +93,8 @@ response's `requestId` is also the correlation id of the one PHI-free
 `notification.otp.outcome` log line written per send; when the fallback ran,
 that line also names the primary provider and its safe code. Ordinary domain
 events remain minimum-necessary versioned envelopes delivered through outbox,
-Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
+Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu
+("Notification worker to Novu" below).
 
 Public patient enrollment proves the chosen contact with a six-digit code
 (`POST /api/v1/identity/patient-enrollments/contact`, then `/contact/verify`;
@@ -108,6 +109,48 @@ answers `429 ENROLLMENT_RATE_LIMITED` and sends no code. Both responses are
 the existing ones, unchanged in shape. This comes from
 D-Eminence/hid-system#61, not yet deployed; the threshold is an
 open product decision.
+
+### Notification worker to Novu
+
+No HID route changes. The worker calls Novu as below (ADR-064, migration
+0095, number provisional).
+
+- Always, as on main: `POST {NOVU_API_URL}/v1/events/trigger` with
+  `idempotency-key: <event id>` and the body `{"name": <workflow>, "to":
+  {"subscriberId": <canonical patient UUID>}, "payload": {"message": "You have
+  a new update in HID. Sign in securely to view it."}}`. With
+  `NOVU_SUBSCRIBER_SYNC=disabled` (the default, and the only value production
+  accepts) this is the only call.
+- With `NOVU_SUBSCRIBER_SYNC=email` the worker first asks the database,
+  through `integration.notification_recipient_for_claim(event, claim token,
+  patient)`, for its live claim's answer: `email` with the verified login
+  email, or `withhold`. Names are never part of the answer or of any call.
+  - `email`: `POST /v2/subscribers` with exactly `{"subscriberId": <patient
+    UUID>, "email": <address>}` and `idempotency-key` = lowercase hex
+    sha256(`hid-novu-subscriber-email-v1` U+001F event id U+001F
+    sha256(address)); then main's trigger, whatever the subscriber call
+    answered.
+  - `withhold` (opted out, a login that is not active or is deleted, a patient
+    who is not active, no verified email, no login, a phone-only login, or a
+    lookup that failed): `PATCH /v2/subscribers/{patient UUID}` with exactly
+    `{"email": null}` and `idempotency-key` = sha256(`hid-novu-subscriber-email-clear-v1`
+    U+001F event id). After a `2xx` or `404` (no such subscriber), main's
+    trigger. Otherwise the trigger with `"to": {"subscriberId": <patient UUID>,
+    "email": null}`, the same workflow and message, and `idempotency-key` =
+    sha256(`hid-novu-trigger-email-withheld-v1` U+001F event id).
+  - Each call has a 5-second timeout. A subscriber call answering `2xx` is
+    confirmed; `408`, `409`, `429`, `5xx`, a timeout or no answer is unknown;
+    any other `4xx` is refused. No subscriber answer decides whether the
+    trigger is sent: the inbox outcome is the trigger's, as on main (accepted
+    completes; `408`, `429`, `5xx` or no answer retries; another `4xx` is
+    terminal).
+- The worker writes one stdout line per flag-on event:
+  `{"event":"notification.worker.outcome","eventType":...,"correlationId":...,
+  "recipient":"email|withhold|unbound|lookup_failed|claim_lost",
+  "subscriber":"synced|sync_failed|cleared|clear_failed|not_run",
+  "subscriberCode"?,"trigger":"standard|email_withheld|not_sent",
+  "triggerOutcome"?,"triggerCode"?,"inbox":"processed|retry_scheduled|failed_terminal|claim_lost"}`.
+  It never holds the address, the patient, the event id or a key.
 
 ### Turnstile verification
 

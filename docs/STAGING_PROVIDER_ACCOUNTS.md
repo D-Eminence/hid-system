@@ -137,12 +137,21 @@ these exact workflow identifiers:
 | `document-update-v1` | `OcrPublicationSucceeded` |
 
 The worker calls `POST /v1/events/trigger` with `to.subscriberId` equal to the
-**canonical Identity patient UUID** and a generic sign-in message. It does not
-send the patient's email, telephone number, clinical record or emergency reason.
-For a test delivery, preconfigure that exact synthetic patient's subscriber with
-the owner-approved test email and enable the workflow's Email step. An API key
-alone cannot supply the missing contact mapping. This is a staging test mapping,
-not evidence of automated production subscriber provisioning.
+**canonical Identity patient UUID** and a generic sign-in message. With
+`NOVU_SUBSCRIBER_SYNC=disabled` (the default) it does not send the patient's
+email, telephone number, clinical record or emergency reason: for a test
+delivery, preconfigure that exact synthetic patient's subscriber with the
+owner-approved test email and enable the workflow's Email step. An API key
+alone cannot supply the missing contact mapping.
+
+With `NOVU_SUBSCRIBER_SYNC=email` (staging only, `HID_NOVU_SUBSCRIBER_SYNC_ENABLED`,
+after release checklist P35; ADR-064) the worker sets the subscriber's email
+itself before each trigger, and only to the patient's verified login email: no
+name, telephone number or anything else. For every patient who may not be
+emailed (notifications off, a login that is not active or deleted, no verified
+email) it clears the subscriber's email first, so a manual mapping of such a
+patient is removed by the next event. The trigger itself is unchanged. Neither
+mode is evidence of production subscriber provisioning, which stays refused.
 [Novu email delivery model](https://docs.novu.co/platform/integrations/email)
 
 **Choose and record the delivery channel before testing:**
