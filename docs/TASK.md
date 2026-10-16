@@ -1327,8 +1327,12 @@ history, and the consolidated `localhost:3000` browser flow.
   `NODE_ENV` is `production`. It grants them all in one audited transaction,
   serializes, and refuses to run while any Super Admin exists, whatever its
   status; `PLATFORM_ADMIN_REPLACE_PENDING=1` replaces an email-seeded set
-  nobody has used yet (a mistyped address). Runtime authorization never reads
-  a bootstrap email or environment flag.
+  nobody has used yet (a mistyped address), so every listed person confirms
+  their reset code arrived before anyone sets a password. Each address is one
+  no HID 1.0 auth user has: a seeded account keeps its address
+  (`accounts_email_ci_uq`), which would block a later HID 1.0 promotion of the
+  same address. Runtime authorization never reads a bootstrap email or
+  environment flag.
 - Facilities have `pending`, `verified`, `rejected`, and `suspended` lifecycle
   state. Suspension makes `active=false`, so existing membership/authorization
   checks fail while history remains. Commands require reason, idempotency, and

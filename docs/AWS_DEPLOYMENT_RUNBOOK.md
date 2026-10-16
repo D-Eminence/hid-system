@@ -545,40 +545,64 @@ account to exist:
 
 1. Run `admin:bootstrap` with `PLATFORM_ADMIN_EMAILS` after the services and
    SES are live (§9, P17), so that the reset code can be delivered. Run it
-   once, naming every initial Super Admin (two or three people), with
-   `PLATFORM_ADMIN_BOOTSTRAP_REASON`. It creates a platform-only account for
-   each address in `PLATFORM_ADMIN_EMAILS`, with no password and no staff or
-   patient record, and grants each Super Admin in one audited transaction. It prints the new account IDs
-   in the order of the addresses, never an address. It refuses an address that
-   already belongs to an account (name existing accounts in
-   `PLATFORM_ADMIN_ACCOUNT_IDS` instead) and refuses to run again once any
-   Super Admin exists, whatever its status; afterwards a Super Admin is added
-   only by a two-person approval (`SUPER_ADMIN_FOUNDATION.md`).
-2. Each person opens the admin recovery page,
+   once, naming every initial Super Admin (two or three people; prefer three
+   people, so that two remain if one address turns out to be wrong after the
+   others have set their passwords), with `PLATFORM_ADMIN_BOOTSTRAP_REASON`.
+   Give each person an address that no HID 1.0 auth user has, such as a
+   dedicated admin mailbox, and check it against the approved read-only HID 1.0
+   source before the run: a seeded account keeps its address under the unique
+   index `accounts_email_ci_uq`, so a later HID 1.0 promotion of a user with
+   the same address is refused and blocks that promotion run (§6). It creates a
+   platform-only account for each address in `PLATFORM_ADMIN_EMAILS`, with no
+   password and no staff or patient record, and grants each Super Admin in one
+   audited transaction. It prints the new account IDs in the order of the
+   addresses, never an address. It refuses an address that already belongs to
+   an account (name existing accounts in `PLATFORM_ADMIN_ACCOUNT_IDS` instead)
+   and refuses to run again once any Super Admin exists, whatever its status;
+   afterwards a Super Admin is added only by a two-person approval
+   (`SUPER_ADMIN_FOUNDATION.md`).
+2. Then every listed person starts the admin reset and confirms that the
+   emailed code arrived before anyone sets a password. Each opens the admin
+   recovery page,
    `https://admin.healthidentitydirectory.com/admin/recover` ("Forgot your
    password?" on the admin sign-in page) or
    `https://www.healthidentitydirectory.com/admin/recover`, which uses the
-   admin reset (Turnstile action `admin-reset`), enters their address and the
-   emailed code, and sets their own password. Nobody else ever knows it.
-3. Each person signs in at `https://admin.healthidentitydirectory.com` with
+   admin reset (Turnstile action `admin-reset`), enters their address and tells
+   the operator that the code arrived, without entering it. Starting a reset
+   changes no account, so a mistyped address can still be replaced (below).
+   The recovery start answers an address without an account exactly as any
+   other, so a code that never arrives is the only sign of a mistyped address.
+3. Once every code has arrived, each person starts the reset again (a code
+   lasts `OTP_EXPIRY_SECONDS`, 300 seconds by default), enters the code and
+   sets their own password. Nobody else ever knows it.
+4. Each person signs in at `https://admin.healthidentitydirectory.com` with
    that password and enrols an authenticator app (TOTP) at the first sign-in;
    the platform enrolment needs no emailed code. Then check P6.
-4. Then one Super Admin pauses Brevo (§13 step 5, P21), enables the QoreID
+5. Then one Super Admin pauses Brevo (§13 step 5, P21), enables the QoreID
    integration `qoreid` (`POST /api/v1/admin/integrations/qoreid/enable`), sets the launch controls
    (`POST /api/v1/admin/controls`, such as `clinician_signup_enabled` once P35
    holds) and designates facilities (P30), each when its own release checklist
    row allows.
 
-If an address was mistyped, run `admin:bootstrap` again at once with the
-corrected list in `PLATFORM_ADMIN_EMAILS` and `PLATFORM_ADMIN_REPLACE_PENDING=1`.
-In one transaction it revokes the Super Admin assignments of the accounts the
-email bootstrap created, marks those accounts deleted (audited) and seeds the
-new list, but only while every Super Admin is such an account that nobody has
-used: still `pending_reset`, with no password, session or authenticator. Once
-anyone has set a password it refuses; the other Super Admins then remove a
-wrong account through the governed role and status commands. Until each person
-has reset, whoever controls a listed address could set that password, so check
-the addresses before the run and have each person reset at once.
+If an address was mistyped (its code never arrives), run `admin:bootstrap`
+again at once with the corrected list in `PLATFORM_ADMIN_EMAILS` and
+`PLATFORM_ADMIN_REPLACE_PENDING=1`. In one transaction it revokes the Super
+Admin assignments of the accounts the email bootstrap created, marks those
+accounts deleted (audited) and seeds the new list, but only while every Super
+Admin is such an account that nobody has used: still `pending_reset`, with no
+password, session or authenticator. A started or verified reset does not count
+as use. Every listed person then
+confirms a new code (step 2) before anyone sets a password. Once anyone has
+set a password it refuses, for every address. The other Super Admins can then
+remove a wrong account through the governed role and status commands, but
+nothing adds the right person: a Super Admin is added only by a two-person
+approval, and no command creates a platform-only account. With two addresses,
+a wrong one found after the other person has set a password leaves a single
+Super Admin, who can never add a second or approve a clinician application,
+and no command repairs it (P6 can then never pass). Until each person has
+reset, whoever controls a listed address could set that password, so check the
+addresses before the run and complete the resets as soon as every code has
+arrived.
 
 Name existing accounts in `PLATFORM_ADMIN_ACCOUNT_IDS` instead only once the
 accounts it names exist, each active with an email address and a password: on
@@ -785,7 +809,13 @@ after it with one `admin:bootstrap` run (§4, P6) naming two or three of those
 accounts in `PLATFORM_ADMIN_ACCOUNT_IDS`, each active with an email address and
 a password: that run is their re-approval (`SUPER_ADMIN_FOUNDATION.md`, Where
 the accounts come from). Once Super Admins exist, the bootstrap refuses, and a
-held HID 1.0 administrator is re-approved by the two-person approval instead.
+held HID 1.0 administrator whose address no seeded account has is re-approved
+by the two-person approval instead. An account seeded by email keeps its
+address under `accounts_email_ci_uq` (every status but `deleted`), and the
+promotion inserts an account only when its ID is new, so promoting a HID 1.0
+user with a seeded address, in any letter case, is a conflict that blocks the
+whole promotion run (`MIGRATION_RUNBOOK.md` §8). That is why §4 seeds only
+addresses no HID 1.0 auth user has.
 
 ## 7. Provider and workload preflight
 

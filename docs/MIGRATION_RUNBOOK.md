@@ -669,6 +669,18 @@ independent lookup HMACs. Missing facility or purpose creates a hold. Legacy
 clinical fragments remain quarantined, are not EHR records, and cannot be made
 visible by merely clearing a flag.
 
+An account that `admin:bootstrap` seeded by email (subject `platform:<id>`,
+`PLATFORM_ADMIN_EMAILS`) keeps its address in every status but `deleted`
+(`accounts_email_ci_uq`), and no command changes it. The promotion inserts an
+account only when its ID is new, so a HID 1.0 user with the same address, in
+any letter case, is a `target_content_mismatch` conflict on `auth.accounts`
+(constraint `accounts_email_ci_uq`) and the run is blocked. Such a conflict
+needs an owner decision: an approved correction of the HID 1.0 address in the
+source and a new run (§10), which leaves that person two accounts, or a merge
+that the promotion path still to be designed would have to provide. The
+email bootstrap therefore seeds only addresses no HID 1.0 auth user has
+(`AWS_DEPLOYMENT_RUNBOOK.md` §4).
+
 Legacy scan evidence not bound to an exact immutable object version and SHA-256
 cannot authorize document access. Create new governed evidence only after the
 exact bytes are independently verified.
