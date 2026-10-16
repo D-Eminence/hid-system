@@ -1,17 +1,18 @@
 // Two operator sequences the runbooks must get right (review round 2 of the
 // sign-up production readiness branch).
 //
-// 1. admin:bootstrap names accounts that must already exist, active with an
-//    email address and a password, and a new RDS instance has none: no
-//    migration seeds an account, and no service runs while the database is
-//    provisioned. So the bootstrap is no step of the new-instance order. The
+// 1. A new RDS instance has no account: no migration seeds one, and no
+//    service runs while the database is provisioned. So admin:bootstrap is no
+//    step of the new-instance order. Its account ID form names accounts that
+//    must already exist, active with an email address and a password. The
 //    HID 1.0 promotion (AWS_DEPLOYMENT_RUNBOOK.md §6) would create them: it
 //    keeps each HID 1.0 user's UUID, email and password and holds a legacy
 //    platform_admin membership for re-approval without granting a platform
 //    role; admin:bootstrap is that re-approval, and the operator takes each
 //    UUID from the HID 1.0 source. The promotion has no AWS execution path
-//    yet, so open question SUPERADMIN-ACCOUNTS blocks P6 for every owner
-//    (super-admin-account-source-docs.test.mjs).
+//    yet. By the owner's decision of 2026-10-16 (SUPERADMIN-ACCOUNTS) the
+//    email form creates the accounts instead, once the services and SES are
+//    live (super-admin-account-source-docs.test.mjs).
 // 2. Rotating a runtime secret: `--runtime-logins` sets the new password in
 //    place, so PostgreSQL refuses the old one at once, while running tasks
 //    keep the value ECS injected when they started. The runbooks give the
@@ -71,11 +72,13 @@ test('the new-instance provisioning order has no admin:bootstrap step', () => {
   for (const row of rows) assert.doesNotMatch(row, /admin:bootstrap/, row.slice(0, 40));
 });
 
-test('the runbooks run admin:bootstrap only once its accounts exist, after the HID 1.0 promotion', () => {
+test('the runbooks run the account ID form only once its accounts exist, and the email form once the services and SES are live', () => {
   for (const [name, text] of [['provisioning task', provisioningTask], ['migration task', migrationTask]]) {
-    assert.match(flat(text), /`admin:bootstrap`[^.]*only once the (?:two or three )?accounts it names exist/,
-      `${name}: admin:bootstrap waits for its accounts`);
-    assert.match(flat(text), /HID 1\.0 promotion of §6/, `${name}: names where the accounts come from`);
+    assert.match(flat(text), /`PLATFORM_ADMIN_ACCOUNT_IDS`[^.]*only once the (?:two or three )?accounts it names exist/,
+      `${name}: the account ID form waits for its accounts`);
+    assert.match(flat(text), /HID 1\.0 promotion of §6/, `${name}: names where existing accounts come from`);
+    assert.match(flat(text), /`PLATFORM_ADMIN_EMAILS`[^.]*after the services and SES are live/,
+      `${name}: the email form creates the accounts once a reset code can be delivered`);
   }
   const legacy = flat(legacyMigration);
   assert.match(legacy, /`admin:bootstrap`/, '§6 runs the bootstrap after the promotion');
@@ -95,8 +98,8 @@ test('SUPER_ADMIN_FOUNDATION.md and P6 say where the accounts and their UUIDs co
   assert.match(p6, /HID 1\.0 promotion/);
   assert.match(p6, /HID 1\.0 auth user ID/);
   const row = decisions.split('\n').find((line) => line.startsWith('| SUPERADMIN-ACCOUNTS |'));
-  assert.ok(row, 'PHASE_3_LAUNCH_DECISIONS.md records the open question');
-  assert.match(row, /\*\*Open/);
+  assert.ok(row, 'PHASE_3_LAUNCH_DECISIONS.md records the question');
+  assert.match(row, /\*\*Decided by the owner 2026-10-16/);
 });
 
 test('a runtime password is changed in place and running tasks keep the value they started with', () => {

@@ -49,6 +49,19 @@
 //   no email address, as platform sign-in is by email) or fourth account, both
 //   forms at once, the one-account form with NODE_ENV=production, and any run
 //   once a Super Admin is active;
+// - the email form of admin:bootstrap (owner decision 2026-10-16,
+//   SUPERADMIN-ACCOUNTS), on a copy of the main database taken before its
+//   first Super Admin: it creates two or three platform-only accounts with no
+//   password and grants each Super Admin; it refuses an address an account
+//   already has, and any rerun of either form while those accounts are still
+//   pending; PLATFORM_ADMIN_REPLACE_PENDING=1 replaces an unused set and is
+//   refused once one of them has set a password. As the Identity runtime
+//   LOGIN, the recovery start lookup of otp.service.ts reaches the account
+//   from the admin page only, and over HTTP the admin reset sets the person's
+//   own password and the first platform sign-in enrols an authenticator
+//   (verify-platform-admin-email-bootstrap-runtime.mjs); after it the platform
+//   sign-in lookup of local-auth.provider.ts and the platform permission
+//   accept the account, which has no staff or patient record;
 // - the platform-control-owner and function-parameter-settings suites;
 // - the database provisioning task's script (provision-database-logins.mjs,
 //   MIGRATION_RUNBOOK.md §6.1 and §6.3) on a second cluster laid out as a new
@@ -730,6 +743,222 @@ try {
     control_owner: { before: ownerBefore, after: ownerAfter },
     administrator_inherit_or_set_memberships_after: 0, control_read_as: upgradeReads };
 
+  // Owner decision 2026-10-16 (SUPERADMIN-ACCOUNTS, "By email, own password"):
+  // on a new database admin:bootstrap takes two or three email addresses
+  // (PLATFORM_ADMIN_EMAILS), creates a platform-only account for each, with no
+  // password, pending_reset, and grants each Super Admin in one audited
+  // transaction; each person then sets their own password with the admin
+  // reset and enrols an authenticator at the first platform sign-in. The
+  // whole path runs here on a copy of the main database taken before its first
+  // Super Admin (the cluster superuser makes the copy; that is scaffolding,
+  // not a step RDS runs). The bootstrap runs as the migration administrator;
+  // the recovery and the sign-in run as the Identity runtime LOGIN, in SQL
+  // taken from the Identity source and then over HTTP through the real
+  // controllers (verify-platform-admin-email-bootstrap-runtime.mjs).
+  const emailDatabase = 'hid_non_superuser_email';
+  run('copy the main database before its first Super Admin', join(pgBindir, 'psql'), ['-X', '-q', '-v', 'ON_ERROR_STOP=1',
+    '-h', temporary, '-U', superuser, '-d', 'postgres', '-c', `create database ${emailDatabase} template ${database} owner ${admin}`]);
+  const emailSql = (label, sql, expected = 0) => psql(label, admin, sql, expected, emailDatabase).stdout.trim();
+  const emailBootstrap = (label, environment, expected = 0) => run(label, process.execPath,
+    [join(service, 'scripts/bootstrap-platform-admin.mjs')], { DATABASE_ADMIN_URL: url(admin, emailDatabase),
+      PLATFORM_ADMIN_BOOTSTRAP_REASON: 'Initial platform governance set by email (synthetic)', ...environment }, expected);
+  const emailState = () => emailSql('platform accounts and Super Admin grants',
+    `select (select count(*) from auth.accounts where subject like 'platform:%') || ':'
+        || (select count(*) from auth.accounts where subject like 'platform:%' and status <> 'deleted') || ':'
+        || (select count(*) from auth.account_roles where role_code = 'platform_super_admin' and revoked_at is null)`);
+  const ownedAddress = 'example-existing-account@example.invalid';
+  const [adminOne, adminTwo, adminThree, mistyped] = ['one', 'two', 'three', 'twoo']
+    .map((label) => `example-platform-admin-${label}@example.invalid`);
+  const existingIds = [randomUUID(), randomUUID()];
+  emailSql('an existing account with a password, and two more for the account ID form', existingIds.map((id, index) =>
+    `insert into auth.accounts (id, subject, email, display_name, status, password_hash, password_algorithm)
+       values ('${id}', 'synthetic:platform-email-bootstrap:existing-${index}',
+         ${index === 0 ? `'${ownedAddress}'` : `'example-existing-${index}@example.invalid'`},
+         'Existing Account ${index}', 'active', 'synthetic-hash', 'argon2id');`).join(' ')
+    + ` insert into auth.accounts (id, subject, email, display_name, status, password_hash, password_algorithm)
+       values ('${randomUUID()}', 'synthetic:platform-email-bootstrap:existing-2', 'example-existing-2@example.invalid',
+         'Existing Account 2', 'active', 'synthetic-hash', 'argon2id')`);
+  const idsIn = (text) => text.match(/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/g) ?? [];
+
+  // Refusals change nothing and never print an address.
+  const emailRefusals = {
+    'an address that already belongs to an account': [{ PLATFORM_ADMIN_EMAILS: `${adminOne},${ownedAddress.toUpperCase()}` },
+      /Bootstrap refused: PLATFORM_ADMIN_EMAILS entry 2 already belongs to an account; name existing accounts in PLATFORM_ADMIN_ACCOUNT_IDS/],
+    'replace-pending with nothing to replace': [{ PLATFORM_ADMIN_EMAILS: `${adminOne},${adminTwo}`, PLATFORM_ADMIN_REPLACE_PENDING: '1' },
+      /PLATFORM_ADMIN_REPLACE_PENDING=1 but no Super Admin exists to replace/],
+    'one address': [{ PLATFORM_ADMIN_EMAILS: adminOne }, /PLATFORM_ADMIN_EMAILS must list two or three/],
+    'a display name': [{ PLATFORM_ADMIN_EMAILS: `Example Admin <${adminOne}>,${adminTwo}` }, /not a single plain email address/],
+  };
+  for (const [label, [environment, message]] of Object.entries(emailRefusals)) {
+    const refused = emailBootstrap(`admin:bootstrap by email refuses ${label}`, environment, 'failure');
+    assert.match(refused.output, message, label);
+    assert.ok(!/@example\.invalid/i.test(refused.output), `${label}: the refusal printed an address`);
+    assert.equal(emailState(), '0:0:0', `${label}: a refused bootstrap created or granted nothing`);
+  }
+
+  // The first run, with a mistyped second address.
+  const firstEmailRun = emailBootstrap('admin:bootstrap seeds three Super Admins by email',
+    { PLATFORM_ADMIN_EMAILS: `${adminOne} ${mistyped} ${adminThree}` });
+  assert.match(firstEmailRun.stdout, /Platform Super Admin bootstrap created 3 platform-only accounts without a password/);
+  assert.ok(!firstEmailRun.output.includes('@'), 'the bootstrap printed an address');
+  const firstIds = idsIn(firstEmailRun.stdout);
+  assert.equal(new Set(firstIds).size, 3);
+  assert.equal(emailState(), '3:3:3');
+  const seededAccount = (id, address) => [id, `platform:${id}`, address, 'true', 'pending_reset', 'true', 'true', 'hid',
+    '0', '0', 'platform_super_admin', 'true', '1'].join('|');
+  // Each account's row, with one audit event naming the whole set it was seeded with.
+  const accountRows = (ids, set = ids) => emailSql('the email-seeded accounts, grants and audit', `select account.id || '|' || account.subject
+      || '|' || account.email || '|' || (account.display_name is null) || '|' || account.status || '|'
+      || (account.password_hash is null and account.password_algorithm is null) || '|' || (account.email_verified_at is null)
+      || '|' || account.source_system
+      || '|' || (select count(*) from identity.staff staff_row where staff_row.account_id = account.id)
+      || '|' || (select count(*) from identity.patients patient_row where patient_row.account_id = account.id)
+      || '|' || (select string_agg(assignment.role_code, ',') from auth.account_roles assignment
+                  where assignment.account_id = account.id and assignment.revoked_at is null
+                    and assignment.scope_type = 'platform')
+      || '|' || (select bool_and(assignment.granted_by is null) from auth.account_roles assignment
+                  where assignment.account_id = account.id)
+      || '|' || (select count(*) from audit.events event where event.action = 'admin.platform-role.bootstrap'
+                  and event.resource_id = account.id::text and event.actor_type = 'system'
+                  and event.details->>'method' = 'email' and event.details->>'accountCreated' = 'true'
+                  and event.details->'bootstrapAccounts' = to_jsonb(array[${set.map((id) => `'${id}'`).join(', ')}]::text[])
+                  and position('@' in event.details::text) = 0)
+     from auth.accounts account where account.id = any(array[${ids.map((id) => `'${id}'`).join(', ')}]::uuid[])
+     order by array_position(array[${ids.map((id) => `'${id}'`).join(', ')}]::uuid[], account.id)`).split('\n');
+  assert.deepEqual(accountRows(firstIds), [[firstIds[0], adminOne], [firstIds[1], mistyped], [firstIds[2], adminThree]]
+    .map(([id, address]) => seededAccount(id, address)));
+
+  // A rerun of either form is refused while those accounts still wait for a
+  // password: the check counts every non-deleted holder, whatever its status.
+  for (const [label, environment] of [['by email again', { PLATFORM_ADMIN_EMAILS: `${adminOne},${adminTwo}` }],
+    ['by account ID', { PLATFORM_ADMIN_ACCOUNT_IDS: existingIds.join(',') }]]) {
+    assert.match(emailBootstrap(`admin:bootstrap refuses a rerun ${label} while pending Super Admins exist`, environment,
+      'failure').output, /Bootstrap refused: a platform Super Admin already exists, in any status but deleted/);
+    assert.equal(emailState(), '3:3:3');
+  }
+
+  // The mistyped address, replaced while nobody has used any of the accounts.
+  const replaced = emailBootstrap('admin:bootstrap replaces an unused email-seeded set',
+    { PLATFORM_ADMIN_EMAILS: `${adminOne},${adminTwo},${adminThree}`, PLATFORM_ADMIN_REPLACE_PENDING: '1' });
+  assert.match(replaced.stdout, /replaced 3 unused email-seeded accounts/);
+  const newIds = idsIn(replaced.stdout).filter((id) => !firstIds.includes(id));
+  assert.equal(new Set(newIds).size, 3);
+  assert.deepEqual(idsIn(replaced.stdout).filter((id) => firstIds.includes(id)).sort(), [...firstIds].sort());
+  assert.equal(emailState(), '6:3:3');
+  assert.deepEqual(accountRows(newIds), [[newIds[0], adminOne], [newIds[1], adminTwo], [newIds[2], adminThree]]
+    .map(([id, address]) => seededAccount(id, address)));
+  assert.deepEqual(emailSql('the replaced accounts', `select account.id || '|' || account.status || '|' || account.token_version
+        || '|' || (select count(*) from auth.account_roles assignment where assignment.account_id = account.id
+                    and assignment.revoked_at is not null and assignment.revoked_by = account.id
+                    and assignment.revocation_reason = 'Initial platform governance set by email (synthetic)')
+        || '|' || (select count(*) from auth.account_roles assignment where assignment.account_id = account.id
+                    and assignment.revoked_at is null)
+        || '|' || (select count(*) from audit.events event where event.action = 'admin.platform-role.bootstrap.replaced'
+                    and event.resource_id = account.id::text and event.details->>'accountStatus' = 'deleted'
+                    and event.details->'replacedBy' = to_jsonb(array[${newIds.map((id) => `'${id}'`).join(', ')}]::text[]))
+      from auth.accounts account where account.id = any(array[${firstIds.map((id) => `'${id}'`).join(', ')}]::uuid[])
+      order by account.id`).split('\n'), [...firstIds].sort().map((id) => `${id}|deleted|2|1|0|1`));
+
+  // Before the reset, as the Identity runtime LOGIN: the admin page's
+  // recovery start reaches the account (otp.service.ts's own lookup), the
+  // staff and patient pages do not, and neither platform sign-in nor the
+  // platform permission accepts it yet.
+  const [adminOneId] = newIds;
+  const identitySource = await readFile(join(repository, 'services/identity-api/src/auth/otp.service.ts'), 'utf8');
+  const startLookup = /client\.query<AccountRow>\(\s*`([\s\S]*?)`,\s*\[identifier, input\.audience\],/.exec(identitySource)?.[1];
+  assert(startLookup, 'otp.service.ts has no recovery start lookup');
+  const localAuthSource = await readFile(join(repository, 'services/identity-api/src/auth/local-auth.provider.ts'), 'utf8');
+  const loginTemplate = /const accountSql = `([\s\S]*?)`;/.exec(localAuthSource)?.[1];
+  assert(loginTemplate, 'local-auth.provider.ts has no account lookup');
+  const loginLookup = loginTemplate.replace(/\$\{hidLogin[\s\S]*?: '(lower\(account\.email\) = lower\(\$1\))'\}/, '$1');
+  assert.ok(!loginLookup.includes('${') && loginLookup.includes('lower(account.email) = lower($1)'),
+    'the platform sign-in lookup by email');
+  const asIdentity = async (operation) => {
+    const client = new Client({ host: temporary, user: logins['identity-api'][0], database: emailDatabase });
+    await client.connect();
+    try {
+      await client.query('begin');
+      await client.query(`select set_config('app.actor_subject', 'system:auth', true),
+        set_config('app.correlation_id', 'example-email-bootstrap-check', true)`);
+      return await operation(client);
+    } finally {
+      await client.query('rollback').catch(() => undefined);
+      await client.end().catch(() => undefined);
+    }
+  };
+  const identityView = (address, id) => asIdentity(async (client) => {
+    const audience = (await client.query(`select auth.recovery_account_audience($1, 'platform') as platform,
+        auth.recovery_account_audience($1, 'staff') as staff, auth.recovery_account_audience($1, 'patient') as patient,
+        auth.account_has_platform_permission($1, 'platform.admin.access') as admin_access`, [id])).rows[0];
+    const start = {};
+    for (const page of ['platform', 'staff', 'patient']) {
+      const row = (await client.query(startLookup, [address.toUpperCase(), page])).rows[0];
+      start[page] = row ? `${row.id}|${row.email}|${row.audience_matches}` : 'none';
+    }
+    const signIn = (await client.query(loginLookup, [address])).rows.map((row) => `${row.id}|${row.password_algorithm}`);
+    return { audience, start, signIn };
+  });
+  const beforeReset = await identityView(adminOne, adminOneId);
+  assert.deepEqual(beforeReset, {
+    audience: { platform: true, staff: false, patient: false, admin_access: false },
+    start: { platform: `${adminOneId}|${adminOne}|true`, staff: `${adminOneId}|${adminOne}|false`,
+      patient: `${adminOneId}|${adminOne}|false` },
+    signIn: [],
+  });
+
+  // The person's own reset and first sign-in over HTTP, as the Identity runtime LOGIN.
+  const journey = JSON.parse(run('the admin reset and first platform sign-in over HTTP as the Identity LOGIN',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-platform-admin-email-bootstrap-runtime.mjs')],
+    { PGHOST: temporary, PGDATABASE: emailDatabase, IDENTITY_LOGIN: logins['identity-api'][0],
+      PLATFORM_ADMIN_EMAIL: adminOne }).stdout.trim().split('\n').at(-1));
+  assert.equal(journey.status, 'passed');
+  assert.equal(journey.account_id, adminOneId);
+
+  // After it: active with the person's own Argon2id password, an
+  // authenticator and a platform session; platform sign-in finds it and the
+  // platform permission holds; still no staff or patient record.
+  const afterReset = await identityView(adminOne, adminOneId);
+  assert.deepEqual(afterReset, {
+    audience: { platform: true, staff: false, patient: false, admin_access: true },
+    start: beforeReset.start,
+    signIn: [`${adminOneId}|argon2id`],
+  });
+  assert.equal(emailSql('the reset account', `select account.status || '|' || (account.password_hash like '$argon2id$%')
+      || '|' || (account.password_changed_at is not null) || '|' || account.token_version
+      || '|' || (select count(*) from auth.mfa_factors factor where factor.account_id = account.id and factor.status = 'active')
+      || '|' || (select count(*) from auth.sessions session_row where session_row.account_id = account.id
+                  and session_row.revoked_at is null)
+      || '|' || (select count(*) from audit.events event where event.action = 'auth.otp.recovery.completed'
+                  and event.actor_account_id = account.id)
+      || '|' || (select count(*) from identity.staff staff_row where staff_row.account_id = account.id)
+      || '|' || (select count(*) from identity.staff_facility_memberships membership where membership.account_id = account.id)
+      || '|' || (select count(*) from identity.patients patient_row where patient_row.account_id = account.id)
+     from auth.accounts account where account.id = '${adminOneId}'`), 'active|true|true|2|1|1|1|0|0|0');
+
+  // Once one of them has set a password, no run replaces or adds anything.
+  const usedRefusals = {
+    'replace-pending': [{ PLATFORM_ADMIN_EMAILS: `${adminOne},${adminTwo},${adminThree}`, PLATFORM_ADMIN_REPLACE_PENDING: '1' },
+      /PLATFORM_ADMIN_REPLACE_PENDING=1 replaces only Super Admins the email bootstrap created that nobody has used yet[^]*1 of 3 is not/],
+    'another email run': [{ PLATFORM_ADMIN_EMAILS: `${adminTwo},example-platform-admin-four@example.invalid` },
+      /a platform Super Admin already exists, in any status but deleted/],
+    'an account ID run': [{ PLATFORM_ADMIN_ACCOUNT_IDS: existingIds.join(',') },
+      /a platform Super Admin already exists, in any status but deleted/],
+  };
+  for (const [label, [environment, message]] of Object.entries(usedRefusals)) {
+    assert.match(emailBootstrap(`admin:bootstrap refuses ${label} once a Super Admin has set a password`, environment,
+      'failure').output, message, label);
+    assert.equal(emailState(), '6:3:3', `${label}: a refused run changed nothing`);
+  }
+  assert.deepEqual(accountRows(newIds.slice(1), newIds), [[newIds[1], adminTwo], [newIds[2], adminThree]]
+    .map(([id, address]) => seededAccount(id, address)));
+  evidence.steps.platform_admin_email_bootstrap = { database: emailDatabase, bootstrap_run_as: admin,
+    recovery_run_as: logins['identity-api'][0], seeded: 3, status_after_seed: 'pending_reset, no password',
+    replaced: { accounts: 3, status: 'deleted', assignments_revoked: 3, reseeded: 3 },
+    before_reset: beforeReset, after_reset: { platform_admin_access: true, sign_in_lookup: 'argon2id', staff_records: 0 },
+    http: journey,
+    refused: [...Object.keys(emailRefusals), 'rerun by email while pending', 'account ID run while pending',
+      ...Object.keys(usedRefusals).map((label) => `${label} after a password was set`)] };
+
   // P6, P35(2) (admin:bootstrap): the first Super Admins, as RDS runs the
   // bootstrap, as the migration administrator, on the main database, where no
   // Super Admin exists yet. A Super Admin grant needs a second Super Admin's
@@ -795,7 +1024,7 @@ try {
   for (const [label, environment] of [['one more account', { PLATFORM_ADMIN_ACCOUNT_ID: d }],
     ['another set', { PLATFORM_ADMIN_ACCOUNT_IDS: `${d},${b}` }]]) {
     assert.match(adminBootstrap(`admin:bootstrap refuses ${label} once Super Admins are active`, environment,
-      'failure').output, /Bootstrap refused: an active platform Super Admin already exists/);
+      'failure').output, /Bootstrap refused: a platform Super Admin already exists, in any status but deleted/);
   }
   assert.equal(superAdminGrants(), '3:3');
   evidence.steps.platform_admin_bootstrap = { run_as: admin, seeded: 3, distinct: 3,
