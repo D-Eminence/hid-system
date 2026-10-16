@@ -378,17 +378,18 @@ try {
   assert.deepEqual(recipients, { verified: `email|${recipientFixture.verified.email}`, phoneOnly: 'withhold|' });
   const workerDirect = psql('the worker login reads no patient row', worker,
     'select count(*) from identity.patients', 'failure');
-  assert.match(workerDirect.output, /permission denied for table patients/);
+  assert.match(workerDirect.output, /permission denied for (schema identity|table patients)/);
   const refusedLogins = {};
   for (const credential of ['identity-api', 'event-dispatcher']) {
     const refused = psql(`the recipient lookup as the ${credential} login`, logins[credential][0],
       `select * from integration.notification_recipient_for_claim('${recipientFixture.verified.event}',
          gen_random_uuid(), '${recipientFixture.verified.patient}')`, 'failure');
-    assert.match(refused.output, /permission denied for function notification_recipient_for_claim/);
-    refusedLogins[credential] = 'permission denied';
+    const refusal = /permission denied for (schema integration|function notification_recipient_for_claim)/.exec(refused.output);
+    assert(refusal, `the ${credential} login was not refused the recipient lookup: ${refused.output.slice(-400)}`);
+    refusedLogins[credential] = refusal[0];
   }
   evidence.steps.notification_recipient = { run_as: worker, answers: { verified: 'email', phone_only: 'withhold' },
-    direct_patient_read: 'permission denied', refused: refusedLogins };
+    direct_patient_read: /permission denied for \S+ \S+/.exec(workerDirect.output)[0], refused: refusedLogins };
 
   // I3 at call time: the claim runs its body without the parameter privilege.
   const claim = psql('OCR claim without a workload context', logins['ocr-worker'][0],
