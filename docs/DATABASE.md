@@ -2379,7 +2379,9 @@ superuser change `SUPERUSER`, and only a role holding `BYPASSRLS` change that
 attribute, even to its current value, so the file stopped there and rolled
 back. It now:
 
-- creates each of the 25 group roles with its attributes, as before, then
+- creates each of its 28 group roles (the 25 of main, `hid_lab_release_reader`
+  since 0095, and `hid_imported_history_commands` and
+  `hid_imported_history_importer` since 0096) with its attributes, as before, then
   checks them: a role with `SUPERUSER`, `BYPASSRLS` or `REPLICATION` is
   refused, and `LOGIN`, `CREATEDB`, `CREATEROLE` and `INHERIT` are corrected
   only when they differ, so a run that changes nothing issues no
@@ -4318,11 +4320,12 @@ set (`PatientRecordRelease`, one default-off flag per category,
 - **The database follows the flags.** Each 0095 policy and the view admit
   their category only in a transaction whose transaction-local setting
   `app.patient_release` names it exactly (a comma-separated list of
-  `vitals`, `diagnoses`, `prescriptions`, `labResults` and `documents`).
+  `vitals`, `diagnoses`, `prescriptions`, `labResults` and `documents`, and
+  since 0096 `importedHistory`).
   `DatabaseService.withPatientTransaction` starts every patient-self
   transaction with it empty, and `PatientRecordRelease.bind` sets it to the
-  categories whose flag is on (its `read` and the patient document download
-  call it first). A transaction that names no category reads none of these
+  categories whose flag is on (its `read`, its `readImportedHistory` and the
+  patient document download call it first). A transaction that names no category reads none of these
   rows, so with every flag off the database refuses these categories to the
   patient as before 0095; every earlier EHR build, including one from before
   D-Eminence/hid-system#52 whose patient summary still queried every
@@ -4528,11 +4531,21 @@ EHR read is filtered:
 | Policy | Admits |
 |---|---|
 | `imported_history_patient_self_read` | the 0091 patient-self binding (`ehr.patient_self_context(patient_id)`, executable by the EHR runtime and the test role only, PSELF-RLS) in a transaction whose `app.patient_release` names `importedHistory`, which `PatientRecordRelease` sets only while `EHR_PATIENT_RELEASE_IMPORTED_HISTORY` is on |
-| `imported_history_staff_read` | `ehr.imported_history_staff_read_allowed(patient_id)`: purpose `direct-care`, an `ehr.context_allows(patient, selected facility, 'read_records')` pass (an active, unheld, unexpired standard consent of the selected membership and no deny directive; break-glass counts only for `emergency`, D9), the membership holding `ehr.imported-history.read`, the patient's `shared` choice, and a login that is not deleted |
+| `imported_history_staff_read` | `patient_id = (select ehr.imported_history_staff_patient())`: the one patient the staff transaction names in `app.imported_history_patient` (`ImportedHistoryService` binds it in the statement that asks the decision), when `ehr.imported_history_staff_read_allowed(patient)` holds: purpose `direct-care`, an `ehr.context_allows(patient, selected facility, 'read_records')` pass (an active, unheld, unexpired standard consent of the selected membership and no deny directive; break-glass counts only for `emergency`, D9), the membership holding `ehr.imported-history.read`, the patient's `shared` choice, and a login that is not deleted |
 
-When the staff decision holds, the patient's whole imported history is
-disclosed: legacy records have no source facility or encounter a
-facility-bound consent could narrow (ADR-065). The patient needs no sharing
+The staff decision sits in a sub-SELECT without a row reference, which
+PostgreSQL evaluates once per statement (an InitPlan), not once per row: a
+page at the caps (51 records with 21 versions and 21 files each) asks it 3
+times instead of about 2,100 (7.6 s to 23 ms in the suite). The binding is
+only the request: naming another patient asks the same decision for that
+patient, a malformed name is no patient, and a staff transaction reads no
+other patient's rows. `ehr.imported_history_staff_patient()` runs as its
+caller (EXECUTE for the EHR runtime and the test role), so the decision keeps
+its single owner. When the staff decision holds, the patient's whole imported
+history is disclosed: legacy records have no source facility or encounter a
+facility-bound consent could narrow (ADR-065). The patient-self policy still
+evaluates `ehr.patient_self_context` per row (about 1.8 s for the same page
+in the suite). The patient needs no sharing
 choice for their own history. No policy admits an `INSERT`, `UPDATE` or
 `DELETE` by any application role; the technical owners' policies (below) are
 created by the role bootstrap.
@@ -4561,18 +4574,45 @@ bypassing row-level security:
 - `ehr.import_legacy_medical_history(uuid, uuid, text, jsonb)`, owned by
   `hid_imported_history_importer`; executable by `hid_migration_admin` only.
   It imports only from main's sealed staging pipeline: the parent run must be
-  the reconciled, verified legacy identity run without conflicts, the history
-  run a sealed staging run of the same source snapshot holding exactly the
-  three history categories with matching counts, and the supplied rows
-  exactly that run's sealed rows (`55000 IMPORTED_HISTORY_ROWS_DIFFER`
-  otherwise). Every patient, author and uploader is resolved through the
+  the reconciled, verified legacy identity run without conflicts
+  (`IMPORTED_HISTORY_PARENT_NOT_VERIFIED`), the history run a sealed staging
+  run of source system `legacy_imported_history` (never `legacy_identity`)
+  and of the same source snapshot (`IMPORTED_HISTORY_RUN_NOT_SEALED`,
+  `IMPORTED_HISTORY_SNAPSHOT_MISMATCH`) holding exactly the three history
+  categories with matching counts (`IMPORTED_HISTORY_CATEGORY_MISMATCH`), and
+  the supplied rows exactly that run's sealed rows (`55000
+  IMPORTED_HISTORY_ROWS_DIFFER` otherwise; `22023
+  IMPORTED_HISTORY_INPUT_INVALID` for a missing operator or rows that are not
+  an array). Every patient, author and uploader is resolved through the
   parent run's sealed identity rows (`IMPORTED_HISTORY_BINDING_DIFFERS`,
   `IMPORTED_HISTORY_AUTHOR_UNRESOLVED`); malformed rows are
-  `IMPORTED_HISTORY_RECORD_INVALID`, `_VERSION_INVALID` or `_FILE_INVALID`.
-  Rows are inserted once; a stored row that differs is refused
-  (`IMPORTED_HISTORY_DIFFERS`); a receipt run (`source_system
-  legacy_imported_history`, mode `cutover`, status `completed`, the counts and
-  the history seal) is recorded once per parent and history run.
+  `IMPORTED_HISTORY_RECORD_INVALID`, `_VERSION_INVALID` or `_FILE_INVALID`,
+  and every legacy timestamp must be ISO 8601 with an offset and finite (no
+  `now`, `today`, `epoch`, `infinity` or zone-less value). Rows are inserted
+  once; a stored row that differs is refused (`IMPORTED_HISTORY_DIFFERS`); a
+  receipt run (`source_system legacy_imported_history`, mode `cutover`,
+  status `completed`, the counts and the history seal) is recorded once per
+  parent and history run. It pins `TimeZone=UTC` and `plan_cache_mode =
+  force_custom_plan`, reads each run's rows once into key lookups, and reads
+  each stored row by its key: its time grows linearly (on tables analyzed
+  empty, 10,000 versions in 2.8 s and 40,000 in 11.7 s; a plan cached while
+  the tables were empty made it quadratic, 207.7 s for 20,000). It defers the
+  current-version check itself, so a second import in one transaction works.
+
+**The history run's seal.** Main's crosswalk gate
+(`identity.legacy_nin_crosswalk_ready`, 0057) closes public patient
+enrollment while any `legacy_identity` run is `running` or `staged`, and a
+history run stays `staged`. So the history scope stages source system
+`legacy_imported_history`, which the gate does not count. 0033's seal guards
+are scoped to `legacy_identity`; two 0096 triggers give
+`legacy_imported_history` runs the same seal:
+`source_rows_imported_history_stage_only` (`migration.source_rows`: rows only
+while the run is `running` in mode `stage`) and
+`runs_imported_history_source_evidence_immutable` (`migration.runs`: counts
+and checksum sealed once from `running` to `staged`; no change of source
+system, snapshot, transaction snapshot or mode; no resume; no other run may
+become one). Both functions run as their caller, pin their search path and
+have no PUBLIC `EXECUTE`.
 
 The bootstrap (`runtime-grants.sql`) creates both owners (no login, no
 member, no membership), their column grants and the exact policies
@@ -4584,8 +4624,11 @@ created on the first run only (`ACCESS EXCLUSIVE` briefly on its table,
 after the platform-control policy) and replaced only when missing or
 different. It gives the four functions to their owners inside `CREATE`
 windows, grants the EHR runtime and the test role `SELECT` on the imported
-tables, and gives `hid_migration_admin` `USAGE` on schema `ehr` so it can
-call the import. The other 0096 tables have no reader.
+tables and `EXECUTE` on `ehr.imported_history_staff_patient()`, and gives
+`hid_migration_admin` `USAGE` on schema `ehr` so it can call the import.
+Right after giving a function to its owner it revokes the owner's own
+`EXECUTE` entry (no owned function calls another), so the first run leaves
+the same ACL as a rerun. The other 0096 tables have no reader.
 
 **Permission.** `ehr.imported-history.read`, held by doctor, clinician and
 nurse (the roles that read notes); the staff route requires it as well.
@@ -4594,13 +4637,16 @@ nurse (the roles that read notes); the staff route requires it as well.
 `ehr.imported_medical_records` and related objects (its 0061 and 0062, which
 disclosed the whole history under any consent and gave the schema owner a
 bypass policy). 0096 refuses such a database before creating anything
-(`55000 IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT`): it is rebuilt from main
-first (release checklist P36).
+(`55000 IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT`) and changes nothing in
+it. Rebuilding it from main is a proposed default that needs the owner's and
+the DPO's approval (ADR-065, release checklist P36).
 
 **Locks.** Creating the foreign keys takes `SHARE ROW EXCLUSIVE` on
-`identity.patients`, `auth.accounts` and `migration.runs`, and the permission
-rows take row locks on `auth.permissions` and `auth.role_permissions`, until
-0096 commits; everything else creates new objects. Each waits at most the
+`identity.patients`, `auth.accounts` and `migration.runs`, creating the seal
+triggers `SHARE ROW EXCLUSIVE` on `migration.runs` and
+`migration.source_rows`, and the permission rows take row locks on
+`auth.permissions` and `auth.role_permissions`, until 0096 commits;
+everything else creates new objects. Each waits at most the
 runner's 5 s lock timeout, and a timeout rolls 0096 back whole.
 
 **Evidence** (local, synthetic only). `imported-medical-history.integration.sql`
@@ -4612,9 +4658,20 @@ withdrawn and a deleted login each disclose nothing; a live break-glass
 grant read with the purpose `emergency` discloses nothing; the patient-self
 binding admits the patient's own rows only with `importedHistory` in the
 release set; the tables are append-only; the sharing commands as the
-Identity runtime (session binding, refusals, repeat, change log); and the
+Identity runtime (session binding, refusals, repeat, change log); the
 catalogue (forced row-level security, the exact policies, owners, definer
-settings, `EXECUTE` holders, triggers and the permission's roles).
+settings, `EXECUTE` holders and no owner entry, triggers and the permission's
+roles); the staff binding (another patient, no patient, a malformed name);
+and a staff page at the caps that asks the decision at most 6 times (3) and
+takes under 3 s. It records 97 cases.
+`imported-history-import.integration.sql` (rollback-only, fixture range
+`ea`) calls the import command as `hid_migration_admin` on runs staged
+through the real ledger triggers: every refusal code, origins, the receipt,
+an idempotent repeat (also in another session time zone), a later differing
+history, the history run's seal, timestamp shapes, enrollment staying open,
+and linear time on tables analyzed empty with no sequential scan per row. It
+records 66 cases; mutants that drop the record patient's binding refusal or
+the author refusals fail it.
 `runtime-roles.integration.sql` asserts both owners' exact grants, policies
 and functions on every bootstrap run. On a database built from empty to 0096
 and bootstrapped, every SQL suite passes, again with the synthetic release

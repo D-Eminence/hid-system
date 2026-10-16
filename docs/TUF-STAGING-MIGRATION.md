@@ -294,6 +294,36 @@ The executable covers:
    EHR's own patient-self transaction (nothing new without the release
    binding; only vitals with only that flag on), as `hid_ehr_api_runtime`
    against a real Identity child.
+   With 0096 (imported legacy medical history, ADR-065): the additional
+   suites include `imported-medical-history.integration.sql` (the patient-self
+   binding and the release set, the staff decision for the one patient a
+   transaction names, every refusal, break-glass, the sharing commands, the
+   catalogue, and a staff page at the caps that asks the decision a few
+   times rather than per row) and `imported-history-import.integration.sql`
+   (the import command as `hid_migration_admin` on crafted runs: every
+   refusal code, origins, the receipt, an idempotent repeat, the history
+   run's seal, timestamp shapes, enrollment staying open, and linear time
+   on tables analyzed empty), run in both passes.
+   `imported_history_branch_precondition` builds a database to 0095 with a
+   branch-shaped `ehr.imported_medical_records` and proves that 0096 refuses
+   it (`IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT`) and leaves it unchanged.
+   `imported_history_runtime` runs `verify-imported-history-runtime.mjs`
+   after the patient record release verifier: the patient's own read, the
+   sharing choice, the staff direct-care read, other purposes, break-glass,
+   staff refused the patient routes, the database following the release
+   binding, a revoked consent, every switch off, and, with Identity's
+   sharing switch off, a withdrawal that still succeeds and the staff read
+   that then answers `shared: false`, as `hid_ehr_api_runtime` and
+   `hid_identity_api_runtime`. `imported_history_import` runs
+   `rehearse-imported-history-import.mjs` on a database of its own: main's
+   stage, promote and reconcile, the NIN crosswalk attestation and contact
+   rekey, the history scope (a `legacy_imported_history` run the promoter
+   refuses and leaves unchanged), the import's dry run, apply, repeat and
+   refusals, and `identity.public_patient_enrollment_ready()` true before the
+   history, once it is staged and once it is imported. The non-superuser
+   pass (`verify-non-superuser-database.mjs`, step `imported_history_import`)
+   runs the same rehearsal as the `NOSUPERUSER NOBYPASSRLS CREATEROLE`
+   administrator and checks that no `hid_migration_admin` membership is left.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,

@@ -4956,9 +4956,10 @@ Date: 2026-10-16
 
 Context:
 
-- On 2026-10-16 the owner approved (decision 3) that patients and staff see
-  the medical history imported from the legacy system: its records, every
-  version of each and the files attached to them.
+- On 2026-10-16 the owner approved decision 3: "patients and staff see
+  imported legacy records". That this covers every version of each record
+  and the metadata of the files attached to them, and nothing else, is this
+  change's reading of the decision, not part of it.
 - The PR #8 branch imported it with its own 0061/0062: any consent at any
   facility disclosed the patient's whole imported history, and the schema
   owner had a bypass policy. Main's security model (forced row-level
@@ -4996,9 +4997,13 @@ Decision:
   `ehr.imported-history.read` (doctor, clinician, nurse), and the patient has
   chosen to share their imported history (`identity.imported_history_sharing`,
   off until they turn it on). The database repeats every condition in
-  `ehr.imported_history_staff_read_allowed`, which the staff policies call.
-  When all hold the whole imported history is disclosed as one unit
-  ("portability"): it has no facility a consent could narrow it to.
+  `ehr.imported_history_staff_read_allowed`. The staff policies ask it once
+  per statement, for the one patient the staff transaction names
+  (`ehr.imported_history_staff_patient()`, a sub-SELECT PostgreSQL evaluates
+  once rather than per row): the name is only the request, and a staff
+  transaction reads no other patient's rows. When all hold the whole
+  imported history is disclosed as one unit ("portability"): it has no
+  facility a consent could narrow it to.
 - Break-glass never discloses imported history. The staff route takes only
   `direct-care` (break-glass grants count only for `emergency`, D9), the
   database decision requires `direct-care`, ClinicalRepository refuses a
@@ -5006,30 +5011,47 @@ Decision:
   the emergency summary is unchanged.
 - The patient's sharing choice is two session-bound commands in Identity
   (`GET` and `POST /api/v1/identity/me/imported-history-sharing`, switch
-  `IMPORTED_HISTORY_SHARING_ENABLED`), each recorded with its session and
-  correlation id in an append-only change log. Turning sharing on needs a
+  `IMPORTED_HISTORY_SHARING_ENABLED`). Each change is recorded with its
+  session and correlation id in an append-only change log; each read and
+  each change request is audited. Turning sharing on needs the switch, a
   recent sign-in and no recent account recovery, as an Access PIN does.
+  Turning it off is always allowed, also while the switch is off: the stored
+  choice is what the database's staff decision reads, whatever the switches
+  say, so a patient must always be able to withdraw it.
 - Import only from main's sealed staging pipeline. The parent run is main's
   legacy identity run, staged, promoted and reconciled to `verified`
   (`stage-legacy-identity.mjs`, `promote-legacy-identity.mjs`,
   `reconcile-legacy-identity.mjs`). `stage-legacy-identity.mjs
   --scope=imported-history` seals the history of the same source snapshot in
-  its own run, which main's promoter refuses. `import-legacy-history.mjs`
-  checks both runs and every row against its seal and the parent's identity
-  rows and calls `ehr.import_legacy_medical_history`, which repeats every
-  check, inserts once, refuses a stored row that differs and records a
-  receipt run. The command is refused in production; staging and owned
-  rehearsals only. Tests and rehearsals use synthetic fixtures only.
+  its own run of source system `legacy_imported_history`, which main's
+  promoter refuses and main's crosswalk gate does not count: a staged
+  `legacy_identity` run closes public patient enrollment (0057), and a history
+  run stays staged. Two 0096 triggers give these runs the seal 0033 gives
+  `legacy_identity` runs. `import-legacy-history.mjs` checks both runs and
+  every row against its seal and the parent's identity rows and calls
+  `ehr.import_legacy_medical_history`, which repeats every check of the runs
+  and of each row's content and bindings (not the stager's checksums, which
+  the importer recomputes; the command takes only rows equal to the sealed
+  rows), takes only ISO 8601 timestamps with an offset, inserts once, refuses
+  a stored row that differs and records a receipt run. Its time grows
+  linearly with the rows (50,000 synthetic rows in 11.7 s on a local
+  cluster). Both CLIs refuse production and run only on staging or an owned
+  rehearsal; that refusal is the operator-declared `HID_DEPLOYMENT_ENV`, not
+  something the database enforces. Tests and rehearsals use synthetic
+  fixtures only.
 - Portability on RDS. Each definer is owned by a NOLOGIN technical owner
   (`hid_imported_history_commands`, `hid_imported_history_importer`) holding
   exactly what its body reads and writes, so nothing relies on an owner
-  bypassing row-level security; the suites pass with every object owned by
-  a `NOSUPERUSER NOBYPASSRLS` role, and the import passes as a `NOSUPERUSER
-  NOBYPASSRLS CREATEROLE` administrator. The import runs as
-  `hid_migration_admin` through a SET-only membership taken and given up in
-  its own transaction.
-- 0096 refuses a database that still holds the branch's 0061/0062 objects;
-  such a staging database is rebuilt from main first.
+  bypassing row-level security; every suite but `schema.integration.sql`
+  (as on main) passes with every other object owned by a `NOSUPERUSER
+  NOBYPASSRLS` role, and the import passes as a `NOSUPERUSER NOBYPASSRLS
+  CREATEROLE` administrator. No technical owner keeps an EXECUTE entry on
+  its own function, so a first role bootstrap and a rerun leave the same
+  ACL. The import runs as `hid_migration_admin` through a SET-only
+  membership taken and given up in its own transaction.
+- 0096 refuses a database that still holds the branch's 0061/0062 objects,
+  and changes nothing in it. What happens to such a staging database is a
+  proposed default below.
 
 Real customer data on staging (recorded, not resolved): the September
 customer data is said to be on staging. Nothing in this change imports,
@@ -5050,9 +5072,24 @@ Proposed defaults (open owner questions; the safest default is built):
   break-glass or for healthcare operations.
 - Every switch is off and refused in production until the DPO and the owner
   sign off the legacy data and Health-id renders the history (P36). Staging
-  may opt in.
+  sets a switch only after P36 (1), the written sign-off for staging, is
+  attached, and with synthetic data only.
+- The switches go on in order and off in reverse: the patient's read, then
+  the sharing choice, then the staff read (the synth refuses sharing without
+  the patient's read, and the staff read without sharing). Stored sharing
+  choices persist when the switches are off; a patient can always withdraw.
 - The import is refused in production and needs the P36 sign-off on staging
   before any real legacy data is imported.
+- A staging database that ran the PR #8 branch's 0061/0062 (0096 refuses it)
+  is rebuilt from main only after a snapshot and a read-only inventory of
+  what it holds, only after the DPO decides what staging may keep, and only
+  with the owner's and the DPO's written approval of the rebuild (P36).
+- The import runs as one all-or-nothing statement. The branch documents name
+  17 legacy records; the command was measured linear to 50,000 synthetic rows
+  (11.7 s), so the CLI's 300 s statement timeout is reached at roughly 1.2
+  million rows. If the dry run of a real history counts more than 250,000
+  rows, it is not applied: batching by record range is designed and reviewed
+  first.
 - Files show their metadata only, with `accessStatus:
   pending-safety-verification`: no attachment, scan evidence or download is
   built (PR 4 of the integration plan), and no health profile
@@ -5072,22 +5109,29 @@ Proposed defaults (open owner questions; the safest default is built):
   read is audited); no caregiver or proxy access (ADR-018).
 - The migration, ADR and checklist numbers are assigned at merge.
 
-Not built (not approved or out of this change's scope): the imported
+Not built, because the owner did not approve it (2026-10-16): the imported
 customer configuration archive and any administrator read of it; a staff
-historical inbox; the patient-only imported inbox (PR 5, which needs the
-owner's confirmation for free-text legacy messages); imported attachments,
-scan evidence, downloads and health profiles (PR 4); legacy PIN secrets;
-imported records in break-glass or emergency summaries.
+historical inbox; legacy PIN secrets; imported records in break-glass or
+emergency summaries.
+
+Not built, deferred to later changes of the integration plan: the
+patient-only imported inbox (PR 5, which needs the owner's confirmation for
+free-text legacy messages); imported attachments, scan evidence, downloads
+and health profiles (PR 4).
 
 Consequences:
 
 - With every switch off nothing changes for patients, staff or Health-id,
-  and the database admits no imported row to anyone but the importer.
+  and no route answers with imported history. Stored sharing choices and
+  imported rows persist: the database's staff policy still admits a sharing
+  patient's rows in a direct-care staff transaction that names them, which
+  no build with the staff switch off makes.
+- Staging and importing a history leave public patient enrollment open.
 - Staff see no imported history until each patient opts in, even with a
   consent; the owner may read decision 3 as "any consent discloses". That is
   recorded as the first proposed default above.
 - A staging database built from the branch cannot run 0096 until it is
-  rebuilt from main.
+  rebuilt from main, under the proposed default above.
 - Rolling the EHR API back to an earlier build releases nothing: no earlier
   build names `importedHistory` in the release set, and the staff policies
   need the staff decision.
