@@ -37,6 +37,8 @@ const schema = z.object({
   META_ACCESS_TOKEN: optional,
   META_OTP_TEMPLATE_NAME: optional,
   META_OTP_TEMPLATE_LANGUAGE: z.string().trim().min(2).max(16).default('en_US'),
+  META_APP_SECRET: optional,
+  META_WEBHOOK_VERIFY_TOKEN: optional,
   BREVO_API_KEY: optional,
   BREVO_EMAIL_FROM: z.preprocess(empty, z.string().email().optional()),
   BREVO_SMS_SENDER: optional,
@@ -78,7 +80,7 @@ const schema = z.object({
       }
     }
     if (value.NOTIFICATION_DELIVERY_PROFILE === 'full') {
-      for (const key of ['TERMII_BASE_URL','TERMII_API_KEY','TERMII_SENDER_ID','META_PHONE_NUMBER_ID','META_ACCESS_TOKEN','META_OTP_TEMPLATE_NAME','BREVO_API_KEY'] as const) {
+      for (const key of ['TERMII_BASE_URL','TERMII_API_KEY','TERMII_SENDER_ID','META_PHONE_NUMBER_ID','META_ACCESS_TOKEN','META_OTP_TEMPLATE_NAME','META_APP_SECRET','META_WEBHOOK_VERIFY_TOKEN','BREVO_API_KEY'] as const) {
         if (!value[key]) context.addIssue({ code: 'custom', path: [key], message: `${key} is required in production` });
       }
     }
@@ -94,7 +96,7 @@ let cached: Environment | undefined;
 export function getEnvironment(): Environment {
   if (cached) return cached;
   const parsed = schema.safeParse(process.env);
-  if (!parsed.success) throw new Error(`Invalid Notification API configuration: ${parsed.error.issues.map(issue => `${issue.path.join('.')}: ${issue.message}`).join('; ')}`);
+  if (!parsed.success) throw new Error(`Invalid Notification API configuration: ${parsed.error.issues.map(issue => `${issue.path.join('.')}\: ${issue.message}`).join('; ')}`);
   return cached = parsed.data;
 }
 export function resetEnvironmentForTests() { cached = undefined; }

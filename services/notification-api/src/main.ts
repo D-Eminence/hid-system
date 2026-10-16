@@ -7,7 +7,7 @@ import { getEnvironment } from './config/environment';
 
 async function bootstrap() {
   const environment = getEnvironment();
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  const app = await NestFactory.create(AppModule, { bufferLogs: true, rawBody: true });
   app.useLogger(new Logger('HidNotificationApi'));
   app.setGlobalPrefix('api/v1');
   app.use(helmet({ contentSecurityPolicy: false, hsts: environment.NODE_ENV === 'production' ? { maxAge: 31_536_000, includeSubDomains: true } : false }));
