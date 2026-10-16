@@ -76,7 +76,46 @@ code, which its enrollment cookie proves (at the contact step and, from 0093,
 the holder step). The holder step's `429 NIN_HOLDER_ROUTE_LIMITED` carries
 none: its budgets are kept per phone and per NIN, so a time left would tell
 of other people's attempts on that NIN, and the answer sends the patient to a
-participating facility rather than to wait.
+participating facility rather than to wait. Clinician self sign-up (ADR-066,
+0098) follows the same rule: its quotas, counted per client network and for
+the platform, state the longest quota window (`86400`), which tells nothing
+of any address; its authenticator steps and admin step 1 state the 15-minute
+MFA window; and a capability's spent search budget,
+`429 CLINICIAN_APPLICATION_SEARCH_LIMITED`, carries none, because those 30
+searches never come back (the applicant verifies the address again).
+
+A clinician applicant (ADR-066) holds an application capability, not a
+session: an HttpOnly, `SameSite=Strict`, host-only cookie scoped to
+`/api/v1/identity/clinician-applications` whose keyed digest is all the
+database stores, opened by the submission or by an emailed code followed by
+the account's authenticator once one exists, and never by a password. It
+reaches no patient data. The 0088 challenge it drives for the authenticator
+is opened on a token Identity derives and never sends, so nothing the
+browser holds works at `/auth/mfa/*`, and that challenge never yields a
+session. Issuing any staff session re-checks that the account has an
+eligible membership (`403 NO_ACTIVE_FACILITY_MEMBERSHIP`, no session), so an
+applicant, or a membership that ended between the password step and the
+code, never gets one. NO-MEMBERSHIP-SIGN-IN is unchanged. A capability is
+checked against its account at every step (an `enrolment_required` one needs
+the code once the account holds an authenticator; a disabled account's
+serves nothing), and an account that holds an approved application or a
+staff membership sets an authenticator up again only through staff sign-in,
+never through a capability the mailbox alone opened. An applicant's wrong
+authenticator codes count against the account's 0088 budget and a
+per-address bucket of the applicants' own, never staff sign-in's, so
+throwaway applicant accounts cannot block staff sign-in from a shared
+address. Clinician self sign-up and provider self-enrollment treat the
+`hid_access_csrf` cookie, which outlives the 15-minute access cookie for as
+long as the refresh session, as a sign-in
+(`409 CLINICIAN_APPLICATION_REQUIRES_SIGN_OUT`,
+`409 PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT`). Patient enrollment and Google
+onboarding do not: they refuse a signed-in browser
+(`409 PATIENT_ENROLLMENT_REQUIRES_SIGN_OUT`,
+`409 GOOGLE_ONBOARDING_REQUIRES_SIGN_OUT`) only on the access cookie, the
+refresh cookie or an `Authorization` header. The browser sends the refresh
+cookie only under `/api/v1/auth`, so once the access cookie has expired, a
+browser whose refresh session is still live is not refused at the enrollment
+routes under `/api/v1/identity`.
 
 ## 3. Authorization
 
@@ -107,6 +146,42 @@ Identity is the single source of patient identity.
 No service may create an alternative patient authority.
 
 Patient lookup must expose the minimum information required.
+
+Clinician self sign-up (ADR-066) answers every address alike: both email-code
+starts return the same `202` whether or not the address is in use or belongs
+to an applicant, deliver after the answer, and only a code's holder learns
+that an address is in use (`409 CLINICIAN_EMAIL_IN_USE` after a correct
+code); a status code is sent only to an applicant, and a decoy challenge
+never verifies. Applying grants nothing. Two different Super Admins who do not
+work at the facility decide: step 1 checks the regulator's register, confirms
+identity by a live video call or in person with a government photo ID while
+the applicant reads a current code from their own authenticator (verified by
+Identity against that factor), and confirms employment through a channel
+independent of the facility administrator (the facility's public phone number
+or a visit); step 2 grants the role pinned to step 1's attestation. Until its
+application is approved, that attestation supports no other grant (the pin
+is bound to the application's own account and facility). Step 1 refuses
+whatever it would refuse anyway before it checks the applicant's code (the
+request's own fields, the application, an insider or the applicant, a reused
+key, an applicant account or staff record that cannot be attested), so no
+administrator, an insider included, can spend an applicant's failure budget
+that way. The sign-up's own limits hold under concurrency (the platform's
+daily cap and a facility's 30 open slots are counted under locks where the
+application is created), and the sign-up hashes a password only for a
+submission the database may create, at most five per verified email draft,
+so its argon2id work is bounded platform-wide. The
+standard, the reviewer list and the register source are owner decisions
+(release checklist P37). Residual risks: the manual identity check (a
+deepfaked call, a forged ID) and what an approved fraudster can then do at
+their facility: emergency reads once break-glass is on, and in-person checks
+(ADR-063) once the facility is designated and `ASSISTED_REGISTRATION_ENABLED`
+is on. The approved grant rests on a current attestation, which is all the
+in-person check requires, so such an account could create another person's
+Health ID within ADR-063's budgets. P37 requires a daily review of break-glass
+use and of in-person checks by accounts approved in the last 90 days, and its
+fraud runbook entry lists the in-person checks such an account recorded; no
+route undoes a Health ID one of them proved (ADR-063's contested-identity
+review is not built).
 
 ## 6. NIN Security
 
@@ -209,6 +284,15 @@ answer. A patient session's request rows record purpose `patient-self`,
 whatever purpose the client sends, so a patient's own action cannot be
 labelled direct care or emergency in the audit trail; a staff request's
 purpose is still the one it declares and its route checks.
+
+Clinician applications (ADR-066) are audited inside their commands as
+`system:auth` (`identity.clinician-application.quota`, `.email-verified`,
+`.status-code-verified`, `.submitted`, `.authenticator-ready`,
+`.authenticator.verified`, `.withdrawn`, `.expired`) and their review as
+platform-scoped events with the administrator's reason
+(`admin.clinician-application.attested`, `.approved`, `.rejected`, beside
+0087's attestation, attach and grant events). No detail carries an email, a
+name, a licence number, a password, a code or a token.
 
 ## 10. Clinical Integrity
 

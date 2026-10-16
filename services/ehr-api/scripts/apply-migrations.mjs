@@ -25,11 +25,23 @@ if (configuredNodeEnvironment !== 'production') loadLocalEnvironment(localEnviro
 const migrationDirectory = path.resolve(scriptDirectory, '../database/migrations');
 const dryRun = process.argv.includes('--dry-run');
 const planOnly = process.argv.includes('--plan');
-// Stops after the named migration (a rehearsal builds a database at an
-// earlier version to test the next migration's upgrade). Never used to deploy.
-const throughArgument = process.argv.find((argument) => argument.startsWith('--through='));
-const through = throughArgument?.slice('--through='.length);
+// `--through <file>` (or `--through=<file>`) plans, dry-runs or applies the
+// pending migrations up to and including that migration, in the usual order,
+// and nothing after it: a rehearsal builds a database at an earlier version to
+// test the next migration's upgrade (verify-non-superuser-database.mjs, the
+// 0093 holder backfill). Never used to deploy. Without the flag every pending
+// migration is taken, as before.
+const throughEquals = process.argv.find((argument) => argument.startsWith('--through='));
+const throughIndex = process.argv.indexOf('--through');
+const throughGiven = throughEquals !== undefined || throughIndex !== -1;
+const through = throughEquals !== undefined
+  ? throughEquals.slice('--through='.length)
+  : throughIndex === -1 ? undefined : process.argv[throughIndex + 1];
 const databaseUrl = process.env.DATABASE_URL;
+
+if (throughGiven && (!through || !/^\d{4}_[a-z0-9_]+\.sql$/.test(through))) {
+  throw new Error('--through needs a migration file name such as 0097_break_glass_launch_with_limits.sql');
+}
 
 if (!databaseUrl) {
   throw new Error('DATABASE_URL is required');
@@ -100,6 +112,10 @@ async function appliedMigrations(client) {
 
 async function main() {
   const migrations = await loadMigrations();
+  // Refused before connecting, so an unknown name changes nothing.
+  if (through !== undefined && !migrations.some((migration) => migration.version === through)) {
+    throw new Error(`--through names no migration file: ${through}`);
+  }
   const client = new Client(databaseOptions(databaseUrl, 'hid-schema-migrator'));
   await client.connect();
 

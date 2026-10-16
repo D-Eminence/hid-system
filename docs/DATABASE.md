@@ -197,7 +197,7 @@ The reviewed role model is:
 | `hid_event_delivery_commands` | Technical security-definer owner | None | Never inherited; reads five domain outboxes through exact RLS policies and mutates only `integration` delivery/inbox state. Since 0095 it also owns the notification worker's claim-bound recipient lookup and executes its private helper, which the migration administrator owns; it holds no privilege on `identity.patients` or `auth.accounts`. |
 | `hid_ocr_queue_metrics` | Technical security-definer owner | None | Never inherited; owns `ocr.worker_queue_metrics()` and reads only `ocr.jobs.status` and `queued_at` through one exact RLS policy (0075). |
 | `hid_platform_control_reader` | Technical security-definer owner | None | Never inherited; owns `platform.control_enabled(text)` and reads only `platform.control_settings.control_key` and `enabled` through one exact RLS policy (launch; role bootstrap only). |
-| `hid_migration_admin` | Migration and provisioning administration | Environment-specific | Never inherited by an application runtime login. |
+| `hid_migration_admin` | Migration and provisioning administration | Environment-specific | Never inherited by an application runtime login. A NOLOGIN group role: the migration administrator LOGIN must have another name, as no LOGIN may take the name of a role `runtime-grants.sql` creates, or the role bootstrap cannot run as it (`MIGRATION_RUNBOOK.md` §6). |
 | `hid_schema_test_runtime` | Rollback-only schema/RLS acceptance | Test-only explicit grants | NOLOGIN and never used by application processes. |
 
 Identity, EHR, and OCR now use separate service processes and pools. The retired
@@ -2289,8 +2289,9 @@ repository; the release checklist's P10 records them before and after 0082.
   BREAK_GLASS_DISABLED` when the control is off and, since the change that
   added 0084, also when it is on: Identity answers the function's
   emergency-purpose refusal (`22023`) as `423 BREAK_GLASS_DISABLED` instead of
-  `400 INVALID_CONSENT_COMMAND`. Break-glass is off at launch (owner default, deny by default): the
-  control is set false and no `emergency` row exists (release checklist P10
+  `400 INVALID_CONSENT_COMMAND`. Since D9 was decided (2026-10-14), 0097 seeds
+  it, with the break-glass permission, and leaves the control to an operator
+  ("Break-glass at launch, with limits (0097)", below; release checklist P10
   and P11).
 - `healthcare-operations` is not seeded. Identity access requests
   (`consent.controller.ts`), Lab and Pharmacy reads and the OCR commands
@@ -2460,6 +2461,14 @@ direct grant and may create nothing; two credentials may not share a login.
 An owner skips the policies of every table that does not force them, among
 them `identity.patients`, `patient_identifiers` and the consent tables (0005),
 so a secret holding the migration URL would otherwise read them unfiltered.
+`npm run db:provision -- --runtime-logins` (`scripts/provision-database-logins.mjs`;
+in AWS the one-shot provisioning task) creates the ten LOGINs as the migration
+administrator from their secrets' URLs, each `LOGIN NOSUPERUSER NOBYPASSRLS
+NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT` and granted its aggregate only,
+all or none, then runs `db:verify-logins`. A password reaches PostgreSQL only as
+a SCRAM-SHA-256 verifier computed by the script. It sets the password of an
+existing LOGIN only when its attributes match and it reaches nothing but its
+aggregate, and otherwise changes nothing (`MIGRATION_RUNBOOK.md` §6.3).
 
 In production, each service that connects to the database (the six APIs, the
 OCR worker, the event dispatcher and the notification worker; the EHR scanner
@@ -4611,3 +4620,326 @@ administrator, the 50 additional suites and the runtime verifier passed;
 exactly as it does on `main` without this change (it fails the same with the
 0096 policies and view dropped), and the rehearsal's owner pass runs only the
 additional suites.
+
+## Break-glass at launch, with limits (0097)
+
+`0097_break_glass_launch_with_limits.sql` (decision D9 as the owner decided
+it on 2026-10-14, "turn on with limits"; ADR-058 addendum) is the reviewed
+re-enabling migration ADR-058 asks for, for break-glass only. 0001 through
+0096 are unchanged; it was written as 0092, then 0093, then 0095, and is
+numbered after 0095 and 0096 of D-Eminence/hid-system#90 and #91.
+
+**Precondition.** It refuses to run while `break_glass_enabled` is on
+(`55000 BREAK_GLASS_CONTROL_ON`; nothing is changed, the ledger stays at
+0096). 0091 set the control off only where the row was still exactly as 0039
+seeded it, and kept a value an administrator had set; granting the
+permission with the control on would make break-glass live at 0097's commit,
+before staff MFA ships and the P11 operator step. A platform administrator
+sets it off with `POST /admin/controls` and `migrate` runs again. The flag is
+read through `platform.control_enabled`, as the guards read it. Before the
+first role bootstrap that function, still owned by the migration
+administrator, cannot see the row under forced row-level security when the
+administrator does not bypass it (RDS) and raises
+`PLATFORM_CONTROL_UNAVAILABLE`; the migration takes that as "not on" and goes
+on, since no runtime role exists yet and the control is as 0091 left it. A
+missing row raises the same, and every activation then fails closed on it.
+
+**Permission.** It inserts `identity.break-glass.write` for doctor, clinician
+and nurse into `auth.role_permissions` (`ON CONFLICT DO NOTHING`). Those are
+the roles 0010 granted it to; no other migration granted it to another role,
+and 0091 deleted it from every role (0084 never touched it). No other role
+receives it, and no other permission 0084 or 0091 withdrew is granted. The
+three roles kept everything else the path needs: `identity.consent.write`
+(the activation route requires it with break-glass),
+`identity.patient.read` (the lookup that opens the record), and
+`ehr.encounter.read` and `ehr.note.read` (the emergency summary route) with
+the other five summary reads. `identity.activate_break_glass` (0031) and the
+`identity_outbox_emergency_insert` policy check the permission through
+`auth.membership_has_permission`, so the database refuses every other role as
+well (`42501 Authorized break-glass context is required`).
+
+**Emergency purpose.** It inserts `emergency` ("Emergency treatment", active,
+`source_system` `hid`) into `identity.purpose_of_use_codes` with
+`ON CONFLICT (code) DO NOTHING`, as 0082 inserted `direct-care`: a row an
+operator inserted or deactivated before is kept as it is. Activation (0031)
+needs the active code, the access request and grant rows reference it (0008),
+and `identity.has_active_consent_grant` (0012) honours an emergency read only
+while it is active, so deactivating the code is an operator's way to stop
+break-glass at once. Standard access requests (0086) still accept only
+`direct-care` and `healthcare-operations`, and PIN grants only `direct-care`.
+`healthcare-operations` is still not seeded (N3).
+
+**Not changed.** `platform.control_settings` `break_glass_enabled` stays off
+(0091 or an administrator set it so; the precondition refuses it on); a
+migration has no actor for a control event, and the control is production
+configuration. Identity checks it in the
+activation transaction before the command, so break-glass answers
+`423 BREAK_GLASS_DISABLED` until a platform administrator turns it on with
+`POST /admin/controls`, after staff MFA ships (release checklist P11). No
+function, policy, table or database grant changes: a grant authorizes only
+`read_records` under `emergency` at its own facility (0012, `ehr.context_allows`),
+the emergency summary reads that facility only, the chart routes stay closed
+to the emergency purpose, the summary's vitals are as first recorded, and the
+clinician's request list leaves break-glass grants out (0074). The document
+list and download are not chart routes and take the emergency purpose as
+before, so a break-glass grant reads the activating facility's documents
+(`documents_read` is `ehr.context_allows`, as for every clinical table);
+whether it should is N3's open question, to be decided before
+`ehr.document.write` is granted again. Uploads are off at launch and no
+import writes EHR documents.
+
+**Role assertions.** `runtime-roles.integration.sql` now requires exactly
+doctor, clinician and nurse to hold `identity.break-glass.write` and still
+refuses any other withdrawn permission. On 0091 the bootstrap fails with "the
+launch module set withdrew a permission it must keep: doctor lacks
+identity.break-glass.write, clinician lacks …, nurse lacks …"; an earlier
+release's bootstrap refuses a database that holds 0097.
+
+**Locks.** `ACCESS SHARE` on `platform.control_settings` (the precondition's
+read, taken first, as an activation and the role bootstrap take that table
+first; only an `ACCESS EXCLUSIVE` holder, which only a migration or the role
+bootstrap takes, makes it wait), `ROW EXCLUSIVE` on `auth.role_permissions`
+and `identity.purpose_of_use_codes`, and the foreign keys' `FOR KEY SHARE` on
+three `auth.roles` rows and one `auth.permissions` row; at most four rows
+written, no scan. Each waits at most the runner's 5 s lock timeout; a timeout rolls 0097
+back whole, and it can be run again. It needs no new grant, but the bootstrap
+of the same release runs after it.
+
+Tests:
+
+- `break-glass-launch.integration.sql` (rollback-only; it inserts no purpose
+  code and grants no permission) requires exactly the three holders, no other
+  withdrawn permission, the three roles' consent, lookup and summary
+  permissions, an active `emergency` row (0097's, or an operator's earlier
+  row, which 0097 keeps; the rehearsal's fresh builds check 0097's exact row)
+  and no `healthcare-operations` row from any source (P11). It does not
+  depend on the environment's control: as `hid_identity_api_runtime` a
+  synthetic platform administrator sets `break_glass_enabled` off through
+  `platform.admin_set_control` (the command behind `POST /admin/controls`),
+  `platform.require_control_enabled` refuses
+  (`55000 PLATFORM_CONTROL_DISABLED:break_glass_enabled`), the administrator
+  turns it on, it passes, and the latest control event names that
+  administrator. A doctor, a clinician and a nurse each activate
+  (a second call replays the grant unextended), each grant authorizes the
+  emergency read only (no write, no direct-care read, not the same doctor's
+  membership at another facility); lab, pharmacist, receptionist, admin and
+  org admin are refused with `42501` and leave no audit row; three grants,
+  three activation and three replay audit rows, three outbox intents and three
+  `EMERGENCY_ACCESS_ACTIVATED` inbox items. As `hid_ehr_api_runtime` the
+  nurse's emergency read returns the encounter, signed note and document of
+  the grant's facility only, `ehr.context_allows(…, 'write_records')` (the
+  check of every EHR insert and update policy) stays false, nothing is read
+  under `direct-care`, and the doctor reads nothing at the other facility. Once the code is deactivated, activation is refused (`22023`) and
+  the existing grant is no longer honoured. On 0091 it fails at its first
+  assertion ("identity.break-glass.write is not held by exactly clinician,
+  doctor and nurse (0010, 0097): no role").
+- `runtime-roles.integration.sql`: the role assertions above.
+- `schema.integration.sql`, `emergency.integration.sql` and
+  `emergency-contacts.integration.sql` no longer grant break-glass to the
+  doctor role themselves; they rely on 0097.
+- The rehearsal's 0028 upgrade check requires the three holders, exactly
+  `direct-care` and `emergency`, and `break_glass_enabled` off.
+- `verify-non-superuser-database.mjs` (run by the rehearsal) builds the chain
+  as a `NOSUPERUSER NOBYPASSRLS` administrator, where 0097 finds the control
+  unreadable before the first bootstrap and applies; after the bootstrap it
+  runs 0097's SQL again as that administrator in rolled-back transactions:
+  refused (`55000 BREAK_GLASS_CONTROL_ON`) with the control on, a no-op with
+  it off.
+- All 54 SQL suites pass on a database built from empty to 0097 and
+  bootstrapped, and the 52 additional suites again with every schema, table
+  and function owned by a `NOSUPERUSER NOBYPASSRLS` role; the full rehearsal
+  passes on 0097 (local evidence, release checklist §8).
+
+## Clinician self sign-up applications (0098)
+
+`0098_clinician_self_signup.sql` (owner decision 2 of 2026-10-14; ADR-066,
+CLIN-SIGNUP) lets a doctor (MDCN) or a nurse or midwife (NMCN) apply to one
+verified facility and puts the application in front of two platform
+administrators. It extends 0087 (ADR-049) and uses 0088's staff MFA tables
+as they are. 0001 through 0097 are unchanged. One transaction; forward-only.
+
+**Control.** `clinician_signup_enabled` joins `platform.control_settings`,
+seeded `false` with version 1 (ADR-058). The 0039 key CHECK is replaced
+(found by its definition, exactly one) by `control_settings_control_key_check`
+with seven keys; `platform.admin_set_control` (0071's body) takes the key;
+`platform.control_enabled` is replaced with 0040's body plus the key. That
+function's technical owner is `hid_platform_control_reader` once the role
+bootstrap ran (0083); a runner that is neither its owner nor holds its
+privileges (RDS) cannot replace it, so 0098 grants itself the role (`INHERIT
+TRUE, SET FALSE`, with the ADMIN OPTION its creator holds from the bootstrap),
+replaces the function, revokes the membership, and fails if the owner changed
+or a membership is left (it fails closed, rolled back whole, without the
+ADMIN OPTION). It reads the owner's plain name (`pg_get_userbyid`, not a
+`regrole` cast, which quotes a name that needs quoting), so a runner that
+still owns the function under such a name takes the owner path.
+`scripts/verify-non-superuser-database.mjs` proves this on the upgrade path
+(`clinician_signup_upgrade_path`) and, rolled back, for an administrator named
+`HidAdmin` that owns the function (`clinician_signup_quoted_owner`).
+
+**Tables** (RLS enabled; no runtime privilege; only the SECURITY DEFINER
+commands below read or write them):
+
+- `identity.clinician_applications`: one per application. The account, its
+  pending staff record (FK `(staff_id, account_id)`), the facility, the
+  requested role and regulator (only `doctor`/`MDCN` and `nurse`/`NMCN`), the
+  licence number and its canonical key (`identity.clinician_licence_key`:
+  regulator plus the upper-cased alphanumerics, `MDCN:12345` for
+  `MDCN/12345` and `mdcn 12345`), the licence expiry, the name, the state
+  (`awaiting_authenticator`, `submitted`, `under_review`, `approved`,
+  `rejected`, `withdrawn`, `expired`), `expires_at = submitted_at + 30 days`
+  (CHECK), the step-1 fields (`attested_by`, `attested_at`,
+  `attestation_id` with FK `(attestation_id, account_id)`, the checklist
+  object, `factor_id`, `factor_confirmed_at`), the step-2 fields
+  (`approved_by`, `approved_at`, `membership_id`), the decision (`decided_by`,
+  `decided_at`, `decision_code` from nine, `decision_reason`), and
+  `row_version`. CHECKs: the pairs, the lifecycle truth table, the
+  attestation and approval pairing, and the two-person rule
+  `approved_by <> attested_by`. One open application per account and facility
+  (partial unique index). The trigger `clinician_applications_guard` refuses
+  a delete, a change to an immutable column, a second write of a set-once
+  column, any transition but the state machine's, and a `row_version` not
+  incremented by one (`55000 CLINICIAN_APPLICATION_IMMUTABLE`).
+- `identity.clinician_application_challenges`: email-code challenges
+  (`signup` or `status`): the keyed email digest, the account for a status
+  challenge of an eligible applicant (none for a decoy, which never
+  verifies), the keyed code digest, ten minutes, at most five failures, and
+  consumed and invalidated times.
+- `identity.clinician_application_sessions`: application capabilities. Only
+  the keyed token digest is stored. A `draft` (60 minutes, the email digest
+  and its challenge, consumed by submit with its idempotency key, request
+  digest and stored answer) or an `account` capability (30 minutes, the
+  account, the stage `enrolment_required`, `authenticator_required` or
+  `ready`, and the 0088 challenge it drives), an end time, a search count
+  (at most 30) and, for a draft, the number of submissions Identity hashed a
+  password for (`submit_attempts`, at most five).
+- `identity.clinician_application_idempotency`: apply-again keys per account.
+- `platform.clinician_application_quota_counters`: per-operation network
+  (hour, day) and platform (day) counters, as 0085's (forced RLS with
+  permissive policies for the definer owner). The platform's `submit` day
+  counter counts created applications: `consume_clinician_application_quota`
+  only checks it (an early refusal), and
+  `platform.count_clinician_application_submission(limit)` (internal) adds
+  one in the submit and apply-again commands for each application they
+  create, never for a refusal or a replay, in one conditional upsert under
+  the counter row's lock: at the limit it raises `P4290
+  CLINICIAN_APPLICATION_QUOTA_EXCEEDED` and the creation rolls back, so
+  concurrent creations never pass the cap.
+
+**Reserved attestations.** `identity.workforce_attestation_usable(attestation,
+pin, account, facility)` is false for an attestation whose application is not
+approved, except that application's own pinned step 2: the pin names the
+attestation, the grant is for the application's account at its facility,
+and the application is under review and not overdue (computed at read time;
+a null pin never unlocks). 0087's
+`identity.admin_change_workforce_role` keeps its signature, result, owner and
+grants and delegates to the internal `identity.workforce_change_role` (no
+runtime may execute it), whose body is 0087's with exactly the pin parameter
+and the reservation and pin predicates in the chosen-attestation query and the
+second-person probe (`scripts/tests/workforce-role-change-body.test.mjs`).
+`identity.admin_workforce_profile` adds `clinicianApplication` and
+`usableForGrant` to each attestation. `auth.facility_role_is_effective` is
+not changed, nor is 0094's `identity.assisted_registration_actor_attested`:
+an approved application's grant, pinned to its attestation, qualifies for the
+in-person check (ADR-063) as any 0087 grant does (ADR-066, release checklist
+P32), and `MIGRATION_RUNBOOK.md` §6 reviews such checks daily (P37).
+
+**Commands** (SECURITY DEFINER, `search_path = pg_catalog, identity, auth,
+platform, audit, pg_temp`, revoked from PUBLIC). The public ones need the
+`system:auth` context Identity sets (`42501
+CLINICIAN_APPLICATION_PERMISSION_DENIED` otherwise) and are granted to
+`hid_identity_runtime` and `hid_schema_test_runtime`:
+`identity.clinician_signup_open`, `platform.consume_clinician_application_quota`,
+`identity.begin_clinician_application_challenge` (an advisory lock per
+address and purpose; cooldowns of one a minute, five an hour, fifteen a day),
+`identity.invalidate_clinician_application_challenge`,
+`identity.verify_clinician_application_signup_code`,
+`identity.verify_clinician_application_status_code` (`staff_sign_in_required`,
+nothing opened, when the account has no factor and holds an approved
+application or an active or pending membership),
+`identity.clinician_application_session` (an account capability at its
+effective stage; `23514 CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE` when its
+account is disabled or inactive),
+`identity.clinician_application_submit_probe` (before the submit quota and
+the password hash, with the submission's details: `replay` for a draft this
+key and request spent; for a live unspent draft of the address C8's first
+refusal that needs no password, as its marker
+(`CLINICIAN_APPLICATION_INVALID`, `..._FACILITY_UNAVAILABLE`,
+`..._FACILITY_BUSY`, `CLINICIAN_EMAIL_IN_USE`), else `new`; anything else,
+and a draft with five hashed submissions, `42501
+CLINICIAN_APPLICATION_SESSION_INVALID`),
+`identity.count_clinician_application_submit_attempt` (after the charge,
+one submission Identity will hash against its draft's five),
+`identity.search_clinician_application_facilities`,
+`identity.submit_clinician_application` (an active account `workforce:<id>`
+with an argon2id password and verified email, a pending staff record with the
+licence, the application; no membership, role or session; it counts the
+facility's open applications under the facility's lock and the application
+against the platform's daily limit it is passed),
+`identity.bind_clinician_application_mfa_challenge` (`42501
+CLINICIAN_APPLICATION_AUTHENTICATOR_READY` on a `ready` capability; no
+enrolment challenge for an account that re-enrols only at staff sign-in,
+`42501 CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED`),
+`identity.clinician_application_authenticator_ready` (the factor must be the
+account's active staff-proven one and used in this transaction; no enrolment
+for an account that re-enrols only at staff sign-in),
+`identity.current_clinician_applications`,
+`identity.withdraw_clinician_application`, `identity.file_clinician_application`
+(the same facility lock and platform count as submit),
+`identity.end_clinician_application_session`,
+`identity.expire_clinician_applications` (SKIP LOCKED) and
+`identity.prune_clinician_application_artifacts`. The administration ones
+(`hid_identity_runtime` only) start with `identity.workforce_command_actor()`
+(`platform.workforce.manage`, MFA, and a step-up for the commands):
+`identity.admin_list_clinician_applications`,
+`identity.admin_get_clinician_application`,
+`identity.admin_clinician_application_attest_precheck` (given the request's
+fields: everything step 1 refuses before it checks the factor the code
+proves, in its order and with its and 0087's markers, before Identity checks
+the applicant's code: the fields, the application, the end of the licence, a
+key used for a generic 0087 attestation, the applicant account and staff
+record; the applicant's account otherwise),
+`identity.admin_clinician_application_prior`,
+`identity.admin_attest_clinician_application` (0087's attestation for exactly
+the requested role, capped at the end of the licence's expiry date in
+Africa/Lagos and three years; the staff record becomes verified),
+`identity.admin_approve_clinician_application` (a different administrator;
+refused after an `identity_not_confirmed` rejection of any of the account's
+applications; 0087's attach by account id and the grant pinned to the step-1
+attestation, in one transaction) and `identity.admin_reject_clinician_application`.
+
+**Capability checks.** The internal helpers
+`identity.clinician_application_account_session` (used by the capability
+commands), `identity.clinician_application_effective_stage` (an
+`enrolment_required` capability is `authenticator_required` once the account
+holds an active factor), `identity.clinician_application_account_usable`
+(active and not disabled), `identity.clinician_application_staff_enrolment_only`
+(an approved clinician application, or an active or pending staff membership)
+and `identity.clinician_application_licence_valid` (the licence details the
+submit, apply-again and probe commands check alike) are granted to no
+runtime.
+
+**Lock order.** Accounts first (in id order when two are involved, 0073),
+then the capability or 0088 challenge, then the application; a command that
+reads a capability before it knows the account reads it again after the
+account lock. Submit and apply-again then take the facility's advisory lock
+(`clinician-application-facility:<id>`) before they count its open
+applications, and the platform's submit counter row last. 0098 itself takes `ACCESS EXCLUSIVE` on
+`platform.control_settings`, then `SHARE ROW EXCLUSIVE` on `auth.accounts`,
+`identity.facilities`, `identity.staff`, `identity.staff_facility_memberships`
+and `identity.staff_credential_attestations` for its foreign keys, under the
+runner's 5 s lock timeout; run it off-peak (it is re-runnable).
+
+**Audit.** In the commands, as `system:auth` with the application's
+provenance: `identity.clinician-application.quota` (success and denied; the
+search only when denied), `.email-verified`, `.status-code-verified` (denied
+with `refusal: staff_sign_in_required` for a refused re-enrolment),
+`.submitted`, `.authenticator-ready`, `.authenticator.verified`,
+`.withdrawn`, `.expired`. No detail carries an email, a name, a licence
+number, a code or a token.
+
+Tests: `clinician-applications.integration.sql` (rollback-only; run from an
+empty database and under the NOSUPERUSER owner of the rehearsal),
+`workforce-role-change-body.test.mjs`, the platform-controls,
+platform-control-owner, platform-mfa-approval, runtime-roles and
+workforce-provisioning suites, `verify-non-superuser-database.mjs` and
+`verify-clinician-application-runtime.mjs` (release checklist §8).

@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
 import { AuditAction, HighRiskAction, PlatformScope, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
-import { DomainProblem } from '../common/problem';
+import { expectedVersion } from '../common/if-match';
 import type { HidRequest } from '../common/request-context';
 import { requireAdminContext } from './admin-context';
 import {
@@ -70,11 +70,6 @@ export class WorkforceAdminController {
   }
 
   private expectedVersion(value: string | undefined): number {
-    const normalized = value?.trim().replace(/^W\//, '').replace(/^"|"$/g, '');
-    const version = normalized ? Number(normalized) : Number.NaN;
-    if (!Number.isSafeInteger(version) || version < 1) {
-      throw new DomainProblem(428, 'IF_MATCH_REQUIRED', 'If-Match must contain the expected positive version');
-    }
-    return version;
+    return expectedVersion(value);
   }
 }

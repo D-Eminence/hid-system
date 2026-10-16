@@ -472,7 +472,7 @@ revoke hid_lab_release_reader from hid_identity_runtime, hid_ehr_runtime,
 -- policy requires platform.control.read, so under a schema owner that does
 -- not bypass row-level security (RDS) the function saw no row and raised
 -- PLATFORM_CONTROL_UNAVAILABLE, which the guards answer with 503. Its
--- technical owner reads only the key and enabled flag of the six non-PHI
+-- technical owner reads only the key and enabled flag of the seven non-PHI
 -- platform-wide controls through one exact policy, so the function no longer
 -- depends on its owner bypassing row-level security. EXECUTE stays granted to
 -- PUBLIC (0040). platform.require_control_enabled reads no table and calls
@@ -1485,6 +1485,85 @@ revoke all on function identity.facility_assisted_registration_participating(uui
   from public;
 revoke all on identity.facility_assisted_registration, identity.facility_assisted_registration_events,
   identity.assisted_registration_verifications
+  from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
+    hid_ehr_api_runtime, hid_schema_test_runtime;
+
+-- Break-glass at launch, with limits (0097, D9, ADR-058 addendum). 0097
+-- creates no object and changes no database grant: it inserts the
+-- identity.break-glass.write rows of doctor, clinician and nurse into
+-- auth.role_permissions and the emergency purpose of use. The Identity
+-- runtime's EXECUTE on identity.activate_break_glass and its read of the
+-- vocabulary are above and unchanged. The role assertions
+-- (runtime-roles.integration.sql) now require exactly those three holders.
+
+-- Clinician self sign-up (0098, ADR-066). The Identity runtime runs the
+-- public, capability and system commands in its system context (each checks
+-- the system:auth subject, a correlation id and no signed-in account), and the
+-- schema test runtime may too. Only the Identity runtime runs the platform
+-- administration commands, each of which repeats the platform.workforce.manage,
+-- MFA and (for the three mutations) step-up checks. The internal helpers,
+-- identity.workforce_change_role (the pinned 0087 grant) and the guard stay
+-- internal, and no runtime holds a privilege on the five tables: the commands
+-- are the only path.
+grant execute on function identity.clinician_signup_open(),
+  platform.consume_clinician_application_quota(character, text, integer, integer, integer),
+  identity.begin_clinician_application_challenge(text, uuid, character, text, character),
+  identity.invalidate_clinician_application_challenge(uuid),
+  identity.verify_clinician_application_signup_code(uuid, character, text, character, character),
+  identity.verify_clinician_application_status_code(uuid, character, character, character),
+  identity.clinician_application_session(character),
+  identity.clinician_application_submit_probe(character, character, text, character, text, text, text, text, text,
+    date, uuid, integer),
+  identity.count_clinician_application_submit_attempt(character),
+  identity.search_clinician_application_facilities(character, text),
+  identity.submit_clinician_application(character, character, text, character, text, character, text, text, text,
+    text, text, date, uuid, integer, integer),
+  identity.bind_clinician_application_mfa_challenge(character, uuid),
+  identity.clinician_application_authenticator_ready(character, uuid, text),
+  identity.current_clinician_applications(character),
+  identity.withdraw_clinician_application(character, uuid, bigint),
+  identity.file_clinician_application(character, text, character, text, text, text, date, uuid, integer, integer),
+  identity.end_clinician_application_session(character),
+  identity.expire_clinician_applications(integer),
+  identity.prune_clinician_application_artifacts()
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function identity.admin_list_clinician_applications(text, timestamptz, uuid, integer),
+  identity.admin_get_clinician_application(uuid),
+  identity.admin_clinician_application_attest_precheck(uuid, bigint, timestamptz, text, jsonb, text, text),
+  identity.admin_clinician_application_prior(text, text, character),
+  identity.admin_attest_clinician_application(uuid, bigint, timestamptz, text, jsonb, uuid, text, text, character),
+  identity.admin_approve_clinician_application(uuid, bigint, text, text, character),
+  identity.admin_reject_clinician_application(uuid, bigint, text, text, text, character)
+  to hid_identity_runtime;
+revoke all on function identity.clinician_licence_key(text, text),
+  identity.clinician_application_displayed_state(text, timestamptz),
+  identity.workforce_attestation_usable(uuid, uuid, uuid, uuid),
+  identity.workforce_change_role(uuid, uuid, bigint, text, text, text, text, character, uuid),
+  identity.clinician_application_require_system(),
+  identity.clinician_intake_require_open(),
+  identity.clinician_application_require_not_maintenance(),
+  identity.clinician_application_session_row(character, boolean),
+  identity.clinician_application_account_session(character, text[], text, boolean),
+  identity.clinician_application_account_stage(uuid),
+  identity.clinician_application_effective_stage(identity.clinician_application_sessions),
+  identity.clinician_application_account_usable(uuid),
+  identity.clinician_application_staff_enrolment_only(uuid),
+  identity.clinician_application_licence_valid(text, text, text, date),
+  platform.count_clinician_application_submission(integer),
+  identity.clinician_application_status_eligible(uuid),
+  identity.clinician_application_identity_refused(uuid),
+  identity.clinician_application_account_refusal(uuid),
+  identity.clinician_application_access_state(identity.clinician_applications),
+  identity.clinician_application_view(identity.clinician_applications),
+  identity.clinician_application_account_view(uuid, text),
+  identity.clinician_application_audit(text, text, text, text, jsonb),
+  identity.clinician_application_inner_key_free(uuid, text[], text),
+  identity.guard_clinician_application_change()
+  from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
+    hid_ehr_api_runtime, hid_schema_test_runtime;
+revoke all on identity.clinician_applications, identity.clinician_application_challenges,
+  identity.clinician_application_sessions, identity.clinician_application_idempotency,
+  platform.clinician_application_quota_counters
   from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
     hid_ehr_api_runtime, hid_schema_test_runtime;
 

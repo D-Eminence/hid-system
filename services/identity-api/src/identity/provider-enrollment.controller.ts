@@ -3,7 +3,7 @@ import type { Response } from 'express';
 import { MfaService } from '../auth/mfa/mfa.service';
 import { TurnstileService } from '../auth/turnstile.service';
 import { AuditAction, AuditFailuresOnly, Public } from '../common/decorators';
-import { DomainProblem } from '../common/problem';
+import { assertAccountless, assertAllowedOrigin, singleCookie } from '../common/public-flow-guards';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { ActivateProviderEnrollmentDto, StartProviderEnrollmentDto,
@@ -107,26 +107,16 @@ export class ProviderEnrollmentController {
   }
 
   private enrollmentCookie(request: HidRequest): string | undefined {
-    const values = (request.header('cookie') ?? '').split(';').map((part) => part.trim())
-      .filter((part) => part.startsWith(`${COOKIE_NAME}=`));
-    return values.length === 1 ? values[0]?.slice(COOKIE_NAME.length + 1) : undefined;
+    return singleCookie(request, COOKIE_NAME);
   }
 
   private assertAccountless(request: HidRequest): void {
-    const authCookie = (request.header('cookie') ?? '').split(';').some((part) =>
-      part.trim().startsWith(`${this.environment.AUTH_COOKIE_NAME}=`)
-      || part.trim().startsWith(`${this.environment.AUTH_COOKIE_NAME}_refresh=`));
-    if (authCookie || request.header('authorization')) {
-      throw new DomainProblem(409, 'PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT',
-        'Sign out before starting or continuing provider enrollment');
-    }
+    assertAccountless(request, this.environment.AUTH_COOKIE_NAME, { code: 'PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT',
+      detail: 'Sign out before starting or continuing provider enrollment' });
   }
 
   private assertOrigin(request: HidRequest): void {
-    const origin = request.header('origin');
-    if (!origin || !this.allowedOrigins.has(origin)) {
-      throw new DomainProblem(403, 'ORIGIN_DENIED', 'Request origin is not allowed');
-    }
+    assertAllowedOrigin(request, this.allowedOrigins);
   }
 
   private enrollmentCookieOptions() {

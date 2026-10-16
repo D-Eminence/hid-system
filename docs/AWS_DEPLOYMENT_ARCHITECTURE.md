@@ -201,7 +201,8 @@ The CDK v2 application under `infra/aws` synthesizes:
   database subnets;
 - one public HTTPS ALB, one internal HTTPS ALB, regional WAF, private service
   discovery, and private DNS;
-- eleven independent ECS/Fargate services and one migration task definition;
+- eleven independent ECS/Fargate services and two one-shot task definitions,
+  database migration and database provisioning;
 - eleven immutable, scan-on-push ECR repositories and twelve digest-qualified
   image parameters;
 - private encrypted PostgreSQL 16 with TLS enforcement, backups, logs, and
@@ -460,7 +461,19 @@ verification evidence and security-definer commands without adding raw NIN/CAC
 or provider-response storage.
 Migration is a controlled ECS RunTask operation: snapshot/PITR gate, plan,
 fixture/source dry run, apply once, reconciliation, runtime-role verification,
-then progressive service rollout.
+then progressive service rollout. The task maps the migration administrator as
+`DATABASE_URL` and `DATABASE_ADMIN_URL` (migrations, role bootstrap and the
+first Super Admins), and wherever it can run (not sleep) its security group
+reaches RDS, the AWS endpoints and Amazon S3 on 443, which it needs to pull its
+image, read its secret and log. Command overrides are in
+`AWS_DEPLOYMENT_RUNBOOK.md` §4. A second one-shot task,
+`hid-<env>-database-provisioning`, runs the same image with the same security
+group, so the database gains no ingress. It maps exactly the RDS master's
+username and password, the migration administrator's URL and the ten runtime
+credentials' URLs, has no task role policy, and by default only runs
+`db:verify-logins`; its overrides create the migration administrator, make and
+revoke 0015's parameter grant and create the runtime LOGINs from their secrets
+(`MIGRATION_RUNBOOK.md` §6). No service runs either task.
 
 Every ECS image parameter must be `repository@sha256:<digest>`. The release
 gate requires all twelve component records, SBOMs, vulnerability decisions,

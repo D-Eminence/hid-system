@@ -126,4 +126,21 @@ describe('EHR header-purpose routes refuse a missing purpose before any work', (
       expect(method).not.toHaveBeenCalled();
     }
   });
+
+  // Break-glass at launch (0097, D9): the chart routes accept only direct-care,
+  // but the document list and download keep taking the emergency purpose, so
+  // a break-glass grant reads the activating facility's documents as before.
+  // Whether it should is open (N3, Health-id hand-off B1(c)); this pins the
+  // contract until that decision, which must precede re-enabling uploads.
+  it.each([
+    { route: 'GET /ehr/documents', method: 'list' as const, call: (request: HidRequest) =>
+      documentRoutes.list({ patientId: id, encounterId: id }, request) },
+    { route: 'GET /ehr/documents/:id/download', method: 'createDownload' as const, call: (request: HidRequest) =>
+      documentRoutes.download(id, request) },
+  ])('$route passes the emergency purpose to Identity\'s authorization unchanged', ({ method, call }) => {
+    documents[method].mockClear();
+    call(guardedRequest({ 'x-purpose-of-use': 'emergency' }));
+    expect(documents[method]).toHaveBeenCalledTimes(1);
+    expect(documents[method].mock.calls[0]?.at(-1)).toMatchObject({ purposeOfUse: 'emergency', facilityId });
+  });
 });
