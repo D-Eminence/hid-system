@@ -499,13 +499,16 @@ secret (the EHR secret's `scannerUrl` is a second, scanner-only LOGIN) and
 verify every one with `npm run db:verify-logins`, which connects with each
 secret's own URL and refuses a superuser, `BYPASSRLS`, owner or
 migration-administrator login, an extra role and a shared login. In production
-each service also refuses to start over such a connection.
+each service also refuses to start over such a connection. In AWS the RDS
+master's statements, the runtime LOGINs and `db:verify-logins` run as the
+provisioning task, and every other step as the migration task (below).
 
 ### Running the migration task
 
-RDS accepts connections only from the service tasks and the one-shot
-migration task, so every `npm run db:*` and `admin:bootstrap` step above runs
-as that task. Its image is distroless: no shell and no npm, and its entrypoint
+RDS accepts connections only from the service tasks and from the migration
+security group, which the one-shot migration task and the one-shot
+provisioning task use, so every `npm run db:*` and `admin:bootstrap` step
+above runs as one of them. The migration task's image is distroless: no shell and no npm, and its entrypoint
 is `/nodejs/bin/node`, so a command override names the script. The task maps
 the migration administrator's `url` as both `DATABASE_URL` and
 `DATABASE_ADMIN_URL`; its security group reaches only RDS, the AWS endpoints
@@ -539,13 +542,63 @@ approval (`SUPER_ADMIN_FOUNDATION.md`). The task runs with
 `NODE_ENV=production`, so the development-only one-account form
 `PLATFORM_ADMIN_ACCOUNT_ID` is refused.
 
-The repository provides no SQL console inside the VPC. The RDS master's
-statements (creating the migration administrator, and the `SET ON PARAMETER`
-grant and revoke of `MIGRATION_RUNBOOK.md` §6.1), creating the runtime LOGINs
-(§6.3) and `db:verify-logins`, which needs every runtime URL, need an approved,
-temporary operator session that reaches RDS from the application subnets with
-the migration security group. Record who opened it and when, and close it
-afterwards. Never add the master or a runtime URL to the migration task.
+### Running the provisioning task
+
+A new RDS instance has only its master. The one-shot provisioning task
+(`hid-<environment>-database-provisioning`, stack output
+`DatabaseProvisioningTaskDefinitionArn`) runs
+`scripts/provision-database-logins.mjs` (`npm run db:provision`) from the
+migration image. It maps exactly the RDS master's `username` and `password`
+(the stack's generated master secret, output `BootstrapDatabaseSecretArn`), the
+migration administrator's `url` and each runtime secret's `url` (and the EHR
+secret's `scannerUrl`); its task role has no policy. Run it as the migration
+task above, with the same subnets and the migration security group, so it has
+no other network path, and with the container name `database-provisioning`.
+Override only the command. Each run does one step:
+
+```bash
+aws ecs run-task --cluster hid-production --launch-type FARGATE \
+  --task-definition <DatabaseProvisioningTaskDefinitionArn> \
+  --network-configuration 'awsvpcConfiguration={subnets=[<ApplicationSubnetIds>],securityGroups=[<MigrationSecurityGroupId>],assignPublicIp=DISABLED}' \
+  --overrides '{"containerOverrides":[{"name":"database-provisioning","command":["scripts/provision-database-logins.mjs","--administrator"]}]}'
+```
+
+| Order | Step | Runs as | Task and `command` override |
+| --- | --- | --- | --- |
+| 1 | Create the migration administrator, or set its password; grant it `CREATE` on the database; record the I3 probe | RDS master | provisioning: `["scripts/provision-database-logins.mjs","--administrator"]` |
+| 2 | `SET ON PARAMETER plpgsql.variable_conflict` for the run that applies 0015 (`MIGRATION_RUNBOOK.md` §6.1); skipped once 0015 is applied | RDS master | provisioning: `["scripts/provision-database-logins.mjs","--grant-variable-conflict"]` |
+| 3 | `db:plan`, `db:dry-run`, `db:migrate` | migration administrator | migration (table above) |
+| 4 | Revoke that grant once the ledger shows 0083, and check it | RDS master | provisioning: `["scripts/provision-database-logins.mjs","--revoke-variable-conflict"]` |
+| 5 | `db:bootstrap`, `db:verify-roles` | migration administrator | migration (table above) |
+| 6 | Create the ten runtime LOGINs, or set their passwords; grant each its aggregate role; then `db:verify-logins` (§6.3) | migration administrator | provisioning: `["scripts/provision-database-logins.mjs","--runtime-logins"]` |
+| 7 | `db:verify-logins` alone, with the RDS master and the administrator forbidden; again after every credential rotation | each runtime LOGIN | provisioning: none, the default is `--verify-logins` |
+| 8 | `admin:bootstrap` (P6) | migration administrator | migration (table above) |
+
+Before step 1 write the secrets. The migration secret's `url` and each runtime
+secret's URL name a lowercase LOGIN (letters, digits and `_`) with a password
+of 16 to 1024 printable ASCII characters without spaces, all on the same host,
+port and database. Each runtime LOGIN is distinct and is not the master, the
+administrator or a HID group role. No URL sets `user`, `password`,
+`database`, `dbname`, `port` or `options` as a query parameter. The script
+refuses anything else before it changes anything.
+
+A password reaches PostgreSQL only as a SCRAM-SHA-256 verifier that the
+script computes, so no statement, log line or output carries a password or
+URL. An existing role is changed only by setting its password from its
+secret, and only when its attributes are the expected ones and, for a runtime
+LOGIN, it is a member of nothing but its aggregate role; otherwise the run
+refuses and changes nothing. Step 6 is one transaction: all ten or none. A
+rerun is safe. After rotating a runtime secret, run step 6 again: it sets the
+new password and verifies all ten. Steps 6 and 7 exit 1 unless
+`db:verify-logins` passes for all ten. Require exit code `0` and read
+`/hid/<environment>/database-provisioning`. If RDS refuses step 2, stop and
+take the reviewed ledger exception of `MIGRATION_RUNBOOK.md` §6.1; never use a
+superuser-like role.
+
+The task's execution role reads the RDS master secret. Allow `ecs:RunTask` on
+this task definition only to the operators who may act as the RDS master.
+Never run it as a service, pass a secret as an override, or add the master or
+a runtime URL to the migration task.
 
 ## 5. Guarded staging operations
 

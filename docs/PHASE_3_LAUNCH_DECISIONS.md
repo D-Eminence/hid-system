@@ -654,7 +654,12 @@ every runtime credential with `db:verify-logins`; then, as the master, revoke
 the grant, which 0083 makes unnecessary after the run (`MIGRATION_RUNBOOK.md`
 §6). Do not try or grant `BYPASSRLS`. If RDS refuses the grant, take a
 reviewed ledger exception for 0015 rather than waiting on AWS. Then confirm
-that OCR claims, patient confirmation, scan events and job events work.
+that OCR claims, patient confirmation, scan events and job events work. In AWS
+the one-shot provisioning task runs the master's part: `--administrator`
+creates the migration administrator and records this probe,
+`--grant-variable-conflict` and `--revoke-variable-conflict` make and revoke
+the grant, and `--runtime-logins` creates and verifies the runtime
+credentials (`AWS_DEPLOYMENT_RUNBOOK.md` §4).
 
 The impact of an owner without `BYPASSRLS` was understated here. Besides
 documents, OCR and Outreach, `platform.control_enabled`, which the Identity,

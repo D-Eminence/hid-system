@@ -95,6 +95,7 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0096_clinician_self_signup.sql` | Clinician self sign-up with two-admin approval (owner decision 2 of 2026-10-14; ADR-064, CLIN-SIGNUP; branch `claude/clinician-self-signup`). Adds the control `clinician_signup_enabled` (seeded off), the application, challenge, capability, idempotency and quota tables (RLS, no runtime privilege), the reserved-attestation predicate, the internal pinned grant `identity.workforce_change_role` (0087's body plus the pin; `identity.admin_change_workforce_role` delegates with no pin) and the public and administration commands (`DATABASE.md`, "Clinician self sign-up applications (0096)"). It replaces `platform.control_enabled` (0040's body plus the key) while keeping its technical owner `hid_platform_control_reader`: a runner that does not own it grants itself that role (`INHERIT`, no `SET`) for the transaction with the ADMIN OPTION it holds as the role's creator (the bootstrap's administrator), revokes it, and fails closed if it cannot or if the owner would change (§6.1). Locks, in order, under the runner's 5 s lock timeout: `ACCESS EXCLUSIVE` on `platform.control_settings` (every guard's control read waits), then `SHARE ROW EXCLUSIVE` on `auth.accounts`, `identity.facilities`, `identity.staff`, `identity.staff_facility_memberships` and `identity.staff_credential_attestations` (the new foreign keys; writes to them wait). A transaction that holds a row lock on one of those and then reads a control can deadlock with it; PostgreSQL aborts one, and an aborted 0096 rolls back whole and is run again. Run it off-peak. Run `db:bootstrap` and `db:verify-roles` of the same release after it: the bootstrap grants the new commands. An older Identity runs on it unchanged; the new Identity on a database without it answers the new routes 503 (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, P35) |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles. Runs as a superuser or as the non-superuser administrator that created the roles (RDS); checks the roles' attributes instead of re-asserting them (§6) |
 | `database/runtime-login-assertions.sql` and `scripts/verify-runtime-logins.mjs` | `npm run db:verify-logins`: checks each runtime credential's own LOGIN, connected with that credential's URL (§6) |
+| `scripts/provision-database-logins.mjs` and `scripts/database-login-provisioning.mjs` | `npm run db:provision`: the RDS master's steps (the migration administrator, and the 0015 parameter grant and revoke) and the ten runtime LOGINs from their secrets' URLs, then `db:verify-logins`; in AWS the one-shot provisioning task (§6) |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
 | `scripts/promote-legacy-identity.mjs` | Explicit dependency ordering, UUID/HID preservation, encryption/HMAC, holds and conflict evidence; refuses, before any write, staged memberships that would give one staff identity two active memberships at one facility, or one beside a membership the target already holds (N5, `membership-duplicates.mjs`) |
@@ -250,7 +251,10 @@ rehearsal; never patch an already-applied migration checksum.
 On RDS no role is a PostgreSQL superuser. The migration administrator is a
 deployment-only LOGIN, `NOSUPERUSER NOBYPASSRLS CREATEROLE`, created by the RDS
 master (`hid_platform_bootstrap`) with `CREATE` on the target database, and it
-owns every schema and object the migrations create. No runtime LOGIN may be
+owns every schema and object the migrations create. In AWS the one-shot
+provisioning task creates it (`--administrator`, which also records the I3
+probe) and makes the master's other statements below
+(`AWS_DEPLOYMENT_RUNBOOK.md` §4, Running the provisioning task). No runtime LOGIN may be
 it, be a member of it, or hold `BYPASSRLS`, and the release does not rely on
 the owner bypassing row-level security (release checklist P8).
 
@@ -282,6 +286,10 @@ revoke set on parameter plpgsql.variable_conflict from <migration administrator>
 select has_parameter_privilege('<migration administrator>',
   'plpgsql.variable_conflict', 'SET');  -- false
 ```
+
+In AWS the provisioning task makes the grant (`--grant-variable-conflict`,
+which grants nothing once 0015 is applied) and the revoke
+(`--revoke-variable-conflict`), each checked with `has_parameter_privilege`.
 
 Without the grant `db:migrate` stops at 0015 with `permission denied to set
 parameter "plpgsql.variable_conflict"`. 0001 to 0014 stay committed, and a
@@ -379,7 +387,13 @@ pool's in `scannerUrl`). Only a role with `ADMIN OPTION` on the aggregate may
 grant it, which in PostgreSQL 16 is the migration administrator that created
 the HID roles; the RDS master is refused (`permission denied to grant role`).
 Create the LOGINs as that administrator too, so one role does both steps. If
-the master creates a LOGIN, the administrator still issues the grant.
+the master creates a LOGIN, the administrator still issues the grant. In AWS
+the provisioning task's `--runtime-logins` does both from the secrets: it
+creates each LOGIN, or sets the password of an existing one whose attributes
+match and that reaches nothing but its aggregate, with the password in that
+secret's URL (sent only as a SCRAM-SHA-256 verifier), grants the aggregate,
+all ten or none, and then runs `db:verify-logins` with the master and the
+administrator forbidden.
 
 | Credential | Variable for `db:verify-logins` | Aggregate role |
 | --- | --- | --- |
@@ -583,10 +597,13 @@ migration administrator as both `DATABASE_URL` and `DATABASE_ADMIN_URL`, so the
 role bootstrap (`["scripts/bootstrap-database-roles.mjs"]`, with
 `--verify-only` for `db:verify-roles`) and `admin:bootstrap`
 (`["scripts/bootstrap-platform-admin.mjs"]`) run in it; the overrides are in
-`AWS_DEPLOYMENT_RUNBOOK.md` §4. The migration image also carries
-`scripts/verify-runtime-logins.mjs`, but the task maps no runtime URL: the RDS
-master's statements, the runtime LOGINs and `db:verify-logins` need the
-approved temporary operator session that section describes.
+`AWS_DEPLOYMENT_RUNBOOK.md` §4. It maps no runtime URL and not the master. The
+RDS master's statements, the runtime LOGINs and `db:verify-logins` run as the
+separate one-shot provisioning task (`hid-<environment>-database-provisioning`,
+the same image and security group), which maps exactly the master's username
+and password, the administrator's URL and the ten runtime URLs, and whose
+default command only verifies (`AWS_DEPLOYMENT_RUNBOOK.md` §4, Running the
+provisioning task).
 
 ## 7. Stage a controlled snapshot
 

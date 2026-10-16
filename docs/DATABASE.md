@@ -2454,6 +2454,14 @@ direct grant and may create nothing; two credentials may not share a login.
 An owner skips the policies of every table that does not force them, among
 them `identity.patients`, `patient_identifiers` and the consent tables (0005),
 so a secret holding the migration URL would otherwise read them unfiltered.
+`npm run db:provision -- --runtime-logins` (`scripts/provision-database-logins.mjs`;
+in AWS the one-shot provisioning task) creates the ten LOGINs as the migration
+administrator from their secrets' URLs, each `LOGIN NOSUPERUSER NOBYPASSRLS
+NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT` and granted its aggregate only,
+all or none, then runs `db:verify-logins`. A password reaches PostgreSQL only as
+a SCRAM-SHA-256 verifier computed by the script. It sets the password of an
+existing LOGIN only when its attributes match and it reaches nothing but its
+aggregate, and otherwise changes nothing (`MIGRATION_RUNBOOK.md` §6.3).
 
 In production, each service that connects to the database (the six APIs, the
 OCR worker, the event dispatcher and the notification worker; the EHR scanner
