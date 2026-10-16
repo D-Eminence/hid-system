@@ -47,11 +47,18 @@ export function assessStagingCapacity(templateBytes, plan, quota) {
       ceiling_rollout_vcpu: Math.floor(ceiling * percent / 100) * cpu };
   });
   assert(services.length > 0, 'No services found');
+  // One-shot tasks without a service: the migration task and, since the
+  // database provisioning job (MIGRATION_RUNBOOK.md §6.1, §6.3), that one too.
+  // The operator runs one at a time, so the envelope reserves the larger.
   const standalone = Object.entries(resources).filter(([id, r]) => r.Type === 'AWS::ECS::TaskDefinition' && !referenced.has(id));
-  assert(standalone.length === 1 && standalone[0][0].startsWith('MigrationTaskDefinition'), 'Standalone migration task unresolved');
-  const migration = taskCpu(standalone[0][0]);
+  const migrations = standalone.filter(([id]) => id.startsWith('MigrationTaskDefinition'));
+  const provisioning = standalone.filter(([id]) => id.startsWith('DatabaseProvisioningTaskDefinition'));
+  assert(migrations.length === 1 && provisioning.length <= 1
+    && standalone.length === migrations.length + provisioning.length, 'Standalone one-shot tasks unresolved');
+  const migration = taskCpu(migrations[0][0]);
+  const oneShot = Math.max(migration, ...provisioning.map(([id]) => taskCpu(id)));
   const sum = key => services.reduce((n, row) => n + row[key], 0);
-  const required = sum('ceiling_rollout_vcpu') + migration;
+  const required = sum('ceiling_rollout_vcpu') + oneShot;
   return { schema_version: 'hid.staging-capacity-review/v1', environment: 'staging',
     account_id: plan.aws_account, region: plan.aws_region, template_sha256: sha256,
     deployment_authorized: false, staging_accepted: false, cloud_calls: false,
@@ -59,7 +66,7 @@ export function assessStagingCapacity(templateBytes, plan, quota) {
     existing_account_usage: 'unverified; do not interpret missing metric datapoints as zero',
     desired_vcpu: sum('desired_vcpu'), desired_rollout_vcpu: sum('desired_rollout_vcpu'),
     configured_ceiling_vcpu: sum('ceiling_vcpu'), simultaneous_ceiling_rollout_vcpu: sum('ceiling_rollout_vcpu'),
-    one_migration_task_vcpu: migration, full_rollout_plus_migration_vcpu: required,
+    one_migration_task_vcpu: migration, one_shot_task_vcpu: oneShot, full_rollout_plus_migration_vcpu: required,
     minimum_whole_vcpu_for_staging_envelope: Math.ceil(required),
     configured_envelope_exceeds_quota: required > quota.value,
     status: required > quota.value ? 'QUOTA_INCREASE_REQUIRED_FOR_CONFIGURED_ENVELOPE' : 'USAGE_AND_LIVE_CAPACITY_CHECK_REQUIRED',

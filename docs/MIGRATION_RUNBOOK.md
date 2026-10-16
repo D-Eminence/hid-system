@@ -98,6 +98,7 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0099_imported_medical_history.sql` | Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-067; numbered after 0098). Refuses a database holding the PR #8 branch's 0061/0062 objects; adds three append-only imported tables, the patient's sharing choice and its log, their patient-self and staff policies, the session-bound sharing commands and `ehr.import_legacy_medical_history` (sealed staging rows only; `hid_migration_admin` only), and the permission `ehr.imported-history.read`. Moves no data (§10.1) |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles. Runs as a superuser or as the non-superuser administrator that created the roles (RDS); checks the roles' attributes instead of re-asserting them (§6) |
 | `database/runtime-login-assertions.sql` and `scripts/verify-runtime-logins.mjs` | `npm run db:verify-logins`: checks each runtime credential's own LOGIN, connected with that credential's URL (§6) |
+| `scripts/provision-database-logins.mjs` and `scripts/database-login-provisioning.mjs` | `npm run db:provision`: the RDS master's steps (the migration administrator, and the 0015 parameter grant and revoke) and the ten runtime LOGINs from their secrets' URLs, then `db:verify-logins`; in AWS the one-shot provisioning task (§6). Refuses an administrator or runtime LOGIN named after a HID group role |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
 | `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger. `--scope=imported-history` seals the legacy medical history of the same snapshot in its own run (§10.1); the default `--scope=identity` is unchanged |
 | `scripts/promote-legacy-identity.mjs` | Explicit dependency ordering, UUID/HID preservation, encryption/HMAC, holds and conflict evidence; refuses, before any write, staged memberships that would give one staff identity two active memberships at one facility, or one beside a membership the target already holds (N5, `membership-duplicates.mjs`) |
@@ -254,7 +255,15 @@ rehearsal; never patch an already-applied migration checksum.
 On RDS no role is a PostgreSQL superuser. The migration administrator is a
 deployment-only LOGIN, `NOSUPERUSER NOBYPASSRLS CREATEROLE`, created by the RDS
 master (`hid_platform_bootstrap`) with `CREATE` on the target database, and it
-owns every schema and object the migrations create. No runtime LOGIN may be
+owns every schema and object the migrations create. In AWS the one-shot
+provisioning task creates it (`--administrator`, which also records the I3
+probe) and makes the master's other statements below
+(`AWS_DEPLOYMENT_RUNBOOK.md` §4, Running the provisioning task). Its name must
+not be one of the 28 group roles that `runtime-grants.sql` creates, such as
+`hid_migration_admin`: the role bootstrap skips a role that exists and then
+needs `ADMIN OPTION` on it, which no role holds on itself, so §6.2 would stop
+after every migration had been applied as that LOGIN. The provisioning task
+refuses such a name before it connects. No runtime LOGIN may be
 it, be a member of it, or hold `BYPASSRLS`, and the release does not rely on
 the owner bypassing row-level security (release checklist P8).
 
@@ -286,6 +295,10 @@ revoke set on parameter plpgsql.variable_conflict from <migration administrator>
 select has_parameter_privilege('<migration administrator>',
   'plpgsql.variable_conflict', 'SET');  -- false
 ```
+
+In AWS the provisioning task makes the grant (`--grant-variable-conflict`,
+which grants nothing once 0015 is applied) and the revoke
+(`--revoke-variable-conflict`), each checked with `has_parameter_privilege`.
 
 Without the grant `db:migrate` stops at 0015 with `permission denied to set
 parameter "plpgsql.variable_conflict"`. 0001 to 0014 stay committed, and a
@@ -387,7 +400,13 @@ pool's in `scannerUrl`). Only a role with `ADMIN OPTION` on the aggregate may
 grant it, which in PostgreSQL 16 is the migration administrator that created
 the HID roles; the RDS master is refused (`permission denied to grant role`).
 Create the LOGINs as that administrator too, so one role does both steps. If
-the master creates a LOGIN, the administrator still issues the grant.
+the master creates a LOGIN, the administrator still issues the grant. In AWS
+the provisioning task's `--runtime-logins` does both from the secrets: it
+creates each LOGIN, or sets the password of an existing one whose attributes
+match and that reaches nothing but its aggregate, with the password in that
+secret's URL (sent only as a SCRAM-SHA-256 verifier), grants the aggregate,
+all ten or none, and then runs `db:verify-logins` with the master and the
+administrator forbidden.
 
 | Credential | Variable for `db:verify-logins` | Aggregate role |
 | --- | --- | --- |
@@ -420,7 +439,10 @@ has the privileges of the owner of the database or of any application schema,
 relation or function, is named by a direct grant, or may create objects; and
 two credentials that share a login. It prints role names only, never a URL or
 password. Run it again after every credential rotation (`--partial` with only
-the rotated credentials). Clear the variables afterwards. In production every
+the rotated credentials). The new password applies at once, while running tasks
+keep the URL they started with, so replace the running tasks of the rotated
+service straight after its LOGIN gets the new password
+(`AWS_DEPLOYMENT_RUNBOOK.md` §4, Running the provisioning task). Clear the variables afterwards. In production every
 service that connects to the database also refuses to start over a superuser,
 `BYPASSRLS` or owner connection.
 
@@ -583,12 +605,41 @@ select verification.id as verification_id, verification.staff_account_id,
 rollback;
 ```
 
-The one-shot ECS migration task defaults to `--plan`; never turn it into a
-service or place administrator credentials in a steady-state task. The
-migration image also carries `scripts/bootstrap-database-roles.mjs` and
-`scripts/verify-runtime-logins.mjs`.
+The one-shot ECS migration task defaults to `scripts/apply-migrations.mjs
+--plan` (its image's entrypoint is `/nodejs/bin/node`, so an override names the
+script: `["scripts/apply-migrations.mjs"]` applies); never turn it into a
+service or place administrator credentials in a steady-state task. It maps the
+migration administrator as both `DATABASE_URL` and `DATABASE_ADMIN_URL`, so the
+role bootstrap (`["scripts/bootstrap-database-roles.mjs"]`, with
+`--verify-only` for `db:verify-roles`) and `admin:bootstrap`
+(`["scripts/bootstrap-platform-admin.mjs"]`; on a new database with
+`PLATFORM_ADMIN_EMAILS` once the services and SES are live, which creates the
+accounts, or with `PLATFORM_ADMIN_ACCOUNT_IDS` only once the accounts it names
+exist; `SUPER_ADMIN_FOUNDATION.md`) run in it; the overrides are in
+`AWS_DEPLOYMENT_RUNBOOK.md` §4. It maps no runtime URL and not the master. The
+RDS master's statements, the runtime LOGINs and `db:verify-logins` run as the
+separate one-shot provisioning task (`hid-<environment>-database-provisioning`,
+the same image and security group), which maps exactly the master's username
+and password, the administrator's URL and the ten runtime URLs, and whose
+default command only verifies (`AWS_DEPLOYMENT_RUNBOOK.md` §4, Running the
+provisioning task). The HID 1.0 stage and promotion (§7, §8) have no AWS
+execution path yet: neither task maps the HID 1.0 source or the promotion's
+keys, and the migration security group reaches only RDS, the AWS endpoints and
+Amazon S3 (`AWS_DEPLOYMENT_RUNBOOK.md` §6). The first Super Admins do not wait
+for them: by the owner's decision of 2026-10-16 (SUPERADMIN-ACCOUNTS,
+`PHASE_3_LAUNCH_DECISIONS.md`) the one-time bootstrap takes their email
+addresses in `PLATFORM_ADMIN_EMAILS`, creates platform-only accounts with no
+password, and each person sets their own with the admin password reset and
+enrols an authenticator at the first platform sign-in (P6).
 
 ## 7. Stage a controlled snapshot
+
+These commands, and the promotion of §8, have no AWS execution path yet
+(`AWS_DEPLOYMENT_RUNBOOK.md` §6): no task maps `LEGACY_DATABASE_URL` or the
+promotion's keys, the migration security group cannot reach the HID 1.0
+source, and a secret is never a RunTask override. A reviewed path is still to
+be decided and built (`PHASE_3_LAUNCH_DECISIONS.md`, SUPERADMIN-ACCOUNTS); it
+blocks the HID 1.0 cutover, not the first Super Admins.
 
 First perform a real-source dry run with a read-only credential:
 
@@ -625,6 +676,18 @@ and timestamps. Contact/identifier/quarantine values use AES-256-GCM and
 independent lookup HMACs. Missing facility or purpose creates a hold. Legacy
 clinical fragments remain quarantined, are not EHR records, and cannot be made
 visible by merely clearing a flag.
+
+An account that `admin:bootstrap` seeded by email (subject `platform:<id>`,
+`PLATFORM_ADMIN_EMAILS`) keeps its address in every status but `deleted`
+(`accounts_email_ci_uq`), and no command changes it. The promotion inserts an
+account only when its ID is new, so a HID 1.0 user with the same address, in
+any letter case, is a `target_content_mismatch` conflict on `auth.accounts`
+(constraint `accounts_email_ci_uq`) and the run is blocked. Such a conflict
+needs an owner decision: an approved correction of the HID 1.0 address in the
+source and a new run (§10), which leaves that person two accounts, or a merge
+that the promotion path still to be designed would have to provide. The
+email bootstrap therefore seeds only addresses no HID 1.0 auth user has
+(`AWS_DEPLOYMENT_RUNBOOK.md` §4).
 
 Legacy scan evidence not bound to an exact immutable object version and SHA-256
 cannot authorize document access. Create new governed evidence only after the

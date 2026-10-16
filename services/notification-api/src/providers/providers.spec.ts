@@ -18,6 +18,23 @@ describe('OTP provider adapters', () => {
     const transport = jest.fn().mockResolvedValue(new Response('{}',{status:400}));
     await expect(new TermiiSmsProvider(getEnvironment(), transport).send({ ...base, channel:'sms' })).resolves.toMatchObject({ outcome:'definitive_failure' });
   });
+  // Termii's Messaging API documents `to` in international format without a
+  // plus (example 23490126727). The recipient reaches the adapter in E.164
+  // ('+234...', the only form deliver-otp.dto accepts), so the adapter strips
+  // the plus, as Brevo's WhatsApp path does.
+  it('Termii sends the documented request body with the recipient as digits only', async () => {
+    const transport = jest.fn().mockResolvedValue(new Response('{"message_id":"termii-id"}', { status: 200 }));
+    await expect(new TermiiSmsProvider(getEnvironment(), transport).send({ ...base, channel:'sms' }))
+      .resolves.toMatchObject({ outcome:'accepted', provider:'termii', providerMessageId:'termii-id' });
+    expect(String(transport.mock.calls[0]![0])).toBe('https://termii.example.test/api/sms/send');
+    expect(transport.mock.calls[0]![1]).toMatchObject({ method:'POST', headers:{ 'content-type':'application/json' } });
+    expect(JSON.parse(String(transport.mock.calls[0]![1].body))).toEqual({
+      api_key:'secret', to:'2348000000000', from:'HID',
+      sms:'Your HID verification code is 012345. It expires shortly. Do not share this code.',
+      type:'plain', channel:'generic',
+    });
+    expect(String(transport.mock.calls[0]![1].body)).not.toContain('+');
+  });
   it('Meta sends a six-digit authentication template parameter', async () => {
     const transport = jest.fn().mockResolvedValue(new Response('{"messages":[{"id":"wa-id"}]}',{status:200}));
     await expect(new MetaWhatsAppProvider(getEnvironment(), transport).send({ ...base, channel:'whatsapp' })).resolves.toMatchObject({ outcome:'accepted' });

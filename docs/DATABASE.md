@@ -199,7 +199,7 @@ The reviewed role model is:
 | `hid_platform_control_reader` | Technical security-definer owner | None | Never inherited; owns `platform.control_enabled(text)` and reads only `platform.control_settings.control_key` and `enabled` through one exact RLS policy (launch; role bootstrap only). |
 | `hid_imported_history_commands` | Technical security-definer owner | None | Never inherited; owns the staff read decision `ehr.imported_history_staff_read_allowed(uuid)` and the patient's two imported history sharing commands, reads `identity.patients` (id, account) and `auth.accounts` (id, status) through column grants and one exact policy, and reads and writes only the sharing choice and its log (0099, ADR-067). |
 | `hid_imported_history_importer` | Technical security-definer owner | None | Never inherited; owns `ehr.import_legacy_medical_history`, which only `hid_migration_admin` may execute; reads the sealed ledger columns of `migration.runs`, `migration.source_rows` and `migration.conflicts`, inserts the receipt run and inserts into the three imported tables through exact policies (0099, ADR-067). |
-| `hid_migration_admin` | Migration and provisioning administration | Environment-specific | Never inherited by an application runtime login. |
+| `hid_migration_admin` | Migration and provisioning administration | Environment-specific | Never inherited by an application runtime login. A NOLOGIN group role: the migration administrator LOGIN must have another name, as no LOGIN may take the name of a role `runtime-grants.sql` creates, or the role bootstrap cannot run as it (`MIGRATION_RUNBOOK.md` §6). |
 | `hid_schema_test_runtime` | Rollback-only schema/RLS acceptance | Test-only explicit grants | NOLOGIN and never used by application processes. |
 
 Identity, EHR, and OCR now use separate service processes and pools. The retired
@@ -2472,6 +2472,14 @@ direct grant and may create nothing; two credentials may not share a login.
 An owner skips the policies of every table that does not force them, among
 them `identity.patients`, `patient_identifiers` and the consent tables (0005),
 so a secret holding the migration URL would otherwise read them unfiltered.
+`npm run db:provision -- --runtime-logins` (`scripts/provision-database-logins.mjs`;
+in AWS the one-shot provisioning task) creates the ten LOGINs as the migration
+administrator from their secrets' URLs, each `LOGIN NOSUPERUSER NOBYPASSRLS
+NOCREATEDB NOCREATEROLE NOREPLICATION INHERIT` and granted its aggregate only,
+all or none, then runs `db:verify-logins`. A password reaches PostgreSQL only as
+a SCRAM-SHA-256 verifier computed by the script. It sets the password of an
+existing LOGIN only when its attributes match and it reaches nothing but its
+aggregate, and otherwise changes nothing (`MIGRATION_RUNBOOK.md` §6.3).
 
 In production, each service that connects to the database (the six APIs, the
 OCR worker, the event dispatcher and the notification worker; the EHR scanner
