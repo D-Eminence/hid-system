@@ -340,6 +340,49 @@ test('token-bearing tasks mount the token volume read-only', () => {
   for (const definition of mounted) assert.match(JSON.stringify(definition), /"ReadOnly":true/);
 });
 
+// Every Node image's runtime stage is gcr.io/distroless/nodejs22-debian13: it
+// has no /bin/sh, and node is /nodejs/bin/node, which is not on PATH. An ECS
+// CMD-SHELL check, or a bare `node`, therefore fails every probe, and ECS
+// replaces the essential container and rolls the deployment back. Only the
+// gateway (nginx-unprivileged, BusyBox sh and wget) may use CMD-SHELL.
+test('every Node container health check runs /nodejs/bin/node in exec form', () => {
+  const nodeImage = /^(?!Gateway)[A-Za-z]+ImageUri$/;
+  for (const [label, template] of [['production', regional], ['staging economy', stagingRegional],
+    ['staging fidelity', fidelityRegional], ['development', developmentRegional]] as const) {
+    const containers = properties(template, 'AWS::ECS::TaskDefinition')
+      .flatMap((definition) => definition.ContainerDefinitions as Array<Record<string, unknown>>);
+    const checked = containers.filter((container) => container.HealthCheck);
+    assert.ok(checked.length >= 10, `${label}: every service with a health path has a container check`);
+    for (const container of checked) {
+      const command = (container.HealthCheck as { readonly Command: readonly string[] }).Command;
+      const image = (container.Image as { readonly Ref?: string }).Ref ?? '';
+      if (container.Name === 'gateway') {
+        assert.equal(image, 'GatewayImageUri');
+        assert.equal(command[0], 'CMD-SHELL', `${label}: the gateway keeps its BusyBox wget check`);
+        assert.match(command[1]!, /^wget -q -O \/dev\/null http:\/\/127\.0\.0\.1:3000\/gateway-health\/ready \|\| exit 1$/);
+        continue;
+      }
+      assert.match(image, nodeImage, `${label}: ${String(container.Name)} runs a distroless Node image`);
+      assert.equal(command[0], 'CMD', `${label}: ${String(container.Name)} must not need a shell`);
+      assert.equal(command[1], '/nodejs/bin/node', `${label}: ${String(container.Name)} must name node's absolute path`);
+      assert.ok(command.every((part) => !/^node\b/.test(part)), `${label}: ${String(container.Name)} runs no bare node`);
+    }
+    const service = (name: string, port: number) => {
+      const container = checked.find((candidate) => candidate.Name === name)!;
+      const command = (container.HealthCheck as { readonly Command: readonly string[] }).Command;
+      assert.deepEqual(command.slice(0, 3), ['CMD', '/nodejs/bin/node', '-e'], `${label}: ${name}`);
+      assert.equal(command.length, 4, `${label}: ${name} passes one script to node -e`);
+      assert.ok(command[3]!.includes(`fetch('http://127.0.0.1:${port}/api/v1/health/ready')`), `${label}: ${name}`);
+      assert.match(command[3]!, /process\.exit\(r\.ok\?0:1\)/);
+      assert.match(command[3]!, /catch\(\(\)=>process\.exit\(1\)\)/);
+    };
+    service('identity-api', 3001);
+    service('notification-api', 3007);
+    service('ehr-api', 3002);
+    service('event-dispatcher', 3010);
+  }
+});
+
 test('migration is a separate one-shot task with a safe plan default', () => {
   const migration = properties(regional, 'AWS::ECS::TaskDefinition')
     .find((definition) => JSON.stringify(definition.Family).includes('database-migration'))!;

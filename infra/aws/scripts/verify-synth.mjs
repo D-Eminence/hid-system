@@ -66,6 +66,31 @@ for (const service of services) {
   if (profile === 'sleep') assert.equal(service.Properties.DesiredCount, 0)
 }
 assert.equal(resources('AWS::ECS::TaskDefinition').length, 12)
+// Every Node image runs on gcr.io/distroless/nodejs22-debian13: no /bin/sh,
+// and node is /nodejs/bin/node, off PATH. A CMD-SHELL or bare `node` check
+// fails every probe and ECS replaces the essential container. Only the
+// gateway (nginx-unprivileged with BusyBox sh and wget) may use CMD-SHELL.
+const healthChecked = resources('AWS::ECS::TaskDefinition')
+  .flatMap(task => task.Properties.ContainerDefinitions).filter(container => container.HealthCheck)
+assert.ok(healthChecked.length >= 10, 'every service with a health path has a container health check')
+for (const container of healthChecked) {
+  const command = container.HealthCheck.Command
+  if (container.Name === 'gateway') {
+    assert.deepEqual(container.Image, { Ref: 'GatewayImageUri' })
+    assert.equal(command[0], 'CMD-SHELL', 'the gateway keeps its BusyBox wget health check')
+    assert.match(command[1], /^wget -q -O \/dev\/null http:\/\/127\.0\.0\.1:3000\/gateway-health\/ready \|\| exit 1$/)
+    continue
+  }
+  assert.match(String(container.Image?.Ref), /^(?!Gateway)[A-Za-z]+ImageUri$/, `${container.Name} runs a distroless Node image`)
+  assert.equal(command[0], 'CMD', `${container.Name}'s health check must not need a shell (distroless)`)
+  assert.equal(command[1], '/nodejs/bin/node', `${container.Name}'s health check must name /nodejs/bin/node`)
+  assert.ok(command.every(part => !/^node\b/.test(part)), `${container.Name}'s health check must not run a bare node`)
+}
+for (const [name, port] of [['identity-api', 3001], ['notification-api', 3007]]) {
+  const command = healthChecked.find(container => container.Name === name)?.HealthCheck.Command
+  assert.deepEqual(command?.slice(0, 3), ['CMD', '/nodejs/bin/node', '-e'], `${name} health check is node -e in exec form`)
+  assert.ok(command[3].includes(`fetch('http://127.0.0.1:${port}/api/v1/health/ready')`), `${name} probes its own readiness`)
+}
 const identityApis = resources('AWS::ECS::TaskDefinition')
   .filter(task => String(task.Properties.Family).endsWith('-identity-api'))
   .flatMap(task => task.Properties.ContainerDefinitions).filter(container => container.Name === 'identity-api')
