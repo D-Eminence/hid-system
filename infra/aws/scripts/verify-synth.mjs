@@ -65,7 +65,9 @@ for (const service of services) {
   assert.equal(service.Properties.NetworkConfiguration.AwsvpcConfiguration.AssignPublicIp, 'DISABLED')
   if (profile === 'sleep') assert.equal(service.Properties.DesiredCount, 0)
 }
-assert.equal(resources('AWS::ECS::TaskDefinition').length, 12)
+// Eleven services, the one-shot migration task and the one-shot database
+// provisioning task.
+assert.equal(resources('AWS::ECS::TaskDefinition').length, 13)
 // Every Node image runs on gcr.io/distroless/nodejs22-debian13: no /bin/sh,
 // and node is /nodejs/bin/node, off PATH. A CMD-SHELL or bare `node` check
 // fails every probe and ECS replaces the essential container. Only the
@@ -162,6 +164,42 @@ if (!asleep) {
     && JSON.stringify(rule.DestinationPrefixListId ?? '').includes('S3PrefixListId')))
 }
 for (const rule of migrationEgress) assert.ok(rule.CidrIp === undefined && rule.CidrIpv6 === undefined)
+// The one-shot database provisioning task (MIGRATION_RUNBOOK.md §6.1, §6.3):
+// the migration image, a verify-only default command, no service, and exactly
+// the RDS master's username and password, the migration administrator's URL
+// and the ten runtime credentials' URLs. It runs with the migration security
+// group, so it adds no database ingress.
+const provisioningTasks = Object.entries(regional.Resources)
+  .filter(([, resource]) => resource.Type === 'AWS::ECS::TaskDefinition'
+    && String(resource.Properties.Family).endsWith('-database-provisioning'))
+assert.equal(provisioningTasks.length, 1)
+assert.ok(!services.some(service => JSON.stringify(service.Properties.TaskDefinition) === JSON.stringify({ Ref: provisioningTasks[0][0] })))
+const provisioningContainers = provisioningTasks[0][1].Properties.ContainerDefinitions
+assert.equal(provisioningContainers.length, 1)
+assert.deepEqual(provisioningContainers[0].Image, { Ref: 'MigrationImageUri' })
+assert.deepEqual(provisioningContainers[0].Command, ['scripts/provision-database-logins.mjs', '--verify-logins'])
+assert.equal(provisioningContainers[0].ReadonlyRootFilesystem, true)
+const masterSecret = regional.Outputs.BootstrapDatabaseSecretArn.Value
+const secretField = (secret, name) => ({ 'Fn::Join': ['', [secret, `:${name}::`]] })
+assert.deepEqual(provisioningContainers[0].Secrets.map(secret => [secret.Name, secret.ValueFrom])
+  .sort((left, right) => left[0].localeCompare(right[0])), [
+  ['DATABASE_ADMIN_URL', migrationAdministrator],
+  ['DATABASE_LOGIN_URL_EHR_API', secretField({ Ref: 'EhrApiDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_EHR_API_SCANNER', secretField({ Ref: 'EhrApiDatabaseSecretArn' }, 'scannerUrl')],
+  ['DATABASE_LOGIN_URL_EVENT_DISPATCHER', secretField({ Ref: 'EventDispatcherDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_IDENTITY_API', secretField({ Ref: 'IdentityApiDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_LAB_API', secretField({ Ref: 'LabApiDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_NOTIFICATION_WORKER', secretField({ Ref: 'NotificationWorkerDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_OCR_API', secretField({ Ref: 'OcrApiDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_OCR_WORKER', secretField({ Ref: 'OcrWorkerDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_OUTREACH_API', secretField({ Ref: 'OutreachApiDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_PHARMACY_API', secretField({ Ref: 'PharmacyApiDatabaseSecretArn' }, 'url')],
+  ['DATABASE_MASTER_PASSWORD', secretField(masterSecret, 'password')],
+  ['DATABASE_MASTER_USERNAME', secretField(masterSecret, 'username')],
+])
+assert.deepEqual(provisioningContainers[0].Environment.map(entry => entry.Name).sort(),
+  ['DATABASE_SSL', 'DATABASE_SSL_ROOT_CERT_BASE64', 'NODE_ENV'])
+assert.ok(regional.Outputs.DatabaseProvisioningTaskDefinitionArn)
 assert.equal(resources('AWS::ElasticLoadBalancingV2::LoadBalancer').length, asleep ? 0 : 2)
 // The public API web ACL, and the workload issuer's NAT allowlist web ACL
 // wherever an in-stack issuer runs behind NAT gateways (staging live modes and

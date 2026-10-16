@@ -48,7 +48,16 @@
 //   audited transaction, and refusing a repeated, ineligible or fourth
 //   account, both forms at once, the one-account form with NODE_ENV=production,
 //   and any run once a Super Admin is active;
-// - the platform-control-owner and function-parameter-settings suites.
+// - the platform-control-owner and function-parameter-settings suites;
+// - the database provisioning task's script (provision-database-logins.mjs,
+//   MIGRATION_RUNBOOK.md §6.1 and §6.3) on a second cluster laid out as a new
+//   RDS instance: a NOSUPERUSER CREATEROLE CREATEDB master owns the database
+//   and creates the migration administrator, the provisioned roles sign in
+//   with SCRAM-SHA-256 passwords, the chain migrates and bootstraps as that
+//   administrator, and the administrator creates the ten runtime LOGINs from
+//   their URLs' passwords and verifies them; refusals change nothing.
+//   The cluster superuser stands in for the master only for the SET ON
+//   PARAMETER grant and revoke, which no other local role can make.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -84,6 +93,10 @@ const temporary = await mkdtemp('/tmp/hid-non-superuser.');
 const data = join(temporary, 'data');
 let pgBindir;
 let started = false;
+// The provisioning stage's cluster: same socket directory, its own port.
+const provisioningData = join(temporary, 'provisioning-data');
+const provisioningPort = 5433;
+let provisioningStarted = false;
 const evidence = { scope: 'local-synthetic-only', status: 'failed', administrator: {}, steps: {} };
 
 // Only what each step needs: no inherited PG* or DATABASE_* variable.
@@ -209,6 +222,147 @@ async function bootstrapWhileControlsHeld(label, mode) {
     await holder.end().catch(() => undefined);
     await observer.end().catch(() => undefined);
   }
+}
+
+// Gap 5: a new RDS instance has only its master; the provisioning task's
+// script creates the migration administrator, makes and revokes the 0015
+// parameter grant, and creates the ten runtime LOGINs from the passwords in
+// their secrets. This runs it as the task would, on a second cluster.
+async function provisioningStage() {
+  const master = 'hid_rds_like_master';
+  const administrator = 'hid_provisioned_admin';
+  const target = 'hid';
+  const at = (user, secret, db = target) => `postgresql://${user}:${encodeURIComponent(secret)}@localhost:${provisioningPort}`
+    + `/${db}?host=${encodeURIComponent(temporary)}`;
+  const sql = (label, user, statements, expected = 0, db = target, environment = {}) => run(label, join(pgBindir, 'psql'),
+    ['-X', '-At', '-v', 'ON_ERROR_STOP=1', '-h', temporary, '-p', String(provisioningPort), '-U', user, '-d', db,
+      ...[statements].flat().flatMap((statement) => ['-c', statement])], environment, expected);
+  const passwords = { admin: 'Provisioned-Admin-Password-0001' };
+  const adminUrl = at(administrator, passwords.admin);
+  const provision = (label, command, environment, expected = 0) => {
+    const result = run(label, process.execPath, [join(service, 'scripts/provision-database-logins.mjs'), command],
+      environment, expected);
+    return { ...result, summary: expected === 0 ? JSON.parse(result.stdout) : null };
+  };
+  const asMaster = (masterUser = master) => ({ DATABASE_ADMIN_URL: adminUrl, DATABASE_MASTER_USERNAME: masterUser,
+    DATABASE_MASTER_PASSWORD: 'unused-on-the-trusted-socket' });
+  const loginName = (credential) => `hid_provisioned_${credential.replaceAll('-', '_')}`;
+  const loginPassword = (credential, round = 1) => `Provisioned-${credential}-Password-${String(round).padStart(4, '0')}`;
+  const runtimeUrls = (overrides = {}) => Object.fromEntries(Object.keys(logins).map((credential) => [
+    `DATABASE_LOGIN_URL_${credential.toUpperCase().replaceAll('-', '_')}`,
+    overrides[credential] ?? at(loginName(credential), loginPassword(credential))]));
+  const provisionedRoles = () => sql('provisioned runtime roles', superuser,
+    `select count(*) from pg_roles where rolname like 'hid\\_provisioned\\_%' and rolname <> '${administrator}'`)
+    .stdout.trim();
+  const steps = {};
+
+  run('initialize the provisioning cluster', join(pgBindir, 'initdb'),
+    ['-D', provisioningData, '-U', superuser, '--auth-local=trust', '--auth-host=reject', '--no-locale', '--encoding=UTF8',
+      '--no-sync']);
+  // The provisioned roles sign in with their passwords; the master and the
+  // cluster superuser stay trusted on the private socket.
+  const hba = join(provisioningData, 'pg_hba.conf');
+  await writeFile(hba, `local all /^hid_provisioned_ scram-sha-256\n${await readFile(hba, 'utf8')}`);
+  run('start the provisioning cluster', join(pgBindir, 'pg_ctl'), ['-D', provisioningData, '-l',
+    join(temporary, 'provisioning.log'), '-o', `-h '' -k ${temporary} -p ${provisioningPort} `
+      + '-c unix_socket_permissions=0700 -c fsync=off', '-w', 'start']);
+  provisioningStarted = true;
+  sql('create the RDS-like master and the database it owns', superuser,
+    [`create role ${master} login nosuperuser nobypassrls createrole createdb noreplication`,
+      `create database ${target} owner ${master}`], 0, 'postgres');
+
+  // The master creates the migration administrator with the password in its
+  // URL (sent only as a SCRAM verifier) and CREATE on the database; a rerun
+  // only sets the password again.
+  const created = provision('--administrator as the master', '--administrator', asMaster()).summary;
+  assert.equal(created.status, 'passed');
+  assert.equal(created.administrator, administrator);
+  assert.equal(created.created, true);
+  assert.equal(provision('--administrator again', '--administrator', asMaster()).summary.created, false);
+  assert.equal(sql('administrator attributes and CREATE', superuser,
+    `select rolsuper || ',' || rolbypassrls || ',' || rolcreaterole || ',' || rolcreatedb || ',' || rolreplication
+        || ',' || has_database_privilege(oid, '${target}', 'CREATE') || ',' || (rolpassword like 'SCRAM-SHA-256$4096:%')
+       from pg_authid where rolname = '${administrator}'`).stdout.trim(), 'false,false,true,false,false,true,true');
+  assert.equal(sql('the administrator signs in with its password', administrator, 'select current_user', 0, target,
+    { PGPASSWORD: passwords.admin }).stdout.trim(), administrator);
+  assert.match(sql('the administrator is refused another password', administrator, 'select 1', 'failure', target,
+    { PGPASSWORD: 'Another-Password-0000' }).output, /password authentication failed/);
+  steps.administrator = { created_by: master, attributes: 'NOSUPERUSER NOBYPASSRLS CREATEROLE NOCREATEDB NOREPLICATION',
+    create_on_database: target, password: 'SCRAM-SHA-256 verifier; signs in with it, refused another' };
+
+  // 0015: the grant before the run, refused once 0015 is applied, and the revoke.
+  assert.equal(provision('--grant-variable-conflict', '--grant-variable-conflict', asMaster(superuser)).summary.granted, true);
+  assert.equal(sql('parameter privilege granted', superuser,
+    `select has_parameter_privilege('${administrator}', 'plpgsql.variable_conflict', 'SET')`).stdout.trim(), 't');
+  run('migrate as the provisioned administrator', process.execPath, [join(service, 'scripts/apply-migrations.mjs')],
+    { DATABASE_URL: adminUrl });
+  const revoked = provision('--revoke-variable-conflict', '--revoke-variable-conflict', asMaster(superuser)).summary;
+  assert.equal(revoked.revoked, true);
+  assert.equal(sql('parameter privilege revoked', superuser,
+    `select has_parameter_privilege('${administrator}', 'plpgsql.variable_conflict', 'SET')`).stdout.trim(), 'f');
+  const skipped = provision('--grant-variable-conflict after 0015', '--grant-variable-conflict', asMaster(superuser)).summary;
+  assert.equal(skipped.granted, false);
+  assert.equal(sql('parameter privilege still revoked', superuser,
+    `select has_parameter_privilege('${administrator}', 'plpgsql.variable_conflict', 'SET')`).stdout.trim(), 'f');
+  run('role bootstrap as the provisioned administrator', process.execPath,
+    [join(service, 'scripts/bootstrap-database-roles.mjs')], { DATABASE_ADMIN_URL: adminUrl });
+  steps.variable_conflict = { granted_before_migrations: true, revoked_after: revoked.ledger?.latest ?? null,
+    not_granted_once_0015_applied: true };
+
+  // Refusals: nothing is created or changed.
+  const refusals = {
+    'shared login': [{ 'lab-api': at(loginName('identity-api'), loginPassword('identity-api')) },
+      /share the LOGIN hid_provisioned_identity_api/],
+    'administrator': [{ 'ehr-api': adminUrl }, /names the migration administrator or the RDS master/],
+    'group role': [{ 'ehr-api': at('hid_ehr_api_runtime', loginPassword('ehr-api')) }, /names a HID group role/],
+    'other database': [{ 'ocr-api': at(loginName('ocr-api'), loginPassword('ocr-api'), 'postgres') },
+      /must point to the migration administrator's database/],
+    'short password': [{ 'ocr-worker': at(loginName('ocr-worker'), 'Short-0001') }, /16 to 1024 printable ASCII/],
+    'existing NOLOGIN role': [{ 'notification-worker': at('hid_platform_control_reader', loginPassword('notification-worker')) },
+      /role hid_platform_control_reader exists with other attributes/],
+  };
+  for (const [label, [overrides, message]] of Object.entries(refusals)) {
+    const refused = provision(`--runtime-logins refuses ${label}`, '--runtime-logins',
+      { ...asMaster(), ...runtimeUrls(overrides) }, 'failure');
+    assert.match(refused.output, message, label);
+    assert.ok(!refused.output.includes('Password-0001') && !refused.output.includes('postgresql://'), label);
+    assert.equal(provisionedRoles(), '0', `${label}: a refused run created no LOGIN`);
+  }
+
+  // The ten LOGINs, verified with their own passwords; a rerun changes nothing.
+  const first = provision('--runtime-logins', '--runtime-logins', { ...asMaster(), ...runtimeUrls() }).summary;
+  assert.equal(first.status, 'passed');
+  assert.equal(first.logins.filter((login) => login.created).length, 10);
+  assert.equal(first.verification.status, 'passed');
+  assert.equal(first.verification.verified.length, 10);
+  assert.deepEqual(first.verification.verified.map(({ credential, expected_role: role, login }) => [credential, role, login]),
+    Object.entries(logins).map(([credential, [, role]]) => [credential, role, loginName(credential)]));
+  assert.ok(!JSON.stringify(first).includes('Password-') && !JSON.stringify(first).includes('postgresql://'));
+  assert.equal(provisionedRoles(), '10');
+  const again = provision('--runtime-logins again', '--runtime-logins', { ...asMaster(), ...runtimeUrls() }).summary;
+  assert.equal(again.logins.filter((login) => login.created).length, 0);
+  assert.equal(again.verification.status, 'passed');
+
+  // A rotated secret: the rerun sets the new password and the old one stops working.
+  const rotated = at(loginName('identity-api'), loginPassword('identity-api', 2));
+  assert.equal(provision('--runtime-logins after a rotation', '--runtime-logins',
+    { ...asMaster(), ...runtimeUrls({ 'identity-api': rotated }) }).summary.verification.status, 'passed');
+  assert.match(sql('the old identity password is refused', loginName('identity-api'), 'select 1', 'failure', target,
+    { PGPASSWORD: loginPassword('identity-api') }).output, /password authentication failed/);
+  assert.equal(sql('the new identity password signs in', loginName('identity-api'), 'select current_user', 0, target,
+    { PGPASSWORD: loginPassword('identity-api', 2) }).stdout.trim(), loginName('identity-api'));
+
+  // The task's default command verifies only, with the master and the
+  // administrator forbidden.
+  const verified = provision('--verify-logins', '--verify-logins',
+    { ...asMaster(), ...runtimeUrls({ 'identity-api': rotated }) }).summary;
+  assert.equal(verified.verification.status, 'passed');
+  const forbidden = provision('--verify-logins refuses the administrator URL', '--verify-logins',
+    { ...asMaster(), ...runtimeUrls({ 'identity-api': rotated, 'lab-api': adminUrl }) }, 'failure');
+  assert.match(forbidden.output, /is the RDS master or the migration administrator/);
+  steps.runtime_logins = { created: 10, verified: first.verification.verified.length, rerun_created: 0,
+    rotation: 'new password set, old refused', refused: Object.keys(refusals), verify_only: 'passed; refuses the administrator URL' };
+  return steps;
 }
 
 try {
@@ -623,11 +777,16 @@ try {
     suite(name, superuser);
   }
   evidence.steps.suites = ['platform-control-owner.integration.sql', 'function-parameter-settings.integration.sql'];
+  evidence.steps.database_provisioning = await provisioningStage();
   evidence.status = 'passed';
 } catch (error) {
   evidence.failure = error instanceof Error ? error.message : String(error);
   process.exitCode = 1;
 } finally {
+  if (provisioningStarted) {
+    const stopped = spawnSync(join(pgBindir, 'pg_ctl'), ['-D', provisioningData, '-m', 'fast', '-w', 'stop'], { encoding: 'utf8' });
+    if (stopped.status !== 0) { evidence.cleanup_failure = 'pg_ctl stop failed'; evidence.status = 'failed'; process.exitCode = 1; }
+  }
   if (started) {
     const stopped = spawnSync(join(pgBindir, 'pg_ctl'), ['-D', data, '-m', 'fast', '-w', 'stop'], { encoding: 'utf8' });
     if (stopped.status !== 0) { evidence.cleanup_failure = 'pg_ctl stop failed'; evidence.status = 'failed'; process.exitCode = 1; }

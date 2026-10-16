@@ -222,7 +222,7 @@ test('all backend ECS services run without public IPs', () => {
 
 test('execution and task roles are separate on every task definition', () => {
   const taskDefinitions = properties(regional, 'AWS::ECS::TaskDefinition');
-  assert.equal(taskDefinitions.length, 12);
+  assert.equal(taskDefinitions.length, 13);
   for (const definition of taskDefinitions) {
     assert.notDeepEqual(definition.ExecutionRoleArn, definition.TaskRoleArn);
   }
@@ -294,11 +294,15 @@ test('OCR KMS use is exact-key and constrained to S3 via-service', () => {
   assert.match(JSON.stringify(statement.Condition), /kms:ViaService/);
 });
 
-test('all workloads and the migration job have separate task definitions', () => {
+// Two one-shot task definitions run no service: the migration job and the
+// database provisioning job (MIGRATION_RUNBOOK.md §6.1, §6.3).
+test('all workloads, the migration job and the provisioning job have separate task definitions', () => {
   assert.equal(properties(regional, 'AWS::ECS::Service').length, workloadNames.length);
-  assert.equal(properties(regional, 'AWS::ECS::TaskDefinition').length, workloadNames.length + 1);
+  assert.equal(properties(regional, 'AWS::ECS::TaskDefinition').length, workloadNames.length + 2);
   const families = properties(regional, 'AWS::ECS::TaskDefinition').map((item) => item.Family);
-  assert.equal(new Set(families.map((item) => JSON.stringify(item))).size, workloadNames.length + 1);
+  assert.equal(new Set(families.map((item) => JSON.stringify(item))).size, workloadNames.length + 2);
+  assert.deepEqual(families.filter((family) => !workloadNames.some((name) => family === `hid-production-${name}`)).sort(),
+    ['hid-production-database-migration', 'hid-production-database-provisioning']);
 });
 
 test('CloudFront is absent because Cloudflare owns frontend and edge delivery', () => {
