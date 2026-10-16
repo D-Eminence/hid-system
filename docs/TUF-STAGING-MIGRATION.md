@@ -277,6 +277,18 @@ The executable covers:
    signed in with an authenticator, refused staff, a mismatch, a match,
    activation and sign-in, an existing Health ID, a race with a phone proof,
    both budgets and a suspension, as `hid_identity_api_runtime`.
+   With 0095 (the patient record release, ADR-064): the additional suites
+   include `patient-record-release.integration.sql` (the released rows of
+   each table and of the released Lab results view across every withheld
+   state, unbound and staff contexts, the Lab and Identity runtimes refused
+   the view, the exact policy inventory), run in both passes.
+   `patient_record_release_runtime` runs
+   `verify-patient-record-release-runtime.mjs` after the delegated cookie
+   read verifier: with every flag off the summary is unchanged; with the
+   flags on, the released sets, the counts-only audit, the document download
+   and its refusals, a staff session refused, Identity refusing lab-api, and
+   the runtime's privileges, as `hid_ehr_api_runtime` against a real
+   Identity child.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
@@ -302,7 +314,13 @@ The executable covers:
    and attestation helpers or `auth.staff_session_is_mfa`, and that the
    permission is held by `clinician`, `doctor` and `nurse` only; the
    bootstrap's own `runtime-roles.integration.sql` checks the 0093 and 0094
-   grants for every runtime role), then
+   grants for every runtime role; and since 0095
+   (`patient_record_release_grants`) that the upgraded bootstrap makes
+   `hid_lab_release_reader` the owner of `ehr.patient_released_lab_results`,
+   grants `SELECT` on it to the EHR runtime and not to the Lab runtimes,
+   gives neither the Lab runtime nor the view's owner `ehr.patient_self_context`
+   or the Lab runtime `USAGE` on `ehr`, and keeps `ehr.patient_self_context`
+   executable by exactly the EHR runtime and the test role), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

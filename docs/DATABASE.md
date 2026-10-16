@@ -2195,11 +2195,14 @@ the schema, policies or grants changes.
   the staff policies (`ehr.context_allows`) never pass, and only the 0030
   patient-self policies release rows: completed encounters, signed or amended
   notes and their current revisions (since 0084 only those of completed
-  encounters; "EHR clinical safety and launch module set (0084)"). The other clinical tables have `SELECT`
-  but no patient-self policy, so a patient read of them returns no rows and no
-  error. The service now reads only the two released categories and names the
-  other five as withheld; before, it read all seven and returned five arrays
-  that were always empty.
+  encounters; "EHR clinical safety and launch module set (0084)"). Until 0095
+  the other clinical tables had `SELECT` but no patient-self policy, so a
+  patient read of them returned no rows and no error. The service reads only
+  the two released categories and names the other five as withheld; before,
+  it read all seven and returned five arrays that were always empty. Since
+  0095 vitals, diagnoses, prescriptions and documents have patient-release
+  policies and released Lab results a view, and the service reads each only
+  when its category's flag is on ("Patient record release (0095)" below).
 - **Emergency summary** (`GET /ehr/patients/:id/emergency-records`). A
   break-glass emergency context passes `ehr.context_allows` for `read_records`
   at its facility (0012), so every clinical table is readable there.
@@ -3666,7 +3669,9 @@ rollback-only transaction and adds the doctor's refusal (release checklist
 
 **Patient-self binding (PSELF-RLS).** `ehr.patient_self_context(uuid)` keeps
 its signature, so the 0030/0084 policies on `ehr.encounters`,
-`ehr.clinical_notes` and `ehr.clinical_note_revisions` are unchanged. It
+`ehr.clinical_notes` and `ehr.clinical_note_revisions` are unchanged (0095
+adds five more policies and a view that call it; its `EXECUTE` grants are
+unchanged, "Patient record release (0095)"). It
 becomes `LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog,
 pg_temp` (CREATE OR REPLACE keeps its owner and its `EXECUTE` for
 `hid_ehr_runtime` and `hid_schema_test_runtime`). It still requires
@@ -4285,3 +4290,126 @@ Tests:
   bootstrapped, and the 49 additional suites again with every schema, table
   and function owned by a `NOSUPERUSER NOBYPASSRLS` role (local evidence,
   release checklist §8).
+
+## Patient record release (0095)
+
+Owner decision 4 of 2026-10-16 (ADR-064, D7): patients may see their
+diagnoses, prescriptions, Lab results, vitals and documents as well as their
+encounters and notes, under D7's rules (items of a completed encounter only;
+never a draft, an unconfirmed or refuted diagnosis or anything entered in
+error; documents only with a patient download route). The EHR service still
+defines the release set (`PatientRecordRelease`, one default-off flag per
+category, `INTERFACE_CONTRACT.md` §11, "Record summaries"); the database admits
+the same rows again, so neither a later policy nor a flag alone widens what a
+patient reads.
+
+**Patient-release policies.** Five permissive `SELECT` policies, PUBLIC like
+the 0030/0084 patient-self policies and gated the same way by
+`ehr.patient_self_context(patient_id)` (the 0091 binding), each requiring the
+row's encounter to be completed and to match on id, patient and facility:
+
+| Policy | Table | Rows admitted |
+|---|---|---|
+| `vitals_patient_release_read` | `ehr.vitals` | `status = 'final'` and `current_correction_no = 0`: a corrected vital is withheld while D8 (correction semantics) is open |
+| `diagnoses_patient_release_read` | `ehr.diagnoses` | `verification_status = 'confirmed'` (the service never selects `notes`) |
+| `prescriptions_patient_release_read` | `ehr.prescriptions` | `status in ('active', 'on_hold', 'completed')` |
+| `documents_patient_release_read` | `ehr.documents` | `status = 'uploaded'`, `classification = 'phi'`, attached to an encounter |
+| `document_scan_events_patient_release_read` | `ehr.document_scan_events` | every scan event of a document the patient may read, so `ehr.documents_effective` (0009, `security_invoker`) computes the true latest scan |
+
+No policy is added on `ehr.vital_corrections`, `ehr.lab_requests` or
+`ehr.record_versions`: lab requests (orders) are never released. Retracting a
+completed encounter (`entered_in_error`) hides all of its items at once.
+
+**Released Lab results.** `ehr.patient_released_lab_results` is a
+`security_barrier` view, not `security_invoker`: for each Lab result of the
+bound patient, its latest released revision (`lab.result_releases`), unless
+that revision was invalidated (`lab.result_invalidations`), with the test from
+`lab.work_item_requested_tests` and the source order and encounter from
+`lab.work_items`; the source EHR order must be `active`, `on_hold` or
+`completed` and the source encounter completed. Every join matches patient and
+facility, as 0020 does. It returns no correction or release reason and no
+staff identity. Lab's staff view (`lab-api`, released history) marks an
+invalidated latest release `entered_in_error`; the patient view leaves the
+result out.
+
+Why a view owned by a technical role, and why not Lab:
+
+- Lab is off at launch (launch module set D17) and lab-api never receives
+  patient credentials or patient-self context: Identity's patient-self
+  authorization accepts only `ehr-api`, the patient reads the view only
+  through EHR's patient route, and `hid_lab_runtime` and
+  `hid_lab_api_runtime` gain no privilege. The view reads Lab's tables
+  without lab-api running.
+- `ehr.patient_self_context` stays executable by `hid_ehr_runtime` and
+  `hid_schema_test_runtime` only (PSELF-RLS). Functions in a view run as its
+  caller, so the view's `ehr.patient_self_context(release_row.patient_id)`
+  condition and the PUBLIC patient-self policy of `ehr.encounters` are
+  evaluated as the EHR runtime; the view's owner can evaluate neither.
+- Relations in a view are read with its owner's privileges and policies.
+  The owner, the technical role `hid_lab_release_reader` (NOLOGIN, NOINHERIT,
+  never granted to a login, no member, no schema `USAGE`, no function
+  privilege), holds column `SELECT` only on what the view reads and reads the
+  seven Lab tables and `ehr.lab_requests` through one exact policy each,
+  `patient_release_reader_read` (`for select to hid_lab_release_reader using
+  (true)`), so the view does not depend on its owner bypassing `FORCE ROW
+  LEVEL SECURITY`. The tables' PUBLIC staff policies are OR-ed with `true`
+  and folded away, so the owner needs no `EXECUTE` on `lab.context_allows` or
+  `ehr.context_allows`. It reads `ehr.encounters` (id, patient, facility,
+  status) through that table's own policies, with the caller's binding.
+- Only `hid_ehr_runtime` (through `hid_ehr_api_runtime`) and the test role
+  hold `SELECT` on the view. The owner selecting it is refused.
+
+The migration creates the view (owned by the migration administrator, with
+no grant); the role bootstrap (`runtime-grants.sql`) creates the technical
+role, its column grants and policies, gives it the view inside a `CREATE`
+window on schema `ehr` and grants `SELECT` on the view. Between the migration
+and the bootstrap a configured Lab results section answers `503
+PATIENT_RECORDS_UNAVAILABLE`. `lab_result_releases_patient_idx` on
+`lab.result_releases (patient_id, released_at desc, result_id)` is the view's
+access path; a launch database holds no Lab rows (0091).
+
+**Locks.** `CREATE POLICY` takes `ACCESS EXCLUSIVE` briefly on `ehr.vitals`,
+`ehr.diagnoses`, `ehr.prescriptions`, `ehr.documents` and
+`ehr.document_scan_events`; `CREATE VIEW` `ACCESS SHARE` on the tables it
+names; `CREATE INDEX` `SHARE` on `lab.result_releases`. Each waits at most the
+runner's 5 s lock timeout and a timeout rolls the migration back whole. The
+bootstrap's eight policies are created on its first run (`ACCESS EXCLUSIVE`
+on each table, after the platform-control policy, so the lock order of
+`scripts/verify-non-superuser-database.mjs` holds) and only replaced when
+missing or different, so a rerun takes no lock on those tables.
+
+**Staging residue.** A database built from the PR #8 branch may carry
+permissive policies such as `diagnoses_patient_self_read`,
+`vitals_patient_self_read`, `vital_corrections_patient_self_read`,
+`investigations_patient_self_read`, `documents_patient_self_read`,
+`document_scans_patient_self_read` or `lab_patient_self_read`, which would
+OR-widen the release. `patient-record-release.integration.sql` asserts the
+exact policy inventory of every table the release reads and fails on any of
+them (release checklist P35).
+
+**Evidence.** `patient-record-release.integration.sql` (rollback-only): a
+patient bound to their own session reads exactly the released rows of each
+table, of `ehr.documents_effective` and of the view across every withheld
+state (corrected and retracted vitals, each diagnosis verification status,
+each prescription status, restricted, internal, unattached, rejected,
+unscanned, re-uploaded and later-rejected documents, unverified, unreleased,
+invalidated, correction-pending and re-released Lab results, results of
+cancelled or retracted orders and of open encounters, another patient's
+rows); the 0091 unbound probes, an expired authorization and a staff context
+read nothing; the Lab runtimes, the Identity runtime and the owner cannot read
+the view; the patient context writes nothing; the exact policy inventory; and
+a released correction, an invalidation and a retraction change the release.
+`runtime-roles.integration.sql` asserts the owner's exact column grants,
+policies and absent privileges, the view's owner and readers, and
+`ehr.patient_self_context` granted to exactly the EHR runtime and the test
+role. `verify-patient-record-release-runtime.mjs` checks it over HTTP as the
+runtime roles. On a database built from empty to 0095 and bootstrapped twice
+(local synthetic evidence) `runtime-roles.integration.sql`,
+`schema.integration.sql` and the 50 additional suites pass, and the 0093
+upgrade suite passes on a database built to 0092. With every schema, table
+and function owned by a `NOSUPERUSER NOBYPASSRLS` role, and again on a
+database migrated and bootstrapped by a `NOSUPERUSER NOBYPASSRLS CREATEROLE`
+administrator, the 50 additional suites pass; `schema.integration.sql` fails
+there at its line 1149 ("Document not found") exactly as it does on `main`
+without this change, and the rehearsal's owner pass runs only the additional
+suites.

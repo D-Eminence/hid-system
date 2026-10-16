@@ -32,16 +32,17 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
 - **Merged, not deployed:** D-Eminence/hid-system#82 adds 0092: a NIN record without a date of birth or gender can enroll. The steps in §3 count 0092.
 - **Merged, not deployed:** D-Eminence/hid-system#84 adds 0093: a Health ID needs a proof that the person holds the NIN, a code to the phone the NIN record lists (ADR-062). Every new flag is off. The online route stays closed on staging, which sends email only, and production runs it only while a facility takes part (ADR-063). Until a staging facility is designated every start answers `503 PATIENT_REGISTRATION_NOT_OPEN` (release checklist §7, S4v). The steps in §3 count 0093.
 - **Merged, not deployed:** D-Eminence/hid-system#85 adds 0094: the facility route (ADR-063). A patient starts on their own device, shows a desk code at a participating facility, and a staff member with MFA and an attested clinical grant checks one original photo ID. The route stays closed until `ASSISTED_REGISTRATION_ENABLED` is on and a facility is designated (release checklist P29 to P33). Production then needs the facility flag with the online route, and opens the online route only while at least one facility takes part. On staging the facility route can open the acceptance rows that need a working start (S4v). The steps in §3 count 0094.
+- **In source, not merged:** the patient record release adds 0095 (owner decision 4 of 2026-10-16, ADR-064): patients may see their vitals, diagnoses, prescriptions, Lab results and documents, one EHR flag per category, every flag off; production refuses Lab results while Lab is off. The steps in §3 count 0095; with every flag off nothing changes for patients (release checklist P35, S4w).
 
 ## 3. Staging, in order
 
-1. **Preflight for staging.** Release checklist §4 lists P1 to P34.
+1. **Preflight for staging.** Release checklist §4 lists P1 to P35.
    - Run against staging: the database, secret and artefact rows, P1 to P5 and P8 to P14. P11 and P12 run again after the migration.
    - P22 (staff enrolment before clinical roles) applies to every environment that enables clinical roles.
-   - Production gates: P6 (two Super Admins), P7 (the staging acceptance passed) and P15 to P21; P28 (no active public enrollment) before 0093; P23 to P27 before any NIN holder route or the signed-in NIN binding is enabled, and P33 before either holder route; P29 to P33 before the facility route is enabled; P34 before self-sign-up opens.
-2. **Rehearse on a restored staging snapshot (S1).** Run `db:plan`, `db:dry-run` and `db:migrate` to 0094 in an isolated copy, then the bootstrap, `db:verify-roles` and `db:verify-logins` (S2).
+   - Production gates: P6 (two Super Admins), P7 (the staging acceptance passed) and P15 to P21; P28 (no active public enrollment) before 0093; P23 to P27 before any NIN holder route or the signed-in NIN binding is enabled, and P33 before either holder route; P29 to P33 before the facility route is enabled; P34 before self-sign-up opens; P35 before any patient record release flag is set.
+2. **Rehearse on a restored staging snapshot (S1).** Run `db:plan`, `db:dry-run` and `db:migrate` to 0095 in an isolated copy, then the bootstrap, `db:verify-roles` and `db:verify-logins` (S2).
 3. **Migrate staging.** Follow release checklist §5 in ledger order.
-   - Each migration has its lock window: steps 2 to 17 for 0067 to 0084, 18 to 27 for 0085 to 0094, the estimate check at 28 and the role bootstrap at 29.
+   - Each migration has its lock window: steps 2 to 17 for 0067 to 0084, 18 to 28 for 0085 to 0095, the estimate check at 29 and the role bootstrap at 30.
    - Run the bootstrap after the last migration and before any new build starts.
 4. **Deploy in the order of release checklist §6.**
    - Identity and EHR builds go out only after their migrations and the bootstrap.
@@ -53,7 +54,7 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
    - Browser checks with real authenticators: S4 and S4a.
    - Launch rows: S4d, S4e, S4f, S4g, S4i, S4j, S4k, S4l, S4m, S4n, S4o, S4p, S4q, S4r, S4s, S4t.
    - Rollback drill: S6.
-   - S4b, S4c and S4h apply only once their module is re-enabled.
+   - S4b, S4c and S4h apply only once their module is re-enabled; S4w before any patient record release flag is set.
    - The provider-portal browser rows (S4a, S4e, S4j, S4o, S4q) need a Health-id build that signs staff in with an authenticator (FE-2, §7). Health-id `82b474e` cannot sign staff in once 0088 is applied, so until FE-2 ships these rows run as scripted API requests and the browser part waits.
 6. **Record the evidence** against the exact build digests and the migration ledger (P7).
 
@@ -62,7 +63,7 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
 **Patient**
 - Sign in with HIDCode and password through `staging`.
 - `GET /auth/session` reports the patient.
-- `GET /ehr/me/records` returns only that patient's completed encounters and signed notes.
+- `GET /ehr/me/records` returns only that patient's completed encounters and signed notes, with every patient record release flag off (the launch default); with a flag on, only that category's released items of completed encounters as well (S4w).
 - A refresh rotates the cookies.
 - Sign-out clears them (S4e).
 - A Turnstile token that signed in once is refused the second time, and a sign-in without a token answers `400 TURNSTILE_REQUIRED` (S4t).

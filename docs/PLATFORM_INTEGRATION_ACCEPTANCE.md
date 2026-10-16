@@ -155,6 +155,7 @@ Pharmacy-to-Lab, and Identity-to-EHR wrong-service routes also returned 404.
 | `hid_event_delivery_commands` | Never inherited | Technical function owner; five domain outbox reads and `integration` state only |
 | `hid_ocr_queue_metrics` | Never inherited | Technical owner of `ocr.worker_queue_metrics()`; reads `ocr.jobs` status and queue time only |
 | `hid_platform_control_reader` | Never inherited | Technical owner of `platform.control_enabled(text)`; reads `platform.control_settings` key and enabled flag only (D-Eminence/hid-system#63) |
+| `hid_lab_release_reader` | Never inherited | Technical owner of the view `ehr.patient_released_lab_results`; reads the columns of the seven Lab release tables, `ehr.lab_requests` and `ehr.encounters` the view names, no schema `USAGE` and no function (patient record release, ADR-064) |
 | `hid_api_runtime` | Nothing | Retired and privilege-free |
 
 The idempotent local bootstrap and assertion-only catalog verification passed.

@@ -91,6 +91,7 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0092_patient_self_reported_enrollment_profile.sql` | Self-reported enrollment profile (D-Eminence/hid-system#82, ADR-061; numbered after 0091). Drops `identity.activate_public_patient_enrollment(uuid,char(64),text,text,text,text,char(64))` and creates it again with `requested_date_of_birth date` and `requested_gender text`, both default null (a 7-argument call still resolves to it), with 0085's owner, `SECURITY DEFINER`, `search_path`, result and body apart from the profile check: a date of birth or gender the profile gives cannot come from the request, one it lacks must, and any failure is `23514 PATIENT_IDENTITY_INVALID`. The patient row takes the profile's or the entered value; the authoritative profile stays what QoreID returned; the activation audit event gains `selfReportedFields` (names only). No table lock, no window. Dropping the function drops its grants: run `db:bootstrap` and `db:verify-roles` immediately after it (the bootstrap grants the new signature to the Identity runtime); until then every Identity build answers an enrollment activation `403 ENROLLMENT_DENIED`. Deploy the Identity build of this change only after both: it calls the 9-argument form, which an earlier schema lacks (`503 ENROLLMENT_UNAVAILABLE`). An earlier Identity build works on 0092 unchanged. Production NIN-only enrollment stays refused by configuration (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §3, §5 step 25, §9) |
 | `database/migrations/0093_nin_holder_ownership_proof.sql` | NIN holder proof (D-Eminence/hid-system#84, ADR-062; numbered after 0092). Adds the enrollment state `verify_holder` (the new default) before the contact step; drops the unique constraint on the enrollment NIN (each start is a row; one proven row per NIN by a partial unique index); adds the holder columns and checks, the code `purpose` (`contact` or `nin_holder`), the append-only `identity.public_patient_holder_events` (forced row-level security, no runtime privilege) and three `SECURITY DEFINER` commands for `system:auth` (`record_public_patient_holder_send`, `_failure`, `_proof`; a send needs the stored code and counts the attempts left on the NIN's open codes with its wrong codes); extends the prune, which now locks expired enrollments, skipping locked ones, before their codes; replaces the 9-argument activation command (same signature, owner, search path and grants) so a first activation needs a holder proof, with the NIN lock before the row lock. Backfill, with forced row-level security lifted on the two tables for it only: open codes of unfinished enrollments invalidated, those enrollments back to `verify_holder` with their contact cleared, active ones marked `none_before_0093`. `ACCESS EXCLUSIVE` on the enrollment and code tables, within the 5 s lock timeout. Preflight: zero active public enrollments in production. Run the role bootstrap after it: it grants the new commands and replaces the runtime's table-level `INSERT`/`UPDATE` on the enrollment table with column lists |
 | `database/migrations/0094_facility_assisted_registration.sql` | Facility-assisted registration (D-Eminence/hid-system#85, ADR-063; numbered after 0093). Adds the permission `identity.patient.assisted_registration` (doctor, clinician, nurse); the designation of participating facilities and its append-only events (forced row-level security, set only by a platform command with step-up, reason, expected version and idempotency key); the public facility list; `auth.staff_session_is_mfa` and the attested-grant check; the append-only in-person checks table (forced row-level security, digests and outcomes only) written by the staff command, which charges the per-staff and per-facility daily budgets and writes a staff audit row; the desk-code salt and issue count on the enrollment with three checks. Replaces the holder proof and the 9-argument activation command (same signatures, owner and grants) to accept `facility_in_person`. Changes no existing row and designates no facility. `ACCESS EXCLUSIVE` on the enrollment table while the columns and checks are added, within the 5 s lock timeout. Run the role bootstrap after it: it grants the Identity runtime the four new commands and the two new columns in its `UPDATE` list |
+| `database/migrations/0095_patient_record_release.sql` | Patient record release (owner decision 4 of 2026-10-16, ADR-064, D7; numbered after 0094). Adds five PUBLIC `SELECT` policies gated by `ehr.patient_self_context` and a completed encounter: final, never corrected vitals; confirmed diagnoses; active, on hold and completed prescriptions; uploaded PHI documents attached to an encounter, and their scan events. Creates the `security_barrier` view `ehr.patient_released_lab_results` (each Lab result's latest released, not invalidated revision of an order still open or completed, of a completed encounter; no reasons or staff identities), revoked from `PUBLIC`, and the index `lab_result_releases_patient_idx`. The role bootstrap creates its owner, the technical role `hid_lab_release_reader` (`NOLOGIN`, column `SELECT` and one `using (true)` policy per table it reads), and grants `SELECT` on it to the EHR runtime only. `ehr.patient_self_context`'s grants are unchanged and no Lab role gains a privilege. Changes no row; brief `ACCESS EXCLUSIVE` on the five EHR tables (release checklist §5 step 28). Every EHR release flag stays off until release checklist P35. |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles. Runs as a superuser or as the non-superuser administrator that created the roles (RDS); checks the roles' attributes instead of re-asserting them (§6) |
 | `database/runtime-login-assertions.sql` and `scripts/verify-runtime-logins.mjs` | `npm run db:verify-logins`: checks each runtime credential's own LOGIN, connected with that credential's URL (§6) |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
@@ -315,10 +316,11 @@ each role with its attributes and then checks them. It refuses a HID group
 role with `SUPERUSER`, `BYPASSRLS` or `REPLICATION`, and a runner that is
 neither a superuser nor holds `ADMIN OPTION` on every HID role; neither can
 happen to roles this administrator created. Inside its own transaction it
-holds `SET` and `INHERIT` membership in the three technical owners
+holds `SET` and `INHERIT` membership in the four technical owners
 (`hid_event_delivery_commands`, `hid_ocr_queue_metrics`,
-`hid_platform_control_reader`), and each of them holds `CREATE` on one schema
-only around its function transfer; it revokes both before it commits.
+`hid_platform_control_reader` and, since 0095, `hid_lab_release_reader`), and
+each of them holds `CREATE` on one schema only around its function (or, for
+`hid_lab_release_reader`, view) transfer; it revokes both before it commits.
 PostgreSQL 16 records, for a non-superuser that creates a role, an `ADMIN
 OPTION`-only membership granted by the bootstrap superuser. It carries no
 privilege and no `SET ROLE`, and the administrator cannot revoke it.
@@ -397,7 +399,7 @@ the rotated credentials). Clear the variables afterwards. In production every
 service that connects to the database also refuses to start over a superuser,
 `BYPASSRLS` or owner connection.
 
-Confirm the candidate ledger reaches `0094`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0095`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 After the legacy import, record (read-only, counts only, no identifiers) how
 many imported patient accounts have `email_verified_at` null and no verified
@@ -564,7 +566,7 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify the ledger at `0094`, runtime grants (`db:verify-roles`) and logins
+6. Verify the ledger at `0095`, runtime grants (`db:verify-roles`) and logins
    (`db:verify-logins`), RLS and purpose/deny behavior, and list the
    purpose-of-use codes (release checklist P10). After `0091`, confirm the
    launch platform controls and the launch module set (P11; like P10, its
@@ -592,7 +594,13 @@ continuity with synthetic or authorized minimum-necessary identifiers.
    runtime privilege on the holder events, the designations, their events
    or the checks. No facility is designated and
    `ASSISTED_REGISTRATION_ENABLED` stays off until release checklist P29 to
-   P33.
+   P33. After `0095`, likewise: the bootstrap creates `hid_lab_release_reader`,
+   gives it the released Lab results view and grants the EHR runtime `SELECT`
+   on it; `db:verify-roles` checks its exact privileges and that
+   `ehr.patient_self_context` is still executable by the EHR runtime only
+   (and the test role). Until it runs, a configured Lab results section
+   answers `503`. Run the P35 policy check before any
+   `EHR_PATIENT_RELEASE_*` flag is set.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts. A migrated staff account signs in with
    its password, then enrols an authenticator with the code emailed to it
