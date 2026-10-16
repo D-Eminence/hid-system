@@ -194,7 +194,7 @@ The reviewed role model is:
 | `hid_outreach_runtime` | Temporary registration, mapping, immutable history, idempotency, and outbox | None | No Identity, EHR, Lab, Pharmacy, or OCR mutation privilege. |
 | `hid_outreach_api_runtime` | Extracted Outreach API aggregate | None | Composes Outreach persistence and append-only audit only. |
 | `hid_event_dispatcher` | Event transport command surface | None | No direct table access; executes only lease-bound claim/result/status functions. |
-| `hid_event_delivery_commands` | Technical security-definer owner | None | Never inherited; reads five domain outboxes through exact RLS policies and mutates only `integration` delivery/inbox state. |
+| `hid_event_delivery_commands` | Technical security-definer owner | None | Never inherited; reads five domain outboxes through exact RLS policies and mutates only `integration` delivery/inbox state. Since 0095 it also owns the notification worker's claim-bound recipient lookup and executes its private helper, which the migration administrator owns; it holds no privilege on `identity.patients` or `auth.accounts`. |
 | `hid_ocr_queue_metrics` | Technical security-definer owner | None | Never inherited; owns `ocr.worker_queue_metrics()` and reads only `ocr.jobs.status` and `queued_at` through one exact RLS policy (0075). |
 | `hid_platform_control_reader` | Technical security-definer owner | None | Never inherited; owns `platform.control_enabled(text)` and reads only `platform.control_settings.control_key` and `enabled` through one exact RLS policy (launch; role bootstrap only). |
 | `hid_migration_admin` | Migration and provisioning administration | Environment-specific | Never inherited by an application runtime login. |
@@ -904,7 +904,9 @@ attempts are separate in `integration.outbox_delivery_state` and
 the dispatcher authority. The generic inbox uses
 `integration.inbox_messages` primary key `(consumer_name,event_id)` plus an
 administrator-owned consumer/database-role binding. Exact command and failure
-semantics are in `EVENT_DELIVERY_ARCHITECTURE.md`.
+semantics are in `EVENT_DELIVERY_ARCHITECTURE.md`. A consumer may learn a
+contact only through a function bound to its live inbox claim, as the
+notification worker's verified recipient lookup is (0095).
 
 Events carry identifiers, classification, and minimal payloads, not complete
 clinical records. Consumers retrieve necessary detail through authorized APIs.
@@ -2195,11 +2197,16 @@ the schema, policies or grants changes.
   the staff policies (`ehr.context_allows`) never pass, and only the 0030
   patient-self policies release rows: completed encounters, signed or amended
   notes and their current revisions (since 0084 only those of completed
-  encounters; "EHR clinical safety and launch module set (0084)"). The other clinical tables have `SELECT`
-  but no patient-self policy, so a patient read of them returns no rows and no
-  error. The service now reads only the two released categories and names the
-  other five as withheld; before, it read all seven and returned five arrays
-  that were always empty.
+  encounters; "EHR clinical safety and launch module set (0084)"). Until 0096
+  the other clinical tables had `SELECT` but no patient-self policy, so a
+  patient read of them returned no rows and no error. The service reads only
+  the two released categories and names the other five as withheld; before,
+  it read all seven and returned five arrays that were always empty. Since
+  0096 vitals, diagnoses, prescriptions and documents have patient-release
+  policies and released Lab results a view, each admitting rows only to a
+  patient-self transaction that names its category in `app.patient_release`,
+  and the service reads and names each only when its category's flag is on
+  ("Patient record release (0096)" below).
 - **Emergency summary** (`GET /ehr/patients/:id/emergency-records`). A
   break-glass emergency context passes `ehr.context_allows` for `read_records`
   at its facility (0012), so every clinical table is readable there.
@@ -3667,7 +3674,9 @@ rollback-only transaction and adds the doctor's refusal (release checklist
 
 **Patient-self binding (PSELF-RLS).** `ehr.patient_self_context(uuid)` keeps
 its signature, so the 0030/0084 policies on `ehr.encounters`,
-`ehr.clinical_notes` and `ehr.clinical_note_revisions` are unchanged. It
+`ehr.clinical_notes` and `ehr.clinical_note_revisions` are unchanged (0096
+adds five more policies and a view that call it; its `EXECUTE` grants are
+unchanged, "Patient record release (0096)"). It
 becomes `LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog,
 pg_temp` (CREATE OR REPLACE keeps its owner and its `EXECUTE` for
 `hid_ehr_runtime` and `hid_schema_test_runtime`). It still requires
@@ -4286,6 +4295,319 @@ Tests:
   bootstrapped, and the 49 additional suites again with every schema, table
   and function owned by a `NOSUPERUSER NOBYPASSRLS` role (local evidence,
   release checklist §8).
+
+## Notification verified recipient (0095)
+
+`0095_notification_verified_recipient.sql` (ADR-064; the number is
+provisional, assigned at merge) lets the notification worker learn a
+patient's verified login email for the event it holds a live inbox claim
+on, and never a name. The worker uses it only with
+`NOVU_SUBSCRIBER_SYNC=email` (off by default, refused in production). No
+table, column, policy or role changes.
+
+**Guard.** The migration first refuses (55000
+`BRANCH_0063_NOTIFICATION_RECIPIENT_PRESENT`) a database that already has
+`integration.verified_notification_recipient(uuid)` or the claim function,
+the shape of the D-Eminence/hid-system#8 branch's 0063, whose functions
+return names. Such a database is rebuilt or reconciled first. Both functions
+are plain `CREATE`.
+
+**Functions.** Both are `SECURITY DEFINER` with `search_path = pg_catalog,
+pg_temp`, revoked from `PUBLIC`, and return `TABLE(delivery text, email
+text)`.
+
+- `integration.notification_recipient_state(uuid)` (private helper, `sql`,
+  `stable`). Owner: the migration administrator, which owns
+  `identity.patients` (row-level security enabled, not forced),
+  `auth.accounts` and `identity.patient_account_deletion_requests` (none),
+  so it reads them without `BYPASSRLS`. One row: `('email', btrim(email))`
+  when the patient is `active` with `notifications_enabled`, and the login
+  is usable as main's `identity.current_patient_account` (0064) defines it:
+  `active`, `disabled_until` null or passed, and no `pending` deletion
+  request whose `scheduled_for` has passed (the test of
+  `identity.patient_account_deletion_due`, inlined so the helper needs no
+  `EXECUTE` on it); and the login has `email_verified_at` set and a
+  non-blank email. Otherwise `('withhold', null)`: phone-only, unverified
+  or blank email, no login, a `pending_reset`, `locked`, `disabled` or
+  `deleted` login, a suspended login (`disabled_until` ahead, which a banned
+  legacy login imports), a login whose confirmed deletion is due but not yet
+  finalized, a patient that is `inactive`, `merged`, `deceased` or
+  `deleted`, notifications off. A deletion confirmed but not yet due keeps
+  `email`, as the login stays usable until `scheduled_for`.
+- `integration.notification_recipient_for_claim(uuid, uuid, uuid)` (event,
+  claim token, patient). Owner: `hid_event_delivery_commands`, moved in
+  `runtime-grants.sql`'s integration CREATE window. Steps:
+  `integration.assert_inbox_consumer_authorized('notification-worker-v1')`
+  (42501 for a disabled consumer or a session user outside its role); the
+  consumer row must still name `hid_notification_worker` (42501 `Notification
+  consumer authorization required`); the inbox row must be `processing` with
+  this token and an unexpired lease (55000 `Inbox claim is stale or not
+  owned`, as `complete_inbox_message`); then the helper's answer for the
+  `integration.outbox_envelopes` row with the claim's event id, producer,
+  type, version and correlation id, a notification workflow type and the
+  given patient. No row when the claim binds no such envelope. It writes
+  nothing.
+
+**Grants** (`runtime-grants.sql`). `EXECUTE` on the claim function to
+`hid_notification_worker` only; on the helper to `hid_event_delivery_commands`
+only, beside its two existing private helpers. No table or column grant to
+any runtime or to the technical owner. The worker login keeps no `USAGE` on
+`identity` or `auth`.
+
+**Callers.** With `NOVU_SUBSCRIBER_SYNC=email` the worker calls the claim
+function once per claimed event, and a second time under the same claim
+after it has synced an email: unless the second answer is the same address,
+it clears the email again before the trigger (an event handled meanwhile,
+after a deletion or a disable, may have cleared it before the sync landed at
+Novu; ADR-064). It checks at startup that the function exists and is
+executable (`has_function_privilege(current_user, ...)`). It records each
+Novu subscriber call in `notification.delivery_attempts` (existing table,
+existing grant): workflow `novu-subscriber-email-v1` or
+`novu-subscriber-email-clear-v1`, channel `email`, the outcome and a fixed
+safe code, at most one row of each per attempt; no address and nothing
+derived from one. The patients whose address may be at Novu are those with a
+`novu-subscriber-email-v1` row (joined to `integration.outbox_envelopes` by
+event id for the patient); release checklist §9 uses them before the flag is
+turned off.
+
+**Tests.**
+
+- `notification-verified-recipient.integration.sql` (new, rollback-only;
+  run as the superuser and again with every schema, table and
+  administrator-owned function moved to a `NOSUPERUSER NOBYPASSRLS NOLOGIN`
+  owner): fixtures A to R (verified; phone-only; unverified; deleted login;
+  deceased; opted out, for an ordinary and a safety event; no login;
+  locked; blank email; suspended; deletion due; deletion confirmed, not yet
+  due; suspension ended; disabled; `pending_reset`; inactive patient; merged
+  patient), each with an Identity outbox event claimed as
+  `hid_notification_worker`. A, L and M answer `email`, every other fixture
+  `withhold`. A claim names no other
+  patient; a claim with another correlation id and an event without a
+  workflow bind nothing; a random token, another event's token and an
+  expired lease are 55000; a disabled consumer and one rebound to the test
+  role are 42501; the Identity, dispatcher and notification API runtimes
+  cannot execute the claim function; the worker cannot execute the helper or
+  read any of the three tables; catalogue checks (owners, security, search
+  path, result, `PUBLIC`; the helper's owner owns the three tables and none
+  forces row-level security); the lookup changes no claim.
+- `runtime-roles.integration.sql`: the exact ACLs (the worker on the claim
+  function, the technical owner on the helper, besides their owners), the
+  owners, `SECURITY DEFINER` and the search path, and no table or column
+  privilege on `identity.patients`, `auth.accounts` or
+  `identity.patient_account_deletion_requests` for the worker, the
+  notification aggregates, the dispatcher or the technical owner.
+- `scripts/verify-non-superuser-database.mjs`: after the non-superuser chain
+  to 0095, the RDS-like worker login claims two Identity events and gets
+  `email` for the verified patient and `withhold` for the phone-only one;
+  it is refused `identity`; the Identity login is refused at `integration`
+  and the dispatcher login at the function.
+- `services/notification-worker/scripts/verify-notification-worker-runtime.mjs`
+  (rehearsal `notification_worker_runtime`): the real worker as
+  `hid_notification_worker` against a fake Novu that applies Novu's replay
+  rule for a seen idempotency key, including a suspended and a deletion-due
+  login, one event retried while the patient goes withheld, eligible,
+  withheld, and two concurrent events with the login deleted between them.
+- Mutants (local evidence): the helper ignoring `notifications_enabled` is
+  killed by the suite (fixture F answers `email`); `EXECUTE` on the claim
+  function given to `hid_notification_runtime` is killed by
+  `db:verify-roles`. The first 0095 helper, which ignored `disabled_until`
+  and due deletions, fails the suite at fixtures J and K and the runtime
+  verifier at its suspended-login step.
+- All 52 SQL suites pass on a database built from empty to 0095 and
+  bootstrapped (0 pending on a rerun), and the 50 additional suites again
+  with the non-superuser owner (local evidence, release checklist §8).
+
+## Patient record release (0096)
+
+Owner decision 4 of 2026-10-16 (ADR-065, D7): patients may see their
+diagnoses, prescriptions, Lab results, vitals and documents as well as their
+encounters and notes. D7's rules apply (items of a completed encounter only;
+never a draft, an unconfirmed or refuted diagnosis or anything entered in
+error; documents only with a patient download route); the further rules below
+(no cancelled prescription, no corrected vital, Lab results of an open or
+completed order only, PHI documents attached to an encounter only, no lab
+request) are ADR-065's proposed defaults. The EHR service defines the release
+set (`PatientRecordRelease`, one default-off flag per category,
+`INTERFACE_CONTRACT.md` §11, "Record summaries"), and the database follows it:
+
+- **The database follows the flags.** Each 0096 policy and the view admit
+  their category only in a transaction whose transaction-local setting
+  `app.patient_release` names it exactly (a comma-separated list of
+  `vitals`, `diagnoses`, `prescriptions`, `labResults` and `documents`).
+  `DatabaseService.withPatientTransaction` starts every patient-self
+  transaction with it empty, and `PatientRecordRelease.bind` sets it to the
+  categories whose flag is on (its `read` and the patient document download
+  call it first). A transaction that names no category reads none of these
+  rows, so with every flag off the database refuses these categories to the
+  patient as before 0096; every earlier EHR build, including one from before
+  D-Eminence/hid-system#52 whose patient summary still queried every
+  category, never sets it and reads nothing new.
+- **Rows, not columns.** As for encounters and notes since 0030 and 0084,
+  row-level security admits rows and cannot restrict columns: a released row
+  is readable whole in the patient-self transaction, so the diagnosis `notes`,
+  a document's `storage_bucket`, `storage_key` and `created_by*` and a scan
+  event's staff columns are withheld only by `PatientRecordRelease`'s and the
+  download's `SELECT` lists (the download needs the storage location to sign
+  its URL). The Lab view also restricts columns.
+
+**Patient-release policies.** Five permissive `SELECT` policies, PUBLIC like
+the 0030/0084 patient-self policies and gated the same way by
+`ehr.patient_self_context(patient_id)` (the 0091 binding) and by their
+category in `app.patient_release`, each requiring the row's encounter to be
+completed and to match on id, patient and facility:
+
+| Policy | Table | Category | Rows admitted |
+|---|---|---|---|
+| `vitals_patient_release_read` | `ehr.vitals` | `vitals` | `status = 'final'` and `current_correction_no = 0`: a corrected vital is withheld while D8 (correction semantics) is open |
+| `diagnoses_patient_release_read` | `ehr.diagnoses` | `diagnoses` | `verification_status = 'confirmed'` (the service never selects `notes`) |
+| `prescriptions_patient_release_read` | `ehr.prescriptions` | `prescriptions` | `status in ('active', 'on_hold', 'completed')` |
+| `documents_patient_release_read` | `ehr.documents` | `documents` | `status = 'uploaded'`, `classification = 'phi'`, attached to an encounter |
+| `document_scan_events_patient_release_read` | `ehr.document_scan_events` | `documents` | every scan event of a document the patient may read, so `ehr.documents_effective` (0009, `security_invoker`) computes the true latest scan |
+
+No policy is added on `ehr.vital_corrections`, `ehr.lab_requests` or
+`ehr.record_versions`: lab requests (orders) are never released. Retracting a
+completed encounter (`entered_in_error`) hides all of its items at once.
+
+**Released Lab results.** `ehr.patient_released_lab_results` is a
+`security_barrier` view, not `security_invoker`, that admits rows only when
+`app.patient_release` names `labResults`: for each Lab result of the bound
+patient, its latest released revision (`lab.result_releases`), unless that
+revision was invalidated (`lab.result_invalidations`), with the test from
+`lab.work_item_requested_tests` and the source order and encounter from
+`lab.work_items`; the source EHR order must be `active`, `on_hold` or
+`completed` and the source encounter completed. Every join matches patient and
+facility, as 0020 does. It returns no correction or release reason and no
+staff identity. Lab's staff view (`lab-api`, released history) marks an
+invalidated latest release `entered_in_error`; the patient view leaves the
+result out. The order-status condition hides a result already released once
+its EHR order is cancelled or entered in error, where Lab's own released
+history keeps it (D10); ADR-065 lists it as a proposed default.
+
+Why a view owned by a technical role, and why not Lab:
+
+- Lab is off at launch (launch module set D17) and lab-api never receives
+  patient credentials or patient-self context: Identity's patient-self
+  authorization accepts only `ehr-api`, the patient reads the view only
+  through EHR's patient route, and `hid_lab_runtime` and
+  `hid_lab_api_runtime` gain no privilege. The view reads Lab's tables
+  without lab-api running.
+- `ehr.patient_self_context` stays executable by `hid_ehr_runtime` and
+  `hid_schema_test_runtime` only (PSELF-RLS). Functions in a view run as its
+  caller, so the view's `ehr.patient_self_context(release_row.patient_id)`
+  condition and the PUBLIC policies of `ehr.encounters` are evaluated as the
+  EHR runtime; the view's owner can evaluate neither. That condition is what
+  refuses a staff context: a consented direct-care staff transaction reaches
+  the encounter through `encounters_read`, and without it would read released
+  Lab values here, outside lab-api's `lab.result.released.read` check and
+  Lab's read audit.
+- Relations in a view are read with its owner's privileges and policies.
+  The owner, the technical role `hid_lab_release_reader` (NOLOGIN, NOINHERIT,
+  never granted to a login, no member, no schema `USAGE`, no function
+  privilege), holds column `SELECT` only on what the view reads and reads the
+  seven Lab tables and `ehr.lab_requests` through one exact policy each,
+  `patient_release_reader_read` (`for select to hid_lab_release_reader using
+  (true)`), so the view does not depend on its owner bypassing `FORCE ROW
+  LEVEL SECURITY`. The tables' PUBLIC staff policies are OR-ed with `true`
+  and folded away, so the owner needs no `EXECUTE` on `lab.context_allows` or
+  `ehr.context_allows`. It reads `ehr.encounters` (id, patient, facility,
+  status) through that table's own policies, with the caller's binding.
+- Only `hid_ehr_runtime` (through `hid_ehr_api_runtime`) and the test role
+  hold `SELECT` on the view; its owner holds no privilege on it. The owner
+  selecting it is refused.
+
+The migration creates the view (owned by the migration administrator, with
+no grant); the role bootstrap (`runtime-grants.sql`) creates the technical
+role, its column grants and policies, gives it the view inside a `CREATE`
+window on schema `ehr`, revokes the owner's own ACL entry (left by the
+migration's `REVOKE ... FROM PUBLIC` and handed over with the view) and grants
+`SELECT` on the view, so its first run already leaves exactly
+`{hid_ehr_runtime=r/hid_lab_release_reader,hid_schema_test_runtime=r/hid_lab_release_reader}`.
+Between the migration and the bootstrap a configured Lab results section
+answers `503 PATIENT_RECORDS_UNAVAILABLE`.
+
+**Indexes.** `lab_result_releases_patient_idx` on `lab.result_releases
+(patient_id, released_at desc, result_id)` is the view's access path (a
+launch database holds no Lab rows, 0091). `vitals_patient_release_idx` on
+`ehr.vitals (patient_id, recorded_at desc, id desc)`, and
+`diagnoses_patient_release_idx` and `prescriptions_patient_release_idx` on
+`(patient_id, created_at desc, id desc)`, match each section's order, so the
+section stops after the 101 rows it reads instead of evaluating the policies
+(about 1.6 ms a row: `ehr.context_allows`, `ehr.patient_self_context` and the
+encounter subquery) on every row the patient has. On the local cluster with
+2,000 and 5,000 rows of one patient, each of the three sections took
+160-190 ms with the indexes, and 1.7-3.4 s for 2,000 rows without them (at
+that rate about 9,000 vitals would pass the EHR pool's 15 s
+`statement_timeout`). The documents section filters on the scan status that
+`ehr.documents_effective` computes and reads every document of the patient
+(about 5 ms a document: 10 s for 2,000); a statement timeout (`57014`) of any
+released section answers `503 PATIENT_RECORDS_UNAVAILABLE`.
+
+**Locks.** `CREATE POLICY` takes `ACCESS EXCLUSIVE` briefly on `ehr.vitals`,
+`ehr.diagnoses`, `ehr.prescriptions`, `ehr.documents` and
+`ehr.document_scan_events`; `CREATE VIEW` `ACCESS SHARE` on the tables it
+names; each `CREATE INDEX` `SHARE` on its table (`lab.result_releases`,
+`ehr.vitals`, `ehr.diagnoses`, `ehr.prescriptions`) while it scans it, so
+writes to those tables wait until the migration commits. Each waits at most
+the runner's 5 s lock timeout and a timeout rolls the migration back whole.
+The bootstrap's eight policies are created on its first run (`ACCESS
+EXCLUSIVE` on each table, after the platform-control policy, so the lock order
+of `scripts/verify-non-superuser-database.mjs` holds) and only replaced when
+missing or different, so a rerun takes no lock on those tables.
+
+**Staging residue.** A database built from the PR #8 branch may carry
+permissive policies such as `diagnoses_patient_self_read`,
+`vitals_patient_self_read`, `vital_corrections_patient_self_read`,
+`investigations_patient_self_read`, `documents_patient_self_read`,
+`document_scans_patient_self_read` or `lab_patient_self_read`, which would
+OR-widen the release whatever `app.patient_release` says.
+`patient-record-release.integration.sql` asserts the exact policy inventory of
+every table the release reads and fails on any of them (release checklist
+P36).
+
+**Evidence.** `patient-record-release.integration.sql` (rollback-only): with
+the patient bound to their own live session, `app.patient_release` never set
+(as an earlier EHR build runs), empty, naming each category alone, two or
+three of them, or a value `PatientRecordRelease` never sets (wrong case,
+padding, another separator, `lab_results`, `labRequests`, `encounters`, `*`)
+admits exactly the named categories through each table, `ehr.documents_effective`
+and the view; with every category named, the patient reads exactly the
+released rows across every withheld state (corrected and retracted vitals,
+each diagnosis verification status, each prescription status, restricted,
+internal, unattached, rejected, unscanned, re-uploaded and later-rejected
+documents, unverified, unreleased, invalidated, correction-pending and
+re-released Lab results, results of cancelled or retracted orders and of open
+encounters, another patient's rows); the 0091 unbound probes and an expired
+authorization (in statements of its own, so the expiry does not depend on how
+long a DO block ran) read nothing; a direct-care staff context whose consent
+reaches the completed encounter reads no released Lab result through the view;
+the Lab runtimes, the Identity runtime and the owner cannot read the view; the
+patient context writes nothing; each policy's and the view's own patient-self
+and category terms (catalogue), the section indexes and the exact policy
+inventory; and a released correction, an invalidation and a retraction change
+the release. Replacing the view's patient-self condition with `true`, its
+category term with `true`, or dropping a policy's patient-self condition or
+category term each fails the suite (local mutation check).
+`runtime-roles.integration.sql` asserts, on every bootstrap run including the
+first, the view's exact ACL with no owner entry, the owner's exact column
+grants, policies and absent privileges, and `ehr.patient_self_context` granted
+to exactly the EHR runtime and the test role.
+`verify-patient-record-release-runtime.mjs` checks it over HTTP as the runtime
+roles, and in the EHR's own patient-self transaction under Identity's real
+authorization that a transaction naming no category reads only the completed
+encounter while one bound by `PatientRecordRelease` reads only the configured
+categories (every flag on, vitals only, every flag off). On a database built
+from empty to 0096 (after 0095, the Novu verified email change) and
+bootstrapped twice (local synthetic evidence) `runtime-roles.integration.sql`,
+`schema.integration.sql` and the 51 additional suites pass, and the 0093
+upgrade suite passes on a database built to 0092. Before the renumber (this
+migration then numbered 0095, without the Novu change), with every schema,
+table and function owned by a `NOSUPERUSER NOBYPASSRLS` role, and again on a
+database migrated and bootstrapped by a `NOSUPERUSER NOBYPASSRLS CREATEROLE`
+administrator, the 50 additional suites and the runtime verifier passed;
+`schema.integration.sql` fails there at its line 1149 ("Document not found")
+exactly as it does on `main` without this change (it fails the same with the
+0096 policies and view dropped), and the rehearsal's owner pass runs only the
+additional suites.
 
 ## Break-glass at launch, with limits (0095)
 

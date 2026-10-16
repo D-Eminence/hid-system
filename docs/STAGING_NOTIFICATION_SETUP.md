@@ -58,7 +58,11 @@ nor authorizes a message.
 
 The plan lists the four exact runtime workflow IDs and their generic message.
 The subscriber UUID remains null until the accepted synthetic journey manifest
-exists; then use `manifest.ids.patient`, never `ids.account`. Inspect existing
+exists; then use `manifest.ids.patient`, never `ids.account`. With
+`HID_NOVU_SUBSCRIBER_SYNC_ENABLED` (ADR-064, after release checklist P35) the
+worker maps that subscriber's email itself, to the patient's verified login
+email, and clears it for a patient who may not be emailed; the send
+authorizations below are unchanged and still required (S4w). Inspect existing
 Novu workflows and the selected integration before modifying anything. Apply the
 chosen `NOVU_API_URL` using the staging-only CloudFormation parameter
 `StagingNovuApiUrl`. It accepts the two documented US/EU endpoints and has no

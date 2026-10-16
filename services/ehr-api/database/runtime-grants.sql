@@ -78,6 +78,9 @@ begin
   if not exists (select 1 from pg_roles where rolname = 'hid_platform_control_reader') then
     create role hid_platform_control_reader nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
   end if;
+  if not exists (select 1 from pg_roles where rolname = 'hid_lab_release_reader') then
+    create role hid_lab_release_reader nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
+  end if;
   if not exists (select 1 from pg_roles where rolname = 'hid_event_dispatcher') then
     create role hid_event_dispatcher nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
   end if;
@@ -131,6 +134,7 @@ begin
     ('hid_event_delivery_commands', false),
     ('hid_ocr_queue_metrics', false),
     ('hid_platform_control_reader', false),
+    ('hid_lab_release_reader', false),
     ('hid_event_dispatcher', false),
     ('hid_notification_runtime', false),
     ('hid_notification_api_runtime', true),
@@ -164,15 +168,15 @@ begin
 end
 $$;
 
--- The administrator transfers functions to the three technical owners below
--- and then grants and revokes privileges on them. A non-superuser may give an
+-- The administrator transfers functions to the three technical owners below,
+-- and a view to the fourth, and then grants and revokes privileges on them. A non-superuser may give an
 -- object to a role only if it may SET ROLE to it, and may grant or revoke on
 -- an object it does not own only with the owner's privileges, which an
 -- INHERIT membership provides; a rerun, where the technical roles already own
 -- the functions, needs the same for the REVOKE ALL statements that follow.
 -- These memberships are revoked at the end of this file, in this transaction.
-grant hid_event_delivery_commands, hid_ocr_queue_metrics, hid_platform_control_reader
-  to current_user with inherit true, set true;
+grant hid_event_delivery_commands, hid_ocr_queue_metrics, hid_platform_control_reader,
+  hid_lab_release_reader to current_user with inherit true, set true;
 
 comment on role hid_identity_runtime is
   'Identity and authentication persistence privileges for an Identity-owned service boundary.';
@@ -216,6 +220,8 @@ comment on role hid_ocr_queue_metrics is
   'Technical owner of the aggregate-only OCR queue metrics command; reads OCR job status and queue time only; never granted to a runtime login.';
 comment on role hid_platform_control_reader is
   'Technical owner of platform.control_enabled(text); reads only the platform control keys and their enabled flags; never granted to a runtime login.';
+comment on role hid_lab_release_reader is
+  'Technical owner of the view ehr.patient_released_lab_results; reads released Lab result columns and source EHR order status; cannot evaluate patient-self; never granted to a runtime login.';
 comment on role hid_event_dispatcher is
   'Transport dispatcher command role with no direct domain or integration table privileges.';
 comment on role hid_notification_runtime is
@@ -326,6 +332,11 @@ revoke all privileges on schema platform, auth, identity, ehr, audit, ocr, lab, 
 revoke all privileges on all tables in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_platform_control_reader;
 revoke all privileges on all sequences in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_platform_control_reader;
 revoke all privileges on all functions in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_platform_control_reader;
+
+revoke all privileges on schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_lab_release_reader;
+revoke all privileges on all tables in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_lab_release_reader;
+revoke all privileges on all sequences in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_lab_release_reader;
+revoke all privileges on all functions in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_lab_release_reader;
 
 revoke all privileges on schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration from hid_event_dispatcher;
 revoke all privileges on all tables in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration from hid_event_dispatcher;
@@ -445,6 +456,14 @@ revoke hid_platform_control_reader from hid_identity_runtime, hid_ehr_runtime,
   hid_migration_admin, hid_event_dispatcher, hid_event_delivery_commands,
   hid_ocr_queue_metrics, hid_notification_runtime, hid_notification_api_runtime,
   hid_notification_worker;
+revoke hid_lab_release_reader from hid_identity_runtime, hid_ehr_runtime,
+  hid_api_runtime, hid_identity_api_runtime, hid_ehr_api_runtime, hid_ocr_api_runtime,
+  hid_audit_writer, hid_document_scanner, hid_ocr_runtime, hid_ocr_worker,
+  hid_lab_runtime, hid_lab_api_runtime, hid_pharmacy_runtime, hid_pharmacy_api_runtime,
+  hid_outreach_runtime, hid_outreach_api_runtime, hid_schema_test_runtime,
+  hid_migration_admin, hid_event_dispatcher, hid_event_delivery_commands,
+  hid_ocr_queue_metrics, hid_platform_control_reader, hid_notification_runtime,
+  hid_notification_api_runtime, hid_notification_worker;
 
 -- Launch (P8-CONTROL): platform.control_enabled(text) is the SECURITY
 -- DEFINER read of platform.control_settings that the Identity, EHR and
@@ -627,6 +646,184 @@ alter function ocr.worker_queue_metrics() owner to hid_ocr_queue_metrics;
 revoke create on schema ocr from hid_ocr_queue_metrics;
 grant execute on function ocr.worker_queue_metrics() to hid_ocr_worker;
 
+-- Patient record release (owner decision 4 of 2026-10-16, D7): the patient's
+-- released Lab results are read through the view ehr.patient_released_lab_results,
+-- which its migration creates. Its technical owner reads the Lab tables and
+-- the source EHR order's status through exact policies and column grants, so
+-- the view does not depend on its owner bypassing FORCE ROW LEVEL SECURITY,
+-- and it never sees a correction or release reason, a staff identity or the
+-- order's clinical information. Functions in a view run as its caller: the
+-- view's ehr.patient_self_context condition and the encounters' patient-self
+-- policy are evaluated as hid_ehr_runtime, the only runtime that may select
+-- the view. The owner holds no EXECUTE on ehr.patient_self_context (PSELF-RLS
+-- is unchanged), no USAGE on any schema and no membership. lab-api and
+-- hid_lab_runtime gain nothing (D17). The PUBLIC staff policies of these
+-- tables are OR-ed with the `true` below and folded away, so the owner needs
+-- no EXECUTE on lab.context_allows or ehr.context_allows. Each policy is
+-- replaced only when it is missing or differs, so a rerun takes no lock on
+-- these tables; one block per table, in the form the privilege replay of
+-- scripts/verify-runtime-locking-privileges.mjs follows.
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'lab.result_releases'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on lab.result_releases;
+    create policy patient_release_reader_read on lab.result_releases
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'lab.result_invalidations'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on lab.result_invalidations;
+    create policy patient_release_reader_read on lab.result_invalidations
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'lab.results'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on lab.results;
+    create policy patient_release_reader_read on lab.results
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'lab.result_revisions'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on lab.result_revisions;
+    create policy patient_release_reader_read on lab.result_revisions
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'lab.test_executions'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on lab.test_executions;
+    create policy patient_release_reader_read on lab.test_executions
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'lab.work_item_requested_tests'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on lab.work_item_requested_tests;
+    create policy patient_release_reader_read on lab.work_item_requested_tests
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'lab.work_items'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on lab.work_items;
+    create policy patient_release_reader_read on lab.work_items
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'ehr.lab_requests'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on ehr.lab_requests;
+    create policy patient_release_reader_read on ehr.lab_requests
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+grant select (result_id, result_version, patient_id, facility_id, released_at)
+  on lab.result_releases to hid_lab_release_reader;
+grant select (result_id, result_version, patient_id)
+  on lab.result_invalidations to hid_lab_release_reader;
+grant select (id, execution_id, patient_id, facility_id) on lab.results to hid_lab_release_reader;
+grant select (result_id, version, patient_id, facility_id, revision_kind, result_type, numeric_value,
+    text_value, unit, reference_range, abnormal_flag)
+  on lab.result_revisions to hid_lab_release_reader;
+grant select (id, requested_test_id, patient_id, facility_id) on lab.test_executions to hid_lab_release_reader;
+grant select (id, work_item_id, patient_id, facility_id, code_system, code, name)
+  on lab.work_item_requested_tests to hid_lab_release_reader;
+grant select (id, patient_id, facility_id, ordering_facility_id, source_ehr_order_id, source_encounter_id)
+  on lab.work_items to hid_lab_release_reader;
+grant select (id, patient_id, facility_id, status) on ehr.lab_requests to hid_lab_release_reader;
+grant select (id, patient_id, facility_id, status) on ehr.encounters to hid_lab_release_reader;
+grant create on schema ehr to hid_lab_release_reader;
+alter view ehr.patient_released_lab_results owner to hid_lab_release_reader;
+revoke create on schema ehr from hid_lab_release_reader;
+-- The migration's REVOKE ... FROM PUBLIC leaves an explicit entry of the
+-- view's owner, which the transfer hands to hid_lab_release_reader; remove it
+-- now, so the first run already leaves the ACL that every later run does
+-- (the owner needs no privilege on its own view).
+revoke all on ehr.patient_released_lab_results from hid_lab_release_reader;
+grant select on ehr.patient_released_lab_results to hid_ehr_runtime, hid_schema_test_runtime;
+
 grant usage on schema platform,identity,lab to hid_lab_runtime;
 grant select,insert on lab.imported_evidence,lab.imported_observations,lab.work_items,
   lab.work_item_requested_tests,lab.work_item_events,lab.accessions,lab.specimen_requirements,
@@ -748,13 +945,20 @@ alter function integration.complete_inbox_message(text,uuid,uuid)
 alter function integration.fail_inbox_message(
   text,uuid,uuid,text,boolean,timestamptz,integer
 ) owner to hid_event_delivery_commands;
+-- 0095 (ADR-064): the notification worker's claim-bound recipient lookup.
+alter function integration.notification_recipient_for_claim(uuid,uuid,uuid)
+  owner to hid_event_delivery_commands;
 revoke create on schema integration from hid_event_delivery_commands;
 
--- The command-owner executes these two private helpers from inside
+-- The command-owner executes these three private helpers from inside
 -- SECURITY DEFINER functions. They remain unavailable to every runtime role.
+-- The recipient helper (0095, ADR-064) stays with the migration
+-- administrator, which owns identity.patients and auth.accounts, so the
+-- command-owner reads neither table and holds no privilege on them.
 grant execute on function integration.outbox_envelope_sha256(
   text,uuid,text,integer,timestamptz,text,uuid,bigint,text,uuid,uuid,uuid,jsonb
-), integration.assert_inbox_consumer_authorized(text)
+), integration.assert_inbox_consumer_authorized(text),
+  integration.notification_recipient_state(uuid)
   to hid_event_delivery_commands;
 
 grant usage on schema integration to hid_event_dispatcher;
@@ -770,7 +974,8 @@ grant usage on schema integration to hid_notification_worker;
 grant execute on function
   integration.claim_inbox_message(text,uuid,text,text,integer,text,character,text,integer),
   integration.complete_inbox_message(text,uuid,uuid),
-  integration.fail_inbox_message(text,uuid,uuid,text,boolean,timestamptz,integer)
+  integration.fail_inbox_message(text,uuid,uuid,text,boolean,timestamptz,integer),
+  integration.notification_recipient_for_claim(uuid,uuid,uuid)
   to hid_notification_worker;
 
 -- The schema test role is intentionally more capable than any runtime role.
@@ -1295,8 +1500,8 @@ revoke all on identity.facility_assisted_registration, identity.facility_assiste
 -- creator's ADMIN OPTION, which PostgreSQL 16 gives a CREATEROLE
 -- administrator in every role it creates, is a separate grant and stays; it
 -- carries no privilege and no SET ROLE.
-revoke hid_event_delivery_commands, hid_ocr_queue_metrics, hid_platform_control_reader
-  from current_user;
+revoke hid_event_delivery_commands, hid_ocr_queue_metrics, hid_platform_control_reader,
+  hid_lab_release_reader from current_user;
 do $$
 begin
   if exists (
@@ -1304,12 +1509,12 @@ begin
      where membership.member = (select oid from pg_roles where rolname = current_user)
        and membership.roleid in (
          'hid_event_delivery_commands'::regrole, 'hid_ocr_queue_metrics'::regrole,
-         'hid_platform_control_reader'::regrole)
+         'hid_platform_control_reader'::regrole, 'hid_lab_release_reader'::regrole)
        and (membership.inherit_option or membership.set_option)
   ) or exists (
     select 1 from pg_namespace namespace_row
      cross join unnest(array['hid_event_delivery_commands', 'hid_ocr_queue_metrics',
-       'hid_platform_control_reader']) technical(role_name)
+       'hid_platform_control_reader', 'hid_lab_release_reader']) technical(role_name)
      where namespace_row.nspname in ('platform', 'auth', 'identity', 'ehr', 'audit', 'ocr', 'lab',
          'pharmacy', 'outreach', 'integration', 'notification', 'migration')
        and has_schema_privilege(technical.role_name, namespace_row.oid, 'CREATE')

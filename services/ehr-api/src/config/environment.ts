@@ -33,9 +33,22 @@ function databaseUrlOverridesTls(connectionString: string): boolean {
     .some((parameter) => url.searchParams.has(parameter));
 }
 
+/**
+ * The production profile: the production deployment, or NODE_ENV production
+ * outside staging (Identity's rule, CFG-PROD). Every ECS task runs with
+ * NODE_ENV production, staging included, so a setting that staging may use
+ * and production may not is keyed on this, not on NODE_ENV alone.
+ */
+export function isProductionProfile(environment: { HID_DEPLOYMENT_ENV?: string; NODE_ENV?: string }): boolean {
+  return environment.HID_DEPLOYMENT_ENV === 'production'
+    || (environment.NODE_ENV === 'production' && environment.HID_DEPLOYMENT_ENV !== 'staging');
+}
+
 const environmentSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    // The deployment profile; unset counts as production (deny by default).
+    HID_DEPLOYMENT_ENV: z.enum(['development', 'staging', 'production']).default('production'),
     NODE_TLS_REJECT_UNAUTHORIZED: optionalString,
     PORT: z.coerce.number().int().min(1).max(65_535).default(3002),
     DATABASE_URL: z.string().url().startsWith('postgresql://'),
@@ -80,8 +93,43 @@ const environmentSchema = z
     AWS_ACCESS_KEY_ID: optionalString,
     AWS_SECRET_ACCESS_KEY: optionalString,
     AWS_SESSION_TOKEN: optionalString,
+    // Patient record release (owner decision 4 of 2026-10-16, D7, ADR-065):
+    // what the patient's own summary releases beyond encounters and notes, one
+    // flag per category, each off by default and refused in the production
+    // profile (below). Lab requests (orders) are never released.
+    EHR_PATIENT_RELEASE_VITALS: booleanString,
+    EHR_PATIENT_RELEASE_DIAGNOSES: booleanString,
+    EHR_PATIENT_RELEASE_PRESCRIPTIONS: booleanString,
+    EHR_PATIENT_RELEASE_LAB_RESULTS: booleanString,
+    EHR_PATIENT_RELEASE_DOCUMENTS: booleanString,
   })
   .superRefine((environment, context) => {
+    // D17: Lab is not routed at launch and every Lab permission is withdrawn
+    // (0091 section 2). The production profile releases no Lab result to a
+    // patient until the reviewed migration that enables Lab removes this rule.
+    if (environment.EHR_PATIENT_RELEASE_LAB_RESULTS && isProductionProfile(environment)) {
+      context.addIssue({ code: 'custom', path: ['EHR_PATIENT_RELEASE_LAB_RESULTS'],
+        message: 'Lab results are not released to patients while Lab is off at launch (D17)' });
+    }
+    // ADR-065: no clinician-review gate or sensitivity classification is
+    // built, so the production profile releases none of the EHR categories
+    // until the clinical owner signs off each category and its wording
+    // (release checklist P36). Each refusal is removed only by a reviewed
+    // change that records that sign-off; staging and a local development run
+    // may opt in. The AWS development stack runs in the production profile.
+    for (const [flag, category] of [['EHR_PATIENT_RELEASE_VITALS', 'Vitals'],
+      ['EHR_PATIENT_RELEASE_DIAGNOSES', 'Diagnoses'], ['EHR_PATIENT_RELEASE_PRESCRIPTIONS', 'Prescriptions'],
+      ['EHR_PATIENT_RELEASE_DOCUMENTS', 'Documents']] as const) {
+      if (environment[flag] && isProductionProfile(environment)) {
+        context.addIssue({ code: 'custom', path: [flag], message: `${category} released to patients are refused in the `
+          + 'production profile until the clinical owner signs off the category and its wording (release checklist P36, '
+          + 'ADR-065)' });
+      }
+    }
+    if (environment.EHR_PATIENT_RELEASE_DOCUMENTS && environment.STORAGE_MODE !== 's3') {
+      context.addIssue({ code: 'custom', path: ['EHR_PATIENT_RELEASE_DOCUMENTS'],
+        message: 'Releasing documents to patients needs S3 storage for their download' });
+    }
     if (environment.EHR_SERVICE_IDENTITY_MODE === 'local-secret'
         && !environment.EHR_INTERNAL_SERVICE_TOKEN && environment.NODE_ENV !== 'test') {
       context.addIssue({ code: 'custom', path: ['EHR_INTERNAL_SERVICE_TOKEN'],
