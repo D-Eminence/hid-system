@@ -87,7 +87,7 @@ for (const [service, port, hasHttpHealth] of backends) {
   assert.ok(dockerfile.includes(`FROM ${distrolessNodeRuntime} AS runtime`),
     `${service} final runtime must use the pinned Distroless Node image`)
   const runtime = dockerfile.slice(dockerfile.lastIndexOf(`FROM ${distrolessNodeRuntime} AS runtime`))
-  assert.match(runtime, /USER 65532:65532/, `${service} runtime must be non-root`)
+  assert.equal([...runtime.matchAll(/^USER (.+)$/gm)].at(-1)?.[1], '65532:65532', `${service} runtime must be non-root`)
   assert.match(runtime, /CMD \["dist\/main\.js"\]/, `${service} must use Distroless exec-form Node startup`)
   assert.doesNotMatch(runtime, /^RUN /m, `${service} final runtime must not include package-manager or build commands`)
   assert.match(dockerfile, /STOPSIGNAL SIGTERM/, `${service} must receive its graceful stop signal`)
@@ -124,6 +124,14 @@ for (const [service, port, hasHttpHealth] of backends) {
 const ehrDockerfile = await readFile(join(repository, 'services/ehr-api/Dockerfile'), 'utf8')
 assert.match(ehrDockerfile, new RegExp(`FROM ${distrolessNodeRuntime} AS migration[\\s\\S]*scripts\\/apply-migrations\\.mjs`),
   'EHR must expose a controlled, separate migration job target')
+// The migration job holds the migration administrator's DATABASE_URL and its
+// ECS container definition sets no user, so the stage itself must end as the
+// non-root runtime user instead of relying on the base image's default user.
+const ehrMigrationStart = ehrDockerfile.indexOf(`FROM ${distrolessNodeRuntime} AS migration`)
+const ehrMigrationEnd = ehrDockerfile.indexOf('\nFROM ', ehrMigrationStart)
+const ehrMigration = ehrDockerfile.slice(ehrMigrationStart, ehrMigrationEnd === -1 ? undefined : ehrMigrationEnd)
+assert.equal([...ehrMigration.matchAll(/^USER (.+)$/gm)].at(-1)?.[1], '65532:65532',
+  'the EHR migration job must run as the non-root runtime user')
 const ehrRuntime = ehrDockerfile.slice(ehrDockerfile.lastIndexOf(`FROM ${distrolessNodeRuntime} AS runtime`))
 assert.doesNotMatch(ehrRuntime, /services\/ehr-api\/(?:database|scripts)/,
   'the EHR API runtime image must not contain the migration executor or ledger')
