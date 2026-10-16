@@ -1425,9 +1425,9 @@ $$;
 -- reads, writes and deletes the patient's own history (row-level security
 -- binds every row to the patient-self transaction) and never updates it; it
 -- runs the two limit commands and the legal hold check of its own history,
--- and reaches no limit table. No other role, the schema-test role included,
--- holds any privilege on the chat tables or commands; PUBLIC executes none of
--- the commands.
+-- and reaches no limit table. No other role, the schema-test role and the
+-- imported history's two technical owners included, holds any privilege on
+-- the chat tables or commands; PUBLIC executes none of the commands.
 do $$
 declare
   other_roles text[] := array[
@@ -1437,13 +1437,21 @@ declare
     'hid_pharmacy_api_runtime', 'hid_outreach_runtime', 'hid_outreach_api_runtime', 'hid_migration_admin',
     'hid_schema_test_runtime', 'hid_event_delivery_commands', 'hid_event_dispatcher', 'hid_notification_runtime',
     'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics',
-    'hid_platform_control_reader', 'hid_lab_release_reader'];
+    'hid_platform_control_reader', 'hid_lab_release_reader',
+    'hid_imported_history_commands', 'hid_imported_history_importer'];
   history text[] := array['ehr.patient_chat_conversations', 'ehr.patient_chat_messages'];
   limits text[] := array['ehr.record_chat_usage_counters', 'ehr.record_chat_reservations',
     'ehr.record_chat_daily_budget'];
   commands text[] := array['ehr.reserve_record_chat(text,uuid,integer,bigint)',
     'ehr.settle_record_chat(uuid,integer,integer,integer,integer,text)', 'ehr.record_chat_history_on_hold(uuid)'];
 begin
+  -- PUBLIC and the 28 group roles listed at the top of this file, less the
+  -- EHR runtime and its API role, each an existing NOLOGIN role.
+  if cardinality(other_roles) <> 27
+     or (select count(*) from pg_roles role_row
+          where role_row.rolname = any (other_roles) and not role_row.rolcanlogin) <> 26 then
+    raise exception 'the record chat check must name every group role but the EHR runtime and its API role';
+  end if;
   if exists (select 1 from unnest(history) relation(name)
               where not has_table_privilege('hid_ehr_runtime', relation.name, 'SELECT')
                  or not has_table_privilege('hid_ehr_runtime', relation.name, 'INSERT')

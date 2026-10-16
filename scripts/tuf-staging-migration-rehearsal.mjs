@@ -411,7 +411,8 @@ try {
     // Patient record chat (owner decision 1): the EHR runtime reads, writes
     // and deletes the patient's history but never updates it, runs the two
     // limit commands and the legal hold check and reaches no limit table; the
-    // kill switch is off.
+    // kill switch is off, and clinician self sign-up's control (0098), whose
+    // key the record chat migration keeps in the control check, is still off.
     assert.deepEqual((await client.query(`select
         has_table_privilege('hid_ehr_runtime', 'ehr.patient_chat_messages', 'SELECT,INSERT,DELETE') as history,
         has_table_privilege('hid_ehr_runtime', 'ehr.patient_chat_messages', 'UPDATE') as history_update,
@@ -422,9 +423,10 @@ try {
         has_function_privilege('hid_ehr_runtime', 'ehr.record_chat_history_on_hold(uuid)', 'EXECUTE') as hold,
         has_function_privilege('public', 'ehr.record_chat_history_on_hold(uuid)', 'EXECUTE') as public_hold,
         has_table_privilege('hid_identity_runtime', 'ehr.patient_chat_messages', 'SELECT') as identity_history,
-        platform.control_enabled('record_chat_enabled') as control`)).rows[0],
+        platform.control_enabled('record_chat_enabled') as control,
+        platform.control_enabled('clinician_signup_enabled') as clinician_control`)).rows[0],
     { history: true, history_update: false, limits: false, reserve: true, public_reserve: false, hold: true,
-      public_hold: false, identity_history: false, control: false },
+      public_hold: false, identity_history: false, control: false, clinician_control: false },
     'The upgraded role bootstrap must give the EHR runtime the record chat history and commands only');
     await client.query('begin');
     try {

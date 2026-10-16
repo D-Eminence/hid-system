@@ -22,14 +22,19 @@ async function accepts(controlKey: unknown): Promise<boolean> {
 }
 
 describe('PlatformControlCommandDto', () => {
-  it('accepts exactly the control keys the database accepts, record chat included', async () => {
-    const keys = databaseControlKeys();
-    expect(keys).toEqual(['break_glass_enabled', 'maintenance_mode', 'outreach_portal_enabled', 'patient_portal_enabled',
-      'provider_portal_enabled', 'record_chat_enabled', 'uploads_enabled']);
-    for (const key of keys) expect({ key, accepted: await accepts(key) }).toEqual({ key, accepted: true });
-  });
+  it('accepts exactly the control keys the database accepts, clinician self sign-up and record chat included',
+    async () => {
+      const keys = databaseControlKeys();
+      // The record chat migration keeps clinician self sign-up's key (0098)
+      // and adds its own: both stay manageable through POST /admin/controls.
+      expect(keys).toEqual(['break_glass_enabled', 'clinician_signup_enabled', 'maintenance_mode',
+        'outreach_portal_enabled', 'patient_portal_enabled', 'provider_portal_enabled', 'record_chat_enabled',
+        'uploads_enabled']);
+      for (const key of keys) expect({ key, accepted: await accepts(key) }).toEqual({ key, accepted: true });
+    });
 
-  it.each(['record_chat', 'RECORD_CHAT_ENABLED', 'record_chat_enabled ', 'staff_record_chat_enabled', '', undefined])(
+  it.each(['record_chat', 'RECORD_CHAT_ENABLED', 'record_chat_enabled ', 'staff_record_chat_enabled',
+    'clinician_signup', 'CLINICIAN_SIGNUP_ENABLED', 'clinician_signup_enabled ', '', undefined])(
     'refuses %p', async (controlKey) => {
       expect(await accepts(controlKey)).toBe(false);
     });

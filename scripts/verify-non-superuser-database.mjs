@@ -23,7 +23,9 @@
 //   them in the first: a migration that replaces such a function (as one
 //   replaces platform.control_enabled, owned by hid_platform_control_reader)
 //   takes the path it takes there. The owner and ACL stay, no temporary
-//   membership is left, and the role bootstrap and db:verify-roles pass;
+//   membership is left, every control row it finds keeps its value (one an
+//   administrator turned on included) and a control it adds is off, and the
+//   role bootstrap and db:verify-roles pass;
 // - db:verify-roles' refusal of an ADMIN OPTION membership of a runtime group
 //   role in a technical owner;
 // - db:verify-logins for one login per runtime credential, and its refusal of
@@ -544,6 +546,23 @@ try {
   const ownersBefore = controlOwnerState(rds);
   assert.match(ownersBefore.control_enabled, /^hid_platform_control_reader\|/);
   assert.equal(ownersBefore.inherit_or_set_memberships, 0);
+  // Every control row the latest migration finds stays as it was, and a key
+  // it adds starts off: on RDS an administrator may already have changed a
+  // control (clinician self sign-up's intake opened after P37, here) before a
+  // migration that replaces the control CHECK and its functions runs. The
+  // cluster superuser stands in for that audited change (POST
+  // /admin/controls) and puts the row back afterwards.
+  const controlRows = (label) => JSON.parse(psql(label, superuser,
+    `select json_object_agg(control_key, json_build_object('enabled', enabled, 'row_version', row_version,
+        'reason', reason, 'updated_by', updated_by) order by control_key) from platform.control_settings`, 0, rds)
+    .stdout.trim());
+  const seededControls = controlRows('control rows on the RDS path as migrated');
+  assert.equal(seededControls.clinician_signup_enabled?.enabled, false);
+  psql('an administrator opens clinician sign-up before the latest migration', superuser,
+    `update platform.control_settings set enabled = true, row_version = row_version + 1,
+        reason = 'Synthetic: intake opened before the latest migration'
+      where control_key = 'clinician_signup_enabled'`, 0, rds);
+  const controlsBefore = controlRows('control rows before the latest migration');
   psql('grant SET ON PARAMETER for the latest migration', superuser,
     `grant set on parameter plpgsql.variable_conflict to ${admin}`);
   const latest = migrate('apply the latest migration as RDS applies it', 0, rds);
@@ -553,13 +572,35 @@ try {
   const ownersAfter = controlOwnerState(rds);
   assert.deepEqual(ownersAfter, ownersBefore,
     'the latest migration changed the owner or ACL of platform.control_enabled or left a membership');
+  const controlsAfter = controlRows('control rows after the latest migration');
+  const addedControls = Object.keys(controlsAfter).filter((key) => !(key in controlsBefore));
+  assert.deepEqual(Object.fromEntries(Object.entries(controlsAfter).filter(([key]) => key in controlsBefore)),
+    controlsBefore, 'the latest migration changed a control row it found');
+  for (const key of addedControls) {
+    assert.equal(controlsAfter[key].enabled, false, `the latest migration added ${key} on`);
+  }
+  // As a guard reads them: platform.control_enabled as the Identity runtime.
+  const guardReads = psql('controls read as the Identity runtime after the latest migration', superuser,
+    `set role hid_identity_api_runtime; select string_agg(key || '=' || platform.control_enabled(key), ','
+       order by key) from unnest(array['${Object.keys(controlsAfter).join("', '")}']) key`, 0, rds).stdout.trim();
+  assert.equal(guardReads, Object.keys(controlsAfter).sort()
+    .map((key) => `${key}=${controlsAfter[key].enabled ? 'true' : 'false'}`).join(','));
+  psql('clinician sign-up closed again after the check', superuser,
+    `update platform.control_settings set enabled = false, row_version = ${seededControls.clinician_signup_enabled.row_version},
+        reason = ${seededControls.clinician_signup_enabled.reason === null ? 'null'
+    : `'${seededControls.clinician_signup_enabled.reason.replaceAll("'", "''")}'`}
+      where control_key = 'clinician_signup_enabled'`, 0, rds);
+  assert.deepEqual(controlRows('control rows after the check')?.clinician_signup_enabled,
+    seededControls.clinician_signup_enabled);
   const rdsBootstrap = [bootstrap('role bootstrap after the latest migration on the RDS path', [], rds),
     bootstrap('db:verify-roles after the latest migration on the RDS path', ['--verify-only'], rds)];
   assert.deepEqual(rdsBootstrap, ['Runtime database roles provisioned and verified',
     'Runtime database role verification passed']);
   evidence.steps.latest_migration_after_bootstrap = { database: rds, through: files.at(-2), migration: files.at(-1),
     technical_objects_transferred: transferred.length, control_enabled: ownersAfter.control_enabled.split('|')[0],
-    acl_unchanged: true, inherit_or_set_memberships: ownersAfter.inherit_or_set_memberships, bootstrap: rdsBootstrap };
+    acl_unchanged: true, inherit_or_set_memberships: ownersAfter.inherit_or_set_memberships, bootstrap: rdsBootstrap,
+    controls_kept: Object.keys(controlsBefore).length, controls_added_off: addedControls,
+    changed_control_kept: 'clinician_signup_enabled on' };
 
   // A runtime group role must hold no ADMIN OPTION in a technical owner, even
   // without INHERIT or SET: it could grant the owner to its own login and
@@ -1218,9 +1259,15 @@ try {
   const suites = ['platform-control-owner.integration.sql', 'function-parameter-settings.integration.sql',
     'patient-record-chat.integration.sql'];
   for (const name of suites) suite(name, superuser);
-  suite('patient-record-chat.integration.sql', superuser, `${database}_rds`);
+  // On the RDS-path database the latest migration ran after the one before
+  // it, with every technical owner, the imported history's two included,
+  // already holding its objects: both imported history suites must still
+  // pass there, so the latest migration undid nothing of the one before it.
+  const rdsPathSuites = ['imported-medical-history.integration.sql', 'imported-history-import.integration.sql',
+    'patient-record-chat.integration.sql'];
+  for (const name of rdsPathSuites) suite(name, superuser, `${database}_rds`);
   evidence.steps.suites = suites;
-  evidence.steps.rds_path_suites = ['patient-record-chat.integration.sql'];
+  evidence.steps.rds_path_suites = rdsPathSuites;
   evidence.steps.database_provisioning = await provisioningStage();
   evidence.status = 'passed';
 } catch (error) {

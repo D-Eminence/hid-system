@@ -60,8 +60,8 @@ begin
     perform set_config('hid_control_owner_test.' || control.control_key, control.enabled::text, true);
     listed := listed + 1;
   end loop;
-  if listed <> 7 then
-    raise exception 'admin_list_controls returned % controls instead of 7', listed;
+  if listed <> 8 then
+    raise exception 'admin_list_controls returned % controls instead of 8', listed;
   end if;
 end
 $$;

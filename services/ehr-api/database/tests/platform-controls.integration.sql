@@ -49,8 +49,8 @@ declare
   result record;
 begin
   select count(*) into listed from platform.admin_list_controls();
-  if listed <> 7 then
-    raise exception 'admin_list_controls returned % controls instead of 7', listed;
+  if listed <> 8 then
+    raise exception 'admin_list_controls returned % controls instead of 8', listed;
   end if;
   select c.row_version, c.enabled into before_version, before_enabled
     from platform.admin_list_controls() c where c.control_key = 'outreach_portal_enabled';

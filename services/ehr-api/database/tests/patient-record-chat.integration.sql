@@ -578,8 +578,10 @@ reset role;
 select pg_temp.record('the control row', 'false|1|true',
   (select enabled || '|' || row_version || '|' || (updated_by is null) from platform.control_settings
     where control_key = 'record_chat_enabled'));
-select pg_temp.record('the control keys', 'break_glass_enabled,maintenance_mode,outreach_portal_enabled,'
-  || 'patient_portal_enabled,provider_portal_enabled,record_chat_enabled,uploads_enabled',
+-- Clinician self sign-up's key (0098) stays beside the new one: the check,
+-- the read and the command admit both, and its row is as 0098 seeded it.
+select pg_temp.record('the control keys', 'break_glass_enabled,clinician_signup_enabled,maintenance_mode,'
+  || 'outreach_portal_enabled,patient_portal_enabled,provider_portal_enabled,record_chat_enabled,uploads_enabled',
   (select string_agg(key_match[1], ',' order by key_match[1])
      from pg_constraint constraint_row,
           regexp_matches(pg_get_constraintdef(constraint_row.oid), '''([a-z_]+)''', 'g') key_match
@@ -587,6 +589,17 @@ select pg_temp.record('the control keys', 'break_glass_enabled,maintenance_mode,
       and constraint_row.conname = 'control_settings_control_key_check'));
 select pg_temp.record('the control command admits the new key', 'record_chat_enabled', (select substring(prosrc
   from 'record_chat_enabled') from pg_proc where oid = 'platform.admin_set_control(text,boolean,bigint,text)'::regprocedure));
+select pg_temp.record('the control command still admits clinician sign-up', 'clinician_signup_enabled',
+  (select substring(prosrc from 'clinician_signup_enabled') from pg_proc
+    where oid = 'platform.admin_set_control(text,boolean,bigint,text)'::regprocedure));
+select pg_temp.record('the control rows', 'break_glass_enabled=false,clinician_signup_enabled=false,'
+  || 'maintenance_mode=false,outreach_portal_enabled=false,patient_portal_enabled=true,provider_portal_enabled=true,'
+  || 'record_chat_enabled=false,uploads_enabled=false',
+  (select string_agg(control_key || '=' || enabled, ',' order by control_key) from platform.control_settings));
+set local role hid_identity_api_runtime;
+select pg_temp.record('clinician sign-up is still read as off', 'false',
+  platform.control_enabled('clinician_signup_enabled')::text);
+reset role;
 select pg_temp.record('no record chat retention class or purge command', '0,0,0',
   (select count(*)::text from platform.record_class_retention_policies where record_class like '%chat%')
   || ',' || (select count(*)::text from pg_proc where proname like '%prune_record_chat%')
@@ -609,7 +622,7 @@ begin
     raise exception 'the patient record chat suite crossed a UTC hour boundary (its hourly and daily cases bucket by '
       'the hour); run it again';
   end if;
-  if (select count(*) from chat_case_results) < 87 then
+  if (select count(*) from chat_case_results) < 90 then
     raise exception 'patient record chat suite recorded only % cases', (select count(*) from chat_case_results);
   end if;
 end $$;
