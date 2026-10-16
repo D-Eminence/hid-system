@@ -19,19 +19,28 @@
 //   WAF-CRS-BODY  a 300 KiB clinical note body reaches ehr-api; a body over
 //               512 KiB answers 413 PAYLOAD_TOO_LARGE before any upstream sees it.
 //
+//   RF-008      the built image runs as 101 and carries the exact Alpine
+//               package versions gateway/Dockerfile installs (pcre2 10.49-r0).
+//
 // Usage:
+//   node scripts/verify-gateway-runtime.mjs --built-image
+//     builds the runtime target of gateway/Dockerfile for this host's platform
+//     (docker build on the host network, no push), checks its user and its
+//     pinned packages, and runs nginx from that image (docker run on the host
+//     network, as this user, with only the temporary directory mounted); the
+//     image is removed afterwards. CI runs this form: npm run
+//     verify:gateway-runtime:image is the gateway-runtime step of
+//     release/scripts/run-workspace-gates.mjs, which the workspace job of
+//     .github/workflows/tuf-local-gates.yml runs.
 //   node scripts/verify-gateway-runtime.mjs --pinned-image
-//     runs nginx from the image gateway/Dockerfile pins by digest (docker run
-//     on the host network, as this user, with only the temporary directory
-//     mounted). CI runs this form: npm run verify:gateway-runtime:image is the
-//     gateway-runtime step of release/scripts/run-workspace-gates.mjs, which
-//     the workspace job of .github/workflows/tuf-local-gates.yml runs.
+//     runs nginx from the base image gateway/Dockerfile pins by digest, without
+//     the gateway's own layers.
 //   HID_NGINX_BINARY=/path/to/nginx node scripts/verify-gateway-runtime.mjs
 //     runs a local binary, which should be the nginx release the pinned image
 //     runs (1.29.x); no container engine is used.
-// No network beyond the image pull, and no credential, is used; everything
-// listens on 127.0.0.1 ports the operating system assigns, and the temporary
-// directory is removed afterwards.
+// No network beyond the image pull and the build's package fetch, and no
+// credential, is used; everything listens on 127.0.0.1 ports the operating
+// system assigns, and the temporary directory is removed afterwards.
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
@@ -43,14 +52,19 @@ import { join, resolve } from 'node:path'
 import { renderTemplate } from './lib/nginx-config-model.mjs'
 
 const repository = resolve(import.meta.dirname, '..')
-const pinnedImage = process.argv.includes('--pinned-image')
+const builtImage = process.argv.includes('--built-image')
+const pinnedImage = builtImage || process.argv.includes('--pinned-image')
 const nginxBinary = process.env.HID_NGINX_BINARY
 if (!pinnedImage && !nginxBinary) {
-  process.stderr.write('verify-gateway-runtime: pass --pinned-image (needs docker) or set HID_NGINX_BINARY to an nginx 1.29 binary; nothing was verified.\n')
+  process.stderr.write('verify-gateway-runtime: pass --built-image or --pinned-image (needs docker) or set HID_NGINX_BINARY to an nginx 1.29 binary; nothing was verified.\n')
   process.exit(2)
 }
-// The runtime image the gateway ships, exactly as gateway/Dockerfile pins it.
+const randomSuffix = randomBytes(6).toString('hex')
+// The runtime base the gateway ships, exactly as gateway/Dockerfile pins it,
+// or the gateway image built from it.
 let image
+let builtTag
+let installedPins
 if (pinnedImage) {
   const dockerfile = await readFile(join(repository, 'gateway/Dockerfile'), 'utf8')
   const pinned = [...dockerfile.matchAll(/^FROM (\S+@sha256:[0-9a-f]{64}) AS runtime$/gm)].map(([, reference]) => reference)
@@ -58,10 +72,39 @@ if (pinnedImage) {
   image = pinned[0]
   const pull = spawnSync('docker', ['pull', '--quiet', image], { stdio: ['ignore', 'ignore', 'inherit'] })
   if (pull.status !== 0) throw new Error(`docker pull ${image} failed (${pull.error?.message ?? `exit ${pull.status}`})`)
+  if (builtImage) {
+    builtTag = `hid-gateway-runtime-check:${randomSuffix}`
+    const build = spawnSync('docker', ['build', '--quiet', '--network', 'host', '--file', 'gateway/Dockerfile',
+      '--target', 'runtime', '--tag', builtTag, '.'], { cwd: repository, stdio: ['ignore', 'ignore', 'inherit'] })
+    if (build.status !== 0) throw new Error(`docker build of gateway/Dockerfile failed (${build.error?.message ?? `exit ${build.status}`})`)
+    try {
+      const user = spawnSync('docker', ['image', 'inspect', '--format', '{{.Config.User}}', builtTag], { encoding: 'utf8' })
+      assert.equal(user.status, 0, `docker image inspect ${builtTag} failed`)
+      assert.equal(user.stdout.trim(), '101', 'the built gateway image must run as the unprivileged Nginx user')
+      // Every exact package pin of the runtime stage (RF-008) must be what the
+      // image actually has installed, read from the apk database.
+      const runtimeStage = dockerfile.slice(dockerfile.indexOf(`FROM ${image} AS runtime`))
+      const pins = [...runtimeStage.matchAll(/^RUN apk add .*$/gm)]
+        .flatMap(([line]) => [...line.matchAll(/'([a-z0-9][a-z0-9._+-]*)=([^'\s]+)'/g)].map(([, name, version]) => [name, version]))
+      const database = spawnSync('docker', ['run', '--rm', '--network', 'none', '--entrypoint', 'cat', builtTag,
+        '/lib/apk/db/installed'], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 })
+      assert.equal(database.status, 0, 'the built gateway image must have an apk database')
+      const installed = new Map(database.stdout.split('\n\n').map(entry => [
+        entry.match(/^P:(.+)$/m)?.[1], entry.match(/^V:(.+)$/m)?.[1]]).filter(([name]) => name))
+      for (const [name, version] of pins) {
+        assert.equal(installed.get(name), version, `the built gateway image must carry ${name} ${version}`)
+      }
+      installedPins = Object.fromEntries(pins.map(([name]) => [name, installed.get(name)]))
+    } catch (error) {
+      spawnSync('docker', ['image', 'rm', '--force', builtTag], { stdio: 'ignore' })
+      throw error
+    }
+    image = builtTag
+  }
 } else {
   await access(nginxBinary)
 }
-const containerName = `hid-gateway-runtime-${randomBytes(6).toString('hex')}`
+const containerName = `hid-gateway-runtime-${randomSuffix}`
 
 /** nginx with these arguments: the local binary, or the pinned image's nginx. */
 function nginxCommand(args, { mount, name } = {}) {
@@ -353,7 +396,7 @@ try {
   })
   const failed = results.filter(result => result.result !== 'passed')
   process.stdout.write(`${JSON.stringify({ status: failed.length ? 'failed' : 'passed', nginx: nginxVersion,
-    ...(pinnedImage ? { image } : {}), results }, null, 2)}\n`)
+    ...(pinnedImage ? { image } : {}), ...(installedPins ? { packages: installedPins } : {}), results }, null, 2)}\n`)
   process.exitCode = failed.length ? 1 : 0
 } finally {
   if (nginx && nginx.exitCode === null) {
@@ -370,4 +413,5 @@ try {
   application.close()
   silent.close()
   await rm(temporary, { recursive: true, force: true })
+  if (builtTag) spawnSync('docker', ['image', 'rm', '--force', builtTag], { stdio: 'ignore' })
 }
