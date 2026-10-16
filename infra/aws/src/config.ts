@@ -97,7 +97,35 @@ export interface HidEnvironmentConfig {
   // Synth input HID_OPERATIONAL_ALARM_TOPIC_ARN; the regional stack requires
   // it in production and it is optional elsewhere.
   readonly operationalAlarmTopicArn?: string;
+  // Identity's enrollment budgets and QoreID timeout that the operator set
+  // (synth inputs HID_<VARIABLE>, identityBudgetInputs). Only these are
+  // emitted; Identity keeps its own default for every other one.
+  readonly identityBudgets: Readonly<Partial<Record<IdentityBudgetVariable, number>>>;
 }
+
+/**
+ * Identity variables the operator may set at synth time as HID_<VARIABLE>,
+ * each optional. The bounds and defaults are Identity's own
+ * (services/identity-api/src/config/environment.ts); the three QoreID lookup
+ * limits are also the bounds of 0085's platform.consume_public_patient_nin_quota.
+ * A test holds both in step. An input left out is not emitted, so Identity
+ * runs its default; QOREID_TIMEOUT_MS is always emitted, 5000 unless set.
+ */
+export const identityBudgetInputs = {
+  // Public NIN lookups a day, platform-wide; the owner sets it from the QoreID contract.
+  PATIENT_ENROLLMENT_QOREID_DAILY_CAP: { min: 1, max: 100_000, default: 200 },
+  // Public NIN lookups per client network (an IPv4 address or an IPv6 /64).
+  PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX: { min: 1, max: 100, default: 5 },
+  PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX: { min: 1, max: 1_000, default: 15 },
+  // Enrollment starts per client network within OTP_RATE_WINDOW_SECONDS.
+  PATIENT_ENROLLMENT_START_RATE_MAX_REQUESTS: { min: 1, max: 100, default: 5 },
+  // In-person checks of the facility route over 24 hours (ADR-063).
+  ASSISTED_VERIFICATION_STAFF_DAILY_MAX: { min: 1, max: 200, default: 20 },
+  ASSISTED_VERIFICATION_FACILITY_DAILY_MAX: { min: 1, max: 1_000, default: 100 },
+  QOREID_TIMEOUT_MS: { min: 250, max: 10_000, default: 5_000 },
+} as const;
+export type IdentityBudgetVariable = keyof typeof identityBudgetInputs;
+export const identityBudgetVariables = Object.keys(identityBudgetInputs) as IdentityBudgetVariable[];
 
 /** Synth inputs beyond the environment, staging mode, QoreID and route switches. */
 export interface SynthOptions {
@@ -107,6 +135,8 @@ export interface SynthOptions {
   readonly qoreIdPatientSelfNinBindingEnabled?: string;
   readonly notificationWorkerEnabled?: string;
   readonly operationalAlarmTopicArn?: string;
+  // HID_<VARIABLE> for each identityBudgetInputs entry, as supplied.
+  readonly identityBudgets?: Readonly<Record<string, string | undefined>>;
 }
 
 interface ProfileValues {
@@ -316,6 +346,55 @@ export function assertNinOwnershipRoutes(configuration: {
   }
 }
 
+/**
+ * Refuses an Identity budget that Identity (or 0085's quota command) would
+ * refuse at start: out of bounds, not a whole number, an hourly NIN lookup
+ * limit above the daily one, or a facility in-person budget below the staff
+ * one. A value left out counts as Identity's default. The regional stack
+ * repeats this for a configuration not built by environmentConfig.
+ */
+export function assertIdentityBudgets(values: Readonly<Partial<Record<IdentityBudgetVariable, number>>>): void {
+  for (const [name, value] of Object.entries(values) as Array<[string, number | undefined]>) {
+    if (!(name in identityBudgetInputs)) throw new Error(`${name} is not an Identity budget synth input`);
+    const { min, max } = identityBudgetInputs[name as IdentityBudgetVariable];
+    if (value === undefined || !Number.isSafeInteger(value) || value < min || value > max) {
+      throw new Error(`HID_${name} must be a whole number from ${min} to ${max}; received ${JSON.stringify(value)}`);
+    }
+  }
+  const effective = (name: IdentityBudgetVariable) => values[name] ?? identityBudgetInputs[name].default;
+  const described = (name: IdentityBudgetVariable) => values[name] === undefined
+    ? `${effective(name)}, Identity's default` : String(effective(name));
+  if (effective('PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX') > effective('PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX')) {
+    throw new Error(`HID_PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX (${described('PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX')}) `
+      + `cannot exceed HID_PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX (${described('PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX')})`);
+  }
+  if (effective('ASSISTED_VERIFICATION_FACILITY_DAILY_MAX') < effective('ASSISTED_VERIFICATION_STAFF_DAILY_MAX')) {
+    throw new Error(`HID_ASSISTED_VERIFICATION_FACILITY_DAILY_MAX (${described('ASSISTED_VERIFICATION_FACILITY_DAILY_MAX')}) `
+      + `cannot be below HID_ASSISTED_VERIFICATION_STAFF_DAILY_MAX (${described('ASSISTED_VERIFICATION_STAFF_DAILY_MAX')})`);
+  }
+}
+
+/**
+ * Parses the optional synth inputs HID_<VARIABLE> of identityBudgetInputs:
+ * plain decimal digits with no sign, space or leading zero. Returns only the
+ * supplied ones.
+ */
+export function identityBudgets(values: Readonly<Record<string, string | undefined>> = {}):
+  Readonly<Partial<Record<IdentityBudgetVariable, number>>> {
+  const parsed: Partial<Record<IdentityBudgetVariable, number>> = {};
+  for (const [name, value] of Object.entries(values)) {
+    if (!(name in identityBudgetInputs)) throw new Error(`${name} is not an Identity budget synth input`);
+    if (value === undefined) continue;
+    const { min, max } = identityBudgetInputs[name as IdentityBudgetVariable];
+    if (!/^[1-9][0-9]{0,8}$/.test(value)) {
+      throw new Error(`HID_${name} must be a whole number from ${min} to ${max}; received ${JSON.stringify(value)}`);
+    }
+    parsed[name as IdentityBudgetVariable] = Number(value);
+  }
+  assertIdentityBudgets(parsed);
+  return parsed;
+}
+
 function booleanInput(variable: string, value: string | undefined, fallback: 'true' | 'false'): boolean {
   const input = value ?? fallback;
   if (!['true', 'false'].includes(input)) throw new Error(`${variable} must be true or false when supplied`);
@@ -380,6 +459,7 @@ export function environmentConfig(
       + 'the notification worker needs an approved Novu account and region and its own decision');
   }
   const topic = operationalAlarmTopic(name, options.operationalAlarmTopicArn);
+  const budgets = identityBudgets(options.identityBudgets);
   return {
     ...environmentIdentity[name], ...profiles[profile],
     ...(stagingMode ? { stagingMode } : {}),
@@ -391,6 +471,7 @@ export function environmentConfig(
     qoreIdPatientSelfNinBindingEnabled,
     notificationWorkerEnabled,
     ...(topic ? { operationalAlarmTopicArn: topic.arn } : {}),
+    identityBudgets: budgets,
   };
 }
 

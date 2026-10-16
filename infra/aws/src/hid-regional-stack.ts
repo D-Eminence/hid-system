@@ -40,8 +40,10 @@ import {
   workloadIssuerEnvironment,
 } from './workload-identity.js';
 import {
+  assertIdentityBudgets,
   assertNinOwnershipRoutes,
   type HidEnvironmentConfig,
+  identityBudgetInputs,
   operationalAlarmTopic,
   operationalAlarmTopicName,
   vpcDnsResolver,
@@ -128,6 +130,7 @@ export class HidRegionalStack extends Stack {
     }
     // CFG-PROD, N1, ADR-062: also for a configuration not built by environmentConfig.
     assertNinOwnershipRoutes(this.configuration);
+    assertIdentityBudgets(this.configuration.identityBudgets);
 
     validateDatabaseConnectionBudget(
       this.configuration.profile,
@@ -926,7 +929,13 @@ export class HidRegionalStack extends Stack {
           ASSISTED_REGISTRATION_ENABLED: this.configuration.assistedRegistrationEnabled ? 'true' : 'false',
           QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: this.configuration.qoreIdPatientSelfNinBindingEnabled
             ? 'true' : 'false',
-          QOREID_BASE_URL: 'https://api.qoreid.com', QOREID_TIMEOUT_MS: '5000', QOREID_MAX_RETRIES: '0',
+          QOREID_BASE_URL: 'https://api.qoreid.com',
+          QOREID_TIMEOUT_MS: String(this.configuration.identityBudgets.QOREID_TIMEOUT_MS
+            ?? identityBudgetInputs.QOREID_TIMEOUT_MS.default),
+          QOREID_MAX_RETRIES: '0',
+          // Only the budgets the operator set; Identity keeps its default otherwise.
+          ...Object.fromEntries(Object.entries(this.configuration.identityBudgets)
+            .filter(([variable]) => variable !== 'QOREID_TIMEOUT_MS').map(([variable, value]) => [variable, String(value)])),
           WORKLOAD_ISSUER_URL: issuer, WORKLOAD_JWKS_URL: jwks, WORKLOAD_AUDIENCE: 'hid-identity-api',
           IDENTITY_EHR_CALLER_SUBJECT: subjects.ehr, IDENTITY_LAB_CALLER_SUBJECT: subjects.lab,
           IDENTITY_PHARMACY_CALLER_SUBJECT: subjects.pharmacy, IDENTITY_OCR_CALLER_SUBJECT: subjects.ocr,

@@ -42,8 +42,36 @@ checks the same. The flag alone opens nothing: the route opens while a
 facility is designated through the admin API. In production Identity also
 keeps the online route closed while no facility takes part. The in-person budgets
 (`ASSISTED_VERIFICATION_STAFF_DAILY_MAX`, `_FACILITY_DAILY_MAX`) keep
-Identity's defaults (20 and 100); they are not synth inputs. Enabling the
-facility route is an operator step after release checklist P29 to P33.
+Identity's defaults (20 and 100) unless the operator sets their synth inputs
+(below). Enabling the facility route is an operator step after release
+checklist P29 to P33.
+
+Identity budgets and QoreID timeout (optional synth inputs). Each input
+`HID_<VARIABLE>` sets the Identity variable `<VARIABLE>` in the Identity task
+only. An input left out is not emitted, so Identity keeps its own default;
+`QOREID_TIMEOUT_MS` is always set, `5000` unless supplied. Set them in the
+synth environment, never by editing the task definition: the next deployment
+replaces a hand-edited task definition.
+
+| Synth input | Identity default | Accepted |
+| --- | --- | --- |
+| `HID_PATIENT_ENROLLMENT_QOREID_DAILY_CAP` | 200 public NIN lookups a day, platform-wide | 1 to 100000 |
+| `HID_PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX` | 5 per client network an hour | 1 to 100, not above the daily limit |
+| `HID_PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX` | 15 per client network a day | 1 to 1000, not below the hourly limit |
+| `HID_PATIENT_ENROLLMENT_START_RATE_MAX_REQUESTS` | 5 enrollment starts per client network per 15 minutes | 1 to 100 |
+| `HID_ASSISTED_VERIFICATION_STAFF_DAILY_MAX` | 20 in-person checks per staff member a day | 1 to 200 |
+| `HID_ASSISTED_VERIFICATION_FACILITY_DAILY_MAX` | 100 in-person checks per facility a day | 1 to 1000, not below the staff budget |
+| `HID_QOREID_TIMEOUT_MS` | 5000 | 250 to 10000 |
+
+The bounds are Identity's own and, for the three lookup limits, those of the
+0085 quota command. Synthesis refuses anything else: a value that is not plain
+digits, out of bounds, an hourly limit above the daily one or a facility
+budget below the staff one, counting an input left out at Identity's default
+(so a per-network hourly limit above 15 needs the daily limit too).
+`verify-synth` checks that the Identity task carries exactly the inputs given.
+The owner sets the cap from the QoreID contract (release checklist §10); a
+per-network limit is raised only when carrier-grade or facility NAT collisions
+show (IP-THRESHOLDS).
 
 ## Staging email acceptance profile
 

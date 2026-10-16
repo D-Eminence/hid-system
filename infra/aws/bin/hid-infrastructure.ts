@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { App } from 'aws-cdk-lib';
-import { environmentConfig, externalAwsEnvironment } from '../src/config.js';
+import { environmentConfig, externalAwsEnvironment, identityBudgetVariables } from '../src/config.js';
 import { HidRegionalStack } from '../src/hid-regional-stack.js';
 import { HidCostGovernanceStack } from '../src/cost-governance-stack.js';
 
@@ -17,6 +17,9 @@ const configuration = environmentConfig(
     qoreIdPatientSelfNinBindingEnabled: process.env.HID_QOREID_PATIENT_SELF_NIN_BINDING_ENABLED,
     notificationWorkerEnabled: process.env.HID_NOTIFICATION_WORKER_ENABLED,
     operationalAlarmTopicArn: process.env.HID_OPERATIONAL_ALARM_TOPIC_ARN,
+    // Optional: HID_PATIENT_ENROLLMENT_QOREID_DAILY_CAP and the other
+    // Identity budgets, and HID_QOREID_TIMEOUT_MS (config.ts).
+    identityBudgets: Object.fromEntries(identityBudgetVariables.map((name) => [name, process.env[`HID_${name}`]])),
   },
 );
 const regionalEnvironment = externalAwsEnvironment(process.env.HID_AWS_ACCOUNT, process.env.HID_AWS_REGION);
