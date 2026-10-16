@@ -4857,7 +4857,8 @@ Decision:
   code, no address and nothing derived from it); a row that cannot be
   written never holds back the trigger. Each flag-on event writes one
   `notification.worker.outcome` stdout line with the event type, the
-  correlation id and fixed codes only.
+  correlation id (only in the outbox's own shape, otherwise `invalid`) and
+  fixed codes only.
 
 Proposed defaults (owner questions answered with the safest choice):
 

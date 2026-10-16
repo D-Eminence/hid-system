@@ -150,7 +150,8 @@ No HID route changes. The worker calls Novu as below (ADR-064, migration
   "subscriber":"synced|sync_failed|cleared|clear_failed|not_run",
   "subscriberCode"?,"trigger":"standard|email_withheld|not_sent",
   "triggerOutcome"?,"triggerCode"?,"inbox":"processed|retry_scheduled|failed_terminal|claim_lost"}`.
-  It never holds the address, the patient, the event id or a key.
+  It never holds the address, the patient, the event id or a key; a
+  correlation id outside the outbox's own pattern is written as `invalid`.
 
 ### Turnstile verification
 
