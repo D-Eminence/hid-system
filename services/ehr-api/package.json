@@ -28,6 +28,7 @@
     "migration:verify": "node scripts/verify-legacy-migration.mjs",
     "migration:verify-nin-crosswalk": "node --test scripts/legacy-nin-crosswalk.test.mjs",
     "migration:verify-membership-duplicates": "node --test scripts/membership-duplicates.test.mjs",
+    "migration:verify-imported-history": "node --test scripts/imported-history-import.test.mjs",
     "migration:rekey-contacts": "node scripts/rekey-patient-contact-lookups.mjs",
     "migration:import-nin-crosswalk": "node scripts/import-legacy-nin-crosswalk.mjs",
     "migration:verify-cutover-input": "node scripts/verify-supabase-cutover-input.mjs",

@@ -12,6 +12,8 @@ import { DomainProblem, ProblemDetailsFilter } from '../common/problem';
 import { DatabaseService } from '../database/database.service';
 import { PatientRecordsController } from '../ehr/patient-records/patient-records.controller';
 import { PatientRecordsService } from '../ehr/patient-records/patient-records.service';
+import { ImportedHistoryController } from '../ehr/imported-history/imported-history.controller';
+import { ImportedHistoryService } from '../ehr/imported-history/imported-history.service';
 import { IdentityApiService } from '../integrations/identity-api.service';
 import { RemoteSecurityGuard } from './remote-security.guard';
 
@@ -116,6 +118,8 @@ let liveActor: IdentityActorContext | undefined;
 let identityRefusal: unknown;
 /** The patient records service behind GET /ehr/me/records: it refuses a non-patient itself, as the real one does. */
 let records: { self: jest.Mock; emergency: jest.Mock; downloadOwnDocument: jest.Mock };
+/** The imported history service behind GET /ehr/me/imported-history (ADR-065). */
+let imported: { self: jest.Mock; staff: jest.Mock };
 
 beforeEach(async () => {
   rows = [];
@@ -141,12 +145,14 @@ beforeEach(async () => {
     emergency: jest.fn(),
     downloadOwnDocument: jest.fn(async () => ({ url: 'https://signed.example.invalid/object', expiresInSeconds: 60 })),
   };
+  imported = { self: jest.fn(async () => ({ records: [] })), staff: jest.fn() };
 
   @Module({
-    controllers: [ProbeController, PatientRecordsController],
+    controllers: [ProbeController, PatientRecordsController, ImportedHistoryController],
     providers: [
       AuditService,
       { provide: PatientRecordsService, useValue: records },
+      { provide: ImportedHistoryService, useValue: imported },
       { provide: DatabaseService, useValue: database },
       { provide: IdentityApiService, useValue: identity },
       { provide: APP_GUARD, useClass: RemoteSecurityGuard },
@@ -366,6 +372,25 @@ describe('Patient-only routes refuse a staff session in the guard (A9-EHR)', () 
     expect(records.downloadOwnDocument).toHaveBeenCalledWith(expect.anything(), '70000000-0000-4000-8000-000000000001');
     expect((await probeAt('/api/v1/ehr/me/documents/not-a-document/download')).status).toBe(400);
     expect(records.downloadOwnDocument).toHaveBeenCalledTimes(1);
+  });
+
+  // The patient's imported legacy history (ADR-065) is patient-only too.
+  it.each([
+    ['without X-Facility-ID', {}],
+    ['with the staff member\'s own facility', { 'X-Facility-ID': DEFAULT_FACILITY.id }],
+  ])('answers a staff session on the patient\'s imported history %s 403 PATIENT_SESSION_REQUIRED, recorded', async (_case, headers) => {
+    const response = await probeAt('/api/v1/ehr/me/imported-history', headers);
+    expect(response).toEqual({ status: 403, code: 'PATIENT_SESSION_REQUIRED' });
+    expect(rows).toEqual([refusedBeforeFacility(staff, 'staff', 403, 'PATIENT_SESSION_REQUIRED',
+      '/api/v1/ehr/me/imported-history')]);
+    expect(imported.self).not.toHaveBeenCalled();
+  });
+
+  it('serves the patient their imported history, auditing no failure', async () => {
+    liveActor = patient;
+    expect((await probeAt('/api/v1/ehr/me/imported-history')).status).toBe(200);
+    expect(imported.self).toHaveBeenCalledTimes(1);
+    expect(rows).toEqual([]);
   });
 
   it('still serves the patient their records, auditing no failure', async () => {

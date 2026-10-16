@@ -1317,6 +1317,56 @@ test('patient record release categories are explicit synth inputs that default t
   }
 });
 
+test('imported history flags are explicit synth inputs that default to false; only staging may set them (ADR-065, P36)', () => {
+  const productionTopic = { operationalAlarmTopicArn: productionTopicArn };
+  const none = { patientRead: false, staffRead: false, sharing: false };
+  assert.deepEqual(environmentConfig('production').importedHistory, none);
+  assert.deepEqual(environmentConfig('development').importedHistory, none);
+  assert.deepEqual(environmentConfig('staging', 'economy').importedHistory, none);
+  for (const template of [regional, stagingRegional]) {
+    assert.equal(containerOf(template, 'ehr-api').environment.EHR_PATIENT_RELEASE_IMPORTED_HISTORY, 'false');
+    assert.equal(containerOf(template, 'ehr-api').environment.EHR_STAFF_IMPORTED_HISTORY_ENABLED, 'false');
+    assert.equal(containerOf(template, 'identity-api').environment.IMPORTED_HISTORY_SHARING_ENABLED, 'false');
+  }
+  const inputs = [['importedHistoryPatientRead', 'patientRead', 'HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY'],
+    ['importedHistoryStaffRead', 'staffRead', 'HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED'],
+    ['importedHistorySharing', 'sharing', 'HID_IMPORTED_HISTORY_SHARING_ENABLED']] as const;
+  for (const [input] of inputs) {
+    assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, { [input]: 'yes' }),
+      /must be true or false/, input);
+  }
+  // Production refuses every imported history flag until the DPO and the owner
+  // sign off the legacy data and Health-id renders it (P36); the development
+  // stack runs its services in the production profile, so it refuses them too.
+  const productionConfiguration = environmentConfig('production', undefined, undefined, undefined, productionTopic);
+  const developmentConfiguration = environmentConfig('development');
+  for (const [input, flag, variable] of inputs) {
+    const refused = new RegExp(`${variable}=true is refused outside staging`);
+    assert.throws(() => environmentConfig('production', undefined, undefined, undefined,
+      { ...productionTopic, [input]: 'true' }), refused, `production ${input}`);
+    assert.throws(() => environmentConfig('development', undefined, undefined, undefined, { [input]: 'true' }),
+      refused, `development ${input}`);
+    for (const [label, configuration] of [['Production', productionConfiguration],
+      ['Development', developmentConfiguration]] as const) {
+      assert.throws(() => new HidRegionalStack(new App(), `ImportedHistory${label}${input}`, { configuration: {
+        ...configuration, importedHistory: { ...none, [flag]: true } } }), refused, `${label} stack ${input}`);
+    }
+  }
+  const staging = environmentConfig('staging', 'economy', undefined, undefined, { importedHistoryPatientRead: 'true',
+    importedHistoryStaffRead: 'true', importedHistorySharing: 'true' });
+  assert.deepEqual(staging.importedHistory, { patientRead: true, staffRead: true, sharing: true });
+  const template = Template.fromStack(new HidRegionalStack(new App(), 'ImportedHistoryStaging', { configuration: staging }))
+    .toJSON() as typeof regional;
+  assert.equal(containerOf(template, 'ehr-api').environment.EHR_PATIENT_RELEASE_IMPORTED_HISTORY, 'true');
+  assert.equal(containerOf(template, 'ehr-api').environment.EHR_STAFF_IMPORTED_HISTORY_ENABLED, 'true');
+  assert.equal(containerOf(template, 'identity-api').environment.IMPORTED_HISTORY_SHARING_ENABLED, 'true');
+  for (const name of workloadNames.filter(item => !['ehr-api', 'identity-api'].includes(item))) {
+    assert.doesNotMatch(JSON.stringify(containerOf(template, name)), /IMPORTED_HISTORY/);
+  }
+  assert.doesNotMatch(JSON.stringify(containerOf(template, 'identity-api')), /EHR_.*IMPORTED_HISTORY/);
+  assert.doesNotMatch(JSON.stringify(containerOf(template, 'ehr-api')), /IMPORTED_HISTORY_SHARING/);
+});
+
 test('NIN-only enrollment and the NIN holder routes are explicit synth inputs that default to false (ADR-062)', () => {
   const productionTopic = { operationalAlarmTopicArn: 'arn:aws:sns:eu-west-1:000000000000:hid-production-operational-alerts' };
   const production = environmentConfig('production');
