@@ -104,8 +104,18 @@ never through a capability the mailbox alone opened. An applicant's wrong
 authenticator codes count against the account's 0088 budget and a
 per-address bucket of the applicants' own, never staff sign-in's, so
 throwaway applicant accounts cannot block staff sign-in from a shared
-address. A public flow that creates an account treats the `hid_access_csrf`
-cookie, which outlives the 15-minute access cookie, as a sign-in.
+address. Clinician self sign-up and provider self-enrollment treat the
+`hid_access_csrf` cookie, which outlives the 15-minute access cookie for as
+long as the refresh session, as a sign-in
+(`409 CLINICIAN_APPLICATION_REQUIRES_SIGN_OUT`,
+`409 PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT`). Patient enrollment and Google
+onboarding do not: they refuse a signed-in browser
+(`409 PATIENT_ENROLLMENT_REQUIRES_SIGN_OUT`,
+`409 GOOGLE_ONBOARDING_REQUIRES_SIGN_OUT`) only on the access cookie, the
+refresh cookie or an `Authorization` header. The browser sends the refresh
+cookie only under `/api/v1/auth`, so once the access cookie has expired, a
+browser whose refresh session is still live is not refused at the enrollment
+routes under `/api/v1/identity`.
 
 ## 3. Authorization
 
