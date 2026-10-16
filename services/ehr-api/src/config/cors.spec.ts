@@ -75,7 +75,8 @@ describe('EHR CORS (A19)', () => {
     expect(response.headers['access-control-allow-origin']).toBe(ALLOWED);
     expect(response.headers['access-control-allow-credentials']).toBe('true');
     expect(response.headers['access-control-max-age']).toBe('600');
-    expect(list(response.headers['access-control-allow-methods'])).toEqual(['get', 'options', 'patch', 'post']);
+    // DELETE for the patient's record chat history (DELETE /ehr/me/chat/history).
+    expect(list(response.headers['access-control-allow-methods'])).toEqual(['delete', 'get', 'options', 'patch', 'post']);
     expect(list(response.headers['access-control-allow-headers'])).toEqual(['authorization', 'content-type', 'idempotency-key', 'if-match', 'x-correlation-id', 'x-csrf-token', 'x-facility-id', 'x-purpose-of-use']);
   });
 
@@ -83,6 +84,7 @@ describe('EHR CORS (A19)', () => {
     const response = await send(port, 'GET', ALLOWED);
     expect(response.status).toBe(200);
     expect(response.headers['access-control-allow-origin']).toBe(ALLOWED);
-    expect(list(response.headers['access-control-expose-headers'])).toEqual(['etag', 'location', 'x-correlation-id', 'x-csrf-token']);
+    // Retry-After for record chat's 429 answers.
+    expect(list(response.headers['access-control-expose-headers'])).toEqual(['etag', 'location', 'retry-after', 'x-correlation-id', 'x-csrf-token']);
   });
 });
