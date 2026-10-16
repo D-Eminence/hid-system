@@ -8,7 +8,11 @@
 // bootstrap seeds the initial governance set, two or three distinct accounts
 // (PLATFORM_ADMIN_ACCOUNT_IDS), in one audited transaction, and refuses once
 // any Super Admin is active, so it can never add an administrator to a live
-// set. The one-account form (PLATFORM_ADMIN_ACCOUNT_ID) stays for development.
+// set. The one-account form (PLATFORM_ADMIN_ACCOUNT_ID) stays for development
+// and is refused when NODE_ENV is production, as the migration task runs in
+// every AWS environment: one Super Admin alone could never add a second or
+// approve a clinician application, and the state could not be repaired
+// without direct SQL.
 
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -31,6 +35,11 @@ export function bootstrapInput(environment) {
       throw new Error('PLATFORM_ADMIN_ACCOUNT_IDS must name two or three distinct accounts');
     }
   } else if (single) {
+    if (environment.NODE_ENV === 'production') {
+      throw new Error('In production name two or three accounts in PLATFORM_ADMIN_ACCOUNT_IDS; '
+        + 'PLATFORM_ADMIN_ACCOUNT_ID is for development only: one Super Admin alone can never add a second '
+        + 'or approve a clinician application');
+    }
     if (!UUID_V4.test(single)) throw new Error('PLATFORM_ADMIN_ACCOUNT_ID must be one exact version-4 account UUID');
     accountIds = [single.toLowerCase()];
   } else {

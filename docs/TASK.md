@@ -1319,7 +1319,8 @@ history, and the consolidated `localhost:3000` browser flow.
   Lab, Pharmacy, OCR, Outreach, audit mutation, or break-glass actions.
 - The one-time `admin:bootstrap` command requires `DATABASE_ADMIN_URL`, two or
   three distinct eligible account UUIDs (`PLATFORM_ADMIN_ACCOUNT_IDS`; one
-  account with `PLATFORM_ADMIN_ACCOUNT_ID` for development), and an explicit
+  account with `PLATFORM_ADMIN_ACCOUNT_ID` for development only, refused when
+  `NODE_ENV` is `production`), and an explicit
   reason; it grants them all in one audited transaction, serializes, and
   refuses to run once any Super Admin is active. Runtime authorization
   never reads a bootstrap email or environment flag.

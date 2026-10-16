@@ -534,7 +534,9 @@ description and in CloudTrail. The account IDs and reason of
 `admin:bootstrap` are not secret. Run `admin:bootstrap` once, with every
 initial Super Admin in `PLATFORM_ADMIN_ACCOUNT_IDS`: it refuses to run again
 once one is active, and afterwards a Super Admin is added only by a two-person
-approval (`SUPER_ADMIN_FOUNDATION.md`).
+approval (`SUPER_ADMIN_FOUNDATION.md`). The task runs with
+`NODE_ENV=production`, so the development-only one-account form
+`PLATFORM_ADMIN_ACCOUNT_ID` is refused.
 
 The repository provides no SQL console inside the VPC. The RDS master's
 statements (creating the migration administrator, and the `SET ON PARAMETER`

@@ -106,8 +106,10 @@ In AWS it runs as the migration task with the command override
 environment overrides (`AWS_DEPLOYMENT_RUNBOOK.md` §4); `DATABASE_ADMIN_URL`
 comes from the task's secret. `PLATFORM_ADMIN_ACCOUNT_IDS` lists two or three
 distinct version-4 account UUIDs separated by commas;
-`PLATFORM_ADMIN_ACCOUNT_ID` (one account) remains for development and is
-refused together with it. Each account must exist already, active and with a
+`PLATFORM_ADMIN_ACCOUNT_ID` (one account) remains for development: it is
+refused together with it, and refused alone when `NODE_ENV` is `production`,
+as the migration task runs in every AWS environment, because one Super Admin
+alone could never add a second or approve a clinician application. Each account must exist already, active and with a
 password credential (Stage 2A: no staff/facility tuple; each administrator
 enrols an authenticator at first platform sign-in).
 

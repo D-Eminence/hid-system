@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 // admin:bootstrap: seeds the first platform Super Admins, once. In production
-// name two or three distinct accounts in PLATFORM_ADMIN_ACCOUNT_IDS: after
-// this run no command can add a Super Admin without a second one's decision
+// name two or three distinct accounts in PLATFORM_ADMIN_ACCOUNT_IDS (the
+// one-account form is refused when NODE_ENV is production): after this run no
+// command can add a Super Admin without a second one's decision
 // (platform-admin-bootstrap.mjs).
 import pg from 'pg';
 import { databaseOptions } from './database-options.mjs';
