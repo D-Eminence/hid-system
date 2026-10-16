@@ -203,11 +203,11 @@ try {
   assert.equal(renamed.body.name, 'Chidi O.'); assert.equal(renamed.body.status, 'verified');
   await post(sa, `/identity/me/emergency-contacts/${added.body.contactId}`, { expectedVersion: listed[0].version, name: 'Stale' }).expect(409);
 
-  // Break-glass at launch, with limits (0095, D9, ADR-058 addendum), through
+  // Break-glass at launch, with limits (0097, D9, ADR-058 addendum), through
   // POST /identity/break-glass as a doctor signed in with an authenticator: the
   // migrations grant identity.break-glass.write and seed the emergency purpose,
   // and the platform control decides. With break_glass_enabled off, as 0091
-  // leaves it and 0095 keeps it, the route answers 423 BREAK_GLASS_DISABLED
+  // leaves it and 0097 keeps it, the route answers 423 BREAK_GLASS_DISABLED
   // and writes nothing; once an operator turns it on, activation creates an
   // alert intent for the verified contact, and the leased dispatcher delivers
   // minimum-necessary fields to the stub; turned off again, it refuses again.
@@ -224,13 +224,13 @@ try {
     [ids.membership, ids.staff, ids.staffAccount, ids.org, ids.facility]);
   await pool.query("insert into auth.account_roles(id,account_id,role_code,scope_type,membership_id,facility_id,grant_reason) values($1,$2,'doctor','facility',$3,$4,'Synthetic rehearsal role')",
     [randomUUID(), ids.staffAccount, ids.membership, ids.facility]);
-  // Nothing here inserts the emergency purpose or grants a permission: both are the migrations' (0095).
+  // Nothing here inserts the emergency purpose or grants a permission: both are the migrations' (0097).
   assert.deepEqual((await pool.query(`select display, active, source_system from identity.purpose_of_use_codes
     where code='emergency'`)).rows, [{ display: 'Emergency treatment', active: true, source_system: 'hid' }],
-  'the migrations seed the active emergency purpose of use (0095)');
+  'the migrations seed the active emergency purpose of use (0097)');
   assert.deepEqual((await pool.query(`select string_agg(role_code, ',' order by role_code) as roles
     from auth.role_permissions where permission_code='identity.break-glass.write'`)).rows[0].roles, 'clinician,doctor,nurse',
-  'the migrations grant identity.break-glass.write to exactly doctor, clinician and nurse (0010, 0095)');
+  'the migrations grant identity.break-glass.write to exactly doctor, clinician and nurse (0010, 0097)');
   const staff = staffClient({ send: supertestTransport(http), origin, password, outbox: staffEnrollmentCodes,
     now: clock.next });
   const staffSession = async (accountId) => {
@@ -305,7 +305,7 @@ try {
     ['Safety Rehearsal Hospital', 'Synthetic clinician', 'doctor'], 'the access request names the requesting clinician and role');
   // The requesting clinician lists their own requests through
   // identity.list_my_staff_access_requests as the Identity runtime role.
-  // The launch module set (0091, D17, ADR-058) with break-glass back (0095):
+  // The launch module set (0091, D17, ADR-058) with break-glass back (0097):
   // a doctor's session lists no permission of a module that is off, nor
   // document upload, holds identity.break-glass.write again, and keeps the EHR
   // reads, access requests and the patient PIN.

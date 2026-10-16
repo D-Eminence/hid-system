@@ -888,17 +888,17 @@ notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
 Activation also requires the platform `break_glass_enabled` control inside the
 activation transaction; a disabled control returns `423 BREAK_GLASS_DISABLED`.
-It also requires an active `emergency` purpose of use, which 0095 seeds (0082
-seeded only `direct-care`); without it, on a database before 0095 or after an
+It also requires an active `emergency` purpose of use, which 0097 seeds (0082
+seeded only `direct-care`); without it, on a database before 0097 or after an
 operator deactivates the code, activation also returns
 `423 BREAK_GLASS_DISABLED` ("Emergency access is not enabled on this
 platform"), where it returned `400 INVALID_CONSENT_COMMAND`. Break-glass is
 permitted at launch with limits (decision D9, owner decision of 2026-10-14,
 ADR-058 addendum) and on only after the P11 operator step: 0091 withdrew
-`identity.break-glass.write` from every role, and 0095 grants it again to
+`identity.break-glass.write` from every role, and 0097 grants it again to
 exactly doctor, clinician and nurse, its holders before 0091, and seeds
 `emergency`. Every other role gets `403 PERMISSION_DENIED` before the control
-or purpose check. `break_glass_enabled` is not changed by 0095 (which refuses
+or purpose check. `break_glass_enabled` is not changed by 0097 (which refuses
 to run while it is on) and starts false (0091): until an operator turns it on
 with `POST /admin/controls`, after staff MFA ships (release checklist P11),
 activation answers `423 BREAK_GLASS_DISABLED` ("Emergency access is currently
@@ -2055,7 +2055,7 @@ All writes require:
 
 Lab, Pharmacy, OCR and Outreach are off at launch (decision D17), and so are
 document uploads; EHR prescriptions and lab requests are records only.
-Break-glass (D9) is permitted with limits since 0095 and on only after the
+Break-glass (D9) is permitted with limits since 0097 and on only after the
 P11 operator step: doctor, clinician and nurse hold
 `identity.break-glass.write` again, the `emergency` purpose is seeded, and
 `break_glass_enabled` stays off until an operator turns it on after staff MFA
@@ -2068,7 +2068,7 @@ any write or call to another service (where the gateway routes it at all; in
 production it answers `404 API_ROUTE_NOT_FOUND` for the Lab, Pharmacy, OCR and
 Outreach APIs), and Health-id 82b474e hides Laboratory, Pharmacy, Document OCR
 and Outreach, their dashboard tiles, released Lab results, Extract with OCR and
-the upload card (between 0091 and 0095 it also disabled emergency access). Its ungated "Health ID Migrate"
+the upload card (between 0091 and 0097 it also disabled emergency access). Its ungated "Health ID Migrate"
 dashboard card still links to a page the gateway refuses (cosmetic). The EHR
 reads, `ehr.document.read` included, stay. Before 0091, migration 0084 withdrew
 `ehr.lab-request.write`, `lab.work-item.accept`, `lab.accession.create`,
@@ -2086,7 +2086,7 @@ or Pharmacy:
 existing lab requests and prescriptions remain readable in the EHR, and a
 production database built at launch holds no Lab or Pharmacy records. The
 platform controls `uploads_enabled`, `outreach_portal_enabled` and
-`break_glass_enabled` start off (0091, where still seeded); 0095 leaves
+`break_glass_enabled` start off (0091, where still seeded); 0097 leaves
 `break_glass_enabled` to the operator. Prescriptions are
 still created and changed in the EHR. No lab request can be created or changed
 at launch. Since 0090 an encounter's cancellation or retraction needs the write

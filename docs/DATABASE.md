@@ -2289,9 +2289,9 @@ repository; the release checklist's P10 records them before and after 0082.
   BREAK_GLASS_DISABLED` when the control is off and, since the change that
   added 0084, also when it is on: Identity answers the function's
   emergency-purpose refusal (`22023`) as `423 BREAK_GLASS_DISABLED` instead of
-  `400 INVALID_CONSENT_COMMAND`. Since D9 was decided (2026-10-14), 0095 seeds
+  `400 INVALID_CONSENT_COMMAND`. Since D9 was decided (2026-10-14), 0097 seeds
   it, with the break-glass permission, and leaves the control to an operator
-  ("Break-glass at launch, with limits (0095)", below; release checklist P10
+  ("Break-glass at launch, with limits (0097)", below; release checklist P10
   and P11).
 - `healthcare-operations` is not seeded. Identity access requests
   (`consent.controller.ts`), Lab and Pharmacy reads and the OCR commands
@@ -4609,19 +4609,19 @@ exactly as it does on `main` without this change (it fails the same with the
 0096 policies and view dropped), and the rehearsal's owner pass runs only the
 additional suites.
 
-## Break-glass at launch, with limits (0095)
+## Break-glass at launch, with limits (0097)
 
-`0095_break_glass_launch_with_limits.sql` (decision D9 as the owner decided
+`0097_break_glass_launch_with_limits.sql` (decision D9 as the owner decided
 it on 2026-10-14, "turn on with limits"; ADR-058 addendum) is the reviewed
 re-enabling migration ADR-058 asks for, for break-glass only. 0001 through
-0094 are unchanged; it was written as 0092, then 0093, and is numbered after
-0093 and 0094 of D-Eminence/hid-system#84 and #85.
+0096 are unchanged; it was written as 0092, then 0093, then 0095, and is
+numbered after 0095 and 0096 of D-Eminence/hid-system#90 and #91.
 
 **Precondition.** It refuses to run while `break_glass_enabled` is on
 (`55000 BREAK_GLASS_CONTROL_ON`; nothing is changed, the ledger stays at
-0094). 0091 set the control off only where the row was still exactly as 0039
+0096). 0091 set the control off only where the row was still exactly as 0039
 seeded it, and kept a value an administrator had set; granting the
-permission with the control on would make break-glass live at 0095's commit,
+permission with the control on would make break-glass live at 0097's commit,
 before staff MFA ships and the P11 operator step. A platform administrator
 sets it off with `POST /admin/controls` and `migrate` runs again. The flag is
 read through `platform.control_enabled`, as the guards read it. Before the
@@ -4681,7 +4681,7 @@ doctor, clinician and nurse to hold `identity.break-glass.write` and still
 refuses any other withdrawn permission. On 0091 the bootstrap fails with "the
 launch module set withdrew a permission it must keep: doctor lacks
 identity.break-glass.write, clinician lacks …, nurse lacks …"; an earlier
-release's bootstrap refuses a database that holds 0095.
+release's bootstrap refuses a database that holds 0097.
 
 **Locks.** `ACCESS SHARE` on `platform.control_settings` (the precondition's
 read, taken first, as an activation and the role bootstrap take that table
@@ -4689,7 +4689,7 @@ first; only an `ACCESS EXCLUSIVE` holder, which only a migration or the role
 bootstrap takes, makes it wait), `ROW EXCLUSIVE` on `auth.role_permissions`
 and `identity.purpose_of_use_codes`, and the foreign keys' `FOR KEY SHARE` on
 three `auth.roles` rows and one `auth.permissions` row; at most four rows
-written, no scan. Each waits at most the runner's 5 s lock timeout; a timeout rolls 0095
+written, no scan. Each waits at most the runner's 5 s lock timeout; a timeout rolls 0097
 back whole, and it can be run again. It needs no new grant, but the bootstrap
 of the same release runs after it.
 
@@ -4698,8 +4698,8 @@ Tests:
 - `break-glass-launch.integration.sql` (rollback-only; it inserts no purpose
   code and grants no permission) requires exactly the three holders, no other
   withdrawn permission, the three roles' consent, lookup and summary
-  permissions, an active `emergency` row (0095's, or an operator's earlier
-  row, which 0095 keeps; the rehearsal's fresh builds check 0095's exact row)
+  permissions, an active `emergency` row (0097's, or an operator's earlier
+  row, which 0097 keeps; the rehearsal's fresh builds check 0097's exact row)
   and no `healthcare-operations` row from any source (P11). It does not
   depend on the environment's control: as `hid_identity_api_runtime` a
   synthetic platform administrator sets `break_glass_enabled` off through
@@ -4720,20 +4720,20 @@ Tests:
   under `direct-care`, and the doctor reads nothing at the other facility. Once the code is deactivated, activation is refused (`22023`) and
   the existing grant is no longer honoured. On 0091 it fails at its first
   assertion ("identity.break-glass.write is not held by exactly clinician,
-  doctor and nurse (0010, 0095): no role").
+  doctor and nurse (0010, 0097): no role").
 - `runtime-roles.integration.sql`: the role assertions above.
 - `schema.integration.sql`, `emergency.integration.sql` and
   `emergency-contacts.integration.sql` no longer grant break-glass to the
-  doctor role themselves; they rely on 0095.
+  doctor role themselves; they rely on 0097.
 - The rehearsal's 0028 upgrade check requires the three holders, exactly
   `direct-care` and `emergency`, and `break_glass_enabled` off.
 - `verify-non-superuser-database.mjs` (run by the rehearsal) builds the chain
-  as a `NOSUPERUSER NOBYPASSRLS` administrator, where 0095 finds the control
+  as a `NOSUPERUSER NOBYPASSRLS` administrator, where 0097 finds the control
   unreadable before the first bootstrap and applies; after the bootstrap it
-  runs 0095's SQL again as that administrator in rolled-back transactions:
+  runs 0097's SQL again as that administrator in rolled-back transactions:
   refused (`55000 BREAK_GLASS_CONTROL_ON`) with the control on, a no-op with
   it off.
-- All 52 SQL suites pass on a database built from empty to 0095 and
-  bootstrapped, and the 50 additional suites again with every schema, table
+- All 54 SQL suites pass on a database built from empty to 0097 and
+  bootstrapped, and the 52 additional suites again with every schema, table
   and function owned by a `NOSUPERUSER NOBYPASSRLS` role; the full rehearsal
-  passes on 0095 (local evidence, release checklist §8).
+  passes on 0097 (local evidence, release checklist §8).

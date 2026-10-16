@@ -1488,7 +1488,7 @@ revoke all on identity.facility_assisted_registration, identity.facility_assiste
   from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
     hid_ehr_api_runtime, hid_schema_test_runtime;
 
--- Break-glass at launch, with limits (0095, D9, ADR-058 addendum). 0095
+-- Break-glass at launch, with limits (0097, D9, ADR-058 addendum). 0097
 -- creates no object and changes no database grant: it inserts the
 -- identity.break-glass.write rows of doctor, clinician and nurse into
 -- auth.role_permissions and the emergency purpose of use. The Identity

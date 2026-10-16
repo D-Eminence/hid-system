@@ -1,9 +1,9 @@
 // docs/MIGRATION_RUNBOOK.md §5 tells operators, before a real source read, how
 // the purpose-of-use vocabulary reaches the database: which codes migrations
-// seed and which an operator inserts by a reviewed change. When 0095 (break-glass
+// seed and which an operator inserts by a reviewed change. When 0097 (break-glass
 // at launch, D9) began seeding `emergency`, the gate still said that operators
 // insert `emergency` by hand and that it stays absent. An operator who did so
-// before 0095 keeps a row 0095 then leaves as it is (ON CONFLICT DO NOTHING),
+// before 0097 keeps a row 0097 then leaves as it is (ON CONFLICT DO NOTHING),
 // whatever its display, source or `active`; an inactive one keeps break-glass
 // refused (release checklist P10).
 //
@@ -52,7 +52,7 @@ const names = (sentence, code) => sentence.includes(`\`${code}\``);
 
 test('the check finds the purpose-of-use codes the migrations seed', () => {
   assert.equal(seeded.get('direct-care'), '0082');
-  assert.equal(seeded.get('emergency'), '0095');
+  assert.equal(seeded.get('emergency'), '0097');
 });
 
 test('the runbook gate names every seeded code with the migration that seeds it', () => {

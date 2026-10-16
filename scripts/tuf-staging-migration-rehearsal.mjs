@@ -285,19 +285,19 @@ try {
       where permission_code ~ '^(lab|pharmacy|ocr|outreach)\\.'
          or permission_code = 'ehr.document.write'`)).rows, [],
     'Upgrade must leave no role holding a permission of a module that is off at launch');
-    // 0095 (break-glass at launch with limits, D9) grants break-glass again to
+    // 0097 (break-glass at launch with limits, D9) grants break-glass again to
     // exactly the roles 0010 granted it to, and to no other role.
     assert.deepEqual((await client.query(`select role_code from auth.role_permissions
       where permission_code = 'identity.break-glass.write' order by role_code`)).rows.map((row) => row.role_code),
     ['clinician', 'doctor', 'nurse'], 'Upgrade must grant break-glass to exactly doctor, clinician and nurse');
     // The 0028 baseline holds no purpose-of-use code; 0082 seeds direct-care
-    // and 0095 emergency (healthcare-operations awaits decision N3).
+    // and 0097 emergency (healthcare-operations awaits decision N3).
     assert.deepEqual((await client.query(`select code, display, active, source_system
       from identity.purpose_of_use_codes order by code`)).rows,
     [{ code:'direct-care', display:'Direct patient care', active:true, source_system:'hid' },
       { code:'emergency', display:'Emergency treatment', active:true, source_system:'hid' }],
     'Upgrade must seed exactly the active direct-care and emergency purposes of use');
-    // 0095 leaves the platform control to an operator: break-glass stays off.
+    // 0097 leaves the platform control to an operator: break-glass stays off.
     assert.equal((await client.query(`select platform.control_enabled('break_glass_enabled') as enabled`)).rows[0].enabled,
       false, 'Upgrade must leave break_glass_enabled off for the operator');
     // 0090 (D-Eminence/hid-system#74) adds the retraction,
@@ -420,9 +420,9 @@ try {
     } finally { await client.query('rollback'); }
   });
   const upgradeAfter = await snapshot('hid_upgrade');
-  // identity.purpose_of_use_codes gains 0082's and 0095's seeds, and
+  // identity.purpose_of_use_codes gains 0082's and 0097's seeds, and
   // auth.role_permissions loses 0084's and 0091's launch-withdrawn permissions
-  // and regains 0095's break-glass rows, all checked above.
+  // and regains 0097's break-glass rows, all checked above.
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
     'auth.permissions', 'auth.role_permissions', 'identity.purpose_of_use_codes',

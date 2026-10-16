@@ -4155,15 +4155,16 @@ Related: ADR-041 (P8 owners); ADR-045 (Outreach campaign governance);
 module set, patient self-service, document upload completion);
 `DATABASE.md` (0091); release checklist §1, §2, §3, P10, P11, §5, §8, §9.
 
-## ADR-058 addendum: break-glass permitted at launch with limits (0095); on only after the P11 operator step
+## ADR-058 addendum: break-glass permitted at launch with limits (0097); on only after the P11 operator step
 
 Status: Decided by the owner on 2026-10-14 (D9, "turn on with limits").
-Source implementation proposed (migration 0095, branch
+Source implementation proposed (migration 0097, branch
 `claude/break-glass-launch`, D-Eminence/hid-system#83); not merged or
-deployed. Written as 0092 and then 0093, it is numbered 0095, after 0093 and
-0094 of D-Eminence/hid-system#84 and #85 (ADR-062, ADR-063), which change
-neither the break-glass permission, the purpose-of-use vocabulary nor the
-platform controls. The platform control is
+deployed. Written as 0092, then 0093, then 0095, it is numbered 0097, after
+0093 and 0094 of D-Eminence/hid-system#84 and #85 (ADR-062, ADR-063) and
+0095 and 0096 of D-Eminence/hid-system#90 and #91 (ADR-064, ADR-065), which
+change neither the break-glass permission, the purpose-of-use vocabulary nor
+the platform controls. The platform control is
 production configuration and is not changed here: it is an operator step.
 
 Date: 2026-10-14
@@ -4183,7 +4184,7 @@ is unaffected.
 
 Decision:
 
-- 0095 grants `identity.break-glass.write` to exactly the roles that held it
+- 0097 grants `identity.break-glass.write` to exactly the roles that held it
   before 0091: doctor, clinician and nurse (0010; no other migration granted
   it to another role). It seeds `emergency` ("Emergency treatment", active,
   source `hid`) with `ON CONFLICT (code) DO NOTHING`, as 0082 seeded
@@ -4194,16 +4195,16 @@ Decision:
 - The role assertions change with it: exactly those three roles hold
   `identity.break-glass.write`. Any other holder, a missing one, or any other
   permission 0084 or 0091 withdrew still stops the bootstrap.
-- The control stays the operator's. 0095 leaves `break_glass_enabled` as 0091
+- The control stays the operator's. 0097 leaves `break_glass_enabled` as 0091
   left it (off where still seeded; a migration has no actor for a control
   event), and refuses to run while it is on (`55000 BREAK_GLASS_CONTROL_ON`,
   nothing changed): 0091 kept a value an administrator had set, and granting
-  the permission with the control on would make break-glass live at 0095's
+  the permission with the control on would make break-glass live at 0097's
   commit, before staff MFA. The administrator sets it off with
   `POST /admin/controls` and `migrate` runs again. Before the first role
   bootstrap the migration administrator cannot read the control (forced
   row-level security, `PLATFORM_CONTROL_UNAVAILABLE`); no runtime role exists
-  then, so the control is as 0091 left it, and 0095 goes on. A platform
+  then, so the control is as 0091 left it, and 0097 goes on. A platform
   administrator turns it on with the audited
   `POST /admin/controls` (MFA platform session, TOTP step-up, reason,
   `If-Match`) once staff MFA has shipped: Identity runs with 0088 in that
@@ -4254,13 +4255,13 @@ Alternatives not taken:
 - Refusing the emergency purpose on the document routes now: it would decide
   N3's document question, which the owner has not decided, and N3's proposed
   default keeps today's reads; no document exists at launch.
-- Checking the control only in the release checklist before 0095: 0095's own
+- Checking the control only in the release checklist before 0097: 0097's own
   precondition also covers a database the checklist does not reach (a
   long-lived development or pre-launch copy).
 
 Consequences:
 
-- From 0095's commit, doctors', clinicians' and nurses' sessions list
+- From 0097's commit, doctors', clinicians' and nurses' sessions list
   `identity.break-glass.write` on their next request (Identity reads
   permissions per request), and Health-id `077b85c` enables its Emergency
   method for them. While the control is off the activation answers
@@ -4270,7 +4271,7 @@ Consequences:
 - After the operator step, activation is live: grant, audit, emergency-contact
   alert intent (delivered only where emergency-contact delivery is enabled)
   and inbox item, and the summary as above.
-- An earlier release's bootstrap refuses a database that holds 0095 (its
+- An earlier release's bootstrap refuses a database that holds 0097 (its
   assertion forbids the permission). Break-glass is turned off again with the
   control (or by deactivating `emergency`); taking the permission away again
   is a new reviewed migration, never a hand-made delete, which would stop the
@@ -4284,15 +4285,15 @@ Consequences:
 - Evidence is local and synthetic: the rollback-only suite
   `break-glass-launch.integration.sql` (which sets the control itself through
   the administrator command, so it does not depend on the environment's
-  control), the role assertions, 0095's precondition run again by
+  control), the role assertions, 0097's precondition run again by
   `verify-non-superuser-database.mjs`, and the patient-safety runtime verifier
   over HTTP with the control off, on and off again (release checklist §8).
   Nothing has been run on staging or production.
 
 Related: ADR-054 (staff MFA); ADR-058; `PHASE_3_LAUNCH_DECISIONS.md` (D9, N3);
 `INTERFACE_CONTRACT.md` (break-glass, launch module set); `DATABASE.md`
-("Break-glass at launch, with limits (0095)"); release checklist §1, §2, §3,
-P10, P11, §5, S4w, §8, §9, §10.
+("Break-glass at launch, with limits (0097)"); release checklist §1, §2, §3,
+P10, P11, §5, S4y, §8, §9, §10.
 
 # ADR-059: A Fault Is Never a Sign-Out; Refusals Carry Their Own Codes
 

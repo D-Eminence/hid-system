@@ -306,7 +306,7 @@ The executable covers:
    EHR's own patient-self transaction (nothing new without the release
    binding; only vitals with only that flag on), as `hid_ehr_api_runtime`
    against a real Identity child.
-   With 0095 (break-glass at launch, with limits; ADR-058 addendum): the role
+   With 0097 (break-glass at launch, with limits; ADR-058 addendum): the role
    assertions require exactly doctor, clinician and nurse to hold
    `identity.break-glass.write`; the additional suites include
    `break-glass-launch.integration.sql` (which sets `break_glass_enabled`
@@ -322,9 +322,9 @@ The executable covers:
    (as P11's operator step would), `423` again once it is off, and `403
    PERMISSION_DENIED` for an org admin; and the non-superuser check's P10 and
    P11 expect `emergency` and the three break-glass holders. The
-   non-superuser check also confirms 0095's precondition: before the first
+   non-superuser check also confirms 0097's precondition: before the first
    bootstrap the administrator cannot read the control
-   (`PLATFORM_CONTROL_UNAVAILABLE`) and 0095 applies; after it, 0095's SQL run
+   (`PLATFORM_CONTROL_UNAVAILABLE`) and 0097 applies; after it, 0097's SQL run
    again as the administrator in rolled-back transactions is refused
    (`55000 BREAK_GLASS_CONTROL_ON`) with the control on and is a no-op with it
    off.
@@ -359,9 +359,10 @@ The executable covers:
    grants `SELECT` on it to the EHR runtime and not to the Lab runtimes,
    gives neither the Lab runtime nor the view's owner `ehr.patient_self_context`
    or the Lab runtime `USAGE` on `ehr`, and keeps `ehr.patient_self_context`
-   executable by exactly the EHR runtime and the test role; and since 0095 break-glass
-   held by exactly doctor, clinician and nurse, exactly the `direct-care` and
-   `emergency` purposes, and `break_glass_enabled` still off), then
+   executable by exactly the EHR runtime and the test role; and since 0097
+   break-glass held by exactly doctor, clinician and nurse, exactly the
+   `direct-care` and `emergency` purposes, and `break_glass_enabled` still
+   off), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

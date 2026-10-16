@@ -29,7 +29,7 @@
 // - the release checklist's read-only P10, P11 and P35 checks, taken from
 //   docs/PHASE_4_STAGE_5_RELEASE_READINESS.md, as the administrator, as an
 //   operator runs them on RDS;
-// - break-glass's migration (0095) run again as the administrator in
+// - break-glass's migration (0097) run again as the administrator in
 //   rolled-back transactions: refused while break_glass_enabled is on, a
 //   no-op while it is off;
 // - the platform-control-owner and function-parameter-settings suites.
@@ -340,10 +340,10 @@ try {
   assert.deepEqual(p10.map((line) => line.split('|').slice(0, 4).join('|')),
     ['break_glass_enabled|f', 'direct-care|Direct patient care|t|hid', 'emergency|Emergency treatment|t|hid'],
     `P10 check: ${p10.join('; ')}`);
-  // After 0095 and the bootstrap: the three launch controls off (break-glass
+  // After 0097 and the bootstrap: the three launch controls off (break-glass
   // until the operator turns it on, P11), no healthcare-operations purpose, no
   // permission 0084 or 0091 withdrew, break-glass granted to exactly the three
-  // roles 0095 names, and no control event.
+  // roles 0097 names, and no control event.
   const p11 = await checklistCheck('P11 check (read-only)');
   assert.deepEqual(p11, ['break_glass_enabled|f', 'outreach_portal_enabled|f', 'uploads_enabled|f',
     'clinician|identity.break-glass.write', 'doctor|identity.break-glass.write', 'nurse|identity.break-glass.write'],
@@ -409,7 +409,7 @@ try {
   evidence.steps.notification_recipient = { run_as: worker, answers: { verified: 'email', phone_only: 'withhold' },
     direct_patient_read: /permission denied for \S+ \S+/.exec(workerDirect.output)[0], refused: refusedLogins };
 
-  // Break-glass's migration (0095, D9, ADR-058 addendum) refuses to run while
+  // Break-glass's migration (0097, D9, ADR-058 addendum) refuses to run while
   // break_glass_enabled is on: 0091 turned the control off only where 0039's
   // seed was untouched, and granting the permission with the control on would
   // make break-glass live at the migration's commit, before staff MFA ships
