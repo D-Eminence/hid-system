@@ -4,7 +4,7 @@ import * as argon2 from 'argon2';
 import type { PoolClient } from 'pg';
 import { AFTER_RESPONSE_SHUTDOWN_GRACE_MS, AfterResponseTasks } from '../common/after-response-tasks';
 import { publicClientNetwork } from '../common/client-network';
-import { DomainProblem } from '../common/problem';
+import { DomainProblem, RetryAfterProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import type { RecoveryAudience, RecoveryOtpPurpose } from './dto/otp.dto';
@@ -480,7 +480,14 @@ export class OtpService implements BeforeApplicationShutdown {
     return new DomainProblem(403, 'OTP_INVALID_OR_EXPIRED', 'The verification code is invalid or expired');
   }
 
+  /**
+   * The recipient, network and account start buckets share one window, so the
+   * window is the same Retry-After whichever refused, and a configuration
+   * constant rather than the time left in a bucket the identifier keys. A
+   * blocked bucket stays blocked for one window (rate-limit.ts): an upper bound.
+   */
   private rateLimited(): DomainProblem {
-    return new DomainProblem(429, 'OTP_RATE_LIMITED', 'Too many verification-code requests');
+    return new RetryAfterProblem(429, 'OTP_RATE_LIMITED', 'Too many verification-code requests',
+      this.environment.OTP_RATE_WINDOW_SECONDS);
   }
 }

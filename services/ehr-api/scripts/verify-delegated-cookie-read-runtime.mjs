@@ -411,6 +411,9 @@ if (process.argv[2] === '--identity-child') {
     ], 'The emergency summary does not return each vital as first recorded');
     assert.deepEqual(emergency.body.documents?.map((item) => [item.id, item.status, item.scanStatus]),
       [[summary.clean, 'available', 'clean']], 'The emergency summary lists a document whose effective status is not available');
+    // size_bytes is a bigint, which pg reads as text; the summary answers a JSON integer.
+    assert.deepEqual(emergency.body.documents?.map((item) => item.sizeBytes), [1024],
+      'The emergency summary returns a document\'s sizeBytes as text instead of an integer');
     assert.deepEqual({ count: emergency.body.encounters?.length, limits: emergency.body.limits,
       truncated: emergency.body.truncated, limit: emergency.body.limit }, { count: 50,
       limits: { encounters: 50, notes: 50, vitals: 100, diagnoses: 100, prescriptions: 100, labRequests: 100, documents: 100 },

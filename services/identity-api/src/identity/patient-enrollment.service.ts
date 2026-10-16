@@ -7,7 +7,7 @@ import { GoogleAuthenticationService } from '../auth/google-authentication.servi
 import { NotificationOtpClient } from '../auth/notification-otp.client';
 import { consumeRateLimit, rateLimitBlocked, type RateLimitWindow } from '../auth/rate-limit';
 import { publicClientNetwork } from '../common/client-network';
-import { DomainProblem, PublicDetailProblem } from '../common/problem';
+import { DomainProblem, PublicDetailProblem, RetryAfterProblem } from '../common/problem';
 import { getEnvironment, isProductionProfile } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { HidCodeGenerator } from './hid-code-generator.service';
@@ -444,7 +444,7 @@ export class PatientEnrollmentService {
           and consumed_at is null and invalidated_at is null order by created_at desc limit 1 for update`,
         [row.id])).rows[0];
       if (active && active.created_at.getTime() + this.env.OTP_RESEND_COOLDOWN_SECONDS * 1000 > Date.now()) {
-        throw new DomainProblem(429, 'OTP_RESEND_COOLDOWN', 'Wait before requesting another code');
+        throw this.resendCooldown(active);
       }
       const sent = await client.query<{ sent: number }>(
         `select count(*)::integer as sent from identity.public_patient_enrollment_otps
@@ -590,7 +590,7 @@ export class PatientEnrollmentService {
       return { limited: ipLimited || recipientLimited || enrollmentLimited || failureBlocked,
         ready: readiness.rows[0]?.ready === true, contactBound: contactBound.rows[0]?.bound === true };
     });
-    if (preflight.limited) throw this.rateLimited();
+    if (preflight.limited) throw this.contactRateLimited();
     if (!preflight.ready) throw this.reconciliationRequired();
     if (preflight.contactBound) throw this.contactAlreadyRegistered();
     const result = await this.withEnrollmentLock(cookie, correlationId, async (client, row) => {
@@ -601,7 +601,7 @@ export class PatientEnrollmentService {
           and consumed_at is null and invalidated_at is null order by created_at desc limit 1 for update`,
         [row.id])).rows[0];
       if (active && active.created_at.getTime() + this.env.OTP_RESEND_COOLDOWN_SECONDS * 1000 > Date.now()) {
-        throw new DomainProblem(429, 'OTP_RESEND_COOLDOWN', 'Wait before requesting another code');
+        throw this.resendCooldown(active);
       }
       if (active) await client.query(
         `update identity.public_patient_enrollment_otps set invalidated_at=clock_timestamp(),
@@ -1206,8 +1206,30 @@ export class PatientEnrollmentService {
     return first.length === second.length && first.length === 32 && timingSafeEqual(first, second);
   }
   private invalidCode() { return new DomainProblem(422, 'OTP_INVALID', 'The verification code is invalid or expired'); }
-  private rateLimited() { return new DomainProblem(429, 'ENROLLMENT_RATE_LIMITED',
-    'Too many enrollment requests; try again later'); }
+  /** Enrollment's own rate windows (consumeRate) are OTP_RATE_WINDOW_SECONDS long: an upper bound. */
+  private rateLimited(retryAfterSeconds = this.env.OTP_RATE_WINDOW_SECONDS) {
+    return new RetryAfterProblem(429, 'ENROLLMENT_RATE_LIMITED', 'Too many enrollment requests; try again later',
+      retryAfterSeconds);
+  }
+  /**
+   * Every contact-step refusal, a spent contact-code budget (#61) included,
+   * carries one Retry-After, the longer of the two windows, so the budget stays
+   * indistinguishable from the request limits.
+   */
+  private contactRateLimited() {
+    return this.rateLimited(Math.max(this.env.OTP_RATE_WINDOW_SECONDS,
+      this.env.PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS));
+  }
+  /**
+   * A resend inside the cooldown, at the holder or the contact step (A21):
+   * Retry-After is the seconds left of this cookie-proven enrollment's own
+   * last code of that step, which the caller asked for, so it tells nothing
+   * about anyone else.
+   */
+  private resendCooldown(active: ChallengeRow) {
+    return new RetryAfterProblem(429, 'OTP_RESEND_COOLDOWN', 'Wait before requesting another code',
+      (active.created_at.getTime() + this.env.OTP_RESEND_COOLDOWN_SECONDS * 1000 - Date.now()) / 1000);
+  }
   private ninAlreadyRegistered() { return new DomainProblem(409, 'NIN_ALREADY_REGISTERED',
     NIN_ALREADY_REGISTERED_DETAIL); }
   /** A fixed patient sentence, shown as sent even with the 503 (ADR-062). */

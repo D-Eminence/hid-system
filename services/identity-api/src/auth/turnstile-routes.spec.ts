@@ -12,6 +12,8 @@ import type { ActorContext, HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import { PublicOrganizationApplicationsController,
   PublicOrganizationProfileCompletionController } from '../identity/organization-applications.controller';
+import { ClinicianApplicationController } from '../identity/clinician-application.controller';
+import { ClinicianApplicationService } from '../identity/clinician-application.service';
 import { OrganizationApplicationsService } from '../identity/organization-applications.service';
 import { OrganizationProfileCompletionService } from '../identity/organization-profile-completion.service';
 import { PatientEnrollmentController } from '../identity/patient-enrollment.controller';
@@ -54,6 +56,7 @@ const downstream = {
   staffLogin: reached(), patientLogin: reached(), googleLogin: reached(), googleExchange: reached(), googleLink: reached(),
   adminLogin: reached(), otpStart: reached(), demoSubmit: reached(), applicationSubmit: reached(), completionStart: reached(),
   patientEnrollmentStart: reached(), providerEnrollmentStart: reached(),
+  clinicianSignupStart: reached(), clinicianStatusStart: reached(),
 };
 
 const password = 'Synthetic-Password-2026';
@@ -85,6 +88,10 @@ const ROUTES = [
     passes: 'DOWNSTREAM_REACHED', service: 'patientEnrollmentStart' },
   { path: '/identity/provider-enrollments', action: 'provider-enrollment',
     body: { ...cac, organizationType: 'clinic', administratorName: 'Ada Example' }, passes: 'DOWNSTREAM_REACHED', service: 'providerEnrollmentStart' },
+  { path: '/identity/clinician-applications/email-code', action: 'clinician-application', body: { email },
+    passes: 'DOWNSTREAM_REACHED', service: 'clinicianSignupStart' },
+  { path: '/identity/clinician-applications/status/email-code', action: 'clinician-application-status', body: { email },
+    passes: 'DOWNSTREAM_REACHED', service: 'clinicianStatusStart' },
 ] as const;
 
 /** Cloudflare Siteverify as documented, for tokens named `pass:<action>:<hostname>`, `invalid`, `expired` and `outage`. */
@@ -131,7 +138,7 @@ beforeEach(async () => {
   const module = await Test.createTestingModule({
     controllers: [AuthController, PlatformAuthController, OtpController, PublicDemoRequestsController,
       PublicOrganizationApplicationsController, PublicOrganizationProfileCompletionController,
-      PatientEnrollmentController, ProviderEnrollmentController],
+      PatientEnrollmentController, ProviderEnrollmentController, ClinicianApplicationController],
     providers: [
       TurnstileService,
       { provide: AuthService, useValue: { login: downstream.patientLogin } },
@@ -150,6 +157,8 @@ beforeEach(async () => {
       { provide: OrganizationProfileCompletionService, useValue: { start: downstream.completionStart } },
       { provide: PatientEnrollmentService, useValue: { start: downstream.patientEnrollmentStart } },
       { provide: ProviderEnrollmentService, useValue: { start: downstream.providerEnrollmentStart } },
+      { provide: ClinicianApplicationService, useValue: { startSignup: downstream.clinicianSignupStart,
+        startStatus: downstream.clinicianStatusStart } },
     ],
   }).compile();
   app = module.createNestApplication({ logger: false });
@@ -251,5 +260,35 @@ describe('the workforce sign-in route', () => {
     expect(response.body.code).toBe('DOWNSTREAM_REACHED');
     expect(siteverifyCalls).toBe(1);
     expect(downstream.staffLogin).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the clinician application routes (ADR-066)', () => {
+  // Both actions belong to the main site only: a product host (where a staff
+  // member signs in) never presents them, so a token from one is refused
+  // before Cloudflare is called.
+  it.each([
+    ['/identity/clinician-applications/email-code', 'clinician-application'],
+    ['/identity/clinician-applications/status/email-code', 'clinician-application-status'],
+  ])('refuses %s from a product host with 403 TURNSTILE_CONTEXT_MISMATCH', async (path, action) => {
+    const host = WORKFORCE_HOSTS['ehr-login'];
+    const response = await request(app.getHttpServer()).post(`/api/v1${path}`).set('Origin', `https://${host}`)
+      .send({ email, turnstileAction: action, turnstileToken: `pass:${action}:${host}:product` });
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('TURNSTILE_CONTEXT_MISMATCH');
+    expect(siteverifyCalls).toBe(0);
+    untouched();
+  });
+
+  it('refuses the sign-up action on the status route and the status action on the sign-up route', async () => {
+    for (const [path, action] of [['/identity/clinician-applications/email-code', 'clinician-application-status'],
+      ['/identity/clinician-applications/status/email-code', 'clinician-application']] as const) {
+      const response = await request(app.getHttpServer()).post(`/api/v1${path}`).set('Origin', ORIGIN)
+        .send({ email, turnstileAction: action, turnstileToken: `pass:${action}:${SITE}:swap` });
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe('VALIDATION_FAILED');
+    }
+    expect(siteverifyCalls).toBe(0);
+    untouched();
   });
 });

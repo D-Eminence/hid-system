@@ -202,7 +202,12 @@ export class PatientRecordRelease {
       prescriptions: sections.prescriptions?.rows ?? [],
       labRequests: [],
       ...(sections.labResults ? { labResults: sections.labResults.rows.map(labResult) } : {}),
-      documents: sections.documents?.rows ?? [],
+      // size_bytes is a bigint, which pg reads as text; the value is at most 52428800 (0004).
+      // Every document answer returns it as a JSON integer (A15).
+      documents: (sections.documents?.rows ?? []).map((row) => ({
+        ...row,
+        sizeBytes: row.sizeBytes == null ? null : Number(row.sizeBytes),
+      })),
       released,
       withheld: WITHHELD_ORDER.filter((category) => !(released as string[]).includes(category)),
       limits: Object.fromEntries(released.map((name) => [name, PATIENT_SECTION_LIMITS[name]])),

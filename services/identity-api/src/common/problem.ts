@@ -45,6 +45,52 @@ export class DomainProblem extends HttpException {
  */
 export class PublicDetailProblem extends DomainProblem {}
 
+/**
+ * A refusal that tells the client when to retry, as the Retry-After header in
+ * whole seconds (A21). The body is the same as any DomainProblem's. Give the
+ * limit's full configured window, an upper bound whichever bucket refused;
+ * never the time left in a bucket keyed by an identifier the caller named,
+ * which would tell another person's activity on it; and never on an answer
+ * that must look like another one (a spent code budget is answered as a wrong
+ * code is, #55 and #61).
+ */
+export class RetryAfterProblem extends DomainProblem {
+  readonly retryAfterSeconds: number;
+
+  constructor(status: 429 | 503, code: string, detail: string, retryAfterSeconds: number) {
+    super(status, code, detail);
+    this.retryAfterSeconds = Math.max(1, Math.ceil(retryAfterSeconds));
+  }
+}
+
+const DEFAULT_CODES: Readonly<Record<number, string>> = {
+  400: 'BAD_REQUEST',
+  401: 'AUTHENTICATION_REQUIRED',
+  403: 'ACCESS_DENIED',
+  404: 'NOT_FOUND',
+  409: 'CONFLICT',
+  412: 'VERSION_CONFLICT',
+  413: 'PAYLOAD_TOO_LARGE',
+  415: 'UNSUPPORTED_MEDIA_TYPE',
+  429: 'RATE_LIMITED',
+  503: 'DEPENDENCY_UNAVAILABLE',
+};
+
+/** The code the problem filter answers for a status without a DomainProblem code. */
+export function defaultProblemCode(status: number): string {
+  return DEFAULT_CODES[status] ?? 'INTERNAL_ERROR';
+}
+
+/**
+ * The status and code the problem filter answers for an exception (an unknown
+ * one is 500 INTERNAL_ERROR), for the request's audit row (A17). Never the
+ * message: only the status and the code.
+ */
+export function problemStatusAndCode(exception: unknown): { status: number; code: string } {
+  const status = exception instanceof HttpException ? exception.getStatus() : HttpStatus.INTERNAL_SERVER_ERROR;
+  return { status, code: exception instanceof DomainProblem ? exception.code : defaultProblemCode(status) };
+}
+
 @Catch()
 export class ProblemDetailsFilter implements ExceptionFilter {
   private readonly logger = new Logger(ProblemDetailsFilter.name);
@@ -87,6 +133,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       ...(domainProblem?.fields ? { fields: domainProblem.fields } : {}),
     };
 
+    if (exception instanceof RetryAfterProblem) response.setHeader('Retry-After', String(exception.retryAfterSeconds));
     response.status(status).type('application/problem+json').json(problem);
   }
 
@@ -107,19 +154,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
   }
 
   private defaultCode(status: number): string {
-    const byStatus: Record<number, string> = {
-      400: 'BAD_REQUEST',
-      401: 'AUTHENTICATION_REQUIRED',
-      403: 'ACCESS_DENIED',
-      404: 'NOT_FOUND',
-      409: 'CONFLICT',
-      412: 'VERSION_CONFLICT',
-      413: 'PAYLOAD_TOO_LARGE',
-      415: 'UNSUPPORTED_MEDIA_TYPE',
-      429: 'RATE_LIMITED',
-      503: 'DEPENDENCY_UNAVAILABLE',
-    };
-    return byStatus[status] ?? 'INTERNAL_ERROR';
+    return defaultProblemCode(status);
   }
 
   private bodyParserStatus(exception: unknown): number | undefined {
