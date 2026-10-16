@@ -795,7 +795,8 @@ handler, with `403 PATIENT_SESSION_REQUIRED` (ADR-059), audited as
 `auth.authorization.denied` on resource type `authentication` with no
 facility. They are every `/api/v1/identity/me` route of `PatientSelfController`
 (`GET /me`, `GET /me/access-history`, `GET /me/notifications`,
-`POST /me/notifications/:id/read`, `POST` and `DELETE /me/access-pin`) and
+`POST /me/notifications/:id/read`, `POST` and `DELETE /me/access-pin`,
+`GET` and `POST /me/imported-history-sharing`) and
 `GET /identity/service/patient-self-authorization`, `POST
 /me/verification/nin`, the emergency contact routes
 (`/identity/me/emergency-contacts/*`), the account deletion routes
@@ -955,9 +956,11 @@ Patient emergency contacts (POST-only commands):
 | `POST /api/v1/identity/me/emergency-contacts/:contactId/verification/confirm` | `{ challengeId, code }`; single use, expiring, attempt-limited |
 
 For 24 hours after an OTP account recovery (0086, REC-NOTIFY), adding or
-changing an emergency contact and setting the access PIN
-(`POST /api/v1/identity/me/access-pin`) answer `403
-PATIENT_RECENT_RECOVERY_HOLD`, as does an access-request approval (above).
+changing an emergency contact, setting the access PIN
+(`POST /api/v1/identity/me/access-pin`) and turning imported history sharing
+on (`POST /api/v1/identity/me/imported-history-sharing` with `shared: true`)
+answer `403 PATIENT_RECENT_RECOVERY_HOLD`, as does an access-request approval
+(above).
 Deactivating a contact, verifying one already added and removing the PIN
 (`DELETE /api/v1/identity/me/access-pin`) stay available.
 
@@ -2382,6 +2385,78 @@ withheld. The seeded doctor, clinician and nurse roles hold all seven.
   `encounterCount`, `noteCount`, `vitalCount`, `diagnosisCount`,
   `prescriptionCount`, `labRequestCount`, `documentCount` (a withheld category
   has no count) and `withheldCategories`.
+
+### Imported legacy medical history
+
+Owner decision 3 of 2026-10-16 (ADR-065, migration 0096): patients and staff
+may see the medical history imported from the legacy system, as the legacy
+system held it. It is never part of either record summary: `GET
+/api/v1/ehr/me/records` and the emergency summary keep exactly their keys,
+reads and audit details. Three switches, each off by default and refused in
+the production profile until the DPO and the owner sign off the legacy data
+and Health-id renders it (release checklist P36); staging may set them:
+`EHR_PATIENT_RELEASE_IMPORTED_HISTORY` (the patient's own read, a category of
+the patient release set), `EHR_STAFF_IMPORTED_HISTORY_ENABLED` (the staff
+read) and Identity's `IMPORTED_HISTORY_SHARING_ENABLED` (the patient's sharing
+choice); synth inputs `HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY`,
+`HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED` and
+`HID_IMPORTED_HISTORY_SHARING_ENABLED`.
+
+- `GET /api/v1/ehr/me/imported-history[?cursor=...]` (patient sessions only,
+  facility-optional; a staff session answers `403 PATIENT_SESSION_REQUIRED`
+  in the guard): the patient's own imported history from every source. It
+  needs no sharing choice. `503 IMPORTED_HISTORY_DISABLED` while its switch
+  is off, before Identity is asked; Identity's answers are as for the
+  summary (`403 PATIENT_ACCESS_DENIED`, `503 IDENTITY_SERVICE_*`). The audit
+  event `ehr.patient.self.imported-history.read` (resource type
+  `imported-medical-history`, purpose `patient-self`) records `recordCount`,
+  `versionCount`, `fileCount`, `healthProfile` (`false`) and `truncated`.
+- `GET /api/v1/ehr/patients/:patientId/imported-history[?cursor=...]` (staff,
+  permission `ehr.imported-history.read`, held by doctor, clinician and
+  nurse; `X-Facility-ID`; `X-Purpose-Of-Use: direct-care` only, any other
+  purpose or none answers `400 DIRECT_CARE_PURPOSE_REQUIRED` before Identity
+  is asked; `503 IMPORTED_HISTORY_DISABLED` while its switch is off). Identity
+  authorizes the consent at the selected facility on every request (`403
+  CONSENT_REQUIRED`, audited denied); a break-glass authorization is refused
+  with `403 BREAK_GLASS_EXCLUDED`. Until the patient shares their imported
+  history the answer is `shared: false` with no record, the same for a
+  patient who has none. The audit event `ehr.imported-history.read` records
+  `shared` and the counts above.
+
+Both answer, newest first:
+
+| Field | Meaning |
+|---|---|
+| `shared` | staff route only: whether the patient shares their imported history with staff they consent to |
+| `records` | at most `limits.records` records: `id`, `origin` (`patient-provided` or `provider-authored`), `title`, `category`, `infoType`, `createdAt`, `updatedAt` (the legacy timestamps), `currentVersionId`, `versions` (newest first: `id`, `versionNo`, `origin`, `createdAt`, `record`, `notes`, `structuredData`, `transcriptionText`), `versionsTruncated`, `files` (`id`, `recordVersionId`, `fileName`, `mediaType`, `sizeBytes`, `createdAt`, `accessStatus`), `filesTruncated` |
+| `healthProfile` | `null`: imported health profiles are not part of this change |
+| `limits` | `{ records: 50, versionsPerRecord: 20, filesPerRecord: 20 }` |
+| `truncated` | `{ records }`: `true` when more records exist; `nextCursor` then fetches the next page |
+| `nextCursor` | an opaque cursor for this route and patient, or `null`; a cursor of the other route, another patient or a changed format answers `400 INVALID_CURSOR` |
+| `provenance` | `legacy-import` |
+
+Every file is `accessStatus: "pending-safety-verification"`: no imported
+attachment, scan evidence or download exists yet. Legacy text is returned as
+the legacy system held it and must be rendered as text, never as markup;
+mentioning an allergy does not make it an allergy record (ALLERGY-1). No
+response carries the stored legacy row, its checksum, the staging run, the
+author's or uploader's account or any storage location. A read the database
+refuses or times out answers `503 IMPORTED_HISTORY_UNAVAILABLE` and
+discloses nothing.
+
+**The patient's sharing choice (Identity).** `GET
+/api/v1/identity/me/imported-history-sharing` answers `{ shared, updatedAt }`
+(`shared: false, updatedAt: null` until the patient chooses). `POST` with `{
+"shared": true | false }` (a boolean, else `400 VALIDATION_FAILED`; cookie
+sessions need Origin and CSRF) answers `200 { shared, changed, updatedAt }`;
+a repeat answers `changed: false`. Turning sharing on needs a recent sign-in
+(`403 PATIENT_RECENT_AUTH_REQUIRED`) and no account recovery in the last 24
+hours (`403 PATIENT_RECENT_RECOVERY_HOLD`); turning it off is always allowed
+and takes effect at the next staff request. Both are patient-only and answer
+`503 IMPORTED_HISTORY_SHARING_DISABLED` while the switch is off, before the
+body is read. The audit events
+`identity.patient.self.imported-history-sharing.read` and `.change` record
+`shared` (and `changed`) only.
 
 ## 12. Lab
 
