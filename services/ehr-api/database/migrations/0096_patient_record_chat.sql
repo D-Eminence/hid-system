@@ -37,7 +37,12 @@
 --    Retention is an open owner decision: there is no expiry, no automatic
 --    purge and no retention class; the patient deletes their history
 --    (DELETE /api/v1/ehr/me/chat/history) and the service stores at most 50
---    exchanges per patient. A message's reply has a checked shape (status,
+--    exchanges per patient. A legal hold (platform.legal_holds, 0064) keeps
+--    it: the delete policies admit a row only while no active hold names the
+--    patient or the patient's account, through
+--    ehr.record_chat_history_on_hold, a SECURITY DEFINER check owned by the
+--    migration administrator that answers only the patient's own
+--    patient-self transaction (true, held, for any other caller). A message's reply has a checked shape (status,
 --    answer of 1-4000 characters, at most 8 blocks and 40 sources) and the
 --    idempotency key follows the EHR rule (16-128 URL-safe characters),
 --    unique per conversation.
@@ -49,15 +54,22 @@
 --    row-level security, policies that admit only the owner's commands).
 --    - ehr.reserve_record_chat(audience, patient, tokens, daily budget)
 --      proves the caller with ehr.patient_self_context (patient audience
---      only), settles the caller's expired lease (its reserved tokens count
---      as used), refuses a second unsettled lease of the account (P4091
---      RECORD_CHAT_BUSY), counts the request against 10 an hour and 30 a
---      day per account (P4290 RECORD_CHAT_RATE_LIMITED, detail = seconds
---      until the bucket resets), and reserves the tokens against the daily
---      budget, capped by a hard ceiling of 20,000,000 (P5030
---      RECORD_CHAT_BUDGET_EXHAUSTED). A lease lasts 60 seconds. Any refusal
---      rolls back the whole call. At most 100 stale counter and reservation
---      rows are pruned per call; these hold no PHI and no text.
+--      only), reads the kill switch again (55000 RECORD_CHAT_PAUSED: turning
+--      it off is atomic with the lease and the disclosure audit row the
+--      caller's transaction commits), settles the caller's expired lease
+--      (its reserved tokens count as used; a lease another transaction is
+--      settling is skipped, and the budget moves only for a lease this call
+--      settled, so a late settlement never counts a lease twice), refuses a
+--      second unsettled lease of the account (P4091 RECORD_CHAT_BUSY),
+--      counts the request against 10 an hour and 30 a day per account
+--      (P4290 RECORD_CHAT_RATE_LIMITED, detail = seconds until the bucket
+--      resets), and reserves the tokens against the daily budget, capped by
+--      a hard ceiling of 20,000,000 (P5030 RECORD_CHAT_BUDGET_EXHAUSTED). A
+--      lease lasts 60 seconds. Any refusal rolls back the whole call. At most
+--      100 stale counter rows and 100 reservations older than two days
+--      (settled, or abandoned by an account that never came back) are pruned
+--      per call, skipping rows another call holds; these hold no PHI and no
+--      text.
 --    - ehr.settle_record_chat(reservation, input, output, cache read, cache
 --      write, outcome) is run by the same patient-self binding, moves the
 --      reserved tokens to used, and is idempotent (false when already
@@ -66,8 +78,9 @@
 --
 -- Not included: the staff audience and its tables, any embedding, chunk,
 -- extraction or vector object, any Lab policy, any permission, any retention
--- class or purge command, and any change to ehr.patient_self_context or to a
--- record table's policies: chat reads only through the patient release.
+-- class or purge command, any change to platform.legal_holds, and any change
+-- to ehr.patient_self_context or to a record table's policies: chat reads
+-- only through the patient release.
 --
 -- Locks, in order: platform.control_settings ACCESS EXCLUSIVE first (section
 -- 1, in the order of a break-glass activation and of the role bootstrap),
@@ -270,6 +283,34 @@ create table ehr.patient_chat_messages (
 create index patient_chat_messages_patient_idx
   on ehr.patient_chat_messages(patient_id, created_at desc, id desc);
 
+-- Whether an active legal hold keeps the patient's history: a hold on the
+-- patient or on the account of the patient-self binding. Only that patient's
+-- own patient-self transaction is answered; every other caller is told true
+-- (held), so the check discloses nothing and fails closed inside the delete
+-- policies. Stable, so both delete policies of one statement read one snapshot.
+create function ehr.record_chat_history_on_hold(requested_patient uuid)
+returns boolean
+language plpgsql
+stable
+security definer
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  account uuid;
+begin
+  if requested_patient is null or not ehr.patient_self_context(requested_patient) then
+    return true;
+  end if;
+  account := nullif(current_setting('app.account_id', true), '')::uuid;
+  return exists (
+    select 1 from platform.legal_holds hold
+     where hold.released_at is null
+       and ((hold.subject_type = 'patient' and hold.subject_id = requested_patient)
+         or (hold.subject_type = 'account' and hold.subject_id = account)));
+end
+$$;
+revoke all on function ehr.record_chat_history_on_hold(uuid) from public;
+
 alter table ehr.patient_chat_conversations enable row level security;
 alter table ehr.patient_chat_conversations force row level security;
 alter table ehr.patient_chat_messages enable row level security;
@@ -280,18 +321,20 @@ create policy patient_chat_conversations_self_read on ehr.patient_chat_conversat
 create policy patient_chat_conversations_self_insert on ehr.patient_chat_conversations for insert
   with check (ehr.patient_self_context(patient_id));
 create policy patient_chat_conversations_self_delete on ehr.patient_chat_conversations for delete
-  using (ehr.patient_self_context(patient_id));
+  using (ehr.patient_self_context(patient_id) and not ehr.record_chat_history_on_hold(patient_id));
 create policy patient_chat_messages_self_read on ehr.patient_chat_messages for select
   using (ehr.patient_self_context(patient_id));
 create policy patient_chat_messages_self_insert on ehr.patient_chat_messages for insert
   with check (ehr.patient_self_context(patient_id));
 create policy patient_chat_messages_self_delete on ehr.patient_chat_messages for delete
-  using (ehr.patient_self_context(patient_id));
+  using (ehr.patient_self_context(patient_id) and not ehr.record_chat_history_on_hold(patient_id));
 
 comment on table ehr.patient_chat_conversations is
   'A patient''s own record chat conversation; read, written and deleted only in that patient''s fresh patient-self transaction (record chat).';
 comment on table ehr.patient_chat_messages is
-  'A patient''s record chat exchanges: question, validated reply and server-side source bindings; never updated; retention is an open owner decision, the patient deletes them (record chat).';
+  'A patient''s record chat exchanges: question, validated reply and server-side source bindings; never updated; retention is an open owner decision, the patient deletes them unless a legal hold keeps them (record chat).';
+comment on function ehr.record_chat_history_on_hold(uuid) is
+  'Whether an active legal hold names the patient or the account of the patient-self caller; true (held) for any other caller (record chat).';
 
 -- 3. Abuse and cost limits. These tables hold account and patient ids,
 -- counts and token numbers only: no name, contact, address or text.
@@ -315,7 +358,7 @@ create table ehr.record_chat_reservations (
   expires_at timestamptz not null,
   settled_at timestamptz,
   outcome text check (outcome in ('answered', 'no_evidence', 'declined', 'unverified', 'failed',
-    'authorization_changed', 'sources_changed', 'conversation_changed', 'expired')),
+    'sources_changed', 'conversation_changed', 'expired')),
   input_tokens integer check (input_tokens >= 0),
   output_tokens integer check (output_tokens >= 0),
   cache_read_tokens integer check (cache_read_tokens >= 0),
@@ -383,31 +426,46 @@ begin
     raise exception using errcode = '42501', message = 'RECORD_CHAT_PERMISSION_DENIED';
   end if;
   account := current_setting('app.account_id', true)::uuid;
+  -- The kill switch again, in the caller's transaction: a question that read
+  -- it on before an administrator turned it off takes no lease, writes no
+  -- disclosure audit row and is never sent.
+  if not platform.control_enabled('record_chat_enabled') then
+    raise exception using errcode = '55000', message = 'RECORD_CHAT_PAUSED';
+  end if;
 
   -- Bounded pruning of operational rows (no PHI): counters older than 48
-  -- hours and settled reservations older than 2 days, at most 100 each.
+  -- hours and reservations older than 2 days (settled, or abandoned by an
+  -- account that never came back: a 60-second lease that old has long
+  -- expired and its day's budget is past), at most 100 each, skipping rows
+  -- another call holds.
   delete from ehr.record_chat_usage_counters old
    where old.ctid in (select stale_row.ctid from ehr.record_chat_usage_counters stale_row
      where stale_row.bucket_start < now_at - interval '48 hours'
-     order by stale_row.bucket_start limit 100);
+     order by stale_row.bucket_start limit 100 for update skip locked);
   delete from ehr.record_chat_reservations old
    where old.ctid in (select stale_row.ctid from ehr.record_chat_reservations stale_row
-     where stale_row.settled_at is not null and stale_row.created_at < now_at - interval '2 days'
-     order by stale_row.created_at limit 100);
+     where stale_row.created_at < now_at - interval '2 days'
+     order by stale_row.created_at limit 100 for update skip locked);
 
-  -- The caller's expired lease is settled as expired; its tokens count as used.
+  -- The caller's expired lease is settled as expired; its tokens count as
+  -- used. A lease another transaction is settling (a late
+  -- ehr.settle_record_chat) is skipped, and the budget moves only when this
+  -- call's update settled the lease, so no lease is counted twice.
   for stale in
     select lease.id, lease.reserved_tokens, (lease.created_at at time zone 'UTC')::date as lease_day
       from ehr.record_chat_reservations lease
      where lease.audience = requested_audience and lease.account_id = account
        and lease.settled_at is null and lease.expires_at <= now_at
+       for update skip locked
   loop
     update ehr.record_chat_reservations lease set settled_at = clock_timestamp(), outcome = 'expired'
      where lease.id = stale.id and lease.settled_at is null;
-    update ehr.record_chat_daily_budget budget
-       set reserved_tokens = greatest(budget.reserved_tokens - stale.reserved_tokens, 0),
-           used_tokens = budget.used_tokens + stale.reserved_tokens
-     where budget.day = stale.lease_day;
+    if found then
+      update ehr.record_chat_daily_budget budget
+         set reserved_tokens = greatest(budget.reserved_tokens - stale.reserved_tokens, 0),
+             used_tokens = budget.used_tokens + stale.reserved_tokens
+       where budget.day = stale.lease_day;
+    end if;
   end loop;
 
   if exists (select 1 from ehr.record_chat_reservations lease
@@ -472,7 +530,7 @@ declare
   lease record;
 begin
   if requested_outcome is null or requested_outcome not in ('answered', 'no_evidence', 'declined', 'unverified',
-       'failed', 'authorization_changed', 'sources_changed', 'conversation_changed')
+       'failed', 'sources_changed', 'conversation_changed')
      or coalesce(requested_input_tokens, 0) not between 0 and 10000000
      or coalesce(requested_output_tokens, 0) not between 0 and 10000000
      or coalesce(requested_cache_read_tokens, 0) not between 0 and 10000000
@@ -515,6 +573,6 @@ revoke all on ehr.patient_chat_conversations, ehr.patient_chat_messages, ehr.rec
   ehr.record_chat_reservations, ehr.record_chat_daily_budget from public;
 
 comment on function ehr.reserve_record_chat(text, uuid, integer, bigint) is
-  'Record chat lease for the patient-self caller: one in flight per account, 10 an hour and 30 a day, tokens against the daily budget (hard ceiling 20,000,000). P4091, P4290 (detail = retry seconds), P5030, 42501.';
+  'Record chat lease for the patient-self caller while record_chat_enabled is on: one in flight per account, 10 an hour and 30 a day, tokens against the daily budget (hard ceiling 20,000,000). 55000 RECORD_CHAT_PAUSED, P4091, P4290 (detail = retry seconds), P5030, 42501.';
 comment on function ehr.settle_record_chat(uuid, integer, integer, integer, integer, text) is
   'Settles the patient-self caller''s own record chat lease with the usage reported by the processor; idempotent.';
