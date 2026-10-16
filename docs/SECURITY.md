@@ -172,9 +172,16 @@ submission the database may create, at most five per verified email draft,
 so its argon2id work is bounded platform-wide. The
 standard, the reviewer list and the register source are owner decisions
 (release checklist P35). Residual risks: the manual identity check (a
-deepfaked call, a forged ID) and, once break-glass is on, emergency reads by
-an approved fraudster at their facility; P35 requires a daily review of
-break-glass use by accounts approved in the last 90 days.
+deepfaked call, a forged ID) and what an approved fraudster can then do at
+their facility: emergency reads once break-glass is on, and in-person checks
+(ADR-063) once the facility is designated and `ASSISTED_REGISTRATION_ENABLED`
+is on. The approved grant rests on a current attestation, which is all the
+in-person check requires, so such an account could create another person's
+Health ID within ADR-063's budgets. P35 requires a daily review of break-glass
+use and of in-person checks by accounts approved in the last 90 days, and its
+fraud runbook entry lists the in-person checks such an account recorded; no
+route undoes a Health ID one of them proved (ADR-063's contested-identity
+review is not built).
 
 ## 6. NIN Security
 

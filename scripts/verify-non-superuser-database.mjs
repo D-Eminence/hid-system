@@ -26,6 +26,9 @@
 // - the release checklist's read-only P10 and P11 checks, taken from
 //   docs/PHASE_4_STAGE_5_RELEASE_READINESS.md, as the administrator, as an
 //   operator runs them on RDS;
+// - the daily reviews of P35 (break-glass use and in-person checks by
+//   accounts approved through a clinician application), taken from
+//   docs/MIGRATION_RUNBOOK.md §6, as the administrator;
 // - break-glass's migration (0095) run again as the administrator in
 //   rolled-back transactions: refused while break_glass_enabled is on, a
 //   no-op while it is off;
@@ -362,6 +365,31 @@ try {
   `P11 check: ${p11.join('; ')}`);
   evidence.steps.release_checklist_checks = { run_as: admin, p10: p10.map((line) => line.split('|').slice(0, 4).join('|')),
     p11 };
+
+  // P35's daily reviews of recent clinician approvals (ADR-064), as the
+  // operator runs them: MIGRATION_RUNBOOK.md §6's read-only SQL, as the
+  // migration administrator. The in-person checks force row-level security,
+  // so a review that set row_security off would fail here; the administrator
+  // reads them as the system actor. No application is approved on this
+  // database, so each review answers no rows.
+  const runbook = await readFile(join(repository, 'docs/MIGRATION_RUNBOOK.md'), 'utf8');
+  const runbookCheck = async (name, lead) => {
+    const start = runbook.search(new RegExp(lead.split(' ')
+      .map((word) => word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+')));
+    assert.notEqual(start, -1, `MIGRATION_RUNBOOK.md has no "${lead}"`);
+    const block = /\n```sql\n([\s\S]*?)\n```/.exec(runbook.slice(start));
+    assert(block, `MIGRATION_RUNBOOK.md has no SQL block after "${lead}"`);
+    const file = join(temporary, `${name}-review.sql`);
+    await writeFile(file, `${block[1]}\n`, { mode: 0o600 });
+    return run(`runbook ${name} review as the migration administrator`, join(pgBindir, 'psql'),
+      ['-X', '-q', '-At', '-F', '|', '-v', 'ON_ERROR_STOP=1', '-h', temporary, '-U', admin, '-d', database, '-f', file])
+      .stdout.trim().split('\n').filter((line) => line && line !== 'system:auth');
+  };
+  const breakGlassReview = await runbookCheck('break-glass', 'review daily (P35) the break-glass activations');
+  const inPersonReview = await runbookCheck('in-person', 'review daily (P35) the in-person checks');
+  assert.deepEqual([breakGlassReview, inPersonReview], [[], []],
+    `P35 reviews: ${JSON.stringify({ breakGlassReview, inPersonReview })}`);
+  evidence.steps.runbook_recent_approval_reviews = { run_as: admin, break_glass_rows: 0, in_person_check_rows: 0 };
 
   // Break-glass's migration (0095, D9, ADR-058 addendum) refuses to run while
   // break_glass_enabled is on: 0091 turned the control off only where 0039's

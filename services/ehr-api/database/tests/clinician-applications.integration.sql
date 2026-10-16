@@ -2029,6 +2029,106 @@ begin
     raise exception 'the approved clinician is not eligible for staff sign-in at the facility';
   end if;
 end $$;
+-- After 0094 and 0095 (ADR-063, D9) the approved role also carries break-glass
+-- and the in-person check of facility-assisted registration, whose own
+-- authorization accepts the step-2 grant pinned to the step-1 attestation;
+-- C's doctor role at X, which rests on no attestation, does not qualify
+-- (ADR-064, P32, P35).
+do $$
+declare
+  membership identity.staff_facility_memberships%rowtype;
+  subject text;
+begin
+  select * into membership from identity.staff_facility_memberships where id = current_setting('ca_suite.p1_membership')::uuid;
+  select account.subject into subject from auth.accounts account where account.id = membership.account_id;
+  if not auth.membership_has_permission(subject, membership.id, membership.facility_id, 'identity.patient.assisted_registration')
+     or not identity.assisted_registration_actor_attested(subject, membership.id, membership.facility_id)
+     or not auth.membership_has_permission(subject, membership.id, membership.facility_id, 'identity.break-glass.write') then
+    raise exception 'the approved role does not carry the in-person check and break-glass';
+  end if;
+  if identity.assisted_registration_actor_attested('synthetic:ca:c', 'ca220000-0000-4000-8000-000000000003',
+       'ca110000-0000-4000-8000-00000000000a') then
+    raise exception 'a doctor role without an attested grant qualifies for the in-person check';
+  end if;
+end $$;
+-- MIGRATION_RUNBOOK.md §6's daily reviews (P35), as the runbook writes them:
+-- an in-person check and a break-glass activation by P1 (approved just now)
+-- are listed; C's, by an account no application approved, are not. As the
+-- owner, rolled back.
+savepoint ca_review_queries;
+insert into identity.assisted_registration_verifications (id, desk_code_hmac, method, document_type, outcome,
+  staff_account_id, membership_id, facility_id, request_key_hmac, request_hmac, correlation_id)
+select ('ca2a0000-0000-4000-8000-0000000000' || tag)::uuid, pg_temp.ca_h('review-desk:' || tag),
+  'government_photo_id_in_person', 'national_id_card', 'code_not_found', membership.account_id, membership.id,
+  membership.facility_id, pg_temp.ca_h('review-key:' || tag), pg_temp.ca_h('review-request:' || tag),
+  'clinician-suite-review-' || tag
+from (values ('01', current_setting('ca_suite.p1_membership')::uuid),
+  ('03', 'ca220000-0000-4000-8000-000000000003'::uuid)) as reviewed(tag, membership_id)
+join identity.staff_facility_memberships membership on membership.id = reviewed.membership_id;
+insert into audit.events (correlation_id, actor_type, actor_subject, actor_account_id, actor_membership_id,
+  organization_id, facility_id, patient_id, action, outcome, resource_type, resource_id, purpose_of_use,
+  reason, provenance, source_system)
+select 'clinician-suite-review-bg-' || tag, 'staff', account.subject, account.id, membership.id,
+  membership.organization_id, membership.facility_id, 'ca260000-0000-4000-8000-000000000007',
+  'identity.break-glass.activate', 'success', 'consent-grant', ('ca2b0000-0000-4000-8000-0000000000' || tag),
+  'emergency', 'Synthetic review fixture', 'application', 'identity-api'
+from (values ('01', current_setting('ca_suite.p1_membership')::uuid),
+  ('03', 'ca220000-0000-4000-8000-000000000003'::uuid)) as reviewed(tag, membership_id)
+join identity.staff_facility_memberships membership on membership.id = reviewed.membership_id
+join auth.accounts account on account.id = membership.account_id;
+select set_config('app.actor_subject', 'system:auth', true);
+create temporary table ca_in_person_review on commit drop as
+select verification.id as verification_id, verification.staff_account_id,
+       verification.facility_id, verification.verified_at, verification.outcome,
+       verification.proof_outcome, verification.enrollment_id, approval.approved_at
+  from identity.assisted_registration_verifications verification
+  join lateral (select max(application.approved_at) as approved_at
+                  from identity.clinician_applications application
+                 where application.account_id = verification.staff_account_id
+                   and application.state = 'approved'
+                   and application.approved_at > now() - interval '90 days') approval
+    on approval.approved_at is not null
+ where verification.verified_at > now() - interval '7 days'
+ order by verification.verified_at desc;
+set local row_security = off;
+create temporary table ca_break_glass_review on commit drop as
+select activation.actor_account_id, activation.occurred_at, activation.resource_id,
+       application.facility_id, application.approved_at
+  from audit.events activation
+  join identity.clinician_applications application
+    on application.account_id = activation.actor_account_id
+   and application.state = 'approved'
+   and application.approved_at > now() - interval '90 days'
+ where activation.action = 'identity.break-glass.activate'
+   and activation.occurred_at > now() - interval '7 days'
+ order by activation.occurred_at desc;
+do $$
+declare
+  p1 uuid := (select account_id from identity.staff_facility_memberships
+               where id = current_setting('ca_suite.p1_membership')::uuid);
+begin
+  -- Rows another stage left in the database (the rehearsal's owner check) may be listed too.
+  if not exists (select 1 from ca_in_person_review review
+                  where review.verification_id = 'ca2a0000-0000-4000-8000-000000000001' and review.staff_account_id = p1
+                    and review.facility_id = 'ca110000-0000-4000-8000-00000000000a' and review.outcome = 'code_not_found'
+                    and review.approved_at = (select approved_at from identity.clinician_applications
+                                               where id = (select p1x from ca_step)))
+     or exists (select 1 from ca_in_person_review review
+                 where review.verification_id = 'ca2a0000-0000-4000-8000-000000000003') then
+    raise exception 'the in-person review did not list P1''s check alone of the two: %',
+      (select json_agg(review) from ca_in_person_review review);
+  end if;
+  if not exists (select 1 from ca_break_glass_review review
+                  where review.actor_account_id = p1 and review.resource_id = 'ca2b0000-0000-4000-8000-000000000001'
+                    and review.facility_id = 'ca110000-0000-4000-8000-00000000000a')
+     or exists (select 1 from ca_break_glass_review review
+                 where review.resource_id = 'ca2b0000-0000-4000-8000-000000000003') then
+    raise exception 'the break-glass review did not list P1''s activation alone of the two: %',
+      (select json_agg(review) from ca_break_glass_review review);
+  end if;
+end $$;
+rollback to savepoint ca_review_queries;
+release savepoint ca_review_queries;
 -- The applicant's view: approved, with access active; applying again there is refused.
 set local role hid_identity_api_runtime;
 select pg_temp.ca_system('approved-view');

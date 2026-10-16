@@ -348,7 +348,12 @@ The executable covers:
    Before that, on the same database, 0096 runs in a rolled-back
    transaction as an administrator named `HidAdmin` (a name that needs
    quoting) that still owns the function, and must apply with no membership
-   taken (`clinician_signup_quoted_owner`).
+   taken (`clinician_signup_quoted_owner`). It also runs
+   `MIGRATION_RUNBOOK.md` §6's two P35 reviews of recent clinician approvals
+   (break-glass use and in-person checks) as that administrator; the
+   in-person review reads the checks, which force row-level security, as the
+   `system:auth` actor, and both answer no rows there
+   (`runbook_recent_approval_reviews`).
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,

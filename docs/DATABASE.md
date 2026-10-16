@@ -4508,7 +4508,10 @@ and the reservation and pin predicates in the chosen-attestation query and the
 second-person probe (`scripts/tests/workforce-role-change-body.test.mjs`).
 `identity.admin_workforce_profile` adds `clinicianApplication` and
 `usableForGrant` to each attestation. `auth.facility_role_is_effective` is
-not changed.
+not changed, nor is 0094's `identity.assisted_registration_actor_attested`:
+an approved application's grant, pinned to its attestation, qualifies for the
+in-person check (ADR-063) as any 0087 grant does (ADR-064, release checklist
+P32), and `MIGRATION_RUNBOOK.md` §6 reviews such checks daily (P35).
 
 **Commands** (SECURITY DEFINER, `search_path = pg_catalog, identity, auth,
 platform, audit, pg_temp`, revoked from PUBLIC). The public ones need the

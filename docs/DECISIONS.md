@@ -5000,6 +5000,13 @@ Context:
 - With 0095, doctor, clinician and nurse hold `identity.break-glass.write`
   again: once `break_glass_enabled` is on, any approved clinician can make
   emergency reads at their facility.
+- With 0094 (ADR-063), doctor, clinician and nurse hold
+  `identity.patient.assisted_registration`, and the in-person check accepts
+  any facility role whose grant rests on a current 0087 attestation. Step 2
+  writes exactly such a grant, so once the facility is designated (P30) and
+  `ASSISTED_REGISTRATION_ENABLED` is on, an approved clinician can run
+  in-person checks there with a staff MFA session and no further step, and so
+  vouch for another person's Health ID.
 
 Decision:
 
@@ -5145,9 +5152,12 @@ Alternatives not taken:
 - A regulator registry lookup as step 1: the source is undecided (D14).
 - `clinician` or free-text regulators at launch: prescriber permissions with
   no mapped regulator.
-- A break-glass probation for self-signed-up clinicians: the approval
-  assurance here exceeds a 0087 grant; a daily review of break-glass use by
-  recent approvals is required instead (P35).
+- A probation for self-signed-up clinicians, with no break-glass and no
+  in-person checks until it ends: the approval assurance here exceeds a 0087
+  grant, and a 0087-provisioned clinician already holds both; a daily review
+  of break-glass use and of in-person checks by recent approvals is required
+  instead (P35). Excluding application-approved grants from the in-person
+  check's authorization for a period stays open to the owner (P32, P35).
 - An environment flag instead of a control: switching it off would need a
   redeploy.
 
@@ -5162,9 +5172,18 @@ Consequences:
   that checklist and the employment channels need product and legal
   approval before the control opens (P35). Uploads are off, so evidence stays
   outside the platform and is named by reference.
-- Approved clinicians can use break-glass once it is on; P35 requires the
-  break-glass decision and a daily review of break-glass use by accounts
-  approved through an application in the last 90 days.
+- Approved clinicians can use break-glass once it is on, and run in-person
+  checks (ADR-063) at their facility once it is designated and
+  `ASSISTED_REGISTRATION_ENABLED` is on. An account approved on a forged
+  identity could then read another person's emergency summary or create
+  another person's Health ID, within ADR-063's budgets (20 checks a day per
+  staff member, 100 per facility). P35 requires the break-glass decision and
+  a daily review of break-glass use and of in-person checks by accounts
+  approved through an application in the last 90 days
+  (`MIGRATION_RUNBOOK.md` §6). Its fraud runbook entry lists the in-person
+  checks such an account recorded; no route undoes a Health ID one of them
+  proved, which waits for the contested-identity review (an ADR-063 owner
+  decision, not built).
 - Rejected, withdrawn and expired applicants keep an active account with no
   membership, plus their application rows; a retention period is a legal
   follow-up.
@@ -5195,8 +5214,9 @@ Consequences:
   stage (with a quoted administrator name) and the rehearsal (release
   checklist §8). Nothing has run on staging or production.
 
-Related: ADR-049, ADR-054, ADR-057, ADR-058, ADR-059;
+Related: ADR-049, ADR-054, ADR-057, ADR-058, ADR-059, ADR-063;
 `PHASE_3_LAUNCH_DECISIONS.md` (D14, NO-MEMBERSHIP-SIGN-IN, CLIN-SIGNUP);
 `INTERFACE_CONTRACT.md` (Turnstile verification; Clinician self sign-up;
 §19 Clinician applications); `DATABASE.md` (Clinician self sign-up
-applications (0096)); release checklist §1-§3, §5, §8, P11, P22, P35, S4x.
+applications (0096)); release checklist §1-§3, §5, §8, P11, P22, P32, P35,
+S4x.

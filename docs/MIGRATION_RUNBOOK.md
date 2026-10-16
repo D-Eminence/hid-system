@@ -539,6 +539,42 @@ select activation.actor_account_id, activation.occurred_at, activation.resource_
  order by activation.occurred_at desc;
 rollback;
 ```
+
+While `ASSISTED_REGISTRATION_ENABLED` is on and a facility is designated
+(ADR-063, P30), review daily (P35) the in-person checks of accounts approved
+through a clinician application in the last 90 days: the approved grant rests
+on a current attestation, which is all the in-person check requires (P32).
+Confirm each check with the facility (the staff member was on duty and the
+patient was there). The checks force row-level security, so the query reads
+them as the `system:auth` actor, set in this read-only transaction only
+(`row_security = off` fails for the migration administrator). It returns ids,
+never a name, document, NIN or contact. For the fraud runbook entry (P35 (6)),
+run it for the one account (`verification.staff_account_id`) without the
+seven-day bound: a check with `proof_outcome` `verified` proved the enrollment
+`enrollment_id`, and the Health ID it created
+(`identity.patient_identifiers.public_enrollment_id`) cannot be undone by any
+route yet (ADR-063's contested-identity review is not built).
+
+```sql
+begin transaction isolation level repeatable read read only;
+set local statement_timeout = '120s';
+set local lock_timeout = '5s';
+select set_config('app.actor_subject', 'system:auth', true);
+select verification.id as verification_id, verification.staff_account_id,
+       verification.facility_id, verification.verified_at, verification.outcome,
+       verification.proof_outcome, verification.enrollment_id, approval.approved_at
+  from identity.assisted_registration_verifications verification
+  join lateral (select max(application.approved_at) as approved_at
+                  from identity.clinician_applications application
+                 where application.account_id = verification.staff_account_id
+                   and application.state = 'approved'
+                   and application.approved_at > now() - interval '90 days') approval
+    on approval.approved_at is not null
+ where verification.verified_at > now() - interval '7 days'
+ order by verification.verified_at desc;
+rollback;
+```
+
 The one-shot ECS migration task defaults to `--plan`; never turn it into a
 service or place administrator credentials in a steady-state task. The
 migration image also carries `scripts/bootstrap-database-roles.mjs` and
