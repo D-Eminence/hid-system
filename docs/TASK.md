@@ -1317,9 +1317,11 @@ history, and the consolidated `localhost:3000` browser flow.
   Browser navigation reflects capabilities, while controllers and database
   commands independently enforce them. Platform role alone cannot perform EHR,
   Lab, Pharmacy, OCR, Outreach, audit mutation, or break-glass actions.
-- The one-time `admin:bootstrap` command requires `DATABASE_ADMIN_URL`, one
-  exact eligible account UUID, and an explicit reason; it serializes, audits,
-  and refuses to create a second active Super Admin. Runtime authorization
+- The one-time `admin:bootstrap` command requires `DATABASE_ADMIN_URL`, two or
+  three distinct eligible account UUIDs (`PLATFORM_ADMIN_ACCOUNT_IDS`; one
+  account with `PLATFORM_ADMIN_ACCOUNT_ID` for development), and an explicit
+  reason; it grants them all in one audited transaction, serializes, and
+  refuses to run once any Super Admin is active. Runtime authorization
   never reads a bootstrap email or environment flag.
 - Facilities have `pending`, `verified`, `rejected`, and `suspended` lifecycle
   state. Suspension makes `active=false`, so existing membership/authorization

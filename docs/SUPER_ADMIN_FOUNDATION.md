@@ -86,23 +86,40 @@ authentication without `platform.admin.access` shows denial. Browser guards
 are UX only; every API method has a backend permission decorator and the
 database command repeats the platform capability check.
 
-The one-time bootstrap command is:
+The one-time bootstrap seeds the initial governance set: two or three Super
+Admins in one run. No administrator can grant another alone: a Super Admin
+grant needs the decision of a second, MFA-enrolled Super Admin who is neither
+the requester nor the target (0070), and a clinician application is approved
+only by a Super Admin other than the one who attested it (0096). With a single
+Super Admin neither can ever happen, and no command adds a second one after the
+bootstrap. So in production name two or three people at once:
 
 ```bash
 DATABASE_ADMIN_URL='postgresql://...' \
-PLATFORM_ADMIN_ACCOUNT_ID='exact-v4-account-uuid' \
-PLATFORM_ADMIN_BOOTSTRAP_REASON='Approved initial platform governance owner' \
+PLATFORM_ADMIN_ACCOUNT_IDS='exact-v4-account-uuid-1,exact-v4-account-uuid-2,exact-v4-account-uuid-3' \
+PLATFORM_ADMIN_BOOTSTRAP_REASON='Approved initial platform governance owners' \
 npm --prefix services/ehr-api run admin:bootstrap
 ```
 
+In AWS it runs as the migration task with the command override
+`["scripts/bootstrap-platform-admin.mjs"]` and these two variables as
+environment overrides (`AWS_DEPLOYMENT_RUNBOOK.md` §4); `DATABASE_ADMIN_URL`
+comes from the task's secret. `PLATFORM_ADMIN_ACCOUNT_IDS` lists two or three
+distinct version-4 account UUIDs separated by commas;
+`PLATFORM_ADMIN_ACCOUNT_ID` (one account) remains for development and is
+refused together with it. Each account must exist already, active and with a
+password credential (Stage 2A: no staff/facility tuple; each administrator
+enrols an authenticator at first platform sign-in).
+
 It runs only with an explicitly injected database-administrator connection,
-serializes with an advisory transaction lock, requires migration `0027`,
-requires one exact active account with a password credential (Stage 2A: no
-staff/facility tuple; the administrator enrolls an authenticator at first
-platform sign-in), refuses to run if any active legacy or current Super Admin exists, creates one
-explicit assignment, increments the account version, and writes a system audit
-event. It has no email inference, developer bypass, reusable login shortcut, or
-repeat-success path.
+serializes with an advisory transaction lock, requires migration `0027`, and
+refuses to run if any active legacy or current Super Admin exists, so it can
+never add an administrator to a live set. In one transaction it creates one
+explicit assignment per account, increments each account's version, and writes
+one system audit event `admin.platform-role.bootstrap` per account whose
+`details.bootstrapAccounts` names the whole set. A repeated, ineligible or
+fourth account grants nothing. It has no email inference, developer bypass,
+reusable login shortcut, or repeat-success path.
 
 ## Implemented API surface
 

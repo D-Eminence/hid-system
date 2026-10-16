@@ -525,13 +525,16 @@ aws ecs run-task --cluster hid-production --launch-type FARGATE \
 | `db:migrate` | `["scripts/apply-migrations.mjs"]` | none |
 | `db:bootstrap` | `["scripts/bootstrap-database-roles.mjs"]` | none |
 | `db:verify-roles` | `["scripts/bootstrap-database-roles.mjs","--verify-only"]` | none |
-| `admin:bootstrap` (P6) | `["scripts/bootstrap-platform-admin.mjs"]` | `PLATFORM_ADMIN_ACCOUNT_ID`, `PLATFORM_ADMIN_BOOTSTRAP_REASON` |
+| `admin:bootstrap` (P6) | `["scripts/bootstrap-platform-admin.mjs"]` | `PLATFORM_ADMIN_ACCOUNT_IDS` (two or three distinct account UUIDs, comma-separated), `PLATFORM_ADMIN_BOOTSTRAP_REASON` |
 
 Wait for the task to stop, then require exit code `0` and read
 `/hid/<environment>/database-migration`. Never pass a database URL, password or
 other secret as an override: RunTask overrides are kept in the task
 description and in CloudTrail. The account IDs and reason of
-`admin:bootstrap` are not secret.
+`admin:bootstrap` are not secret. Run `admin:bootstrap` once, with every
+initial Super Admin in `PLATFORM_ADMIN_ACCOUNT_IDS`: it refuses to run again
+once one is active, and afterwards a Super Admin is added only by a two-person
+approval (`SUPER_ADMIN_FOUNDATION.md`).
 
 The repository provides no SQL console inside the VPC. The RDS master's
 statements (creating the migration administrator, and the `SET ON PARAMETER`
