@@ -1334,8 +1334,9 @@ SQL over 24 hours, 30 days or a year (a bound kept for a NIN would also tell
 of other people's attempts on it); `ASSISTED_DESK_CODE_LIMITED` (0094) is
 the enrollment's five desk codes, which never come back, so the patient
 starts again. EHR, Lab,
-Pharmacy, OCR and Outreach set none; EHR has no rate limit of its own, and the
-patient routes of the patient record release (0096) answer no `429`. Identity's CORS policy exposes
+Pharmacy, OCR and Outreach set none; EHR has no rate limit of its own and
+answers no `429` itself, on the patient routes of the patient record release
+(0096) as on its other routes. Identity's CORS policy exposes
 `retry-after` to allowed origins. Before this change no answer carried the
 header and CORS did not expose it.
 
