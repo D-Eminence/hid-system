@@ -659,31 +659,144 @@ grant execute on function ocr.worker_queue_metrics() to hid_ocr_worker;
 -- is unchanged), no USAGE on any schema and no membership. lab-api and
 -- hid_lab_runtime gain nothing (D17). The PUBLIC staff policies of these
 -- tables are OR-ed with the `true` below and folded away, so the owner needs
--- no EXECUTE on lab.context_allows or ehr.context_allows. A policy is
+-- no EXECUTE on lab.context_allows or ehr.context_allows. Each policy is
 -- replaced only when it is missing or differs, so a rerun takes no lock on
--- these tables.
+-- these tables; one block per table, in the form the privilege replay of
+-- scripts/verify-runtime-locking-privileges.mjs follows.
 do $$
-declare
-  target regclass;
 begin
-  foreach target in array array['lab.result_releases'::regclass, 'lab.result_invalidations'::regclass,
-    'lab.results'::regclass, 'lab.result_revisions'::regclass, 'lab.test_executions'::regclass,
-    'lab.work_item_requested_tests'::regclass, 'lab.work_items'::regclass, 'ehr.lab_requests'::regclass]
-  loop
-    if not exists (
-      select 1 from pg_policy policy
-       where policy.polrelid = target
-         and policy.polname = 'patient_release_reader_read'
-         and policy.polcmd = 'r' and policy.polpermissive
-         and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
-         and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
-         and policy.polwithcheck is null
-    ) then
-      execute format('drop policy if exists patient_release_reader_read on %s', target);
-      execute format('create policy patient_release_reader_read on %s for select to hid_lab_release_reader using (true)',
-        target);
-    end if;
-  end loop;
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'lab.result_releases'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on lab.result_releases;
+    create policy patient_release_reader_read on lab.result_releases
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'lab.result_invalidations'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on lab.result_invalidations;
+    create policy patient_release_reader_read on lab.result_invalidations
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'lab.results'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on lab.results;
+    create policy patient_release_reader_read on lab.results
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'lab.result_revisions'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on lab.result_revisions;
+    create policy patient_release_reader_read on lab.result_revisions
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'lab.test_executions'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on lab.test_executions;
+    create policy patient_release_reader_read on lab.test_executions
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'lab.work_item_requested_tests'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on lab.work_item_requested_tests;
+    create policy patient_release_reader_read on lab.work_item_requested_tests
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'lab.work_items'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on lab.work_items;
+    create policy patient_release_reader_read on lab.work_items
+      for select to hid_lab_release_reader using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'ehr.lab_requests'::regclass
+       and policy.polname = 'patient_release_reader_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists patient_release_reader_read on ehr.lab_requests;
+    create policy patient_release_reader_read on ehr.lab_requests
+      for select to hid_lab_release_reader using (true);
+  end if;
 end
 $$;
 grant select (result_id, result_version, patient_id, facility_id, released_at)
