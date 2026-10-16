@@ -48,6 +48,7 @@ export const HID_GROUP_ROLES = Object.freeze([
   'hid_outreach_api_runtime', 'hid_migration_admin', 'hid_schema_test_runtime', 'hid_event_delivery_commands',
   'hid_ocr_queue_metrics', 'hid_platform_control_reader', 'hid_event_dispatcher', 'hid_notification_runtime',
   'hid_notification_api_runtime', 'hid_notification_worker', 'hid_lab_release_reader',
+  'hid_imported_history_commands', 'hid_imported_history_importer',
 ]);
 const GROUP_ROLES = new Set(HID_GROUP_ROLES);
 const ADMINISTRATOR_ATTRIBUTES = Object.freeze({ rolcanlogin: true, rolsuper: false, rolbypassrls: false,

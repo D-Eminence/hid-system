@@ -43,6 +43,7 @@ import {
   assertIdentityBudgets,
   assertNinOwnershipRoutes,
   assertPatientRecordRelease,
+  assertImportedHistory,
   type HidEnvironmentConfig,
   identityBudgetInputs,
   operationalAlarmTopic,
@@ -133,6 +134,7 @@ export class HidRegionalStack extends Stack {
     assertNinOwnershipRoutes(this.configuration);
     assertIdentityBudgets(this.configuration.identityBudgets);
     assertPatientRecordRelease(this.configuration);
+    assertImportedHistory(this.configuration);
 
     validateDatabaseConnectionBudget(
       this.configuration.profile,
@@ -934,6 +936,8 @@ export class HidRegionalStack extends Stack {
           ASSISTED_REGISTRATION_ENABLED: this.configuration.assistedRegistrationEnabled ? 'true' : 'false',
           QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: this.configuration.qoreIdPatientSelfNinBindingEnabled
             ? 'true' : 'false',
+          // The patient's imported history sharing choice (ADR-067, P38).
+          IMPORTED_HISTORY_SHARING_ENABLED: String(this.configuration.importedHistory.sharing),
           QOREID_BASE_URL: 'https://api.qoreid.com',
           QOREID_TIMEOUT_MS: String(this.configuration.identityBudgets.QOREID_TIMEOUT_MS
             ?? identityBudgetInputs.QOREID_TIMEOUT_MS.default),
@@ -958,7 +962,10 @@ export class HidRegionalStack extends Stack {
           OUTREACH_IDENTITY_SERVICE_IDENTITY_MODE: 'jwt', OUTREACH_CALLER_SUBJECT: subjects.outreach,
           WORKLOAD_DATABASE_POOL_MAX: '3', STORAGE_MODE: 's3', S3_REGION: Aws.REGION, S3_BUCKET: this.documentBucket.bucketName,
           S3_FORCE_PATH_STYLE: 'false', S3_KMS_KEY_ID: documentKey.keyArn,
-          ...patientReleaseEnvironment(this.configuration.patientRecordRelease) };
+          ...patientReleaseEnvironment(this.configuration.patientRecordRelease),
+          // Imported legacy medical history (ADR-067, P38): the patient's and the staff read.
+          EHR_PATIENT_RELEASE_IMPORTED_HISTORY: String(this.configuration.importedHistory.patientRead),
+          EHR_STAFF_IMPORTED_HISTORY_ENABLED: String(this.configuration.importedHistory.staffRead) };
       case 'lab-api':
         return { ...commonApi, ...base, PORT: '3003', IDENTITY_API_URL: urls['identity-api']!,
           IDENTITY_SERVICE_IDENTITY_MODE: 'jwt', LAB_SERVICE_IDENTITY_MODE: 'jwt',

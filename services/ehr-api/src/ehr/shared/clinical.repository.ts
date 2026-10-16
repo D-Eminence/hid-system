@@ -11,7 +11,14 @@ import { type EncounterChange, lockEncounterStatus, refuseClosedEncounter } from
 export type ClinicalAccess = 'read_records' | 'write_records';
 
 export interface SemanticEvent {
+  /** Only a break-glass authorization may run it (the emergency summary). */
   breakGlassOnly?: boolean;
+  /**
+   * A break-glass authorization may never run it (imported legacy history,
+   * ADR-067): refused with 403 and this code, audited denied, before any
+   * transaction.
+   */
+  excludeBreakGlass?: { code: string };
   action: string;
   resourceType: string;
   resourceId?: string;
@@ -52,6 +59,9 @@ export class ClinicalRepository {
     operation: (client: PoolClient) => Promise<OperationResult<Value>>,
     scopedLookup?: (client: PoolClient) => Promise<boolean>,
   ): Promise<Value> {
+    if (event.breakGlassOnly && event.excludeBreakGlass) {
+      throw new Error('A clinical event cannot set both breakGlassOnly and excludeBreakGlass');
+    }
     // Set once a refusal has its own audit row: Identity's refusal, or a
     // resource not found, recorded inside its transaction.
     let audited = false;
@@ -81,6 +91,26 @@ export class ClinicalRepository {
         });
         audited = true;
         throw new DomainProblem(403, 'CONSENT_REQUIRED', 'Active consent and facility membership are required');
+      }
+      if (event.excludeBreakGlass && authorization.breakGlass) {
+        await this.audit.record({
+          correlationId: context.correlationId,
+          actorType: 'staff',
+          actorSubject: context.actor.subject,
+          actorAccountId: context.actor.accountId,
+          actorMembershipId: context.membershipId,
+          organizationId: context.actor.facility?.organizationId,
+          facilityId: context.facilityId,
+          patientId,
+          action: event.action,
+          resourceType: event.resourceType,
+          resourceId: event.resourceId,
+          outcome: 'denied',
+          purposeOfUse: context.purposeOfUse,
+          details: { ...event.details, reason: 'break_glass_excluded' },
+        });
+        audited = true;
+        throw new DomainProblem(403, event.excludeBreakGlass.code, 'This read is never available under break-glass');
       }
       const result = await this.database.withTransaction(context, async (client): Promise<TransactionState<Value>> => {
         // Resource probes are always constrained by facility and patient before

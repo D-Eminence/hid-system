@@ -136,6 +136,11 @@ const environmentSchema = z.object({
   // lookup or quota charge; production refuses true until the owner decides
   // whether decision N1 covers it.
   QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: booleanString,
+  // Imported legacy medical history (owner decision 3 of 2026-10-16,
+  // ADR-067): the patient's choice to share it with staff they consent to.
+  // False answers 503 on both sharing routes; production refuses true until
+  // the DPO and the owner sign off the legacy data (release checklist P38).
+  IMPORTED_HISTORY_SHARING_ENABLED: booleanString,
   // Holder budgets (ADR-062), counted from identity.public_patient_holder_events
   // over sliding windows: codes sent to one registry phone in 24 hours; wrong
   // codes for one NIN in 24 hours and in 30 days (both checked before a code
@@ -298,6 +303,11 @@ const environmentSchema = z.object({
   if (environment.ASSISTED_VERIFICATION_FACILITY_DAILY_MAX < environment.ASSISTED_VERIFICATION_STAFF_DAILY_MAX) {
     context.addIssue({ code: 'custom', path: ['ASSISTED_VERIFICATION_FACILITY_DAILY_MAX'],
       message: 'The facility budget of in-person checks cannot be below the staff budget' });
+  }
+  if (productionProfile && environment.IMPORTED_HISTORY_SHARING_ENABLED) {
+    context.addIssue({ code: 'custom', path: ['IMPORTED_HISTORY_SHARING_ENABLED'],
+      message: 'Imported medical history sharing is refused in production until the DPO and the owner sign off the '
+        + 'legacy data (release checklist P38, ADR-067)' });
   }
   if (productionProfile && environment.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED) {
     context.addIssue({ code: 'custom', path: ['QOREID_PATIENT_SELF_NIN_BINDING_ENABLED'],

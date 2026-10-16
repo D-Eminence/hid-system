@@ -35,6 +35,9 @@
 // - break-glass's migration (0097) run again as the administrator in
 //   rolled-back transactions: refused while break_glass_enabled is on, a
 //   no-op while it is off;
+// - the imported legacy history import (ADR-067) as the administrator: main's
+//   stage, promote and reconcile of a synthetic source, a sealed history run,
+//   and the importer's in-transaction membership in hid_migration_admin;
 // - the upgrade path of clinician self sign-up (ADR-066): a second database
 //   migrated through the migration before it, where the previous release's
 //   bootstrap statements for platform.control_enabled (P8-CONTROL) give the
@@ -694,6 +697,25 @@ try {
   assert.match(claim.output, /Authorized OCR workload context is required/);
   assert.doesNotMatch(claim.output, /permission denied to set parameter/);
   evidence.steps.ocr_claim = { refused_by: 'body authorization check', parameter_privilege_needed: false };
+
+  // ADR-067: the importer as the administrator, who is not a superuser: its
+  // in-transaction membership in hid_migration_admin (held through the ADMIN
+  // OPTION of the roles it created) runs the import command, and is gone after.
+  const imported = JSON.parse(run('imported history import as the administrator', process.execPath,
+    [join(service, 'scripts/rehearse-imported-history-import.mjs')], {
+      DATABASE_URL: url(admin), MIGRATION_FIELD_KEY_REFERENCE: 'public-synthetic-test-vector-v1',
+      // Public test vectors, never operational secrets.
+      MIGRATION_FIELD_ENCRYPTION_KEY_B64: Buffer.alloc(32, 0x11).toString('base64'),
+      MIGRATION_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 0x22).toString('base64'),
+      CONTACT_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 0x44).toString('base64'),
+      CUTOVER_EXPECTED_PIN_COUNT: '0', CUTOVER_EXPECTED_GOOGLE_COUNT: '0',
+      CUTOVER_EXPECTED_PLANNED_CAMPAIGN_COUNT: '0', CUTOVER_EXPECTED_QUEUED_ENCOUNTER_COUNT: '0' }).stdout);
+  assert.equal(imported.status, 'passed', `imported history import: ${imported.failure}`);
+  assert.equal(imported.steps.import.administrator_superuser, false);
+  assert.equal(psql('no imported history membership left', superuser,
+    `select count(*) from pg_auth_members m where m.roleid = 'hid_migration_admin'::regrole
+      and m.member = '${admin}'::regrole and (m.inherit_option or m.set_option)`).stdout.trim(), '0');
+  evidence.steps.imported_history_import = imported.steps;
 
   // The upgrade path of clinician self sign-up (ADR-066, P1 of its design): on
   // RDS platform.control_enabled already belongs to hid_platform_control_reader

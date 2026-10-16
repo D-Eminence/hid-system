@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { databaseOptions } from './database-options.mjs';
+import { IMPORTED_HISTORY_SOURCE_SYSTEM, requireStagingOrRehearsal } from './imported-history-import.mjs';
 
 const { Client } = pg;
 const sourceUrl = process.env.LEGACY_DATABASE_URL;
@@ -14,6 +15,24 @@ const targetUrl = process.env.DATABASE_URL;
 const snapshotLabel = process.env.MIGRATION_SNAPSHOT_ID;
 const operator = process.env.MIGRATION_OPERATOR;
 const dryRun = process.argv.includes('--dry-run');
+// --scope=identity (the default) stages main's identity categories, exactly as
+// before. --scope=imported-history stages only the legacy medical history
+// (ADR-067) into its own sealed run of the same source snapshot, of source
+// system legacy_imported_history, which only ehr.import_legacy_medical_history
+// reads: main's crosswalk gate does not count it (a staged legacy_identity run
+// closes patient enrollment), and main's promoter and reconciler never take it.
+// The history scope copies medical history into the target, so it runs only on
+// staging or an owned rehearsal reading a synthetic fixture, never in
+// production, and refuses before it reads or connects.
+const scopeArguments = process.argv.filter((argument) => argument === '--scope' || argument.startsWith('--scope='));
+const scope = scopeArguments.length === 0 ? 'identity' : scopeArguments[0].slice('--scope='.length);
+if (scopeArguments.length > 1 || !['identity', 'imported-history'].includes(scope)) {
+  throw new Error('--scope must be identity or imported-history');
+}
+if (scope === 'imported-history') {
+  requireStagingOrRehearsal('Staging the legacy medical history', { syntheticSourceOnly: true });
+}
+const runSourceSystem = scope === 'imported-history' ? IMPORTED_HISTORY_SOURCE_SYSTEM : 'legacy_identity';
 const batchSize = Number.parseInt(process.env.MIGRATION_BATCH_SIZE ?? '250', 10);
 const runId = process.env.MIGRATION_RUN_ID ?? randomUUID();
 
@@ -149,6 +168,17 @@ const entities = [
 
 export const MIGRATION_ENTITY_TYPES = Object.freeze(entities.map((entity) => entity.type));
 
+// The legacy medical history (owner decision 3 of 2026-10-16, ADR-067): every
+// record, every version and the metadata of every file, as the legacy tables
+// hold them. No category is optional: a history without one is refused.
+const historyEntities = [
+  tableEntity('medical_records', 'public.hid_medical_records'),
+  tableEntity('medical_record_versions', 'public.hid_medical_record_versions', 'created_at'),
+  tableEntity('medical_record_files', 'public.hid_medical_record_files', 'created_at'),
+];
+export const IMPORTED_HISTORY_STAGED_ENTITY_TYPES = Object.freeze(historyEntities.map((entity) => entity.type));
+const scopedEntities = scope === 'imported-history' ? historyEntities : entities;
+
 function tableEntity(type, qualifiedTable, timestampColumn = 'updated_at') {
   return {
     type,
@@ -232,7 +262,7 @@ async function stageBatch(target, entityType, rows) {
 }
 
 async function main() {
-  const fixture = fixturePath ? await loadMigrationFixture(fixturePath) : undefined;
+  const fixture = fixturePath ? await loadMigrationFixture(fixturePath, scopedEntities) : undefined;
   const source = fixture ? undefined : new Client(databaseOptions(sourceUrl, 'hid-legacy-reader', 'LEGACY_DATABASE'));
   const target = dryRun ? undefined : new Client(databaseOptions(targetUrl, 'hid-legacy-stager'));
   if (source) await source.connect();
@@ -255,10 +285,10 @@ async function main() {
       const started = await target.query(
         `insert into migration.runs (
            id, source_system, source_snapshot, mode, status, started_by, source_transaction_snapshot
-         ) values ($1, 'legacy_identity', $2, 'stage', 'running', $3, $4)
+         ) values ($1, $5, $2, 'stage', 'running', $3, $4)
          on conflict (id) do nothing
          returning id`,
-        [runId, snapshotLabel, operator, snapshot],
+        [runId, snapshotLabel, operator, snapshot, runSourceSystem],
       );
       if (started.rowCount !== 1) {
         throw new Error('MIGRATION_RUN_ID is already in use; start a fresh staging run from a new controlled snapshot');
@@ -270,7 +300,7 @@ async function main() {
       stageRunCreated = true;
     }
 
-    for (const entity of entities) {
+    for (const entity of scopedEntities) {
       let cursor = '';
       let count = 0;
       const aggregate = createHash('sha256');
@@ -326,12 +356,12 @@ async function main() {
   }
 }
 
-export async function loadMigrationFixture(path) {
+export async function loadMigrationFixture(path, fixtureEntities = entities) {
   const parsed = JSON.parse(await readFile(path, 'utf8'));
   if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') {
     throw new Error('MIGRATION_FIXTURE_PATH must contain an entity-to-row object');
   }
-  for (const entity of entities) {
+  for (const entity of fixtureEntities) {
     const rows = parsed[entity.type];
     // Existing synthetic identity fixtures predate controlled cutover inputs.
     // They remain usable only with an explicit empty optional category; the

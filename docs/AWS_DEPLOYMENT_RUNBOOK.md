@@ -73,6 +73,18 @@ The owner sets the cap from the QoreID contract (release checklist §10); a
 per-network limit is raised only when carrier-grade or facility NAT collisions
 show (IP-THRESHOLDS).
 
+Imported legacy medical history (ADR-067, migration 0099): the synth inputs
+`HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY` and
+`HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED` set ehr-api's
+`EHR_PATIENT_RELEASE_IMPORTED_HISTORY` and `EHR_STAFF_IMPORTED_HISTORY_ENABLED`,
+and `HID_IMPORTED_HISTORY_SHARING_ENABLED` sets identity-api's
+`IMPORTED_HISTORY_SHARING_ENABLED`. Each defaults to `false`; synthesis and
+`verify-synth` refuse any of them outside staging, and in staging the sharing
+switch without the patient read and the staff read without the sharing
+switch. Set them on staging only after release checklist P38 (1), the written
+sign-off, in the order patient read, sharing, staff read, and turn them off in
+reverse. The EHR and Identity production profiles refuse them as well.
+
 ## Staging email acceptance profile
 
 Staging selects `NOTIFICATION_DELIVERY_PROFILE=email-only`. Its Notification API
@@ -672,7 +684,7 @@ Before step 1 write the secrets. The migration secret's `url` and each runtime
 secret's URL name a lowercase LOGIN (letters, digits and `_`) with a password
 of 16 to 1024 printable ASCII characters without spaces, all on the same host,
 port and database. No LOGIN, the migration administrator included, is named
-after one of the 26 HID group roles that `runtime-grants.sql` creates (such as
+after one of the 28 HID group roles that `runtime-grants.sql` creates (such as
 `hid_migration_admin`; use, for example, `hid_deploy_admin`): the role
 bootstrap of step 5 cannot run as such an administrator. Each runtime LOGIN is
 distinct and is not the master or the administrator. No URL sets `user`, `password`,

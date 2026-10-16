@@ -95,16 +95,18 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0096_patient_record_release.sql` | Patient record release (owner decision 4 of 2026-10-16, ADR-065, D7; numbered after 0095). Adds five PUBLIC `SELECT` policies gated by `ehr.patient_self_context`, a completed encounter and the row's category in the transaction-local `app.patient_release` (which only the EHR build of this change sets, to the categories whose flag is on): final, never corrected vitals; confirmed diagnoses; active, on hold and completed prescriptions; uploaded PHI documents attached to an encounter, and their scan events. Creates the `security_barrier` view `ehr.patient_released_lab_results` (each Lab result's latest released, not invalidated revision of an order still open or completed, of a completed encounter, when `app.patient_release` names `labResults`; no reasons or staff identities), revoked from `PUBLIC`, and the indexes `lab_result_releases_patient_idx`, `vitals_patient_release_idx`, `diagnoses_patient_release_idx` and `prescriptions_patient_release_idx`. The role bootstrap creates its owner, the technical role `hid_lab_release_reader` (`NOLOGIN`, column `SELECT` and one `using (true)` policy per table it reads, no privilege on the view itself), and grants `SELECT` on it to the EHR runtime and the test role only. `ehr.patient_self_context`'s grants are unchanged and no Lab role gains a privilege. Changes no row; brief `ACCESS EXCLUSIVE` on the five EHR tables and `SHARE` on `lab.result_releases`, `ehr.vitals`, `ehr.diagnoses` and `ehr.prescriptions` while their indexes build, to the commit (release checklist §5 step 29). Every EHR release flag stays off, and the production profile refuses it, until release checklist P36. |
 | `database/migrations/0097_break_glass_launch_with_limits.sql` | Break-glass at launch, with limits (decision D9 as the owner decided it on 2026-10-14; ADR-058 addendum; branch `claude/break-glass-launch`, D-Eminence/hid-system#83; numbered after 0096). Inserts `identity.break-glass.write` for doctor, clinician and nurse into `auth.role_permissions` (the roles 0010 granted it to before 0091 withdrew it; no other role, no other withdrawn permission) and `emergency` ("Emergency treatment", active, `hid`) into `identity.purpose_of_use_codes`, both `ON CONFLICT DO NOTHING`, so an operator's earlier row is kept. First it refuses to run while `break_glass_enabled` is on (`55000 BREAK_GLASS_CONTROL_ON`, nothing changed): 0091 kept a value an administrator had set, and the grant would make break-glass live at once; set the control off with `POST /admin/controls` and run `migrate` again. Before the first role bootstrap a non-superuser administrator cannot read the control (`PLATFORM_CONTROL_UNAVAILABLE`), which 0097 takes as off. `ACCESS SHARE` on `platform.control_settings` (that read, first), `ROW EXCLUSIVE` on the two tables and `FOR KEY SHARE` on the referenced role and permission rows; at most four rows, no scan, no window. No object, function, policy or database grant changes, and `break_glass_enabled` is not changed (off since 0091): break-glass answers `423 BREAK_GLASS_DISABLED` until a platform administrator turns the control on with `POST /admin/controls` after staff MFA ships (`PHASE_4_STAGE_5_RELEASE_READINESS.md` P11). Run `db:bootstrap` and `db:verify-roles` of the same release after it: their role assertions require exactly the three holders, so an earlier release's bootstrap refuses a database holding 0097, and this release's bootstrap refuses one without it. From its commit, doctors', clinicians' and nurses' sessions list the permission on their next request (every build); Identity and EHR builds are unchanged by it (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §3, §5, §9) |
 | `database/migrations/0098_clinician_self_signup.sql` | Clinician self sign-up with two-admin approval (owner decision 2 of 2026-10-14; ADR-066, CLIN-SIGNUP; branch `claude/clinician-self-signup`). Adds the control `clinician_signup_enabled` (seeded off), the application, challenge, capability, idempotency and quota tables (RLS, no runtime privilege), the reserved-attestation predicate, the internal pinned grant `identity.workforce_change_role` (0087's body plus the pin; `identity.admin_change_workforce_role` delegates with no pin) and the public and administration commands (`DATABASE.md`, "Clinician self sign-up applications (0098)"). It replaces `platform.control_enabled` (0040's body plus the key) while keeping its technical owner `hid_platform_control_reader`: a runner that does not own it grants itself that role (`INHERIT`, no `SET`) for the transaction with the ADMIN OPTION it holds as the role's creator (the bootstrap's administrator), revokes it, and fails closed if it cannot or if the owner would change (§6.1). Locks, in order, under the runner's 5 s lock timeout: `ACCESS EXCLUSIVE` on `platform.control_settings` (every guard's control read waits), then `SHARE ROW EXCLUSIVE` on `auth.accounts`, `identity.facilities`, `identity.staff`, `identity.staff_facility_memberships` and `identity.staff_credential_attestations` (the new foreign keys; writes to them wait). A transaction that holds a row lock on one of those and then reads a control can deadlock with it; PostgreSQL aborts one, and an aborted 0098 rolls back whole and is run again. Run it off-peak. Run `db:bootstrap` and `db:verify-roles` of the same release after it: the bootstrap grants the new commands. An older Identity runs on it unchanged; the new Identity on a database without it answers the new routes 503 (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, P37) |
+| `database/migrations/0099_imported_medical_history.sql` | Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-067; numbered after 0098). Refuses a database holding the PR #8 branch's 0061/0062 objects; adds three append-only imported tables, the patient's sharing choice and its log, their patient-self and staff policies, the session-bound sharing commands and `ehr.import_legacy_medical_history` (sealed staging rows only; `hid_migration_admin` only), and the permission `ehr.imported-history.read`. Moves no data (§10.1) |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles. Runs as a superuser or as the non-superuser administrator that created the roles (RDS); checks the roles' attributes instead of re-asserting them (§6) |
 | `database/runtime-login-assertions.sql` and `scripts/verify-runtime-logins.mjs` | `npm run db:verify-logins`: checks each runtime credential's own LOGIN, connected with that credential's URL (§6) |
 | `scripts/provision-database-logins.mjs` and `scripts/database-login-provisioning.mjs` | `npm run db:provision`: the RDS master's steps (the migration administrator, and the 0015 parameter grant and revoke) and the ten runtime LOGINs from their secrets' URLs, then `db:verify-logins`; in AWS the one-shot provisioning task (§6). Refuses an administrator or runtime LOGIN named after a HID group role |
 | `scripts/apply-migrations.mjs` | Ordered checksummed plan/dry-run/apply |
-| `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger |
+| `scripts/stage-legacy-identity.mjs` | Read-only repeatable source snapshot or deterministic offline fixture; restricted per-row hash evidence and sealed staging ledger. `--scope=imported-history` seals the legacy medical history of the same snapshot in its own run (§10.1); the default `--scope=identity` is unchanged |
 | `scripts/promote-legacy-identity.mjs` | Explicit dependency ordering, UUID/HID preservation, encryption/HMAC, holds and conflict evidence; refuses, before any write, staged memberships that would give one staff identity two active memberships at one facility, or one beside a membership the target already holds (N5, `membership-duplicates.mjs`) |
 | `scripts/reconcile-legacy-identity.mjs` | Independent destination read-back, counts, decryption and checksums |
 | `scripts/verify-legacy-migration.mjs` | Offline determinism, preservation, idempotency and blocking-contract verification |
 | `scripts/rekey-patient-contact-lookups.mjs` | Dry-run-default, conflict-checked canonical contact lookup rekey with an atomic completion marker |
 | `scripts/import-legacy-nin-crosswalk.mjs` | Dry-run-default import of a complete, attested exact/absent legacy NIN source inventory; never asserts QoreID verification |
+| `scripts/import-legacy-history.mjs` | Dry-run-default import of a sealed legacy medical history run through `ehr.import_legacy_medical_history`; staging or an owned rehearsal only, refused in production (§10.1) |
 | `test/fixtures/legacy-identity.sample.json` | Synthetic account/profile/patient rehearsal with fixed UUID/HID |
 
 The migration ledger is physically under EHR for the current repository
@@ -257,7 +259,7 @@ owns every schema and object the migrations create. In AWS the one-shot
 provisioning task creates it (`--administrator`, which also records the I3
 probe) and makes the master's other statements below
 (`AWS_DEPLOYMENT_RUNBOOK.md` §4, Running the provisioning task). Its name must
-not be one of the 26 group roles that `runtime-grants.sql` creates, such as
+not be one of the 28 group roles that `runtime-grants.sql` creates, such as
 `hid_migration_admin`: the role bootstrap skips a role that exists and then
 needs `ADMIN OPTION` on it, which no role holds on itself, so §6.2 would stop
 after every migration had been applied as that LOGIN. The provisioning task
@@ -349,11 +351,14 @@ each role with its attributes and then checks them. It refuses a HID group
 role with `SUPERUSER`, `BYPASSRLS` or `REPLICATION`, and a runner that is
 neither a superuser nor holds `ADMIN OPTION` on every HID role; neither can
 happen to roles this administrator created. Inside its own transaction it
-holds `SET` and `INHERIT` membership in the four technical owners
+holds `SET` and `INHERIT` membership in the six technical owners
 (`hid_event_delivery_commands`, `hid_ocr_queue_metrics`,
-`hid_platform_control_reader` and, since 0096, `hid_lab_release_reader`), and
-each of them holds `CREATE` on one schema only around its function (or, for
-`hid_lab_release_reader`, view) transfer; it revokes both before it commits.
+`hid_platform_control_reader`, since 0096 `hid_lab_release_reader`, and
+since 0099 `hid_imported_history_commands` and
+`hid_imported_history_importer`), and each of them holds `CREATE` on one
+schema (`hid_imported_history_commands` on `ehr` and `identity`) only around
+its function (or, for `hid_lab_release_reader`, view) transfer; it revokes
+both before it commits.
 PostgreSQL 16 records, for a non-superuser that creates a role, an `ADMIN
 OPTION`-only membership granted by the bootstrap superuser. It carries no
 privilege and no `SET ROLE`, and the administrator cannot revoke it.
@@ -441,7 +446,7 @@ service straight after its LOGIN gets the new password
 service that connects to the database also refuses to start over a superuser,
 `BYPASSRLS` or owner connection.
 
-Confirm the candidate ledger reaches `0098`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0099`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 After the legacy import, record (read-only, counts only, no identifiers) how
 many imported patient accounts have `email_verified_at` null and no verified
@@ -722,6 +727,60 @@ Also reconcile object inventory count, byte total, checksum, version ID,
 missing/unreadable rows, and malware/scan binding. Sample UUID/HID/account
 continuity with synthetic or authorized minimum-necessary identifiers.
 
+### 10.1 Imported legacy medical history (ADR-067)
+
+Only after the DPO's and the owner's written sign-off of the legacy data's
+provenance, lawful basis, scope and retention (release checklist P38), on
+staging, and never in production. Both commands below refuse
+`HID_DEPLOYMENT_ENV=production` and anything but `staging` or an owned
+rehearsal before they read or connect; that is the operator's declaration of
+where they run, not something the database enforces, so set it truthfully.
+The September customer data said to be on staging is covered by the same
+sign-off; nothing here reads or moves it. Rehearse first on a restored copy
+with synthetic data (`rehearse-imported-history-import.mjs`).
+
+1. The parent run is the legacy identity run staged, promoted and reconciled
+   above, with status `verified` and no conflict. Note its
+   `source_checksum_sha256`.
+2. Seal the history of the same source snapshot (the same
+   `MIGRATION_SNAPSHOT_ID`) in its own run:
+
+   ```bash
+   HID_DEPLOYMENT_ENV=staging MIGRATION_RUN_ID=<new history run id> \
+     npm --prefix services/ehr-api run migration:stage -- --scope=imported-history
+   ```
+
+   The run's source system is `legacy_imported_history`: main's crosswalk
+   gate does not count it, so public patient enrollment stays open while it
+   is staged (a `legacy_identity` run left staged would close it), and
+   main's promoter refuses it and leaves it as it is. Never promote or
+   reconcile it; leave it staged. The stager seals it as it seals an
+   identity run (no row after the seal, no second seal).
+3. Dry run, then apply, as the migration administrator (`DATABASE_URL`):
+
+   ```bash
+   HID_DEPLOYMENT_ENV=staging MIGRATION_PARENT_RUN_ID=<parent run id> \
+     MIGRATION_HISTORY_RUN_ID=<history run id> \
+     MIGRATION_PARENT_SOURCE_CHECKSUM=<parent source checksum> MIGRATION_OPERATOR=<operator> \
+     npm --prefix services/ehr-api run migration:import-legacy-history -- --operation medical-records
+   # then the same with --apply
+   ```
+
+   The command checks both runs and every row against its seal and the
+   parent's identity rows, then runs the import as `hid_migration_admin`
+   through a SET-only membership given up before its transaction ends. It
+   prints counts and the receipt id only. A refusal prints its code
+   (`IMPORTED_HISTORY_*`) and writes nothing; a repeated apply inserts
+   nothing; a later history run whose rows differ from the imported ones is
+   refused (`IMPORTED_HISTORY_DIFFERS`).
+   The import is one all-or-nothing statement, linear in the rows (50,000
+   synthetic rows in 11.7 s locally; the 300 s statement timeout is reached
+   at roughly 1.2 million). If the dry run counts more than 250,000 rows,
+   stop: batching by record range is reviewed first (ADR-067).
+4. Confirm that patient enrollment is still open (the P38 check's
+   `open_identity_runs` is 0), and attach the dry-run and apply output and
+   the P38 check to the release evidence.
+
 ## 11. Controlled single-writer cutover
 
 1. Announce and enter the approved identity-write window.
@@ -729,7 +788,7 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify the ledger at `0098`, runtime grants (`db:verify-roles`) and logins
+6. Verify the ledger at `0099`, runtime grants (`db:verify-roles`) and logins
    (`db:verify-logins`), RLS and purpose/deny behavior, and list the
    purpose-of-use codes (release checklist P10; after `0097` `direct-care` and
    `emergency`). After `0097`, confirm the
@@ -778,6 +837,16 @@ continuity with synthetic or authorized minimum-necessary identifiers.
    the bootstrap's administrator (the ADMIN OPTION on
    `hid_platform_control_reader`, §6.1). `clinician_signup_enabled` stays off
    until release checklist P37.
+   After `0099`, likewise: the bootstrap creates
+   `hid_imported_history_commands` and `hid_imported_history_importer`, gives
+   them the staff decision, the two sharing commands and the import (no owner
+   keeps an entry of its own), and grants the EHR runtime `SELECT` on the
+   imported tables and `EXECUTE` on the staff decision and its binding, the
+   Identity runtime the sharing commands and `hid_migration_admin` the import;
+   `db:verify-roles` checks their exact privileges. Until it runs, the staff route answers `503
+   IMPORTED_HISTORY_UNAVAILABLE` and the sharing routes fail. Run the P38
+   check before any imported history switch is set or any history is
+   imported.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts. A migrated staff account signs in with
    its password, then enrols an authenticator with the code emailed to it

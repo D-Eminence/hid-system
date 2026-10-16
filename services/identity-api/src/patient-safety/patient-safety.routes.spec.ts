@@ -77,6 +77,8 @@ describe('Patient-only routes (A9)', () => {
     'PatientSelfController.profile', 'PatientSelfController.history', 'PatientSelfController.notificationInbox',
     'PatientSelfController.markNotificationRead', 'PatientSelfController.setAccessPin',
     'PatientSelfController.revokeAccessPin', 'PatientSelfController.authorize',
+    // The patient's imported history sharing choice (ADR-067, 0099).
+    'PatientSelfController.importedHistorySharing', 'PatientSelfController.setImportedHistorySharing',
     'ConsentController.listMyAccessRequests', 'ConsentController.approveAccessRequest',
     'ConsentController.denyAccessRequest', 'ConsentController.revokeMyConsentGrant',
     'EmergencyContactController.list', 'EmergencyContactController.add', 'EmergencyContactController.update',

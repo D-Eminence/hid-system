@@ -81,6 +81,12 @@ begin
   if not exists (select 1 from pg_roles where rolname = 'hid_lab_release_reader') then
     create role hid_lab_release_reader nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
   end if;
+  if not exists (select 1 from pg_roles where rolname = 'hid_imported_history_commands') then
+    create role hid_imported_history_commands nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
+  end if;
+  if not exists (select 1 from pg_roles where rolname = 'hid_imported_history_importer') then
+    create role hid_imported_history_importer nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
+  end if;
   if not exists (select 1 from pg_roles where rolname = 'hid_event_dispatcher') then
     create role hid_event_dispatcher nologin nosuperuser nocreatedb nocreaterole noinherit nobypassrls;
   end if;
@@ -135,6 +141,8 @@ begin
     ('hid_ocr_queue_metrics', false),
     ('hid_platform_control_reader', false),
     ('hid_lab_release_reader', false),
+    ('hid_imported_history_commands', false),
+    ('hid_imported_history_importer', false),
     ('hid_event_dispatcher', false),
     ('hid_notification_runtime', false),
     ('hid_notification_api_runtime', true),
@@ -168,15 +176,16 @@ begin
 end
 $$;
 
--- The administrator transfers functions to the three technical owners below,
--- and a view to the fourth, and then grants and revokes privileges on them. A non-superuser may give an
+-- The administrator transfers functions to the technical owners below (a
+-- view to hid_lab_release_reader), and then grants and revokes privileges on them. A non-superuser may give an
 -- object to a role only if it may SET ROLE to it, and may grant or revoke on
 -- an object it does not own only with the owner's privileges, which an
 -- INHERIT membership provides; a rerun, where the technical roles already own
 -- the functions, needs the same for the REVOKE ALL statements that follow.
 -- These memberships are revoked at the end of this file, in this transaction.
 grant hid_event_delivery_commands, hid_ocr_queue_metrics, hid_platform_control_reader,
-  hid_lab_release_reader to current_user with inherit true, set true;
+  hid_lab_release_reader, hid_imported_history_commands, hid_imported_history_importer
+  to current_user with inherit true, set true;
 
 comment on role hid_identity_runtime is
   'Identity and authentication persistence privileges for an Identity-owned service boundary.';
@@ -222,6 +231,10 @@ comment on role hid_platform_control_reader is
   'Technical owner of platform.control_enabled(text); reads only the platform control keys and their enabled flags; never granted to a runtime login.';
 comment on role hid_lab_release_reader is
   'Technical owner of the view ehr.patient_released_lab_results; reads released Lab result columns and source EHR order status; cannot evaluate patient-self; never granted to a runtime login.';
+comment on role hid_imported_history_commands is
+  'Technical owner of the imported history staff read decision and the patient''s two sharing commands (ADR-067); reads the patient''s account, the login''s status and the sharing choice, writes only the sharing choice and its log; never granted to a runtime login.';
+comment on role hid_imported_history_importer is
+  'Technical owner of ehr.import_legacy_medical_history (ADR-067); reads the sealed migration ledger and inserts only imported history and its receipt; executable by hid_migration_admin only; never granted to a runtime login.';
 comment on role hid_event_dispatcher is
   'Transport dispatcher command role with no direct domain or integration table privileges.';
 comment on role hid_notification_runtime is
@@ -337,6 +350,11 @@ revoke all privileges on schema platform, auth, identity, ehr, audit, ocr, lab, 
 revoke all privileges on all tables in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_lab_release_reader;
 revoke all privileges on all sequences in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_lab_release_reader;
 revoke all privileges on all functions in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification from hid_lab_release_reader;
+
+revoke all privileges on schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification, migration from hid_imported_history_commands, hid_imported_history_importer;
+revoke all privileges on all tables in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification, migration from hid_imported_history_commands, hid_imported_history_importer;
+revoke all privileges on all sequences in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification, migration from hid_imported_history_commands, hid_imported_history_importer;
+revoke all privileges on all functions in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration, notification, migration from hid_imported_history_commands, hid_imported_history_importer;
 
 revoke all privileges on schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration from hid_event_dispatcher;
 revoke all privileges on all tables in schema platform, auth, identity, ehr, audit, ocr, lab, pharmacy, outreach, integration from hid_event_dispatcher;
@@ -464,6 +482,16 @@ revoke hid_lab_release_reader from hid_identity_runtime, hid_ehr_runtime,
   hid_migration_admin, hid_event_dispatcher, hid_event_delivery_commands,
   hid_ocr_queue_metrics, hid_platform_control_reader, hid_notification_runtime,
   hid_notification_api_runtime, hid_notification_worker;
+revoke hid_imported_history_commands, hid_imported_history_importer from hid_identity_runtime, hid_ehr_runtime,
+  hid_api_runtime, hid_identity_api_runtime, hid_ehr_api_runtime, hid_ocr_api_runtime,
+  hid_audit_writer, hid_document_scanner, hid_ocr_runtime, hid_ocr_worker,
+  hid_lab_runtime, hid_lab_api_runtime, hid_pharmacy_runtime, hid_pharmacy_api_runtime,
+  hid_outreach_runtime, hid_outreach_api_runtime, hid_schema_test_runtime,
+  hid_migration_admin, hid_event_dispatcher, hid_event_delivery_commands,
+  hid_ocr_queue_metrics, hid_platform_control_reader, hid_lab_release_reader, hid_notification_runtime,
+  hid_notification_api_runtime, hid_notification_worker;
+revoke hid_imported_history_commands from hid_imported_history_importer;
+revoke hid_imported_history_importer from hid_imported_history_commands;
 
 -- Launch (P8-CONTROL): platform.control_enabled(text) is the SECURITY
 -- DEFINER read of platform.control_settings that the Identity, EHR and
@@ -823,6 +851,270 @@ revoke create on schema ehr from hid_lab_release_reader;
 -- (the owner needs no privilege on its own view).
 revoke all on ehr.patient_released_lab_results from hid_lab_release_reader;
 grant select on ehr.patient_released_lab_results to hid_ehr_runtime, hid_schema_test_runtime;
+
+-- Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-067,
+-- 0099). Two NOLOGIN technical owners, so that no definer relies on its owner
+-- bypassing row-level security (identity.patients has it enabled, the five
+-- new tables force it), and none is a member of any role or has a member:
+-- - hid_imported_history_commands owns the staff read decision
+--   ehr.imported_history_staff_read_allowed and the patient's two sharing
+--   commands. It reads the patient's account (identity.patients id and
+--   account_id) and the login's status (auth.accounts id and status) through
+--   column grants and one `true` policy, and reads and writes the sharing
+--   choice and appends its log through exact policies; it calls
+--   ehr.context_allows, auth.membership_has_permission,
+--   identity.patient_self_session (whose only EXECUTE holder it is) and the
+--   platform context functions. It holds no EXECUTE on
+--   ehr.patient_self_context (PSELF-RLS is unchanged).
+-- - hid_imported_history_importer owns ehr.import_legacy_medical_history. It
+--   reads the sealed ledger columns of migration.runs, migration.source_rows
+--   and migration.conflicts, inserts the receipt run, and reads and inserts
+--   the three imported tables through exact policies. Only hid_migration_admin
+--   may execute the import; no runtime role can.
+-- The EHR runtime and the test role read the imported tables, filtered by
+-- the migration's patient-self and staff policies, and run the staff
+-- decision and its once-per-statement binding,
+-- ehr.imported_history_staff_patient(); the Identity runtime and the test role run the sharing commands
+-- and reach the sharing tables through them only. Each policy is replaced
+-- only when it is missing or differs, so a rerun takes no lock on its table
+-- (on the first run, ACCESS EXCLUSIVE briefly on identity.patients, the two
+-- sharing tables and the three imported tables, after the platform-control
+-- policy); one block per policy, in the form the privilege replay of
+-- scripts/verify-runtime-locking-privileges.mjs follows.
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'identity.patients'::regclass
+       and policy.polname = 'imported_history_commands_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_imported_history_commands'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists imported_history_commands_read on identity.patients;
+    create policy imported_history_commands_read on identity.patients
+      for select to hid_imported_history_commands using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'identity.imported_history_sharing'::regclass
+       and policy.polname = 'imported_history_commands_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_imported_history_commands'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists imported_history_commands_read on identity.imported_history_sharing;
+    create policy imported_history_commands_read on identity.imported_history_sharing
+      for select to hid_imported_history_commands using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'identity.imported_history_sharing'::regclass
+       and policy.polname = 'imported_history_commands_insert'
+       and policy.polcmd = 'a' and policy.polpermissive
+       and policy.polroles = array['hid_imported_history_commands'::regrole::oid]
+       and policy.polqual is null
+       and pg_get_expr(policy.polwithcheck, policy.polrelid) = 'true'
+  ) then
+    drop policy if exists imported_history_commands_insert on identity.imported_history_sharing;
+    create policy imported_history_commands_insert on identity.imported_history_sharing
+      for insert to hid_imported_history_commands with check (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'identity.imported_history_sharing'::regclass
+       and policy.polname = 'imported_history_commands_update'
+       and policy.polcmd = 'w' and policy.polpermissive
+       and policy.polroles = array['hid_imported_history_commands'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and pg_get_expr(policy.polwithcheck, policy.polrelid) = 'true'
+  ) then
+    drop policy if exists imported_history_commands_update on identity.imported_history_sharing;
+    create policy imported_history_commands_update on identity.imported_history_sharing
+      for update to hid_imported_history_commands using (true) with check (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'identity.imported_history_sharing_events'::regclass
+       and policy.polname = 'imported_history_commands_insert'
+       and policy.polcmd = 'a' and policy.polpermissive
+       and policy.polroles = array['hid_imported_history_commands'::regrole::oid]
+       and policy.polqual is null
+       and pg_get_expr(policy.polwithcheck, policy.polrelid) = 'true'
+  ) then
+    drop policy if exists imported_history_commands_insert on identity.imported_history_sharing_events;
+    create policy imported_history_commands_insert on identity.imported_history_sharing_events
+      for insert to hid_imported_history_commands with check (true);
+  end if;
+end
+$$;
+grant usage on schema platform, auth, identity, ehr to hid_imported_history_commands;
+grant select (id, account_id) on identity.patients to hid_imported_history_commands;
+grant select (id, status) on auth.accounts to hid_imported_history_commands;
+grant select, insert, update on identity.imported_history_sharing to hid_imported_history_commands;
+grant insert on identity.imported_history_sharing_events to hid_imported_history_commands;
+grant execute on function platform.current_actor_subject(), platform.current_correlation_id(),
+  platform.current_facility_id(), platform.current_membership_id(), platform.current_purpose_of_use(),
+  ehr.context_allows(uuid, uuid, text), auth.membership_has_permission(text, uuid, uuid, text),
+  identity.patient_self_session(text, uuid)
+  to hid_imported_history_commands;
+grant create on schema ehr, identity to hid_imported_history_commands;
+alter function ehr.imported_history_staff_read_allowed(uuid) owner to hid_imported_history_commands;
+alter function identity.my_imported_history_sharing(text, uuid) owner to hid_imported_history_commands;
+alter function identity.set_my_imported_history_sharing(text, uuid, boolean) owner to hid_imported_history_commands;
+revoke create on schema ehr, identity from hid_imported_history_commands;
+-- No owner keeps an EXECUTE entry on its own function (none calls another),
+-- so the first run leaves the same ACL as a rerun, whose REVOKE ALL above
+-- removes the entry the ownership transfer carried over (P38).
+revoke all on function ehr.imported_history_staff_read_allowed(uuid),
+  identity.my_imported_history_sharing(text, uuid),
+  identity.set_my_imported_history_sharing(text, uuid, boolean) from public, hid_imported_history_commands;
+grant execute on function ehr.imported_history_staff_read_allowed(uuid) to hid_ehr_runtime, hid_schema_test_runtime;
+-- The staff policies' binding (0099) runs as its caller and asks the decision above.
+revoke all on function ehr.imported_history_staff_patient() from public;
+grant execute on function ehr.imported_history_staff_patient() to hid_ehr_runtime, hid_schema_test_runtime;
+grant execute on function identity.my_imported_history_sharing(text, uuid),
+  identity.set_my_imported_history_sharing(text, uuid, boolean)
+  to hid_identity_runtime, hid_schema_test_runtime;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'ehr.imported_medical_records'::regclass
+       and policy.polname = 'imported_history_importer_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_imported_history_importer'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists imported_history_importer_read on ehr.imported_medical_records;
+    create policy imported_history_importer_read on ehr.imported_medical_records
+      for select to hid_imported_history_importer using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'ehr.imported_medical_records'::regclass
+       and policy.polname = 'imported_history_importer_insert'
+       and policy.polcmd = 'a' and policy.polpermissive
+       and policy.polroles = array['hid_imported_history_importer'::regrole::oid]
+       and policy.polqual is null
+       and pg_get_expr(policy.polwithcheck, policy.polrelid) = 'true'
+  ) then
+    drop policy if exists imported_history_importer_insert on ehr.imported_medical_records;
+    create policy imported_history_importer_insert on ehr.imported_medical_records
+      for insert to hid_imported_history_importer with check (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'ehr.imported_medical_record_versions'::regclass
+       and policy.polname = 'imported_history_importer_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_imported_history_importer'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists imported_history_importer_read on ehr.imported_medical_record_versions;
+    create policy imported_history_importer_read on ehr.imported_medical_record_versions
+      for select to hid_imported_history_importer using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'ehr.imported_medical_record_versions'::regclass
+       and policy.polname = 'imported_history_importer_insert'
+       and policy.polcmd = 'a' and policy.polpermissive
+       and policy.polroles = array['hid_imported_history_importer'::regrole::oid]
+       and policy.polqual is null
+       and pg_get_expr(policy.polwithcheck, policy.polrelid) = 'true'
+  ) then
+    drop policy if exists imported_history_importer_insert on ehr.imported_medical_record_versions;
+    create policy imported_history_importer_insert on ehr.imported_medical_record_versions
+      for insert to hid_imported_history_importer with check (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'ehr.imported_medical_record_files'::regclass
+       and policy.polname = 'imported_history_importer_read'
+       and policy.polcmd = 'r' and policy.polpermissive
+       and policy.polroles = array['hid_imported_history_importer'::regrole::oid]
+       and pg_get_expr(policy.polqual, policy.polrelid) = 'true'
+       and policy.polwithcheck is null
+  ) then
+    drop policy if exists imported_history_importer_read on ehr.imported_medical_record_files;
+    create policy imported_history_importer_read on ehr.imported_medical_record_files
+      for select to hid_imported_history_importer using (true);
+  end if;
+end
+$$;
+do $$
+begin
+  if not exists (
+    select 1 from pg_policy policy
+     where policy.polrelid = 'ehr.imported_medical_record_files'::regclass
+       and policy.polname = 'imported_history_importer_insert'
+       and policy.polcmd = 'a' and policy.polpermissive
+       and policy.polroles = array['hid_imported_history_importer'::regrole::oid]
+       and policy.polqual is null
+       and pg_get_expr(policy.polwithcheck, policy.polrelid) = 'true'
+  ) then
+    drop policy if exists imported_history_importer_insert on ehr.imported_medical_record_files;
+    create policy imported_history_importer_insert on ehr.imported_medical_record_files
+      for insert to hid_imported_history_importer with check (true);
+  end if;
+end
+$$;
+grant usage on schema ehr, migration to hid_imported_history_importer;
+grant select (id, source_system, source_snapshot, mode, status, source_counts, target_counts,
+    source_checksum_sha256, target_checksum_sha256, notes), insert
+  on migration.runs to hid_imported_history_importer;
+grant select (run_id, entity_type, source_pk, payload, payload_sha256)
+  on migration.source_rows to hid_imported_history_importer;
+grant select (run_id) on migration.conflicts to hid_imported_history_importer;
+grant select, insert on ehr.imported_medical_records, ehr.imported_medical_record_versions,
+  ehr.imported_medical_record_files to hid_imported_history_importer;
+grant create on schema ehr to hid_imported_history_importer;
+alter function ehr.import_legacy_medical_history(uuid, uuid, text, jsonb) owner to hid_imported_history_importer;
+revoke create on schema ehr from hid_imported_history_importer;
+revoke all on function ehr.import_legacy_medical_history(uuid, uuid, text, jsonb) from public, hid_imported_history_importer;
+-- The migration administrator takes hid_migration_admin for the import's
+-- transaction only (import-legacy-history.mjs); it needs the schema to call it.
+grant usage on schema ehr to hid_migration_admin;
+grant execute on function ehr.import_legacy_medical_history(uuid, uuid, text, jsonb) to hid_migration_admin;
+grant select on ehr.imported_medical_records, ehr.imported_medical_record_versions,
+  ehr.imported_medical_record_files to hid_ehr_runtime, hid_schema_test_runtime;
 
 grant usage on schema platform,identity,lab to hid_lab_runtime;
 grant select,insert on lab.imported_evidence,lab.imported_observations,lab.work_items,
@@ -1572,7 +1864,7 @@ revoke all on identity.clinician_applications, identity.clinician_application_ch
 -- administrator in every role it creates, is a separate grant and stays; it
 -- carries no privilege and no SET ROLE.
 revoke hid_event_delivery_commands, hid_ocr_queue_metrics, hid_platform_control_reader,
-  hid_lab_release_reader from current_user;
+  hid_lab_release_reader, hid_imported_history_commands, hid_imported_history_importer from current_user;
 do $$
 begin
   if exists (
@@ -1580,12 +1872,14 @@ begin
      where membership.member = (select oid from pg_roles where rolname = current_user)
        and membership.roleid in (
          'hid_event_delivery_commands'::regrole, 'hid_ocr_queue_metrics'::regrole,
-         'hid_platform_control_reader'::regrole, 'hid_lab_release_reader'::regrole)
+         'hid_platform_control_reader'::regrole, 'hid_lab_release_reader'::regrole,
+         'hid_imported_history_commands'::regrole, 'hid_imported_history_importer'::regrole)
        and (membership.inherit_option or membership.set_option)
   ) or exists (
     select 1 from pg_namespace namespace_row
      cross join unnest(array['hid_event_delivery_commands', 'hid_ocr_queue_metrics',
-       'hid_platform_control_reader', 'hid_lab_release_reader']) technical(role_name)
+       'hid_platform_control_reader', 'hid_lab_release_reader', 'hid_imported_history_commands',
+       'hid_imported_history_importer']) technical(role_name)
      where namespace_row.nspname in ('platform', 'auth', 'identity', 'ehr', 'audit', 'ocr', 'lab',
          'pharmacy', 'outreach', 'integration', 'notification', 'migration')
        and has_schema_privilege(technical.role_name, namespace_row.oid, 'CREATE')

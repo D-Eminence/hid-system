@@ -89,7 +89,7 @@
     "verify:migration-ledger": "node scripts/verify-migration-ledger.mjs",
     "verify:runtime-locks": "node scripts/verify-runtime-locking-privileges.mjs",
     "verify:prebaseline-git": "bash scripts/verify-prebaseline-git.sh",
-    "verify:migration": "npm --prefix services/ehr-api run migration:verify && npm --prefix services/ehr-api run migration:verify-nin-crosswalk && npm --prefix services/ehr-api run migration:verify-membership-duplicates",
+    "verify:migration": "npm --prefix services/ehr-api run migration:verify && npm --prefix services/ehr-api run migration:verify-nin-crosswalk && npm --prefix services/ehr-api run migration:verify-membership-duplicates && npm --prefix services/ehr-api run migration:verify-imported-history",
     "verify:containers": "node scripts/verify-container-platform.mjs",
     "verify:gateway-runtime": "node scripts/verify-gateway-runtime.mjs",
     "verify:gateway-runtime:image": "node scripts/verify-gateway-runtime.mjs --built-image",

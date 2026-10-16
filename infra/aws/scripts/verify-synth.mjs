@@ -552,6 +552,29 @@ if (environment !== 'staging') {
   }
 }
 
+// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-067):
+// the patient read and the staff read in ehr-api and the patient's sharing
+// choice in identity-api are explicit synth inputs, false by default, and only
+// staging may set one until the P38 sign-off.
+// identityApis is the identity-api container list declared above.
+const importedHistory = {}
+for (const [containers, flag, input] of [[ehrApis, 'EHR_PATIENT_RELEASE_IMPORTED_HISTORY', 'HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY'],
+  [ehrApis, 'EHR_STAFF_IMPORTED_HISTORY_ENABLED', 'HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED'],
+  [identityApis, 'IMPORTED_HISTORY_SHARING_ENABLED', 'HID_IMPORTED_HISTORY_SHARING_ENABLED']]) {
+  const value = containers[0].Environment.find(entry => entry.Name === flag)?.Value
+  assert.equal(value, process.env[input] ?? 'false', flag)
+  if (environment !== 'staging') {
+    assert.equal(value, 'false', `${environment} must not set ${flag} outside staging (P38, ADR-067)`)
+  }
+  importedHistory[flag] = value === 'true'
+}
+// Staff read only while patients can choose and withdraw, and sharing only
+// of what the patient can see: on patient read first, off staff read first.
+assert.ok(!importedHistory.EHR_STAFF_IMPORTED_HISTORY_ENABLED || importedHistory.IMPORTED_HISTORY_SHARING_ENABLED,
+  'EHR_STAFF_IMPORTED_HISTORY_ENABLED needs IMPORTED_HISTORY_SHARING_ENABLED (ADR-067)')
+assert.ok(!importedHistory.IMPORTED_HISTORY_SHARING_ENABLED || importedHistory.EHR_PATIENT_RELEASE_IMPORTED_HISTORY,
+  'IMPORTED_HISTORY_SHARING_ENABLED needs EHR_PATIENT_RELEASE_IMPORTED_HISTORY (ADR-067)')
+
 assert.equal(regional.Parameters.OriginDomainName, undefined)
 if (asleep) {
   assert.equal(regional.Parameters[contract.secret], undefined)

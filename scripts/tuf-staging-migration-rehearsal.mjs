@@ -446,6 +446,26 @@ try {
     assisted_registration_commands_runtime_only:true,patient_record_release_grants:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
+  // 0099 (ADR-067) refuses a database that holds the PR #8 branch's imported
+  // history objects (its 0061 and 0062): staging must be rebuilt first. The
+  // refused migration rolls back whole and leaves the branch object as it was.
+  command('create synthetic 0098 database with a branch-era imported table', join(pgBindir, 'createdb'),
+    ['hid_upgrade_imported']);
+  migration('schema apply through 0098', 'apply-migrations.mjs', 'hid_upgrade_imported', {}, 0,
+    ['--through=0098_clinician_self_signup.sql']);
+  await withClient('hid_upgrade_imported', (client) => client.query(`create table ehr.imported_medical_records (
+    id uuid primary key, patient_id uuid not null, source_payload jsonb not null)`));
+  migration('0099 refuses a branch-shaped database', 'apply-migrations.mjs', 'hid_upgrade_imported', {}, 'failure');
+  assert.match(logs.at(-1).stderr + logs.at(-1).stdout, /IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT/);
+  assert.deepEqual(await withClient('hid_upgrade_imported', async (client) => (await client.query(`select
+      (select max(version) from migration.schema_migrations) as latest,
+      to_regclass('identity.imported_history_sharing') is null as sharing_absent,
+      (select count(*)::int from information_schema.columns where table_schema = 'ehr'
+        and table_name = 'imported_medical_records') as branch_columns`)).rows[0]),
+  { latest: '0098_clinician_self_signup.sql', sharing_absent: true, branch_columns: 3 });
+  command('drop synthetic 0098 database', join(pgBindir, 'dropdb'), ['hid_upgrade_imported']);
+  evidence.checks.imported_history_branch_precondition = { from: '0098', refused: 'IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT',
+    unchanged: true };
   // 0093 (ADR-062) on a database at 0092 that holds public enrollments in
   // every state: the rollback-only upgrade suite seeds them, applies 0093
   // itself and checks the backfill, then rolls everything back.
@@ -509,6 +529,12 @@ try {
   evidence.checks.patient_record_release_runtime = JSON.parse(command(
     'exact-role patient record release and document download through the patient-self path', process.execPath,
     [join(repository, 'services/ehr-api/scripts/verify-patient-record-release-runtime.mjs')], workflowEnvironment));
+  // Imported legacy history (owner decision 3, ADR-067): the patient's own
+  // read, the sharing choice, the staff direct-care read, break-glass excluded.
+  evidence.checks.imported_history_runtime = JSON.parse(command(
+    'exact-role imported legacy history: patient-self read, sharing choice, staff direct-care read, break-glass excluded',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-imported-history-runtime.mjs')],
+    workflowEnvironment));
   evidence.checks.outreach_cookie_read_runtime = JSON.parse(command(
     'exact-role Outreach reads and writes authorized through Identity with a browser cookie session', process.execPath,
     [join(repository, 'services/outreach-api/scripts/verify-outreach-cookie-read-runtime.mjs')], workflowEnvironment));
@@ -573,6 +599,17 @@ try {
     'exact-role notification worker: claim-bound recipient lookup, Novu subscriber email sync and the in-app trigger',
     process.execPath, [join(repository, 'services/notification-worker/scripts/verify-notification-worker-runtime.mjs')],
     workflowEnvironment));
+  // Imported legacy history (ADR-067): main's stage, promote and reconcile of
+  // a synthetic identity source, a sealed history run of the same snapshot and
+  // the importer's dry run, apply, repeat and refusals, on a database of its own.
+  command('create imported history database', join(pgBindir, 'createdb'), ['hid_imported_history']);
+  migration('schema apply (imported history)', 'apply-migrations.mjs', 'hid_imported_history');
+  migration('bootstrap runtime roles (imported history)', 'bootstrap-database-roles.mjs', 'hid_imported_history');
+  evidence.checks.imported_history_import = JSON.parse(migration(
+    'imported history import: dry run, apply, idempotent repeat, changed and tampered rows refused',
+    'rehearse-imported-history-import.mjs', 'hid_imported_history'));
+  assert.equal(evidence.checks.imported_history_import.status, 'passed');
+  command('drop imported history database', join(pgBindir, 'dropdb'), ['hid_imported_history']);
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
   const before = await snapshot(database);
