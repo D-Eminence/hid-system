@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0094",
-    "count": 94,
+    "last": "0095",
+    "count": 95,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -473,6 +473,10 @@
       {
         "name": "0094_facility_assisted_registration.sql",
         "sha256": "322f2baa20fbe68764cfed4fd54a278653a367f213aa4fc0418d2b26c4a0aae8"
+      },
+      {
+        "name": "0095_notification_verified_recipient.sql",
+        "sha256": "dfe23d2d07ecf859f173ad67123581ed67ec4a954c416f5bf8afac9713da12ff"
       }
     ]
   },
