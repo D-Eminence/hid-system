@@ -15,11 +15,13 @@
 --    administrator's runtime kill switch (POST /admin/controls). The
 --    control_key CHECK of platform.control_settings, platform.control_enabled
 --    and platform.admin_set_control each name the allowed keys, so all three
---    gain the seventh key. The CHECK is unnamed in 0039 and is matched by
---    content: exactly the six 0039 keys, and neither record_chat_enabled nor
---    a key added after 0039. Anything else stops this migration (55000) and
---    changes nothing: a migration that added another key (for example
---    clinician_signup_enabled) must be listed here first, at rebase.
+--    gain the eighth key. The CHECK is matched by content: exactly the seven
+--    keys it holds since clinician self sign-up (0098), the six 0039 keys and
+--    clinician_signup_enabled, and neither record_chat_enabled nor any other
+--    key. Anything else stops this migration (55000) and changes nothing: a
+--    migration that added another key must be listed here first, at rebase.
+--    Every existing control row and its value is kept, clinician sign-up's
+--    included; the CHECK, the read and the command keep every earlier key.
 --    platform.control_enabled keeps its technical owner
 --    (hid_platform_control_reader, runtime-grants.sql); the migration
 --    administrator takes a temporary membership in it only to replace the
@@ -107,13 +109,13 @@ begin
        and constraint_row.contype = 'c'
        and pg_get_constraintdef(constraint_row.oid) like '%control_key%'
   loop
-    if matching.control_keys = array['break_glass_enabled', 'maintenance_mode', 'outreach_portal_enabled',
-         'patient_portal_enabled', 'provider_portal_enabled', 'uploads_enabled']::text[] then
+    if matching.control_keys = array['break_glass_enabled', 'clinician_signup_enabled', 'maintenance_mode',
+         'outreach_portal_enabled', 'patient_portal_enabled', 'provider_portal_enabled', 'uploads_enabled']::text[] then
       matched := matched + 1;
       constraint_name := matching.conname;
     else
       raise exception using errcode = '55000', message = format(
-        'the record chat migration expected the six 0039 control keys and found another control_key check: %s',
+        'the record chat migration expected the seven control keys of 0039 and 0098 and found another control_key check: %s',
         matching.definition);
     end if;
   end loop;
@@ -127,7 +129,7 @@ $$;
 
 alter table platform.control_settings add constraint control_settings_control_key_check check (control_key in (
   'patient_portal_enabled', 'provider_portal_enabled', 'outreach_portal_enabled',
-  'maintenance_mode', 'uploads_enabled', 'break_glass_enabled', 'record_chat_enabled'
+  'maintenance_mode', 'uploads_enabled', 'break_glass_enabled', 'clinician_signup_enabled', 'record_chat_enabled'
 ));
 
 -- platform.control_enabled keeps its technical owner. The membership is taken
@@ -153,8 +155,9 @@ begin
 end
 $$;
 
--- 0040's body, language, volatility, security and search path, with the new
--- key added. CREATE OR REPLACE keeps the owner and the ACL (EXECUTE to PUBLIC).
+-- 0098's body (0040's, with clinician sign-up's key), language, volatility,
+-- security and search path, with the new key added. CREATE OR REPLACE keeps
+-- the owner and the ACL (EXECUTE to PUBLIC).
 create or replace function platform.control_enabled(requested_key text)
 returns boolean
 language plpgsql
@@ -166,7 +169,7 @@ declare enabled_state boolean;
 begin
   if requested_key not in (
     'patient_portal_enabled','provider_portal_enabled','outreach_portal_enabled',
-    'maintenance_mode','uploads_enabled','break_glass_enabled','record_chat_enabled'
+    'maintenance_mode','uploads_enabled','break_glass_enabled','clinician_signup_enabled','record_chat_enabled'
   ) then
     raise exception using errcode='22023', message='PLATFORM_CONTROL_INVALID';
   end if;
@@ -205,8 +208,9 @@ begin
 end
 $$;
 
--- 0071's body with the new key. Owned by the migration administrator (the
--- role bootstrap transfers only control_enabled among the control functions).
+-- 0098's body (0071's, with clinician sign-up's key) with the new key. Owned
+-- by the migration administrator (the role bootstrap transfers only
+-- control_enabled among the control functions).
 create or replace function platform.admin_set_control(
  requested_key text, requested_enabled boolean, expected_version bigint, requested_reason text)
 returns table(control_key text,enabled boolean,row_version bigint,replayed boolean)
@@ -218,7 +222,7 @@ begin
  if not auth.account_has_platform_permission(actor,'platform.control.manage') then
    raise exception using errcode='42501',message='ADMIN_PERMISSION_DENIED';
  end if;
- if requested_key not in ('patient_portal_enabled','provider_portal_enabled','outreach_portal_enabled','maintenance_mode','uploads_enabled','break_glass_enabled','record_chat_enabled')
+ if requested_key not in ('patient_portal_enabled','provider_portal_enabled','outreach_portal_enabled','maintenance_mode','uploads_enabled','break_glass_enabled','clinician_signup_enabled','record_chat_enabled')
     or requested_reason is null or length(btrim(requested_reason))<8 then
    raise exception using errcode='22023',message='ADMIN_INVALID_CONTROL';
  end if;

@@ -6162,9 +6162,10 @@ Consequences:
   `anthropicApiKey`, `auditDigestKeyB64`), the synth inputs, the Health-id
   screens and notice, and then the platform control (release checklist P36,
   S4x).
-- The seventh platform control means any later migration that names the
-  control keys starts from seven; this one refuses to run beside an
-  unexpected key.
+- The eighth platform control means any later migration that names the
+  control keys starts from eight; this one starts from the seven of 0039 and
+  clinician self sign-up (0098), keeps each of them and its value, and
+  refuses to run beside an unexpected key.
 
 Residual risks:
 

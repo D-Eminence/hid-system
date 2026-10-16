@@ -2461,9 +2461,9 @@ NOINHERIT NOBYPASSRLS`, never granted to any role), following
 
 - `SELECT (control_key, enabled)` on `platform.control_settings`, and the
   policy `platform_controls_definer_read`, `FOR SELECT TO
-  hid_platform_control_reader USING (true)`. The controls (seven since the
-  record chat control) are platform-wide booleans with no PHI, so reading all of them is the
-  function's purpose;
+  hid_platform_control_reader USING (true)`. The controls (eight since the
+  clinician sign-up and record chat controls) are platform-wide booleans
+  with no PHI, so reading all of them is the function's purpose;
 - `USAGE` on `platform` and on `auth`, and no privilege on any `auth` object.
   The table's PUBLIC read policy applies to this role too, and PostgreSQL
   inlines its SQL function `platform.current_account_id()` while planning, as
@@ -5181,10 +5181,12 @@ the history, the limits and the kill switch. Every gate is off.
 chat (record chat decision)". The `control_key` CHECK of
 `platform.control_settings` (unnamed in 0039; matched by content and named
 `control_settings_control_key_check` now), `platform.control_enabled` and
-`platform.admin_set_control` gain the seventh key. The migration refuses
-(`55000`, nothing changed) any CHECK other than exactly the six 0039 keys,
-so a migration that adds another key must be reconciled with this one
-first. `platform.control_enabled` keeps its owner `hid_platform_control_reader`:
+`platform.admin_set_control` gain the eighth key. The migration refuses
+(`55000`, nothing changed) any CHECK other than exactly the seven keys it
+holds since clinician self sign-up (0098): the six 0039 keys and
+`clinician_signup_enabled`. A migration that adds another key must be
+reconciled with this one first. Every control row and its value are kept,
+and the CHECK, the read and the command keep every earlier key. `platform.control_enabled` keeps its owner `hid_platform_control_reader`:
 the migration administrator takes a membership in it only to replace the
 function, drops it, and checks that the owner and its memberships are as
 before. The row is inserted with forced row-level security lifted for the
