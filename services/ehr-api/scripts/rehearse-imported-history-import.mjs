@@ -50,18 +50,38 @@ function run(label, script, environment, args = [], expected = 0) {
 const client = new Client({ connectionString: databaseUrl, application_name: 'hid-imported-history-rehearsal' });
 await client.connect();
 const count = async (sql, values = []) => Number((await client.query(sql, values)).rows[0].n);
+/**
+ * Reads the imported tables for this rehearsal's evidence. They force
+ * row-level security on their owner too, and their patient and staff policies
+ * call functions no administrator may execute, so the evidence is read as the
+ * importer's technical owner, whose own read policy admits every row: through
+ * a SET-only membership in a transaction that is rolled back, as
+ * runtime-grants.sql takes one, so none is left behind.
+ */
+const asImporter = async (sql, values = []) => {
+  await client.query('begin');
+  try {
+    await client.query('grant hid_imported_history_importer to current_user with inherit false, set true');
+    await client.query('set local role hid_imported_history_importer');
+    return (await client.query(sql, values)).rows;
+  } finally {
+    await client.query('rollback');
+  }
+};
 const importedCounts = async () => ({
-  records: await count('select count(*) n from ehr.imported_medical_records'),
-  versions: await count('select count(*) n from ehr.imported_medical_record_versions'),
-  files: await count('select count(*) n from ehr.imported_medical_record_files'),
+  ...(await asImporter(`select (select count(*)::int from ehr.imported_medical_records) as records,
+    (select count(*)::int from ehr.imported_medical_record_versions) as versions,
+    (select count(*)::int from ehr.imported_medical_record_files) as files`))[0],
   receipts: await count("select count(*) n from migration.runs where source_system = 'legacy_imported_history'"),
 });
-const importedSnapshot = async () => (await client.query(`select
+const importedSnapshot = async () => ({
+  ...(await asImporter(`select
     (select coalesce(md5(string_agg(to_jsonb(t)::text, ',' order by id)), '') from ehr.imported_medical_records t) records,
     (select coalesce(md5(string_agg(to_jsonb(t)::text, ',' order by id)), '') from ehr.imported_medical_record_versions t) versions,
-    (select coalesce(md5(string_agg(to_jsonb(t)::text, ',' order by id)), '') from ehr.imported_medical_record_files t) files,
-    (select coalesce(md5(string_agg(to_jsonb(t)::text, ',' order by id)), '') from migration.runs t
-      where source_system = 'legacy_imported_history') receipts`)).rows[0];
+    (select coalesce(md5(string_agg(to_jsonb(t)::text, ',' order by id)), '') from ehr.imported_medical_record_files t) files`))[0],
+  receipts: (await client.query(`select coalesce(md5(string_agg(to_jsonb(t)::text, ',' order by id)), '') receipts
+    from migration.runs t where source_system = 'legacy_imported_history'`)).rows[0].receipts,
+});
 try {
   const identityPath = join(directory, 'identity.json');
   const historyPath = join(directory, 'history.json');
@@ -120,8 +140,8 @@ try {
     { medical_records: 3, medical_record_versions: 4, medical_record_files: 1 },
     { medical_records: 3, medical_record_versions: 4, medical_record_files: 1 }]);
   assert.deepEqual(await importedCounts(), { records: 3, versions: 4, files: 1, receipts: 1 });
-  const origins = (await client.query(`select origin, count(*)::int n from ehr.imported_medical_records
-    where patient_id = $1 group by origin order by origin`, [ids.patient])).rows;
+  const origins = await asImporter(`select origin, count(*)::int n from ehr.imported_medical_records
+    where patient_id = $1 group by origin order by origin`, [ids.patient]);
   assert.deepEqual(origins, [{ origin: 'patient-provided', n: 2 }, { origin: 'provider-authored', n: 1 }]);
   const afterApply = await importedSnapshot();
 
@@ -180,9 +200,12 @@ try {
   const state = (await client.query(`select
       (select bool_and(relforcerowsecurity) from pg_class where oid in ('ehr.imported_medical_records'::regclass,
         'ehr.imported_medical_record_versions'::regclass, 'ehr.imported_medical_record_files'::regclass)) as forced,
-      (select count(*)::int from pg_auth_members where roleid = 'hid_migration_admin'::regrole
+      (select count(*)::int from pg_auth_members where roleid in ('hid_migration_admin'::regrole,
+        'hid_imported_history_importer'::regrole)
         and member = (select oid from pg_roles where rolname = current_user) and (inherit_option or set_option)) as memberships,
       (select count(*)::int from pg_roles runtime where runtime.rolname like 'hid\\_%' and runtime.rolname <> 'hid_migration_admin'
+        and runtime.oid <> (select proowner from pg_proc
+          where oid = 'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb)'::regprocedure)
         and has_function_privilege(runtime.oid, 'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb)', 'EXECUTE'))
         as runtime_importers,
       (select rolsuper from pg_roles where rolname = current_user) as superuser`)).rows[0];

@@ -1077,7 +1077,7 @@ begin
      or has_function_privilege('hid_imported_history_commands', 'ehr.patient_self_context(uuid)', 'EXECUTE') then
     raise exception 'the imported history commands owner must hold exactly its column, table, function and schema privileges';
   end if;
-  if (select coalesce(array_agg(policy.polrelid::regclass::text || ':' || policy.polname || ':' || policy.polcmd
+  if (select coalesce(array_agg(policy.polrelid::regclass::text || ':' || policy.polname || ':' || policy.polcmd::text
           || ':' || coalesce(pg_get_expr(policy.polqual, policy.polrelid), '-')
           || ':' || coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '-')
           order by policy.polrelid::regclass::text, policy.polname), '{}')
@@ -1116,7 +1116,7 @@ begin
             'outreach', 'integration', 'notification', 'migration')
             and has_schema_privilege('hid_imported_history_importer', namespace_row.oid, 'USAGE'))
      is distinct from array['ehr', 'migration']::text[]
-     or (select coalesce(array_agg(policy.polrelid::regclass::text || ':' || policy.polname || ':' || policy.polcmd
+     or (select coalesce(array_agg(policy.polrelid::regclass::text || ':' || policy.polname || ':' || policy.polcmd::text
           || ':' || coalesce(pg_get_expr(policy.polqual, policy.polrelid), '-')
           || ':' || coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '-')
           order by policy.polrelid::regclass::text, policy.polname), '{}')
@@ -1133,6 +1133,7 @@ begin
        select 1 from unnest(every_role) runtime(role_name)
         where has_function_privilege(runtime.role_name, 'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb)', 'EXECUTE')
               <> (runtime.role_name = 'hid_migration_admin')
+           or (runtime.role_name = 'hid_migration_admin' and not has_schema_privilege(runtime.role_name, 'ehr', 'USAGE'))
            or has_function_privilege(runtime.role_name, 'ehr.imported_history_staff_read_allowed(uuid)', 'EXECUTE')
               <> (runtime.role_name in ('hid_ehr_runtime', 'hid_ehr_api_runtime', 'hid_schema_test_runtime'))
            or has_function_privilege(runtime.role_name, 'identity.set_my_imported_history_sharing(text,uuid,boolean)', 'EXECUTE')

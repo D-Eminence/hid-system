@@ -400,12 +400,24 @@ begin
   foreach target in array array['ehr.imported_medical_records', 'ehr.imported_medical_record_versions',
       'ehr.imported_medical_record_files', 'identity.imported_history_sharing_events'] loop
     begin
+      -- A row trigger fires only on a row: the change log gets one here,
+      -- rolled back with the refused statement.
+      if target = 'identity.imported_history_sharing_events' then
+        insert into identity.imported_history_sharing_events(patient_id, shared, row_version, session_id, correlation_id)
+        values ('e3200000-0000-4000-8000-000000000004', true, 900, 'e3300000-0000-4000-8000-000000000004',
+                'imported-append-only');
+      end if;
       execute format('update %s set patient_id = patient_id', target);
       outcome := 'updated';
     exception when sqlstate '55000' then outcome := 'append-only';
     end;
     perform pg_temp.imported_record('owner updates ' || target, 'append-only', outcome);
     begin
+      if target = 'identity.imported_history_sharing_events' then
+        insert into identity.imported_history_sharing_events(patient_id, shared, row_version, session_id, correlation_id)
+        values ('e3200000-0000-4000-8000-000000000004', true, 900, 'e3300000-0000-4000-8000-000000000004',
+                'imported-append-only');
+      end if;
       execute format('delete from %s', target);
       outcome := 'deleted';
     exception when sqlstate '55000' then outcome := 'append-only';
@@ -532,8 +544,8 @@ reset role;
 -- 7. Catalogue: forced row-level security, the exact policies, the owners,
 --    the EXECUTE holders, the immutability triggers and no other trigger.
 select pg_temp.imported_record('forced row-level security',
-  'ehr.imported_medical_record_files:t:t,ehr.imported_medical_record_versions:t:t,ehr.imported_medical_records:t:t,'
-  || 'identity.imported_history_sharing:t:t,identity.imported_history_sharing_events:t:t',
+  'ehr.imported_medical_record_files:true:true,ehr.imported_medical_record_versions:true:true,ehr.imported_medical_records:true:true,'
+  || 'identity.imported_history_sharing:true:true,identity.imported_history_sharing_events:true:true',
   (select string_agg(oid::regclass::text||':'||relrowsecurity||':'||relforcerowsecurity, ',' order by oid::regclass::text collate "C")
      from pg_class where oid in ('ehr.imported_medical_records'::regclass,'ehr.imported_medical_record_versions'::regclass,
        'ehr.imported_medical_record_files'::regclass,'identity.imported_history_sharing'::regclass,
@@ -554,7 +566,7 @@ select pg_temp.imported_record('policies of the imported tables',
   || 'identity.imported_history_sharing_events:imported_history_commands_insert(a:hid_imported_history_commands)',
   (select string_agg(entry, ';' order by relation_order, entry collate "C") from (
      select case when policy.polrelid::regclass::text like 'ehr.%' then 0 else 1 end as relation_order,
-       policy.polrelid::regclass::text || ':' || string_agg(policy.polname || '(' || policy.polcmd || ':'
+       policy.polrelid::regclass::text || ':' || string_agg(policy.polname || '(' || policy.polcmd::text || ':'
          || coalesce((select string_agg(rolname, '|' order by rolname) from pg_roles where oid = any(policy.polroles)
                       and oid <> 0), 'public') || ')', '/' order by policy.polname collate "C") as entry
        from pg_policy policy
@@ -562,18 +574,18 @@ select pg_temp.imported_record('policies of the imported tables',
         'ehr.imported_medical_record_files'::regclass,'identity.imported_history_sharing'::regclass,
         'identity.imported_history_sharing_events'::regclass)
       group by policy.polrelid) inventory));
-select pg_temp.imported_record('patient-self policies follow the release set and the binding', 't:t:t',
+select pg_temp.imported_record('patient-self policies follow the release set and the binding', 'true:true:true',
   (select string_agg((pg_get_expr(polqual, polrelid) like '%''importedHistory''::text = ANY (string_to_array(current_setting(''app.patient_release''::text, true), '',''::text))%'
      and pg_get_expr(polqual, polrelid) like '%ehr.patient_self_context(patient_id)%')::text, ':' order by polrelid::regclass::text)
      from pg_policy where polname = 'imported_history_patient_self_read'));
-select pg_temp.imported_record('staff policies call the staff helper', 't:t:t',
+select pg_temp.imported_record('staff policies call the staff helper', 'true:true:true',
   (select string_agg((pg_get_expr(polqual, polrelid) = 'ehr.imported_history_staff_read_allowed(patient_id)')::text, ':'
      order by polrelid::regclass::text) from pg_policy where polname = 'imported_history_staff_read'));
 select pg_temp.imported_record('function owners, definer and pinned search_path',
-  'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb):hid_imported_history_importer:t:{search_path=pg_catalog,pg_temp},'
-  || 'ehr.imported_history_staff_read_allowed(uuid):hid_imported_history_commands:t:{search_path=pg_catalog,pg_temp},'
-  || 'identity.my_imported_history_sharing(text,uuid):hid_imported_history_commands:t:{search_path=pg_catalog,pg_temp},'
-  || 'identity.set_my_imported_history_sharing(text,uuid,boolean):hid_imported_history_commands:t:{search_path=pg_catalog,pg_temp}',
+  'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb):hid_imported_history_importer:true:{"search_path=pg_catalog, pg_temp"},'
+  || 'ehr.imported_history_staff_read_allowed(uuid):hid_imported_history_commands:true:{"search_path=pg_catalog, pg_temp"},'
+  || 'identity.my_imported_history_sharing(text,uuid):hid_imported_history_commands:true:{"search_path=pg_catalog, pg_temp"},'
+  || 'identity.set_my_imported_history_sharing(text,uuid,boolean):hid_imported_history_commands:true:{"search_path=pg_catalog, pg_temp"}',
   (select string_agg(replace(oid::regprocedure::text, ' ', '')||':'||proowner::regrole||':'||prosecdef||':'||proconfig::text, ','
      order by oid::regprocedure::text)
      from pg_proc where oid in ('ehr.imported_history_staff_read_allowed(uuid)'::regprocedure,
@@ -602,7 +614,7 @@ select pg_temp.imported_record('PUBLIC executes none of the new functions', 'f,f
     has_function_privilege('public','identity.set_my_imported_history_sharing(text,uuid,boolean)','EXECUTE'),
     has_function_privilege('public','ehr.import_legacy_medical_history(uuid,uuid,text,jsonb)','EXECUTE')));
 select pg_temp.imported_record('runtime table privileges',
-  'ehr:t:f:f:f,identity:f:f,events:f,shared:f',
+  'ehr:true:false:false:false,identity:false:false,events:false,shared:false',
   'ehr:' || has_table_privilege('hid_ehr_runtime','ehr.imported_medical_records','SELECT')
     || ':' || has_table_privilege('hid_ehr_runtime','ehr.imported_medical_records','INSERT')
     || ':' || has_table_privilege('hid_ehr_runtime','ehr.imported_medical_records','UPDATE')

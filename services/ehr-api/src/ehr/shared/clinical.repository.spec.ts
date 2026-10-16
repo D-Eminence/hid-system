@@ -50,7 +50,7 @@ function repositoryWith({ allowed = true, auditFails = false } = {}) {
   };
   const identity = { authorize: jest.fn(async () => ({ allowed, breakGlass: false })) };
   const repository = new ClinicalRepository(database as never, audit as never, identity as never);
-  return { repository, audit, recorded, committed };
+  return { repository, audit, recorded, committed, database };
 }
 
 const failWith = (error: unknown) => async () => { throw error; };
@@ -148,10 +148,8 @@ describe('ClinicalRepository excludes break-glass from a read that may never use
   function breakGlassRepository(breakGlass: boolean) {
     const built = repositoryWith();
     const identity = { authorize: jest.fn(async () => ({ allowed: true, breakGlass })) };
-    const database = { withTransaction: jest.fn(async (_context: unknown, operation: (client: unknown) => Promise<unknown>) =>
-      operation({ query: jest.fn(async () => ({ rows: [] })) })) };
-    const repository = new ClinicalRepository(database as never, built.audit as never, identity as never);
-    return { ...built, repository, identity, database };
+    const repository = new ClinicalRepository(built.database as never, built.audit as never, identity as never);
+    return { ...built, repository, identity };
   }
   const imported = { action: 'ehr.imported-history.read', resourceType: 'imported-medical-history',
     excludeBreakGlass: { code: 'BREAK_GLASS_EXCLUDED' } };

@@ -267,7 +267,7 @@ if (process.argv[2] === '--identity-child') {
     const doctor = await staffSession.signIn(doctorEmail, { action: 'staff-login' });
     const staffRead = (patientId, purpose = 'direct-care', base = ehr.base) => call(base, 'GET',
       `/ehr/patients/${patientId}/imported-history`, { cookie: doctor.cookie, 'x-facility-id': ids.facility,
-        ...(purpose === undefined ? {} : { 'x-purpose-of-use': purpose }) });
+        ...(purpose === null ? {} : { 'x-purpose-of-use': purpose }) });
     // The imported rows one patient-self transaction of the EHR reads, under
     // Identity's real authorization for this cookie; `bind` says whether
     // PatientRecordRelease tells the database its release set.
@@ -368,7 +368,8 @@ if (process.argv[2] === '--identity-child') {
     checks.push('with direct-care consent at the selected facility and the patient\'s sharing choice, the clinician reads the patient\'s whole imported history, audited with counts and the choice; another patient without consent is refused 403 CONSENT_REQUIRED');
 
     // 5. Direct care only, before Identity is asked.
-    for (const purpose of ['emergency', 'healthcare-operations', undefined]) {
+    // null sends no X-Purpose-Of-Use header at all.
+    for (const purpose of ['emergency', 'healthcare-operations', null]) {
       const refused = await staffRead(ids.patient, purpose);
       assert.deepEqual([refused.status, refused.body?.code], [400, 'DIRECT_CARE_PURPOSE_REQUIRED'], `purpose ${purpose}`);
     }
