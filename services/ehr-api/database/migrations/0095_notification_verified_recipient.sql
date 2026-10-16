@@ -13,20 +13,26 @@
 -- private helper below.
 --
 -- integration.notification_recipient_state(patient) stays with the
--- migration administrator, which owns identity.patients and auth.accounts,
--- so it reads them as their owner without BYPASSRLS (identity.patients
--- enables row-level security without forcing it; auth.accounts has none). Only
--- the technical owner may execute it, granted by runtime-grants.sql.
+-- migration administrator, which owns identity.patients, auth.accounts and
+-- identity.patient_account_deletion_requests, so it reads them as their owner
+-- without BYPASSRLS (identity.patients enables row-level security without
+-- forcing it; the other two have none). Only the technical owner may execute
+-- it, granted by runtime-grants.sql.
 --
 -- Both answer one of two rows, with no name:
 --   ('email', <verified login email>) for an active patient who has
---     notifications on, whose login is active with a verified, non-blank
---     email;
+--     notifications on, whose login is usable as main's
+--     identity.current_patient_account defines it (0064: status active, no
+--     suspension ahead in disabled_until, no confirmed deletion whose
+--     scheduled_for has passed) and has a verified, non-blank email;
 --   ('withhold', null) otherwise: a phone-only login (0093/0094), an
 --     unverified or blank email, no login, a login that is pending_reset,
---     locked, disabled or deleted, a patient who is not active, or
---     notifications off. The worker then clears any email Novu holds before
---     main's in-app trigger, so the opt-out holds after an earlier sync.
+--     locked, disabled, deleted, suspended or due for deletion, a patient who
+--     is not active, or notifications off. The worker then clears any email
+--     Novu holds before main's in-app trigger, so the opt-out holds after an
+--     earlier sync. The deletion test is inlined, as
+--     identity.patient_account_deletion_due(uuid) reads it, so the helper
+--     needs no EXECUTE on another function.
 -- The claim function answers no row when the claim does not bind an outbox
 -- event of that patient with a notification workflow.
 --
@@ -61,6 +67,12 @@ as $$
          and patient.status = 'active'
          and patient.notifications_enabled
          and account.status = 'active'
+         and (account.disabled_until is null or account.disabled_until <= statement_timestamp())
+         and not exists (
+           select 1 from identity.patient_account_deletion_requests deletion
+            where deletion.account_id = account.id
+              and deletion.state = 'pending'
+              and deletion.scheduled_for <= statement_timestamp())
          and account.email_verified_at is not null
          and btrim(coalesce(account.email, '')) <> ''
     ) recipient on true
