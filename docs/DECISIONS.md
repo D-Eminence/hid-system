@@ -4198,29 +4198,6 @@ Related: ADR-041 (P8 owners); ADR-045 (Outreach campaign governance);
 module set, patient self-service, document upload completion);
 `DATABASE.md` (0091); release checklist §1, §2, §3, P10, P11, §5, §8, §9.
 
-## ADR-058 addendum: completion while uploads are off answers 423 UPLOADS_DISABLED
-
-Date: 2026-10-14
-
-Change: this change (launch review item A15, register
-BE-EHR-DOCUMENTS-CONTRACT).
-
-ADR-058 had completion answer `409` while `uploads_enabled` is off: the
-generic `409 CONFLICT` that the upload intent also answered. Under ADR-059
-("refusals carry their own codes") both now answer `423 UPLOADS_DISABLED`,
-with the same detail ("Document uploads are temporarily disabled"), as
-`423 PLATFORM_PORTAL_DISABLED` and `423 BREAK_GLASS_DISABLED` do for their
-controls. The check itself is unchanged: on completion it still runs first,
-before Identity, the storage read or any write; on the intent it follows the
-`Idempotency-Key` check. A control that cannot be read still answers `500`.
-The other document refusals took their own codes in the same change
-(`INTERFACE_CONTRACT.md` §16, "Document route answers"). The request audit
-records the refusal with `details.code` `UPLOADS_DISABLED` and outcome
-`denied`, as it recorded the `409`. At launch no role holds
-`ehr.document.write`, so both routes answer `403 PERMISSION_DENIED` first; the
-`423` is reached only once a reviewed migration grants the permission again
-while the control is still off.
-
 ## ADR-058 addendum: break-glass permitted at launch with limits (0097); on only after the P11 operator step
 
 Status: Decided by the owner on 2026-10-14 (D9, "turn on with limits").
@@ -4360,6 +4337,29 @@ Related: ADR-054 (staff MFA); ADR-058; `PHASE_3_LAUNCH_DECISIONS.md` (D9, N3);
 `INTERFACE_CONTRACT.md` (break-glass, launch module set); `DATABASE.md`
 ("Break-glass at launch, with limits (0097)"); release checklist §1, §2, §3,
 P10, P11, §5, S4y, §8, §9, §10.
+
+## ADR-058 addendum: completion while uploads are off answers 423 UPLOADS_DISABLED
+
+Date: 2026-10-14
+
+Change: this change (launch review item A15, register
+BE-EHR-DOCUMENTS-CONTRACT).
+
+ADR-058 had completion answer `409` while `uploads_enabled` is off: the
+generic `409 CONFLICT` that the upload intent also answered. Under ADR-059
+("refusals carry their own codes") both now answer `423 UPLOADS_DISABLED`,
+with the same detail ("Document uploads are temporarily disabled"), as
+`423 PLATFORM_PORTAL_DISABLED` and `423 BREAK_GLASS_DISABLED` do for their
+controls. The check itself is unchanged: on completion it still runs first,
+before Identity, the storage read or any write; on the intent it follows the
+`Idempotency-Key` check. A control that cannot be read still answers `500`.
+The other document refusals took their own codes in the same change
+(`INTERFACE_CONTRACT.md` §16, "Document route answers"). The request audit
+records the refusal with `details.code` `UPLOADS_DISABLED` and outcome
+`denied`, as it recorded the `409`. At launch no role holds
+`ehr.document.write`, so both routes answer `403 PERMISSION_DENIED` first; the
+`423` is reached only once a reviewed migration grants the permission again
+while the control is still off.
 
 # ADR-059: A Fault Is Never a Sign-Out; Refusals Carry Their Own Codes
 
