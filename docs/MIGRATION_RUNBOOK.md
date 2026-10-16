@@ -431,7 +431,10 @@ has the privileges of the owner of the database or of any application schema,
 relation or function, is named by a direct grant, or may create objects; and
 two credentials that share a login. It prints role names only, never a URL or
 password. Run it again after every credential rotation (`--partial` with only
-the rotated credentials). Clear the variables afterwards. In production every
+the rotated credentials). The new password applies at once, while running tasks
+keep the URL they started with, so replace the running tasks of the rotated
+service straight after its LOGIN gets the new password
+(`AWS_DEPLOYMENT_RUNBOOK.md` §4, Running the provisioning task). Clear the variables afterwards. In production every
 service that connects to the database also refuses to start over a superuser,
 `BYPASSRLS` or owner connection.
 
@@ -601,7 +604,8 @@ service or place administrator credentials in a steady-state task. It maps the
 migration administrator as both `DATABASE_URL` and `DATABASE_ADMIN_URL`, so the
 role bootstrap (`["scripts/bootstrap-database-roles.mjs"]`, with
 `--verify-only` for `db:verify-roles`) and `admin:bootstrap`
-(`["scripts/bootstrap-platform-admin.mjs"]`) run in it; the overrides are in
+(`["scripts/bootstrap-platform-admin.mjs"]`, only once the accounts it names
+exist, after the HID 1.0 promotion; `SUPER_ADMIN_FOUNDATION.md`) run in it; the overrides are in
 `AWS_DEPLOYMENT_RUNBOOK.md` §4. It maps no runtime URL and not the master. The
 RDS master's statements, the runtime LOGINs and `db:verify-logins` run as the
 separate one-shot provisioning task (`hid-<environment>-database-provisioning`,

@@ -127,6 +127,30 @@ active, or without an email address or password) or fourth account grants
 nothing. It has no email inference, developer bypass,
 reusable login shortcut, or repeat-success path.
 
+### Where the accounts come from
+
+A new database has no account: no migration seeds one, and no service runs
+while the database is provisioned, so the bootstrap is no step of the
+provisioning order (`AWS_DEPLOYMENT_RUNBOOK.md` §4) and runs only once the
+accounts it names exist. In production they come from the HID 1.0 promotion
+(`AWS_DEPLOYMENT_RUNBOOK.md` §6, `MIGRATION_RUNBOOK.md`). It creates each
+HID 1.0 user's account with the HID 1.0 auth user UUID as its account ID, its
+email and its HID 1.0 password (bcrypt, upgraded to Argon2id at the first
+sign-in). The account is active only with an email confirmed in HID 1.0;
+otherwise it is `pending_reset`, which the bootstrap refuses. A HID 1.0
+`platform_admin` membership is held with `privileged_role_requires_reapproval`
+and grants no platform role, so the bootstrap's check for an active Super
+Admin still passes, and the bootstrap is the re-approval.
+
+So, after the promotion, name two or three promoted accounts of the
+governance owners, each active with an email address and a password. Take
+each UUID from that person's HID 1.0 auth user ID in the approved read-only
+HID 1.0 source (the promotion keeps it unchanged); never guess a UUID from an
+email or a name. A governance owner without such a HID 1.0 account has no
+supported route to a password account yet: that is open question
+SUPERADMIN-ACCOUNTS (`PHASE_3_LAUNCH_DECISIONS.md`), and until it is decided
+the initial set is chosen among the promoted accounts.
+
 ## Implemented API surface
 
 All routes are under `/api/v1/admin` and are Identity-authenticated.

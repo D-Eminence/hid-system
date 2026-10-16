@@ -535,7 +535,9 @@ Wait for the task to stop, then require exit code `0` and read
 `/hid/<environment>/database-migration`. Never pass a database URL, password or
 other secret as an override: RunTask overrides are kept in the task
 description and in CloudTrail. The account IDs and reason of
-`admin:bootstrap` are not secret. Run `admin:bootstrap` once, with every
+`admin:bootstrap` are not secret. Run `admin:bootstrap` only once the accounts
+it names exist: on a new database, after the HID 1.0 promotion of §6
+(`SUPER_ADMIN_FOUNDATION.md`, Where the accounts come from). Run it once, with every
 initial Super Admin in `PLATFORM_ADMIN_ACCOUNT_IDS`: it refuses to run again
 once one is active, and afterwards a Super Admin is added only by a two-person
 approval (`SUPER_ADMIN_FOUNDATION.md`). Platform sign-in is by email and
@@ -573,7 +575,13 @@ aws ecs run-task --cluster hid-production --launch-type FARGATE \
 | 5 | `db:bootstrap`, `db:verify-roles` | migration administrator | migration (table above) |
 | 6 | Create the ten runtime LOGINs, or set their passwords; grant each its aggregate role; then `db:verify-logins` (§6.3) | migration administrator | provisioning: `["scripts/provision-database-logins.mjs","--runtime-logins"]` |
 | 7 | `db:verify-logins` alone, with the RDS master and the administrator forbidden; again after every credential rotation | each runtime LOGIN | provisioning: none, the default is `--verify-logins` |
-| 8 | `admin:bootstrap` (P6) | migration administrator | migration (table above) |
+
+`admin:bootstrap` (P6) is no step of this order and runs as the migration task
+only once the accounts it names exist, each active with an email address and a
+password: a new database has none, and the run is refused. They come from the
+HID 1.0 promotion of §6, which keeps each HID 1.0 user's UUID, email and
+password and grants no platform role (`SUPER_ADMIN_FOUNDATION.md`, Where the
+accounts come from).
 
 Before step 1 write the secrets. The migration secret's `url` and each runtime
 secret's URL name a lowercase LOGIN (letters, digits and `_`) with a password
@@ -592,9 +600,34 @@ URL. An existing role is changed only by setting its password from its
 secret, and only when its attributes are the expected ones and, for a runtime
 LOGIN, it is a member of nothing but its aggregate role; otherwise the run
 refuses and changes nothing. Step 6 is one transaction: all ten or none. A
-rerun is safe. After rotating a runtime secret, run step 6 again: it sets the
-new password and verifies all ten. Steps 6 and 7 exit 1 unless
-`db:verify-logins` passes for all ten. Require exit code `0` and read
+rerun is safe. Steps 6 and 7 exit 1 unless `db:verify-logins` passes for all
+ten.
+
+To rotate a runtime secret, keep to this order, in a quiet hour. Step 6 sets
+the new password in place, so PostgreSQL refuses the old password at once
+(open connections stay), while the service's running tasks keep the URL ECS
+injected when they started; the service's new connections fail until its
+tasks are replaced. A task that starts between the write and step 6 cannot
+connect either.
+
+1. Write the new password into the secret's URL.
+2. Run step 6 at once. It sets the new password and verifies all ten.
+3. Replace the running tasks of the service that maps that secret (`<workload>`
+   is that service: `identity-api`, `ehr-api` for both EHR URLs, `lab-api`,
+   `pharmacy-api`, `ocr-api`, `ocr-worker`, `outreach-api`, `event-dispatcher`
+   or `notification-worker`), and wait until it is stable:
+
+   ```bash
+   aws ecs update-service --cluster hid-<environment> --service hid-<environment>-<workload> --force-new-deployment
+   aws ecs wait services-stable --cluster hid-<environment> --services hid-<environment>-<workload>
+   ```
+
+   `ocr-worker` has no container health check, so ECS never replaces it on its
+   own: without this step it stays unable to connect. A service scaled to zero
+   needs no new deployment.
+4. Run step 7.
+
+Require exit code `0` and read
 `/hid/<environment>/database-provisioning`. If RDS refuses step 2, stop and
 take the reviewed ledger exception of `MIGRATION_RUNBOOK.md` §6.1; never use a
 superuser-like role.
@@ -677,6 +710,15 @@ conflict, promote idempotently, validate patient/HID continuity, and retain a
 rollback/PITR decision point. Do not trust a raw HID 1.0 session token: the
 issuer/signature/audience/expiry contract is not proven. Use local/OIDC login
 or the six-digit contact-OTP fallback mapped to the existing patient.
+
+The promotion creates each HID 1.0 user's account with the HID 1.0 auth user
+UUID, email and password, active once the email was confirmed in HID 1.0, and
+holds a HID 1.0 `platform_admin` membership
+(`privileged_role_requires_reapproval`) without granting any platform role.
+After it, seed the initial Super Admins with one `admin:bootstrap` run (§4,
+P6) naming two or three of those accounts, each active with an email address
+and a password: that run is their re-approval (`SUPER_ADMIN_FOUNDATION.md`,
+Where the accounts come from).
 
 ## 7. Provider and workload preflight
 
