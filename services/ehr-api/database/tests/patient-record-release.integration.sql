@@ -38,34 +38,34 @@ grant all on release_case_results to public;
 
 -- Accounts, patients and live patient sessions (patients 1 and 2), and a doctor.
 insert into auth.accounts(id,subject,email,display_name,status)
-select ('b1000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
+select ('f5100000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
   'synthetic:release:'||n,'release-'||n||'@example.invalid','Synthetic release '||n,'active'
 from generate_series(1,3) n;
 insert into identity.patients(id,account_id,hid_code,first_name,last_name,full_name,status)
 values
- ('b2000000-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000001','HID-RELAXA','Release','One','Release One','active'),
- ('b2000000-0000-4000-8000-000000000002','b1000000-0000-4000-8000-000000000002','HID-RELAXB','Release','Two','Release Two','active');
+ ('f5200000-0000-4000-8000-000000000001','f5100000-0000-4000-8000-000000000001','HID-RELAXA','Release','One','Release One','active'),
+ ('f5200000-0000-4000-8000-000000000002','f5100000-0000-4000-8000-000000000002','HID-RELAXB','Release','Two','Release Two','active');
 insert into auth.sessions(id,account_id,family_id,refresh_token_sha256,access_jti,account_token_version,
   authentication_method,issued_at,expires_at,absolute_expires_at,session_kind,patient_id)
-select ('b3000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
-  ('b1000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
-  ('b3000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
+select ('f5300000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
+  ('f5100000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
+  ('f5300000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
   md5('release'||n)||md5('release'||n),gen_random_uuid(),1,'password',clock_timestamp(),
   clock_timestamp()+interval '1 hour',clock_timestamp()+interval '2 hours','patient',
-  ('b2000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid
+  ('f5200000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid
 from generate_series(1,2) n;
 insert into identity.organizations(id,name,slug)
-values('b4000000-0000-4000-8000-000000000001','Release test organization','release-test-organization');
+values('f5400000-0000-4000-8000-000000000001','Release test organization','release-test-organization');
 insert into identity.facilities(id,organization_id,name,code,timezone,active,lifecycle_status)
-values('b4000000-0000-4000-8000-000000000002','b4000000-0000-4000-8000-000000000001','Release test facility',
+values('f5400000-0000-4000-8000-000000000002','f5400000-0000-4000-8000-000000000001','Release test facility',
   'REL-A','Africa/Lagos',true,'verified');
 insert into identity.staff(id,account_id,full_name,email,verification_status,default_role)
-values('b5000000-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000003','Synthetic release doctor',
+values('f5500000-0000-4000-8000-000000000001','f5100000-0000-4000-8000-000000000003','Synthetic release doctor',
   'doctor-release@example.invalid','verified','doctor');
 insert into identity.staff_facility_memberships(id,staff_id,account_id,organization_id,facility_id,membership_role,
   app_role,is_primary,active)
-values('b6000000-0000-4000-8000-000000000001','b5000000-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000003',
-  'b4000000-0000-4000-8000-000000000001','b4000000-0000-4000-8000-000000000002','doctor','doctor',true,true);
+values('f5600000-0000-4000-8000-000000000001','f5500000-0000-4000-8000-000000000001','f5100000-0000-4000-8000-000000000003',
+  'f5400000-0000-4000-8000-000000000001','f5400000-0000-4000-8000-000000000002','doctor','doctor',true,true);
 
 set local session_replication_role = replica;
 
@@ -74,9 +74,9 @@ set local session_replication_role = replica;
 -- patient-self condition keeps it from the released Lab results.
 insert into identity.consent_grants(id,patient_id,staff_id,account_id,membership_id,facility_id,scope,purpose_of_use,
   status,reason,starts_at,expires_at)
-values('b6100000-0000-4000-8000-000000000001','b2000000-0000-4000-8000-000000000001',
-  'b5000000-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000003','b6000000-0000-4000-8000-000000000001',
-  'b4000000-0000-4000-8000-000000000002','read_records','direct-care','active','Synthetic release staff consent',
+values('f5610000-0000-4000-8000-000000000001','f5200000-0000-4000-8000-000000000001',
+  'f5500000-0000-4000-8000-000000000001','f5100000-0000-4000-8000-000000000003','f5600000-0000-4000-8000-000000000001',
+  'f5400000-0000-4000-8000-000000000002','read_records','direct-care','active','Synthetic release staff consent',
   clock_timestamp()-interval '1 hour',clock_timestamp()+interval '30 days');
 
 -- Encounters: 1 completed, 2 in progress, 3 cancelled, 4 entered in error and
@@ -84,9 +84,9 @@ values('b6100000-0000-4000-8000-000000000001','b2000000-0000-4000-8000-000000000
 -- patient 1; 6 completed, of patient 2.
 insert into ehr.encounters(id,patient_id,facility_id,created_by,created_by_membership_id,encounter_type,status,
   started_at,ended_at)
-select ('b7000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
-  ('b2000000-0000-4000-8000-'||lpad((case when n=6 then 2 else 1 end)::text,12,'0'))::uuid,
-  'b4000000-0000-4000-8000-000000000002','b1000000-0000-4000-8000-000000000003','b6000000-0000-4000-8000-000000000001',
+select ('f5700000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
+  ('f5200000-0000-4000-8000-'||lpad((case when n=6 then 2 else 1 end)::text,12,'0'))::uuid,
+  'f5400000-0000-4000-8000-000000000002','f5100000-0000-4000-8000-000000000003','f5600000-0000-4000-8000-000000000001',
   'ambulatory',(array['completed','in_progress','cancelled','entered_in_error','entered_in_error','completed'])[n],
   clock_timestamp()-interval '3 hours',
   case when n in (1,5,6) then clock_timestamp()-interval '2 hours' end
@@ -98,10 +98,10 @@ from generate_series(1,6) n;
 -- cancelled encounter.
 insert into ehr.vitals(id,encounter_id,patient_id,facility_id,created_by,created_by_membership_id,recorded_at,
   systolic_mmhg,diastolic_mmhg,pulse_bpm,current_correction_no,status)
-select ('b8000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
-  ('b7000000-0000-4000-8000-'||lpad((array[1,1,1,2,4,6,3])[n]::text,12,'0'))::uuid,
-  ('b2000000-0000-4000-8000-'||lpad((case when n=6 then 2 else 1 end)::text,12,'0'))::uuid,
-  'b4000000-0000-4000-8000-000000000002','b1000000-0000-4000-8000-000000000003','b6000000-0000-4000-8000-000000000001',
+select ('f5800000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
+  ('f5700000-0000-4000-8000-'||lpad((array[1,1,1,2,4,6,3])[n]::text,12,'0'))::uuid,
+  ('f5200000-0000-4000-8000-'||lpad((case when n=6 then 2 else 1 end)::text,12,'0'))::uuid,
+  'f5400000-0000-4000-8000-000000000002','f5100000-0000-4000-8000-000000000003','f5600000-0000-4000-8000-000000000001',
   clock_timestamp()-n*interval '1 minute',120,80,70,case when n=2 then 1 else 0 end,
   case when n=3 then 'entered_in_error' else 'final' end
 from generate_series(1,7) n;
@@ -111,10 +111,10 @@ from generate_series(1,7) n;
 -- retracted encounter (8) and of patient 2 (9).
 insert into ehr.diagnoses(id,encounter_id,patient_id,facility_id,created_by,created_by_membership_id,code_system,code,
   display,clinical_status,verification_status,notes)
-select ('b9000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
-  ('b7000000-0000-4000-8000-'||lpad((array[1,1,1,1,1,1,2,5,6])[n]::text,12,'0'))::uuid,
-  ('b2000000-0000-4000-8000-'||lpad((case when n=9 then 2 else 1 end)::text,12,'0'))::uuid,
-  'b4000000-0000-4000-8000-000000000002','b1000000-0000-4000-8000-000000000003','b6000000-0000-4000-8000-000000000001',
+select ('f5900000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
+  ('f5700000-0000-4000-8000-'||lpad((array[1,1,1,1,1,1,2,5,6])[n]::text,12,'0'))::uuid,
+  ('f5200000-0000-4000-8000-'||lpad((case when n=9 then 2 else 1 end)::text,12,'0'))::uuid,
+  'f5400000-0000-4000-8000-000000000002','f5100000-0000-4000-8000-000000000003','f5600000-0000-4000-8000-000000000001',
   'http://hl7.org/fhir/sid/icd-10','J0'||n,'Synthetic diagnosis '||n,'active',
   (array['unconfirmed','provisional','differential','confirmed','refuted','entered_in_error',
          'confirmed','confirmed','confirmed'])[n],'Synthetic clinician note '||n
@@ -124,10 +124,10 @@ from generate_series(1,9) n;
 -- completed are released), of the cancelled encounter (7) and of patient 2 (8).
 insert into ehr.prescriptions(id,encounter_id,patient_id,facility_id,created_by,created_by_membership_id,
   medication_display,frequency,instructions,status)
-select ('ba000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
-  ('b7000000-0000-4000-8000-'||lpad((array[1,1,1,1,1,1,3,6])[n]::text,12,'0'))::uuid,
-  ('b2000000-0000-4000-8000-'||lpad((case when n=8 then 2 else 1 end)::text,12,'0'))::uuid,
-  'b4000000-0000-4000-8000-000000000002','b1000000-0000-4000-8000-000000000003','b6000000-0000-4000-8000-000000000001',
+select ('f5a00000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
+  ('f5700000-0000-4000-8000-'||lpad((array[1,1,1,1,1,1,3,6])[n]::text,12,'0'))::uuid,
+  ('f5200000-0000-4000-8000-'||lpad((case when n=8 then 2 else 1 end)::text,12,'0'))::uuid,
+  'f5400000-0000-4000-8000-000000000002','f5100000-0000-4000-8000-000000000003','f5600000-0000-4000-8000-000000000001',
   'Synthetic medication '||n,'Once daily','Synthetic instructions',
   (array['draft','active','on_hold','completed','cancelled','entered_in_error','active','active'])[n]
 from generate_series(1,8) n;
@@ -140,11 +140,11 @@ from generate_series(1,8) n;
 insert into ehr.documents(id,encounter_id,patient_id,facility_id,created_by,created_by_membership_id,original_file_name,
   storage_bucket,storage_key,object_version_id,declared_media_type,size_bytes,sha256_hex,classification,status,
   retention_class)
-select ('bb000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
+select ('f5b00000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
   case when n=7 then null
-       else ('b7000000-0000-4000-8000-'||lpad((case n when 10 then 2 when 11 then 6 else 1 end)::text,12,'0'))::uuid end,
-  ('b2000000-0000-4000-8000-'||lpad((case when n=11 then 2 else 1 end)::text,12,'0'))::uuid,
-  'b4000000-0000-4000-8000-000000000002','b1000000-0000-4000-8000-000000000003','b6000000-0000-4000-8000-000000000001',
+       else ('f5700000-0000-4000-8000-'||lpad((case n when 10 then 2 when 11 then 6 else 1 end)::text,12,'0'))::uuid end,
+  ('f5200000-0000-4000-8000-'||lpad((case when n=11 then 2 else 1 end)::text,12,'0'))::uuid,
+  'f5400000-0000-4000-8000-000000000002','f5100000-0000-4000-8000-000000000003','f5600000-0000-4000-8000-000000000001',
   'synthetic-release-'||n||'.pdf','synthetic-release-bucket','synthetic/release-'||n||'.pdf',
   case when n=6 then null when n=8 then 'release-v2-'||n else 'release-v1-'||n end,'application/pdf',
   case when n=6 then null else 2048 end, case when n=6 then null else repeat(to_hex(n % 16),64) end,
@@ -153,7 +153,7 @@ select ('bb000000-0000-4000-8000-'||lpad(n::text,12,'0'))::uuid,
 from generate_series(1,12) n;
 insert into ehr.document_scan_events(document_id,patient_id,facility_id,created_by,event_type,detected_media_type,
   reason_code,scanner_engine,scanner_version,idempotency_key,correlation_id,object_version_id,object_sha256_hex,created_at)
-select document_row.id,document_row.patient_id,document_row.facility_id,'b1000000-0000-4000-8000-000000000003',
+select document_row.id,document_row.patient_id,document_row.facility_id,'f5100000-0000-4000-8000-000000000003',
   scan.event_type,case when scan.event_type='clean' then 'application/pdf' end,
   case when scan.event_type='rejected' then 'MALWARE_DETECTED' end,'synthetic-scanner','1.0',
   'release-scan-'||scan.n||'-'||document_row.id,'release-scan-correlation',
@@ -167,7 +167,7 @@ from (values (1,1,'clean',null::text,interval '5 minutes'), (2,2,'clean',null,in
              (11,12,'clean',null,interval '5 minutes'))
        scan(n,document_no,event_type,object_version,age)
 join ehr.documents document_row
-  on document_row.id = ('bb000000-0000-4000-8000-'||lpad(scan.document_no::text,12,'0'))::uuid;
+  on document_row.id = ('f5b00000-0000-4000-8000-'||lpad(scan.document_no::text,12,'0'))::uuid;
 
 -- Lab results, one EHR lab order, work item, requested test and execution
 -- each. Case k: patient, encounter, order status, entered revisions, and the
@@ -193,16 +193,16 @@ insert into release_lab_cases values
   (11,1,1,'cancelled',1,'{1}','{1}','{}');
 create temporary view release_lab_ids as
 select k, patient, encounter, order_status, revisions, verified, released, invalidated,
-  ('bc000000-0000-4000-8000-'||lpad(k::text,12,'0'))::uuid as order_id,
-  ('bd000000-0000-4000-8000-'||lpad(k::text,12,'0'))::uuid as work_item_id,
-  ('be000000-0000-4000-8000-'||lpad(k::text,12,'0'))::uuid as test_id,
-  ('bf000000-0000-4000-8000-'||lpad(k::text,12,'0'))::uuid as execution_id,
-  ('c1000000-0000-4000-8000-'||lpad(k::text,12,'0'))::uuid as result_id,
-  ('b2000000-0000-4000-8000-'||lpad(patient::text,12,'0'))::uuid as patient_id,
-  ('b7000000-0000-4000-8000-'||lpad(encounter::text,12,'0'))::uuid as encounter_id,
-  'b4000000-0000-4000-8000-000000000002'::uuid as facility_id,
-  'b1000000-0000-4000-8000-000000000003'::uuid as doctor,
-  'b6000000-0000-4000-8000-000000000001'::uuid as membership
+  ('f5c00000-0000-4000-8000-'||lpad(k::text,12,'0'))::uuid as order_id,
+  ('f5d00000-0000-4000-8000-'||lpad(k::text,12,'0'))::uuid as work_item_id,
+  ('f5e00000-0000-4000-8000-'||lpad(k::text,12,'0'))::uuid as test_id,
+  ('f5f00000-0000-4000-8000-'||lpad(k::text,12,'0'))::uuid as execution_id,
+  ('f5c10000-0000-4000-8000-'||lpad(k::text,12,'0'))::uuid as result_id,
+  ('f5200000-0000-4000-8000-'||lpad(patient::text,12,'0'))::uuid as patient_id,
+  ('f5700000-0000-4000-8000-'||lpad(encounter::text,12,'0'))::uuid as encounter_id,
+  'f5400000-0000-4000-8000-000000000002'::uuid as facility_id,
+  'f5100000-0000-4000-8000-000000000003'::uuid as doctor,
+  'f5600000-0000-4000-8000-000000000001'::uuid as membership
 from release_lab_cases;
 insert into ehr.lab_requests(id,encounter_id,patient_id,facility_id,created_by,created_by_membership_id,test_code_system,
   test_code,test_display,status)
@@ -237,13 +237,13 @@ select result_id,execution_id,patient_id,facility_id,v,
 from release_lab_ids, generate_series(1,revisions) v;
 insert into lab.result_verifications(id,result_id,execution_id,patient_id,facility_id,result_version,verified_by,
   verified_by_membership_id,verified_at,reason,idempotency_key,request_sha256,correlation_id)
-select ('c2000000-0000-4000-8000-'||lpad((k*10+v)::text,12,'0'))::uuid,result_id,execution_id,patient_id,facility_id,v,
+select ('f5c20000-0000-4000-8000-'||lpad((k*10+v)::text,12,'0'))::uuid,result_id,execution_id,patient_id,facility_id,v,
   doctor,membership,clock_timestamp()-interval '70 minutes'+v*interval '1 minute','Synthetic verification',
   'release-verify-'||k||'-'||v||'-000000',repeat('d',64),'release-lab-correlation'
 from release_lab_ids, unnest(verified) v;
 insert into lab.result_releases(verification_id,result_id,execution_id,patient_id,facility_id,result_version,released_by,
   released_by_membership_id,released_at,reason,idempotency_key,request_sha256,correlation_id)
-select ('c2000000-0000-4000-8000-'||lpad((k*10+v)::text,12,'0'))::uuid,result_id,execution_id,patient_id,facility_id,v,
+select ('f5c20000-0000-4000-8000-'||lpad((k*10+v)::text,12,'0'))::uuid,result_id,execution_id,patient_id,facility_id,v,
   doctor,membership,clock_timestamp()-interval '60 minutes'+k*interval '1 minute'+v*interval '10 seconds',
   'Synthetic release reason','release-release-'||k||'-'||v||'-00000',repeat('e',64),'release-lab-correlation'
 from release_lab_ids, unnest(released) v;
@@ -258,8 +258,8 @@ set local session_replication_role = origin;
 -- The patient-self binding, as DatabaseService.withPatientTransaction sets it.
 create temporary table release_binding(patient text, subject text, account text, session text) on commit drop;
 grant all on release_binding to public;
-insert into release_binding values ('b2000000-0000-4000-8000-000000000001','synthetic:release:1',
-  'b1000000-0000-4000-8000-000000000001','b3000000-0000-4000-8000-000000000001');
+insert into release_binding values ('f5200000-0000-4000-8000-000000000001','synthetic:release:1',
+  'f5100000-0000-4000-8000-000000000001','f5300000-0000-4000-8000-000000000001');
 create function pg_temp.bind_self(patient text, subject text, account text, session text) returns void
 language sql as $$
   select set_config('app.actor_subject',subject,true), set_config('app.account_id',account,true),
@@ -299,7 +299,7 @@ $$;
 --    with values it never sets, none of which releases anything.
 set local role hid_ehr_api_runtime;
 select pg_temp.bind_self(patient, subject, account, session) from release_binding;
-select pg_temp.release_record('flags never set: the binding is live', 'b7000000-0000-4000-8000-000000000001',
+select pg_temp.release_record('flags never set: the binding is live', 'f5700000-0000-4000-8000-000000000001',
   (select string_agg(id::text, ',' order by id) from ehr.encounters));
 select pg_temp.release_record('flags never set (an EHR build before the release)', '<null>:',
   coalesce(current_setting('app.patient_release', true), '<null>') || ':' || pg_temp.release_visible());
@@ -331,41 +331,41 @@ reset role;
 set local role hid_ehr_api_runtime;
 select pg_temp.bind_release(patient, subject, account, session) from release_binding;
 select pg_temp.release_record('vitals released',
-  'b8000000-0000-4000-8000-000000000001',
+  'f5800000-0000-4000-8000-000000000001',
   (select string_agg(id::text, ',' order by id) from ehr.vitals));
 select pg_temp.release_record('diagnoses released',
-  'b9000000-0000-4000-8000-000000000004',
+  'f5900000-0000-4000-8000-000000000004',
   (select string_agg(id::text, ',' order by id) from ehr.diagnoses));
 select pg_temp.release_record('prescriptions released',
-  'ba000000-0000-4000-8000-000000000002,ba000000-0000-4000-8000-000000000003,ba000000-0000-4000-8000-000000000004',
+  'f5a00000-0000-4000-8000-000000000002,f5a00000-0000-4000-8000-000000000003,f5a00000-0000-4000-8000-000000000004',
   (select string_agg(id::text, ',' order by id) from ehr.prescriptions));
 select pg_temp.release_record('documents readable',
-  'bb000000-0000-4000-8000-000000000001,bb000000-0000-4000-8000-000000000003,bb000000-0000-4000-8000-000000000004,'
-  || 'bb000000-0000-4000-8000-000000000008,bb000000-0000-4000-8000-000000000009',
+  'f5b00000-0000-4000-8000-000000000001,f5b00000-0000-4000-8000-000000000003,f5b00000-0000-4000-8000-000000000004,'
+  || 'f5b00000-0000-4000-8000-000000000008,f5b00000-0000-4000-8000-000000000009',
   (select string_agg(id::text, ',' order by id) from ehr.documents));
 select pg_temp.release_record('documents effective status',
-  'bb000000-0000-4000-8000-000000000001:available:clean,bb000000-0000-4000-8000-000000000003:rejected:rejected,'
-  || 'bb000000-0000-4000-8000-000000000004:uploaded:pending,bb000000-0000-4000-8000-000000000008:uploaded:pending,'
-  || 'bb000000-0000-4000-8000-000000000009:rejected:rejected',
+  'f5b00000-0000-4000-8000-000000000001:available:clean,f5b00000-0000-4000-8000-000000000003:rejected:rejected,'
+  || 'f5b00000-0000-4000-8000-000000000004:uploaded:pending,f5b00000-0000-4000-8000-000000000008:uploaded:pending,'
+  || 'f5b00000-0000-4000-8000-000000000009:rejected:rejected',
   (select string_agg(id::text||':'||status||':'||scan_status, ',' order by id) from ehr.documents_effective));
 select pg_temp.release_record('scan events readable',
-  'bb000000-0000-4000-8000-000000000001,bb000000-0000-4000-8000-000000000003,bb000000-0000-4000-8000-000000000008,'
-  || 'bb000000-0000-4000-8000-000000000009,bb000000-0000-4000-8000-000000000009',
+  'f5b00000-0000-4000-8000-000000000001,f5b00000-0000-4000-8000-000000000003,f5b00000-0000-4000-8000-000000000008,'
+  || 'f5b00000-0000-4000-8000-000000000009,f5b00000-0000-4000-8000-000000000009',
   (select string_agg(document_id::text, ',' order by document_id) from ehr.document_scan_events));
 select pg_temp.release_record('lab results released',
-  'c1000000-0000-4000-8000-000000000001:1:original:numeric,c1000000-0000-4000-8000-000000000002:1:original:numeric,'
-  || 'c1000000-0000-4000-8000-000000000006:2:correction:text',
+  'f5c10000-0000-4000-8000-000000000001:1:original:numeric,f5c10000-0000-4000-8000-000000000002:1:original:numeric,'
+  || 'f5c10000-0000-4000-8000-000000000006:2:correction:text',
   (select string_agg(result_id::text||':'||version||':'||revision_kind||':'||result_type, ',' order by result_id)
      from ehr.patient_released_lab_results));
 select pg_temp.release_record('lab result values and source',
-  'c1000000-0000-4000-8000-000000000001|b7000000-0000-4000-8000-000000000001|bc000000-0000-4000-8000-000000000001|'
-  || 'b4000000-0000-4000-8000-000000000002|2345-1|Synthetic glucose 1|6.1|mmol/L|3.9-5.5|normal',
+  'f5c10000-0000-4000-8000-000000000001|f5700000-0000-4000-8000-000000000001|f5c00000-0000-4000-8000-000000000001|'
+  || 'f5400000-0000-4000-8000-000000000002|2345-1|Synthetic glucose 1|6.1|mmol/L|3.9-5.5|normal',
   (select string_agg(concat_ws('|', result_id, encounter_id, source_ehr_order_id, facility_id, test_code, test_name,
        numeric_value, unit, reference_range, abnormal_flag), ',')
-     from ehr.patient_released_lab_results where result_id = 'c1000000-0000-4000-8000-000000000001'));
+     from ehr.patient_released_lab_results where result_id = 'f5c10000-0000-4000-8000-000000000001'));
 select pg_temp.release_record('lab text value is the released revision',
   'Synthetic text result v2', (select text_value from ehr.patient_released_lab_results
-    where result_id = 'c1000000-0000-4000-8000-000000000006'));
+    where result_id = 'f5c10000-0000-4000-8000-000000000006'));
 -- The patient context cannot write any released table.
 do $$
 declare
@@ -385,8 +385,8 @@ begin
   begin
     insert into ehr.document_scan_events(document_id,patient_id,facility_id,created_by,event_type,scanner_engine,
       scanner_version,idempotency_key,correlation_id)
-    values ('bb000000-0000-4000-8000-000000000004','b2000000-0000-4000-8000-000000000001',
-      'b4000000-0000-4000-8000-000000000002','b1000000-0000-4000-8000-000000000001','scan_started','x','1',
+    values ('f5b00000-0000-4000-8000-000000000004','f5200000-0000-4000-8000-000000000001',
+      'f5400000-0000-4000-8000-000000000002','f5100000-0000-4000-8000-000000000001','scan_started','x','1',
       'release-forged-scan-0000','release-forged-scan');
     outcome := 'inserted';
   exception when insufficient_privilege then outcome := 'refused';
@@ -405,7 +405,7 @@ reset role;
 --    missing, revoked, another account's or subject's session, a non-UUID
 --    session) and an expired authorization.
 update auth.sessions set revoked_at=clock_timestamp(),revocation_reason='synthetic-test'
-  where id='b3000000-0000-4000-8000-000000000002';
+  where id='f5300000-0000-4000-8000-000000000002';
 -- Patient 2 holds a released Lab result (case 9) and a released vital-free
 -- completed encounter; patient 1's binding to another account or subject
 -- must hide patient 1's own rows.
@@ -417,19 +417,19 @@ declare
 begin
   for probe in select * from (values
     ('another patient with the caller''s own live session',
-     'b2000000-0000-4000-8000-000000000002','synthetic:release:1','b1000000-0000-4000-8000-000000000001','b3000000-0000-4000-8000-000000000001'),
+     'f5200000-0000-4000-8000-000000000002','synthetic:release:1','f5100000-0000-4000-8000-000000000001','f5300000-0000-4000-8000-000000000001'),
     ('another patient with a session that does not exist',
-     'b2000000-0000-4000-8000-000000000002','synthetic:release:2','b1000000-0000-4000-8000-000000000002','b3000000-0000-4000-8000-000000000099'),
+     'f5200000-0000-4000-8000-000000000002','synthetic:release:2','f5100000-0000-4000-8000-000000000002','f5300000-0000-4000-8000-000000000099'),
     ('a patient whose own session is revoked',
-     'b2000000-0000-4000-8000-000000000002','synthetic:release:2','b1000000-0000-4000-8000-000000000002','b3000000-0000-4000-8000-000000000002'),
+     'f5200000-0000-4000-8000-000000000002','synthetic:release:2','f5100000-0000-4000-8000-000000000002','f5300000-0000-4000-8000-000000000002'),
     ('a patient session of another account',
-     'b2000000-0000-4000-8000-000000000002','synthetic:release:2','b1000000-0000-4000-8000-000000000002','b3000000-0000-4000-8000-000000000001'),
+     'f5200000-0000-4000-8000-000000000002','synthetic:release:2','f5100000-0000-4000-8000-000000000002','f5300000-0000-4000-8000-000000000001'),
     ('the patient''s own session under another account id',
-     'b2000000-0000-4000-8000-000000000001','synthetic:release:1','b1000000-0000-4000-8000-000000000002','b3000000-0000-4000-8000-000000000001'),
+     'f5200000-0000-4000-8000-000000000001','synthetic:release:1','f5100000-0000-4000-8000-000000000002','f5300000-0000-4000-8000-000000000001'),
     ('the patient''s own session under another subject',
-     'b2000000-0000-4000-8000-000000000001','synthetic:release:2','b1000000-0000-4000-8000-000000000001','b3000000-0000-4000-8000-000000000001'),
+     'f5200000-0000-4000-8000-000000000001','synthetic:release:2','f5100000-0000-4000-8000-000000000001','f5300000-0000-4000-8000-000000000001'),
     ('a session id that is not a UUID',
-     'b2000000-0000-4000-8000-000000000001','synthetic:release:1','b1000000-0000-4000-8000-000000000001','not-a-session-id'))
+     'f5200000-0000-4000-8000-000000000001','synthetic:release:1','f5100000-0000-4000-8000-000000000001','not-a-session-id'))
     cases(label, patient, subject, account, session)
   loop
     perform pg_temp.bind_release(probe.patient, probe.subject, probe.account, probe.session);
@@ -448,8 +448,8 @@ end $$;
 -- An expired authorization, in statements of their own: patient-self compares
 -- it with the statement's start, which inside one DO block would be the
 -- block's start (patient-self.integration.sql does the same).
-select pg_temp.bind_release('b2000000-0000-4000-8000-000000000001','synthetic:release:1',
-  'b1000000-0000-4000-8000-000000000001','b3000000-0000-4000-8000-000000000001');
+select pg_temp.bind_release('f5200000-0000-4000-8000-000000000001','synthetic:release:1',
+  'f5100000-0000-4000-8000-000000000001','f5300000-0000-4000-8000-000000000001');
 select set_config('app.self_authorized_until',(clock_timestamp()-interval '1 second')::text,true);
 select pg_temp.release_record('unbound: an expired self authorization', '0',
   ((select count(*) from ehr.vitals) + (select count(*) from ehr.diagnoses) + (select count(*) from ehr.prescriptions)
@@ -459,27 +459,27 @@ select pg_temp.release_record('unbound: an expired self authorization', '0',
 -- view serves only the bound patient-self context. The first case shows the
 -- consent reaches the encounter, so only the view's own condition refuses.
 select set_config('app.actor_subject','synthetic:release:3',true),
-  set_config('app.account_id','b1000000-0000-4000-8000-000000000003',true), set_config('app.session_id','',true),
-  set_config('app.membership_id','b6000000-0000-4000-8000-000000000001',true),
-  set_config('app.facility_id','b4000000-0000-4000-8000-000000000002',true),
+  set_config('app.account_id','f5100000-0000-4000-8000-000000000003',true), set_config('app.session_id','',true),
+  set_config('app.membership_id','f5600000-0000-4000-8000-000000000001',true),
+  set_config('app.facility_id','f5400000-0000-4000-8000-000000000002',true),
   set_config('app.purpose_of_use','direct-care',true), set_config('app.patient_id','',true),
   set_config('app.self_authorized_until','',true),
   set_config('app.patient_release','vitals,diagnoses,prescriptions,labResults,documents',true);
 select pg_temp.release_record('staff context with consent reads the completed encounter', '1',
-  (select count(*)::text from ehr.encounters where id = 'b7000000-0000-4000-8000-000000000001'));
+  (select count(*)::text from ehr.encounters where id = 'f5700000-0000-4000-8000-000000000001'));
 select pg_temp.release_record('staff context reads the Lab view', '0',
   (select count(*)::text from ehr.patient_released_lab_results));
 reset role;
-update auth.sessions set revoked_at=null,revocation_reason=null where id='b3000000-0000-4000-8000-000000000002';
+update auth.sessions set revoked_at=null,revocation_reason=null where id='f5300000-0000-4000-8000-000000000002';
 
 -- Patient 2 bound to its own session sees its own released Lab result only.
 set local role hid_ehr_api_runtime;
-select pg_temp.bind_release('b2000000-0000-4000-8000-000000000002','synthetic:release:2',
-  'b1000000-0000-4000-8000-000000000002','b3000000-0000-4000-8000-000000000002');
-select pg_temp.release_record('patient 2 lab results', 'c1000000-0000-4000-8000-000000000009:1',
+select pg_temp.bind_release('f5200000-0000-4000-8000-000000000002','synthetic:release:2',
+  'f5100000-0000-4000-8000-000000000002','f5300000-0000-4000-8000-000000000002');
+select pg_temp.release_record('patient 2 lab results', 'f5c10000-0000-4000-8000-000000000009:1',
   (select string_agg(result_id::text||':'||version, ',') from ehr.patient_released_lab_results));
 select pg_temp.release_record('patient 2 vitals', '',
-  coalesce((select string_agg(id::text, ',') from ehr.vitals where encounter_id <> 'b7000000-0000-4000-8000-000000000006'), ''));
+  coalesce((select string_agg(id::text, ',') from ehr.vitals where encounter_id <> 'f5700000-0000-4000-8000-000000000006'), ''));
 reset role;
 
 -- 3. The Lab runtimes, the view's owner and PUBLIC cannot read the view, and
@@ -618,38 +618,38 @@ select pg_temp.release_record('section indexes',
 set local session_replication_role = replica;
 insert into lab.result_verifications(id,result_id,execution_id,patient_id,facility_id,result_version,verified_by,
   verified_by_membership_id,verified_at,reason,idempotency_key,request_sha256,correlation_id)
-values ('c2000000-0000-4000-8000-000000000022','c1000000-0000-4000-8000-000000000002',
-  'bf000000-0000-4000-8000-000000000002','b2000000-0000-4000-8000-000000000001','b4000000-0000-4000-8000-000000000002',
-  2,'b1000000-0000-4000-8000-000000000003','b6000000-0000-4000-8000-000000000001',clock_timestamp(),
+values ('f5c20000-0000-4000-8000-000000000022','f5c10000-0000-4000-8000-000000000002',
+  'f5f00000-0000-4000-8000-000000000002','f5200000-0000-4000-8000-000000000001','f5400000-0000-4000-8000-000000000002',
+  2,'f5100000-0000-4000-8000-000000000003','f5600000-0000-4000-8000-000000000001',clock_timestamp(),
   'Synthetic verification','release-verify-2-2-later-0',repeat('d',64),'release-lab-correlation');
 insert into lab.result_releases(verification_id,result_id,execution_id,patient_id,facility_id,result_version,released_by,
   released_by_membership_id,released_at,reason,idempotency_key,request_sha256,correlation_id)
-values ('c2000000-0000-4000-8000-000000000022','c1000000-0000-4000-8000-000000000002',
-  'bf000000-0000-4000-8000-000000000002','b2000000-0000-4000-8000-000000000001','b4000000-0000-4000-8000-000000000002',
-  2,'b1000000-0000-4000-8000-000000000003','b6000000-0000-4000-8000-000000000001',clock_timestamp(),
+values ('f5c20000-0000-4000-8000-000000000022','f5c10000-0000-4000-8000-000000000002',
+  'f5f00000-0000-4000-8000-000000000002','f5200000-0000-4000-8000-000000000001','f5400000-0000-4000-8000-000000000002',
+  2,'f5100000-0000-4000-8000-000000000003','f5600000-0000-4000-8000-000000000001',clock_timestamp(),
   'Synthetic release reason','release-release-2-2-later-',repeat('e',64),'release-lab-correlation');
 set local session_replication_role = origin;
 set local role hid_ehr_api_runtime;
 select pg_temp.bind_release(patient, subject, account, session) from release_binding;
 select pg_temp.release_record('a released correction replaces the earlier value', '2:correction:high',
   (select version||':'||revision_kind||':'||abnormal_flag from ehr.patient_released_lab_results
-    where result_id = 'c1000000-0000-4000-8000-000000000002'));
+    where result_id = 'f5c10000-0000-4000-8000-000000000002'));
 reset role;
 set local session_replication_role = replica;
 insert into lab.result_invalidations(result_id,execution_id,patient_id,facility_id,result_version,disposition,actor_id,
   actor_membership_id,reason,idempotency_key,request_sha256,correlation_id)
-values ('c1000000-0000-4000-8000-000000000002','bf000000-0000-4000-8000-000000000002',
-  'b2000000-0000-4000-8000-000000000001','b4000000-0000-4000-8000-000000000002',2,'entered_in_error',
-  'b1000000-0000-4000-8000-000000000003','b6000000-0000-4000-8000-000000000001','Synthetic invalidation reason',
+values ('f5c10000-0000-4000-8000-000000000002','f5f00000-0000-4000-8000-000000000002',
+  'f5200000-0000-4000-8000-000000000001','f5400000-0000-4000-8000-000000000002',2,'entered_in_error',
+  'f5100000-0000-4000-8000-000000000003','f5600000-0000-4000-8000-000000000001','Synthetic invalidation reason',
   'release-invalidate-2-2-later',repeat('f',64),'release-lab-correlation');
 set local session_replication_role = origin;
 set local role hid_ehr_api_runtime;
 select pg_temp.bind_release(patient, subject, account, session) from release_binding;
 select pg_temp.release_record('an invalidated latest release is withheld', '0',
-  (select count(*)::text from ehr.patient_released_lab_results where result_id = 'c1000000-0000-4000-8000-000000000002'));
+  (select count(*)::text from ehr.patient_released_lab_results where result_id = 'f5c10000-0000-4000-8000-000000000002'));
 reset role;
 set local session_replication_role = replica;
-update ehr.encounters set status = 'entered_in_error' where id = 'b7000000-0000-4000-8000-000000000001';
+update ehr.encounters set status = 'entered_in_error' where id = 'f5700000-0000-4000-8000-000000000001';
 set local session_replication_role = origin;
 set local role hid_ehr_api_runtime;
 select pg_temp.bind_release(patient, subject, account, session) from release_binding;
