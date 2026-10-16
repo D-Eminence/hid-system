@@ -218,8 +218,7 @@ The executable covers:
    access history to name the requesting clinician and role, the history to
    report `truncated: false`, a doctor's `GET /auth/session` to list none of
    the withdrawn permissions, and a PIN use over HTTP to place one
-   `PATIENT_ACCESS_PIN_USED` inbox item (none for the replay); it grants
-   break-glass to the doctor role in its copy only for the activation;
+   `PATIENT_ACCESS_PIN_USED` inbox item (none for the replay);
    `patient_runtime` expects the history's additive `truncated`;
    `outreach_runtime` and `outreach_cookie_read_runtime` opt their disposable
    copies into Outreach (the doctor role's Outreach permissions and the
@@ -307,6 +306,28 @@ The executable covers:
    EHR's own patient-self transaction (nothing new without the release
    binding; only vitals with only that flag on), as `hid_ehr_api_runtime`
    against a real Identity child.
+   With 0097 (break-glass at launch, with limits; ADR-058 addendum): the role
+   assertions require exactly doctor, clinician and nurse to hold
+   `identity.break-glass.write`; the additional suites include
+   `break-glass-launch.integration.sql` (which sets `break_glass_enabled`
+   itself through the administrator command inside its transaction, so it
+   passes whatever the restored control holds, and needs an active
+   `emergency` and no `healthcare-operations` row), and `schema`, `emergency` and
+   `emergency-contacts` rely on the migrated grant; `patient_safety_runtime`
+   no longer inserts the `emergency` code or grants the permission, requires
+   both from the migrations, and drives `POST /identity/break-glass` over
+   HTTP as a doctor signed in with an authenticator: `423
+   BREAK_GLASS_DISABLED` with nothing written while `break_glass_enabled` is
+   off, `201` and an unextended replay once its copy turns the control on
+   (as P11's operator step would), `423` again once it is off, and `403
+   PERMISSION_DENIED` for an org admin; and the non-superuser check's P10 and
+   P11 expect `emergency` and the three break-glass holders. The
+   non-superuser check also confirms 0097's precondition: before the first
+   bootstrap the administrator cannot read the control
+   (`PLATFORM_CONTROL_UNAVAILABLE`) and 0097 applies; after it, 0097's SQL run
+   again as the administrator in rolled-back transactions is refused
+   (`55000 BREAK_GLASS_CONTROL_ON`) with the control on and is a no-op with it
+   off.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
@@ -318,7 +339,7 @@ The executable covers:
    closed-record, retracted-vital-correction and retracted-document triggers
    and the vital status are installed and the upgraded
    role bootstrap grants the EHR runtime the permission decision they use; since 0091 no Lab, Pharmacy, OCR or
-   Outreach permission, break-glass or document upload; and since 0092 that
+   Outreach permission or document upload; since 0092 that
    the 7-argument enrollment activation command is gone and the upgraded role
    bootstrap grants the Identity runtime, and not `PUBLIC`, the new one; and
    since 0093 that the upgraded bootstrap grants the Identity runtime the
@@ -338,7 +359,10 @@ The executable covers:
    grants `SELECT` on it to the EHR runtime and not to the Lab runtimes,
    gives neither the Lab runtime nor the view's owner `ehr.patient_self_context`
    or the Lab runtime `USAGE` on `ehr`, and keeps `ehr.patient_self_context`
-   executable by exactly the EHR runtime and the test role), then
+   executable by exactly the EHR runtime and the test role; and since 0097
+   break-glass held by exactly doctor, clinician and nurse, exactly the
+   `direct-care` and `emergency` purposes, and `break_glass_enabled` still
+   off), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

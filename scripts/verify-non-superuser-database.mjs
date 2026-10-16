@@ -29,6 +29,9 @@
 // - the release checklist's read-only P10, P11 and P35 checks, taken from
 //   docs/PHASE_4_STAGE_5_RELEASE_READINESS.md, as the administrator, as an
 //   operator runs them on RDS;
+// - break-glass's migration (0097) run again as the administrator in
+//   rolled-back transactions: refused while break_glass_enabled is on, a
+//   no-op while it is off;
 // - the platform-control-owner and function-parameter-settings suites.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -230,6 +233,12 @@ try {
   `${files.length}:${files.at(-1)}`);
   evidence.steps.migrations = { refused_at: '0015_ocr_claim_column_resolution.sql', applied_before_grant: 14,
     applied: files.length, latest: files.at(-1), set_on_parameter: 'granted for the run, then revoked' };
+  // Before the first bootstrap the administrator cannot read a control: the
+  // table's forced row-level security hides the row from platform.control_enabled,
+  // which it still owns. Break-glass's migration read the control this way
+  // above and, finding it unreadable, applied (its precondition below).
+  assert.match(psql('control read before the first bootstrap', admin,
+    `select platform.control_enabled('break_glass_enabled')`, 'failure').output, /PLATFORM_CONTROL_UNAVAILABLE/);
 
   // P8-BOOTSTRAP: the role bootstrap and its assertions, twice, then verify-only.
   // Each run overlaps a transaction that holds a lock on platform.control_settings
@@ -329,12 +338,16 @@ try {
   };
   const p10 = await checklistCheck('P10 check (read-only)');
   assert.deepEqual(p10.map((line) => line.split('|').slice(0, 4).join('|')),
-    ['break_glass_enabled|f', 'direct-care|Direct patient care|t|hid'], `P10 check: ${p10.join('; ')}`);
-  // After 0091 and the bootstrap: the three launch controls off, no emergency or
-  // healthcare-operations purpose, no withdrawn permission, no control event.
+    ['break_glass_enabled|f', 'direct-care|Direct patient care|t|hid', 'emergency|Emergency treatment|t|hid'],
+    `P10 check: ${p10.join('; ')}`);
+  // After 0097 and the bootstrap: the three launch controls off (break-glass
+  // until the operator turns it on, P11), no healthcare-operations purpose, no
+  // permission 0084 or 0091 withdrew, break-glass granted to exactly the three
+  // roles 0097 names, and no control event.
   const p11 = await checklistCheck('P11 check (read-only)');
-  assert.deepEqual(p11, ['break_glass_enabled|f', 'outreach_portal_enabled|f', 'uploads_enabled|f'],
-    `P11 check: ${p11.join('; ')}`);
+  assert.deepEqual(p11, ['break_glass_enabled|f', 'outreach_portal_enabled|f', 'uploads_enabled|f',
+    'clinician|identity.break-glass.write', 'doctor|identity.break-glass.write', 'nurse|identity.break-glass.write'],
+  `P11 check: ${p11.join('; ')}`);
   // P35 (ADR-064): the owners and the only executors of 0095's two functions.
   const p35 = await checklistCheck('P35 check (read-only)');
   assert.deepEqual(p35, [`integration.notification_recipient_state(uuid)|${admin}|t|hid_event_delivery_commands`,
@@ -395,6 +408,48 @@ try {
   }
   evidence.steps.notification_recipient = { run_as: worker, answers: { verified: 'email', phone_only: 'withhold' },
     direct_patient_read: /permission denied for \S+ \S+/.exec(workerDirect.output)[0], refused: refusedLogins };
+
+  // Break-glass's migration (0097, D9, ADR-058 addendum) refuses to run while
+  // break_glass_enabled is on: 0091 turned the control off only where 0039's
+  // seed was untouched, and granting the permission with the control on would
+  // make break-glass live at the migration's commit, before staff MFA ships
+  // and the P11 operator step. Its SQL runs again here as the administrator,
+  // now that platform.control_enabled has its technical owner, each time in a
+  // transaction that is rolled back. The cluster superuser turns the control
+  // on in the first (an operator would use POST /admin/controls).
+  const breakGlassMigration = files.find((name) => /^\d{4}_break_glass_launch_with_limits\.sql$/.test(name));
+  assert(breakGlassMigration, 'the break-glass migration is missing');
+  const breakGlassSql = await readFile(join(service, 'database/migrations', breakGlassMigration), 'utf8');
+  const rerunBreakGlassMigration = async (controlOn) => {
+    const client = new Client({ host: temporary, user: superuser, database });
+    await client.connect();
+    try {
+      await client.query('begin');
+      if (controlOn) {
+        await client.query(`update platform.control_settings set enabled = true, row_version = row_version + 1
+          where control_key = 'break_glass_enabled'`);
+      }
+      await client.query(`set local role ${admin}`);
+      await client.query(breakGlassSql);
+      return { applied: true };
+    } catch (error) {
+      return { applied: false, code: error.code, message: error.message };
+    } finally {
+      await client.query('rollback').catch(() => undefined);
+      await client.end().catch(() => undefined);
+    }
+  };
+  const withControlOn = await rerunBreakGlassMigration(true);
+  assert.deepEqual([withControlOn.applied, withControlOn.code], [false, '55000'],
+    `break-glass's migration ran with break_glass_enabled on: ${JSON.stringify(withControlOn)}`);
+  assert.match(withControlOn.message, /^BREAK_GLASS_CONTROL_ON: /);
+  const withControlOff = await rerunBreakGlassMigration(false);
+  assert.deepEqual(withControlOff, { applied: true }, `break-glass's migration with the control off: ${JSON.stringify(withControlOff)}`);
+  assert.equal(psql('break-glass control after the reruns', admin,
+    `select platform.control_enabled('break_glass_enabled')`).stdout.trim(), 'f');
+  evidence.steps.break_glass_migration_precondition = { migration: breakGlassMigration, run_as: admin,
+    before_first_bootstrap: 'control unreadable (PLATFORM_CONTROL_UNAVAILABLE), applied',
+    control_on: `refused ${withControlOn.code} ${withControlOn.message.split(':')[0]}`, control_off: 'applied, rolled back' };
 
   // I3 at call time: the claim runs its body without the parameter privilege.
   const claim = psql('OCR claim without a workload context', logins['ocr-worker'][0],

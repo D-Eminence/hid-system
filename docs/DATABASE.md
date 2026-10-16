@@ -2289,8 +2289,9 @@ repository; the release checklist's P10 records them before and after 0082.
   BREAK_GLASS_DISABLED` when the control is off and, since the change that
   added 0084, also when it is on: Identity answers the function's
   emergency-purpose refusal (`22023`) as `423 BREAK_GLASS_DISABLED` instead of
-  `400 INVALID_CONSENT_COMMAND`. Break-glass is off at launch (owner default, deny by default): the
-  control is set false and no `emergency` row exists (release checklist P10
+  `400 INVALID_CONSENT_COMMAND`. Since D9 was decided (2026-10-14), 0097 seeds
+  it, with the break-glass permission, and leaves the control to an operator
+  ("Break-glass at launch, with limits (0097)", below; release checklist P10
   and P11).
 - `healthcare-operations` is not seeded. Identity access requests
   (`consent.controller.ts`), Lab and Pharmacy reads and the OCR commands
@@ -4611,3 +4612,132 @@ administrator, the 50 additional suites and the runtime verifier passed;
 exactly as it does on `main` without this change (it fails the same with the
 0096 policies and view dropped), and the rehearsal's owner pass runs only the
 additional suites.
+
+## Break-glass at launch, with limits (0097)
+
+`0097_break_glass_launch_with_limits.sql` (decision D9 as the owner decided
+it on 2026-10-14, "turn on with limits"; ADR-058 addendum) is the reviewed
+re-enabling migration ADR-058 asks for, for break-glass only. 0001 through
+0096 are unchanged; it was written as 0092, then 0093, then 0095, and is
+numbered after 0095 and 0096 of D-Eminence/hid-system#90 and #91.
+
+**Precondition.** It refuses to run while `break_glass_enabled` is on
+(`55000 BREAK_GLASS_CONTROL_ON`; nothing is changed, the ledger stays at
+0096). 0091 set the control off only where the row was still exactly as 0039
+seeded it, and kept a value an administrator had set; granting the
+permission with the control on would make break-glass live at 0097's commit,
+before staff MFA ships and the P11 operator step. A platform administrator
+sets it off with `POST /admin/controls` and `migrate` runs again. The flag is
+read through `platform.control_enabled`, as the guards read it. Before the
+first role bootstrap that function, still owned by the migration
+administrator, cannot see the row under forced row-level security when the
+administrator does not bypass it (RDS) and raises
+`PLATFORM_CONTROL_UNAVAILABLE`; the migration takes that as "not on" and goes
+on, since no runtime role exists yet and the control is as 0091 left it. A
+missing row raises the same, and every activation then fails closed on it.
+
+**Permission.** It inserts `identity.break-glass.write` for doctor, clinician
+and nurse into `auth.role_permissions` (`ON CONFLICT DO NOTHING`). Those are
+the roles 0010 granted it to; no other migration granted it to another role,
+and 0091 deleted it from every role (0084 never touched it). No other role
+receives it, and no other permission 0084 or 0091 withdrew is granted. The
+three roles kept everything else the path needs: `identity.consent.write`
+(the activation route requires it with break-glass),
+`identity.patient.read` (the lookup that opens the record), and
+`ehr.encounter.read` and `ehr.note.read` (the emergency summary route) with
+the other five summary reads. `identity.activate_break_glass` (0031) and the
+`identity_outbox_emergency_insert` policy check the permission through
+`auth.membership_has_permission`, so the database refuses every other role as
+well (`42501 Authorized break-glass context is required`).
+
+**Emergency purpose.** It inserts `emergency` ("Emergency treatment", active,
+`source_system` `hid`) into `identity.purpose_of_use_codes` with
+`ON CONFLICT (code) DO NOTHING`, as 0082 inserted `direct-care`: a row an
+operator inserted or deactivated before is kept as it is. Activation (0031)
+needs the active code, the access request and grant rows reference it (0008),
+and `identity.has_active_consent_grant` (0012) honours an emergency read only
+while it is active, so deactivating the code is an operator's way to stop
+break-glass at once. Standard access requests (0086) still accept only
+`direct-care` and `healthcare-operations`, and PIN grants only `direct-care`.
+`healthcare-operations` is still not seeded (N3).
+
+**Not changed.** `platform.control_settings` `break_glass_enabled` stays off
+(0091 or an administrator set it so; the precondition refuses it on); a
+migration has no actor for a control event, and the control is production
+configuration. Identity checks it in the
+activation transaction before the command, so break-glass answers
+`423 BREAK_GLASS_DISABLED` until a platform administrator turns it on with
+`POST /admin/controls`, after staff MFA ships (release checklist P11). No
+function, policy, table or database grant changes: a grant authorizes only
+`read_records` under `emergency` at its own facility (0012, `ehr.context_allows`),
+the emergency summary reads that facility only, the chart routes stay closed
+to the emergency purpose, the summary's vitals are as first recorded, and the
+clinician's request list leaves break-glass grants out (0074). The document
+list and download are not chart routes and take the emergency purpose as
+before, so a break-glass grant reads the activating facility's documents
+(`documents_read` is `ehr.context_allows`, as for every clinical table);
+whether it should is N3's open question, to be decided before
+`ehr.document.write` is granted again. Uploads are off at launch and no
+import writes EHR documents.
+
+**Role assertions.** `runtime-roles.integration.sql` now requires exactly
+doctor, clinician and nurse to hold `identity.break-glass.write` and still
+refuses any other withdrawn permission. On 0091 the bootstrap fails with "the
+launch module set withdrew a permission it must keep: doctor lacks
+identity.break-glass.write, clinician lacks …, nurse lacks …"; an earlier
+release's bootstrap refuses a database that holds 0097.
+
+**Locks.** `ACCESS SHARE` on `platform.control_settings` (the precondition's
+read, taken first, as an activation and the role bootstrap take that table
+first; only an `ACCESS EXCLUSIVE` holder, which only a migration or the role
+bootstrap takes, makes it wait), `ROW EXCLUSIVE` on `auth.role_permissions`
+and `identity.purpose_of_use_codes`, and the foreign keys' `FOR KEY SHARE` on
+three `auth.roles` rows and one `auth.permissions` row; at most four rows
+written, no scan. Each waits at most the runner's 5 s lock timeout; a timeout rolls 0097
+back whole, and it can be run again. It needs no new grant, but the bootstrap
+of the same release runs after it.
+
+Tests:
+
+- `break-glass-launch.integration.sql` (rollback-only; it inserts no purpose
+  code and grants no permission) requires exactly the three holders, no other
+  withdrawn permission, the three roles' consent, lookup and summary
+  permissions, an active `emergency` row (0097's, or an operator's earlier
+  row, which 0097 keeps; the rehearsal's fresh builds check 0097's exact row)
+  and no `healthcare-operations` row from any source (P11). It does not
+  depend on the environment's control: as `hid_identity_api_runtime` a
+  synthetic platform administrator sets `break_glass_enabled` off through
+  `platform.admin_set_control` (the command behind `POST /admin/controls`),
+  `platform.require_control_enabled` refuses
+  (`55000 PLATFORM_CONTROL_DISABLED:break_glass_enabled`), the administrator
+  turns it on, it passes, and the latest control event names that
+  administrator. A doctor, a clinician and a nurse each activate
+  (a second call replays the grant unextended), each grant authorizes the
+  emergency read only (no write, no direct-care read, not the same doctor's
+  membership at another facility); lab, pharmacist, receptionist, admin and
+  org admin are refused with `42501` and leave no audit row; three grants,
+  three activation and three replay audit rows, three outbox intents and three
+  `EMERGENCY_ACCESS_ACTIVATED` inbox items. As `hid_ehr_api_runtime` the
+  nurse's emergency read returns the encounter, signed note and document of
+  the grant's facility only, `ehr.context_allows(…, 'write_records')` (the
+  check of every EHR insert and update policy) stays false, nothing is read
+  under `direct-care`, and the doctor reads nothing at the other facility. Once the code is deactivated, activation is refused (`22023`) and
+  the existing grant is no longer honoured. On 0091 it fails at its first
+  assertion ("identity.break-glass.write is not held by exactly clinician,
+  doctor and nurse (0010, 0097): no role").
+- `runtime-roles.integration.sql`: the role assertions above.
+- `schema.integration.sql`, `emergency.integration.sql` and
+  `emergency-contacts.integration.sql` no longer grant break-glass to the
+  doctor role themselves; they rely on 0097.
+- The rehearsal's 0028 upgrade check requires the three holders, exactly
+  `direct-care` and `emergency`, and `break_glass_enabled` off.
+- `verify-non-superuser-database.mjs` (run by the rehearsal) builds the chain
+  as a `NOSUPERUSER NOBYPASSRLS` administrator, where 0097 finds the control
+  unreadable before the first bootstrap and applies; after the bootstrap it
+  runs 0097's SQL again as that administrator in rolled-back transactions:
+  refused (`55000 BREAK_GLASS_CONTROL_ON`) with the control on, a no-op with
+  it off.
+- All 54 SQL suites pass on a database built from empty to 0097 and
+  bootstrapped, and the 52 additional suites again with every schema, table
+  and function owned by a `NOSUPERUSER NOBYPASSRLS` role; the full rehearsal
+  passes on 0097 (local evidence, release checklist §8).

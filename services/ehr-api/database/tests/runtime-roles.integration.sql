@@ -814,15 +814,18 @@ begin
 end
 $$;
 
--- The launch module set (0084 and 0091, decision D17, ADR-058): Lab, Pharmacy,
--- OCR and Outreach are off, EHR lab ordering is off, break-glass is off (D9)
--- and document uploads are off. No role holds a permission of a module that
--- is off (lab.*, pharmacy.*, ocr.*, outreach.*), the EHR lab-ordering write,
--- identity.break-glass.write or ehr.document.write, so the routes that need
--- them answer 403 before any write and Health-id hides their navigation and
--- actions. The EHR reads and writes of the launch set stay. Re-enabling a
--- module takes its own reviewed migration that grants the permissions again
--- and changes this assertion with it.
+-- The launch module set (0084, 0091 and 0097, decision D17, ADR-058): Lab,
+-- Pharmacy, OCR and Outreach are off, EHR lab ordering is off and document
+-- uploads are off. No role holds a permission of a module that is off (lab.*,
+-- pharmacy.*, ocr.*, outreach.*), the EHR lab-ordering write or
+-- ehr.document.write, so the routes that need them answer 403 before any
+-- write and Health-id hides their navigation and actions. The EHR reads and
+-- writes of the launch set stay. Re-enabling a module takes its own reviewed
+-- migration that grants the permissions again and changes this assertion with
+-- it. Break-glass is the first (D9, owner decision of 2026-10-14, ADR-058
+-- addendum): 0097 grants identity.break-glass.write again to exactly the
+-- roles 0010 granted it to, doctor, clinician and nurse, and no other role may
+-- hold it; its platform control stays an operator's step.
 do $$
 declare
   holders text;
@@ -831,7 +834,8 @@ begin
     into holders
     from auth.role_permissions
    where permission_code ~ '^(lab|pharmacy|ocr|outreach)\.'
-      or permission_code in ('ehr.lab-request.write', 'identity.break-glass.write', 'ehr.document.write');
+      or permission_code in ('ehr.lab-request.write', 'ehr.document.write')
+      or (permission_code = 'identity.break-glass.write' and role_code not in ('doctor', 'clinician', 'nurse'));
   if holders is not null then
     raise exception 'a role holds a permission withdrawn by the launch module set: %', holders;
   end if;
@@ -847,7 +851,10 @@ begin
                  ('nurse', 'identity.consent.write'),
                  ('doctor', 'identity.patient-access-pin.verify'),
                  ('clinician', 'identity.patient-access-pin.verify'),
-                 ('nurse', 'identity.patient-access-pin.verify'))
+                 ('nurse', 'identity.patient-access-pin.verify'),
+                 ('doctor', 'identity.break-glass.write'),
+                 ('clinician', 'identity.break-glass.write'),
+                 ('nurse', 'identity.break-glass.write'))
          expected(role_code, permission_code)
    where not exists (select 1 from auth.role_permissions held
                       where held.role_code = expected.role_code and held.permission_code = expected.permission_code);

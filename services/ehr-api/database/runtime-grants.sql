@@ -1488,6 +1488,14 @@ revoke all on identity.facility_assisted_registration, identity.facility_assiste
   from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
     hid_ehr_api_runtime, hid_schema_test_runtime;
 
+-- Break-glass at launch, with limits (0097, D9, ADR-058 addendum). 0097
+-- creates no object and changes no database grant: it inserts the
+-- identity.break-glass.write rows of doctor, clinician and nurse into
+-- auth.role_permissions and the emergency purpose of use. The Identity
+-- runtime's EXECUTE on identity.activate_break_glass and its read of the
+-- vocabulary are above and unchanged. The role assertions
+-- (runtime-roles.integration.sql) now require exactly those three holders.
+
 -- End the temporary memberships granted after the role check above. A
 -- creator's ADMIN OPTION, which PostgreSQL 16 gives a CREATEROLE
 -- administrator in every role it creates, is a separate grant and stays; it
