@@ -16,7 +16,7 @@ COPY packages/api-client/package.json ./packages/api-client/
 COPY services/ocr-api/package.json services/ocr-api/package-lock.json ./services/ocr-api/
 RUN cd services/ocr-api && npm ci --omit=dev && npm cache clean --force
 
-FROM gcr.io/distroless/nodejs22-debian13@sha256:939d6f1671529d230f50b563578e9b5d206af58f038b10ebd7e1233023d4e167 AS runtime
+FROM gcr.io/distroless/nodejs22-debian13@sha256:55e7cd155c86d8956af63fec0a9d0790dd6d0ba98c7d38e63c0866557ee7aff8 AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --chown=65532:65532 --from=production-dependencies /app/services/ocr-api/node_modules ./services/ocr-api/node_modules

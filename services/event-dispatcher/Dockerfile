@@ -12,7 +12,7 @@ WORKDIR /app/services/event-dispatcher
 COPY services/event-dispatcher/package.json services/event-dispatcher/package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-FROM gcr.io/distroless/nodejs22-debian13@sha256:939d6f1671529d230f50b563578e9b5d206af58f038b10ebd7e1233023d4e167 AS runtime
+FROM gcr.io/distroless/nodejs22-debian13@sha256:55e7cd155c86d8956af63fec0a9d0790dd6d0ba98c7d38e63c0866557ee7aff8 AS runtime
 ENV NODE_ENV=production \
     EVENT_DISPATCHER_STATUS_HOST=0.0.0.0
 WORKDIR /app/services/event-dispatcher
