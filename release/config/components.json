@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0098",
-    "count": 98,
+    "last": "0099",
+    "count": 99,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -491,8 +491,8 @@
         "sha256": "5f784d5d472a11209f8cc43956b4eb267404254fa745a96174b4c6e4d16cfe3c"
       },
       {
-        "name": "0097_imported_medical_history.sql",
-        "sha256": "e3106e0f56fc76e48e9439ddef4772385769e1e60d7e6fc1ff595c12dd6b6ee6"
+        "name": "0099_imported_medical_history.sql",
+        "sha256": "ceaae61dc3f0879c195643bd1fc456ea04426e1cc601cd07dbcb19e589a5636d"
       }
     ]
   },

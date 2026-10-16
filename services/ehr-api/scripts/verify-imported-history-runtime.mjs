@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066)
+// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-067)
 // over HTTP: the real EHR AppModule as hid_ehr_api_runtime in this process,
 // authorizing every read through the real Identity AppModule (as
 // hid_identity_api_runtime, in a child process) with browser cookies, on a
@@ -437,7 +437,7 @@ if (process.argv[2] === '--identity-child') {
     checks.push('with both EHR flags off, GET /ehr/me/imported-history and the staff route answer 503 IMPORTED_HISTORY_DISABLED and the release binding admits no imported row');
 
     // 11. The sharing switch off while the staff read is on (a setting the
-    //     synth inputs refuse, ADR-066): the stored choice still holds, so
+    //     synth inputs refuse, ADR-067): the stored choice still holds, so
     //     the patient can always turn sharing off, never on, and the staff
     //     read answers shared: false at the next request.
     await ehr.close();

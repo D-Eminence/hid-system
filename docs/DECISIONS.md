@@ -5625,9 +5625,9 @@ Related: ADR-049, ADR-054, ADR-057, ADR-058, ADR-059, ADR-063;
 applications (0098)); release checklist §1-§3, §5, §8, P11, P22, P32, P37,
 S4z.
 
-# ADR-066: Imported legacy medical history
+# ADR-067: Imported legacy medical history
 
-Status: Accepted in source (migration 0097). Not merged, not deployed. Every
+Status: Accepted in source (migration 0099). Not merged, not deployed. Every
 switch is off, and the production profile refuses each of them. Nothing has
 been imported anywhere: the import command runs only when an operator runs
 it, and only after the sign-off below.
@@ -5706,7 +5706,7 @@ Decision:
   its own run of source system `legacy_imported_history`, which main's
   promoter refuses and main's crosswalk gate does not count: a staged
   `legacy_identity` run closes public patient enrollment (0057), and a history
-  run stays staged. Two 0097 triggers give these runs the seal 0033 gives
+  run stays staged. Two 0099 triggers give these runs the seal 0033 gives
   `legacy_identity` runs. `import-legacy-history.mjs` checks both runs and
   every row against its seal and the parent's identity rows and calls
   `ehr.import_legacy_medical_history`, which repeats every check of the runs
@@ -5729,7 +5729,7 @@ Decision:
   its own function, so a first role bootstrap and a rerun leave the same
   ACL. The import runs as `hid_migration_admin` through a SET-only
   membership taken and given up in its own transaction.
-- 0097 refuses a database that still holds the branch's 0061/0062 objects,
+- 0099 refuses a database that still holds the branch's 0061/0062 objects,
   and changes nothing in it. What happens to such a staging database is a
   proposed default below.
 
@@ -5738,7 +5738,7 @@ customer data is said to be on staging. Nothing in this change imports,
 reads or moves it, and no tooling here touches staging. Importing any real
 legacy data, on staging or in production, needs the DPO's and the owner's
 written sign-off of its provenance, lawful basis, scope and retention first
-(release checklist P37); whether staging may keep the data it already holds
+(release checklist P38); whether staging may keep the data it already holds
 is the DPO's decision.
 
 Proposed defaults (open owner questions; the safest default is built):
@@ -5751,19 +5751,19 @@ Proposed defaults (open owner questions; the safest default is built):
 - Imported history is disclosed for direct care only, never under
   break-glass or for healthcare operations.
 - Every switch is off and refused in production until the DPO and the owner
-  sign off the legacy data and Health-id renders the history (P37). Staging
-  sets a switch only after P37 (1), the written sign-off for staging, is
+  sign off the legacy data and Health-id renders the history (P38). Staging
+  sets a switch only after P38 (1), the written sign-off for staging, is
   attached, and with synthetic data only.
 - The switches go on in order and off in reverse: the patient's read, then
   the sharing choice, then the staff read (the synth refuses sharing without
   the patient's read, and the staff read without sharing). Stored sharing
   choices persist when the switches are off; a patient can always withdraw.
-- The import is refused in production and needs the P37 sign-off on staging
+- The import is refused in production and needs the P38 sign-off on staging
   before any real legacy data is imported.
-- A staging database that ran the PR #8 branch's 0061/0062 (0097 refuses it)
+- A staging database that ran the PR #8 branch's 0061/0062 (0099 refuses it)
   is rebuilt from main only after a snapshot and a read-only inventory of
   what it holds, only after the DPO decides what staging may keep, and only
-  with the owner's and the DPO's written approval of the rebuild (P37).
+  with the owner's and the DPO's written approval of the rebuild (P38).
 - The import runs as one all-or-nothing statement. The branch documents name
   17 legacy records; the command was measured linear to 50,000 synthetic rows
   (11.7 s), so the CLI's 300 s statement timeout is reached at roughly 1.2
@@ -5810,7 +5810,7 @@ Consequences:
 - Staff see no imported history until each patient opts in, even with a
   consent; the owner may read decision 3 as "any consent discloses". That is
   recorded as the first proposed default above.
-- A staging database built from the branch cannot run 0097 until it is
+- A staging database built from the branch cannot run 0099 until it is
   rebuilt from main, under the proposed default above.
 - Rolling the EHR API back to an earlier build releases nothing: no earlier
   build names `importedHistory` in the release set, and the staff policies
@@ -5833,5 +5833,5 @@ Residual risks:
 Related: ADR-018; ADR-058 (PSELF-RLS); ADR-065 (one release set); ADR-056
 (ALLERGY-1); `PHASE_3_LAUNCH_DECISIONS.md` IMPORT-HISTORY, D9 and D17;
 `INTERFACE_CONTRACT.md`, "Imported legacy medical history";
-`DATABASE.md`, "Imported legacy medical history (0097)"; release checklist
-P37 and S4y.
+`DATABASE.md`, "Imported legacy medical history (0099)"; release checklist
+P38 and S4aa.

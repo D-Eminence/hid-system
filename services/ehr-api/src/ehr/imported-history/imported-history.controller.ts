@@ -15,7 +15,7 @@ export class ImportedHistoryQueryDto {
 }
 
 /**
- * Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066).
+ * Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-067).
  * Success is audited by the service with counts only; failures by the
  * interceptor.
  */

@@ -733,7 +733,7 @@ describe('Patient document download (owner decision 4, D7: documents only with a
   });
 });
 
-describe('Imported history never enters either record summary (owner decision 3, ADR-066)', () => {
+describe('Imported history never enters either record summary (owner decision 3, ADR-067)', () => {
   // The release set with every category and the imported history on.
   const EVERY_RELEASE = ['vitals', 'diagnoses', 'prescriptions', 'labResults', 'documents', 'importedHistory'] as
     unknown as PatientReleasable[];

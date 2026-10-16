@@ -128,14 +128,14 @@ describe('Identity production database transport', () => {
     }
   });
 
-  // ADR-066: the patient's choice to share imported legacy history with the
+  // ADR-067: the patient's choice to share imported legacy history with the
   // facilities they approve. Off by default; the production profile refuses it
-  // until the P37 sign-off; staging and local development may opt in.
+  // until the P38 sign-off; staging and local development may opt in.
   it('keeps the imported history sharing routes off by default and refuses them in production', () => {
     production(); resetEnvironmentForTests();
     expect(getEnvironment().IMPORTED_HISTORY_SHARING_ENABLED).toBe(false);
     production(); process.env.IMPORTED_HISTORY_SHARING_ENABLED = 'true'; resetEnvironmentForTests();
-    expect(() => getEnvironment()).toThrow(/IMPORTED_HISTORY_SHARING_ENABLED: .*P37/);
+    expect(() => getEnvironment()).toThrow(/IMPORTED_HISTORY_SHARING_ENABLED: .*P38/);
     production(); process.env.IMPORTED_HISTORY_SHARING_ENABLED = 'yes'; resetEnvironmentForTests();
     expect(() => getEnvironment()).toThrow(/IMPORTED_HISTORY_SHARING_ENABLED/);
   });

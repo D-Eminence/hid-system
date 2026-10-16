@@ -19,11 +19,11 @@ import {
 
 export { IMPORTED_HISTORY_LIMITS } from './imported-history.query';
 
-/** Where every imported record came from: the legacy system, imported as it held them (ADR-066). */
+/** Where every imported record came from: the legacy system, imported as it held them (ADR-067). */
 const PROVENANCE = 'legacy-import' as const;
 
 export interface ImportedHistoryResponse extends ImportedHistoryPage {
-  /** Imported health profiles are not part of this change (ADR-066). */
+  /** Imported health profiles are not part of this change (ADR-067). */
   healthProfile: null;
   limits: typeof IMPORTED_HISTORY_LIMITS;
   provenance: typeof PROVENANCE;
@@ -36,12 +36,12 @@ export interface StaffImportedHistoryResponse extends ImportedHistoryResponse {
 
 /**
  * Imported legacy medical history (owner decision 3 of 2026-10-16,
- * ADR-066). The patient reads their own through the patient-self path and
+ * ADR-067). The patient reads their own through the patient-self path and
  * the one release set, behind its own flag, needing no sharing choice. Staff
  * read it only through ClinicalRepository (Identity's fresh consent and
  * facility authorization, the audit and the refusal record), for direct
  * care, never under break-glass, and see it only when the database's staff
- * decision (0097: the purpose, the consent at the selected facility, the
+ * decision (0099: the purpose, the consent at the selected facility, the
  * permission, and the patient's own sharing choice) allows it.
  */
 @Injectable()
@@ -85,7 +85,7 @@ export class ImportedHistoryService {
     }, async (client) => {
       // The decision the staff policies apply, asked once so that "not
       // shared" is an answer rather than an empty page, in the statement that
-      // binds the patient the policies compare each row with (0097): the
+      // binds the patient the policies compare each row with (0099): the
       // policies then decide once per statement, not once per row, and admit
       // no other patient's rows in this transaction.
       let shared: boolean;

@@ -1,11 +1,11 @@
 import { getEnvironment, resetEnvironmentForTests } from './environment';
 
-// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066):
+// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-067):
 // one flag for the patient's own read (part of the patient record release
 // set) and one for the staff read, both off by default. The production
 // profile refuses both until the DPO and the owner sign off the provenance,
 // scope and retention of the legacy data and Health-id renders the history
-// (release checklist P37); staging and a local development run may opt in.
+// (release checklist P38); staging and a local development run may opt in.
 describe('EHR imported history flags', () => {
   const original = { ...process.env };
   const local = { NODE_ENV: 'test', DATABASE_URL: 'postgresql://ehr:test@localhost/hid', CORS_ORIGINS: 'http://127.0.0.1',
@@ -68,11 +68,11 @@ describe('EHR imported history flags', () => {
     expect(getEnvironment()[flag]).toBe(true);
   });
 
-  it.each(flags)('refuses %s in the production profile until the P37 sign-off', (flag) => {
+  it.each(flags)('refuses %s in the production profile until the P38 sign-off', (flag) => {
     configure(production, { [flag]: 'true' });
-    expect(() => getEnvironment()).toThrow(new RegExp(`${flag}: .*P37`));
+    expect(() => getEnvironment()).toThrow(new RegExp(`${flag}: .*P38`));
     configure(local, { [flag]: 'true' });
-    expect(() => getEnvironment()).toThrow(new RegExp(`${flag}: .*P37`));
+    expect(() => getEnvironment()).toThrow(new RegExp(`${flag}: .*P38`));
   });
 
   it('starts the production profile with both flags off', () => {

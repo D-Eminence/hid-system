@@ -35,7 +35,7 @@
 // - break-glass's migration (0097) run again as the administrator in
 //   rolled-back transactions: refused while break_glass_enabled is on, a
 //   no-op while it is off;
-// - the imported legacy history import (ADR-066) as the administrator: main's
+// - the imported legacy history import (ADR-067) as the administrator: main's
 //   stage, promote and reconcile of a synthetic source, a sealed history run,
 //   and the importer's in-transaction membership in hid_migration_admin;
 // - the upgrade path of clinician self sign-up (ADR-066): a second database
@@ -504,7 +504,7 @@ try {
   assert.doesNotMatch(claim.output, /permission denied to set parameter/);
   evidence.steps.ocr_claim = { refused_by: 'body authorization check', parameter_privilege_needed: false };
 
-  // ADR-066: the importer as the administrator, who is not a superuser: its
+  // ADR-067: the importer as the administrator, who is not a superuser: its
   // in-transaction membership in hid_migration_admin (held through the ADMIN
   // OPTION of the roles it created) runs the import command, and is gone after.
   const imported = JSON.parse(run('imported history import as the administrator', process.execPath,

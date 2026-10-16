@@ -2813,14 +2813,14 @@ withheld. The seeded doctor, clinician and nurse roles hold all seven.
 
 ### Imported legacy medical history
 
-Owner decision 3 of 2026-10-16 (ADR-066, migration 0097): patients and staff
+Owner decision 3 of 2026-10-16 (ADR-067, migration 0099): patients and staff
 may see the medical history imported from the legacy system, as the legacy
 system held it. It is never part of either record summary: `GET
 /api/v1/ehr/me/records` and the emergency summary keep exactly their keys,
 reads and audit details. Three switches, each off by default and refused in
 the production profile until the DPO and the owner sign off the legacy data
-and Health-id renders it (release checklist P37); staging sets one only after
-P37 (1), the written sign-off for staging, is attached:
+and Health-id renders it (release checklist P38); staging sets one only after
+P38 (1), the written sign-off for staging, is attached:
 `EHR_PATIENT_RELEASE_IMPORTED_HISTORY` (the patient's own read, a category of
 the patient release set), `EHR_STAFF_IMPORTED_HISTORY_ENABLED` (the staff
 read) and Identity's `IMPORTED_HISTORY_SHARING_ENABLED` (the patient's sharing

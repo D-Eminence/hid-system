@@ -384,7 +384,7 @@ The executable covers:
    in-person review reads the checks, which force row-level security, as the
    `system:auth` actor, and both answer no rows there
    (`runbook_recent_approval_reviews`).
-   With 0097 (imported legacy medical history, ADR-066): the additional
+   With 0099 (imported legacy medical history, ADR-067): the additional
    suites include `imported-medical-history.integration.sql` (the patient-self
    binding and the release set, the staff decision for the one patient a
    transaction names, every refusal, break-glass, the sharing commands, the
@@ -394,8 +394,8 @@ The executable covers:
    refusal code, origins, the receipt, an idempotent repeat, the history
    run's seal, timestamp shapes, enrollment staying open, and linear time
    on tables analyzed empty), run in both passes.
-   `imported_history_branch_precondition` builds a database to 0096 with a
-   branch-shaped `ehr.imported_medical_records` and proves that 0097 refuses
+   `imported_history_branch_precondition` builds a database to 0098 with a
+   branch-shaped `ehr.imported_medical_records` and proves that 0099 refuses
    it (`IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT`) and leaves it unchanged.
    `imported_history_runtime` runs `verify-imported-history-runtime.mjs`
    after the patient record release verifier: the patient's own read, the

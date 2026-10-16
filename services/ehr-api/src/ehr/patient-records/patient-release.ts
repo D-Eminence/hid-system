@@ -9,7 +9,7 @@ import type { TimelineCursor } from '../shared/clinical-context';
  * summaries"; owner decision 4 of 2026-10-16; D7). This module is the one
  * definition of what a patient may see of their record: the patient summary
  * reads it (read), the patient's imported legacy history reads it
- * (readImportedHistory, owner decision 3 of 2026-10-16, ADR-066), and every
+ * (readImportedHistory, owner decision 3 of 2026-10-16, ADR-067), and every
  * later patient-facing reader (record chat) must read through
  * PatientRecordRelease and never with its own SQL. It also tells the database
  * its release set (bind): the patient record
@@ -33,10 +33,10 @@ export const PATIENT_RELEASABLE = ['vitals', 'diagnoses', 'prescriptions', 'labR
 export type PatientReleasable = (typeof PATIENT_RELEASABLE)[number];
 export const PATIENT_NEVER_RELEASED = ['labRequests'] as const;
 /**
- * The patient's imported legacy history (ADR-066): released on its own flag
+ * The patient's imported legacy history (ADR-067): released on its own flag
  * and its own route, never a section of either record summary. The database
  * admits an imported row to the patient only in a transaction whose release
- * set names it (0097).
+ * set names it (0099).
  */
 export const PATIENT_IMPORTED_HISTORY = 'importedHistory' as const;
 /** Every category a deployment may release: the summary categories, then the imported history. */
@@ -160,10 +160,10 @@ export class PatientRecordRelease {
   }
 
   /**
-   * The patient's imported legacy history (ADR-066), one page newest first.
+   * The patient's imported legacy history (ADR-067), one page newest first.
    * Run it only inside a patient-self transaction bound to this patient, as
    * read() is, and only while the imported history is released: it binds the
-   * release set first, so the 0097 patient-self policies admit the patient's
+   * release set first, so the 0099 patient-self policies admit the patient's
    * own imported rows. It never adds anything to read()'s summary.
    */
   async readImportedHistory(client: PoolClient, patientId: string, cursor?: TimelineCursor):

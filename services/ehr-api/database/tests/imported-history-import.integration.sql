@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 \o /dev/null
 -- The legacy medical history import command (owner decision 3 of 2026-10-16,
--- ADR-066, migration 0097), against the database. Rollback-only.
+-- ADR-067, migration 0099), against the database. Rollback-only.
 --
 -- ehr.import_legacy_medical_history is the write boundary: whatever
 -- import-legacy-history.mjs checked first, the command itself must refuse
