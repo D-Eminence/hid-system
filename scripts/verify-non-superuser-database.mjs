@@ -326,17 +326,21 @@ async function provisioningStage() {
   steps.variable_conflict = { granted_before_migrations: true, revoked_after: revoked.ledger?.latest ?? null,
     not_granted_once_0015_applied: true };
 
-  // Refusals: nothing is created or changed.
+  // Refusals: nothing is created or changed. A NOLOGIN role that is no HID
+  // group role stands for a role created by hand with other attributes.
+  sql('an existing NOLOGIN role that is no HID group role', master, 'create role hid_rds_like_nologin nologin');
   const refusals = {
     'shared login': [{ 'lab-api': at(loginName('identity-api'), loginPassword('identity-api')) },
       /share the LOGIN hid_provisioned_identity_api/],
     'administrator': [{ 'ehr-api': adminUrl }, /names the migration administrator or the RDS master/],
     'group role': [{ 'ehr-api': at('hid_ehr_api_runtime', loginPassword('ehr-api')) }, /names a HID group role/],
+    'technical owner role': [{ 'notification-worker': at('hid_platform_control_reader', loginPassword('notification-worker')) },
+      /DATABASE_LOGIN_URL_NOTIFICATION_WORKER names a HID group role/],
     'other database': [{ 'ocr-api': at(loginName('ocr-api'), loginPassword('ocr-api'), 'postgres') },
       /must point to the migration administrator's database/],
     'short password': [{ 'ocr-worker': at(loginName('ocr-worker'), 'Short-0001') }, /16 to 1024 printable ASCII/],
-    'existing NOLOGIN role': [{ 'notification-worker': at('hid_platform_control_reader', loginPassword('notification-worker')) },
-      /role hid_platform_control_reader exists with other attributes/],
+    'existing NOLOGIN role': [{ 'notification-worker': at('hid_rds_like_nologin', loginPassword('notification-worker')) },
+      /role hid_rds_like_nologin exists with other attributes/],
   };
   for (const [label, [overrides, message]] of Object.entries(refusals)) {
     const refused = provision(`--runtime-logins refuses ${label}`, '--runtime-logins',

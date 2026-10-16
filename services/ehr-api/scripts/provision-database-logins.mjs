@@ -18,13 +18,14 @@
 // It reads DATABASE_ADMIN_URL, DATABASE_MASTER_USERNAME,
 // DATABASE_MASTER_PASSWORD (the master's commands only) and the ten
 // DATABASE_LOGIN_URL_* variables; TLS follows DATABASE_SSL and
-// DATABASE_SSL_ROOT_CERT_BASE64. Verification forbids the master and the
-// administrator as runtime logins. It prints role names only, never a URL or
-// password, and exits 1 on any refusal or failed check.
+// DATABASE_SSL_ROOT_CERT_BASE64. The administrator never carries the name of
+// a HID group role. Verification forbids the master and the administrator as
+// runtime logins. It prints role names only, never a URL or password, and
+// exits 1 on any refusal or failed check.
 import pg from 'pg';
 import { databaseOptions } from './database-options.mjs';
 import {
-  grantVariableConflict, loginFromUrl, masterConnectionUrl, parseCommand, provisionAdministrator,
+  administratorFromUrl, grantVariableConflict, masterConnectionUrl, parseCommand, provisionAdministrator,
   provisionRuntimeLogins, revokeVariableConflict, roleNameFromUrl, runtimeLoginPlan, verificationEnvironment,
 } from './database-login-provisioning.mjs';
 import { verifyRuntimeLogins } from './verify-runtime-logins.mjs';
@@ -60,7 +61,9 @@ async function run(command, environment) {
     const verification = await verify(environment, roleNameFromUrl(adminUrl, 'DATABASE_ADMIN_URL'));
     return { status: verification.status, verification };
   }
-  const administrator = loginFromUrl(adminUrl, 'DATABASE_ADMIN_URL');
+  // Every changing command refuses an administrator named after a HID group
+  // role here, before it connects.
+  const administrator = administratorFromUrl(adminUrl);
   if (command === '--runtime-logins') {
     const plan = runtimeLoginPlan(environment, administrator, masterUser(environment));
     const logins = await withClient(adminUrl, 'hid-database-provisioning', (admin) => provisionRuntimeLogins(admin, plan));

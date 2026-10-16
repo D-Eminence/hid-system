@@ -197,7 +197,7 @@ The reviewed role model is:
 | `hid_event_delivery_commands` | Technical security-definer owner | None | Never inherited; reads five domain outboxes through exact RLS policies and mutates only `integration` delivery/inbox state. |
 | `hid_ocr_queue_metrics` | Technical security-definer owner | None | Never inherited; owns `ocr.worker_queue_metrics()` and reads only `ocr.jobs.status` and `queued_at` through one exact RLS policy (0075). |
 | `hid_platform_control_reader` | Technical security-definer owner | None | Never inherited; owns `platform.control_enabled(text)` and reads only `platform.control_settings.control_key` and `enabled` through one exact RLS policy (launch; role bootstrap only). |
-| `hid_migration_admin` | Migration and provisioning administration | Environment-specific | Never inherited by an application runtime login. |
+| `hid_migration_admin` | Migration and provisioning administration | Environment-specific | Never inherited by an application runtime login. A NOLOGIN group role: the migration administrator LOGIN must have another name, as no LOGIN may take the name of a role `runtime-grants.sql` creates, or the role bootstrap cannot run as it (`MIGRATION_RUNBOOK.md` §6). |
 | `hid_schema_test_runtime` | Rollback-only schema/RLS acceptance | Test-only explicit grants | NOLOGIN and never used by application processes. |
 
 Identity, EHR, and OCR now use separate service processes and pools. The retired

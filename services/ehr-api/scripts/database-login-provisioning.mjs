@@ -19,8 +19,9 @@
 // here, never in a statement's text, so a statement log or pg_stat_activity
 // shows no password. An existing role keeps its attributes: if they differ,
 // or an existing runtime LOGIN is a member of any role but its aggregate, the
-// run refuses and changes nothing. Every message names roles and variables
-// only, never a URL or password.
+// run refuses and changes nothing. Neither the administrator nor a runtime
+// LOGIN may carry the name of a HID group role. Every message names roles and
+// variables only, never a URL or password.
 import { createHash, createHmac, pbkdf2Sync, randomBytes } from 'node:crypto';
 import { RUNTIME_CREDENTIALS, credentialVariable } from './verify-runtime-logins.mjs';
 
@@ -34,7 +35,21 @@ const PASSWORD = /^[\x21-\x7e]{16,1024}$/;
 // Query parameters that would make node-postgres connect as another role, to
 // another database or with other session options than the URL's own parts.
 const OVERRIDING_PARAMETERS = ['user', 'password', 'database', 'dbname', 'port', 'options'];
-const GROUP_ROLES = new Set(Object.values(RUNTIME_CREDENTIALS));
+// The NOLOGIN group roles the role bootstrap (database/runtime-grants.sql)
+// creates; a test keeps this list equal to its `create role` statements. The
+// bootstrap skips a role that already exists and then requires ADMIN OPTION
+// on it, which in PostgreSQL 16 no role holds on itself, so a LOGIN of one of
+// these names, above all the migration administrator, would stop it after the
+// whole chain had been migrated.
+export const HID_GROUP_ROLES = Object.freeze([
+  'hid_identity_runtime', 'hid_ehr_runtime', 'hid_api_runtime', 'hid_identity_api_runtime', 'hid_ehr_api_runtime',
+  'hid_ocr_api_runtime', 'hid_audit_writer', 'hid_document_scanner', 'hid_ocr_runtime', 'hid_ocr_worker',
+  'hid_lab_runtime', 'hid_lab_api_runtime', 'hid_pharmacy_runtime', 'hid_pharmacy_api_runtime', 'hid_outreach_runtime',
+  'hid_outreach_api_runtime', 'hid_migration_admin', 'hid_schema_test_runtime', 'hid_event_delivery_commands',
+  'hid_ocr_queue_metrics', 'hid_platform_control_reader', 'hid_event_dispatcher', 'hid_notification_runtime',
+  'hid_notification_api_runtime', 'hid_notification_worker',
+]);
+const GROUP_ROLES = new Set(HID_GROUP_ROLES);
 const ADMINISTRATOR_ATTRIBUTES = Object.freeze({ rolcanlogin: true, rolsuper: false, rolbypassrls: false,
   rolcreaterole: true, rolcreatedb: false, rolreplication: false, rolinherit: true });
 const RUNTIME_ATTRIBUTES = Object.freeze({ ...ADMINISTRATOR_ATTRIBUTES, rolcreaterole: false });
@@ -86,6 +101,20 @@ export function loginFromUrl(value, label) {
   if (!DATABASE_NAME.test(database)) throw new Error(`${label} must name its database`);
   const host = (url.searchParams.get('host') ?? url.hostname).toLowerCase();
   return { user, password, database, target: `${host}:${url.port || '5432'}/${database}` };
+}
+
+function refuseGroupRoleAdministrator(user) {
+  if (GROUP_ROLES.has(user)) {
+    throw new Error(`DATABASE_ADMIN_URL names the HID group role ${user}; the role bootstrap creates that role and `
+      + 'cannot run as it, so name the migration administrator otherwise');
+  }
+}
+
+/** The migration administrator of DATABASE_ADMIN_URL: a LOGIN to provision, never a HID group role. */
+export function administratorFromUrl(value) {
+  const administrator = loginFromUrl(value, 'DATABASE_ADMIN_URL');
+  refuseGroupRoleAdministrator(administrator.user);
+  return administrator;
 }
 
 /**
@@ -196,6 +225,7 @@ export async function ledgerState(admin) {
  * administrator's attributes and the master's memberships).
  */
 export async function provisionAdministrator(master, administrator, masterUser) {
+  refuseGroupRoleAdministrator(administrator.user);
   if (administrator.user === masterUser) throw new Error('The migration administrator must not be the RDS master');
   return inTransaction(master, async () => {
     const existing = await roleAttributes(master, administrator.user);
