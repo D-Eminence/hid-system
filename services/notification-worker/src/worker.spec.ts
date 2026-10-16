@@ -307,3 +307,17 @@ describe('flag email: one PHI-free outcome line per processed event', () => {
     expect(lost.lines.join('')).not.toContain(patientId);
   });
 });
+
+describe('flag email: the outcome line echoes only a correlation id of the outbox shape', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('a correlation id outside the outbox pattern is reported as invalid, never echoed', async () => {
+    const { worker, repositoryValue, orchestratorValue, lines } = recorded('accepted');
+    repositoryValue.resolveRecipient.mockResolvedValue({ delivery: 'withhold', bound: false });
+    orchestratorValue.clearSubscriberEmail.mockResolvedValue({ outcome: 'confirmed', provider: 'novu' });
+    const forged = { ...event, correlationId: 'synthetic.patient@example.invalid' };
+    await worker.process(sqsMessage(forged));
+    expect(outcomeLines(lines)).toEqual([expect.objectContaining({ correlationId: 'invalid', inbox: 'processed' })]);
+    expect(lines.join('')).not.toContain('@');
+  });
+});

@@ -102,3 +102,11 @@ describe('subscriber sync startup privilege', () => {
     expect(ended()).toBe(1);
   });
 });
+
+describe('subscriber sync startup privilege when the database fails', () => {
+  it('closes the pool and rethrows when the check itself fails', async () => {
+    const { repository, ended } = repositoryWith(() => Object.assign(new Error('connection refused'), { code: 'ECONNREFUSED' }));
+    await expect(repository.verifySubscriberSyncPrivilege()).rejects.toThrow('connection refused');
+    expect(ended()).toBe(1);
+  });
+});
