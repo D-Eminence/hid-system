@@ -222,7 +222,7 @@ test('all backend ECS services run without public IPs', () => {
 
 test('execution and task roles are separate on every task definition', () => {
   const taskDefinitions = properties(regional, 'AWS::ECS::TaskDefinition');
-  assert.equal(taskDefinitions.length, 12);
+  assert.equal(taskDefinitions.length, 13);
   for (const definition of taskDefinitions) {
     assert.notDeepEqual(definition.ExecutionRoleArn, definition.TaskRoleArn);
   }
@@ -294,11 +294,15 @@ test('OCR KMS use is exact-key and constrained to S3 via-service', () => {
   assert.match(JSON.stringify(statement.Condition), /kms:ViaService/);
 });
 
-test('all workloads and the migration job have separate task definitions', () => {
+// Two one-shot task definitions run no service: the migration job and the
+// database provisioning job (MIGRATION_RUNBOOK.md §6.1, §6.3).
+test('all workloads, the migration job and the provisioning job have separate task definitions', () => {
   assert.equal(properties(regional, 'AWS::ECS::Service').length, workloadNames.length);
-  assert.equal(properties(regional, 'AWS::ECS::TaskDefinition').length, workloadNames.length + 1);
+  assert.equal(properties(regional, 'AWS::ECS::TaskDefinition').length, workloadNames.length + 2);
   const families = properties(regional, 'AWS::ECS::TaskDefinition').map((item) => item.Family);
-  assert.equal(new Set(families.map((item) => JSON.stringify(item))).size, workloadNames.length + 1);
+  assert.equal(new Set(families.map((item) => JSON.stringify(item))).size, workloadNames.length + 2);
+  assert.deepEqual(families.filter((family) => !workloadNames.some((name) => family === `hid-production-${name}`)).sort(),
+    ['hid-production-database-migration', 'hid-production-database-provisioning']);
 });
 
 test('CloudFront is absent because Cloudflare owns frontend and edge delivery', () => {
@@ -340,13 +344,105 @@ test('token-bearing tasks mount the token volume read-only', () => {
   for (const definition of mounted) assert.match(JSON.stringify(definition), /"ReadOnly":true/);
 });
 
+// Every Node image's runtime stage is gcr.io/distroless/nodejs22-debian13: it
+// has no /bin/sh, and node is /nodejs/bin/node, which is not on PATH. An ECS
+// CMD-SHELL check, or a bare `node`, therefore fails every probe, and ECS
+// replaces the essential container and rolls the deployment back. Only the
+// gateway (nginx-unprivileged, BusyBox sh and wget) may use CMD-SHELL.
+test('every Node container health check runs /nodejs/bin/node in exec form', () => {
+  const nodeImage = /^(?!Gateway)[A-Za-z]+ImageUri$/;
+  for (const [label, template] of [['production', regional], ['staging economy', stagingRegional],
+    ['staging fidelity', fidelityRegional], ['development', developmentRegional]] as const) {
+    const containers = properties(template, 'AWS::ECS::TaskDefinition')
+      .flatMap((definition) => definition.ContainerDefinitions as Array<Record<string, unknown>>);
+    const checked = containers.filter((container) => container.HealthCheck);
+    assert.ok(checked.length >= 10, `${label}: every service with a health path has a container check`);
+    for (const container of checked) {
+      const command = (container.HealthCheck as { readonly Command: readonly string[] }).Command;
+      const image = (container.Image as { readonly Ref?: string }).Ref ?? '';
+      if (container.Name === 'gateway') {
+        assert.equal(image, 'GatewayImageUri');
+        assert.equal(command[0], 'CMD-SHELL', `${label}: the gateway keeps its BusyBox wget check`);
+        assert.match(command[1]!, /^wget -q -O \/dev\/null http:\/\/127\.0\.0\.1:3000\/gateway-health\/ready \|\| exit 1$/);
+        continue;
+      }
+      assert.match(image, nodeImage, `${label}: ${String(container.Name)} runs a distroless Node image`);
+      assert.equal(command[0], 'CMD', `${label}: ${String(container.Name)} must not need a shell`);
+      assert.equal(command[1], '/nodejs/bin/node', `${label}: ${String(container.Name)} must name node's absolute path`);
+      assert.ok(command.every((part) => !/^node\b/.test(part)), `${label}: ${String(container.Name)} runs no bare node`);
+    }
+    const service = (name: string, port: number) => {
+      const container = checked.find((candidate) => candidate.Name === name)!;
+      const command = (container.HealthCheck as { readonly Command: readonly string[] }).Command;
+      assert.deepEqual(command.slice(0, 3), ['CMD', '/nodejs/bin/node', '-e'], `${label}: ${name}`);
+      assert.equal(command.length, 4, `${label}: ${name} passes one script to node -e`);
+      assert.ok(command[3]!.includes(`fetch('http://127.0.0.1:${port}/api/v1/health/ready')`), `${label}: ${name}`);
+      assert.match(command[3]!, /process\.exit\(r\.ok\?0:1\)/);
+      assert.match(command[3]!, /catch\(\(\)=>process\.exit\(1\)\)/);
+    };
+    service('identity-api', 3001);
+    service('notification-api', 3007);
+    service('ehr-api', 3002);
+    service('event-dispatcher', 3010);
+  }
+});
+
 test('migration is a separate one-shot task with a safe plan default', () => {
   const migration = properties(regional, 'AWS::ECS::TaskDefinition')
     .find((definition) => JSON.stringify(definition.Family).includes('database-migration'))!;
   const containers = migration.ContainerDefinitions as Array<Record<string, unknown>>;
-  assert.deepEqual(containers[0]!.Command, ['--plan']);
+  // The migration image's entrypoint is the distroless /nodejs/bin/node, and
+  // ECS `command` replaces its CMD: a bare ['--plan'] runs `node --plan`,
+  // which Node refuses ("bad option"). The command names the script.
+  assert.deepEqual(containers[0]!.Command, ['scripts/apply-migrations.mjs', '--plan']);
   assert.equal(properties(regional, 'AWS::ECS::Service')
     .some((service) => JSON.stringify(service).includes('database-migration')), false);
+});
+
+// The role bootstrap (db:bootstrap, db:verify-roles) and the first Super
+// Admin bootstrap (admin:bootstrap) read DATABASE_ADMIN_URL, and RDS is
+// reachable only from the service tasks and this task. Both variables are
+// the one deployment-only migration administrator; no other secret.
+test('the migration task maps the migration administrator as DATABASE_URL and DATABASE_ADMIN_URL only', () => {
+  for (const [label, template] of [['production', regional], ['staging economy', stagingRegional],
+    ['development', developmentRegional]] as const) {
+    const migration = properties(template, 'AWS::ECS::TaskDefinition')
+      .find((definition) => JSON.stringify(definition.Family).includes('database-migration'))!;
+    const container = (migration.ContainerDefinitions as Array<Record<string, unknown>>)[0]!;
+    const secrets = (container.Secrets as Array<{ readonly Name: string; readonly ValueFrom: unknown }>)
+      .map((secret) => [secret.Name, secret.ValueFrom]);
+    const administrator = { 'Fn::Join': ['', [{ Ref: 'MigrationDatabaseSecretArn' }, ':url::']] };
+    assert.deepEqual(secrets.sort(), [['DATABASE_ADMIN_URL', administrator], ['DATABASE_URL', administrator]], label);
+    assert.deepEqual((container.Environment as Array<{ readonly Name: string }>).map((entry) => entry.Name).sort(),
+      ['DATABASE_SSL', 'DATABASE_SSL_ROOT_CERT_BASE64', 'NODE_ENV'], label);
+  }
+});
+
+// On Fargate the task's own network interface pulls the image from ECR,
+// fetches its secret and writes its logs. Wherever the task can run (every
+// profile but sleep), it needs the endpoints and S3 on 443, as staging has.
+test('the production and development migration task can pull its image, read its secret and log', () => {
+  for (const [label, template] of [['production', regional], ['development', developmentRegional]] as const) {
+    const [groupId] = resources(template, 'AWS::EC2::SecurityGroup')
+      .find(([id]) => id.startsWith('MigrationSecurityGroup'))!;
+    const outbound = properties(template, 'AWS::EC2::SecurityGroupEgress')
+      .filter((rule) => JSON.stringify(rule.GroupId).includes(groupId));
+    assert.equal(outbound.length, 3, `${label}: migration may reach only RDS, AWS endpoints, and S3`);
+    assert.ok(outbound.some((rule) => rule.FromPort === 5432 && rule.ToPort === 5432
+      && JSON.stringify(rule.DestinationSecurityGroupId ?? '').includes('DatabaseSecurityGroup')), label);
+    assert.ok(outbound.some((rule) => rule.FromPort === 443 && rule.ToPort === 443
+      && JSON.stringify(rule.DestinationSecurityGroupId ?? '').includes('AwsEndpointSecurityGroup')), label);
+    assert.ok(outbound.some((rule) => rule.FromPort === 443 && rule.ToPort === 443
+      && JSON.stringify(rule.DestinationPrefixListId ?? '').includes('S3PrefixListId')), label);
+    for (const rule of outbound) {
+      assert.equal(rule.CidrIp, undefined, `${label}: migration must not gain public egress`);
+      assert.equal(rule.CidrIpv6, undefined, `${label}: migration must not gain public IPv6 egress`);
+    }
+    const inbound = properties(template, 'AWS::EC2::SecurityGroupIngress')
+      .filter((rule) => JSON.stringify(rule.SourceSecurityGroupId ?? '').includes(groupId));
+    assert.ok(inbound.some((rule) => rule.FromPort === 443
+      && JSON.stringify(rule.GroupId).includes('AwsEndpointSecurityGroup')), `${label}: the endpoints admit the migration task`);
+  }
 });
 
 test('ordinary notifications have one selected EventBridge route and encrypted SQS/DLQ pair', () => {

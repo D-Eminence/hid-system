@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { App } from 'aws-cdk-lib';
-import { environmentConfig, externalAwsEnvironment } from '../src/config.js';
+import { environmentConfig, externalAwsEnvironment, identityBudgetVariables } from '../src/config.js';
 import { HidRegionalStack } from '../src/hid-regional-stack.js';
 import { HidCostGovernanceStack } from '../src/cost-governance-stack.js';
 
@@ -18,6 +18,9 @@ const configuration = environmentConfig(
     notificationWorkerEnabled: process.env.HID_NOTIFICATION_WORKER_ENABLED,
     novuSubscriberSyncEnabled: process.env.HID_NOVU_SUBSCRIBER_SYNC_ENABLED,
     operationalAlarmTopicArn: process.env.HID_OPERATIONAL_ALARM_TOPIC_ARN,
+    // Optional: HID_PATIENT_ENROLLMENT_QOREID_DAILY_CAP and the other
+    // Identity budgets, and HID_QOREID_TIMEOUT_MS (config.ts).
+    identityBudgets: Object.fromEntries(identityBudgetVariables.map((name) => [name, process.env[`HID_${name}`]])),
     patientReleaseVitals: process.env.HID_EHR_PATIENT_RELEASE_VITALS,
     patientReleaseDiagnoses: process.env.HID_EHR_PATIENT_RELEASE_DIAGNOSES,
     patientReleasePrescriptions: process.env.HID_EHR_PATIENT_RELEASE_PRESCRIPTIONS,

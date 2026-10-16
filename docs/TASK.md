@@ -1317,10 +1317,22 @@ history, and the consolidated `localhost:3000` browser flow.
   Browser navigation reflects capabilities, while controllers and database
   commands independently enforce them. Platform role alone cannot perform EHR,
   Lab, Pharmacy, OCR, Outreach, audit mutation, or break-glass actions.
-- The one-time `admin:bootstrap` command requires `DATABASE_ADMIN_URL`, one
-  exact eligible account UUID, and an explicit reason; it serializes, audits,
-  and refuses to create a second active Super Admin. Runtime authorization
-  never reads a bootstrap email or environment flag.
+- The one-time `admin:bootstrap` command requires `DATABASE_ADMIN_URL`, an
+  explicit reason and exactly one of: two or three email addresses
+  (`PLATFORM_ADMIN_EMAILS`, owner decision 2026-10-16, SUPERADMIN-ACCOUNTS:
+  it creates platform-only accounts with no password, and each person sets
+  their own with the admin password reset and enrols an authenticator), two or
+  three distinct eligible account UUIDs (`PLATFORM_ADMIN_ACCOUNT_IDS`), or one
+  account with `PLATFORM_ADMIN_ACCOUNT_ID` for development only, refused when
+  `NODE_ENV` is `production`. It grants them all in one audited transaction,
+  serializes, and refuses to run while any Super Admin exists, whatever its
+  status; `PLATFORM_ADMIN_REPLACE_PENDING=1` replaces an email-seeded set
+  nobody has used yet (a mistyped address), so every listed person confirms
+  their reset code arrived before anyone sets a password. Each address is one
+  no HID 1.0 auth user has: a seeded account keeps its address
+  (`accounts_email_ci_uq`), which would block a later HID 1.0 promotion of the
+  same address. Runtime authorization never reads a bootstrap email or
+  environment flag.
 - Facilities have `pending`, `verified`, `rejected`, and `suspended` lifecycle
   state. Suspension makes `active=false`, so existing membership/authorization
   checks fail while history remains. Commands require reason, idempotency, and

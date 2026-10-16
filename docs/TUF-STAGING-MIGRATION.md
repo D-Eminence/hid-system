@@ -444,9 +444,15 @@ The executable covers:
    Outreach logins from the control rows, and the OCR worker login's claim
    must reach the function's own authorization check without the parameter
    privilege. It also runs `platform-control-owner.integration.sql` and
-   `function-parameter-settings.integration.sql`, removes its cluster, and is
-   recorded under `evidence.checks` as `non_superuser_database` (about 5 s
-   locally).
+   `function-parameter-settings.integration.sql`. On a second cluster laid out
+   as a new RDS instance (a `NOSUPERUSER CREATEROLE` master owns the database,
+   and the provisioned roles sign in with SCRAM-SHA-256 passwords), it runs
+   the provisioning task's script: `--administrator`, the 0015 grant, the
+   migrations and the revoke, the bootstrap, refusals that change nothing, the
+   ten runtime LOGINs verified with their own passwords, a rerun, a rotation
+   and `--verify-logins` (`AWS_DEPLOYMENT_RUNBOOK.md` §4). It removes both
+   clusters and is recorded under `evidence.checks` as
+   `non_superuser_database` (about 20 s locally).
 2. Seed a separate synthetic canonical patient/account/facility/membership,
    encounter, clinical note/revision and audit event before backup. Record
    per-table counts and deterministic sorted-row SHA-256 plus sequence state.

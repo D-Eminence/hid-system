@@ -46,3 +46,34 @@ test('wrong account, production, mismatched source bytes, unresolved counts and 
     f => { f.plan.parameters.AppScalingCeiling.value = 0; },
   ]) { const f = fixture(); modify(f); assert.throws(() => assessStagingCapacity(f.bytes, f.plan, f.quota)); }
 });
+
+// The database provisioning task (MIGRATION_RUNBOOK.md §6.1, §6.3) is a second
+// one-shot task with no service. The operator runs one one-shot task at a
+// time, so the envelope reserves the larger of the two; any other task
+// definition without a service is still refused.
+function withStandalone(extra) {
+  const f = fixture();
+  const template = JSON.parse(f.bytes.toString());
+  Object.assign(template.Resources, extra);
+  f.bytes = Buffer.from(JSON.stringify(template));
+  f.plan.template_sha256 = createHash('sha256').update(f.bytes).digest('hex');
+  return f;
+}
+
+test('reserves the larger one-shot task and refuses an unknown task definition without a service', () => {
+  const smaller = withStandalone({ DatabaseProvisioningTaskDefinitionA1B2: { Type: 'AWS::ECS::TaskDefinition', Properties: { Cpu: '256' } } });
+  const r = assessStagingCapacity(smaller.bytes, smaller.plan, smaller.quota);
+  assert.equal(r.one_migration_task_vcpu, 0.5);
+  assert.equal(r.one_shot_task_vcpu, 0.5);
+  assert.equal(r.full_rollout_plus_migration_vcpu, 2.5);
+  const larger = withStandalone({ DatabaseProvisioningTaskDefinitionA1B2: { Type: 'AWS::ECS::TaskDefinition', Properties: { Cpu: '1024' } } });
+  const l = assessStagingCapacity(larger.bytes, larger.plan, larger.quota);
+  assert.equal(l.one_shot_task_vcpu, 1);
+  assert.equal(l.full_rollout_plus_migration_vcpu, 3);
+  for (const extra of [{ OtherTaskDefinition: { Type: 'AWS::ECS::TaskDefinition', Properties: { Cpu: '256' } } },
+    { DatabaseProvisioningTaskDefinitionA: { Type: 'AWS::ECS::TaskDefinition', Properties: { Cpu: '256' } },
+      DatabaseProvisioningTaskDefinitionB: { Type: 'AWS::ECS::TaskDefinition', Properties: { Cpu: '256' } } }]) {
+    const f = withStandalone(extra);
+    assert.throws(() => assessStagingCapacity(f.bytes, f.plan, f.quota), /Standalone one-shot tasks unresolved/);
+  }
+});

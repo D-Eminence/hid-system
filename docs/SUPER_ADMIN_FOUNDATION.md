@@ -86,23 +86,198 @@ authentication without `platform.admin.access` shows denial. Browser guards
 are UX only; every API method has a backend permission decorator and the
 database command repeats the platform capability check.
 
-The one-time bootstrap command is:
+The one-time bootstrap seeds the initial governance set: two or three Super
+Admins in one run. No administrator can grant another alone: a Super Admin
+grant needs the decision of a second, MFA-enrolled Super Admin who is neither
+the requester nor the target (0070), and a clinician application is approved
+only by a Super Admin other than the one who attested it (0098). With a single
+Super Admin neither can ever happen, and no command adds a second one after the
+bootstrap. So in production name two or three people at once, preferably
+three (Where the accounts come from). On a new database name them by email
+address (owner decision 2026-10-16, below):
 
 ```bash
 DATABASE_ADMIN_URL='postgresql://...' \
-PLATFORM_ADMIN_ACCOUNT_ID='exact-v4-account-uuid' \
-PLATFORM_ADMIN_BOOTSTRAP_REASON='Approved initial platform governance owner' \
+PLATFORM_ADMIN_EMAILS='example-owner-1@example.org example-owner-2@example.org example-owner-3@example.org' \
+PLATFORM_ADMIN_BOOTSTRAP_REASON='Approved initial platform governance owners' \
 npm --prefix services/ehr-api run admin:bootstrap
 ```
 
+or name existing accounts by UUID in `PLATFORM_ADMIN_ACCOUNT_IDS`
+(`exact-v4-account-uuid-1,exact-v4-account-uuid-2,exact-v4-account-uuid-3`)
+instead of `PLATFORM_ADMIN_EMAILS`.
+
+In AWS it runs as the migration task with the command override
+`["scripts/bootstrap-platform-admin.mjs"]` and these variables as environment
+overrides (`AWS_DEPLOYMENT_RUNBOOK.md` §4); `DATABASE_ADMIN_URL` comes from the
+task's secret. It takes exactly one of three inputs:
+
+- `PLATFORM_ADMIN_EMAILS`: two or three distinct email addresses, separated by
+  commas or spaces. Each is trimmed and lower-cased, as staff email is (0087),
+  and must be one plain address of at most 254 characters, with no display
+  name. For each address the run creates a platform-only account (subject
+  `platform:<id>`, no display name, no staff or patient record, source `hid`)
+  with no password, status `pending_reset` and its email not marked verified,
+  and grants it `platform_super_admin`. It refuses an address that already
+  belongs to any non-deleted account or staff record: name existing accounts
+  in `PLATFORM_ADMIN_ACCOUNT_IDS` instead. It needs migration `0086`, whose
+  platform recovery reaches an administrator still setting a password. It
+  prints the new account IDs in the order of the addresses, never an address.
+- `PLATFORM_ADMIN_ACCOUNT_IDS`: two or three distinct version-4 account UUIDs
+  separated by commas. Each account must exist already, active, with an email
+  address and a password credential: platform sign-in is by email and password
+  and finds the account by its email alone, so an account without one (a
+  phone-only patient account, for instance) is refused.
+- `PLATFORM_ADMIN_ACCOUNT_ID` (one account) remains for development: it is
+  refused together with another form, and refused alone when `NODE_ENV` is
+  `production`, as the migration task runs in every AWS environment, because
+  one Super Admin alone could never add a second or approve a clinician
+  application.
+
+Each administrator enrols an authenticator at the first platform sign-in
+(Stage 2A: no staff/facility tuple). An input error is refused before the run
+connects, naming the variable and never echoing an address.
+
 It runs only with an explicitly injected database-administrator connection,
-serializes with an advisory transaction lock, requires migration `0027`,
-requires one exact active account with a password credential (Stage 2A: no
-staff/facility tuple; the administrator enrolls an authenticator at first
-platform sign-in), refuses to run if any active legacy or current Super Admin exists, creates one
-explicit assignment, increments the account version, and writes a system audit
-event. It has no email inference, developer bypass, reusable login shortcut, or
-repeat-success path.
+serializes with an advisory transaction lock, requires migration `0027`, and
+refuses to run while any non-deleted account holds an unrevoked platform Super
+Admin (or legacy platform admin) assignment, whatever that account's status,
+so it can never add an administrator beside a set already seeded, even one
+still waiting for its passwords. In one transaction it creates the accounts
+(email form), one explicit assignment per account, increments each account's
+version, and writes one system audit event `admin.platform-role.bootstrap`
+per account whose `details.bootstrapAccounts` names the whole set; the email
+form adds `details.method` `email` and `accountCreated` and records no
+address. A repeated, ineligible (not active, or without an email address or
+password) or fourth account grants nothing. It never resolves an existing
+account from an email address, and has no developer bypass, reusable login
+shortcut, or repeat-success path.
+
+### Where the accounts come from
+
+A new database has no account: no migration seeds one, and no service runs
+while the database is provisioned, so the bootstrap is no step of the
+provisioning order (`AWS_DEPLOYMENT_RUNBOOK.md` §4).
+
+Owner decision 2026-10-16 (SUPERADMIN-ACCOUNTS, `PHASE_3_LAUNCH_DECISIONS.md`):
+"By email, own password". The one-time bootstrap names the governance owners
+by email address in `PLATFORM_ADMIN_EMAILS` and creates each a platform-only
+account with no password, `pending_reset`, in the same audited transaction that
+grants each Super Admin. Each person then sets their own password with the
+admin reset and enrols an authenticator. Nobody else ever knows the password:
+not the operator who runs the task, and not another Super Admin. In order
+(`AWS_DEPLOYMENT_RUNBOOK.md` §4, Running the migration task):
+
+1. Choose the people and their addresses. Prefer three people: if one address
+   turns out to be wrong after the others have set their passwords, two Super
+   Admins remain. Give each person an address that no HID 1.0 auth user has,
+   such as a dedicated admin mailbox, and check it against the approved
+   read-only HID 1.0 source before the run: a seeded account keeps its address
+   (`accounts_email_ci_uq`), which blocks a later HID 1.0 promotion of the same
+   address (below).
+2. Run it after the services and SES are live, so the reset code can be
+   delivered by email.
+3. Then every listed person starts the admin reset and confirms that the
+   emailed code arrived before anyone sets a password. Each opens the admin
+   password reset ("Forgot your password?" on the admin sign-in page:
+   `/admin/recover` on the admin site or on the main site), which starts the
+   recovery with the Turnstile action `admin-reset` (the platform audience,
+   0086), enters their address and tells the operator that the code arrived,
+   without entering it. Starting a reset changes no account, so a mistyped
+   address can still be replaced (below). The recovery start answers an
+   address without an account exactly as any other, so a code that never
+   arrives is the only sign of a mistyped address.
+4. Once every code has arrived, each person enters the code from step 3 on the
+   same page and sets their own password. Completing the recovery turns
+   `pending_reset` into `active` (0086). A code lasts `OTP_EXPIRY_SECONDS`
+   (300 seconds by default), and entering
+   it changes no account until the password is set. Only a person whose
+   code has expired starts the reset again, and not within
+   `OTP_RESEND_COOLDOWN_SECONDS` (60 seconds) of their last start, which
+   returns the same challenge and sends no new code. Recovery starts are
+   limited per client network (`OTP_RATE_MAX_REQUESTS`, 5 by default, per
+   `OTP_RATE_WINDOW_SECONDS`, 900 seconds, for one IPv4 address or IPv6 /64),
+   so people on one network space their starts; `429 OTP_RATE_LIMITED` means
+   waiting the `Retry-After`, not a mistyped address.
+5. Each person signs in at the admin site with that password and enrols an
+   authenticator app (TOTP) at the first sign-in; a platform enrolment needs no
+   emailed code. An account that is also an eligible staff member would enrol
+   at staff sign-in instead, but these accounts have no staff record.
+6. Then one Super Admin enables the QoreID integration, sets the launch
+   controls and designates facilities, as their release checklist rows require.
+
+If an address was mistyped (its code never arrives), run the bootstrap again
+at once with the corrected list and `PLATFORM_ADMIN_REPLACE_PENDING=1`.
+It is accepted only while every account holding a Super Admin assignment is
+one the email bootstrap created (its audit event says so) that nobody has used:
+still `pending_reset`, with no password, session, authenticator, external
+sign-in, staff or patient record. A started or verified reset changes no
+account (it writes only recovery challenge, cooldown and rate-limit records),
+so it does not count as use. In the same transaction it revokes
+their assignments, marks those accounts `deleted` (audit event
+`admin.platform-role.bootstrap.replaced` for each) and seeds the new list; an
+address on both lists is created again, so every listed person confirms a new
+code (step 3) before anyone sets a password. Once anyone has set a password it
+refuses, for every address. The other Super Admins can then remove a wrong
+account through the governed role and status commands
+(`POST /principals/:id/platform-roles` and `/status`), but nothing adds the
+right person: a Super Admin is added only by a two-person approval, and no
+command creates a platform-only account. With two addresses, a wrong one found
+after the other person has set a password leaves a single Super Admin, who can
+never add a second or approve a clinician application, and no command repairs
+it (P6 can then never pass). Until the people reset, whoever controls an
+address on the list can set that Super Admin's password through the admin
+reset, so check the addresses before the run, complete the resets as soon as
+every code has arrived, and after the run compare each
+`auth.otp.recovery.completed` event with the person who reset.
+
+The HID 1.0 promotion (`MIGRATION_RUNBOOK.md` §7 and §8) would also create
+accounts. It creates each HID 1.0 user's account with the HID 1.0 auth user
+UUID as its account ID, its email and its HID 1.0 password (bcrypt, upgraded to
+Argon2id at the first sign-in). The account is active only with an email
+confirmed in HID 1.0; otherwise it is `pending_reset`, which the account ID
+form refuses. A HID 1.0 `platform_admin` membership is held with
+`privileged_role_requires_reapproval` and grants no platform role, so on a
+database not yet seeded by email the bootstrap's check for an existing Super
+Admin still passes, and the bootstrap is the re-approval.
+
+An account seeded by email keeps its address. The unique index
+`accounts_email_ci_uq` (0002) covers every status but `deleted`, no command
+changes an account's address, and disabling the account keeps it. The
+promotion inserts an account only when its ID is new (`on conflict (id)`), so
+promoting a HID 1.0 user whose address a seeded account has, in any letter
+case, is a `target_content_mismatch` conflict on `auth.accounts` that blocks
+the whole promotion run (`MIGRATION_RUNBOOK.md` §8). Hence step 1: each person
+is seeded with an address that no HID 1.0 auth user has. If a governance
+owner's seeded address is nevertheless their HID 1.0 address, record it:
+resolving that conflict needs an owner decision, and the promotion path still
+to be designed must handle it.
+
+A HID 1.0 administrator who already holds a Super Admin account seeded by
+email under another address is not re-approved: that HID 1.0 account keeps
+no platform role. Two-person approval (0070) and clinician approval (0098)
+separate accounts, not people, so each person holds at most one Super Admin
+account.
+
+But the promotion has no AWS execution path yet (`AWS_DEPLOYMENT_RUNBOOK.md`
+§6). RDS accepts connections only from the service tasks and the migration
+security group. The migration task maps only the migration administrator's
+URL, as `DATABASE_URL` and `DATABASE_ADMIN_URL`; its security group reaches
+only RDS, the AWS endpoints and Amazon S3, and its image holds no HID 1.0
+export. So `migration:stage` can read neither the HID 1.0 source
+(`LEGACY_DATABASE_URL`) nor an export (`MIGRATION_FIXTURE_PATH`), and
+`migration:promote` refuses to start without
+`MIGRATION_FIELD_ENCRYPTION_KEY_B64`, `MIGRATION_LOOKUP_HMAC_KEY_B64` and
+`CONTACT_LOOKUP_HMAC_KEY_B64`: secrets that no task maps and that are never
+passed as RunTask overrides. The first Super Admins no longer wait for it: the
+email form above is the production route. Never open RDS to another network or
+pass a key as an override to get around the promotion's missing path.
+
+Once a promotion path exists, promoted accounts may be named in
+`PLATFORM_ADMIN_ACCOUNT_IDS` instead, each active with an email address and a
+password. For a promoted account, take each UUID from that person's HID 1.0
+auth user ID in the approved read-only HID 1.0 source (the promotion keeps it
+unchanged); never guess a UUID from an email or a name.
 
 ## Implemented API surface
 
