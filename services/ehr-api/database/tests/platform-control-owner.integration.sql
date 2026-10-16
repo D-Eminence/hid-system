@@ -60,8 +60,8 @@ begin
     perform set_config('hid_control_owner_test.' || control.control_key, control.enabled::text, true);
     listed := listed + 1;
   end loop;
-  if listed <> 6 then
-    raise exception 'admin_list_controls returned % controls instead of 6', listed;
+  if listed <> 7 then
+    raise exception 'admin_list_controls returned % controls instead of 7', listed;
   end if;
 end
 $$;
@@ -76,7 +76,7 @@ declare
 begin
   foreach control_key in array array[
     'patient_portal_enabled', 'provider_portal_enabled', 'outreach_portal_enabled',
-    'maintenance_mode', 'uploads_enabled', 'break_glass_enabled'
+    'maintenance_mode', 'uploads_enabled', 'break_glass_enabled', 'record_chat_enabled'
   ] loop
     if platform.control_enabled(control_key)
          is distinct from current_setting('hid_control_owner_test.' || control_key)::boolean then

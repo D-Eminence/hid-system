@@ -913,6 +913,25 @@ select kind, record_id, record_status, encounter_id, encounter_status, facility_
 rollback;
 ```
 
+P36 check (read-only), after the patient record chat migration and its bootstrap, and before any record chat flag is set:
+
+```sql
+begin transaction isolation level repeatable read read only;
+set local statement_timeout = '120s';
+set local lock_timeout = '5s';
+-- The kill switch through platform.control_enabled, as every guard reads it
+-- (forced row-level security hides the row from the migration administrator).
+select 'record_chat_enabled' as control_key, platform.control_enabled('record_chat_enabled') as enabled;
+-- The two limit commands: security definer with a pinned search path.
+set local row_security = off;
+select proname, prosecdef, proconfig
+  from pg_proc
+ where oid in ('ehr.reserve_record_chat(text,uuid,integer,bigint)'::regprocedure,
+   'ehr.settle_record_chat(uuid,integer,integer,integer,integer,text)'::regprocedure)
+ order by proname;
+rollback;
+```
+
 ### 4.1 P8 follow-up: dedicated technical owners (proposal, Stage 7C)
 
 This is a design proposal, recorded in full in ADR-041. Its

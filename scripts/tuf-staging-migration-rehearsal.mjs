@@ -399,6 +399,21 @@ try {
     { owner: 'hid_lab_release_reader', ehr_view: true, lab_view: false, lab_api_view: false, lab_self: false,
       reader_self: false, lab_ehr: false, self_holders: ['hid_ehr_runtime', 'hid_schema_test_runtime'] },
     'The upgraded role bootstrap must give the released Lab results view to its technical owner and the EHR runtime only');
+    // Patient record chat (owner decision 1): the EHR runtime reads, writes
+    // and deletes the patient's history but never updates it, runs the two
+    // limit commands and reaches no limit table; the kill switch is off.
+    assert.deepEqual((await client.query(`select
+        has_table_privilege('hid_ehr_runtime', 'ehr.patient_chat_messages', 'SELECT,INSERT,DELETE') as history,
+        has_table_privilege('hid_ehr_runtime', 'ehr.patient_chat_messages', 'UPDATE') as history_update,
+        has_table_privilege('hid_ehr_runtime', 'ehr.record_chat_reservations', 'SELECT') as limits,
+        has_function_privilege('hid_ehr_runtime', 'ehr.reserve_record_chat(text,uuid,integer,bigint)', 'EXECUTE')
+          as reserve,
+        has_function_privilege('public', 'ehr.reserve_record_chat(text,uuid,integer,bigint)', 'EXECUTE') as public_reserve,
+        has_table_privilege('hid_identity_runtime', 'ehr.patient_chat_messages', 'SELECT') as identity_history,
+        platform.control_enabled('record_chat_enabled') as control`)).rows[0],
+    { history: true, history_update: false, limits: false, reserve: true, public_reserve: false,
+      identity_history: false, control: false },
+    'The upgraded role bootstrap must give the EHR runtime the record chat history and commands only');
     await client.query('begin');
     try {
       await client.query('set local role hid_identity_api_runtime');
@@ -432,7 +447,7 @@ try {
     purpose_of_use_seeded:['direct-care'],launch_write_permissions_withdrawn:true,retraction_guards_installed:true,
     launch_module_permissions_withdrawn:true,patient_activation_command_regranted:true,
     holder_commands_runtime_only:true,holder_columns_not_runtime_writable:true,
-    assisted_registration_commands_runtime_only:true,patient_record_release_grants:true,
+    assisted_registration_commands_runtime_only:true,patient_record_release_grants:true,record_chat_grants:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
   // 0093 (ADR-062) on a database at 0092 that holds public enrollments in
@@ -498,6 +513,12 @@ try {
   evidence.checks.patient_record_release_runtime = JSON.parse(command(
     'exact-role patient record release and document download through the patient-self path', process.execPath,
     [join(repository, 'services/ehr-api/scripts/verify-patient-record-release-runtime.mjs')], workflowEnvironment));
+  // Patient record chat (owner decision 1): the patient's question answered
+  // from the released records through a local fake Messages API, with the
+  // kill switch, quotas, history, idempotency, minimisation and audit rows.
+  evidence.checks.record_chat_runtime = JSON.parse(command(
+    'exact-role patient record chat against a local fake model endpoint', process.execPath,
+    [join(repository, 'services/ehr-api/scripts/verify-record-chat-runtime.mjs')], workflowEnvironment));
   evidence.checks.outreach_cookie_read_runtime = JSON.parse(command(
     'exact-role Outreach reads and writes authorized through Identity with a browser cookie session', process.execPath,
     [join(repository, 'services/outreach-api/scripts/verify-outreach-cookie-read-runtime.mjs')], workflowEnvironment));

@@ -23,10 +23,11 @@
 //   the administrator's URL and of a login with an extra role;
 // - platform.control_enabled as the Identity, EHR and Outreach logins, and
 //   ocr.claim_worker_job as the OCR worker login without the SET grant;
-// - the release checklist's read-only P10 and P11 checks, taken from
+// - the release checklist's read-only P10, P11 and P36 checks, taken from
 //   docs/PHASE_4_STAGE_5_RELEASE_READINESS.md, as the administrator, as an
 //   operator runs them on RDS;
-// - the platform-control-owner and function-parameter-settings suites.
+// - the platform-control-owner, function-parameter-settings and
+//   patient-record-chat suites.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -299,10 +300,12 @@ try {
     controls[credential] = psql(`platform controls as ${credential}`, logins[credential][0],
       `select platform.control_enabled('patient_portal_enabled') || ',' || platform.control_enabled('provider_portal_enabled')
          || ',' || platform.control_enabled('maintenance_mode') || ',' || platform.control_enabled('uploads_enabled')
-         || ',' || platform.control_enabled('outreach_portal_enabled') || ',' || platform.control_enabled('break_glass_enabled');
+         || ',' || platform.control_enabled('outreach_portal_enabled') || ',' || platform.control_enabled('break_glass_enabled')
+         || ',' || platform.control_enabled('record_chat_enabled');
        select platform.require_control_enabled('patient_portal_enabled')`)
       .stdout.trim().split('\n')[0];
-    assert.equal(controls[credential], 'true,true,false,false,false,false');
+    // The last is patient record chat's kill switch, seeded off by its migration.
+    assert.equal(controls[credential], 'true,true,false,false,false,false,false');
   }
   evidence.steps.platform_controls = { read_as: controls, owner: psql('control owner', superuser,
     `select proowner::regrole from pg_proc where oid = 'platform.control_enabled(text)'::regprocedure`).stdout.trim() };
@@ -332,8 +335,14 @@ try {
   const p11 = await checklistCheck('P11 check (read-only)');
   assert.deepEqual(p11, ['break_glass_enabled|f', 'outreach_portal_enabled|f', 'uploads_enabled|f'],
     `P11 check: ${p11.join('; ')}`);
+  // P36 (patient record chat): the kill switch is off and both limit
+  // commands are security definer with a pinned search path, as the operator
+  // checks before any record chat flag is set.
+  const p36 = await checklistCheck('P36 check (read-only)');
+  assert.deepEqual(p36, ['record_chat_enabled|f', 'reserve_record_chat|t|{"search_path=pg_catalog, pg_temp"}',
+    'settle_record_chat|t|{"search_path=pg_catalog, pg_temp"}'], `P36 check: ${p36.join('; ')}`);
   evidence.steps.release_checklist_checks = { run_as: admin, p10: p10.map((line) => line.split('|').slice(0, 4).join('|')),
-    p11 };
+    p11, p36 };
 
   // I3 at call time: the claim runs its body without the parameter privilege.
   const claim = psql('OCR claim without a workload context', logins['ocr-worker'][0],
@@ -342,10 +351,13 @@ try {
   assert.doesNotMatch(claim.output, /permission denied to set parameter/);
   evidence.steps.ocr_claim = { refused_by: 'body authorization check', parameter_privilege_needed: false };
 
-  for (const name of ['platform-control-owner.integration.sql', 'function-parameter-settings.integration.sql']) {
-    suite(name, superuser);
-  }
-  evidence.steps.suites = ['platform-control-owner.integration.sql', 'function-parameter-settings.integration.sql'];
+  // patient-record-chat runs the chat limit commands, owned by this
+  // NOSUPERUSER NOBYPASSRLS administrator, against their forced row-level
+  // security as the EHR runtime.
+  const suites = ['platform-control-owner.integration.sql', 'function-parameter-settings.integration.sql',
+    'patient-record-chat.integration.sql'];
+  for (const name of suites) suite(name, superuser);
+  evidence.steps.suites = suites;
   evidence.status = 'passed';
 } catch (error) {
   evidence.failure = error instanceof Error ? error.message : String(error);
