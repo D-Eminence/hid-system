@@ -1265,7 +1265,7 @@ test('production OTP delivery injects only the otp-email-sms provider fields', (
   assert.ok(containerOf(stagingRegional, 'notification-worker').secrets.some(item => item.Name === 'NOVU_API_KEY'));
 });
 
-test('patient record release categories are explicit synth inputs that default to false; only staging may set them (D17, P35)', () => {
+test('patient record release categories are explicit synth inputs that default to false; only staging may set them (D17, P36)', () => {
   const productionTopic = { operationalAlarmTopicArn: productionTopicArn };
   const none = { vitals: false, diagnoses: false, prescriptions: false, labResults: false, documents: false };
   assert.deepEqual(environmentConfig('production').patientRecordRelease, none);
@@ -1287,7 +1287,7 @@ test('patient record release categories are explicit synth inputs that default t
   }
   // Production refuses every category: Lab results while Lab is withdrawn at
   // launch (D17, 0091 section 2), the others until the clinical owner signs
-  // off each one (P35, ADR-064). The development stack's ehr-api runs in the
+  // off each one (P36, ADR-065). The development stack's ehr-api runs in the
   // production profile (HID_DEPLOYMENT_ENV=production), so it refuses them too.
   const productionConfiguration = environmentConfig('production', undefined, undefined, undefined, productionTopic);
   const developmentConfiguration = environmentConfig('development');

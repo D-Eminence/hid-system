@@ -479,8 +479,8 @@
         "sha256": "dfe23d2d07ecf859f173ad67123581ed67ec4a954c416f5bf8afac9713da12ff"
       },
       {
-        "name": "0095_patient_record_release.sql",
-        "sha256": "cd68c17b660ffc3e646eb7f5925686699e602f0454f882fe093de38308e3ec4e"
+        "name": "0096_patient_record_release.sql",
+        "sha256": "06c534de5228b42fec9238fc0bafc46557dbf703820115e96ea6b598689473b2"
       }
     ]
   },

@@ -290,7 +290,7 @@ The executable covers:
    deleted, a suspended or a deletion-due login whose email is cleared first,
    an event retried while the patient goes withheld, eligible, withheld, and
    two concurrent events with the login deleted between them.
-   With 0095 (the patient record release, ADR-064): the additional suites
+   With 0096 (the patient record release, ADR-065): the additional suites
    include `patient-record-release.integration.sql` (the database following
    `app.patient_release` category by category, the released rows of each
    table and of the released Lab results view across every withheld state,
@@ -332,7 +332,7 @@ The executable covers:
    and attestation helpers or `auth.staff_session_is_mfa`, and that the
    permission is held by `clinician`, `doctor` and `nurse` only; the
    bootstrap's own `runtime-roles.integration.sql` checks the 0093 and 0094
-   grants for every runtime role; and since 0095
+   grants for every runtime role; and since 0096
    (`patient_record_release_grants`) that the upgraded bootstrap makes
    `hid_lab_release_reader` the owner of `ehr.patient_released_lab_results`,
    grants `SELECT` on it to the EHR runtime and not to the Lab runtimes,

@@ -1,5 +1,5 @@
 -- Patient record release (owner decision 4 of 2026-10-16, D7).
--- Applied migrations 0001 through 0094 are immutable.
+-- Applied migrations 0001 through 0095 are immutable.
 --
 -- Patients may see their diagnoses, prescriptions, Lab results, vitals and
 -- clinical documents as well as their encounters and notes. The EHR service
@@ -15,8 +15,8 @@
 -- change runs its patient transactions that way, including one from before
 -- D-Eminence/hid-system#52, whose patient summary still queried every
 -- category: with every flag off, or under an earlier build, the database
--- refuses these categories to the patient as before 0095.
--- The rules (proposed defaults, ADR-064, beyond D7's completed-encounter,
+-- refuses these categories to the patient as before 0096.
+-- The rules (proposed defaults, ADR-065, beyond D7's completed-encounter,
 -- no-draft, confirmed-diagnosis and no-entered-in-error rules) are below.
 -- Row-level security restricts rows, not columns, as for encounters and notes
 -- since 0030: the service's SELECT lists leave out the diagnosis notes, the
@@ -77,7 +77,7 @@
 -- to the emergency summary, to any staff path or to any Lab permission (Lab
 -- stays off at launch, 0091 section 2). The EHR production profile refuses
 -- every category's flag (Lab results while Lab is off, D17; the others until
--- the clinical owner signs them off, release checklist P35).
+-- the clinical owner signs them off, release checklist P36).
 --
 -- Locks, in order: CREATE POLICY takes ACCESS EXCLUSIVE briefly on
 -- ehr.vitals, ehr.diagnoses, ehr.prescriptions, ehr.documents and
@@ -210,7 +210,7 @@ select result_row.id as result_id,
 
 revoke all on ehr.patient_released_lab_results from public;
 comment on view ehr.patient_released_lab_results is
-  'Latest released, not invalidated revision of each Lab result of the bound patient-self patient whose source order is open or completed and whose source encounter is completed, in a transaction whose app.patient_release names labResults; no reasons or staff identities (patient record release, ADR-064). Owned by hid_lab_release_reader; selected only by hid_ehr_runtime and the test role.';
+  'Latest released, not invalidated revision of each Lab result of the bound patient-self patient whose source order is open or completed and whose source encounter is completed, in a transaction whose app.patient_release names labResults; no reasons or staff identities (patient record release, ADR-065). Owned by hid_lab_release_reader; selected only by hid_ehr_runtime and the test role.';
 
 -- 3. The view's access path, and each EHR section's.
 create index lab_result_releases_patient_idx

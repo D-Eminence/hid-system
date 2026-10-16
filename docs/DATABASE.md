@@ -2197,16 +2197,16 @@ the schema, policies or grants changes.
   the staff policies (`ehr.context_allows`) never pass, and only the 0030
   patient-self policies release rows: completed encounters, signed or amended
   notes and their current revisions (since 0084 only those of completed
-  encounters; "EHR clinical safety and launch module set (0084)"). Until 0095
+  encounters; "EHR clinical safety and launch module set (0084)"). Until 0096
   the other clinical tables had `SELECT` but no patient-self policy, so a
   patient read of them returned no rows and no error. The service reads only
   the two released categories and names the other five as withheld; before,
   it read all seven and returned five arrays that were always empty. Since
-  0095 vitals, diagnoses, prescriptions and documents have patient-release
+  0096 vitals, diagnoses, prescriptions and documents have patient-release
   policies and released Lab results a view, each admitting rows only to a
   patient-self transaction that names its category in `app.patient_release`,
   and the service reads and names each only when its category's flag is on
-  ("Patient record release (0095)" below).
+  ("Patient record release (0096)" below).
 - **Emergency summary** (`GET /ehr/patients/:id/emergency-records`). A
   break-glass emergency context passes `ehr.context_allows` for `read_records`
   at its facility (0012), so every clinical table is readable there.
@@ -3673,9 +3673,9 @@ rollback-only transaction and adds the doctor's refusal (release checklist
 
 **Patient-self binding (PSELF-RLS).** `ehr.patient_self_context(uuid)` keeps
 its signature, so the 0030/0084 policies on `ehr.encounters`,
-`ehr.clinical_notes` and `ehr.clinical_note_revisions` are unchanged (0095
+`ehr.clinical_notes` and `ehr.clinical_note_revisions` are unchanged (0096
 adds five more policies and a view that call it; its `EXECUTE` grants are
-unchanged, "Patient record release (0095)"). It
+unchanged, "Patient record release (0096)"). It
 becomes `LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog,
 pg_temp` (CREATE OR REPLACE keeps its owner and its `EXECUTE` for
 `hid_ehr_runtime` and `hid_schema_test_runtime`). It still requires
@@ -4416,20 +4416,20 @@ turned off.
   bootstrapped (0 pending on a rerun), and the 50 additional suites again
   with the non-superuser owner (local evidence, release checklist §8).
 
-## Patient record release (0095)
+## Patient record release (0096)
 
-Owner decision 4 of 2026-10-16 (ADR-064, D7): patients may see their
+Owner decision 4 of 2026-10-16 (ADR-065, D7): patients may see their
 diagnoses, prescriptions, Lab results, vitals and documents as well as their
 encounters and notes. D7's rules apply (items of a completed encounter only;
 never a draft, an unconfirmed or refuted diagnosis or anything entered in
 error; documents only with a patient download route); the further rules below
 (no cancelled prescription, no corrected vital, Lab results of an open or
 completed order only, PHI documents attached to an encounter only, no lab
-request) are ADR-064's proposed defaults. The EHR service defines the release
+request) are ADR-065's proposed defaults. The EHR service defines the release
 set (`PatientRecordRelease`, one default-off flag per category,
 `INTERFACE_CONTRACT.md` §11, "Record summaries"), and the database follows it:
 
-- **The database follows the flags.** Each 0095 policy and the view admit
+- **The database follows the flags.** Each 0096 policy and the view admit
   their category only in a transaction whose transaction-local setting
   `app.patient_release` names it exactly (a comma-separated list of
   `vitals`, `diagnoses`, `prescriptions`, `labResults` and `documents`).
@@ -4438,7 +4438,7 @@ set (`PatientRecordRelease`, one default-off flag per category,
   categories whose flag is on (its `read` and the patient document download
   call it first). A transaction that names no category reads none of these
   rows, so with every flag off the database refuses these categories to the
-  patient as before 0095; every earlier EHR build, including one from before
+  patient as before 0096; every earlier EHR build, including one from before
   D-Eminence/hid-system#52 whose patient summary still queried every
   category, never sets it and reads nothing new.
 - **Rows, not columns.** As for encounters and notes since 0030 and 0084,
@@ -4480,7 +4480,7 @@ staff identity. Lab's staff view (`lab-api`, released history) marks an
 invalidated latest release `entered_in_error`; the patient view leaves the
 result out. The order-status condition hides a result already released once
 its EHR order is cancelled or entered in error, where Lab's own released
-history keeps it (D10); ADR-064 lists it as a proposed default.
+history keeps it (D10); ADR-065 lists it as a proposed default.
 
 Why a view owned by a technical role, and why not Lab:
 
@@ -4561,7 +4561,7 @@ permissive policies such as `diagnoses_patient_self_read`,
 OR-widen the release whatever `app.patient_release` says.
 `patient-record-release.integration.sql` asserts the exact policy inventory of
 every table the release reads and fails on any of them (release checklist
-P35).
+P36).
 
 **Evidence.** `patient-record-release.integration.sql` (rollback-only): with
 the patient bound to their own live session, `app.patient_release` never set
@@ -4595,13 +4595,15 @@ roles, and in the EHR's own patient-self transaction under Identity's real
 authorization that a transaction naming no category reads only the completed
 encounter while one bound by `PatientRecordRelease` reads only the configured
 categories (every flag on, vitals only, every flag off). On a database built
-from empty to 0095 and bootstrapped twice (local synthetic evidence)
-`runtime-roles.integration.sql`, `schema.integration.sql` and the 50
-additional suites pass, and the 0093 upgrade suite passes on a database built
-to 0092. With every schema, table and function owned by a `NOSUPERUSER
-NOBYPASSRLS` role, and again on a database migrated and bootstrapped by a
-`NOSUPERUSER NOBYPASSRLS CREATEROLE` administrator, the 50 additional suites
-and the runtime verifier pass; `schema.integration.sql` fails there at its line
-1149 ("Document not found") exactly as it does on `main` without this change
-(it fails the same with the 0095 policies and view dropped), and the
-rehearsal's owner pass runs only the additional suites.
+from empty to 0096 (after 0095, the Novu verified email change) and
+bootstrapped twice (local synthetic evidence) `runtime-roles.integration.sql`,
+`schema.integration.sql` and the 51 additional suites pass, and the 0093
+upgrade suite passes on a database built to 0092. Before the renumber (this
+migration then numbered 0095, without the Novu change), with every schema,
+table and function owned by a `NOSUPERUSER NOBYPASSRLS` role, and again on a
+database migrated and bootstrapped by a `NOSUPERUSER NOBYPASSRLS CREATEROLE`
+administrator, the 50 additional suites and the runtime verifier passed;
+`schema.integration.sql` fails there at its line 1149 ("Document not found")
+exactly as it does on `main` without this change (it fails the same with the
+0096 policies and view dropped), and the rehearsal's owner pass runs only the
+additional suites.

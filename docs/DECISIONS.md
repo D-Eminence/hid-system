@@ -4975,9 +4975,9 @@ Related: ADR-053 and D17 (the worker is off in production); ADR-058
 `INTERFACE_CONTRACT.md`, "Notification worker to Novu"; `DATABASE.md`,
 "Notification verified recipient (0095)"; release checklist P35 and S4w.
 
-# ADR-064: Patient record release
+# ADR-065: Patient record release
 
-Status: Accepted in source (migration 0095). Not merged, not deployed. Every
+Status: Accepted in source (migration 0096). Not merged, not deployed. Every
 release flag is off, and the production profile refuses each of them.
 
 Date: 2026-10-16
@@ -5013,13 +5013,13 @@ Decision:
   every one of them, as `HID_NOTIFICATION_WORKER_ENABLED` is fixed false in
   production: Lab results while Lab is off at launch (D17), and the other
   four until the clinical owner signs off each category and its wording
-  (release checklist P35), since no clinician-review gate or sensitivity
+  (release checklist P36), since no clinician-review gate or sensitivity
   classification is built. `infra/aws` (`environmentConfig` and the regional
   stack) and `verify-synth` refuse every input outside staging; the AWS
   development stack runs ehr-api in the production profile
   (`HID_DEPLOYMENT_ENV=production`), so it opts in to nothing. Staging and a
   local run with `HID_DEPLOYMENT_ENV=development` may opt in. A reviewed
-  change that records a category's P35 sign-off lifts that category's
+  change that records a category's P36 sign-off lifts that category's
   refusal. EHR also refuses documents without S3 storage.
 - D7's rules, as adopted by the owner: only items of a completed encounter;
   never a draft, an unconfirmed or refuted diagnosis or anything entered in
@@ -5029,7 +5029,7 @@ Decision:
   (below), not part of D7.
 - D8 interim: a corrected vital is withheld from the patient (shown to
   clinicians as today) until D8 decides what a correction means.
-- The database follows the flags. 0095 adds five PUBLIC patient-release
+- The database follows the flags. 0096 adds five PUBLIC patient-release
   policies (vitals, diagnoses, prescriptions, documents and their scan
   events) and the Lab view below, each gated by
   `ehr.patient_self_context(patient_id)` and by its category in the
@@ -5097,7 +5097,7 @@ Proposed defaults (open owner questions; the safest default is built):
 
 - Every release flag stays off in production, and the production profile
   refuses it, until the clinical owner signs off that category and its
-  wording (release checklist P35). No delay or clinician-review gate and no
+  wording (release checklist P36). No delay or clinician-review gate and no
   sensitivity classification is built. Lab results are refused in production
   until Lab is re-enabled as well.
 - Corrected vitals are withheld while D8 is open.
@@ -5122,34 +5122,34 @@ Proposed defaults (open owner questions; the safest default is built):
 - The migration, ADR and checklist numbers are assigned at merge.
 - The EHR task role's `s3:GetObject`, `s3:GetObjectVersion` and `kms:Decrypt`
   via S3 cover `HeadObject` with checksum mode on SSE-KMS objects; staging
-  check S4w confirms it before documents are released.
+  check S4x confirms it before documents are released.
 
 Consequences:
 
 - With every flag off nothing changes for patients, staff or Health-id, and
-  the database refuses the new categories to the patient as before 0095.
-- A deployment can release each category on its own, once its P35 sign-off
+  the database refuses the new categories to the patient as before 0096.
+- A deployment can release each category on its own, once its P36 sign-off
   lifts its production refusal. The database admits at most the rows the
-  0095 rules allow for the categories the transaction names; a wrong
+  0096 rules allow for the categories the transaction names; a wrong
   `SELECT` list in EHR could still return a column of a released row that
   the service means to withhold (rows, not columns).
-- The role bootstrap must run after 0095: until it does, a configured Lab
+- The role bootstrap must run after 0096: until it does, a configured Lab
   results section answers `503 PATIENT_RECORDS_UNAVAILABLE` and discloses
   nothing.
-- Rolling the EHR API back to any earlier build on a database with 0095
+- Rolling the EHR API back to any earlier build on a database with 0096
   releases nothing new: no earlier build sets `app.patient_release`.
 - Health-id renders none of the new sections or the download; the flags stay
-  off until it does (P35).
+  off until it does (P36).
 
 Residual risks:
 
 - A released abnormal result or a sensitive diagnosis reaches the patient
-  without a clinician's explanation (no review gate; P35 sign-off).
+  without a clinician's explanation (no review gate; P36 sign-off).
 - A withdrawn item vanishes silently; a patient who saw it is not told why.
 - A staging database built from the PR #8 branch may hold its permissive
   patient-self policies, which would widen the release whatever
   `app.patient_release` says; the SQL suite's exact policy inventory fails on
-  them (P35 preflight).
+  them (P36 preflight).
 - The view's owner reads Lab's release tables unfiltered; it is safe only
   while it has no login, no member and no other privilege, which
   `runtime-roles.integration.sql` asserts.
@@ -5160,4 +5160,4 @@ Residual risks:
 
 Related: ADR-018; ADR-058 (PSELF-RLS); `PHASE_3_LAUNCH_DECISIONS.md` D7, D8
 and D17; `INTERFACE_CONTRACT.md`, "Record summaries" and "Patient document
-download"; `DATABASE.md`, "Patient record release (0095)".
+download"; `DATABASE.md`, "Patient record release (0096)".

@@ -834,10 +834,10 @@ returns at most 50 completed encounters and 50 current signed/amended note
 revisions of completed encounters (since 0084), after fresh Identity
 authorization through the EHR workload caller.
 It names the other five record categories as withheld from the patient, not as
-absent (§11, "Record summaries"). Since the patient record release (0095,
+absent (§11, "Record summaries"). Since the patient record release (0096,
 owner decision 4 of 2026-10-16, D7) a deployment may also release vitals,
 diagnoses, prescriptions, Lab results and documents, one flag per category,
-each off by default and refused in the production profile until its P35
+each off by default and refused in the production profile until its P36
 sign-off; with every flag off the response is exactly the one above. `GET /api/v1/ehr/me/documents/:documentId/download` returns a 60 s
 attachment URL for one released document (§11, "Patient document
 download"). Only a patient session may use either route: EHR's
@@ -2349,8 +2349,8 @@ D7, since 0084): the notes of an encounter in progress, on hold, cancelled or
 entered in error are not returned, whatever the note's own status, and
 row-level security refuses them to the patient's session as well.
 
-Since the patient record release (owner decision 4 of 2026-10-16, D7, ADR-064,
-migration 0095) the patient may also see vitals, diagnoses, prescriptions,
+Since the patient record release (owner decision 4 of 2026-10-16, D7, ADR-065,
+migration 0096) the patient may also see vitals, diagnoses, prescriptions,
 Lab results and documents. Each category is released only when its own
 ehr-api flag is on, and every flag is off by default:
 `EHR_PATIENT_RELEASE_VITALS`, `EHR_PATIENT_RELEASE_DIAGNOSES`,
@@ -2358,7 +2358,7 @@ ehr-api flag is on, and every flag is off by default:
 `EHR_PATIENT_RELEASE_DOCUMENTS` (synth inputs `HID_EHR_PATIENT_RELEASE_*`).
 The production profile refuses every one of them: Lab results while Lab is
 off at launch (D17), the others until the clinical owner signs off each
-category and its wording (release checklist P35); staging may set them.
+category and its wording (release checklist P36); staging may set them.
 Lab requests (orders, which carry the clinician's clinical information) are
 never released. Every released item belongs to a completed encounter, matched
 on patient and facility. The database follows the flags: its policies admit a
@@ -2390,7 +2390,7 @@ error, refuted, invalidated or retracted with its encounter disappears from
 the summary without a marker.
 
 If the database refuses a released category's read (for example the role
-bootstrap did not run after migration 0095) or the read passes the
+bootstrap did not run after migration 0096) or the read passes the
 database statement timeout, the summary answers `503
 PATIENT_RECORDS_UNAVAILABLE`, discloses nothing and records no success. The
 audit event `ehr.patient.self.records.read` records `encounterCount`,
