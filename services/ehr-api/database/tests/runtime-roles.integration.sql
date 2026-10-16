@@ -985,10 +985,10 @@ $$;
 -- email only through the claim-bound integration.notification_recipient_for_claim,
 -- owned by the event-delivery technical owner, which alone executes the
 -- private helper that reads identity.patients and auth.accounts as their
--- owner. The exact ACLs: the worker on the claim function and the technical
--- owner on the helper, besides their owners. Neither the worker, its
--- notification aggregate nor the technical owner holds any table or column
--- privilege on the two tables.
+-- owner, with the login's deletion requests. The exact ACLs: the worker on
+-- the claim function and the technical owner on the helper, besides their
+-- owners. Neither the worker, its notification aggregate nor the technical
+-- owner holds any table or column privilege on the three tables.
 do $$
 declare
   claim_function regprocedure := to_regprocedure('integration.notification_recipient_for_claim(uuid,uuid,uuid)');
@@ -1022,12 +1022,12 @@ begin
        select 1
        from unnest(array['hid_notification_worker', 'hid_notification_runtime', 'hid_notification_api_runtime',
          'hid_event_delivery_commands', 'hid_event_dispatcher']) runtime(role_name),
-         unnest(array['identity.patients', 'auth.accounts']) protected(table_name)
+         unnest(array['identity.patients', 'auth.accounts', 'identity.patient_account_deletion_requests']) protected(table_name)
        where has_table_privilege(runtime.role_name, protected.table_name,
          'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
           or has_any_column_privilege(runtime.role_name, protected.table_name, 'SELECT,INSERT,UPDATE,REFERENCES')
      ) then
-    raise exception 'a notification or event-delivery role can read identity.patients or auth.accounts directly';
+    raise exception 'a notification or event-delivery role can read identity.patients, auth.accounts or identity.patient_account_deletion_requests directly';
   end if;
 end
 $$;

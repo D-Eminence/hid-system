@@ -1,6 +1,6 @@
 import type { Message, SQSClient } from '@aws-sdk/client-sqs';
 import { readConfig } from './config';
-import type { NotificationOrchestrator } from './novu.orchestrator';
+import { NovuOrchestrator, type NotificationOrchestrator } from './novu.orchestrator';
 import { ClaimLostError, type NotificationRepository } from './repository';
 import { NotificationWorker } from './worker';
 
@@ -113,13 +113,16 @@ describe('flag email: a verified login email is synced, and the in-app trigger n
     orchestratorValue.syncSubscriberEmail.mockResolvedValue({ outcome: 'confirmed', provider: 'novu' });
     await worker.process(message);
     expect(repositoryValue.resolveRecipient).toHaveBeenCalledWith(expect.objectContaining({ id: event.id }), 'claim-1');
-    expect(orchestratorValue.syncSubscriberEmail).toHaveBeenCalledWith(patientId, verifiedEmail, event.id);
+    expect(orchestratorValue.syncSubscriberEmail).toHaveBeenCalledWith(patientId, verifiedEmail, event.id, 'claim-1');
     expect(repositoryValue.recordSubscriberOperation).toHaveBeenCalledWith(expect.objectContaining({ id: event.id }),
       'email', { outcome: 'confirmed', provider: 'novu' }, 1);
     expect(orchestratorValue.trigger).toHaveBeenCalledWith(expect.objectContaining({ id: event.id }));
     expect(orchestratorValue.clearSubscriberEmail).not.toHaveBeenCalled();
     expect(orchestratorValue.triggerWithEmailWithheld).not.toHaveBeenCalled();
-    expect(order()).toEqual(['claim', 'resolveRecipient', 'syncSubscriberEmail', 'recordSubscriberOperation', 'trigger', 'complete']);
+    // The recipient is asked again under the same claim once the sync has answered (ADR-064).
+    expect(order()).toEqual(['claim', 'resolveRecipient', 'syncSubscriberEmail', 'recordSubscriberOperation',
+      'resolveRecipient', 'trigger', 'complete']);
+    expect(repositoryValue.resolveRecipient).toHaveBeenNthCalledWith(2, expect.objectContaining({ id: event.id }), 'claim-1');
     expect(repositoryValue.complete).toHaveBeenCalledWith(expect.anything(), 'claim-1', expect.objectContaining({ outcome: 'accepted' }));
     expect(sqs.send).toHaveBeenCalledTimes(1);
   });
@@ -193,7 +196,7 @@ describe('flag email: the opt-out holds after an email was synced earlier, and i
     orchestratorValue.clearSubscriberEmail.mockResolvedValue({ outcome: 'confirmed', provider: 'novu' });
     await worker.process(message);
     expect(orchestratorValue.syncSubscriberEmail).not.toHaveBeenCalled();
-    expect(orchestratorValue.clearSubscriberEmail).toHaveBeenCalledWith(patientId, event.id);
+    expect(orchestratorValue.clearSubscriberEmail).toHaveBeenCalledWith(patientId, event.id, 'claim-1');
     expect(repositoryValue.recordSubscriberOperation).toHaveBeenCalledWith(expect.anything(), 'clear',
       { outcome: 'confirmed', provider: 'novu' }, 1);
     expect(orchestratorValue.triggerWithEmailWithheld).not.toHaveBeenCalled();
@@ -319,5 +322,188 @@ describe('flag email: the outcome line echoes only a correlation id of the outbo
     await worker.process(sqsMessage(forged));
     expect(outcomeLines(lines)).toEqual([expect.objectContaining({ correlationId: 'invalid', inbox: 'processed' })]);
     expect(lines.join('')).not.toContain('@');
+  });
+});
+
+describe('flag email: the recipient is asked again after the sync, under the same claim', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it.each([
+    ['withheld by now', { delivery: 'withhold', bound: true }],
+    ['another address', { delivery: 'email', email: 'other.synthetic@example.invalid' }],
+  ])('an answer that is %s at the second lookup clears the email just synced before main\'s trigger', async (_label, second) => {
+    const { worker, repositoryValue, orchestratorValue, order, lines } = recorded('accepted');
+    repositoryValue.resolveRecipient.mockResolvedValueOnce({ delivery: 'email', email: verifiedEmail }).mockResolvedValueOnce(second);
+    orchestratorValue.syncSubscriberEmail.mockResolvedValue({ outcome: 'confirmed', provider: 'novu' });
+    orchestratorValue.clearSubscriberEmail.mockResolvedValue({ outcome: 'confirmed', provider: 'novu' });
+    await worker.process(message);
+    expect(order()).toEqual(['claim', 'resolveRecipient', 'syncSubscriberEmail', 'recordSubscriberOperation',
+      'resolveRecipient', 'clearSubscriberEmail', 'recordSubscriberOperation', 'trigger', 'complete']);
+    expect(orchestratorValue.clearSubscriberEmail).toHaveBeenCalledWith(patientId, event.id, 'claim-1');
+    expect(repositoryValue.recordSubscriberOperation).toHaveBeenNthCalledWith(2, expect.anything(), 'clear',
+      { outcome: 'confirmed', provider: 'novu' }, 1);
+    expect(orchestratorValue.triggerWithEmailWithheld).not.toHaveBeenCalled();
+    expect(outcomeLines(lines)).toEqual([expect.objectContaining({ recipient: 'withdrawn', subscriber: 'cleared',
+      trigger: 'standard', inbox: 'processed' })]);
+    expect(lines.join('')).not.toContain('other.synthetic');
+  });
+
+  it('a second lookup that fails is handled as withheld; an unconfirmed clear sends the trigger that clears the email', async () => {
+    const { worker, repositoryValue, orchestratorValue, lines } = recorded('accepted');
+    repositoryValue.resolveRecipient.mockResolvedValueOnce({ delivery: 'email', email: verifiedEmail })
+      .mockRejectedValueOnce(Object.assign(new Error('synthetic'), { code: '08006' }));
+    orchestratorValue.syncSubscriberEmail.mockResolvedValue({ outcome: 'unknown', provider: 'novu', safeCode: 'NOVU_SUBSCRIBER_HTTP_503' });
+    orchestratorValue.clearSubscriberEmail.mockResolvedValue({ outcome: 'unknown', provider: 'novu', safeCode: 'NOVU_SUBSCRIBER_HTTP_503' });
+    orchestratorValue.triggerWithEmailWithheld.mockResolvedValue({ outcome: 'accepted', provider: 'novu' });
+    await worker.process(sqsMessage(pinEvent));
+    expect(orchestratorValue.trigger).not.toHaveBeenCalled();
+    expect(orchestratorValue.triggerWithEmailWithheld).toHaveBeenCalledWith(expect.objectContaining({ type: 'PatientAccessPinVerified' }));
+    expect(repositoryValue.fail).not.toHaveBeenCalled();
+    expect(outcomeLines(lines)).toEqual([expect.objectContaining({ recipient: 'withdrawn', subscriber: 'clear_failed',
+      subscriberCode: 'NOVU_SUBSCRIBER_HTTP_503', trigger: 'email_withheld', inbox: 'processed' })]);
+  });
+
+  it('a claim lost after the sync clears the email it may have set and stops: no trigger, completion, failure or acknowledgement', async () => {
+    const { worker, repositoryValue, orchestratorValue, sqs, lines } = recorded('accepted');
+    repositoryValue.resolveRecipient.mockResolvedValueOnce({ delivery: 'email', email: verifiedEmail })
+      .mockRejectedValueOnce(new ClaimLostError());
+    orchestratorValue.syncSubscriberEmail.mockResolvedValue({ outcome: 'confirmed', provider: 'novu' });
+    orchestratorValue.clearSubscriberEmail.mockResolvedValue({ outcome: 'confirmed', provider: 'novu' });
+    await worker.process(message);
+    expect(orchestratorValue.clearSubscriberEmail).toHaveBeenCalledWith(patientId, event.id, 'claim-1');
+    expect(orchestratorValue.trigger).not.toHaveBeenCalled();
+    expect(orchestratorValue.triggerWithEmailWithheld).not.toHaveBeenCalled();
+    expect(repositoryValue.complete).not.toHaveBeenCalled();
+    expect(repositoryValue.fail).not.toHaveBeenCalled();
+    expect(sqs.send).not.toHaveBeenCalled();
+    expect(outcomeLines(lines)).toEqual([{ event: 'notification.worker.outcome', eventType: 'LabResultReleased',
+      correlationId: event.correlationId, recipient: 'claim_lost', subscriber: 'cleared', trigger: 'not_sent', inbox: 'claim_lost' }]);
+  });
+});
+
+/**
+ * A fake Novu behind global fetch that keeps each subscriber's email and
+ * applies Novu's documented idempotency rule (idempotency.md): a request
+ * whose Idempotency-Key was seen gets the cached answer, success or error,
+ * and is not processed again. Each trigger it processes records the email
+ * its subscriber had at that moment. A trigger key in `drop` never reaches
+ * Novu (nothing is cached); `holdNextSync` stops the next upsert at Novu
+ * until released, then applies it before answering.
+ */
+function fakeNovu() {
+  const subscribers = new Map<string, string | null>();
+  const cache = new Map<string, { status: number; body: unknown }>();
+  const triggers: Array<{ key: string; emailAtTrigger: string | null }> = [];
+  const replays: string[] = [];
+  const drop = new Set<string>();
+  let held: { arrived: () => void; released: Promise<void> } | undefined;
+  jest.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+    const url = new URL(String(input));
+    const key = new Headers(init?.headers).get('idempotency-key') ?? '';
+    const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+    if (url.pathname === '/v1/events/trigger' && drop.delete(key)) throw new TypeError('synthetic network failure');
+    const cached = cache.get(key);
+    if (cached) {
+      replays.push(`${init?.method} ${url.pathname}`);
+      return new Response(JSON.stringify(cached.body), { status: cached.status, headers: { 'idempotency-replay': 'true' } });
+    }
+    let status = 200;
+    let answer: unknown = {};
+    if (init?.method === 'POST' && url.pathname === '/v2/subscribers') {
+      const hold = held;
+      held = undefined;
+      if (hold) { hold.arrived(); await hold.released; }
+      subscribers.set(String(body.subscriberId), body.email as string | null);
+      status = 201;
+    } else if (init?.method === 'PATCH' && url.pathname.startsWith('/v2/subscribers/')) {
+      const id = decodeURIComponent(url.pathname.slice('/v2/subscribers/'.length));
+      if (subscribers.has(id)) subscribers.set(id, body.email as string | null); else status = 404;
+    } else if (init?.method === 'POST' && url.pathname === '/v1/events/trigger') {
+      const to = body.to as { subscriberId: string; email?: string | null };
+      if ('email' in to) subscribers.set(to.subscriberId, to.email ?? null);
+      triggers.push({ key, emailAtTrigger: subscribers.get(to.subscriberId) ?? null });
+      status = 201;
+      answer = { data: { transactionId: `novu-fake-${triggers.length}` } };
+    }
+    cache.set(key, { status, body: answer });
+    return new Response(JSON.stringify(answer), { status });
+  });
+  const holdNextSync = () => {
+    let arrived!: () => void;
+    let release!: () => void;
+    const arrival = new Promise<void>((resolve) => { arrived = resolve; });
+    held = { arrived, released: new Promise<void>((resolve) => { release = resolve; }) };
+    return { arrival, release };
+  };
+  return { subscribers, triggers, replays, drop, holdNextSync };
+}
+
+/** The real worker and orchestrator (live mode) over a stub repository whose answer follows `state`. */
+function liveWorker(state: { eligible: boolean }) {
+  const attempts = new Map<string, number>();
+  const repositoryValue = {
+    claim: jest.fn(async (claimed: { id: string }) => {
+      const attempt = (attempts.get(claimed.id) ?? 0) + 1;
+      attempts.set(claimed.id, attempt);
+      return { status: 'claimed', claimToken: `50000000-0000-4000-8000-00000000000${attempt}`, attemptCount: attempt };
+    }),
+    resolveRecipient: jest.fn(async () => (state.eligible ? { delivery: 'email', email: verifiedEmail } : { delivery: 'withhold', bound: true })),
+    recordSubscriberOperation: jest.fn(), complete: jest.fn(), fail: jest.fn().mockResolvedValue('retry_scheduled'),
+  };
+  const config = readConfig({ NODE_ENV: 'test', HID_DEPLOYMENT_ENV: 'development', NOTIFICATION_WORKER_ENABLED: 'true',
+    NOTIFICATION_WORKER_DATABASE_URL: 'postgresql://test:test@localhost/hid', NOTIFICATION_WORKER_QUEUE_URL: 'https://sqs.example/queue',
+    NOVU_MODE: 'live', NOVU_API_URL: 'https://novu.example.invalid', NOVU_API_KEY: 'example-novu-spec-key', NOVU_SUBSCRIBER_SYNC: 'email' });
+  const orchestrator: NotificationOrchestrator = new NovuOrchestrator(config);
+  const sqs = { send: jest.fn().mockResolvedValue({}) } as unknown as SQSClient;
+  return { repositoryValue,
+    worker: new NotificationWorker(config, repositoryValue as unknown as NotificationRepository, orchestrator, sqs) };
+}
+
+describe('flag email against a fake Novu that replays seen idempotency keys', () => {
+  beforeEach(() => { jest.spyOn(process.stdout, 'write').mockImplementation(() => true); });
+  afterEach(() => jest.restoreAllMocks());
+
+  it('a retried event clears the email again: the first attempt\'s cached clear cannot stand in for it', async () => {
+    const novu = fakeNovu();
+    const state = { eligible: false };
+    const { worker, repositoryValue } = liveWorker(state);
+    novu.subscribers.set(patientId, null);
+    const later = { ...event, id: '10000000-0000-4000-8000-000000000004', correlationId: 'correlation-0004' };
+    // Attempt 1 of the event, patient withheld: cleared, but the trigger never reaches Novu, so the event is retried.
+    novu.drop.add(event.id);
+    await worker.process(message);
+    expect(repositoryValue.fail).toHaveBeenCalledWith(expect.objectContaining({ id: event.id }),
+      '50000000-0000-4000-8000-000000000001', expect.objectContaining({ outcome: 'unknown' }), true, 1);
+    // A later event while the patient is eligible syncs the email.
+    state.eligible = true;
+    await worker.process(sqsMessage(later));
+    expect(novu.subscribers.get(patientId)).toBe(verifiedEmail);
+    // Attempt 2 of the first event, patient withheld again: its clear is processed, not replayed.
+    state.eligible = false;
+    await worker.process(message);
+    expect(novu.replays).toEqual([]);
+    expect(novu.triggers.at(-1)).toEqual({ key: event.id, emailAtTrigger: null });
+    expect(novu.subscribers.get(patientId)).toBeNull();
+  });
+
+  it('concurrent events for one patient: an upsert that lands after a later event\'s clear leaves no email at Novu', async () => {
+    const novu = fakeNovu();
+    const state = { eligible: true };
+    const { worker } = liveWorker(state);
+    novu.subscribers.set(patientId, null);
+    const withheld = { ...event, id: '10000000-0000-4000-8000-000000000005', correlationId: 'correlation-0005' };
+    const gate = novu.holdNextSync();
+    // The first event looks the patient up as eligible; its upsert reaches Novu and waits there.
+    const first = worker.process(message);
+    await gate.arrival;
+    // The login is then deleted, and a second event is handled in full: withheld, cleared, in-app only.
+    state.eligible = false;
+    await worker.process(sqsMessage(withheld));
+    expect(novu.triggers).toEqual([{ key: withheld.id, emailAtTrigger: null }]);
+    // Novu applies the first upsert only now, after that clear.
+    gate.release();
+    await first;
+    expect(novu.subscribers.get(patientId)).toBeNull();
+    expect(novu.triggers.map((trigger) => trigger.emailAtTrigger)).toEqual([null, null]);
   });
 });

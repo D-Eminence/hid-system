@@ -13,6 +13,11 @@ const event = {
 };
 const subscriberId = event.context.patientId;
 const email = 'synthetic.patient@example.invalid';
+// The inbox claim token of the attempt (unique per attempt). Novu replays a
+// seen idempotency key's cached answer for 24 hours without reprocessing, so
+// a subscriber call keyed by the event alone would be a no-op on a retry.
+const claimToken = '50000000-0000-4000-8000-000000000001';
+const nextClaimToken = '50000000-0000-4000-8000-000000000002';
 const sha256 = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
 const live = () => new NovuOrchestrator(readConfig({ NODE_ENV: 'test', HID_DEPLOYMENT_ENV: 'development',
   NOVU_MODE: 'live', NOVU_API_KEY: 'server-secret', NOVU_API_URL: 'https://novu.example.invalid/',
@@ -25,9 +30,9 @@ const body = (fetchMock: jest.SpyInstance) => JSON.parse(String((fetchMock.mock.
 describe('Novu subscriber email sync', () => {
   afterEach(() => jest.restoreAllMocks());
 
-  it('upserts the subscriber with exactly its id and the verified email, keyed by event and email digest', async () => {
+  it('upserts the subscriber with exactly its id and the verified email, keyed by event, attempt and email digest', async () => {
     const fetchMock = respond(201, { data: { subscriberId } });
-    await expect(live().syncSubscriberEmail(subscriberId, email, event.id))
+    await expect(live().syncSubscriberEmail(subscriberId, email, event.id, claimToken))
       .resolves.toEqual({ outcome: 'confirmed', provider: 'novu' });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock.mock.calls[0][0]).toBe('https://novu.example.invalid/v2/subscribers');
@@ -36,40 +41,43 @@ describe('Novu subscriber email sync', () => {
     expect(headers(fetchMock).get('authorization')).toBe('ApiKey server-secret');
     expect(headers(fetchMock).get('content-type')).toBe('application/json');
     expect(headers(fetchMock).get('idempotency-key'))
-      .toBe(sha256(`hid-novu-subscriber-email-v1\u001f${event.id}\u001f${sha256(email)}`));
+      .toBe(sha256(`hid-novu-subscriber-email-v1\u001f${event.id}\u001f${claimToken}\u001f${sha256(email)}`));
     expect(headers(fetchMock).get('idempotency-key')).toMatch(/^[0-9a-f]{64}$/);
     expect(String(init.body)).toBe(JSON.stringify({ subscriberId, email }));
     expect(String(init.body)).not.toMatch(/firstName|lastName|phone|name/i);
     expect(init.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it('binds the key to the email: the same input gives the same key, another email another key', async () => {
+  it('binds the key to the attempt and the email: a retry of the event is a new request', async () => {
     const fetchMock = respond(201);
     const orchestrator = live();
-    await orchestrator.syncSubscriberEmail(subscriberId, email, event.id);
-    await orchestrator.syncSubscriberEmail(subscriberId, email, event.id);
-    await orchestrator.syncSubscriberEmail(subscriberId, 'other.synthetic@example.invalid', event.id);
+    await orchestrator.syncSubscriberEmail(subscriberId, email, event.id, claimToken);
+    await orchestrator.syncSubscriberEmail(subscriberId, email, event.id, claimToken);
+    await orchestrator.syncSubscriberEmail(subscriberId, 'other.synthetic@example.invalid', event.id, claimToken);
+    await orchestrator.syncSubscriberEmail(subscriberId, email, event.id, nextClaimToken);
     const keys = fetchMock.mock.calls.map((call) => new Headers((call[1] as RequestInit).headers).get('idempotency-key'));
     expect(keys[0]).toBe(keys[1]);
     expect(keys[2]).not.toBe(keys[0]);
+    expect(keys[3]).not.toBe(keys[0]);
     expect(keys.join()).not.toContain(email);
+    expect(keys.join()).not.toContain(claimToken);
   });
 
   it.each([[408], [409], [429], [500], [503]])('answers unknown for HTTP %i', async (status) => {
     respond(status);
-    await expect(live().syncSubscriberEmail(subscriberId, email, event.id))
+    await expect(live().syncSubscriberEmail(subscriberId, email, event.id, claimToken))
       .resolves.toEqual({ outcome: 'unknown', provider: 'novu', safeCode: `NOVU_SUBSCRIBER_HTTP_${status}` });
   });
 
   it('answers unknown for a timeout or network failure', async () => {
     jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('synthetic network failure'));
-    await expect(live().syncSubscriberEmail(subscriberId, email, event.id))
+    await expect(live().syncSubscriberEmail(subscriberId, email, event.id, claimToken))
       .resolves.toEqual({ outcome: 'unknown', provider: 'novu', safeCode: 'NOVU_SUBSCRIBER_TIMEOUT_OR_UNAVAILABLE' });
   });
 
   it.each([[400], [401], [404], [422]])('answers rejected for HTTP %i', async (status) => {
     respond(status);
-    await expect(live().syncSubscriberEmail(subscriberId, email, event.id))
+    await expect(live().syncSubscriberEmail(subscriberId, email, event.id, claimToken))
       .resolves.toEqual({ outcome: 'rejected', provider: 'novu', safeCode: `NOVU_SUBSCRIBER_HTTP_${status}` });
   });
 
@@ -77,13 +85,13 @@ describe('Novu subscriber email sync', () => {
     const fetchMock = jest.spyOn(globalThis, 'fetch');
     const test = new NovuOrchestrator(readConfig({ NODE_ENV: 'test', HID_DEPLOYMENT_ENV: 'development',
       NOVU_MODE: 'test', NOVU_SUBSCRIBER_SYNC: 'email' }));
-    await expect(test.syncSubscriberEmail(subscriberId, email, event.id)).resolves.toEqual({ outcome: 'confirmed', provider: 'novu' });
-    await expect(test.clearSubscriberEmail(subscriberId, event.id)).resolves.toEqual({ outcome: 'confirmed', provider: 'novu' });
+    await expect(test.syncSubscriberEmail(subscriberId, email, event.id, claimToken)).resolves.toEqual({ outcome: 'confirmed', provider: 'novu' });
+    await expect(test.clearSubscriberEmail(subscriberId, event.id, claimToken)).resolves.toEqual({ outcome: 'confirmed', provider: 'novu' });
     await expect(test.triggerWithEmailWithheld(event)).resolves.toMatchObject({ outcome: 'accepted', provider: 'novu' });
     const keyless = new NovuOrchestrator(readConfig({ NODE_ENV: 'test', NOVU_MODE: 'disabled' }));
-    await expect(keyless.syncSubscriberEmail(subscriberId, email, event.id))
+    await expect(keyless.syncSubscriberEmail(subscriberId, email, event.id, claimToken))
       .resolves.toEqual({ outcome: 'rejected', provider: 'novu', safeCode: 'NOVU_NOT_CONFIGURED' });
-    await expect(keyless.clearSubscriberEmail(subscriberId, event.id))
+    await expect(keyless.clearSubscriberEmail(subscriberId, event.id, claimToken))
       .resolves.toEqual({ outcome: 'rejected', provider: 'novu', safeCode: 'NOVU_NOT_CONFIGURED' });
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -92,25 +100,36 @@ describe('Novu subscriber email sync', () => {
 describe('Novu subscriber email clear (the opt-out holds after an earlier sync)', () => {
   afterEach(() => jest.restoreAllMocks());
 
-  it('sets the subscriber email to null and nothing else, keyed by the event', async () => {
+  it('sets the subscriber email to null and nothing else, keyed by the event and the attempt', async () => {
     const fetchMock = respond(200, { data: { subscriberId } });
-    await expect(live().clearSubscriberEmail(subscriberId, event.id)).resolves.toEqual({ outcome: 'confirmed', provider: 'novu' });
+    await expect(live().clearSubscriberEmail(subscriberId, event.id, claimToken)).resolves.toEqual({ outcome: 'confirmed', provider: 'novu' });
     expect(fetchMock.mock.calls[0][0]).toBe(`https://novu.example.invalid/v2/subscribers/${subscriberId}`);
     expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe('PATCH');
     expect(String((fetchMock.mock.calls[0][1] as RequestInit).body)).toBe('{"email":null}');
-    expect(headers(fetchMock).get('idempotency-key')).toBe(sha256(`hid-novu-subscriber-email-clear-v1\u001f${event.id}`));
+    expect(headers(fetchMock).get('idempotency-key'))
+      .toBe(sha256(`hid-novu-subscriber-email-clear-v1\u001f${event.id}\u001f${claimToken}`));
+  });
+
+  it('a retry of the event clears again under a new key, so Novu cannot answer it from its replay cache', async () => {
+    const fetchMock = respond(200);
+    const orchestrator = live();
+    await orchestrator.clearSubscriberEmail(subscriberId, event.id, claimToken);
+    await orchestrator.clearSubscriberEmail(subscriberId, event.id, nextClaimToken);
+    const keys = fetchMock.mock.calls.map((call) => new Headers((call[1] as RequestInit).headers).get('idempotency-key'));
+    expect(keys[1]).not.toBe(keys[0]);
+    expect(keys.join()).not.toContain(claimToken);
   });
 
   it('treats a subscriber Novu does not have as cleared', async () => {
     respond(404);
-    await expect(live().clearSubscriberEmail(subscriberId, event.id))
+    await expect(live().clearSubscriberEmail(subscriberId, event.id, claimToken))
       .resolves.toEqual({ outcome: 'confirmed', provider: 'novu', safeCode: 'NOVU_SUBSCRIBER_ABSENT' });
   });
 
   it.each([[408, 'unknown'], [409, 'unknown'], [429, 'unknown'], [503, 'unknown'], [400, 'rejected'], [422, 'rejected']])(
     'answers HTTP %i as %s', async (status, outcome) => {
       respond(status);
-      await expect(live().clearSubscriberEmail(subscriberId, event.id))
+      await expect(live().clearSubscriberEmail(subscriberId, event.id, claimToken))
         .resolves.toEqual({ outcome, provider: 'novu', safeCode: `NOVU_SUBSCRIBER_HTTP_${status}` });
     });
 });
