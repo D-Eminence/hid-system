@@ -754,10 +754,16 @@ export class HidRegionalStack extends Stack {
       secrets,
       logging: ecs.LogDrivers.awsLogs({ logGroup, streamPrefix: definition.name }),
       readonlyRootFilesystem: definition.name !== 'gateway',
+      // This check replaces the image's own HEALTHCHECK. Every Node image runs
+      // on gcr.io/distroless/nodejs22-debian13, which has no /bin/sh and keeps
+      // node at /nodejs/bin/node, off PATH: exec form with the absolute path,
+      // or every probe fails and ECS replaces the task. The gateway's
+      // nginx-unprivileged image has BusyBox sh and wget.
       healthCheck: definition.healthPath ? {
         command: definition.name === 'gateway'
           ? ['CMD-SHELL', `wget -q -O /dev/null http://127.0.0.1:${definition.port}${definition.healthPath} || exit 1`]
-          : ['CMD-SHELL', `node -e "fetch('http://127.0.0.1:${definition.port}${definition.healthPath}').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"`],
+          : ['CMD', '/nodejs/bin/node', '-e',
+            `fetch('http://127.0.0.1:${definition.port}${definition.healthPath}').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))`],
         interval: Duration.seconds(30),
         timeout: Duration.seconds(10),
         retries: 3,
