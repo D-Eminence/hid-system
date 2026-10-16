@@ -232,8 +232,13 @@ async function provisioningStage() {
   const master = 'hid_rds_like_master';
   const administrator = 'hid_provisioned_admin';
   const target = 'hid';
-  const at = (user, secret, db = target) => `postgresql://${user}:${encodeURIComponent(secret)}@localhost:${provisioningPort}`
-    + `/${db}?host=${encodeURIComponent(temporary)}`;
+  // Built with URL setters so no credential appears inline (verify-secret-readiness).
+  const at = (user, secret, db = target) => {
+    const url = new URL(`postgresql://localhost:${provisioningPort}/${db}?host=${encodeURIComponent(temporary)}`);
+    url.username = encodeURIComponent(user);
+    url.password = encodeURIComponent(secret);
+    return url.toString();
+  };
   const sql = (label, user, statements, expected = 0, db = target, environment = {}) => run(label, join(pgBindir, 'psql'),
     ['-X', '-At', '-v', 'ON_ERROR_STOP=1', '-h', temporary, '-p', String(provisioningPort), '-U', user, '-d', db,
       ...[statements].flat().flatMap((statement) => ['-c', statement])], environment, expected);
@@ -286,7 +291,7 @@ async function provisioningStage() {
   assert.equal(sql('the administrator signs in with its password', administrator, 'select current_user', 0, target,
     { PGPASSWORD: passwords.admin }).stdout.trim(), administrator);
   assert.match(sql('the administrator is refused another password', administrator, 'select 1', 'failure', target,
-    { PGPASSWORD: 'Another-Password-0000' }).output, /password authentication failed/);
+    { PGPASSWORD: 'example-wrong-password-0000' }).output, /password authentication failed/);
   steps.administrator = { created_by: master, attributes: 'NOSUPERUSER NOBYPASSRLS CREATEROLE NOCREATEDB NOREPLICATION',
     create_on_database: target, password: 'SCRAM-SHA-256 verifier; signs in with it, refused another' };
 

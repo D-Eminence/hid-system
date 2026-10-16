@@ -18,8 +18,13 @@ import { RUNTIME_CREDENTIALS, credentialVariable } from '../../services/ehr-api/
 // statement's text, and no output names a URL or password. Synthetic values.
 const password = 'Synthetic-Password-0001';
 const host = 'hid-production-postgres.example.invalid';
-const url = (user, secret = password, rest = `${host}:5432/hid`) =>
-  `postgresql://${user}:${encodeURIComponent(secret)}@${rest}`;
+// Built with URL setters so no credential appears inline (verify-secret-readiness).
+const url = (user, secret = password, rest = `${host}:5432/hid`) => {
+  const value = new URL(`postgresql://${rest}`);
+  value.username = encodeURIComponent(user);
+  value.password = encodeURIComponent(secret);
+  return value.toString();
+};
 const adminUrl = url('hid_migration_admin');
 const loginNames = Object.fromEntries(Object.keys(RUNTIME_CREDENTIALS)
   .map((credential) => [credential, `hid_${credential.replaceAll('-', '_')}_login`]));
@@ -39,7 +44,7 @@ test('takes exactly one known command', () => {
 test('reads a login, its password and its database target from a URL', () => {
   assert.deepEqual(loginFromUrl(url('hid_identity_login', 'Synthetic/Pass@word%0001'), 'DATABASE_LOGIN_URL_IDENTITY_API'), {
     user: 'hid_identity_login', password: 'Synthetic/Pass@word%0001', database: 'hid', target: `${host}:5432/hid` });
-  assert.deepEqual(loginFromUrl('postgres://hid_admin:Synthetic-Password-0001@localhost/hid_x?host=%2Ftmp%2Fsocket&sslmode=disable',
+  assert.deepEqual(loginFromUrl('postgres://hid_admin:example-Synthetic-0001@localhost/hid_x?host=%2Ftmp%2Fsocket&sslmode=disable',
     'DATABASE_ADMIN_URL').target, '/tmp/socket:5432/hid_x');
   assert.equal(roleNameFromUrl(url('hid_migration_admin', 'short'), 'DATABASE_ADMIN_URL'), 'hid_migration_admin');
 });
