@@ -46,7 +46,8 @@
 //   (a chain migrated before its first bootstrap);
 // - admin:bootstrap seeding two or three distinct first Super Admins in one
 //   audited transaction, and refusing a repeated, ineligible or fourth
-//   account, both forms at once, and any run once a Super Admin is active;
+//   account, both forms at once, the one-account form with NODE_ENV=production,
+//   and any run once a Super Admin is active;
 // - the platform-control-owner and function-parameter-settings suites.
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
@@ -586,6 +587,12 @@ try {
   }
   assert.match(adminBootstrap('admin:bootstrap refuses both forms', { PLATFORM_ADMIN_ACCOUNT_IDS: `${a},${b}`,
     PLATFORM_ADMIN_ACCOUNT_ID: c }, 'failure').output, /not both/);
+  // The migration task runs with NODE_ENV=production: one Super Admin alone
+  // could never add a second or approve a clinician application.
+  assert.match(adminBootstrap('admin:bootstrap refuses one account in production', { NODE_ENV: 'production',
+    PLATFORM_ADMIN_ACCOUNT_ID: a }, 'failure').output,
+  /In production name two or three accounts in PLATFORM_ADMIN_ACCOUNT_IDS; PLATFORM_ADMIN_ACCOUNT_ID is for development only/);
+  assert.equal(superAdminGrants(), '0:0', 'a refused bootstrap (one account in production) granted nothing');
   const seeded = adminBootstrap('admin:bootstrap seeds three Super Admins', { PLATFORM_ADMIN_ACCOUNT_IDS: `${a},${b},${c}` });
   assert.match(seeded.stdout, new RegExp(`Platform Super Admin bootstrap completed for accounts ${a}, ${b}, ${c}`));
   assert.equal(superAdminGrants(), '3:3');
@@ -609,7 +616,8 @@ try {
   assert.equal(superAdminGrants(), '3:3');
   evidence.steps.platform_admin_bootstrap = { run_as: admin, seeded: 3, distinct: 3,
     each_holds: 'platform.workforce.manage', audit_events: 3,
-    refused: [...Object.keys(bootstrapRefusals), 'both forms', 'one more account', 'another set'] };
+    refused: [...Object.keys(bootstrapRefusals), 'both forms', 'one account in production', 'one more account',
+      'another set'] };
 
   for (const name of ['platform-control-owner.integration.sql', 'function-parameter-settings.integration.sql']) {
     suite(name, superuser);

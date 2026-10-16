@@ -21,9 +21,29 @@ test('seeds two or three distinct accounts named in PLATFORM_ADMIN_ACCOUNT_IDS',
     PLATFORM_ADMIN_BOOTSTRAP_REASON: ` ${reason} ` }), { accountIds: [a, b, c], reason });
 });
 
-test('keeps the one-account form', () => {
+test('keeps the one-account form outside production', () => {
   assert.deepEqual(bootstrapInput({ PLATFORM_ADMIN_ACCOUNT_ID: a, PLATFORM_ADMIN_BOOTSTRAP_REASON: reason }),
     { accountIds: [a], reason });
+  for (const NODE_ENV of ['development', 'test']) {
+    assert.deepEqual(bootstrapInput({ NODE_ENV, PLATFORM_ADMIN_ACCOUNT_ID: a, PLATFORM_ADMIN_BOOTSTRAP_REASON: reason }),
+      { accountIds: [a], reason }, NODE_ENV);
+  }
+});
+
+// One Super Admin alone can never add a second (0070 refuses a one-step
+// platform_super_admin grant, and a two-person request needs another Super
+// Admin's decision) nor approve a clinician application (0096), and the
+// bootstrap refuses to run again once one is active. The migration task runs
+// with NODE_ENV=production in every AWS environment, so there the one-account
+// form is refused before any connection.
+test('refuses the one-account form in production and names PLATFORM_ADMIN_ACCOUNT_IDS', () => {
+  assert.throws(() => bootstrapInput({ NODE_ENV: 'production', PLATFORM_ADMIN_ACCOUNT_ID: a,
+    PLATFORM_ADMIN_BOOTSTRAP_REASON: reason }),
+  /In production name two or three accounts in PLATFORM_ADMIN_ACCOUNT_IDS; PLATFORM_ADMIN_ACCOUNT_ID is for development only/);
+  assert.throws(() => bootstrapInput({ NODE_ENV: 'production', PLATFORM_ADMIN_ACCOUNT_IDS: a,
+    PLATFORM_ADMIN_BOOTSTRAP_REASON: reason }), /PLATFORM_ADMIN_ACCOUNT_IDS must name two or three distinct accounts/);
+  assert.deepEqual(bootstrapInput({ NODE_ENV: 'production', PLATFORM_ADMIN_ACCOUNT_IDS: `${a},${b}`,
+    PLATFORM_ADMIN_BOOTSTRAP_REASON: reason }), { accountIds: [a, b], reason });
 });
 
 test('refuses a repeated, missing, malformed or fourth account, and both forms at once', () => {
