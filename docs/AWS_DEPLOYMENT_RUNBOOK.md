@@ -98,7 +98,8 @@ local service token. The Notification Worker (Novu) is off in production
 line, and `OtpDefinitiveFailures` alarms on its `definitive_failure` count. The NIN holder code (ADR-062, purpose `NIN_HOLDER_VERIFY`) goes by SMS
 only, through Termii, and counts there too. Before `NIN_HOLDER_SMS_ENABLED`
 is set, add the holder SMS volume and failure ratio alerts of the release
-checklist §10; Termii's sender ID (P18) and QoreID's written confirmation of
+checklist §10; Termii's sender ID and DND route, with the Termii integration
+configuration on `dnd` (P18, §13 step 7), and QoreID's written confirmation of
 `nin.phone` (P23) come first.
 When the fallback ran, the line also names the primary provider and its safe
 code (`primaryProvider`, `primarySafeCode`); read those for why SES or Termii
@@ -1017,7 +1018,8 @@ production deployment authorization of §12.
 External dependencies: the operations owner names the on-call recipients of
 `hid-production-operational-alerts`; SES production access and a DKIM-verified
 domain in the production account; a Termii account with an approved Nigerian
-sender ID; the security owner's production keys (launch plan I1).
+sender ID and Termii's DND (transactional) route activated for it; the
+security owner's production keys (launch plan I1).
 
 1. **Alarm topic.** In the production account and region, create a
    customer-managed KMS key whose key policy keeps the account root statement
@@ -1073,12 +1075,26 @@ sender ID; the security owner's production keys (launch plan I1).
    must show it paused.
 6. Synthesize with `HID_OPERATIONAL_ALARM_TOPIC_ARN`, `HID_AWS_ACCOUNT` and
    `HID_AWS_REGION` (§2) and continue with §12.
+7. **Termii on its DND route** (release checklist P18). notification-api's
+   `TERMII_CHANNEL` defaults to `generic`, which Termii documents as
+   promotional: OTP on it may fail or be blocked, and it does not reach a
+   number on the Do-Not-Disturb register. The stack does not set it. After
+   deployment and before any SMS OTP is relied on, a platform administrator
+   with `platform.integration.manage` sets the route with the audited
+   `POST /api/v1/admin/integrations/termii/configuration` (a critical action,
+   as in step 5) and the body
+   `{"reason": "<why>", "configuration": {"channel": "dnd"}}`. It replaces the
+   stored Termii configuration; without `senderId` the secret's
+   `termiiSenderId` is used. `GET /api/v1/admin/integrations/termii` must show
+   `configuration.channel` `dnd`. Identity passes that configuration with each
+   send. Only then may `NIN_HOLDER_SMS_ENABLED` be set.
 
 After deployment, confirm in CloudWatch that every alarm of the stack lists the
 topic as its alarm and OK action, then run a synthetic signup OTP over email
 and over SMS and a recovery OTP, and check that each wrote one
 `notification.otp.outcome` line with outcome `accepted` and no recipient, code
-or message. A line with `fallbackUsed: true` means Brevo was not paused (step
+or message. Send the SMS OTP, after step 7, to a test handset with DND active,
+and confirm that the code arrived. A line with `fallbackUsed: true` means Brevo was not paused (step
 5); its `primaryProvider` and `primarySafeCode` give the primary's result.
 
 Rollback: the topic, key and subscriptions are retained; removing them makes
