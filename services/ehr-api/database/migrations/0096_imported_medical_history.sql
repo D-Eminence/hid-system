@@ -80,8 +80,12 @@
 --      the parent run's sealed identity rows; every legacy timestamp must be
 --      ISO 8601 with an offset and finite. Rows are inserted once (a repeat
 --      changes nothing) and a stored row that differs is refused; a receipt
---      run records the counts. Its checks look rows up by key, so its time
---      grows with the number of rows, not with their square.
+--      run records the counts. Its checks look rows up by key, and it plans
+--      each statement for the rows it has (plan_cache_mode
+--      force_custom_plan: a plan cached while the imported tables were
+--      empty, as autovacuum analyzes them on a new database, would read every
+--      stored row by a sequential scan), so its time grows with the number of
+--      rows, not with their square.
 --
 -- 6. The history run's own seal. Main's crosswalk gate
 --    (identity.legacy_nin_crosswalk_ready, 0057) closes public patient
@@ -411,6 +415,7 @@ volatile
 security definer
 set search_path = pg_catalog, pg_temp
 set timezone = 'UTC'
+set plan_cache_mode = 'force_custom_plan'
 as $$
 declare
   history_types constant text[] := array['medical_record_files', 'medical_record_versions', 'medical_records'];
