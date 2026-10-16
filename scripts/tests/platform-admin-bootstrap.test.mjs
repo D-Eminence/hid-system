@@ -109,11 +109,34 @@ test('refuses, rolls back and grants nothing while a Super Admin is active or an
     /Bootstrap refused: an active platform Super Admin already exists/);
   const ineligible = fakeClient({ eligible: (ids) => ids.filter((id) => id !== b) });
   await assert.rejects(bootstrapPlatformAdmins(ineligible, { accountIds: [a, b], reason }),
-    new RegExp(`Bootstrap refused: account ${b} is not active or has no password credential`));
+    new RegExp(`Bootstrap refused: account ${b} is not active or has no email address and password credential`));
   for (const client of [active, ineligible]) {
     const sql = client.statements.map((statement) => statement.sql);
     assert.equal(sql.at(-1), 'rollback');
     assert.ok(!sql.includes('commit'));
     assert.ok(!sql.some((text) => text.startsWith('insert ') || text.startsWith('update ')));
   }
+});
+
+// Platform sign-in (POST /api/v1/auth/admin/login) takes an email and finds
+// the account by that email alone (LocalAuthProvider, 'staff'). A phone-only
+// patient account has a password and no email, so a Super Admin seeded on it
+// could never sign in or enrol MFA, while the bootstrap's own check would
+// count it and refuse every later run: one usable Super Admin could then
+// neither approve a second (0070) nor a clinician application (0096).
+test('an account is eligible only with an email address and a password: platform sign-in is by email', async () => {
+  const client = fakeClient();
+  await bootstrapPlatformAdmins(client, { accountIds: [a, b], reason });
+  const eligibility = client.statements.find((statement) => statement.sql.includes('for update'));
+  assert.ok(eligibility, 'the eligibility query');
+  assert.match(eligibility.sql, /account\.status = 'active'/);
+  assert.match(eligibility.sql, /account\.password_hash is not null/);
+  assert.match(eligibility.sql, /account\.email is not null and btrim\(account\.email\) <> ''/);
+  const emailless = fakeClient({ eligible: (ids) => ids.filter((id) => id !== c) });
+  await assert.rejects(bootstrapPlatformAdmins(emailless, { accountIds: [a, b, c], reason }),
+    new RegExp(`^Error: Bootstrap refused: account ${c} is not active or has no email address and password credential; `
+      + 'platform sign-in is by email and password$'));
+  const sql = emailless.statements.map((statement) => statement.sql);
+  assert.equal(sql.at(-1), 'rollback');
+  assert.ok(!sql.some((text) => text.startsWith('insert ') || text.startsWith('update ')));
 });

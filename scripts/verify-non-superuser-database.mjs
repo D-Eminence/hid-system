@@ -45,9 +45,10 @@
 //   administrator whose name needs quoting and which still owns the function
 //   (a chain migrated before its first bootstrap);
 // - admin:bootstrap seeding two or three distinct first Super Admins in one
-//   audited transaction, and refusing a repeated, ineligible or fourth
-//   account, both forms at once, the one-account form with NODE_ENV=production,
-//   and any run once a Super Admin is active;
+//   audited transaction, and refusing a repeated, ineligible (no password, or
+//   no email address, as platform sign-in is by email) or fourth account, both
+//   forms at once, the one-account form with NODE_ENV=production, and any run
+//   once a Super Admin is active;
 // - the platform-control-owner and function-parameter-settings suites;
 // - the database provisioning task's script (provision-database-logins.mjs,
 //   MIGRATION_RUNBOOK.md §6.1 and §6.3) on a second cluster laid out as a new
@@ -736,11 +737,16 @@ try {
   // approval (0096), so the one-time bootstrap seeds two or three distinct
   // accounts in one audited transaction. It refuses a repeated, ineligible or
   // fourth account and both forms at once, granting nothing, and every run
-  // once a Super Admin is active.
-  const bootstrapAccounts = Object.fromEntries(['a', 'b', 'c', 'd', 'none'].map((label) => [label, randomUUID()]));
+  // once a Super Admin is active. Platform sign-in is by email and password,
+  // so an account with a password and no email (a phone-only patient's) or a
+  // blank one is ineligible too.
+  const bootstrapAccounts = Object.fromEntries(['a', 'b', 'c', 'd', 'none', 'noemail', 'blankemail']
+    .map((label) => [label, randomUUID()]));
+  const bootstrapEmail = (label) => ({ noemail: 'null', blankemail: "'  '" })[label]
+    ?? `'platform-bootstrap-${label}@example.invalid'`;
   psql('create the synthetic bootstrap accounts', admin, Object.entries(bootstrapAccounts).map(([label, id]) =>
     `insert into auth.accounts (id, subject, email, display_name, status, password_hash, password_algorithm)
-       values ('${id}', 'synthetic:platform-bootstrap:${label}', 'platform-bootstrap-${label}@example.invalid',
+       values ('${id}', 'synthetic:platform-bootstrap:${label}', ${bootstrapEmail(label)},
          'Platform Bootstrap ${label}', 'active', ${label === 'none' ? 'null, null' : "'synthetic-hash', 'argon2id'"});`)
     .join(' '));
   const adminBootstrap = (label, environment, expected = 0) => run(label, process.execPath,
@@ -749,11 +755,14 @@ try {
   const superAdminGrants = () => psql('active Super Admin grants', admin,
     `select count(*) || ':' || count(distinct account_id) from auth.account_roles
       where role_code = 'platform_super_admin' and scope_type = 'platform' and revoked_at is null`).stdout.trim();
-  const { a, b, c, d, none } = bootstrapAccounts;
+  const { a, b, c, d, none, noemail, blankemail } = bootstrapAccounts;
+  const ineligibleAccount = (id) => new RegExp(`account ${id} is not active or has no email address and password credential`);
   const bootstrapRefusals = {
     repeated: [`${a},${a}`, /two or three distinct accounts/],
     fourth: [`${a},${b},${c},${d}`, /two or three/],
-    ineligible: [`${a},${none}`, new RegExp(`account ${none} is not active or has no password credential`)],
+    ineligible: [`${a},${none}`, ineligibleAccount(none)],
+    'no-email': [`${a},${b},${noemail}`, ineligibleAccount(noemail)],
+    'blank-email': [`${a},${blankemail}`, ineligibleAccount(blankemail)],
   };
   for (const [label, [ids, message]] of Object.entries(bootstrapRefusals)) {
     assert.match(adminBootstrap(`admin:bootstrap refuses a ${label} account`, { PLATFORM_ADMIN_ACCOUNT_IDS: ids },
