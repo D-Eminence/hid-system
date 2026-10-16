@@ -452,9 +452,14 @@ try {
     and outcome = 'failure' and resource_type = 'session' and resource_id = $1 and actor_type = 'staff'
     and facility_id is null and actor_membership_id is null`, [selecting.sessionId])).rows[0].count), 2,
   'both refused selections are audited');
+  // A17: each refusal row records the status and code it was answered.
+  assert.deepEqual((await pool.query(`select details->>'status' as status, details->>'code' as code from audit.events
+    where action = 'auth.facility.select' and outcome = 'failure' and resource_id = $1 order by sequence_id`,
+  [selecting.sessionId])).rows, [{ status: '403', code: 'FACILITY_ACCESS_DENIED' }, { status: '400', code: malformed.body.code }],
+  'each refused selection records the status and code it was answered');
   const own = await select(ids.facility);
   assert.equal(own.status, 200, JSON.stringify(own.body)); assert.equal(own.body.actor.facility.id, ids.facility);
-  checks.push('a facility selection refused for a facility the staff member has no membership at (403 FACILITY_ACCESS_DENIED) or for a malformed id (400) answers its refusal, not 503, and is audited as an auth.facility.select failure of that session with no facility; selecting their own facility still succeeds');
+  checks.push('a facility selection refused for a facility the staff member has no membership at (403 FACILITY_ACCESS_DENIED) or for a malformed id (400) answers its refusal, not 503, and is audited as an auth.facility.select failure of that session with no facility, recording the status and code answered (A17); selecting their own facility still succeeds');
 
   // 15. A sign-in whose actor refresh() can no longer resolve is not one refresh
   // could renew (SES-4): a staff sign-in whose facility membership was
@@ -548,20 +553,28 @@ try {
   const deniedRows = async () => (await pool.query(`select count(*)::int as n from audit.events
     where actor_account_id = $1 and action = 'auth.authorization.denied' and facility_id is null and outcome = 'denied'`,
   [doctor.id])).rows[0].n;
+  // A17: the guard's row records the status and code it answered.
+  const lastDenied = async () => (await pool.query(`select details from audit.events
+    where actor_account_id = $1 and action = 'auth.authorization.denied' and facility_id is null and outcome = 'denied'
+    order by sequence_id desc limit 1`, [doctor.id])).rows[0]?.details;
   for (const path of ['/api/v1/identity/me', '/api/v1/identity/me/access-history', '/api/v1/identity/me/notifications']) {
     const before = await deniedRows();
     const refused = await http.get(path).set('Cookie', cookie(staffOnPatientRoutes.cookies));
     assert.equal(refused.status, 403, `${path}: ${JSON.stringify(refused.body)}`);
     assert.equal(refused.body.code, 'PATIENT_SESSION_REQUIRED');
     assert.equal(await deniedRows(), before + 1, `${path} records exactly one refusal`);
+    assert.deepEqual(await lastDenied(), { method: 'GET', route: path, status: 403, code: 'PATIENT_SESSION_REQUIRED' },
+      `${path}: the refusal row records the status and code answered`);
   }
   const pin = await http.post('/api/v1/identity/me/access-pin').set('Cookie', cookie(staffOnPatientRoutes.cookies))
     .set('Origin', origin).set('x-csrf-token', staffOnPatientRoutes.cookies[`${name}_csrf`]).send({ pin: '482916' });
   assert.equal(pin.status, 403, JSON.stringify(pin.body)); assert.equal(pin.body.code, 'PATIENT_SESSION_REQUIRED');
+  assert.deepEqual(await lastDenied(), { method: 'POST', route: '/api/v1/identity/me/access-pin', status: 403,
+    code: 'PATIENT_SESSION_REQUIRED' }, 'the access-PIN refusal row records the status and code answered');
   const patientOnOwnRoute = await signIn(ada, 'patient');
   const ownProfile = await http.get('/api/v1/identity/me').set('Cookie', cookie(patientOnOwnRoute.cookies));
   assert.equal(ownProfile.status, 200, JSON.stringify(ownProfile.body));
-  checks.push('A9: a staff session on GET /identity/me, /me/access-history, /me/notifications and POST /me/access-pin is 403 PATIENT_SESSION_REQUIRED, each refusal audited once as auth.authorization.denied with no facility; a patient session still reads its own profile');
+  checks.push('A9: a staff session on GET /identity/me, /me/access-history, /me/notifications and POST /me/access-pin is 403 PATIENT_SESSION_REQUIRED, each refusal audited once as auth.authorization.denied with no facility and with the status and code answered (A17); a patient session still reads its own profile');
 
   process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: 'hid_identity_api_runtime', checks })}\n`);
 } finally { if (app) await app.close(); await pool.end(); }

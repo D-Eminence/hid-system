@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { consumeRateLimit, rateLimitBlocked } from '../auth/rate-limit';
-import { DomainProblem } from '../common/problem';
+import { RetryAfterProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
@@ -66,10 +66,18 @@ export class StaffSearchBudget {
   }
 }
 
-function rateLimited(operation: StaffSearchOperation): DomainProblem {
+/**
+ * The operation's actor and facility buckets share one configured window, so
+ * Retry-After (A21) is that whole window whichever refused: an upper bound,
+ * since a blocked bucket stays blocked for one window, and never the time left.
+ */
+function rateLimited(operation: StaffSearchOperation): RetryAfterProblem {
+  const environment = getEnvironment();
   return operation === 'patient_lookup'
-    ? new DomainProblem(429, 'PATIENT_LOOKUP_RATE_LIMITED', 'Too many patient lookups; wait and try again')
-    : new DomainProblem(429, 'ACCESS_REQUEST_RATE_LIMITED', 'Too many access requests; wait and try again');
+    ? new RetryAfterProblem(429, 'PATIENT_LOOKUP_RATE_LIMITED', 'Too many patient lookups; wait and try again',
+      environment.PATIENT_LOOKUP_RATE_WINDOW_SECONDS)
+    : new RetryAfterProblem(429, 'ACCESS_REQUEST_RATE_LIMITED', 'Too many access requests; wait and try again',
+      environment.ACCESS_REQUEST_RATE_WINDOW_SECONDS);
 }
 
 export function staffSearchBucket(operation: StaffSearchOperation, scope: 'actor' | 'facility', id: string): string {

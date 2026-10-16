@@ -395,8 +395,10 @@ if (process.argv[2] === '--identity-child') {
     assert.deepEqual(own.body.diagnoses.map((item) => [item.id, item.verificationStatus]), [[r.confirmed, 'confirmed']]);
     assert.equal(Object.hasOwn(own.body.diagnoses[0], 'notes'), false, 'the clinician\'s diagnosis notes reached the patient');
     assert.deepEqual(own.body.prescriptions.map((item) => [item.id, item.status]), [[r.active, 'active']]);
-    assert.deepEqual(own.body.documents.map((item) => [item.id, item.status, item.scanStatus, item.classification]),
-      [[r.clean, 'available', 'clean', 'phi']]);
+    // sizeBytes is a JSON integer, as on every document answer (A15); pg reads the bigint as text.
+    assert.deepEqual(own.body.documents.map((item) => [item.id, item.status, item.scanStatus, item.classification,
+      item.sizeBytes]), [[r.clean, 'available', 'clean', 'phi', 2048]],
+    'GET /ehr/me/records does not release exactly the clean PHI document, with sizeBytes as an integer (A15)');
     assert.equal(JSON.stringify(own.body.documents).includes('synthetic/release-'), false,
       'the document storage key reached the patient');
     assert.deepEqual(own.body.labResults.map((item) => [item.id, item.version, item.revisionKind, item.numericValue,
@@ -409,7 +411,7 @@ if (process.argv[2] === '--identity-child') {
       where action='ehr.patient.self.records.read' and outcome='success' and patient_id=$1`, [ids.patient]);
     assert.deepEqual(summaryAudit.rows.map((row) => row.details), [{ encounterCount: 1, noteCount: 0, vitalCount: 1,
       diagnosisCount: 1, prescriptionCount: 1, labResultCount: 2, documentCount: 1, withheldCategories: ['labRequests'] }]);
-    checks.push('with every category flag on, GET /ehr/me/records releases exactly the final uncorrected vital, the confirmed diagnosis without its clinician notes, the active prescription, the latest released and not invalidated Lab result revisions and the clean PHI document of the completed encounter, withholds lab requests, and audits counts only');
+    checks.push('with every category flag on, GET /ehr/me/records releases exactly the final uncorrected vital, the confirmed diagnosis without its clinician notes, the active prescription, the latest released and not invalidated Lab result revisions and the clean PHI document of the completed encounter (its sizeBytes an integer, A15), withholds lab requests, and audits counts only');
 
     // 2. The document download: the released document only, the audit before
     //    the URL, the exact object checked, an attachment signed.

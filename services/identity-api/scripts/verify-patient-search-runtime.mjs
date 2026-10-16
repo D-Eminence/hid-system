@@ -35,13 +35,16 @@ const isolated = `hid_rehearsal_search_${randomUUID().replaceAll('-', '').slice(
 const SERVICE_APPLICATION = 'hid-patient-search-verifier';
 const maintenance = new Pool({ host: socket, user: process.env.PGUSER, database: 'postgres', max: 1 });
 // Small budgets so that the rate limits are reached within this run.
-const LIMITS = { lookupActor: 6, lookupFacility: 8, requestActor: 3 };
+const LIMITS = { lookupActor: 6, lookupFacility: 8, requestActor: 3, lookupWindowSeconds: 300, requestWindowSeconds: 900 };
 Object.assign(process.env, { MFA_SECRET_KEY_B64: SYNTHETIC_STAFF_MFA_KEY_B64, MFA_KEY_VERSION: 'patient-search-runtime-v1',
   AUTH_COOKIE_SECURE: 'true', NIN_PROVIDER_MODE: 'unavailable', TURNSTILE_MODE: 'disabled',
   IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret', PATIENT_LIFECYCLE_SWEEP_SECONDS: '0',
   PATIENT_LOOKUP_ACTOR_MAX_REQUESTS: String(LIMITS.lookupActor),
   PATIENT_LOOKUP_FACILITY_MAX_REQUESTS: String(LIMITS.lookupFacility),
   ACCESS_REQUEST_ACTOR_MAX_REQUESTS: String(LIMITS.requestActor),
+  // The defaults, set so that the Retry-After checks (A21) do not depend on the shell.
+  PATIENT_LOOKUP_RATE_WINDOW_SECONDS: String(LIMITS.lookupWindowSeconds),
+  ACCESS_REQUEST_RATE_WINDOW_SECONDS: String(LIMITS.requestWindowSeconds),
   // The production DatabaseService, unchanged; every connection it opens
   // starts as the runtime role (the libpq startup option role).
   DATABASE_URL: `postgresql://${encodeURIComponent(process.env.PGUSER)}@localhost/${isolated}?host=${encodeURIComponent(socket)}`
@@ -288,8 +291,10 @@ try {
 
   // 3. Access-request budget per actor.
   expectStatus(await requestAccess(first, 'HID-SRCHRTUNKNWB'), 201);
-  expectStatus(await requestAccess(first, 'HID-SRCHRTUNKNWC'), 429, 'ACCESS_REQUEST_RATE_LIMITED');
-  check(`access-request creation: the request after ${LIMITS.requestActor} per actor in the window is 429 ACCESS_REQUEST_RATE_LIMITED`);
+  const requestLimited = await requestAccess(first, 'HID-SRCHRTUNKNWC');
+  expectStatus(requestLimited, 429, 'ACCESS_REQUEST_RATE_LIMITED');
+  assert.equal(requestLimited.headers['retry-after'], String(LIMITS.requestWindowSeconds));
+  check(`access-request creation: the request after ${LIMITS.requestActor} per actor in the window is 429 ACCESS_REQUEST_RATE_LIMITED, with Retry-After the whole window (A21)`);
 
   // 4. Lookup budgets (FE-10): only refusals count, alike, per actor (across
   // facilities) and per facility; while a budget is blocked every lookup is 429.
@@ -324,6 +329,7 @@ try {
   // The refusal that crosses the maximum (a patient without a grant) is 429, not 404.
   const crossing = await lookup(first, 'HID-SRCHRTNGRNT');
   expectStatus(crossing, 429, 'PATIENT_LOOKUP_RATE_LIMITED');
+  assert.equal(crossing.headers['retry-after'], String(LIMITS.lookupWindowSeconds), 'the lookup 429 states the whole window (A21)');
   assert.deepEqual(await budgetRow('actor', first.account), { request_count: LIMITS.lookupActor + 1, blocked: true });
   assert.equal((await budgetRow('facility', ids.facility)).request_count, mainBeforeCrossing,
     'a refusal that crosses the actor\'s maximum must not count for the facility');

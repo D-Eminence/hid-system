@@ -1440,8 +1440,9 @@ try {
   // The same answer from the allowed Origin and with a signed-in session. The
   // route itself refuses no Origin: this verifier mounts no CORS middleware,
   // so a foreign Origin reaches it here. Deployed, main.ts's CORS middleware
-  // answers an Origin outside CORS_ORIGINS before any route (500, no CORS
-  // permission; src/config/cors.spec.ts), as on every Identity route.
+  // refuses an Origin outside CORS_ORIGINS before any route (403
+  // ORIGIN_DENIED, no CORS permission; src/config/cors.spec.ts), as on every
+  // Identity route since #76.
   await expectAvailability(true, 'allowed Origin', { Origin: origin });
   await expectAvailability(true, 'foreign Origin without CORS middleware', { Origin: 'https://attacker.example' });
   await expectAvailability(true, 'signed-in caller', { Cookie: `${cookieName}=existing-session; ${cookieA}` });

@@ -384,10 +384,29 @@ describe('Identity OTP credentials', () => {
     await expect(new OtpService(transactionDatabase(client), notification as unknown as NotificationOtpClient).start(startArgs({
       identifier: 'person@example.test', purpose: 'PASSWORD_RESET',
       remoteIp: '192.0.2.12', correlationId: 'otp-rate-denial-0001',
-    }))).rejects.toMatchObject({ code: 'OTP_RATE_LIMITED' });
+    }))).rejects.toMatchObject({ status: 429, code: 'OTP_RATE_LIMITED', retryAfterSeconds: 900 });
     expect(notification.deliver).not.toHaveBeenCalled();
     expect(statements.findIndex(sql => sql.includes('pg_advisory_xact_lock')))
       .toBeLessThan(statements.findIndex(sql => sql.includes('from auth.otp_rate_limits')));
+  });
+
+  // A21: Retry-After states the configured window, the same whichever start
+  // bucket (recipient, network, account) refused, never the time left in one
+  // that the caller's identifier keys.
+  it('gives the whole start window, not the time left, when a bucket is already blocked', async () => {
+    process.env.OTP_RATE_WINDOW_SECONDS = '1200';
+    resetEnvironmentForTests();
+    const client = { query: jest.fn(async (sql: string) => {
+      if (sql.includes('from auth.accounts account')) return { rows: [{ id: 'account-1', email: 'person@example.test' }] };
+      if (sql.includes('from auth.otp_rate_limits')) return { rows: [{
+        request_count: 6, window_started_at: new Date(Date.now() - 1_170_000), blocked_until: new Date(Date.now() + 30_000),
+      }] };
+      return { rows: [] };
+    }) } as unknown as PoolClient;
+    await expect(new OtpService(transactionDatabase(client), { deliver: jest.fn() } as unknown as NotificationOtpClient)
+      .start(startArgs({ identifier: 'person@example.test', purpose: 'PASSWORD_RESET',
+        remoteIp: '192.0.2.13', correlationId: 'otp-rate-denial-0002' })))
+      .rejects.toMatchObject({ status: 429, code: 'OTP_RATE_LIMITED', retryAfterSeconds: 1200 });
   });
 
   it('invalidates the old active code before inserting and delivering a resend', async () => {
@@ -828,6 +847,20 @@ describe('Identity OTP credentials', () => {
         .toEqual({ blockedAfterConfiguredBudget: true });
       await expect(service.verify({ challengeId: last.challengeId, purpose: last.purpose,
         code: last.code, correlationId: 'verify-after-twelfth' })).rejects.toMatchObject({ code: 'OTP_INVALID_OR_EXPIRED' });
+    });
+
+    it('refuses a code for a spent budget as it refuses a wrong one, with no Retry-After (A21)', async () => {
+      const store = recoveryStore();
+      const notification = recordingNotification();
+      const service = new OtpService(store.database, notification.client);
+      const probe = await startAndCapture(service, notification, KNOWN_EMAIL, 'LEGACY_SESSION_FALLBACK');
+      await spendFailures(service, notification, 5);
+      await lifecycle(service).settleDeliveries?.();
+
+      const refused = await service.verify({ challengeId: probe.challengeId, purpose: 'LEGACY_SESSION_FALLBACK',
+        code: probe.code, correlationId: 'verify-spent-budget' }).then(() => undefined, (error: unknown) => error);
+      expect(refused).toMatchObject({ status: 403, code: 'OTP_INVALID_OR_EXPIRED' });
+      expect(refused).not.toHaveProperty('retryAfterSeconds');
     });
 
     it('answers a start for an account whose budget is spent like an unknown identifier and sends nothing', async () => {

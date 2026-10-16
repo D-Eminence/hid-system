@@ -7,12 +7,14 @@
 // it for the sign-in family, so a reload (GET /auth/session) or a refresh
 // reports it instead of the primary facility; a membership that has since
 // ended asks the user again (reselect); another sign-in of the same account is
-// not affected; a refused selection writes nothing. When the selection cannot
-// be read, a session read answers 503 and a refresh, whose rotation has
-// committed, answers 200 with the rotated cookies and facilitySelection
-// 'unavailable'. The selection is only the default the session reports:
-// X-Facility-ID still authorizes each request. Executes only against the owned
-// disposable synthetic rehearsal.
+// not affected; a refused selection writes nothing. A refresh reads the
+// selection on its rotation's transaction and records auth.refresh at the
+// facility it reports. When the selection cannot be read, a session read
+// answers 503 and a refresh, whose failed read is rolled back to its savepoint
+// so the rotation still commits, answers 200 with the rotated cookies and
+// facilitySelection 'unavailable'. The selection is only the default the
+// session reports: X-Facility-ID still authorizes each request. Executes only
+// against the owned disposable synthetic rehearsal.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -173,6 +175,8 @@ try {
       row_version::int from auth.session_facility_selection where account_id = $1 order by selected_at`, [accountId])).rows;
   const selectionAudits = async (sessionId) => (await pool.query(`select facility_id::text, actor_membership_id::text
       from audit.events where action = 'auth.facility.select' and outcome = 'success' and resource_id = $1`, [sessionId])).rows;
+  const refreshAudits = async (sessionId) => (await pool.query(`select facility_id::text, actor_membership_id::text
+      from audit.events where action = 'auth.refresh' and outcome = 'success' and resource_id = $1`, [sessionId])).rows;
   const refusalAudits = async (sessionId) => (await pool.query(`select actor_type, resource_type, facility_id::text,
       actor_membership_id::text, organization_id::text from audit.events
       where action = 'auth.facility.select' and outcome = 'failure' and resource_id = $1`, [sessionId])).rows;
@@ -214,16 +218,19 @@ try {
   const rotated = await refresh(first);
   reports(rotated.response, beta, 'selected');
   assert.notEqual(rotated.held.sessionId, first.sessionId);
+  assert.deepEqual(await refreshAudits(rotated.held.sessionId), [{ facility_id: beta, actor_membership_id: doctor.memberships[beta] }],
+    'the auth.refresh row names the selected facility the refresh reports');
   reports(await session(rotated.held), beta, 'selected');
   const stale = await session(first);
   assert.equal(stale.status, 401, 'the rotated-away access cookie no longer reads the session');
   assert.deepEqual((await rows(doctor.id)).map(row => [row.family_id, row.facility_id, row.row_version]), [[first.sessionId, beta, 1]]);
-  checks.push('refresh reports the selected facility, the rotated session reads it on reload, and the stored row is unchanged (keyed by the family)');
+  checks.push('refresh reports the selected facility and records its one auth.refresh row at that facility and membership, the rotated session reads it on reload, and the stored row is unchanged (keyed by the family)');
 
   // 3b. The selection cannot be read (SELECT revoked from the Identity runtime
   // for this step only): the session read is 503 with the cookies untouched,
-  // and the refresh, whose rotation commits first, answers 200 with the
-  // rotated cookies and 'unavailable', never the default as a choice.
+  // and the refresh, whose failed read in the rotation is rolled back to its
+  // savepoint, commits the rotation and answers 200 with the rotated cookies
+  // and 'unavailable', never the default as a choice.
   await pool.query('revoke select on auth.session_facility_selection from hid_identity_runtime');
   selectionReadRevoked = true;
   let unreadable;
@@ -248,10 +255,12 @@ try {
   assert.equal(unavailable.response.headers['x-csrf-token'], unavailable.held.cookies[`${name}_csrf`]);
   assert.notEqual(unavailable.held.sessionId, rotated.held.sessionId);
   assert.equal((await session(rotated.held)).status, 401, 'the rotation committed');
+  assert.deepEqual(await refreshAudits(unavailable.held.sessionId), [{ facility_id: alpha, actor_membership_id: doctor.memberships[alpha] }],
+    'the rotation committed with its auth.refresh row, at the default facility it reports');
   const current = unavailable.held;
   reports(await session(current), beta, 'selected');
   assert.deepEqual((await rows(doctor.id)).map(row => [row.family_id, row.facility_id, row.row_version]), [[first.sessionId, beta, 1]]);
-  checks.push('with the selection unreadable by the runtime, GET /auth/session is 503 DEPENDENCY_UNAVAILABLE with no Set-Cookie, and POST /auth/refresh is 200 with the three rotated session cookies, the rotated X-CSRF-Token and facilitySelection unavailable; once readable, the rotated session reports the stored selection again');
+  checks.push('with the selection unreadable by the runtime, GET /auth/session is 503 DEPENDENCY_UNAVAILABLE with no Set-Cookie, and POST /auth/refresh is 200 with the three rotated session cookies, the rotated X-CSRF-Token and facilitySelection unavailable, its rotation committed with one auth.refresh row at the default facility (the failed read rolled back to its savepoint); once readable, the rotated session reports the stored selection again');
 
   // 4. A second sign-in of the same account (TOTP this time) is not affected,
   // and its own refresh neither.

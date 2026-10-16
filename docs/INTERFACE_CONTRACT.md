@@ -106,7 +106,10 @@ fifth wrong code within 15 minutes blocks the recipient for 15 minutes
 `PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS`): `/contact/verify`
 answers `422 OTP_INVALID` for every code, a correct one too, and `/contact`
 answers `429 ENROLLMENT_RATE_LIMITED` and sends no code. Both responses are
-the existing ones, unchanged in shape. This comes from
+the existing ones, unchanged in shape. Since this change (A21) the `429`
+carries the same `Retry-After` as the contact step's request limits (§6), so
+a spent budget and a request limit cannot be told apart; the `422` carries
+none. This comes from
 D-Eminence/hid-system#61, not yet deployed; the threshold is an
 open product decision.
 
@@ -384,7 +387,7 @@ platform challenge by no staff step. Refusals:
 | `403 STAFF_MFA_FACTOR_UNPROVEN` | `POST /auth/login` with the right password, but the account's authenticator was enrolled at platform sign-in on the password alone (before 0088, or before the account held a staff membership), so it records no staff proof. No challenge or cookie is issued; a denied `login_failed` session event (reason `staff_mfa_factor_unproven`) is recorded. The remedy is a two-person MFA reset (0070), after which the account enrols at staff sign-in; the new factor then verifies platform sign-in too. The same answer at `/auth/mfa/verify` if such a factor is met there |
 | `403 NO_ACTIVE_FACILITY_MEMBERSHIP` | `POST /auth/login` with the right password of an active, enabled account that has a staff record or a facility membership but no membership eligible for staff sign-in: every one ended, suspended or held, the staff record not active or its verification not accepted, or the organization or facility not active (`eligibleStaffMembershipJoins`). Launch decision NO-MEMBERSHIP-SIGN-IN, owner default (a), ADR-059. No challenge or cookie and no session. A denied `login_failed` session event (reason `no_active_membership`) is recorded. It is not counted as a failed sign-in. Like any right password it ends the account's own failure window (SIGNIN-LOCKOUT); the window of the identifier typed is unchanged. The detail asks the user to contact their organization administrator. Checked before the factor, so it answers the same with or without an authenticator. An account with neither (a patient or a platform-only account) keeps the uniform `401` |
 | `401 MFA_INVALID_CODE` | A wrong, reused (the same 30-second step twice) or already used code; a wrong email code. Each counts against the challenge (five attempts), the account's MFA failure budget and the source address's staff budget |
-| `429 MFA_RATE_LIMITED` | A failure budget is spent, and while it is every code is refused, a correct one too, until its 15-minute window passes: the account's (the fifth failed code within 15 minutes, staff and platform together), or the source address's staff budget (the 100th failed staff code from one address within 15 minutes; it is the staff sign-in's own, apart from platform sign-in's per-address budget of 20, and sized for a facility whose staff share one address). Also more than five enrolment-code sends or enrolment starts in 15 minutes |
+| `429 MFA_RATE_LIMITED` | A failure budget is spent, and while it is every code is refused, a correct one too, until its 15-minute window passes: the account's (the fifth failed code within 15 minutes, staff and platform together), or the source address's staff budget (the 100th failed staff code from one address within 15 minutes; it is the staff sign-in's own, apart from platform sign-in's per-address budget of 20, and sized for a facility whose staff share one address). Also more than five enrolment-code sends or enrolment starts in 15 minutes. Since this change (A21) it carries `Retry-After: 900`, the whole window, whichever budget refused (§6) |
 | `403 MFA_ENROLLMENT_PROOF_REQUIRED` | Enrolment start or activation without a verified proof (no email code, and the challenge was not opened by provider activation). No factor is created |
 | `409 MFA_ENROLLMENT_PROOF_COMPLETE` | An email code asked for once the proof is verified |
 | `409 MFA_ENROLLMENT_PROOF_UNAVAILABLE` | The account has no email address |
@@ -513,7 +516,7 @@ this order:
 | `403 STAFF_MFA_REQUIRED` | A staff sign-in without live MFA assurance (MFA-1, 0088): one from before staff MFA, or whose authenticator was reset. Nothing is rotated; the whole sign-in is ended (revocation reason `staff_mfa_required`, a denied `refresh` session event) | Cleared |
 | `401 AUTHENTICATION_REQUIRED` | Rotation refuses the token: unknown, ended, expired, reused (reuse ends the whole sign-in), a platform token, or an account that is no longer active, is disabled or has a new token version | Cleared |
 | `5xx` | A fault while rotating (ADR-059): `503 DEPENDENCY_UNAVAILABLE` when the `auth.refresh` audit row cannot be written, `500` for another database fault. The audit row is written in the rotation's own transaction, so the rotation commits with it or not at all: nothing is rotated and the presented refresh token stays live. Before, such a fault cleared the cookies and signed the user out, and a rotation could commit without its audit row. The client may retry | Untouched |
-| `200` `{ actor, expiresAt }` with a new `X-CSRF-Token` header, plus `facilitySelection` for a staff sign-in (below) | The refresh token is rotated into a new session of the same sign-in. If a staff sign-in's facility selection cannot be read after the rotation, it is still `200`, with `facilitySelection: 'unavailable'` (below) | Replaced |
+| `200` `{ actor, expiresAt }` with a new `X-CSRF-Token` header, plus `facilitySelection` for a staff sign-in (below) | The refresh token is rotated into a new session of the same sign-in. A staff sign-in's facility selection is read in the rotation's transaction, and the `auth.refresh` audit row records the facility the response reports. If the selection cannot be read, the read is rolled back to its savepoint and the rotation still commits: it is still `200`, with `facilitySelection: 'unavailable'` (below) | Replaced |
 
 The cookies are cleared only for a `4xx` refusal of the refresh token itself
 (`refreshRefused` in `services/identity-api/src/auth/refresh-refusal.ts`).
@@ -574,7 +577,9 @@ bind one only when the request names one of the actor's facilities in
 organization, and otherwise none. A staff audit row without a facility is
 accepted only as an `auth.*` session event; recorded as a generic `api.*`
 request, a staff refusal failed its own audit and answered
-`503 DEPENDENCY_UNAVAILABLE`.
+`503 DEPENDENCY_UNAVAILABLE`. Each such refusal row carries `details.status`
+and `details.code`, the status and code answered (A17, this change), and a
+patient's row records purpose `patient-self`.
 
 The refresh-token lookups are in `refreshSessionKind` and
 `revokeByRefreshToken` (`services/identity-api/src/auth/token.service.ts`).
@@ -656,6 +661,38 @@ user out only when the credential itself was refused. Health-id signs out on
 | `403 PATIENT_SESSION_REQUIRED` | A staff or platform session on a patient-only route ("Patient sessions and self service", below), refused by the guard before the handler runs. Audited as `auth.authorization.denied` on resource type `authentication` with no facility, membership or organization |
 | `403 NO_ACTIVE_FACILITY_MEMBERSHIP` | Staff sign-in only, with the right password (refusals table above). A live session whose membership ends is refused `401`: its credential no longer resolves, and Health-id returns the user to sign-in, where the `403` explains |
 | `403 ORIGIN_DENIED` | A cross-origin request whose `Origin` is not in `CORS_ORIGINS`, refused by the CORS layer before routing, with no `Access-Control-Allow-*` header. The same in Identity, EHR, Lab, OCR, Outreach and Pharmacy (`config/cors.ts` in each); all six answered `500` before |
+| `403 MFA_INVALID_CODE`, `403 PLATFORM_SESSION_REQUIRED` on step-up | `POST /api/v1/admin/mfa/step-up` and `POST /api/v1/admin/mfa/recovery-codes/regenerate` run under an accepted platform session. A wrong or replayed step-up code is `403 MFA_INVALID_CODE` (counted, as before); a session that lost its MFA assurance while the request waited for the account lock is `403 PLATFORM_SESSION_REQUIRED`, as `requirePlatformAssurance` answers it. Both were `401` before this change (A20; `MFA_INVALID_CODE`, `MFA_CHALLENGE_INVALID`), which the console read as an ended session. The unauthenticated challenge steps, platform `/auth/admin/mfa/*` and staff `/auth/mfa/verify` and `/auth/mfa/enroll/*`, keep `401 MFA_INVALID_CODE` and `401 MFA_CHALLENGE_INVALID` |
+
+Identity's audit rows tell these answers apart too (A17, this change). Every
+`SecurityGuard` refusal row (`security.authorization` once a facility is
+bound or on a platform route, `auth.authorization.denied` before a facility
+is bound, and the `system` `security.authorization.denied` without an actor)
+carries `details.status` and `details.code`, the status and code answered,
+next to `method` and `route`; platform rows keep `highRiskAction`. Every
+request-audit failure row (`api.<method>.<route>` on `http-request`, the
+`auth.*` session events and the facility-less staff row of the patient-only
+defence below) carries them too, next to `method`, `route` and `durationMs`.
+Before, only a platform guard row carried the code (and only a
+`DomainProblem`'s), no guard row the status, and a request-audit failure row
+neither (the facility-less staff row had the status), so a refused
+credential (`401 AUTHENTICATION_REQUIRED`), a refusal (`403`, `409`, `429`)
+and a fault (`503 AUTHENTICATION_UNAVAILABLE`, `500 INTERNAL_ERROR`) read
+alike. Only the status and the code are recorded, never the message. The
+routes of 0093 and 0094 (`/patient-enrollments/holder`, `/holder/verify`,
+`/facility-code`, `POST /identity/assisted-verifications` and the admin
+designation `/admin/facilities/:facilityId/assisted-registration`) record
+their refusals through the same guard and request audit, so their rows carry
+the status and code too (never `422 ASSISTED_VERIFICATION_NOT_MATCHED`'s
+`fields`). One of their answers has no row: `503 ASSISTED_REGISTRATION_DISABLED`
+on `/identity/assisted-verifications` comes from a route guard, which runs
+after `SecurityGuard` has passed and before the request audit, so the
+switched-off route is answered without an audit row. The
+outcomes are unchanged: a guard row is `denied`, a `503` fault included; a
+request-audit failure row is `failure` whatever its status; the
+facility-less staff row is `denied` below `500` and `failure` from `500`.
+EHR records its refusals as `denied` by status ("Extracted Identity
+boundary", below). Whether the two services should share one rule is an
+open owner decision (`PHASE_3_LAUNCH_DECISIONS.md` §2, AUDIT-OUTCOME).
 
 Sign-in answers every refused credential alike. `POST /auth/login` (the staff
 password step) and `POST /auth/patient/login` answer any refusal of the
@@ -679,6 +716,18 @@ account held `platform.admin.access` was exempt, so an administrator's
 clinical staff session kept reading and writing records during maintenance and
 with the provider portal off. EHR and Outreach exempt no session (they never
 see a platform session).
+
+EHR's document routes give each refusal its own code since this change
+(A15), where they answered the generic `409 CONFLICT` or
+`403 ACCESS_DENIED`: `400 IDEMPOTENCY_KEY_REQUIRED`, `423 UPLOADS_DISABLED`
+(the upload intent and completion while `uploads_enabled` is off),
+`403 CONSENT_REQUIRED`, and `409` with `REQUEST_IN_PROGRESS`,
+`IDEMPOTENCY_KEY_REUSED`, `DOCUMENT_INTEGRITY_MISMATCH`,
+`DOCUMENT_NOT_COMPLETABLE` or `DOCUMENT_NOT_AVAILABLE` (§16, "Document route
+answers"). None is a `401`, so none signs a user out. An `uploads_enabled`
+control that cannot be read still answers `500 INTERNAL_ERROR` on those two
+routes, not `503 PLATFORM_CONTROL_UNAVAILABLE` as EHR's guard answers its
+own control reads (an open follow-up).
 
 ### Staff facility binding (N5, migration 0087)
 
@@ -729,7 +778,7 @@ Staff session responses carry `facilitySelection`:
 | `selected` | The sign-in chose a facility that is still one of the actor's active facilities. Facilities are compared by id: if the membership at that facility was replaced by another active one, the choice is still `selected`, with the new membership's roles | The chosen facility, with that membership's `roles`, `role` and `permissions`: the actor `POST /auth/facility` returns. On `GET /auth/session` with a valid `X-Facility-ID`, the facility that header binds instead (below) |
 | `default` | The sign-in has not chosen one; every new sign-in | The default, as before: the primary facility, else the first by name, or the facility a valid `X-Facility-ID` binds on `GET /auth/session` |
 | `reselect` | The chosen facility is no longer one of the actor's active facilities: the membership ended, or the staff record, facility or organization is no longer active | As for `default`. The client asks the user to choose again instead of working elsewhere silently |
-| `unavailable` | `POST /auth/refresh` only: the rotation committed, but the stored choice could not be read | As for `default`, and not a choice: the client asks where the user is working (Health-id treats a value it does not name as unconfirmed and asks). The stored choice is kept and reported on the next read |
+| `unavailable` | `POST /auth/refresh` only: the stored choice could not be read in the rotation's transaction; the rotation still commits | As for `default`, and not a choice: the client asks where the user is working (Health-id treats a value it does not name as unconfirmed and asks). The stored choice is kept and reported on the next read |
 
 `facilitySelection` always describes the sign-in's stored choice. A valid
 `X-Facility-ID` on `GET /auth/session` still binds the facility it names, as
@@ -746,15 +795,28 @@ before, so `actor.facility` is then that bound facility while
 
 If the stored choice cannot be read, Identity never reports a facility as
 chosen when the user did not choose it. `GET /auth/session` answers
-`503 DEPENDENCY_UNAVAILABLE` and leaves the cookies untouched. A refresh has
-already rotated the session by then: it answers `200` with the rotated
-session's cookies and `X-CSRF-Token`, as a successful refresh does, the actor
-as resolved (its default facility) and `facilitySelection: 'unavailable'`,
-and records the `auth.refresh` audit event. It does not answer a `5xx`
-carrying the rotated cookies: an edge that replaces an upstream `5xx` drops its
-`Set-Cookie` (the gateway did before D-Eminence/hid-system#72, `proxy_intercept_errors`), so the
-browser would keep the spent refresh token and its next refresh would end the
-whole sign-in as reuse.
+`503 DEPENDENCY_UNAVAILABLE` and leaves the cookies untouched. A refresh reads
+the choice on its rotation's own transaction, which already holds the rotated
+session, as a plain read under a savepoint: a read that fails is rolled back
+to the savepoint, and the rotation still commits with its `auth.refresh` audit
+row. The refresh answers `200` with the rotated session's cookies and
+`X-CSRF-Token`, as a successful refresh does, the actor as resolved (its
+default facility) and `facilitySelection: 'unavailable'`. It does not answer a
+`5xx`, which would leave the sign-in unrenewable for as long as the choice
+stays unreadable. (Before the read moved into the rotation, a `5xx` would also
+have carried the rotated cookies, which an edge that replaces an upstream
+`5xx` drops, as the gateway did before D-Eminence/hid-system#72,
+`proxy_intercept_errors`.) A transaction the savepoint cannot restore fails
+the audit write instead: the refresh is the refresh table's `5xx`, with
+nothing rotated and the cookies untouched.
+
+The `auth.refresh` audit row records the actor the refresh reports: for
+`selected`, the chosen facility with that membership and organization; for
+`default`, `reselect` and `unavailable`, the default facility. Before this
+change (A6) the row was written in the rotation (D-Eminence/hid-system#76)
+with the default facility even when the response reported the chosen one, so
+a facility's audit list showed a clinician's refresh at their primary
+facility.
 
 `POST /auth/facility` (cookie mutations need Origin and CSRF as any other):
 
@@ -772,8 +834,13 @@ A refusal writes no selection row and no successful `auth.facility.select`
 audit. The global `AuditInterceptor` records it once as a failed
 `auth.facility.select` event on `session`, with no facility, membership or
 organization unless the guard bound one from `X-Facility-ID`, as for the other
-session routes (D-Eminence/hid-system#42). The write takes the account lock
-first, as sign-out and revocation do, and is made only while the presented
+session routes (D-Eminence/hid-system#42). Its details carry the status and
+code answered (A17, this change): a selection refused while it waited for the
+account lock records `401 AUTHENTICATION_REQUIRED` or
+`403 FACILITY_ACCESS_DENIED`, and a `GET /auth/session` answered
+`503 DEPENDENCY_UNAVAILABLE` because the selection cannot be read records
+that status and code on its failed `auth.session.read`. The write takes the
+account lock first, as sign-out and revocation do, and is made only while the presented
 session is a live staff session of the account.
 
 The choice is only the facility the session reports by default; it authorizes
@@ -877,7 +944,11 @@ any other staff failure that has no facility bound, on a route that is neither
 a session event nor platform administration, as `auth.authorization.denied`
 (a `4xx`, outcome `denied`) or `auth.request.failed` (a `5xx`, outcome
 `failure`) on `authentication`, with the request's own `api.*` action in its
-details, instead of answering `503`.
+details, instead of answering `503`. Since this change (A17) that row's
+details are `method`, `route`, `status`, `code` (the code answered),
+`requestAction` (the request's `api.*` action) and `durationMs`, and the
+guard's own `403 PATIENT_SESSION_REQUIRED` row's are `method`, `route`,
+`status` and `code`.
 
 `GET /api/v1/ehr/patients/:patientId/emergency-records` requires current workforce
 permissions, emergency purpose and a freshly checked break-glass grant authorizing
@@ -1013,7 +1084,10 @@ unauthorized HID alike) or `429 ACCESS_REQUEST_RATE_LIMITED`, and blocks that
 budget for one window: until it ends, every lookup by that actor, or at that
 facility, and every access request by that actor, or at that facility, is
 `429`. A call refused for the actor's own budget does not count against the
-facility's.
+facility's. Since this change (A21) both `429`s carry `Retry-After`, the
+operation's whole window (`PATIENT_LOOKUP_RATE_WINDOW_SECONDS` or
+`ACCESS_REQUEST_RATE_WINDOW_SECONDS`), which the actor's and the facility's
+budgets share, never the time left (§6).
 
 Patient login/account deletion (Phase 3, ADR-036) closes the login only:
 
@@ -1093,7 +1167,8 @@ budget per account across its challenges and purposes: by default the fifth wron
 code within 15 minutes (`OTP_VERIFY_FAILURE_MAX`,
 `OTP_VERIFY_FAILURE_WINDOW_SECONDS`) refuses every code of that account, a correct
 one too, for 15 minutes. Every refusal is `403 OTP_INVALID_OR_EXPIRED`; start
-limits are `429 OTP_RATE_LIMITED`, unchanged.
+limits are `429 OTP_RATE_LIMITED`, unchanged, with `Retry-After` set to
+`OTP_RATE_WINDOW_SECONDS` since this change (A21, §6); the `403` carries none.
 
 Password sign-in (`POST /api/v1/auth/login`, `POST /api/v1/auth/patient/login`,
 the platform password step and the password check of a Google link) counts a
@@ -1192,6 +1267,28 @@ Conceptual fields:
 }
 ```
 
+A `400 VALIDATION_FAILED` answer also carries `errors`, one
+`{ "field", "messages" }` entry per refused field. Identity and EHR name a
+nested property, or an array element, by its dotted path
+(`replacementValues.systolicMmhg`, `items.0.code`; A23, this change), for
+example `{ "field": "replacementValues.systolicMmhg", "messages":
+["systolicMmhg must not be greater than 350"] }`. A parent that failed only
+through its nested fields has no entry of its own; one that failed its own
+rule keeps its entry, followed by its nested ones. At most 50 entries are
+listed (`MAX_FIELD_ERRORS`), in the order class-validator reports them, so a
+body that refuses many array elements cannot produce a large answer. Before
+this change a nested refusal named only the top-level property, with
+`messages: []`.
+Top-level entries and their order, the code, the status and the detail are
+unchanged. `field` is a DTO property name, or the unknown key the client
+sent; `messages` are the validators' own and never contain a submitted
+value. Lab, Pharmacy, OCR and Outreach, off at launch (D17), still name only
+the top-level property. The patient routes of the patient record release
+(`GET /api/v1/ehr/me/records` and `/ehr/me/documents/:documentId/download`,
+0096) take no body; a malformed document id is the UUID pipe's
+`400 BAD_REQUEST` with no `errors`, as on every EHR route with an id, so no
+`VALIDATION_FAILED` answer arises there.
+
 Do not leak:
 
 * secrets
@@ -1221,6 +1318,45 @@ short result codes, never a submitted or stored value. From 0094 only
 `422 ASSISTED_VERIFICATION_NOT_MATCHED` sends it
 (`{ "firstName", "lastName", "dateOfBirth" }`, each `match`, `no_match` or
 `not_in_record`).
+
+Identity sets `Retry-After`, in whole seconds, on the rate-limit answers
+whose window its own code owns (A21, this change); the Problem Details body
+is unchanged. The value is the limit's full configured window, an upper bound
+whichever bucket refused, never the time left in a bucket:
+
+| Answer | Where | `Retry-After` |
+|---|---|---|
+| `429 OTP_RATE_LIMITED` | `POST /api/v1/auth/otp/start` | `OTP_RATE_WINDOW_SECONDS` (default 900) |
+| `429 ENROLLMENT_RATE_LIMITED` | patient enrollment start, the holder code send (`POST .../holder`, from 0093; the network budget it shares with start and the contact step) and activation | `OTP_RATE_WINDOW_SECONDS` |
+| `429 ENROLLMENT_RATE_LIMITED` | patient enrollment contact step, every refusal (its request limits and a spent contact-code budget alike) | the larger of `OTP_RATE_WINDOW_SECONDS` and `PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS` |
+| `429 OTP_RESEND_COOLDOWN` | patient enrollment holder code send (from 0093) and contact step | the seconds left of the cooldown of this enrollment's own last code of that step (`OTP_RESEND_COOLDOWN_SECONDS`) |
+| `429 MFA_RATE_LIMITED` | platform and staff sign-in, enrolment and its email code, step-up and recovery-code regeneration | 900, the length of every MFA window |
+| `429 PATIENT_LOOKUP_RATE_LIMITED` | `POST /api/v1/identity/patient-lookup` | `PATIENT_LOOKUP_RATE_WINDOW_SECONDS` (default 300) |
+| `429 ACCESS_REQUEST_RATE_LIMITED` | `POST /api/v1/identity/access-requests` | `ACCESS_REQUEST_RATE_WINDOW_SECONDS` (default 900) |
+
+No other answer carries it. A refusal answered like a wrong code carries
+none: a spent recovery or contact code budget (`403 OTP_INVALID_OR_EXPIRED`,
+`422 OTP_INVALID`), a wrong or spent holder code (`422 OTP_INVALID`) and the
+sign-in lockout (`401`). Neither do the limits counted in SQL
+(`VERIFICATION_QUOTA_EXCEEDED`, `APPLICATION_RATE_LIMITED`,
+`EMERGENCY_CONTACT_VERIFICATION_RATE_LIMITED`,
+`ACCOUNT_DELETION_RATE_LIMITED`, `EMERGENCY_RATE_LIMITED`, and from 0094
+`ASSISTED_VERIFICATION_LIMITED`, the staff and facility checks of the last
+24 hours), whose command does not report which window refused,
+`QOREID_RATE_LIMITED`, or `503 PLATFORM_MAINTENANCE`, for which no end time
+is recorded. Two `429`s of the sign-up routes are not "try again later"
+answers and carry none either: `NIN_HOLDER_ROUTE_LIMITED` (0093) sends the
+patient to a participating facility, and its budgets are the enrollment's
+three codes, which never come back, and the phone's and the NIN's, counted in
+SQL over 24 hours, 30 days or a year (a bound kept for a NIN would also tell
+of other people's attempts on it); `ASSISTED_DESK_CODE_LIMITED` (0094) is
+the enrollment's five desk codes, which never come back, so the patient
+starts again. EHR, Lab,
+Pharmacy, OCR and Outreach set none; EHR has no rate limit of its own and
+answers no `429` itself, on the patient routes of the patient record release
+(0096) as on its other routes. Identity's CORS policy exposes
+`retry-after` to allowed origins. Before this change no answer carried the
+header and CORS did not expose it.
 
 ## 7. Health Endpoints
 
@@ -1404,6 +1540,29 @@ row without a facility is accepted only as an `auth.*` event on
 `authentication` or `session` (migration 0067). A database fault in EHR's
 runtime-control check answered a patient `401 AUTHENTICATION_REQUIRED`.
 
+Identity's guard and request-audit rows carry `details.status` and
+`details.code` the same way since this change (A17; "Refusals and faults
+(ADR-059)"), but Identity keeps its own outcomes: a request-audit failure row
+is `failure` whatever its status, where EHR's is `denied` for `401`, `403`,
+`409`, `412`, `423` and `429` and `failure` otherwise. EHR therefore records
+a `400` and a `404` as `failure`, the masked non-uploader completion
+("Document upload completion") among them, while Identity's facility-less
+staff row records any status below `500` as `denied`. One rule for both is
+open (AUDIT-OUTCOME, `PHASE_3_LAUNCH_DECISIONS.md` §2). In both services
+every request-audit row of a patient session records purpose `patient-self`,
+whatever `purpose` query parameter or `X-Purpose-Of-Use` header the client
+sends, as the patient's own service events already did
+(`identity.patient.self.*`, `ehr.patient.self.records.read` and, since 0096,
+`ehr.patient.self.document.download`); before this change a patient's request
+rows recorded the client's value, so a patient's own approval sent with
+`direct-care` read as direct care. A staff request keeps the purpose it
+declares. The patient document download (0096) is audited by the request
+audit on failure only: each refusal's row records its status and code
+(`404 DOCUMENT_NOT_AVAILABLE`, `503 DOCUMENT_INTEGRITY_UNAVAILABLE`,
+`503 DOCUMENT_STORAGE_UNAVAILABLE`, `403 PATIENT_ACCESS_DENIED`, a malformed
+id's `400 BAD_REQUEST`) with purpose `patient-self`; a signed download is
+recorded by its own `ehr.patient.self.document.download` row.
+
 ## 8. Identity Resolution
 
 HID lookup uses the existing versioned Identity resolution interface. Sensitive
@@ -1453,6 +1612,8 @@ attempts that then fail (for example `503 ENROLLMENT_RECONCILIATION_REQUIRED`
 or `409 CONTACT_ALREADY_REGISTERED`). A malformed password (`400`), a missing
 or forged enrollment cookie (`404`) or an enrollment not yet at the password
 step (`409`) is refused first and not counted. Success bodies are unchanged.
+Since this change (A21) the `429` carries `Retry-After` set to
+`OTP_RATE_WINDOW_SECONDS` (§6).
 
 Changes of D-Eminence/hid-system#68 (migration 0085; not
 deployed). Request and success bodies are unchanged:
@@ -1498,8 +1659,9 @@ D-Eminence/hid-system#68; no migration; not deployed):
   refuses no `Origin`, but Identity's CORS middleware (`main.ts`) runs first,
   as on every route: a request without an `Origin` or from one in
   `CORS_ORIGINS` (the Health-id hosts) gets the answer, and a request from
-  any other `Origin` is answered `500` with no CORS permission before the
-  route is reached. `open` is `true` only when a start would now pass the
+  any other `Origin` is refused `403 ORIGIN_DENIED` with no CORS permission
+  before the route is reached ("Refusals and faults (ADR-059)"; a `500`
+  before D-Eminence/hid-system#76). `open` is `true` only when a start would now pass the
   checks it makes before it reads a NIN: the enrollment keys are
   configured, `QOREID_ENABLED` and `QOREID_NIN_ONLY_ENROLLMENT_ENABLED` are
   on, and QoreID's `patient_nin` capability is not paused at runtime. It
@@ -1718,14 +1880,14 @@ Health ID can be activated without a holder proof; the database refuses it.
 | `POST .../patient-enrollments` | `502`, `503` or `504` (QoreID code kept) | The NIN lookup could not be completed | Try again later |
 | `POST .../holder` | `409 NIN_HOLDER_ROUTE_UNAVAILABLE` | No usable phone on the record, an age under 18, or not at the holder step | Register at a participating facility |
 | `POST .../holder` | `503 NIN_HOLDER_ROUTE_UNAVAILABLE` | The online route is off (in production from 0094, also while no facility takes part) | Register at a participating facility, or try later |
-| `POST .../holder` | `429 OTP_RESEND_COOLDOWN` | A code was sent less than `resendAfterSeconds` ago | Wait, then ask again |
-| `POST .../holder` | `429 NIN_HOLDER_ROUTE_LIMITED` | A send or failure budget is spent, or three codes were sent | Register at a participating facility |
-| `POST .../holder` | `429 ENROLLMENT_RATE_LIMITED` | The network's request budget is spent | Try again later |
+| `POST .../holder` | `429 OTP_RESEND_COOLDOWN` | A code was sent less than `resendAfterSeconds` ago | Wait the `Retry-After` seconds (what is left of the cooldown, §6), then ask again |
+| `POST .../holder` | `429 NIN_HOLDER_ROUTE_LIMITED` | A send or failure budget is spent, or three codes were sent | Register at a participating facility (no `Retry-After`, §6) |
+| `POST .../holder` | `429 ENROLLMENT_RATE_LIMITED` | The network's request budget is spent | Try again after `Retry-After` (`OTP_RATE_WINDOW_SECONDS`, §6) |
 | `POST .../holder` | `503 OTP_DELIVERY_UNAVAILABLE` | The SMS provider refused the code | Try again later; the attempt counts toward the phone's five sends a day and the enrollment's three codes |
 | `POST .../holder/verify` | `422 OTP_INVALID` | Wrong, expired, used or closed code | Check the code, or ask for a new one |
 | `POST .../holder/verify` | `409 NIN_ALREADY_REGISTERED` | The NIN already has a Health ID | Use account recovery to sign in. If they never registered, contact Health ID support quoting the `correlationId` |
 | `POST .../holder/verify` | `409 NIN_HOLDER_PROOF_CONFLICT` | An in-person proof of this NIN is open at a facility | Finish at the facility |
-| `POST .../holder/verify` | `429 NIN_HOLDER_ROUTE_LIMITED` | The phone already proved five other NINs this year | Register at a participating facility |
+| `POST .../holder/verify` | `429 NIN_HOLDER_ROUTE_LIMITED` | The phone already proved five other NINs this year | Register at a participating facility (no `Retry-After`, §6) |
 | `POST .../holder/verify` | `503 ENROLLMENT_RECONCILIATION_REQUIRED` | Enrollment is paused for reconciliation | Try again later |
 | `POST .../holder/verify` | `503 NIN_HOLDER_ROUTE_UNAVAILABLE` | The online route was turned off after the code was sent | Register at a participating facility, or try again later |
 | `POST .../holder`, `/holder/verify` | `404 ENROLLMENT_NOT_FOUND` | No, a forged or a removed enrollment cookie (for example after a later proof of the same NIN) | Start again |
@@ -1810,14 +1972,14 @@ is designated, so the route is closed until an operator opens it.
 | --- | --- | --- | --- |
 | `POST .../facility-code` | `409 ASSISTED_REGISTRATION_UNAVAILABLE` | The facility route is closed (flag off or no participating facility) | Use the online route, or try later |
 | `POST .../facility-code` | `409 ENROLLMENT_STAGE_INVALID` | The holder step is done | Continue with the contact step |
-| `POST .../facility-code` | `429 ASSISTED_DESK_CODE_LIMITED` | Five codes were issued for this enrollment | Start again |
+| `POST .../facility-code` | `429 ASSISTED_DESK_CODE_LIMITED` | Five codes were issued for this enrollment | Start again (no `Retry-After`, §6) |
 | `POST .../facility-code` | `404 ENROLLMENT_NOT_FOUND` | No, a forged, an expired or a removed enrollment cookie | Start again, on the patient's own device |
 | `POST .../facility-code` | `503 ENROLLMENT_CONFIGURATION_UNAVAILABLE` | Enrollment keys are not configured | Try later |
 | `GET .../current` (patient's device) | `200`, `stage: verify_contact` | Staff recorded a match | Continue on the device: contact, password, activation |
 | `GET .../current` (patient's device) | `404 ENROLLMENT_NOT_FOUND` | Staff were told the NIN has a Health ID (the registration is deleted), or the registration expired | Follow the staff member's direction: account recovery when the NIN has a Health ID; otherwise start again |
 | `POST .../activate` (patient's device) | `409 ENROLLMENT_HOLDER_PROOF_REQUIRED` | After the check, the facility stopped taking part or the verifying staff member lost the permission, the attested grant, an active membership or an active account | Start again and check in person at a participating facility |
 | `POST .../assisted-verifications` | `503 ASSISTED_REGISTRATION_DISABLED` | The route is off | None; the route is closed |
-| `POST .../assisted-verifications` | `400 VALIDATION_FAILED` | The body is malformed: a desk code shorter than 10 or longer than 20 characters or with characters other than letters, digits, spaces and hyphens, a missing field, or an attestation that is not `true` | Correct the entry |
+| `POST .../assisted-verifications` | `400 VALIDATION_FAILED` | The body is malformed: a desk code shorter than 10 or longer than 20 characters or with characters other than letters, digits, spaces and hyphens, a missing field, or an attestation that is not `true`. `errors` names a refused `document` or `attestations` field by its dotted path, for example `document.dateOfBirth` or `attestations.patientConsents` (A23, §6) | Correct the entry |
 | `POST .../assisted-verifications` | `400 DESK_CODE_INVALID` | The code passes the form check but is not 10 Crockford characters once spaces and hyphens are removed (for example a `U`) | Ask the patient for the code again |
 | `POST .../assisted-verifications` | `404 DESK_CODE_NOT_FOUND` | No enrollment waits for this code | Ask the patient to show the code on their phone again |
 | `POST .../assisted-verifications` | `422 ASSISTED_VERIFICATION_NOT_MATCHED` | A field differs from the NIN record | Check the document. If only spelling or spacing differs (a hyphen or a space in a name), retry with the form the document allows, within the budget. Otherwise do not register |
@@ -1825,7 +1987,7 @@ is designated, so the route is closed until an operator opens it.
 | `POST .../assisted-verifications` | `409 NIN_ALREADY_REGISTERED` | The NIN already has a Health ID | Direct the patient to account recovery; if they never registered, Health ID support with the reference in `detail` |
 | `POST .../assisted-verifications` | `409 ASSISTED_VERIFICATION_STALE` | The check can no longer prove the enrollment (another proof came first, or a new desk code) | Ask for a new desk code and check again |
 | `POST .../assisted-verifications` | `409 IDEMPOTENCY_KEY_REUSED` | The key was used for another request | Use a new key |
-| `POST .../assisted-verifications` | `429 ASSISTED_VERIFICATION_LIMITED` | A staff or facility budget is spent | Try again later |
+| `POST .../assisted-verifications` | `429 ASSISTED_VERIFICATION_LIMITED` | A staff or facility budget is spent | Try again later (no `Retry-After`: counted in SQL, §6) |
 | `POST .../assisted-verifications` | `503 ASSISTED_VERIFICATION_UNAVAILABLE` | The check could not be recorded, or its proof could not be completed | Retry with the same `Idempotency-Key`: it replays the stored check and completes the proof, and is not charged again |
 | `POST .../assisted-verifications` | `503 ENROLLMENT_RECONCILIATION_REQUIRED` or `503 ENROLLMENT_UNAVAILABLE` | The check is recorded and charged, but the proof step could not run | Retry with the same `Idempotency-Key` within 10 minutes of the check |
 | `GET /admin/facilities/:id/assisted-registration` | `404 ADMIN_FACILITY_NOT_FOUND` | No such facility | Check the facility id |
@@ -2023,7 +2185,9 @@ header answered `500 INTERNAL_ERROR` before
 D-Eminence/hid-system#60: EHR's document routes and its internal
 OCR routes, Identity's registration-case read, OCR's reads, and every Lab and
 Pharmacy route without a body purpose. Whether a route then accepts that
-purpose is its own authorization.
+purpose is its own authorization. A patient session acts on its own record:
+the Identity and EHR request audit records its purpose as `patient-self` and
+never the value it sends (A17, this change).
 
 ## 11. EHR
 
@@ -2398,7 +2562,7 @@ leaves out the clinician's notes, storage locations and staff identities.
 | `diagnoses` | `verificationStatus` `confirmed`: `id`, `encounterId`, `facilityId`, `codeSystem`, `code`, `display`, `clinicalStatus`, `verificationStatus`, `onsetAt`, `abatementAt` | unconfirmed, provisional, differential, refuted and entered-in-error diagnoses; the clinician's `notes` (never returned) |
 | `prescriptions` | `status` `active`, `on_hold` or `completed`, with the emergency summary's fields | drafts, cancelled and entered-in-error prescriptions |
 | `labResults` | per Lab result, its latest released revision that was not invalidated, of an order still active, on hold or completed: `id` (Lab result), `encounterId` (source EHR encounter), `sourceEhrOrderId`, `facilityId` (ordering facility), `test` `{codeSystem, code, name}`, `version`, `revisionKind` (`original`, `correction` or `amendment`), `resultType`, `numericValue` (number or `null`), `textValue`, `unit`, `referenceRange`, `abnormalFlag`, `releasedAt` | unverified or unreleased revisions (a newer correction that is not released leaves the earlier released value, as for clinicians, D11); a result whose latest released revision was entered in error (Lab's staff view shows it marked, the patient does not see it); results of a cancelled or entered-in-error order; correction and release reasons and staff identities |
-| `documents` | `classification` `phi`, uploaded, attached to an encounter, and `status` `available` (the latest scan of the exact stored object version and SHA-256 is clean): `id`, `encounterId`, `facilityId`, `fileName`, `mediaType`, `sizeBytes`, `classification`, `status`, `scanStatus`, `createdAt` | restricted or internal documents, documents attached to no encounter, rejected, not yet scanned, initiated or entered-in-error documents; the storage location (the download route signs a URL) |
+| `documents` | `classification` `phi`, uploaded, attached to an encounter, and `status` `available` (the latest scan of the exact stored object version and SHA-256 is clean): `id`, `encounterId`, `facilityId`, `fileName`, `mediaType`, `sizeBytes` (a JSON integer, as on every document answer, A15), `classification`, `status`, `scanStatus`, `createdAt` | restricted or internal documents, documents attached to no encounter, rejected, not yet scanned, initiated or entered-in-error documents; the storage location (the download route signs a URL) |
 
 `released` lists `encounters`, `notes` and then each released category in
 the order `vitals`, `diagnoses`, `prescriptions`, `labResults`, `documents`.
@@ -2429,8 +2593,11 @@ exact stored object version, served as an attachment with `Cache-Control:
 private, no-store`. Every document the patient may not download answers the
 same `404 DOCUMENT_NOT_AVAILABLE`: documents are not released, the document
 is unknown or another patient's, it is not an available PHI document of a
-completed encounter, or it is held in another bucket. A malformed id is
-`400`. The audit event `ehr.patient.self.document.download` (resource type
+completed encounter, or it is held in another bucket. The staff download
+answers the same code `409` for a document that exists but is not available
+(A15); the patient route answers `404` for every case, so it does not say
+whether the document exists. A malformed id is the UUID pipe's
+`400 BAD_REQUEST`. The audit event `ehr.patient.self.document.download` (resource type
 `document`, the document id, `details.mediaType` and `details.sizeBytes`
 only) commits before the stored object is checked; then the object's
 version, size, SHA-256 and encryption are read back (HEAD with checksum
@@ -2460,6 +2627,8 @@ withheld. The seeded doctor, clinician and nurse roles hold all seven.
   latest scan of the exact stored object version and SHA-256 is clean, the rule
   the download applies. Each has `status` `available`, `scanStatus` `clean`,
   and `mediaType` as the scan detected it (as declared if the scan named none).
+  `sizeBytes` is a JSON integer; until this change (A15) it was the text
+  PostgreSQL returns for a `bigint` (`"20480"`).
 - `vitals` are returned as first recorded (the vital row's eight measurement
   columns, which no API route changes and, since 0084, the database refuses
   to change), with the same fields as before, and since 0090 without the
@@ -2742,10 +2911,11 @@ Use:
 Document uploads are off at launch (0091, ADR-058): no role holds
 `ehr.document.write`, so `POST /api/v1/ehr/documents/upload-intents` and
 `POST /api/v1/ehr/documents/:id/complete` answer `403 PERMISSION_DENIED` (where
-they answered `201`, `200` or `409 CONFLICT`) before any write, and Health-id
+they answered `201` or `409 CONFLICT`) before any write, and Health-id
 82b474e hides the upload card. `uploads_enabled` also starts off, and since
 0091 completion checks it first, as an upload intent does: with the control off
-it answers `409 CONFLICT` ("Document uploads are temporarily disabled") before
+it answers `423 UPLOADS_DISABLED` ("Document uploads are temporarily disabled";
+`409 CONFLICT` from 0091 until this change, A15) before
 Identity, the storage read or any write, so an upload started before the
 control was turned off cannot complete either. The rules below apply once a
 reviewed migration grants `ehr.document.write` again and the control is on.
@@ -2768,21 +2938,85 @@ facility may be bound to either.
   facility, or one the caller cannot read. It is refused before the patient
   authorization check and the storage read, and nothing is written. After the
   uploader has completed, another caller still gets `404`, not the idempotent
-  `200`.
+  `201`.
 - A caller that fails the route checks, uploader or not, gets their answer
   first, as on every route: `400 FACILITY_REQUIRED` without a valid
   `X-Facility-ID`, `403 FACILITY_ACCESS_DENIED` when not active at that
   facility, `403 PERMISSION_DENIED` without `ehr.document.write`.
 - `GET /api/v1/ehr/documents` still lists an `initiated` document to every
   holder of a read grant, so a member can see an upload they cannot complete.
-- The uploader's answers are unchanged: `200` with the document view, `403`
-  without a write grant, `409` when the stored object does not match or the
-  document is no longer completable. A repeat after completion answers `200`
-  with the current view while the status is `uploaded`, and `409` once the
-  scan is clean or rejected (status `available` or `rejected`).
+- The uploader's answers: `201` with the document view (a `POST` without an
+  explicit status; this section said `200` until this change), `403
+  CONSENT_REQUIRED` without a write grant, `409 DOCUMENT_INTEGRITY_MISMATCH`
+  when the stored object does not match, and `409 DOCUMENT_NOT_COMPLETABLE`
+  when the document is no longer completable. A repeat after completion
+  answers `201` with the current view while the status is `uploaded`, and
+  `409 DOCUMENT_NOT_COMPLETABLE` once the scan is clean or rejected (status
+  `available` or `rejected`). Until this change (A15) the refusals were
+  `403 ACCESS_DENIED` and `409 CONFLICT`, with the same details.
 - A refusal is recorded only by the request audit
-  (`api.ehr.document.upload-complete.request`, outcome `failure`, without the
-  document id); no `ehr.document.upload.complete` event is written.
+  (`api.ehr.document.upload-complete.request`, without the document id), with
+  `details.status` and `details.code` and outcome `denied` for `403`, `409`
+  and `423` and `failure` for `404` (§7, "Extracted Identity boundary"); no
+  `ehr.document.upload.complete` event is written. Until
+  D-Eminence/hid-system#74 every such row was outcome `failure` without status
+  or code.
+
+### Document route answers
+
+Each document route answers the route checks first, as every EHR route does
+(`400 FACILITY_REQUIRED`, `403 FACILITY_ACCESS_DENIED`,
+`403 PERMISSION_DENIED`, `400 PURPOSE_OF_USE_REQUIRED`,
+`400 VALIDATION_FAILED`), then, in this order:
+
+- `POST /api/v1/ehr/documents/upload-intents`:
+  - `400 IDEMPOTENCY_KEY_REQUIRED` ("Idempotency-Key must contain 16 to 128
+    URL-safe characters") for a missing key or one that does not match the
+    pattern the clinical routes use (`common/idempotency.ts`).
+  - `423 UPLOADS_DISABLED` ("Document uploads are temporarily disabled")
+    while the platform control `uploads_enabled` is off. Identity is not
+    asked and nothing is written. A control that cannot be read stays
+    `500 INTERNAL_ERROR`.
+  - `403 CONSENT_REQUIRED` ("Patient write access is not authorized") when
+    Identity refuses `write_records` for the patient.
+  - `409 IDEMPOTENCY_KEY_REUSED` for the key with a different request, and
+    `409 REQUEST_IN_PROGRESS` for the same request while the first has not
+    completed. A completed repeat of the same request returns the stored
+    document with a new signed upload.
+  - `404 ENCOUNTER_NOT_FOUND` and `409 ENCOUNTER_NOT_OPEN` for the linked
+    encounter (§11).
+- `GET /api/v1/ehr/documents`: `403 CONSENT_REQUIRED` ("Patient read access
+  is not authorized"). Each item's `sizeBytes` (or `null`) and `version` are
+  JSON integers.
+- `POST /api/v1/ehr/documents/:id/complete`: `423 UPLOADS_DISABLED` first, as
+  for the intent ("Document upload completion" above); then `404 NOT_FOUND`
+  for anyone but the uploader, unchanged; then `403 CONSENT_REQUIRED`,
+  `409 DOCUMENT_INTEGRITY_MISMATCH` and `409 DOCUMENT_NOT_COMPLETABLE`.
+- `GET /api/v1/ehr/documents/:id/download`: `404 NOT_FOUND`,
+  `403 CONSENT_REQUIRED`, and `409 DOCUMENT_NOT_AVAILABLE` ("Document is not
+  available for download") unless the document is `available` with a clean
+  scan.
+- `GET /api/v1/ehr/internal/ocr/documents/:documentId/source`: `404
+  NOT_FOUND` and `403 CONSENT_REQUIRED`, which OCR passes through with its
+  status and code.
+- The patient routes of the patient record release (0096, ADR-065; §11,
+  "Record summaries" and "Patient document download") follow the same rules:
+  `GET /api/v1/ehr/me/records` returns each released document's `sizeBytes`
+  as a JSON integer, and `GET /api/v1/ehr/me/documents/:documentId/download`
+  answers its own codes (`404 DOCUMENT_NOT_AVAILABLE`,
+  `503 DOCUMENT_INTEGRITY_UNAVAILABLE`, `503 DOCUMENT_STORAGE_UNAVAILABLE`).
+  Until the merge of 0096 into this change the released documents' `sizeBytes`
+  was the text PostgreSQL returns for a `bigint`.
+
+Until this change (A15) the key refusal and the disabled control answered
+`409 CONFLICT` (the key's detail was "A valid Idempotency-Key header is
+required"), the consent refusals `403 ACCESS_DENIED`, and the other refusals
+`409 CONFLICT`; the list returned `sizeBytes` and `version` as strings. Every
+other detail is unchanged. The request audit records each refusal with its
+status and code, `denied` for `403`, `409` and `423` and `failure` for `400`
+and `404` (§7). A database error in a document write (a row-level security
+refusal, a closed-encounter trigger refusal) and a stored object missing at
+completion still answer `500`.
 
 ## 17. Event Contracts
 
@@ -3038,6 +3272,34 @@ Principal search requires at least two characters. Facility, principal, and
 review page sizes are bounded to 100; audit pages are bounded to 200 and use a
 descending sequence cursor. Raw NIN, password material, tokens, event payloads,
 patient audit identifiers, and free-form audit details are absent.
+
+Own MFA endpoints (`platform.admin.access`):
+
+```text
+GET /api/v1/admin/mfa
+POST /api/v1/admin/mfa/step-up                      { "code": "<six digits>" }
+POST /api/v1/admin/mfa/recovery-codes/regenerate    (needs a fresh step-up)
+```
+
+These run under an accepted platform session, so a refusal there is never
+`401` from the service ("Refusals and faults (ADR-059)"). A wrong or
+already-used step-up code is `403 MFA_INVALID_CODE`: the session stays valid,
+and the failure counts toward the account's and the network's second-factor
+failure budgets. The fifth failure within 15 minutes blocks the account's
+step-up, sign-in and enrolment activation for 15 minutes with
+`429 MFA_RATE_LIMITED`; regeneration is limited to five per 15 minutes, also
+`429 MFA_RATE_LIMITED`. Each `429` carries `Retry-After: 900` (A21, §6). A
+step-up or regeneration whose session lost its MFA assurance while the
+request waited for the account (its session row gone, or its factor no
+longer the session's or no longer active) is `403 PLATFORM_SESSION_REQUIRED`,
+as for every platform command. Before this change (A20) a wrong code was
+`401 MFA_INVALID_CODE` and a lost assurance `401 MFA_CHALLENGE_INVALID`. A
+`401` on these routes now comes only from the guard
+(`AUTHENTICATION_REQUIRED`, `PLATFORM_SESSION_EXPIRED`,
+`PLATFORM_SESSION_REVOKED`). The sign-in challenge routes
+`POST /api/v1/auth/admin/mfa/verify`, `/mfa/enroll/start` and
+`/mfa/enroll/activate` are unauthenticated and keep `401 MFA_INVALID_CODE`
+and `401 MFA_CHALLENGE_INVALID`.
 
 Command endpoints:
 

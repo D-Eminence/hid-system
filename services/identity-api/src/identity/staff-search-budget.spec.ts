@@ -128,6 +128,36 @@ describe('StaffSearchBudget', () => {
     ]);
   });
 
+  // A21: a refused lookup or access request says when to retry, as Retry-After:
+  // the operation's whole configured window, the same whichever of its actor and
+  // facility buckets refused, and never the time left in the blocked bucket.
+  it('carries the whole configured window as Retry-After on every refused lookup and access request (A21)', async () => {
+    Object.assign(process.env, { PATIENT_LOOKUP_RATE_WINDOW_SECONDS: '600', ACCESS_REQUEST_ACTOR_MAX_REQUESTS: '1' });
+    resetEnvironmentForTests();
+    jest.useFakeTimers({ now: new Date('2026-10-14T09:00:00Z') });
+    try {
+      const s = store();
+      const budget = new StaffSearchBudget(s.database);
+      const colleague = { ...context, actor: { ...context.actor, accountId: 'colleague-account' } } as unknown as DataAccessContext;
+      const lookupLimited = { status: 429, code: 'PATIENT_LOOKUP_RATE_LIMITED', retryAfterSeconds: 600 };
+      await budget.consume('patient_lookup', context);
+      await budget.consume('patient_lookup', context);
+      // The actor's bucket refuses a counted lookup...
+      await expect(budget.consume('patient_lookup', context)).rejects.toMatchObject(lookupLimited);
+      // ...and the read-only check, 500 seconds later, still states the whole window, not the 100 left.
+      jest.setSystemTime(new Date('2026-10-14T09:08:20Z'));
+      await expect(refuseWhileBlocked(budget, context)).rejects.toMatchObject(lookupLimited);
+      // The facility's bucket (its maximum is 3) refuses a colleague with the same value.
+      await budget.consume('patient_lookup', colleague);
+      await expect(budget.consume('patient_lookup', colleague)).rejects.toMatchObject(lookupLimited);
+      await budget.consume('access_request', context);
+      await expect(budget.consume('access_request', context)).rejects.toMatchObject({
+        status: 429, code: 'ACCESS_REQUEST_RATE_LIMITED', retryAfterSeconds: 900 });
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('reads whether the actor or the facility is blocked, in a read-only staff transaction, counting nothing', async () => {
     const s = store();
     const budget = new StaffSearchBudget(s.database);
