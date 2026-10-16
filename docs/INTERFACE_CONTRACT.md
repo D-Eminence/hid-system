@@ -773,9 +773,12 @@ diagnoses, prescriptions, Lab results and documents, one flag per category,
 each off by default and refused in the production profile until its P35
 sign-off; with every flag off the response is exactly the one above. `GET /api/v1/ehr/me/documents/:documentId/download` returns a 60 s
 attachment URL for one released document (§11, "Patient document
-download"). Only a patient session may use either route: EHR's
-guard answers any other session `403 PATIENT_SESSION_REQUIRED` before the
-handler runs and records `auth.authorization.denied` (§7). Before
+download"). Patient record chat (ADR-065, off by default) adds four more
+patient-only EHR routes, `GET /api/v1/ehr/me/chat/availability`, `POST
+/api/v1/ehr/me/chat` and `GET` and `DELETE /api/v1/ehr/me/chat/history`
+(§11, "Patient record chat"). Only a patient session may use these routes:
+EHR's guard answers any other session `403 PATIENT_SESSION_REQUIRED` before
+the handler runs and records `auth.authorization.denied` (§7). Before
 D-Eminence/hid-system#74 a staff session there got `503 DEPENDENCY_UNAVAILABLE` and nothing was
 audited.
 These routes accept no browser-selected patient identity. Patient record access
@@ -1267,8 +1270,10 @@ boundary below).
 EHR and OCR authenticate every request through that service session, then
 their guards (`RemoteSecurityGuard`) bind the facility named by
 `X-Facility-ID` on every route that is not marked facility-optional (only
-EHR's patient-only routes are: `GET /api/v1/ehr/me/records` and, since the
-patient record release, `GET /api/v1/ehr/me/documents/:documentId/download`). A missing or malformed header is
+EHR's patient-only routes are: `GET /api/v1/ehr/me/records`, since the
+patient record release `GET /api/v1/ehr/me/documents/:documentId/download`,
+and since patient record chat `GET /api/v1/ehr/me/chat/availability`,
+`POST /api/v1/ehr/me/chat` and `GET` and `DELETE /api/v1/ehr/me/chat/history`). A missing or malformed header is
 `400 FACILITY_REQUIRED`. A facility where the actor has no active membership,
 such as a stale tab after the membership ended, is
 `403 FACILITY_ACCESS_DENIED`. Before binding, EHR also applies the runtime
@@ -1293,9 +1298,11 @@ A refusal keeps its own status and code. If its audit row cannot be written,
 the request fails closed with `503 DEPENDENCY_UNAVAILABLE`. Since
 D-Eminence/hid-system#74 each EHR refusal row carries `details.status` and `details.code`,
 the status and code answered, next to `method` and `route`. A route marked
-patient-only (EHR's `GET /api/v1/ehr/me/records` and `GET
-/api/v1/ehr/me/documents/:documentId/download`) refuses any other session
-with `403 PATIENT_SESSION_REQUIRED` before a facility is bound.
+patient-only (EHR's `GET /api/v1/ehr/me/records`, `GET
+/api/v1/ehr/me/documents/:documentId/download`, `GET
+/api/v1/ehr/me/chat/availability`, `POST /api/v1/ehr/me/chat` and `GET` and
+`DELETE /api/v1/ehr/me/chat/history`) refuses any other session with `403
+PATIENT_SESSION_REQUIRED` before a facility is bound.
 
 EHR's request audit (`api.<method>.<route>` on `http-request`) records a failed
 request with `details.status` and `details.code` too, and with outcome `denied`
@@ -2404,7 +2411,9 @@ exposes `Retry-After` to the allowed origins.
   call.
 - `POST /api/v1/ehr/me/chat` with `Idempotency-Key` (16 to 128 URL-safe
   characters) and `{ question, noticeVersion }` (a question of 1 to 1,000
-  characters; the notice version the patient acknowledged): `200` with
+  characters with no NUL, no other control character but tab and line
+  breaks, and no lone surrogate; the notice version the patient
+  acknowledged): `200` with
   `{ status, answer, blocks, sources, coverage, conversationId, messageId,
   processor: "anthropic", createdAt, idempotentReplay }`.
   - `status`: `answered` (from the records), `no_evidence` (the released
@@ -2421,20 +2430,33 @@ exposes `Retry-After` to the allowed origins.
   - `coverage`: `{ complete, released, withheld, truncated, selectedCount,
     recordCount }`: whether every released record was sent, and which
     categories were withheld.
-  - The same key and question again answer the stored reply with
-    `idempotentReplay: true` and no new request.
-- `GET /api/v1/ehr/me/chat/history`: `{ conversationId, exchanges, limit:
-  50 }`, newest first, each `{ messageId, question, reply: { status, answer,
-  blocks, sources }, createdAt }`; an exchange citing a record that is no
-  longer released is left out. Available while chat is off.
+  - The same key, question and notice version again answer the stored
+    reply with `idempotentReplay: true` and no new request, while every
+    record it cites is still released with the same content (`409
+    CHAT_SOURCES_CHANGED` otherwise). The request digest covers the notice
+    version, so after a notice change the same key and question answer `409
+    IDEMPOTENCY_KEY_REUSED`; ask again with a new key.
+  - The earlier exchanges sent with a question as context are the newest
+    four whose every cited record is still released with the same content
+    (ADR-065).
+- `GET /api/v1/ehr/me/chat/history`: `{ conversationId: uuid | null,
+  exchanges, limit: 50 }` (`conversationId` is null until the first
+  question), newest first, each `{ messageId, question, reply: { status,
+  answer, blocks, sources }, createdAt }`; an exchange citing a record that
+  is no longer released, or whose content changed since the answer (an
+  amendment, a correction or a retraction), is left out. Available while
+  chat is off.
 - `DELETE /api/v1/ehr/me/chat/history`: deletes every exchange; `200 {
-  cleared: true, deletedCount }`. Available while chat is off.
+  cleared: true, deletedCount }`, the number of exchanges deleted. `409
+  CHAT_HISTORY_ON_HOLD`, audited, deletes nothing while an active legal hold
+  (`platform.legal_holds`) names the patient or the patient's account.
+  Available while chat is off.
 
 Order of checks for a question, after the session guard and the body's
 shape (`400 VALIDATION_FAILED`): the flag (`503 RECORD_CHAT_DISABLED`, no
 record read and no request), the control (`503 RECORD_CHAT_PAUSED`, `503
 PLATFORM_CONTROL_UNAVAILABLE`), the question (`400 INVALID_QUESTION` when
-blank), the notice (`428
+blank, too long or holding a character above), the notice (`428
 CHAT_NOTICE_REQUIRED`), the key (`400 IDEMPOTENCY_KEY_REQUIRED`), four calls
 in flight per EHR process (`429 RECORD_CHAT_BUSY`, `Retry-After: 5`), then
 Identity's patient-self authorization (its answers as for the summary).
@@ -2443,13 +2465,17 @@ Identity's patient-self authorization (its answers as for the summary).
 |---|---|
 | `409 IDEMPOTENCY_KEY_REUSED` | the key was used for another question |
 | `409 CHAT_HISTORY_FULL` | 50 exchanges are stored; delete the history to ask again |
-| `409 CHAT_SOURCES_CHANGED` | a cited record changed or is no longer released before the answer was stored, or before a replay |
+| `409 CHAT_SOURCES_CHANGED` | a cited record changed (its content hash) or is no longer released, before the answer was stored or before a replay |
 | `409 CHAT_CONVERSATION_CHANGED` | the history was deleted while the question was answered |
+| `409 CHAT_HISTORY_ON_HOLD` | `DELETE /ehr/me/chat/history` while a legal hold names the patient or the account; nothing deleted |
 | `429 RECORD_CHAT_BUSY` | another question of the patient is being answered (`Retry-After: 5`) |
 | `429 RECORD_CHAT_RATE_LIMITED` | 10 questions this hour or 30 today (`Retry-After`: seconds until the bucket resets) |
-| `403 PATIENT_ACCESS_DENIED` | the patient-self authorization failed, or changed during the call (nothing stored) |
+| `401 AUTHENTICATION_REQUIRED` | Identity's answer for a session that ended (sign-out, revocation, expiry), before the read or during the call (nothing stored) |
+| `403 PATIENT_ACCESS_DENIED` | Identity answered for another session, patient or account, before the read or after the call, or the binding failed in the database (nothing stored) |
+| `503 RECORD_CHAT_PAUSED` | also when the kill switch was turned off between the first check and the lease (nothing sent) |
 | `503 RECORD_CHAT_BUDGET_EXHAUSTED` | the day's token budget is spent |
-| `503 RECORD_CHAT_UNAVAILABLE` | the processor failed, timed out or answered too much; nothing stored |
+| `503 RECORD_CHAT_UNAVAILABLE` | the processor failed, timed out or answered too much, or the answer could not be saved; nothing stored |
+| `503 IDENTITY_SERVICE_UNAVAILABLE` | Identity could not be reached, before the read or after the call (nothing stored) |
 | `503 PATIENT_RECORDS_UNAVAILABLE` | a released category could not be read |
 
 What the request to the processor holds, field by field, and what it never
@@ -2458,10 +2484,15 @@ codes, counts and digests only; no question, answer or record text):
 `ehr.record-chat.disclosure` (before every request: processor, model,
 inference geography, counts, notice version, reservation, disclosure
 digest), `ehr.record-chat.answer` (status, reason code, citation validity,
-token usage, served geography, processor message id; `denied` or `failure`
-outcomes for a change during the call or a processor failure),
+token usage, the served geography and a refusal category when known
+(`other` otherwise), the processor message id; `denied` or `failure`
+outcomes for a change during the call, a processor failure or a failed save
+(`save_failed`, written in a fallback transaction that also settles the
+lease); `priorExchangeCount` in the disclosure row counts only the earlier
+exchanges actually sent),
 `ehr.record-chat.replay`, `ehr.record-chat.history.read` and
-`ehr.record-chat.history.clear`; refused requests are audited as
+`ehr.record-chat.history.clear` (`denied` with `reason: legal_hold` while a
+hold keeps the history); refused requests are audited as
 `ehr.record-chat.ask`, `ehr.record-chat.history.read.request` and
 `ehr.record-chat.history.clear.request`.
 

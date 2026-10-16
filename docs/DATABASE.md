@@ -420,6 +420,15 @@ excluded from a combined patient timeline rather than guessed.
   is itself legally deletable.
 - Erasure requests create a governed case and record-class decision.
 - Legal hold overrides lifecycle deletion.
+- One patient-initiated deletion exists outside that model: patient record
+  chat's history (0096, ADR-065) is a patient-owned, non-authoritative copy
+  of questions and answers with no record class, and the patient deletes it
+  with `DELETE /api/v1/ehr/me/chat/history` without a governed case. Legal
+  hold still overrides it: while an active `platform.legal_holds` row names
+  the patient or the patient's account, the delete policies keep every row
+  and the route answers `409 CHAT_HISTORY_ON_HOLD`. That this deletion needs
+  no governed case is a proposed default awaiting owner and DPO sign-off
+  (release checklist P36).
 - An S3 deletion is driven by an approved durable database transition; the
   workflow must not leave database metadata and object state silently divergent.
 
@@ -621,9 +630,9 @@ and update of a clinical row records a version in `ehr.record_versions`
 
 The five record chat tables are not clinical records: the two history tables
 have patient-self row-level security only (no consent or staff path), no
-version history, and the patient deletes them; the three limit tables hold no
-PHI and are reached only through two security-definer commands ("Patient
-record chat", below).
+version history, and the patient deletes them unless a legal hold keeps them
+(§3.5); the three limit tables hold no PHI and are reached only through two
+security-definer commands ("Patient record chat", below).
 
 **Allergies are not recorded.** No migration creates an allergy or
 intolerance table, no EHR route records one, and no prescribing path checks
@@ -4526,12 +4535,33 @@ transaction, as 0091 changed control rows.
 Both force row-level security. Their only policies are `*_self_read`
 (`SELECT`), `*_self_insert` (`INSERT`) and `*_self_delete` (`DELETE`), each
 `ehr.patient_self_context(patient_id)`, the 0091 binding to the patient's
-live session; there is no `UPDATE` policy, so a stored exchange is never
-rewritten, and no staff, consent or break-glass path reads either table. The
-EHR runtime holds `SELECT`, `INSERT` and `DELETE` on both and nothing else
-(`runtime-grants.sql`). Retention is an open owner decision: there is no
-expiry, purge command or retention class; the patient deletes the history
-(`DELETE /api/v1/ehr/me/chat/history`), and EHR stores at most 50 exchanges.
+live session, and for `DELETE` also `not
+ehr.record_chat_history_on_hold(patient_id)`; there is no `UPDATE` policy,
+so a stored exchange is never rewritten, and no staff, consent or
+break-glass path reads either table. The EHR runtime holds `SELECT`,
+`INSERT` and `DELETE` on both and nothing else (`runtime-grants.sql`).
+Retention is an open owner decision: there is no expiry, purge command or
+retention class; the patient deletes the history (`DELETE
+/api/v1/ehr/me/chat/history`, one statement that deletes the exchanges and
+the conversation and counts the exchanges deleted), and EHR stores at most
+50 exchanges. Account deletion (0064) does not touch the history: it stays
+with the patient record, which no live patient session can then reach, until
+the owner decides (ADR-065, proposed defaults).
+
+`ehr.record_chat_history_on_hold(patient)` (`SECURITY DEFINER`, `STABLE`,
+owned by the migration administrator, `search_path = pg_catalog, pg_temp`,
+`EXECUTE` to the EHR runtime only) is true while an active
+`platform.legal_holds` row (`released_at` null) names the patient or the
+account of the patient-self binding. It answers only that patient's own
+patient-self transaction; for any other caller it is true (held), so it
+discloses nothing and the delete policies fail closed. Stable, so the two
+delete policies of one statement read one snapshot.
+
+Each stored exchange keeps `source_bindings`, the kind, id and content hash
+of every record it cites. An exchange is sent again as context, replayed or
+shown in the history only while every one of them is still released with the
+same hash (`bindingsStillReleased` in EHR); an amendment, a correction, a
+retraction or a category's release flag turned off hides it.
 
 **The limits.** Three tables reached only through two `SECURITY DEFINER`
 commands owned by the migration administrator (as 0049's QoreID quota), with
@@ -4546,8 +4576,8 @@ ids, counts and token numbers, and no text.
 | `ehr.record_chat_usage_counters` | `(audience, account_id, bucket_period, bucket_start)`: requests per account per UTC hour and day |
 | `ehr.record_chat_reservations` | one lease per question: account, patient, reserved tokens, `expires_at` at most 60 s after creation, and once settled the outcome and token usage; at most one unsettled lease per audience and account (partial unique index) |
 | `ehr.record_chat_daily_budget` | per UTC day, tokens reserved and used |
-| `ehr.reserve_record_chat(audience, patient, tokens, daily budget)` | `patient` audience only (`22023`); proves the caller with `ehr.patient_self_context` (`42501`); prunes at most 100 counters older than 48 hours and 100 settled leases older than 2 days; settles the caller's expired lease as `expired` (its tokens count as used); refuses a second unsettled lease (`P4091`); counts the request against 10 an hour and 30 a day (`P4290`, detail the seconds until the bucket resets); reserves the tokens against the configured budget capped at 20,000,000 (`P5030`). Any refusal rolls the whole call back |
-| `ehr.settle_record_chat(reservation, input, output, cache read, cache write, outcome)` | the same binding and account (`42501`); moves the reservation to used tokens; `false` when already settled |
+| `ehr.reserve_record_chat(audience, patient, tokens, daily budget)` | `patient` audience only (`22023`); proves the caller with `ehr.patient_self_context` (`42501`); reads `record_chat_enabled` again through `platform.control_enabled` (`55000 RECORD_CHAT_PAUSED`), so turning the kill switch off is atomic with the lease and the disclosure audit row; prunes at most 100 counters older than 48 hours and 100 leases older than 2 days (settled, or never settled by an account that did not come back), skipping rows another call holds; settles the caller's expired lease as `expired` (its tokens count as used), selecting it `FOR UPDATE SKIP LOCKED` and moving the budget only when this call settled it, so a late settlement racing the reservation never counts a lease twice; refuses a second unsettled lease (`P4091`); counts the request against 10 an hour and 30 a day (`P4290`, detail the seconds until the bucket resets); reserves the tokens against the configured budget capped at 20,000,000 (`P5030`). Any refusal rolls the whole call back |
+| `ehr.settle_record_chat(reservation, input, output, cache read, cache write, outcome)` | the same binding and account (`42501`); outcomes `answered`, `no_evidence`, `declined`, `unverified`, `failed`, `sources_changed`, `conversation_changed` (`expired` is the reservation's own); moves the reservation to used tokens; `false` when already settled, then changing nothing. A lease whose patient-self binding ended during the call cannot be settled by it and expires, charged its reserved tokens |
 
 **Locks.** `ACCESS EXCLUSIVE` on `platform.control_settings` first (every
 control read waits until the commit, as for 0091), then `SHARE ROW EXCLUSIVE`
@@ -4556,5 +4586,14 @@ runner's 5 s lock timeout. No existing row changes.
 
 **Not included:** the staff audience's tables and use, any embedding, chunk,
 extraction or vector object, any Lab or record table policy, any permission,
-any retention class, and any change to `ehr.patient_self_context` or
-`identity.patient_self_session` (their grants are those of 0091).
+any retention class, any change to `platform.legal_holds`, and any change to
+`ehr.patient_self_context` or `identity.patient_self_session` (their grants
+are those of 0091).
+
+**Tests.** `patient-record-chat.integration.sql` (rollback-only, fixture ids
+`5c4a7...`) covers the history, the legal hold, the limits and the
+catalogue; within a minute of a UTC hour boundary it waits for the next hour,
+and it fails asking for a rerun if a run still crossed one.
+`verify-non-superuser-database.mjs` also applies the latest migration as RDS
+does, on a database migrated to the one before it whose functions and view
+already belong to their technical owners.
