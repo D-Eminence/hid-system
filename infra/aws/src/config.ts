@@ -399,7 +399,7 @@ const RECORD_CHAT_NOTICE_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
  * The operator's attestation of the external-processing approval, as ehr-api
  * checks it: ADR-NNN@YYYY-MM-DD, a real date not in the future, naming the ADR
  * that records the processing agreement, geography, retention and quotas. Only
- * the form is checked; the release checklist (P36) checks what it names.
+ * the form is checked; the release checklist's record chat row checks what it names.
  */
 const RECORD_CHAT_APPROVAL = /^ADR-(\d{3})@(\d{4})-(\d{2})-(\d{2})$/;
 

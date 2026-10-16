@@ -53,7 +53,8 @@ const MODEL_ID_SHAPE = /^[a-z0-9][a-z0-9._:@-]{0,99}$/;
  * that records the processing agreement and transfer mechanism, the inference
  * geography, the retention of the chat history and the quotas, and the date it
  * was accepted, for example ADR-123@2026-10-16. Only its form is checked here;
- * the release checklist (P36) checks what it names. ADR-065 is not that ADR.
+ * the release checklist's record chat row checks what it names. The record
+ * chat design ADR is not that ADR.
  */
 const PROCESSING_APPROVAL = /^ADR-(\d{3})@(\d{4})-(\d{2})-(\d{2})$/;
 const NOTICE_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
@@ -209,7 +210,8 @@ const environmentSchema = z
     RECORD_CHAT_EFFORT: z.preprocess(emptyToUndefined, z.enum(['low', 'medium', 'high']).optional()),
     RECORD_CHAT_DEADLINE_MS: z.coerce.number().int().min(5000).max(25_000).default(25_000),
     // Always 0, as QOREID_MAX_RETRIES: a retry would send the same PHI again
-    // under the one disclosure audit row written before the request (ADR-065).
+    // under the one disclosure audit row written before the request (the
+    // record chat ADR).
     RECORD_CHAT_MAX_RETRIES: z.coerce.number().int().min(0).max(0).default(0),
     RECORD_CHAT_MAX_EVIDENCE_CHARS: z.coerce.number().int().min(4000).max(90_000).default(40_000),
     RECORD_CHAT_DAILY_TOKEN_BUDGET: z.preprocess(emptyToUndefined,
