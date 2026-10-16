@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { createHash, createHmac } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import * as provisioning from '../../services/ehr-api/scripts/database-login-provisioning.mjs';
 import {
   COMMANDS, grantVariableConflict, loginFromUrl, masterConnectionUrl, parseCommand, provisionAdministrator,
   provisionRuntimeLogins, revokeVariableConflict, roleNameFromUrl, runtimeLoginPlan, scramVerifier,
@@ -25,7 +28,7 @@ const url = (user, secret = password, rest = `${host}:5432/hid`) => {
   value.password = encodeURIComponent(secret);
   return value.toString();
 };
-const adminUrl = url('hid_migration_admin');
+const adminUrl = url('hid_deploy_admin');
 const loginNames = Object.fromEntries(Object.keys(RUNTIME_CREDENTIALS)
   .map((credential) => [credential, `hid_${credential.replaceAll('-', '_')}_login`]));
 const runtimeEnvironment = () => Object.fromEntries(Object.keys(RUNTIME_CREDENTIALS)
@@ -46,7 +49,7 @@ test('reads a login, its password and its database target from a URL', () => {
     user: 'hid_identity_login', password: 'Synthetic/Pass@word%0001', database: 'hid', target: `${host}:5432/hid` });
   assert.deepEqual(loginFromUrl('postgres://hid_admin:example-Synthetic-0001@localhost/hid_x?host=%2Ftmp%2Fsocket&sslmode=disable',
     'DATABASE_ADMIN_URL').target, '/tmp/socket:5432/hid_x');
-  assert.equal(roleNameFromUrl(url('hid_migration_admin', 'short'), 'DATABASE_ADMIN_URL'), 'hid_migration_admin');
+  assert.equal(roleNameFromUrl(url('hid_deploy_admin', 'short'), 'DATABASE_ADMIN_URL'), 'hid_deploy_admin');
 });
 
 test('refuses a URL it cannot provision safely, without echoing the URL or password', () => {
@@ -122,7 +125,7 @@ test('plans exactly one distinct LOGIN per runtime credential on the administrat
     /Runtime credential URLs are missing: DATABASE_LOGIN_URL_OCR_WORKER/);
   refuse((environment) => { environment.DATABASE_LOGIN_URL_LAB_API = url(loginNames['identity-api']); },
     /DATABASE_LOGIN_URL_LAB_API and DATABASE_LOGIN_URL_IDENTITY_API share the LOGIN hid_identity_api_login/);
-  refuse((environment) => { environment.DATABASE_LOGIN_URL_EHR_API = url('hid_migration_admin'); },
+  refuse((environment) => { environment.DATABASE_LOGIN_URL_EHR_API = url('hid_deploy_admin'); },
     /DATABASE_LOGIN_URL_EHR_API names the migration administrator or the RDS master/);
   refuse((environment) => { environment.DATABASE_LOGIN_URL_EHR_API = url('hid_platform_bootstrap'); },
     /DATABASE_LOGIN_URL_EHR_API names the migration administrator or the RDS master/);
@@ -136,8 +139,8 @@ test('plans exactly one distinct LOGIN per runtime credential on the administrat
 
 test('verification forbids the RDS master and the migration administrator', () => {
   const environment = verificationEnvironment({ DATABASE_LOGIN_URL_LAB_API: 'x', DATABASE_FORBIDDEN_LOGINS: 'other' },
-    'hid_platform_bootstrap', 'hid_migration_admin');
-  assert.equal(environment.DATABASE_FORBIDDEN_LOGINS, 'hid_platform_bootstrap,hid_migration_admin');
+    'hid_platform_bootstrap', 'hid_deploy_admin');
+  assert.equal(environment.DATABASE_FORBIDDEN_LOGINS, 'hid_platform_bootstrap,hid_deploy_admin');
   assert.equal(environment.DATABASE_LOGIN_URL_LAB_API, 'x');
 });
 
@@ -184,36 +187,36 @@ test('the master creates the migration administrator with a SCRAM verifier and C
   const administrator = loginFromUrl(adminUrl, 'DATABASE_ADMIN_URL');
   const client = fakeClient();
   const result = await provisionAdministrator(client, administrator, 'hid_platform_bootstrap');
-  assert.equal(result.administrator, 'hid_migration_admin');
+  assert.equal(result.administrator, 'hid_deploy_admin');
   assert.equal(result.created, true);
   const sql = sqlOf(client);
   assert.equal(sql[0], 'begin');
   assert.equal(sql.at(-1), 'commit');
   assert.ok(sql.some((text) => text.includes('pg_advisory_xact_lock')));
   const create = sql.find((text) => text.startsWith('create role'));
-  assert.match(create, /^create role "hid_migration_admin" login nosuperuser nobypassrls createrole nocreatedb noreplication inherit password 'SCRAM-SHA-256\$4096:[^']+'$/);
-  assert.ok(sql.includes('grant create on database "hid" to "hid_migration_admin"'));
-  assert.ok(sql.findIndex((text) => text.includes('has_database_privilege')) > sql.indexOf('grant create on database "hid" to "hid_migration_admin"'));
+  assert.match(create, /^create role "hid_deploy_admin" login nosuperuser nobypassrls createrole nocreatedb noreplication inherit password 'SCRAM-SHA-256\$4096:[^']+'$/);
+  assert.ok(sql.includes('grant create on database "hid" to "hid_deploy_admin"'));
+  assert.ok(sql.findIndex((text) => text.includes('has_database_privilege')) > sql.indexOf('grant create on database "hid" to "hid_deploy_admin"'));
   noPlaintext(client, [password]);
 });
 
 test('an existing administrator keeps its attributes and gets the secret\'s password; other attributes are refused', async () => {
   const administrator = loginFromUrl(adminUrl, 'DATABASE_ADMIN_URL');
-  const existing = fakeClient({ roles: { hid_migration_admin: adminAttributes } });
+  const existing = fakeClient({ roles: { hid_deploy_admin: adminAttributes } });
   assert.equal((await provisionAdministrator(existing, administrator, 'hid_platform_bootstrap')).created, false);
-  assert.ok(sqlOf(existing).some((text) => /^alter role "hid_migration_admin" with password 'SCRAM-SHA-256\$/.test(text)));
+  assert.ok(sqlOf(existing).some((text) => /^alter role "hid_deploy_admin" with password 'SCRAM-SHA-256\$/.test(text)));
   assert.ok(!sqlOf(existing).some((text) => text.startsWith('create role')));
   for (const attribute of ['rolbypassrls', 'rolsuper', 'rolreplication', 'rolcreatedb']) {
-    const wrong = fakeClient({ roles: { hid_migration_admin: { ...adminAttributes, [attribute]: true } } });
+    const wrong = fakeClient({ roles: { hid_deploy_admin: { ...adminAttributes, [attribute]: true } } });
     await assert.rejects(provisionAdministrator(wrong, administrator, 'hid_platform_bootstrap'),
-      /Role hid_migration_admin exists with other attributes/);
+      /Role hid_deploy_admin exists with other attributes/);
     assert.equal(sqlOf(wrong).at(-1), 'rollback');
     assert.ok(!sqlOf(wrong).some((text) => /^(create|alter|grant) /.test(text)), attribute);
   }
   const unmet = fakeClient({ createPrivilege: false });
   await assert.rejects(provisionAdministrator(unmet, administrator, 'hid_platform_bootstrap'), /CREATE on database hid/);
   assert.equal(sqlOf(unmet).at(-1), 'rollback');
-  await assert.rejects(provisionAdministrator(fakeClient(), administrator, 'hid_migration_admin'),
+  await assert.rejects(provisionAdministrator(fakeClient(), administrator, 'hid_deploy_admin'),
     /The migration administrator must not be the RDS master/);
 });
 
@@ -222,7 +225,7 @@ test('the 0015 parameter grant is made only before 0015 and checked; its revoke 
   const fresh = { master: fakeClient({ parameterPrivilege: [true] }), admin: fakeClient() };
   const granted = await grantVariableConflict(fresh.master, fresh.admin, administrator);
   assert.equal(granted.granted, true);
-  assert.ok(sqlOf(fresh.master).includes('grant set on parameter plpgsql.variable_conflict to "hid_migration_admin"'));
+  assert.ok(sqlOf(fresh.master).includes('grant set on parameter plpgsql.variable_conflict to "hid_deploy_admin"'));
   const applied = { master: fakeClient(), admin: fakeClient({ ledger: { applied: 96, latest: '0096_x.sql',
     applied_0015: true, applied_0083: true } }) };
   const skipped = await grantVariableConflict(applied.master, applied.admin, administrator);
@@ -234,7 +237,7 @@ test('the 0015 parameter grant is made only before 0015 and checked; its revoke 
 
   const revoke = fakeClient({ parameterPrivilege: [false] });
   assert.equal((await revokeVariableConflict(revoke, fakeClient(), administrator)).revoked, true);
-  assert.ok(sqlOf(revoke).includes('revoke set on parameter plpgsql.variable_conflict from "hid_migration_admin"'));
+  assert.ok(sqlOf(revoke).includes('revoke set on parameter plpgsql.variable_conflict from "hid_deploy_admin"'));
   await assert.rejects(revokeVariableConflict(fakeClient({ parameterPrivilege: [true] }), fakeClient(), administrator),
     /still holds SET on plpgsql\.variable_conflict/);
 });
@@ -280,11 +283,73 @@ test('an existing runtime LOGIN that is a member of another role is refused befo
   const own = fakeClient({ roles: { [login]: runtimeAttributes }, memberships: { [login]: ['hid_event_dispatcher'] } });
   await provisionRuntimeLogins(own, plan);
   assert.equal(sqlOf(own).at(-1), 'commit');
-  for (const other of [['hid_migration_admin'], ['hid_event_dispatcher', 'hid_ocr_worker']]) {
+  for (const other of [['hid_deploy_admin'], ['hid_event_dispatcher', 'hid_ocr_worker']]) {
     const refused = fakeClient({ roles: { [login]: runtimeAttributes }, memberships: { [login]: other } });
     await assert.rejects(provisionRuntimeLogins(refused, plan),
       /DATABASE_LOGIN_URL_EVENT_DISPATCHER: role hid_event_dispatcher_login is already a member of hid_/);
     assert.equal(sqlOf(refused).at(-1), 'rollback');
     assert.ok(!sqlOf(refused).some((text) => text.startsWith(`alter role "${login}"`)));
+  }
+});
+
+// The role bootstrap (runtime-grants.sql) creates 25 NOLOGIN group roles and
+// skips any that already exists, then requires ADMIN OPTION on each, which in
+// PostgreSQL 16 no role holds on itself. A migration administrator named after
+// one of them (hid_migration_admin is one) is created, migrates every
+// migration as its owner and then stops the bootstrap, so no runtime LOGIN can
+// ever be granted. The script refuses such a name before it connects.
+const runtimeGrants = readFileSync(new URL('../../services/ehr-api/database/runtime-grants.sql', import.meta.url), 'utf8');
+const createdGroupRoles = [...runtimeGrants.matchAll(/\bcreate role (hid_[a-z0-9_]+) nologin\b/g)].map((match) => match[1]);
+
+test('knows every HID group role the role bootstrap creates', () => {
+  assert.equal(createdGroupRoles.length, (runtimeGrants.match(/\bcreate role\b/gi) ?? []).length,
+    'every create role statement of runtime-grants.sql is a NOLOGIN hid_ role');
+  assert.ok(createdGroupRoles.includes('hid_migration_admin'));
+  assert.deepEqual([...(provisioning.HID_GROUP_ROLES ?? [])].sort(), [...createdGroupRoles].sort());
+  for (const role of Object.values(RUNTIME_CREDENTIALS)) assert.ok(provisioning.HID_GROUP_ROLES.includes(role), role);
+});
+
+test('refuses a migration administrator named after a HID group role, before any statement', async () => {
+  assert.equal(typeof provisioning.administratorFromUrl, 'function', 'administratorFromUrl is exported');
+  for (const role of createdGroupRoles) {
+    assert.throws(() => provisioning.administratorFromUrl(url(role)), (error) => {
+      assert.match(error.message, new RegExp(`^DATABASE_ADMIN_URL names the HID group role ${role}; `), role);
+      assert.ok(!error.message.includes(password) && !error.message.includes(host), error.message);
+      return true;
+    });
+    const client = fakeClient();
+    await assert.rejects(provisionAdministrator(client, loginFromUrl(url(role), 'DATABASE_ADMIN_URL'),
+      'hid_platform_bootstrap'), new RegExp(`DATABASE_ADMIN_URL names the HID group role ${role}; `), role);
+    assert.deepEqual(client.statements, [], `${role}: a statement was sent`);
+  }
+  assert.deepEqual(provisioning.administratorFromUrl(adminUrl), loginFromUrl(adminUrl, 'DATABASE_ADMIN_URL'));
+});
+
+test('refuses a runtime LOGIN named after any HID group role, not only an aggregate', () => {
+  const administrator = loginFromUrl(adminUrl, 'DATABASE_ADMIN_URL');
+  for (const role of createdGroupRoles) {
+    const environment = runtimeEnvironment();
+    environment.DATABASE_LOGIN_URL_EHR_API = url(role);
+    assert.throws(() => runtimeLoginPlan(environment, administrator, 'hid_platform_bootstrap'),
+      /DATABASE_LOGIN_URL_EHR_API names a HID group role/, role);
+  }
+});
+
+// The task's every changing command reads the administrator first, so a
+// group-role name stops it before it connects (here to a closed port).
+test('the provisioning task refuses such an administrator before it connects', () => {
+  const script = new URL('../../services/ehr-api/scripts/provision-database-logins.mjs', import.meta.url).pathname;
+  const closed = '127.0.0.1:9/hid';
+  for (const command of ['--administrator', '--grant-variable-conflict', '--revoke-variable-conflict', '--runtime-logins']) {
+    const result = spawnSync(process.execPath, [script, command], { encoding: 'utf8', timeout: 30_000,
+      env: { PATH: process.env.PATH, NODE_ENV: 'test', DATABASE_SSL: 'false',
+        DATABASE_ADMIN_URL: url('hid_migration_admin', password, closed),
+        DATABASE_MASTER_USERNAME: 'hid_platform_bootstrap', DATABASE_MASTER_PASSWORD: 'Synthetic-Master-0001',
+        ...Object.fromEntries(Object.entries(runtimeEnvironment()).map(([variable, value]) =>
+          [variable, value.replace(`${host}:5432/hid`, closed)])) } });
+    assert.equal(result.status, 1, command);
+    assert.match(result.stderr, /^Database provisioning failed: DATABASE_ADMIN_URL names the HID group role hid_migration_admin; /,
+      `${command}: ${result.stderr}`);
+    assert.ok(!result.stderr.includes(password) && !result.stdout.includes(password), command);
   }
 });

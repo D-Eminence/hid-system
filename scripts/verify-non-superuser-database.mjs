@@ -52,7 +52,8 @@
 // - the database provisioning task's script (provision-database-logins.mjs,
 //   MIGRATION_RUNBOOK.md §6.1 and §6.3) on a second cluster laid out as a new
 //   RDS instance: a NOSUPERUSER CREATEROLE CREATEDB master owns the database
-//   and creates the migration administrator, the provisioned roles sign in
+//   and creates the migration administrator (refusing one named after a HID
+//   group role, such as hid_migration_admin), the provisioned roles sign in
 //   with SCRAM-SHA-256 passwords, the chain migrates and bootstraps as that
 //   administrator, and the administrator creates the ten runtime LOGINs from
 //   their URLs' passwords and verifies them; refusals change nothing.
@@ -276,6 +277,16 @@ async function provisioningStage() {
     [`create role ${master} login nosuperuser nobypassrls createrole createdb noreplication`,
       `create database ${target} owner ${master}`], 0, 'postgres');
 
+  // An administrator named after a HID group role (hid_migration_admin is one)
+  // would own the whole chain and then stop the role bootstrap, which skips an
+  // existing role and needs ADMIN OPTION on it; the script refuses the name
+  // before it connects.
+  const groupRoleAdministrator = provision('--administrator refuses a HID group role name', '--administrator',
+    { ...asMaster(), DATABASE_ADMIN_URL: at('hid_migration_admin', passwords.admin) }, 'failure');
+  assert.match(groupRoleAdministrator.output, /DATABASE_ADMIN_URL names the HID group role hid_migration_admin; /);
+  assert.equal(sql('no role for the refused administrator name', superuser,
+    "select count(*) from pg_roles where rolname = 'hid_migration_admin'", 0, 'postgres').stdout.trim(), '0');
+
   // The master creates the migration administrator with the password in its
   // URL (sent only as a SCRAM verifier) and CREATE on the database; a rerun
   // only sets the password again.
@@ -293,7 +304,8 @@ async function provisioningStage() {
   assert.match(sql('the administrator is refused another password', administrator, 'select 1', 'failure', target,
     { PGPASSWORD: 'example-wrong-password-0000' }).output, /password authentication failed/);
   steps.administrator = { created_by: master, attributes: 'NOSUPERUSER NOBYPASSRLS CREATEROLE NOCREATEDB NOREPLICATION',
-    create_on_database: target, password: 'SCRAM-SHA-256 verifier; signs in with it, refused another' };
+    create_on_database: target, password: 'SCRAM-SHA-256 verifier; signs in with it, refused another',
+    refused_group_role_name: 'hid_migration_admin' };
 
   // 0015: the grant before the run, refused once 0015 is applied, and the revoke.
   assert.equal(provision('--grant-variable-conflict', '--grant-variable-conflict', asMaster(superuser)).summary.granted, true);
