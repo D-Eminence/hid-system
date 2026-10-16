@@ -22,7 +22,7 @@ begin
     'hid_schema_test_runtime', 'hid_event_delivery_commands',
     'hid_event_dispatcher', 'hid_notification_runtime',
     'hid_notification_api_runtime', 'hid_notification_worker',
-    'hid_ocr_queue_metrics', 'hid_platform_control_reader'
+    'hid_ocr_queue_metrics', 'hid_platform_control_reader', 'hid_lab_release_reader'
   ] loop
     if not exists (select 1 from pg_roles where rolname = role_name) then
       raise exception 'required HID role is missing: %', role_name;
@@ -154,7 +154,7 @@ begin
     'hid_pharmacy_api_runtime', 'hid_outreach_runtime', 'hid_outreach_api_runtime',
     'hid_event_delivery_commands', 'hid_event_dispatcher', 'hid_notification_runtime',
     'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics',
-    'hid_platform_control_reader'
+    'hid_platform_control_reader', 'hid_lab_release_reader'
   ] loop
     if has_table_privilege(role_name, 'auth.otp_start_cooldowns',
          'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
@@ -179,7 +179,8 @@ begin
     'hid_lab_runtime', 'hid_lab_api_runtime', 'hid_pharmacy_runtime',
     'hid_pharmacy_api_runtime', 'hid_outreach_runtime', 'hid_outreach_api_runtime',
     'hid_event_delivery_commands', 'hid_event_dispatcher', 'hid_notification_runtime',
-    'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics'
+    'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics',
+    'hid_lab_release_reader'
   ] loop
     if has_function_privilege(role_name,
          'platform.consume_public_patient_nin_quota(char,integer,integer,integer)', 'EXECUTE')
@@ -411,7 +412,7 @@ begin
       'hid_schema_test_runtime', 'hid_event_delivery_commands',
       'hid_event_dispatcher', 'hid_notification_runtime',
       'hid_notification_api_runtime', 'hid_notification_worker',
-      'hid_ocr_queue_metrics', 'hid_platform_control_reader'
+      'hid_ocr_queue_metrics', 'hid_platform_control_reader', 'hid_lab_release_reader'
     ]) runtime(role_name)
     join pg_class relation on relation.relkind in ('r', 'p')
     join pg_namespace namespace_row on namespace_row.oid = relation.relnamespace
@@ -702,10 +703,10 @@ begin
      ) then
     raise exception 'platform control reader privileges are inconsistent';
   end if;
-  -- The three technical owners are never granted to a role and are members of
+  -- The four technical owners are never granted to a role and are members of
   -- none, and none may create objects: the role bootstrap grants its
   -- administrator SET and INHERIT membership in them, and each of them CREATE
-  -- on one schema, only while it transfers and grants their functions, and
+  -- on one schema, only while it transfers and grants their objects, and
   -- revokes both in the same transaction. The one membership row allowed is
   -- the ADMIN OPTION that PostgreSQL 16 records, as granted by the bootstrap
   -- superuser, for a CREATEROLE administrator that is not a superuser in every
@@ -717,7 +718,8 @@ begin
   -- to it) is refused. `is not true` also refuses the row when the runner may
   -- not create roles (administrator is null).
   foreach role_name in array array[
-    'hid_event_delivery_commands', 'hid_ocr_queue_metrics', 'hid_platform_control_reader'
+    'hid_event_delivery_commands', 'hid_ocr_queue_metrics', 'hid_platform_control_reader',
+    'hid_lab_release_reader'
   ] loop
     if exists (select 1 from pg_auth_members where member = role_name::regrole)
        or exists (
@@ -804,7 +806,7 @@ begin
         'hid_pharmacy_api_runtime', 'hid_outreach_runtime',
         'hid_outreach_api_runtime', 'hid_schema_test_runtime',
         'hid_event_delivery_commands', 'hid_event_dispatcher',
-        'hid_ocr_queue_metrics', 'hid_platform_control_reader'
+        'hid_ocr_queue_metrics', 'hid_platform_control_reader', 'hid_lab_release_reader'
       )
   ) then
     raise exception 'a runtime or test role owns a protected application relation';
@@ -874,6 +876,14 @@ begin
      or has_function_privilege('hid_notification_worker', 'ehr.patient_self_context(uuid)', 'EXECUTE') then
     raise exception 'ehr.patient_self_context must be executable by the EHR runtime only';
   end if;
+  -- Exactly: no grant beside the EHR runtime and the test role, whichever
+  -- role it would name (PSELF-RLS; the patient record release keeps it).
+  if (select coalesce(array_agg(privilege.grantee::regrole::text order by privilege.grantee::regrole::text), '{}')
+        from pg_proc proc, aclexplode(proc.proacl) privilege
+       where proc.oid = 'ehr.patient_self_context(uuid)'::regprocedure and privilege.grantee <> proc.proowner)
+     is distinct from array['hid_ehr_runtime', 'hid_schema_test_runtime'] then
+    raise exception 'ehr.patient_self_context must be granted to hid_ehr_runtime and hid_schema_test_runtime only';
+  end if;
   if to_regprocedure('notification.on_identity_pin_outbox_created()') is null
      or not exists (select 1 from pg_trigger
                      where tgrelid = 'identity.outbox_events'::regclass and tgname = 'pin_use_notification_inbox'
@@ -890,6 +900,110 @@ begin
      or has_function_privilege('hid_identity_runtime', 'identity.list_my_access_requests()', 'EXECUTE')
      or has_function_privilege('public', 'identity.list_my_access_requests()', 'EXECUTE') then
     raise exception 'the patient access-request list must be reachable only through its session-bound wrapper';
+  end if;
+end
+$$;
+
+-- Patient record release (owner decision 4 of 2026-10-16, D7). The view of
+-- the patient's released Lab results belongs to the technical owner
+-- hid_lab_release_reader: it is a security-barrier view (not
+-- security_invoker), selected only by hid_ehr_runtime and the test role.
+-- Its ACL holds exactly those two SELECT entries from the first bootstrap
+-- run on: no entry of the owner itself, which the migration's REVOKE ... FROM
+-- PUBLIC would otherwise leave until the next run (release checklist P36).
+-- Its owner reads exactly the listed columns through one exact `true` policy
+-- per table, holds no schema USAGE, no table or function privilege and no
+-- EXECUTE on ehr.patient_self_context, and owns nothing else. The EHR runtime
+-- reaches no Lab object; the Lab runtimes reach neither the view nor the
+-- patient-self context, and hold no USAGE on schema ehr (D17).
+do $$
+begin
+  if (select concat_ws('|', relation.relkind, relation.relowner::regrole::text,
+        array_to_string(relation.reloptions, ','))
+        from pg_class relation where relation.oid = 'ehr.patient_released_lab_results'::regclass)
+     is distinct from 'v|hid_lab_release_reader|security_barrier=true'
+     or (select coalesce(array_agg(privilege.grantee::regrole::text || ':' || privilege.privilege_type
+              order by privilege.grantee::regrole::text, privilege.privilege_type), '{}')
+           from pg_class relation, aclexplode(relation.relacl) privilege
+          where relation.oid = 'ehr.patient_released_lab_results'::regclass)
+        is distinct from array['hid_ehr_runtime:SELECT', 'hid_schema_test_runtime:SELECT'] then
+    raise exception 'ehr.patient_released_lab_results must be the technical owner''s security-barrier view, selected only by the EHR runtime and the test role, with no entry of its owner';
+  end if;
+  if (select coalesce(array_agg(relation.oid::regclass::text || '.' || attribute.attname || ':' || privilege.privilege_type
+          order by relation.oid::regclass::text, attribute.attname, privilege.privilege_type), '{}')
+        from pg_class relation
+        join pg_attribute attribute on attribute.attrelid = relation.oid
+        cross join lateral aclexplode(attribute.attacl) privilege
+       where privilege.grantee = 'hid_lab_release_reader'::regrole)
+     is distinct from array[
+       'ehr.encounters.facility_id:SELECT', 'ehr.encounters.id:SELECT', 'ehr.encounters.patient_id:SELECT',
+       'ehr.encounters.status:SELECT',
+       'ehr.lab_requests.facility_id:SELECT', 'ehr.lab_requests.id:SELECT', 'ehr.lab_requests.patient_id:SELECT',
+       'ehr.lab_requests.status:SELECT',
+       'lab.result_invalidations.patient_id:SELECT', 'lab.result_invalidations.result_id:SELECT',
+       'lab.result_invalidations.result_version:SELECT',
+       'lab.result_releases.facility_id:SELECT', 'lab.result_releases.patient_id:SELECT',
+       'lab.result_releases.released_at:SELECT', 'lab.result_releases.result_id:SELECT',
+       'lab.result_releases.result_version:SELECT',
+       'lab.result_revisions.abnormal_flag:SELECT', 'lab.result_revisions.facility_id:SELECT',
+       'lab.result_revisions.numeric_value:SELECT', 'lab.result_revisions.patient_id:SELECT',
+       'lab.result_revisions.reference_range:SELECT', 'lab.result_revisions.result_id:SELECT',
+       'lab.result_revisions.result_type:SELECT', 'lab.result_revisions.revision_kind:SELECT',
+       'lab.result_revisions.text_value:SELECT', 'lab.result_revisions.unit:SELECT',
+       'lab.result_revisions.version:SELECT',
+       'lab.results.execution_id:SELECT', 'lab.results.facility_id:SELECT', 'lab.results.id:SELECT',
+       'lab.results.patient_id:SELECT',
+       'lab.test_executions.facility_id:SELECT', 'lab.test_executions.id:SELECT',
+       'lab.test_executions.patient_id:SELECT', 'lab.test_executions.requested_test_id:SELECT',
+       'lab.work_item_requested_tests.code:SELECT', 'lab.work_item_requested_tests.code_system:SELECT',
+       'lab.work_item_requested_tests.facility_id:SELECT', 'lab.work_item_requested_tests.id:SELECT',
+       'lab.work_item_requested_tests.name:SELECT', 'lab.work_item_requested_tests.patient_id:SELECT',
+       'lab.work_item_requested_tests.work_item_id:SELECT',
+       'lab.work_items.facility_id:SELECT', 'lab.work_items.id:SELECT',
+       'lab.work_items.ordering_facility_id:SELECT', 'lab.work_items.patient_id:SELECT',
+       'lab.work_items.source_ehr_order_id:SELECT', 'lab.work_items.source_encounter_id:SELECT'] then
+    raise exception 'the Lab release reader must read exactly the released result columns and the source order and encounter status';
+  end if;
+  if exists (select 1 from pg_class relation, aclexplode(relation.relacl) privilege
+              where privilege.grantee = 'hid_lab_release_reader'::regrole
+                and relation.relowner <> 'hid_lab_release_reader'::regrole)
+     or exists (select 1 from pg_proc proc, aclexplode(proc.proacl) privilege
+                 where privilege.grantee = 'hid_lab_release_reader'::regrole)
+     or exists (select 1 from pg_proc where proowner = 'hid_lab_release_reader'::regrole)
+     or (select count(*) from pg_class where relowner = 'hid_lab_release_reader'::regrole) <> 1
+     or exists (select 1 from pg_namespace where nspowner = 'hid_lab_release_reader'::regrole)
+     or exists (select 1 from pg_namespace namespace_row
+                 where namespace_row.nspname in ('platform', 'auth', 'identity', 'ehr', 'audit', 'ocr', 'lab',
+                     'pharmacy', 'outreach', 'integration', 'notification', 'migration')
+                   and has_schema_privilege('hid_lab_release_reader', namespace_row.oid, 'USAGE'))
+     or has_function_privilege('hid_lab_release_reader', 'ehr.patient_self_context(uuid)', 'EXECUTE')
+     or has_function_privilege('hid_lab_release_reader', 'identity.patient_self_session(text,uuid)', 'EXECUTE') then
+    raise exception 'the Lab release reader holds a privilege beyond its column grants, or can evaluate patient-self';
+  end if;
+  if (select coalesce(array_agg(policy.polrelid::regclass::text order by policy.polrelid::regclass::text), '{}')
+        from pg_policy policy
+       where policy.polname = 'patient_release_reader_read' and policy.polcmd = 'r' and policy.polpermissive
+         and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
+         and pg_get_expr(policy.polqual, policy.polrelid) = 'true' and policy.polwithcheck is null)
+     is distinct from array['ehr.lab_requests', 'lab.result_invalidations', 'lab.result_releases',
+       'lab.result_revisions', 'lab.results', 'lab.test_executions', 'lab.work_item_requested_tests',
+       'lab.work_items']
+     or exists (select 1 from pg_policy policy
+                 where 'hid_lab_release_reader'::regrole::oid = any(policy.polroles)
+                   and policy.polname <> 'patient_release_reader_read') then
+    raise exception 'the Lab release reader must read through exactly one true policy on each of its eight tables';
+  end if;
+  if has_schema_privilege('hid_ehr_runtime', 'lab', 'USAGE')
+     or exists (select 1 from pg_class relation join pg_namespace namespace_row on namespace_row.oid = relation.relnamespace
+                 where namespace_row.nspname = 'lab' and relation.relkind in ('r', 'p', 'v')
+                   and has_any_column_privilege('hid_ehr_runtime', relation.oid, 'SELECT,INSERT,UPDATE,REFERENCES')) then
+    raise exception 'the EHR runtime must reach the released Lab results through the view only';
+  end if;
+  if exists (select 1 from unnest(array['hid_lab_runtime', 'hid_lab_api_runtime', 'public']) lab_role(role_name)
+              where has_table_privilege(lab_role.role_name, 'ehr.patient_released_lab_results', 'SELECT')
+                 or has_function_privilege(lab_role.role_name, 'ehr.patient_self_context(uuid)', 'EXECUTE')
+                 or (lab_role.role_name <> 'public' and has_schema_privilege(lab_role.role_name, 'ehr', 'USAGE'))) then
+    raise exception 'Lab never reaches the patient-self context or the patient release view (D17)';
   end if;
 end
 $$;
@@ -911,7 +1025,7 @@ declare
     'hid_pharmacy_api_runtime', 'hid_outreach_runtime', 'hid_outreach_api_runtime',
     'hid_event_delivery_commands', 'hid_event_dispatcher', 'hid_notification_runtime',
     'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics',
-    'hid_platform_control_reader'];
+    'hid_platform_control_reader', 'hid_lab_release_reader'];
   every_role text[] := array['public', 'hid_identity_runtime', 'hid_identity_api_runtime',
     'hid_schema_test_runtime', 'hid_migration_admin'] || other_runtimes;
 begin
@@ -977,6 +1091,57 @@ begin
       where permission_code = 'identity.patient.assisted_registration')
      is distinct from array['clinician', 'doctor', 'nurse'] then
     raise exception 'identity.patient.assisted_registration must be held by doctor, clinician and nurse only';
+  end if;
+end
+$$;
+
+-- 0095 (ADR-064). The notification worker learns a patient's verified login
+-- email only through the claim-bound integration.notification_recipient_for_claim,
+-- owned by the event-delivery technical owner, which alone executes the
+-- private helper that reads identity.patients and auth.accounts as their
+-- owner, with the login's deletion requests. The exact ACLs: the worker on
+-- the claim function and the technical owner on the helper, besides their
+-- owners. Neither the worker, its notification aggregate nor the technical
+-- owner holds any table or column privilege on the three tables.
+do $$
+declare
+  claim_function regprocedure := to_regprocedure('integration.notification_recipient_for_claim(uuid,uuid,uuid)');
+  helper regprocedure := to_regprocedure('integration.notification_recipient_state(uuid)');
+begin
+  if claim_function is null or helper is null then
+    raise exception 'the 0095 notification recipient functions are missing';
+  end if;
+  if (select proowner from pg_proc where oid = claim_function) <> 'hid_event_delivery_commands'::regrole
+     or (select proowner from pg_proc where oid = helper)
+        <> (select relowner from pg_class where oid = 'identity.patients'::regclass)
+     or exists (select 1 from pg_proc where oid in (claim_function, helper)
+                 and (not prosecdef or proconfig is distinct from array['search_path=pg_catalog, pg_temp'])) then
+    raise exception 'the 0095 recipient functions have the wrong owner, security or search_path';
+  end if;
+  if (select proacl from pg_proc where oid = claim_function) is null
+     or (select coalesce(array_agg(distinct privilege.grantee::regrole::text), '{}')
+           from pg_proc proc, aclexplode(proc.proacl) privilege
+          where proc.oid = claim_function and privilege.grantee <> proc.proowner) <> array['hid_notification_worker']
+     or (select proacl from pg_proc where oid = helper) is null
+     or (select coalesce(array_agg(distinct privilege.grantee::regrole::text), '{}')
+           from pg_proc proc, aclexplode(proc.proacl) privilege
+          where proc.oid = helper and privilege.grantee <> proc.proowner) <> array['hid_event_delivery_commands']
+     or not has_function_privilege('hid_notification_worker', claim_function, 'EXECUTE')
+     or has_function_privilege('hid_notification_worker', helper, 'EXECUTE')
+     or has_function_privilege('hid_notification_runtime', claim_function, 'EXECUTE')
+     or has_function_privilege('hid_notification_api_runtime', claim_function, 'EXECUTE') then
+    raise exception 'the 0095 recipient function grants are broader or narrower than the worker and its technical owner';
+  end if;
+  if exists (
+       select 1
+       from unnest(array['hid_notification_worker', 'hid_notification_runtime', 'hid_notification_api_runtime',
+         'hid_event_delivery_commands', 'hid_event_dispatcher']) runtime(role_name),
+         unnest(array['identity.patients', 'auth.accounts', 'identity.patient_account_deletion_requests']) protected(table_name)
+       where has_table_privilege(runtime.role_name, protected.table_name,
+         'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+          or has_any_column_privilege(runtime.role_name, protected.table_name, 'SELECT,INSERT,UPDATE,REFERENCES')
+     ) then
+    raise exception 'a notification or event-delivery role can read identity.patients, auth.accounts or identity.patient_account_deletion_requests directly';
   end if;
 end
 $$;

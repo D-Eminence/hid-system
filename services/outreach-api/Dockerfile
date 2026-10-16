@@ -16,7 +16,7 @@ COPY packages/api-client/package.json ./packages/api-client/
 COPY services/outreach-api/package.json services/outreach-api/package-lock.json ./services/outreach-api/
 RUN cd services/outreach-api && npm ci --omit=dev && npm cache clean --force
 
-FROM gcr.io/distroless/nodejs22-debian13@sha256:939d6f1671529d230f50b563578e9b5d206af58f038b10ebd7e1233023d4e167 AS runtime
+FROM gcr.io/distroless/nodejs22-debian13@sha256:ec2313763dd43931543bd03830466e0c409ce73a487e8d46f10db72d3b816c1c AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --chown=65532:65532 --from=production-dependencies /app/services/outreach-api/node_modules ./services/outreach-api/node_modules

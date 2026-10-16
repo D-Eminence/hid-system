@@ -1,5 +1,5 @@
 import { Injectable, ServiceUnavailableException } from '@nestjs/common';
-import type { PresignedUpload, StorageProvider, StoredObjectMetadata, UploadIntent } from './storage.types';
+import type { DownloadAttachment, PresignedUpload, StorageProvider, StoredObjectMetadata, UploadIntent } from './storage.types';
 
 @Injectable()
 export class DisabledStorageProvider implements StorageProvider {
@@ -11,7 +11,11 @@ export class DisabledStorageProvider implements StorageProvider {
   inspect(_key: string): Promise<StoredObjectMetadata> {
     throw new ServiceUnavailableException('Document storage is disabled');
   }
-  createDownload(_key: string, _versionId: string): Promise<{ url: string; expiresInSeconds: number }> {
+  inspectVersion(_key: string, _versionId: string): Promise<StoredObjectMetadata> {
+    throw new ServiceUnavailableException('Document storage is disabled');
+  }
+  createDownload(_key: string, _versionId: string, _attachment?: DownloadAttachment):
+    Promise<{ url: string; expiresInSeconds: number }> {
     throw new ServiceUnavailableException('Document storage is disabled');
   }
 }

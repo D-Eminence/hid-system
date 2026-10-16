@@ -115,7 +115,7 @@ let liveActor: IdentityActorContext | undefined;
 /** A refusal Identity's /auth/service-session answers with, as IdentityApiService translates it, or a fault. */
 let identityRefusal: unknown;
 /** The patient records service behind GET /ehr/me/records: it refuses a non-patient itself, as the real one does. */
-let records: { self: jest.Mock; emergency: jest.Mock };
+let records: { self: jest.Mock; emergency: jest.Mock; downloadOwnDocument: jest.Mock };
 
 beforeEach(async () => {
   rows = [];
@@ -139,6 +139,7 @@ beforeEach(async () => {
       return { encounters: [], notes: [] };
     }),
     emergency: jest.fn(),
+    downloadOwnDocument: jest.fn(async () => ({ url: 'https://signed.example.invalid/object', expiresInSeconds: 60 })),
   };
 
   @Module({
@@ -343,6 +344,28 @@ describe('Patient-only routes refuse a staff session in the guard (A9-EHR)', () 
     expect(response).toEqual({ status: 403, code: 'PATIENT_SESSION_REQUIRED' });
     expect(rows).toEqual([refusedBeforeFacility(staff, 'staff', 403, 'PATIENT_SESSION_REQUIRED', '/api/v1/ehr/me/records')]);
     expect(records.self).not.toHaveBeenCalled();
+  });
+
+  // The patient document download (patient record release, D7) is patient-only
+  // too: a staff session never reaches its handler or the object store.
+  const DOWNLOAD = '/api/v1/ehr/me/documents/70000000-0000-4000-8000-000000000001/download';
+  it.each([
+    ['without X-Facility-ID', {}],
+    ['with the staff member\'s own facility', { 'X-Facility-ID': DEFAULT_FACILITY.id }],
+  ])('answers a staff session on the patient document download %s 403 PATIENT_SESSION_REQUIRED, recorded', async (_case, headers) => {
+    const response = await probeAt(DOWNLOAD, headers);
+    expect(response).toEqual({ status: 403, code: 'PATIENT_SESSION_REQUIRED' });
+    expect(rows).toEqual([refusedBeforeFacility(staff, 'staff', 403, 'PATIENT_SESSION_REQUIRED',
+      '/api/v1/ehr/me/documents/:documentId/download')]);
+    expect(records.downloadOwnDocument).not.toHaveBeenCalled();
+  });
+
+  it('serves the patient their document download and refuses a malformed document id before the handler', async () => {
+    liveActor = patient;
+    expect((await probeAt(DOWNLOAD)).status).toBe(200);
+    expect(records.downloadOwnDocument).toHaveBeenCalledWith(expect.anything(), '70000000-0000-4000-8000-000000000001');
+    expect((await probeAt('/api/v1/ehr/me/documents/not-a-document/download')).status).toBe(400);
+    expect(records.downloadOwnDocument).toHaveBeenCalledTimes(1);
   });
 
   it('still serves the patient their records, auditing no failure', async () => {

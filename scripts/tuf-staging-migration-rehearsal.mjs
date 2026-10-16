@@ -379,6 +379,26 @@ try {
       attested: false, participating: false, checks: false, designations: false, designation_events: false,
       holders: ['clinician', 'doctor', 'nurse'] },
     'The upgraded role bootstrap must give the Identity runtime the 0094 commands and no assisted-registration table');
+    // Patient record release (owner decision 4 of 2026-10-16, D7): the
+    // released Lab results view belongs to its technical owner and only the
+    // EHR runtime may read it; Lab gains neither the view nor the
+    // patient-self context, whose EXECUTE stays with the EHR runtime and the
+    // test role (PSELF-RLS, D17).
+    assert.deepEqual((await client.query(`select
+        (select relowner::regrole::text from pg_class where oid = 'ehr.patient_released_lab_results'::regclass) as owner,
+        has_table_privilege('hid_ehr_runtime', 'ehr.patient_released_lab_results', 'SELECT') as ehr_view,
+        has_table_privilege('hid_lab_runtime', 'ehr.patient_released_lab_results', 'SELECT') as lab_view,
+        has_table_privilege('hid_lab_api_runtime', 'ehr.patient_released_lab_results', 'SELECT') as lab_api_view,
+        has_function_privilege('hid_lab_runtime', 'ehr.patient_self_context(uuid)', 'EXECUTE') as lab_self,
+        has_function_privilege('hid_lab_release_reader', 'ehr.patient_self_context(uuid)', 'EXECUTE') as reader_self,
+        has_schema_privilege('hid_lab_runtime', 'ehr', 'USAGE') as lab_ehr,
+        (select array_agg(privilege.grantee::regrole::text order by privilege.grantee::regrole::text)
+           from pg_proc proc, aclexplode(proc.proacl) privilege
+          where proc.oid = 'ehr.patient_self_context(uuid)'::regprocedure and privilege.grantee <> proc.proowner)
+          as self_holders`)).rows[0],
+    { owner: 'hid_lab_release_reader', ehr_view: true, lab_view: false, lab_api_view: false, lab_self: false,
+      reader_self: false, lab_ehr: false, self_holders: ['hid_ehr_runtime', 'hid_schema_test_runtime'] },
+    'The upgraded role bootstrap must give the released Lab results view to its technical owner and the EHR runtime only');
     await client.query('begin');
     try {
       await client.query('set local role hid_identity_api_runtime');
@@ -412,7 +432,7 @@ try {
     purpose_of_use_seeded:['direct-care'],launch_write_permissions_withdrawn:true,retraction_guards_installed:true,
     launch_module_permissions_withdrawn:true,patient_activation_command_regranted:true,
     holder_commands_runtime_only:true,holder_columns_not_runtime_writable:true,
-    assisted_registration_commands_runtime_only:true,
+    assisted_registration_commands_runtime_only:true,patient_record_release_grants:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
   // 0093 (ADR-062) on a database at 0092 that holds public enrollments in
@@ -473,6 +493,11 @@ try {
   evidence.checks.delegated_cookie_read_runtime = JSON.parse(command(
     'exact-role EHR read delegated to Identity with a browser cookie session', process.execPath,
     [join(repository, 'services/ehr-api/scripts/verify-delegated-cookie-read-runtime.mjs')], workflowEnvironment));
+  // Patient record release (owner decision 4, D7): the released categories,
+  // the patient document download, staff and Lab refused, flags off unchanged.
+  evidence.checks.patient_record_release_runtime = JSON.parse(command(
+    'exact-role patient record release and document download through the patient-self path', process.execPath,
+    [join(repository, 'services/ehr-api/scripts/verify-patient-record-release-runtime.mjs')], workflowEnvironment));
   evidence.checks.outreach_cookie_read_runtime = JSON.parse(command(
     'exact-role Outreach reads and writes authorized through Identity with a browser cookie session', process.execPath,
     [join(repository, 'services/outreach-api/scripts/verify-outreach-cookie-read-runtime.mjs')], workflowEnvironment));
@@ -522,6 +547,14 @@ try {
     evidence.checks[name] = JSON.parse(command(`exact-role ${name.replace('_runtime', '')} HTTP write commands`,
       process.execPath, [join(repository, script)], workflowEnvironment));
   }
+  // ADR-064 (0095): the notification worker's subscriber email sync, as
+  // hid_notification_worker against a fake Novu: flag off is main's trigger
+  // alone; a failed subscriber call never holds back the in-app trigger; an
+  // opt-out or a deleted login clears an email synced earlier first.
+  evidence.checks.notification_worker_runtime = JSON.parse(command(
+    'exact-role notification worker: claim-bound recipient lookup, Novu subscriber email sync and the in-app trigger',
+    process.execPath, [join(repository, 'services/notification-worker/scripts/verify-notification-worker-runtime.mjs')],
+    workflowEnvironment));
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
   const before = await snapshot(database);
