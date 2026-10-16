@@ -387,9 +387,58 @@ test('migration is a separate one-shot task with a safe plan default', () => {
   const migration = properties(regional, 'AWS::ECS::TaskDefinition')
     .find((definition) => JSON.stringify(definition.Family).includes('database-migration'))!;
   const containers = migration.ContainerDefinitions as Array<Record<string, unknown>>;
-  assert.deepEqual(containers[0]!.Command, ['--plan']);
+  // The migration image's entrypoint is the distroless /nodejs/bin/node, and
+  // ECS `command` replaces its CMD: a bare ['--plan'] runs `node --plan`,
+  // which Node refuses ("bad option"). The command names the script.
+  assert.deepEqual(containers[0]!.Command, ['scripts/apply-migrations.mjs', '--plan']);
   assert.equal(properties(regional, 'AWS::ECS::Service')
     .some((service) => JSON.stringify(service).includes('database-migration')), false);
+});
+
+// The role bootstrap (db:bootstrap, db:verify-roles) and the first Super
+// Admin bootstrap (admin:bootstrap) read DATABASE_ADMIN_URL, and RDS is
+// reachable only from the service tasks and this task. Both variables are
+// the one deployment-only migration administrator; no other secret.
+test('the migration task maps the migration administrator as DATABASE_URL and DATABASE_ADMIN_URL only', () => {
+  for (const [label, template] of [['production', regional], ['staging economy', stagingRegional],
+    ['development', developmentRegional]] as const) {
+    const migration = properties(template, 'AWS::ECS::TaskDefinition')
+      .find((definition) => JSON.stringify(definition.Family).includes('database-migration'))!;
+    const container = (migration.ContainerDefinitions as Array<Record<string, unknown>>)[0]!;
+    const secrets = (container.Secrets as Array<{ readonly Name: string; readonly ValueFrom: unknown }>)
+      .map((secret) => [secret.Name, secret.ValueFrom]);
+    const administrator = { 'Fn::Join': ['', [{ Ref: 'MigrationDatabaseSecretArn' }, ':url::']] };
+    assert.deepEqual(secrets.sort(), [['DATABASE_ADMIN_URL', administrator], ['DATABASE_URL', administrator]], label);
+    assert.deepEqual((container.Environment as Array<{ readonly Name: string }>).map((entry) => entry.Name).sort(),
+      ['DATABASE_SSL', 'DATABASE_SSL_ROOT_CERT_BASE64', 'NODE_ENV'], label);
+  }
+});
+
+// On Fargate the task's own network interface pulls the image from ECR,
+// fetches its secret and writes its logs. Wherever the task can run (every
+// profile but sleep), it needs the endpoints and S3 on 443, as staging has.
+test('the production and development migration task can pull its image, read its secret and log', () => {
+  for (const [label, template] of [['production', regional], ['development', developmentRegional]] as const) {
+    const [groupId] = resources(template, 'AWS::EC2::SecurityGroup')
+      .find(([id]) => id.startsWith('MigrationSecurityGroup'))!;
+    const outbound = properties(template, 'AWS::EC2::SecurityGroupEgress')
+      .filter((rule) => JSON.stringify(rule.GroupId).includes(groupId));
+    assert.equal(outbound.length, 3, `${label}: migration may reach only RDS, AWS endpoints, and S3`);
+    assert.ok(outbound.some((rule) => rule.FromPort === 5432 && rule.ToPort === 5432
+      && JSON.stringify(rule.DestinationSecurityGroupId ?? '').includes('DatabaseSecurityGroup')), label);
+    assert.ok(outbound.some((rule) => rule.FromPort === 443 && rule.ToPort === 443
+      && JSON.stringify(rule.DestinationSecurityGroupId ?? '').includes('AwsEndpointSecurityGroup')), label);
+    assert.ok(outbound.some((rule) => rule.FromPort === 443 && rule.ToPort === 443
+      && JSON.stringify(rule.DestinationPrefixListId ?? '').includes('S3PrefixListId')), label);
+    for (const rule of outbound) {
+      assert.equal(rule.CidrIp, undefined, `${label}: migration must not gain public egress`);
+      assert.equal(rule.CidrIpv6, undefined, `${label}: migration must not gain public IPv6 egress`);
+    }
+    const inbound = properties(template, 'AWS::EC2::SecurityGroupIngress')
+      .filter((rule) => JSON.stringify(rule.SourceSecurityGroupId ?? '').includes(groupId));
+    assert.ok(inbound.some((rule) => rule.FromPort === 443
+      && JSON.stringify(rule.GroupId).includes('AwsEndpointSecurityGroup')), `${label}: the endpoints admit the migration task`);
+  }
 });
 
 test('ordinary notifications have one selected EventBridge route and encrypted SQS/DLQ pair', () => {

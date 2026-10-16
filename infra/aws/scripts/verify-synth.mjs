@@ -134,6 +134,34 @@ assert.equal(resources('AWS::EC2::VPCEndpoint')
   .filter(resource => resource.Properties.VpcEndpointType === 'Interface').length, contract.endpoints)
 
 const asleep = profile === 'sleep'
+// The one-shot migration task: its image's entrypoint is /nodejs/bin/node, so
+// the command names the script (a bare `--plan` is `node --plan`, refused).
+// DATABASE_URL and DATABASE_ADMIN_URL are both the migration administrator,
+// for apply-migrations, the role bootstrap and admin:bootstrap. Wherever it
+// can run it reaches RDS, the AWS endpoints and S3 (image layers), nothing else.
+const migrationContainers = resources('AWS::ECS::TaskDefinition')
+  .filter(task => String(task.Properties.Family).endsWith('-database-migration'))
+  .flatMap(task => task.Properties.ContainerDefinitions)
+assert.equal(migrationContainers.length, 1)
+assert.deepEqual(migrationContainers[0].Command, ['scripts/apply-migrations.mjs', '--plan'])
+const migrationAdministrator = { 'Fn::Join': ['', [{ Ref: 'MigrationDatabaseSecretArn' }, ':url::']] }
+assert.deepEqual(migrationContainers[0].Secrets.map(secret => [secret.Name, secret.ValueFrom])
+  .sort((left, right) => left[0].localeCompare(right[0])),
+[['DATABASE_ADMIN_URL', migrationAdministrator], ['DATABASE_URL', migrationAdministrator]])
+const [migrationGroupId] = Object.entries(regional.Resources)
+  .find(([id, resource]) => resource.Type === 'AWS::EC2::SecurityGroup' && id.startsWith('MigrationSecurityGroup'))
+const migrationEgress = resources('AWS::EC2::SecurityGroupEgress')
+  .filter(rule => JSON.stringify(rule.Properties.GroupId).includes(migrationGroupId)).map(rule => rule.Properties)
+assert.equal(migrationEgress.length, asleep ? 1 : 3, 'the migration task reaches RDS, and while live the endpoints and S3')
+assert.ok(migrationEgress.some(rule => rule.FromPort === 5432
+  && JSON.stringify(rule.DestinationSecurityGroupId).includes('DatabaseSecurityGroup')))
+if (!asleep) {
+  assert.ok(migrationEgress.some(rule => rule.FromPort === 443
+    && JSON.stringify(rule.DestinationSecurityGroupId ?? '').includes('AwsEndpointSecurityGroup')))
+  assert.ok(migrationEgress.some(rule => rule.FromPort === 443
+    && JSON.stringify(rule.DestinationPrefixListId ?? '').includes('S3PrefixListId')))
+}
+for (const rule of migrationEgress) assert.ok(rule.CidrIp === undefined && rule.CidrIpv6 === undefined)
 assert.equal(resources('AWS::ElasticLoadBalancingV2::LoadBalancer').length, asleep ? 0 : 2)
 // The public API web ACL, and the workload issuer's NAT allowlist web ACL
 // wherever an in-stack issuer runs behind NAT gateways (staging live modes and
