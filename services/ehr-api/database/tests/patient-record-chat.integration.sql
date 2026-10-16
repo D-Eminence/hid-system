@@ -22,6 +22,14 @@
 -- the suite fails at the end listing every case whose outcome differs. The
 -- rehearsal also runs this suite with a schema owner that is neither a
 -- superuser nor BYPASSRLS (release checklist P8).
+--
+-- The hourly and daily cases need one UTC hour (ehr.reserve_record_chat
+-- buckets by statement_timestamp()): within a minute of the next hour the
+-- suite first waits for it, and at the end it fails, asking for a rerun, if
+-- the run still crossed an hour boundary.
+select pg_sleep(extract(epoch from date_trunc('hour', clock_timestamp(), 'UTC') + interval '1 hour' - clock_timestamp()) + 1)
+ where date_trunc('hour', clock_timestamp(), 'UTC') + interval '1 hour' - clock_timestamp() < interval '60 seconds';
+select set_config('hid.record_chat_suite_hour', date_trunc('hour', clock_timestamp(), 'UTC')::text, false);
 begin;
 set constraints all deferred;
 
@@ -134,6 +142,31 @@ exception when others then
   return sqlstate || ':' || sqlerrm;
 end
 $$;
+-- A statement's SQLSTATE and message, or 'ok'; its effects are always rolled back.
+create function pg_temp.attempt(statement text) returns text
+language plpgsql as $$
+begin
+  begin
+    execute statement;
+    raise exception using errcode = 'P0001', message = 'record chat attempt succeeded';
+  exception when others then
+    if sqlerrm = 'record chat attempt succeeded' then return 'ok'; end if;
+    return sqlstate || ':' || sqlerrm;
+  end;
+end
+$$;
+-- What ehr.record_chat_history_on_hold answers for patient n, or the SQLSTATE it raises.
+create function pg_temp.held(patient_no integer) returns text
+language plpgsql as $$
+declare
+  answer boolean;
+begin
+  execute 'select ehr.record_chat_history_on_hold($1)' into answer using pg_temp.patient(patient_no);
+  return answer::text;
+exception when others then
+  return sqlstate;
+end
+$$;
 create function pg_temp.visible() returns text
 language sql as $$
   select (select count(*) from ehr.patient_chat_conversations)::text || ','
@@ -238,7 +271,77 @@ reset role;
 select pg_temp.record('nothing of patient 1''s history remains', '0', (select count(*)::text
   from ehr.patient_chat_messages where patient_id = pg_temp.patient(1)));
 
--- 4. The limits are reached through the commands only.
+-- 3a. A legal hold keeps the history: while an active hold names the patient
+--     or the patient's account, the delete policies keep every row, and
+--     ehr.record_chat_history_on_hold says so to the patient's own
+--     transaction only (true, fail closed, for any other caller).
+set local role hid_ehr_api_runtime;
+select pg_temp.bind_self(2);
+insert into ehr.patient_chat_conversations(id,patient_id) values (pg_temp.conversation(2), pg_temp.patient(2));
+select pg_temp.insert_message(10, 2, 2, 'record-chat-key-000010');
+select pg_temp.record('no hold on patient 2', 'false',
+  pg_temp.held(2));
+reset role;
+insert into platform.legal_holds(id,subject_type,subject_id,reason)
+values ('5c4a7b10-0000-4000-8000-000000000001','patient','5c4a7200-0000-4000-8000-000000000002',
+  'Synthetic record chat hold on the patient');
+insert into platform.legal_holds(id,subject_type,subject_id,reason,released_at,release_reason)
+values ('5c4a7b10-0000-4000-8000-000000000003','patient','5c4a7200-0000-4000-8000-000000000001',
+  'Synthetic released record chat hold',clock_timestamp(),'Synthetic hold released');
+set local role hid_ehr_api_runtime;
+select pg_temp.bind_self(2);
+select pg_temp.record('a hold on patient 2', 'true',
+  pg_temp.held(2));
+delete from chat_deleted;
+with deleted as (delete from ehr.patient_chat_messages returning 1) insert into chat_deleted select count(*) from deleted;
+with deleted as (delete from ehr.patient_chat_conversations returning 1) insert into chat_deleted select count(*) from deleted;
+select pg_temp.record('patient 2 deletes their history under a patient hold', '0,0',
+  (select string_agg(n::text, ',') from chat_deleted));
+select pg_temp.record('the held history remains', '1,1', pg_temp.visible());
+select pg_temp.bind_self(1);
+select pg_temp.record('a released hold does not hold', 'false',
+  pg_temp.held(1));
+select pg_temp.record('patient 1 asks about patient 2''s hold', 'true',
+  pg_temp.held(2));
+select pg_temp.bind_staff();
+select pg_temp.record('a staff context asks about a hold', 'true',
+  pg_temp.held(1));
+reset role;
+set local session_replication_role = replica;
+delete from platform.legal_holds where id = '5c4a7b10-0000-4000-8000-000000000001';
+set local session_replication_role = origin;
+insert into platform.legal_holds(id,subject_type,subject_id,reason)
+values ('5c4a7b10-0000-4000-8000-000000000002','account','5c4a7100-0000-4000-8000-000000000002',
+  'Synthetic record chat hold on the account');
+set local role hid_ehr_api_runtime;
+select pg_temp.bind_self(2);
+select pg_temp.record('a hold on patient 2''s account', 'true',
+  pg_temp.held(2));
+delete from chat_deleted;
+with deleted as (delete from ehr.patient_chat_conversations returning 1) insert into chat_deleted select count(*) from deleted;
+select pg_temp.record('patient 2 deletes their history under an account hold', '0|1,1',
+  (select string_agg(n::text, ',') from chat_deleted) || '|' || pg_temp.visible());
+reset role;
+set local session_replication_role = replica;
+delete from platform.legal_holds where id = '5c4a7b10-0000-4000-8000-000000000002';
+set local session_replication_role = origin;
+set local role hid_ehr_api_runtime;
+select pg_temp.bind_self(2);
+select pg_temp.record('the hold released, patient 2 deletes their history', 'ok|0,0', pg_temp.outcome(
+  $sql$delete from ehr.patient_chat_conversations where patient_id = '5c4a7200-0000-4000-8000-000000000002'$sql$)
+  || '|' || pg_temp.visible());
+reset role;
+
+-- 4. The limits are reached through the commands only. A reservation reads
+--    the kill switch again, in the transaction that commits the disclosure
+--    audit row (55000 RECORD_CHAT_PAUSED while it is off); it is turned on
+--    for this section and off again after it.
+set local role hid_ehr_api_runtime;
+select pg_temp.bind_self(1);
+select pg_temp.record('a reservation while record chat is paused', '55000:RECORD_CHAT_PAUSED', pg_temp.attempt(
+  $sql$select ehr.reserve_record_chat('patient', '5c4a7200-0000-4000-8000-000000000001', 1000, 1000000)$sql$));
+reset role;
+update platform.control_settings set enabled = true where control_key = 'record_chat_enabled';
 set local role hid_ehr_api_runtime;
 select pg_temp.bind_self(1);
 select pg_temp.record('the runtime reads the usage counters', '42501', pg_temp.outcome(
@@ -276,6 +379,11 @@ select pg_temp.record('patient 2 settles patient 1''s lease', '42501:RECORD_CHAT
 select pg_temp.bind_self(1);
 select pg_temp.record('an unknown outcome', '22023:RECORD_CHAT_SETTLEMENT_INVALID', pg_temp.refusal(
   $sql$select ehr.settle_record_chat((select id from chat_leases where name = 'first'), 10, 10, 0, 0, 'expired')$sql$));
+-- No path settles a lease as authorization_changed: a lease whose
+-- authorization ended during the call expires and is charged its estimate.
+select pg_temp.record('the outcome no path writes', '22023:RECORD_CHAT_SETTLEMENT_INVALID', pg_temp.attempt(
+  $sql$select ehr.settle_record_chat((select id from chat_leases where name = 'first'), 10, 10, 0, 0,
+       'authorization_changed')$sql$));
 select pg_temp.record('patient 1 settles their lease', 'true',
   (select ehr.settle_record_chat(id, 1200, 300, 0, 0, 'answered')::text from chat_leases where name = 'first'));
 select pg_temp.record('settling again changes nothing', 'false',
@@ -368,6 +476,44 @@ select pg_temp.record('the stale lease is settled as expired and its tokens used
   || '|' || (select (budget.reserved_tokens - before.reserved) || ',' || (budget.used_tokens - before.used)
     from ehr.record_chat_daily_budget budget, chat_budget_before before
     where budget.day = (statement_timestamp() at time zone 'UTC')::date));
+-- Settling the lease again, as a late settlement for it would, changes nothing.
+delete from chat_budget_before;
+insert into chat_budget_before select reserved_tokens, used_tokens from ehr.record_chat_daily_budget
+ where day = (statement_timestamp() at time zone 'UTC')::date;
+set local role hid_ehr_api_runtime;
+select pg_temp.bind_self(2);
+select pg_temp.record('a late settlement of the expired lease', 'false',
+  ehr.settle_record_chat('5c4a7a00-0000-4000-8000-000000000001', 100, 0, 0, 0, 'failed')::text);
+reset role;
+select pg_temp.record('the late settlement left the budget alone', '0,0',
+  (select (budget.reserved_tokens - before.reserved) || ',' || (budget.used_tokens - before.used)
+     from ehr.record_chat_daily_budget budget,
+          chat_budget_before before
+    where budget.day = (statement_timestamp() at time zone 'UTC')::date));
+-- An unsettled lease of an account that never came back is pruned after two
+-- days with the settled ones (its day's budget is long past).
+set local session_replication_role = replica;
+insert into ehr.record_chat_reservations(id,audience,account_id,patient_id,reserved_tokens,created_at,expires_at)
+values ('5c4a7a00-0000-4000-8000-000000000003','patient','5c4a7100-0000-4000-8000-000000000003',
+  '5c4a7200-0000-4000-8000-000000000003',500,statement_timestamp()-interval '3 days',
+  statement_timestamp()-interval '3 days'+interval '60 seconds');
+set local session_replication_role = origin;
+set local role hid_ehr_api_runtime;
+select pg_temp.bind_self(2);
+select ehr.settle_record_chat(id, 0, 0, 0, 0, 'failed') from chat_leases where name = 'after stale';
+select pg_temp.record('another reservation prunes the abandoned lease', 'ok', pg_temp.outcome(
+  $sql$insert into chat_leases select 'prune', ehr.reserve_record_chat('patient',
+       '5c4a7200-0000-4000-8000-000000000002', 1000, 1000000)$sql$));
+reset role;
+select pg_temp.record('the abandoned lease is gone', '0', (select count(*)::text from ehr.record_chat_reservations
+  where id = '5c4a7a00-0000-4000-8000-000000000003'));
+select pg_temp.record('the reservations admit no authorization_changed outcome', '23514', pg_temp.outcome(
+  $sql$insert into ehr.record_chat_reservations(audience,account_id,patient_id,reserved_tokens,created_at,expires_at,
+         settled_at,outcome)
+       values ('patient','5c4a7100-0000-4000-8000-000000000003','5c4a7200-0000-4000-8000-000000000003',1,
+         statement_timestamp(),statement_timestamp()+interval '60 seconds',statement_timestamp(),
+         'authorization_changed')$sql$));
+update platform.control_settings set enabled = false where control_key = 'record_chat_enabled';
 select pg_temp.record('a lease lasts at most 60 seconds', '23514', pg_temp.outcome(
   $sql$insert into ehr.record_chat_reservations(audience,account_id,patient_id,reserved_tokens,created_at,expires_at)
        values ('patient','5c4a7100-0000-4000-8000-000000000003','5c4a7200-0000-4000-8000-000000000003',1,
@@ -380,16 +526,22 @@ select pg_temp.record('the reservations hold ids, counts and token numbers only'
 
 -- 5. The catalogue: the commands, the policies, forced row-level security.
 select pg_temp.record('the commands are owned by the schema owner, security definer, with a pinned search path',
-  'ehr.reserve_record_chat(text,uuid,integer,bigint):true:{"search_path=pg_catalog, pg_temp"}:true;'
+  'ehr.record_chat_history_on_hold(uuid):true:{"search_path=pg_catalog, pg_temp"}:true;'
+  || 'ehr.reserve_record_chat(text,uuid,integer,bigint):true:{"search_path=pg_catalog, pg_temp"}:true;'
   || 'ehr.settle_record_chat(uuid,integer,integer,integer,integer,text):true:{"search_path=pg_catalog, pg_temp"}:true',
   (select string_agg(proc.oid::regprocedure::text || ':' || proc.prosecdef || ':' || proc.proconfig::text || ':'
       || (proc.proowner = (select relowner from pg_class where oid = 'ehr.patient_chat_messages'::regclass)),
       ';' order by proc.oid::regprocedure::text)
      from pg_proc proc where proc.oid in ('ehr.reserve_record_chat(text,uuid,integer,bigint)'::regprocedure,
-       'ehr.settle_record_chat(uuid,integer,integer,integer,integer,text)'::regprocedure)));
-select pg_temp.record('PUBLIC executes neither command', 'false,false',
+       'ehr.settle_record_chat(uuid,integer,integer,integer,integer,text)'::regprocedure,
+       to_regprocedure('ehr.record_chat_history_on_hold(uuid)'))));
+select pg_temp.record('PUBLIC executes no command', 'false,false,false',
   has_function_privilege('public', 'ehr.reserve_record_chat(text,uuid,integer,bigint)', 'EXECUTE') || ','
-  || has_function_privilege('public', 'ehr.settle_record_chat(uuid,integer,integer,integer,integer,text)', 'EXECUTE'));
+  || has_function_privilege('public', 'ehr.settle_record_chat(uuid,integer,integer,integer,integer,text)', 'EXECUTE')
+  || ',' || coalesce(has_function_privilege('public', to_regprocedure('ehr.record_chat_history_on_hold(uuid)'),
+    'EXECUTE')::text, 'missing'));
+select pg_temp.record('the hold check is stable', 's', (select provolatile::text from pg_proc
+  where oid = to_regprocedure('ehr.record_chat_history_on_hold(uuid)')));
 select pg_temp.record('the chat tables force row-level security',
   'patient_chat_conversations,patient_chat_messages,record_chat_daily_budget,record_chat_reservations,'
   || 'record_chat_usage_counters',
@@ -397,11 +549,13 @@ select pg_temp.record('the chat tables force row-level security',
     where relnamespace = 'ehr'::regnamespace and relrowsecurity and relforcerowsecurity
       and relname in ('patient_chat_conversations','patient_chat_messages','record_chat_usage_counters',
         'record_chat_reservations','record_chat_daily_budget')));
-select pg_temp.record('the history policies: patient-self select, insert and delete, no update',
-  'patient_chat_conversations_self_delete:d:ehr.patient_self_context(patient_id):;'
+select pg_temp.record('the history policies: patient-self select, insert and delete without a hold, no update',
+  'patient_chat_conversations_self_delete:d:(ehr.patient_self_context(patient_id) AND (NOT '
+  || 'ehr.record_chat_history_on_hold(patient_id))):;'
   || 'patient_chat_conversations_self_insert:a::ehr.patient_self_context(patient_id);'
   || 'patient_chat_conversations_self_read:r:ehr.patient_self_context(patient_id):;'
-  || 'patient_chat_messages_self_delete:d:ehr.patient_self_context(patient_id):;'
+  || 'patient_chat_messages_self_delete:d:(ehr.patient_self_context(patient_id) AND (NOT '
+  || 'ehr.record_chat_history_on_hold(patient_id))):;'
   || 'patient_chat_messages_self_insert:a::ehr.patient_self_context(patient_id);'
   || 'patient_chat_messages_self_read:r:ehr.patient_self_context(patient_id):',
   (select string_agg(policy.polname || ':' || policy.polcmd::text || ':'
@@ -450,6 +604,10 @@ begin
     into failures from chat_case_results where expected is distinct from actual;
   if failures is not null then
     raise exception E'patient record chat cases differ from the record chat rules:\n%', failures;
+  end if;
+  if date_trunc('hour', clock_timestamp(), 'UTC')::text <> current_setting('hid.record_chat_suite_hour') then
+    raise exception 'the patient record chat suite crossed a UTC hour boundary (its hourly and daily cases bucket by '
+      'the hour); run it again';
   end if;
   if (select count(*) from chat_case_results) < 55 then
     raise exception 'patient record chat suite recorded only % cases', (select count(*) from chat_case_results);

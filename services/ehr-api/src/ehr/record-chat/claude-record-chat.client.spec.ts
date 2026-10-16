@@ -155,6 +155,27 @@ describe('ClaudeRecordChatClient', () => {
     }
   });
 
+  it('keeps only known values of the served geography and the refusal category, for the audit row', async () => {
+    const odd = await new ClaudeRecordChatClient(config, fakeSdk({ message: message({ usage: { input_tokens: 1,
+      output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, inference_geo: 'x'.repeat(500) },
+    } as unknown as Partial<Anthropic.Message>) }).factory).ask(request, later());
+    expect(odd).toMatchObject({ usage: { servedGeo: 'other' } });
+    const global = await new ClaudeRecordChatClient(config, fakeSdk({ message: message({ usage: { input_tokens: 1,
+      output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0, inference_geo: 'global' },
+    } as unknown as Partial<Anthropic.Message>) }).factory).ask(request, later());
+    expect(global).toMatchObject({ usage: { servedGeo: 'global' } });
+    const refused = await new ClaudeRecordChatClient(config, fakeSdk({ message: message({ stop_reason: 'refusal',
+      stop_details: { type: 'refusal', category: 'y'.repeat(500), explanation: null } as unknown as
+        Anthropic.Message['stop_details'], content: [] }) }).factory).ask(request, later());
+    expect(refused).toMatchObject({ kind: 'refusal', refusalCategory: 'other' });
+    for (const category of ['cyber', 'bio', 'frontier_llm', 'reasoning_extraction', 'general_harms']) {
+      const known = await new ClaudeRecordChatClient(config, fakeSdk({ message: message({ stop_reason: 'refusal',
+        stop_details: { type: 'refusal', category, explanation: null } as unknown as Anthropic.Message['stop_details'],
+        content: [] }) }).factory).ask(request, later());
+      expect(known).toMatchObject({ refusalCategory: category });
+    }
+  });
+
   it('aborts the stream when the visible output passes its bound', async () => {
     const sdk = fakeSdk({ deltas: ['a'.repeat(OUTPUT_CHARACTER_LIMIT), 'b'] });
     await expect(new ClaudeRecordChatClient(config, sdk.factory).ask(request, later()))

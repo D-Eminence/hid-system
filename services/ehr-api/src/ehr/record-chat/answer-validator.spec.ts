@@ -50,10 +50,23 @@ describe('record chat answer validation', () => {
     ['a phone number', answer([record('Call +234 803 123 4567 now.')]), 'content_invalid'],
     ['an email address', answer([record('Write to synthetic@example.invalid.')]), 'content_invalid'],
     ['a record id', answer([record('Record 5c4a7900-0000-4000-8000-000000000001 says so.')]), 'content_invalid'],
+    // Text the database cannot store (a NUL; a lone surrogate in jsonb) or a terminal could act on.
+    ['a NUL character', answer([record('Your pulse was 64.\u0000')]), 'content_invalid'],
+    ['a NUL escape in the JSON text', '{"status":"answered","blocks":[{"kind":"record","text":"Pulse 64\\u0000","references":[1]}]}',
+      'content_invalid'],
+    ['a control character', answer([record('Your pulse was 64.\u001b[2J')]), 'content_invalid'],
+    ['a C1 control character', answer([record('Your pulse was 64.\u0085')]), 'content_invalid'],
+    ['a lone surrogate', '{"status":"answered","blocks":[{"kind":"record","text":"Pulse \\ud800 64","references":[1]}]}',
+      'content_invalid'],
     ['an answer over 4000 characters', answer([record('a'.repeat(1990)), record('b'.repeat(1990)), record('c'.repeat(100))]),
       'answer_too_long'],
   ])('refuses %s', (_label, raw, reason) => {
     expect(validateAnswer(raw, 3)).toEqual({ ok: false, reason });
+  });
+
+  it('keeps line breaks and tabs, which are not control characters for this purpose', () => {
+    expect(validateAnswer(answer([record('Your pulse was 64.\nYour temperature was 36.6.\tBoth normal.')]), 1))
+      .toMatchObject({ ok: true });
   });
 
   it('keeps dates, doses and measurements, which are not identifiers', () => {

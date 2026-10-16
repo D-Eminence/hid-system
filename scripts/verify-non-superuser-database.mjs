@@ -17,6 +17,13 @@
 //   platform.control_settings and then takes the lock of an
 //   identity.outbox_events insert, as an Identity break-glass activation does,
 //   then db:verify-roles;
+// - the latest migration as RDS staging and production apply it, on a second
+//   database migrated to the migration before it whose functions and
+//   relations already belong to the technical owners the role bootstrap gave
+//   them in the first: a migration that replaces such a function (as one
+//   replaces platform.control_enabled, owned by hid_platform_control_reader)
+//   takes the path it takes there. The owner and ACL stay, no temporary
+//   membership is left, and the role bootstrap and db:verify-roles pass;
 // - db:verify-roles' refusal of an ADMIN OPTION membership of a runtime group
 //   role in a technical owner;
 // - db:verify-logins for one login per runtime credential, and its refusal of
@@ -86,24 +93,39 @@ function url(user) {
   return `postgresql://${user}@localhost/${database}?host=${encodeURIComponent(temporary)}`;
 }
 
-function psql(label, user, sql, expected = 0) {
+function psql(label, user, sql, expected = 0, on = database) {
   return run(label, join(pgBindir, 'psql'),
-    ['-X', '-At', '-v', 'ON_ERROR_STOP=1', '-h', temporary, '-U', user, '-d', database, '-c', sql], {}, expected);
+    ['-X', '-At', '-v', 'ON_ERROR_STOP=1', '-h', temporary, '-U', user, '-d', on, '-c', sql], {}, expected);
 }
 
-function suite(name, user) {
-  run(`${name} as ${user}`, join(pgBindir, 'psql'), ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-h', temporary,
-    '-U', user, '-d', database, '-f', join(service, 'database/tests', name)]);
+function suite(name, user, on = database) {
+  run(`${name} as ${user} on ${on}`, join(pgBindir, 'psql'), ['-X', '-q', '-v', 'ON_ERROR_STOP=1', '-h', temporary,
+    '-U', user, '-d', on, '-f', join(service, 'database/tests', name)]);
 }
 
-function migrate(label, expected = 0) {
-  return run(label, process.execPath, [join(service, 'scripts/apply-migrations.mjs')],
-    { DATABASE_URL: url(admin) }, expected);
+function migrate(label, expected = 0, flags = [], on = database) {
+  return run(label, process.execPath, [join(service, 'scripts/apply-migrations.mjs'), ...flags],
+    { DATABASE_URL: url(admin).replace(`/${database}?`, `/${on}?`) }, expected);
 }
 
-function bootstrap(label, flags = []) {
+function bootstrap(label, flags = [], on = database) {
   return run(label, process.execPath, [join(service, 'scripts/bootstrap-database-roles.mjs'), ...flags],
-    { DATABASE_ADMIN_URL: url(admin) }).stdout.trim();
+    { DATABASE_ADMIN_URL: url(admin).replace(`/${database}?`, `/${on}?`) }).stdout.trim();
+}
+
+// platform.control_enabled's owner and ACL in one database, and the
+// administrator's memberships that carry INHERIT or SET into a hid_ role
+// (cluster-wide; none may be left by a migration or a bootstrap).
+function controlOwnerState(on) {
+  return {
+    control_enabled: psql('control_enabled owner and ACL', superuser,
+      `select proowner::regrole || '|' || coalesce(proacl::text, 'default') from pg_proc
+        where oid = 'platform.control_enabled(text)'::regprocedure`, 0, on).stdout.trim(),
+    inherit_or_set_memberships: Number(psql('administrator memberships', superuser,
+      `select count(*) from pg_auth_members m join pg_roles r on r.oid = m.roleid
+        where r.rolname like 'hid\\_%' and m.member = '${admin}'::regrole
+          and (m.inherit_option or m.set_option)`, 0, on).stdout.trim()),
+  };
 }
 
 function verifyLogins(label, urls, expected = 0, flags = []) {
@@ -252,6 +274,66 @@ try {
   assert.deepEqual(evidence.steps.bootstrap, ['Runtime database roles provisioned and verified',
     'Runtime database roles provisioned and verified', 'Runtime database role verification passed']);
 
+  // The latest migration as RDS applies it. Every database there was
+  // bootstrapped after its previous migration, so the technical owners
+  // already own their functions and relations when a new migration runs; a
+  // chain migrated before its first bootstrap (above) never takes that path.
+  // A second database is migrated to the migration before the latest, its
+  // functions and relations go to the owners the bootstrap gave them in the
+  // first database (as the bootstrap moves them: a SET-only membership and
+  // the schema's CREATE, both revoked), and the latest migration runs on it.
+  const rds = `${database}_rds`;
+  psql('create the database for the RDS path', superuser, `create database ${rds} owner ${admin}`, 0, 'postgres');
+  psql('grant SET ON PARAMETER for the RDS-path run to the previous migration', superuser,
+    `grant set on parameter plpgsql.variable_conflict to ${admin}`);
+  migrate('migrate the RDS-path database to the migration before the latest', 0, [`--through=${files.at(-2)}`], rds);
+  psql('revoke SET ON PARAMETER after that run', superuser,
+    `revoke set on parameter plpgsql.variable_conflict from ${admin}`);
+  const technicalObjects = psql('objects of the technical owners after the bootstrap', superuser,
+    `select kind || '|' || object || '|' || owner || '|' || namespace from (
+       select 'function' as kind, p.oid::regprocedure::text as object, r.rolname as owner, n.nspname as namespace
+         from pg_proc p join pg_roles r on r.oid = p.proowner join pg_namespace n on n.oid = p.pronamespace
+        where r.rolname like 'hid\\_%' and p.prokind = 'f'
+       union all
+       select case c.relkind when 'v' then 'view' when 'm' then 'materialized view' when 'S' then 'sequence'
+                else 'table' end, c.oid::regclass::text, r.rolname, n.nspname
+         from pg_class c join pg_roles r on r.oid = c.relowner join pg_namespace n on n.oid = c.relnamespace
+        where r.rolname like 'hid\\_%' and c.relkind in ('r', 'p', 'v', 'm', 'S')) owned order by 1`)
+    .stdout.trim().split('\n').filter(Boolean).map((line) => line.split('|'));
+  assert(technicalObjects.some(([kind, object, owner]) => kind === 'function'
+    && object === 'platform.control_enabled(text)' && owner === 'hid_platform_control_reader'),
+  'the role bootstrap gave platform.control_enabled to hid_platform_control_reader');
+  const transferred = [];
+  for (const [kind, object, owner, namespace] of technicalObjects) {
+    const exists = kind === 'function' ? `to_regprocedure('${object}')` : `to_regclass('${object}')`;
+    if (psql(`${object} before the latest migration`, superuser, `select ${exists} is not null`, 0, rds).stdout.trim()
+      !== 't') continue;
+    psql(`give ${object} to ${owner}`, admin, [`begin;`, `grant ${owner} to ${admin} with inherit false, set true;`,
+      `grant create on schema ${namespace} to ${owner};`, `alter ${kind} ${object} owner to ${owner};`,
+      `revoke create on schema ${namespace} from ${owner};`, `revoke ${owner} from ${admin};`, 'commit;'].join(' '),
+    0, rds);
+    transferred.push(object);
+  }
+  const ownersBefore = controlOwnerState(rds);
+  assert.match(ownersBefore.control_enabled, /^hid_platform_control_reader\|/);
+  assert.equal(ownersBefore.inherit_or_set_memberships, 0);
+  psql('grant SET ON PARAMETER for the latest migration', superuser,
+    `grant set on parameter plpgsql.variable_conflict to ${admin}`);
+  const latest = migrate('apply the latest migration as RDS applies it', 0, [], rds);
+  psql('revoke SET ON PARAMETER after the latest migration', superuser,
+    `revoke set on parameter plpgsql.variable_conflict from ${admin}`);
+  assert.match(latest.stdout, new RegExp(`Applied ${files.at(-1).replaceAll('.', '\\.')}`));
+  const ownersAfter = controlOwnerState(rds);
+  assert.deepEqual(ownersAfter, ownersBefore,
+    'the latest migration changed the owner or ACL of platform.control_enabled or left a membership');
+  const rdsBootstrap = [bootstrap('role bootstrap after the latest migration on the RDS path', [], rds),
+    bootstrap('db:verify-roles after the latest migration on the RDS path', ['--verify-only'], rds)];
+  assert.deepEqual(rdsBootstrap, ['Runtime database roles provisioned and verified',
+    'Runtime database role verification passed']);
+  evidence.steps.latest_migration_after_bootstrap = { database: rds, through: files.at(-2), migration: files.at(-1),
+    technical_objects_transferred: transferred.length, control_enabled: ownersAfter.control_enabled.split('|')[0],
+    acl_unchanged: true, inherit_or_set_memberships: ownersAfter.inherit_or_set_memberships, bootstrap: rdsBootstrap };
+
   // A runtime group role must hold no ADMIN OPTION in a technical owner, even
   // without INHERIT or SET: it could grant the owner to its own login and
   // SET ROLE to it. Only the administrator's own creator row is allowed.
@@ -335,11 +417,13 @@ try {
   const p11 = await checklistCheck('P11 check (read-only)');
   assert.deepEqual(p11, ['break_glass_enabled|f', 'outreach_portal_enabled|f', 'uploads_enabled|f'],
     `P11 check: ${p11.join('; ')}`);
-  // P36 (patient record chat): the kill switch is off and both limit
-  // commands are security definer with a pinned search path, as the operator
-  // checks before any record chat flag is set.
+  // P36 (patient record chat): the kill switch is off and the two limit
+  // commands and the legal hold check are security definer with a pinned
+  // search path, as the operator checks before any record chat flag is set.
   const p36 = await checklistCheck('P36 check (read-only)');
-  assert.deepEqual(p36, ['record_chat_enabled|f', 'reserve_record_chat|t|{"search_path=pg_catalog, pg_temp"}',
+  assert.deepEqual(p36, ['record_chat_enabled|f',
+    'record_chat_history_on_hold|t|{"search_path=pg_catalog, pg_temp"}',
+    'reserve_record_chat|t|{"search_path=pg_catalog, pg_temp"}',
     'settle_record_chat|t|{"search_path=pg_catalog, pg_temp"}'], `P36 check: ${p36.join('; ')}`);
   evidence.steps.release_checklist_checks = { run_as: admin, p10: p10.map((line) => line.split('|').slice(0, 4).join('|')),
     p11, p36 };
@@ -357,7 +441,9 @@ try {
   const suites = ['platform-control-owner.integration.sql', 'function-parameter-settings.integration.sql',
     'patient-record-chat.integration.sql'];
   for (const name of suites) suite(name, superuser);
+  suite('patient-record-chat.integration.sql', superuser, `${database}_rds`);
   evidence.steps.suites = suites;
+  evidence.steps.rds_path_suites = ['patient-record-chat.integration.sql'];
   evidence.status = 'passed';
 } catch (error) {
   evidence.failure = error instanceof Error ? error.message : String(error);

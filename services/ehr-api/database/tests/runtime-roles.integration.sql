@@ -1098,9 +1098,10 @@ $$;
 -- Patient record chat (owner decision 1 of 2026-10-16). The EHR runtime
 -- reads, writes and deletes the patient's own history (row-level security
 -- binds every row to the patient-self transaction) and never updates it; it
--- runs the two limit commands and reaches no limit table. No other role, the
--- schema-test role included, holds any privilege on the chat tables or
--- commands; PUBLIC executes neither command.
+-- runs the two limit commands and the legal hold check of its own history,
+-- and reaches no limit table. No other role, the schema-test role included,
+-- holds any privilege on the chat tables or commands; PUBLIC executes none of
+-- the commands.
 do $$
 declare
   other_roles text[] := array[
@@ -1115,7 +1116,7 @@ declare
   limits text[] := array['ehr.record_chat_usage_counters', 'ehr.record_chat_reservations',
     'ehr.record_chat_daily_budget'];
   commands text[] := array['ehr.reserve_record_chat(text,uuid,integer,bigint)',
-    'ehr.settle_record_chat(uuid,integer,integer,integer,integer,text)'];
+    'ehr.settle_record_chat(uuid,integer,integer,integer,integer,text)', 'ehr.record_chat_history_on_hold(uuid)'];
 begin
   if exists (select 1 from unnest(history) relation(name)
               where not has_table_privilege('hid_ehr_runtime', relation.name, 'SELECT')

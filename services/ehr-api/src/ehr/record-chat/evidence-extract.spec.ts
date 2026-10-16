@@ -107,6 +107,33 @@ describe('record chat evidence extract', () => {
     expect(payload).toContain('[redacted]');
   });
 
+  it('redacts identifier patterns in every free-length field, codes, units and routes included', () => {
+    const extract = buildPatientExtract(records({
+      diagnoses: [{ id: '5c4a7b00-0000-4000-8000-0000000000c1', encounterId: SYNTHETIC.encounterId,
+        facilityId: SYNTHETIC.facilityId, codeSystem: 'local', code: `E11 ${SYNTHETIC.hid}`, display: 'Diabetes',
+        clinicalStatus: 'active', verificationStatus: 'confirmed', onsetAt: null, abatementAt: null }],
+      prescriptions: [{ id: '5c4a7b00-0000-4000-8000-0000000000d1', encounterId: SYNTHETIC.encounterId,
+        facilityId: SYNTHETIC.facilityId, medicationCodeSystem: 'local', medicationCode: `call ${SYNTHETIC.phone}`,
+        medicationDisplay: 'Metformin', doseQuantity: '1', doseUnit: `tablet ${SYNTHETIC.email}`,
+        routeCode: `oral ${SYNTHETIC.nin}`, frequency: 'Daily', instructions: null, startsOn: null, endsOn: null,
+        status: 'active' }],
+      labResults: [{ id: '5c4a7b00-0000-4000-8000-0000000001a1', encounterId: SYNTHETIC.encounterId,
+        sourceEhrOrderId: 'order-1', facilityId: SYNTHETIC.facilityId,
+        test: { codeSystem: 'local', code: `GLU ${SYNTHETIC.patientId}`, name: 'Glucose' }, version: 1,
+        revisionKind: 'original', resultType: 'numeric', numericValue: 6.1, textValue: null,
+        unit: 'mmol/L see https://example.invalid/u', referenceRange: '3.9-5.5', abnormalFlag: 'high',
+        releasedAt: new Date('2026-09-01T08:00:00Z') }],
+    }), 'What are my codes?', LIMITS);
+    const sent = JSON.stringify(extract.records);
+    for (const value of [SYNTHETIC.hid, SYNTHETIC.phone, SYNTHETIC.email, SYNTHETIC.nin, SYNTHETIC.patientId,
+      'https://example.invalid/u']) expect(sent).not.toContain(value);
+    const byKind = (kind: string) => extract.records.find((record) => record.kind === kind)!;
+    expect(byKind('diagnosis').code).toBe('E11 [redacted]');
+    expect(byKind('prescription')).toMatchObject({ medicationCode: 'call [redacted]', doseUnit: 'tablet [redacted]',
+      route: 'oral [redacted]' });
+    expect(byKind('lab_result')).toMatchObject({ testCode: 'GLU [redacted]', unit: 'mmol/L see [redacted]' });
+  });
+
   it('redacts identifier patterns but keeps dates, doses and readings', () => {
     expect(redactIdentifiers('HID-ABCDEF on 2026-10-01: 118/76, 500 mg, call 08031234567 or a@b.example'))
       .toBe('[redacted] on 2026-10-01: 118/76, 500 mg, call [redacted] or [redacted]');

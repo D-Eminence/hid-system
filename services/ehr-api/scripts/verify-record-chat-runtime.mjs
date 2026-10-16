@@ -16,8 +16,11 @@
 // sends nothing; an answer that fails validation, a refusal and a processor
 // failure keep nothing from the model; one question per patient is in flight;
 // a record changed or a history cleared during the call discards the answer;
+// an earlier exchange whose cited record was amended or is no longer released
+// is never sent again, replayed or shown; a legal hold keeps the history;
 // another patient sees none of it, a staff session is refused, the hourly
-// quota answers 429 with Retry-After, and the patient deletes the history.
+// quota answers 429 with Retry-After, the patient deletes the history, and a
+// late settlement racing the next reservation counts a lease once.
 // Synthetic accounts and records only.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -25,6 +28,7 @@ import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createInterface } from 'node:readline';
+import { setTimeout as delay } from 'node:timers/promises';
 import { join, resolve } from 'node:path';
 import { childOutboxLine, enrollmentCodeOutbox, fetchTransport, readChildOutbox, staffClient,
   SYNTHETIC_STAFF_MFA_KEY_B64 } from '../../identity-api/scripts/staff-session-client.mjs';
@@ -49,14 +53,17 @@ const SENT_FIELDS = {
 
 /**
  * A copy of the owned synthetic rehearsal database, on the rehearsal's private
- * socket-only cluster (or a disposable local cluster under /tmp/pgtmp-),
- * dropped by close(). `url(role)` connects as the rehearsal admin and starts
- * every session as `role`, as a login of that role would.
+ * socket-only cluster, dropped by close(). A developer's own disposable
+ * cluster under /tmp/pgtmp- is admitted only with
+ * HID_VERIFIER_LOCAL_CLUSTER=1, which the rehearsal never sets. `url(role)`
+ * connects as the rehearsal admin and starts every session as `role`, as a
+ * login of that role would.
  */
 async function disposableDatabase(require) {
   const socket = process.env.PGHOST;
-  assert(process.env.NODE_ENV === 'test' && (socket?.startsWith('/tmp/hid-tuf-migration.')
-    || socket?.startsWith('/tmp/pgtmp-')) && process.env.PGDATABASE === 'hid_rehearsal' && process.env.PGUSER,
+  const localCluster = process.env.HID_VERIFIER_LOCAL_CLUSTER === '1' && socket?.startsWith('/tmp/pgtmp-');
+  assert(process.env.NODE_ENV === 'test' && (socket?.startsWith('/tmp/hid-tuf-migration.') || localCluster)
+    && process.env.PGDATABASE === 'hid_rehearsal' && process.env.PGUSER,
   'Only the owned synthetic rehearsal is supported');
   const { Client, Pool } = require('pg');
   const admin = process.env.PGUSER;
@@ -166,7 +173,7 @@ async function fakeMessagesApi() {
       usage: { output_tokens: 3 } }], ['message_stop', { type: 'message_stop' }]]);
       return;
     }
-    const text = behaviour.text ?? validAnswer(entry.body);
+    const text = behaviour.answer ? behaviour.answer(entry.body) : behaviour.text ?? validAnswer(entry.body);
     sse(response, [start,
       ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
       ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } }],
@@ -193,6 +200,19 @@ function validAnswer(body) {
     text: 'Your blood pressure was 118 over 76 at your last visit.', references: [vital.ref] },
   { kind: 'explanation', text: 'Blood pressure has two numbers, the pressure when the heart beats and between beats.',
     references: [] }] });
+}
+
+/** A valid answer citing the extract's note. */
+const NOTE_ANSWER = 'Your follow-up note says your blood pressure was stable.';
+function noteAnswer(body) {
+  const note = sentExtract(body).records.find((record) => record.kind === 'note');
+  return JSON.stringify({ status: 'answered', blocks: [{ kind: 'record', text: NOTE_ANSWER, references: [note.ref] }] });
+}
+
+/** Waits until the current UTC hour has at least `seconds` left, so an hourly bucket cannot reset mid-step. */
+async function awayFromHourBoundary(seconds = 20) {
+  const left = 3_600_000 - (Date.now() % 3_600_000);
+  if (left < seconds * 1000) await delay(left + 1000);
 }
 
 if (process.argv[2] === '--identity-child') {
@@ -508,6 +528,70 @@ if (process.argv[2] === '--identity-child') {
     assert.deepEqual((await call(ehr.base, 'GET', '/ehr/me/chat/history', { cookie: patient.cookie })).body.exchanges, []);
     checks.push('an answer whose cited vital was corrected during the call is discarded with 409 CHAT_SOURCES_CHANGED, and one whose history the patient cleared during the call with 409 CHAT_CONVERSATION_CHANGED');
 
+    // 9b. Earlier exchanges follow the release (the blocking review finding):
+    //     an exchange whose cited note was amended is replayed as 409, hidden
+    //     from the history and never sent to the processor again; one whose
+    //     cited vital is no longer released likewise. The hour's question
+    //     count is reset first so step 10 stays within 10 an hour.
+    await owner.query(`delete from ehr.record_chat_usage_counters where account_id=$1 and bucket_period='hour'`,
+      [ids.patientAccount]);
+    const NOTE_QUESTION = 'What does my follow-up note say?';
+    const noteKey = key();
+    fake.queue.push({ answer: noteAnswer });
+    const noteAnswered = await ask(patient, NOTE_QUESTION, noteKey);
+    assert.deepEqual([noteAnswered.status, noteAnswered.body?.answer, noteAnswered.body?.sources?.map((source) => source.kind)],
+      [200, NOTE_ANSWER, ['note']], JSON.stringify(noteAnswered.body));
+    await database.fixture(async (client) => {
+      await client.query(`insert into ehr.clinical_note_revisions(clinical_note_id,patient_id,facility_id,revision_no,
+        content,change_reason,created_by,created_by_membership_id) values($1,$2,$3,2,$4,'Synthetic amendment',$5,$6)`,
+      [ids.note, ids.patient, ids.facility, 'Synthetic amended note: blood pressure reading corrected.', ids.doctorAccount,
+        ids.membership]);
+      await client.query('update ehr.clinical_notes set current_revision_no=2 where id=$1', [ids.note]);
+    });
+    const sentBeforeReplay = fake.messages().length;
+    const amendedReplay = await ask(patient, NOTE_QUESTION, noteKey);
+    assert.deepEqual([amendedReplay.status, amendedReplay.body?.code], [409, 'CHAT_SOURCES_CHANGED'],
+      `a replay after the cited note was amended: ${JSON.stringify(amendedReplay.body)}`);
+    assert.equal(fake.messages().length, sentBeforeReplay, 'a replay reached the processor');
+    const amendedHistory = await call(ehr.base, 'GET', '/ehr/me/chat/history', { cookie: patient.cookie });
+    assert.deepEqual(amendedHistory.body.exchanges.map((exchange) => exchange.question), [],
+      'the history shows an exchange whose cited note was amended');
+    const afterAmendment = await ask(patient, 'What was my blood pressure after that visit?');
+    assert.equal(afterAmendment.status, 200, JSON.stringify(afterAmendment.body));
+    const amendedSent = fake.messages().at(-1).raw;
+    for (const text of [NOTE_ANSWER, NOTE_QUESTION]) {
+      assert.equal(amendedSent.includes(text), false, `an earlier exchange about the amended note was sent again: ${text}`);
+    }
+    await database.fixture((client) => client.query('update ehr.vitals set current_correction_no=1 where id=$1',
+      [ids.vital]));
+    fake.queue.push({ answer: noteAnswer });
+    const afterWithdrawal = await ask(patient, 'And what does the note say now?');
+    assert.equal(afterWithdrawal.status, 200, JSON.stringify(afterWithdrawal.body));
+    const withdrawnSent = fake.messages().at(-1).raw;
+    assert.equal(withdrawnSent.includes('Your blood pressure was 118 over 76'), false,
+      'an earlier answer citing a vital no longer released was sent again');
+    assert.equal(withdrawnSent.includes('What was my blood pressure after that visit?'), false);
+    const withdrawnAudit = (await owner.query(`select details from audit.events where action='ehr.record-chat.disclosure'
+      and resource_id=$1`, [afterWithdrawal.body.messageId])).rows[0].details;
+    assert.equal(withdrawnAudit.priorExchangeCount, 0, JSON.stringify(withdrawnAudit));
+    await database.fixture((client) => client.query('update ehr.vitals set current_correction_no=0 where id=$1',
+      [ids.vital]));
+    checks.push('an earlier exchange whose cited note was amended is replayed as 409 CHAT_SOURCES_CHANGED, left out of the history and never sent to the processor again, and one citing a vital no longer released is not sent either (priorExchangeCount 0)');
+
+    // 9c. A legal hold on the patient keeps the history; released, the patient deletes it.
+    const holdId = randomUUID();
+    await owner.query(`insert into platform.legal_holds(id,subject_type,subject_id,reason)
+      values($1,'patient',$2,'Synthetic record chat verifier hold')`, [holdId, ids.patient]);
+    const held = await call(ehr.base, 'DELETE', '/ehr/me/chat/history', write(patient));
+    assert.deepEqual([held.status, held.body?.code], [409, 'CHAT_HISTORY_ON_HOLD'], JSON.stringify(held.body));
+    assert.equal((await owner.query('select count(*)::int as count from ehr.patient_chat_messages where patient_id=$1',
+      [ids.patient])).rows[0].count, 3);
+    await owner.query(`update platform.legal_holds set released_at=clock_timestamp(),
+      release_reason='Synthetic record chat verifier hold released' where id=$1`, [holdId]);
+    const unheld = await call(ehr.base, 'DELETE', '/ehr/me/chat/history', write(patient));
+    assert.deepEqual([unheld.status, unheld.body], [200, { cleared: true, deletedCount: 3 }], JSON.stringify(unheld.body));
+    checks.push('DELETE /ehr/me/chat/history answers 409 CHAT_HISTORY_ON_HOLD and keeps every exchange while a legal hold names the patient, and deletes them once the hold is released');
+
     // 10. The patient deletes the history.
     const last = await ask(patient, 'What was my blood pressure at my last visit?');
     assert.equal(last.status, 200, JSON.stringify(last.body));
@@ -518,6 +602,7 @@ if (process.argv[2] === '--identity-child') {
     checks.push('DELETE /ehr/me/chat/history removes every stored exchange of the patient');
 
     // 11. The hourly quota, then the kill switch off again.
+    await awayFromHourBoundary();
     await owner.query(`insert into ehr.record_chat_usage_counters(audience,account_id,bucket_period,bucket_start,
       request_count) values('patient',$1,'hour',date_trunc('hour',statement_timestamp(),'UTC'),10)
       on conflict (audience,account_id,bucket_period,bucket_start) do update set request_count=10`, [ids.patientAccount]);
@@ -538,7 +623,7 @@ if (process.argv[2] === '--identity-child') {
     const leases = (await owner.query(`select outcome, settled_at is not null as settled from ehr.record_chat_reservations
       where account_id=$1 order by created_at`, [ids.patientAccount])).rows;
     assert.deepEqual(leases.map((lease) => lease.outcome), ['answered', 'unverified', 'declined', 'failed', 'answered',
-      'sources_changed', 'conversation_changed', 'answered']);
+      'sources_changed', 'conversation_changed', 'answered', 'answered', 'answered', 'answered']);
     assert.ok(leases.every((lease) => lease.settled));
     const allAudits = await audits();
     const serialized = JSON.stringify(allAudits);
@@ -552,6 +637,101 @@ if (process.argv[2] === '--identity-child') {
     assert.equal(allAudits.filter((row) => row.action === 'ehr.record-chat.disclosure').length, fake.messages().length,
       'a request reached the processor without its disclosure audit row');
     checks.push('every lease is settled with its outcome; there is one disclosure audit row per request sent, and no audit row holds a question, an answer or record text');
+
+    // 13. A late settlement racing the next reservation counts an expired
+    //     lease once. Two runtime-role connections bound to the patient's own
+    //     session, as withPatientTransaction binds them; the kill switch on.
+    await owner.query(`update platform.control_settings set enabled=true, reason='Record chat verifier race',
+      row_version=row_version+1 where control_key='record_chat_enabled'`);
+    // Step 11 left the hour's bucket at its limit.
+    await owner.query(`delete from ehr.record_chat_usage_counters where account_id=$1 and bucket_period='hour'`,
+      [ids.patientAccount]);
+    const { Client } = require('pg');
+    const session = (await owner.query(`select id from auth.sessions where account_id=$1 and revoked_at is null
+      order by issued_at desc limit 1`, [ids.patientAccount])).rows[0].id;
+    const runtime = async () => {
+      const client = new Client({ connectionString: database.url('hid_ehr_api_runtime') });
+      client.on('error', () => undefined);
+      await client.connect();
+      return client;
+    };
+    const bind = (client) => client.query(`select set_config('app.actor_subject',$1,true),
+      set_config('app.account_id',$2,true),set_config('app.session_id',$3,true),set_config('app.patient_id',$4,true),
+      set_config('app.correlation_id','record-chat-verifier-race',true),
+      set_config('app.self_authorized_until',(clock_timestamp()+interval '30 seconds')::text,true),
+      set_config('app.purpose_of_use','patient-self',true),set_config('app.facility_id','',true),
+      set_config('app.membership_id','',true),set_config('app.patient_release','',true)`,
+    [`synthetic:chat-patient:${ids.patientAccount}`, ids.patientAccount, session, ids.patient]);
+    const budget = async () => (await owner.query(`select reserved_tokens::bigint as reserved, used_tokens::bigint as used
+      from ehr.record_chat_daily_budget where day=(statement_timestamp() at time zone 'UTC')::date`)).rows[0];
+    const staleLease = async () => {
+      const lease = randomUUID();
+      await database.fixture(async (client) => {
+        await client.query(`insert into ehr.record_chat_reservations(id,audience,account_id,patient_id,reserved_tokens,
+          created_at,expires_at) values($1,'patient',$2,$3,7000,statement_timestamp()-interval '61 seconds',
+          statement_timestamp()-interval '1 second')`, [lease, ids.patientAccount, ids.patient]);
+        await client.query(`insert into ehr.record_chat_daily_budget(day,reserved_tokens) values
+          ((statement_timestamp() at time zone 'UTC')::date,7000) on conflict (day) do update
+          set reserved_tokens=ehr.record_chat_daily_budget.reserved_tokens+7000`);
+      });
+      return lease;
+    };
+    const settling = await runtime();
+    const reserving = await runtime();
+    try {
+      // The late settlement holds the lease; the next reservation must not count it again.
+      const first = await staleLease();
+      const before = await budget();
+      await settling.query('begin');
+      await bind(settling);
+      assert.deepEqual((await settling.query(`select ehr.settle_record_chat($1,100,0,0,0,'failed') as settled`,
+        [first])).rows, [{ settled: true }]);
+      await reserving.query('begin');
+      await bind(reserving);
+      const reserved = reserving.query(`select ehr.reserve_record_chat('patient',$1,1000,1000000) as id`, [ids.patient])
+        .then((result) => ({ id: result.rows[0].id }), (error) => ({ code: error.code }));
+      await delay(500);
+      await settling.query('commit');
+      const raced = await reserved;
+      await reserving.query(raced.id ? 'commit' : 'rollback');
+      if (raced.id) {
+        await reserving.query('begin');
+        await bind(reserving);
+        await reserving.query(`select ehr.settle_record_chat($1,0,0,0,0,'failed')`, [raced.id]);
+        await reserving.query('commit');
+      }
+      const after = await budget();
+      assert.deepEqual({ raced: raced.code ?? 'reserved', reserved: Number(after.reserved) - Number(before.reserved),
+        used: Number(after.used) - Number(before.used) }, { raced: 'P4091', reserved: -7000, used: 100 },
+      'a late settlement and the next reservation counted the expired lease twice');
+      // The reservation settles the expired lease first; the late settlement then changes nothing.
+      const second = await staleLease();
+      const beforeSecond = await budget();
+      await reserving.query('begin');
+      await bind(reserving);
+      const next = (await reserving.query(`select ehr.reserve_record_chat('patient',$1,1000,1000000) as id`,
+        [ids.patient])).rows[0].id;
+      await settling.query('begin');
+      await bind(settling);
+      const late = settling.query(`select ehr.settle_record_chat($1,100,0,0,0,'failed') as settled`, [second]);
+      await delay(300);
+      await reserving.query('commit');
+      assert.deepEqual((await late).rows, [{ settled: false }]);
+      await settling.query('commit');
+      const afterSecond = await budget();
+      assert.deepEqual({ reserved: Number(afterSecond.reserved) - Number(beforeSecond.reserved),
+        used: Number(afterSecond.used) - Number(beforeSecond.used) }, { reserved: -6000, used: 7000 });
+      await reserving.query('begin');
+      await bind(reserving);
+      await reserving.query(`select ehr.settle_record_chat($1,0,0,0,0,'failed')`, [next]);
+      await reserving.query('commit');
+    } finally {
+      await settling.end().catch(() => undefined);
+      await reserving.end().catch(() => undefined);
+      await owner.query(`update platform.control_settings set enabled=false, reason='Record chat verifier race done',
+        row_version=row_version+1 where control_key='record_chat_enabled'`);
+    }
+    checks.push('a late settlement of an expired lease racing the next reservation counts the lease once: the reservation is refused 429-busy while the settlement holds the lease, and a settlement after the reservation settled it as expired returns false and changes nothing');
 
     process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only',
       roles: ['hid_ehr_api_runtime', 'hid_identity_api_runtime'], processor: 'local fake Messages API on 127.0.0.1',

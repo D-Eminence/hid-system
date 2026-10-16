@@ -937,12 +937,13 @@ set local lock_timeout = '5s';
 -- The kill switch through platform.control_enabled, as every guard reads it
 -- (forced row-level security hides the row from the migration administrator).
 select 'record_chat_enabled' as control_key, platform.control_enabled('record_chat_enabled') as enabled;
--- The two limit commands: security definer with a pinned search path.
+-- The two limit commands and the legal hold check: security definer with a pinned search path.
 set local row_security = off;
 select proname, prosecdef, proconfig
   from pg_proc
  where oid in ('ehr.reserve_record_chat(text,uuid,integer,bigint)'::regprocedure,
-   'ehr.settle_record_chat(uuid,integer,integer,integer,integer,text)'::regprocedure)
+   'ehr.settle_record_chat(uuid,integer,integer,integer,integer,text)'::regprocedure,
+   'ehr.record_chat_history_on_hold(uuid)'::regprocedure)
  order by proname;
 rollback;
 ```

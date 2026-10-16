@@ -105,6 +105,8 @@ describe('EHR patient record chat configuration', () => {
     ['a deadline above 25 seconds', { RECORD_CHAT_DEADLINE_MS: '25001' }, /RECORD_CHAT_DEADLINE_MS/],
     ['a deadline below 5 seconds', { RECORD_CHAT_DEADLINE_MS: '4999' }, /RECORD_CHAT_DEADLINE_MS/],
     ['two retries', { RECORD_CHAT_MAX_RETRIES: '2' }, /RECORD_CHAT_MAX_RETRIES/],
+    // A retry would send the same PHI again under one disclosure audit row (ADR-065): never, in any environment.
+    ['one retry', { RECORD_CHAT_MAX_RETRIES: '1' }, /RECORD_CHAT_MAX_RETRIES/],
     ['an evidence bound above 90000', { RECORD_CHAT_MAX_EVIDENCE_CHARS: '90001' }, /RECORD_CHAT_MAX_EVIDENCE_CHARS/],
     ['an unknown effort', { RECORD_CHAT_EFFORT: 'max' }, /RECORD_CHAT_EFFORT/],
     ['a flag that is not true or false', { RECORD_CHAT_PATIENT_ENABLED: 'yes' }, /RECORD_CHAT_PATIENT_ENABLED/],

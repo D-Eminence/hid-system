@@ -5,9 +5,11 @@ import { DomainProblem } from '../../common/problem';
 import type { HidRequest } from '../../common/request-context';
 import type { DatabaseService } from '../../database/database.service';
 import { PatientRecordRelease, type PatientReleasable } from '../patient-records/patient-release';
+import { requestDigest } from '../../common/idempotency';
 import type { PatientRecordsService } from '../patient-records/patient-records.service';
 import { RecordChatProcessorError, type ProcessorResult, type RecordChatProcessor } from './claude-record-chat.client';
-import { FIXED_REPLIES, HISTORY_LIMIT, PatientRecordChatService } from './patient-record-chat.service';
+import { releasedBindings } from './evidence-extract';
+import { FIXED_REPLIES, HISTORY_LIMIT, PRIOR_TURNS, PatientRecordChatService } from './patient-record-chat.service';
 import { ANSWER_DETAIL_KEYS, DISCLOSURE_DETAIL_KEYS, HISTORY_DETAIL_KEYS } from './record-chat-audit';
 import type { RecordChatConfig } from './record-chat.config';
 
@@ -49,7 +51,7 @@ interface Options {
   control?: boolean | Error;
   stored?: Record<string, unknown> | null;
   storedCount?: number;
-  reserveError?: { code: string; detail?: string };
+  reserveError?: { code: string; detail?: string; message?: string };
   auditFails?: boolean;
   insertError?: { code: string };
   result?: ProcessorResult | Error;
@@ -57,6 +59,9 @@ interface Options {
   vitalsOnSecondRead?: Record<string, unknown>[];
   noRecords?: boolean;
   history?: Record<string, unknown>[];
+  prior?: Record<string, unknown>[];
+  hold?: boolean;
+  holdDuringDelete?: boolean;
 }
 
 function setup(options: Options = {}) {
@@ -91,7 +96,16 @@ function setup(options: Options = {}) {
     if (/select count\(\*\)::text as count from ehr\.patient_chat_messages/.test(text)) {
       return { rows: [{ count: String(options.storedCount ?? 0) }] };
     }
-    if (/reply->>'answer' as answer/.test(text)) return { rows: [] };
+    if (/reply->>'answer' as answer/.test(text)) return { rows: options.prior ?? [] };
+    if (/ehr\.record_chat_history_on_hold/.test(text) && !/with deleted/.test(text)) {
+      events.push('hold-check');
+      return { rows: [{ held: options.hold ?? false }] };
+    }
+    if (/with deleted_messages as \(delete from ehr\.patient_chat_messages/.test(text)) {
+      events.push('delete');
+      return { rows: [{ count: options.holdDuringDelete ? '0' : String(options.storedCount ?? 0),
+        existing: 1, deleted: options.holdDuringDelete ? 0 : 1 }] };
+    }
     if (/insert into ehr\.patient_chat_conversations/.test(text)) {
       events.push('conversation');
       return { rows: [{ id: CONVERSATION }] };
@@ -172,6 +186,13 @@ function setup(options: Options = {}) {
     { authorizeOwnSession } as unknown as PatientRecordsService, release, options.config ?? enabled, processor);
   return { service, events, violations, query, processor, authorizeOwnSession, recordWithClient, record,
     withPatientTransaction, databaseQuery, release };
+}
+
+/** The hash the release set gives the fixture vital now, as a stored binding records it. */
+async function currentVitalHash(): Promise<string> {
+  const probe = setup();
+  const visible = releasedBindings(await probe.release.read({ query: probe.query } as unknown as PoolClient, PATIENT));
+  return visible.get(`vital:${VITAL}`)!;
 }
 
 /** key null sends no Idempotency-Key header. */
@@ -264,6 +285,9 @@ describe('PatientRecordChatService', () => {
     [{ code: 'P4091' }, 429, 'RECORD_CHAT_BUSY', 5],
     [{ code: 'P5030' }, 503, 'RECORD_CHAT_BUDGET_EXHAUSTED', undefined],
     [{ code: '42501' }, 403, 'PATIENT_ACCESS_DENIED', undefined],
+    // The kill switch, read again by the reservation in the same transaction as the disclosure audit.
+    [{ code: '55000', message: 'RECORD_CHAT_PAUSED' }, 503, 'RECORD_CHAT_PAUSED', undefined],
+    [{ code: '55000', message: 'PLATFORM_CONTROL_UNAVAILABLE' }, 503, 'PLATFORM_CONTROL_UNAVAILABLE', undefined],
   ])('answers the limit refusal %j as %s %s, with no call', async (error, status, code, retryAfter) => {
     const chat = setup({ reserveError: error });
     const refused = await problem(ask(chat));
@@ -416,10 +440,127 @@ describe('PatientRecordChatService', () => {
     expect(Object.keys(audit.details).every((key) => (HISTORY_DETAIL_KEYS as readonly string[]).includes(key))).toBe(true);
   });
 
-  it('deletes the whole history on request, while chat is off too', async () => {
+  it('deletes the whole history on request, while chat is off too, counting the exchanges its own statement deleted', async () => {
     const chat = setup({ config: { ...enabled, patientEnabled: false }, storedCount: 3 });
     await expect(chat.service.clear(request)).resolves.toEqual({ cleared: true, deletedCount: 3 });
-    expect(chat.events).toEqual(['authorize:1', 'begin:1', 'delete', 'audit:ehr.record-chat.history.clear', 'commit:1']);
+    expect(chat.events).toEqual(['authorize:1', 'begin:1', 'hold-check', 'delete', 'audit:ehr.record-chat.history.clear',
+      'commit:1']);
+    // The messages and the conversation go in one statement, which also returns how many it deleted.
+    const deleting = chat.query.mock.calls.map(([sql]) => String(sql).replace(/\s+/g, ' '))
+      .filter((sql) => /delete from ehr\.patient_chat/.test(sql));
+    expect(deleting).toHaveLength(1);
+    expect(deleting[0]).toMatch(/with deleted_messages as \(delete from ehr\.patient_chat_messages where patient_id=\$1 returning 1\)/);
+    expect(deleting[0]).toMatch(/delete from ehr\.patient_chat_conversations where patient_id=\$1 returning 1/);
+  });
+
+  it('keeps the history while a legal hold names the patient or the account: 409 CHAT_HISTORY_ON_HOLD, audited', async () => {
+    const held = setup({ hold: true, storedCount: 3 });
+    const refused = await problem(held.service.clear(request));
+    expect([refused.getStatus(), refused.code]).toEqual([409, 'CHAT_HISTORY_ON_HOLD']);
+    expect(held.events).toEqual(['authorize:1', 'begin:1', 'hold-check', 'audit:ehr.record-chat.history.clear', 'commit:1']);
+    expect(held.recordWithClient).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      action: 'ehr.record-chat.history.clear', outcome: 'denied', details: { reason: 'legal_hold' } }));
+    // A hold placed after the check: the delete policy keeps every row and nothing is reported cleared.
+    const raced = setup({ holdDuringDelete: true, storedCount: 3 });
+    const late = await problem(raced.service.clear(request));
+    expect([late.getStatus(), late.code]).toEqual([409, 'CHAT_HISTORY_ON_HOLD']);
+    expect(raced.events).toEqual(['authorize:1', 'begin:1', 'hold-check', 'delete', 'rollback:1',
+      'audit-pool:ehr.record-chat.history.clear']);
+    expect(raced.record).toHaveBeenCalledWith(expect.objectContaining({ outcome: 'denied',
+      details: { reason: 'legal_hold' } }));
+  });
+
+  it('sends earlier exchanges only while every record they cite is still released with the same content', async () => {
+    const hash = await currentVitalHash();
+    const chat = setup({ prior: [
+      { id: 'message-4', question: 'PRIOR-QUESTION-MATCHING', answer: 'PRIOR-ANSWER-MATCHING',
+        sourceBindings: [{ kind: 'vital', id: VITAL, hash }] },
+      { id: 'message-3', question: 'PRIOR-QUESTION-CHANGED', answer: 'PRIOR-ANSWER-CHANGED',
+        sourceBindings: [{ kind: 'vital', id: VITAL, hash: 'superseded-content' }] },
+      { id: 'message-2', question: 'PRIOR-QUESTION-RETRACTED', answer: 'PRIOR-ANSWER-RETRACTED',
+        sourceBindings: [{ kind: 'note', id: '5c4a7c00-0000-4000-8000-0000000000a9', hash: 'h' }] },
+      { id: 'message-1', question: 'PRIOR-QUESTION-DECLINED', answer: FIXED_REPLIES.declined, sourceBindings: [] },
+    ] });
+    await ask(chat);
+    const sent = ((chat.processor.ask as jest.Mock).mock.calls[0][0].userBlocks as string[]).join('\n');
+    for (const text of ['PRIOR-QUESTION-CHANGED', 'PRIOR-ANSWER-CHANGED', 'PRIOR-QUESTION-RETRACTED',
+      'PRIOR-ANSWER-RETRACTED']) expect(sent).not.toContain(text);
+    expect(sent).toContain('PRIOR-ANSWER-MATCHING');
+    // Oldest first, as a conversation reads.
+    expect(sent.indexOf('PRIOR-QUESTION-DECLINED')).toBeGreaterThan(-1);
+    expect(sent.indexOf('PRIOR-QUESTION-DECLINED')).toBeLessThan(sent.indexOf('PRIOR-QUESTION-MATCHING'));
+    const disclosure = chat.recordWithClient.mock.calls.map(([, event]) => event as unknown as {
+      action: string; details: Record<string, unknown> }).find((event) => event.action === 'ehr.record-chat.disclosure')!;
+    expect(disclosure.details.priorExchangeCount).toBe(2);
+    // The query reads the bindings it filters on.
+    const prior = chat.query.mock.calls.map(([sql]) => String(sql)).find((sql) => /reply->>'answer' as answer/.test(sql))!;
+    expect(prior).toMatch(/source_bindings/);
+  });
+
+  it(`sends at most ${PRIOR_TURNS} earlier exchanges, the newest that still match the release`, async () => {
+    const hash = await currentVitalHash();
+    const prior = [6, 5, 4, 3, 2, 1].map((n) => ({ id: `message-${n}`, question: `PRIOR-Q-${n}`, answer: `PRIOR-A-${n}`,
+      sourceBindings: n === 6 ? [{ kind: 'vital', id: VITAL, hash: 'superseded-content' }]
+        : [{ kind: 'vital', id: VITAL, hash }] }));
+    const chat = setup({ prior });
+    await ask(chat);
+    const sent = ((chat.processor.ask as jest.Mock).mock.calls[0][0].userBlocks as string[]).join('\n');
+    expect([1, 2, 3, 4, 5, 6].filter((n) => sent.includes(`PRIOR-Q-${n}`))).toEqual([2, 3, 4, 5]);
+  });
+
+  it('answers 409 CHAT_SOURCES_CHANGED on a replay whose cited record changed or is gone, with no call', async () => {
+    const hash = await currentVitalHash();
+    const reply = { status: 'answered', answer: ANSWER_TEXT, blocks: [], sources: [], coverage: {} };
+    const stored = (sourceBindings: unknown[]) => ({ id: 'message-1', conversationId: CONVERSATION, question: QUESTION,
+      reply, sourceBindings, requestSha256: requestDigest('ehr.record-chat.ask', { question: QUESTION,
+        noticeVersion: 'notice-1' }), createdAt: new Date('2026-10-16T12:00:00Z') });
+    for (const bindings of [[{ kind: 'vital', id: VITAL, hash: 'superseded-content' }],
+      [{ kind: 'diagnosis', id: '5c4a7c00-0000-4000-8000-0000000000d9', hash: 'h' }]]) {
+      const chat = setup({ stored: stored(bindings) });
+      const refused = await problem(ask(chat));
+      expect([refused.getStatus(), refused.code]).toEqual([409, 'CHAT_SOURCES_CHANGED']);
+      expect(chat.processor.ask).not.toHaveBeenCalled();
+    }
+    const unchanged = setup({ stored: stored([{ kind: 'vital', id: VITAL, hash }]) });
+    await expect(ask(unchanged)).resolves.toMatchObject({ idempotentReplay: true, messageId: 'message-1' });
+  });
+
+  it('leaves out of the history an exchange whose cited record changed since it was answered', async () => {
+    const hash = await currentVitalHash();
+    const reply = { status: 'answered', answer: ANSWER_TEXT, blocks: [], sources: [], coverage: {} };
+    const chat = setup({ history: [
+      { id: 'message-2', question: QUESTION, reply, sourceBindings: [{ kind: 'vital', id: VITAL, hash }],
+        createdAt: new Date('2026-10-16T12:00:00Z') },
+      { id: 'message-1', question: QUESTION, reply, sourceBindings: [{ kind: 'vital', id: VITAL, hash: 'superseded-content' }],
+        createdAt: new Date('2026-10-15T12:00:00Z') }] });
+    const history = await chat.service.history(request);
+    expect(history.exchanges.map((exchange) => exchange.messageId)).toEqual(['message-2']);
+    expect(chat.recordWithClient.mock.calls.at(-1)![1]).toMatchObject({ details: { exchangeCount: 1, hiddenCount: 1 } });
+  });
+
+  it('refuses a question holding a NUL, another control character or a lone surrogate, before Identity', async () => {
+    for (const question of ['what\u0000is my pulse', 'my pulse\u0007?', 'pulse \u001b[2J', 'pulse\u007f', 'pulse\u0085',
+      'pulse \ud800 now']) {
+      const chat = setup();
+      const refused = await problem(ask(chat, { question }));
+      expect([refused.getStatus(), refused.code]).toEqual([400, 'INVALID_QUESTION']);
+      expect(chat.authorizeOwnSession).not.toHaveBeenCalled();
+    }
+    await expect(ask(setup(), { question: 'First line\nsecond line\twith a tab' })).resolves.toMatchObject({
+      status: 'answered' });
+  });
+
+  it('settles the lease with the known usage and audits the failure when the answer cannot be saved, answering 503', async () => {
+    const chat = setup({ insertError: { code: '22021' } });
+    const refused = await problem(ask(chat));
+    expect([refused.getStatus(), refused.code]).toEqual([503, 'RECORD_CHAT_UNAVAILABLE']);
+    expect(chat.events.slice(chat.events.indexOf('rollback:2'))).toEqual(['rollback:2', 'begin:3', 'settle:failed',
+      'audit:ehr.record-chat.answer', 'commit:3']);
+    const settled = chat.query.mock.calls.filter(([sql]) => /ehr\.settle_record_chat/.test(String(sql))).at(-1)![1];
+    expect(settled).toEqual([RESERVATION, 1500, 120, 300, 0, 'failed']);
+    expect(chat.recordWithClient).toHaveBeenLastCalledWith(expect.anything(), expect.objectContaining({
+      action: 'ehr.record-chat.answer', outcome: 'failure', details: expect.objectContaining({ reason: 'save_failed',
+        inputTokens: 1500, processor: 'anthropic' }) }));
   });
 
   it('says chat is unavailable when the flag or the control is off, and what it is otherwise, without Identity', async () => {
