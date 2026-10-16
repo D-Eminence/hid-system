@@ -33,16 +33,17 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
 - **Merged, not deployed:** D-Eminence/hid-system#84 adds 0093: a Health ID needs a proof that the person holds the NIN, a code to the phone the NIN record lists (ADR-062). Every new flag is off. The online route stays closed on staging, which sends email only, and production runs it only while a facility takes part (ADR-063). Until a staging facility is designated every start answers `503 PATIENT_REGISTRATION_NOT_OPEN` (release checklist §7, S4v). The steps in §3 count 0093.
 - **Merged, not deployed:** D-Eminence/hid-system#85 adds 0094: the facility route (ADR-063). A patient starts on their own device, shows a desk code at a participating facility, and a staff member with MFA and an attested clinical grant checks one original photo ID. The route stays closed until `ASSISTED_REGISTRATION_ENABLED` is on and a facility is designated (release checklist P29 to P33). Production then needs the facility flag with the online route, and opens the online route only while at least one facility takes part. On staging the facility route can open the acceptance rows that need a working start (S4v). The steps in §3 count 0094.
 - **In source, not merged:** the patient record release adds 0095 (owner decision 4 of 2026-10-16, ADR-064): patients may see their vitals, diagnoses, prescriptions, Lab results and documents, one EHR flag per category, every flag off; production refuses every flag (Lab results while Lab is off, the others until the clinical owner signs each off, P35), and only staging may set one. The database follows the flags, so with every flag off nothing changes for patients and the database refuses the new categories as before. The steps in §3 count 0095 (release checklist P35, S4w).
+- **In source, not merged:** patient record chat adds 0096 (owner decision 1 of 2026-10-16, ADR-065): a patient asks about their own released records and the Claude API answers. Off: `RECORD_CHAT_PATIENT_ENABLED` defaults to false and the platform control `record_chat_enabled` is seeded off; every deployed ehr-api refuses the flag without the recorded processing approval (P36). Nothing is sent to the processor until P36 and S4x.
 
 ## 3. Staging, in order
 
-1. **Preflight for staging.** Release checklist §4 lists P1 to P35.
+1. **Preflight for staging.** Release checklist §4 lists P1 to P36.
    - Run against staging: the database, secret and artefact rows, P1 to P5 and P8 to P14. P11 and P12 run again after the migration.
    - P22 (staff enrolment before clinical roles) applies to every environment that enables clinical roles.
-   - Production gates: P6 (two Super Admins), P7 (the staging acceptance passed) and P15 to P21; P28 (no active public enrollment) before 0093; P23 to P27 before any NIN holder route or the signed-in NIN binding is enabled, and P33 before either holder route; P29 to P33 before the facility route is enabled; P34 before self-sign-up opens; P35 before any patient record release flag is set.
-2. **Rehearse on a restored staging snapshot (S1).** Run `db:plan`, `db:dry-run` and `db:migrate` to 0095 in an isolated copy, then the bootstrap, `db:verify-roles` and `db:verify-logins` (S2).
+   - Production gates: P6 (two Super Admins), P7 (the staging acceptance passed) and P15 to P21; P28 (no active public enrollment) before 0093; P23 to P27 before any NIN holder route or the signed-in NIN binding is enabled, and P33 before either holder route; P29 to P33 before the facility route is enabled; P34 before self-sign-up opens; P35 before any patient record release flag is set; P36 before patient record chat is turned on.
+2. **Rehearse on a restored staging snapshot (S1).** Run `db:plan`, `db:dry-run` and `db:migrate` to 0096 in an isolated copy, then the bootstrap, `db:verify-roles` and `db:verify-logins` (S2).
 3. **Migrate staging.** Follow release checklist §5 in ledger order.
-   - Each migration has its lock window: steps 2 to 17 for 0067 to 0084, 18 to 28 for 0085 to 0095, the estimate check at 29 and the role bootstrap at 30.
+   - Each migration has its lock window: steps 2 to 17 for 0067 to 0084, 18 to 29 for 0085 to 0096, the estimate check at 30 and the role bootstrap at 31.
    - Run the bootstrap after the last migration and before any new build starts.
 4. **Deploy in the order of release checklist §6.**
    - Identity and EHR builds go out only after their migrations and the bootstrap.
@@ -64,6 +65,7 @@ Re-enabling an off module takes its own reviewed migration (ADR-058). It is neve
 - Sign in with HIDCode and password through `staging`.
 - `GET /auth/session` reports the patient.
 - `GET /ehr/me/records` returns only that patient's completed encounters and signed notes, with every patient record release flag off (the launch default); with a flag on, only that category's released items of completed encounters as well (S4w).
+- With patient record chat off (the launch default), `GET /ehr/me/chat/availability` answers `available: false` and `POST /ehr/me/chat` `503 RECORD_CHAT_DISABLED`; with it on, S4x.
 - A refresh rotates the cookies.
 - Sign-out clears them (S4e).
 - A Turnstile token that signed in once is refused the second time, and a sign-in without a token answers `400 TURNSTILE_REQUIRED` (S4t).

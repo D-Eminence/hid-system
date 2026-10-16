@@ -340,6 +340,9 @@ Responsibilities:
 * prescriptions
 * EHR document references
 * EHR workflow state
+* the patient's record chat (ADR-065): a question about the patient's own
+  released records answered by the Claude API, an external processor that
+  receives a minimised extract of those records; off by default
 
 Every clinical record must include as appropriate:
 

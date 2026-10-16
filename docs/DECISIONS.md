@@ -4944,3 +4944,238 @@ Residual risks:
 Related: ADR-018; ADR-058 (PSELF-RLS); `PHASE_3_LAUNCH_DECISIONS.md` D7, D8
 and D17; `INTERFACE_CONTRACT.md`, "Record summaries" and "Patient document
 download"; `DATABASE.md`, "Patient record release (0095)".
+
+# ADR-065: Patient record chat through the Claude API
+
+Status: Accepted in source (migration 0096). Not merged, not deployed. Off:
+the EHR flag `RECORD_CHAT_PATIENT_ENABLED` defaults to false, the platform
+control `record_chat_enabled` is seeded false, and every deployed ehr-api
+refuses the flag without a recorded processing approval.
+
+Date: 2026-10-16
+
+Context:
+
+- On 2026-10-16 the owner approved (decision 1) record chat through the
+  Claude API, for patients and for staff. This change builds the patient part
+  (PR 7 of the PR #8 design): a signed-in patient asks a question about their
+  own records and reads the answer. Staff chat is a later change.
+- The PR #8 design retrieved records through Bedrock embeddings, pgvector and
+  Textract OCR. The owner did not approve any of them (decision of
+  2026-10-16), and none is built.
+- On main the patient sees their records only through `PatientRecordRelease`
+  (ADR-064), inside the patient-self transaction bound to their own live
+  session (0091, PSELF-RLS). Main's security model (runtime roles, grants,
+  row-level security, audit, platform kill switches, rate limits) applies
+  unchanged.
+
+Decision:
+
+- **Evidence: the release set only.** Each question reads the patient's
+  records with `PatientRecordRelease.read` in that patient-self transaction:
+  encounters and completed encounters' notes always, and each other category
+  only while its release flag is on (ADR-064). Lab requests, imported
+  records, other patients' and staff-only data are never read. There is no
+  embedding, vector store, chunking, OCR or semantic retrieval: a
+  deterministic selection takes up to 40 released records, those sharing
+  terms with the question first and then the newest, within a character
+  budget (`RECORD_CHAT_MAX_EVIDENCE_CHARS`, default 40,000; at most 8,000
+  characters of one record).
+- **What leaves the system.** One Messages API request per question, with
+  only:
+  - the frozen system prompt (no patient data; the one block marked for
+    prompt caching);
+  - the extract: per record a `ref` number, its `kind` and its encounter's
+    `ref`, and only these fields:
+    - encounter: `facility` (an ordinal, `F1`, `F2`; never a name or id),
+      `type`, `status`, `startedOn`, `endedOn`;
+    - note: `noteType`, `title`, `signedOn`, `text` (the current revision,
+      cut to the budget with `excerpt: true` when it is cut);
+    - diagnosis: `code`, `display`, `clinicalStatus`, `verificationStatus`,
+      `onsetOn`, `abatementOn`;
+    - prescription: `medication`, `medicationCode`, `dose`, `doseUnit`,
+      `route`, `frequency`, `instructions`, `startsOn`, `endsOn`, `status`;
+    - Lab result: `test`, `testCode`, `resultType`, `value`, `text`, `unit`,
+      `referenceRange`, `flag`, `revisionKind`, `releasedOn`;
+    - vital: `recordedOn` and the recorded `measurements`;
+    - document: `classification`, `mediaType`, `createdOn` (never the file
+      name, content or storage location);
+  - the coverage (the released and withheld category names, whether the
+    extract was cut, counts) and exact differences between numeric Lab
+    results of the same test (computed in EHR);
+  - the patient's last four exchanges of this conversation (question and
+    answer) and the question;
+  - the request settings: the configured model id, `max_tokens`,
+    `inference_geo`, the answer's JSON schema and the configured effort.
+  Every timestamp is cut to a calendar date (UTC). Every free-text value
+  (titles, note text, displays, instructions, test names and texts, prior
+  turns and the question) passes through an identifier filter that replaces
+  Health IDs, UUIDs, email addresses, URLs and runs of ten or more digits
+  (NINs, phone numbers) with `[redacted]`. Never sent: the patient's name,
+  Health ID, NIN, date of birth, sex, contact details or address; any
+  account, patient, session, record, facility or staff id; facility and
+  staff names; diagnosis notes; file names and storage locations; audit
+  data; no `metadata.user_id`. The SDK adds its own request headers (API key,
+  API version, and the SDK, runtime and platform names and versions).
+- **The processor.** Anthropic's Claude API through the official TypeScript
+  SDK (`@anthropic-ai/sdk`, pinned exactly), at the first-party origin
+  `https://api.anthropic.com`. One module (`claude-record-chat.client.ts`)
+  imports the SDK and sets every client option explicitly: the API key from
+  the secret store (`RECORD_CHAT_ANTHROPIC_API_KEY`), no auth token, no
+  webhook key, the base URL, the deadline as timeout, retries
+  (`RECORD_CHAT_MAX_RETRIES`, default 0: PHI is not sent twice), SDK logging
+  off with a silent logger. The SDK's ambient chain (`ANTHROPIC_*`
+  variables, profiles, workload identity) is never consulted, and while chat
+  is on ehr-api refuses to start beside any `ANTHROPIC_*` variable. The model
+  id comes only from `RECORD_CHAT_MODEL_ID`: no code, configuration default,
+  test or document names a model. Before the first request (and hourly) the
+  Models API confirms that the configured model exists and supports
+  structured outputs (and the configured effort), sending no PHI. The
+  request is streamed and read whole (`finalMessage`), the stop reason is
+  checked before any content, thinking blocks are ignored, and a reply over
+  16,000 characters is aborted. No tools, no thinking parameter, no
+  sampling parameters, no fallback model.
+- **Record text is data.** The system prompt states that everything in the
+  user turn (records, earlier turns, the question) is data and never
+  instructions, that facts must come from the extract with their `ref`
+  numbers, that the model must not diagnose or advise treatment changes,
+  must add a safety block for urgent symptoms, must not claim completeness
+  when categories are withheld, and must write no markup or identifiers.
+- **Nothing from the model is kept unless it validates.** The answer must
+  parse as the JSON schema (status `answered` or `no_evidence`, one to eight
+  blocks of kind `record`, `explanation` or `safety`; the schema carries no
+  length or count keywords, which the Messages API refuses; EHR checks
+  them). Each `record` block must cite at least one supplied `ref` and no
+  other block may cite any; an answered reply needs a record block and a
+  no-evidence reply may have none; no bracketed markers, markup, links or
+  identifiers; at most 2,000 characters a block and 4,000 in all. A refusal
+  (`stop_reason` `refusal`) stores the fixed declined text, any other
+  failure to validate (including `max_tokens`) the fixed unverified text.
+- **Authorization each request.** `@PatientOnly`; Identity's patient-self
+  authorization of the request's own session before the read, and again
+  after the call: a change (sign-out, suspension) discards the answer
+  (`403`). The cited records are read again before the answer is stored
+  and must be unchanged (`409 CHAT_SOURCES_CHANGED`); a history the patient
+  cleared during the call stores nothing (`409 CHAT_CONVERSATION_CHANGED`).
+  Cookie writes keep main's Origin and CSRF checks.
+- **Audit names the processor, never PHI.** The disclosure row
+  (`ehr.record-chat.disclosure`) is written in the same transaction as the
+  lease and before the request: processor, model, inference geography,
+  audience, counts per kind, prior exchanges, withheld categories, notice
+  version, token reservation and an HMAC-SHA256 disclosure digest
+  (`RECORD_CHAT_AUDIT_DIGEST_KEY_B64`) over the message id, model,
+  geography, each sent record's kind, id and content hash, the question's
+  SHA-256 and the prior message ids: with the stored records it proves what
+  was sent without holding the text. If that row cannot be written, nothing
+  is sent. The answer row (`ehr.record-chat.answer`) holds the status, the
+  reason code, citation validity, token usage, the served geography and the
+  processor's message id. Each detail key is allowlisted; no question,
+  answer or record text reaches an audit row or a log.
+- **Limits.** Two admin-owned `SECURITY DEFINER` commands, as 0049's quota:
+  `ehr.reserve_record_chat` (patient-self proof; one 60 s lease in flight
+  per account, `429 RECORD_CHAT_BUSY`; 10 questions an hour and 30 a day,
+  `429 RECORD_CHAT_RATE_LIMITED` with `Retry-After`; the configured daily
+  token budget `RECORD_CHAT_DAILY_TOKEN_BUDGET`, required, under a hard
+  ceiling of 20,000,000 a day, `503 RECORD_CHAT_BUDGET_EXHAUSTED`) and
+  `ehr.settle_record_chat` (the processor's usage, or the input estimate for
+  a timeout). Four calls in flight per EHR process; a deadline of
+  `RECORD_CHAT_DEADLINE_MS` (default and maximum 25,000, under the gateway's
+  30 s proxy timeout); `max_tokens` from `RECORD_CHAT_MAX_OUTPUT_TOKENS`
+  (default 4,096).
+- **Flags and kill switch.** Off by default (`RECORD_CHAT_PATIENT_ENABLED`,
+  synth input `HID_RECORD_CHAT_PATIENT_ENABLED`); with it off ehr-api answers
+  `503 RECORD_CHAT_DISABLED` before anything is read and no task holds the
+  key. The platform control `record_chat_enabled` (seeded false, the step-up
+  administrator's `POST /admin/controls`) pauses chat at once (`503
+  RECORD_CHAT_PAUSED`) without a deploy. The history stays readable and
+  deletable while chat is off.
+- **The production gate.** With chat on, every deployed ehr-api
+  (`NODE_ENV=production`, staging included) refuses to start without
+  `RECORD_CHAT_PROCESSING_APPROVAL` in the form `ADR-NNN@YYYY-MM-DD` (the
+  accepted ADR recording the owner's approval of this external processing,
+  and its date: a real date, not in the future) and with any base URL but
+  the first-party origin. `infra/aws` refuses the same at synthesis, and
+  refuses the sleep profile, which has no NAT egress.
+- **The history.** One conversation per patient, its exchanges (question,
+  validated reply, the cited records' bindings), at most 50; `GET
+  /ehr/me/chat/history` leaves out an exchange whose cited records are no
+  longer released, and `DELETE` removes the whole history. Patient-self
+  row-level security only: no staff, consent or break-glass path reads it.
+- **Database ownership.** The design gave the limit commands a new
+  technical role (`hid_record_chat_commands`) and widened
+  `ehr.patient_self_context` and `identity.patient_self_session` to it. This
+  change keeps them owned by the migration administrator, as 0049's quota
+  and 0087's workforce commands are, so the patient-self functions keep
+  exactly their 0091 grants and the bootstrap gains no role.
+- **No permission.** `ehr.record-chat.use` is not seeded: patient sessions
+  need none, and modules that are off hold no permission (ADR-058). The
+  staff change seeds what staff chat needs.
+
+Proposed defaults (open owner questions; the safest default is built):
+
+- Retention of the chat history: no expiry, no automatic purge and no
+  retention class; the patient deletes it, and at most 50 exchanges are kept
+  (a full history answers `409 CHAT_HISTORY_FULL`). The owner decides the
+  retention period.
+- The processing approval is required in every deployed environment,
+  staging with synthetic data included, and names the accepted ADR and its
+  date; the owner records it before any flag is set (release checklist P36).
+- The inference geography has no default: the owner chooses `us` or
+  `global` with the approval.
+- Quotas: 10 questions an hour and 30 a day per patient account, one at a
+  time; four calls in flight per EHR process; the daily token budget is
+  required and capped at 20,000,000.
+- The patient acknowledges the notice version `RECORD_CHAT_NOTICE_VERSION`
+  with every question (`428 CHAT_NOTICE_REQUIRED` otherwise); the notice's
+  wording is the owner's and Health-id's.
+- No retries, a 25 s deadline, a 4,096-token output cap, no effort setting
+  unless configured, no thinking parameter, no fallback model, and prompt
+  caching of the system prompt only.
+- A refusal or an answer that fails validation shows a fixed text; no part
+  of it is shown or stored.
+- Names inside note text are not redacted (only identifier patterns are):
+  the patient already reads the note through the release set.
+- Facilities are sent as ordinals only.
+- No gateway or WAF rule specific to chat; the quotas are the database's.
+- Staff chat, its audience and its permission are a later change.
+
+Options considered:
+
+- Bedrock embeddings, pgvector and Textract OCR (the PR #8 design):
+  rejected; not approved by the owner.
+- Sending the whole patient summary or profile: rejected; minimisation.
+- Tool use, letting the model ask for more records: rejected; the model
+  receives one fixed extract and can request nothing.
+- Storing the model's raw output: rejected; only a validated reply or a
+  fixed text is stored.
+- Retries and a fallback model: rejected; each would send PHI again, or to
+  a model nobody configured.
+- A technical owner role for the commands (the design): rejected above.
+
+Consequences:
+
+- With the flag off nothing changes for patients, staff or Health-id; the
+  migration adds tables, two commands and a control that is off.
+- Turning chat on needs, in order: the owner's processing approval and its
+  ADR, the secret (`RecordChatSecretArn`: `anthropicApiKey`,
+  `auditDigestKeyB64`), the synth inputs, the Health-id screens and notice,
+  and then the platform control (release checklist P36, S4x).
+- The seventh platform control means any later migration that names the
+  control keys starts from seven; this one refuses to run beside an
+  unexpected key.
+
+Residual risks:
+
+- The processor receives the extract's clinical content (minimised, but
+  health data) under the owner's approval; its handling is governed by the
+  processing agreement, not by this code.
+- The identifier filter is pattern based: an identifier written in an
+  unusual form inside a note, or a name, can reach the processor.
+- An answer can be wrong while still citing real records; the validator
+  checks form and citations, not clinical correctness.
+- A process crash after the request leaves the lease to expire (60 s) and
+  charges its reserved tokens.
+
+Related: ADR-018; ADR-058 (PSELF-RLS); ADR-064 (patient record release);
+`INTERFACE_CONTRACT.md` §11, "Patient record chat"; `DATABASE.md`, "Patient
+record chat"; release checklist P36 and S4x.

@@ -613,6 +613,17 @@ and update of a clinical row records a version in `ehr.record_versions`
 | `ehr.ocr_import_provenance` | Provenance of notes imported from OCR. |
 | `ehr.idempotency_keys` | Idempotency of clinical creates. |
 | `ehr.record_versions` | The version history of every clinical row. |
+| `ehr.patient_chat_conversations` | Patient record chat: one conversation per patient (below). |
+| `ehr.patient_chat_messages` | Patient record chat: the patient's questions and validated replies, never updated, deleted with the conversation. |
+| `ehr.record_chat_usage_counters` | Patient record chat: requests per account and hour or day; ids and counts only. |
+| `ehr.record_chat_reservations` | Patient record chat: leases and their token outcome; ids and numbers only. |
+| `ehr.record_chat_daily_budget` | Patient record chat: tokens reserved and used per UTC day. |
+
+The five record chat tables are not clinical records: the two history tables
+have patient-self row-level security only (no consent or staff path), no
+version history, and the patient deletes them; the three limit tables hold no
+PHI and are reached only through two security-definer commands ("Patient
+record chat", below).
 
 **Allergies are not recorded.** No migration creates an allergy or
 intolerance table, no EHR route records one, and no prescribing path checks
@@ -2427,8 +2438,8 @@ NOINHERIT NOBYPASSRLS`, never granted to any role), following
 
 - `SELECT (control_key, enabled)` on `platform.control_settings`, and the
   policy `platform_controls_definer_read`, `FOR SELECT TO
-  hid_platform_control_reader USING (true)`. The six controls are
-  platform-wide booleans with no PHI, so reading all of them is the
+  hid_platform_control_reader USING (true)`. The controls (seven since the
+  record chat control) are platform-wide booleans with no PHI, so reading all of them is the
   function's purpose;
 - `USAGE` on `platform` and on `auth`, and no privilege on any `auth` object.
   The table's PUBLIC read policy applies to this role too, and PostgreSQL
@@ -4482,3 +4493,68 @@ and the runtime verifier pass; `schema.integration.sql` fails there at its line
 1149 ("Document not found") exactly as it does on `main` without this change
 (it fails the same with the 0095 policies and view dropped), and the
 rehearsal's owner pass runs only the additional suites.
+
+## Patient record chat (0096)
+
+Owner decision 1 of 2026-10-16 (ADR-065): a signed-in patient asks a
+question about their own released records and the Claude API answers it.
+The EHR service reads the records only through `PatientRecordRelease`
+(ADR-064) in the patient's own patient-self transaction; this migration adds
+the history, the limits and the kill switch. Every gate is off.
+
+**The kill switch.** The platform control `record_chat_enabled`, seeded
+`false` with the reason "Off until an administrator turns on patient record
+chat (record chat decision)". The `control_key` CHECK of
+`platform.control_settings` (unnamed in 0039; matched by content and named
+`control_settings_control_key_check` now), `platform.control_enabled` and
+`platform.admin_set_control` gain the seventh key. The migration refuses
+(`55000`, nothing changed) any CHECK other than exactly the six 0039 keys,
+so a migration that adds another key must be reconciled with this one
+first. `platform.control_enabled` keeps its owner `hid_platform_control_reader`:
+the migration administrator takes a membership in it only to replace the
+function, drops it, and checks that the owner and its memberships are as
+before. The row is inserted with forced row-level security lifted for the
+transaction, as 0091 changed control rows.
+
+**The history.**
+
+| Table | Columns and rules |
+|---|---|
+| `ehr.patient_chat_conversations` | `id`, `patient_id` (unique: one per patient, references `identity.patients`), `created_at` |
+| `ehr.patient_chat_messages` | `id`, `conversation_id` and `patient_id` (one foreign key to the conversation's `(id, patient_id)`, `ON DELETE CASCADE`), `idempotency_key` (the EHR key rule, unique per conversation), `request_sha256`, `question` (1 to 1,000 characters), `reply` (`jsonb`: an object whose `status` is `answered`, `no_evidence`, `declined` or `unverified`, an `answer` of 1 to 4,000 characters, at most 8 `blocks` and 40 `sources`), `source_bindings` (`jsonb` array of at most 40 `{kind, id, hash}`, never returned), `created_at`; index on `(patient_id, created_at desc, id desc)` |
+
+Both force row-level security. Their only policies are `*_self_read`
+(`SELECT`), `*_self_insert` (`INSERT`) and `*_self_delete` (`DELETE`), each
+`ehr.patient_self_context(patient_id)`, the 0091 binding to the patient's
+live session; there is no `UPDATE` policy, so a stored exchange is never
+rewritten, and no staff, consent or break-glass path reads either table. The
+EHR runtime holds `SELECT`, `INSERT` and `DELETE` on both and nothing else
+(`runtime-grants.sql`). Retention is an open owner decision: there is no
+expiry, purge command or retention class; the patient deletes the history
+(`DELETE /api/v1/ehr/me/chat/history`), and EHR stores at most 50 exchanges.
+
+**The limits.** Three tables reached only through two `SECURITY DEFINER`
+commands owned by the migration administrator (as 0049's QoreID quota), with
+`search_path = pg_catalog, pg_temp`, revoked from `PUBLIC` and executable by
+the EHR runtime only. No runtime role, the test role included, holds a
+privilege on the tables, which force row-level security with one `using
+(true)` policy each for the owner's commands. They hold account and patient
+ids, counts and token numbers, and no text.
+
+| Object | Holds or does |
+|---|---|
+| `ehr.record_chat_usage_counters` | `(audience, account_id, bucket_period, bucket_start)`: requests per account per UTC hour and day |
+| `ehr.record_chat_reservations` | one lease per question: account, patient, reserved tokens, `expires_at` at most 60 s after creation, and once settled the outcome and token usage; at most one unsettled lease per audience and account (partial unique index) |
+| `ehr.record_chat_daily_budget` | per UTC day, tokens reserved and used |
+| `ehr.reserve_record_chat(audience, patient, tokens, daily budget)` | `patient` audience only (`22023`); proves the caller with `ehr.patient_self_context` (`42501`); prunes at most 100 counters older than 48 hours and 100 settled leases older than 2 days; settles the caller's expired lease as `expired` (its tokens count as used); refuses a second unsettled lease (`P4091`); counts the request against 10 an hour and 30 a day (`P4290`, detail the seconds until the bucket resets); reserves the tokens against the configured budget capped at 20,000,000 (`P5030`). Any refusal rolls the whole call back |
+| `ehr.settle_record_chat(reservation, input, output, cache read, cache write, outcome)` | the same binding and account (`42501`); moves the reservation to used tokens; `false` when already settled |
+
+**Locks.** `ACCESS EXCLUSIVE` on `platform.control_settings` first (every
+control read waits until the commit, as for 0091), then `SHARE ROW EXCLUSIVE`
+on `identity.patients` for the conversation's foreign key; each within the
+runner's 5 s lock timeout. No existing row changes.
+
+**Not included:** the staff audience's tables and use, any embedding, chunk,
+extraction or vector object, any Lab or record table policy, any permission,
+any retention class, and any change to `ehr.patient_self_context` or
+`identity.patient_self_session` (their grants are those of 0091).

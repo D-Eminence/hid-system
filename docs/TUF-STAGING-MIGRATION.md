@@ -294,6 +294,19 @@ The executable covers:
    EHR's own patient-self transaction (nothing new without the release
    binding; only vitals with only that flag on), as `hid_ehr_api_runtime`
    against a real Identity child.
+   With 0096 (patient record chat, ADR-065): the additional suites include
+   `patient-record-chat.integration.sql` (the patient's own history under
+   patient-self row-level security against every other context, the limit
+   commands' quotas, leases and budget, their catalogue, the kill switch),
+   run in both passes. `record_chat_runtime` runs
+   `verify-record-chat-runtime.mjs` after the release verifier, against a
+   local fake Messages API on 127.0.0.1 (nothing leaves the machine): flag
+   off and kill switch off send nothing, one answered question sends one
+   request with the configured model and geography and only the minimised
+   extract, replay, validation, refusal, failure, the in-flight lease, a
+   record changed and a history cleared during the call, another patient, a
+   staff session, the hourly quota and the audit rows, as
+   `hid_ehr_api_runtime` against a real Identity child.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
@@ -325,7 +338,10 @@ The executable covers:
    grants `SELECT` on it to the EHR runtime and not to the Lab runtimes,
    gives neither the Lab runtime nor the view's owner `ehr.patient_self_context`
    or the Lab runtime `USAGE` on `ehr`, and keeps `ehr.patient_self_context`
-   executable by exactly the EHR runtime and the test role), then
+   executable by exactly the EHR runtime and the test role; and since 0096
+   (`record_chat_grants`) that the upgraded bootstrap gives the EHR runtime
+   the chat history without `UPDATE` and the two chat commands, no runtime
+   the limit tables, and that `record_chat_enabled` is off), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

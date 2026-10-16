@@ -15,7 +15,7 @@ workload tokens from their own environment's issuer.
 | Runtime | Execution-role secret scope | Task-role allows | Explicit non-authority |
 |---|---|---|---|
 | Identity API | its DB; auth; NIN/OTP/Turnstile/platform MFA key | workload issuer `POST /token` only | no SES, provider secret API, S3, Textract, queue, EventBridge, or other DB secret |
-| EHR API | its DB/scanner URL | exact document bucket metadata/read/write and exact document KMS use via S3; workload issuer `POST /token` | no auth signing/pepper, Textract, queue, EventBridge, delete, or bucket administration |
+| EHR API | its DB/scanner URL; with patient record chat on only, the record chat secret (`anthropicApiKey`, `auditDigestKeyB64`) | exact document bucket metadata/read/write and exact document KMS use via S3; workload issuer `POST /token` | no auth signing/pepper, Textract, queue, EventBridge, delete, or bucket administration |
 | Lab API | its DB | workload issuer `POST /token` only | no document/provider/event/queue authority |
 | Pharmacy API | its DB | workload issuer `POST /token` only | no document/provider/event/queue authority |
 | OCR API | its DB | workload issuer `POST /token` only | no S3/KMS/Textract/EventBridge/queue authority |
@@ -41,6 +41,14 @@ the `mfaSecretKeyB64` field of the Identity sensitive secret, and
 `MFA_KEY_VERSION`; this is asserted for every profile. The Identity execution
 role already resolves that secret, so the key adds no IAM statement.
 Provider fields are injected only into Notification API/Worker as required.
+Only the `ehr-api` container receives `RECORD_CHAT_ANTHROPIC_API_KEY` and
+`RECORD_CHAT_AUDIT_DIGEST_KEY_B64`, from the `RecordChatSecretArn` secret, and
+only while `HID_RECORD_CHAT_PATIENT_ENABLED` is true (ADR-065); with it off no
+task references that secret and the parameter does not exist. No task receives
+an `ANTHROPIC_*` variable. The EHR execution role reads the secret through the
+container definition, as for its database secret, and the Claude API call
+leaves through NAT on HTTPS like other approved provider egress; no IAM
+statement is added.
 
 ## Resource-wildcard exceptions
 
