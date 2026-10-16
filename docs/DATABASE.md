@@ -3365,10 +3365,14 @@ runner's 5 s lock timeout (`MIGRATION_RUNBOOK.md`).
   session of the account, `ON CONFLICT (family_id) DO UPDATE` (a new choice
   replaces the old and increments `row_version`), then the
   `auth.facility.select` audit row on the same transaction. It reads the row
-  only through a live staff session of the family. A read that fails is never
-  reported as a choice: `GET /auth/session` answers
-  `503 DEPENDENCY_UNAVAILABLE`, and a refresh, whose rotation has committed,
-  answers `200` with `facilitySelection: 'unavailable'` (ADR-046, as ported).
+  only through a live staff session of the family. A refresh reads it on its
+  rotation's transaction (which already holds the rotated session of the
+  family), as a plain read under a savepoint, and records its `auth.refresh`
+  audit row at the facility it reports. A read that fails is never reported as
+  a choice: `GET /auth/session` answers `503 DEPENDENCY_UNAVAILABLE`, and a
+  refresh rolls the read back to its savepoint, still commits the rotation and
+  answers `200` with `facilitySelection: 'unavailable'` (ADR-046, as ported,
+  and its addendum).
   Since staff MFA (0088) the API reaches the row only through a staff session
   its guard found MFA-verified; the database guard does not repeat that check,
   because the row authorizes nothing.

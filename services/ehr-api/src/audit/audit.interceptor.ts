@@ -101,7 +101,14 @@ export class AuditInterceptor implements NestInterceptor {
     return typeof value === 'string' ? value : undefined;
   }
 
+  /**
+   * A patient acts on their own record: every row of a patient session is
+   * `patient-self`, whatever purpose the client sends, as the patient's own
+   * records read records it (A17). A staff request keeps the purpose it
+   * declares.
+   */
   private purpose(request: HidRequest): string | undefined {
+    if (request.actor?.kind === 'patient') return 'patient-self';
     const value = request.query?.purpose;
     return typeof value === 'string' ? value : request.header('x-purpose-of-use');
   }

@@ -132,4 +132,50 @@ describe('TokenService.selectedFacilityId', () => {
     database.query.mockResolvedValue({ rows: [], rowCount: 0 });
     await expect(service.selectedFacilityId(sessionId, accountId)).resolves.toBeUndefined();
   });
+
+  /** A caller's open transaction (a refresh's rotation, A6): the read fails with `fault` when one is given. */
+  function transaction(fault?: Error) {
+    const statements: string[] = [];
+    const client = { query: jest.fn(async (sql: string, _values?: unknown[]) => {
+      statements.push(normalized(sql));
+      if (!sql.includes('auth.session_facility_selection')) return { rows: [], rowCount: 0 };
+      if (fault) throw fault;
+      return { rows: [{ facility_id: facilityId }], rowCount: 1 };
+    }) };
+    return { client, statements };
+  }
+
+  it('reads on the caller\'s transaction when given its client, under a savepoint released after the read', async () => {
+    const { service, database } = harness();
+    const { client, statements } = transaction();
+
+    await expect(service.selectedFacilityId(sessionId, accountId, client as unknown as PoolClient)).resolves.toBe(facilityId);
+
+    // The same read as on the pool, never on another connection: on the
+    // rotation's transaction it sees the rotated session of the sign-in.
+    expect(database.query).not.toHaveBeenCalled();
+    expect(statements).toHaveLength(3);
+    expect(statements[0]).toBe('savepoint facility_selection_read');
+    expect(statements[1]).toContain('from auth.sessions session join auth.session_facility_selection selection on selection.family_id = session.family_id and selection.account_id = session.account_id');
+    for (const condition of ['session.id = $1', 'session.account_id = $2', "session.session_kind = 'staff'",
+      'session.revoked_at is null', 'session.expires_at > clock_timestamp()',
+      'session.absolute_expires_at > clock_timestamp()']) {
+      expect(statements[1]).toContain(condition);
+    }
+    // A plain read: it takes no row lock, so it never waits on another transaction's.
+    expect(statements[1]).not.toMatch(/\bfor (update|no key update|share|key share)\b/);
+    expect(client.query.mock.calls[1]![1]).toEqual([sessionId, accountId]);
+    expect(statements[2]).toBe('release savepoint facility_selection_read');
+  });
+
+  it('rolls a failed read back to its savepoint only, leaving the caller\'s transaction usable, and rethrows it', async () => {
+    const { service } = harness();
+    const fault = Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' });
+    const { client, statements } = transaction(fault);
+
+    await expect(service.selectedFacilityId(sessionId, accountId, client as unknown as PoolClient)).rejects.toBe(fault);
+
+    expect(statements[0]).toBe('savepoint facility_selection_read');
+    expect(statements.slice(2)).toEqual(['rollback to savepoint facility_selection_read']);
+  });
 });

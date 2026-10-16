@@ -8,8 +8,9 @@ import { validate } from 'class-validator';
 import type { Response } from 'express';
 import type { PoolClient } from 'pg';
 import { AUDIT_ACTION, NO_AUDIT, PUBLIC_ROUTE, REQUIRED_PERMISSIONS } from '../common/decorators';
-import { DomainProblem, ProblemDetailsFilter, PublicDetailProblem } from '../common/problem';
+import { DomainProblem, ProblemDetailsFilter, PublicDetailProblem, RetryAfterProblem } from '../common/problem';
 import type { DataAccessContext, HidRequest } from '../common/request-context';
+import { globalValidationPipe } from '../common/validation-problem';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import { matchDocument, normalizeDocumentName } from './assisted-match';
@@ -163,6 +164,21 @@ describe('the in-person check request', () => {
     ['a desk code too long', { deskCode: 'X'.repeat(30) }],
   ])('refuses %s', async (_label, overrides) => {
     expect((await valid(body(overrides))).length).toBeGreaterThan(0);
+  });
+
+  // A23: Identity's one nested body names a refused document or attestation
+  // field by its dotted path through main.ts's pipe, never its parent alone.
+  it('names a refused document or attestation field by its dotted path, without the typed value', async () => {
+    const refused = await globalValidationPipe().transform(body({
+      document: { firstName: 'Ada', lastName: 'Okafor', dateOfBirth: '02/01/1990' },
+      attestations: { ...attestations, codeShownOnPatientsOwnDevice: false, extra: true } }),
+    { type: 'body', metatype: AssistedVerificationDto }).then(() => undefined, (error: unknown) => error);
+    expect(refused).toMatchObject({ status: 400, code: 'VALIDATION_FAILED' });
+    const errors = (refused as DomainProblem).errors ?? [];
+    expect(errors.map(({ field }) => field).sort()).toEqual(['attestations.codeShownOnPatientsOwnDevice',
+      'attestations.extra', 'document.dateOfBirth']);
+    expect(errors.every(({ messages }) => messages.length > 0)).toBe(true);
+    expect(JSON.stringify(errors)).not.toContain('02/01/1990');
   });
 });
 
@@ -326,6 +342,9 @@ describe('AssistedVerificationService', () => {
     const f = fixture({ recordError: Object.assign(new Error(message), { code }) });
     const refused = await problem(f.service.verify(input(), 'assisted-check-key-0009', context));
     expect([refused.getStatus(), refused.code]).toEqual([status, answer]);
+    // No Retry-After (A21): the budgets are counted in SQL (0094), which
+    // reports only that it refused (RETRY-AFTER-SQL).
+    expect(refused).not.toBeInstanceOf(RetryAfterProblem);
     expect(f.enrollments.proveAtFacility).not.toHaveBeenCalled();
   });
 

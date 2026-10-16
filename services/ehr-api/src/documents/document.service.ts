@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
+import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { AuditService } from '../audit/audit.service';
+import { requireIdempotencyKey } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
@@ -34,6 +35,20 @@ interface DocumentRow {
   detected_media_type: string | null;
 }
 
+/** A list row as the statement reads it: the bigint columns arrive as ::text. */
+interface DocumentListRow {
+  id: string;
+  patientId: string;
+  encounterId: string | null;
+  fileName: string;
+  mediaType: string;
+  sizeBytes: string | null;
+  status: string;
+  scanStatus: string;
+  version: string;
+  createdAt: Date;
+}
+
 interface IdempotencyRow {
   state: 'processing' | 'completed' | 'failed';
   request_sha256: string;
@@ -50,10 +65,10 @@ export class DocumentService {
   ) {}
 
   async createUploadIntent(input: CreateDocumentUploadDto, idempotencyKey: string, context: DataAccessContext) {
-    this.validateIdempotencyKey(idempotencyKey);
-    await this.requirePlatformControl('uploads_enabled');
+    requireIdempotencyKey(idempotencyKey);
+    await this.requireUploadsEnabled();
     const authorization = await this.identity.authorize(input.patientId, 'write_records', context.purposeOfUse, context);
-    if (!authorization.allowed) throw new ForbiddenException('Patient write access is not authorized');
+    if (!authorization.allowed) throw new DomainProblem(403, 'CONSENT_REQUIRED', 'Patient write access is not authorized');
 
     const requestHash = this.hash(JSON.stringify({
       patientId: input.patientId,
@@ -70,7 +85,7 @@ export class DocumentService {
       if (existing?.state === 'completed' && existing.result_resource_id) {
         return this.findById(client, existing.result_resource_id, context.facilityId);
       }
-      if (existing) throw new ConflictException('An identical request is already being processed');
+      if (existing) throw new DomainProblem(409, 'REQUEST_IN_PROGRESS', 'An identical request is already being processed');
 
       if (input.encounterId) {
         // A document linked to an encounter is a record of it (CLIN-EIE, 0084): the encounter is share-locked
@@ -138,9 +153,9 @@ export class DocumentService {
 
   async list(patientId: string, encounterId: string, context: DataAccessContext) {
     const authorization = await this.identity.authorize(patientId, 'read_records', context.purposeOfUse, context);
-    if (!authorization.allowed) throw new ForbiddenException('Patient read access is not authorized');
+    if (!authorization.allowed) throw new DomainProblem(403, 'CONSENT_REQUIRED', 'Patient read access is not authorized');
     return this.database.withTransaction(context, async (client) => {
-      const result = await client.query(
+      const result = await client.query<DocumentListRow>(
         `select document.id::text as "id", document.patient_id::text as "patientId",
                 document.encounter_id::text as "encounterId", document.original_file_name as "fileName",
                 coalesce(scan.detected_media_type, document.declared_media_type) as "mediaType",
@@ -160,7 +175,11 @@ export class DocumentService {
       await this.audit.recordWithClient(client, this.auditEvent(
         context, 'ehr.document.list', 'success', patientId, encounterId,
       ));
-      return { items: result.rows };
+      return { items: result.rows.map((row) => ({
+        ...row,
+        sizeBytes: row.sizeBytes === null ? null : Number(row.sizeBytes),
+        version: Number(row.version),
+      })) };
     });
   }
 
@@ -173,7 +192,7 @@ export class DocumentService {
     const authorization = await this.identity.authorize(
       document.patient_id, 'read_records', context.purposeOfUse, context,
     );
-    if (!authorization.allowed) throw new ForbiddenException('Patient read access is not authorized');
+    if (!authorization.allowed) throw new DomainProblem(403, 'CONSENT_REQUIRED', 'Patient read access is not authorized');
     await this.audit.record(this.auditEvent(
       context, 'ehr.document.ocr-source.read', 'success', document.patient_id, document.id,
     ));
@@ -191,7 +210,7 @@ export class DocumentService {
   async complete(documentId: string, context: DataAccessContext) {
     // An upload started before uploads were turned off must not complete
     // either; checked first, as for an upload intent (0091).
-    await this.requirePlatformControl('uploads_enabled');
+    await this.requireUploadsEnabled();
     const initial = await this.database.withTransaction(
       context,
       (client) => this.findById(client, documentId, context.facilityId),
@@ -199,12 +218,13 @@ export class DocumentService {
     );
     this.assertUploader(initial, context);
     const authorization = await this.identity.authorize(initial.patient_id, 'write_records', context.purposeOfUse, context);
-    if (!authorization.allowed) throw new ForbiddenException('Patient write access is not authorized');
+    if (!authorization.allowed) throw new DomainProblem(403, 'CONSENT_REQUIRED', 'Patient write access is not authorized');
     const metadata = await this.storage.inspect(initial.storage_key);
     if (metadata.sizeBytes !== Number(initial.size_bytes)
       || metadata.sha256Hex !== initial.sha256_hex
       || metadata.mediaType !== initial.declared_media_type) {
-      throw new ConflictException('Uploaded object does not match the declared content metadata');
+      throw new DomainProblem(409, 'DOCUMENT_INTEGRITY_MISMATCH',
+        'Uploaded object does not match the declared content metadata');
     }
 
     return this.database.withTransaction(context, async (client) => {
@@ -225,7 +245,7 @@ export class DocumentService {
         const current = await this.findById(client, documentId, context.facilityId);
         this.assertUploader(current, context);
         if (current.status === 'uploaded' && current.object_version_id === metadata.versionId) return this.view(current);
-        throw new ConflictException('Document is not in an upload-completable state');
+        throw new DomainProblem(409, 'DOCUMENT_NOT_COMPLETABLE', 'Document is not in an upload-completable state');
       }
       await this.audit.recordWithClient(client, this.auditEvent(
         context, 'ehr.document.upload.complete', 'success', row.patient_id, row.id,
@@ -241,9 +261,9 @@ export class DocumentService {
       { readOnly: true },
     );
     const authorization = await this.identity.authorize(document.patient_id, 'read_records', context.purposeOfUse, context);
-    if (!authorization.allowed) throw new ForbiddenException('Patient read access is not authorized');
+    if (!authorization.allowed) throw new DomainProblem(403, 'CONSENT_REQUIRED', 'Patient read access is not authorized');
     if (document.status !== 'available' || document.scan_status !== 'clean' || !document.object_version_id) {
-      throw new ConflictException('Document is not available for download');
+      throw new DomainProblem(409, 'DOCUMENT_NOT_AVAILABLE', 'Document is not available for download');
     }
     const download = await this.storage.createDownload(document.storage_key, document.object_version_id);
     await this.audit.record(this.auditEvent(
@@ -277,13 +297,14 @@ export class DocumentService {
     });
   }
 
-  private async requirePlatformControl(controlKey: string): Promise<void> {
+  /** 423 UPLOADS_DISABLED while `uploads_enabled` is off; any other error, an unreadable control included, stays a 500. */
+  private async requireUploadsEnabled(): Promise<void> {
     try {
-      await this.database.query('select platform.require_control_enabled($1)', [controlKey]);
+      await this.database.query('select platform.require_control_enabled($1)', ['uploads_enabled']);
     } catch (error) {
       if (isDatabaseError(error) && error.code === '55000'
-        && String((error as { message?: unknown }).message ?? '').startsWith('PLATFORM_CONTROL_DISABLED:')) {
-        throw new ConflictException('Document uploads are temporarily disabled');
+        && String((error as { message?: unknown }).message ?? '') === 'PLATFORM_CONTROL_DISABLED:uploads_enabled') {
+        throw new DomainProblem(423, 'UPLOADS_DISABLED', 'Document uploads are temporarily disabled');
       }
       throw error;
     }
@@ -317,7 +338,7 @@ export class DocumentService {
     );
     const row = existing.rows[0];
     if (!row || row.request_sha256 !== requestHash) {
-      throw new ConflictException('Idempotency key was already used for a different request');
+      throw new DomainProblem(409, 'IDEMPOTENCY_KEY_REUSED', 'Idempotency key was already used for a different request');
     }
     return row;
   }
@@ -379,12 +400,6 @@ export class DocumentService {
       outcome,
       purposeOfUse: context.purposeOfUse,
     };
-  }
-
-  private validateIdempotencyKey(key: string): void {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(key)) {
-      throw new ConflictException('A valid Idempotency-Key header is required');
-    }
   }
 
   private hash(value: string): string {

@@ -2526,7 +2526,7 @@ Decision:
   the new membership's roles.
 - A stored choice that cannot be read is never reported as a choice:
   `GET /auth/session` answers `503 DEPENDENCY_UNAVAILABLE` with the cookies
-  untouched. A refresh, whose rotation has already committed, answers `200`
+  untouched. A refresh, whose rotation still commits (addendum below), answers `200`
   with the rotated session's cookies and CSRF token, the actor as resolved
   (the default facility) and `facilitySelection: 'unavailable'`, which the
   client must not take as a choice; it asks where the user is working, and
@@ -2624,6 +2624,41 @@ Related: ADR-038 (session assurance per family), ADR-044 (sign-out under the
 account lock), ADR-049 (one active membership per facility), ADR-054 (staff
 sign-in is password then TOTP); `INTERFACE_CONTRACT.md`, "Working facility per sign-in";
 `DATABASE.md`, "Session facility selection (0089)".
+
+## ADR-046 addendum: refresh reads the choice in its rotation and audits where it reports
+
+Date: 2026-10-14
+
+D-Eminence/hid-system#76 (ADR-059, launch item A6) moved the refresh's
+`auth.refresh` audit row into the rotation's transaction, with the actor the
+rotation resolved, at the default facility; the choice was still read after
+the commit, on another connection, for the response. A staff sign-in that had
+chosen another facility was therefore answered `selected` at that facility but
+audited at its primary facility, membership and organization, and a
+facility's audit list (`GET /audit/events`) showed the refresh at the wrong
+facility. D-Eminence/hid-system#73 had audited the reported actor, after the
+commit.
+
+Decision (this change, the A6 residual):
+
+- The refresh reads the choice in the rotation's transaction, which already
+  holds the rotated session of the family, and writes the `auth.refresh` row
+  with the actor it reports. The response reports that same read; nothing is
+  read after the commit.
+- The read is a plain `SELECT` (no row lock) under a savepoint. A read that
+  fails is rolled back to the savepoint only: the rotation commits with its
+  row at the default facility and the answer is still `200` with
+  `facilitySelection: 'unavailable'`. A transaction the savepoint cannot
+  restore fails the audit write, so the refresh is a `5xx` with nothing
+  rotated and the cookies kept (ADR-059).
+- `unavailable` stays although a failed rotation no longer spends the refresh
+  token: a `5xx` would leave every staff sign-in unrenewable for as long as
+  the choice cannot be read, while `unavailable` only asks the user where they
+  are working.
+
+No request, response, schema or grant change. The rotation's transaction holds
+the presented session's row lock for one more statement, bounded by the
+statement timeout.
 
 # ADR-047: One Environment-Bound Workload Issuer for Staging and Production
 
@@ -3689,7 +3724,8 @@ bypass):
   which this change does not relax. Identity's CORS policy is unchanged and
   applies first, as on every route: a request with no `Origin` or one in
   `CORS_ORIGINS` is answered, and a foreign `Origin` is refused by the CORS
-  middleware (`500`, no CORS permission) before the route.
+  middleware (`500`, no CORS permission; `403 ORIGIN_DENIED` since
+  D-Eminence/hid-system#76, ADR-059) before the route.
 - `PublicDetailProblem` is the one exception to Identity's 5xx detail
   masking. It takes only a fixed sentence written for the person using the
   client, never a message built from an error or from request data; any
@@ -4154,6 +4190,29 @@ Related: ADR-041 (P8 owners); ADR-045 (Outreach campaign governance);
 `PHASE_3_LAUNCH_DECISIONS.md` (D9, D17); `INTERFACE_CONTRACT.md` (launch
 module set, patient self-service, document upload completion);
 `DATABASE.md` (0091); release checklist §1, §2, §3, P10, P11, §5, §8, §9.
+
+## ADR-058 addendum: completion while uploads are off answers 423 UPLOADS_DISABLED
+
+Date: 2026-10-14
+
+Change: this change (launch review item A15, register
+BE-EHR-DOCUMENTS-CONTRACT).
+
+ADR-058 had completion answer `409` while `uploads_enabled` is off: the
+generic `409 CONFLICT` that the upload intent also answered. Under ADR-059
+("refusals carry their own codes") both now answer `423 UPLOADS_DISABLED`,
+with the same detail ("Document uploads are temporarily disabled"), as
+`423 PLATFORM_PORTAL_DISABLED` and `423 BREAK_GLASS_DISABLED` do for their
+controls. The check itself is unchanged: on completion it still runs first,
+before Identity, the storage read or any write; on the intent it follows the
+`Idempotency-Key` check. A control that cannot be read still answers `500`.
+The other document refusals took their own codes in the same change
+(`INTERFACE_CONTRACT.md` §16, "Document route answers"). The request audit
+records the refusal with `details.code` `UPLOADS_DISABLED` and outcome
+`denied`, as it recorded the `409`. At launch no role holds
+`ehr.document.write`, so both routes answer `403 PERMISSION_DENIED` first; the
+`423` is reached only once a reviewed migration grants the permission again
+while the control is still off.
 
 # ADR-059: A Fault Is Never a Sign-Out; Refusals Carry Their Own Codes
 

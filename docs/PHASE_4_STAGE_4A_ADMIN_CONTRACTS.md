@@ -85,6 +85,8 @@ session is no longer accepted:
 | `AUTHENTICATION_REQUIRED` | 401 | Everything else: no credential, an unknown, forged or malformed token, an access token that simply needs a refresh, or a session replaced by a refresh. |
 | `STEP_UP_REQUIRED` | 403 | The command needs a step-up and this session has none. |
 | `STEP_UP_EXPIRED` | 403 | The session's last step-up is older than five minutes. |
+| `MFA_INVALID_CODE` | 403 | A wrong or replayed code on `POST /admin/mfa/step-up`. The session stays valid and the failure is counted. (On the sign-in challenge routes `/auth/admin/mfa/*` it stays `401`.) |
+| `PLATFORM_SESSION_REQUIRED` | 403 | The session is accepted but has no MFA assurance, including a step-up or recovery-code regeneration whose session lost it while the request waited (`401 MFA_CHALLENGE_INVALID` for those two before this change, A20). |
 
 Enumeration:
 - A session end is reported only after the credential is shown to be one the
@@ -116,6 +118,8 @@ session's family has no live session. Every other reuse handling is unchanged.
 
 The shared web client retries a 401 once after a refresh and then surfaces the
 original error, so the console should record the refresh's own code as well.
+Step-up refusals are `403` since this change (A20), so that refresh never
+repeats a step-up with the same code or a regeneration against its budget.
 SQL commands that re-check step-up at the boundary still map to
 `STEP_UP_REQUIRED`.
 
@@ -125,6 +129,8 @@ Identity's CORS policy (`src/config/cors.ts`, used by `main.ts`) also exposes
 `x-hid-export-row-count`, `x-hid-export-row-limit` and `x-hid-export-truncated`.
 The export controller takes the names from the same constant. Allowed origins,
 methods and credentials are unchanged. Same-origin deployments see no change.
+Since this change (A21) it also exposes `retry-after`, which Identity's
+rate-limit `429`s carry.
 
 ## 6. Facility transition reachability
 

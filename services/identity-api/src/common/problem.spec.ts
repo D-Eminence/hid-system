@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 import type { ArgumentsHost } from '@nestjs/common';
 import type { Response } from 'express';
 import type { HidRequest } from './request-context';
-import { DomainProblem, ProblemDetailsFilter, PublicDetailProblem } from './problem';
+import { DomainProblem, ProblemDetailsFilter, PublicDetailProblem, RetryAfterProblem } from './problem';
 
 describe('ProblemDetailsFilter PHI safety', () => {
   it('does not log or echo a raw exception, stack, concrete patient path, or query string', () => {
@@ -85,5 +85,40 @@ describe('ProblemDetailsFilter PHI safety', () => {
       .toMatchObject({ status: 503, code: 'DEPENDENCY_DOWN', detail: 'The service could not complete the request.' });
     expect(answer(new PublicDetailProblem(409, 'SOME_CONFLICT', 'A conflict.')))
       .toMatchObject({ status: 409, detail: 'A conflict.' });
+  });
+
+  it('sets Retry-After only for a RetryAfterProblem, in whole seconds, and keeps the body', () => {
+    const request = { correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPQ', method: 'POST',
+      route: { path: '/auth/otp/start' } } as unknown as HidRequest;
+    const answer = (exception: unknown) => {
+      const response = {
+        status: jest.fn().mockReturnThis(),
+        type: jest.fn().mockReturnThis(),
+        json: jest.fn().mockReturnThis(),
+        setHeader: jest.fn().mockReturnThis(),
+      };
+      const host = {
+        switchToHttp: () => ({ getRequest: () => request, getResponse: () => response as unknown as Response }),
+      } as unknown as ArgumentsHost;
+      new ProblemDetailsFilter().catch(exception, host);
+      return response;
+    };
+
+    // The whole window, rounded up: never a fraction or zero.
+    const limited = answer(new RetryAfterProblem(429, 'OTP_RATE_LIMITED', 'Too many verification-code requests', 899.2));
+    expect(limited.setHeader.mock.calls).toEqual([['Retry-After', '900']]);
+    expect(limited.status).toHaveBeenCalledWith(429);
+    // The body is unchanged: no field names the wait.
+    expect(Object.keys(limited.json.mock.calls[0]?.[0] as object).sort())
+      .toEqual(['code', 'correlationId', 'detail', 'instance', 'status', 'title', 'type']);
+    expect(limited.json.mock.calls[0]?.[0]).toMatchObject({ status: 429, code: 'OTP_RATE_LIMITED',
+      detail: 'Too many verification-code requests' });
+    expect(answer(new RetryAfterProblem(429, 'OTP_RESEND_COOLDOWN', 'Wait before requesting another code', 0.2))
+      .setHeader.mock.calls).toEqual([['Retry-After', '1']]);
+
+    // Any other problem, a 429 or a 503 included, carries none.
+    expect(answer(new DomainProblem(429, 'RATE_LIMITED', 'Too many requests')).setHeader).not.toHaveBeenCalled();
+    expect(answer(new DomainProblem(503, 'PLATFORM_MAINTENANCE', 'HID is temporarily in maintenance mode')).setHeader)
+      .not.toHaveBeenCalled();
   });
 });

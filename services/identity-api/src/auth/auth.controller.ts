@@ -405,32 +405,48 @@ export class AuthController {
     // fault (5xx, or any other error) leaves the cookies the browser holds,
     // which still refresh, so the client may retry (A6).
     try {
-      const result = await this.auth.refresh(refreshToken, this.event(request),
-        (client, actor) => this.recordRotation(client, actor, request));
+      let reported: SessionReport | undefined;
+      const result = await this.auth.refresh(refreshToken, this.event(request), async (client, actor) => {
+        reported = await this.recordRotation(client, actor, request);
+      });
       // The rotation has committed: the presented refresh token is spent and
-      // only the rotated session is live. It keeps the sign-in's family, and so
-      // its facility selection (0089). A selection that cannot be read now does
-      // not fail the refresh: a 5xx after the rotation would leave the browser
-      // with the spent token (an edge that replaces a 5xx drops its Set-Cookie). It is answered as
-      // 'unavailable', with the default facility, which the client does not
-      // take as a choice; the stored choice is kept for the next read.
-      const reported = await this.withFacilitySelection(result.actor, undefined, 'report');
+      // only the rotated session is live. The response reports the actor the
+      // rotation read and audited, without reading again. (TokenService runs
+      // the hook for every rotation it returns; a staff sign-in it did not run
+      // for would be reported 'unavailable', never as a choice.)
+      const report = reported ?? { actor: result.actor,
+        ...(this.staffSignIn(result.actor) ? { facilitySelection: 'unavailable' as const } : {}) };
       this.setCookies(response, result);
       response.setHeader('x-csrf-token', result.csrfToken);
-      return this.sessionResponse(reported.actor, result.expiresAt, reported.facilitySelection);
+      return this.sessionResponse(report.actor, result.expiresAt, report.facilitySelection);
     } catch (error) {
       if (refreshRefused(error)) this.clearCookies(response);
       throw error;
     }
   }
 
-  /** The auth.refresh audit event, written in the rotation's transaction: a failed write rolls the rotation back. */
-  private async recordRotation(client: PoolClient, actor: ActorContext, request: HidRequest): Promise<void> {
+  /**
+   * The refresh's work in the rotation's transaction (A6). The rotated session
+   * keeps the sign-in's family, and so its facility selection (0089), which is
+   * read on that transaction and re-checked as on any read; the auth.refresh
+   * audit event then records the actor at the facility the response reports.
+   * A selection that cannot be read does not fail the refresh, which would
+   * leave the sign-in unrenewable for as long as it stays unreadable: the read
+   * is rolled back to its savepoint (TokenService.selectedFacilityId) and
+   * reported as 'unavailable', with the default facility, which the client
+   * does not take as a choice; the stored choice is kept for the next read.
+   * The audit row is written after the read on the same transaction, so a
+   * transaction the savepoint could not restore fails there. A failed audit
+   * write is 503 and rolls the rotation back.
+   */
+  private async recordRotation(client: PoolClient, actor: ActorContext, request: HidRequest): Promise<SessionReport> {
+    const reported = await this.withFacilitySelection(actor, undefined, 'report', client);
     try {
-      await this.audit.recordWithClient(client, this.successEvent('auth.refresh', actor, request));
+      await this.audit.recordWithClient(client, this.successEvent('auth.refresh', reported.actor, request));
     } catch {
       throw new ServiceUnavailableException('Audit persistence is unavailable; request was denied');
     }
+    return reported;
   }
 
   /**
@@ -677,15 +693,16 @@ export class AuthController {
    * the actor's current active facilities. `boundFacilityId` is the facility a
    * valid X-Facility-ID bound to this request, which keeps the actor at it.
    * A failed read is never answered as the default facility: it is 503
-   * DEPENDENCY_UNAVAILABLE, or, when `unreadable` is 'report' (a refresh whose
-   * rotation has committed), the actor as resolved with 'unavailable'.
+   * DEPENDENCY_UNAVAILABLE, or, when `unreadable` is 'report' (a refresh, read
+   * on its rotation's transaction, `client`), the actor as resolved with
+   * 'unavailable'.
    */
   private async withFacilitySelection(actor: ActorContext, boundFacilityId?: string,
-    unreadable: 'refuse' | 'report' = 'refuse'): Promise<SessionReport> {
+    unreadable: 'refuse' | 'report' = 'refuse', client?: PoolClient): Promise<SessionReport> {
     if (!this.staffSignIn(actor)) return { actor };
     let selectedId: string | undefined;
     try {
-      selectedId = await this.tokens.selectedFacilityId(actor.sessionId, actor.accountId);
+      selectedId = await this.tokens.selectedFacilityId(actor.sessionId, actor.accountId, client);
     } catch {
       if (unreadable === 'report') return { actor, facilitySelection: 'unavailable' };
       throw new ServiceUnavailableException('The facility selection is unavailable');

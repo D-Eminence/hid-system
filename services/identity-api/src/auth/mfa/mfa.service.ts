@@ -4,7 +4,7 @@ import type { PoolClient } from 'pg';
 import { platformAuditActor } from '../../admin/admin-context';
 import { AuditService } from '../../audit/audit.service';
 import { AfterResponseTasks } from '../../common/after-response-tasks';
-import { DomainProblem } from '../../common/problem';
+import { DomainProblem, RetryAfterProblem } from '../../common/problem';
 import type { ActorContext, PlatformAccessContext } from '../../common/request-context';
 import { getEnvironment } from '../../config/environment';
 import { DatabaseService } from '../../database/database.service';
@@ -107,6 +107,13 @@ const FAILURE_PER_IP: Record<MfaSessionKind, RateLimitWindow> = {
 const IP_BUCKET: Record<MfaSessionKind, string> = { platform: 'ip', staff: 'staff-ip' };
 /** Enrollment starts and recovery-code regenerations: five per 15 minutes. */
 const REQUESTS_PER_ACCOUNT: RateLimitWindow = { windowSeconds: 900, maxRequests: 5 };
+/**
+ * Retry-After of 429 MFA_RATE_LIMITED (A21): the longest MFA window (each is
+ * 15 minutes), an upper bound whichever budget refused; a blocked bucket stays
+ * blocked for one window. Never the time left in the blocked bucket.
+ */
+const MFA_RETRY_AFTER_SECONDS = Math.max(FAILURE_PER_ACCOUNT.windowSeconds, REQUESTS_PER_ACCOUNT.windowSeconds,
+  ...Object.values(FAILURE_PER_IP).map((window) => window.windowSeconds));
 const CHALLENGE_TTL_SECONDS: Record<PlatformChallengePurpose, number> = { verify: 300, enroll: 600 };
 const CHALLENGE_MAX_ATTEMPTS = 5;
 const TOTP_ISSUER: Record<MfaSessionKind, string> = { platform: 'HID Platform Admin', staff: 'Health ID' };
@@ -557,7 +564,7 @@ export class MfaService {
       });
       return { kind: 'verified', expiresAt: updated.rows[0]!.step_up_expires_at } as const;
     });
-    if (outcome.kind !== 'verified') throw this.failure(outcome);
+    if (outcome.kind !== 'verified') throw this.sessionFailure(outcome);
     return { stepUpExpiresAt: outcome.expiresAt.toISOString() };
   }
 
@@ -593,7 +600,7 @@ export class MfaService {
       });
       return { kind: 'regenerated' } as const;
     });
-    if (outcome.kind !== 'regenerated') throw this.failure(outcome);
+    if (outcome.kind !== 'regenerated') throw this.sessionFailure(outcome);
     return { recoveryCodes };
   }
 
@@ -860,9 +867,27 @@ export class MfaService {
 
   private failure(outcome: Failure): DomainProblem {
     if (outcome.kind === 'rate_limited') {
-      return new DomainProblem(429, 'MFA_RATE_LIMITED', 'Too many verification attempts; try again later');
+      return new RetryAfterProblem(429, 'MFA_RATE_LIMITED', 'Too many verification attempts; try again later',
+        MFA_RETRY_AFTER_SECONDS);
     }
     if (outcome.kind === 'failed') return new DomainProblem(401, 'MFA_INVALID_CODE', 'The code is not valid');
     return new DomainProblem(401, 'MFA_CHALLENGE_INVALID', 'Sign in again to continue');
+  }
+
+  /**
+   * The refusal of step-up and recovery-code regeneration (A20). Both run on an
+   * authenticated platform route, where 401 would read as an ended session: a
+   * wrong or replayed code is 403 MFA_INVALID_CODE, and a session that lost its
+   * MFA assurance while the request waited for the account lock is 403
+   * PLATFORM_SESSION_REQUIRED, as requirePlatformAssurance answers it. It is
+   * thrown after the transaction committed, so a counted failure stays counted.
+   * The sign-in challenge steps are unauthenticated and keep failure() and 401.
+   */
+  private sessionFailure(outcome: Failure): DomainProblem {
+    if (outcome.kind === 'failed') return new DomainProblem(403, 'MFA_INVALID_CODE', 'The code is not valid');
+    if (outcome.kind === 'invalid') {
+      return new DomainProblem(403, 'PLATFORM_SESSION_REQUIRED', 'An MFA-verified platform administration session is required');
+    }
+    return this.failure(outcome);
   }
 }
