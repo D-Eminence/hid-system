@@ -1231,7 +1231,7 @@ export class HidRegionalStack extends Stack {
       image: ecs.ContainerImage.fromRegistry(this.parameter('MigrationImageUri').valueAsString),
       // The image's entrypoint is /nodejs/bin/node and `command` replaces its
       // CMD, so the command names the script. Other runs override it
-      // (AWS_DEPLOYMENT_RUNBOOK.md §6).
+      // (AWS_DEPLOYMENT_RUNBOOK.md §4, Running the migration task).
       command: ['scripts/apply-migrations.mjs', '--plan'],
       environment: { NODE_ENV: 'production', DATABASE_SSL: 'true', DATABASE_SSL_ROOT_CERT_BASE64: this.parameter('RdsCaBundleBase64').valueAsString },
       secrets: { DATABASE_URL: migrationAdministrator, DATABASE_ADMIN_URL: migrationAdministrator },
