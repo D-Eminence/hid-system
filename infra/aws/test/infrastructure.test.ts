@@ -1265,40 +1265,50 @@ test('production OTP delivery injects only the otp-email-sms provider fields', (
   assert.ok(containerOf(stagingRegional, 'notification-worker').secrets.some(item => item.Name === 'NOVU_API_KEY'));
 });
 
-test('patient record release categories are explicit synth inputs that default to false; production refuses Lab results (D17)', () => {
+test('patient record release categories are explicit synth inputs that default to false; only staging may set them (D17, P35)', () => {
   const productionTopic = { operationalAlarmTopicArn: productionTopicArn };
   const none = { vitals: false, diagnoses: false, prescriptions: false, labResults: false, documents: false };
   assert.deepEqual(environmentConfig('production').patientRecordRelease, none);
+  assert.deepEqual(environmentConfig('development').patientRecordRelease, none);
   assert.deepEqual(environmentConfig('staging', 'economy').patientRecordRelease, none);
   const flags = ['EHR_PATIENT_RELEASE_VITALS', 'EHR_PATIENT_RELEASE_DIAGNOSES', 'EHR_PATIENT_RELEASE_PRESCRIPTIONS',
     'EHR_PATIENT_RELEASE_LAB_RESULTS', 'EHR_PATIENT_RELEASE_DOCUMENTS'];
   for (const template of [regional, stagingRegional]) {
     for (const flag of flags) assert.equal(containerOf(template, 'ehr-api').environment[flag], 'false', flag);
   }
-  for (const input of ['patientReleaseVitals', 'patientReleaseDiagnoses', 'patientReleasePrescriptions',
-    'patientReleaseLabResults', 'patientReleaseDocuments'] as const) {
+  const inputs = [['patientReleaseVitals', 'vitals', 'HID_EHR_PATIENT_RELEASE_VITALS'],
+    ['patientReleaseDiagnoses', 'diagnoses', 'HID_EHR_PATIENT_RELEASE_DIAGNOSES'],
+    ['patientReleasePrescriptions', 'prescriptions', 'HID_EHR_PATIENT_RELEASE_PRESCRIPTIONS'],
+    ['patientReleaseLabResults', 'labResults', 'HID_EHR_PATIENT_RELEASE_LAB_RESULTS'],
+    ['patientReleaseDocuments', 'documents', 'HID_EHR_PATIENT_RELEASE_DOCUMENTS']] as const;
+  for (const [input] of inputs) {
     assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, { [input]: 'yes' }),
       /must be true or false/, input);
   }
-  // Lab is withdrawn at launch (D17, 0091 section 2): production never releases Lab results.
-  assert.throws(() => environmentConfig('production', undefined, undefined, undefined,
-    { ...productionTopic, patientReleaseLabResults: 'true' }),
-  /HID_EHR_PATIENT_RELEASE_LAB_RESULTS=true is refused in production/);
-  const approved = environmentConfig('production', undefined, undefined, undefined, { ...productionTopic,
-    patientReleaseVitals: 'true', patientReleaseDiagnoses: 'true', patientReleasePrescriptions: 'true',
-    patientReleaseDocuments: 'true' });
-  assert.deepEqual(approved.patientRecordRelease, { ...none, vitals: true, diagnoses: true, prescriptions: true,
-    documents: true });
+  // Production refuses every category: Lab results while Lab is withdrawn at
+  // launch (D17, 0091 section 2), the others until the clinical owner signs
+  // off each one (P35, ADR-064). The development stack's ehr-api runs in the
+  // production profile (HID_DEPLOYMENT_ENV=production), so it refuses them too.
+  const productionConfiguration = environmentConfig('production', undefined, undefined, undefined, productionTopic);
+  const developmentConfiguration = environmentConfig('development');
+  for (const [input, category, variable] of inputs) {
+    const refused = new RegExp(`${variable}=true is refused outside staging`);
+    assert.throws(() => environmentConfig('production', undefined, undefined, undefined,
+      { ...productionTopic, [input]: 'true' }), refused, `production ${input}`);
+    assert.throws(() => environmentConfig('development', undefined, undefined, undefined, { [input]: 'true' }),
+      refused, `development ${input}`);
+    // The regional stack refuses the same for a configuration built by hand.
+    for (const [label, configuration] of [['Production', productionConfiguration],
+      ['Development', developmentConfiguration]] as const) {
+      assert.throws(() => new HidRegionalStack(new App(), `PatientRelease${label}${input}`, { configuration: {
+        ...configuration, patientRecordRelease: { ...none, [category]: true } } }), refused, `${label} stack ${input}`);
+    }
+  }
   const staging = environmentConfig('staging', 'economy', undefined, undefined, { patientReleaseVitals: 'true',
     patientReleaseDiagnoses: 'true', patientReleasePrescriptions: 'true', patientReleaseLabResults: 'true',
     patientReleaseDocuments: 'true' });
   assert.deepEqual(staging.patientRecordRelease, { vitals: true, diagnoses: true, prescriptions: true, labResults: true,
     documents: true });
-  // The regional stack refuses the same for a configuration built by hand.
-  const productionConfiguration = environmentConfig('production', undefined, undefined, undefined, productionTopic);
-  assert.throws(() => new HidRegionalStack(new App(), 'PatientReleaseLabProduction', { configuration: {
-    ...productionConfiguration, patientRecordRelease: { ...none, labResults: true } } }),
-  /HID_EHR_PATIENT_RELEASE_LAB_RESULTS=true is refused in production/);
   const template = Template.fromStack(new HidRegionalStack(new App(), 'PatientReleaseStaging', { configuration: staging }))
     .toJSON() as typeof regional;
   for (const flag of flags) assert.equal(containerOf(template, 'ehr-api').environment[flag], 'true', flag);

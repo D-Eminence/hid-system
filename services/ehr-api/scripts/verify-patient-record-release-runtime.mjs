@@ -16,8 +16,13 @@
 // it does not release, checks the exact stored object after the audit
 // commits, and signs a 60 s attachment URL. A staff session is refused both
 // routes before a facility is bound, Identity refuses the patient-self
-// authorization to lab-api (D17), and lab-api serves no patient route. A
-// second EHR boot with every flag off answers exactly as before the release.
+// authorization to lab-api (D17), and lab-api serves no patient route. The
+// database follows the flags: in the EHR's own patient-self transaction, with
+// Identity's real authorization, a transaction that names no category (as an
+// EHR build from before the release would run it) reads nothing new, and one
+// bound by PatientRecordRelease reads only the configured categories. A
+// second EHR boot with only vitals on releases only vitals, and a third with
+// every flag off answers exactly as before the release.
 // Synthetic accounts and records only.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
@@ -105,7 +110,7 @@ async function startService({ require, service, override }) {
       errors.map((error) => ({ field: error.property, messages: Object.values(error.constraints ?? {}) }))) }));
   app.useGlobalFilters(new ProblemDetailsFilter());
   await app.listen(0, '127.0.0.1');
-  return { app, load, database: module.get(DatabaseService), close: () => app.close() };
+  return { app, load, module, database: module.get(DatabaseService), close: () => app.close() };
 }
 
 /** The document object store, recording each call; `integrity` changes what the stored object reports. */
@@ -347,6 +352,29 @@ if (process.argv[2] === '--identity-child') {
       return { status: response.status, headers: response.headers, body: await response.json().catch(() => null) };
     };
     const checks = [];
+    // The released relations one patient-self transaction of the EHR reads,
+    // under Identity's real patient-self authorization for this cookie; `bind`
+    // says whether PatientRecordRelease tells the database its release set.
+    const releasedRows = async (booted, cookie, bind) => {
+      const identityApi = booted.module.get(booted.load('integrations/identity-api.service.ts').IdentityApiService);
+      const release = booted.module.get(booted.load('ehr/patient-records/patient-release.ts').PatientRecordRelease);
+      const headers = { cookie, origin: ORIGIN };
+      const authorization = await identityApi.authorizeSelf({ correlationId: `release-binding-${randomUUID()}`,
+        header: (name) => headers[name.toLowerCase()] });
+      return booted.database.withPatientTransaction(authorization, `release-binding-${randomUUID()}`, async (client) => {
+        if (bind) await release.bind(client);
+        const { rows } = await client.query(`select
+            (select count(*)::int from ehr.encounters) as encounters,
+            (select count(*)::int from ehr.vitals) as vitals,
+            (select count(*)::int from ehr.diagnoses) as diagnoses,
+            (select count(*)::int from ehr.prescriptions) as prescriptions,
+            (select count(*)::int from ehr.patient_released_lab_results) as lab_results,
+            (select count(*)::int from ehr.documents) as documents,
+            (select count(*)::int from ehr.document_scan_events) as scan_events,
+            current_user as role`);
+        return rows[0];
+      });
+    };
     const signInPatient = async () => {
       const response = await call(identityUrl, 'POST', '/auth/patient/login', { origin: ORIGIN },
         { email: patientEmail, password, turnstileAction: 'patient-login' });
@@ -442,7 +470,28 @@ if (process.argv[2] === '--identity-child') {
       owner: 'hid_lab_release_reader' });
     checks.push('Identity refuses the patient-self authorization to lab-api (403 WORKLOAD_AUTHENTICATION_REQUIRED); the Lab runtime cannot execute ehr.patient_self_context, read the released-results view or use schema ehr, and the view belongs to hid_lab_release_reader');
 
-    // 5. Every flag off: exactly the earlier contract.
+    // 5. The database follows the flags. Every flag is on in this boot: a
+    //    patient-self transaction that names no category reads only the
+    //    completed encounter (the binding is live), one bound by
+    //    PatientRecordRelease reads every released relation.
+    assert.deepEqual(await releasedRows(ehr, patient.cookie, false), { encounters: 1, vitals: 0, diagnoses: 0,
+      prescriptions: 0, lab_results: 0, documents: 0, scan_events: 0, role: 'hid_ehr_api_runtime' },
+    'a patient-self transaction that names no release category read a released relation');
+    assert.deepEqual(await releasedRows(ehr, patient.cookie, true), { encounters: 1, vitals: 1, diagnoses: 1,
+      prescriptions: 1, lab_results: 2, documents: 2, scan_events: 2, role: 'hid_ehr_api_runtime' });
+    await ehr.close();
+    ehr = await bootEhr(['EHR_PATIENT_RELEASE_VITALS']);
+    const vitalsOnly = await call(ehr.base, 'GET', '/ehr/me/records', { cookie: patient.cookie });
+    assert.equal(vitalsOnly.status, 200, JSON.stringify(vitalsOnly.body));
+    assert.deepEqual({ released: vitalsOnly.body.released, withheld: vitalsOnly.body.withheld,
+      vitals: vitalsOnly.body.vitals.map((item) => item.id) }, { released: ['encounters', 'notes', 'vitals'],
+      withheld: ['diagnoses', 'prescriptions', 'labRequests', 'documents'], vitals: [r.vital] });
+    assert.deepEqual(await releasedRows(ehr, patient.cookie, true), { encounters: 1, vitals: 1, diagnoses: 0,
+      prescriptions: 0, lab_results: 0, documents: 0, scan_events: 0, role: 'hid_ehr_api_runtime' },
+    'the database admitted a category whose flag is off');
+    checks.push('the database follows the release flags: in the EHR\'s own patient-self transaction under Identity\'s real authorization, a transaction that names no category (as an EHR build from before the release runs it) reads only the completed encounter, one bound by PatientRecordRelease with every flag on reads every released relation, and with only vitals on GET /ehr/me/records releases only the vital and the database admits no other category');
+
+    // 6. Every flag off: exactly the earlier contract.
     await ehr.close();
     ehr = await bootEhr([]);
     const before = await call(ehr.base, 'GET', '/ehr/me/records', { cookie: patient.cookie });
@@ -462,7 +511,10 @@ if (process.argv[2] === '--identity-child') {
       and outcome='success' and patient_id=$1 order by occurred_at desc limit 1`, [ids.patient]);
     assert.deepEqual(offAudit.rows[0].details, { encounterCount: 1, noteCount: 0,
       withheldCategories: ['vitals', 'diagnoses', 'prescriptions', 'labRequests', 'documents'] });
-    checks.push('with every flag off, GET /ehr/me/records answers and audits exactly as before the release (encounters and notes; the five categories withheld; no Lab results key), and the download answers 404 DOCUMENT_NOT_AVAILABLE');
+    assert.deepEqual(await releasedRows(ehr, patient.cookie, true), { encounters: 1, vitals: 0, diagnoses: 0,
+      prescriptions: 0, lab_results: 0, documents: 0, scan_events: 0, role: 'hid_ehr_api_runtime' },
+    'with every flag off the database admitted a released category');
+    checks.push('with every flag off, GET /ehr/me/records answers and audits exactly as before the release (encounters and notes; the five categories withheld; no Lab results key), the download answers 404 DOCUMENT_NOT_AVAILABLE, and the database admits no released category to the patient-self transaction');
 
     process.stdout.write(`${JSON.stringify({ status: 'passed', scope: 'local-synthetic-only',
       roles: ['hid_ehr_api_runtime', 'hid_identity_api_runtime'], checks })}\n`);

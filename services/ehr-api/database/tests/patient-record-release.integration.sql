@@ -14,6 +14,14 @@
 -- privilege on schema ehr or on ehr.patient_self_context, whose EXECUTE stays
 -- with hid_ehr_runtime and the test role (PSELF-RLS).
 --
+-- The database follows the release flags: each 0095 policy and the view
+-- admit their category only when the transaction-local app.patient_release,
+-- which PatientRecordRelease sets to the categories the EHR configuration
+-- releases, names it exactly. A transaction that names none, such as one of
+-- an EHR build from before the release (a rollback past D-Eminence/hid-system#52),
+-- reads nothing new. The policies' and the view's own conditions are checked
+-- in the catalogue too, where a behaviour case cannot tell them apart.
+--
 -- Fixtures are synthetic and inserted as the suite runner with
 -- session_replication_role = replica (no triggers or foreign keys; CHECK
 -- constraints still apply), so each row has exactly the state its case
@@ -60,6 +68,16 @@ values('b6000000-0000-4000-8000-000000000001','b5000000-0000-4000-8000-000000000
   'b4000000-0000-4000-8000-000000000001','b4000000-0000-4000-8000-000000000002','doctor','doctor',true,true);
 
 set local session_replication_role = replica;
+
+-- The doctor's active direct-care read consent for patient 1, so the staff
+-- context below reaches patient 1's encounters and only the view's own
+-- patient-self condition keeps it from the released Lab results.
+insert into identity.consent_grants(id,patient_id,staff_id,account_id,membership_id,facility_id,scope,purpose_of_use,
+  status,reason,starts_at,expires_at)
+values('b6100000-0000-4000-8000-000000000001','b2000000-0000-4000-8000-000000000001',
+  'b5000000-0000-4000-8000-000000000001','b1000000-0000-4000-8000-000000000003','b6000000-0000-4000-8000-000000000001',
+  'b4000000-0000-4000-8000-000000000002','read_records','direct-care','active','Synthetic release staff consent',
+  clock_timestamp()-interval '1 hour',clock_timestamp()+interval '30 days');
 
 -- Encounters: 1 completed, 2 in progress, 3 cancelled, 4 entered in error and
 -- 5 completed then entered in error (a wrong-patient retraction), all of
@@ -242,7 +260,7 @@ create temporary table release_binding(patient text, subject text, account text,
 grant all on release_binding to public;
 insert into release_binding values ('b2000000-0000-4000-8000-000000000001','synthetic:release:1',
   'b1000000-0000-4000-8000-000000000001','b3000000-0000-4000-8000-000000000001');
-create function pg_temp.bind_release(patient text, subject text, account text, session text) returns void
+create function pg_temp.bind_self(patient text, subject text, account text, session text) returns void
 language sql as $$
   select set_config('app.actor_subject',subject,true), set_config('app.account_id',account,true),
     set_config('app.session_id',session,true), set_config('app.patient_id',patient,true),
@@ -251,10 +269,62 @@ language sql as $$
     set_config('app.purpose_of_use','patient-self',true), set_config('app.facility_id','',true),
     set_config('app.membership_id','',true);
 $$;
+-- As PatientRecordRelease.bind sets it with every release flag on.
+create function pg_temp.bind_release(patient text, subject text, account text, session text) returns void
+language sql as $$
+  select pg_temp.bind_self(patient, subject, account, session),
+    set_config('app.patient_release','vitals,diagnoses,prescriptions,labResults,documents',true);
+$$;
+-- Which released relations the current context reads any row of.
+create function pg_temp.release_visible() returns text
+language sql as $$
+  select concat_ws(',',
+    case when exists(select 1 from ehr.vitals) then 'vitals' end,
+    case when exists(select 1 from ehr.diagnoses) then 'diagnoses' end,
+    case when exists(select 1 from ehr.prescriptions) then 'prescriptions' end,
+    case when exists(select 1 from ehr.patient_released_lab_results) then 'labResults' end,
+    case when exists(select 1 from ehr.documents) then 'documents' end,
+    case when exists(select 1 from ehr.document_scan_events) then 'scan events' end,
+    case when exists(select 1 from ehr.documents_effective) then 'documents_effective' end);
+$$;
 create function pg_temp.release_record(name text, expected text, actual text) returns void
 language sql as $$
   insert into release_case_results values (name, expected, coalesce(actual, '<none>'));
 $$;
+
+-- 0. The database follows the release flags. The patient is bound to their
+--    own live session throughout; only app.patient_release changes. First as
+--    an EHR build from before the release binds it (the setting never set in
+--    this session), then with each value PatientRecordRelease may set, and
+--    with values it never sets, none of which releases anything.
+set local role hid_ehr_api_runtime;
+select pg_temp.bind_self(patient, subject, account, session) from release_binding;
+select pg_temp.release_record('flags never set: the binding is live', 'b7000000-0000-4000-8000-000000000001',
+  (select string_agg(id::text, ',' order by id) from ehr.encounters));
+select pg_temp.release_record('flags never set (an EHR build before the release)', '<null>:',
+  coalesce(current_setting('app.patient_release', true), '<null>') || ':' || pg_temp.release_visible());
+do $$
+declare
+  probe record;
+begin
+  for probe in select * from (values
+    ('', ''),
+    ('vitals', 'vitals'),
+    ('diagnoses', 'diagnoses'),
+    ('prescriptions', 'prescriptions'),
+    ('labResults', 'labResults'),
+    ('documents', 'documents,scan events,documents_effective'),
+    ('vitals,labResults', 'vitals,labResults'),
+    ('diagnoses,prescriptions,documents', 'diagnoses,prescriptions,documents,scan events,documents_effective'),
+    ('Vitals', ''), (' vitals', ''), ('vitals ', ''), ('vitals;diagnoses', ''), ('lab_results', ''),
+    ('labRequests', ''), ('encounters', ''), ('*', ''), ('vitals,,', 'vitals'))
+    cases(setting, visible)
+  loop
+    perform set_config('app.patient_release', probe.setting, true);
+    perform pg_temp.release_record('flags ' || quote_literal(probe.setting), probe.visible, pg_temp.release_visible());
+  end loop;
+end $$;
+reset role;
 
 -- 1. The bound patient sees exactly the released rows, through each table,
 --    through ehr.documents_effective and through the Lab view.
@@ -374,20 +444,29 @@ begin
       into leaked;
     perform pg_temp.release_record('unbound: ' || probe.label, '', leaked);
   end loop;
-  perform pg_temp.bind_release('b2000000-0000-4000-8000-000000000001','synthetic:release:1',
-    'b1000000-0000-4000-8000-000000000001','b3000000-0000-4000-8000-000000000001');
-  perform set_config('app.self_authorized_until',(clock_timestamp()-interval '1 second')::text,true);
-  perform pg_temp.release_record('unbound: an expired self authorization', '0',
-    ((select count(*) from ehr.vitals) + (select count(*) from ehr.diagnoses) + (select count(*) from ehr.prescriptions)
-      + (select count(*) from ehr.documents) + (select count(*) from ehr.patient_released_lab_results))::text);
 end $$;
--- A staff direct-care context (consent or not) reads no released Lab result
--- through the view: it serves only the bound patient-self context.
+-- An expired authorization, in statements of their own: patient-self compares
+-- it with the statement's start, which inside one DO block would be the
+-- block's start (patient-self.integration.sql does the same).
+select pg_temp.bind_release('b2000000-0000-4000-8000-000000000001','synthetic:release:1',
+  'b1000000-0000-4000-8000-000000000001','b3000000-0000-4000-8000-000000000001');
+select set_config('app.self_authorized_until',(clock_timestamp()-interval '1 second')::text,true);
+select pg_temp.release_record('unbound: an expired self authorization', '0',
+  ((select count(*) from ehr.vitals) + (select count(*) from ehr.diagnoses) + (select count(*) from ehr.prescriptions)
+    + (select count(*) from ehr.documents) + (select count(*) from ehr.patient_released_lab_results))::text);
+-- A staff direct-care context whose consent covers patient 1 reads no released
+-- Lab result through the view, even with every release category named: the
+-- view serves only the bound patient-self context. The first case shows the
+-- consent reaches the encounter, so only the view's own condition refuses.
 select set_config('app.actor_subject','synthetic:release:3',true),
+  set_config('app.account_id','b1000000-0000-4000-8000-000000000003',true), set_config('app.session_id','',true),
   set_config('app.membership_id','b6000000-0000-4000-8000-000000000001',true),
   set_config('app.facility_id','b4000000-0000-4000-8000-000000000002',true),
   set_config('app.purpose_of_use','direct-care',true), set_config('app.patient_id','',true),
-  set_config('app.self_authorized_until','',true);
+  set_config('app.self_authorized_until','',true),
+  set_config('app.patient_release','vitals,diagnoses,prescriptions,labResults,documents',true);
+select pg_temp.release_record('staff context with consent reads the completed encounter', '1',
+  (select count(*)::text from ehr.encounters where id = 'b7000000-0000-4000-8000-000000000001'));
 select pg_temp.release_record('staff context reads the Lab view', '0',
   (select count(*)::text from ehr.patient_released_lab_results));
 reset role;
@@ -503,6 +582,34 @@ select pg_temp.release_record('technical owner policies are true and select-only
     where policy.polname = 'patient_release_reader_read' and policy.polcmd = 'r' and policy.polpermissive
       and policy.polroles = array['hid_lab_release_reader'::regrole::oid]
       and pg_get_expr(policy.polqual, policy.polrelid) = 'true' and policy.polwithcheck is null));
+
+-- 4b. Each release policy and the view require the patient-self binding and
+--     their own category in app.patient_release. A policy without its
+--     patient-self condition still reads nothing in any behaviour case above
+--     (its encounter's own policy hides the row), so the catalogue says it.
+select pg_temp.release_record('release policies require the binding and their category',
+  'diagnoses_patient_release_read:diagnoses:true,document_scan_events_patient_release_read:documents:true,'
+  || 'documents_patient_release_read:documents:true,prescriptions_patient_release_read:prescriptions:true,'
+  || 'vitals_patient_release_read:vitals:true',
+  (select string_agg(policy.polname || ':' || coalesce(substring(pg_get_expr(policy.polqual, policy.polrelid)
+        from '^\(\(''([A-Za-z]+)''::text = ANY \(string_to_array\(current_setting\(''app\.patient_release''::text, true\), '',''::text\)\)\) AND '), '<none>')
+      || ':' || (position('ehr.patient_self_context(patient_id)' in pg_get_expr(policy.polqual, policy.polrelid)) > 0),
+      ',' order by policy.polname)
+     from pg_policy policy where policy.polname like '%\_patient\_release\_read'
+       and policy.polrelid::regclass::text like 'ehr.%'));
+select pg_temp.release_record('Lab view requires the binding and its category', 't,t',
+  (select concat_ws(',',
+     position('ehr.patient_self_context(release_row.patient_id)' in pg_get_viewdef('ehr.patient_released_lab_results'::regclass)) > 0,
+     position('(''labResults''::text = ANY (string_to_array(current_setting(''app.patient_release''::text, true), '',''::text)))'
+       in pg_get_viewdef('ehr.patient_released_lab_results'::regclass)) > 0)));
+-- Each section reads its newest rows through an index in its own order, so
+-- it stops after the rows it shows instead of checking every row's policy.
+select pg_temp.release_record('section indexes',
+  'diagnoses:diagnoses_patient_release_idx:(patient_id, created_at DESC, id DESC),'
+  || 'prescriptions:prescriptions_patient_release_idx:(patient_id, created_at DESC, id DESC),'
+  || 'vitals:vitals_patient_release_idx:(patient_id, recorded_at DESC, id DESC)',
+  (select string_agg(tablename || ':' || indexname || ':' || substring(indexdef from '\(.*\)$'), ',' order by tablename)
+     from pg_indexes where schemaname = 'ehr' and indexname like '%\_patient\_release\_idx'));
 
 -- 5. Changes after release (undone with the suite): a released correction
 --    replaces the earlier value, an invalidated release disappears, and

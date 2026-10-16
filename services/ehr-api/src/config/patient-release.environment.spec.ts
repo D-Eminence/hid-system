@@ -1,10 +1,16 @@
 import { getEnvironment, isProductionProfile, resetEnvironmentForTests } from './environment';
 
 // Patient record release (owner decision 4 of 2026-10-16, D7): one flag per
-// category, all off by default. Lab results stay refused in the production
-// profile while the Lab module is withdrawn at launch (D17, 0091 section 2);
-// staging (HID_DEPLOYMENT_ENV=staging, which every ECS task also runs with
-// NODE_ENV=production) and development may opt in.
+// category, all off by default. The production profile refuses every one of
+// them: Lab results while the Lab module is withdrawn at launch (D17, 0091
+// section 2), and the four EHR categories until the clinical owner signs off
+// each category and its wording (release checklist P35, ADR-064), since no
+// clinician-review gate or sensitivity classification is built. Each refusal
+// is lifted only by a reviewed change that records that sign-off. Staging
+// (HID_DEPLOYMENT_ENV=staging, which every ECS task also runs with
+// NODE_ENV=production) and a local development run may opt in. The AWS
+// development stack runs ehr-api in the production profile and opts in to
+// nothing.
 describe('EHR patient record release flags', () => {
   const original = { ...process.env };
   const local = { NODE_ENV: 'test', DATABASE_URL: 'postgresql://ehr:test@localhost/hid', CORS_ORIGINS: 'http://127.0.0.1',
@@ -66,6 +72,7 @@ describe('EHR patient record release flags', () => {
   it.each([
     ['production', { ...production }],
     ['NODE_ENV production with no deployment profile', { ...production, HID_DEPLOYMENT_ENV: undefined }],
+    ['the AWS development stack (development, NODE_ENV production)', { ...production, HID_DEPLOYMENT_ENV: 'development' }],
     ['a local run with no deployment profile', { ...local }],
   ])('refuses Lab results in %s (D17)', (_label, base) => {
     const { HID_DEPLOYMENT_ENV: profile, ...rest } = base as Record<string, string | undefined>;
@@ -80,13 +87,28 @@ describe('EHR patient record release flags', () => {
     expect(getEnvironment().EHR_PATIENT_RELEASE_LAB_RESULTS).toBe(true);
   });
 
-  it('accepts the four approved EHR categories in production', () => {
-    configure(production, { EHR_PATIENT_RELEASE_VITALS: 'true', EHR_PATIENT_RELEASE_DIAGNOSES: 'true',
-      EHR_PATIENT_RELEASE_PRESCRIPTIONS: 'true', EHR_PATIENT_RELEASE_DOCUMENTS: 'true' });
-    const environment = getEnvironment();
-    expect([environment.EHR_PATIENT_RELEASE_VITALS, environment.EHR_PATIENT_RELEASE_DIAGNOSES,
-      environment.EHR_PATIENT_RELEASE_PRESCRIPTIONS, environment.EHR_PATIENT_RELEASE_DOCUMENTS])
-      .toEqual([true, true, true, true]);
+  const ehrFlags = ['EHR_PATIENT_RELEASE_VITALS', 'EHR_PATIENT_RELEASE_DIAGNOSES', 'EHR_PATIENT_RELEASE_PRESCRIPTIONS',
+    'EHR_PATIENT_RELEASE_DOCUMENTS'] as const;
+  const productionProfiles = [
+    ['production', { ...production }],
+    ['NODE_ENV production with no deployment profile', { ...production, HID_DEPLOYMENT_ENV: undefined }],
+    ['the AWS development stack (development, NODE_ENV production)', { ...production, HID_DEPLOYMENT_ENV: 'development' }],
+    ['a local run with no deployment profile', { ...local }],
+  ] as const;
+
+  it.each(ehrFlags.flatMap((flag) => productionProfiles.map(([label, base]) => [flag, label, base] as const)))(
+    'refuses %s in %s until the clinical owner signs off (P35)', (flag, _label, base) => {
+      const { HID_DEPLOYMENT_ENV: profile, ...rest } = base as Record<string, string | undefined>;
+      configure(rest as Record<string, string>, { HID_DEPLOYMENT_ENV: profile, [flag]: 'true' });
+      expect(() => getEnvironment()).toThrow(new RegExp(`${flag}: .*refused in the production profile.*P35`));
+    });
+
+  it('accepts every category on staging and in a local development run', () => {
+    const every = Object.fromEntries(flags.map((flag) => [flag, 'true']));
+    configure(production, { HID_DEPLOYMENT_ENV: 'staging', ...every });
+    for (const flag of flags) expect(getEnvironment()[flag]).toBe(true);
+    configure(local, { HID_DEPLOYMENT_ENV: 'development', ...every });
+    for (const flag of flags) expect(getEnvironment()[flag]).toBe(true);
   });
 
   it('refuses releasing documents without S3 storage, where no patient could download them', () => {

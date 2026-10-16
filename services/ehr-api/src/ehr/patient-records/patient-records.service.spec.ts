@@ -40,6 +40,18 @@ const SECTION_SOURCES: ReadonlyArray<readonly [Section, RegExp]> = [
 function sectionOf(sql: string): Section | undefined {
   return SECTION_SOURCES.find(([, source]) => source.test(sql))?.[0];
 }
+/** The statement that tells the database which categories this transaction releases (0095's policies read it). */
+const RELEASE_BINDING = /set_config\('app\.patient_release'/;
+type QueryCall = [string, unknown[]];
+/** The record reads: every statement except the release binding. */
+function reads(query: jest.Mock): QueryCall[] {
+  return (query.mock.calls as unknown as QueryCall[]).filter(([sql]) => !RELEASE_BINDING.test(String(sql)));
+}
+/** The values the release binding set, in order. */
+function bindings(query: jest.Mock): unknown[] {
+  return (query.mock.calls as unknown as QueryCall[]).filter(([sql]) => RELEASE_BINDING.test(String(sql)))
+    .map(([, params]) => params);
+}
 function rows(count: number, extra: (index: number) => Record<string, unknown> = () => ({})) {
   return Array.from({ length: count }, (_, index) => ({ id: `row-${index}`, ...extra(index) }));
 }
@@ -55,6 +67,10 @@ function setup(fixture: Fixture = {}, categories: readonly PatientReleasable[] =
   const authorization = { ...actor, expiresAt: new Date(Date.now() + 30_000).toISOString(), allowed: true };
   const authorizeSelf = jest.fn().mockResolvedValue(authorization);
   const query = jest.fn(async (sql: string) => {
+    if (RELEASE_BINDING.test(sql)) {
+      events.push('bind');
+      return { rows: [] };
+    }
     if (/ d\.id=\$1/.test(sql.replace(/\s+/g, ' '))) {
       events.push('read');
       return { rows: options.download === null ? [] : [options.download ?? STORED_DOCUMENT] };
@@ -107,7 +123,7 @@ describe('Owning EHR patient and emergency read boundary', () => {
     const { service, authorizeSelf, query } = setup();
     await service.self(request);
     expect(authorizeSelf).toHaveBeenCalledWith(request);
-    for (const [, params] of query.mock.calls as unknown as Array<[string, unknown[]]>) {
+    for (const [, params] of reads(query)) {
       expect(params).toEqual(['patient-id']);
     }
     expect(sqlFor(query, 'encounters')).toContain("status='completed'");
@@ -140,9 +156,11 @@ describe('Patient self records: release honesty', () => {
     const { service, query } = setup({ encounters: rows(2), notes: rows(1) });
     const summary = await service.self(request) as unknown as Summary;
     // Only completed encounters and current signed/amended notes are released
-    // (INTERFACE_CONTRACT.md, migration 0030); nothing else is read for the patient.
-    expect(query).toHaveBeenCalledTimes(2);
-    expect(query.mock.calls.map(([sql]) => sectionOf(String(sql)))).toEqual(['encounters', 'notes']);
+    // (INTERFACE_CONTRACT.md, migration 0030); nothing else is read for the patient,
+    // and the database is told that no further category is released.
+    expect(query).toHaveBeenCalledTimes(3);
+    expect(bindings(query)).toEqual([['']]);
+    expect(reads(query).map(([sql]) => sectionOf(String(sql)))).toEqual(['encounters', 'notes']);
     expect(summary.released).toEqual(['encounters', 'notes']);
     expect(summary.withheld).toEqual(WITHHELD);
     expect(summary.encounters).toHaveLength(2);
@@ -402,9 +420,9 @@ describe('Patient self records: the configured release (owner decision 4 of 2026
     const { service, query } = setup({ encounters: rows(1), notes: rows(1), vitals: rows(2), diagnoses: rows(3),
       prescriptions: rows(4), labResults: [labRow], documents: rows(5) }, ALL);
     const summary = await service.self(request) as unknown as Summary;
-    expect(query.mock.calls.map(([sql]) => sectionOf(String(sql))))
+    expect(reads(query).map(([sql]) => sectionOf(String(sql))))
       .toEqual(['encounters', 'notes', 'vitals', 'diagnoses', 'prescriptions', 'labResults', 'documents']);
-    for (const [, params] of query.mock.calls as unknown as Array<[string, unknown[]]>) {
+    for (const [, params] of reads(query)) {
       expect(params).toEqual(['patient-id']);
     }
     expect(summary.released).toEqual(['encounters', 'notes', 'vitals', 'diagnoses', 'prescriptions', 'labResults',
@@ -488,7 +506,7 @@ describe('Patient self records: the configured release (owner decision 4 of 2026
   it('reads one configured category alone and keeps every other one withheld', async () => {
     const { service, query } = setup({ diagnoses: rows(2) }, ['diagnoses']);
     const summary = await service.self(request) as unknown as Summary;
-    expect(query.mock.calls.map(([sql]) => sectionOf(String(sql)))).toEqual(['encounters', 'notes', 'diagnoses']);
+    expect(reads(query).map(([sql]) => sectionOf(String(sql)))).toEqual(['encounters', 'notes', 'diagnoses']);
     expect(summary.released).toEqual(['encounters', 'notes', 'diagnoses']);
     expect(summary.withheld).toEqual(['vitals', 'prescriptions', 'labRequests', 'documents']);
     expect(summary).not.toHaveProperty('labResults');
@@ -520,8 +538,8 @@ describe('Patient self records: the configured release (owner decision 4 of 2026
     }));
   });
 
-  it.each(['42501', '42P01', '42883'])(
-    'answers 503 PATIENT_RECORDS_UNAVAILABLE when the database refuses a released read (%s), disclosing nothing',
+  it.each(['42501', '42P01', '42883', '57014'])(
+    'answers 503 PATIENT_RECORDS_UNAVAILABLE when the database refuses or times out a released read (%s), disclosing nothing',
     async (code) => {
       const { service, query, recordWithClient } = setup({ labResults: [labRow] }, ['labResults']);
       query.mockImplementation(async (sql: string) => {
@@ -538,6 +556,22 @@ describe('Patient self records: the configured release (owner decision 4 of 2026
     await expect(service.self(request)).rejects.toThrow('audit failed');
   });
 
+  it.each([
+    [[], ''],
+    [['vitals'], 'vitals'],
+    [['documents', 'vitals'], 'vitals,documents'],
+    [ALL, 'vitals,diagnoses,prescriptions,labResults,documents'],
+  ] as Array<[PatientReleasable[], string]>)(
+    'tells the database, before any read, that it releases exactly %j (app.patient_release %j)',
+    async (categories, setting) => {
+      const { service, query } = setup({}, categories);
+      await service.self(request);
+      const [first] = query.mock.calls as unknown as QueryCall[];
+      expect(String(first?.[0]).replace(/\s+/g, ' ')).toBe("select set_config('app.patient_release',$1,true)");
+      expect(first?.[1]).toEqual([setting]);
+      expect(bindings(query)).toEqual([[setting]]);
+    });
+
   it('refuses a configuration that names lab requests or an unknown category', () => {
     expect(() => new PatientRecordRelease(['labRequests' as PatientReleasable])).toThrow(/never released/);
     expect(() => new PatientRecordRelease(['allergies' as PatientReleasable])).toThrow(/not a releasable/);
@@ -547,6 +581,9 @@ describe('Patient self records: the configured release (owner decision 4 of 2026
     const release = new PatientRecordRelease(['vitals']);
     const query = jest.fn(async (sql: string) => ({ rows: sectionOf(sql) === 'vitals' ? rows(1) : [] }));
     const released = await release.read({ query } as unknown as PoolClient, 'patient-id');
+    // Any reader through read() tells the database its release set first, so a
+    // reader cannot widen what the policies admit by forgetting it.
+    expect(query.mock.calls[0]).toEqual(["select set_config('app.patient_release',$1,true)", ['vitals']]);
     expect(released.released).toEqual(['encounters', 'notes', 'vitals']);
     expect(released.vitals).toHaveLength(1);
     expect(release.releases('vitals')).toBe(true);
@@ -604,7 +641,7 @@ describe('Patient document download (owner decision 4, D7: documents only with a
   it('repeats the release rules in its read: the patient\'s own available, clean PHI document of a completed encounter', async () => {
     const { service, query } = setup({}, ['documents']);
     await service.downloadOwnDocument(request, documentId);
-    const [sql, params] = query.mock.calls[0] as unknown as [string, unknown[]];
+    const [sql, params] = reads(query)[0] as QueryCall;
     const text = sql.replace(/\s+/g, ' ');
     expect(text).toContain('from ehr.documents_effective d');
     expect(text).toContain('d.id=$1 and d.patient_id=$2');
@@ -613,6 +650,8 @@ describe('Patient document download (owner decision 4, D7: documents only with a
     expect(text).toContain("d.classification='phi'");
     expect(text).toContain("e.status='completed'");
     expect(params).toEqual([documentId, 'patient-id']);
+    // In the same transaction, the database was first told the release set.
+    expect(bindings(query)).toEqual([['documents']]);
   });
 
   it('answers 404 for a document of another bucket, auditing nothing', async () => {
@@ -628,7 +667,8 @@ describe('Patient document download (owner decision 4, D7: documents only with a
     const { service, events, storage, recordWithClient } = setup({}, ['documents']);
     await expect(service.downloadOwnDocument(request, documentId))
       .resolves.toEqual({ url: 'https://signed.example.invalid/object', expiresInSeconds: 60 });
-    expect(events).toEqual(['read', 'audit', 'commit', 'inspect', 'sign']);
+    // The database is told the release set before the document is read.
+    expect(events).toEqual(['bind', 'read', 'audit', 'commit', 'inspect', 'sign']);
     expect(storage.inspectVersion).toHaveBeenCalledWith('synthetic/lab-report.pdf', 'object-version-1');
     expect(storage.createDownload).toHaveBeenCalledWith('synthetic/lab-report.pdf', 'object-version-1',
       { fileName: 'Lab report (October).pdf', mediaType: 'application/pdf' });

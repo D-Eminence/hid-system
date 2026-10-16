@@ -908,6 +908,9 @@ $$;
 -- the patient's released Lab results belongs to the technical owner
 -- hid_lab_release_reader: it is a security-barrier view (not
 -- security_invoker), selected only by hid_ehr_runtime and the test role.
+-- Its ACL holds exactly those two SELECT entries from the first bootstrap
+-- run on: no entry of the owner itself, which the migration's REVOKE ... FROM
+-- PUBLIC would otherwise leave until the next run (release checklist P35).
 -- Its owner reads exactly the listed columns through one exact `true` policy
 -- per table, holds no schema USAGE, no table or function privilege and no
 -- EXECUTE on ehr.patient_self_context, and owns nothing else. The EHR runtime
@@ -922,9 +925,9 @@ begin
      or (select coalesce(array_agg(privilege.grantee::regrole::text || ':' || privilege.privilege_type
               order by privilege.grantee::regrole::text, privilege.privilege_type), '{}')
            from pg_class relation, aclexplode(relation.relacl) privilege
-          where relation.oid = 'ehr.patient_released_lab_results'::regclass and privilege.grantee <> relation.relowner)
+          where relation.oid = 'ehr.patient_released_lab_results'::regclass)
         is distinct from array['hid_ehr_runtime:SELECT', 'hid_schema_test_runtime:SELECT'] then
-    raise exception 'ehr.patient_released_lab_results must be the technical owner''s security-barrier view, selected only by the EHR runtime and the test role';
+    raise exception 'ehr.patient_released_lab_results must be the technical owner''s security-barrier view, selected only by the EHR runtime and the test role, with no entry of its owner';
   end if;
   if (select coalesce(array_agg(relation.oid::regclass::text || '.' || attribute.attname || ':' || privilege.privilege_type
           order by relation.oid::regclass::text, attribute.attname, privilege.privilege_type), '{}')
