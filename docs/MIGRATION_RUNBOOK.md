@@ -416,7 +416,7 @@ the rotated credentials). Clear the variables afterwards. In production every
 service that connects to the database also refuses to start over a superuser,
 `BYPASSRLS` or owner connection.
 
-Confirm the candidate ledger reaches `0095`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0096`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 After the legacy import, record (read-only, counts only, no identifiers) how
 many imported patient accounts have `email_verified_at` null and no verified
@@ -627,7 +627,7 @@ continuity with synthetic or authorized minimum-necessary identifiers.
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify the ledger at `0095`, runtime grants (`db:verify-roles`) and logins
+6. Verify the ledger at `0096`, runtime grants (`db:verify-roles`) and logins
    (`db:verify-logins`), RLS and purpose/deny behavior, and list the
    purpose-of-use codes (release checklist P10; after `0095` `direct-care` and
    `emergency`). After `0095`, confirm the
