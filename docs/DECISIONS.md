@@ -3835,8 +3835,9 @@ Decision:
    `API_ORIGIN_CLIENT_RATE_LIMIT` (and `API_ORIGIN_EDGE_RATE_LIMIT`), which are
    code constants.
 8. **Gateway runtime check in CI.** `scripts/verify-gateway-runtime.mjs
-   --pinned-image` runs the shipped configuration under the nginx of the image
-   `gateway/Dockerfile` pins by digest; it is the `gateway-runtime` step of
+   --built-image` builds `gateway/Dockerfile` (no push) and runs the shipped
+   configuration under the nginx of that image, which is the base the
+   Dockerfile pins by digest plus its own layers (RF-008); it is the `gateway-runtime` step of
    `release/scripts/run-workspace-gates.mjs`, which the required workspace
    job of `tuf-local-gates.yml` runs, so the pass-through, body bound, header
    strips and both logs are checked against real nginx on every change, not

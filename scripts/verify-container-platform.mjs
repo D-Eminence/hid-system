@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import { readdir, readFile, stat } from 'node:fs/promises'
 import { extname, join, relative, resolve } from 'node:path'
 import { assertGatewayContract } from './lib/gateway-contract.mjs'
+import { normalizeVerificationPath } from './verification-paths.mjs'
 
 const repository = resolve(import.meta.dirname, '..')
 const backends = [
@@ -21,7 +22,9 @@ const backends = [
 const apps = ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin']
 const bases = { web: '/', ehr: '/ehr/', lab: '/lab/', pharmacy: '/pharmacy/',
   ocr: '/migrate/', outreach: '/outreach/', admin: '/admin/' }
-const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:939d6f1671529d230f50b563578e9b5d206af58f038b10ebd7e1233023d4e167'
+// The `nonroot` variant (default user 65532, RF-004), so a stage that omits
+// USER still does not run as root.
+const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:ec2313763dd43931543bd03830466e0c409ce73a487e8d46f10db72d3b816c1c'
 const unprivilegedNginxRuntime = 'nginxinc/nginx-unprivileged@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3'
 
 const textExtensions = new Set([
@@ -57,7 +60,7 @@ function secretFindings(path, source) {
 
   for (const match of source.matchAll(/postgres(?:ql)?:\/\/[^\s:'"/]+:([^@\s'"/]+)@/gi)) {
     const normalized = match[1].toLowerCase()
-    const testFixture = /(?:\.spec\.[cm]?[jt]sx?$|\/tests?\/)/.test(path)
+    const testFixture = /(?:\.spec\.[cm]?[jt]sx?$|\/tests?\/)/.test(normalizeVerificationPath(path))
     if (!testFixture && !/^(?:change-me|replace-me|password|postgres|test|testing|local|example|<[^>]+>)$/.test(normalized)) {
       findings.push(`${relativePath(path)}:embedded-database-password`)
     }
@@ -86,7 +89,7 @@ for (const [service, port, hasHttpHealth] of backends) {
   assert.ok(dockerfile.includes(`FROM ${distrolessNodeRuntime} AS runtime`),
     `${service} final runtime must use the pinned Distroless Node image`)
   const runtime = dockerfile.slice(dockerfile.lastIndexOf(`FROM ${distrolessNodeRuntime} AS runtime`))
-  assert.match(runtime, /USER 65532:65532/, `${service} runtime must be non-root`)
+  assert.equal([...runtime.matchAll(/^USER (.+)$/gm)].at(-1)?.[1], '65532:65532', `${service} runtime must be non-root`)
   assert.match(runtime, /CMD \["dist\/main\.js"\]/, `${service} must use Distroless exec-form Node startup`)
   assert.doesNotMatch(runtime, /^RUN /m, `${service} final runtime must not include package-manager or build commands`)
   assert.match(dockerfile, /STOPSIGNAL SIGTERM/, `${service} must receive its graceful stop signal`)
@@ -123,6 +126,14 @@ for (const [service, port, hasHttpHealth] of backends) {
 const ehrDockerfile = await readFile(join(repository, 'services/ehr-api/Dockerfile'), 'utf8')
 assert.match(ehrDockerfile, new RegExp(`FROM ${distrolessNodeRuntime} AS migration[\\s\\S]*scripts\\/apply-migrations\\.mjs`),
   'EHR must expose a controlled, separate migration job target')
+// The migration job holds the migration administrator's DATABASE_URL and its
+// ECS container definition sets no user, so the stage itself must end as the
+// non-root runtime user instead of relying on the base image's default user.
+const ehrMigrationStart = ehrDockerfile.indexOf(`FROM ${distrolessNodeRuntime} AS migration`)
+const ehrMigrationEnd = ehrDockerfile.indexOf('\nFROM ', ehrMigrationStart)
+const ehrMigration = ehrDockerfile.slice(ehrMigrationStart, ehrMigrationEnd === -1 ? undefined : ehrMigrationEnd)
+assert.equal([...ehrMigration.matchAll(/^USER (.+)$/gm)].at(-1)?.[1], '65532:65532',
+  'the EHR migration job must run as the non-root runtime user')
 const ehrRuntime = ehrDockerfile.slice(ehrDockerfile.lastIndexOf(`FROM ${distrolessNodeRuntime} AS runtime`))
 assert.doesNotMatch(ehrRuntime, /services\/ehr-api\/(?:database|scripts)/,
   'the EHR API runtime image must not contain the migration executor or ledger')
@@ -163,7 +174,7 @@ const webVite = await readFile(join(repository, 'apps/web/vite.config.ts'), 'utf
 assert.match(webVite, /envPrefix:\s*\[['"]VITE_['"]\]/,
   'Web builds must expose only explicitly public VITE_* variables')
 const allFrontendSource = (await walk(join(repository, 'apps'), { textOnly: true }))
-  .filter((path) => path.includes('/src/'))
+  .filter((path) => normalizeVerificationPath(path).includes('/src/'))
 for (const path of allFrontendSource) {
   const source = await readFile(path, 'utf8')
   assert.doesNotMatch(source, /(?:from\s+['"]pg['"]|DATABASE_URL|WORKLOAD_TOKEN_FILE|node:fs|scripts\/apply-migrations)/,
@@ -180,6 +191,16 @@ for (const app of apps) {
     `API-only gateway must not package the Cloudflare-hosted ${app} frontend`)
 }
 assert.match(gatewayDockerfile, /USER 101/, 'gateway must run as the unprivileged Nginx user')
+// RF-008: the only package command is the exact PCRE2 patch, from the base's
+// signed repository, and the image still ends as the unprivileged user.
+assert.deepEqual([...gatewayDockerfile.matchAll(/^RUN .*$/gm)].map(([line]) => line), ["RUN apk add --no-cache 'pcre2=10.49-r0'"],
+  'gateway must install only the exact PCRE2 security patch')
+assert.match(gatewayDockerfile, /^USER 0\nRUN apk add --no-cache 'pcre2=10\.49-r0'$/m,
+  'gateway must switch to root only for the PCRE2 patch')
+assert.doesNotMatch(gatewayDockerfile, /apk upgrade|--allow-untrusted|--no-check-certificate|--repository|\s-X\s/,
+  'gateway must not broadly upgrade packages or bypass package trust')
+assert.equal([...gatewayDockerfile.matchAll(/^USER (.+)$/gm)].at(-1)?.[1], '101',
+  'gateway security patch must restore the non-root runtime user')
 assert.match(gatewayDockerfile, /EXPOSE 3000/)
 assert.match(gatewayDockerfile, /HEALTHCHECK[\s\S]*gateway-health\/ready/)
 assert.doesNotMatch(gatewayDockerfile, /(?:SENTRY_AUTH_TOKEN|POSTHOG_(?:PERSONAL_API_KEY|PRIVATE_KEY)|DATABASE_URL|WORKLOAD_TOKEN)/,
