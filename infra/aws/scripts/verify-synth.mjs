@@ -464,6 +464,22 @@ if (environment === 'production') {
   assert.equal(patientSelfNinBinding, 'false', 'production identity-api must not enable the signed-in NIN binding')
 }
 
+// Identity's enrollment and in-person budgets are optional synth inputs
+// HID_<VARIABLE>: a supplied one reaches the Identity task exactly, one left
+// out is not emitted (Identity keeps its default). QOREID_TIMEOUT_MS is
+// HID_QOREID_TIMEOUT_MS or 5000.
+for (const name of ['PATIENT_ENROLLMENT_QOREID_DAILY_CAP', 'PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX',
+  'PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX', 'PATIENT_ENROLLMENT_START_RATE_MAX_REQUESTS',
+  'ASSISTED_VERIFICATION_STAFF_DAILY_MAX', 'ASSISTED_VERIFICATION_FACILITY_DAILY_MAX']) {
+  assert.equal(identityFlag(name), process.env[`HID_${name}`], `Identity's ${name} must be exactly HID_${name}, or absent`)
+}
+assert.equal(identityFlag('QOREID_TIMEOUT_MS'), process.env.HID_QOREID_TIMEOUT_MS ?? '5000')
+for (const container of resources('AWS::ECS::TaskDefinition').flatMap(task => task.Properties.ContainerDefinitions)) {
+  if (container.Name === 'identity-api') continue
+  assert.ok(!(container.Environment ?? []).some(entry => /^(PATIENT_ENROLLMENT_|ASSISTED_VERIFICATION_|QOREID_TIMEOUT_MS$)/
+    .test(entry.Name)), `${container.Name} must not carry an Identity budget or the QoreID timeout`)
+}
+
 assert.equal(regional.Parameters.OriginDomainName, undefined)
 if (asleep) {
   assert.equal(regional.Parameters[contract.secret], undefined)
