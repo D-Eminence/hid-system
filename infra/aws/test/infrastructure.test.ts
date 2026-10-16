@@ -1265,6 +1265,48 @@ test('production OTP delivery injects only the otp-email-sms provider fields', (
   assert.ok(containerOf(stagingRegional, 'notification-worker').secrets.some(item => item.Name === 'NOVU_API_KEY'));
 });
 
+test('patient record release categories are explicit synth inputs that default to false; production refuses Lab results (D17)', () => {
+  const productionTopic = { operationalAlarmTopicArn: productionTopicArn };
+  const none = { vitals: false, diagnoses: false, prescriptions: false, labResults: false, documents: false };
+  assert.deepEqual(environmentConfig('production').patientRecordRelease, none);
+  assert.deepEqual(environmentConfig('staging', 'economy').patientRecordRelease, none);
+  const flags = ['EHR_PATIENT_RELEASE_VITALS', 'EHR_PATIENT_RELEASE_DIAGNOSES', 'EHR_PATIENT_RELEASE_PRESCRIPTIONS',
+    'EHR_PATIENT_RELEASE_LAB_RESULTS', 'EHR_PATIENT_RELEASE_DOCUMENTS'];
+  for (const template of [regional, stagingRegional]) {
+    for (const flag of flags) assert.equal(containerOf(template, 'ehr-api').environment[flag], 'false', flag);
+  }
+  for (const input of ['patientReleaseVitals', 'patientReleaseDiagnoses', 'patientReleasePrescriptions',
+    'patientReleaseLabResults', 'patientReleaseDocuments'] as const) {
+    assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, { [input]: 'yes' }),
+      /must be true or false/, input);
+  }
+  // Lab is withdrawn at launch (D17, 0091 section 2): production never releases Lab results.
+  assert.throws(() => environmentConfig('production', undefined, undefined, undefined,
+    { ...productionTopic, patientReleaseLabResults: 'true' }),
+  /HID_EHR_PATIENT_RELEASE_LAB_RESULTS=true is refused in production/);
+  const approved = environmentConfig('production', undefined, undefined, undefined, { ...productionTopic,
+    patientReleaseVitals: 'true', patientReleaseDiagnoses: 'true', patientReleasePrescriptions: 'true',
+    patientReleaseDocuments: 'true' });
+  assert.deepEqual(approved.patientRecordRelease, { ...none, vitals: true, diagnoses: true, prescriptions: true,
+    documents: true });
+  const staging = environmentConfig('staging', 'economy', undefined, undefined, { patientReleaseVitals: 'true',
+    patientReleaseDiagnoses: 'true', patientReleasePrescriptions: 'true', patientReleaseLabResults: 'true',
+    patientReleaseDocuments: 'true' });
+  assert.deepEqual(staging.patientRecordRelease, { vitals: true, diagnoses: true, prescriptions: true, labResults: true,
+    documents: true });
+  // The regional stack refuses the same for a configuration built by hand.
+  const productionConfiguration = environmentConfig('production', undefined, undefined, undefined, productionTopic);
+  assert.throws(() => new HidRegionalStack(new App(), 'PatientReleaseLabProduction', { configuration: {
+    ...productionConfiguration, patientRecordRelease: { ...none, labResults: true } } }),
+  /HID_EHR_PATIENT_RELEASE_LAB_RESULTS=true is refused in production/);
+  const template = Template.fromStack(new HidRegionalStack(new App(), 'PatientReleaseStaging', { configuration: staging }))
+    .toJSON() as typeof regional;
+  for (const flag of flags) assert.equal(containerOf(template, 'ehr-api').environment[flag], 'true', flag);
+  for (const name of workloadNames.filter(item => item !== 'ehr-api')) {
+    assert.doesNotMatch(JSON.stringify(containerOf(template, name)), /EHR_PATIENT_RELEASE/);
+  }
+});
+
 test('NIN-only enrollment and the NIN holder routes are explicit synth inputs that default to false (ADR-062)', () => {
   const productionTopic = { operationalAlarmTopicArn: 'arn:aws:sns:eu-west-1:000000000000:hid-production-operational-alerts' };
   const production = environmentConfig('production');
