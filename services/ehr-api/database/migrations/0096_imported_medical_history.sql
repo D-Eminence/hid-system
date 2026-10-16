@@ -34,16 +34,21 @@
 --      app.patient_release names importedHistory, which PatientRecordRelease
 --      binds only while its own flag is on. A patient needs no sharing
 --      choice to see their own history.
---    - imported_history_staff_read: ehr.imported_history_staff_read_allowed,
---      true only for the purpose direct-care, an ehr.context_allows pass for
+--    - imported_history_staff_read: a row is read only when its patient is
+--      ehr.imported_history_staff_patient(), the one patient the staff
+--      transaction names in app.imported_history_patient (the request, never
+--      the permission) for whom ehr.imported_history_staff_read_allowed is
+--      true: only for the purpose direct-care, an ehr.context_allows pass for
 --      the patient at the selected facility (an active, unheld, unexpired
 --      standard consent of the selected membership and no deny directive;
 --      break-glass grants count only for the purpose emergency, which is
 --      refused here), the membership holding ehr.imported-history.read, the
---      patient's sharing choice, and a login that is not deleted. When all
---      hold, the patient's whole imported history is disclosed as one unit:
---      it has no source facility or encounter that a facility-bound consent
---      could narrow (ADR-065).
+--      patient's sharing choice, and a login that is not deleted. The
+--      decision sits in a sub-SELECT, which PostgreSQL evaluates once per
+--      statement (an InitPlan), not once per row: a page at the caps asks it
+--      three times, not about 2,200. When all hold, the patient's whole
+--      imported history is disclosed as one unit: it has no source facility
+--      or encounter that a facility-bound consent could narrow (ADR-065).
 --    No policy admits an INSERT, UPDATE or DELETE by any role named here;
 --    the technical owners' policies are created by the role bootstrap
 --    (runtime-grants.sql), where those roles exist.
@@ -63,16 +68,32 @@
 --      correlation id, and a repeat changes nothing.
 --    - ehr.import_legacy_medical_history(uuid, uuid, text, jsonb), owned by
 --      hid_imported_history_importer, executable by hid_migration_admin
---      only. It imports only from main's sealed staging pipeline: the parent
---      run must be the reconciled, verified legacy identity run
---      (stage-legacy-identity.mjs, promote-legacy-identity.mjs and
---      reconcile-legacy-identity.mjs), the history run a sealed staging run
---      of the same source snapshot holding only the three history categories
---      (stage-legacy-identity.mjs --scope=imported-history), and the
---      supplied rows exactly that run's sealed rows. Every patient, author
---      and uploader is resolved through the parent run's sealed identity
---      rows. Rows are inserted once (a repeat changes nothing) and a stored
---      row that differs is refused; a receipt run records the counts.
+--      only, with its time zone pinned to UTC. It imports only from main's
+--      sealed staging pipeline: the parent run must be the reconciled,
+--      verified legacy identity run (stage-legacy-identity.mjs,
+--      promote-legacy-identity.mjs and reconcile-legacy-identity.mjs), the
+--      history run a sealed staging run of source system
+--      legacy_imported_history and the same source snapshot holding only the
+--      three history categories (stage-legacy-identity.mjs
+--      --scope=imported-history), and the supplied rows exactly that run's
+--      sealed rows. Every patient, author and uploader is resolved through
+--      the parent run's sealed identity rows; every legacy timestamp must be
+--      ISO 8601 with an offset and finite. Rows are inserted once (a repeat
+--      changes nothing) and a stored row that differs is refused; a receipt
+--      run records the counts. Its checks look rows up by key, so its time
+--      grows with the number of rows, not with their square.
+--
+-- 6. The history run's own seal. Main's crosswalk gate
+--    (identity.legacy_nin_crosswalk_ready, 0057) closes public patient
+--    enrollment while any legacy_identity run is running or staged, and a
+--    history run stays staged for good, so it is never a legacy_identity
+--    run: its source system is legacy_imported_history, which the gate does
+--    not count and main's promoter refuses. 0033's seal guards are scoped
+--    to legacy_identity, so two triggers give legacy_imported_history runs
+--    the same seal: source rows only while the run is running in stage
+--    mode, counts and checksum sealed once (running to staged), and no
+--    change of source system, snapshot, transaction snapshot or mode, and
+--    no resume.
 --
 -- 5. The permission ehr.imported-history.read, held by doctor, clinician and
 --    nurse (the roles that read notes); the staff route needs it as well.
@@ -86,9 +107,11 @@
 -- signed off (release checklist P36).
 --
 -- Locks: creating the foreign keys takes SHARE ROW EXCLUSIVE on
--- identity.patients, auth.accounts and migration.runs, and the permission
--- rows take row locks on auth.permissions and auth.role_permissions, until
--- the migration commits; everything else creates new objects. Each waits at
+-- identity.patients, auth.accounts and migration.runs, creating the seal
+-- triggers SHARE ROW EXCLUSIVE on migration.runs and migration.source_rows,
+-- and the permission rows take row locks on auth.permissions and
+-- auth.role_permissions, until the migration commits; everything else
+-- creates new objects. Each waits at
 -- most the runner's 5 s lock timeout; a timeout rolls 0096 back whole, and it
 -- can be run again.
 
@@ -247,22 +270,45 @@ revoke all on function ehr.imported_history_staff_read_allowed(uuid) from public
 comment on function ehr.imported_history_staff_read_allowed(uuid) is
   'True only for direct care with a standard consent at the selected facility, the membership holding ehr.imported-history.read, the patient''s sharing choice and a login that is not deleted (ADR-065). Never true under break-glass. Owned by hid_imported_history_commands.';
 
+-- The one patient a staff transaction may read imported history of: the
+-- patient it names in app.imported_history_patient (ImportedHistoryService
+-- binds it, transaction-local, in the statement that asks the decision),
+-- when the staff decision allows it; null otherwise. The binding is only the
+-- request: naming another patient asks the same decision for that patient.
+-- It runs as its caller (EXECUTE for the EHR runtime and the test role, from
+-- the role bootstrap), so that the decision keeps its single owner.
+create function ehr.imported_history_staff_patient()
+returns uuid
+language sql
+stable
+set search_path = pg_catalog, pg_temp
+as $$
+  select requested.patient_id
+    from (select case when current_setting('app.imported_history_patient', true)
+                             ~ '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+                      then current_setting('app.imported_history_patient', true)::uuid end as patient_id) requested
+   where ehr.imported_history_staff_read_allowed(requested.patient_id)
+$$;
+revoke all on function ehr.imported_history_staff_patient() from public;
+comment on function ehr.imported_history_staff_patient() is
+  'The patient named in app.imported_history_patient when ehr.imported_history_staff_read_allowed allows it, else null; the staff policies compare each row with it once per statement (ADR-065).';
+
 -- 3. The read policies of the imported tables.
 create policy imported_history_patient_self_read on ehr.imported_medical_records for select
   using ('importedHistory' = any(string_to_array(current_setting('app.patient_release', true), ','))
     and ehr.patient_self_context(patient_id));
 create policy imported_history_staff_read on ehr.imported_medical_records for select
-  using (ehr.imported_history_staff_read_allowed(patient_id));
+  using (patient_id = (select ehr.imported_history_staff_patient()));
 create policy imported_history_patient_self_read on ehr.imported_medical_record_versions for select
   using ('importedHistory' = any(string_to_array(current_setting('app.patient_release', true), ','))
     and ehr.patient_self_context(patient_id));
 create policy imported_history_staff_read on ehr.imported_medical_record_versions for select
-  using (ehr.imported_history_staff_read_allowed(patient_id));
+  using (patient_id = (select ehr.imported_history_staff_patient()));
 create policy imported_history_patient_self_read on ehr.imported_medical_record_files for select
   using ('importedHistory' = any(string_to_array(current_setting('app.patient_release', true), ','))
     and ehr.patient_self_context(patient_id));
 create policy imported_history_staff_read on ehr.imported_medical_record_files for select
-  using (ehr.imported_history_staff_read_allowed(patient_id));
+  using (patient_id = (select ehr.imported_history_staff_patient()));
 
 -- 4b. The patient's own sharing choice.
 create function identity.my_imported_history_sharing(requested_subject text, requested_session uuid)
@@ -364,10 +410,17 @@ language plpgsql
 volatile
 security definer
 set search_path = pg_catalog, pg_temp
+set timezone = 'UTC'
 as $$
 declare
   history_types constant text[] := array['medical_record_files', 'medical_record_versions', 'medical_records'];
   uuid_shape constant text := '^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$';
+  -- A legacy timestamp as the stager writes it: ISO 8601 with an offset
+  -- (import-legacy-history.mjs refuses anything else first). No relative or
+  -- special value ('now', 'today', 'epoch', 'infinity') and no zone-less
+  -- value, whose meaning would depend on the session.
+  timestamp_shape constant text :=
+    '^[0-9]{4}-[0-9]{2}-[0-9]{2}[T ][0-9]{2}:[0-9]{2}(:[0-9]{2}([.][0-9]{1,6})?)?(Z|[+-][0-9]{2}(:?[0-9]{2})?)$';
   parent_row record;
   history_row record;
   item record;
@@ -377,6 +430,18 @@ declare
   author_staff text;
   author_account uuid;
   author_origin text;
+  author_staff_ids jsonb;
+  created_text text;
+  updated_text text;
+  -- The parent's sealed identity rows and the history run's own rows, each
+  -- read once and looked up by key, so that every check below costs a key
+  -- lookup rather than a scan of the run.
+  parent_patients jsonb;
+  profile_accounts jsonb;
+  staff_accounts jsonb;
+  history_records jsonb;
+  history_versions jsonb;
+  repeated_versions jsonb;
   counts jsonb;
   inserted_records integer := 0;
   inserted_versions integer := 0;
@@ -400,10 +465,13 @@ begin
     raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_PARENT_NOT_VERIFIED';
   end if;
 
-  -- The history: a sealed staging run of the same snapshot, of exactly the three categories.
+  -- The history: a sealed staging run of source system
+  -- legacy_imported_history (never legacy_identity, which closes patient
+  -- enrollment while it is staged), of the same snapshot, of exactly the
+  -- three categories.
   select run.source_system, run.mode, run.status, run.source_snapshot, run.source_counts, run.source_checksum_sha256
     into history_row from migration.runs run where run.id = history_run;
-  if not found or history_run = parent_run or history_row.source_system is distinct from 'legacy_identity'
+  if not found or history_run = parent_run or history_row.source_system is distinct from 'legacy_imported_history'
      or history_row.mode is distinct from 'stage' or history_row.status is distinct from 'staged'
      or history_row.source_checksum_sha256 is null
      or exists (select 1 from migration.conflicts conflict where conflict.run_id = history_run) then
@@ -425,7 +493,11 @@ begin
   end if;
 
   -- The supplied rows are exactly the sealed rows: none missing, none added,
-  -- none repeated, each with its sealed payload and checksum.
+  -- none repeated, each with its sealed payload and checksum (each looked up
+  -- by its key). The command does not recompute the stager's checksums: the
+  -- importer does that first (ROW_TAMPERED, SEAL_MISMATCH and
+  -- PARENT_SEAL_MISMATCH), and the seal triggers keep a sealed run's rows,
+  -- counts and checksum as they were sealed.
   if jsonb_array_length(supplied) <> (select count(*) from migration.source_rows source where source.run_id = history_run)
      or exists (
        select 1 from jsonb_array_elements(supplied) element
@@ -440,6 +512,51 @@ begin
     raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_ROWS_DIFFER';
   end if;
 
+  -- Each run's rows by key, once: the parent's patients (their legacy
+  -- account), user profiles whose account the parent staged (that account)
+  -- and staff (by account); the history's records (their patient), versions
+  -- (their record) and any record and version number used twice.
+  select coalesce(jsonb_object_agg(patient_row.source_pk, patient_row.payload ->> 'auth_user_id'), '{}')
+    into parent_patients
+    from migration.source_rows patient_row
+   where patient_row.run_id = parent_run and patient_row.entity_type = 'patients'
+     and patient_row.payload ->> 'auth_user_id' is not null;
+  select coalesce(jsonb_object_agg(profile_row.source_pk, profile_row.payload ->> 'auth_user_id'), '{}')
+    into profile_accounts
+    from migration.source_rows profile_row
+    join migration.source_rows account_row on account_row.run_id = parent_run
+     and account_row.entity_type = 'accounts' and account_row.source_pk = profile_row.payload ->> 'auth_user_id'
+   where profile_row.run_id = parent_run and profile_row.entity_type = 'user_profiles'
+     and coalesce(profile_row.payload ->> 'auth_user_id', '') ~ uuid_shape;
+  select coalesce(jsonb_object_agg(by_account.account_id, by_account.staff_ids), '{}')
+    into staff_accounts
+    from (select staff_row.payload ->> 'auth_user_id' as account_id, jsonb_agg(staff_row.source_pk) as staff_ids
+            from migration.source_rows staff_row
+           where staff_row.run_id = parent_run and staff_row.entity_type = 'staff'
+             and staff_row.payload ->> 'auth_user_id' is not null
+           group by 1) by_account;
+  select coalesce(jsonb_object_agg(record_row.source_pk, record_row.payload ->> 'patient_id'), '{}')
+    into history_records
+    from migration.source_rows record_row
+   where record_row.run_id = history_run and record_row.entity_type = 'medical_records';
+  select coalesce(jsonb_object_agg(version_row.source_pk, version_row.payload ->> 'record_id'), '{}')
+    into history_versions
+    from migration.source_rows version_row
+   where version_row.run_id = history_run and version_row.entity_type = 'medical_record_versions';
+  select coalesce(jsonb_object_agg(repeated.version_key, true), '{}')
+    into repeated_versions
+    from (select (version_row.payload ->> 'record_id') || '|' || (version_row.payload ->> 'version_no') as version_key
+            from migration.source_rows version_row
+           where version_row.run_id = history_run and version_row.entity_type = 'medical_record_versions'
+           group by 1
+          having count(*) > 1) repeated
+   where repeated.version_key is not null;
+
+  -- A record names its current version, which is inserted after it: the
+  -- check waits until every version is in, also when an earlier import in
+  -- this transaction made it immediate.
+  set constraints ehr.imported_current_version deferred;
+
   -- Records: the patient and the author through the parent's sealed identity rows.
   for item in
     select source.source_pk, source.payload, btrim(source.payload_sha256) as payload_sha256
@@ -447,11 +564,15 @@ begin
      where source.run_id = history_run and source.entity_type = 'medical_records'
      order by source.source_pk
   loop
+    created_text := item.payload ->> 'created_at';
+    updated_text := item.payload ->> 'updated_at';
     if item.source_pk !~ uuid_shape or item.payload ->> 'id' is distinct from item.source_pk
        or coalesce(item.payload ->> 'patient_id', '') !~ uuid_shape
        or coalesce(item.payload ->> 'current_version_id', '') !~ uuid_shape
-       or pg_input_is_valid(item.payload ->> 'created_at', 'timestamptz') is not true
-       or pg_input_is_valid(item.payload ->> 'updated_at', 'timestamptz') is not true then
+       or not (case when coalesce(created_text, '') ~ timestamp_shape and pg_input_is_valid(created_text, 'timestamptz')
+                then isfinite(created_text::timestamptz) else false end)
+       or not (case when coalesce(updated_text, '') ~ timestamp_shape and pg_input_is_valid(updated_text, 'timestamptz')
+                then isfinite(updated_text::timestamptz) else false end) then
       raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_RECORD_INVALID';
     end if;
     record_patient := (item.payload ->> 'patient_id')::uuid;
@@ -460,44 +581,33 @@ begin
     -- The author, through the parent run's sealed identity rows (below, as for versions).
     <<record_author>>
     begin
-      select patient_row.payload ->> 'auth_user_id' into patient_account from migration.source_rows patient_row
-       where patient_row.run_id = parent_run and patient_row.entity_type = 'patients'
-         and patient_row.source_pk = record_patient::text;
+      patient_account := parent_patients ->> record_patient::text;
       if patient_account is null then
         raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_BINDING_DIFFERS';
       end if;
-      select (profile_row.payload ->> 'auth_user_id')::uuid into author_account
-        from migration.source_rows profile_row
-        join migration.source_rows account_row on account_row.run_id = parent_run
-         and account_row.entity_type = 'accounts' and account_row.source_pk = profile_row.payload ->> 'auth_user_id'
-       where profile_row.run_id = parent_run and profile_row.entity_type = 'user_profiles'
-         and profile_row.source_pk = author_profile
-         and coalesce(profile_row.payload ->> 'auth_user_id', '') ~ uuid_shape;
+      author_account := (profile_accounts ->> author_profile)::uuid;
       if author_account is null then
         raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_AUTHOR_UNRESOLVED';
       end if;
+      author_staff_ids := staff_accounts -> author_account::text;
       if author_account::text = patient_account and author_staff is null then
         author_origin := 'patient-provided';
-      elsif author_account::text <> patient_account and (select count(*) from migration.source_rows staff_row
-              where staff_row.run_id = parent_run and staff_row.entity_type = 'staff'
-                and staff_row.payload ->> 'auth_user_id' = author_account::text
-                and (author_staff is null or staff_row.source_pk = author_staff)) = 1 then
+      elsif author_account::text <> patient_account
+            and (case when author_staff is null then coalesce(jsonb_array_length(author_staff_ids), 0) = 1
+                      else coalesce(author_staff_ids ? author_staff, false) end) then
         author_origin := 'provider-authored';
       else
         raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_AUTHOR_UNRESOLVED';
       end if;
     end record_author;
-    if not exists (select 1 from migration.source_rows version_row
-                    where version_row.run_id = history_run and version_row.entity_type = 'medical_record_versions'
-                      and version_row.source_pk = item.payload ->> 'current_version_id'
-                      and version_row.payload ->> 'record_id' = item.source_pk) then
+    if history_versions ->> (item.payload ->> 'current_version_id') is distinct from item.source_pk then
       raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_BINDING_DIFFERS';
     end if;
     insert into ehr.imported_medical_records (id, patient_id, author_account_id, origin, current_version_id,
       source_run_id, source_payload, source_sha256, source_created_at, source_updated_at)
     values (item.source_pk::uuid, record_patient, author_account, author_origin,
       (item.payload ->> 'current_version_id')::uuid, history_run, item.payload, item.payload_sha256,
-      (item.payload ->> 'created_at')::timestamptz, (item.payload ->> 'updated_at')::timestamptz)
+      created_text::timestamptz, updated_text::timestamptz)
     on conflict (id) do nothing;
     get diagnostics added = row_count;
     inserted_records := inserted_records + added;
@@ -506,8 +616,8 @@ begin
                       and stored.author_account_id = author_account and stored.origin = author_origin
                       and stored.current_version_id = (item.payload ->> 'current_version_id')::uuid
                       and stored.source_payload = item.payload and stored.source_sha256 = item.payload_sha256
-                      and stored.source_created_at = (item.payload ->> 'created_at')::timestamptz
-                      and stored.source_updated_at = (item.payload ->> 'updated_at')::timestamptz) then
+                      and stored.source_created_at = created_text::timestamptz
+                      and stored.source_updated_at = updated_text::timestamptz) then
       raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_DIFFERS';
     end if;
   end loop;
@@ -519,20 +629,17 @@ begin
      where source.run_id = history_run and source.entity_type = 'medical_record_versions'
      order by source.source_pk
   loop
-    select (record_row.payload ->> 'patient_id')::uuid into record_patient
-      from migration.source_rows record_row
-     where record_row.run_id = history_run and record_row.entity_type = 'medical_records'
-       and record_row.source_pk = item.payload ->> 'record_id';
+    -- The records' patients were checked to be UUIDs above.
+    record_patient := (history_records ->> (item.payload ->> 'record_id'))::uuid;
     if item.source_pk !~ uuid_shape or item.payload ->> 'id' is distinct from item.source_pk or record_patient is null then
       raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_BINDING_DIFFERS';
     end if;
+    created_text := item.payload ->> 'created_at';
     if jsonb_typeof(item.payload -> 'version_no') is distinct from 'number'
        or (item.payload ->> 'version_no') !~ '^[1-9][0-9]{0,8}$'
-       or pg_input_is_valid(item.payload ->> 'created_at', 'timestamptz') is not true
-       or (select count(*) from migration.source_rows other
-            where other.run_id = history_run and other.entity_type = 'medical_record_versions'
-              and other.payload ->> 'record_id' = item.payload ->> 'record_id'
-              and other.payload -> 'version_no' = item.payload -> 'version_no') <> 1
+       or not (case when coalesce(created_text, '') ~ timestamp_shape and pg_input_is_valid(created_text, 'timestamptz')
+                then isfinite(created_text::timestamptz) else false end)
+       or coalesce(repeated_versions ? ((item.payload ->> 'record_id') || '|' || (item.payload ->> 'version_no')), false)
        or not (
          (jsonb_typeof(item.payload -> 'record') = 'string' and btrim(item.payload ->> 'record') <> '')
          or (jsonb_typeof(item.payload -> 'notes') = 'string' and btrim(item.payload ->> 'notes') <> '')
@@ -545,25 +652,17 @@ begin
     author_staff := item.payload ->> 'created_by_staff_account_id';
     <<version_author>>
     begin
-      select patient_row.payload ->> 'auth_user_id' into patient_account from migration.source_rows patient_row
-       where patient_row.run_id = parent_run and patient_row.entity_type = 'patients'
-         and patient_row.source_pk = record_patient::text;
-      select (profile_row.payload ->> 'auth_user_id')::uuid into author_account
-        from migration.source_rows profile_row
-        join migration.source_rows account_row on account_row.run_id = parent_run
-         and account_row.entity_type = 'accounts' and account_row.source_pk = profile_row.payload ->> 'auth_user_id'
-       where profile_row.run_id = parent_run and profile_row.entity_type = 'user_profiles'
-         and profile_row.source_pk = author_profile
-         and coalesce(profile_row.payload ->> 'auth_user_id', '') ~ uuid_shape;
+      patient_account := parent_patients ->> record_patient::text;
+      author_account := (profile_accounts ->> author_profile)::uuid;
       if author_account is null then
         raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_AUTHOR_UNRESOLVED';
       end if;
+      author_staff_ids := staff_accounts -> author_account::text;
       if author_account::text = patient_account and author_staff is null then
         author_origin := 'patient-provided';
-      elsif author_account::text <> patient_account and (select count(*) from migration.source_rows staff_row
-              where staff_row.run_id = parent_run and staff_row.entity_type = 'staff'
-                and staff_row.payload ->> 'auth_user_id' = author_account::text
-                and (author_staff is null or staff_row.source_pk = author_staff)) = 1 then
+      elsif author_account::text <> patient_account
+            and (case when author_staff is null then coalesce(jsonb_array_length(author_staff_ids), 0) = 1
+                      else coalesce(author_staff_ids ? author_staff, false) end) then
         author_origin := 'provider-authored';
       else
         raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_AUTHOR_UNRESOLVED';
@@ -573,7 +672,7 @@ begin
       source_payload, source_sha256, source_created_at)
     values (item.source_pk::uuid, (item.payload ->> 'record_id')::uuid, record_patient,
       (item.payload ->> 'version_no')::integer, author_account, author_origin, item.payload, item.payload_sha256,
-      (item.payload ->> 'created_at')::timestamptz)
+      created_text::timestamptz)
     on conflict (id) do nothing;
     get diagnostics added = row_count;
     inserted_versions := inserted_versions + added;
@@ -583,7 +682,7 @@ begin
                       and stored.version_no = (item.payload ->> 'version_no')::integer
                       and stored.author_account_id = author_account and stored.origin = author_origin
                       and stored.source_payload = item.payload and stored.source_sha256 = item.payload_sha256
-                      and stored.source_created_at = (item.payload ->> 'created_at')::timestamptz) then
+                      and stored.source_created_at = created_text::timestamptz) then
       raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_DIFFERS';
     end if;
   end loop;
@@ -596,20 +695,16 @@ begin
      where source.run_id = history_run and source.entity_type = 'medical_record_files'
      order by source.source_pk
   loop
-    select (record_row.payload ->> 'patient_id')::uuid into record_patient
-      from migration.source_rows record_row
-     where record_row.run_id = history_run and record_row.entity_type = 'medical_records'
-       and record_row.source_pk = item.payload ->> 'record_id';
+    record_patient := (history_records ->> (item.payload ->> 'record_id'))::uuid;
     if item.source_pk !~ uuid_shape or item.payload ->> 'id' is distinct from item.source_pk or record_patient is null
        or item.payload ->> 'patient_id' is distinct from record_patient::text
-       or (item.payload ->> 'record_version_id' is not null and not exists (
-             select 1 from migration.source_rows version_row
-              where version_row.run_id = history_run and version_row.entity_type = 'medical_record_versions'
-                and version_row.source_pk = item.payload ->> 'record_version_id'
-                and version_row.payload ->> 'record_id' = item.payload ->> 'record_id')) then
+       or (item.payload ->> 'record_version_id' is not null
+           and history_versions ->> (item.payload ->> 'record_version_id') is distinct from item.payload ->> 'record_id') then
       raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_BINDING_DIFFERS';
     end if;
-    if pg_input_is_valid(item.payload ->> 'created_at', 'timestamptz') is not true
+    created_text := item.payload ->> 'created_at';
+    if not (case when coalesce(created_text, '') ~ timestamp_shape and pg_input_is_valid(created_text, 'timestamptz')
+             then isfinite(created_text::timestamptz) else false end)
        or jsonb_typeof(item.payload -> 'size_bytes') is distinct from 'number'
        or (item.payload ->> 'size_bytes') !~ '^[0-9]{1,15}$'
        or jsonb_typeof(item.payload -> 'original_file_name') is distinct from 'string'
@@ -617,13 +712,7 @@ begin
       raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_FILE_INVALID';
     end if;
     -- The uploader, through the parent run's sealed profile and account rows.
-    select (profile_row.payload ->> 'auth_user_id')::uuid into author_account
-      from migration.source_rows profile_row
-      join migration.source_rows account_row on account_row.run_id = parent_run
-       and account_row.entity_type = 'accounts' and account_row.source_pk = profile_row.payload ->> 'auth_user_id'
-     where profile_row.run_id = parent_run and profile_row.entity_type = 'user_profiles'
-       and profile_row.source_pk = item.payload ->> 'uploaded_by_user_profile_id'
-       and coalesce(profile_row.payload ->> 'auth_user_id', '') ~ uuid_shape;
+    author_account := (profile_accounts ->> (item.payload ->> 'uploaded_by_user_profile_id'))::uuid;
     if author_account is null then
       raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_AUTHOR_UNRESOLVED';
     end if;
@@ -631,7 +720,7 @@ begin
       source_payload, source_sha256, source_created_at)
     values (item.source_pk::uuid, (item.payload ->> 'record_id')::uuid, record_patient,
       (item.payload ->> 'record_version_id')::uuid, author_account, item.payload, item.payload_sha256,
-      (item.payload ->> 'created_at')::timestamptz)
+      created_text::timestamptz)
     on conflict (id) do nothing;
     get diagnostics added = row_count;
     inserted_files := inserted_files + added;
@@ -641,7 +730,7 @@ begin
                       and stored.record_version_id is not distinct from (item.payload ->> 'record_version_id')::uuid
                       and stored.uploader_account_id = author_account
                       and stored.source_payload = item.payload and stored.source_sha256 = item.payload_sha256
-                      and stored.source_created_at = (item.payload ->> 'created_at')::timestamptz) then
+                      and stored.source_created_at = created_text::timestamptz) then
       raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_DIFFERS';
     end if;
   end loop;
@@ -673,7 +762,73 @@ end
 $$;
 revoke all on function ehr.import_legacy_medical_history(uuid, uuid, text, jsonb) from public;
 comment on function ehr.import_legacy_medical_history(uuid, uuid, text, jsonb) is
-  'Imports a sealed legacy history staging run of a verified legacy identity run, accepting only rows equal to their sealed staging rows; inserts once, refuses a stored row that differs, records a receipt run (ADR-065). Owned by hid_imported_history_importer; executable by hid_migration_admin only.';
+  'Imports a sealed legacy_imported_history staging run of a verified legacy identity run, accepting only rows equal to their sealed staging rows and ISO 8601 timestamps with an offset; inserts once, refuses a stored row that differs, records a receipt run (ADR-065). Owned by hid_imported_history_importer; executable by hid_migration_admin only.';
+
+-- 6. The history run's own seal (0033's guards, for legacy_imported_history).
+create function migration.guard_imported_history_source_row_insert()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  run_source_system text;
+  run_status text;
+  run_mode text;
+begin
+  select run.source_system, run.status, run.mode
+    into run_source_system, run_status, run_mode
+    from migration.runs run
+   where run.id = new.run_id
+   for share;
+  if run_source_system = 'legacy_imported_history'
+     and (run_status is distinct from 'running' or run_mode is distinct from 'stage') then
+    raise exception using errcode = '55000',
+      message = 'imported history source rows may be inserted only during their original staging run';
+  end if;
+  return new;
+end
+$$;
+create trigger source_rows_imported_history_stage_only
+  before insert on migration.source_rows
+  for each row execute function migration.guard_imported_history_source_row_insert();
+
+create function migration.guard_imported_history_run_mutation()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, pg_temp
+as $$
+begin
+  if old.source_system is distinct from 'legacy_imported_history' then
+    if new.source_system = 'legacy_imported_history' then
+      raise exception using errcode = '55000', message = 'a run cannot become an imported history run';
+    end if;
+    return new;
+  end if;
+  if new.source_system is distinct from old.source_system
+     or new.source_snapshot is distinct from old.source_snapshot
+     or new.source_transaction_snapshot is distinct from old.source_transaction_snapshot
+     or new.mode is distinct from old.mode then
+    raise exception using errcode = '55000', message = 'imported history run evidence is immutable';
+  end if;
+  if old.status is distinct from 'running' and new.status = 'running' then
+    raise exception using errcode = '55000',
+      message = 'an imported history staging run cannot be resumed from a later source transaction';
+  end if;
+  if (new.source_counts is distinct from old.source_counts
+      or new.source_checksum_sha256 is distinct from old.source_checksum_sha256)
+     and (old.status is distinct from 'running' or new.status is distinct from 'staged'
+          or old.mode is distinct from 'stage') then
+    raise exception using errcode = '55000',
+      message = 'imported history source count and checksum evidence may be sealed only once';
+  end if;
+  return new;
+end
+$$;
+create trigger runs_imported_history_source_evidence_immutable
+  before update on migration.runs
+  for each row execute function migration.guard_imported_history_run_mutation();
+revoke all on function migration.guard_imported_history_source_row_insert(),
+  migration.guard_imported_history_run_mutation() from public;
 
 -- 5. The permission.
 insert into auth.permissions (code, description) values

@@ -873,7 +873,8 @@ grant select on ehr.patient_released_lab_results to hid_ehr_runtime, hid_schema_
 --   may execute the import; no runtime role can.
 -- The EHR runtime and the test role read the imported tables, filtered by
 -- the migration's patient-self and staff policies, and run the staff
--- decision; the Identity runtime and the test role run the sharing commands
+-- decision and its once-per-statement binding,
+-- ehr.imported_history_staff_patient(); the Identity runtime and the test role run the sharing commands
 -- and reach the sharing tables through them only. Each policy is replaced
 -- only when it is missing or differs, so a rerun takes no lock on its table
 -- (on the first run, ACCESS EXCLUSIVE briefly on identity.patients, the two
@@ -980,10 +981,16 @@ alter function ehr.imported_history_staff_read_allowed(uuid) owner to hid_import
 alter function identity.my_imported_history_sharing(text, uuid) owner to hid_imported_history_commands;
 alter function identity.set_my_imported_history_sharing(text, uuid, boolean) owner to hid_imported_history_commands;
 revoke create on schema ehr, identity from hid_imported_history_commands;
+-- No owner keeps an EXECUTE entry on its own function (none calls another),
+-- so the first run leaves the same ACL as a rerun, whose REVOKE ALL above
+-- removes the entry the ownership transfer carried over (P36).
 revoke all on function ehr.imported_history_staff_read_allowed(uuid),
   identity.my_imported_history_sharing(text, uuid),
-  identity.set_my_imported_history_sharing(text, uuid, boolean) from public;
+  identity.set_my_imported_history_sharing(text, uuid, boolean) from public, hid_imported_history_commands;
 grant execute on function ehr.imported_history_staff_read_allowed(uuid) to hid_ehr_runtime, hid_schema_test_runtime;
+-- The staff policies' binding (0096) runs as its caller and asks the decision above.
+revoke all on function ehr.imported_history_staff_patient() from public;
+grant execute on function ehr.imported_history_staff_patient() to hid_ehr_runtime, hid_schema_test_runtime;
 grant execute on function identity.my_imported_history_sharing(text, uuid),
   identity.set_my_imported_history_sharing(text, uuid, boolean)
   to hid_identity_runtime, hid_schema_test_runtime;
@@ -1101,7 +1108,7 @@ grant select, insert on ehr.imported_medical_records, ehr.imported_medical_recor
 grant create on schema ehr to hid_imported_history_importer;
 alter function ehr.import_legacy_medical_history(uuid, uuid, text, jsonb) owner to hid_imported_history_importer;
 revoke create on schema ehr from hid_imported_history_importer;
-revoke all on function ehr.import_legacy_medical_history(uuid, uuid, text, jsonb) from public;
+revoke all on function ehr.import_legacy_medical_history(uuid, uuid, text, jsonb) from public, hid_imported_history_importer;
 -- The migration administrator takes hid_migration_admin for the import's
 -- transaction only (import-legacy-history.mjs); it needs the schema to call it.
 grant usage on schema ehr to hid_migration_admin;
