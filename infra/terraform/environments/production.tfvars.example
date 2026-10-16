@@ -1,0 +1,16 @@
+aws_region          = "eu-west-1"
+expected_account_id = "123456789012"
+environment         = "production"
+
+availability_zones       = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+public_subnet_cidrs      = ["10.40.0.0/24", "10.40.1.0/24", "10.40.2.0/24"]
+application_subnet_cidrs = ["10.40.10.0/24", "10.40.11.0/24", "10.40.12.0/24"]
+database_subnet_cidrs    = ["10.40.20.0/24", "10.40.21.0/24", "10.40.22.0/24"]
+
+enable_database    = false
+enable_runtime     = false
+enable_ingress     = false
+enable_backup_plan = false
+
+# Populate the runtime inputs documented in the Terraform README with
+# production-specific immutable image digests, certificates, and identities.

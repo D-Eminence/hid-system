@@ -105,12 +105,12 @@ export interface HidEnvironmentConfig {
   // the clinical owner signs them off (P36, ADR-065).
   readonly patientRecordRelease: PatientRecordRelease;
   // Imported legacy medical history (owner decision 3 of 2026-10-16,
-  // ADR-066): ehr-api's EHR_PATIENT_RELEASE_IMPORTED_HISTORY (the patient's
+  // ADR-067): ehr-api's EHR_PATIENT_RELEASE_IMPORTED_HISTORY (the patient's
   // own read) and EHR_STAFF_IMPORTED_HISTORY_ENABLED (the staff read), and
   // identity-api's IMPORTED_HISTORY_SHARING_ENABLED (the patient's sharing
   // choice). Synth inputs HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY,
   // HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED and HID_IMPORTED_HISTORY_SHARING_ENABLED,
-  // each default false and refused outside staging until the P37 sign-off.
+  // each default false and refused outside staging until the P38 sign-off.
   readonly importedHistory: ImportedHistory;
   // ehr-api's patient record chat (owner decision 1 of 2026-10-16):
   // a patient's question about their own released records, answered through
@@ -126,7 +126,35 @@ export interface HidEnvironmentConfig {
   // Synth input HID_OPERATIONAL_ALARM_TOPIC_ARN; the regional stack requires
   // it in production and it is optional elsewhere.
   readonly operationalAlarmTopicArn?: string;
+  // Identity's enrollment budgets and QoreID timeout that the operator set
+  // (synth inputs HID_<VARIABLE>, identityBudgetInputs). Only these are
+  // emitted; Identity keeps its own default for every other one.
+  readonly identityBudgets: Readonly<Partial<Record<IdentityBudgetVariable, number>>>;
 }
+
+/**
+ * Identity variables the operator may set at synth time as HID_<VARIABLE>,
+ * each optional. The bounds and defaults are Identity's own
+ * (services/identity-api/src/config/environment.ts); the three QoreID lookup
+ * limits are also the bounds of 0085's platform.consume_public_patient_nin_quota.
+ * A test holds both in step. An input left out is not emitted, so Identity
+ * runs its default; QOREID_TIMEOUT_MS is always emitted, 5000 unless set.
+ */
+export const identityBudgetInputs = {
+  // Public NIN lookups a day, platform-wide; the owner sets it from the QoreID contract.
+  PATIENT_ENROLLMENT_QOREID_DAILY_CAP: { min: 1, max: 100_000, default: 200 },
+  // Public NIN lookups per client network (an IPv4 address or an IPv6 /64).
+  PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX: { min: 1, max: 100, default: 5 },
+  PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX: { min: 1, max: 1_000, default: 15 },
+  // Enrollment starts per client network within OTP_RATE_WINDOW_SECONDS.
+  PATIENT_ENROLLMENT_START_RATE_MAX_REQUESTS: { min: 1, max: 100, default: 5 },
+  // In-person checks of the facility route over 24 hours (ADR-063).
+  ASSISTED_VERIFICATION_STAFF_DAILY_MAX: { min: 1, max: 200, default: 20 },
+  ASSISTED_VERIFICATION_FACILITY_DAILY_MAX: { min: 1, max: 1_000, default: 100 },
+  QOREID_TIMEOUT_MS: { min: 250, max: 10_000, default: 5_000 },
+} as const;
+export type IdentityBudgetVariable = keyof typeof identityBudgetInputs;
+export const identityBudgetVariables = Object.keys(identityBudgetInputs) as IdentityBudgetVariable[];
 
 /** The patient record release categories, one flag each. */
 export interface PatientRecordRelease {
@@ -137,7 +165,7 @@ export interface PatientRecordRelease {
   readonly documents: boolean;
 }
 
-/** The imported legacy medical history switches (ADR-066). */
+/** The imported legacy medical history switches (ADR-067). */
 export interface ImportedHistory {
   readonly patientRead: boolean;
   readonly staffRead: boolean;
@@ -177,6 +205,8 @@ export interface SynthOptions {
   readonly notificationWorkerEnabled?: string;
   readonly novuSubscriberSyncEnabled?: string;
   readonly operationalAlarmTopicArn?: string;
+  // HID_<VARIABLE> for each identityBudgetInputs entry, as supplied.
+  readonly identityBudgets?: Readonly<Record<string, string | undefined>>;
 }
 
 interface ProfileValues {
@@ -386,6 +416,55 @@ export function assertNinOwnershipRoutes(configuration: {
   }
 }
 
+/**
+ * Refuses an Identity budget that Identity (or 0085's quota command) would
+ * refuse at start: out of bounds, not a whole number, an hourly NIN lookup
+ * limit above the daily one, or a facility in-person budget below the staff
+ * one. A value left out counts as Identity's default. The regional stack
+ * repeats this for a configuration not built by environmentConfig.
+ */
+export function assertIdentityBudgets(values: Readonly<Partial<Record<IdentityBudgetVariable, number>>>): void {
+  for (const [name, value] of Object.entries(values) as Array<[string, number | undefined]>) {
+    if (!(name in identityBudgetInputs)) throw new Error(`${name} is not an Identity budget synth input`);
+    const { min, max } = identityBudgetInputs[name as IdentityBudgetVariable];
+    if (value === undefined || !Number.isSafeInteger(value) || value < min || value > max) {
+      throw new Error(`HID_${name} must be a whole number from ${min} to ${max}; received ${JSON.stringify(value)}`);
+    }
+  }
+  const effective = (name: IdentityBudgetVariable) => values[name] ?? identityBudgetInputs[name].default;
+  const described = (name: IdentityBudgetVariable) => values[name] === undefined
+    ? `${effective(name)}, Identity's default` : String(effective(name));
+  if (effective('PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX') > effective('PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX')) {
+    throw new Error(`HID_PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX (${described('PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX')}) `
+      + `cannot exceed HID_PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX (${described('PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX')})`);
+  }
+  if (effective('ASSISTED_VERIFICATION_FACILITY_DAILY_MAX') < effective('ASSISTED_VERIFICATION_STAFF_DAILY_MAX')) {
+    throw new Error(`HID_ASSISTED_VERIFICATION_FACILITY_DAILY_MAX (${described('ASSISTED_VERIFICATION_FACILITY_DAILY_MAX')}) `
+      + `cannot be below HID_ASSISTED_VERIFICATION_STAFF_DAILY_MAX (${described('ASSISTED_VERIFICATION_STAFF_DAILY_MAX')})`);
+  }
+}
+
+/**
+ * Parses the optional synth inputs HID_<VARIABLE> of identityBudgetInputs:
+ * plain decimal digits with no sign, space or leading zero. Returns only the
+ * supplied ones.
+ */
+export function identityBudgets(values: Readonly<Record<string, string | undefined>> = {}):
+  Readonly<Partial<Record<IdentityBudgetVariable, number>>> {
+  const parsed: Partial<Record<IdentityBudgetVariable, number>> = {};
+  for (const [name, value] of Object.entries(values)) {
+    if (!(name in identityBudgetInputs)) throw new Error(`${name} is not an Identity budget synth input`);
+    if (value === undefined) continue;
+    const { min, max } = identityBudgetInputs[name as IdentityBudgetVariable];
+    if (!/^[1-9][0-9]{0,8}$/.test(value)) {
+      throw new Error(`HID_${name} must be a whole number from ${min} to ${max}; received ${JSON.stringify(value)}`);
+    }
+    parsed[name as IdentityBudgetVariable] = Number(value);
+  }
+  assertIdentityBudgets(parsed);
+  return parsed;
+}
+
 const PATIENT_RELEASE_INPUTS: ReadonlyArray<readonly [keyof PatientRecordRelease, string, string]> = [
   ['vitals', 'HID_EHR_PATIENT_RELEASE_VITALS', 'the clinical owner has not signed off the category (P36, ADR-065)'],
   ['diagnoses', 'HID_EHR_PATIENT_RELEASE_DIAGNOSES', 'the clinical owner has not signed off the category (P36, ADR-065)'],
@@ -423,12 +502,12 @@ const IMPORTED_HISTORY_INPUTS: ReadonlyArray<readonly [keyof ImportedHistory, st
 ];
 
 /**
- * Only staging may show imported legacy medical history (ADR-066), and there
+ * Only staging may show imported legacy medical history (ADR-067), and there
  * the staff read needs the sharing route and the sharing route the patient's
  * own read. Production
  * refuses each switch until the DPO and the owner sign off the legacy data's
  * provenance, scope and retention and Health-id renders it (release checklist
- * P37); the development stack runs its services in the production profile,
+ * P38); the development stack runs its services in the production profile,
  * where ehr-api and identity-api refuse them at start, so it is refused here
  * as well. The regional stack repeats this for a configuration not built by
  * environmentConfig.
@@ -440,21 +519,21 @@ export function assertImportedHistory(configuration: {
     for (const [flag, variable] of IMPORTED_HISTORY_INPUTS) {
       if (configuration.importedHistory[flag]) {
         throw new Error(`${variable}=true is refused outside staging (${configuration.name}): the DPO and the owner `
-          + 'have not signed off the legacy data (P37, ADR-066)');
+          + 'have not signed off the legacy data (P38, ADR-067)');
       }
     }
   }
   // A patient shares only what they can see themselves, and staff read only
   // while patients can choose and withdraw through the sharing route: the
-  // switches go on patient read first and off staff read first (ADR-066).
+  // switches go on patient read first and off staff read first (ADR-067).
   const { patientRead, staffRead, sharing } = configuration.importedHistory;
   if (sharing && !patientRead) {
     throw new Error('HID_IMPORTED_HISTORY_SHARING_ENABLED=true needs HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY=true: '
-      + 'a patient may share only the imported history they can see (ADR-066)');
+      + 'a patient may share only the imported history they can see (ADR-067)');
   }
   if (staffRead && !sharing) {
     throw new Error('HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED=true needs HID_IMPORTED_HISTORY_SHARING_ENABLED=true: '
-      + 'staff read imported history only while patients can choose and withdraw (ADR-066)');
+      + 'staff read imported history only while patients can choose and withdraw (ADR-067)');
   }
 }
 
@@ -626,6 +705,7 @@ export function environmentConfig(
   const recordChat = recordChatSettings(options);
   assertRecordChat({ name, natGateways: profiles[profile].natGateways, recordChat });
   const topic = operationalAlarmTopic(name, options.operationalAlarmTopicArn);
+  const budgets = identityBudgets(options.identityBudgets);
   return {
     ...environmentIdentity[name], ...profiles[profile],
     ...(stagingMode ? { stagingMode } : {}),
@@ -641,6 +721,7 @@ export function environmentConfig(
     importedHistory,
     recordChat,
     ...(topic ? { operationalAlarmTopicArn: topic.arn } : {}),
+    identityBudgets: budgets,
   };
 }
 

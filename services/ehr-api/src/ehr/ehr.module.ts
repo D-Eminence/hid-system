@@ -39,7 +39,7 @@ import {
   controllers: [PatientRecordsController, ImportedHistoryController, PatientRecordChatController],
   providers: [
     PatientRecordsService,
-    // Imported legacy medical history (ADR-066): the patient's own read is a
+    // Imported legacy medical history (ADR-067): the patient's own read is a
     // category of the release set below; the staff read has its own switch.
     ImportedHistoryService,
     StaffImportedHistoryEnabledGuard,

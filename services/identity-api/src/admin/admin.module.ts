@@ -7,6 +7,8 @@ import { IntegrationAdminService } from '../integrations/integration-admin.servi
 import { AdminController } from './admin.controller';
 import { AdminOperationsService } from './admin-operations.service';
 import { AdminService } from './admin.service';
+import { AdminClinicianApplicationsController } from './clinician-application-admin.controller';
+import { ClinicianApplicationAdminService } from './clinician-application-admin.service';
 import { PlatformSecurityController } from './platform-security.controller';
 import { PlatformSecurityService } from './platform-security.service';
 import { PricingService } from './pricing.service';
@@ -17,8 +19,8 @@ import { WorkforceAdminService } from './workforce-admin.service';
 @Module({
   imports: [DatabaseModule, AuditModule, IdentityModule],
   controllers: [AdminController, PlatformSecurityController, PublicPricingController, IntegrationAdminController,
-    WorkforceAdminController],
+    WorkforceAdminController, AdminClinicianApplicationsController],
   providers: [AdminService, AdminOperationsService, PricingService, IntegrationAdminService, PlatformSecurityService,
-    WorkforceAdminService],
+    WorkforceAdminService, ClinicianApplicationAdminService],
 })
 export class AdminModule {}

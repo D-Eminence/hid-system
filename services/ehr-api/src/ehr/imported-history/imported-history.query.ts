@@ -4,7 +4,7 @@ import { type TimelineCursor, type TimelineScope, timelineCursorSql, timelinePag
 
 /**
  * The read of the imported legacy medical history (owner decision 3 of
- * 2026-10-16, ADR-066, 0097), shared by the patient's own route (through
+ * 2026-10-16, ADR-067, 0099), shared by the patient's own route (through
  * PatientRecordRelease.readImportedHistory) and the staff route (through
  * ClinicalRepository). Row-level security decides whose rows a transaction
  * sees; the SELECT list below decides which fields leave the database. Only
@@ -20,7 +20,7 @@ export const IMPORTED_HISTORY_LIMITS = Object.freeze({ records: 50, versionsPerR
 export const IMPORTED_HISTORY_LISTS = Object.freeze({ self: 'imported-history:self', staff: 'imported-history:staff' });
 
 /**
- * What a patient's file is, until imported files are verified (ADR-066: no
+ * What a patient's file is, until imported files are verified (ADR-067: no
  * attachment, scan evidence or download is part of this change).
  */
 export const IMPORTED_FILE_ACCESS = 'pending-safety-verification' as const;

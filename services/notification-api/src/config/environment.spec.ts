@@ -16,6 +16,7 @@ describe('Notification API delivery profile validation', () => {
     ...emailConfiguration, NOTIFICATION_DELIVERY_PROFILE: 'full',
     TERMII_BASE_URL: 'https://termii.example.test', TERMII_API_KEY: randomBytes(24).toString('base64url'), TERMII_SENDER_ID: 'HID',
     META_PHONE_NUMBER_ID: '123', META_ACCESS_TOKEN: randomBytes(24).toString('base64url'), META_OTP_TEMPLATE_NAME: 'hid_otp',
+    META_APP_SECRET: randomBytes(24).toString('base64url'), META_WEBHOOK_VERIFY_TOKEN: randomBytes(24).toString('base64url'),
     BREVO_API_KEY: randomBytes(24).toString('base64url'), BREVO_EMAIL_FROM: 'security@example.test',
     BREVO_SMS_SENDER: 'HID', BREVO_WHATSAPP_SENDER: '2348000000000',
   });

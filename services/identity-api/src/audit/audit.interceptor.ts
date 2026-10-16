@@ -1,7 +1,6 @@
 import {
   CallHandler,
   ExecutionContext,
-  HttpException,
   Injectable,
   NestInterceptor,
 } from '@nestjs/common';
@@ -9,6 +8,7 @@ import { Reflector } from '@nestjs/core';
 import type { Response } from 'express';
 import { catchError, from, mergeMap, type Observable, throwError } from 'rxjs';
 import { AUDIT_ACTION, AUDIT_FAILURES_ONLY, AUDIT_SESSION_EVENT, NO_AUDIT } from '../common/decorators';
+import { problemStatusAndCode } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { AuditService } from './audit.service';
 
@@ -72,7 +72,9 @@ export class AuditInterceptor implements NestInterceptor {
         purposeOfUse: this.purpose(request),
         sourceIp: request.ip,
         userAgent: request.header('user-agent'),
-        details: { method: request.method, route: request.route?.path, durationMs: Date.now() - startedAt },
+        // The status and code the client is answered, never the message (A17).
+        details: { method: request.method, route: request.route?.path, ...problemStatusAndCode(error),
+          durationMs: Date.now() - startedAt },
       })).pipe(mergeMap(() => throwError(() => error)))),
     );
   }
@@ -92,7 +94,7 @@ export class AuditInterceptor implements NestInterceptor {
     if (!actor || actor.kind === 'patient' || sessionEvent || request.accessScope === 'platform' || request.facilityId) {
       return undefined;
     }
-    const status = error instanceof HttpException ? error.getStatus() : 500;
+    const { status, code } = problemStatusAndCode(error);
     return {
       correlationId: request.correlationId,
       actorType: 'staff' as const,
@@ -103,7 +105,7 @@ export class AuditInterceptor implements NestInterceptor {
       outcome: status < 500 ? 'denied' as const : 'failure' as const,
       sourceIp: request.ip,
       userAgent: request.header('user-agent'),
-      details: { method: request.method, route: request.route?.path, status, requestAction: `api.${action}`,
+      details: { method: request.method, route: request.route?.path, status, code, requestAction: `api.${action}`,
         durationMs: Date.now() - startedAt },
     };
   }
@@ -150,7 +152,14 @@ export class AuditInterceptor implements NestInterceptor {
     return typeof value === 'string' ? value : undefined;
   }
 
+  /**
+   * A patient acts on their own record: every row of a patient session is
+   * `patient-self`, whatever purpose the client sends, as the patient's own
+   * service events record it (A17). A staff request keeps the purpose it
+   * declares.
+   */
   private purpose(request: HidRequest): string | undefined {
+    if (request.actor?.kind === 'patient') return 'patient-self';
     const value = request.query?.purpose;
     return typeof value === 'string' ? value : request.header('x-purpose-of-use');
   }

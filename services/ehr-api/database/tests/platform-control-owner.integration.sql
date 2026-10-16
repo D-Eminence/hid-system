@@ -76,7 +76,7 @@ declare
 begin
   foreach control_key in array array[
     'patient_portal_enabled', 'provider_portal_enabled', 'outreach_portal_enabled',
-    'maintenance_mode', 'uploads_enabled', 'break_glass_enabled', 'record_chat_enabled'
+    'maintenance_mode', 'uploads_enabled', 'break_glass_enabled', 'clinician_signup_enabled', 'record_chat_enabled'
   ] loop
     if platform.control_enabled(control_key)
          is distinct from current_setting('hid_control_owner_test.' || control_key)::boolean then

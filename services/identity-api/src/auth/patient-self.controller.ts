@@ -54,7 +54,7 @@ export class PatientSelfController {
   }
 
   // The patient's choice to share imported legacy history with staff they
-  // consent to (ADR-066). Reading it and turning it on need its own switch;
+  // consent to (ADR-067). Reading it and turning it on need its own switch;
   // turning it off is always allowed (the service decides by the choice).
   @Get('me/imported-history-sharing')
   @UseGuards(ImportedHistorySharingEnabledGuard)

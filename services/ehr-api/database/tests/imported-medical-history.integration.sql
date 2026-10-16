@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
 \o /dev/null
--- Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066,
--- migration 0097). Rollback-only.
+-- Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-067,
+-- migration 0099). Rollback-only.
 --
 -- Patients read their own imported history through main's patient-self
 -- binding (ehr.patient_self_context, 0091) only in a transaction whose

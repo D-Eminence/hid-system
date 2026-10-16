@@ -10,7 +10,7 @@ import * as argon2 from 'argon2';
 import type { ArgumentsHost } from '@nestjs/common';
 import type { Response } from 'express';
 import type { PoolClient } from 'pg';
-import { DomainProblem, ProblemDetailsFilter, PublicDetailProblem } from '../common/problem';
+import { DomainProblem, ProblemDetailsFilter, PublicDetailProblem, RetryAfterProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import * as environment from '../config/environment';
 import { getEnvironment, resetEnvironmentForTests } from '../config/environment';
@@ -58,6 +58,20 @@ function answered(error: unknown): { status: number; code: string; detail: strin
   }) } as unknown as ArgumentsHost;
   new ProblemDetailsFilter().catch(error, host);
   return response.json.mock.calls[0]?.[0];
+}
+/** The Retry-After header ProblemDetailsFilter sets on a refusal's answer, or undefined (A21). */
+function retryAfterHeader(error: unknown): string | undefined {
+  const headers = new Map<string, string>();
+  const response = { status: jest.fn().mockReturnThis(), type: jest.fn().mockReturnThis(),
+    json: jest.fn().mockReturnThis(),
+    setHeader: jest.fn((name: string, value: string) => { headers.set(name.toLowerCase(), value); }) };
+  const host = { switchToHttp: () => ({
+    getRequest: () => ({ correlationId, method: 'POST',
+      route: { path: '/identity/patient-enrollments/holder' } } as unknown as HidRequest),
+    getResponse: () => response as unknown as Response,
+  }) } as unknown as ArgumentsHost;
+  new ProblemDetailsFilter().catch(error, host);
+  return headers.get('retry-after');
 }
 /** `auth.otp_rate_limits` rows by `scope:bucket`; fixtures given one map share the table. */
 type OtpRateRow = { request_count: number; window_started_at: Date; blocked_until: Date | null };
@@ -845,6 +859,45 @@ describe('PatientEnrollmentService', () => {
       expect(f.otpRates.get(`recipient:${bucket}`)?.blocked_until).toBeInstanceOf(Date);
     });
 
+    // A21: the spent budget is answered with the contact step's request-limit
+    // 429 (#61), so every contact-step 429 states one Retry-After, the longer
+    // of the two windows, and the budget stays indistinguishable.
+    it.each([
+      ['the code budget window', { OTP_RATE_WINDOW_SECONDS: '900', PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS: '1800' }, 1800],
+      ['the request window', { OTP_RATE_WINDOW_SECONDS: '3600', PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS: '900' }, 3600],
+    ])('answers a spent budget and a contact request limit with one 429 and Retry-After, %s when longer', async (_longer, windows, seconds) => {
+      Object.assign(process.env, windows);
+      resetEnvironmentForTests();
+      const answer = (error: unknown) => ({ status: (error as DomainProblem).getStatus(), code: (error as DomainProblem).code,
+        detail: (error as DomainProblem).message, retryAfterSeconds: (error as { retryAfterSeconds?: number }).retryAfterSeconds });
+      // The recipient's code budget is spent.
+      const spent = fixture();
+      const startedSpent = await provenStart(spent);
+      const contact = await spent.service.startContact(startedSpent.cookie, 'email', 'patient@example.test',
+        '203.0.113.10', correlationId);
+      const code = lastCode(spent);
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await refusesCode(spent, startedSpent.cookie, contact.challengeId, wrong(code));
+      }
+      const budget = await spent.service.startContact(startedSpent.cookie, 'email', 'patient@example.test',
+        '198.51.100.7', correlationId).then(() => undefined, (error: unknown) => error);
+      // The recipient's request limit is reached; its code budget is untouched.
+      const busy = fixture();
+      const startedBusy = await provenStart(busy);
+      busy.rateCount = getEnvironment().OTP_RATE_MAX_REQUESTS;
+      const requests = await busy.service.startContact(startedBusy.cookie, 'email', 'patient@example.test',
+        '203.0.113.10', correlationId).then(() => undefined, (error: unknown) => error);
+
+      expect(answer(budget)).toEqual({ status: 429, code: 'ENROLLMENT_RATE_LIMITED',
+        detail: 'Too many enrollment requests; try again later', retryAfterSeconds: seconds });
+      expect(answer(requests)).toEqual(answer(budget));
+      // The code itself is still refused as a wrong code is, with no Retry-After.
+      const refusedCode = await spent.service.verifyContact(startedSpent.cookie, contact.challengeId, code, correlationId)
+        .then(() => undefined, (error: unknown) => error);
+      expect(refusedCode).toMatchObject({ status: 422, code: 'OTP_INVALID' });
+      expect(refusedCode).not.toHaveProperty('retryAfterSeconds');
+    });
+
     it('applies a configured budget and window', async () => {
       Object.assign(process.env, { PATIENT_ENROLLMENT_CONTACT_FAILURE_MAX: '3',
         PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS: '1800' });
@@ -864,6 +917,24 @@ describe('PatientEnrollmentService', () => {
       expect(remaining).toBeGreaterThan(1_790_000);
       expect(remaining).toBeLessThanOrEqual(1_800_000);
     });
+  });
+
+  // A21: the cooldown of this cookie-proven enrollment's own code, reached only
+  // after the contact step's limits, so the seconds left disclose nothing else.
+  it('tells a resend within the cooldown how many seconds of it remain', async () => {
+    const f = fixture();
+    const started = await provenStart(f);
+    await f.service.startContact(started.cookie, 'email', 'patient@example.test', '203.0.113.10', correlationId);
+    // The code went out 20 seconds into a 60-second cooldown.
+    f.challenge!.created_at = new Date(Date.now() - 20_000);
+    const refused = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
+      '203.0.113.10', correlationId).then(() => undefined, (error: unknown) => error);
+    expect(refused).toMatchObject({ status: 429, code: 'OTP_RESEND_COOLDOWN' });
+    const retryAfter = (refused as { retryAfterSeconds?: number }).retryAfterSeconds;
+    expect(getEnvironment().OTP_RESEND_COOLDOWN_SECONDS).toBe(60);
+    expect(retryAfter).toBeGreaterThanOrEqual(39);
+    expect(retryAfter).toBeLessThanOrEqual(40);
+    expect(f.notification.deliver).toHaveBeenCalledTimes(1);
   });
 
   it('invalidates the old challenge when the applicant changes the selected account contact', async () => {
@@ -985,6 +1056,8 @@ describe('PatientEnrollmentService', () => {
       expect(refused).toBeInstanceOf(DomainProblem);
       expect([(refused as DomainProblem).getStatus(), (refused as DomainProblem).code])
         .toEqual([429, 'ENROLLMENT_RATE_LIMITED']);
+      // A21: the enrollment rate window (OTP_RATE_WINDOW_SECONDS), an upper bound.
+      expect(refused).toHaveProperty('retryAfterSeconds', 900);
       expect(passwordHash().mock.calls.length).toBe(before);
       expect(activation(f.queries)).toHaveLength(0);
       expect(rateLookups(f.queries)).toEqual([{ scope: 'enrollment', bucket: expect.any(String) }]);
@@ -1091,7 +1164,7 @@ describe('PatientEnrollmentService', () => {
       const limited = fixture();
       limited.rateCount = 2;
       await expect(limited.service.start(nin, requestKey, '198.51.100.7', correlationId))
-        .rejects.toMatchObject({ status: 429, code: 'ENROLLMENT_RATE_LIMITED' });
+        .rejects.toMatchObject({ status: 429, code: 'ENROLLMENT_RATE_LIMITED', retryAfterSeconds: 900 });
       expect(limited.provider.verifyNin).not.toHaveBeenCalled();
       const allowed = fixture();
       allowed.rateCount = 1;
@@ -1720,6 +1793,65 @@ describe('PatientEnrollmentService', () => {
       expect(f.notification.deliver).toHaveBeenCalledTimes(3);
     });
 
+    // A21, as at the contact step: the cooldown of this cookie-proven
+    // enrollment's own last holder code, which the caller asked for, so the
+    // seconds left tell nothing about anyone else.
+    it('tells a holder resend within the cooldown how many seconds of it remain (A21)', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId);
+      // The code went out 20 seconds into a 60-second cooldown.
+      f.challenge!.created_at = new Date(Date.now() - 20_000);
+      const refused = await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId)
+        .then(() => undefined, (error: unknown) => error);
+      expect(refused).toMatchObject({ status: 429, code: 'OTP_RESEND_COOLDOWN',
+        message: 'Wait before requesting another code' });
+      expect(getEnvironment().OTP_RESEND_COOLDOWN_SECONDS).toBe(60);
+      expect(refused).toBeInstanceOf(RetryAfterProblem);
+      const retryAfter = Number(retryAfterHeader(refused));
+      expect(retryAfter).toBeGreaterThanOrEqual(39);
+      expect(retryAfter).toBeLessThanOrEqual(40);
+      expect(f.notification.deliver).toHaveBeenCalledTimes(1);
+    });
+
+    // A21: the network's request budget shares the start's and the contact
+    // step's bucket and window, so it states the same full window.
+    it('answers a spent network budget at the holder send with Retry-After of the full window (A21)', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      f.rateCount = getEnvironment().OTP_RATE_MAX_REQUESTS * 3;
+      const refused = await f.service.sendHolderCode(started.cookie, '203.0.113.10', correlationId)
+        .then(() => undefined, (error: unknown) => error);
+      expect(refused).toMatchObject({ status: 429, code: 'ENROLLMENT_RATE_LIMITED',
+        message: 'Too many enrollment requests; try again later' });
+      expect(getEnvironment().OTP_RATE_WINDOW_SECONDS).toBe(900);
+      expect(retryAfterHeader(refused)).toBe('900');
+      expect(f.notification.deliver).not.toHaveBeenCalled();
+      expect(f.challenges).toEqual([]);
+    });
+
+    // Not a retry-later answer: it sends the patient to a facility, and its
+    // budgets are the enrollment's three codes, which never come back, and
+    // the NIN's and phone's, counted in SQL over 24 hours, 30 days or a year.
+    it('answers NIN_HOLDER_ROUTE_LIMITED with no Retry-After, at the send and at the proof', async () => {
+      const spent = fixture();
+      const startedSpent = await spent.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      spent.holderSendAllowed = false;
+      const budget = await spent.service.sendHolderCode(startedSpent.cookie, '203.0.113.10', correlationId)
+        .then(() => undefined, (error: unknown) => error);
+      const proved = fixture();
+      const startedProved = await proved.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const sent = await proved.service.sendHolderCode(startedProved.cookie, '203.0.113.10', correlationId);
+      proved.holderProofOutcome = 'route_limited';
+      const proof = await proved.service.verifyHolderCode(startedProved.cookie, sent.challengeId,
+        lastDelivery(proved).code, correlationId).then(() => undefined, (error: unknown) => error);
+      for (const refused of [budget, proof]) {
+        expect(refused).toMatchObject({ status: 429, code: 'NIN_HOLDER_ROUTE_LIMITED' });
+        expect(refused).not.toBeInstanceOf(RetryAfterProblem);
+        expect(retryAfterHeader(refused)).toBeUndefined();
+      }
+    });
+
     it('answers a 503 holder refusal with its fixed patient text through the problem filter', async () => {
       const f = fixture();
       const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
@@ -1989,8 +2121,11 @@ describe('PatientEnrollmentService', () => {
       expect(again.facility.deskCode).not.toBe(code);
       expect(f.enrollment!.desk_code_hmac).toBe(keyed('patient-enrollment-desk-code', again.facility.deskCode as string));
       for (let n = 3; n <= 5; n += 1) await f.service.issueDeskCode(started.cookie, correlationId);
-      await expect(f.service.issueDeskCode(started.cookie, correlationId)).rejects.toMatchObject({ status: 429,
-        code: 'ASSISTED_DESK_CODE_LIMITED' });
+      const limited = await f.service.issueDeskCode(started.cookie, correlationId)
+        .then(() => undefined, (error: unknown) => error);
+      expect(limited).toMatchObject({ status: 429, code: 'ASSISTED_DESK_CODE_LIMITED' });
+      // No Retry-After (A21): the five codes never come back; the patient starts again.
+      expect(retryAfterHeader(limited)).toBeUndefined();
       expect(f.enrollment!.desk_code_issues).toBe(5);
     });
 

@@ -2526,7 +2526,7 @@ Decision:
   the new membership's roles.
 - A stored choice that cannot be read is never reported as a choice:
   `GET /auth/session` answers `503 DEPENDENCY_UNAVAILABLE` with the cookies
-  untouched. A refresh, whose rotation has already committed, answers `200`
+  untouched. A refresh, whose rotation still commits (addendum below), answers `200`
   with the rotated session's cookies and CSRF token, the actor as resolved
   (the default facility) and `facilitySelection: 'unavailable'`, which the
   client must not take as a choice; it asks where the user is working, and
@@ -2624,6 +2624,41 @@ Related: ADR-038 (session assurance per family), ADR-044 (sign-out under the
 account lock), ADR-049 (one active membership per facility), ADR-054 (staff
 sign-in is password then TOTP); `INTERFACE_CONTRACT.md`, "Working facility per sign-in";
 `DATABASE.md`, "Session facility selection (0089)".
+
+## ADR-046 addendum: refresh reads the choice in its rotation and audits where it reports
+
+Date: 2026-10-14
+
+D-Eminence/hid-system#76 (ADR-059, launch item A6) moved the refresh's
+`auth.refresh` audit row into the rotation's transaction, with the actor the
+rotation resolved, at the default facility; the choice was still read after
+the commit, on another connection, for the response. A staff sign-in that had
+chosen another facility was therefore answered `selected` at that facility but
+audited at its primary facility, membership and organization, and a
+facility's audit list (`GET /audit/events`) showed the refresh at the wrong
+facility. D-Eminence/hid-system#73 had audited the reported actor, after the
+commit.
+
+Decision (this change, the A6 residual):
+
+- The refresh reads the choice in the rotation's transaction, which already
+  holds the rotated session of the family, and writes the `auth.refresh` row
+  with the actor it reports. The response reports that same read; nothing is
+  read after the commit.
+- The read is a plain `SELECT` (no row lock) under a savepoint. A read that
+  fails is rolled back to the savepoint only: the rotation commits with its
+  row at the default facility and the answer is still `200` with
+  `facilitySelection: 'unavailable'`. A transaction the savepoint cannot
+  restore fails the audit write, so the refresh is a `5xx` with nothing
+  rotated and the cookies kept (ADR-059).
+- `unavailable` stays although a failed rotation no longer spends the refresh
+  token: a `5xx` would leave every staff sign-in unrenewable for as long as
+  the choice cannot be read, while `unavailable` only asks the user where they
+  are working.
+
+No request, response, schema or grant change. The rotation's transaction holds
+the presented session's row lock for one more statement, bounded by the
+statement timeout.
 
 # ADR-047: One Environment-Bound Workload Issuer for Staging and Production
 
@@ -3200,6 +3235,8 @@ step-up and two-person elevation); `INTERFACE_CONTRACT.md` §19 (Workforce
 provisioning) and the auth session contract (Staff facility binding);
 `DATABASE.md` (Governed workforce provisioning (0087)); release checklist §2,
 §5, §8 and §9; `PHASE_3_LAUNCH_DECISIONS.md` D14 and N5.
+Extended by ADR-066 (clinician self sign-up with two-admin approval;
+reserved attestations; grants pinned to the step-1 attestation).
 # ADR-052: Health-id Is the Single Launch Frontend; Only Its Hosts Are Deployed
 
 Status: Accepted (2026-10-13) with the owner's defaults (deny by default, least
@@ -3627,6 +3664,9 @@ Consequences:
   an out-of-band code issued by the provisioning administrator), existing
   clinical accounts enrol before clinical roles are enabled and operators
   review enrolments that followed a recovery (release checklist P22).
+- Self-signed-up clinicians (ADR-066) enrol before review, and step 1 of
+  their review confirms the authenticator outside the mailbox: the applicant
+  reads a live code to the reviewing Super Admin during the identity call.
 - Evidence is local and synthetic: unit specs, `staff-mfa.integration.sql`,
   `verify-staff-mfa-runtime.mjs` and every runtime verifier that signs staff
   in (release checklist §8). Nothing has been run on staging or production.
@@ -3689,11 +3729,14 @@ bypass):
   which this change does not relax. Identity's CORS policy is unchanged and
   applies first, as on every route: a request with no `Origin` or one in
   `CORS_ORIGINS` is answered, and a foreign `Origin` is refused by the CORS
-  middleware (`500`, no CORS permission) before the route.
+  middleware (`500`, no CORS permission; `403 ORIGIN_DENIED` since
+  D-Eminence/hid-system#76, ADR-059) before the route.
 - `PublicDetailProblem` is the one exception to Identity's 5xx detail
   masking. It takes only a fixed sentence written for the person using the
   client, never a message built from an error or from request data; any
   new use needs its own decision.
+  ADR-066 adds `503 CLINICIAN_SIGNUP_CLOSED` ("Clinician sign-up is not open
+  yet. If you already have a Health ID provider account, sign in.").
 
 Consequences:
 
@@ -4154,6 +4197,169 @@ Related: ADR-041 (P8 owners); ADR-045 (Outreach campaign governance);
 `PHASE_3_LAUNCH_DECISIONS.md` (D9, D17); `INTERFACE_CONTRACT.md` (launch
 module set, patient self-service, document upload completion);
 `DATABASE.md` (0091); release checklist §1, §2, §3, P10, P11, §5, §8, §9.
+
+## ADR-058 addendum: break-glass permitted at launch with limits (0097); on only after the P11 operator step
+
+Status: Decided by the owner on 2026-10-14 (D9, "turn on with limits").
+Source implementation proposed (migration 0097, branch
+`claude/break-glass-launch`, D-Eminence/hid-system#83); not merged or
+deployed. Written as 0092, then 0093, then 0095, it is numbered 0097, after
+0093 and 0094 of D-Eminence/hid-system#84 and #85 (ADR-062, ADR-063) and
+0095 and 0096 of D-Eminence/hid-system#90 and #91 (ADR-064, ADR-065), which
+change neither the break-glass permission, the purpose-of-use vocabulary nor
+the platform controls. The platform control is
+production configuration and is not changed here: it is an operator step.
+
+Date: 2026-10-14
+
+Context:
+
+ADR-058 kept break-glass off at launch: 0091 withdrew
+`identity.break-glass.write` from every role and started `break_glass_enabled`
+off, and no `emergency` purpose of use existed (0082 seeded only
+`direct-care`). It also set how a module comes back: a reviewed migration that
+grants its permissions again and changes the role assertions with it, applying
+to every environment; for break-glass, also the `emergency` purpose and the
+control. The owner has now decided D9 for launch: break-glass is on, with
+limits. One reviewed migration grants the permission again and seeds the
+purpose; an operator turns the control on after staff MFA ships. Direct care
+is unaffected.
+
+Decision:
+
+- 0097 grants `identity.break-glass.write` to exactly the roles that held it
+  before 0091: doctor, clinician and nurse (0010; no other migration granted
+  it to another role). It seeds `emergency` ("Emergency treatment", active,
+  source `hid`) with `ON CONFLICT (code) DO NOTHING`, as 0082 seeded
+  `direct-care`, so an operator's row, active or not, is kept. Nothing else
+  0084 or 0091 withdrew is granted, and `healthcare-operations` stays unseeded
+  (N3). The rest of the activation and summary path was never withdrawn:
+  `identity.consent.write`, `identity.patient.read` and the EHR reads.
+- The role assertions change with it: exactly those three roles hold
+  `identity.break-glass.write`. Any other holder, a missing one, or any other
+  permission 0084 or 0091 withdrew still stops the bootstrap.
+- The control stays the operator's. 0097 leaves `break_glass_enabled` as 0091
+  left it (off where still seeded; a migration has no actor for a control
+  event), and refuses to run while it is on (`55000 BREAK_GLASS_CONTROL_ON`,
+  nothing changed): 0091 kept a value an administrator had set, and granting
+  the permission with the control on would make break-glass live at 0097's
+  commit, before staff MFA. The administrator sets it off with
+  `POST /admin/controls` and `migrate` runs again. Before the first role
+  bootstrap the migration administrator cannot read the control (forced
+  row-level security, `PLATFORM_CONTROL_UNAVAILABLE`); no runtime role exists
+  then, so the control is as 0091 left it, and 0097 goes on. A platform
+  administrator turns it on with the audited
+  `POST /admin/controls` (MFA platform session, TOTP step-up, reason,
+  `If-Match`) once staff MFA has shipped: Identity runs with 0088 in that
+  environment and Health-id signs staff in with an authenticator (FE-2), so
+  every session that can activate break-glass is MFA-verified (ADR-054), and
+  P22 is done. Until then activation answers `423 BREAK_GLASS_DISABLED` and
+  writes no grant and no `identity.break-glass.*` audit row, only the
+  request's own `api.identity.break-glass.command` failure row (release
+  checklist P11).
+- Limits, unchanged here and accepted for launch:
+  - the emergency summary covers the activating facility only, and the chart
+    routes stay closed to the emergency purpose: break-glass cannot open the
+    full chart, and an emergency room that never treated the patient sees an
+    empty summary (Health-id hand-off B1);
+  - the document list and download are not chart routes and take the
+    emergency purpose as before, so a break-glass grant reads the activating
+    facility's document metadata and files, as the release checklist has
+    recorded since D-Eminence/hid-system#52. Whether it should is N3's open
+    question (Health-id hand-off B1(c)); this addendum does not decide it.
+    Uploads are off at launch and no import writes EHR documents, so a
+    launch database holds none; the reviewed migration that grants
+    `ehr.document.write` again must decide it first;
+  - the summary's vitals are as first recorded; corrections are not applied
+    (D8; hand-off A11(a));
+  - the clinician's access-request list leaves break-glass grants out (0074),
+    so after a reload a grant is found again only by activating again, which
+    replays the same grant without extending it (hand-off B11);
+  - as since 0010, 0012 and 0031: a reason of 8 to 500 characters, 5 to 240
+    minutes, read only, at most ten new activations per account per rolling
+    hour, the audit row and the patient notification intent in the activation
+    transaction, an in-app inbox item for the patient, and no revocation by
+    the patient (the clinician closes the grant).
+
+Alternatives not taken:
+
+- Turning the control on in the migration: a control event needs an acting
+  account (ADR-058), and the owner keeps production configuration an
+  operator's action.
+- Granting the permission or seeding the purpose alone: activation needs both,
+  so either alone changes nothing a user sees, and the other half would need
+  a second reviewed migration.
+- Granting break-glass to further roles (lab, pharmacist, receptionist,
+  admin, org admin): none held it before 0091; widening it is a new decision.
+- A database check of the control inside `identity.activate_break_glass`:
+  Identity checks it in the activation transaction, and only the Identity
+  runtime may execute the command. It would be defence in depth for a later
+  change, not part of this decision.
+- Refusing the emergency purpose on the document routes now: it would decide
+  N3's document question, which the owner has not decided, and N3's proposed
+  default keeps today's reads; no document exists at launch.
+- Checking the control only in the release checklist before 0097: 0097's own
+  precondition also covers a database the checklist does not reach (a
+  long-lived development or pre-launch copy).
+
+Consequences:
+
+- From 0097's commit, doctors', clinicians' and nurses' sessions list
+  `identity.break-glass.write` on their next request (Identity reads
+  permissions per request), and Health-id `077b85c` enables its Emergency
+  method for them. While the control is off the activation answers
+  `423 BREAK_GLASS_DISABLED` ("Emergency access is currently disabled by the
+  platform administrator"), which Health-id shows as the error; every other
+  role still gets `403 PERMISSION_DENIED`.
+- After the operator step, activation is live: grant, audit, emergency-contact
+  alert intent (delivered only where emergency-contact delivery is enabled)
+  and inbox item, and the summary as above.
+- An earlier release's bootstrap refuses a database that holds 0097 (its
+  assertion forbids the permission). Break-glass is turned off again with the
+  control (or by deactivating `emergency`); taking the permission away again
+  is a new reviewed migration, never a hand-made delete, which would stop the
+  next bootstrap.
+- The control must follow staff MFA in rollbacks too: before Identity is
+  rolled back past the staff MFA build (0088's Identity) or Health-id past
+  its staff authenticator sign-in (FE-2), a platform administrator sets
+  `break_glass_enabled` off with `POST /admin/controls` and confirms it with
+  P11, and turns it on again only once the MFA builds are back (release
+  checklist §9).
+- Evidence is local and synthetic: the rollback-only suite
+  `break-glass-launch.integration.sql` (which sets the control itself through
+  the administrator command, so it does not depend on the environment's
+  control), the role assertions, 0097's precondition run again by
+  `verify-non-superuser-database.mjs`, and the patient-safety runtime verifier
+  over HTTP with the control off, on and off again (release checklist §8).
+  Nothing has been run on staging or production.
+
+Related: ADR-054 (staff MFA); ADR-058; `PHASE_3_LAUNCH_DECISIONS.md` (D9, N3);
+`INTERFACE_CONTRACT.md` (break-glass, launch module set); `DATABASE.md`
+("Break-glass at launch, with limits (0097)"); release checklist §1, §2, §3,
+P10, P11, §5, S4y, §8, §9, §10.
+
+## ADR-058 addendum: completion while uploads are off answers 423 UPLOADS_DISABLED
+
+Date: 2026-10-14
+
+Change: this change (launch review item A15, register
+BE-EHR-DOCUMENTS-CONTRACT).
+
+ADR-058 had completion answer `409` while `uploads_enabled` is off: the
+generic `409 CONFLICT` that the upload intent also answered. Under ADR-059
+("refusals carry their own codes") both now answer `423 UPLOADS_DISABLED`,
+with the same detail ("Document uploads are temporarily disabled"), as
+`423 PLATFORM_PORTAL_DISABLED` and `423 BREAK_GLASS_DISABLED` do for their
+controls. The check itself is unchanged: on completion it still runs first,
+before Identity, the storage read or any write; on the intent it follows the
+`Idempotency-Key` check. A control that cannot be read still answers `500`.
+The other document refusals took their own codes in the same change
+(`INTERFACE_CONTRACT.md` §16, "Document route answers"). The request audit
+records the refusal with `details.code` `UPLOADS_DISABLED` and outcome
+`denied`, as it recorded the `409`. At launch no role holds
+`ehr.document.write`, so both routes answer `403 PERMISSION_DENIED` first; the
+`423` is reached only once a reviewed migration grants the permission again
+while the control is still off.
 
 # ADR-059: A Fault Is Never a Sign-Out; Refusals Carry Their Own Codes
 
@@ -5160,9 +5366,268 @@ Related: ADR-018; ADR-058 (PSELF-RLS); `PHASE_3_LAUNCH_DECISIONS.md` D7, D8
 and D17; `INTERFACE_CONTRACT.md`, "Record summaries" and "Patient document
 download"; `DATABASE.md`, "Patient record release (0096)".
 
-# ADR-066: Imported legacy medical history
+# ADR-066: Doctors and Nurses Apply by Themselves; They Set Up an Authenticator Before Review, and Two Platform Administrators Still Verify and Grant Every Clinical Role
 
-Status: Accepted in source (migration 0097). Not merged, not deployed. Every
+Status: Proposed; needs owner approval (owner decision 2 of 2026-10-14,
+"self sign-up + admin approval"; launch decision CLIN-SIGNUP; migration
+0098, numbered after main's 0093 to 0096 and break-glass's 0097; built as
+0094, then merged as 0096 under ADR-064 until main took 0095, 0096, ADR-064
+and ADR-065). Not merged or deployed. It extends ADR-049. It does not supersede
+ADR-049 and does not change ADR-054, ADR-059 or NO-MEMBERSHIP-SIGN-IN. Three
+points are implemented with the design default and stay open for the owner
+(release checklist P37):
+the step-1 identity-assurance standard and the reviewer list; the service
+level stated to applicants (the default is a 30-day expiry with no promise);
+and the licence register check's source (the default is a manual check of
+the regulator's public register, recorded by reference).
+
+Date: 2026-10-15
+
+Context:
+
+- ADR-049 (0087) grants clinical facility roles only through
+  platform-governed commands, under a two-person rule: one reviewer attests
+  the credential and another administrator grants. It deferred facility
+  self-service; a clinician got access only by being provisioned by two
+  Super Admins. The self-service `org_admin` (CAC and email only) is
+  untrusted for clinical authority.
+- The owner decided on 2026-10-14 that clinicians sign up themselves and
+  land in a verification queue, and that two platform administrators approve.
+- Constraints: NO-MEMBERSHIP-SIGN-IN (ADR-059: no MFA challenge and no
+  session on the password of an account without an eligible membership);
+  ADR-054 and P22 (a clinical account holds a staff-proven authenticator
+  before its clinical role is enabled, each enrolment confirmed outside the
+  mailbox); an account is not a patient identity; N5 and
+  `WORKFORCE_ROLE_CONFLICT`; anti-enumeration; ADR-057 (a new
+  `PublicDetailProblem` needs a decision); ADR-058 (off starts off in the
+  database).
+- With 0097, doctor, clinician and nurse hold `identity.break-glass.write`
+  again: once `break_glass_enabled` is on, any approved clinician can make
+  emergency reads at their facility.
+- With 0094 (ADR-063), doctor, clinician and nurse hold
+  `identity.patient.assisted_registration`, and the in-person check accepts
+  any facility role whose grant rests on a current 0087 attestation. Step 2
+  writes exactly such a grant, so once the facility is designated (P30) and
+  `ASSISTED_REGISTRATION_ENABLED` is on, an approved clinician can run
+  in-person checks there with a staff MFA session and no further step, and so
+  vouch for another person's Health ID.
+
+Decision:
+
+- Who may apply at launch: doctors registered with MDCN and nurses or
+  midwives registered with NMCN, one verified facility per application. A
+  table CHECK, the commands and the API enforce the pair. The prescribing
+  `clinician` role and other regulators are not offered; the 0087 governed
+  path still grants `clinician`.
+- Self sign-up files an application and grants nothing. The applicant proves
+  an email address with a six-digit code (the code is sent whether or not
+  the address is in use; only its holder learns that it is), sets a password
+  and gives their name, licence number and licence expiry. This creates an
+  active account with a pending staff record and an application; no
+  membership and no role. The applicant then sets up an authenticator app
+  through the unchanged 0088 staff enrolment (a second email code bound to
+  the factor's challenge). The application is not reviewable until then
+  (`awaiting_authenticator` → `submitted`). Staff sign-in still answers
+  `403 NO_ACTIVE_FACILITY_MEMBERSHIP` until approval.
+- The applicant reads and changes an application through an application
+  capability: an HttpOnly, SameSite=Strict, host-only cookie scoped to the
+  application routes and bound to a server-side row (60 minutes for a draft,
+  30 for an account capability). It is opened by the submission itself, or
+  later by a code emailed to an account that holds a clinician application
+  followed by its authenticator; never by a password. It is not a session and
+  reaches no patient data. The 0088 challenge it drives is opened by the
+  server on a token derived from the capability and the challenge id, which
+  never reaches the browser, so no value the browser holds works at
+  `/auth/mfa/*`; it never yields a session. Staff-session issuance re-checks
+  eligibility (`403 NO_ACTIVE_FACILITY_MEMBERSHIP`). NO-MEMBERSHIP-SIGN-IN
+  is therefore unchanged. A capability is checked against its account at
+  every step (review fix): `enrolment_required` ends once the account holds
+  an authenticator, and a disabled or inactive account's capability serves
+  nothing (`403 CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE`). An account that
+  holds an approved clinician application, or an active or pending staff
+  membership, sets an authenticator up again (after a two-person MFA reset)
+  only through staff sign-in, the password then the emailed enrolment code
+  that P22's query (3) reviews; the status page refuses it after a correct
+  code (`403 CLINICIAN_APPLICATION_STAFF_SIGN_IN_REQUIRED`), so the mailbox
+  alone never enrols a clinician's factor.
+- Intake starts closed. The platform control `clinician_signup_enabled` is
+  seeded off; an administrator opens it with the audited
+  `POST /admin/controls` after release gate P37. Intake also closes while
+  `provider_portal_enabled` is off or `maintenance_mode` is on. While the
+  control or the provider portal is off, the intake routes (the sign-up
+  start and its verify, facility search, submit and apply-again) answer
+  `503 CLINICIAN_SIGNUP_CLOSED` with the fixed public sentence "Clinician
+  sign-up is not open yet. If you already have a Health ID provider account,
+  sign in." This is the decision ADR-057 requires for a new
+  `PublicDetailProblem`. In maintenance with both on, every route but
+  availability and session end answers `503 PLATFORM_MAINTENANCE` (the
+  generic maintenance answer, not the sentence). Availability answers
+  `{ open: false }` in all three cases. The status page and the admin queue work
+  whatever the control's state (maintenance aside). 0098 replaces
+  `platform.control_enabled` while preserving its technical owner
+  (`hid_platform_control_reader`) by taking that role's membership only for
+  its own transaction, and fails closed when it cannot.
+- Two people, through the 0087 commands. Every step needs
+  `platform.workforce.manage` (Super Admin only), an MFA platform session, a
+  step-up from the last five minutes, a reason, If-Match and an
+  Idempotency-Key; no Super Admin who works at the facility may take a step.
+  Step 1: a Super Admin who is not the applicant checks the regulator's
+  register; confirms identity by a live video call or in person with a
+  government photo ID, during which the applicant reads a current code from
+  their authenticator, which Identity verifies against the applicant's own
+  factor (before that code is checked, step 1 refuses whatever it would
+  refuse anyway: the request's own fields, the application's version, state,
+  identity refusal and facility, an insider's or the applicant's own call,
+  the end of the licence, a reused inner key, and an applicant account or
+  staff record 0087's attestation refuses; so no such call counts against
+  the applicant's failure budget, and a concurrent duplicate is answered
+  from the first one's result; only the staff-proven factor itself is found
+  after the code, and a missing one is never counted); confirms employment
+  through a channel
+  independent of the facility
+  administrator's account (the facility's phone number from a public record,
+  or an in-person visit); and records the 0087 credential attestation for
+  exactly the requested role, valid no later than the end of the licence's
+  expiry date (Africa/Lagos) and at most three years. Step 2: a different
+  Super Admin attaches the account by id and grants the role in one
+  transaction, pinned to the step-1 attestation; 0087's independent-reviewer
+  rule still applies; the approval is refused if the authenticator confirmed
+  at step 1 is no longer the account's active factor; a table CHECK refuses
+  an approver who was the attester. When the role becomes effective the
+  account already holds a staff-proven authenticator a platform administrator
+  confirmed outside the mailbox: P22 as written.
+- Reserved attestations: until its application is approved, a step-1
+  attestation supports only that application's own pinned step 2 (a grant
+  to that application's account at that application's facility; review
+  fix: the predicate itself binds the pin, not only its single caller),
+  while the application is under review and not overdue, computed at read
+  time (no sweeper is waited for). No role rests on it before approval; rejecting,
+  withdrawing or expiring an application revokes nothing anywhere. After
+  approval it behaves as any 0087 attestation.
+  `identity.admin_change_workforce_role` keeps its signature and delegates to
+  an internal `identity.workforce_change_role` whose body is 0087's with only
+  the reservation and the pin added (a node test holds the copy to 0087);
+  `auth.facility_role_is_effective` is not changed.
+- Endings: any eligible Super Admin may reject an open application with one
+  of nine fixed reasons shown to the applicant plus an internal reason. After
+  `identity_not_confirmed` the account can file no new application, its
+  other open applications cannot pass step 1, and one that already passed
+  step 1 cannot be approved (a conservative addition to the design: the
+  person behind the account could not be confirmed). The applicant may
+  withdraw. An application not decided within 30 days expires.
+- Abuse limits: Turnstile on both email starts (main site only);
+  per-network and platform quotas on codes, search and submissions;
+  per-address cooldowns; at most 3 open applications per account, 10 in 30
+  days, and 30 open per facility. Submit and apply-again check the
+  capability before they charge the submit quota, and the platform's daily
+  submit cap counts created applications, not attempts, refusals or
+  replays (review fix: a forged cookie could otherwise use up the cap with
+  no email or account). Both caps hold under concurrency: the platform's is
+  checked and counted in one statement under its counter's row lock where
+  the application is created, and a facility's open applications are
+  counted under a per-facility lock (review fix: concurrent submissions
+  could pass either). Submit hashes the password (argon2id) only for a
+  submission the database may create: its cheap refusals are answered
+  first, a replay is not hashed, and a draft has at most five hashed
+  submissions (review fix: one draft could otherwise make the service hash
+  without bound from many networks). Applicants' wrong authenticator codes count against
+  the account's 0088 budget and a per-address bucket of the applicants' own,
+  never staff sign-in's per-address bucket (review fix: throwaway
+  applicants could otherwise block staff sign-in from a shared address).
+- Facility self-service workforce management stays deferred; the
+  `org_admin` gets no route and is never the employment confirmation.
+- Every step is audited: public steps inside their commands, admin steps
+  platform-scoped in the same transaction with the reason. No email, name,
+  licence number, password or code appears in audit details, logs or URLs.
+
+Alternatives not taken:
+
+- The `org_admin` approves or confirms employment by itself: ADR-049's
+  threat.
+- A password-opened status page: the token NO-MEMBERSHIP-SIGN-IN refused.
+- Enrolment at first sign-in after approval: it would activate a clinical
+  membership with no factor, against P22.
+- A new 0088 proof method so the sign-up code doubles as the enrolment
+  proof: it widens a 0088 CHECK; a second code is the price.
+- Withdrawing attestations when an application ends: it would revoke
+  legitimate roles resting on them and depend on a sweeper.
+- Redefining `auth.facility_role_is_effective`: not needed once attestations
+  are reserved.
+- A regulator registry lookup as step 1: the source is undecided (D14).
+- `clinician` or free-text regulators at launch: prescriber permissions with
+  no mapped regulator.
+- A probation for self-signed-up clinicians, with no break-glass and no
+  in-person checks until it ends: the approval assurance here exceeds a 0087
+  grant, and a 0087-provisioned clinician already holds both; a daily review
+  of break-glass use and of in-person checks by recent approvals is required
+  instead (P37). Excluding application-approved grants from the in-person
+  check's authorization for a period stays open to the owner (P32, P37).
+- An environment flag instead of a control: switching it off would need a
+  redeploy.
+
+Consequences:
+
+- Every approval needs two MFA-enrolled Super Admins who do not work at the
+  facility, a video call and an independent call to the facility; the queue's
+  speed depends on them, and applications expire after 30 days.
+- The applicant receives two email codes (address proof, then authenticator
+  proof).
+- Identity confirmation rests on the reviewer's call and photo-ID check;
+  that checklist and the employment channels need product and legal
+  approval before the control opens (P37). Uploads are off, so evidence stays
+  outside the platform and is named by reference.
+- Approved clinicians can use break-glass once it is on, and run in-person
+  checks (ADR-063) at their facility once it is designated and
+  `ASSISTED_REGISTRATION_ENABLED` is on. An account approved on a forged
+  identity could then read another person's emergency summary or create
+  another person's Health ID, within ADR-063's budgets (20 checks a day per
+  staff member, 100 per facility). P37 requires the break-glass decision and
+  a daily review of break-glass use and of in-person checks by accounts
+  approved through an application in the last 90 days
+  (`MIGRATION_RUNBOOK.md` §6). Its fraud runbook entry lists the in-person
+  checks such an account recorded; no route undoes a Health ID one of them
+  proved, which waits for the contested-identity review (an ADR-063 owner
+  decision, not built).
+- Rejected, withdrawn and expired applicants keep an active account with no
+  membership, plus their application rows; a retention period is a legal
+  follow-up.
+- A wrong step-1 code counts against the applicant's authenticator budget;
+  a step-1 call that would be refused anyway does not (the pre-check takes
+  the request's fields for that).
+- A refusal at the platform's daily cap inside the creating transaction
+  rolls back with it and is not audited; the early check's refusals are.
+- An approved clinician whose authenticator was reset, and whose membership
+  has since ended, cannot set one up through the status page and needs HID
+  support (the conservative side of the staff-sign-in-only rule).
+- No notice sink is bound: applicants learn decisions from the status page
+  and facilities are not notified.
+- Merged with main's 0093 to 0096 (D-Eminence/hid-system#84, #85, #90 and
+  #91), break-glass's 0097 (#83) and the launch alignment fixes (#80), the
+  migration is 0098 and holds to #80's A17, A21 and A23: every refusal's
+  audit row records its status and code; a rate-limit `429` that means "try
+  again later" carries `Retry-After` (86400 for the quotas, 900 for the
+  authenticator budgets), while a capability's spent search budget, which
+  never comes back, answers its own `429 CLINICIAN_APPLICATION_SEARCH_LIMITED`
+  with none (it was `429 CLINICIAN_APPLICATION_RATE_LIMITED` with
+  `Retry-After: 3600`); and a refused `declarations` or `checklist` field is
+  named by its dotted path. `503 CLINICIAN_SIGNUP_CLOSED` is listed with the
+  other `PublicDetailProblem` answers.
+- Evidence is local and synthetic: `clinician-applications.integration.sql`,
+  `workforce-role-change-body.test.mjs`, the Identity specs,
+  `verify-clinician-application-runtime.mjs`, the non-superuser upgrade
+  stage (with a quoted administrator name) and the rehearsal (release
+  checklist §8). Nothing has run on staging or production.
+
+Related: ADR-049, ADR-054, ADR-057, ADR-058, ADR-059, ADR-063;
+`PHASE_3_LAUNCH_DECISIONS.md` (D14, NO-MEMBERSHIP-SIGN-IN, CLIN-SIGNUP);
+`INTERFACE_CONTRACT.md` (Turnstile verification; Clinician self sign-up;
+§19 Clinician applications); `DATABASE.md` (Clinician self sign-up
+applications (0098)); release checklist §1-§3, §5, §8, P11, P22, P32, P37,
+S4z.
+
+# ADR-067: Imported legacy medical history
+
+Status: Accepted in source (migration 0099). Not merged, not deployed. Every
 switch is off, and the production profile refuses each of them. Nothing has
 been imported anywhere: the import command runs only when an operator runs
 it, and only after the sign-off below.
@@ -5241,7 +5706,7 @@ Decision:
   its own run of source system `legacy_imported_history`, which main's
   promoter refuses and main's crosswalk gate does not count: a staged
   `legacy_identity` run closes public patient enrollment (0057), and a history
-  run stays staged. Two 0097 triggers give these runs the seal 0033 gives
+  run stays staged. Two 0099 triggers give these runs the seal 0033 gives
   `legacy_identity` runs. `import-legacy-history.mjs` checks both runs and
   every row against its seal and the parent's identity rows and calls
   `ehr.import_legacy_medical_history`, which repeats every check of the runs
@@ -5264,7 +5729,7 @@ Decision:
   its own function, so a first role bootstrap and a rerun leave the same
   ACL. The import runs as `hid_migration_admin` through a SET-only
   membership taken and given up in its own transaction.
-- 0097 refuses a database that still holds the branch's 0061/0062 objects,
+- 0099 refuses a database that still holds the branch's 0061/0062 objects,
   and changes nothing in it. What happens to such a staging database is a
   proposed default below.
 
@@ -5273,7 +5738,7 @@ customer data is said to be on staging. Nothing in this change imports,
 reads or moves it, and no tooling here touches staging. Importing any real
 legacy data, on staging or in production, needs the DPO's and the owner's
 written sign-off of its provenance, lawful basis, scope and retention first
-(release checklist P37); whether staging may keep the data it already holds
+(release checklist P38); whether staging may keep the data it already holds
 is the DPO's decision.
 
 Proposed defaults (open owner questions; the safest default is built):
@@ -5286,19 +5751,19 @@ Proposed defaults (open owner questions; the safest default is built):
 - Imported history is disclosed for direct care only, never under
   break-glass or for healthcare operations.
 - Every switch is off and refused in production until the DPO and the owner
-  sign off the legacy data and Health-id renders the history (P37). Staging
-  sets a switch only after P37 (1), the written sign-off for staging, is
+  sign off the legacy data and Health-id renders the history (P38). Staging
+  sets a switch only after P38 (1), the written sign-off for staging, is
   attached, and with synthetic data only.
 - The switches go on in order and off in reverse: the patient's read, then
   the sharing choice, then the staff read (the synth refuses sharing without
   the patient's read, and the staff read without sharing). Stored sharing
   choices persist when the switches are off; a patient can always withdraw.
-- The import is refused in production and needs the P37 sign-off on staging
+- The import is refused in production and needs the P38 sign-off on staging
   before any real legacy data is imported.
-- A staging database that ran the PR #8 branch's 0061/0062 (0097 refuses it)
+- A staging database that ran the PR #8 branch's 0061/0062 (0099 refuses it)
   is rebuilt from main only after a snapshot and a read-only inventory of
   what it holds, only after the DPO decides what staging may keep, and only
-  with the owner's and the DPO's written approval of the rebuild (P37).
+  with the owner's and the DPO's written approval of the rebuild (P38).
 - The import runs as one all-or-nothing statement. The branch documents name
   17 legacy records; the command was measured linear to 50,000 synthetic rows
   (11.7 s), so the CLI's 300 s statement timeout is reached at roughly 1.2
@@ -5345,7 +5810,7 @@ Consequences:
 - Staff see no imported history until each patient opts in, even with a
   consent; the owner may read decision 3 as "any consent discloses". That is
   recorded as the first proposed default above.
-- A staging database built from the branch cannot run 0097 until it is
+- A staging database built from the branch cannot run 0099 until it is
   rebuilt from main, under the proposed default above.
 - Rolling the EHR API back to an earlier build releases nothing: no earlier
   build names `importedHistory` in the release set, and the staff policies
@@ -5368,8 +5833,8 @@ Residual risks:
 Related: ADR-018; ADR-058 (PSELF-RLS); ADR-065 (one release set); ADR-056
 (ALLERGY-1); `PHASE_3_LAUNCH_DECISIONS.md` IMPORT-HISTORY, D9 and D17;
 `INTERFACE_CONTRACT.md`, "Imported legacy medical history";
-`DATABASE.md`, "Imported legacy medical history (0097)"; release checklist
-P37 and S4y.
+`DATABASE.md`, "Imported legacy medical history (0099)"; release checklist
+P38 and S4aa.
 
 # ADR-065: Patient record chat through the Claude API
 

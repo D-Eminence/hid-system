@@ -66,7 +66,7 @@ export class PatientRecordsService {
    * The patient's own summary: the release set (PatientRecordRelease), read in
    * the patient-self transaction Identity authorized for this session, with
    * its counts-only audit in the same transaction. The imported legacy
-   * history is never a section of it (ADR-066): it has its own route.
+   * history is never a section of it (ADR-067): it has its own route.
    */
   async self(request: HidRequest) {
     const { actor, authorization } = await authorizeOwnSession(this.identity, request);
@@ -188,7 +188,7 @@ export class PatientRecordsService {
   /**
    * The break-glass summary of one facility: every category the reader holds the read permission for.
    * Which categories it may contain at all is unchanged (all seven) pending a decision. Imported
-   * legacy history is never one of them (owner decision of 2026-10-16, ADR-066): break-glass never
+   * legacy history is never one of them (owner decision of 2026-10-16, ADR-067): break-glass never
    * discloses it, and its staff route refuses a break-glass authorization.
    */
   private async readEmergency(client: PoolClient, patientId: string, facilityId: string,
@@ -251,7 +251,11 @@ export class PatientRecordsService {
       diagnoses: diagnoses?.rows ?? [],
       prescriptions: prescriptions?.rows ?? [],
       labRequests: labRequests?.rows ?? [],
-      documents: documents?.rows ?? [],
+      // size_bytes is a bigint, which pg reads as text; the value is at most 52428800 (0004).
+      documents: (documents?.rows ?? []).map((row) => ({
+        ...row,
+        sizeBytes: row.sizeBytes == null ? null : Number(row.sizeBytes),
+      })),
       released,
       withheld: [...withheld],
       limits: Object.fromEntries(released.map((name) => [name, SECTION_LIMITS[name]])),

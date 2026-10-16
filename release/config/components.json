@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0097",
-    "count": 98,
+    "last": "0100",
+    "count": 100,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -483,11 +483,19 @@
         "sha256": "06c534de5228b42fec9238fc0bafc46557dbf703820115e96ea6b598689473b2"
       },
       {
-        "name": "0097_imported_medical_history.sql",
-        "sha256": "e3106e0f56fc76e48e9439ddef4772385769e1e60d7e6fc1ff595c12dd6b6ee6"
+        "name": "0097_break_glass_launch_with_limits.sql",
+        "sha256": "6b176cd8e30f9e94e53cd5b06cae3f514bb7b9b51443028dfec7f4cf3e4b27d4"
       },
       {
-        "name": "0096_patient_record_chat.sql",
+        "name": "0098_clinician_self_signup.sql",
+        "sha256": "5f784d5d472a11209f8cc43956b4eb267404254fa745a96174b4c6e4d16cfe3c"
+      },
+      {
+        "name": "0099_imported_medical_history.sql",
+        "sha256": "ceaae61dc3f0879c195643bd1fc456ea04426e1cc601cd07dbcb19e589a5636d"
+      },
+      {
+        "name": "0100_patient_record_chat.sql",
         "sha256": "eb7b0074e61e170fca0377c4dea859fd3d018b43b6d2b476151276d97936a560"
       }
     ]

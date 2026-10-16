@@ -232,9 +232,9 @@ comment on role hid_platform_control_reader is
 comment on role hid_lab_release_reader is
   'Technical owner of the view ehr.patient_released_lab_results; reads released Lab result columns and source EHR order status; cannot evaluate patient-self; never granted to a runtime login.';
 comment on role hid_imported_history_commands is
-  'Technical owner of the imported history staff read decision and the patient''s two sharing commands (ADR-066); reads the patient''s account, the login''s status and the sharing choice, writes only the sharing choice and its log; never granted to a runtime login.';
+  'Technical owner of the imported history staff read decision and the patient''s two sharing commands (ADR-067); reads the patient''s account, the login''s status and the sharing choice, writes only the sharing choice and its log; never granted to a runtime login.';
 comment on role hid_imported_history_importer is
-  'Technical owner of ehr.import_legacy_medical_history (ADR-066); reads the sealed migration ledger and inserts only imported history and its receipt; executable by hid_migration_admin only; never granted to a runtime login.';
+  'Technical owner of ehr.import_legacy_medical_history (ADR-067); reads the sealed migration ledger and inserts only imported history and its receipt; executable by hid_migration_admin only; never granted to a runtime login.';
 comment on role hid_event_dispatcher is
   'Transport dispatcher command role with no direct domain or integration table privileges.';
 comment on role hid_notification_runtime is
@@ -500,7 +500,7 @@ revoke hid_imported_history_importer from hid_imported_history_commands;
 -- policy requires platform.control.read, so under a schema owner that does
 -- not bypass row-level security (RDS) the function saw no row and raised
 -- PLATFORM_CONTROL_UNAVAILABLE, which the guards answer with 503. Its
--- technical owner reads only the key and enabled flag of the six non-PHI
+-- technical owner reads only the key and enabled flag of the seven non-PHI
 -- platform-wide controls through one exact policy, so the function no longer
 -- depends on its owner bypassing row-level security. EXECUTE stays granted to
 -- PUBLIC (0040). platform.require_control_enabled reads no table and calls
@@ -869,8 +869,8 @@ revoke create on schema ehr from hid_lab_release_reader;
 revoke all on ehr.patient_released_lab_results from hid_lab_release_reader;
 grant select on ehr.patient_released_lab_results to hid_ehr_runtime, hid_schema_test_runtime;
 
--- Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066,
--- 0097). Two NOLOGIN technical owners, so that no definer relies on its owner
+-- Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-067,
+-- 0099). Two NOLOGIN technical owners, so that no definer relies on its owner
 -- bypassing row-level security (identity.patients has it enabled, the five
 -- new tables force it), and none is a member of any role or has a member:
 -- - hid_imported_history_commands owns the staff read decision
@@ -1000,12 +1000,12 @@ alter function identity.set_my_imported_history_sharing(text, uuid, boolean) own
 revoke create on schema ehr, identity from hid_imported_history_commands;
 -- No owner keeps an EXECUTE entry on its own function (none calls another),
 -- so the first run leaves the same ACL as a rerun, whose REVOKE ALL above
--- removes the entry the ownership transfer carried over (P37).
+-- removes the entry the ownership transfer carried over (P38).
 revoke all on function ehr.imported_history_staff_read_allowed(uuid),
   identity.my_imported_history_sharing(text, uuid),
   identity.set_my_imported_history_sharing(text, uuid, boolean) from public, hid_imported_history_commands;
 grant execute on function ehr.imported_history_staff_read_allowed(uuid) to hid_ehr_runtime, hid_schema_test_runtime;
--- The staff policies' binding (0097) runs as its caller and asks the decision above.
+-- The staff policies' binding (0099) runs as its caller and asks the decision above.
 revoke all on function ehr.imported_history_staff_patient() from public;
 grant execute on function ehr.imported_history_staff_patient() to hid_ehr_runtime, hid_schema_test_runtime;
 grant execute on function identity.my_imported_history_sharing(text, uuid),
@@ -1794,6 +1794,85 @@ revoke all on function identity.facility_assisted_registration_participating(uui
   from public;
 revoke all on identity.facility_assisted_registration, identity.facility_assisted_registration_events,
   identity.assisted_registration_verifications
+  from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
+    hid_ehr_api_runtime, hid_schema_test_runtime;
+
+-- Break-glass at launch, with limits (0097, D9, ADR-058 addendum). 0097
+-- creates no object and changes no database grant: it inserts the
+-- identity.break-glass.write rows of doctor, clinician and nurse into
+-- auth.role_permissions and the emergency purpose of use. The Identity
+-- runtime's EXECUTE on identity.activate_break_glass and its read of the
+-- vocabulary are above and unchanged. The role assertions
+-- (runtime-roles.integration.sql) now require exactly those three holders.
+
+-- Clinician self sign-up (0098, ADR-066). The Identity runtime runs the
+-- public, capability and system commands in its system context (each checks
+-- the system:auth subject, a correlation id and no signed-in account), and the
+-- schema test runtime may too. Only the Identity runtime runs the platform
+-- administration commands, each of which repeats the platform.workforce.manage,
+-- MFA and (for the three mutations) step-up checks. The internal helpers,
+-- identity.workforce_change_role (the pinned 0087 grant) and the guard stay
+-- internal, and no runtime holds a privilege on the five tables: the commands
+-- are the only path.
+grant execute on function identity.clinician_signup_open(),
+  platform.consume_clinician_application_quota(character, text, integer, integer, integer),
+  identity.begin_clinician_application_challenge(text, uuid, character, text, character),
+  identity.invalidate_clinician_application_challenge(uuid),
+  identity.verify_clinician_application_signup_code(uuid, character, text, character, character),
+  identity.verify_clinician_application_status_code(uuid, character, character, character),
+  identity.clinician_application_session(character),
+  identity.clinician_application_submit_probe(character, character, text, character, text, text, text, text, text,
+    date, uuid, integer),
+  identity.count_clinician_application_submit_attempt(character),
+  identity.search_clinician_application_facilities(character, text),
+  identity.submit_clinician_application(character, character, text, character, text, character, text, text, text,
+    text, text, date, uuid, integer, integer),
+  identity.bind_clinician_application_mfa_challenge(character, uuid),
+  identity.clinician_application_authenticator_ready(character, uuid, text),
+  identity.current_clinician_applications(character),
+  identity.withdraw_clinician_application(character, uuid, bigint),
+  identity.file_clinician_application(character, text, character, text, text, text, date, uuid, integer, integer),
+  identity.end_clinician_application_session(character),
+  identity.expire_clinician_applications(integer),
+  identity.prune_clinician_application_artifacts()
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function identity.admin_list_clinician_applications(text, timestamptz, uuid, integer),
+  identity.admin_get_clinician_application(uuid),
+  identity.admin_clinician_application_attest_precheck(uuid, bigint, timestamptz, text, jsonb, text, text),
+  identity.admin_clinician_application_prior(text, text, character),
+  identity.admin_attest_clinician_application(uuid, bigint, timestamptz, text, jsonb, uuid, text, text, character),
+  identity.admin_approve_clinician_application(uuid, bigint, text, text, character),
+  identity.admin_reject_clinician_application(uuid, bigint, text, text, text, character)
+  to hid_identity_runtime;
+revoke all on function identity.clinician_licence_key(text, text),
+  identity.clinician_application_displayed_state(text, timestamptz),
+  identity.workforce_attestation_usable(uuid, uuid, uuid, uuid),
+  identity.workforce_change_role(uuid, uuid, bigint, text, text, text, text, character, uuid),
+  identity.clinician_application_require_system(),
+  identity.clinician_intake_require_open(),
+  identity.clinician_application_require_not_maintenance(),
+  identity.clinician_application_session_row(character, boolean),
+  identity.clinician_application_account_session(character, text[], text, boolean),
+  identity.clinician_application_account_stage(uuid),
+  identity.clinician_application_effective_stage(identity.clinician_application_sessions),
+  identity.clinician_application_account_usable(uuid),
+  identity.clinician_application_staff_enrolment_only(uuid),
+  identity.clinician_application_licence_valid(text, text, text, date),
+  platform.count_clinician_application_submission(integer),
+  identity.clinician_application_status_eligible(uuid),
+  identity.clinician_application_identity_refused(uuid),
+  identity.clinician_application_account_refusal(uuid),
+  identity.clinician_application_access_state(identity.clinician_applications),
+  identity.clinician_application_view(identity.clinician_applications),
+  identity.clinician_application_account_view(uuid, text),
+  identity.clinician_application_audit(text, text, text, text, jsonb),
+  identity.clinician_application_inner_key_free(uuid, text[], text),
+  identity.guard_clinician_application_change()
+  from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
+    hid_ehr_api_runtime, hid_schema_test_runtime;
+revoke all on identity.clinician_applications, identity.clinician_application_challenges,
+  identity.clinician_application_sessions, identity.clinician_application_idempotency,
+  platform.clinician_application_quota_counters
   from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
     hid_ehr_api_runtime, hid_schema_test_runtime;
 

@@ -4,7 +4,8 @@ type LoginAction = NonNullable<LoginDto['turnstileAction']>;
 export type TurnstileAction = LoginAction | 'patient-reset-start' | 'staff-reset'
   | 'admin-reset' | 'legacy-recovery' | 'book-demo' | 'organization-application'
   | 'organization-completion'
-  | 'patient-enrollment' | 'provider-enrollment';
+  | 'patient-enrollment' | 'provider-enrollment'
+  | 'clinician-application' | 'clinician-application-status';
 export type TurnstileDeployment = 'staging' | 'production';
 
 function deploymentActions(value: Record<string, readonly TurnstileAction[]>): Readonly<Record<string, readonly TurnstileAction[]>> {
@@ -24,6 +25,7 @@ const ACTIONS_BY_DEPLOYMENT: Readonly<Record<TurnstileDeployment, Readonly<Recor
       'staff-reset', 'admin-reset', 'legacy-recovery', 'book-demo', 'organization-application',
       'organization-completion',
       'patient-enrollment', 'provider-enrollment',
+      'clinician-application', 'clinician-application-status',
     ],
     'ehr.healthidentitydirectory.com': ['ehr-login', 'staff-login'],
     'lab.healthidentitydirectory.com': ['lab-login'],
@@ -38,6 +40,7 @@ const ACTIONS_BY_DEPLOYMENT: Readonly<Record<TurnstileDeployment, Readonly<Recor
       'staff-reset', 'admin-reset', 'legacy-recovery', 'book-demo', 'organization-application',
       'organization-completion',
       'patient-enrollment', 'provider-enrollment',
+      'clinician-application', 'clinician-application-status',
     ],
     'ehr.staging.healthidentitydirectory.com': ['ehr-login', 'staff-login'],
     'lab.staging.healthidentitydirectory.com': ['lab-login'],

@@ -21,6 +21,7 @@
     "db:bootstrap:local": "node scripts/bootstrap-database-roles.mjs --local-development-admin",
     "db:verify-roles": "node scripts/bootstrap-database-roles.mjs --verify-only",
     "db:verify-logins": "node scripts/verify-runtime-logins.mjs",
+    "db:provision": "node scripts/provision-database-logins.mjs",
     "migration:stage": "node scripts/stage-legacy-identity.mjs",
     "migration:stage:dry-run": "node scripts/stage-legacy-identity.mjs --dry-run",
     "migration:promote": "node scripts/promote-legacy-identity.mjs",
@@ -40,9 +41,9 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.131.0",
+    "@hid/api-client": "file:../../packages/api-client",
     "@aws-sdk/client-s3": "^3.850.0",
     "@aws-sdk/s3-request-presigner": "^3.850.0",
-    "@hid/api-client": "file:../../packages/api-client",
     "@nestjs/common": "^11.1.0",
     "@nestjs/core": "^11.1.0",
     "@nestjs/platform-express": "^11.1.0",

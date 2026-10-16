@@ -34,7 +34,7 @@ export class RevokeSessionsCommandDto {
 
 
 export class PlatformControlCommandDto {
-  @Matches(/^(patient_portal_enabled|provider_portal_enabled|outreach_portal_enabled|maintenance_mode|uploads_enabled|break_glass_enabled|record_chat_enabled)$/)
+  @Matches(/^(patient_portal_enabled|provider_portal_enabled|outreach_portal_enabled|maintenance_mode|uploads_enabled|break_glass_enabled|clinician_signup_enabled|record_chat_enabled)$/)
   controlKey!: string;
   @IsBoolean()
   enabled!: boolean;

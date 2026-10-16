@@ -77,6 +77,9 @@ its refresh-cookie path never matches a platform refresh token
     staff sign-in counts its failures per IP in a bucket of its own, which
     blocks at 100 (§10).
   - Enrollment starts and regenerations are limited to five per 15 minutes.
+  - Each of these limits answers `429 MFA_RATE_LIMITED` with `Retry-After: 900`,
+    the length of every MFA window, whichever refused (A21, this change). Staff
+    sign-in's limits (§10) answer the same.
   - Each challenge also allows only five attempts.
   - Password lockout (`auth.login_attempts`) is unchanged.
 - **Mandatory for all platform roles.** No path to a platform session skips the
@@ -95,6 +98,12 @@ its refresh-cookie path never matches a platform refresh token
   session family. The assurance lasts 5 minutes (`PLATFORM_STEP_UP_TTL_SECONDS`,
   at most 300). It survives refresh rotation and is per sign-in. Client
   headers, body fields and token claims are never consulted.
+  A wrong or replayed step-up code is `403 MFA_INVALID_CODE` and counts
+  toward the §2 failure budgets; a step-up or regeneration whose session lost
+  its assurance while it waited is `403 PLATFORM_SESSION_REQUIRED`; a blocked
+  budget stays `429 MFA_RATE_LIMITED`. Before this change (A20) the first two
+  were `401 MFA_INVALID_CODE` and `401 MFA_CHALLENGE_INVALID`. The §1 sign-in
+  challenge routes (and the staff ones of §10) keep `401`.
 - `src/admin/high-risk-policy.ts` is the single registry. `@HighRiskAction()`
   names an action on each route. The guard refuses a platform mutation without
   one (`HIGH_RISK_POLICY_MISSING`), then checks the policy's permissions,

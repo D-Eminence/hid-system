@@ -1,14 +1,14 @@
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { createRemoteJWKSet, jwtVerify, SignJWT, type JWTPayload } from 'jose';
-import type { PoolClient } from 'pg';
+import type { PoolClient, QueryResult } from 'pg';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import type { ActorContext } from '../common/request-context';
 import { ACTIVE_STAFF_VERIFICATION_STATUSES } from './auth-policy';
 import type { CredentialIdentity, HidJwtClaims, LoginResult } from './auth.types';
-import { CurrentStaffContextService, eligibleStaffMembershipJoins } from './current-staff-context.service';
+import { CurrentStaffContextService, eligibleStaffMembershipJoins, StaffMembershipInactiveError } from './current-staff-context.service';
 import { CurrentPatientContextService } from './current-patient-context.service';
 import { jwksUnavailable } from './jwks-fault';
 import { databaseMessage, isDatabaseError } from '../patient-safety/database-error';
@@ -293,12 +293,31 @@ export class TokenService {
     return this.issueAssuredSession(client, 'staff', assurance, event);
   }
 
+  /**
+   * The staff actor of a new staff session. Eligibility is re-checked here
+   * (ADR-066, defence in depth): an account whose membership ended after its
+   * password step, or a clinician applicant whose application is not
+   * approved, gets the password step's 403 NO_ACTIVE_FACILITY_MEMBERSHIP and
+   * no session, never a 401, which reads as a refused credential (ADR-059).
+   */
+  private async resolveEligibleStaff(subject: string, client: PoolClient): Promise<ActorContext> {
+    try {
+      return await this.currentStaff.resolve(subject, 'local', undefined, undefined, client);
+    } catch (error) {
+      if (error instanceof StaffMembershipInactiveError) {
+        throw new DomainProblem(403, 'NO_ACTIVE_FACILITY_MEMBERSHIP',
+          'Your account has no active facility membership. Ask your organization administrator for access.');
+      }
+      throw error;
+    }
+  }
+
   private async issueAssuredSession(client: PoolClient, kind: 'platform' | 'staff',
     assurance: PlatformSessionAssurance, event: SessionEventMetadata): Promise<LoginResult> {
     // On this transaction's client: the caller holds the account row lock (Stage 7A).
     const resolved = kind === 'platform'
       ? await this.currentStaff.resolvePlatform(assurance.subject, undefined, client)
-      : await this.currentStaff.resolve(assurance.subject, 'local', undefined, undefined, client);
+      : await this.resolveEligibleStaff(assurance.subject, client);
     if (resolved.accountId !== assurance.accountId) {
       throw new UnauthorizedException('Resolved account does not match the authenticated identity');
     }
@@ -344,7 +363,8 @@ export class TokenService {
    * Rotates a refresh token. Platform sessions refresh only through the
    * platform endpoint and staff/patient sessions only through the standard
    * one, so a session of one kind can never be exchanged for the other.
-   * `onRotated` (the refresh's own audit event) runs inside the rotation's
+   * `onRotated` (the refresh's own audit event, at the facility a staff
+   * sign-in selected, read on the same transaction) runs inside the rotation's
    * transaction, so the rotation commits with it or not at all (A6).
    */
   async refresh(refreshToken: string, event: SessionEventMetadata,
@@ -713,10 +733,15 @@ export class TokenService {
    * session: only while it is a live staff session of the account, so a
    * signed-out or revoked sign-in never reads its selection again. The caller
    * re-checks it against the actor's current facilities; it authorizes nothing.
+   *
+   * With `client`, the read runs on the caller's open transaction instead (a
+   * refresh's rotation, A6), which sees the rotated session it has not yet
+   * committed. It is a plain read, waiting on no row lock, under a savepoint:
+   * a failed read is rolled back to the savepoint only and rethrown, so the
+   * caller's transaction can still commit.
    */
-  async selectedFacilityId(sessionId: string, accountId: string): Promise<string | undefined> {
-    const result = await this.database.query<{ facility_id: string }>(
-      `select selection.facility_id::text
+  async selectedFacilityId(sessionId: string, accountId: string, client?: PoolClient): Promise<string | undefined> {
+    const read = `select selection.facility_id::text
          from auth.sessions session
          join auth.session_facility_selection selection
            on selection.family_id = session.family_id and selection.account_id = session.account_id
@@ -725,9 +750,19 @@ export class TokenService {
           and session.session_kind = 'staff'
           and session.revoked_at is null
           and session.expires_at > clock_timestamp()
-          and session.absolute_expires_at > clock_timestamp()`,
-      [sessionId, accountId],
-    );
+          and session.absolute_expires_at > clock_timestamp()`;
+    if (!client) {
+      return (await this.database.query<{ facility_id: string }>(read, [sessionId, accountId])).rows[0]?.facility_id;
+    }
+    await client.query('savepoint facility_selection_read');
+    let result: QueryResult<{ facility_id: string }>;
+    try {
+      result = await client.query<{ facility_id: string }>(read, [sessionId, accountId]);
+    } catch (error) {
+      await client.query('rollback to savepoint facility_selection_read');
+      throw error;
+    }
+    await client.query('release savepoint facility_selection_read');
     return result.rows[0]?.facility_id;
   }
 

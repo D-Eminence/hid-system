@@ -678,8 +678,16 @@ declare
   account_lock integer;
   membership_lock integer;
 begin
+  -- Since 0098 the grant's body is identity.workforce_change_role (0087's body
+  -- with the reservation and the pin) and identity.admin_change_workforce_role
+  -- only delegates to it with no pin, so the lock order is checked there.
+  definition := regexp_replace(lower(pg_get_functiondef(
+    'identity.admin_change_workforce_role(uuid,uuid,bigint,text,text,text,text,character)'::regprocedure)), '\s+', ' ', 'g');
+  if definition !~ 'as \$function\$ begin return query select \* from identity\.workforce_change_role\(requested_membership_id, requested_facility_id, expected_membership_version, requested_role_code, requested_action, requested_reason, requested_idempotency_key, requested_sha256, null\); end \$function\$' then
+    raise exception 'identity.admin_change_workforce_role must only delegate to identity.workforce_change_role with no pin';
+  end if;
   foreach command in array array[
-    'identity.admin_change_workforce_role(uuid,uuid,bigint,text,text,text,text,character)'::regprocedure,
+    'identity.workforce_change_role(uuid,uuid,bigint,text,text,text,text,character,uuid)'::regprocedure,
     'identity.admin_end_workforce_membership(uuid,uuid,bigint,text,text,character)'::regprocedure
   ] loop
     definition := regexp_replace(lower(pg_get_functiondef(command)), '\s+', ' ', 'g');

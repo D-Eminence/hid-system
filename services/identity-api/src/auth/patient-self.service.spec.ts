@@ -96,7 +96,7 @@ describe('Patient self service', () => {
   });
 });
 
-// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066):
+// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-067):
 // the patient's own choice to share it with the facilities they approve,
 // through session-bound database commands, audited in the same transaction.
 describe('Patient imported history sharing', () => {

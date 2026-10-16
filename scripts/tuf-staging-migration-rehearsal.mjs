@@ -283,14 +283,23 @@ try {
     // Outreach permission, break-glass and document upload from every role.
     assert.deepEqual((await client.query(`select role_code, permission_code from auth.role_permissions
       where permission_code ~ '^(lab|pharmacy|ocr|outreach)\\.'
-         or permission_code in ('identity.break-glass.write', 'ehr.document.write')`)).rows, [],
+         or permission_code = 'ehr.document.write'`)).rows, [],
     'Upgrade must leave no role holding a permission of a module that is off at launch');
-    // The 0028 baseline holds no purpose-of-use code; 0082 seeds only
-    // direct-care (emergency and healthcare-operations await product decisions).
+    // 0097 (break-glass at launch with limits, D9) grants break-glass again to
+    // exactly the roles 0010 granted it to, and to no other role.
+    assert.deepEqual((await client.query(`select role_code from auth.role_permissions
+      where permission_code = 'identity.break-glass.write' order by role_code`)).rows.map((row) => row.role_code),
+    ['clinician', 'doctor', 'nurse'], 'Upgrade must grant break-glass to exactly doctor, clinician and nurse');
+    // The 0028 baseline holds no purpose-of-use code; 0082 seeds direct-care
+    // and 0097 emergency (healthcare-operations awaits decision N3).
     assert.deepEqual((await client.query(`select code, display, active, source_system
       from identity.purpose_of_use_codes order by code`)).rows,
-    [{ code:'direct-care', display:'Direct patient care', active:true, source_system:'hid' }],
-    'Upgrade must seed exactly the active direct-care purpose of use');
+    [{ code:'direct-care', display:'Direct patient care', active:true, source_system:'hid' },
+      { code:'emergency', display:'Emergency treatment', active:true, source_system:'hid' }],
+    'Upgrade must seed exactly the active direct-care and emergency purposes of use');
+    // 0097 leaves the platform control to an operator: break-glass stays off.
+    assert.equal((await client.query(`select platform.control_enabled('break_glass_enabled') as enabled`)).rows[0].enabled,
+      false, 'Upgrade must leave break_glass_enabled off for the operator');
     // 0090 (D-Eminence/hid-system#74) adds the retraction,
     // closed-encounter, closed-order, retracted-vital-correction and
     // retracted-document guards and the vital status, and the upgraded role
@@ -429,8 +438,9 @@ try {
     } finally { await client.query('rollback'); }
   });
   const upgradeAfter = await snapshot('hid_upgrade');
-  // identity.purpose_of_use_codes gains 0082's seed, and auth.role_permissions
-  // loses 0084's launch-withdrawn write permissions, both checked above.
+  // identity.purpose_of_use_codes gains 0082's and 0097's seeds, and
+  // auth.role_permissions loses 0084's and 0091's launch-withdrawn permissions
+  // and regains 0097's break-glass rows, all checked above.
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
     'auth.permissions', 'auth.role_permissions', 'identity.purpose_of_use_codes',
@@ -447,31 +457,32 @@ try {
   assert.deepEqual(await snapshot('hid_upgrade_restored'), upgradeBefore, 'Pre-schema backup must restore the exact 0028 state');
   evidence.checks.existing_schema_upgrade = {from:'0028',to:latestSchema,dry_run_unchanged:true,
     historical_tables_preserved:true,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
-    purpose_of_use_seeded:['direct-care'],launch_write_permissions_withdrawn:true,retraction_guards_installed:true,
+    purpose_of_use_seeded:['direct-care','emergency'],launch_write_permissions_withdrawn:true,retraction_guards_installed:true,
     launch_module_permissions_withdrawn:true,patient_activation_command_regranted:true,
+    break_glass_granted_to:['clinician','doctor','nurse'],break_glass_control_left_off:true,
     holder_commands_runtime_only:true,holder_columns_not_runtime_writable:true,
     assisted_registration_commands_runtime_only:true,patient_record_release_grants:true,record_chat_grants:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
-  // 0097 (ADR-066) refuses a database that holds the PR #8 branch's imported
+  // 0099 (ADR-067) refuses a database that holds the PR #8 branch's imported
   // history objects (its 0061 and 0062): staging must be rebuilt first. The
   // refused migration rolls back whole and leaves the branch object as it was.
-  command('create synthetic 0096 database with a branch-era imported table', join(pgBindir, 'createdb'),
+  command('create synthetic 0098 database with a branch-era imported table', join(pgBindir, 'createdb'),
     ['hid_upgrade_imported']);
-  migration('schema apply through 0096', 'apply-migrations.mjs', 'hid_upgrade_imported', {}, 0,
-    ['--through=0096_patient_record_release.sql']);
+  migration('schema apply through 0098', 'apply-migrations.mjs', 'hid_upgrade_imported', {}, 0,
+    ['--through=0098_clinician_self_signup.sql']);
   await withClient('hid_upgrade_imported', (client) => client.query(`create table ehr.imported_medical_records (
     id uuid primary key, patient_id uuid not null, source_payload jsonb not null)`));
-  migration('0097 refuses a branch-shaped database', 'apply-migrations.mjs', 'hid_upgrade_imported', {}, 'failure');
+  migration('0099 refuses a branch-shaped database', 'apply-migrations.mjs', 'hid_upgrade_imported', {}, 'failure');
   assert.match(logs.at(-1).stderr + logs.at(-1).stdout, /IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT/);
   assert.deepEqual(await withClient('hid_upgrade_imported', async (client) => (await client.query(`select
       (select max(version) from migration.schema_migrations) as latest,
       to_regclass('identity.imported_history_sharing') is null as sharing_absent,
       (select count(*)::int from information_schema.columns where table_schema = 'ehr'
         and table_name = 'imported_medical_records') as branch_columns`)).rows[0]),
-  { latest: '0096_patient_record_release.sql', sharing_absent: true, branch_columns: 3 });
-  command('drop synthetic 0096 database', join(pgBindir, 'dropdb'), ['hid_upgrade_imported']);
-  evidence.checks.imported_history_branch_precondition = { from: '0096', refused: 'IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT',
+  { latest: '0098_clinician_self_signup.sql', sharing_absent: true, branch_columns: 3 });
+  command('drop synthetic 0098 database', join(pgBindir, 'dropdb'), ['hid_upgrade_imported']);
+  evidence.checks.imported_history_branch_precondition = { from: '0098', refused: 'IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT',
     unchanged: true };
   // 0093 (ADR-062) on a database at 0092 that holds public enrollments in
   // every state: the rollback-only upgrade suite seeds them, applies 0093
@@ -536,7 +547,7 @@ try {
   evidence.checks.patient_record_release_runtime = JSON.parse(command(
     'exact-role patient record release and document download through the patient-self path', process.execPath,
     [join(repository, 'services/ehr-api/scripts/verify-patient-record-release-runtime.mjs')], workflowEnvironment));
-  // Imported legacy history (owner decision 3, ADR-066): the patient's own
+  // Imported legacy history (owner decision 3, ADR-067): the patient's own
   // read, the sharing choice, the staff direct-care read, break-glass excluded.
   evidence.checks.imported_history_runtime = JSON.parse(command(
     'exact-role imported legacy history: patient-self read, sharing choice, staff direct-care read, break-glass excluded',
@@ -577,6 +588,13 @@ try {
     'exact-role staff MFA sign-in, enrolment proof, unassured-session refusal, recovery and reset HTTP workflow',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-staff-mfa-runtime.mjs')],
     workflowEnvironment));
+  // Owner decision 2 (ADR-066, 0098): clinician self sign-up with the
+  // authenticator before review and two different Super Admins; nothing the
+  // applicant's browser holds works at /auth/mfa/*.
+  evidence.checks.clinician_application_runtime = JSON.parse(command(
+    'exact-role clinician self sign-up, authenticator before review, two-admin approval and first staff sign-in HTTP workflow',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-clinician-application-runtime.mjs')],
+    workflowEnvironment));
   // Phase 4 Stage 9: the commands whose row locks their runtime roles could not
   // take, each through its real API as its runtime role, with concurrency,
   // replay, denial and rollback cases.
@@ -605,7 +623,7 @@ try {
     'exact-role notification worker: claim-bound recipient lookup, Novu subscriber email sync and the in-app trigger',
     process.execPath, [join(repository, 'services/notification-worker/scripts/verify-notification-worker-runtime.mjs')],
     workflowEnvironment));
-  // Imported legacy history (ADR-066): main's stage, promote and reconcile of
+  // Imported legacy history (ADR-067): main's stage, promote and reconcile of
   // a synthetic identity source, a sealed history run of the same snapshot and
   // the importer's dry run, apply, repeat and refusals, on a database of its own.
   command('create imported history database', join(pgBindir, 'createdb'), ['hid_imported_history']);

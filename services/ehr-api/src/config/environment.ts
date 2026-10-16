@@ -195,7 +195,7 @@ const environmentSchema = z
     EHR_PATIENT_RELEASE_LAB_RESULTS: booleanString,
     EHR_PATIENT_RELEASE_DOCUMENTS: booleanString,
     // Imported legacy medical history (owner decision 3 of 2026-10-16,
-    // ADR-066): the patient's own read (a category of the release set, its own
+    // ADR-067): the patient's own read (a category of the release set, its own
     // route, never part of either summary) and the staff read (direct care,
     // standard consent and the patient's own sharing choice). Both off by
     // default and refused in the production profile (below).
@@ -247,15 +247,15 @@ const environmentSchema = z
           + 'ADR-065)' });
       }
     }
-    // ADR-066: imported legacy history is shown to nobody in the production
+    // ADR-067: imported legacy history is shown to nobody in the production
     // profile until the DPO and the owner sign off the legacy data's
     // provenance, scope and retention and Health-id renders it (release
-    // checklist P37). Removed only by a reviewed change that records that
+    // checklist P38). Removed only by a reviewed change that records that
     // sign-off; staging and a local development run may opt in.
     for (const flag of ['EHR_PATIENT_RELEASE_IMPORTED_HISTORY', 'EHR_STAFF_IMPORTED_HISTORY_ENABLED'] as const) {
       if (environment[flag] && isProductionProfile(environment)) {
         context.addIssue({ code: 'custom', path: [flag], message: 'Imported legacy medical history is refused in the '
-          + 'production profile until the DPO and the owner sign off the legacy data (release checklist P37, ADR-066)' });
+          + 'production profile until the DPO and the owner sign off the legacy data (release checklist P38, ADR-067)' });
       }
     }
     for (const issue of recordChatIssues(environment)) context.addIssue({ code: 'custom', ...issue });

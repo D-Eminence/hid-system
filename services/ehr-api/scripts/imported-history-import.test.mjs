@@ -1,5 +1,5 @@
 // The imported legacy history import (owner decision 3 of 2026-10-16,
-// ADR-066), without a database: the importer takes only rows of a sealed
+// ADR-067), without a database: the importer takes only rows of a sealed
 // legacy staging run whose identity parent run is verified, checks every
 // row against its seal and the parent's identity rows, refuses anything
 // else with a code (never an identifier or any content), and its command line

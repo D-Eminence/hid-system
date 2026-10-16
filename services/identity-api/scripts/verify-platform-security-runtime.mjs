@@ -250,8 +250,10 @@ try {
     expectStatus(await post('/auth/admin/mfa/verify', limitedLogin.jar, { code: '000000' }), 401, 'MFA_INVALID_CODE');
   }
   const afterFailures = await platform.login(limited.email);
-  expectStatus(await post('/auth/admin/mfa/verify', afterFailures.jar, { code: platform.code(limitedAdmin.secret) }),
-    429, 'MFA_RATE_LIMITED');
+  const lockedOut = await post('/auth/admin/mfa/verify', afterFailures.jar, { code: platform.code(limitedAdmin.secret) });
+  expectStatus(lockedOut, 429, 'MFA_RATE_LIMITED');
+  // A21: the lockout states its whole 15-minute window, never the time left.
+  assert.equal(lockedOut.headers['retry-after'], '900', 'the MFA lockout carries Retry-After 900');
   const blocked = (await owner.query(`select count(*)::int as n from auth.otp_rate_limits
     where scope = 'mfa_failure_account' and blocked_until > clock_timestamp()`)).rows[0].n;
   assert.equal(blocked, 1);
@@ -347,7 +349,7 @@ try {
   const superBAdmin = await platform.signIn({ email: superB.email, secret: staff.secretOf(superB.email) });
   expectStatus(await decide(superBAdmin, elevation.body.requestId, 'approve', elevation.body.version, 'no-step-up'),
     403, 'STEP_UP_REQUIRED');
-  expectStatus(await command(superBAdmin, '/admin/mfa/step-up', { code: '000000' }), 401, 'MFA_INVALID_CODE');
+  expectStatus(await command(superBAdmin, '/admin/mfa/step-up', { code: '000000' }), 403, 'MFA_INVALID_CODE');
   await platform.stepUp(superBAdmin);
   // Two concurrent approvals: exactly one grants the role.
   const decisions = await Promise.all([
@@ -1062,7 +1064,7 @@ try {
   const parallelGuesses = { waiting: guesses.waiting,
     responses: guesses.responses.map(response => `${response.status} ${response.body?.code}`).sort(), ...guessEvents };
   assert.deepEqual(parallelGuesses, { waiting: 6,
-    responses: [...Array(5).fill('401 MFA_INVALID_CODE'), '429 MFA_RATE_LIMITED'], failed: 5, limited: 1 },
+    responses: [...Array(5).fill('403 MFA_INVALID_CODE'), '429 MFA_RATE_LIMITED'], failed: 5, limited: 1 },
   `parallel step-ups with a wrong code: ${JSON.stringify(parallelGuesses)}`);
   const serialSignIn = await account('serial-sign-in', { platformRole: 'security_auditor' });
   expectStatus(await post('/auth/admin/login', {}, { email: serialSignIn.email, password: 'Wrong-Password-2026',
@@ -1097,7 +1099,7 @@ try {
   // Stage 4A: an allowed cross-origin console may read the export metadata.
   assert.equal(exported.headers['access-control-allow-origin'], origin);
   const exposedHeaders = String(exported.headers['access-control-expose-headers']).toLowerCase().split(',').map(value => value.trim());
-  for (const name of ['x-hid-export-row-count', 'x-hid-export-row-limit', 'x-hid-export-truncated']) {
+  for (const name of ['x-hid-export-row-count', 'x-hid-export-row-limit', 'x-hid-export-truncated', 'retry-after']) {
     assert(exposedHeaders.includes(name), `CORS does not expose ${name}`);
   }
   assert.equal(exported.headers['content-type'], 'text/csv; charset=utf-8; header=present');

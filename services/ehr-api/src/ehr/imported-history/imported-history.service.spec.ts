@@ -4,7 +4,7 @@ import type { DataAccessContext, HidRequest } from '../../common/request-context
 import { configuredPatientRelease, PatientRecordRelease, type PatientReleaseCategory } from '../patient-records/patient-release';
 import { ImportedHistoryService, IMPORTED_HISTORY_LIMITS } from './imported-history.service';
 
-// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066).
+// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-067).
 // The patient reads their own history through the patient-self path and the
 // one release set (PatientRecordRelease, its own flag off by default); staff
 // read it through ClinicalRepository.run, direct care only, never under
@@ -201,7 +201,7 @@ describe('ImportedHistoryService.staff: direct care, standard consent and the pa
     expect(value).toEqual({ shared: false, records: [], healthProfile: null, limits: IMPORTED_HISTORY_LIMITS,
       truncated: { records: false }, nextCursor: null, provenance: 'legacy-import' });
     // One statement decides and binds the patient the staff policies compare
-    // with (ADR-066): the decision runs once per statement, not per row.
+    // with (ADR-067): the decision runs once per statement, not per row.
     expect(statements(query)).toEqual([STAFF_DECISION]);
     expect(query.mock.calls[0]?.[1]).toEqual([patientId]);
   });

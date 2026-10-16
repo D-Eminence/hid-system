@@ -137,9 +137,9 @@ const environmentSchema = z.object({
   // whether decision N1 covers it.
   QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: booleanString,
   // Imported legacy medical history (owner decision 3 of 2026-10-16,
-  // ADR-066): the patient's choice to share it with staff they consent to.
+  // ADR-067): the patient's choice to share it with staff they consent to.
   // False answers 503 on both sharing routes; production refuses true until
-  // the DPO and the owner sign off the legacy data (release checklist P37).
+  // the DPO and the owner sign off the legacy data (release checklist P38).
   IMPORTED_HISTORY_SHARING_ENABLED: booleanString,
   // Holder budgets (ADR-062), counted from identity.public_patient_holder_events
   // over sliding windows: codes sent to one registry phone in 24 hours; wrong
@@ -181,6 +181,29 @@ const environmentSchema = z.object({
   PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX: z.coerce.number().int().min(1).max(100).default(5),
   PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX: z.coerce.number().int().min(1).max(1000).default(15),
   PATIENT_ENROLLMENT_QOREID_DAILY_CAP: z.coerce.number().int().min(1).max(100_000).default(200),
+  // Clinician self sign-up (ADR-066): per-operation limits charged, before
+  // anything else is written, to the client network (an IPv4 address or an
+  // IPv6 /64) per hour and per day and to one platform-wide daily cap
+  // (`platform.consume_clinician_application_quota`, 0098). A network's
+  // hourly limit may not exceed its daily one.
+  CLINICIAN_APPLICATION_SIGNUP_NETWORK_HOURLY_LIMIT: z.coerce.number().int().min(1).max(200).default(20),
+  CLINICIAN_APPLICATION_SIGNUP_NETWORK_DAILY_LIMIT: z.coerce.number().int().min(1).max(2000).default(60),
+  CLINICIAN_APPLICATION_SIGNUP_PLATFORM_DAILY_LIMIT: z.coerce.number().int().min(1).max(100_000).default(1000),
+  CLINICIAN_APPLICATION_STATUS_NETWORK_HOURLY_LIMIT: z.coerce.number().int().min(1).max(200).default(20),
+  CLINICIAN_APPLICATION_STATUS_NETWORK_DAILY_LIMIT: z.coerce.number().int().min(1).max(2000).default(60),
+  CLINICIAN_APPLICATION_STATUS_PLATFORM_DAILY_LIMIT: z.coerce.number().int().min(1).max(100_000).default(2000),
+  CLINICIAN_APPLICATION_SEARCH_NETWORK_HOURLY_LIMIT: z.coerce.number().int().min(1).max(1000).default(120),
+  CLINICIAN_APPLICATION_SEARCH_NETWORK_DAILY_LIMIT: z.coerce.number().int().min(1).max(5000).default(500),
+  CLINICIAN_APPLICATION_SEARCH_PLATFORM_DAILY_LIMIT: z.coerce.number().int().min(1).max(100_000).default(20_000),
+  CLINICIAN_APPLICATION_SUBMIT_NETWORK_HOURLY_LIMIT: z.coerce.number().int().min(1).max(200).default(5),
+  CLINICIAN_APPLICATION_SUBMIT_NETWORK_DAILY_LIMIT: z.coerce.number().int().min(1).max(2000).default(10),
+  CLINICIAN_APPLICATION_SUBMIT_PLATFORM_DAILY_LIMIT: z.coerce.number().int().min(1).max(100_000).default(200),
+  // Open (not overdue) applications one facility may hold; the next submit is
+  // 409 CLINICIAN_APPLICATION_FACILITY_BUSY.
+  CLINICIAN_APPLICATION_FACILITY_OPEN_LIMIT: z.coerce.number().int().min(1).max(500).default(30),
+  // How often due applications are recorded as expired and stale artefacts
+  // pruned. Not security-critical: every reader computes expiry itself.
+  CLINICIAN_APPLICATION_SWEEP_SECONDS: z.coerce.number().int().min(60).max(3600).default(900),
   IDENTITY_SERVICE_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: optionalSecret,
   IDENTITY_LAB_INTERNAL_SERVICE_TOKEN: optionalSecret,
@@ -284,7 +307,7 @@ const environmentSchema = z.object({
   if (productionProfile && environment.IMPORTED_HISTORY_SHARING_ENABLED) {
     context.addIssue({ code: 'custom', path: ['IMPORTED_HISTORY_SHARING_ENABLED'],
       message: 'Imported medical history sharing is refused in production until the DPO and the owner sign off the '
-        + 'legacy data (release checklist P37, ADR-066)' });
+        + 'legacy data (release checklist P38, ADR-067)' });
   }
   if (productionProfile && environment.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED) {
     context.addIssue({ code: 'custom', path: ['QOREID_PATIENT_SELF_NIN_BINDING_ENABLED'],
@@ -293,6 +316,13 @@ const environmentSchema = z.object({
   if (environment.PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX > environment.PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX) {
     context.addIssue({ code: 'custom', path: ['PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX'],
       message: 'The hourly NIN lookup limit per network cannot exceed the daily one' });
+  }
+  for (const operation of ['SIGNUP', 'STATUS', 'SEARCH', 'SUBMIT'] as const) {
+    const hourly = `CLINICIAN_APPLICATION_${operation}_NETWORK_HOURLY_LIMIT` as const;
+    if (environment[hourly] > environment[`CLINICIAN_APPLICATION_${operation}_NETWORK_DAILY_LIMIT`]) {
+      context.addIssue({ code: 'custom', path: [hourly],
+        message: 'A clinician sign-up hourly limit per network cannot exceed the daily one' });
+    }
   }
   if (environment.NIN_LOOKUP_HMAC_KEY_B64 && !isBase64Key(environment.NIN_LOOKUP_HMAC_KEY_B64, 32)) {
     context.addIssue({ code: 'custom', path: ['NIN_LOOKUP_HMAC_KEY_B64'], message: 'The NIN lookup key must be exactly 32 base64-encoded bytes' });

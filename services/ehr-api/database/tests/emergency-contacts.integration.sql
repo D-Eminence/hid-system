@@ -39,11 +39,9 @@ insert into identity.staff_facility_memberships (id, staff_id, account_id, organ
 insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason) values
   ('e1700000-0000-4000-8000-000000000001', 'e1100000-0000-4000-8000-000000000003', 'doctor', 'facility',
    'e1600000-0000-4000-8000-000000000001', 'e1400000-0000-4000-8000-000000000002', 'Contact fixture role');
--- Break-glass is off at launch (D9): 0091 withdraws identity.break-glass.write
--- from every role. This rollback-only suite exercises the command as a
--- reviewed re-grant would enable it again (ADR-058).
-insert into auth.role_permissions (role_code, permission_code) values ('doctor', 'identity.break-glass.write')
-on conflict do nothing;
+-- Break-glass is on at launch with limits (D9): 0097 grants
+-- identity.break-glass.write to the doctor role (with clinician and nurse)
+-- again and seeds the emergency purpose, and this suite relies on the grant.
 insert into identity.purpose_of_use_codes (code, display, source_system) values
   ('direct-care', 'Direct care', 'contact-test'), ('emergency', 'Emergency', 'contact-test')
 on conflict (code) do nothing;

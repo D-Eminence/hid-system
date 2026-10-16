@@ -42,10 +42,38 @@ checks the same. The flag alone opens nothing: the route opens while a
 facility is designated through the admin API. In production Identity also
 keeps the online route closed while no facility takes part. The in-person budgets
 (`ASSISTED_VERIFICATION_STAFF_DAILY_MAX`, `_FACILITY_DAILY_MAX`) keep
-Identity's defaults (20 and 100); they are not synth inputs. Enabling the
-facility route is an operator step after release checklist P29 to P33.
+Identity's defaults (20 and 100) unless the operator sets their synth inputs
+(below). Enabling the facility route is an operator step after release
+checklist P29 to P33.
 
-Imported legacy medical history (ADR-066, migration 0097): the synth inputs
+Identity budgets and QoreID timeout (optional synth inputs). Each input
+`HID_<VARIABLE>` sets the Identity variable `<VARIABLE>` in the Identity task
+only. An input left out is not emitted, so Identity keeps its own default;
+`QOREID_TIMEOUT_MS` is always set, `5000` unless supplied. Set them in the
+synth environment, never by editing the task definition: the next deployment
+replaces a hand-edited task definition.
+
+| Synth input | Identity default | Accepted |
+| --- | --- | --- |
+| `HID_PATIENT_ENROLLMENT_QOREID_DAILY_CAP` | 200 public NIN lookups a day, platform-wide | 1 to 100000 |
+| `HID_PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX` | 5 per client network an hour | 1 to 100, not above the daily limit |
+| `HID_PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX` | 15 per client network a day | 1 to 1000, not below the hourly limit |
+| `HID_PATIENT_ENROLLMENT_START_RATE_MAX_REQUESTS` | 5 enrollment starts per client network per 15 minutes | 1 to 100 |
+| `HID_ASSISTED_VERIFICATION_STAFF_DAILY_MAX` | 20 in-person checks per staff member a day | 1 to 200 |
+| `HID_ASSISTED_VERIFICATION_FACILITY_DAILY_MAX` | 100 in-person checks per facility a day | 1 to 1000, not below the staff budget |
+| `HID_QOREID_TIMEOUT_MS` | 5000 | 250 to 10000 |
+
+The bounds are Identity's own and, for the three lookup limits, those of the
+0085 quota command. Synthesis refuses anything else: a value that is not plain
+digits, out of bounds, an hourly limit above the daily one or a facility
+budget below the staff one, counting an input left out at Identity's default
+(so a per-network hourly limit above 15 needs the daily limit too).
+`verify-synth` checks that the Identity task carries exactly the inputs given.
+The owner sets the cap from the QoreID contract (release checklist §10); a
+per-network limit is raised only when carrier-grade or facility NAT collisions
+show (IP-THRESHOLDS).
+
+Imported legacy medical history (ADR-067, migration 0099): the synth inputs
 `HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY` and
 `HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED` set ehr-api's
 `EHR_PATIENT_RELEASE_IMPORTED_HISTORY` and `EHR_STAFF_IMPORTED_HISTORY_ENABLED`,
@@ -53,7 +81,7 @@ and `HID_IMPORTED_HISTORY_SHARING_ENABLED` sets identity-api's
 `IMPORTED_HISTORY_SHARING_ENABLED`. Each defaults to `false`; synthesis and
 `verify-synth` refuse any of them outside staging, and in staging the sharing
 switch without the patient read and the staff read without the sharing
-switch. Set them on staging only after release checklist P37 (1), the written
+switch. Set them on staging only after release checklist P38 (1), the written
 sign-off, in the order patient read, sharing, staff read, and turn them off in
 reverse. The EHR and Identity production profiles refuse them as well.
 
@@ -82,7 +110,8 @@ local service token. The Notification Worker (Novu) is off in production
 line, and `OtpDefinitiveFailures` alarms on its `definitive_failure` count. The NIN holder code (ADR-062, purpose `NIN_HOLDER_VERIFY`) goes by SMS
 only, through Termii, and counts there too. Before `NIN_HOLDER_SMS_ENABLED`
 is set, add the holder SMS volume and failure ratio alerts of the release
-checklist §10; Termii's sender ID (P18) and QoreID's written confirmation of
+checklist §10; Termii's sender ID and DND route, with the Termii integration
+configuration on `dnd` (P18, §13 step 7), and QoreID's written confirmation of
 `nin.phone` (P23) come first.
 When the fallback ran, the line also names the primary provider and its safe
 code (`primaryProvider`, `primarySafeCode`); read those for why SES or Termii
@@ -485,7 +514,225 @@ secret (the EHR secret's `scannerUrl` is a second, scanner-only LOGIN) and
 verify every one with `npm run db:verify-logins`, which connects with each
 secret's own URL and refuses a superuser, `BYPASSRLS`, owner or
 migration-administrator login, an extra role and a shared login. In production
-each service also refuses to start over such a connection.
+each service also refuses to start over such a connection. In AWS the RDS
+master's statements, the runtime LOGINs and `db:verify-logins` run as the
+provisioning task, and every other step as the migration task (below).
+
+### Running the migration task
+
+RDS accepts connections only from the service tasks and from the migration
+security group, which the one-shot migration task and the one-shot
+provisioning task use, so every `npm run db:*` and `admin:bootstrap` step
+above runs as one of them. The migration task's image is distroless: no shell and no npm, and its entrypoint
+is `/nodejs/bin/node`, so a command override names the script. Both tasks run
+it as the image's own user, UID/GID 65532 (neither task definition sets one),
+from `/app/services/ehr-api` with a read-only root filesystem; no step writes
+a file. The task maps
+the migration administrator's `url` as both `DATABASE_URL` and
+`DATABASE_ADMIN_URL`; its security group reaches only RDS, the AWS endpoints
+and Amazon S3. Run it from the stack outputs `MigrationTaskDefinitionArn`,
+`ApplicationSubnetIds` and `MigrationSecurityGroupId`:
+
+```bash
+aws ecs run-task --cluster hid-production --launch-type FARGATE \
+  --task-definition <MigrationTaskDefinitionArn> \
+  --network-configuration 'awsvpcConfiguration={subnets=[<ApplicationSubnetIds>],securityGroups=[<MigrationSecurityGroupId>],assignPublicIp=DISABLED}' \
+  --overrides '{"containerOverrides":[{"name":"database-migration","command":["scripts/apply-migrations.mjs","--dry-run"]}]}'
+```
+
+| Step | `command` override | `environment` override |
+| --- | --- | --- |
+| `db:plan` (P1) | none: the default is `scripts/apply-migrations.mjs --plan` | none |
+| `db:dry-run` | `["scripts/apply-migrations.mjs","--dry-run"]` | none |
+| `db:migrate` | `["scripts/apply-migrations.mjs"]` | none |
+| `db:bootstrap` | `["scripts/bootstrap-database-roles.mjs"]` | none |
+| `db:verify-roles` | `["scripts/bootstrap-database-roles.mjs","--verify-only"]` | none |
+| `admin:bootstrap` (P6) | `["scripts/bootstrap-platform-admin.mjs"]` | On a new database `PLATFORM_ADMIN_EMAILS` (two or three governance owners' email addresses, separated by commas or spaces); or `PLATFORM_ADMIN_ACCOUNT_IDS` (two or three distinct account UUIDs, comma-separated, each an active account with an email address and a password); and `PLATFORM_ADMIN_BOOTSTRAP_REASON`. `PLATFORM_ADMIN_REPLACE_PENDING=1` only to replace a mistyped address (below) |
+
+Wait for the task to stop, then require exit code `0` and read
+`/hid/<environment>/database-migration`. Never pass a database URL, password or
+other secret as an override: RunTask overrides are kept in the task
+description and in CloudTrail. The email addresses, account IDs and reason of
+`admin:bootstrap` are not secret, so they may be overrides.
+
+On a new database, seed the first Super Admins by email (owner decision
+2026-10-16, SUPERADMIN-ACCOUNTS: by email, own password;
+`SUPER_ADMIN_FOUNDATION.md`, Where the accounts come from). The HID 1.0
+promotion of §6 has no AWS execution path yet, and the email form needs no
+account to exist:
+
+1. Run `admin:bootstrap` with `PLATFORM_ADMIN_EMAILS` after the services and
+   SES are live (§9, P17), so that the reset code can be delivered. Run it
+   once, naming every initial Super Admin (two or three people; prefer three
+   people, so that two remain if one address turns out to be wrong after the
+   others have set their passwords), with `PLATFORM_ADMIN_BOOTSTRAP_REASON`.
+   Give each person an address that no HID 1.0 auth user has, such as a
+   dedicated admin mailbox, and check it against the approved read-only HID 1.0
+   source before the run: a seeded account keeps its address under the unique
+   index `accounts_email_ci_uq`, so a later HID 1.0 promotion of a user with
+   the same address is refused and blocks that promotion run (§6). It creates a
+   platform-only account for each address in `PLATFORM_ADMIN_EMAILS`, with no
+   password and no staff or patient record, and grants each Super Admin in one
+   audited transaction. It prints the new account IDs in the order of the
+   addresses, never an address. It refuses an address that already belongs to
+   an account (name existing accounts in `PLATFORM_ADMIN_ACCOUNT_IDS` instead)
+   and refuses to run again once any Super Admin exists, whatever its status;
+   afterwards a Super Admin is added only by a two-person approval
+   (`SUPER_ADMIN_FOUNDATION.md`).
+2. Then every listed person starts the admin reset and confirms that the
+   emailed code arrived before anyone sets a password. Each opens the admin
+   recovery page,
+   `https://admin.healthidentitydirectory.com/admin/recover` ("Forgot your
+   password?" on the admin sign-in page) or
+   `https://www.healthidentitydirectory.com/admin/recover`, which uses the
+   admin reset (Turnstile action `admin-reset`), enters their address and tells
+   the operator that the code arrived, without entering it. Starting a reset
+   changes no account, so a mistyped address can still be replaced (below).
+   The recovery start answers an address without an account exactly as any
+   other, so a code that never arrives is the only sign of a mistyped address.
+3. Once every code has arrived, each person enters the code from step 2 on the
+   same page and sets their own password. Nobody else ever knows it. A code
+   lasts `OTP_EXPIRY_SECONDS` (300 seconds by default), and entering
+   it changes no account until the password is set. Only a person whose
+   code has expired starts the reset again, and not within
+   `OTP_RESEND_COOLDOWN_SECONDS` (60 seconds) of their last start, which
+   returns the same challenge and sends no new code. Recovery starts are
+   limited per client network (`OTP_RATE_MAX_REQUESTS`, 5 by default, per
+   `OTP_RATE_WINDOW_SECONDS`, 900 seconds, for one IPv4 address or IPv6 /64),
+   so people on one network space their starts; `429 OTP_RATE_LIMITED` means
+   waiting the `Retry-After`, not a mistyped address.
+4. Each person signs in at `https://admin.healthidentitydirectory.com` with
+   that password and enrols an authenticator app (TOTP) at the first sign-in;
+   the platform enrolment needs no emailed code. Then check P6.
+5. Then one Super Admin pauses Brevo (§13 step 5, P21), enables the QoreID
+   integration `qoreid` (`POST /api/v1/admin/integrations/qoreid/enable`), sets the launch controls
+   (`POST /api/v1/admin/controls`, such as `clinician_signup_enabled` once P37
+   holds) and designates facilities (P30), each when its own release checklist
+   row allows.
+
+If an address was mistyped (its code never arrives), run `admin:bootstrap`
+again at once with the corrected list in `PLATFORM_ADMIN_EMAILS` and
+`PLATFORM_ADMIN_REPLACE_PENDING=1`. In one transaction it revokes the Super
+Admin assignments of the accounts the email bootstrap created, marks those
+accounts deleted (audited) and seeds the new list, but only while every Super
+Admin is such an account that nobody has used: still `pending_reset`, with no
+password, session or authenticator. A started or verified reset does not count
+as use. Every listed person then
+confirms a new code (step 2) before anyone sets a password. Once anyone has
+set a password it refuses, for every address. The other Super Admins can then
+remove a wrong account through the governed role and status commands, but
+nothing adds the right person: a Super Admin is added only by a two-person
+approval, and no command creates a platform-only account. With two addresses,
+a wrong one found after the other person has set a password leaves a single
+Super Admin, who can never add a second or approve a clinician application,
+and no command repairs it (P6 can then never pass). Until each person has
+reset, whoever controls a listed address could set that password, so check the
+addresses before the run and complete the resets as soon as every code has
+arrived.
+
+Name existing accounts in `PLATFORM_ADMIN_ACCOUNT_IDS` instead only once the
+accounts it names exist, each active with an email address and a password: on
+a new database, after the HID 1.0 promotion of §6, which has no AWS execution
+path yet. Platform sign-in is by email and password, so that form refuses an
+account without an email address or password. The task runs with
+`NODE_ENV=production`, so the development-only one-account form
+`PLATFORM_ADMIN_ACCOUNT_ID` is refused.
+
+### Running the provisioning task
+
+A new RDS instance has only its master. The one-shot provisioning task
+(`hid-<environment>-database-provisioning`, stack output
+`DatabaseProvisioningTaskDefinitionArn`) runs
+`scripts/provision-database-logins.mjs` (`npm run db:provision`) from the
+migration image. It maps exactly the RDS master's `username` and `password`
+(the stack's generated master secret, output `BootstrapDatabaseSecretArn`), the
+migration administrator's `url` and each runtime secret's `url` (and the EHR
+secret's `scannerUrl`); its task role has no policy. Run it as the migration
+task above, with the same subnets and the migration security group, so it has
+no other network path, and with the container name `database-provisioning`.
+Override only the command. Each run does one step:
+
+```bash
+aws ecs run-task --cluster hid-production --launch-type FARGATE \
+  --task-definition <DatabaseProvisioningTaskDefinitionArn> \
+  --network-configuration 'awsvpcConfiguration={subnets=[<ApplicationSubnetIds>],securityGroups=[<MigrationSecurityGroupId>],assignPublicIp=DISABLED}' \
+  --overrides '{"containerOverrides":[{"name":"database-provisioning","command":["scripts/provision-database-logins.mjs","--administrator"]}]}'
+```
+
+| Order | Step | Runs as | Task and `command` override |
+| --- | --- | --- | --- |
+| 1 | Create the migration administrator, or set its password; grant it `CREATE` on the database; record the I3 probe | RDS master | provisioning: `["scripts/provision-database-logins.mjs","--administrator"]` |
+| 2 | `SET ON PARAMETER plpgsql.variable_conflict` for the run that applies 0015 (`MIGRATION_RUNBOOK.md` §6.1); skipped once 0015 is applied | RDS master | provisioning: `["scripts/provision-database-logins.mjs","--grant-variable-conflict"]` |
+| 3 | `db:plan`, `db:dry-run`, `db:migrate` | migration administrator | migration (table above) |
+| 4 | Revoke that grant once the ledger shows 0083, and check it | RDS master | provisioning: `["scripts/provision-database-logins.mjs","--revoke-variable-conflict"]` |
+| 5 | `db:bootstrap`, `db:verify-roles` | migration administrator | migration (table above) |
+| 6 | Create the ten runtime LOGINs, or set their passwords; grant each its aggregate role; then `db:verify-logins` (§6.3) | migration administrator | provisioning: `["scripts/provision-database-logins.mjs","--runtime-logins"]` |
+| 7 | `db:verify-logins` alone, with the RDS master and the administrator forbidden; again after every credential rotation | each runtime LOGIN | provisioning: none, the default is `--verify-logins` |
+
+`admin:bootstrap` (P6) is no step of this order: no service runs yet, so no
+reset code could be delivered. On a new database it runs as the migration task
+with `PLATFORM_ADMIN_EMAILS` after the services and SES are live, and creates
+the accounts it names (owner decision 2026-10-16, SUPERADMIN-ACCOUNTS; §4,
+Running the migration task). With `PLATFORM_ADMIN_ACCOUNT_IDS` it runs only
+once the accounts it names exist, each active with an email address and a
+password: the HID 1.0 promotion of §6 would create them (it keeps each HID 1.0
+user's UUID, email and password and grants no platform role), but it has no
+AWS execution path yet (`SUPER_ADMIN_FOUNDATION.md`, Where the accounts come
+from). Neither provisioning step creates a Health ID account.
+
+Before step 1 write the secrets. The migration secret's `url` and each runtime
+secret's URL name a lowercase LOGIN (letters, digits and `_`) with a password
+of 16 to 1024 printable ASCII characters without spaces, all on the same host,
+port and database. No LOGIN, the migration administrator included, is named
+after one of the 28 HID group roles that `runtime-grants.sql` creates (such as
+`hid_migration_admin`; use, for example, `hid_deploy_admin`): the role
+bootstrap of step 5 cannot run as such an administrator. Each runtime LOGIN is
+distinct and is not the master or the administrator. No URL sets `user`, `password`,
+`database`, `dbname`, `port` or `options` as a query parameter. The script
+refuses anything else before it changes anything.
+
+A password reaches PostgreSQL only as a SCRAM-SHA-256 verifier that the
+script computes, so no statement, log line or output carries a password or
+URL. An existing role is changed only by setting its password from its
+secret, and only when its attributes are the expected ones and, for a runtime
+LOGIN, it is a member of nothing but its aggregate role; otherwise the run
+refuses and changes nothing. Step 6 is one transaction: all ten or none. A
+rerun is safe. Steps 6 and 7 exit 1 unless `db:verify-logins` passes for all
+ten.
+
+To rotate a runtime secret, keep to this order, in a quiet hour. Step 6 sets
+the new password in place, so PostgreSQL refuses the old password at once
+(open connections stay), while the service's running tasks keep the URL ECS
+injected when they started; the service's new connections fail until its
+tasks are replaced. A task that starts between the write and step 6 cannot
+connect either.
+
+1. Write the new password into the secret's URL.
+2. Run step 6 at once. It sets the new password and verifies all ten.
+3. Replace the running tasks of the service that maps that secret (`<workload>`
+   is that service: `identity-api`, `ehr-api` for both EHR URLs, `lab-api`,
+   `pharmacy-api`, `ocr-api`, `ocr-worker`, `outreach-api`, `event-dispatcher`
+   or `notification-worker`), and wait until it is stable:
+
+   ```bash
+   aws ecs update-service --cluster hid-<environment> --service hid-<environment>-<workload> --force-new-deployment
+   aws ecs wait services-stable --cluster hid-<environment> --services hid-<environment>-<workload>
+   ```
+
+   `ocr-worker` has no container health check, so ECS never replaces it on its
+   own: without this step it stays unable to connect. A service scaled to zero
+   needs no new deployment.
+4. Run step 7.
+
+Require exit code `0` and read
+`/hid/<environment>/database-provisioning`. If RDS refuses step 2, stop and
+take the reviewed ledger exception of `MIGRATION_RUNBOOK.md` §6.1; never use a
+superuser-like role.
+
+The task's execution role reads the RDS master secret. Allow `ecs:RunTask` on
+this task definition only to the operators who may act as the RDS master.
+Never run it as a service, pass a secret as an override, or add the master or
+a runtime URL to the migration task.
 
 ## 5. Guarded staging operations
 
@@ -536,8 +783,9 @@ Never run any of these commands for production.
 ## 6. Migrate identity and data
 
 Never edit migrations `0001`–`0028`. Apply all 34 ledger migrations through
-`0034` using the one-shot migration task. First record snapshot/PITR readiness
-and run `--plan`.
+`0034` using the one-shot migration task (§4, Running the migration task).
+First record snapshot/PITR readiness and run the plan (the task's default
+command).
 Exercise the offline fixture path before using an approved read-only HID 1.0
 source:
 
@@ -546,6 +794,24 @@ npm --prefix services/ehr-api run migration:verify
 MIGRATION_FIXTURE_PATH=test/fixtures/legacy-identity.sample.json \
   npm --prefix services/ehr-api run migration:stage:dry-run
 ```
+
+The stage and promote commands (`MIGRATION_RUNBOOK.md` §7 and §8) have no AWS
+execution path yet. RDS accepts connections only from the service tasks and
+the migration security group (§4). The migration task maps only the migration
+administrator's URL, as `DATABASE_URL` and `DATABASE_ADMIN_URL`; its security
+group reaches only RDS, the AWS endpoints and Amazon S3, its root filesystem is
+read-only, and its image holds no HID 1.0 export. So `migration:stage` can
+read neither the HID 1.0 source (`LEGACY_DATABASE_URL`) nor an export
+(`MIGRATION_FIXTURE_PATH`). `migration:promote` refuses to start without
+`MIGRATION_FIELD_ENCRYPTION_KEY_B64`, `MIGRATION_LOOKUP_HMAC_KEY_B64` and
+`CONTACT_LOOKUP_HMAC_KEY_B64`; no task maps them, and a secret is never a
+RunTask override (§4). Never open RDS to another network or pass a key as an
+override to get around this. A reviewed path, such as a one-shot legacy
+migration task that maps these keys from Secrets Manager and reads the source
+through a private S3 export, is still to be decided and built; it blocks the
+HID 1.0 cutover, no longer the first Super Admins, which the owner decided on
+2026-10-16 to seed by email (SUPERADMIN-ACCOUNTS, `PHASE_3_LAUNCH_DECISIONS.md`;
+§4). The steps below apply once such a path exists.
 
 For real migration, preserve source and destination UUID/HID mappings,
 checksums, conflicts, batch checkpoints, and reconciliation output. Copy legacy
@@ -559,6 +825,27 @@ conflict, promote idempotently, validate patient/HID continuity, and retain a
 rollback/PITR decision point. Do not trust a raw HID 1.0 session token: the
 issuer/signature/audience/expiry contract is not proven. Use local/OIDC login
 or the six-digit contact-OTP fallback mapped to the existing patient.
+
+Once it can run, the promotion creates each HID 1.0 user's account with the
+HID 1.0 auth user UUID, email and password, active once the email was
+confirmed in HID 1.0, and holds a HID 1.0 `platform_admin` membership
+(`privileged_role_requires_reapproval`) without granting any platform role.
+If the initial Super Admins were not already seeded by email (§4), seed them
+after it with one `admin:bootstrap` run (§4, P6) naming two or three of those
+accounts in `PLATFORM_ADMIN_ACCOUNT_IDS`, each active with an email address and
+a password: that run is their re-approval (`SUPER_ADMIN_FOUNDATION.md`, Where
+the accounts come from). Once Super Admins exist, the bootstrap refuses, and a
+held HID 1.0 administrator whose address no seeded account has is re-approved
+by the two-person approval instead. A HID 1.0 administrator who already holds a Super Admin account seeded by
+email under another address is not re-approved: that HID 1.0 account keeps
+no platform role. Two-person approval (0070) and clinician approval (0098)
+separate accounts, not people, so each person holds at most one Super Admin
+account. An account seeded by email keeps its
+address under `accounts_email_ci_uq` (every status but `deleted`), and the
+promotion inserts an account only when its ID is new, so promoting a HID 1.0
+user with a seeded address, in any letter case, is a conflict that blocks the
+whole promotion run (`MIGRATION_RUNBOOK.md` §8). That is why §4 seeds only
+addresses no HID 1.0 auth user has.
 
 ## 7. Provider and workload preflight
 
@@ -957,7 +1244,8 @@ production deployment authorization of §12.
 External dependencies: the operations owner names the on-call recipients of
 `hid-production-operational-alerts`; SES production access and a DKIM-verified
 domain in the production account; a Termii account with an approved Nigerian
-sender ID; the security owner's production keys (launch plan I1).
+sender ID and Termii's DND (transactional) route activated for it; the
+security owner's production keys (launch plan I1).
 
 1. **Alarm topic.** In the production account and region, create a
    customer-managed KMS key whose key policy keeps the account root statement
@@ -1010,15 +1298,33 @@ sender ID; the security owner's production keys (launch plan I1).
    platform session, TOTP step-up, a reason, `If-Match` and
    `Idempotency-Key`), which records the actor in the integration audit. Identity then plans no fallback, and a definitive SES
    or Termii failure is reported as the primary's. `GET /api/v1/admin/integrations/brevo`
-   must show it paused.
+   must show it paused. On a new database that administrator exists only
+   after the email `admin:bootstrap` run and the resets of §4, which need
+   Identity, SES and the admin recovery page reachable: do this step as soon
+   as the first Super Admins have signed in, before the public sign-up routes
+   open.
 6. Synthesize with `HID_OPERATIONAL_ALARM_TOPIC_ARN`, `HID_AWS_ACCOUNT` and
    `HID_AWS_REGION` (§2) and continue with §12.
+7. **Termii on its DND route** (release checklist P18). notification-api's
+   `TERMII_CHANNEL` defaults to `generic`, which Termii documents as
+   promotional: OTP on it may fail or be blocked, and it does not reach a
+   number on the Do-Not-Disturb register. The stack does not set it. After
+   deployment and before any SMS OTP is relied on, a platform administrator
+   with `platform.integration.manage` sets the route with the audited
+   `POST /api/v1/admin/integrations/termii/configuration` (a critical action,
+   as in step 5) and the body
+   `{"reason": "<why>", "configuration": {"channel": "dnd"}}`. It replaces the
+   stored Termii configuration; without `senderId` the secret's
+   `termiiSenderId` is used. `GET /api/v1/admin/integrations/termii` must show
+   `configuration.channel` `dnd`. Identity passes that configuration with each
+   send. Only then may `NIN_HOLDER_SMS_ENABLED` be set.
 
 After deployment, confirm in CloudWatch that every alarm of the stack lists the
 topic as its alarm and OK action, then run a synthetic signup OTP over email
 and over SMS and a recovery OTP, and check that each wrote one
 `notification.otp.outcome` line with outcome `accepted` and no recipient, code
-or message. A line with `fallbackUsed: true` means Brevo was not paused (step
+or message. Send the SMS OTP, after step 7, to a test handset with DND active,
+and confirm that the code arrived. A line with `fallbackUsed: true` means Brevo was not paused (step
 5); its `primaryProvider` and `primarySafeCode` give the primary's result.
 
 Rollback: the topic, key and subscriptions are retained; removing them makes

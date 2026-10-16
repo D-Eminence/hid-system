@@ -6,8 +6,9 @@ begin;
 -- The launch database starts with the controls of the modules that are off at
 -- launch turned off (0091, decision D17, ADR-058): document uploads, the
 -- Outreach portal and break-glass. 0039 seeded all three on, and before 0091
--- only an operator's audited change (P11) turned them off. The other three
--- controls keep their seeded launch state. Patient record chat's kill switch,
+-- only an operator's audited change (P11) turned them off. 0098 (ADR-066)
+-- seeds clinician self sign-up off. The other three controls keep their
+-- seeded launch state. Patient record chat's kill switch,
 -- record_chat_enabled, is seeded off by its migration (owner decision 1 of
 -- 2026-10-16) and turned on only by an administrator's audited change.
 do $$
@@ -16,8 +17,9 @@ declare
 begin
   select string_agg(format('%s=%s', control_key, enabled::text), ', ' order by control_key) into states
     from platform.control_settings;
-  if states is distinct from 'break_glass_enabled=false, maintenance_mode=false, outreach_portal_enabled=false, '
-      || 'patient_portal_enabled=true, provider_portal_enabled=true, record_chat_enabled=false, uploads_enabled=false' then
+  if states is distinct from 'break_glass_enabled=false, clinician_signup_enabled=false, maintenance_mode=false, '
+      || 'outreach_portal_enabled=false, patient_portal_enabled=true, provider_portal_enabled=true, '
+      || 'record_chat_enabled=false, uploads_enabled=false' then
     raise exception 'the launch controls are not in their launch state: %', states;
   end if;
 end $$;

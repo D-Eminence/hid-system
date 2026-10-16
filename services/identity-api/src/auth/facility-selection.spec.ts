@@ -284,6 +284,32 @@ describe('staff facility selection per sign-in', () => {
     expect(reloaded.body).toMatchObject({ facilitySelection: 'selected', actor: { facility: { id: secondary.id } } });
   });
 
+  it('audits auth.refresh at the facility the refresh reports, read once in the rotation\'s own transaction', async () => {
+    const signIn = store.signIn(accountId);
+    expect((await select(signIn.accessToken, secondary.id)).status).toBe(200);
+    tokens.selectedFacilityId.mockClear();
+
+    const refreshed = await refresh(signIn);
+
+    expect(refreshed.status).toBe(200);
+    const rotatedSession: string = refreshed.body.actor.sessionId;
+    expect(refreshed.body).toMatchObject({ facilitySelection: 'selected', actor: { facility: { id: secondary.id } } });
+    // The row names the facility the refreshed session works at, as the
+    // response and the next session read do, not the primary facility.
+    const refreshAudits = audit.recordWithClient.mock.calls.filter(([, event]) => event.action === 'auth.refresh');
+    expect(refreshAudits).toHaveLength(1);
+    expect(refreshAudits[0]![0]).toEqual({ rotation: rotatedSession });
+    expect(refreshAudits[0]![1]).toMatchObject({ actorType: 'staff', actorAccountId: accountId,
+      actorMembershipId: secondary.membershipId, organizationId: secondary.organizationId, facilityId: secondary.id,
+      resourceType: 'session', resourceId: rotatedSession, outcome: 'success' });
+    expect(audit.record).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.refresh' }));
+    // Read on the rotation's transaction, which already holds the rotated
+    // session of the same sign-in; the response reports that read, so nothing
+    // is read again once the rotation has committed.
+    expect(tokens.selectedFacilityId).toHaveBeenCalledTimes(1);
+    expect(tokens.selectedFacilityId).toHaveBeenCalledWith(rotatedSession, accountId, { rotation: rotatedSession });
+  });
+
   it('reports reselect and the default facility once the selected membership has ended', async () => {
     const signIn = store.signIn(accountId);
     expect((await select(signIn.accessToken, secondary.id)).status).toBe(200);
@@ -299,6 +325,8 @@ describe('staff facility selection per sign-in', () => {
     expect(refreshed.status).toBe(200);
     expect(refreshed.body.facilitySelection).toBe('reselect');
     expect(refreshed.body.actor.facility.id).toBe(primary.id);
+    expect(audit.recordWithClient).toHaveBeenCalledWith({ rotation: refreshed.body.actor.sessionId },
+      expect.objectContaining({ action: 'auth.refresh', facilityId: primary.id, actorMembershipId: primary.membershipId }));
   });
 
   it('refuses a facility the actor is not active at with 403 and writes nothing', async () => {
@@ -396,18 +424,22 @@ describe('staff facility selection per sign-in', () => {
     expect(tokens.selectedFacilityId).not.toHaveBeenCalled();
   });
 
-  it('answers a refresh whose selection read fails after the rotation with 200, the rotated cookies and facilitySelection unavailable, and clears nothing', async () => {
+  it('answers a refresh whose selection read fails in the rotation with 200, the rotated cookies and facilitySelection unavailable, and clears nothing', async () => {
     const signIn = store.signIn(accountId);
     expect((await select(signIn.accessToken, secondary.id)).status).toBe(200);
-    tokens.selectedFacilityId.mockRejectedValueOnce(Object.assign(new Error('connection reset'), { code: '08006' }));
+    tokens.selectedFacilityId.mockClear();
+    tokens.selectedFacilityId.mockRejectedValueOnce(
+      Object.assign(new Error('canceling statement due to statement timeout'), { code: '57014' }));
 
     const refreshed = await refresh(signIn);
 
-    // Not a 5xx: behind the gateway a 5xx loses its Set-Cookie, and the
-    // browser would keep the spent refresh token. The rotation has committed,
-    // so the rotated session is answered, with a state that is not a choice:
-    // the client asks where the user is working (it never takes the default
-    // facility reported here as chosen).
+    // The read runs on the rotation's own transaction, under a savepoint
+    // (TokenService.selectedFacilityId): its failure is rolled back to the
+    // savepoint and the rotation still commits, with its audit row. Not a 5xx,
+    // which would leave the sign-in unrenewable for as long as the choice
+    // stays unreadable. The rotated session is answered with a state that is
+    // not a choice: the client asks where the user is working (it never takes
+    // the default facility reported here as chosen).
     expect(refreshed.status).toBe(200);
     expect(refreshed.body.facilitySelection).toBe('unavailable');
     expect(refreshed.body.actor.facility.id).toBe(primary.id);
@@ -421,10 +453,15 @@ describe('staff facility selection per sign-in', () => {
     expect(issued).toEqual({ hid_access: `access-${rotatedSession}`, hid_access_refresh: `refresh-${rotatedSession}`,
       hid_access_csrf: `csrf-refresh-${rotatedSession}` });
     expect(refreshed.headers['x-csrf-token']).toBe(`csrf-refresh-${rotatedSession}`);
+    // The failed read was the one on the rotation's transaction, and the
+    // only one: nothing is read again after the commit.
+    expect(tokens.selectedFacilityId).toHaveBeenCalledTimes(1);
+    expect(tokens.selectedFacilityId).toHaveBeenCalledWith(rotatedSession, accountId, { rotation: rotatedSession });
     // The refresh happened and is audited in the rotation's own transaction,
-    // at the facility the rotation resolved (the default, as reported).
+    // at the facility the response reports (the default, as resolved).
     expect(audit.recordWithClient).toHaveBeenCalledWith({ rotation: rotatedSession }, expect.objectContaining({
-      action: 'auth.refresh', outcome: 'success', resourceId: rotatedSession, facilityId: primary.id }));
+      action: 'auth.refresh', outcome: 'success', resourceId: rotatedSession, facilityId: primary.id,
+      actorMembershipId: primary.membershipId }));
     expect(audit.record).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auth.refresh' }));
     // The stored choice is untouched: once it can be read again the rotated
     // session reports it.
