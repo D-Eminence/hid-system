@@ -72,6 +72,23 @@ describe('record chat evidence extract', () => {
     expect(categories).not.toContain('labRequests');
   });
 
+  // The imported legacy history (0097) is a release category of its own,
+  // read only through its own route: it is never evidence (the record chat
+  // ADR, Proposed defaults). The extract is built from the summary sections
+  // only, so even records that carried it would not send it.
+  it('never carries the imported legacy history, which is no chat source category', () => {
+    expect(Object.values(CHAT_SOURCE_CATEGORIES)).not.toContain('importedHistory');
+    expect(SOURCE_KINDS.some((kind) => /import/i.test(kind))).toBe(false);
+    const withImported = { ...records(), importedHistory: [{ id: '5c4a7b00-0000-4000-8000-0000000009e1',
+      recordType: 'legacy-note', sourcePayload: { text: 'IMPORTED-LEGACY-HISTORY-TEXT' } }] } as PatientReleasedRecords;
+    const extract = buildPatientExtract(withImported, 'What does my legacy history say?', LIMITS);
+    const payload = userTurnBlocks(extract, [], 'What does my legacy history say?').join('\n');
+    expect(payload).not.toMatch(/IMPORTED-LEGACY-HISTORY-TEXT|legacy-note|5c4a7b00-0000-4000-8000-0000000009e1/);
+    expect(extract.coverage.released).not.toContain('importedHistory');
+    expect(extract.bindings.map((binding) => binding.id)).not.toContain('5c4a7b00-0000-4000-8000-0000000009e1');
+    expect(new Set(extract.records.map((record) => record.kind))).toEqual(new Set(SOURCE_KINDS));
+  });
+
   it('sends exactly the allowlisted fields of each kind', () => {
     const extract = buildPatientExtract(records(), 'How is my glucose?', LIMITS);
     for (const record of extract.records) {

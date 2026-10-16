@@ -4,7 +4,7 @@ import type { AuditService } from '../../audit/audit.service';
 import { DomainProblem } from '../../common/problem';
 import type { HidRequest } from '../../common/request-context';
 import type { DatabaseService } from '../../database/database.service';
-import { PatientRecordRelease, type PatientReleasable } from '../patient-records/patient-release';
+import { PatientRecordRelease, type PatientReleaseCategory } from '../patient-records/patient-release';
 import { requestDigest } from '../../common/idempotency';
 import type { PatientRecordsService } from '../patient-records/patient-records.service';
 import { RecordChatProcessorError, type ProcessorResult, type RecordChatProcessor } from './claude-record-chat.client';
@@ -47,7 +47,7 @@ const CLINICAL = /from ehr\.(encounters|clinical_notes|vitals|diagnoses|prescrip
 
 interface Options {
   config?: RecordChatConfig;
-  categories?: PatientReleasable[];
+  categories?: PatientReleaseCategory[];
   control?: boolean | Error;
   stored?: Record<string, unknown> | null;
   storedCount?: number;
@@ -67,6 +67,9 @@ interface Options {
 function setup(options: Options = {}) {
   const events: string[] = [];
   const violations: string[] = [];
+  // Statements that name the imported legacy history (0097's tables or its
+  // binding): record chat must never run one.
+  const importedReads: string[] = [];
   let inRelease = false;
   let releaseReads = 0;
   const vital = { id: VITAL, encounterId: ENCOUNTER, facilityId: 'facility-1', recordedAt: new Date('2026-09-30T09:00:00Z'),
@@ -75,6 +78,10 @@ function setup(options: Options = {}) {
   const query = jest.fn(async (sql: string, params?: unknown[]) => {
     const text = sql.replace(/\s+/g, ' ');
     if (CLINICAL.test(text) && !inRelease) violations.push(text);
+    if (/imported_medical_record|imported_history/.test(text)) {
+      importedReads.push(text);
+      return { rows: [{ id: 'imported-legacy-row', sourcePayload: { text: 'IMPORTED-LEGACY-HISTORY-TEXT' } }] };
+    }
     if (/set_config\('app\.patient_release'/.test(text)) { events.push('bind'); return { rows: [] }; }
     if (/from ehr\.encounters/.test(text)) {
       return { rows: options.noRecords ? [] : [{ id: ENCOUNTER, facilityId: 'facility-1', encounterType: 'ambulatory',
@@ -184,7 +191,7 @@ function setup(options: Options = {}) {
     { withPatientTransaction, query: databaseQuery } as unknown as DatabaseService,
     { recordWithClient, record } as unknown as AuditService,
     { authorizeOwnSession } as unknown as PatientRecordsService, release, options.config ?? enabled, processor);
-  return { service, events, violations, query, processor, authorizeOwnSession, recordWithClient, record,
+  return { service, events, violations, importedReads, query, processor, authorizeOwnSession, recordWithClient, record,
     withPatientTransaction, databaseQuery, release };
 }
 
@@ -269,6 +276,38 @@ describe('PatientRecordChatService', () => {
     const withVitals = setup({ categories: ['vitals'] });
     await ask(withVitals);
     expect((withVitals.processor.ask as jest.Mock).mock.calls[0][0].userBlocks.join('\n')).toContain('"vital"');
+  });
+
+  it('never sends the imported legacy history to the processor, even with its release flag on', async () => {
+    // EHR_PATIENT_RELEASE_IMPORTED_HISTORY on: the release set names
+    // importedHistory, and the database would admit the patient's imported
+    // rows in this transaction. Record chat reads only PatientRecordRelease.read,
+    // whose summary categories never include it, and never calls
+    // readImportedHistory: the imported history is not evidence (the record
+    // chat ADR, Proposed defaults).
+    const chat = setup({ categories: ['vitals', 'importedHistory'] });
+    const readImported = jest.spyOn(chat.release, 'readImportedHistory');
+    expect(chat.release.releases('importedHistory')).toBe(true);
+    const reply = await ask(chat);
+    expect(reply.status).toBe('answered');
+    const bindings = chat.query.mock.calls.filter(([sql]) => /set_config\('app\.patient_release'/.test(String(sql)));
+    expect(bindings.length).toBeGreaterThan(0);
+    for (const [, params] of bindings) expect(params).toEqual(['vitals,importedHistory']);
+    expect(readImported).not.toHaveBeenCalled();
+    expect(chat.importedReads).toEqual([]);
+    const sentRequest = (chat.processor.ask as jest.Mock).mock.calls[0][0] as { systemPrompt: string; userBlocks: string[] };
+    const sent = sentRequest.userBlocks.join('\n');
+    expect(sent).toContain('"vital"');
+    expect(sent).not.toMatch(/imported|IMPORTED-LEGACY-HISTORY-TEXT|imported-legacy-row/i);
+    expect(reply.coverage.released).toEqual(['encounters', 'notes', 'vitals']);
+    expect([...reply.coverage.released, ...reply.coverage.withheld]).not.toContain('importedHistory');
+    expect(reply.sources.map((source) => source.kind)).not.toContain('importedHistory');
+    // Availability lists the categories chat reads: not the imported history.
+    await expect(chat.service.availability()).resolves.toMatchObject({ released: ['encounters', 'notes', 'vitals'] });
+    // Nor does the history read it.
+    await chat.service.history(request);
+    expect(readImported).not.toHaveBeenCalled();
+    expect(chat.importedReads).toEqual([]);
   });
 
   it('makes no call when the disclosure audit cannot be written', async () => {
