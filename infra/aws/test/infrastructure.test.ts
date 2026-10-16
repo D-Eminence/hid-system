@@ -1265,7 +1265,7 @@ test('production OTP delivery injects only the otp-email-sms provider fields', (
   assert.ok(containerOf(stagingRegional, 'notification-worker').secrets.some(item => item.Name === 'NOVU_API_KEY'));
 });
 
-test('patient record release categories are explicit synth inputs that default to false; only staging may set them (D17, P35)', () => {
+test('patient record release categories are explicit synth inputs that default to false; only staging may set them (D17, P36)', () => {
   const productionTopic = { operationalAlarmTopicArn: productionTopicArn };
   const none = { vitals: false, diagnoses: false, prescriptions: false, labResults: false, documents: false };
   assert.deepEqual(environmentConfig('production').patientRecordRelease, none);
@@ -1287,7 +1287,7 @@ test('patient record release categories are explicit synth inputs that default t
   }
   // Production refuses every category: Lab results while Lab is withdrawn at
   // launch (D17, 0091 section 2), the others until the clinical owner signs
-  // off each one (P35, ADR-064). The development stack's ehr-api runs in the
+  // off each one (P36, ADR-065). The development stack's ehr-api runs in the
   // production profile (HID_DEPLOYMENT_ENV=production), so it refuses them too.
   const productionConfiguration = environmentConfig('production', undefined, undefined, undefined, productionTopic);
   const developmentConfiguration = environmentConfig('development');
@@ -1315,6 +1315,78 @@ test('patient record release categories are explicit synth inputs that default t
   for (const name of workloadNames.filter(item => item !== 'ehr-api')) {
     assert.doesNotMatch(JSON.stringify(containerOf(template, name)), /EHR_PATIENT_RELEASE/);
   }
+});
+
+test('imported history flags are explicit synth inputs that default to false; only staging may set them (ADR-066, P37)', () => {
+  const productionTopic = { operationalAlarmTopicArn: productionTopicArn };
+  const none = { patientRead: false, staffRead: false, sharing: false };
+  assert.deepEqual(environmentConfig('production').importedHistory, none);
+  assert.deepEqual(environmentConfig('development').importedHistory, none);
+  assert.deepEqual(environmentConfig('staging', 'economy').importedHistory, none);
+  for (const template of [regional, stagingRegional]) {
+    assert.equal(containerOf(template, 'ehr-api').environment.EHR_PATIENT_RELEASE_IMPORTED_HISTORY, 'false');
+    assert.equal(containerOf(template, 'ehr-api').environment.EHR_STAFF_IMPORTED_HISTORY_ENABLED, 'false');
+    assert.equal(containerOf(template, 'identity-api').environment.IMPORTED_HISTORY_SHARING_ENABLED, 'false');
+  }
+  const inputs = [['importedHistoryPatientRead', 'patientRead', 'HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY'],
+    ['importedHistoryStaffRead', 'staffRead', 'HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED'],
+    ['importedHistorySharing', 'sharing', 'HID_IMPORTED_HISTORY_SHARING_ENABLED']] as const;
+  for (const [input] of inputs) {
+    assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, { [input]: 'yes' }),
+      /must be true or false/, input);
+  }
+  // Production refuses every imported history flag until the DPO and the owner
+  // sign off the legacy data and Health-id renders it (P37); the development
+  // stack runs its services in the production profile, so it refuses them too.
+  const productionConfiguration = environmentConfig('production', undefined, undefined, undefined, productionTopic);
+  const developmentConfiguration = environmentConfig('development');
+  for (const [input, flag, variable] of inputs) {
+    const refused = new RegExp(`${variable}=true is refused outside staging`);
+    assert.throws(() => environmentConfig('production', undefined, undefined, undefined,
+      { ...productionTopic, [input]: 'true' }), refused, `production ${input}`);
+    assert.throws(() => environmentConfig('development', undefined, undefined, undefined, { [input]: 'true' }),
+      refused, `development ${input}`);
+    for (const [label, configuration] of [['Production', productionConfiguration],
+      ['Development', developmentConfiguration]] as const) {
+      assert.throws(() => new HidRegionalStack(new App(), `ImportedHistory${label}${input}`, { configuration: {
+        ...configuration, importedHistory: { ...none, [flag]: true } } }), refused, `${label} stack ${input}`);
+    }
+  }
+  const staging = environmentConfig('staging', 'economy', undefined, undefined, { importedHistoryPatientRead: 'true',
+    importedHistoryStaffRead: 'true', importedHistorySharing: 'true' });
+  assert.deepEqual(staging.importedHistory, { patientRead: true, staffRead: true, sharing: true });
+  const template = Template.fromStack(new HidRegionalStack(new App(), 'ImportedHistoryStaging', { configuration: staging }))
+    .toJSON() as typeof regional;
+  assert.equal(containerOf(template, 'ehr-api').environment.EHR_PATIENT_RELEASE_IMPORTED_HISTORY, 'true');
+  assert.equal(containerOf(template, 'ehr-api').environment.EHR_STAFF_IMPORTED_HISTORY_ENABLED, 'true');
+  assert.equal(containerOf(template, 'identity-api').environment.IMPORTED_HISTORY_SHARING_ENABLED, 'true');
+  for (const name of workloadNames.filter(item => !['ehr-api', 'identity-api'].includes(item))) {
+    assert.doesNotMatch(JSON.stringify(containerOf(template, name)), /IMPORTED_HISTORY/);
+  }
+  assert.doesNotMatch(JSON.stringify(containerOf(template, 'identity-api')), /EHR_.*IMPORTED_HISTORY/);
+  assert.doesNotMatch(JSON.stringify(containerOf(template, 'ehr-api')), /IMPORTED_HISTORY_SHARING/);
+});
+
+test('in staging the imported history switches depend on each other: staff read needs sharing, sharing needs the patient read (ADR-066)', () => {
+  // A patient may share only what they can see themselves, and staff read
+  // only while patients can still choose (and withdraw) through the sharing
+  // route, so the switches go on patient read first and off staff read first.
+  const staging = (inputs: Record<string, string>) => environmentConfig('staging', 'economy', undefined, undefined, inputs);
+  assert.throws(() => staging({ importedHistorySharing: 'true' }),
+    /HID_IMPORTED_HISTORY_SHARING_ENABLED=true needs HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY=true/);
+  assert.throws(() => staging({ importedHistoryPatientRead: 'true', importedHistoryStaffRead: 'true' }),
+    /HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED=true needs HID_IMPORTED_HISTORY_SHARING_ENABLED=true/);
+  assert.throws(() => staging({ importedHistoryStaffRead: 'true', importedHistorySharing: 'true' }),
+    /HID_IMPORTED_HISTORY_SHARING_ENABLED=true needs HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY=true/);
+  assert.deepEqual(staging({ importedHistoryPatientRead: 'true' }).importedHistory,
+    { patientRead: true, staffRead: false, sharing: false });
+  assert.deepEqual(staging({ importedHistoryPatientRead: 'true', importedHistorySharing: 'true' }).importedHistory,
+    { patientRead: true, staffRead: false, sharing: true });
+  // The regional stack repeats the rule for a configuration not built by environmentConfig.
+  const configuration = staging({});
+  assert.throws(() => new HidRegionalStack(new App(), 'ImportedHistoryStaffWithoutSharing', { configuration: {
+    ...configuration, importedHistory: { patientRead: true, staffRead: true, sharing: false } } }),
+  /HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED=true needs HID_IMPORTED_HISTORY_SHARING_ENABLED=true/);
 });
 
 test('patient record chat is an explicit synth input that defaults to false and needs its settings and approval when on', () => {
@@ -1476,4 +1548,34 @@ test('the production preflight checks exactly the secret fields and alarm topic 
   assert.deepEqual([...list('NOTIFICATION_PROVIDER_FIELDS')].sort(), fields('NotificationProviderSecretArn', 'notification-api'));
   assert.deepEqual([...list('AUTH_FIELDS')].sort(), fields('AuthSecretArn', 'identity-api'));
   assert.match(script, /^ALARM_TOPIC_NAME = "hid-production-operational-alerts"$/m);
+});
+
+test('Novu subscriber email sync is a staging-only synth input that defaults to false (ADR-064)', () => {
+  // The default: every environment keeps main's worker, which gives Novu no email.
+  for (const config of [environmentConfig('production', undefined, undefined, undefined,
+    { operationalAlarmTopicArn: productionTopicArn }), environmentConfig('staging', 'economy'), environmentConfig('development')]) {
+    assert.equal(config.novuSubscriberSyncEnabled, false);
+  }
+  const defaultWorker = containerOf(stagingRegional, 'notification-worker').environment;
+  assert.equal(defaultWorker.NOVU_SUBSCRIBER_SYNC, 'disabled');
+  assert.equal(defaultWorker.HID_DEPLOYMENT_ENV, 'staging');
+  assert.equal(containerOf(regional, 'notification-worker').environment.NOVU_SUBSCRIBER_SYNC, 'disabled');
+  assert.equal(containerOf(regional, 'notification-worker').environment.HID_DEPLOYMENT_ENV, 'production');
+  assert.equal(containerOf(developmentRegional, 'notification-worker').environment.HID_DEPLOYMENT_ENV, 'development');
+  // Staging opts in explicitly; the worker then runs NOVU_SUBSCRIBER_SYNC=email.
+  const optedIn = environmentConfig('staging', 'economy', undefined, undefined, { novuSubscriberSyncEnabled: 'true' });
+  assert.equal(optedIn.novuSubscriberSyncEnabled, true);
+  const optedInWorker = containerOf(Template.fromStack(new HidRegionalStack(new App(), 'NovuSubscriberSyncStaging', {
+    configuration: optedIn })).toJSON() as typeof regional, 'notification-worker').environment;
+  assert.equal(optedInWorker.NOVU_SUBSCRIBER_SYNC, 'email');
+  assert.equal(optedInWorker.HID_DEPLOYMENT_ENV, 'staging');
+  // Refused in production, outside staging, without the worker, and for a non-boolean.
+  assert.throws(() => environmentConfig('production', undefined, undefined, undefined,
+    { operationalAlarmTopicArn: productionTopicArn, novuSubscriberSyncEnabled: 'true' }), /HID_NOVU_SUBSCRIBER_SYNC_ENABLED/);
+  assert.throws(() => environmentConfig('development', undefined, undefined, undefined, { novuSubscriberSyncEnabled: 'true' }),
+    /HID_NOVU_SUBSCRIBER_SYNC_ENABLED/);
+  assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined,
+    { novuSubscriberSyncEnabled: 'true', notificationWorkerEnabled: 'false' }), /HID_NOVU_SUBSCRIBER_SYNC_ENABLED/);
+  assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, { novuSubscriberSyncEnabled: 'yes' }),
+    /HID_NOVU_SUBSCRIBER_SYNC_ENABLED/);
 });

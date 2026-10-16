@@ -93,7 +93,8 @@ response's `requestId` is also the correlation id of the one PHI-free
 `notification.otp.outcome` log line written per send; when the fallback ran,
 that line also names the primary provider and its safe code. Ordinary domain
 events remain minimum-necessary versioned envelopes delivered through outbox,
-Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
+Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu
+("Notification worker to Novu" below).
 
 Public patient enrollment proves the chosen contact with a six-digit code
 (`POST /api/v1/identity/patient-enrollments/contact`, then `/contact/verify`;
@@ -108,6 +109,72 @@ answers `429 ENROLLMENT_RATE_LIMITED` and sends no code. Both responses are
 the existing ones, unchanged in shape. This comes from
 D-Eminence/hid-system#61, not yet deployed; the threshold is an
 open product decision.
+
+### Notification worker to Novu
+
+No HID route changes. The worker calls Novu as below (ADR-064, migration
+0095).
+
+- Main's trigger: `POST {NOVU_API_URL}/v1/events/trigger` with
+  `idempotency-key: <event id>` and the body `{"name": <workflow>, "to":
+  {"subscriberId": <canonical patient UUID>}, "payload": {"message": "You have
+  a new update in HID. Sign in securely to view it."}}`. With
+  `NOVU_SUBSCRIBER_SYNC=disabled` (the default, and the only value production
+  accepts) this is the only call, for every event, as on main. With
+  `NOVU_SUBSCRIBER_SYNC=email` it is sent after the subscriber call below,
+  except in two cases: when a clear is not confirmed the worker sends the
+  email-withheld trigger instead, and when the claim is lost (55000) it sends
+  no trigger at all.
+- With `NOVU_SUBSCRIBER_SYNC=email` the worker first asks the database,
+  through `integration.notification_recipient_for_claim(event, claim token,
+  patient)`, for its live claim's answer: `email` with the verified login
+  email, or `withhold`. Names are never part of the answer or of any call.
+  Each subscriber key below includes the attempt's claim token (unique per
+  attempt), because Novu answers a seen idempotency key from its cache for
+  24 hours, success or error, without processing it again; a retry of the
+  event is therefore a new request. The key holds neither the token nor the
+  address.
+  - `email`: `POST /v2/subscribers` with exactly `{"subscriberId": <patient
+    UUID>, "email": <address>}` and `idempotency-key` = lowercase hex
+    sha256(`hid-novu-subscriber-email-v1` U+001F event id U+001F claim token
+    U+001F sha256(address)). Then the worker asks the database again under
+    the same claim. If it answers the same address, main's trigger follows,
+    whatever the subscriber call answered. Any other answer (withheld,
+    another address or a failed lookup) is handled as `withhold` below, so
+    an upsert that reached Novu after another event's clear is cleared again.
+  - `withhold` (opted out; a login that is not active, is suspended
+    (`disabled_until` ahead), is due for deletion or is deleted; a patient
+    who is not active; no verified email; no login; a phone-only login; no
+    outbox envelope bound to the claim (`unbound`); or a lookup that failed):
+    `PATCH /v2/subscribers/{patient UUID}` with exactly `{"email": null}` and
+    `idempotency-key` = sha256(`hid-novu-subscriber-email-clear-v1` U+001F
+    event id U+001F claim token). After a `2xx` or `404` (no such
+    subscriber), main's trigger. Otherwise the email-withheld trigger: `"to":
+    {"subscriberId": <patient UUID>, "email": null}`, the same workflow and
+    message, and `idempotency-key` = sha256(`hid-novu-trigger-email-withheld-v1`
+    U+001F event id).
+  - A claim lost at the first lookup sends nothing. A claim lost at the
+    second lookup, after a sync, sends the clear above and nothing else. In
+    both cases the message is neither completed, failed nor acknowledged.
+  - Each call has a 5-second timeout. A subscriber call answering `2xx` is
+    confirmed; `408`, `409`, `429`, `5xx`, a timeout or no answer is unknown;
+    any other `4xx` is refused. No subscriber answer decides whether the
+    trigger is sent: the inbox outcome is the trigger's, as on main (accepted
+    completes; `408`, `429`, `5xx` or no answer retries; another `4xx` is
+    terminal).
+- The worker writes one stdout line per flag-on event attempt:
+  `{"event":"notification.worker.outcome","eventType":...,"correlationId":...,
+  "recipient":"email|withhold|unbound|lookup_failed|withdrawn|claim_lost",
+  "subscriber":"synced|sync_failed|cleared|clear_failed|not_run",
+  "subscriberCode"?,"trigger":"standard|email_withheld|not_sent",
+  "triggerOutcome"?,"triggerCode"?,"inbox":"processed|retry_scheduled|failed_terminal|claim_lost"}`.
+  `withdrawn` means the first lookup answered `email` and the second did not
+  confirm it, so the email was cleared. It never holds the address, the
+  patient, the event id or a key; a correlation id outside the outbox's own
+  pattern is written as `invalid`.
+- Turning the flag off does not clear what it synced: main's trigger then
+  goes to subscribers that may still hold an address. Release checklist §9
+  clears them before the flag is turned off or the worker is rolled back.
 
 ### Turnstile verification
 
@@ -767,10 +834,10 @@ returns at most 50 completed encounters and 50 current signed/amended note
 revisions of completed encounters (since 0084), after fresh Identity
 authorization through the EHR workload caller.
 It names the other five record categories as withheld from the patient, not as
-absent (§11, "Record summaries"). Since the patient record release (0095,
+absent (§11, "Record summaries"). Since the patient record release (0096,
 owner decision 4 of 2026-10-16, D7) a deployment may also release vitals,
 diagnoses, prescriptions, Lab results and documents, one flag per category,
-each off by default and refused in the production profile until its P35
+each off by default and refused in the production profile until its P36
 sign-off; with every flag off the response is exactly the one above. `GET /api/v1/ehr/me/documents/:documentId/download` returns a 60 s
 attachment URL for one released document (§11, "Patient document
 download"). Patient record chat (ADR-065, off by default) adds four more
@@ -798,7 +865,8 @@ handler, with `403 PATIENT_SESSION_REQUIRED` (ADR-059), audited as
 `auth.authorization.denied` on resource type `authentication` with no
 facility. They are every `/api/v1/identity/me` route of `PatientSelfController`
 (`GET /me`, `GET /me/access-history`, `GET /me/notifications`,
-`POST /me/notifications/:id/read`, `POST` and `DELETE /me/access-pin`) and
+`POST /me/notifications/:id/read`, `POST` and `DELETE /me/access-pin`,
+`GET` and `POST /me/imported-history-sharing`) and
 `GET /identity/service/patient-self-authorization`, `POST
 /me/verification/nin`, the emergency contact routes
 (`/identity/me/emergency-contacts/*`), the account deletion routes
@@ -958,9 +1026,11 @@ Patient emergency contacts (POST-only commands):
 | `POST /api/v1/identity/me/emergency-contacts/:contactId/verification/confirm` | `{ challengeId, code }`; single use, expiring, attempt-limited |
 
 For 24 hours after an OTP account recovery (0086, REC-NOTIFY), adding or
-changing an emergency contact and setting the access PIN
-(`POST /api/v1/identity/me/access-pin`) answer `403
-PATIENT_RECENT_RECOVERY_HOLD`, as does an access-request approval (above).
+changing an emergency contact, setting the access PIN
+(`POST /api/v1/identity/me/access-pin`) and turning imported history sharing
+on (`POST /api/v1/identity/me/imported-history-sharing` with `shared: true`)
+answer `403 PATIENT_RECENT_RECOVERY_HOLD`, as does an access-request approval
+(above).
 Deactivating a contact, verifying one already added and removing the PIN
 (`DELETE /api/v1/identity/me/access-pin`) stay available.
 
@@ -2289,8 +2359,8 @@ D7, since 0084): the notes of an encounter in progress, on hold, cancelled or
 entered in error are not returned, whatever the note's own status, and
 row-level security refuses them to the patient's session as well.
 
-Since the patient record release (owner decision 4 of 2026-10-16, D7, ADR-064,
-migration 0095) the patient may also see vitals, diagnoses, prescriptions,
+Since the patient record release (owner decision 4 of 2026-10-16, D7, ADR-065,
+migration 0096) the patient may also see vitals, diagnoses, prescriptions,
 Lab results and documents. Each category is released only when its own
 ehr-api flag is on, and every flag is off by default:
 `EHR_PATIENT_RELEASE_VITALS`, `EHR_PATIENT_RELEASE_DIAGNOSES`,
@@ -2298,7 +2368,7 @@ ehr-api flag is on, and every flag is off by default:
 `EHR_PATIENT_RELEASE_DOCUMENTS` (synth inputs `HID_EHR_PATIENT_RELEASE_*`).
 The production profile refuses every one of them: Lab results while Lab is
 off at launch (D17), the others until the clinical owner signs off each
-category and its wording (release checklist P35); staging may set them.
+category and its wording (release checklist P36); staging may set them.
 Lab requests (orders, which carry the clinician's clinical information) are
 never released. Every released item belongs to a completed encounter, matched
 on patient and facility. The database follows the flags: its policies admit a
@@ -2330,7 +2400,7 @@ error, refuted, invalidated or retracted with its encounter disappears from
 the summary without a marker.
 
 If the database refuses a released category's read (for example the role
-bootstrap did not run after migration 0095) or the read passes the
+bootstrap did not run after migration 0096) or the read passes the
 database statement timeout, the summary answers `503
 PATIENT_RECORDS_UNAVAILABLE`, discloses nothing and records no success. The
 audit event `ehr.patient.self.records.read` records `encounterCount`,
@@ -2389,6 +2459,94 @@ withheld. The seeded doctor, clinician and nurse roles hold all seven.
   `encounterCount`, `noteCount`, `vitalCount`, `diagnosisCount`,
   `prescriptionCount`, `labRequestCount`, `documentCount` (a withheld category
   has no count) and `withheldCategories`.
+
+### Imported legacy medical history
+
+Owner decision 3 of 2026-10-16 (ADR-066, migration 0097): patients and staff
+may see the medical history imported from the legacy system, as the legacy
+system held it. It is never part of either record summary: `GET
+/api/v1/ehr/me/records` and the emergency summary keep exactly their keys,
+reads and audit details. Three switches, each off by default and refused in
+the production profile until the DPO and the owner sign off the legacy data
+and Health-id renders it (release checklist P37); staging sets one only after
+P37 (1), the written sign-off for staging, is attached:
+`EHR_PATIENT_RELEASE_IMPORTED_HISTORY` (the patient's own read, a category of
+the patient release set), `EHR_STAFF_IMPORTED_HISTORY_ENABLED` (the staff
+read) and Identity's `IMPORTED_HISTORY_SHARING_ENABLED` (the patient's sharing
+choice); synth inputs `HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY`,
+`HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED` and
+`HID_IMPORTED_HISTORY_SHARING_ENABLED`. The synth refuses the sharing switch
+without the patient read and the staff read without the sharing switch, so
+they go on in that order and off staff read first. A patient's stored sharing
+choice outlives every switch: it is what the database's staff decision reads.
+
+- `GET /api/v1/ehr/me/imported-history[?cursor=...]` (patient sessions only,
+  facility-optional; a staff session answers `403 PATIENT_SESSION_REQUIRED`
+  in the guard): the patient's own imported history from every source. It
+  needs no sharing choice. `503 IMPORTED_HISTORY_DISABLED` while its switch
+  is off, before Identity is asked; Identity's answers are as for the
+  summary (`403 PATIENT_ACCESS_DENIED`, `503 IDENTITY_SERVICE_*`). The audit
+  event `ehr.patient.self.imported-history.read` (resource type
+  `imported-medical-history`, purpose `patient-self`) records `recordCount`,
+  `versionCount`, `fileCount`, `healthProfile` (`false`) and `truncated`.
+- `GET /api/v1/ehr/patients/:patientId/imported-history[?cursor=...]` (staff,
+  permission `ehr.imported-history.read`, held by doctor, clinician and
+  nurse; `X-Facility-ID`; `X-Purpose-Of-Use: direct-care` only, any other
+  purpose or none answers `400 DIRECT_CARE_PURPOSE_REQUIRED` before Identity
+  is asked; `503 IMPORTED_HISTORY_DISABLED` while its switch is off). Identity
+  authorizes the consent at the selected facility on every request (`403
+  CONSENT_REQUIRED`, audited denied). Identity matches a grant on its purpose,
+  so under an active break-glass grant clients see `400
+  DIRECT_CARE_PURPOSE_REQUIRED` (purpose `emergency`) or `403
+  CONSENT_REQUIRED` (purpose `direct-care`); `403 BREAK_GLASS_EXCLUDED` is
+  the defence in depth for a break-glass authorization that reaches the
+  route. Until the patient shares their imported history the answer is
+  `shared: false` with no record, the same for a patient who has none. The
+  database decides once per request, for the one patient the request names,
+  and admits no other patient's row. The audit event
+  `ehr.imported-history.read` records `shared` and the counts above.
+
+Both answer records newest first, each record's versions newest first and
+its files oldest first:
+
+| Field | Meaning |
+|---|---|
+| `shared` | staff route only: the database's staff decision, true only when the patient has chosen to share, their login is not deleted, and the consent and the permission hold at the selected facility for direct care |
+| `records` | at most `limits.records` records: `id`, `origin` (`patient-provided` or `provider-authored`), `title`, `category`, `infoType`, `createdAt`, `updatedAt` (the legacy timestamps), `currentVersionId`, `versions` (newest first: `id`, `versionNo`, `origin`, `createdAt`, `record`, `notes`, `structuredData`, `transcriptionText`), `versionsTruncated`, `files` (oldest first: `id`, `recordVersionId`, `fileName`, `mediaType`, `sizeBytes`, `createdAt`, `accessStatus`), `filesTruncated` |
+| `healthProfile` | `null`: imported health profiles are not part of this change |
+| `limits` | `{ records: 50, versionsPerRecord: 20, filesPerRecord: 20 }` |
+| `truncated` | `{ records }`: `true` when more records exist; `nextCursor` then fetches the next page |
+| `nextCursor` | an opaque cursor for this route and patient, or `null`; a malformed cursor answers `400 VALIDATION_FAILED` (§11, "EHR clinical list paging"), and a cursor of the other route, another patient or a changed format `400 INVALID_CURSOR` |
+| `provenance` | `legacy-import` |
+
+Every file is `accessStatus: "pending-safety-verification"`: no imported
+attachment, scan evidence or download exists yet. Legacy text is returned as
+the legacy system held it and must be rendered as text, never as markup;
+mentioning an allergy does not make it an allergy record (ALLERGY-1). No
+response carries the stored legacy row, its checksum, the staging run, the
+author's or uploader's account or any storage location. On both routes a
+read the database refuses or times out, and on the staff route the staff
+decision too, answers `503 IMPORTED_HISTORY_UNAVAILABLE` and discloses
+nothing.
+
+**The patient's sharing choice (Identity).** `GET
+/api/v1/identity/me/imported-history-sharing` answers `{ shared, updatedAt }`
+(`shared: false, updatedAt: null` until the patient chooses). `POST` with `{
+"shared": true | false }` (a boolean, else `400 VALIDATION_FAILED`; cookie
+sessions need Origin and CSRF) answers `200 { shared, changed, updatedAt }`;
+a repeat answers `changed: false`. Turning sharing on needs the switch, a
+recent sign-in (`403 PATIENT_RECENT_AUTH_REQUIRED`) and no account recovery
+in the last 24 hours (`403 PATIENT_RECENT_RECOVERY_HOLD`). Turning it off is
+always allowed, also while the switch is off, and takes effect at the next
+staff request. Both are patient-only. While the switch is off, `GET` (before
+anything is read) and `POST { "shared": true }` (before any transaction)
+answer `503 IMPORTED_HISTORY_SHARING_DISABLED`. A session the command does not
+accept as this patient's live session answers `403 PATIENT_ACCESS_DENIED`; a
+command that returns no row, `503 IMPORTED_HISTORY_SHARING_UNAVAILABLE`. The
+audit event `identity.patient.self.imported-history-sharing.read` (each read)
+records `shared`, and `.change` (each `POST`, a change or a repeat) records
+`shared` and `changed`; the database's change log records each change only,
+with its session and correlation id.
 
 ### Patient record chat
 

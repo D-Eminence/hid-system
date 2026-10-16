@@ -92,13 +92,26 @@ export interface HidEnvironmentConfig {
   // HID_NOTIFICATION_WORKER_ENABLED; production is fixed to false (D17)
   // until a Novu account and region are approved.
   readonly notificationWorkerEnabled: boolean;
+  // Whether the notification worker gives Novu the patient's verified login
+  // email (NOVU_SUBSCRIBER_SYNC=email, ADR-064). Synth input
+  // HID_NOVU_SUBSCRIBER_SYNC_ENABLED, default false; staging only, with the
+  // worker enabled, after the release checklist's approvals.
+  readonly novuSubscriberSyncEnabled: boolean;
   // ehr-api's EHR_PATIENT_RELEASE_* flags (owner decision 4 of 2026-10-16,
   // D7): what a patient's own summary releases beyond encounters and notes.
   // Synth inputs HID_EHR_PATIENT_RELEASE_VITALS, _DIAGNOSES, _PRESCRIPTIONS,
   // _LAB_RESULTS and _DOCUMENTS, each default false and refused outside
   // staging: Lab results while Lab is off at launch (D17), the others until
-  // the clinical owner signs them off (P35, ADR-064).
+  // the clinical owner signs them off (P36, ADR-065).
   readonly patientRecordRelease: PatientRecordRelease;
+  // Imported legacy medical history (owner decision 3 of 2026-10-16,
+  // ADR-066): ehr-api's EHR_PATIENT_RELEASE_IMPORTED_HISTORY (the patient's
+  // own read) and EHR_STAFF_IMPORTED_HISTORY_ENABLED (the staff read), and
+  // identity-api's IMPORTED_HISTORY_SHARING_ENABLED (the patient's sharing
+  // choice). Synth inputs HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY,
+  // HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED and HID_IMPORTED_HISTORY_SHARING_ENABLED,
+  // each default false and refused outside staging until the P37 sign-off.
+  readonly importedHistory: ImportedHistory;
   // ehr-api's patient record chat (owner decision 1 of 2026-10-16):
   // a patient's question about their own released records, answered through
   // the Claude API. Synth input HID_RECORD_CHAT_PATIENT_ENABLED, default
@@ -124,6 +137,13 @@ export interface PatientRecordRelease {
   readonly documents: boolean;
 }
 
+/** The imported legacy medical history switches (ADR-066). */
+export interface ImportedHistory {
+  readonly patientRead: boolean;
+  readonly staffRead: boolean;
+  readonly sharing: boolean;
+}
+
 /** Patient record chat's synth settings; with patientEnabled false nothing else is set. */
 export interface RecordChatSettings {
   readonly patientEnabled: boolean;
@@ -136,6 +156,9 @@ export interface RecordChatSettings {
 
 /** Synth inputs beyond the environment, staging mode, QoreID and route switches. */
 export interface SynthOptions {
+  readonly importedHistoryPatientRead?: string;
+  readonly importedHistoryStaffRead?: string;
+  readonly importedHistorySharing?: string;
   readonly recordChatPatientEnabled?: string;
   readonly recordChatModelId?: string;
   readonly recordChatInferenceGeo?: string;
@@ -152,6 +175,7 @@ export interface SynthOptions {
   readonly assistedRegistrationEnabled?: string;
   readonly qoreIdPatientSelfNinBindingEnabled?: string;
   readonly notificationWorkerEnabled?: string;
+  readonly novuSubscriberSyncEnabled?: string;
   readonly operationalAlarmTopicArn?: string;
 }
 
@@ -363,19 +387,19 @@ export function assertNinOwnershipRoutes(configuration: {
 }
 
 const PATIENT_RELEASE_INPUTS: ReadonlyArray<readonly [keyof PatientRecordRelease, string, string]> = [
-  ['vitals', 'HID_EHR_PATIENT_RELEASE_VITALS', 'the clinical owner has not signed off the category (P35, ADR-064)'],
-  ['diagnoses', 'HID_EHR_PATIENT_RELEASE_DIAGNOSES', 'the clinical owner has not signed off the category (P35, ADR-064)'],
+  ['vitals', 'HID_EHR_PATIENT_RELEASE_VITALS', 'the clinical owner has not signed off the category (P36, ADR-065)'],
+  ['diagnoses', 'HID_EHR_PATIENT_RELEASE_DIAGNOSES', 'the clinical owner has not signed off the category (P36, ADR-065)'],
   ['prescriptions', 'HID_EHR_PATIENT_RELEASE_PRESCRIPTIONS',
-    'the clinical owner has not signed off the category (P35, ADR-064)'],
+    'the clinical owner has not signed off the category (P36, ADR-065)'],
   ['labResults', 'HID_EHR_PATIENT_RELEASE_LAB_RESULTS', 'Lab is off at launch (D17)'],
-  ['documents', 'HID_EHR_PATIENT_RELEASE_DOCUMENTS', 'the clinical owner has not signed off the category (P35, ADR-064)'],
+  ['documents', 'HID_EHR_PATIENT_RELEASE_DOCUMENTS', 'the clinical owner has not signed off the category (P36, ADR-065)'],
 ];
 
 /**
  * Only staging may release a patient record category. Production refuses
  * Lab results while Lab is not routed and every Lab permission is withdrawn
  * (D17, 0091 section 2), and every other category until the clinical owner
- * signs it off (release checklist P35, ADR-064); a reviewed change that
+ * signs it off (release checklist P36, ADR-065); a reviewed change that
  * records the sign-off lifts one refusal. The development stack runs ehr-api
  * in the production profile (HID_DEPLOYMENT_ENV=production), where ehr-api
  * refuses every flag at start, so it is refused here as well. The regional
@@ -389,6 +413,48 @@ export function assertPatientRecordRelease(configuration: {
     if (configuration.patientRecordRelease[category]) {
       throw new Error(`${variable}=true is refused outside staging (${configuration.name}): ${reason}`);
     }
+  }
+}
+
+const IMPORTED_HISTORY_INPUTS: ReadonlyArray<readonly [keyof ImportedHistory, string]> = [
+  ['patientRead', 'HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY'],
+  ['staffRead', 'HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED'],
+  ['sharing', 'HID_IMPORTED_HISTORY_SHARING_ENABLED'],
+];
+
+/**
+ * Only staging may show imported legacy medical history (ADR-066), and there
+ * the staff read needs the sharing route and the sharing route the patient's
+ * own read. Production
+ * refuses each switch until the DPO and the owner sign off the legacy data's
+ * provenance, scope and retention and Health-id renders it (release checklist
+ * P37); the development stack runs its services in the production profile,
+ * where ehr-api and identity-api refuse them at start, so it is refused here
+ * as well. The regional stack repeats this for a configuration not built by
+ * environmentConfig.
+ */
+export function assertImportedHistory(configuration: {
+  readonly name: EnvironmentName; readonly importedHistory: ImportedHistory;
+}): void {
+  if (configuration.name !== 'staging') {
+    for (const [flag, variable] of IMPORTED_HISTORY_INPUTS) {
+      if (configuration.importedHistory[flag]) {
+        throw new Error(`${variable}=true is refused outside staging (${configuration.name}): the DPO and the owner `
+          + 'have not signed off the legacy data (P37, ADR-066)');
+      }
+    }
+  }
+  // A patient shares only what they can see themselves, and staff read only
+  // while patients can choose and withdraw through the sharing route: the
+  // switches go on patient read first and off staff read first (ADR-066).
+  const { patientRead, staffRead, sharing } = configuration.importedHistory;
+  if (sharing && !patientRead) {
+    throw new Error('HID_IMPORTED_HISTORY_SHARING_ENABLED=true needs HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY=true: '
+      + 'a patient may share only the imported history they can see (ADR-066)');
+  }
+  if (staffRead && !sharing) {
+    throw new Error('HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED=true needs HID_IMPORTED_HISTORY_SHARING_ENABLED=true: '
+      + 'staff read imported history only while patients can choose and withdraw (ADR-066)');
   }
 }
 
@@ -534,6 +600,15 @@ export function environmentConfig(
     throw new Error('HID_NOTIFICATION_WORKER_ENABLED is fixed to false in production (the launch module set, D17): '
       + 'the notification worker needs an approved Novu account and region and its own decision');
   }
+  const novuSubscriberSyncEnabled = booleanInput('HID_NOVU_SUBSCRIBER_SYNC_ENABLED', options.novuSubscriberSyncEnabled,
+    'false');
+  if (novuSubscriberSyncEnabled && name !== 'staging') {
+    throw new Error('HID_NOVU_SUBSCRIBER_SYNC_ENABLED may be true only in staging (ADR-064): production refuses Novu '
+      + 'subscriber email sync until its approvals are recorded, and the worker refuses it outside staging');
+  }
+  if (novuSubscriberSyncEnabled && !notificationWorkerEnabled) {
+    throw new Error('HID_NOVU_SUBSCRIBER_SYNC_ENABLED=true requires HID_NOTIFICATION_WORKER_ENABLED=true');
+  }
   const patientRecordRelease: PatientRecordRelease = {
     vitals: booleanInput('HID_EHR_PATIENT_RELEASE_VITALS', options.patientReleaseVitals, 'false'),
     diagnoses: booleanInput('HID_EHR_PATIENT_RELEASE_DIAGNOSES', options.patientReleaseDiagnoses, 'false'),
@@ -542,6 +617,12 @@ export function environmentConfig(
     documents: booleanInput('HID_EHR_PATIENT_RELEASE_DOCUMENTS', options.patientReleaseDocuments, 'false'),
   };
   assertPatientRecordRelease({ name, patientRecordRelease });
+  const importedHistory: ImportedHistory = {
+    patientRead: booleanInput('HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY', options.importedHistoryPatientRead, 'false'),
+    staffRead: booleanInput('HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED', options.importedHistoryStaffRead, 'false'),
+    sharing: booleanInput('HID_IMPORTED_HISTORY_SHARING_ENABLED', options.importedHistorySharing, 'false'),
+  };
+  assertImportedHistory({ name, importedHistory });
   const recordChat = recordChatSettings(options);
   assertRecordChat({ name, natGateways: profiles[profile].natGateways, recordChat });
   const topic = operationalAlarmTopic(name, options.operationalAlarmTopicArn);
@@ -555,7 +636,9 @@ export function environmentConfig(
     assistedRegistrationEnabled,
     qoreIdPatientSelfNinBindingEnabled,
     notificationWorkerEnabled,
+    novuSubscriberSyncEnabled,
     patientRecordRelease,
+    importedHistory,
     recordChat,
     ...(topic ? { operationalAlarmTopicArn: topic.arn } : {}),
   };

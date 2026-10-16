@@ -8,6 +8,7 @@ import { IdentityApiService } from '../../integrations/identity-api.service';
 import { STORAGE_PROVIDER, StoredObjectIntegrityError, type StorageProvider } from '../../storage/storage.types';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { PatientRecordRelease } from './patient-release';
+import { authorizeOwnSession, requirePatientSession } from './patient-self-authorization';
 
 /** Rows each emergency summary section shows at most, newest first. */
 export const SECTION_LIMITS = {
@@ -64,10 +65,11 @@ export class PatientRecordsService {
   /**
    * The patient's own summary: the release set (PatientRecordRelease), read in
    * the patient-self transaction Identity authorized for this session, with
-   * its counts-only audit in the same transaction.
+   * its counts-only audit in the same transaction. The imported legacy
+   * history is never a section of it (ADR-066): it has its own route.
    */
   async self(request: HidRequest) {
-    const { actor, authorization } = await this.authorizeOwnSession(request);
+    const { actor, authorization } = await authorizeOwnSession(this.identity, request);
     return this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
       const value = await this.release.read(client, authorization.patientId);
       await this.audit.recordWithClient(client, {
@@ -91,12 +93,9 @@ export class PatientRecordsService {
    * failure after it is audited by the interceptor.
    */
   async downloadOwnDocument(request: HidRequest, documentId: string) {
-    const actor = request.actor;
-    if (actor?.kind !== 'patient' || !actor.patientId || !actor.sessionId) {
-      throw new DomainProblem(403, 'PATIENT_SESSION_REQUIRED', 'An active patient session is required');
-    }
+    const actor = requirePatientSession(request);
     if (!this.release.releases('documents')) throw DOCUMENT_NOT_AVAILABLE();
-    const { authorization } = await this.authorizeOwnSession(request);
+    const { authorization } = await authorizeOwnSession(this.identity, request);
     const document = await this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
       // The documents policies admit a row only once the release set is bound.
       await this.release.bind(client);
@@ -144,23 +143,12 @@ export class PatientRecordsService {
   }
 
   /**
-   * The patient-self authorization of this request's own session: Identity
-   * confirms it (cookie or bearer, ehr-api workload) and it must still name
-   * the same patient, account, subject and session. The one patient-self
-   * authorization every patient reader uses (the summary, the document
-   * download and record chat, before and after its model call).
+   * The patient-self authorization of this request's own session
+   * (patient-self-authorization.ts), for the readers that reach it through
+   * this service: record chat, before and after its model call.
    */
-  async authorizeOwnSession(request: HidRequest) {
-    const actor = request.actor;
-    if (actor?.kind !== 'patient' || !actor.patientId || !actor.sessionId) {
-      throw new DomainProblem(403, 'PATIENT_SESSION_REQUIRED', 'An active patient session is required');
-    }
-    const authorization = await this.identity.authorizeSelf(request);
-    if (authorization.patientId !== actor.patientId || authorization.accountId !== actor.accountId
-      || authorization.subject !== actor.subject || authorization.sessionId !== actor.sessionId) {
-      throw new DomainProblem(403, 'PATIENT_ACCESS_DENIED', 'Patient authorization changed');
-    }
-    return { actor, authorization };
+  authorizeOwnSession(request: HidRequest) {
+    return authorizeOwnSession(this.identity, request);
   }
 
   /** The configured bucket; storage that is not configured is unavailable, not a missing document. */
@@ -199,7 +187,9 @@ export class PatientRecordsService {
 
   /**
    * The break-glass summary of one facility: every category the reader holds the read permission for.
-   * Which categories it may contain at all is unchanged (all seven) pending a decision.
+   * Which categories it may contain at all is unchanged (all seven) pending a decision. Imported
+   * legacy history is never one of them (owner decision of 2026-10-16, ADR-066): break-glass never
+   * discloses it, and its staff route refuses a break-glass authorization.
    */
   private async readEmergency(client: PoolClient, patientId: string, facilityId: string,
     withheld: readonly EmergencyCategory[]) {

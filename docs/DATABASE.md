@@ -194,9 +194,11 @@ The reviewed role model is:
 | `hid_outreach_runtime` | Temporary registration, mapping, immutable history, idempotency, and outbox | None | No Identity, EHR, Lab, Pharmacy, or OCR mutation privilege. |
 | `hid_outreach_api_runtime` | Extracted Outreach API aggregate | None | Composes Outreach persistence and append-only audit only. |
 | `hid_event_dispatcher` | Event transport command surface | None | No direct table access; executes only lease-bound claim/result/status functions. |
-| `hid_event_delivery_commands` | Technical security-definer owner | None | Never inherited; reads five domain outboxes through exact RLS policies and mutates only `integration` delivery/inbox state. |
+| `hid_event_delivery_commands` | Technical security-definer owner | None | Never inherited; reads five domain outboxes through exact RLS policies and mutates only `integration` delivery/inbox state. Since 0095 it also owns the notification worker's claim-bound recipient lookup and executes its private helper, which the migration administrator owns; it holds no privilege on `identity.patients` or `auth.accounts`. |
 | `hid_ocr_queue_metrics` | Technical security-definer owner | None | Never inherited; owns `ocr.worker_queue_metrics()` and reads only `ocr.jobs.status` and `queued_at` through one exact RLS policy (0075). |
 | `hid_platform_control_reader` | Technical security-definer owner | None | Never inherited; owns `platform.control_enabled(text)` and reads only `platform.control_settings.control_key` and `enabled` through one exact RLS policy (launch; role bootstrap only). |
+| `hid_imported_history_commands` | Technical security-definer owner | None | Never inherited; owns the staff read decision `ehr.imported_history_staff_read_allowed(uuid)` and the patient's two imported history sharing commands, reads `identity.patients` (id, account) and `auth.accounts` (id, status) through column grants and one exact policy, and reads and writes only the sharing choice and its log (0097, ADR-066). |
+| `hid_imported_history_importer` | Technical security-definer owner | None | Never inherited; owns `ehr.import_legacy_medical_history`, which only `hid_migration_admin` may execute; reads the sealed ledger columns of `migration.runs`, `migration.source_rows` and `migration.conflicts`, inserts the receipt run and inserts into the three imported tables through exact policies (0097, ADR-066). |
 | `hid_migration_admin` | Migration and provisioning administration | Environment-specific | Never inherited by an application runtime login. |
 | `hid_schema_test_runtime` | Rollback-only schema/RLS acceptance | Test-only explicit grants | NOLOGIN and never used by application processes. |
 
@@ -602,10 +604,14 @@ these tables.
 ### 7.1 Implemented EHR records
 
 The EHR does not use a generic JSON medical-record table. Migrations 0004
-onward create these EHR tables. Each has forced row-level security on the
-patient's consent at the facility (`ehr.context_allows`, 0005); every insert
-and update of a clinical row records a version in `ehr.record_versions`
-(`ehr.capture_record_version`, 0004); and no clinical row is deleted.
+onward create these EHR tables. Each clinical table has forced row-level
+security on the patient's consent at the facility (`ehr.context_allows`,
+0005); every insert and update of a clinical row records a version in
+`ehr.record_versions` (`ehr.capture_record_version`, 0004); and no clinical
+row is deleted. The three imported history tables (0097) are not clinical
+records of main's model: they keep the legacy system's rows as staged,
+append-only, and have their own patient-self and staff policies
+("Imported legacy medical history (0097)" below).
 
 | Table | Holds |
 |---|---|
@@ -622,6 +628,9 @@ and update of a clinical row records a version in `ehr.record_versions`
 | `ehr.ocr_import_provenance` | Provenance of notes imported from OCR. |
 | `ehr.idempotency_keys` | Idempotency of clinical creates. |
 | `ehr.record_versions` | The version history of every clinical row. |
+| `ehr.imported_medical_records` | Imported legacy records, as staged: the legacy row, its sealed checksum, author account, origin and staging run (0097). |
+| `ehr.imported_medical_record_versions` | Every version of each imported record, append-only (0097). |
+| `ehr.imported_medical_record_files` | The metadata of each imported record's files; no object is stored or served (0097). |
 | `ehr.patient_chat_conversations` | Patient record chat: one conversation per patient (below). |
 | `ehr.patient_chat_messages` | Patient record chat: the patient's questions and validated replies, never updated, deleted with the conversation. |
 | `ehr.record_chat_usage_counters` | Patient record chat: requests per account and hour or day; ids and counts only. |
@@ -924,7 +933,9 @@ attempts are separate in `integration.outbox_delivery_state` and
 the dispatcher authority. The generic inbox uses
 `integration.inbox_messages` primary key `(consumer_name,event_id)` plus an
 administrator-owned consumer/database-role binding. Exact command and failure
-semantics are in `EVENT_DELIVERY_ARCHITECTURE.md`.
+semantics are in `EVENT_DELIVERY_ARCHITECTURE.md`. A consumer may learn a
+contact only through a function bound to its live inbox claim, as the
+notification worker's verified recipient lookup is (0095).
 
 Events carry identifiers, classification, and minimal payloads, not complete
 clinical records. Consumers retrieve necessary detail through authorized APIs.
@@ -2215,16 +2226,16 @@ the schema, policies or grants changes.
   the staff policies (`ehr.context_allows`) never pass, and only the 0030
   patient-self policies release rows: completed encounters, signed or amended
   notes and their current revisions (since 0084 only those of completed
-  encounters; "EHR clinical safety and launch module set (0084)"). Until 0095
+  encounters; "EHR clinical safety and launch module set (0084)"). Until 0096
   the other clinical tables had `SELECT` but no patient-self policy, so a
   patient read of them returned no rows and no error. The service reads only
   the two released categories and names the other five as withheld; before,
   it read all seven and returned five arrays that were always empty. Since
-  0095 vitals, diagnoses, prescriptions and documents have patient-release
+  0096 vitals, diagnoses, prescriptions and documents have patient-release
   policies and released Lab results a view, each admitting rows only to a
   patient-self transaction that names its category in `app.patient_release`,
   and the service reads and names each only when its category's flag is on
-  ("Patient record release (0095)" below).
+  ("Patient record release (0096)" below).
 - **Emergency summary** (`GET /ehr/patients/:id/emergency-records`). A
   break-glass emergency context passes `ehr.context_allows` for `read_records`
   at its facility (0012), so every clinical table is readable there.
@@ -2390,7 +2401,9 @@ superuser change `SUPERUSER`, and only a role holding `BYPASSRLS` change that
 attribute, even to its current value, so the file stopped there and rolled
 back. It now:
 
-- creates each of the 25 group roles with its attributes, as before, then
+- creates each of its 28 group roles (the 25 of main, `hid_lab_release_reader`
+  since 0096, and `hid_imported_history_commands` and
+  `hid_imported_history_importer` since 0097) with its attributes, as before, then
   checks them: a role with `SUPERUSER`, `BYPASSRLS` or `REPLICATION` is
   refused, and `LOGIN`, `CREATEDB`, `CREATEROLE` and `INHERIT` are corrected
   only when they differ, so a run that changes nothing issues no
@@ -3691,9 +3704,9 @@ rollback-only transaction and adds the doctor's refusal (release checklist
 
 **Patient-self binding (PSELF-RLS).** `ehr.patient_self_context(uuid)` keeps
 its signature, so the 0030/0084 policies on `ehr.encounters`,
-`ehr.clinical_notes` and `ehr.clinical_note_revisions` are unchanged (0095
+`ehr.clinical_notes` and `ehr.clinical_note_revisions` are unchanged (0096
 adds five more policies and a view that call it; its `EXECUTE` grants are
-unchanged, "Patient record release (0095)"). It
+unchanged, "Patient record release (0096)"). It
 becomes `LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = pg_catalog,
 pg_temp` (CREATE OR REPLACE keeps its owner and its `EXECUTE` for
 `hid_ehr_runtime` and `hid_schema_test_runtime`). It still requires
@@ -4313,29 +4326,151 @@ Tests:
   and function owned by a `NOSUPERUSER NOBYPASSRLS` role (local evidence,
   release checklist §8).
 
-## Patient record release (0095)
+## Notification verified recipient (0095)
 
-Owner decision 4 of 2026-10-16 (ADR-064, D7): patients may see their
+`0095_notification_verified_recipient.sql` (ADR-064; the number is
+provisional, assigned at merge) lets the notification worker learn a
+patient's verified login email for the event it holds a live inbox claim
+on, and never a name. The worker uses it only with
+`NOVU_SUBSCRIBER_SYNC=email` (off by default, refused in production). No
+table, column, policy or role changes.
+
+**Guard.** The migration first refuses (55000
+`BRANCH_0063_NOTIFICATION_RECIPIENT_PRESENT`) a database that already has
+`integration.verified_notification_recipient(uuid)` or the claim function,
+the shape of the D-Eminence/hid-system#8 branch's 0063, whose functions
+return names. Such a database is rebuilt or reconciled first. Both functions
+are plain `CREATE`.
+
+**Functions.** Both are `SECURITY DEFINER` with `search_path = pg_catalog,
+pg_temp`, revoked from `PUBLIC`, and return `TABLE(delivery text, email
+text)`.
+
+- `integration.notification_recipient_state(uuid)` (private helper, `sql`,
+  `stable`). Owner: the migration administrator, which owns
+  `identity.patients` (row-level security enabled, not forced),
+  `auth.accounts` and `identity.patient_account_deletion_requests` (none),
+  so it reads them without `BYPASSRLS`. One row: `('email', btrim(email))`
+  when the patient is `active` with `notifications_enabled`, and the login
+  is usable as main's `identity.current_patient_account` (0064) defines it:
+  `active`, `disabled_until` null or passed, and no `pending` deletion
+  request whose `scheduled_for` has passed (the test of
+  `identity.patient_account_deletion_due`, inlined so the helper needs no
+  `EXECUTE` on it); and the login has `email_verified_at` set and a
+  non-blank email. Otherwise `('withhold', null)`: phone-only, unverified
+  or blank email, no login, a `pending_reset`, `locked`, `disabled` or
+  `deleted` login, a suspended login (`disabled_until` ahead, which a banned
+  legacy login imports), a login whose confirmed deletion is due but not yet
+  finalized, a patient that is `inactive`, `merged`, `deceased` or
+  `deleted`, notifications off. A deletion confirmed but not yet due keeps
+  `email`, as the login stays usable until `scheduled_for`.
+- `integration.notification_recipient_for_claim(uuid, uuid, uuid)` (event,
+  claim token, patient). Owner: `hid_event_delivery_commands`, moved in
+  `runtime-grants.sql`'s integration CREATE window. Steps:
+  `integration.assert_inbox_consumer_authorized('notification-worker-v1')`
+  (42501 for a disabled consumer or a session user outside its role); the
+  consumer row must still name `hid_notification_worker` (42501 `Notification
+  consumer authorization required`); the inbox row must be `processing` with
+  this token and an unexpired lease (55000 `Inbox claim is stale or not
+  owned`, as `complete_inbox_message`); then the helper's answer for the
+  `integration.outbox_envelopes` row with the claim's event id, producer,
+  type, version and correlation id, a notification workflow type and the
+  given patient. No row when the claim binds no such envelope. It writes
+  nothing.
+
+**Grants** (`runtime-grants.sql`). `EXECUTE` on the claim function to
+`hid_notification_worker` only; on the helper to `hid_event_delivery_commands`
+only, beside its two existing private helpers. No table or column grant to
+any runtime or to the technical owner. The worker login keeps no `USAGE` on
+`identity` or `auth`.
+
+**Callers.** With `NOVU_SUBSCRIBER_SYNC=email` the worker calls the claim
+function once per claimed event, and a second time under the same claim
+after it has synced an email: unless the second answer is the same address,
+it clears the email again before the trigger (an event handled meanwhile,
+after a deletion or a disable, may have cleared it before the sync landed at
+Novu; ADR-064). It checks at startup that the function exists and is
+executable (`has_function_privilege(current_user, ...)`). It records each
+Novu subscriber call in `notification.delivery_attempts` (existing table,
+existing grant): workflow `novu-subscriber-email-v1` or
+`novu-subscriber-email-clear-v1`, channel `email`, the outcome and a fixed
+safe code, at most one row of each per attempt; no address and nothing
+derived from one. The patients whose address may be at Novu are those with a
+`novu-subscriber-email-v1` row (joined to `integration.outbox_envelopes` by
+event id for the patient); release checklist §9 uses them before the flag is
+turned off.
+
+**Tests.**
+
+- `notification-verified-recipient.integration.sql` (new, rollback-only;
+  run as the superuser and again with every schema, table and
+  administrator-owned function moved to a `NOSUPERUSER NOBYPASSRLS NOLOGIN`
+  owner): fixtures A to R (verified; phone-only; unverified; deleted login;
+  deceased; opted out, for an ordinary and a safety event; no login;
+  locked; blank email; suspended; deletion due; deletion confirmed, not yet
+  due; suspension ended; disabled; `pending_reset`; inactive patient; merged
+  patient), each with an Identity outbox event claimed as
+  `hid_notification_worker`. A, L and M answer `email`, every other fixture
+  `withhold`. A claim names no other
+  patient; a claim with another correlation id and an event without a
+  workflow bind nothing; a random token, another event's token and an
+  expired lease are 55000; a disabled consumer and one rebound to the test
+  role are 42501; the Identity, dispatcher and notification API runtimes
+  cannot execute the claim function; the worker cannot execute the helper or
+  read any of the three tables; catalogue checks (owners, security, search
+  path, result, `PUBLIC`; the helper's owner owns the three tables and none
+  forces row-level security); the lookup changes no claim.
+- `runtime-roles.integration.sql`: the exact ACLs (the worker on the claim
+  function, the technical owner on the helper, besides their owners), the
+  owners, `SECURITY DEFINER` and the search path, and no table or column
+  privilege on `identity.patients`, `auth.accounts` or
+  `identity.patient_account_deletion_requests` for the worker, the
+  notification aggregates, the dispatcher or the technical owner.
+- `scripts/verify-non-superuser-database.mjs`: after the non-superuser chain
+  to 0095, the RDS-like worker login claims two Identity events and gets
+  `email` for the verified patient and `withhold` for the phone-only one;
+  it is refused `identity`; the Identity login is refused at `integration`
+  and the dispatcher login at the function.
+- `services/notification-worker/scripts/verify-notification-worker-runtime.mjs`
+  (rehearsal `notification_worker_runtime`): the real worker as
+  `hid_notification_worker` against a fake Novu that applies Novu's replay
+  rule for a seen idempotency key, including a suspended and a deletion-due
+  login, one event retried while the patient goes withheld, eligible,
+  withheld, and two concurrent events with the login deleted between them.
+- Mutants (local evidence): the helper ignoring `notifications_enabled` is
+  killed by the suite (fixture F answers `email`); `EXECUTE` on the claim
+  function given to `hid_notification_runtime` is killed by
+  `db:verify-roles`. The first 0095 helper, which ignored `disabled_until`
+  and due deletions, fails the suite at fixtures J and K and the runtime
+  verifier at its suspended-login step.
+- All 52 SQL suites pass on a database built from empty to 0095 and
+  bootstrapped (0 pending on a rerun), and the 50 additional suites again
+  with the non-superuser owner (local evidence, release checklist §8).
+
+## Patient record release (0096)
+
+Owner decision 4 of 2026-10-16 (ADR-065, D7): patients may see their
 diagnoses, prescriptions, Lab results, vitals and documents as well as their
 encounters and notes. D7's rules apply (items of a completed encounter only;
 never a draft, an unconfirmed or refuted diagnosis or anything entered in
 error; documents only with a patient download route); the further rules below
 (no cancelled prescription, no corrected vital, Lab results of an open or
 completed order only, PHI documents attached to an encounter only, no lab
-request) are ADR-064's proposed defaults. The EHR service defines the release
+request) are ADR-065's proposed defaults. The EHR service defines the release
 set (`PatientRecordRelease`, one default-off flag per category,
 `INTERFACE_CONTRACT.md` §11, "Record summaries"), and the database follows it:
 
-- **The database follows the flags.** Each 0095 policy and the view admit
+- **The database follows the flags.** Each 0096 policy and the view admit
   their category only in a transaction whose transaction-local setting
   `app.patient_release` names it exactly (a comma-separated list of
-  `vitals`, `diagnoses`, `prescriptions`, `labResults` and `documents`).
+  `vitals`, `diagnoses`, `prescriptions`, `labResults` and `documents`, and
+  since 0097 `importedHistory`).
   `DatabaseService.withPatientTransaction` starts every patient-self
   transaction with it empty, and `PatientRecordRelease.bind` sets it to the
-  categories whose flag is on (its `read` and the patient document download
-  call it first). A transaction that names no category reads none of these
+  categories whose flag is on (its `read`, its `readImportedHistory` and the
+  patient document download call it first). A transaction that names no category reads none of these
   rows, so with every flag off the database refuses these categories to the
-  patient as before 0095; every earlier EHR build, including one from before
+  patient as before 0096; every earlier EHR build, including one from before
   D-Eminence/hid-system#52 whose patient summary still queried every
   category, never sets it and reads nothing new.
 - **Rows, not columns.** As for encounters and notes since 0030 and 0084,
@@ -4377,7 +4512,7 @@ staff identity. Lab's staff view (`lab-api`, released history) marks an
 invalidated latest release `entered_in_error`; the patient view leaves the
 result out. The order-status condition hides a result already released once
 its EHR order is cancelled or entered in error, where Lab's own released
-history keeps it (D10); ADR-064 lists it as a proposed default.
+history keeps it (D10); ADR-065 lists it as a proposed default.
 
 Why a view owned by a technical role, and why not Lab:
 
@@ -4458,7 +4593,7 @@ permissive policies such as `diagnoses_patient_self_read`,
 OR-widen the release whatever `app.patient_release` says.
 `patient-record-release.integration.sql` asserts the exact policy inventory of
 every table the release reads and fails on any of them (release checklist
-P35).
+P36).
 
 **Evidence.** `patient-record-release.integration.sql` (rollback-only): with
 the patient bound to their own live session, `app.patient_release` never set
@@ -4492,16 +4627,210 @@ roles, and in the EHR's own patient-self transaction under Identity's real
 authorization that a transaction naming no category reads only the completed
 encounter while one bound by `PatientRecordRelease` reads only the configured
 categories (every flag on, vitals only, every flag off). On a database built
-from empty to 0095 and bootstrapped twice (local synthetic evidence)
-`runtime-roles.integration.sql`, `schema.integration.sql` and the 50
-additional suites pass, and the 0093 upgrade suite passes on a database built
-to 0092. With every schema, table and function owned by a `NOSUPERUSER
-NOBYPASSRLS` role, and again on a database migrated and bootstrapped by a
-`NOSUPERUSER NOBYPASSRLS CREATEROLE` administrator, the 50 additional suites
-and the runtime verifier pass; `schema.integration.sql` fails there at its line
-1149 ("Document not found") exactly as it does on `main` without this change
-(it fails the same with the 0095 policies and view dropped), and the
-rehearsal's owner pass runs only the additional suites.
+from empty to 0096 (after 0095, the Novu verified email change) and
+bootstrapped twice (local synthetic evidence) `runtime-roles.integration.sql`,
+`schema.integration.sql` and the 51 additional suites pass, and the 0093
+upgrade suite passes on a database built to 0092. Before the renumber (this
+migration then numbered 0095, without the Novu change), with every schema,
+table and function owned by a `NOSUPERUSER NOBYPASSRLS` role, and again on a
+database migrated and bootstrapped by a `NOSUPERUSER NOBYPASSRLS CREATEROLE`
+administrator, the 50 additional suites and the runtime verifier passed;
+`schema.integration.sql` fails there at its line 1149 ("Document not found")
+exactly as it does on `main` without this change (it fails the same with the
+0096 policies and view dropped), and the rehearsal's owner pass runs only the
+additional suites.
+
+## Imported legacy medical history (0097)
+
+Owner decision 3 of 2026-10-16 (ADR-066): patients and staff may see the
+medical history imported from the legacy system. 0097 builds the tables, the
+policies and the commands; it moves no data. Records, versions and files
+are kept as the legacy system held them, never turned into encounters,
+notes, signatures or allergies, and never part of either record summary.
+
+**Tables.** `ehr.imported_medical_records`,
+`ehr.imported_medical_record_versions` and `ehr.imported_medical_record_files`
+keep the staged legacy row (`source_payload`, whose `source_sha256` is the
+sealed staging checksum), the legacy author's or uploader's account,
+`origin` (`patient-provided` when the patient's own account wrote it,
+`provider-authored` when exactly one staged staff member did), the sealed
+staging run and the legacy timestamps. Versions and files reference their
+record on `(record_id, patient_id)`; a record's current version is a
+deferred foreign key on `(current_version_id, id, patient_id)`. All three
+force row-level security, have no PUBLIC privilege and are append-only
+(`platform.reject_mutation` on update and delete). Indexes follow the read
+order: `(patient_id, source_created_at desc, id desc)` for records,
+`(record_id, version_no desc)` for versions and `(record_id,
+source_created_at, id)` for files.
+
+**The patient's sharing choice.** `identity.imported_history_sharing`
+(one row per patient, `shared` false until the patient turns it on; no row
+means off) and its append-only log `identity.imported_history_sharing_events`
+(each change with its row version, session and correlation id). Both force
+row-level security and have no PUBLIC privilege; only the two commands below
+read or write them.
+
+**Policies.** Two PUBLIC `SELECT` policies on each imported table, so every
+EHR read is filtered:
+
+| Policy | Admits |
+|---|---|
+| `imported_history_patient_self_read` | the 0091 patient-self binding (`ehr.patient_self_context(patient_id)`, executable by the EHR runtime and the test role only, PSELF-RLS) in a transaction whose `app.patient_release` names `importedHistory`, which `PatientRecordRelease` sets only while `EHR_PATIENT_RELEASE_IMPORTED_HISTORY` is on |
+| `imported_history_staff_read` | `patient_id = (select ehr.imported_history_staff_patient())`: the one patient the staff transaction names in `app.imported_history_patient` (`ImportedHistoryService` binds it in the statement that asks the decision), when `ehr.imported_history_staff_read_allowed(patient)` holds: purpose `direct-care`, an `ehr.context_allows(patient, selected facility, 'read_records')` pass (an active, unheld, unexpired standard consent of the selected membership and no deny directive; break-glass counts only for `emergency`, D9), the membership holding `ehr.imported-history.read`, the patient's `shared` choice, and a login that is not deleted |
+
+The staff decision sits in a sub-SELECT without a row reference, which
+PostgreSQL evaluates once per statement (an InitPlan), not once per row: a
+page at the caps (51 records with 21 versions and 21 files each) asks it 3
+times instead of about 2,100 (7.6 s to 23 ms in the suite). The binding is
+only the request: naming another patient asks the same decision for that
+patient, a malformed name is no patient, and a staff transaction reads no
+other patient's rows. `ehr.imported_history_staff_patient()` runs as its
+caller (EXECUTE for the EHR runtime and the test role), so the decision keeps
+its single owner. When the staff decision holds, the patient's whole imported
+history is disclosed: legacy records have no source facility or encounter a
+facility-bound consent could narrow (ADR-066). The patient-self policy still
+evaluates `ehr.patient_self_context` per row (about 1.8 s for the same page
+in the suite). The patient needs no sharing
+choice for their own history. No policy admits an `INSERT`, `UPDATE` or
+`DELETE` by any application role; the technical owners' policies (below) are
+created by the role bootstrap.
+
+**Commands** (`SECURITY DEFINER`, `search_path = pg_catalog, pg_temp`, no
+PUBLIC `EXECUTE`), owned by two NOLOGIN technical owners whose privileges are
+exactly what their bodies read and write, so none relies on its owner
+bypassing row-level security:
+
+- `ehr.imported_history_staff_read_allowed(uuid)`, owned by
+  `hid_imported_history_commands`; executable by the EHR runtime and the
+  test role. It reads `identity.patients` (id, account) through column
+  grants and one `true` policy, `auth.accounts` (id, status) through column
+  grants, the sharing choice through its exact policy, and calls
+  `ehr.context_allows`, `auth.membership_has_permission` and the platform
+  context functions.
+- `identity.my_imported_history_sharing(text, uuid)` and
+  `identity.set_my_imported_history_sharing(text, uuid, boolean)`, owned by
+  the same role; executable by the Identity runtime and the test role. Both
+  take the patient from `identity.patient_self_session` (a live, unrevoked
+  patient session of an active login bound to the acting subject;
+  `hid_imported_history_commands` is its only `EXECUTE` grantee) and refuse anything
+  else with `42501 PATIENT_SELF_SESSION_REQUIRED`. A change needs a
+  correlation id and appends to the log; a repeat changes nothing; a
+  concurrent first choice is serialized on the patient's row.
+- `ehr.import_legacy_medical_history(uuid, uuid, text, jsonb)`, owned by
+  `hid_imported_history_importer`; executable by `hid_migration_admin` only.
+  It imports only from main's sealed staging pipeline: the parent run must be
+  the reconciled, verified legacy identity run without conflicts
+  (`IMPORTED_HISTORY_PARENT_NOT_VERIFIED`), the history run a sealed staging
+  run of source system `legacy_imported_history` (never `legacy_identity`)
+  and of the same source snapshot (`IMPORTED_HISTORY_RUN_NOT_SEALED`,
+  `IMPORTED_HISTORY_SNAPSHOT_MISMATCH`) holding exactly the three history
+  categories with matching counts (`IMPORTED_HISTORY_CATEGORY_MISMATCH`), and
+  the supplied rows exactly that run's sealed rows (`55000
+  IMPORTED_HISTORY_ROWS_DIFFER` otherwise; `22023
+  IMPORTED_HISTORY_INPUT_INVALID` for a missing operator or rows that are not
+  an array). Every patient, author and uploader is resolved through the
+  parent run's sealed identity rows (`IMPORTED_HISTORY_BINDING_DIFFERS`,
+  `IMPORTED_HISTORY_AUTHOR_UNRESOLVED`); malformed rows are
+  `IMPORTED_HISTORY_RECORD_INVALID`, `_VERSION_INVALID` or `_FILE_INVALID`,
+  and every legacy timestamp must be ISO 8601 with an offset and finite (no
+  `now`, `today`, `epoch`, `infinity` or zone-less value). Rows are inserted
+  once; a stored row that differs is refused (`IMPORTED_HISTORY_DIFFERS`); a
+  receipt run (`source_system legacy_imported_history`, mode `cutover`,
+  status `completed`, the counts and the history seal) is recorded once per
+  parent and history run. It pins `TimeZone=UTC` and `plan_cache_mode =
+  force_custom_plan`, reads each run's rows once into key lookups, and reads
+  each stored row by its key: its time grows linearly (on tables analyzed
+  empty, 10,000 versions in 2.8 s and 40,000 in 11.7 s; a plan cached while
+  the tables were empty made it quadratic, 207.7 s for 20,000). It defers the
+  current-version check itself, so a second import in one transaction works.
+
+**The history run's seal.** Main's crosswalk gate
+(`identity.legacy_nin_crosswalk_ready`, 0057) closes public patient
+enrollment while any `legacy_identity` run is `running` or `staged`, and a
+history run stays `staged`. So the history scope stages source system
+`legacy_imported_history`, which the gate does not count. 0033's seal guards
+are scoped to `legacy_identity`; two 0097 triggers give
+`legacy_imported_history` runs the same seal:
+`source_rows_imported_history_stage_only` (`migration.source_rows`: rows only
+while the run is `running` in mode `stage`) and
+`runs_imported_history_source_evidence_immutable` (`migration.runs`: counts
+and checksum sealed once from `running` to `staged`; no change of source
+system, snapshot, transaction snapshot or mode; no resume; no other run may
+become one). Both functions run as their caller, pin their search path and
+have no PUBLIC `EXECUTE`.
+
+The bootstrap (`runtime-grants.sql`) creates both owners (no login, no
+member, no membership), their column grants and the exact policies
+`imported_history_commands_read` (`identity.patients`, the sharing table),
+`imported_history_commands_insert` and `_update` (the sharing table),
+`imported_history_commands_insert` (the log), and
+`imported_history_importer_read` and `_insert` (each imported table); each is
+created on the first run only (`ACCESS EXCLUSIVE` briefly on its table,
+after the platform-control policy) and replaced only when missing or
+different. It gives the four functions to their owners inside `CREATE`
+windows, grants the EHR runtime and the test role `SELECT` on the imported
+tables and `EXECUTE` on `ehr.imported_history_staff_patient()`, and gives
+`hid_migration_admin` `USAGE` on schema `ehr` so it can call the import.
+Right after giving a function to its owner it revokes the owner's own
+`EXECUTE` entry (no owned function calls another), so the first run leaves
+the same ACL as a rerun. The other 0097 tables have no reader.
+
+**Permission.** `ehr.imported-history.read`, held by doctor, clinician and
+nurse (the roles that read notes); the staff route requires it as well.
+
+**Branch residue.** A database built from the PR #8 branch holds its own
+`ehr.imported_medical_records` and related objects (its 0061 and 0062, which
+disclosed the whole history under any consent and gave the schema owner a
+bypass policy). 0097 refuses such a database before creating anything
+(`55000 IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT`) and changes nothing in
+it. Rebuilding it from main is a proposed default that needs the owner's and
+the DPO's approval (ADR-066, release checklist P37).
+
+**Locks.** Creating the foreign keys takes `SHARE ROW EXCLUSIVE` on
+`identity.patients`, `auth.accounts` and `migration.runs`, creating the seal
+triggers `SHARE ROW EXCLUSIVE` on `migration.runs` and
+`migration.source_rows`, and the permission rows take row locks on
+`auth.permissions` and `auth.role_permissions`, until 0097 commits;
+everything else creates new objects. Each waits at most the
+runner's 5 s lock timeout, and a timeout rolls 0097 back whole.
+
+**Evidence** (local, synthetic only). `imported-medical-history.integration.sql`
+(rollback-only, fixture range `e3`): staff visibility with consent at the
+selected facility, the permission and the patient's choice; every purpose
+other than direct care, another facility, another membership, a revoked,
+expired or held consent, a deny directive, sharing turned off, the permission
+withdrawn and a deleted login each disclose nothing; a live break-glass
+grant read with the purpose `emergency` discloses nothing; the patient-self
+binding admits the patient's own rows only with `importedHistory` in the
+release set; the tables are append-only; the sharing commands as the
+Identity runtime (session binding, refusals, repeat, change log); the
+catalogue (forced row-level security, the exact policies, owners, definer
+settings, `EXECUTE` holders and no owner entry, triggers and the permission's
+roles); the staff binding (another patient, no patient, a malformed name);
+and a staff page at the caps that asks the decision at most 6 times (3) and
+takes under 3 s. It records 97 cases.
+`imported-history-import.integration.sql` (rollback-only, fixture range
+`ea`) calls the import command as `hid_migration_admin` on runs staged
+through the real ledger triggers: every refusal code, origins, the receipt,
+an idempotent repeat (also in another session time zone), a later differing
+history, the history run's seal, timestamp shapes, enrollment staying open,
+and linear time on tables analyzed empty with no sequential scan per row. It
+records 66 cases; mutants that drop the record patient's binding refusal or
+the author refusals fail it.
+`runtime-roles.integration.sql` asserts both owners' exact grants, policies
+and functions on every bootstrap run. On a database built from empty to 0097
+(after 0095 and 0096 of `main`) and bootstrapped twice, every SQL suite
+passes, again with the synthetic release fixture loaded, and with every
+object owned by a `NOSUPERUSER NOBYPASSRLS` role every suite but
+`schema.integration.sql` passes (it fails there as on `main`, and the
+rehearsal's owner pass excludes it). The import rehearsal
+(`rehearse-imported-history-import.mjs`) runs main's stage, promote and
+reconcile, the history scope, the import's dry run, apply, repeat and
+refusals as a superuser and, in `verify-non-superuser-database.mjs`, as a
+`NOSUPERUSER NOBYPASSRLS CREATEROLE` administrator; and 0097 refuses a
+branch-shaped 0096 database and leaves it unchanged.
+`verify-imported-history-runtime.mjs` checks the routes over HTTP as the EHR
+and Identity runtime roles.
 
 ## Patient record chat (0096)
 

@@ -22,7 +22,8 @@ begin
     'hid_schema_test_runtime', 'hid_event_delivery_commands',
     'hid_event_dispatcher', 'hid_notification_runtime',
     'hid_notification_api_runtime', 'hid_notification_worker',
-    'hid_ocr_queue_metrics', 'hid_platform_control_reader', 'hid_lab_release_reader'
+    'hid_ocr_queue_metrics', 'hid_platform_control_reader', 'hid_lab_release_reader',
+    'hid_imported_history_commands', 'hid_imported_history_importer'
   ] loop
     if not exists (select 1 from pg_roles where rolname = role_name) then
       raise exception 'required HID role is missing: %', role_name;
@@ -154,7 +155,8 @@ begin
     'hid_pharmacy_api_runtime', 'hid_outreach_runtime', 'hid_outreach_api_runtime',
     'hid_event_delivery_commands', 'hid_event_dispatcher', 'hid_notification_runtime',
     'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics',
-    'hid_platform_control_reader', 'hid_lab_release_reader'
+    'hid_platform_control_reader', 'hid_lab_release_reader',
+    'hid_imported_history_commands', 'hid_imported_history_importer'
   ] loop
     if has_table_privilege(role_name, 'auth.otp_start_cooldowns',
          'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') then
@@ -180,7 +182,8 @@ begin
     'hid_pharmacy_api_runtime', 'hid_outreach_runtime', 'hid_outreach_api_runtime',
     'hid_event_delivery_commands', 'hid_event_dispatcher', 'hid_notification_runtime',
     'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics',
-    'hid_lab_release_reader'
+    'hid_lab_release_reader',
+    'hid_imported_history_commands', 'hid_imported_history_importer'
   ] loop
     if has_function_privilege(role_name,
          'platform.consume_public_patient_nin_quota(char,integer,integer,integer)', 'EXECUTE')
@@ -412,7 +415,8 @@ begin
       'hid_schema_test_runtime', 'hid_event_delivery_commands',
       'hid_event_dispatcher', 'hid_notification_runtime',
       'hid_notification_api_runtime', 'hid_notification_worker',
-      'hid_ocr_queue_metrics', 'hid_platform_control_reader', 'hid_lab_release_reader'
+      'hid_ocr_queue_metrics', 'hid_platform_control_reader', 'hid_lab_release_reader',
+      'hid_imported_history_commands', 'hid_imported_history_importer'
     ]) runtime(role_name)
     join pg_class relation on relation.relkind in ('r', 'p')
     join pg_namespace namespace_row on namespace_row.oid = relation.relnamespace
@@ -703,7 +707,7 @@ begin
      ) then
     raise exception 'platform control reader privileges are inconsistent';
   end if;
-  -- The four technical owners are never granted to a role and are members of
+  -- The six technical owners are never granted to a role and are members of
   -- none, and none may create objects: the role bootstrap grants its
   -- administrator SET and INHERIT membership in them, and each of them CREATE
   -- on one schema, only while it transfers and grants their objects, and
@@ -719,7 +723,8 @@ begin
   -- not create roles (administrator is null).
   foreach role_name in array array[
     'hid_event_delivery_commands', 'hid_ocr_queue_metrics', 'hid_platform_control_reader',
-    'hid_lab_release_reader'
+    'hid_lab_release_reader',
+    'hid_imported_history_commands', 'hid_imported_history_importer'
   ] loop
     if exists (select 1 from pg_auth_members where member = role_name::regrole)
        or exists (
@@ -806,7 +811,8 @@ begin
         'hid_pharmacy_api_runtime', 'hid_outreach_runtime',
         'hid_outreach_api_runtime', 'hid_schema_test_runtime',
         'hid_event_delivery_commands', 'hid_event_dispatcher',
-        'hid_ocr_queue_metrics', 'hid_platform_control_reader', 'hid_lab_release_reader'
+        'hid_ocr_queue_metrics', 'hid_platform_control_reader', 'hid_lab_release_reader',
+        'hid_imported_history_commands', 'hid_imported_history_importer'
       )
   ) then
     raise exception 'a runtime or test role owns a protected application relation';
@@ -910,7 +916,7 @@ $$;
 -- security_invoker), selected only by hid_ehr_runtime and the test role.
 -- Its ACL holds exactly those two SELECT entries from the first bootstrap
 -- run on: no entry of the owner itself, which the migration's REVOKE ... FROM
--- PUBLIC would otherwise leave until the next run (release checklist P35).
+-- PUBLIC would otherwise leave until the next run (release checklist P36).
 -- Its owner reads exactly the listed columns through one exact `true` policy
 -- per table, holds no schema USAGE, no table or function privilege and no
 -- EXECUTE on ehr.patient_self_context, and owns nothing else. The EHR runtime
@@ -1008,6 +1014,183 @@ begin
 end
 $$;
 
+-- Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066,
+-- 0097). Two NOLOGIN technical owners, created by the role bootstrap:
+-- hid_imported_history_commands owns the staff read helper and the patient's
+-- two sharing commands and reads exactly what they need (the patient's
+-- account, the login's status, the sharing row) through column grants and
+-- policies naming it, because identity.patients has row-level security and the
+-- sharing tables force it, so no owner bypass is relied on;
+-- hid_imported_history_importer owns the import command, reads the sealed
+-- migration ledger and inserts only into the three imported tables. Only
+-- hid_migration_admin may run the import, the EHR runtime and the test role
+-- the staff helper, the Identity runtime and the test role the sharing
+-- commands. identity.patient_self_session gains exactly one EXECUTE holder,
+-- the commands owner; ehr.patient_self_context keeps its two (PSELF-RLS).
+do $$
+declare
+  commands oid := 'hid_imported_history_commands'::regrole;
+  importer oid := 'hid_imported_history_importer'::regrole;
+  every_role text[] := array['public', 'hid_identity_runtime', 'hid_ehr_runtime', 'hid_api_runtime',
+    'hid_identity_api_runtime', 'hid_ehr_api_runtime', 'hid_ocr_api_runtime', 'hid_audit_writer',
+    'hid_document_scanner', 'hid_ocr_runtime', 'hid_ocr_worker', 'hid_lab_runtime', 'hid_lab_api_runtime',
+    'hid_pharmacy_runtime', 'hid_pharmacy_api_runtime', 'hid_outreach_runtime', 'hid_outreach_api_runtime',
+    'hid_schema_test_runtime', 'hid_event_delivery_commands', 'hid_event_dispatcher', 'hid_notification_runtime',
+    'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics',
+    'hid_platform_control_reader', 'hid_lab_release_reader', 'hid_migration_admin'];
+begin
+  if (select coalesce(array_agg(replace(oid::regprocedure::text, ' ', '') order by oid::regprocedure::text), '{}')
+        from pg_proc where proowner = commands)
+     is distinct from array['ehr.imported_history_staff_read_allowed(uuid)',
+       'identity.my_imported_history_sharing(text,uuid)', 'identity.set_my_imported_history_sharing(text,uuid,boolean)']
+     or (select coalesce(array_agg(replace(oid::regprocedure::text, ' ', '')), '{}') from pg_proc where proowner = importer)
+     is distinct from array['ehr.import_legacy_medical_history(uuid,uuid,text,jsonb)']
+     or exists (select 1 from pg_proc where proowner in (commands, importer) and (not prosecdef
+          or proconfig is distinct from case when proowner = importer
+            then array['search_path=pg_catalog, pg_temp', 'TimeZone=UTC', 'plan_cache_mode=force_custom_plan']
+            else array['search_path=pg_catalog, pg_temp'] end))
+     or exists (select 1 from pg_class where relowner in (commands, importer))
+     or exists (select 1 from pg_namespace where nspowner in (commands, importer)) then
+    raise exception 'the imported history technical owners must own exactly their pinned security-definer commands and nothing else';
+  end if;
+  -- The bootstrap leaves no owner entry on their functions, on its first run
+  -- as on a rerun, so that every run leaves the same ACL (P37).
+  if exists (select 1 from pg_proc proc, aclexplode(proc.proacl) privilege
+              where proc.proowner in (commands, importer) and privilege.grantee = proc.proowner) then
+    raise exception 'the imported history technical owners must hold no EXECUTE entry on their own functions';
+  end if;
+  -- The staff policies' binding function runs as its caller: only the EHR
+  -- runtime and the test role may run it, and it pins its search path.
+  if to_regprocedure('ehr.imported_history_staff_patient()') is null then
+    raise exception 'ehr.imported_history_staff_patient() is missing';
+  end if;
+  if (select prosecdef or provolatile <> 's' or proconfig is distinct from array['search_path=pg_catalog, pg_temp']
+           from pg_proc where oid = to_regprocedure('ehr.imported_history_staff_patient()'))
+     or exists (select 1 from unnest(every_role) runtime(role_name)
+                 where has_function_privilege(runtime.role_name, 'ehr.imported_history_staff_patient()', 'EXECUTE')
+                       <> (runtime.role_name in ('hid_ehr_runtime', 'hid_ehr_api_runtime', 'hid_schema_test_runtime'))) then
+    raise exception 'ehr.imported_history_staff_patient() must be a pinned invoker function that only the EHR runtime and the test role run';
+  end if;
+  if (select coalesce(array_agg(relation.oid::regclass::text || ':' || privilege.privilege_type
+          order by relation.oid::regclass::text, privilege.privilege_type), '{}')
+        from pg_class relation, aclexplode(relation.relacl) privilege where privilege.grantee = commands)
+     is distinct from array['identity.imported_history_sharing:INSERT', 'identity.imported_history_sharing:SELECT',
+       'identity.imported_history_sharing:UPDATE', 'identity.imported_history_sharing_events:INSERT']
+     or (select coalesce(array_agg(relation.oid::regclass::text || '.' || attribute.attname || ':' || privilege.privilege_type
+          order by relation.oid::regclass::text, attribute.attname, privilege.privilege_type), '{}')
+        from pg_class relation join pg_attribute attribute on attribute.attrelid = relation.oid
+        cross join lateral aclexplode(attribute.attacl) privilege where privilege.grantee = commands)
+     is distinct from array['auth.accounts.id:SELECT', 'auth.accounts.status:SELECT',
+       'identity.patients.account_id:SELECT', 'identity.patients.id:SELECT']
+     or (select coalesce(array_agg(replace(proc.oid::regprocedure::text, ' ', '') order by proc.oid::regprocedure::text), '{}')
+        from pg_proc proc, aclexplode(proc.proacl) privilege
+       where privilege.grantee = commands and proc.proowner <> commands)
+     is distinct from array['auth.membership_has_permission(text,uuid,uuid,text)', 'ehr.context_allows(uuid,uuid,text)',
+       'identity.patient_self_session(text,uuid)', 'platform.current_actor_subject()',
+       'platform.current_correlation_id()', 'platform.current_facility_id()', 'platform.current_membership_id()',
+       'platform.current_purpose_of_use()']
+     or (select coalesce(array_agg(namespace_row.nspname::text order by namespace_row.nspname), '{}') from pg_namespace namespace_row
+          where namespace_row.nspname in ('platform', 'auth', 'identity', 'ehr', 'audit', 'ocr', 'lab', 'pharmacy',
+            'outreach', 'integration', 'notification', 'migration')
+            and has_schema_privilege('hid_imported_history_commands', namespace_row.oid, 'USAGE'))
+     is distinct from array['auth', 'ehr', 'identity', 'platform']::text[]
+     or has_function_privilege('hid_imported_history_commands', 'ehr.patient_self_context(uuid)', 'EXECUTE') then
+    raise exception 'the imported history commands owner must hold exactly its column, table, function and schema privileges';
+  end if;
+  if (select coalesce(array_agg(policy.polrelid::regclass::text || ':' || policy.polname || ':' || policy.polcmd::text
+          || ':' || coalesce(pg_get_expr(policy.polqual, policy.polrelid), '-')
+          || ':' || coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '-')
+          order by policy.polrelid::regclass::text, policy.polname), '{}')
+        from pg_policy policy where commands = any(policy.polroles))
+     is distinct from array['identity.imported_history_sharing:imported_history_commands_insert:a:-:true',
+       'identity.imported_history_sharing:imported_history_commands_read:r:true:-',
+       'identity.imported_history_sharing:imported_history_commands_update:w:true:true',
+       'identity.imported_history_sharing_events:imported_history_commands_insert:a:-:true',
+       'identity.patients:imported_history_commands_read:r:true:-']
+     or exists (select 1 from pg_policy policy where commands = any(policy.polroles)
+                 and (policy.polroles <> array[commands] or not policy.polpermissive)) then
+    raise exception 'the imported history commands owner must reach its tables through exactly its five policies';
+  end if;
+  if (select coalesce(array_agg(relation.oid::regclass::text || ':' || privilege.privilege_type
+          order by relation.oid::regclass::text, privilege.privilege_type), '{}')
+        from pg_class relation, aclexplode(relation.relacl) privilege where privilege.grantee = importer)
+     is distinct from array['ehr.imported_medical_record_files:INSERT', 'ehr.imported_medical_record_files:SELECT',
+       'ehr.imported_medical_record_versions:INSERT', 'ehr.imported_medical_record_versions:SELECT',
+       'ehr.imported_medical_records:INSERT', 'ehr.imported_medical_records:SELECT', 'migration.runs:INSERT']
+     or (select coalesce(array_agg(relation.oid::regclass::text || '.' || attribute.attname || ':' || privilege.privilege_type
+          order by relation.oid::regclass::text, attribute.attname, privilege.privilege_type), '{}')
+        from pg_class relation join pg_attribute attribute on attribute.attrelid = relation.oid
+        cross join lateral aclexplode(attribute.attacl) privilege where privilege.grantee = importer)
+     is distinct from array['migration.conflicts.run_id:SELECT',
+       'migration.runs.id:SELECT', 'migration.runs.mode:SELECT', 'migration.runs.notes:SELECT',
+       'migration.runs.source_checksum_sha256:SELECT', 'migration.runs.source_counts:SELECT',
+       'migration.runs.source_snapshot:SELECT', 'migration.runs.source_system:SELECT', 'migration.runs.status:SELECT',
+       'migration.runs.target_checksum_sha256:SELECT', 'migration.runs.target_counts:SELECT',
+       'migration.source_rows.entity_type:SELECT', 'migration.source_rows.payload:SELECT',
+       'migration.source_rows.payload_sha256:SELECT', 'migration.source_rows.run_id:SELECT',
+       'migration.source_rows.source_pk:SELECT']
+     or exists (select 1 from pg_proc proc, aclexplode(proc.proacl) privilege
+                 where privilege.grantee = importer and proc.proowner <> importer)
+     or (select coalesce(array_agg(namespace_row.nspname::text order by namespace_row.nspname), '{}') from pg_namespace namespace_row
+          where namespace_row.nspname in ('platform', 'auth', 'identity', 'ehr', 'audit', 'ocr', 'lab', 'pharmacy',
+            'outreach', 'integration', 'notification', 'migration')
+            and has_schema_privilege('hid_imported_history_importer', namespace_row.oid, 'USAGE'))
+     is distinct from array['ehr', 'migration']::text[]
+     or (select coalesce(array_agg(policy.polrelid::regclass::text || ':' || policy.polname || ':' || policy.polcmd::text
+          || ':' || coalesce(pg_get_expr(policy.polqual, policy.polrelid), '-')
+          || ':' || coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '-')
+          order by policy.polrelid::regclass::text, policy.polname), '{}')
+        from pg_policy policy where importer = any(policy.polroles))
+     is distinct from array['ehr.imported_medical_record_files:imported_history_importer_insert:a:-:true',
+       'ehr.imported_medical_record_files:imported_history_importer_read:r:true:-',
+       'ehr.imported_medical_record_versions:imported_history_importer_insert:a:-:true',
+       'ehr.imported_medical_record_versions:imported_history_importer_read:r:true:-',
+       'ehr.imported_medical_records:imported_history_importer_insert:a:-:true',
+       'ehr.imported_medical_records:imported_history_importer_read:r:true:-'] then
+    raise exception 'the imported history importer must hold exactly its ledger reads, its inserts and its six policies';
+  end if;
+  if exists (
+       select 1 from unnest(every_role) runtime(role_name)
+        where has_function_privilege(runtime.role_name, 'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb)', 'EXECUTE')
+              <> (runtime.role_name = 'hid_migration_admin')
+           or (runtime.role_name = 'hid_migration_admin' and not has_schema_privilege(runtime.role_name, 'ehr', 'USAGE'))
+           or has_function_privilege(runtime.role_name, 'ehr.imported_history_staff_read_allowed(uuid)', 'EXECUTE')
+              <> (runtime.role_name in ('hid_ehr_runtime', 'hid_ehr_api_runtime', 'hid_schema_test_runtime'))
+           or has_function_privilege(runtime.role_name, 'identity.set_my_imported_history_sharing(text,uuid,boolean)', 'EXECUTE')
+              <> (runtime.role_name in ('hid_identity_runtime', 'hid_identity_api_runtime',
+                  'hid_schema_test_runtime'))
+           or has_function_privilege(runtime.role_name, 'identity.my_imported_history_sharing(text,uuid)', 'EXECUTE')
+              <> (runtime.role_name in ('hid_identity_runtime', 'hid_identity_api_runtime',
+                  'hid_schema_test_runtime'))
+           or has_table_privilege(runtime.role_name, 'ehr.imported_medical_records', 'SELECT')
+              <> (runtime.role_name in ('hid_ehr_runtime', 'hid_ehr_api_runtime', 'hid_schema_test_runtime'))
+           or exists (select 1 from unnest(array['ehr.imported_medical_records', 'ehr.imported_medical_record_versions',
+                 'ehr.imported_medical_record_files', 'identity.imported_history_sharing',
+                 'identity.imported_history_sharing_events']) imported(table_name)
+               where has_table_privilege(runtime.role_name, imported.table_name, 'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                  or (imported.table_name like 'identity.%'
+                      and has_any_column_privilege(runtime.role_name, imported.table_name, 'SELECT,INSERT,UPDATE,REFERENCES')))
+     ) then
+    raise exception 'only the migration administrator imports, only the EHR runtime reads imported history and runs its staff helper, and only the Identity runtime runs the sharing commands';
+  end if;
+  if (select coalesce(array_agg(privilege.grantee::regrole::text order by privilege.grantee::regrole::text), '{}')
+        from pg_proc proc, aclexplode(proc.proacl) privilege
+       where proc.oid = 'identity.patient_self_session(text,uuid)'::regprocedure and privilege.grantee <> proc.proowner)
+     is distinct from array['hid_imported_history_commands']
+     or (select coalesce(array_agg(privilege.grantee::regrole::text order by privilege.grantee::regrole::text), '{}')
+        from pg_proc proc, aclexplode(proc.proacl) privilege
+       where proc.oid = 'ehr.patient_self_context(uuid)'::regprocedure and privilege.grantee <> proc.proowner)
+     is distinct from array['hid_ehr_runtime', 'hid_schema_test_runtime'] then
+    raise exception 'identity.patient_self_session must be executable by the imported history commands owner alone, and ehr.patient_self_context by the EHR runtime and the test role alone';
+  end if;
+  if (select array_agg(role_code::text order by role_code) from auth.role_permissions
+      where permission_code = 'ehr.imported-history.read')
+     is distinct from array['clinician', 'doctor', 'nurse'] then
+    raise exception 'ehr.imported-history.read must be held by doctor, clinician and nurse only';
+  end if;
+end
+$$;
+
 -- 0093 and 0094 (ADR-062, ADR-063). The Identity runtime runs the three
 -- holder commands, the facility list, the in-person check command and the two
 -- designation commands; no other runtime role and not PUBLIC. The
@@ -1025,7 +1208,8 @@ declare
     'hid_pharmacy_api_runtime', 'hid_outreach_runtime', 'hid_outreach_api_runtime',
     'hid_event_delivery_commands', 'hid_event_dispatcher', 'hid_notification_runtime',
     'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics',
-    'hid_platform_control_reader', 'hid_lab_release_reader'];
+    'hid_platform_control_reader', 'hid_lab_release_reader',
+    'hid_imported_history_commands', 'hid_imported_history_importer'];
   every_role text[] := array['public', 'hid_identity_runtime', 'hid_identity_api_runtime',
     'hid_schema_test_runtime', 'hid_migration_admin'] || other_runtimes;
 begin
@@ -1091,6 +1275,57 @@ begin
       where permission_code = 'identity.patient.assisted_registration')
      is distinct from array['clinician', 'doctor', 'nurse'] then
     raise exception 'identity.patient.assisted_registration must be held by doctor, clinician and nurse only';
+  end if;
+end
+$$;
+
+-- 0095 (ADR-064). The notification worker learns a patient's verified login
+-- email only through the claim-bound integration.notification_recipient_for_claim,
+-- owned by the event-delivery technical owner, which alone executes the
+-- private helper that reads identity.patients and auth.accounts as their
+-- owner, with the login's deletion requests. The exact ACLs: the worker on
+-- the claim function and the technical owner on the helper, besides their
+-- owners. Neither the worker, its notification aggregate nor the technical
+-- owner holds any table or column privilege on the three tables.
+do $$
+declare
+  claim_function regprocedure := to_regprocedure('integration.notification_recipient_for_claim(uuid,uuid,uuid)');
+  helper regprocedure := to_regprocedure('integration.notification_recipient_state(uuid)');
+begin
+  if claim_function is null or helper is null then
+    raise exception 'the 0095 notification recipient functions are missing';
+  end if;
+  if (select proowner from pg_proc where oid = claim_function) <> 'hid_event_delivery_commands'::regrole
+     or (select proowner from pg_proc where oid = helper)
+        <> (select relowner from pg_class where oid = 'identity.patients'::regclass)
+     or exists (select 1 from pg_proc where oid in (claim_function, helper)
+                 and (not prosecdef or proconfig is distinct from array['search_path=pg_catalog, pg_temp'])) then
+    raise exception 'the 0095 recipient functions have the wrong owner, security or search_path';
+  end if;
+  if (select proacl from pg_proc where oid = claim_function) is null
+     or (select coalesce(array_agg(distinct privilege.grantee::regrole::text), '{}')
+           from pg_proc proc, aclexplode(proc.proacl) privilege
+          where proc.oid = claim_function and privilege.grantee <> proc.proowner) <> array['hid_notification_worker']
+     or (select proacl from pg_proc where oid = helper) is null
+     or (select coalesce(array_agg(distinct privilege.grantee::regrole::text), '{}')
+           from pg_proc proc, aclexplode(proc.proacl) privilege
+          where proc.oid = helper and privilege.grantee <> proc.proowner) <> array['hid_event_delivery_commands']
+     or not has_function_privilege('hid_notification_worker', claim_function, 'EXECUTE')
+     or has_function_privilege('hid_notification_worker', helper, 'EXECUTE')
+     or has_function_privilege('hid_notification_runtime', claim_function, 'EXECUTE')
+     or has_function_privilege('hid_notification_api_runtime', claim_function, 'EXECUTE') then
+    raise exception 'the 0095 recipient function grants are broader or narrower than the worker and its technical owner';
+  end if;
+  if exists (
+       select 1
+       from unnest(array['hid_notification_worker', 'hid_notification_runtime', 'hid_notification_api_runtime',
+         'hid_event_delivery_commands', 'hid_event_dispatcher']) runtime(role_name),
+         unnest(array['identity.patients', 'auth.accounts', 'identity.patient_account_deletion_requests']) protected(table_name)
+       where has_table_privilege(runtime.role_name, protected.table_name,
+         'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+          or has_any_column_privilege(runtime.role_name, protected.table_name, 'SELECT,INSERT,UPDATE,REFERENCES')
+     ) then
+    raise exception 'a notification or event-delivery role can read identity.patients, auth.accounts or identity.patient_account_deletion_requests directly';
   end if;
 end
 $$;

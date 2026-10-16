@@ -45,6 +45,18 @@ keeps the online route closed while no facility takes part. The in-person budget
 Identity's defaults (20 and 100); they are not synth inputs. Enabling the
 facility route is an operator step after release checklist P29 to P33.
 
+Imported legacy medical history (ADR-066, migration 0097): the synth inputs
+`HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY` and
+`HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED` set ehr-api's
+`EHR_PATIENT_RELEASE_IMPORTED_HISTORY` and `EHR_STAFF_IMPORTED_HISTORY_ENABLED`,
+and `HID_IMPORTED_HISTORY_SHARING_ENABLED` sets identity-api's
+`IMPORTED_HISTORY_SHARING_ENABLED`. Each defaults to `false`; synthesis and
+`verify-synth` refuse any of them outside staging, and in staging the sharing
+switch without the patient read and the staff read without the sharing
+switch. Set them on staging only after release checklist P37 (1), the written
+sign-off, in the order patient read, sharing, staff read, and turn them off in
+reverse. The EHR and Identity production profiles refuse them as well.
+
 ## Staging email acceptance profile
 
 Staging selects `NOTIFICATION_DELIVERY_PROFILE=email-only`. Its Notification API
@@ -79,7 +91,10 @@ production gives it no key, so it answers `not_configured`: before ingress a
 platform administrator pauses it (§13 step 5, release checklist P21).
 
 Novu also needs the configured workflow, canonical synthetic patient subscriber
-mapping and approved delivery integration. See
+mapping and approved delivery integration. The synth input
+`HID_NOVU_SUBSCRIBER_SYNC_ENABLED` (default `false`, staging only, refused in
+production; ADR-064) makes the worker map the subscriber's verified login email
+itself; set it only after release checklist P35. See
 [provider accounts and activation](STAGING_PROVIDER_ACCOUNTS.md) and
 [read-only external preflight](STAGING_EXTERNAL_PREFLIGHT.md). No key-presence or
 health check substitutes for actual delivery evidence.

@@ -277,7 +277,20 @@ The executable covers:
    signed in with an authenticator, refused staff, a mismatch, a match,
    activation and sign-in, an existing Health ID, a race with a phone proof,
    both budgets and a suspension, as `hid_identity_api_runtime`.
-   With 0095 (the patient record release, ADR-064): the additional suites
+   With 0095 (ADR-064): the additional suites include
+   `notification-verified-recipient.integration.sql` (the claim-bound
+   recipient answers, its refusals and catalogue), run in both passes, and
+   `scripts/verify-non-superuser-database.mjs` calls the lookup as the
+   RDS-like worker login. `notification_worker_runtime` runs
+   `services/notification-worker/scripts/verify-notification-worker-runtime.mjs`
+   after the Pharmacy, Lab, OCR and Outreach verifiers: the real worker as
+   `hid_notification_worker` against a fake Novu that replays a seen
+   idempotency key's answer as Novu does: flag off and on, a failed
+   subscriber call that still sends the in-app trigger, an opt-out, a
+   deleted, a suspended or a deletion-due login whose email is cleared first,
+   an event retried while the patient goes withheld, eligible, withheld, and
+   two concurrent events with the login deleted between them.
+   With 0096 (the patient record release, ADR-065): the additional suites
    include `patient-record-release.integration.sql` (the database following
    `app.patient_release` category by category, the released rows of each
    table and of the released Lab results view across every withheld state,
@@ -294,13 +307,43 @@ The executable covers:
    EHR's own patient-self transaction (nothing new without the release
    binding; only vitals with only that flag on), as `hid_ehr_api_runtime`
    against a real Identity child.
+   With 0097 (imported legacy medical history, ADR-066): the additional
+   suites include `imported-medical-history.integration.sql` (the patient-self
+   binding and the release set, the staff decision for the one patient a
+   transaction names, every refusal, break-glass, the sharing commands, the
+   catalogue, and a staff page at the caps that asks the decision a few
+   times rather than per row) and `imported-history-import.integration.sql`
+   (the import command as `hid_migration_admin` on crafted runs: every
+   refusal code, origins, the receipt, an idempotent repeat, the history
+   run's seal, timestamp shapes, enrollment staying open, and linear time
+   on tables analyzed empty), run in both passes.
+   `imported_history_branch_precondition` builds a database to 0096 with a
+   branch-shaped `ehr.imported_medical_records` and proves that 0097 refuses
+   it (`IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT`) and leaves it unchanged.
+   `imported_history_runtime` runs `verify-imported-history-runtime.mjs`
+   after the patient record release verifier: the patient's own read, the
+   sharing choice, the staff direct-care read, other purposes, break-glass,
+   staff refused the patient routes, the database following the release
+   binding, a revoked consent, every switch off, and, with Identity's
+   sharing switch off, a withdrawal that still succeeds and the staff read
+   that then answers `shared: false`, as `hid_ehr_api_runtime` and
+   `hid_identity_api_runtime`. `imported_history_import` runs
+   `rehearse-imported-history-import.mjs` on a database of its own: main's
+   stage, promote and reconcile, the NIN crosswalk attestation and contact
+   rekey, the history scope (a `legacy_imported_history` run the promoter
+   refuses and leaves unchanged), the import's dry run, apply, repeat and
+   refusals, and `identity.public_patient_enrollment_ready()` true before the
+   history, once it is staged and once it is imported. The non-superuser
+   pass (`verify-non-superuser-database.mjs`, step `imported_history_import`)
+   runs the same rehearsal as the `NOSUPERUSER NOBYPASSRLS CREATEROLE`
+   administrator and checks that no `hid_migration_admin` membership is left.
    With 0096 (patient record chat, ADR-065): the additional suites include
    `patient-record-chat.integration.sql` (the patient's own history under
    patient-self row-level security against every other context, the legal
    hold that keeps it, the limit commands' quotas, leases and budget, their
    catalogue, the kill switch read again by the reservation),
    run in both passes. `record_chat_runtime` runs
-   `verify-record-chat-runtime.mjs` after the release verifier, against a
+   `verify-record-chat-runtime.mjs` after the imported history verifier, against a
    local fake Messages API on 127.0.0.1 (nothing leaves the machine): flag
    off and kill switch off send nothing, one answered question sends one
    request with the configured model and geography and only the minimised
@@ -338,7 +381,7 @@ The executable covers:
    and attestation helpers or `auth.staff_session_is_mfa`, and that the
    permission is held by `clinician`, `doctor` and `nurse` only; the
    bootstrap's own `runtime-roles.integration.sql` checks the 0093 and 0094
-   grants for every runtime role; and since 0095
+   grants for every runtime role; and since 0096
    (`patient_record_release_grants`) that the upgraded bootstrap makes
    `hid_lab_release_reader` the owner of `ehr.patient_released_lab_results`,
    grants `SELECT` on it to the EHR runtime and not to the Lab runtimes,

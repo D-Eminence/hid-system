@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0096",
-    "count": 96,
+    "last": "0097",
+    "count": 98,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -475,8 +475,16 @@
         "sha256": "322f2baa20fbe68764cfed4fd54a278653a367f213aa4fc0418d2b26c4a0aae8"
       },
       {
-        "name": "0095_patient_record_release.sql",
-        "sha256": "cd68c17b660ffc3e646eb7f5925686699e602f0454f882fe093de38308e3ec4e"
+        "name": "0095_notification_verified_recipient.sql",
+        "sha256": "dfe23d2d07ecf859f173ad67123581ed67ec4a954c416f5bf8afac9713da12ff"
+      },
+      {
+        "name": "0096_patient_record_release.sql",
+        "sha256": "06c534de5228b42fec9238fc0bafc46557dbf703820115e96ea6b598689473b2"
+      },
+      {
+        "name": "0097_imported_medical_history.sql",
+        "sha256": "e3106e0f56fc76e48e9439ddef4772385769e1e60d7e6fc1ff595c12dd6b6ee6"
       },
       {
         "name": "0096_patient_record_chat.sql",

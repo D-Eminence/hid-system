@@ -128,6 +128,29 @@ describe('Identity production database transport', () => {
     }
   });
 
+  // ADR-066: the patient's choice to share imported legacy history with the
+  // facilities they approve. Off by default; the production profile refuses it
+  // until the P37 sign-off; staging and local development may opt in.
+  it('keeps the imported history sharing routes off by default and refuses them in production', () => {
+    production(); resetEnvironmentForTests();
+    expect(getEnvironment().IMPORTED_HISTORY_SHARING_ENABLED).toBe(false);
+    production(); process.env.IMPORTED_HISTORY_SHARING_ENABLED = 'true'; resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/IMPORTED_HISTORY_SHARING_ENABLED: .*P37/);
+    production(); process.env.IMPORTED_HISTORY_SHARING_ENABLED = 'yes'; resetEnvironmentForTests();
+    expect(() => getEnvironment()).toThrow(/IMPORTED_HISTORY_SHARING_ENABLED/);
+  });
+
+  it.each<[string, string, string | undefined]>([
+    ['the staging deployment profile', 'production', 'staging'],
+    ['local development', 'development', undefined],
+  ])('accepts the imported history sharing routes in %s', (_label, nodeEnvironment, deployment) => {
+    production(); Object.assign(process.env, { IMPORTED_HISTORY_SHARING_ENABLED: 'true', NODE_ENV: nodeEnvironment });
+    if (deployment) Object.assign(process.env, { HID_DEPLOYMENT_ENV: deployment, CORS_ORIGINS: 'https://staging.healthidentitydirectory.com' });
+    else delete process.env.HID_DEPLOYMENT_ENV;
+    resetEnvironmentForTests();
+    expect(getEnvironment().IMPORTED_HISTORY_SHARING_ENABLED).toBe(true);
+  });
+
   it('accepts the online NIN holder route in production only with the facility route', () => {
     production(); Object.assign(process.env, qoreId, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true',
       NIN_HOLDER_SMS_ENABLED: 'true', ASSISTED_REGISTRATION_ENABLED: 'true' });

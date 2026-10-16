@@ -711,3 +711,36 @@ describe('Patient document download (owner decision 4, D7: documents only with a
     expect(storage.createDownload).not.toHaveBeenCalled();
   });
 });
+
+describe('Imported history never enters either record summary (owner decision 3, ADR-066)', () => {
+  // The release set with every category and the imported history on.
+  const EVERY_RELEASE = ['vitals', 'diagnoses', 'prescriptions', 'labResults', 'documents', 'importedHistory'] as
+    unknown as PatientReleasable[];
+  const touchesImported = (query: jest.Mock) =>
+    (query.mock.calls as unknown as QueryCall[]).some(([sql]) => /imported/i.test(String(sql)));
+
+  it('GET /ehr/me/records keeps exactly its keys and reads no imported table with the imported history released', async () => {
+    const { service, query } = setup({}, EVERY_RELEASE);
+    const summary = await service.self(request) as unknown as Summary;
+    expect(Object.keys(summary)).toEqual(['encounters', 'notes', 'vitals', 'diagnoses', 'prescriptions', 'labRequests',
+      'labResults', 'documents', 'released', 'withheld', 'limits', 'truncated', 'limit']);
+    expect(summary.released).toEqual(['encounters', 'notes', 'vitals', 'diagnoses', 'prescriptions', 'labResults',
+      'documents']);
+    expect(summary.withheld).toEqual(['labRequests']);
+    expect(touchesImported(query)).toBe(false);
+    expect(JSON.stringify(summary)).not.toMatch(/imported/i);
+    // The one binding names the imported history too (its own route reads it), the summary never does.
+    expect(bindings(query)).toEqual([['vitals,diagnoses,prescriptions,labResults,documents,importedHistory']]);
+  });
+
+  it('the emergency (break-glass) summary keeps exactly its keys, audit counts and reads, and no imported table', async () => {
+    const { service, query, operations } = setup({}, EVERY_RELEASE);
+    const summary = await service.emergency('patient-id', emergencyContext) as unknown as Summary;
+    expect(Object.keys(summary)).toEqual(['encounters', 'notes', 'vitals', 'diagnoses', 'prescriptions', 'labRequests',
+      'documents', 'released', 'withheld', 'limits', 'truncated', 'limit']);
+    expect(touchesImported(query)).toBe(false);
+    expect(Object.keys(operations[0]?.details ?? {})).toEqual(['encounterCount', 'noteCount', 'vitalCount',
+      'diagnosisCount', 'prescriptionCount', 'labRequestCount', 'documentCount', 'withheldCategories']);
+    expect(JSON.stringify({ summary, operations })).not.toMatch(/imported/i);
+  });
+});

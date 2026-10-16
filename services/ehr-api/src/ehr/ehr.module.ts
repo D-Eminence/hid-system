@@ -6,6 +6,9 @@ import { LabRequestsModule } from './lab-requests/lab-requests.module';
 import { PrescriptionsModule } from './prescriptions/prescriptions.module';
 import { VitalsModule } from './vitals/vitals.module';
 import { OcrIntegrationModule } from './ocr-integration/ocr-integration.module';
+import { ImportedHistoryController } from './imported-history/imported-history.controller';
+import { StaffImportedHistoryEnabledGuard } from './imported-history/imported-history-enabled.guard';
+import { ImportedHistoryService } from './imported-history/imported-history.service';
 import { PatientRecordsController } from './patient-records/patient-records.controller';
 import { PatientRecordsService } from './patient-records/patient-records.service';
 import { ClinicalInfrastructureModule } from './shared/clinical-infrastructure.module';
@@ -33,9 +36,13 @@ import {
     LabRequestsModule,
     StorageModule,
   ],
-  controllers: [PatientRecordsController, PatientRecordChatController],
+  controllers: [PatientRecordsController, ImportedHistoryController, PatientRecordChatController],
   providers: [
     PatientRecordsService,
+    // Imported legacy medical history (ADR-066): the patient's own read is a
+    // category of the release set below; the staff read has its own switch.
+    ImportedHistoryService,
+    StaffImportedHistoryEnabledGuard,
     PatientRecordChatService,
     // Patient record chat (owner decision 1 of 2026-10-16): off unless
     // RECORD_CHAT_PATIENT_ENABLED; the Claude client is built only then.
@@ -43,7 +50,8 @@ import {
     { provide: RECORD_CHAT_PROCESSOR, inject: [RECORD_CHAT_CONFIG], useFactory: (config: RecordChatConfig) =>
       (config.patientEnabled ? new ClaudeRecordChatClient(enabledRecordChatConfig(config)) : DISABLED_RECORD_CHAT_PROCESSOR) },
     // The patient record release this deployment configures (one flag per
-    // category, default off): the single release set every patient reader uses.
+    // category, the imported history included, default off): the single
+    // release set every patient reader uses.
     { provide: PatientRecordRelease, useFactory: () => new PatientRecordRelease(configuredPatientRelease(getEnvironment())) },
   ],
   exports: [PatientRecordRelease],

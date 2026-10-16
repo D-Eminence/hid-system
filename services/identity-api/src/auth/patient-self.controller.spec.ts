@@ -42,3 +42,74 @@ describe('Patient-self authorization is for the EHR service only (D17)', () => {
     expect(authorize).toHaveBeenCalledWith(request);
   });
 });
+
+// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066):
+// the patient's sharing choice, on the patient-only controller, behind its
+// own switch (off by default), answered before the body is read.
+describe('Patient imported history sharing routes', () => {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { Reflector } = require('@nestjs/core') as typeof import('@nestjs/core');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { plainToInstance } = require('class-transformer') as typeof import('class-transformer');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { validateSync } = require('class-validator') as typeof import('class-validator');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { AUDIT_ACTION, PATIENT_ONLY } = require('../common/decorators') as typeof import('../common/decorators');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { ImportedHistorySharingDto } = require('./dto/imported-history-sharing.dto') as
+    typeof import('./dto/imported-history-sharing.dto');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const { ImportedHistorySharingEnabledGuard } = require('./imported-history-sharing.guard') as
+    typeof import('./imported-history-sharing.guard');
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const environment = require('../config/environment') as typeof import('../config/environment');
+  const reflector = new Reflector();
+  const prototype = PatientSelfController.prototype as unknown as Record<string, object>;
+
+  it('serves both routes on the patient-only controller; only the read is behind the sharing switch', () => {
+    expect(reflector.get(PATIENT_ONLY, PatientSelfController)).toBe(true);
+    expect(Reflect.getMetadata('__guards__', prototype.importedHistorySharing as object))
+      .toEqual([ImportedHistorySharingEnabledGuard]);
+    // Turning sharing off is always allowed (ADR-066): the change route has
+    // no switch guard, and the service refuses only turning it on while the
+    // switch is off.
+    expect(Reflect.getMetadata('__guards__', prototype.setImportedHistorySharing as object)).toBeUndefined();
+    expect(reflector.get(AUDIT_ACTION, prototype.setImportedHistorySharing as () => unknown))
+      .toBe('identity.patient.imported-history-sharing.change.command');
+    expect(Reflect.getMetadata('__httpCode__', prototype.setImportedHistorySharing as object)).toBe(200);
+  });
+
+  it('passes the verified request and the choice to the service', async () => {
+    const self = { importedHistorySharing: jest.fn(async () => ({ shared: false, updatedAt: null })),
+      setImportedHistorySharing: jest.fn(async () => ({ shared: true, changed: true, updatedAt: null })) };
+    const controller = new PatientSelfController(self as unknown as PatientSelfService, {} as WorkloadAuthService);
+    const request = { correlationId: 'sharing-controller-test' } as unknown as HidRequest;
+    await controller.importedHistorySharing(request);
+    await controller.setImportedHistorySharing(request, { shared: true });
+    expect(self.importedHistorySharing).toHaveBeenCalledWith(request);
+    expect(self.setImportedHistorySharing).toHaveBeenCalledWith(request, true);
+  });
+
+  it.each([
+    [{ shared: true }, true], [{ shared: false }, true], [{}, false], [{ shared: 'true' }, false], [{ shared: 1 }, false],
+    [{ shared: null }, false],
+  ])('validates the body %j: %s', (body, valid) => {
+    const errors = validateSync(plainToInstance(ImportedHistorySharingDto, body));
+    expect(errors.length === 0).toBe(valid);
+  });
+
+  describe('ImportedHistorySharingEnabledGuard', () => {
+    afterEach(() => { jest.restoreAllMocks(); });
+    it('answers 503 IMPORTED_HISTORY_SHARING_DISABLED while the switch is off', () => {
+      jest.spyOn(environment, 'getEnvironment').mockReturnValue(
+        { IMPORTED_HISTORY_SHARING_ENABLED: false } as ReturnType<typeof environment.getEnvironment>);
+      expect(() => new ImportedHistorySharingEnabledGuard().canActivate())
+        .toThrow(expect.objectContaining({ status: 503, code: 'IMPORTED_HISTORY_SHARING_DISABLED' }));
+    });
+    it('lets the request through when the switch is on', () => {
+      jest.spyOn(environment, 'getEnvironment').mockReturnValue(
+        { IMPORTED_HISTORY_SHARING_ENABLED: true } as ReturnType<typeof environment.getEnvironment>);
+      expect(new ImportedHistorySharingEnabledGuard().canActivate()).toBe(true);
+    });
+  });
+});

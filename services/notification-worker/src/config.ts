@@ -4,9 +4,14 @@ const empty = (value: unknown) => typeof value === 'string' && !value.trim() ? u
 const optional = z.preprocess(empty, z.string().trim().min(1).optional());
 const optionalUrl = z.preprocess(empty, z.string().url().optional());
 const bool = z.enum(['true', 'false']).default('false').transform((value) => value === 'true');
+// The two Novu regions the staging stack allows (StagingNovuApiUrl).
+const APPROVED_NOVU_ORIGINS = ['https://api.novu.co', 'https://eu.api.novu.co'];
 
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+  // The deployment, as notification-api reads it. It defaults to production so
+  // a task that does not say where it runs is refused what production refuses.
+  HID_DEPLOYMENT_ENV: z.enum(['development', 'staging', 'production']).default('production'),
   NODE_TLS_REJECT_UNAUTHORIZED: optional,
   NOTIFICATION_WORKER_ENABLED: bool,
   NOTIFICATION_WORKER_ID: z.string().trim().min(3).max(128)
@@ -27,6 +32,13 @@ const schema = z.object({
   NOVU_MODE: z.enum(['disabled', 'test', 'live']).default('disabled'),
   NOVU_API_URL: z.string().url().default('https://api.novu.co'),
   NOVU_API_KEY: optional,
+  // ADR-064 (0095): `email` gives Novu the patient's verified login email
+  // before the trigger, through the claim-bound recipient lookup, and clears
+  // it when the patient may not be emailed. `disabled` (the default) is main's
+  // worker exactly. Refused for a production deployment until the release
+  // checklist's approvals are recorded and this refusal is lifted by a
+  // reviewed change.
+  NOVU_SUBSCRIBER_SYNC: z.enum(['disabled', 'email']).default('disabled'),
   FCM_PROJECT_ID: optional,
   FCM_API_URL: z.string().url().default('https://fcm.googleapis.com'),
 }).superRefine((value, context) => {
@@ -37,6 +49,21 @@ const schema = z.object({
   }
   if (value.NOVU_MODE === 'test' && value.NODE_ENV !== 'test') {
     context.addIssue({ code: 'custom', path: ['NOVU_MODE'], message: 'Deterministic Novu mode is test-only' });
+  }
+  if (value.NOVU_SUBSCRIBER_SYNC === 'email') {
+    if (value.HID_DEPLOYMENT_ENV === 'production'
+        || (value.NODE_ENV === 'production' && value.HID_DEPLOYMENT_ENV !== 'staging')) {
+      context.addIssue({ code: 'custom', path: ['NOVU_SUBSCRIBER_SYNC'],
+        message: 'Novu subscriber email sync is not approved in production (ADR-064)' });
+    }
+    if (value.NOVU_MODE !== 'live' && !(value.NOVU_MODE === 'test' && value.NODE_ENV === 'test')) {
+      context.addIssue({ code: 'custom', path: ['NOVU_SUBSCRIBER_SYNC'],
+        message: 'Novu subscriber email sync needs the live Novu orchestrator' });
+    }
+    if (value.NODE_ENV === 'production' && !APPROVED_NOVU_ORIGINS.includes(new URL(value.NOVU_API_URL).origin)) {
+      context.addIssue({ code: 'custom', path: ['NOVU_API_URL'],
+        message: 'Novu subscriber email sync sends the email only to an approved Novu region origin' });
+    }
   }
   if (Boolean(value.AWS_ACCESS_KEY_ID) !== Boolean(value.AWS_SECRET_ACCESS_KEY)) {
     context.addIssue({ code: 'custom', path: ['AWS_ACCESS_KEY_ID'], message: 'AWS static credentials must be supplied together' });

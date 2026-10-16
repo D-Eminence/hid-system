@@ -326,6 +326,16 @@ if (!notificationWorkerEnabled) {
     'the notification worker is off: no notification queue alarms')
   assert.doesNotMatch(text, /:novuApiKey::/, 'a disabled notification worker reads nothing from the provider secret')
 }
+// ADR-064: the worker gives Novu the verified login email only when staging
+// opts in with HID_NOVU_SUBSCRIBER_SYNC_ENABLED; every other synth keeps it off.
+const notificationWorkerTask = taskContainer('notification-worker')
+if (notificationWorkerTask) {
+  const workerEnvironment = Object.fromEntries((notificationWorkerTask.Environment ?? []).map(entry => [entry.Name, entry.Value]))
+  assert.equal(workerEnvironment.NOVU_SUBSCRIBER_SYNC,
+    environment === 'staging' && process.env.HID_NOVU_SUBSCRIBER_SYNC_ENABLED === 'true' ? 'email' : 'disabled',
+    'the notification worker syncs subscriber emails only where staging opted in')
+  assert.equal(workerEnvironment.HID_DEPLOYMENT_ENV, environment)
+}
 
 // D4 (ADR-053): in production, and wherever HID_OPERATIONAL_ALARM_TOPIC_ARN is
 // supplied, every alarm notifies the environment's own operator-created
@@ -415,7 +425,7 @@ if (environment === 'production') {
 // category flags are the explicit synth inputs, false by default, and only
 // staging may set one. Production releases no Lab result while Lab is off at
 // launch (D17) and no other category until the clinical owner signs it off
-// (P35); the development stack's ehr-api runs in the production profile.
+// (P36); the development stack's ehr-api runs in the production profile.
 const ehrApis = resources('AWS::ECS::TaskDefinition')
   .filter(task => String(task.Properties.Family).endsWith('-ehr-api'))
   .flatMap(task => task.Properties.ContainerDefinitions).filter(container => container.Name === 'ehr-api')
@@ -431,10 +441,32 @@ if (environment !== 'staging') {
   for (const flag of ['EHR_PATIENT_RELEASE_VITALS', 'EHR_PATIENT_RELEASE_DIAGNOSES', 'EHR_PATIENT_RELEASE_PRESCRIPTIONS',
     'EHR_PATIENT_RELEASE_LAB_RESULTS', 'EHR_PATIENT_RELEASE_DOCUMENTS']) {
     assert.equal(ehrApis[0].Environment.find(entry => entry.Name === flag)?.Value, 'false',
-      `${environment} ehr-api must not release ${flag} to patients outside staging (D17, P35)`)
+      `${environment} ehr-api must not release ${flag} to patients outside staging (D17, P36)`)
   }
 }
 
+// Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-066):
+// the patient read and the staff read in ehr-api and the patient's sharing
+// choice in identity-api are explicit synth inputs, false by default, and only
+// staging may set one until the P37 sign-off.
+// identityApis is the identity-api container list declared above.
+const importedHistory = {}
+for (const [containers, flag, input] of [[ehrApis, 'EHR_PATIENT_RELEASE_IMPORTED_HISTORY', 'HID_EHR_PATIENT_RELEASE_IMPORTED_HISTORY'],
+  [ehrApis, 'EHR_STAFF_IMPORTED_HISTORY_ENABLED', 'HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED'],
+  [identityApis, 'IMPORTED_HISTORY_SHARING_ENABLED', 'HID_IMPORTED_HISTORY_SHARING_ENABLED']]) {
+  const value = containers[0].Environment.find(entry => entry.Name === flag)?.Value
+  assert.equal(value, process.env[input] ?? 'false', flag)
+  if (environment !== 'staging') {
+    assert.equal(value, 'false', `${environment} must not set ${flag} outside staging (P37, ADR-066)`)
+  }
+  importedHistory[flag] = value === 'true'
+}
+// Staff read only while patients can choose and withdraw, and sharing only
+// of what the patient can see: on patient read first, off staff read first.
+assert.ok(!importedHistory.EHR_STAFF_IMPORTED_HISTORY_ENABLED || importedHistory.IMPORTED_HISTORY_SHARING_ENABLED,
+  'EHR_STAFF_IMPORTED_HISTORY_ENABLED needs IMPORTED_HISTORY_SHARING_ENABLED (ADR-066)')
+assert.ok(!importedHistory.IMPORTED_HISTORY_SHARING_ENABLED || importedHistory.EHR_PATIENT_RELEASE_IMPORTED_HISTORY,
+  'IMPORTED_HISTORY_SHARING_ENABLED needs EHR_PATIENT_RELEASE_IMPORTED_HISTORY (ADR-066)')
 // Patient record chat (owner decision 1 of 2026-10-16): off unless HID_RECORD_CHAT_PATIENT_ENABLED
 // is true. Off, ehr-api receives the false flag and nothing else of record
 // chat, and no task reads the record chat secret. No task receives an

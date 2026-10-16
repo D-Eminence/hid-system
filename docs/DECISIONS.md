@@ -3835,8 +3835,9 @@ Decision:
    `API_ORIGIN_CLIENT_RATE_LIMIT` (and `API_ORIGIN_EDGE_RATE_LIMIT`), which are
    code constants.
 8. **Gateway runtime check in CI.** `scripts/verify-gateway-runtime.mjs
-   --pinned-image` runs the shipped configuration under the nginx of the image
-   `gateway/Dockerfile` pins by digest; it is the `gateway-runtime` step of
+   --built-image` builds `gateway/Dockerfile` (no push) and runs the shipped
+   configuration under the nginx of that image, which is the base the
+   Dockerfile pins by digest plus its own layers (RF-008); it is the `gateway-runtime` step of
    `release/scripts/run-workspace-gates.mjs`, which the required workspace
    job of `tuf-local-gates.yml` runs, so the pass-through, body bound, header
    strips and both logs are checked against real nginx on every change, not
@@ -4087,6 +4088,9 @@ Decision:
 - The patient is told in the app when their PIN is used: an inbox item per
   new PIN grant, written in the PIN transaction, without the notification
   worker. SMS and email notices wait for an approved notification channel.
+  (Amended by ADR-064: email through Novu is approved, behind
+  `NOVU_SUBSCRIBER_SYNC`, off by default and refused in production; the
+  inbox item is unchanged.)
 - Pending access requests do not yet lapse (ACCESS-REQ-STALE): deferred.
   A lapse needs request creation (0086), which reuses a pending request, the
   approval command and both lists to change together, beyond this change's
@@ -4353,9 +4357,9 @@ Consequences:
 - iOS delivers web push only to Home-Screen web apps, which need a manifest
   that ADR-052 also forbids; this is a separate choice.
 - The FCM adapter stays for a future native app.
-- Draft D-Eminence/hid-system#8 (Novu subscriber sync) does not touch devices
-  or push; the migration takes the next free number on `main` when the work
-  starts.
+- The Novu subscriber sync of draft D-Eminence/hid-system#8 is ported as
+  ADR-064 (migration 0095, D-Eminence/hid-system#90); it does not touch devices or
+  push.
 
 Open for the owner: approve web push as a patient channel; the ADR-052
 amendment; iOS; DPO review of subscription data (an endpoint identifies a
@@ -4758,9 +4762,220 @@ Related: ADR-062; ADR-054 (staff MFA); ADR-049 (workforce provisioning);
 "Facility-assisted registration"; `DATABASE.md`, "Facility-assisted
 registration (0094)".
 
-# ADR-064: Patient record release
+# ADR-064: Novu receives the patient's verified login email, behind a flag; the in-app notice never depends on it
 
-Status: Accepted in source (migration 0095). Not merged, not deployed. Every
+Status: Merged (D-Eminence/hid-system#90, migration 0095), not deployed.
+`NOVU_SUBSCRIBER_SYNC` is off by default and refused in production. Its
+numbers 0095, ADR-064, P35 and S4w are final.
+
+Date: 2026-10-16
+
+Context:
+
+- Main's notification worker triggers Novu by `subscriberId` (the canonical
+  patient UUID) with a generic sign-in message and gives Novu no contact.
+  An email reaches a patient only if someone maps the subscriber's email by
+  hand (`STAGING_PROVIDER_ACCOUNTS.md`).
+- Owner decision 2 of 2026-10-16: Novu may receive the patient's verified
+  email.
+- The draft D-Eminence/hid-system#8 did this on an old base. It sent names,
+  read `identity.patients` and `auth.accounts` from the worker's pool, made
+  every phone-only patient's event terminal, and suppressed every event,
+  safety notices included, for an opted-out patient. None of that is ported.
+- Main's worker login holds no Identity or Auth table privilege, and is no
+  member of the event-delivery technical owner (`runtime-roles.integration.sql`).
+- A review of the first design found two failure modes this ADR closes: a
+  failed subscriber call could make in-app safety notices terminal, and an
+  opt-out did not hold once an email had been synced.
+- A review of the second design found three more, also closed below: the
+  lookup emailed suspended logins and logins whose deletion was due; a
+  retried event's clear could be answered from Novu's idempotency replay
+  cache without being applied; and an upsert could reach Novu after a later
+  event's clear when the login was deleted or disabled in between.
+
+Decision:
+
+- Flag. The worker setting `NOVU_SUBSCRIBER_SYNC=disabled|email`, default
+  `disabled`. With `disabled` the worker is main's exactly: no lookup, no
+  subscriber call, main's trigger body and idempotency key, no new output.
+  `email` is refused for a production deployment (`HID_DEPLOYMENT_ENV`,
+  new in the worker and defaulting to `production`, or `NODE_ENV=production`
+  without `HID_DEPLOYMENT_ENV=staging`), as notification-api refuses
+  `EMERGENCY_CONTACT_DELIVERY_ENABLED`. It needs the live orchestrator, and
+  under `NODE_ENV=production` an approved Novu region origin
+  (`https://api.novu.co` or `https://eu.api.novu.co`). The synth input
+  `HID_NOVU_SUBSCRIBER_SYNC_ENABLED` (default `false`) may be `true` only in
+  staging, with the worker enabled.
+- Data. Novu receives the `subscriberId` it already receives and, for an
+  eligible patient, the verified login email (`auth.accounts.email`). No
+  name, phone, NIN, clinical value or reason. The trigger payload is
+  unchanged.
+- Lookup (0095). `integration.notification_recipient_for_claim(event,
+  claim token, patient)` checks the inbox consumer as main's inbox commands
+  do (`integration.assert_inbox_consumer_authorized`), requires the
+  consumer row bound to `hid_notification_worker`, the worker's live claim
+  (55000 otherwise) and an outbox envelope that matches the claim
+  (producer, type, version, correlation, a workflow event type and the
+  patient). It belongs to `hid_event_delivery_commands`, moved in main's
+  CREATE window, and only the worker executes it. It reads the patient and
+  login through the private helper `integration.notification_recipient_state`,
+  owned by the migration administrator (the owner of the three tables it
+  reads, `identity.patients`, `auth.accounts` and
+  `identity.patient_account_deletion_requests`, which needs no BYPASSRLS
+  because none of them forces row-level security) and executable only by
+  the technical owner. The answer is
+  `('email', address)` or `('withhold', null)`; no row when the claim binds
+  no envelope.
+- Eligible for email: an active patient with notifications on, whose login
+  is usable as main's `identity.current_patient_account` defines it (0064:
+  status active, no suspension ahead in `disabled_until`, no confirmed
+  deletion whose `scheduled_for` has passed) and has a verified, non-blank
+  email. Everyone else is withheld: a phone-only login, an unverified or
+  blank email, no login, a login that is pending_reset, locked, disabled,
+  deleted, suspended or due for deletion, a patient who is not active,
+  notifications off. A deletion confirmed but not yet due keeps the email,
+  as the login itself stays usable until then.
+- Keys. Novu answers a seen idempotency key from its cache for 24 hours,
+  success or error, without processing the request again. So both
+  subscriber keys include the attempt's inbox claim token (unique per
+  attempt, hashed, never sent): a retried event clears or sets the email
+  again instead of receiving the first attempt's cached answer. Setting or
+  clearing an email is idempotent, so nothing is lost. Main's trigger key
+  (the event id) and the email-withheld trigger key stay per event: they
+  dedupe the in-app notice.
+- Eligible: `POST /v2/subscribers` (Novu upserts) with exactly
+  `{subscriberId, email}` and the idempotency key
+  sha256("hid-novu-subscriber-email-v1", event id, claim token,
+  sha256(email)). Then the worker asks the lookup again under the same
+  claim. If it answers the same address, main's trigger follows, whatever
+  the sync answered. Otherwise (withheld, another address or a failed
+  lookup) the event is handled as withheld below, so an upsert that reached
+  Novu after a concurrent event's clear (the login deleted, disabled,
+  locked or reset in between) is cleared again before this trigger. A claim
+  lost at the second lookup clears the email and stops.
+- Withheld: `PATCH /v2/subscribers/{subscriberId}` with `{"email": null}`
+  (the field is nullable; 404 means Novu has no such subscriber, so no
+  email) and the key sha256("hid-novu-subscriber-email-clear-v1", event id,
+  claim token), then main's trigger once the clear is confirmed. When it is not
+  confirmed (timeout, 408, 409, 429, 5xx or a refusal), the worker sends
+  instead the trigger that clears the email itself: main's workflow and
+  message to `{subscriberId, email: null}` under its own key
+  (`hid-novu-trigger-email-withheld-v1`). Novu's trigger creates or
+  updates the subscriber it names (the `to` fields are nullable), so the
+  email is cleared by the same request that sends the in-app notice; S4w
+  confirms on staging that the update comes before the Email step.
+- The in-app notice never depends on a subscriber call. No subscriber
+  answer decides whether a trigger is sent, delays it or fails the event:
+  the inbox outcome is the trigger's own outcome, handled as main handles
+  it (accepted completes; unknown retries; a definitive failure is
+  terminal). Safety notices (`EmergencyAccessActivated`,
+  `PatientAccessPinVerified`) go in-app for every patient.
+- A recipient lookup that fails is handled as withheld (clear, then the
+  trigger), so it neither retries the event nor emails. A claim lost to
+  another worker (55000) stops without failing or acknowledging the message.
+- Startup: with the flag on, the worker refuses to start unless the lookup
+  exists and its login may execute it, after main's runtime-role guard.
+- Records: each subscriber call writes one PHI-free row per attempt in
+  `notification.delivery_attempts` (`novu-subscriber-email-v1` or
+  `novu-subscriber-email-clear-v1`, channel `email`, outcome and fixed safe
+  code, no address and nothing derived from it); a row that cannot be
+  written never holds back the trigger. Each flag-on event attempt writes one
+  `notification.worker.outcome` stdout line with the event type, the
+  correlation id (only in the outbox's own shape, otherwise `invalid`) and
+  fixed codes only.
+
+Proposed defaults (owner questions answered with the safest choice):
+
+- Safety notices to an opted-out patient: in-app only, no email. Emailing
+  them would need a per-workflow rule that the shared `patient-update-v1`
+  workflow cannot express.
+- Deleted logins and patients who are not active keep main's in-app
+  trigger: no new suppression. Their Novu email is cleared before it.
+  Suppressing the trigger itself stays the F4 decision
+  (`PHASE_3_PATIENT_SAFETY.md`).
+- The Novu subscriber is not deleted when a login is deleted. That needs an
+  event from the account deletion and a Novu delete call; it is a follow-up,
+  not built, and it is required before the production refusal is lifted
+  (staging uses synthetic patients only, S4w). Until then, while
+  `NOVU_SUBSCRIBER_SYNC=email` stays on, the next event for a deleted login
+  clears its email at Novu, and a request to erase it is handled in the
+  Novu dashboard.
+- Suspended logins and logins whose deletion is due are withheld as main
+  withholds them from sign-in; no new state is added for them.
+- A claim lost after a sync: the worker clears the email it may have set and
+  stops. The worker that now holds the event decides for itself, so an
+  eligible patient misses at most this attempt's email.
+- Turning the flag off or rolling the worker back is a reviewed operation:
+  every subscriber with a `novu-subscriber-email-v1` disclosure row has its
+  email cleared or the subscriber deleted at Novu first (release checklist
+  §9).
+- A failed sync skips the email for that event only. Novu then emails at
+  most the address an earlier sync of the same account stored: no route on
+  main changes a login's email, so that is the same verified address.
+- Phone-only patients get main's in-app trigger and one clear call per
+  event, which keeps the opt-out true even after a manual staging mapping.
+- The disclosure rows are kept (an auditable record that an address was
+  given to Novu for an event), with the log line.
+- The helper stays with the migration administrator and only the technical
+  owner executes it; a dedicated NOLOGIN reader is the fallback if
+  `identity.patients` ever forces row-level security (the owner pass of the
+  new suite would fail first).
+- Production refuses the flag unconditionally. Lifting it is a reviewed
+  change after P35 and the subscriber deletion follow-up, not a setting.
+
+Consequences:
+
+- With the flag off the worker runs main's code path: no lookup, no
+  subscriber call, main's trigger. 0095 only adds two functions and their
+  grants. That is main's behaviour only if the flag was never on: emails it
+  synced stay on the Novu subscribers, and main's trigger can then email
+  them, opted-out and deleted patients included. Release checklist §9 clears
+  them before the flag is turned off.
+- With the flag on in staging, a verified-email patient's notice can arrive
+  by email as well as in-app, once the staging workflow has an Email step
+  (S4w); phone-only patients see no change.
+- Every flag-on event makes one extra Novu call (sync or clear), two when a
+  second lookup after a sync withdraws it (sync, then clear), and one extra
+  lookup after every sync.
+- Health-id needs no API change. Before the flag is set where Health-id
+  serves real patients, its privacy notice must name the processor and the
+  data, and the account deletion screen must say that email updates stop and
+  that the provider may keep the address until it is removed on request.
+
+Residual risks:
+
+- Novu semantics are taken from its API reference, not from a call: the
+  upsert, the nullable email on PATCH and on the trigger's `to`, and the
+  order of the trigger's subscriber update before the Email step. S4w
+  confirms them on staging before the flag is set anywhere.
+- Concurrency. Main routes change eligibility while events are in flight:
+  account deletion (0064, at `scheduled_for` and at finalization), and the
+  administrator's disable, lock and reset (0068), besides an imported
+  `notifications_enabled`. The second lookup after a sync closes the window
+  for every upsert Novu applies before answering. It stays open for an
+  upsert whose answer never arrives (timeout) and that Novu applies only
+  after this worker's second lookup and a later event's clear: the address
+  then stays at Novu, unused by HID triggers while the flag stays on (every
+  later event for that patient clears first), until the deletion follow-up
+  or a manual deletion.
+- Retries reuse nothing at Novu for subscriber calls (per-attempt keys).
+  Main's trigger key is the event id, as on main: a retried trigger whose
+  first attempt Novu processed is answered from the cache and sends no
+  second notice.
+- Flag off after on: see Consequences; the §9 step is manual.
+- The key protects personal data now: Novu's API key has full
+  administrative access to the subscribers.
+- The region (US or EU), the data processing agreement and the NDPA
+  transfer basis are not decided; P35 needs them before any non-local use.
+
+Related: ADR-053 and D17 (the worker is off in production); ADR-058
+(NOTIF-PIN-NOTICE); ADR-060; `PHASE_3_LAUNCH_DECISIONS.md` NOTIF-PIN-NOTICE;
+`INTERFACE_CONTRACT.md`, "Notification worker to Novu"; `DATABASE.md`,
+"Notification verified recipient (0095)"; release checklist P35 and S4w.
+
+# ADR-065: Patient record release
+
+Status: Accepted in source (migration 0096). Not merged, not deployed. Every
 release flag is off, and the production profile refuses each of them.
 
 Date: 2026-10-16
@@ -4796,13 +5011,13 @@ Decision:
   every one of them, as `HID_NOTIFICATION_WORKER_ENABLED` is fixed false in
   production: Lab results while Lab is off at launch (D17), and the other
   four until the clinical owner signs off each category and its wording
-  (release checklist P35), since no clinician-review gate or sensitivity
+  (release checklist P36), since no clinician-review gate or sensitivity
   classification is built. `infra/aws` (`environmentConfig` and the regional
   stack) and `verify-synth` refuse every input outside staging; the AWS
   development stack runs ehr-api in the production profile
   (`HID_DEPLOYMENT_ENV=production`), so it opts in to nothing. Staging and a
   local run with `HID_DEPLOYMENT_ENV=development` may opt in. A reviewed
-  change that records a category's P35 sign-off lifts that category's
+  change that records a category's P36 sign-off lifts that category's
   refusal. EHR also refuses documents without S3 storage.
 - D7's rules, as adopted by the owner: only items of a completed encounter;
   never a draft, an unconfirmed or refuted diagnosis or anything entered in
@@ -4812,7 +5027,7 @@ Decision:
   (below), not part of D7.
 - D8 interim: a corrected vital is withheld from the patient (shown to
   clinicians as today) until D8 decides what a correction means.
-- The database follows the flags. 0095 adds five PUBLIC patient-release
+- The database follows the flags. 0096 adds five PUBLIC patient-release
   policies (vitals, diagnoses, prescriptions, documents and their scan
   events) and the Lab view below, each gated by
   `ehr.patient_self_context(patient_id)` and by its category in the
@@ -4880,7 +5095,7 @@ Proposed defaults (open owner questions; the safest default is built):
 
 - Every release flag stays off in production, and the production profile
   refuses it, until the clinical owner signs off that category and its
-  wording (release checklist P35). No delay or clinician-review gate and no
+  wording (release checklist P36). No delay or clinician-review gate and no
   sensitivity classification is built. Lab results are refused in production
   until Lab is re-enabled as well.
 - Corrected vitals are withheld while D8 is open.
@@ -4905,34 +5120,34 @@ Proposed defaults (open owner questions; the safest default is built):
 - The migration, ADR and checklist numbers are assigned at merge.
 - The EHR task role's `s3:GetObject`, `s3:GetObjectVersion` and `kms:Decrypt`
   via S3 cover `HeadObject` with checksum mode on SSE-KMS objects; staging
-  check S4w confirms it before documents are released.
+  check S4x confirms it before documents are released.
 
 Consequences:
 
 - With every flag off nothing changes for patients, staff or Health-id, and
-  the database refuses the new categories to the patient as before 0095.
-- A deployment can release each category on its own, once its P35 sign-off
+  the database refuses the new categories to the patient as before 0096.
+- A deployment can release each category on its own, once its P36 sign-off
   lifts its production refusal. The database admits at most the rows the
-  0095 rules allow for the categories the transaction names; a wrong
+  0096 rules allow for the categories the transaction names; a wrong
   `SELECT` list in EHR could still return a column of a released row that
   the service means to withhold (rows, not columns).
-- The role bootstrap must run after 0095: until it does, a configured Lab
+- The role bootstrap must run after 0096: until it does, a configured Lab
   results section answers `503 PATIENT_RECORDS_UNAVAILABLE` and discloses
   nothing.
-- Rolling the EHR API back to any earlier build on a database with 0095
+- Rolling the EHR API back to any earlier build on a database with 0096
   releases nothing new: no earlier build sets `app.patient_release`.
 - Health-id renders none of the new sections or the download; the flags stay
-  off until it does (P35).
+  off until it does (P36).
 
 Residual risks:
 
 - A released abnormal result or a sensitive diagnosis reaches the patient
-  without a clinician's explanation (no review gate; P35 sign-off).
+  without a clinician's explanation (no review gate; P36 sign-off).
 - A withdrawn item vanishes silently; a patient who saw it is not told why.
 - A staging database built from the PR #8 branch may hold its permissive
   patient-self policies, which would widen the release whatever
   `app.patient_release` says; the SQL suite's exact policy inventory fails on
-  them (P35 preflight).
+  them (P36 preflight).
 - The view's owner reads Lab's release tables unfiltered; it is safe only
   while it has no login, no member and no other privilege, which
   `runtime-roles.integration.sql` asserts.
@@ -4943,7 +5158,218 @@ Residual risks:
 
 Related: ADR-018; ADR-058 (PSELF-RLS); `PHASE_3_LAUNCH_DECISIONS.md` D7, D8
 and D17; `INTERFACE_CONTRACT.md`, "Record summaries" and "Patient document
-download"; `DATABASE.md`, "Patient record release (0095)".
+download"; `DATABASE.md`, "Patient record release (0096)".
+
+# ADR-066: Imported legacy medical history
+
+Status: Accepted in source (migration 0097). Not merged, not deployed. Every
+switch is off, and the production profile refuses each of them. Nothing has
+been imported anywhere: the import command runs only when an operator runs
+it, and only after the sign-off below.
+
+Date: 2026-10-16
+
+Context:
+
+- On 2026-10-16 the owner approved decision 3: "patients and staff see
+  imported legacy records". That this covers every version of each record
+  and the metadata of the files attached to them, and nothing else, is this
+  change's reading of the decision, not part of it.
+- The PR #8 branch imported it with its own 0061/0062: any consent at any
+  facility disclosed the patient's whole imported history, and the schema
+  owner had a bypass policy. Main's security model (forced row-level
+  security, the 0091 patient-self binding, ClinicalRepository's fresh
+  Identity authorization and audit, NOLOGIN technical owners for every
+  definer, flags off by default) is the one this port follows.
+- The legacy history has no facility or encounter of main's model: a legacy
+  record names the patient and its author, not where it was written. A
+  facility-bound consent cannot narrow it.
+- The branch documents say that real September customer data (123 reconciled
+  patients, 16 patient-authored and 1 provider-authored medical record,
+  files, notifications and configuration) is on staging or was authorized
+  for import there. It is real patient data under staging controls.
+
+Decision:
+
+- Three append-only tables, `ehr.imported_medical_records`, their versions
+  and their files, keep the legacy row as staged (its sealed checksum, its
+  author's account, whether the patient or a clinician wrote it, and its
+  sealed staging run). Nothing is turned into encounters, notes, signatures
+  or allergies; imported history is never a section of either record
+  summary.
+- The patient reads their own imported history through main's patient-self
+  path (`GET /api/v1/ehr/me/imported-history`): Identity's patient-self
+  authorization and `PatientRecordRelease`, whose release set gains the
+  category `importedHistory` behind its own flag
+  `EHR_PATIENT_RELEASE_IMPORTED_HISTORY`. The database admits an imported row
+  to the patient only in a transaction whose release set names it. The
+  patient needs no sharing choice to see their own history.
+- Staff read it (`GET /api/v1/ehr/patients/:patientId/imported-history`,
+  switch `EHR_STAFF_IMPORTED_HISTORY_ENABLED`) only when all of these hold:
+  the purpose is direct care, Identity authorizes an active standard consent
+  at the selected facility (ClinicalRepository, with its audit and refusal
+  record), the membership holds the new permission
+  `ehr.imported-history.read` (doctor, clinician, nurse), and the patient has
+  chosen to share their imported history (`identity.imported_history_sharing`,
+  off until they turn it on). The database repeats every condition in
+  `ehr.imported_history_staff_read_allowed`. The staff policies ask it once
+  per statement, for the one patient the staff transaction names
+  (`ehr.imported_history_staff_patient()`, a sub-SELECT PostgreSQL evaluates
+  once rather than per row): the name is only the request, and a staff
+  transaction reads no other patient's rows. When all hold the whole
+  imported history is disclosed as one unit ("portability"): it has no
+  facility a consent could narrow it to.
+- Break-glass never discloses imported history. The staff route takes only
+  `direct-care` (break-glass grants count only for `emergency`, D9), the
+  database decision requires `direct-care`, ClinicalRepository refuses a
+  break-glass authorization for this read (`403 BREAK_GLASS_EXCLUDED`), and
+  the emergency summary is unchanged.
+- The patient's sharing choice is two session-bound commands in Identity
+  (`GET` and `POST /api/v1/identity/me/imported-history-sharing`, switch
+  `IMPORTED_HISTORY_SHARING_ENABLED`). Each change is recorded with its
+  session and correlation id in an append-only change log; each read and
+  each change request is audited. Turning sharing on needs the switch, a
+  recent sign-in and no recent account recovery, as an Access PIN does.
+  Turning it off is always allowed, also while the switch is off: the stored
+  choice is what the database's staff decision reads, whatever the switches
+  say, so a patient must always be able to withdraw it.
+- Import only from main's sealed staging pipeline. The parent run is main's
+  legacy identity run, staged, promoted and reconciled to `verified`
+  (`stage-legacy-identity.mjs`, `promote-legacy-identity.mjs`,
+  `reconcile-legacy-identity.mjs`). `stage-legacy-identity.mjs
+  --scope=imported-history` seals the history of the same source snapshot in
+  its own run of source system `legacy_imported_history`, which main's
+  promoter refuses and main's crosswalk gate does not count: a staged
+  `legacy_identity` run closes public patient enrollment (0057), and a history
+  run stays staged. Two 0097 triggers give these runs the seal 0033 gives
+  `legacy_identity` runs. `import-legacy-history.mjs` checks both runs and
+  every row against its seal and the parent's identity rows and calls
+  `ehr.import_legacy_medical_history`, which repeats every check of the runs
+  and of each row's content and bindings (not the stager's checksums, which
+  the importer recomputes; the command takes only rows equal to the sealed
+  rows), takes only ISO 8601 timestamps with an offset, inserts once, refuses
+  a stored row that differs and records a receipt run. Its time grows
+  linearly with the rows (50,000 synthetic rows in 11.7 s on a local
+  cluster). Both CLIs refuse production and run only on staging or an owned
+  rehearsal; that refusal is the operator-declared `HID_DEPLOYMENT_ENV`, not
+  something the database enforces. Tests and rehearsals use synthetic
+  fixtures only.
+- Portability on RDS. Each definer is owned by a NOLOGIN technical owner
+  (`hid_imported_history_commands`, `hid_imported_history_importer`) holding
+  exactly what its body reads and writes, so nothing relies on an owner
+  bypassing row-level security; every suite but `schema.integration.sql`
+  (as on main) passes with every other object owned by a `NOSUPERUSER
+  NOBYPASSRLS` role, and the import passes as a `NOSUPERUSER NOBYPASSRLS
+  CREATEROLE` administrator. No technical owner keeps an EXECUTE entry on
+  its own function, so a first role bootstrap and a rerun leave the same
+  ACL. The import runs as `hid_migration_admin` through a SET-only
+  membership taken and given up in its own transaction.
+- 0097 refuses a database that still holds the branch's 0061/0062 objects,
+  and changes nothing in it. What happens to such a staging database is a
+  proposed default below.
+
+Real customer data on staging (recorded, not resolved): the September
+customer data is said to be on staging. Nothing in this change imports,
+reads or moves it, and no tooling here touches staging. Importing any real
+legacy data, on staging or in production, needs the DPO's and the owner's
+written sign-off of its provenance, lawful basis, scope and retention first
+(release checklist P37); whether staging may keep the data it already holds
+is the DPO's decision.
+
+Proposed defaults (open owner questions; the safest default is built):
+
+- Staff see a patient's imported history only after the patient shares it,
+  on top of a standard consent at the selected facility. The alternatives
+  (any consent discloses it, as on the branch; or a per-facility share) are
+  not built; changing this is a reviewed migration of the staff decision,
+  not a setting.
+- Imported history is disclosed for direct care only, never under
+  break-glass or for healthcare operations.
+- Every switch is off and refused in production until the DPO and the owner
+  sign off the legacy data and Health-id renders the history (P37). Staging
+  sets a switch only after P37 (1), the written sign-off for staging, is
+  attached, and with synthetic data only.
+- The switches go on in order and off in reverse: the patient's read, then
+  the sharing choice, then the staff read (the synth refuses sharing without
+  the patient's read, and the staff read without sharing). Stored sharing
+  choices persist when the switches are off; a patient can always withdraw.
+- The import is refused in production and needs the P37 sign-off on staging
+  before any real legacy data is imported.
+- A staging database that ran the PR #8 branch's 0061/0062 (0097 refuses it)
+  is rebuilt from main only after a snapshot and a read-only inventory of
+  what it holds, only after the DPO decides what staging may keep, and only
+  with the owner's and the DPO's written approval of the rebuild (P37).
+- The import runs as one all-or-nothing statement. The branch documents name
+  17 legacy records; the command was measured linear to 50,000 synthetic rows
+  (11.7 s), so the CLI's 300 s statement timeout is reached at roughly 1.2
+  million rows. If the dry run of a real history counts more than 250,000
+  rows, it is not applied: batching by record range is designed and reviewed
+  first.
+- Files show their metadata only, with `accessStatus:
+  pending-safety-verification`: no attachment, scan evidence or download is
+  built (PR 4 of the integration plan), and no health profile
+  (`healthProfile: null`).
+- Legacy content is shown as the legacy system held it, labelled
+  `patient-provided` or `provider-authored` with `provenance:
+  legacy-import`; Health-id must render it as text. Legacy free text that
+  mentions an allergy is not a structured allergy record (ALLERGY-1).
+- A deleted login's imported history is never shown to staff.
+- Turning sharing on needs a recent sign-in and no account recovery in the
+  last 24 hours; turning it off is always allowed and takes effect at the
+  next staff request.
+- Pages of 50 records, each with its 20 newest versions and first 20 files,
+  with `truncated`, `versionsTruncated`, `filesTruncated` and an opaque
+  cursor; audits record counts and the sharing choice only.
+- No notification to the patient when staff read the imported history (the
+  read is audited); no caregiver or proxy access (ADR-018).
+- The migration, ADR and checklist numbers are assigned at merge.
+
+Not built, because the owner did not approve it (2026-10-16): the imported
+customer configuration archive and any administrator read of it; a staff
+historical inbox; legacy PIN secrets; imported records in break-glass or
+emergency summaries.
+
+Not built, deferred to later changes of the integration plan: the
+patient-only imported inbox (PR 5, which needs the owner's confirmation for
+free-text legacy messages); imported attachments, scan evidence, downloads
+and health profiles (PR 4).
+
+Consequences:
+
+- With every switch off nothing changes for patients, staff or Health-id,
+  and no route answers with imported history. Stored sharing choices and
+  imported rows persist: the database's staff policy still admits a sharing
+  patient's rows in a direct-care staff transaction that names them, which
+  no build with the staff switch off makes.
+- Staging and importing a history leave public patient enrollment open.
+- Staff see no imported history until each patient opts in, even with a
+  consent; the owner may read decision 3 as "any consent discloses". That is
+  recorded as the first proposed default above.
+- A staging database built from the branch cannot run 0097 until it is
+  rebuilt from main, under the proposed default above.
+- Rolling the EHR API back to an earlier build releases nothing: no earlier
+  build names `importedHistory` in the release set, and the staff policies
+  need the staff decision.
+
+Residual risks:
+
+- Legacy free text may contain markup or sensitive content; the API returns
+  it as data and never logs or audits it, and Health-id must render it as
+  text.
+- The patient's choice is per patient, not per facility: once shared, every
+  facility the patient consents to for direct care sees the whole imported
+  history.
+- `app.patient_release` and the patient-self binding are set by the EHR
+  runtime itself; they guard against a wrong flag check, a wrong query and
+  older builds, not against code running as the EHR runtime.
+- Real customer PHI may already be on staging under staging controls until
+  the DPO decides.
+
+Related: ADR-018; ADR-058 (PSELF-RLS); ADR-065 (one release set); ADR-056
+(ALLERGY-1); `PHASE_3_LAUNCH_DECISIONS.md` IMPORT-HISTORY, D9 and D17;
+`INTERFACE_CONTRACT.md`, "Imported legacy medical history";
+`DATABASE.md`, "Imported legacy medical history (0097)"; release checklist
+P37 and S4y.
 
 # ADR-065: Patient record chat through the Claude API
 

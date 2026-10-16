@@ -50,7 +50,7 @@ function repositoryWith({ allowed = true, auditFails = false } = {}) {
   };
   const identity = { authorize: jest.fn(async () => ({ allowed, breakGlass: false })) };
   const repository = new ClinicalRepository(database as never, audit as never, identity as never);
-  return { repository, audit, recorded, committed };
+  return { repository, audit, recorded, committed, database };
 }
 
 const failWith = (error: unknown) => async () => { throw error; };
@@ -141,5 +141,50 @@ describe('ClinicalRepository translates the 0090 guards', () => {
     const { repository } = repositoryWith();
     await expect(repository.run(context, patientId, 'write_records', event, failWith(error)))
       .rejects.toMatchObject({ status, code });
+  });
+});
+
+describe('ClinicalRepository excludes break-glass from a read that may never use it (imported history, ADR-066)', () => {
+  function breakGlassRepository(breakGlass: boolean) {
+    const built = repositoryWith();
+    const identity = { authorize: jest.fn(async () => ({ allowed: true, breakGlass })) };
+    const repository = new ClinicalRepository(built.database as never, built.audit as never, identity as never);
+    return { ...built, repository, identity };
+  }
+  const imported = { action: 'ehr.imported-history.read', resourceType: 'imported-medical-history',
+    excludeBreakGlass: { code: 'BREAK_GLASS_EXCLUDED' } };
+
+  it('refuses a break-glass authorization with 403 and the event\'s code, audited denied, before any transaction', async () => {
+    const { repository, recorded, database } = breakGlassRepository(true);
+    const operation = jest.fn(async () => ({ value: 'disclosed' }));
+    await expect(repository.run(context, patientId, 'read_records', imported, operation))
+      .rejects.toMatchObject({ status: 403, code: 'BREAK_GLASS_EXCLUDED' });
+    expect(operation).not.toHaveBeenCalled();
+    expect(database.withTransaction).not.toHaveBeenCalled();
+    expect(recorded).toEqual([expect.objectContaining({ action: 'ehr.imported-history.read',
+      resourceType: 'imported-medical-history', outcome: 'denied', patientId,
+      details: { reason: 'break_glass_excluded' } })]);
+    expect(recorded).toHaveLength(1);
+  });
+
+  it('answers the code a later caller names', async () => {
+    const { repository } = breakGlassRepository(true);
+    await expect(repository.run(context, patientId, 'read_records',
+      { ...imported, excludeBreakGlass: { code: 'RECORD_CHAT_BREAK_GLASS_NOT_SUPPORTED' } },
+      async () => ({ value: 'disclosed' }))).rejects.toMatchObject({ status: 403, code: 'RECORD_CHAT_BREAK_GLASS_NOT_SUPPORTED' });
+  });
+
+  it('runs the read for a standard consent authorization', async () => {
+    const { repository, committed } = breakGlassRepository(false);
+    await expect(repository.run(context, patientId, 'read_records', imported, async () => ({ value: 'read' })))
+      .resolves.toBe('read');
+    expect(committed).toEqual([expect.objectContaining({ action: 'ehr.imported-history.read', outcome: 'success' })]);
+  });
+
+  it('refuses an event that both requires and excludes break-glass before asking Identity', async () => {
+    const { repository, identity } = breakGlassRepository(true);
+    await expect(repository.run(context, patientId, 'read_records', { ...imported, breakGlassOnly: true },
+      async () => ({ value: 'read' }))).rejects.toThrow(/breakGlassOnly and excludeBreakGlass/);
+    expect(identity.authorize).not.toHaveBeenCalled();
   });
 });

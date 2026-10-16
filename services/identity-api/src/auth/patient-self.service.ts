@@ -4,6 +4,7 @@ import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { requireNoRecentRecoveryHold, requireRecentPatientAuthentication } from './recent-authentication';
+import { requireImportedHistorySharingEnabled } from './imported-history-sharing.guard';
 
 export function requirePatient(actor: ActorContext | undefined): ActorContext & { patientId: string; sessionId: string } {
   if (actor?.kind !== 'patient' || !actor.patientId || !actor.sessionId) {
@@ -88,6 +89,69 @@ export class PatientSelfService {
     return { revoked: true };
   }
 
+  /**
+   * The patient's choice to share their imported legacy history with staff
+   * they consent to (ADR-066), read through the session-bound command and
+   * audited in the same transaction. No choice recorded reads as not shared.
+   */
+  async importedHistorySharing(request: HidRequest): Promise<{ shared: boolean; updatedAt: Date | string | null }> {
+    const actor = requirePatient(request.actor);
+    return this.database.withSystemTransaction(request.correlationId, async (client) => {
+      await client.query("select set_config('app.actor_subject',$1,true)", [actor.subject]);
+      const result = await sharingCommand(() => client.query<{ shared: boolean; updatedAt: Date | string | null }>(
+        'select shared, updated_at as "updatedAt" from identity.my_imported_history_sharing($1,$2)',
+        [actor.subject, actor.sessionId]));
+      const row = result.rows[0];
+      if (!row) throw new DomainProblem(503, 'IMPORTED_HISTORY_SHARING_UNAVAILABLE', 'Sharing is unavailable');
+      const value = { shared: row.shared === true, updatedAt: row.updatedAt ?? null };
+      await this.audit.recordWithClient(client, {
+        correlationId: request.correlationId, actorType: 'patient', actorSubject: actor.subject,
+        actorAccountId: actor.accountId, patientId: actor.patientId,
+        action: 'identity.patient.self.imported-history-sharing.read', resourceType: 'imported-history-sharing',
+        outcome: 'success', purposeOfUse: 'patient-self', sourceIp: request.ip, userAgent: request.header('user-agent'),
+        details: { shared: value.shared },
+      });
+      return value;
+    });
+  }
+
+  /**
+   * Turns sharing of the imported history on or off. Turning it on discloses
+   * more, so it needs the sharing switch, a recent sign-in and no recent
+   * account recovery, as an Access PIN does; turning it off is always
+   * allowed, also while the switch is off, because the stored choice keeps
+   * deciding the staff read (ADR-066). A repeat changes nothing (changed:
+   * false). The command records the change with its session and correlation
+   * id; the audit row commits with it.
+   */
+  async setImportedHistorySharing(request: HidRequest, shared: boolean):
+    Promise<{ shared: boolean; changed: boolean; updatedAt: Date | string | null }> {
+    const actor = requirePatient(request.actor);
+    if (shared) requireImportedHistorySharingEnabled();
+    return this.database.withSystemTransaction(request.correlationId, async (client) => {
+      if (shared) {
+        await requireNoRecentRecoveryHold(client, actor.accountId, 'imported medical history sharing changes');
+        await requireRecentPatientAuthentication(client, actor, 'Sign in again before sharing your imported medical history');
+      }
+      await client.query("select set_config('app.actor_subject',$1,true)", [actor.subject]);
+      const result = await sharingCommand(() => client.query<{ shared: boolean; changed: boolean;
+        updatedAt: Date | string | null }>(
+        'select shared, changed, updated_at as "updatedAt" from identity.set_my_imported_history_sharing($1,$2,$3)',
+        [actor.subject, actor.sessionId, shared]));
+      const row = result.rows[0];
+      if (!row) throw new DomainProblem(503, 'IMPORTED_HISTORY_SHARING_UNAVAILABLE', 'Sharing is unavailable');
+      const value = { shared: row.shared === true, changed: row.changed === true, updatedAt: row.updatedAt ?? null };
+      await this.audit.recordWithClient(client, {
+        correlationId: request.correlationId, actorType: 'patient', actorSubject: actor.subject,
+        actorAccountId: actor.accountId, patientId: actor.patientId,
+        action: 'identity.patient.self.imported-history-sharing.change', resourceType: 'imported-history-sharing',
+        outcome: 'success', purposeOfUse: 'patient-self', sourceIp: request.ip, userAgent: request.header('user-agent'),
+        details: { shared: value.shared, changed: value.changed },
+      });
+      return value;
+    });
+  }
+
   private requireRecentAuthentication(client: import('pg').PoolClient,
     actor: ActorContext & { patientId: string; sessionId: string }) {
     return requireRecentPatientAuthentication(client, actor, 'Sign in again before changing your Access PIN');
@@ -122,5 +186,22 @@ export class PatientSelfService {
       if (value === null) throw new DomainProblem(403, 'PATIENT_ACCESS_DENIED', 'Patient access is unavailable');
       return value;
     });
+  }
+}
+
+/**
+ * The sharing commands refuse any session that is not this live patient
+ * session (42501 PATIENT_SELF_SESSION_REQUIRED): answered as 403, like the
+ * other patient-self reads.
+ */
+async function sharingCommand<Result>(command: () => Promise<Result>): Promise<Result> {
+  try {
+    return await command();
+  } catch (error) {
+    const { code, message } = (error ?? {}) as { code?: unknown; message?: unknown };
+    if (code === '42501' && message === 'PATIENT_SELF_SESSION_REQUIRED') {
+      throw new DomainProblem(403, 'PATIENT_ACCESS_DENIED', 'Patient access is unavailable');
+    }
+    throw error;
   }
 }
