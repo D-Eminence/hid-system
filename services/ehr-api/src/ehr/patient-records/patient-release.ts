@@ -1,14 +1,18 @@
 import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../../common/problem';
 import type { Environment } from '../../config/environment';
+import { type ImportedHistoryPage, readImportedHistory } from '../imported-history/imported-history.query';
+import type { TimelineCursor } from '../shared/clinical-context';
 
 /**
  * The patient's own record release (INTERFACE_CONTRACT.md, "Record
  * summaries"; owner decision 4 of 2026-10-16; D7). This module is the one
  * definition of what a patient may see of their record: the patient summary
- * reads it, and every later patient-facing reader (record chat, imported
- * records) must read through PatientRecordRelease.read and never with its own
- * SQL. It also tells the database its release set (bind): the patient record
+ * reads it (read), the patient's imported legacy history reads it
+ * (readImportedHistory, owner decision 3 of 2026-10-16, ADR-065), and every
+ * later patient-facing reader (record chat) must read through
+ * PatientRecordRelease and never with its own SQL. It also tells the database
+ * its release set (bind): the patient record
  * release migration's policies and Lab view admit a category only in a
  * transaction whose app.patient_release names it, so with a flag off the
  * database refuses that category as well, and an EHR build that never binds
@@ -28,6 +32,16 @@ export const PATIENT_ALWAYS_RELEASED = ['encounters', 'notes'] as const;
 export const PATIENT_RELEASABLE = ['vitals', 'diagnoses', 'prescriptions', 'labResults', 'documents'] as const;
 export type PatientReleasable = (typeof PATIENT_RELEASABLE)[number];
 export const PATIENT_NEVER_RELEASED = ['labRequests'] as const;
+/**
+ * The patient's imported legacy history (ADR-065): released on its own flag
+ * and its own route, never a section of either record summary. The database
+ * admits an imported row to the patient only in a transaction whose release
+ * set names it (0096).
+ */
+export const PATIENT_IMPORTED_HISTORY = 'importedHistory' as const;
+/** Every category a deployment may release: the summary categories, then the imported history. */
+export type PatientReleaseCategory = PatientReleasable | typeof PATIENT_IMPORTED_HISTORY;
+const RELEASE_ORDER: readonly PatientReleaseCategory[] = [...PATIENT_RELEASABLE, PATIENT_IMPORTED_HISTORY];
 
 /** The categories named as withheld when not released, in the order the summary always named them. */
 const WITHHELD_ORDER = ['vitals', 'diagnoses', 'prescriptions', 'labRequests', 'documents'] as const;
@@ -39,12 +53,13 @@ export const PATIENT_RELEASE_FLAGS = {
   prescriptions: 'EHR_PATIENT_RELEASE_PRESCRIPTIONS',
   labResults: 'EHR_PATIENT_RELEASE_LAB_RESULTS',
   documents: 'EHR_PATIENT_RELEASE_DOCUMENTS',
-} as const satisfies Readonly<Record<PatientReleasable, keyof Environment>>;
+  importedHistory: 'EHR_PATIENT_RELEASE_IMPORTED_HISTORY',
+} as const satisfies Readonly<Record<PatientReleaseCategory, keyof Environment>>;
 
-/** The categories the environment releases. */
+/** The categories the environment releases, in release order. */
 export function configuredPatientRelease(environment: Pick<Environment,
-  (typeof PATIENT_RELEASE_FLAGS)[PatientReleasable]>): PatientReleasable[] {
-  return PATIENT_RELEASABLE.filter((category) => environment[PATIENT_RELEASE_FLAGS[category]]);
+  (typeof PATIENT_RELEASE_FLAGS)[PatientReleaseCategory]>): PatientReleaseCategory[] {
+  return RELEASE_ORDER.filter((category) => environment[PATIENT_RELEASE_FLAGS[category]]);
 }
 
 /** Rows each section shows at most, newest first; one more is read so truncation is known. */
@@ -109,22 +124,25 @@ export interface PatientReleasedRecords {
 interface SectionRows<Row> { rows: Row[]; truncated: boolean }
 
 export class PatientRecordRelease {
-  private readonly categories: ReadonlySet<PatientReleasable>;
-  /** The database's form of the release set: the released categories, in release order. */
+  private readonly categories: ReadonlySet<PatientReleaseCategory>;
+  /**
+   * The database's form of the release set: the released categories, in
+   * release order (the summary categories, then the imported history).
+   */
   private readonly setting: string;
 
-  constructor(categories: Iterable<PatientReleasable>) {
+  constructor(categories: Iterable<PatientReleaseCategory>) {
     const configured = [...categories];
     for (const category of configured as string[]) {
       if ((PATIENT_NEVER_RELEASED as readonly string[]).includes(category)) {
         throw new Error(`${category} are never released to the patient`);
       }
-      if (!(PATIENT_RELEASABLE as readonly string[]).includes(category)) {
+      if (!(RELEASE_ORDER as readonly string[]).includes(category)) {
         throw new Error(`${category} is not a releasable patient record category`);
       }
     }
     this.categories = new Set(configured);
-    this.setting = PATIENT_RELEASABLE.filter((category) => this.categories.has(category)).join(',');
+    this.setting = RELEASE_ORDER.filter((category) => this.categories.has(category)).join(',');
   }
 
   /**
@@ -137,8 +155,24 @@ export class PatientRecordRelease {
   }
 
   /** Whether this deployment releases the category to the patient. */
-  releases(category: PatientReleasable): boolean {
+  releases(category: PatientReleaseCategory): boolean {
     return this.categories.has(category);
+  }
+
+  /**
+   * The patient's imported legacy history (ADR-065), one page newest first.
+   * Run it only inside a patient-self transaction bound to this patient, as
+   * read() is, and only while the imported history is released: it binds the
+   * release set first, so the 0096 patient-self policies admit the patient's
+   * own imported rows. It never adds anything to read()'s summary.
+   */
+  async readImportedHistory(client: PoolClient, patientId: string, cursor?: TimelineCursor):
+    Promise<ImportedHistoryPage> {
+    if (!this.releases(PATIENT_IMPORTED_HISTORY)) {
+      throw new Error('The imported history is not released by this deployment');
+    }
+    await this.bind(client);
+    return readImportedHistory(client, patientId, cursor);
   }
 
   /**

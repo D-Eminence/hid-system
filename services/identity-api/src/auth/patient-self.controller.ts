@@ -1,10 +1,12 @@
-import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post, Query, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { AuditAction, AuditFailuresOnly, PatientOnly } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { PatientSelfService } from './patient-self.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { SetPatientAccessPinDto } from './dto/set-patient-access-pin.dto';
+import { ImportedHistorySharingDto } from './dto/imported-history-sharing.dto';
+import { ImportedHistorySharingEnabledGuard } from './imported-history-sharing.guard';
 
 // Patient-only (A9): a staff or platform session is refused by the guard with
 // 403 PATIENT_SESSION_REQUIRED and that refusal is audited.
@@ -49,6 +51,20 @@ export class PatientSelfController {
   @AuditAction('identity.patient-access-pin.revoke.command')
   revokeAccessPin(@Req() request: HidRequest) {
     return this.self.revokeAccessPin(request);
+  }
+
+  // The patient's choice to share imported legacy history with staff they
+  // consent to (ADR-065), behind its own switch.
+  @Get('me/imported-history-sharing')
+  @UseGuards(ImportedHistorySharingEnabledGuard)
+  importedHistorySharing(@Req() request: HidRequest) { return this.self.importedHistorySharing(request); }
+
+  @Post('me/imported-history-sharing')
+  @HttpCode(200)
+  @UseGuards(ImportedHistorySharingEnabledGuard)
+  @AuditAction('identity.patient.imported-history-sharing.change.command')
+  setImportedHistorySharing(@Req() request: HidRequest, @Body() input: ImportedHistorySharingDto) {
+    return this.self.setImportedHistorySharing(request, input.shared);
   }
 
   @Get('service/patient-self-authorization')
