@@ -1,16 +1,21 @@
 // The import of the legacy medical history (owner decision 3 of 2026-10-16,
 // ADR-065), without the database: what import-legacy-history.mjs checks
-// before it asks ehr.import_legacy_medical_history to import, and the
-// transaction it runs that command in. The command repeats every check
-// itself (0096); this module refuses earlier and with the same codes, so an
-// operator learns what is wrong before anything is written.
+// before it asks ehr.import_legacy_medical_history to import, the transaction
+// it runs that command in, and the deployment check both CLIs of the history
+// pipeline make first. The command repeats every check of the runs and of
+// each row's content and bindings itself (0096), with the same codes; it
+// does not recompute the stager's checksums (ROW_TAMPERED, SEAL_MISMATCH,
+// PARENT_SEAL_MISMATCH are this module's alone) but takes only rows equal to
+// the sealed rows, whose seal the database's triggers keep. This module
+// refuses earlier, so an operator learns what is wrong before anything is
+// written.
 //
 // The history comes only from main's sealed staging pipeline: a parent run
 // that is main's reconciled and verified legacy identity run (stage, promote,
-// reconcile), and a history run that stage-legacy-identity.mjs
-// --scope=imported-history sealed from the same source snapshot. Every
-// refusal is an ImportRefusal whose message is its code: never an
-// identifier and never any content.
+// reconcile), and a history run of source system legacy_imported_history
+// that stage-legacy-identity.mjs --scope=imported-history sealed from the
+// same source snapshot. Every refusal is an ImportRefusal whose message is
+// its code: never an identifier and never any content.
 import { createHash } from 'node:crypto';
 
 export const IMPORTED_HISTORY_ENTITY_TYPES = Object.freeze(['medical_records', 'medical_record_versions',
@@ -19,6 +24,33 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-
 const SHA256 = /^[0-9a-f]{64}$/;
 // A legacy timestamp as the stager writes it from the legacy database (ISO 8601 with a zone).
 const TIMESTAMP = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d{1,6})?)?(Z|[+-]\d{2}(:?\d{2})?)$/;
+
+/** The source system of a history run: never legacy_identity, whose staged runs close patient enrollment (0057). */
+export const IMPORTED_HISTORY_SOURCE_SYSTEM = 'legacy_imported_history';
+
+/**
+ * The history pipeline runs on staging, or on an owned disposable rehearsal
+ * (NODE_ENV test on a local Unix-socket cluster, reading a synthetic fixture
+ * when `syntheticSourceOnly`), never in production. HID_DEPLOYMENT_ENV is the
+ * operator's declaration of where the command runs; the database does not
+ * enforce it (ADR-065, P36). Checked before anything is read or connected.
+ * @param {string} what what is refused, for the message
+ * @param {{ syntheticSourceOnly?: boolean, environment?: NodeJS.ProcessEnv }} [options]
+ */
+export function requireStagingOrRehearsal(what, { syntheticSourceOnly = false, environment = process.env } = {}) {
+  const deployment = environment.HID_DEPLOYMENT_ENV ?? '';
+  if (deployment === 'production') throw new Error(`${what} is refused in production (ADR-065)`);
+  if (deployment === 'staging') return;
+  let socket;
+  try {
+    socket = environment.DATABASE_URL ? new URL(environment.DATABASE_URL).searchParams.get('host') : null;
+  } catch {
+    socket = null;
+  }
+  if (deployment === '' && environment.NODE_ENV === 'test' && socket?.startsWith('/tmp/')
+    && (!syntheticSourceOnly || (environment.MIGRATION_FIXTURE_PATH && !environment.LEGACY_DATABASE_URL))) return;
+  throw new Error(`${what} runs only on staging or an owned rehearsal database`);
+}
 
 export class ImportRefusal extends Error {
   constructor(code) {
@@ -92,7 +124,8 @@ export function prepareImportedHistory({ parent, history, parentChecksum, parent
   if (String(parent.source_checksum_sha256).trim() !== parentChecksum) refuse('IMPORTED_HISTORY_PARENT_SEAL_MISMATCH');
 
   // The history: a sealed staging run of the same snapshot, of exactly the three categories.
-  if (!history || history.id === parent.id || history.source_system !== 'legacy_identity' || history.mode !== 'stage'
+  if (!history || history.id === parent.id || history.source_system !== IMPORTED_HISTORY_SOURCE_SYSTEM
+    || history.mode !== 'stage'
     || history.status !== 'staged' || !SHA256.test(String(history.source_checksum_sha256 ?? '').trim())
     || Number(history.conflicts ?? 0) !== 0) {
     refuse('IMPORTED_HISTORY_RUN_NOT_SEALED');
@@ -125,13 +158,25 @@ export function prepareImportedHistory({ parent, history, parentChecksum, parent
   const accounts = parentByType('accounts');
   const profiles = parentByType('user_profiles');
   const patients = parentByType('patients');
-  const staff = [...parentByType('staff').entries()];
+  // Staff ids by their legacy account, and the history's rows by key, built
+  // once: every check below is a lookup, so the checks grow with the rows.
+  const staffByAccount = new Map();
+  for (const [id, row] of parentByType('staff')) {
+    const account = text(row.auth_user_id);
+    if (account !== null) staffByAccount.set(account, [...(staffByAccount.get(account) ?? []), id]);
+  }
   const byType = (type) => historyRows.filter((row) => row.entity_type === type)
     .sort((left, right) => (left.source_pk < right.source_pk ? -1 : 1));
   const recordRows = byType('medical_records');
   const versionRows = byType('medical_record_versions');
   const fileRows = byType('medical_record_files');
   const recordsById = new Map(recordRows.map((row) => [row.source_pk, row.payload]));
+  const versionsById = new Map(versionRows.map((row) => [row.source_pk, row.payload]));
+  const versionNumberKey = (payload) => JSON.stringify([payload.record_id, payload.version_no]);
+  const versionNumberUses = new Map();
+  for (const { payload } of versionRows) {
+    versionNumberUses.set(versionNumberKey(payload), (versionNumberUses.get(versionNumberKey(payload)) ?? 0) + 1);
+  }
 
   /** The account of a legacy user profile the parent staged, whose account the parent staged too. */
   const profileAccount = (profileId) => {
@@ -145,8 +190,8 @@ export function prepareImportedHistory({ parent, history, parentChecksum, parent
     if (!account) refuse('IMPORTED_HISTORY_AUTHOR_UNRESOLVED');
     const staffId = payload.created_by_staff_account_id ?? null;
     if (account === patientAccount && staffId === null) return { account, origin: 'patient-provided' };
-    if (account !== patientAccount && staff.filter(([id, row]) => text(row.auth_user_id) === account
-      && (staffId === null || id === staffId)).length === 1) {
+    const staffIds = staffByAccount.get(account) ?? [];
+    if (account !== patientAccount && (staffId === null ? staffIds.length === 1 : staffIds.includes(staffId))) {
       return { account, origin: 'provider-authored' };
     }
     return refuse('IMPORTED_HISTORY_AUTHOR_UNRESOLVED');
@@ -165,8 +210,8 @@ export function prepareImportedHistory({ parent, history, parentChecksum, parent
     const patientAccount = patientAccountOf(payload.patient_id);
     if (!patientAccount) refuse('IMPORTED_HISTORY_BINDING_DIFFERS');
     const resolved = author(patientAccount, payload);
-    const current = versionRows.find((row) => row.source_pk === payload.current_version_id);
-    if (!current || current.payload.record_id !== id) refuse('IMPORTED_HISTORY_BINDING_DIFFERS');
+    const current = versionsById.get(payload.current_version_id);
+    if (!current || current.record_id !== id) refuse('IMPORTED_HISTORY_BINDING_DIFFERS');
     return { id, patientId: payload.patient_id, authorAccountId: resolved.account, origin: resolved.origin,
       currentVersionId: payload.current_version_id };
   });
@@ -174,8 +219,7 @@ export function prepareImportedHistory({ parent, history, parentChecksum, parent
   const versions = versionRows.map(({ source_pk: id, payload }) => {
     const record = typeof payload.record_id === 'string' ? recordsById.get(payload.record_id) : undefined;
     if (!UUID.test(id) || payload.id !== id || !record) refuse('IMPORTED_HISTORY_BINDING_DIFFERS');
-    const numbered = versionRows.filter((other) => other.payload.record_id === payload.record_id
-      && other.payload.version_no === payload.version_no).length;
+    const numbered = versionNumberUses.get(versionNumberKey(payload));
     if (!Number.isSafeInteger(payload.version_no) || !/^[1-9][0-9]{0,8}$/.test(String(payload.version_no))
       || !isTimestamp(payload.created_at) || numbered !== 1
       || !(hasText(payload.record) || hasText(payload.notes) || hasText(payload.transcription_text)
@@ -192,8 +236,7 @@ export function prepareImportedHistory({ parent, history, parentChecksum, parent
     const record = typeof payload.record_id === 'string' ? recordsById.get(payload.record_id) : undefined;
     const versionId = payload.record_version_id ?? null;
     if (!UUID.test(id) || payload.id !== id || !record || payload.patient_id !== record.patient_id
-      || (versionId !== null && !versionRows.some((row) => row.source_pk === versionId
-        && row.payload.record_id === payload.record_id))) {
+      || (versionId !== null && versionsById.get(versionId)?.record_id !== payload.record_id)) {
       refuse('IMPORTED_HISTORY_BINDING_DIFFERS');
     }
     if (!isTimestamp(payload.created_at) || !Number.isSafeInteger(payload.size_bytes)

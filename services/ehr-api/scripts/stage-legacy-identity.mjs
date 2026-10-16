@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { databaseOptions } from './database-options.mjs';
+import { IMPORTED_HISTORY_SOURCE_SYSTEM, requireStagingOrRehearsal } from './imported-history-import.mjs';
 
 const { Client } = pg;
 const sourceUrl = process.env.LEGACY_DATABASE_URL;
@@ -16,14 +17,22 @@ const operator = process.env.MIGRATION_OPERATOR;
 const dryRun = process.argv.includes('--dry-run');
 // --scope=identity (the default) stages main's identity categories, exactly as
 // before. --scope=imported-history stages only the legacy medical history
-// (ADR-065) into its own sealed run of the same source snapshot, which only
-// ehr.import_legacy_medical_history reads; main's promoter and reconciler
-// never take it (their cutover input gate refuses its categories).
+// (ADR-065) into its own sealed run of the same source snapshot, of source
+// system legacy_imported_history, which only ehr.import_legacy_medical_history
+// reads: main's crosswalk gate does not count it (a staged legacy_identity run
+// closes patient enrollment), and main's promoter and reconciler never take it.
+// The history scope copies medical history into the target, so it runs only on
+// staging or an owned rehearsal reading a synthetic fixture, never in
+// production, and refuses before it reads or connects.
 const scopeArguments = process.argv.filter((argument) => argument === '--scope' || argument.startsWith('--scope='));
 const scope = scopeArguments.length === 0 ? 'identity' : scopeArguments[0].slice('--scope='.length);
 if (scopeArguments.length > 1 || !['identity', 'imported-history'].includes(scope)) {
   throw new Error('--scope must be identity or imported-history');
 }
+if (scope === 'imported-history') {
+  requireStagingOrRehearsal('Staging the legacy medical history', { syntheticSourceOnly: true });
+}
+const runSourceSystem = scope === 'imported-history' ? IMPORTED_HISTORY_SOURCE_SYSTEM : 'legacy_identity';
 const batchSize = Number.parseInt(process.env.MIGRATION_BATCH_SIZE ?? '250', 10);
 const runId = process.env.MIGRATION_RUN_ID ?? randomUUID();
 
@@ -276,10 +285,10 @@ async function main() {
       const started = await target.query(
         `insert into migration.runs (
            id, source_system, source_snapshot, mode, status, started_by, source_transaction_snapshot
-         ) values ($1, 'legacy_identity', $2, 'stage', 'running', $3, $4)
+         ) values ($1, $5, $2, 'stage', 'running', $3, $4)
          on conflict (id) do nothing
          returning id`,
-        [runId, snapshotLabel, operator, snapshot],
+        [runId, snapshotLabel, operator, snapshot, runSourceSystem],
       );
       if (started.rowCount !== 1) {
         throw new Error('MIGRATION_RUN_ID is already in use; start a fresh staging run from a new controlled snapshot');

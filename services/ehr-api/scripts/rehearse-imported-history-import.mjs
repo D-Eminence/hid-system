@@ -82,7 +82,7 @@ const importedCounts = async () => ({
   ...(await asImporter(`select (select count(*)::int from ehr.imported_medical_records) as records,
     (select count(*)::int from ehr.imported_medical_record_versions) as versions,
     (select count(*)::int from ehr.imported_medical_record_files) as files`))[0],
-  receipts: await count("select count(*) n from migration.runs where source_system = 'legacy_imported_history'"),
+  receipts: await count("select count(*) n from migration.runs where source_system = 'legacy_imported_history' and mode = 'cutover'"),
 });
 /** Main's enrollment gate, as Identity asks it before any public enrollment, in a transaction that is rolled back. */
 const enrollmentReady = async () => {
@@ -102,7 +102,7 @@ const importedSnapshot = async () => ({
     (select coalesce(md5(string_agg(to_jsonb(t)::text, ',' order by id)), '') from ehr.imported_medical_record_versions t) versions,
     (select coalesce(md5(string_agg(to_jsonb(t)::text, ',' order by id)), '') from ehr.imported_medical_record_files t) files`))[0],
   receipts: (await client.query(`select coalesce(md5(string_agg(to_jsonb(t)::text, ',' order by id)), '') receipts
-    from migration.runs t where source_system = 'legacy_imported_history'`)).rows[0].receipts,
+    from migration.runs t where source_system = 'legacy_imported_history' and mode = 'cutover'`)).rows[0].receipts,
 });
 try {
   const identityPath = join(directory, 'identity.json');

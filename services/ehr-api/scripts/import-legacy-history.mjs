@@ -14,36 +14,22 @@
 //      a dry run that rolls back (the default) or, with --apply, a commit.
 //
 // It runs on staging, or on an owned disposable rehearsal database, never in
-// production, and only after the DPO and the owner have signed off the import
-// (release checklist P36). It prints counts and the receipt id only: never an
+// production (an operator-declared HID_DEPLOYMENT_ENV check, not one the
+// database enforces), and only after the DPO and the owner have signed off
+// the import (release checklist P36). It prints counts and the receipt id only: never an
 // identifier of a patient, a record or any content. Synthetic fixtures only
 // in every test and rehearsal.
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 import { databaseOptions } from './database-options.mjs';
-import { IMPORTED_HISTORY_ENTITY_TYPES, ImportRefusal, prepareImportedHistory, withImportTransaction }
-  from './imported-history-import.mjs';
+import { IMPORTED_HISTORY_ENTITY_TYPES, ImportRefusal, prepareImportedHistory, requireStagingOrRehearsal,
+  withImportTransaction } from './imported-history-import.mjs';
 
 const { Client } = pg;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const OPERATIONS = ['medical-records'];
 const PARENT_IDENTITY_TYPES = ['accounts', 'user_profiles', 'patients', 'staff'];
-
-/** Staging, or an owned disposable rehearsal (NODE_ENV test on a local Unix-socket cluster). */
-function requireStagingOrRehearsal() {
-  const deployment = process.env.HID_DEPLOYMENT_ENV ?? '';
-  if (deployment === 'production') throw new Error('The legacy history import is refused in production (ADR-065)');
-  if (deployment === 'staging') return;
-  let socket;
-  try {
-    socket = process.env.DATABASE_URL ? new URL(process.env.DATABASE_URL).searchParams.get('host') : null;
-  } catch {
-    socket = null;
-  }
-  if (deployment === '' && process.env.NODE_ENV === 'test' && socket?.startsWith('/tmp/')) return;
-  throw new Error('The legacy history import runs only on staging or an owned rehearsal database');
-}
 
 function parseArguments(argv) {
   let operation;
@@ -89,7 +75,9 @@ async function readRun(client, id) {
 }
 
 async function main() {
-  requireStagingOrRehearsal();
+  // Staging, or an owned disposable rehearsal (NODE_ENV test on a local
+  // Unix-socket cluster): HID_DEPLOYMENT_ENV as the operator declares it.
+  requireStagingOrRehearsal('The legacy history import');
   const { operation, apply } = parseArguments(process.argv.slice(2));
   const { databaseUrl, parentRunId, historyRunId, parentChecksum, operator } = configuration();
   const client = new Client(databaseOptions(databaseUrl, 'hid-legacy-history-import'));
