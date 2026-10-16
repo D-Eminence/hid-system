@@ -1,0 +1,9 @@
+variable "name_prefix" { type = string }
+variable "vpc_cidr" { type = string }
+variable "availability_zones" { type = list(string) }
+variable "public_subnet_cidrs" { type = list(string) }
+variable "application_subnet_cidrs" { type = list(string) }
+variable "database_subnet_cidrs" { type = list(string) }
+variable "nat_gateway_count" { type = number }
+variable "interface_endpoint_services" { type = list(string) }
+variable "interface_endpoint_az_count" { type = number }
