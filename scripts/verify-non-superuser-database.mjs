@@ -293,12 +293,13 @@ try {
     `select kind || '|' || object || '|' || owner || '|' || namespace from (
        select 'function' as kind, p.oid::regprocedure::text as object, r.rolname as owner, n.nspname as namespace
          from pg_proc p join pg_roles r on r.oid = p.proowner join pg_namespace n on n.oid = p.pronamespace
-        where r.rolname like 'hid\\_%' and p.prokind = 'f'
+        where r.rolname like 'hid\\_%' and not r.rolcanlogin and r.rolname <> '${admin}' and p.prokind = 'f'
        union all
        select case c.relkind when 'v' then 'view' when 'm' then 'materialized view' when 'S' then 'sequence'
                 else 'table' end, c.oid::regclass::text, r.rolname, n.nspname
          from pg_class c join pg_roles r on r.oid = c.relowner join pg_namespace n on n.oid = c.relnamespace
-        where r.rolname like 'hid\\_%' and c.relkind in ('r', 'p', 'v', 'm', 'S')) owned order by 1`)
+        where r.rolname like 'hid\\_%' and not r.rolcanlogin and r.rolname <> '${admin}'
+          and c.relkind in ('r', 'p', 'v', 'm', 'S')) owned order by 1`)
     .stdout.trim().split('\n').filter(Boolean).map((line) => line.split('|'));
   assert(technicalObjects.some(([kind, object, owner]) => kind === 'function'
     && object === 'platform.control_enabled(text)' && owner === 'hid_platform_control_reader'),

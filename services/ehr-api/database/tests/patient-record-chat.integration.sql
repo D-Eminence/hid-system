@@ -609,7 +609,7 @@ begin
     raise exception 'the patient record chat suite crossed a UTC hour boundary (its hourly and daily cases bucket by '
       'the hour); run it again';
   end if;
-  if (select count(*) from chat_case_results) < 55 then
+  if (select count(*) from chat_case_results) < 87 then
     raise exception 'patient record chat suite recorded only % cases', (select count(*) from chat_case_results);
   end if;
 end $$;
