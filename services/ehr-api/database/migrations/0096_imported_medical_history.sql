@@ -10,8 +10,9 @@
 --    0061 and 0062, which gave every consent at any facility the whole
 --    history and gave the schema owner a bypass policy) is refused with
 --    55000 IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT before anything is
---    created: such a staging database is rebuilt from main first (release
---    checklist P36).
+--    created, and nothing in it changes. Rebuilding such a staging database
+--    from main is a proposed default that needs the owner's and the DPO's
+--    written approval first (ADR-065, release checklist P36).
 --
 -- 1. Three append-only tables, ehr.imported_medical_records, their versions
 --    and their files, each keeping the legacy row as staged (source_payload,
@@ -119,7 +120,7 @@
 -- most the runner's 5 s lock timeout; a timeout rolls 0096 back whole, and it
 -- can be run again.
 
--- 0. A database built from the PR #8 branch is reconciled first.
+-- 0. A database built from the PR #8 branch is refused, unchanged.
 do $$
 begin
   if to_regclass('ehr.imported_medical_records') is not null
@@ -138,7 +139,7 @@ begin
      or exists (select 1 from migration.schema_migrations
                  where version in ('0061_imported_medical_records.sql', '0062_customer_history_access.sql')) then
     raise exception using errcode = '55000', message = 'IMPORTED_HISTORY_BRANCH_OBJECTS_PRESENT',
-      detail = 'This database holds imported history objects of the PR #8 branch; rebuild it from main first (ADR-065).';
+      detail = 'This database holds imported history objects of the PR #8 branch; it may be rebuilt from main only with the approval release checklist P36 names (ADR-065).';
   end if;
 end
 $$;
