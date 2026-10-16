@@ -1,7 +1,7 @@
 import type { Response } from 'express';
 
 /**
- * The clinician application capability (ADR-064): host-only, HttpOnly,
+ * The clinician application capability (ADR-066): host-only, HttpOnly,
  * SameSite=Strict and scoped to the clinician application routes. It is never
  * a session: it opens no route outside /identity/clinician-applications, and
  * the 0088 challenge it drives is derived on the server and never set as a

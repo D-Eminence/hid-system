@@ -14,7 +14,7 @@ import { ClinicianApplicationService } from './clinician-application.service';
 import type { SubmitClinicianApplicationDto } from './dto/clinician-application.dto';
 
 /**
- * ClinicianApplicationService (ADR-064) against a scripted database: the gate
+ * ClinicianApplicationService (ADR-066) against a scripted database: the gate
  * and quota order, the keyed digests and the derived 0088 token, delivery
  * after the response, the submit transaction, the authenticator steps and the
  * database error table.

@@ -20,7 +20,7 @@ import { PlatformControlCommandDto } from './dto/admin-command.dto';
 import { AttestClinicianApplicationDto, ListClinicianApplicationsDto,
   RejectClinicianApplicationDto } from './dto/clinician-application-command.dto';
 
-/** The clinician verification queue and its two-administrator review (ADR-064). */
+/** The clinician verification queue and its two-administrator review (ADR-066). */
 const APPLICATION = '60000000-0000-4000-8000-0000000000a1';
 const APPLICANT = '20000000-0000-4000-8000-0000000000b1';
 const FACILITY = '10000000-0000-4000-8000-0000000000c1';

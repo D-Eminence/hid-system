@@ -93,7 +93,8 @@ response's `requestId` is also the correlation id of the one PHI-free
 `notification.otp.outcome` log line written per send; when the fallback ran,
 that line also names the primary provider and its safe code. Ordinary domain
 events remain minimum-necessary versioned envelopes delivered through outbox,
-Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
+Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu
+("Notification worker to Novu" below).
 
 Public patient enrollment proves the chosen contact with a six-digit code
 (`POST /api/v1/identity/patient-enrollments/contact`, then `/contact/verify`;
@@ -111,6 +112,72 @@ a spent budget and a request limit cannot be told apart; the `422` carries
 none. This comes from
 D-Eminence/hid-system#61, not yet deployed; the threshold is an
 open product decision.
+
+### Notification worker to Novu
+
+No HID route changes. The worker calls Novu as below (ADR-064, migration
+0095).
+
+- Main's trigger: `POST {NOVU_API_URL}/v1/events/trigger` with
+  `idempotency-key: <event id>` and the body `{"name": <workflow>, "to":
+  {"subscriberId": <canonical patient UUID>}, "payload": {"message": "You have
+  a new update in HID. Sign in securely to view it."}}`. With
+  `NOVU_SUBSCRIBER_SYNC=disabled` (the default, and the only value production
+  accepts) this is the only call, for every event, as on main. With
+  `NOVU_SUBSCRIBER_SYNC=email` it is sent after the subscriber call below,
+  except in two cases: when a clear is not confirmed the worker sends the
+  email-withheld trigger instead, and when the claim is lost (55000) it sends
+  no trigger at all.
+- With `NOVU_SUBSCRIBER_SYNC=email` the worker first asks the database,
+  through `integration.notification_recipient_for_claim(event, claim token,
+  patient)`, for its live claim's answer: `email` with the verified login
+  email, or `withhold`. Names are never part of the answer or of any call.
+  Each subscriber key below includes the attempt's claim token (unique per
+  attempt), because Novu answers a seen idempotency key from its cache for
+  24 hours, success or error, without processing it again; a retry of the
+  event is therefore a new request. The key holds neither the token nor the
+  address.
+  - `email`: `POST /v2/subscribers` with exactly `{"subscriberId": <patient
+    UUID>, "email": <address>}` and `idempotency-key` = lowercase hex
+    sha256(`hid-novu-subscriber-email-v1` U+001F event id U+001F claim token
+    U+001F sha256(address)). Then the worker asks the database again under
+    the same claim. If it answers the same address, main's trigger follows,
+    whatever the subscriber call answered. Any other answer (withheld,
+    another address or a failed lookup) is handled as `withhold` below, so
+    an upsert that reached Novu after another event's clear is cleared again.
+  - `withhold` (opted out; a login that is not active, is suspended
+    (`disabled_until` ahead), is due for deletion or is deleted; a patient
+    who is not active; no verified email; no login; a phone-only login; no
+    outbox envelope bound to the claim (`unbound`); or a lookup that failed):
+    `PATCH /v2/subscribers/{patient UUID}` with exactly `{"email": null}` and
+    `idempotency-key` = sha256(`hid-novu-subscriber-email-clear-v1` U+001F
+    event id U+001F claim token). After a `2xx` or `404` (no such
+    subscriber), main's trigger. Otherwise the email-withheld trigger: `"to":
+    {"subscriberId": <patient UUID>, "email": null}`, the same workflow and
+    message, and `idempotency-key` = sha256(`hid-novu-trigger-email-withheld-v1`
+    U+001F event id).
+  - A claim lost at the first lookup sends nothing. A claim lost at the
+    second lookup, after a sync, sends the clear above and nothing else. In
+    both cases the message is neither completed, failed nor acknowledged.
+  - Each call has a 5-second timeout. A subscriber call answering `2xx` is
+    confirmed; `408`, `409`, `429`, `5xx`, a timeout or no answer is unknown;
+    any other `4xx` is refused. No subscriber answer decides whether the
+    trigger is sent: the inbox outcome is the trigger's, as on main (accepted
+    completes; `408`, `429`, `5xx` or no answer retries; another `4xx` is
+    terminal).
+- The worker writes one stdout line per flag-on event attempt:
+  `{"event":"notification.worker.outcome","eventType":...,"correlationId":...,
+  "recipient":"email|withhold|unbound|lookup_failed|withdrawn|claim_lost",
+  "subscriber":"synced|sync_failed|cleared|clear_failed|not_run",
+  "subscriberCode"?,"trigger":"standard|email_withheld|not_sent",
+  "triggerOutcome"?,"triggerCode"?,"inbox":"processed|retry_scheduled|failed_terminal|claim_lost"}`.
+  `withdrawn` means the first lookup answered `email` and the second did not
+  confirm it, so the email was cleared. It never holds the address, the
+  patient, the event id or a key; a correlation id outside the outbox's own
+  pattern is written as `invalid`.
+- Turning the flag off does not clear what it synced: main's trigger then
+  goes to subscribers that may still hold an address. Release checklist §9
+  clears them before the flag is turned off or the worker is rolled back.
 
 ### Turnstile verification
 
@@ -226,7 +293,7 @@ own attempt and rate limits: the MFA steps (`/auth/mfa/*`,
 current steps, provider enrollment verify and activate, organization
 completion verify and profile, the clinician application steps after an
 email-code start (code verification, facility search, submit, the
-authenticator steps, current, withdraw, apply again and session end; ADR-064),
+authenticator steps, current, withdraw, apply again and session end; ADR-066),
 `GET /auth/google/nonce`, and refresh, session and logout.
 `GET /identity/patient-enrollments/availability` and
 `GET /identity/clinician-applications/availability` are public reads with no
@@ -324,7 +391,7 @@ platform challenge by no staff step. Refusals:
 | Code | When |
 |---|---|
 | `403 STAFF_MFA_FACTOR_UNPROVEN` | `POST /auth/login` with the right password, but the account's authenticator was enrolled at platform sign-in on the password alone (before 0088, or before the account held a staff membership), so it records no staff proof. No challenge or cookie is issued; a denied `login_failed` session event (reason `staff_mfa_factor_unproven`) is recorded. The remedy is a two-person MFA reset (0070), after which the account enrols at staff sign-in; the new factor then verifies platform sign-in too. The same answer at `/auth/mfa/verify` if such a factor is met there |
-| `403 NO_ACTIVE_FACILITY_MEMBERSHIP` | Also at `/auth/mfa/verify` and `/auth/mfa/enroll/activate` since ADR-064: issuing a staff session re-checks eligibility, so a membership that ended between the two steps gets this answer and no session. `POST /auth/login` with the right password of an active, enabled account that has a staff record or a facility membership but no membership eligible for staff sign-in: every one ended, suspended or held, the staff record not active or its verification not accepted, or the organization or facility not active (`eligibleStaffMembershipJoins`). Launch decision NO-MEMBERSHIP-SIGN-IN, owner default (a), ADR-059. No challenge or cookie and no session. A denied `login_failed` session event (reason `no_active_membership`) is recorded. It is not counted as a failed sign-in. Like any right password it ends the account's own failure window (SIGNIN-LOCKOUT); the window of the identifier typed is unchanged. The detail asks the user to contact their organization administrator. Checked before the factor, so it answers the same with or without an authenticator. An account with neither (a patient or a platform-only account) keeps the uniform `401` |
+| `403 NO_ACTIVE_FACILITY_MEMBERSHIP` | Also at `/auth/mfa/verify` and `/auth/mfa/enroll/activate` since ADR-066: issuing a staff session re-checks eligibility, so a membership that ended between the two steps gets this answer and no session. `POST /auth/login` with the right password of an active, enabled account that has a staff record or a facility membership but no membership eligible for staff sign-in: every one ended, suspended or held, the staff record not active or its verification not accepted, or the organization or facility not active (`eligibleStaffMembershipJoins`). Launch decision NO-MEMBERSHIP-SIGN-IN, owner default (a), ADR-059. No challenge or cookie and no session. A denied `login_failed` session event (reason `no_active_membership`) is recorded. It is not counted as a failed sign-in. Like any right password it ends the account's own failure window (SIGNIN-LOCKOUT); the window of the identifier typed is unchanged. The detail asks the user to contact their organization administrator. Checked before the factor, so it answers the same with or without an authenticator. An account with neither (a patient or a platform-only account) keeps the uniform `401` |
 | `401 MFA_INVALID_CODE` | A wrong, reused (the same 30-second step twice) or already used code; a wrong email code. Each counts against the challenge (five attempts), the account's MFA failure budget and the source address's staff budget |
 | `429 MFA_RATE_LIMITED` | A failure budget is spent, and while it is every code is refused, a correct one too, until its 15-minute window passes: the account's (the fifth failed code within 15 minutes, staff and platform together), or the source address's staff budget (the 100th failed staff code from one address within 15 minutes; it is the staff sign-in's own, apart from platform sign-in's per-address budget of 20, and sized for a facility whose staff share one address). Also more than five enrolment-code sends or enrolment starts in 15 minutes. Since this change (A21) it carries `Retry-After: 900`, the whole window, whichever budget refused (§6) |
 | `403 MFA_ENROLLMENT_PROOF_REQUIRED` | Enrolment start or activation without a verified proof (no email code, and the challenge was not opened by provider activation). No factor is created |
@@ -626,7 +693,7 @@ the status and code too (never `422 ASSISTED_VERIFICATION_NOT_MATCHED`'s
 on `/identity/assisted-verifications` comes from a route guard, which runs
 after `SecurityGuard` has passed and before the request audit, so the
 switched-off route is answered without an audit row. The clinician
-application routes of 0096 do the same: the public routes
+application routes of 0098 do the same: the public routes
 (`/identity/clinician-applications/*`, whose `SecurityGuard` does not run)
 write a request-audit failure row for every refusal, with the status and
 code and never the email, name, licence, code or detail (their successes
@@ -847,7 +914,13 @@ returns at most 50 completed encounters and 50 current signed/amended note
 revisions of completed encounters (since 0084), after fresh Identity
 authorization through the EHR workload caller.
 It names the other five record categories as withheld from the patient, not as
-absent (§11, "Record summaries"). Only a patient session may use it: EHR's
+absent (§11, "Record summaries"). Since the patient record release (0096,
+owner decision 4 of 2026-10-16, D7) a deployment may also release vitals,
+diagnoses, prescriptions, Lab results and documents, one flag per category,
+each off by default and refused in the production profile until its P36
+sign-off; with every flag off the response is exactly the one above. `GET /api/v1/ehr/me/documents/:documentId/download` returns a 60 s
+attachment URL for one released document (§11, "Patient document
+download"). Only a patient session may use either route: EHR's
 guard answers any other session `403 PATIENT_SESSION_REQUIRED` before the
 handler runs and records `auth.authorization.denied` (§7). Before
 D-Eminence/hid-system#74 a staff session there got `503 DEPENDENCY_UNAVAILABLE` and nothing was
@@ -899,17 +972,17 @@ notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
 Activation also requires the platform `break_glass_enabled` control inside the
 activation transaction; a disabled control returns `423 BREAK_GLASS_DISABLED`.
-It also requires an active `emergency` purpose of use, which 0095 seeds (0082
-seeded only `direct-care`); without it, on a database before 0095 or after an
+It also requires an active `emergency` purpose of use, which 0097 seeds (0082
+seeded only `direct-care`); without it, on a database before 0097 or after an
 operator deactivates the code, activation also returns
 `423 BREAK_GLASS_DISABLED` ("Emergency access is not enabled on this
 platform"), where it returned `400 INVALID_CONSENT_COMMAND`. Break-glass is
 permitted at launch with limits (decision D9, owner decision of 2026-10-14,
 ADR-058 addendum) and on only after the P11 operator step: 0091 withdrew
-`identity.break-glass.write` from every role, and 0095 grants it again to
+`identity.break-glass.write` from every role, and 0097 grants it again to
 exactly doctor, clinician and nurse, its holders before 0091, and seeds
 `emergency`. Every other role gets `403 PERMISSION_DENIED` before the control
-or purpose check. `break_glass_enabled` is not changed by 0095 (which refuses
+or purpose check. `break_glass_enabled` is not changed by 0097 (which refuses
 to run while it is on) and starts false (0091): until an operator turns it on
 with `POST /admin/controls`, after staff MFA ships (release checklist P11),
 activation answers `423 BREAK_GLASS_DISABLED` ("Emergency access is currently
@@ -1224,11 +1297,15 @@ unchanged. `field` is a DTO property name, or the unknown key the client
 sent; `messages` are the validators' own and never contain a submitted
 value. Identity's nested bodies are the in-person check (ADR-063:
 `document.dateOfBirth`, `attestations.patientConsents`) and clinician self
-sign-up's (ADR-064, 0096): the submit and apply-again `declarations`
+sign-up's (ADR-066, 0098): the submit and apply-again `declarations`
 (`declarations.accurate`, `declarations.verificationConsent`) and step 1's
 `checklist` (`checklist.identityMethod`); an unknown nested key is named
-the same way (`declarations.extra`). Lab, Pharmacy, OCR and Outreach, off at launch (D17), still name only
-the top-level property.
+the same way (`declarations.extra`). Lab, Pharmacy, OCR and Outreach, off
+at launch (D17), still name only the top-level property. The patient routes
+of the patient record release (`GET /api/v1/ehr/me/records` and
+`/ehr/me/documents/:documentId/download`, 0096) take no body; a malformed
+document id is the UUID pipe's `400 BAD_REQUEST` with no `errors`, as on
+every EHR route with an id, so no `VALIDATION_FAILED` answer arises there.
 
 Do not leak:
 
@@ -1252,8 +1329,8 @@ a fixed sentence written for the person using the client, which keeps its
 `502`, `503` or `504`; and, from 0094
 (D-Eminence/hid-system#85),
 `503 ASSISTED_REGISTRATION_DISABLED` and
-`503 ASSISTED_VERIFICATION_UNAVAILABLE`; and, from 0096 (clinician self
-sign-up, ADR-064), `503 CLINICIAN_SIGNUP_CLOSED` ("Clinician sign-up is not
+`503 ASSISTED_VERIFICATION_UNAVAILABLE`; and, from 0098 (clinician self
+sign-up, ADR-066), `503 CLINICIAN_SIGNUP_CLOSED` ("Clinician sign-up is not
 open yet. If you already have a Health ID provider account, sign in.").
 
 A problem may carry an optional `fields` member: an object of field names to
@@ -1276,7 +1353,7 @@ whichever bucket refused, never the time left in a bucket:
 | `429 MFA_RATE_LIMITED` | platform and staff sign-in, enrolment and its email code, step-up and recovery-code regeneration | 900, the length of every MFA window |
 | `429 PATIENT_LOOKUP_RATE_LIMITED` | `POST /api/v1/identity/patient-lookup` | `PATIENT_LOOKUP_RATE_WINDOW_SECONDS` (default 300) |
 | `429 ACCESS_REQUEST_RATE_LIMITED` | `POST /api/v1/identity/access-requests` | `ACCESS_REQUEST_RATE_WINDOW_SECONDS` (default 900) |
-| `429 CLINICIAN_APPLICATION_RATE_LIMITED` | clinician self sign-up (ADR-064, 0096): a per-network (hourly or daily) or platform (daily) quota of the email-code, status-code, search, submit or apply-again operation, and the platform's daily submit cap reached while P4 or P14 creates the application | 86400, the longest quota window, an upper bound whichever window refused (the quotas are counted in SQL; RETRY-AFTER-SQL) |
+| `429 CLINICIAN_APPLICATION_RATE_LIMITED` | clinician self sign-up (ADR-066, 0098): a per-network (hourly or daily) or platform (daily) quota of the email-code, status-code, search, submit or apply-again operation, and the platform's daily submit cap reached while P4 or P14 creates the application | 86400, the longest quota window, an upper bound whichever window refused (the quotas are counted in SQL; RETRY-AFTER-SQL) |
 | `429 MFA_RATE_LIMITED` | clinician self sign-up's authenticator steps (P5-P9: the account's 0088 budgets and the applicants' own per-address bucket) | 900 |
 | `429 CLINICIAN_APPLICATION_AUTHENTICATOR_RATE_LIMITED` | admin step 1, the applicant's authenticator code (`POST /api/v1/admin/clinician-applications/:applicationId/attest`) | 900 |
 
@@ -1298,10 +1375,11 @@ SQL over 24 hours, 30 days or a year (a bound kept for a NIN would also tell
 of other people's attempts on it); `ASSISTED_DESK_CODE_LIMITED` (0094) is
 the enrollment's five desk codes, which never come back, so the patient
 starts again. For the same reason clinician self sign-up's
-`CLINICIAN_APPLICATION_SEARCH_LIMITED` (0096, P3) carries none: a
+`CLINICIAN_APPLICATION_SEARCH_LIMITED` (0098, P3) carries none: a
 capability's 30 searches never come back, and the applicant verifies the
-address again. EHR, Lab,
-Pharmacy, OCR and Outreach set none. Identity's CORS policy exposes
+address again. EHR, Lab, Pharmacy, OCR and Outreach set none; EHR has no
+rate limit of its own and answers no `429` itself, on the patient routes of
+the patient record release (0096) as on its other routes. Identity's CORS policy exposes
 `retry-after` to allowed origins. Before this change no answer carried the
 header and CORS did not expose it.
 
@@ -1435,7 +1513,8 @@ boundary below).
 EHR and OCR authenticate every request through that service session, then
 their guards (`RemoteSecurityGuard`) bind the facility named by
 `X-Facility-ID` on every route that is not marked facility-optional (only
-EHR's `GET /api/v1/ehr/me/records` is). A missing or malformed header is
+EHR's patient-only routes are: `GET /api/v1/ehr/me/records` and, since the
+patient record release, `GET /api/v1/ehr/me/documents/:documentId/download`). A missing or malformed header is
 `400 FACILITY_REQUIRED`. A facility where the actor has no active membership,
 such as a stale tab after the membership ended, is
 `403 FACILITY_ACCESS_DENIED`. Before binding, EHR also applies the runtime
@@ -1460,7 +1539,8 @@ A refusal keeps its own status and code. If its audit row cannot be written,
 the request fails closed with `503 DEPENDENCY_UNAVAILABLE`. Since
 D-Eminence/hid-system#74 each EHR refusal row carries `details.status` and `details.code`,
 the status and code answered, next to `method` and `route`. A route marked
-patient-only (EHR's `GET /api/v1/ehr/me/records`) refuses any other session
+patient-only (EHR's `GET /api/v1/ehr/me/records` and `GET
+/api/v1/ehr/me/documents/:documentId/download`) refuses any other session
 with `403 PATIENT_SESSION_REQUIRED` before a facility is bound.
 
 EHR's request audit (`api.<method>.<route>` on `http-request`) records a failed
@@ -1497,10 +1577,16 @@ open (AUDIT-OUTCOME, `PHASE_3_LAUNCH_DECISIONS.md` §2). In both services
 every request-audit row of a patient session records purpose `patient-self`,
 whatever `purpose` query parameter or `X-Purpose-Of-Use` header the client
 sends, as the patient's own service events already did
-(`identity.patient.self.*`, `ehr.patient.self.records.read`); before this
-change a patient's request rows recorded the client's value, so a patient's
-own approval sent with `direct-care` read as direct care. A staff request
-keeps the purpose it declares.
+(`identity.patient.self.*`, `ehr.patient.self.records.read` and, since 0096,
+`ehr.patient.self.document.download`); before this change a patient's request
+rows recorded the client's value, so a patient's own approval sent with
+`direct-care` read as direct care. A staff request keeps the purpose it
+declares. The patient document download (0096) is audited by the request
+audit on failure only: each refusal's row records its status and code
+(`404 DOCUMENT_NOT_AVAILABLE`, `503 DOCUMENT_INTEGRITY_UNAVAILABLE`,
+`503 DOCUMENT_STORAGE_UNAVAILABLE`, `403 PATIENT_ACCESS_DENIED`, a malformed
+id's `400 BAD_REQUEST`) with purpose `patient-self`; a signed download is
+recorded by its own `ehr.patient.self.document.download` row.
 
 ## 8. Identity Resolution
 
@@ -1945,7 +2031,7 @@ is designated, so the route is closed until an operator opens it.
 Health-id 55a50b0 has none of these screens (facility list, desk code,
 staff check, designation). It cannot use the facility route.
 
-### Clinician self sign-up (ADR-064, migration 0096)
+### Clinician self sign-up (ADR-066, migration 0098)
 
 A doctor (MDCN) or a nurse or midwife (NMCN) applies to work at one verified
 facility; two platform administrators verify and grant later (§19, Clinician
@@ -2298,7 +2384,7 @@ All writes require:
 
 Lab, Pharmacy, OCR and Outreach are off at launch (decision D17), and so are
 document uploads; EHR prescriptions and lab requests are records only.
-Break-glass (D9) is permitted with limits since 0095 and on only after the
+Break-glass (D9) is permitted with limits since 0097 and on only after the
 P11 operator step: doctor, clinician and nurse hold
 `identity.break-glass.write` again, the `emergency` purpose is seeded, and
 `break_glass_enabled` stays off until an operator turns it on after staff MFA
@@ -2311,7 +2397,7 @@ any write or call to another service (where the gateway routes it at all; in
 production it answers `404 API_ROUTE_NOT_FOUND` for the Lab, Pharmacy, OCR and
 Outreach APIs), and Health-id 82b474e hides Laboratory, Pharmacy, Document OCR
 and Outreach, their dashboard tiles, released Lab results, Extract with OCR and
-the upload card (between 0091 and 0095 it also disabled emergency access). Its ungated "Health ID Migrate"
+the upload card (between 0091 and 0097 it also disabled emergency access). Its ungated "Health ID Migrate"
 dashboard card still links to a page the gateway refuses (cosmetic). The EHR
 reads, `ehr.document.read` included, stay. Before 0091, migration 0084 withdrew
 `ehr.lab-request.write`, `lab.work-item.accept`, `lab.accession.create`,
@@ -2329,7 +2415,7 @@ or Pharmacy:
 existing lab requests and prescriptions remain readable in the EHR, and a
 production database built at launch holds no Lab or Pharmacy records. The
 platform controls `uploads_enabled`, `outreach_portal_enabled` and
-`break_glass_enabled` start off (0091, where still seeded); 0095 leaves
+`break_glass_enabled` start off (0091, where still seeded); 0097 leaves
 `break_glass_enabled` to the operator. Prescriptions are
 still created and changed in the EHR. No lab request can be created or changed
 at launch. Since 0090 an encounter's cancellation or retraction needs the write
@@ -2592,7 +2678,9 @@ within its millisecond (earlier in that millisecond, or tied with a lower
 Two read-only summaries return the same seven arrays, each newest first:
 `encounters` (completed), `notes` (signed or amended, with the current
 revision's content; which encounters' notes depends on the summary, below),
-`vitals`, `diagnoses`, `prescriptions`, `labRequests` and `documents`.
+`vitals`, `diagnoses`, `prescriptions`, `labRequests` and `documents`. The
+patient summary adds an eighth, `labResults`, only where Lab results are
+released to patients (below); the emergency summary never has it.
 
 - `GET /api/v1/ehr/me/records`: the patient's own records, from every facility.
 - `GET /api/v1/ehr/patients/:patientId/emergency-records`: the break-glass
@@ -2608,16 +2696,82 @@ Both also return:
 | `truncated` | per released section, `true` when more rows exist than its limit; the section then holds the newest `limits[section]` rows |
 | `limit` | `50`, the smallest section limit, kept for existing clients; read `limits` and `truncated` instead |
 
-**Patient summary.** Only encounters and notes are released to the patient:
-`released` is `["encounters","notes"]` and `withheld` is
-`["vitals","diagnoses","prescriptions","labRequests","documents"]`. A note is
-released only once its encounter is completed (decision D7, since 0084): the
-notes of an encounter in progress, on hold, cancelled or entered in error are
-not returned, whatever the note's own status, and row-level security refuses
-them to the patient's session as well. Which other
-categories are released, and on which conditions, is an open product decision;
-this is the current default. The audit event `ehr.patient.self.records.read`
-records `encounterCount`, `noteCount` and `withheldCategories`.
+**Patient summary.** Encounters and notes are always released to the
+patient. A note is released only once its encounter is completed (decision
+D7, since 0084): the notes of an encounter in progress, on hold, cancelled or
+entered in error are not returned, whatever the note's own status, and
+row-level security refuses them to the patient's session as well.
+
+Since the patient record release (owner decision 4 of 2026-10-16, D7, ADR-065,
+migration 0096) the patient may also see vitals, diagnoses, prescriptions,
+Lab results and documents. Each category is released only when its own
+ehr-api flag is on, and every flag is off by default:
+`EHR_PATIENT_RELEASE_VITALS`, `EHR_PATIENT_RELEASE_DIAGNOSES`,
+`EHR_PATIENT_RELEASE_PRESCRIPTIONS`, `EHR_PATIENT_RELEASE_LAB_RESULTS` and
+`EHR_PATIENT_RELEASE_DOCUMENTS` (synth inputs `HID_EHR_PATIENT_RELEASE_*`).
+The production profile refuses every one of them: Lab results while Lab is
+off at launch (D17), the others until the clinical owner signs off each
+category and its wording (release checklist P36); staging may set them.
+Lab requests (orders, which carry the clinician's clinical information) are
+never released. Every released item belongs to a completed encounter, matched
+on patient and facility. The database follows the flags: its policies admit a
+category's rows to the patient's transaction only when EHR names that
+category as released in it, so with a flag off neither EHR nor the database
+releases the category. Row-level security restricts rows, not columns: within
+a released category the fields below are what EHR selects, and it is EHR that
+leaves out the clinician's notes, storage locations and staff identities.
+
+| Category | Released | Never released |
+|---|---|---|
+| `vitals` | `status` `final` and never corrected (`current_correction_no` 0), as first recorded, with the emergency summary's fields | a corrected vital, while D8 (correction semantics) is open; a vital entered in error |
+| `diagnoses` | `verificationStatus` `confirmed`: `id`, `encounterId`, `facilityId`, `codeSystem`, `code`, `display`, `clinicalStatus`, `verificationStatus`, `onsetAt`, `abatementAt` | unconfirmed, provisional, differential, refuted and entered-in-error diagnoses; the clinician's `notes` (never returned) |
+| `prescriptions` | `status` `active`, `on_hold` or `completed`, with the emergency summary's fields | drafts, cancelled and entered-in-error prescriptions |
+| `labResults` | per Lab result, its latest released revision that was not invalidated, of an order still active, on hold or completed: `id` (Lab result), `encounterId` (source EHR encounter), `sourceEhrOrderId`, `facilityId` (ordering facility), `test` `{codeSystem, code, name}`, `version`, `revisionKind` (`original`, `correction` or `amendment`), `resultType`, `numericValue` (number or `null`), `textValue`, `unit`, `referenceRange`, `abnormalFlag`, `releasedAt` | unverified or unreleased revisions (a newer correction that is not released leaves the earlier released value, as for clinicians, D11); a result whose latest released revision was entered in error (Lab's staff view shows it marked, the patient does not see it); results of a cancelled or entered-in-error order; correction and release reasons and staff identities |
+| `documents` | `classification` `phi`, uploaded, attached to an encounter, and `status` `available` (the latest scan of the exact stored object version and SHA-256 is clean): `id`, `encounterId`, `facilityId`, `fileName`, `mediaType`, `sizeBytes` (a JSON integer, as on every document answer, A15), `classification`, `status`, `scanStatus`, `createdAt` | restricted or internal documents, documents attached to no encounter, rejected, not yet scanned, initiated or entered-in-error documents; the storage location (the download route signs a URL) |
+
+`released` lists `encounters`, `notes` and then each released category in
+the order `vitals`, `diagnoses`, `prescriptions`, `labResults`, `documents`.
+`withheld` lists the other categories of `vitals`, `diagnoses`,
+`prescriptions`, `labRequests` and `documents`; it always holds
+`labRequests`. The `labResults` array and name appear only when Lab results
+are released, so with every flag off the response is exactly
+`released: ["encounters","notes"]` and `withheld:
+["vitals","diagnoses","prescriptions","labRequests","documents"]`, as before
+the release. `limits` and `truncated` cover the released sections (100 rows
+each beyond encounters and notes). A released item that is later entered in
+error, refuted, invalidated or retracted with its encounter disappears from
+the summary without a marker.
+
+If the database refuses a released category's read (for example the role
+bootstrap did not run after migration 0096) or the read passes the
+database statement timeout, the summary answers `503
+PATIENT_RECORDS_UNAVAILABLE`, discloses nothing and records no success. The
+audit event `ehr.patient.self.records.read` records `encounterCount`,
+`noteCount`, the count of each further category read (`vitalCount`,
+`diagnosisCount`, `prescriptionCount`, `labResultCount`, `documentCount`) and
+`withheldCategories`; counts only.
+
+**Patient document download.** `GET
+/api/v1/ehr/me/documents/:documentId/download` (patient sessions only,
+facility-optional) answers `200 { url, expiresInSeconds: 60 }`: a URL for the
+exact stored object version, served as an attachment with `Cache-Control:
+private, no-store`. Every document the patient may not download answers the
+same `404 DOCUMENT_NOT_AVAILABLE`: documents are not released, the document
+is unknown or another patient's, it is not an available PHI document of a
+completed encounter, or it is held in another bucket. The staff download
+answers the same code `409` for a document that exists but is not available
+(A15); the patient route answers `404` for every case, so it does not say
+whether the document exists. A malformed id is the UUID pipe's
+`400 BAD_REQUEST`. The audit event `ehr.patient.self.document.download` (resource type
+`document`, the document id, `details.mediaType` and `details.sizeBytes`
+only) commits before the stored object is checked; then the object's
+version, size, SHA-256 and encryption are read back (HEAD with checksum
+mode) and must match the record, else `503 DOCUMENT_INTEGRITY_UNAVAILABLE`
+and no URL is signed; an object store that cannot be read is `503
+DOCUMENT_STORAGE_UNAVAILABLE`. Identity's answers are as for the summary
+(`403 PATIENT_ACCESS_DENIED`, `503 IDENTITY_SERVICE_AUTH_UNAVAILABLE`,
+`503 IDENTITY_SERVICE_UNAVAILABLE`). Caregivers and other delegates have no
+access to either route (no delegated-access model exists, ADR-018).
 
 **Emergency summary.** Of the seven categories it returns those the reader
 holds the read permission for, pending a decision on the break-glass scope.
@@ -3010,6 +3164,14 @@ Each document route answers the route checks first, as every EHR route does
 - `GET /api/v1/ehr/internal/ocr/documents/:documentId/source`: `404
   NOT_FOUND` and `403 CONSENT_REQUIRED`, which OCR passes through with its
   status and code.
+- The patient routes of the patient record release (0096, ADR-065; §11,
+  "Record summaries" and "Patient document download") follow the same rules:
+  `GET /api/v1/ehr/me/records` returns each released document's `sizeBytes`
+  as a JSON integer, and `GET /api/v1/ehr/me/documents/:documentId/download`
+  answers its own codes (`404 DOCUMENT_NOT_AVAILABLE`,
+  `503 DOCUMENT_INTEGRITY_UNAVAILABLE`, `503 DOCUMENT_STORAGE_UNAVAILABLE`).
+  Until the merge of 0096 into this change the released documents' `sizeBytes`
+  was the text PostgreSQL returns for a `bigint`.
 
 Until this change (A15) the key refusal and the disabled control answered
 `409 CONFLICT` (the key's detail was "A valid Idempotency-Key header is
@@ -3434,7 +3596,7 @@ new membership starts pending.
 | `403 WORKFORCE_FACILITY_CONFLICT` | The caller has an active membership at the facility (its `org_admin` included) and attaches or grants there |
 | `403 WORKFORCE_SECOND_PERSON_REQUIRED` | The only current attestation for the role was recorded by the caller |
 | `404 WORKFORCE_ACCOUNT_NOT_FOUND`, `WORKFORCE_STAFF_NOT_FOUND`, `WORKFORCE_FACILITY_NOT_FOUND`, `WORKFORCE_MEMBERSHIP_NOT_FOUND` | The named record does not exist |
-| `409 WORKFORCE_ATTESTATION_REQUIRED` | No current attestation for the role by an independent reviewer. An attestation recorded by step 1 of a clinician application (ADR-064) supports no grant here until its application is approved, also once the application is rejected, withdrawn or overdue; the profile's attestations carry `clinicianApplication: { id, state } \| null` and `usableForGrant` |
+| `409 WORKFORCE_ATTESTATION_REQUIRED` | No current attestation for the role by an independent reviewer. An attestation recorded by step 1 of a clinician application (ADR-066) supports no grant here until its application is approved, also once the application is rejected, withdrawn or overdue; the profile's attestations carry `clinicianApplication: { id, state } \| null` and `usableForGrant` |
 | `409 WORKFORCE_ROLE_CONFLICT` | The membership holds `org_admin` or `admin`; an administering membership stays non-clinical |
 | `409 WORKFORCE_ROLE_ALREADY_ACTIVE`, `WORKFORCE_ROLE_NOT_ACTIVE` | Granting a held role that is not due for renewal (its attestation is current and no current attestation lasts longer, or it was not granted on an attestation), or revoking one the membership does not hold |
 | `409 WORKFORCE_MEMBERSHIP_EXISTS` | The account already has an active or pending membership at the facility |
@@ -3444,7 +3606,7 @@ new membership starts pending.
 | `409 WORKFORCE_ACCOUNT_INELIGIBLE`, `WORKFORCE_STAFF_INELIGIBLE` | The account is disabled, locked, deleted or a patient's own account, the staff record is inactive, or its verification status cannot be attested or granted |
 | `409 WORKFORCE_EMAIL_IN_USE` | A new identity's email is already used by an account or staff record |
 
-### Clinician applications (ADR-064, migration 0096)
+### Clinician applications (ADR-066, migration 0098)
 
 The verification queue of clinician self sign-up. Every route needs an
 MFA-verified platform session and `platform.workforce.manage`

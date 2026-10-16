@@ -1,17 +1,17 @@
-// Approving a clinician application (0096, ADR-064) grants a doctor or nurse
+// Approving a clinician application (0098, ADR-066) grants a doctor or nurse
 // role pinned to the step-1 credential attestation. Merged with main's 0094
-// (ADR-063) and break-glass's 0095 (D9), that role carries two authorities an
+// (ADR-063) and break-glass's 0097 (D9), that role carries two authorities an
 // account approved on a forged identity could misuse: break-glass emergency
 // reads, and the in-person check of facility-assisted registration, whose own
 // authorization accepts any facility role resting on a current attestation,
 // so an approved clinician at a designated facility can vouch for another
 // person's Health ID. After the merge the documents named break-glass only:
-// ADR-064, SECURITY.md §5, P35 and its daily review of recent approvals, the
+// ADR-066, SECURITY.md §5, P37 and its daily review of recent approvals, the
 // launch decision CLIN-SIGNUP, and MIGRATION_RUNBOOK.md §6.
 //
 // These checks hold those documents to the migrations: each authority that a
 // migration grants to every role an application can approve is named in each
-// of them, P35 and the runbook review it daily for accounts approved in the
+// of them, P37 and the runbook review it daily for accounts approved in the
 // last 90 days, P32 counts an approval as an attested grant, and the runbook's
 // review queries are the ones clinician-applications.integration.sql runs.
 import assert from 'node:assert/strict';
@@ -46,14 +46,14 @@ function grantees(sql, permission) {
 }
 
 const decisions = read('docs/DECISIONS.md');
-const adr = decisions.slice(decisions.indexOf('\n# ADR-064:'));
+const adr = decisions.slice(decisions.indexOf('\n# ADR-066:'));
 const part = (start, end) => flat(adr.slice(adr.indexOf(`\n${start}:\n`), end ? adr.indexOf(`\n${end}:\n`) : undefined));
 const context = part('Context', 'Decision');
 const alternatives = part('Alternatives not taken', 'Consequences');
 const consequences = part('Consequences');
 
 const security = flat(read('docs/SECURITY.md'));
-const signUp = security.slice(security.indexOf('Clinician self sign-up (ADR-064) answers every address alike'),
+const signUp = security.slice(security.indexOf('Clinician self sign-up (ADR-066) answers every address alike'),
   security.indexOf('## 6. NIN Security'));
 const residual = signUp.slice(signUp.indexOf('Residual risks:'));
 
@@ -75,11 +75,11 @@ test('the migrations give each authority to every role an application can approv
   }
 });
 
-test('ADR-064 names each authority in its context, its alternatives and its consequences', () => {
+test('ADR-066 names each authority in its context, its alternatives and its consequences', () => {
   for (const { permission, term } of authorities) {
-    assert.match(context, term, `ADR-064's context does not name ${permission}`);
-    assert.match(alternatives, new RegExp(`probation[^.]*${term.source}`, 'i'), `ADR-064 does not weigh a probation for ${permission}`);
-    assert.match(consequences, term, `ADR-064's consequences do not name ${permission}`);
+    assert.match(context, term, `ADR-066's context does not name ${permission}`);
+    assert.match(alternatives, new RegExp(`probation[^.]*${term.source}`, 'i'), `ADR-066 does not weigh a probation for ${permission}`);
+    assert.match(consequences, term, `ADR-066's consequences do not name ${permission}`);
   }
 });
 
@@ -87,18 +87,18 @@ test('SECURITY.md §5 names each authority among the residual risks of clinician
   for (const { permission, term } of authorities) assert.match(residual, term, `SECURITY.md §5 does not name ${permission}`);
 });
 
-test('P35 and CLIN-SIGNUP name each authority, and P35 reviews each daily for recent approvals', () => {
-  const p35 = flat(row('P35'));
-  const daily = p35.slice(p35.indexOf('daily review'));
+test('P37 and CLIN-SIGNUP name each authority, and P37 reviews each daily for recent approvals', () => {
+  const p37 = flat(row('P37'));
+  const daily = p37.slice(p37.indexOf('daily review'));
   for (const { permission, term } of authorities) {
-    assert.match(daily.slice(0, daily.indexOf('(6)')), term, `P35 (5) does not review ${permission} daily`);
+    assert.match(daily.slice(0, daily.indexOf('(6)')), term, `P37 (5) does not review ${permission} daily`);
     assert.match(flat(launch), term, `CLIN-SIGNUP does not name ${permission}`);
   }
-  assert.match(p35, /in-person checks? it recorded/, 'P35 (6), the fraud runbook entry, does not list the in-person checks of the account');
+  assert.match(p37, /in-person checks? it recorded/, 'P37 (6), the fraud runbook entry, does not list the in-person checks of the account');
 });
 
 test('P32 counts an approved clinician application as an attested grant', () => {
-  assert.match(flat(row('P32')), /ADR-064/);
+  assert.match(flat(row('P32')), /ADR-066/);
 });
 
 test('MIGRATION_RUNBOOK.md §6 has a recent-approval review query for each authority', () => {

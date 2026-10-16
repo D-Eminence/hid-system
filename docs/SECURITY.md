@@ -76,15 +76,15 @@ code, which its enrollment cookie proves (at the contact step and, from 0093,
 the holder step). The holder step's `429 NIN_HOLDER_ROUTE_LIMITED` carries
 none: its budgets are kept per phone and per NIN, so a time left would tell
 of other people's attempts on that NIN, and the answer sends the patient to a
-participating facility rather than to wait. Clinician self sign-up (ADR-064,
-0096) follows the same rule: its quotas, counted per client network and for
+participating facility rather than to wait. Clinician self sign-up (ADR-066,
+0098) follows the same rule: its quotas, counted per client network and for
 the platform, state the longest quota window (`86400`), which tells nothing
 of any address; its authenticator steps and admin step 1 state the 15-minute
 MFA window; and a capability's spent search budget,
 `429 CLINICIAN_APPLICATION_SEARCH_LIMITED`, carries none, because those 30
 searches never come back (the applicant verifies the address again).
 
-A clinician applicant (ADR-064) holds an application capability, not a
+A clinician applicant (ADR-066) holds an application capability, not a
 session: an HttpOnly, `SameSite=Strict`, host-only cookie scoped to
 `/api/v1/identity/clinician-applications` whose keyed digest is all the
 database stores, opened by the submission or by an emailed code followed by
@@ -147,7 +147,7 @@ No service may create an alternative patient authority.
 
 Patient lookup must expose the minimum information required.
 
-Clinician self sign-up (ADR-064) answers every address alike: both email-code
+Clinician self sign-up (ADR-066) answers every address alike: both email-code
 starts return the same `202` whether or not the address is in use or belongs
 to an applicant, deliver after the answer, and only a code's holder learns
 that an address is in use (`409 CLINICIAN_EMAIL_IN_USE` after a correct
@@ -171,13 +171,13 @@ application is created), and the sign-up hashes a password only for a
 submission the database may create, at most five per verified email draft,
 so its argon2id work is bounded platform-wide. The
 standard, the reviewer list and the register source are owner decisions
-(release checklist P35). Residual risks: the manual identity check (a
+(release checklist P37). Residual risks: the manual identity check (a
 deepfaked call, a forged ID) and what an approved fraudster can then do at
 their facility: emergency reads once break-glass is on, and in-person checks
 (ADR-063) once the facility is designated and `ASSISTED_REGISTRATION_ENABLED`
 is on. The approved grant rests on a current attestation, which is all the
 in-person check requires, so such an account could create another person's
-Health ID within ADR-063's budgets. P35 requires a daily review of break-glass
+Health ID within ADR-063's budgets. P37 requires a daily review of break-glass
 use and of in-person checks by accounts approved in the last 90 days, and its
 fraud runbook entry lists the in-person checks such an account recorded; no
 route undoes a Health ID one of them proved (ADR-063's contested-identity
@@ -285,7 +285,7 @@ whatever purpose the client sends, so a patient's own action cannot be
 labelled direct care or emergency in the audit trail; a staff request's
 purpose is still the one it declares and its route checks.
 
-Clinician applications (ADR-064) are audited inside their commands as
+Clinician applications (ADR-066) are audited inside their commands as
 `system:auth` (`identity.clinician-application.quota`, `.email-verified`,
 `.status-code-verified`, `.submitted`, `.authenticator-ready`,
 `.authenticator.verified`, `.withdrawn`, `.expired`) and their review as

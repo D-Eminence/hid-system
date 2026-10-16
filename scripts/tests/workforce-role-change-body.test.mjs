@@ -1,4 +1,4 @@
-// Clinician self sign-up (ADR-064) moves the body of 0087's
+// Clinician self sign-up (ADR-066) moves the body of 0087's
 // identity.admin_change_workforce_role into the internal
 // identity.workforce_change_role, which takes a pinned attestation, and makes
 // the 0087 command a one-line delegation with no pin. A copying mistake there

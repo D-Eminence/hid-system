@@ -13,7 +13,7 @@ import { ClinicianApplicationController } from './clinician-application.controll
 import { ClinicianApplicationService } from './clinician-application.service';
 
 /**
- * The clinician application routes (ADR-064) over HTTP, through the real
+ * The clinician application routes (ADR-066) over HTTP, through the real
  * ValidationPipe and problem filter, with the service and Turnstile replaced:
  * the refusal order, the capability cookie, the headers and the answers that
  * must not differ.

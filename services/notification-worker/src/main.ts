@@ -17,6 +17,9 @@ async function main(): Promise<void> {
   }
   const repository = new NotificationRepository(config);
   await repository.verifyRuntimeRole();
+  // ADR-064: the claim-bound recipient lookup (0095) must exist and be
+  // executable before the worker gives Novu any email.
+  if (config.NOVU_SUBSCRIBER_SYNC === 'email') await repository.verifySubscriberSyncPrivilege();
   const orchestrator = new NovuOrchestrator(config);
   const worker = new NotificationWorker(config, repository, orchestrator);
   const status = new StatusServer(config, worker, repository, orchestrator);

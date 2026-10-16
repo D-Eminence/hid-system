@@ -101,7 +101,7 @@ const CONFLICTS: Readonly<Record<string, string>> = Object.freeze({
 });
 
 /**
- * Clinician self sign-up and its status page (ADR-064, owner decision 2). A
+ * Clinician self sign-up and its status page (ADR-066, owner decision 2). A
  * doctor or nurse proves an email address, submits a licence and a facility,
  * and sets up an authenticator before any review; two Super Admins then
  * verify and grant (AdminClinicianApplicationsService). Nothing here issues a
@@ -109,7 +109,7 @@ const CONFLICTS: Readonly<Record<string, string>> = Object.freeze({
  * the 0088 challenge that capability drives is derived here and never leaves
  * Identity, so no value captured from these routes works at /auth/mfa/*.
  *
- * The database commands (0096) hold every rule; this service adds the gate
+ * The database commands (0098) hold every rule; this service adds the gate
  * and quota order, the keyed digests, the delivery after the response and
  * the HTTP answers. Nothing it logs carries an email, a name, a licence, a
  * search, a code or a token.

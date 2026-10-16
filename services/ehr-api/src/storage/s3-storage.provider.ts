@@ -10,11 +10,13 @@ import {
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { getEnvironment } from '../config/environment';
-import type {
-  PresignedUpload,
-  StorageProvider,
-  StoredObjectMetadata,
-  UploadIntent,
+import {
+  type DownloadAttachment,
+  type PresignedUpload,
+  type StorageProvider,
+  type StoredObjectMetadata,
+  StoredObjectIntegrityError,
+  type UploadIntent,
 } from './storage.types';
 
 @Injectable()
@@ -106,10 +108,52 @@ export class S3StorageProvider implements StorageProvider {
     };
   }
 
-  async createDownload(key: string, versionId: string): Promise<{ url: string; expiresInSeconds: number }> {
+  /**
+   * The exact version's metadata, with S3 recomputing nothing: HEAD with
+   * ChecksumMode returns the SHA-256 recorded at upload. A version, checksum,
+   * size or encryption that is not as required is an integrity failure; any
+   * error of the request itself is passed through as an object-store failure.
+   */
+  async inspectVersion(key: string, versionId: string): Promise<StoredObjectMetadata> {
+    const result = await this.client.send(new HeadObjectCommand({
+      Bucket: this.bucket(), Key: key, VersionId: versionId, ChecksumMode: 'ENABLED',
+    }));
+    const checksum = Buffer.from(result.ChecksumSHA256 ?? '', 'base64');
+    if (result.VersionId !== versionId || checksum.length !== 32 || typeof result.ContentLength !== 'number') {
+      throw new StoredObjectIntegrityError('Stored object version, checksum or size is not as recorded');
+    }
+    if (this.environment.S3_KMS_KEY_ID) {
+      if (result.ServerSideEncryption !== 'aws:kms' || result.SSEKMSKeyId !== this.environment.S3_KMS_KEY_ID) {
+        throw new StoredObjectIntegrityError('Stored object is not protected by the required KMS key');
+      }
+    } else if (result.ServerSideEncryption !== 'AES256') {
+      throw new StoredObjectIntegrityError('Stored object server-side encryption is missing');
+    }
+    return {
+      versionId,
+      sizeBytes: result.ContentLength,
+      mediaType: result.ContentType ?? 'application/octet-stream',
+      sha256Hex: checksum.toString('hex'),
+    };
+  }
+
+  /**
+   * A 60 s URL for one exact version. With an attachment (the patient
+   * download) the object is served as a named attachment that browsers and
+   * proxies must not keep; without one (the staff download) the request is
+   * unchanged.
+   */
+  async createDownload(key: string, versionId: string, attachment?: DownloadAttachment):
+    Promise<{ url: string; expiresInSeconds: number }> {
     const expiresInSeconds = 60;
     const url = await getSignedUrl(this.client, new GetObjectCommand({
       Bucket: this.bucket(), Key: key, VersionId: versionId,
+      ...(attachment ? {
+        ResponseContentDisposition: `attachment; filename="${
+          attachment.fileName.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 120) || 'attachment'}"`,
+        ResponseContentType: attachment.mediaType,
+        ResponseCacheControl: 'private, no-store',
+      } : {}),
     }), { expiresIn: expiresInSeconds });
     return { url, expiresInSeconds };
   }

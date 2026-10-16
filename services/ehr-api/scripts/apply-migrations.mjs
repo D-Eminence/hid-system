@@ -40,7 +40,7 @@ const through = throughEquals !== undefined
 const databaseUrl = process.env.DATABASE_URL;
 
 if (throughGiven && (!through || !/^\d{4}_[a-z0-9_]+\.sql$/.test(through))) {
-  throw new Error('--through needs a migration file name such as 0095_break_glass_launch_with_limits.sql');
+  throw new Error('--through needs a migration file name such as 0097_break_glass_launch_with_limits.sql');
 }
 
 if (!databaseUrl) {

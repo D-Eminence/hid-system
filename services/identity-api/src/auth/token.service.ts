@@ -295,7 +295,7 @@ export class TokenService {
 
   /**
    * The staff actor of a new staff session. Eligibility is re-checked here
-   * (ADR-064, defence in depth): an account whose membership ended after its
+   * (ADR-066, defence in depth): an account whose membership ended after its
    * password step, or a clinician applicant whose application is not
    * approved, gets the password step's 403 NO_ACTIVE_FACILITY_MEMBERSHIP and
    * no session, never a 401, which reads as a refused credential (ADR-059).

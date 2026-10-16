@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Clinician self sign-up with two-admin approval (ADR-064, migration 0096)
+// Clinician self sign-up with two-admin approval (ADR-066, migration 0098)
 // over HTTP, executed as the exact Identity API runtime role against a
 // disposable copy of the owned synthetic rehearsal. The real DatabaseService,
 // SecurityGuard, AuditInterceptor, controllers, Turnstile verifier, MFA,

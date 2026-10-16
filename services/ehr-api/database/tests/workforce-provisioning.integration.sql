@@ -678,7 +678,7 @@ declare
   account_lock integer;
   membership_lock integer;
 begin
-  -- Since 0096 the grant's body is identity.workforce_change_role (0087's body
+  -- Since 0098 the grant's body is identity.workforce_change_role (0087's body
   -- with the reservation and the pin) and identity.admin_change_workforce_role
   -- only delegates to it with no pin, so the lock order is checked there.
   definition := regexp_replace(lower(pg_get_functiondef(

@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Clinician self sign-up with two-admin approval (0096, ADR-064, owner
+-- Clinician self sign-up with two-admin approval (0098, ADR-066, owner
 -- decision 2 of 2026-10-14). Rollback-only; synthetic data only. Every
 -- public, capability and system command runs as hid_identity_api_runtime in
 -- Identity's system context, and every administration command as that role
@@ -357,7 +357,7 @@ begin
          and relation.relrowsecurity) <> 4
      or not (select relrowsecurity and relforcerowsecurity from pg_class
               where oid = 'platform.clinician_application_quota_counters'::regclass) then
-    raise exception 'row-level security is not enabled as 0096 requires';
+    raise exception 'row-level security is not enabled as 0098 requires';
   end if;
   if not exists (select 1 from auth.role_permissions where role_code = 'platform_super_admin'
       and permission_code = 'platform.workforce.manage')
@@ -371,7 +371,7 @@ begin
          <> 'hid_platform_control_reader') then
     raise exception 'platform.control_enabled lost its technical owner or its PUBLIC execute grant';
   end if;
-  -- Every 0096 definer has a fixed search path and no other setting.
+  -- Every 0098 definer has a fixed search path and no other setting.
   if exists (select 1 from pg_proc proc join pg_namespace namespace_row on namespace_row.oid = proc.pronamespace
               where (proc.proname like '%clinician%' or proc.proname in ('workforce_change_role', 'workforce_attestation_usable'))
                 and proc.prosecdef
@@ -389,7 +389,7 @@ declare
 begin
   select * into control from platform.control_settings where control_key = 'clinician_signup_enabled';
   if control.enabled is distinct from false or control.row_version <> 1 or control.updated_by is not null
-     or control.reason <> 'Off until an administrator opens clinician self sign-up (0096, ADR-064)' then
+     or control.reason <> 'Off until an administrator opens clinician self sign-up (0098, ADR-066)' then
     raise exception 'clinician_signup_enabled is not seeded off: %', row_to_json(control);
   end if;
   select count(*) into keys from pg_constraint
@@ -2029,11 +2029,11 @@ begin
     raise exception 'the approved clinician is not eligible for staff sign-in at the facility';
   end if;
 end $$;
--- After 0094 and 0095 (ADR-063, D9) the approved role also carries break-glass
+-- After 0094 and 0097 (ADR-063, D9) the approved role also carries break-glass
 -- and the in-person check of facility-assisted registration, whose own
 -- authorization accepts the step-2 grant pinned to the step-1 attestation;
 -- C's doctor role at X, which rests on no attestation, does not qualify
--- (ADR-064, P32, P35).
+-- (ADR-066, P32, P37).
 do $$
 declare
   membership identity.staff_facility_memberships%rowtype;
@@ -2051,7 +2051,7 @@ begin
     raise exception 'a doctor role without an attested grant qualifies for the in-person check';
   end if;
 end $$;
--- MIGRATION_RUNBOOK.md §6's daily reviews (P35), as the runbook writes them:
+-- MIGRATION_RUNBOOK.md §6's daily reviews (P37), as the runbook writes them:
 -- an in-person check and a break-glass activation by P1 (approved just now)
 -- are listed; C's, by an account no application approved, are not. As the
 -- owner, rolled back.

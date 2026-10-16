@@ -9,7 +9,7 @@ export const CLINICIAN_APPLICATION_LIST_STATES = ['open', 'awaiting_authenticato
   'approved', 'rejected', 'withdrawn', 'expired'] as const;
 export type ClinicianApplicationListState = typeof CLINICIAN_APPLICATION_LIST_STATES[number];
 
-/** The applicant-facing reasons of a rejection (ADR-064); `identity_not_confirmed` blocks further applications. */
+/** The applicant-facing reasons of a rejection (ADR-066); `identity_not_confirmed` blocks further applications. */
 export const CLINICIAN_APPLICATION_DECISION_CODES = ['licence_not_verified', 'licence_not_current', 'details_mismatch',
   'identity_not_confirmed', 'employment_not_confirmed', 'facility_not_available', 'duplicate', 'existing_account',
   'other'] as const;
