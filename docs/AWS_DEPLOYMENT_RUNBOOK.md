@@ -91,7 +91,10 @@ production gives it no key, so it answers `not_configured`: before ingress a
 platform administrator pauses it (§13 step 5, release checklist P21).
 
 Novu also needs the configured workflow, canonical synthetic patient subscriber
-mapping and approved delivery integration. See
+mapping and approved delivery integration. The synth input
+`HID_NOVU_SUBSCRIBER_SYNC_ENABLED` (default `false`, staging only, refused in
+production; ADR-064) makes the worker map the subscriber's verified login email
+itself; set it only after release checklist P35. See
 [provider accounts and activation](STAGING_PROVIDER_ACCOUNTS.md) and
 [read-only external preflight](STAGING_EXTERNAL_PREFLIGHT.md). No key-presence or
 health check substitutes for actual delivery evidence.

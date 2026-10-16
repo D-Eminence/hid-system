@@ -1265,7 +1265,7 @@ test('production OTP delivery injects only the otp-email-sms provider fields', (
   assert.ok(containerOf(stagingRegional, 'notification-worker').secrets.some(item => item.Name === 'NOVU_API_KEY'));
 });
 
-test('patient record release categories are explicit synth inputs that default to false; only staging may set them (D17, P35)', () => {
+test('patient record release categories are explicit synth inputs that default to false; only staging may set them (D17, P36)', () => {
   const productionTopic = { operationalAlarmTopicArn: productionTopicArn };
   const none = { vitals: false, diagnoses: false, prescriptions: false, labResults: false, documents: false };
   assert.deepEqual(environmentConfig('production').patientRecordRelease, none);
@@ -1287,7 +1287,7 @@ test('patient record release categories are explicit synth inputs that default t
   }
   // Production refuses every category: Lab results while Lab is withdrawn at
   // launch (D17, 0091 section 2), the others until the clinical owner signs
-  // off each one (P35, ADR-064). The development stack's ehr-api runs in the
+  // off each one (P36, ADR-065). The development stack's ehr-api runs in the
   // production profile (HID_DEPLOYMENT_ENV=production), so it refuses them too.
   const productionConfiguration = environmentConfig('production', undefined, undefined, undefined, productionTopic);
   const developmentConfiguration = environmentConfig('development');
@@ -1476,4 +1476,34 @@ test('the production preflight checks exactly the secret fields and alarm topic 
   assert.deepEqual([...list('NOTIFICATION_PROVIDER_FIELDS')].sort(), fields('NotificationProviderSecretArn', 'notification-api'));
   assert.deepEqual([...list('AUTH_FIELDS')].sort(), fields('AuthSecretArn', 'identity-api'));
   assert.match(script, /^ALARM_TOPIC_NAME = "hid-production-operational-alerts"$/m);
+});
+
+test('Novu subscriber email sync is a staging-only synth input that defaults to false (ADR-064)', () => {
+  // The default: every environment keeps main's worker, which gives Novu no email.
+  for (const config of [environmentConfig('production', undefined, undefined, undefined,
+    { operationalAlarmTopicArn: productionTopicArn }), environmentConfig('staging', 'economy'), environmentConfig('development')]) {
+    assert.equal(config.novuSubscriberSyncEnabled, false);
+  }
+  const defaultWorker = containerOf(stagingRegional, 'notification-worker').environment;
+  assert.equal(defaultWorker.NOVU_SUBSCRIBER_SYNC, 'disabled');
+  assert.equal(defaultWorker.HID_DEPLOYMENT_ENV, 'staging');
+  assert.equal(containerOf(regional, 'notification-worker').environment.NOVU_SUBSCRIBER_SYNC, 'disabled');
+  assert.equal(containerOf(regional, 'notification-worker').environment.HID_DEPLOYMENT_ENV, 'production');
+  assert.equal(containerOf(developmentRegional, 'notification-worker').environment.HID_DEPLOYMENT_ENV, 'development');
+  // Staging opts in explicitly; the worker then runs NOVU_SUBSCRIBER_SYNC=email.
+  const optedIn = environmentConfig('staging', 'economy', undefined, undefined, { novuSubscriberSyncEnabled: 'true' });
+  assert.equal(optedIn.novuSubscriberSyncEnabled, true);
+  const optedInWorker = containerOf(Template.fromStack(new HidRegionalStack(new App(), 'NovuSubscriberSyncStaging', {
+    configuration: optedIn })).toJSON() as typeof regional, 'notification-worker').environment;
+  assert.equal(optedInWorker.NOVU_SUBSCRIBER_SYNC, 'email');
+  assert.equal(optedInWorker.HID_DEPLOYMENT_ENV, 'staging');
+  // Refused in production, outside staging, without the worker, and for a non-boolean.
+  assert.throws(() => environmentConfig('production', undefined, undefined, undefined,
+    { operationalAlarmTopicArn: productionTopicArn, novuSubscriberSyncEnabled: 'true' }), /HID_NOVU_SUBSCRIBER_SYNC_ENABLED/);
+  assert.throws(() => environmentConfig('development', undefined, undefined, undefined, { novuSubscriberSyncEnabled: 'true' }),
+    /HID_NOVU_SUBSCRIBER_SYNC_ENABLED/);
+  assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined,
+    { novuSubscriberSyncEnabled: 'true', notificationWorkerEnabled: 'false' }), /HID_NOVU_SUBSCRIBER_SYNC_ENABLED/);
+  assert.throws(() => environmentConfig('staging', 'economy', undefined, undefined, { novuSubscriberSyncEnabled: 'yes' }),
+    /HID_NOVU_SUBSCRIBER_SYNC_ENABLED/);
 });

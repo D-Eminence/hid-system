@@ -93,7 +93,7 @@ const environmentSchema = z
     AWS_ACCESS_KEY_ID: optionalString,
     AWS_SECRET_ACCESS_KEY: optionalString,
     AWS_SESSION_TOKEN: optionalString,
-    // Patient record release (owner decision 4 of 2026-10-16, D7, ADR-064):
+    // Patient record release (owner decision 4 of 2026-10-16, D7, ADR-065):
     // what the patient's own summary releases beyond encounters and notes, one
     // flag per category, each off by default and refused in the production
     // profile (below). Lab requests (orders) are never released.
@@ -118,10 +118,10 @@ const environmentSchema = z
       context.addIssue({ code: 'custom', path: ['EHR_PATIENT_RELEASE_LAB_RESULTS'],
         message: 'Lab results are not released to patients while Lab is off at launch (D17)' });
     }
-    // ADR-064: no clinician-review gate or sensitivity classification is
+    // ADR-065: no clinician-review gate or sensitivity classification is
     // built, so the production profile releases none of the EHR categories
     // until the clinical owner signs off each category and its wording
-    // (release checklist P35). Each refusal is removed only by a reviewed
+    // (release checklist P36). Each refusal is removed only by a reviewed
     // change that records that sign-off; staging and a local development run
     // may opt in. The AWS development stack runs in the production profile.
     for (const [flag, category] of [['EHR_PATIENT_RELEASE_VITALS', 'Vitals'],
@@ -129,8 +129,8 @@ const environmentSchema = z
       ['EHR_PATIENT_RELEASE_DOCUMENTS', 'Documents']] as const) {
       if (environment[flag] && isProductionProfile(environment)) {
         context.addIssue({ code: 'custom', path: [flag], message: `${category} released to patients are refused in the `
-          + 'production profile until the clinical owner signs off the category and its wording (release checklist P35, '
-          + 'ADR-064)' });
+          + 'production profile until the clinical owner signs off the category and its wording (release checklist P36, '
+          + 'ADR-065)' });
       }
     }
     // ADR-065: imported legacy history is shown to nobody in the production

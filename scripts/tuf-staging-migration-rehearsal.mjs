@@ -573,6 +573,14 @@ try {
     evidence.checks[name] = JSON.parse(command(`exact-role ${name.replace('_runtime', '')} HTTP write commands`,
       process.execPath, [join(repository, script)], workflowEnvironment));
   }
+  // ADR-064 (0095): the notification worker's subscriber email sync, as
+  // hid_notification_worker against a fake Novu: flag off is main's trigger
+  // alone; a failed subscriber call never holds back the in-app trigger; an
+  // opt-out or a deleted login clears an email synced earlier first.
+  evidence.checks.notification_worker_runtime = JSON.parse(command(
+    'exact-role notification worker: claim-bound recipient lookup, Novu subscriber email sync and the in-app trigger',
+    process.execPath, [join(repository, 'services/notification-worker/scripts/verify-notification-worker-runtime.mjs')],
+    workflowEnvironment));
   // Imported legacy history (ADR-065): main's stage, promote and reconcile of
   // a synthetic identity source, a sealed history run of the same snapshot and
   // the importer's dry run, apply, repeat and refusals, on a database of its own.

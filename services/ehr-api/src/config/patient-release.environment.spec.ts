@@ -4,7 +4,7 @@ import { getEnvironment, isProductionProfile, resetEnvironmentForTests } from '.
 // category, all off by default. The production profile refuses every one of
 // them: Lab results while the Lab module is withdrawn at launch (D17, 0091
 // section 2), and the four EHR categories until the clinical owner signs off
-// each category and its wording (release checklist P35, ADR-064), since no
+// each category and its wording (release checklist P36, ADR-065), since no
 // clinician-review gate or sensitivity classification is built. Each refusal
 // is lifted only by a reviewed change that records that sign-off. Staging
 // (HID_DEPLOYMENT_ENV=staging, which every ECS task also runs with
@@ -97,10 +97,10 @@ describe('EHR patient record release flags', () => {
   ] as const;
 
   it.each(ehrFlags.flatMap((flag) => productionProfiles.map(([label, base]) => [flag, label, base] as const)))(
-    'refuses %s in %s until the clinical owner signs off (P35)', (flag, _label, base) => {
+    'refuses %s in %s until the clinical owner signs off (P36)', (flag, _label, base) => {
       const { HID_DEPLOYMENT_ENV: profile, ...rest } = base as Record<string, string | undefined>;
       configure(rest as Record<string, string>, { HID_DEPLOYMENT_ENV: profile, [flag]: 'true' });
-      expect(() => getEnvironment()).toThrow(new RegExp(`${flag}: .*refused in the production profile.*P35`));
+      expect(() => getEnvironment()).toThrow(new RegExp(`${flag}: .*refused in the production profile.*P36`));
     });
 
   it('accepts every category on staging and in a local development run', () => {

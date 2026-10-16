@@ -916,7 +916,7 @@ $$;
 -- security_invoker), selected only by hid_ehr_runtime and the test role.
 -- Its ACL holds exactly those two SELECT entries from the first bootstrap
 -- run on: no entry of the owner itself, which the migration's REVOKE ... FROM
--- PUBLIC would otherwise leave until the next run (release checklist P35).
+-- PUBLIC would otherwise leave until the next run (release checklist P36).
 -- Its owner reads exactly the listed columns through one exact `true` policy
 -- per table, holds no schema USAGE, no table or function privilege and no
 -- EXECUTE on ehr.patient_self_context, and owns nothing else. The EHR runtime
@@ -1275,6 +1275,57 @@ begin
       where permission_code = 'identity.patient.assisted_registration')
      is distinct from array['clinician', 'doctor', 'nurse'] then
     raise exception 'identity.patient.assisted_registration must be held by doctor, clinician and nurse only';
+  end if;
+end
+$$;
+
+-- 0095 (ADR-064). The notification worker learns a patient's verified login
+-- email only through the claim-bound integration.notification_recipient_for_claim,
+-- owned by the event-delivery technical owner, which alone executes the
+-- private helper that reads identity.patients and auth.accounts as their
+-- owner, with the login's deletion requests. The exact ACLs: the worker on
+-- the claim function and the technical owner on the helper, besides their
+-- owners. Neither the worker, its notification aggregate nor the technical
+-- owner holds any table or column privilege on the three tables.
+do $$
+declare
+  claim_function regprocedure := to_regprocedure('integration.notification_recipient_for_claim(uuid,uuid,uuid)');
+  helper regprocedure := to_regprocedure('integration.notification_recipient_state(uuid)');
+begin
+  if claim_function is null or helper is null then
+    raise exception 'the 0095 notification recipient functions are missing';
+  end if;
+  if (select proowner from pg_proc where oid = claim_function) <> 'hid_event_delivery_commands'::regrole
+     or (select proowner from pg_proc where oid = helper)
+        <> (select relowner from pg_class where oid = 'identity.patients'::regclass)
+     or exists (select 1 from pg_proc where oid in (claim_function, helper)
+                 and (not prosecdef or proconfig is distinct from array['search_path=pg_catalog, pg_temp'])) then
+    raise exception 'the 0095 recipient functions have the wrong owner, security or search_path';
+  end if;
+  if (select proacl from pg_proc where oid = claim_function) is null
+     or (select coalesce(array_agg(distinct privilege.grantee::regrole::text), '{}')
+           from pg_proc proc, aclexplode(proc.proacl) privilege
+          where proc.oid = claim_function and privilege.grantee <> proc.proowner) <> array['hid_notification_worker']
+     or (select proacl from pg_proc where oid = helper) is null
+     or (select coalesce(array_agg(distinct privilege.grantee::regrole::text), '{}')
+           from pg_proc proc, aclexplode(proc.proacl) privilege
+          where proc.oid = helper and privilege.grantee <> proc.proowner) <> array['hid_event_delivery_commands']
+     or not has_function_privilege('hid_notification_worker', claim_function, 'EXECUTE')
+     or has_function_privilege('hid_notification_worker', helper, 'EXECUTE')
+     or has_function_privilege('hid_notification_runtime', claim_function, 'EXECUTE')
+     or has_function_privilege('hid_notification_api_runtime', claim_function, 'EXECUTE') then
+    raise exception 'the 0095 recipient function grants are broader or narrower than the worker and its technical owner';
+  end if;
+  if exists (
+       select 1
+       from unnest(array['hid_notification_worker', 'hid_notification_runtime', 'hid_notification_api_runtime',
+         'hid_event_delivery_commands', 'hid_event_dispatcher']) runtime(role_name),
+         unnest(array['identity.patients', 'auth.accounts', 'identity.patient_account_deletion_requests']) protected(table_name)
+       where has_table_privilege(runtime.role_name, protected.table_name,
+         'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+          or has_any_column_privilege(runtime.role_name, protected.table_name, 'SELECT,INSERT,UPDATE,REFERENCES')
+     ) then
+    raise exception 'a notification or event-delivery role can read identity.patients, auth.accounts or identity.patient_account_deletion_requests directly';
   end if;
 end
 $$;

@@ -326,6 +326,16 @@ if (!notificationWorkerEnabled) {
     'the notification worker is off: no notification queue alarms')
   assert.doesNotMatch(text, /:novuApiKey::/, 'a disabled notification worker reads nothing from the provider secret')
 }
+// ADR-064: the worker gives Novu the verified login email only when staging
+// opts in with HID_NOVU_SUBSCRIBER_SYNC_ENABLED; every other synth keeps it off.
+const notificationWorkerTask = taskContainer('notification-worker')
+if (notificationWorkerTask) {
+  const workerEnvironment = Object.fromEntries((notificationWorkerTask.Environment ?? []).map(entry => [entry.Name, entry.Value]))
+  assert.equal(workerEnvironment.NOVU_SUBSCRIBER_SYNC,
+    environment === 'staging' && process.env.HID_NOVU_SUBSCRIBER_SYNC_ENABLED === 'true' ? 'email' : 'disabled',
+    'the notification worker syncs subscriber emails only where staging opted in')
+  assert.equal(workerEnvironment.HID_DEPLOYMENT_ENV, environment)
+}
 
 // D4 (ADR-053): in production, and wherever HID_OPERATIONAL_ALARM_TOPIC_ARN is
 // supplied, every alarm notifies the environment's own operator-created
@@ -415,7 +425,7 @@ if (environment === 'production') {
 // category flags are the explicit synth inputs, false by default, and only
 // staging may set one. Production releases no Lab result while Lab is off at
 // launch (D17) and no other category until the clinical owner signs it off
-// (P35); the development stack's ehr-api runs in the production profile.
+// (P36); the development stack's ehr-api runs in the production profile.
 const ehrApis = resources('AWS::ECS::TaskDefinition')
   .filter(task => String(task.Properties.Family).endsWith('-ehr-api'))
   .flatMap(task => task.Properties.ContainerDefinitions).filter(container => container.Name === 'ehr-api')
@@ -431,7 +441,7 @@ if (environment !== 'staging') {
   for (const flag of ['EHR_PATIENT_RELEASE_VITALS', 'EHR_PATIENT_RELEASE_DIAGNOSES', 'EHR_PATIENT_RELEASE_PRESCRIPTIONS',
     'EHR_PATIENT_RELEASE_LAB_RESULTS', 'EHR_PATIENT_RELEASE_DOCUMENTS']) {
     assert.equal(ehrApis[0].Environment.find(entry => entry.Name === flag)?.Value, 'false',
-      `${environment} ehr-api must not release ${flag} to patients outside staging (D17, P35)`)
+      `${environment} ehr-api must not release ${flag} to patients outside staging (D17, P36)`)
   }
 }
 

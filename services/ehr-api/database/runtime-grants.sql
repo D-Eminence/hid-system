@@ -1237,13 +1237,20 @@ alter function integration.complete_inbox_message(text,uuid,uuid)
 alter function integration.fail_inbox_message(
   text,uuid,uuid,text,boolean,timestamptz,integer
 ) owner to hid_event_delivery_commands;
+-- 0095 (ADR-064): the notification worker's claim-bound recipient lookup.
+alter function integration.notification_recipient_for_claim(uuid,uuid,uuid)
+  owner to hid_event_delivery_commands;
 revoke create on schema integration from hid_event_delivery_commands;
 
--- The command-owner executes these two private helpers from inside
+-- The command-owner executes these three private helpers from inside
 -- SECURITY DEFINER functions. They remain unavailable to every runtime role.
+-- The recipient helper (0095, ADR-064) stays with the migration
+-- administrator, which owns identity.patients and auth.accounts, so the
+-- command-owner reads neither table and holds no privilege on them.
 grant execute on function integration.outbox_envelope_sha256(
   text,uuid,text,integer,timestamptz,text,uuid,bigint,text,uuid,uuid,uuid,jsonb
-), integration.assert_inbox_consumer_authorized(text)
+), integration.assert_inbox_consumer_authorized(text),
+  integration.notification_recipient_state(uuid)
   to hid_event_delivery_commands;
 
 grant usage on schema integration to hid_event_dispatcher;
@@ -1259,7 +1266,8 @@ grant usage on schema integration to hid_notification_worker;
 grant execute on function
   integration.claim_inbox_message(text,uuid,text,text,integer,text,character,text,integer),
   integration.complete_inbox_message(text,uuid,uuid),
-  integration.fail_inbox_message(text,uuid,uuid,text,boolean,timestamptz,integer)
+  integration.fail_inbox_message(text,uuid,uuid,text,boolean,timestamptz,integer),
+  integration.notification_recipient_for_claim(uuid,uuid,uuid)
   to hid_notification_worker;
 
 -- The schema test role is intentionally more capable than any runtime role.

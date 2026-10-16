@@ -277,7 +277,20 @@ The executable covers:
    signed in with an authenticator, refused staff, a mismatch, a match,
    activation and sign-in, an existing Health ID, a race with a phone proof,
    both budgets and a suspension, as `hid_identity_api_runtime`.
-   With 0095 (the patient record release, ADR-064): the additional suites
+   With 0095 (ADR-064): the additional suites include
+   `notification-verified-recipient.integration.sql` (the claim-bound
+   recipient answers, its refusals and catalogue), run in both passes, and
+   `scripts/verify-non-superuser-database.mjs` calls the lookup as the
+   RDS-like worker login. `notification_worker_runtime` runs
+   `services/notification-worker/scripts/verify-notification-worker-runtime.mjs`
+   after the Pharmacy, Lab, OCR and Outreach verifiers: the real worker as
+   `hid_notification_worker` against a fake Novu that replays a seen
+   idempotency key's answer as Novu does: flag off and on, a failed
+   subscriber call that still sends the in-app trigger, an opt-out, a
+   deleted, a suspended or a deletion-due login whose email is cleared first,
+   an event retried while the patient goes withheld, eligible, withheld, and
+   two concurrent events with the login deleted between them.
+   With 0096 (the patient record release, ADR-065): the additional suites
    include `patient-record-release.integration.sql` (the database following
    `app.patient_release` category by category, the released rows of each
    table and of the released Lab results view across every withheld state,
@@ -349,7 +362,7 @@ The executable covers:
    and attestation helpers or `auth.staff_session_is_mfa`, and that the
    permission is held by `clinician`, `doctor` and `nurse` only; the
    bootstrap's own `runtime-roles.integration.sql` checks the 0093 and 0094
-   grants for every runtime role; and since 0095
+   grants for every runtime role; and since 0096
    (`patient_record_release_grants`) that the upgraded bootstrap makes
    `hid_lab_release_reader` the owner of `ehr.patient_released_lab_results`,
    grants `SELECT` on it to the EHR runtime and not to the Lab runtimes,

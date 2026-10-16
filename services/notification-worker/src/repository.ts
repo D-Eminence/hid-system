@@ -3,7 +3,21 @@ import { Pool, type PoolConfig } from 'pg';
 import type { NotificationWorkerConfig } from './config';
 import { assertRuntimeDatabaseRole } from './runtime-role-guard';
 import { WORKFLOW_BY_EVENT } from './event';
-import type { ClaimedInbox, HidEventEnvelope, OrchestrationResult } from './types';
+import type {
+  ClaimedInbox, HidEventEnvelope, OrchestrationResult, RecipientDelivery, SubscriberOperation, SubscriberOperationResult,
+} from './types';
+
+/** The inbox claim is stale or held by another worker (SQLSTATE 55000): stop without failing or acknowledging. */
+export class ClaimLostError extends Error {
+  override readonly name = 'ClaimLostError';
+  constructor() { super('NOTIFICATION_CLAIM_LOST'); }
+}
+
+const DISCLOSURE_WORKFLOW: Readonly<Record<SubscriberOperation, string>> = Object.freeze({
+  email: 'novu-subscriber-email-v1',
+  clear: 'novu-subscriber-email-clear-v1',
+});
+const DISCLOSURE_OUTCOME = Object.freeze({ confirmed: 'accepted', rejected: 'definitive_failure', unknown: 'unknown' } as const);
 
 export class NotificationRepository {
   private readonly pool: Pool;
@@ -75,6 +89,69 @@ export class NotificationRepository {
         retryable, nextAttempt, this.config.NOTIFICATION_WORKER_MAX_ATTEMPTS],
     );
     return response.rows[0]?.fail_inbox_message ?? 'failed_terminal';
+  }
+
+  /**
+   * The recipient of the claimed event (0095, ADR-064), through the
+   * claim-bound SECURITY DEFINER lookup only: the worker reads no Identity or
+   * Auth table. No row means the claim bound no outbox event of that patient.
+   * Any answer outside the contract is refused, and the caller withholds email.
+   */
+  async resolveRecipient(event: HidEventEnvelope, claimToken: string): Promise<RecipientDelivery> {
+    let rows: Array<{ delivery: unknown; email: unknown }>;
+    try {
+      rows = (await this.pool.query<{ delivery: unknown; email: unknown }>(
+        `select delivery, email
+         from integration.notification_recipient_for_claim($1, $2, $3)`,
+        [event.id, claimToken, event.context.patientId],
+      )).rows;
+    } catch (error) {
+      if ((error as { code?: unknown }).code === '55000') throw new ClaimLostError();
+      throw error;
+    }
+    if (rows.length === 0) return { delivery: 'withhold', bound: false };
+    const [row] = rows;
+    if (rows.length === 1 && row.delivery === 'email' && typeof row.email === 'string' && row.email.trim()) {
+      return { delivery: 'email', email: row.email };
+    }
+    if (rows.length === 1 && row.delivery === 'withhold' && row.email === null) return { delivery: 'withhold', bound: true };
+    throw new Error('NOTIFICATION_RECIPIENT_CONTRACT_VIOLATION');
+  }
+
+  /**
+   * A PHI-free record of one Novu subscriber call per attempt: which event,
+   * which operation and its outcome, never the address or anything derived
+   * from it. Existing reconciliation rows are left as they are.
+   */
+  async recordSubscriberOperation(event: HidEventEnvelope, operation: SubscriberOperation,
+    result: SubscriberOperationResult, attemptCount: number): Promise<void> {
+    const workflow = DISCLOSURE_WORKFLOW[operation];
+    await this.pool.query(
+      `insert into notification.delivery_attempts (
+         event_id, idempotency_key, workflow_id, channel, provider, outcome, safe_code, correlation_id
+       ) values ($1, $2, $3, $4, $5, $6, $7, $8)
+       on conflict (idempotency_key, provider) do nothing`,
+      [event.id, createHash('sha256').update(`${workflow}\u001f${event.id}\u001f${attemptCount}`, 'utf8').digest('hex'),
+        workflow, 'email', result.provider, DISCLOSURE_OUTCOME[result.outcome], result.safeCode ?? null, event.correlationId],
+    );
+  }
+
+  /**
+   * With NOVU_SUBSCRIBER_SYNC=email, refuse to start unless 0095's lookup
+   * exists and this login may execute it, so a task deployed before the
+   * migration or its grants fails its rollout instead of handling events.
+   */
+  async verifySubscriberSyncPrivilege(): Promise<void> {
+    try {
+      const result = await this.pool.query<{ executable: boolean | null }>(
+        `select has_function_privilege(current_user,
+           to_regprocedure('integration.notification_recipient_for_claim(uuid,uuid,uuid)'), 'EXECUTE') as executable`,
+      );
+      if (result.rows[0]?.executable !== true) throw new Error('NOTIFICATION_RECIPIENT_LOOKUP_NOT_EXECUTABLE');
+    } catch (error) {
+      await this.pool.end().catch(() => undefined);
+      throw error;
+    }
   }
 
   /** In production, refuse to start over a superuser, BYPASSRLS or owner connection (runtime-role-guard.ts). */

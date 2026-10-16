@@ -23,7 +23,10 @@
 //   the administrator's URL and of a login with an extra role;
 // - platform.control_enabled as the Identity, EHR and Outreach logins, and
 //   ocr.claim_worker_job as the OCR worker login without the SET grant;
-// - the release checklist's read-only P10 and P11 checks, taken from
+// - the notification worker's claim-bound recipient lookup (0095, ADR-064) as
+//   the worker login, which reads no patient or login table, and its refusal
+//   for the Identity and dispatcher logins;
+// - the release checklist's read-only P10, P11 and P35 checks, taken from
 //   docs/PHASE_4_STAGE_5_RELEASE_READINESS.md, as the administrator, as an
 //   operator runs them on RDS;
 // - the imported legacy history import (ADR-065) as the administrator: main's
@@ -335,8 +338,66 @@ try {
   const p11 = await checklistCheck('P11 check (read-only)');
   assert.deepEqual(p11, ['break_glass_enabled|f', 'outreach_portal_enabled|f', 'uploads_enabled|f'],
     `P11 check: ${p11.join('; ')}`);
+  // P35 (ADR-064): the owners and the only executors of 0095's two functions.
+  const p35 = await checklistCheck('P35 check (read-only)');
+  assert.deepEqual(p35, [`integration.notification_recipient_state(uuid)|${admin}|t|hid_event_delivery_commands`,
+    'integration.notification_recipient_for_claim(uuid,uuid,uuid)|hid_event_delivery_commands|t|hid_notification_worker'],
+  `P35 check: ${p35.join('; ')}`);
   evidence.steps.release_checklist_checks = { run_as: admin, p10: p10.map((line) => line.split('|').slice(0, 4).join('|')),
-    p11 };
+    p11, p35 };
+
+  // 0095 (ADR-064): the worker login claims an Identity event and learns the
+  // patient's verified login email through the claim, as the real login of
+  // its aggregate (session_user binding, no superuser). The superuser only
+  // seeds the synthetic rows, as a test fixture (replica mode: no triggers or
+  // foreign keys behind the outbox rows).
+  const recipientFixture = {
+    verified: { account: 'e9b00000-0000-4000-8000-000000000001', patient: 'e9c00000-0000-4000-8000-000000000001',
+      event: 'e9d00000-0000-4000-8000-000000000001', email: 'rds-like-recipient@example.invalid' },
+    phoneOnly: { account: 'e9b00000-0000-4000-8000-000000000002', patient: 'e9c00000-0000-4000-8000-000000000002',
+      event: 'e9d00000-0000-4000-8000-000000000002' },
+  };
+  psql('seed synthetic notification recipients', superuser, `begin; set local session_replication_role = replica;
+    insert into auth.accounts (id, subject, email, status, email_verified_at) values
+      ('${recipientFixture.verified.account}', 'synthetic:rds-like:recipient:1', '${recipientFixture.verified.email}', 'active', clock_timestamp()),
+      ('${recipientFixture.phoneOnly.account}', 'synthetic:rds-like:recipient:2', null, 'active', null);
+    insert into identity.patients (id, account_id, hid_code, first_name, last_name, full_name) values
+      ('${recipientFixture.verified.patient}', '${recipientFixture.verified.account}', 'HID-RDSNVA', 'Synthetic', 'Verified', 'Synthetic Verified'),
+      ('${recipientFixture.phoneOnly.patient}', '${recipientFixture.phoneOnly.account}', 'HID-RDSNVB', 'Synthetic', 'Phone', 'Synthetic Phone');
+    insert into identity.outbox_events (event_id, event_type, aggregate_id, aggregate_version, facility_id, patient_id,
+      correlation_id, payload) values
+      ('${recipientFixture.verified.event}', 'PatientRegistered', gen_random_uuid(), 1, gen_random_uuid(),
+       '${recipientFixture.verified.patient}', 'rds-like-recipient-0001', '{}'),
+      ('${recipientFixture.phoneOnly.event}', 'PatientRegistered', gen_random_uuid(), 1, gen_random_uuid(),
+       '${recipientFixture.phoneOnly.patient}', 'rds-like-recipient-0002', '{}');
+    commit;`);
+  const worker = logins['notification-worker'][0];
+  const recipients = {};
+  for (const [name, fixture] of Object.entries(recipientFixture)) {
+    const token = psql(`claim the ${name} event as the worker login`, worker,
+      `select claim_token from integration.claim_inbox_message('notification-worker-v1', '${fixture.event}', 'identity',
+         'PatientRegistered', 1, 'rds-like-recipient-000${name === 'verified' ? 1 : 2}', repeat('a', 64)::character(64),
+         'notification-worker-rds-like', 60)`).stdout.trim();
+    assert.match(token, /^[0-9a-f-]{36}$/);
+    recipients[name] = psql(`recipient for the ${name} claim as the worker login`, worker,
+      `select delivery || '|' || coalesce(email, '') from integration.notification_recipient_for_claim(
+         '${fixture.event}', '${token}', '${fixture.patient}')`).stdout.trim();
+  }
+  assert.deepEqual(recipients, { verified: `email|${recipientFixture.verified.email}`, phoneOnly: 'withhold|' });
+  const workerDirect = psql('the worker login reads no patient row', worker,
+    'select count(*) from identity.patients', 'failure');
+  assert.match(workerDirect.output, /permission denied for (schema identity|table patients)/);
+  const refusedLogins = {};
+  for (const credential of ['identity-api', 'event-dispatcher']) {
+    const refused = psql(`the recipient lookup as the ${credential} login`, logins[credential][0],
+      `select * from integration.notification_recipient_for_claim('${recipientFixture.verified.event}',
+         gen_random_uuid(), '${recipientFixture.verified.patient}')`, 'failure');
+    const refusal = /permission denied for (schema integration|function notification_recipient_for_claim)/.exec(refused.output);
+    assert(refusal, `the ${credential} login was not refused the recipient lookup: ${refused.output.slice(-400)}`);
+    refusedLogins[credential] = refusal[0];
+  }
+  evidence.steps.notification_recipient = { run_as: worker, answers: { verified: 'email', phone_only: 'withhold' },
+    direct_patient_read: /permission denied for \S+ \S+/.exec(workerDirect.output)[0], refused: refusedLogins };
 
   // I3 at call time: the claim runs its body without the parameter privilege.
   const claim = psql('OCR claim without a workload context', logins['ocr-worker'][0],
