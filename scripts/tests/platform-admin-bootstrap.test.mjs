@@ -9,8 +9,8 @@ const { bootstrapInput, bootstrapPlatformAdmins } = platformAdminBootstrap;
 // where the module does not provide it.
 const bootstrapPlatformAdminsByEmail = (...args) => platformAdminBootstrap.bootstrapPlatformAdminsByEmail(...args);
 
-// P6, P35(2): a clinician application is approved by a second Super Admin
-// (0096), and a Super Admin grant needs a second Super Admin's decision
+// P6, P37(2): a clinician application is approved by a second Super Admin
+// (0098), and a Super Admin grant needs a second Super Admin's decision
 // (0070). The one-time bootstrap therefore seeds the initial governance set,
 // two or three distinct accounts, in one audited transaction. Synthetic IDs.
 const a = '7a1c2f30-0000-4000-8000-0000000000a1';
@@ -37,7 +37,7 @@ test('keeps the one-account form outside production', () => {
 
 // One Super Admin alone can never add a second (0070 refuses a one-step
 // platform_super_admin grant, and a two-person request needs another Super
-// Admin's decision) nor approve a clinician application (0096), and the
+// Admin's decision) nor approve a clinician application (0098), and the
 // bootstrap refuses to run again once one is active. The migration task runs
 // with NODE_ENV=production in every AWS environment, so there the one-account
 // form is refused before any connection.
@@ -128,7 +128,7 @@ test('refuses, rolls back and grants nothing while a Super Admin exists or an ac
 // patient account has a password and no email, so a Super Admin seeded on it
 // could never sign in or enrol MFA, while the bootstrap's own check would
 // count it and refuse every later run: one usable Super Admin could then
-// neither approve a second (0070) nor a clinician application (0096).
+// neither approve a second (0070) nor a clinician application (0098).
 test('an account is eligible only with an email address and a password: platform sign-in is by email', async () => {
   const client = fakeClient();
   await bootstrapPlatformAdmins(client, { accountIds: [a, b], reason });

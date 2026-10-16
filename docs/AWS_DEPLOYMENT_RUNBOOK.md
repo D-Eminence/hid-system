@@ -591,7 +591,7 @@ account to exist:
    the platform enrolment needs no emailed code. Then check P6.
 5. Then one Super Admin pauses Brevo (§13 step 5, P21), enables the QoreID
    integration `qoreid` (`POST /api/v1/admin/integrations/qoreid/enable`), sets the launch controls
-   (`POST /api/v1/admin/controls`, such as `clinician_signup_enabled` once P35
+   (`POST /api/v1/admin/controls`, such as `clinician_signup_enabled` once P37
    holds) and designates facilities (P30), each when its own release checklist
    row allows.
 
@@ -823,7 +823,7 @@ the accounts come from). Once Super Admins exist, the bootstrap refuses, and a
 held HID 1.0 administrator whose address no seeded account has is re-approved
 by the two-person approval instead. A HID 1.0 administrator who already holds a Super Admin account seeded by
 email under another address is not re-approved: that HID 1.0 account keeps
-no platform role. Two-person approval (0070) and clinician approval (0096)
+no platform role. Two-person approval (0070) and clinician approval (0098)
 separate accounts, not people, so each person holds at most one Super Admin
 account. An account seeded by email keeps its
 address under `accounts_email_ci_uq` (every status but `deleted`), and the

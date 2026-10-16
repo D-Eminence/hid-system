@@ -226,7 +226,7 @@ test('the 0015 parameter grant is made only before 0015 and checked; its revoke 
   const granted = await grantVariableConflict(fresh.master, fresh.admin, administrator);
   assert.equal(granted.granted, true);
   assert.ok(sqlOf(fresh.master).includes('grant set on parameter plpgsql.variable_conflict to "hid_deploy_admin"'));
-  const applied = { master: fakeClient(), admin: fakeClient({ ledger: { applied: 96, latest: '0096_x.sql',
+  const applied = { master: fakeClient(), admin: fakeClient({ ledger: { applied: 98, latest: '0098_x.sql',
     applied_0015: true, applied_0083: true } }) };
   const skipped = await grantVariableConflict(applied.master, applied.admin, administrator);
   assert.equal(skipped.granted, false);

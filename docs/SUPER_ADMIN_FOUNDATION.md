@@ -90,7 +90,7 @@ The one-time bootstrap seeds the initial governance set: two or three Super
 Admins in one run. No administrator can grant another alone: a Super Admin
 grant needs the decision of a second, MFA-enrolled Super Admin who is neither
 the requester nor the target (0070), and a clinician application is approved
-only by a Super Admin other than the one who attested it (0096). With a single
+only by a Super Admin other than the one who attested it (0098). With a single
 Super Admin neither can ever happen, and no command adds a second one after the
 bootstrap. So in production name two or three people at once, preferably
 three (Where the accounts come from). On a new database name them by email
@@ -255,7 +255,7 @@ to be designed must handle it.
 
 A HID 1.0 administrator who already holds a Super Admin account seeded by
 email under another address is not re-approved: that HID 1.0 account keeps
-no platform role. Two-person approval (0070) and clinician approval (0096)
+no platform role. Two-person approval (0070) and clinician approval (0098)
 separate accounts, not people, so each person holds at most one Super Admin
 account.
 

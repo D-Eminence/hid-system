@@ -3,7 +3,7 @@
 //
 // No administrator can grant another Super Admin alone: after 0070 a grant
 // needs the decision of a second, MFA-enrolled Super Admin who is neither the
-// requester nor the target, and after 0096 a clinician application is
+// requester nor the target, and after 0098 a clinician application is
 // approved only by a Super Admin other than the one who attested it. So the
 // bootstrap seeds the initial governance set, two or three people, in one
 // audited transaction, and refuses while any Super Admin exists, whatever its

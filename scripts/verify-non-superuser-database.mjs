@@ -1020,11 +1020,11 @@ try {
     refused: [...Object.keys(emailRefusals), 'rerun by email while pending', 'account ID run while pending',
       ...Object.keys(usedRefusals).map((label) => `${label} after a password was set`)] };
 
-  // P6, P35(2) (admin:bootstrap): the first Super Admins, as RDS runs the
+  // P6, P37(2) (admin:bootstrap): the first Super Admins, as RDS runs the
   // bootstrap, as the migration administrator, on the main database, where no
   // Super Admin exists yet. A Super Admin grant needs a second Super Admin's
   // decision (0070) and a clinician application a second Super Admin's
-  // approval (0096), so the one-time bootstrap seeds two or three distinct
+  // approval (0098), so the one-time bootstrap seeds two or three distinct
   // accounts in one audited transaction. It refuses a repeated, ineligible or
   // fourth account and both forms at once, granting nothing, and every run
   // once a Super Admin is active. Platform sign-in is by email and password,
