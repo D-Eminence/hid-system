@@ -529,22 +529,62 @@ aws ecs run-task --cluster hid-production --launch-type FARGATE \
 | `db:migrate` | `["scripts/apply-migrations.mjs"]` | none |
 | `db:bootstrap` | `["scripts/bootstrap-database-roles.mjs"]` | none |
 | `db:verify-roles` | `["scripts/bootstrap-database-roles.mjs","--verify-only"]` | none |
-| `admin:bootstrap` (P6) | `["scripts/bootstrap-platform-admin.mjs"]` | `PLATFORM_ADMIN_ACCOUNT_IDS` (two or three distinct account UUIDs, comma-separated, each an active account with an email address and a password), `PLATFORM_ADMIN_BOOTSTRAP_REASON` |
+| `admin:bootstrap` (P6) | `["scripts/bootstrap-platform-admin.mjs"]` | On a new database `PLATFORM_ADMIN_EMAILS` (two or three governance owners' email addresses, separated by commas or spaces); or `PLATFORM_ADMIN_ACCOUNT_IDS` (two or three distinct account UUIDs, comma-separated, each an active account with an email address and a password); and `PLATFORM_ADMIN_BOOTSTRAP_REASON`. `PLATFORM_ADMIN_REPLACE_PENDING=1` only to replace a mistyped address (below) |
 
 Wait for the task to stop, then require exit code `0` and read
 `/hid/<environment>/database-migration`. Never pass a database URL, password or
 other secret as an override: RunTask overrides are kept in the task
-description and in CloudTrail. The account IDs and reason of
-`admin:bootstrap` are not secret. Run `admin:bootstrap` only once the accounts
-it names exist: on a new database, after the HID 1.0 promotion of §6. That
-promotion has no AWS execution path yet, so no supported production route to
-these accounts exists today, and P6 waits on open question
-SUPERADMIN-ACCOUNTS (`SUPER_ADMIN_FOUNDATION.md`, Where the accounts come
-from). Run it once, with every
-initial Super Admin in `PLATFORM_ADMIN_ACCOUNT_IDS`: it refuses to run again
-once one is active, and afterwards a Super Admin is added only by a two-person
-approval (`SUPER_ADMIN_FOUNDATION.md`). Platform sign-in is by email and
-password, so it refuses an account without an email address or password. The task runs with
+description and in CloudTrail. The email addresses, account IDs and reason of
+`admin:bootstrap` are not secret, so they may be overrides.
+
+On a new database, seed the first Super Admins by email (owner decision
+2026-10-16, SUPERADMIN-ACCOUNTS: by email, own password;
+`SUPER_ADMIN_FOUNDATION.md`, Where the accounts come from). The HID 1.0
+promotion of §6 has no AWS execution path yet, and the email form needs no
+account to exist:
+
+1. Run `admin:bootstrap` with `PLATFORM_ADMIN_EMAILS` after the services and
+   SES are live (§9, P17), so that the reset code can be delivered. Run it
+   once, naming every initial Super Admin (two or three people), with
+   `PLATFORM_ADMIN_BOOTSTRAP_REASON`. It creates a platform-only account for
+   each address in `PLATFORM_ADMIN_EMAILS`, with no password and no staff or
+   patient record, and grants each Super Admin in one audited transaction. It prints the new account IDs
+   in the order of the addresses, never an address. It refuses an address that
+   already belongs to an account (name existing accounts in
+   `PLATFORM_ADMIN_ACCOUNT_IDS` instead) and refuses to run again once any
+   Super Admin exists, whatever its status; afterwards a Super Admin is added
+   only by a two-person approval (`SUPER_ADMIN_FOUNDATION.md`).
+2. Each person opens the admin recovery page,
+   `https://admin.healthidentitydirectory.com/admin/recover` ("Forgot your
+   password?" on the admin sign-in page) or
+   `https://www.healthidentitydirectory.com/admin/recover`, which uses the
+   admin reset (Turnstile action `admin-reset`), enters their address and the
+   emailed code, and sets their own password. Nobody else ever knows it.
+3. Each person signs in at `https://admin.healthidentitydirectory.com` with
+   that password and enrols an authenticator app (TOTP) at the first sign-in;
+   the platform enrolment needs no emailed code. Then check P6.
+4. Then one Super Admin pauses Brevo (§13 step 5, P21), enables the QoreID
+   integration `qoreid` (`POST /api/v1/admin/integrations/qoreid/enable`), sets the launch controls
+   (`POST /api/v1/admin/controls`, such as `clinician_signup_enabled` once P35
+   holds) and designates facilities (P30), each when its own release checklist
+   row allows.
+
+If an address was mistyped, run `admin:bootstrap` again at once with the
+corrected list in `PLATFORM_ADMIN_EMAILS` and `PLATFORM_ADMIN_REPLACE_PENDING=1`.
+In one transaction it revokes the Super Admin assignments of the accounts the
+email bootstrap created, marks those accounts deleted (audited) and seeds the
+new list, but only while every Super Admin is such an account that nobody has
+used: still `pending_reset`, with no password, session or authenticator. Once
+anyone has set a password it refuses; the other Super Admins then remove a
+wrong account through the governed role and status commands. Until each person
+has reset, whoever controls a listed address could set that password, so check
+the addresses before the run and have each person reset at once.
+
+Name existing accounts in `PLATFORM_ADMIN_ACCOUNT_IDS` instead only once the
+accounts it names exist, each active with an email address and a password: on
+a new database, after the HID 1.0 promotion of §6, which has no AWS execution
+path yet. Platform sign-in is by email and password, so that form refuses an
+account without an email address or password. The task runs with
 `NODE_ENV=production`, so the development-only one-account form
 `PLATFORM_ADMIN_ACCOUNT_ID` is refused.
 
@@ -579,15 +619,16 @@ aws ecs run-task --cluster hid-production --launch-type FARGATE \
 | 6 | Create the ten runtime LOGINs, or set their passwords; grant each its aggregate role; then `db:verify-logins` (§6.3) | migration administrator | provisioning: `["scripts/provision-database-logins.mjs","--runtime-logins"]` |
 | 7 | `db:verify-logins` alone, with the RDS master and the administrator forbidden; again after every credential rotation | each runtime LOGIN | provisioning: none, the default is `--verify-logins` |
 
-`admin:bootstrap` (P6) is no step of this order and runs as the migration task
-only once the accounts it names exist, each active with an email address and a
-password: a new database has none, and the run is refused. The HID 1.0
-promotion of §6 would create them (it keeps each HID 1.0 user's UUID, email
-and password and grants no platform role), but it has no AWS execution path
-yet. So no supported production route to these accounts exists today, for any
-owner, and P6 is blocked by open question SUPERADMIN-ACCOUNTS
-(`SUPER_ADMIN_FOUNDATION.md`, Where the accounts come from). Neither one-shot
-task creates a Health ID account.
+`admin:bootstrap` (P6) is no step of this order: no service runs yet, so no
+reset code could be delivered. On a new database it runs as the migration task
+with `PLATFORM_ADMIN_EMAILS` after the services and SES are live, and creates
+the accounts it names (owner decision 2026-10-16, SUPERADMIN-ACCOUNTS; §4,
+Running the migration task). With `PLATFORM_ADMIN_ACCOUNT_IDS` it runs only
+once the accounts it names exist, each active with an email address and a
+password: the HID 1.0 promotion of §6 would create them (it keeps each HID 1.0
+user's UUID, email and password and grants no platform role), but it has no
+AWS execution path yet (`SUPER_ADMIN_FOUNDATION.md`, Where the accounts come
+from). Neither provisioning step creates a Health ID account.
 
 Before step 1 write the secrets. The migration secret's `url` and each runtime
 secret's URL name a lowercase LOGIN (letters, digits and `_`) with a password
@@ -717,9 +758,10 @@ read neither the HID 1.0 source (`LEGACY_DATABASE_URL`) nor an export
 RunTask override (§4). Never open RDS to another network or pass a key as an
 override to get around this. A reviewed path, such as a one-shot legacy
 migration task that maps these keys from Secrets Manager and reads the source
-through a private S3 export, is part of open question SUPERADMIN-ACCOUNTS
-(`PHASE_3_LAUNCH_DECISIONS.md`), which blocks P6 until it is decided and
-built. The steps below apply once such a path exists.
+through a private S3 export, is still to be decided and built; it blocks the
+HID 1.0 cutover, no longer the first Super Admins, which the owner decided on
+2026-10-16 to seed by email (SUPERADMIN-ACCOUNTS, `PHASE_3_LAUNCH_DECISIONS.md`;
+§4). The steps below apply once such a path exists.
 
 For real migration, preserve source and destination UUID/HID mappings,
 checksums, conflicts, batch checkpoints, and reconciliation output. Copy legacy
@@ -738,10 +780,12 @@ Once it can run, the promotion creates each HID 1.0 user's account with the
 HID 1.0 auth user UUID, email and password, active once the email was
 confirmed in HID 1.0, and holds a HID 1.0 `platform_admin` membership
 (`privileged_role_requires_reapproval`) without granting any platform role.
-After it, seed the initial Super Admins with one `admin:bootstrap` run (§4,
-P6) naming two or three of those accounts, each active with an email address
-and a password: that run is their re-approval (`SUPER_ADMIN_FOUNDATION.md`,
-Where the accounts come from).
+If the initial Super Admins were not already seeded by email (§4), seed them
+after it with one `admin:bootstrap` run (§4, P6) naming two or three of those
+accounts in `PLATFORM_ADMIN_ACCOUNT_IDS`, each active with an email address and
+a password: that run is their re-approval (`SUPER_ADMIN_FOUNDATION.md`, Where
+the accounts come from). Once Super Admins exist, the bootstrap refuses, and a
+held HID 1.0 administrator is re-approved by the two-person approval instead.
 
 ## 7. Provider and workload preflight
 
@@ -1194,7 +1238,11 @@ security owner's production keys (launch plan I1).
    platform session, TOTP step-up, a reason, `If-Match` and
    `Idempotency-Key`), which records the actor in the integration audit. Identity then plans no fallback, and a definitive SES
    or Termii failure is reported as the primary's. `GET /api/v1/admin/integrations/brevo`
-   must show it paused.
+   must show it paused. On a new database that administrator exists only
+   after the email `admin:bootstrap` run and the resets of §4, which need
+   Identity, SES and the admin recovery page reachable: do this step as soon
+   as the first Super Admins have signed in, before the public sign-up routes
+   open.
 6. Synthesize with `HID_OPERATIONAL_ALARM_TOPIC_ARN`, `HID_AWS_ACCOUNT` and
    `HID_AWS_REGION` (§2) and continue with §12.
 7. **Termii on its DND route** (release checklist P18). notification-api's

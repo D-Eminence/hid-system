@@ -604,8 +604,10 @@ service or place administrator credentials in a steady-state task. It maps the
 migration administrator as both `DATABASE_URL` and `DATABASE_ADMIN_URL`, so the
 role bootstrap (`["scripts/bootstrap-database-roles.mjs"]`, with
 `--verify-only` for `db:verify-roles`) and `admin:bootstrap`
-(`["scripts/bootstrap-platform-admin.mjs"]`, only once the accounts it names
-exist, after the HID 1.0 promotion; `SUPER_ADMIN_FOUNDATION.md`) run in it; the overrides are in
+(`["scripts/bootstrap-platform-admin.mjs"]`; on a new database with
+`PLATFORM_ADMIN_EMAILS` once the services and SES are live, which creates the
+accounts, or with `PLATFORM_ADMIN_ACCOUNT_IDS` only once the accounts it names
+exist; `SUPER_ADMIN_FOUNDATION.md`) run in it; the overrides are in
 `AWS_DEPLOYMENT_RUNBOOK.md` §4. It maps no runtime URL and not the master. The
 RDS master's statements, the runtime LOGINs and `db:verify-logins` run as the
 separate one-shot provisioning task (`hid-<environment>-database-provisioning`,
@@ -615,17 +617,21 @@ default command only verifies (`AWS_DEPLOYMENT_RUNBOOK.md` §4, Running the
 provisioning task). The HID 1.0 stage and promotion (§7, §8) have no AWS
 execution path yet: neither task maps the HID 1.0 source or the promotion's
 keys, and the migration security group reaches only RDS, the AWS endpoints and
-Amazon S3 (`AWS_DEPLOYMENT_RUNBOOK.md` §6). So no supported production route
-to the accounts `admin:bootstrap` names exists today, and open question
-SUPERADMIN-ACCOUNTS (`PHASE_3_LAUNCH_DECISIONS.md`) blocks P6.
+Amazon S3 (`AWS_DEPLOYMENT_RUNBOOK.md` §6). The first Super Admins do not wait
+for them: by the owner's decision of 2026-10-16 (SUPERADMIN-ACCOUNTS,
+`PHASE_3_LAUNCH_DECISIONS.md`) the one-time bootstrap takes their email
+addresses in `PLATFORM_ADMIN_EMAILS`, creates platform-only accounts with no
+password, and each person sets their own with the admin password reset and
+enrols an authenticator at the first platform sign-in (P6).
 
 ## 7. Stage a controlled snapshot
 
 These commands, and the promotion of §8, have no AWS execution path yet
 (`AWS_DEPLOYMENT_RUNBOOK.md` §6): no task maps `LEGACY_DATABASE_URL` or the
 promotion's keys, the migration security group cannot reach the HID 1.0
-source, and a secret is never a RunTask override. Building a reviewed path is
-part of open question SUPERADMIN-ACCOUNTS (`PHASE_3_LAUNCH_DECISIONS.md`).
+source, and a secret is never a RunTask override. A reviewed path is still to
+be decided and built (`PHASE_3_LAUNCH_DECISIONS.md`, SUPERADMIN-ACCOUNTS); it
+blocks the HID 1.0 cutover, not the first Super Admins.
 
 First perform a real-source dry run with a read-only credential:
 
