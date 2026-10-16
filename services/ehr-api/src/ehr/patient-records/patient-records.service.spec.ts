@@ -494,6 +494,20 @@ describe('Patient self records: the configured release (owner decision 4 of 2026
     expect(documents).not.toMatch(/storage_key|storage_bucket|object_version_id|sha256/);
   });
 
+  // A15: every document answer returns sizeBytes as a JSON integer (the staff
+  // list and the emergency summary since the launch alignment fixes). pg reads
+  // the bigint size_bytes as text, so the released documents need the same
+  // conversion; the value is at most 52428800 (0004).
+  it('returns each released document\'s sizeBytes as an integer, not as the text pg reads a bigint as (A15)', async () => {
+    const { service, recordWithClient } = setup({ documents: [{ id: 'doc-1', sizeBytes: '20480' },
+      { id: 'doc-2', sizeBytes: '52428800' }] }, ['documents']);
+    const summary = await service.self(request) as unknown as Summary;
+    expect(summary.documents).toStrictEqual([{ id: 'doc-1', sizeBytes: 20480 }, { id: 'doc-2', sizeBytes: 52428800 }]);
+    expect(recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      details: { encounterCount: 0, noteCount: 0, documentCount: 2,
+        withheldCategories: ['vitals', 'diagnoses', 'prescriptions', 'labRequests'] } }));
+  });
+
   it('reads Lab results only through the released-results view and returns them as Lab does', async () => {
     const { service, query } = setup({ labResults: [labRow] }, ['labResults']);
     const summary = await service.self(request) as unknown as Summary;
