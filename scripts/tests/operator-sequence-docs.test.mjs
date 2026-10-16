@@ -5,12 +5,13 @@
 //    email address and a password, and a new RDS instance has none: no
 //    migration seeds an account, and no service runs while the database is
 //    provisioned. So the bootstrap is no step of the new-instance order. The
-//    accounts come from the HID 1.0 promotion (AWS_DEPLOYMENT_RUNBOOK.md §6),
-//    which keeps each HID 1.0 user's UUID, email and password and holds a
-//    legacy platform_admin membership for re-approval without granting a
-//    platform role; admin:bootstrap is that re-approval. The operator takes
-//    each UUID from the HID 1.0 source. A governance owner without a HID 1.0
-//    account stays an open question.
+//    HID 1.0 promotion (AWS_DEPLOYMENT_RUNBOOK.md §6) would create them: it
+//    keeps each HID 1.0 user's UUID, email and password and holds a legacy
+//    platform_admin membership for re-approval without granting a platform
+//    role; admin:bootstrap is that re-approval, and the operator takes each
+//    UUID from the HID 1.0 source. The promotion has no AWS execution path
+//    yet, so open question SUPERADMIN-ACCOUNTS blocks P6 for every owner
+//    (super-admin-account-source-docs.test.mjs).
 // 2. Rotating a runtime secret: `--runtime-logins` sets the new password in
 //    place, so PostgreSQL refuses the old one at once, while running tasks
 //    keep the value ECS injected when they started. The runbooks give the
