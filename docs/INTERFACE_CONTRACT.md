@@ -1521,7 +1521,9 @@ their guards (`RemoteSecurityGuard`) bind the facility named by
 `X-Facility-ID` on every route that is not marked facility-optional (only
 EHR's patient-only routes are: `GET /api/v1/ehr/me/records`, since the
 patient record release `GET /api/v1/ehr/me/documents/:documentId/download`,
-and since patient record chat `GET /api/v1/ehr/me/chat/availability`,
+since imported legacy medical history (0099) `GET
+/api/v1/ehr/me/imported-history`, and since patient record chat `GET
+/api/v1/ehr/me/chat/availability`,
 `POST /api/v1/ehr/me/chat` and `GET` and `DELETE /api/v1/ehr/me/chat/history`). A missing or malformed header is
 `400 FACILITY_REQUIRED`. A facility where the actor has no active membership,
 such as a stale tab after the membership ended, is
@@ -1549,6 +1551,7 @@ D-Eminence/hid-system#74 each EHR refusal row carries `details.status` and `deta
 the status and code answered, next to `method` and `route`. A route marked
 patient-only (EHR's `GET /api/v1/ehr/me/records`, `GET
 /api/v1/ehr/me/documents/:documentId/download`, `GET
+/api/v1/ehr/me/imported-history`, `GET
 /api/v1/ehr/me/chat/availability`, `POST /api/v1/ehr/me/chat` and `GET` and
 `DELETE /api/v1/ehr/me/chat/history`) refuses any other session with `403
 PATIENT_SESSION_REQUIRED` before a facility is bound.
