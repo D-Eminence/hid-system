@@ -110,7 +110,7 @@ export class DatabaseService implements OnModuleInit, OnApplicationShutdown {
   /**
    * A patient-self transaction bound to Identity's fresh authorization. It
    * releases no record category to the database (app.patient_release empty)
-   * until PatientRecordRelease.bind names the configured ones (0095).
+   * until PatientRecordRelease.bind names the configured ones (patient record release migration).
    */
   async withPatientTransaction<Result>(
     context: { subject: string; accountId: string; sessionId: string; patientId: string; expiresAt: string },

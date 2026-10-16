@@ -14,7 +14,7 @@
 -- privilege on schema ehr or on ehr.patient_self_context, whose EXECUTE stays
 -- with hid_ehr_runtime and the test role (PSELF-RLS).
 --
--- The database follows the release flags: each 0095 policy and the view
+-- The database follows the release flags: each release policy and the view
 -- admit their category only when the transaction-local app.patient_release,
 -- which PatientRecordRelease sets to the categories the EHR configuration
 -- releases, names it exactly. A transaction that names none, such as one of

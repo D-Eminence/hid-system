@@ -98,7 +98,7 @@ export class PatientRecordsService {
     if (!this.release.releases('documents')) throw DOCUMENT_NOT_AVAILABLE();
     const { authorization } = await this.authorizeOwnSession(request);
     const document = await this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
-      // The documents policies admit a row only once the release set is bound (0095).
+      // The documents policies admit a row only once the release set is bound.
       await this.release.bind(client);
       const result = await client.query<PatientDocumentRow>(
         `select d.id,d.storage_bucket as "storageBucket",d.storage_key as "storageKey",

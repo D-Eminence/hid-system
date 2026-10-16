@@ -40,7 +40,7 @@ const SECTION_SOURCES: ReadonlyArray<readonly [Section, RegExp]> = [
 function sectionOf(sql: string): Section | undefined {
   return SECTION_SOURCES.find(([, source]) => source.test(sql))?.[0];
 }
-/** The statement that tells the database which categories this transaction releases (0095's policies read it). */
+/** The statement that tells the database which categories this transaction releases (the release policies read it). */
 const RELEASE_BINDING = /set_config\('app\.patient_release'/;
 type QueryCall = [string, unknown[]];
 /** The record reads: every statement except the release binding. */

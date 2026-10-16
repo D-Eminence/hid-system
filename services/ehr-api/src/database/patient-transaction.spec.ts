@@ -23,7 +23,7 @@ describe('Patient read transaction boundary', () => {
     await service.withPatientTransaction(fresh(), 'patient-transaction-test', async () => undefined);
     const [begin, binding] = query.mock.calls as Array<[string, unknown[]]>;
     expect(begin).toEqual(['BEGIN']);
-    // 0095's release policies admit a category only when the transaction names
+    // The patient record release policies admit a category only when the transaction names
     // it; only PatientRecordRelease names any, so nothing earlier can leak in.
     expect(String(binding?.[0]).replace(/\s+/g, '')).toContain("set_config('app.patient_release','',true)");
     expect(String(binding?.[0]).replace(/\s+/g, '')).toContain("set_config('app.purpose_of_use','patient-self',true)");

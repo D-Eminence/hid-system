@@ -12,9 +12,9 @@ import type { Environment } from '../../config/environment';
  * release migration's policies and Lab view admit a category only in a
  * transaction whose app.patient_release names it, so with a flag off the
  * database refuses that category as well, and an EHR build that never binds
- * reads nothing beyond encounters and notes. Row-level security (0030, 0084,
- * 0095) restricts rows, not columns: the SELECT lists below are what keep the
- * diagnosis notes, storage locations and staff identities out.
+ * reads nothing beyond encounters and notes. Row-level security restricts
+ * rows, not columns: the SELECT lists below are what keep the diagnosis
+ * notes, storage locations and staff identities out.
  *
  * Always released: completed encounters and the current signed or amended
  * notes of completed encounters. Released when its flag is on: final vitals
@@ -68,7 +68,7 @@ const COUNT_KEYS: Readonly<Record<ReleasedSection, string>> = {
  */
 const REFUSED_READ = new Set(['42501', '42P01', '42883', '42703', '57014']);
 
-/** Names the transaction's release set for the release policies and the Lab view (0095). */
+/** Names the transaction's release set for the release policies and the Lab view. */
 const RELEASE_BINDING = "select set_config('app.patient_release',$1,true)";
 
 /** A released Lab result revision, as Lab's own API names its fields. */
@@ -249,7 +249,7 @@ export function patientNotesSql(): string {
  * Each releasable category's read, repeating the release policy's predicates
  * as defense in depth. Every statement names the patient as $1 and nothing
  * else: the patient's summary spans facilities. Vitals, diagnoses and
- * prescriptions are ordered as their 0095 index is, so each stops after the
+ * prescriptions are ordered as their release index is, so each stops after the
  * rows it shows.
  */
 const PATIENT_SQL: Readonly<Record<PatientReleasable, string>> = {
