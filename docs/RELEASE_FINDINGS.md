@@ -103,3 +103,15 @@ this dependency review.
 | Verification | High/critical before and after: EHR, Lab, OCR, Outreach and Pharmacy APIs 5/2 to 0/0; Notification API 3/2 to 0/0; Event Dispatcher, Notification Worker and OCR Worker 2/1 to 0/0; Identity API 0/2 to 0/0. In a clean copy of each service, `npm ci`, `npm ls --all`, typecheck, lint, build and the unit suites pass. |
 | Residual risk | Every service still reports one moderate advisory, sprintf-js GHSA-hp3w-g68c-fv3c (`<=1.1.3`, no patched release), reached through `argparse` and js-yaml 3 in the Jest/Istanbul development toolchain. npm attributes it to 20 development packages per service. No production dependency is affected. Image regeneration and scanning are still required before release; a package audit does not replace an image scan. |
 | Status | **RESOLVED IN SOURCE — image evidence pending** |
+
+## Finding RF-008: Gateway PCRE2 in the pinned Nginx base
+
+| Field | Record |
+|---|---|
+| Review date | 2026-10-16, against `origin/main` `f9dbaf0`. |
+| Original issue | The pinned `nginxinc/nginx-unprivileged@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3` (Nginx 1.31.3, Alpine 3.24.1) ships `pcre2` 10.47-r1 in both its linux/amd64 and linux/arm64 images, read from `/lib/apk/db/installed` in the image layers. Nginx links `libpcre2-8.so.0`. Alpine's 3.24 security database lists CVE-2026-86145, CVE-2026-89156, CVE-2026-89157, CVE-2026-89158, CVE-2026-89160, CVE-2026-89161 and CVE-2026-89162 as fixed in 10.48-r0, and CVE-2026-103111 in 10.49-r0. |
+| Decision | Patch the one library in the final stage. Keep the Nginx base digest, version, user, health probe, routing and shutdown contract. No broad upgrade, untrusted repository, severity exception or scanner suppression. |
+| Change | `gateway/Dockerfile` switches to `USER 0` only for `apk add --no-cache 'pcre2=10.49-r0'` and still ends as `USER 101`. The Alpine v3.24 main `APKINDEX` (x86_64 and aarch64) lists `pcre2` 10.49-r0 as its only version, providing the same `libpcre2-8.so.0` soname. `scripts/verify-container-platform.mjs` requires that exact single `RUN`, rejects `apk upgrade`, untrusted or extra repositories, and requires the last `USER` to be 101. |
+| Residual risk | Alpine removes superseded revisions, so the build fails once 10.49-r0 is replaced. That is the intended fail-closed result: move the pin, or move to a newer Nginx base digest that already ships a fixed `pcre2`, and drop the `RUN` line then. `npm run verify:gateway-runtime:image` runs the bare pinned base, not the built gateway image, so it does not exercise this patch. |
+| Required closure | Build the gateway for linux/arm64 through the governed path, confirm `apk info -v pcre2` reports 10.49-r0, and attach a final-image scan with zero critical/high findings. No Docker daemon was available for this change. |
+| Status | **PATCHED IN SOURCE — image build and scan pending** |

@@ -180,6 +180,16 @@ for (const app of apps) {
     `API-only gateway must not package the Cloudflare-hosted ${app} frontend`)
 }
 assert.match(gatewayDockerfile, /USER 101/, 'gateway must run as the unprivileged Nginx user')
+// RF-008: the only package command is the exact PCRE2 patch, from the base's
+// signed repository, and the image still ends as the unprivileged user.
+assert.deepEqual([...gatewayDockerfile.matchAll(/^RUN .*$/gm)].map(([line]) => line), ["RUN apk add --no-cache 'pcre2=10.49-r0'"],
+  'gateway must install only the exact PCRE2 security patch')
+assert.match(gatewayDockerfile, /^USER 0\nRUN apk add --no-cache 'pcre2=10\.49-r0'$/m,
+  'gateway must switch to root only for the PCRE2 patch')
+assert.doesNotMatch(gatewayDockerfile, /apk upgrade|--allow-untrusted|--no-check-certificate|--repository|\s-X\s/,
+  'gateway must not broadly upgrade packages or bypass package trust')
+assert.equal([...gatewayDockerfile.matchAll(/^USER (.+)$/gm)].at(-1)?.[1], '101',
+  'gateway security patch must restore the non-root runtime user')
 assert.match(gatewayDockerfile, /EXPOSE 3000/)
 assert.match(gatewayDockerfile, /HEALTHCHECK[\s\S]*gateway-health\/ready/)
 assert.doesNotMatch(gatewayDockerfile, /(?:SENTRY_AUTH_TOKEN|POSTHOG_(?:PERSONAL_API_KEY|PRIVATE_KEY)|DATABASE_URL|WORKLOAD_TOKEN)/,

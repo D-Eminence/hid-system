@@ -5,6 +5,12 @@ COPY gateway/nginx.conf.template /tmp/default.conf.template
 COPY gateway/proxy-headers.conf /tmp/hid-proxy-headers.conf
 
 FROM nginxinc/nginx-unprivileged@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3 AS runtime
+# RF-008: the pinned base ships pcre2 10.47-r1. Install only the exact fixed
+# package from the base's signed Alpine 3.24 main repository; the build fails
+# rather than taking another version once Alpine drops this one. The runtime
+# returns to the unprivileged Nginx user below.
+USER 0
+RUN apk add --no-cache 'pcre2=10.49-r0'
 # Local defaults for every variable the template uses: envsubst leaves an
 # undefined ${NAME} in the configuration. The CDK sets each one in AWS. Locally
 # the resolver is Docker's embedded DNS, no hop is trusted for X-Real-IP,
