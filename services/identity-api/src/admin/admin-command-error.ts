@@ -1,10 +1,19 @@
 import { DomainProblem } from '../common/problem';
 
-/** Maps governed SQL command errors (0027, 0068-0070, 0087, 0094) to stable API problems. */
+/** Maps governed SQL command errors (0027, 0068-0070, 0087, 0094, 0098) to stable API problems. */
 export function adminCommandError(error: unknown): Error {
   if (error instanceof DomainProblem) return error;
   const message = typeof error === 'object' && error && 'message' in error ? String(error.message) : '';
   const problems: readonly [string, number, string, string][] = [
+    // Clinician application review (ADR-066, 0098). Before the generic
+    // NOT_FOUND and *_INVALID fallbacks below, which these would also match.
+    ['CLINICIAN_APPLICATION_COMMAND_INVALID', 400, 'CLINICIAN_APPLICATION_COMMAND_INVALID', 'The application command is invalid'],
+    ['CLINICIAN_APPLICATION_SECOND_ADMIN_REQUIRED', 403, 'CLINICIAN_APPLICATION_SECOND_ADMIN_REQUIRED', 'A different Super Admin must approve an application you verified'],
+    ['CLINICIAN_APPLICATION_NOT_FOUND', 404, 'CLINICIAN_APPLICATION_NOT_FOUND', 'The application was not found'],
+    ['CLINICIAN_APPLICATION_STATE_INVALID', 409, 'CLINICIAN_APPLICATION_STATE_INVALID', 'This application is no longer at this step; reload it'],
+    ['CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED', 409, 'CLINICIAN_APPLICATION_AUTHENTICATOR_REQUIRED', 'The applicant\'s authenticator was not verified in this step'],
+    ['CLINICIAN_APPLICATION_AUTHENTICATOR_CHANGED', 409, 'CLINICIAN_APPLICATION_AUTHENTICATOR_CHANGED', 'The applicant\'s authenticator changed after step 1; reject the application or verify again'],
+    ['CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE', 409, 'CLINICIAN_APPLICATION_ACCOUNT_INELIGIBLE', 'The applicant\'s account cannot be granted access in its current state'],
     ['ADMIN_STEP_UP_REQUIRED', 403, 'STEP_UP_REQUIRED', 'Confirm with your authenticator code to continue'],
     ['ADMIN_APPROVAL_REQUIRED', 403, 'TWO_PERSON_APPROVAL_REQUIRED', 'Granting Super Admin requires a second Super Admin to approve'],
     ['ADMIN_SELF_APPROVAL_DENIED', 403, 'SELF_APPROVAL_DENIED', 'The requester and the affected administrator cannot approve'],

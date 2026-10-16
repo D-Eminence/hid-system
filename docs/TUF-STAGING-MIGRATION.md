@@ -46,7 +46,8 @@ The executable covers:
    `delegated_cookie_read_runtime`, `outreach_cookie_read_runtime`,
    `provider_enrollment_runtime`, `platform_admin_runtime`,
    `session_sign_out_runtime`, `facility_selection_runtime`,
-   `platform_security_runtime`, `registration_review_runtime` and
+   `platform_security_runtime`, `staff_mfa_runtime`,
+   `clinician_application_runtime`, `registration_review_runtime` and
    `patient_search_runtime` (the patient enrollment, patient safety, delegated
    cookie-read, Outreach cookie-read, provider enrollment, platform admin,
    session sign-out, facility selection, platform security, registration
@@ -218,8 +219,7 @@ The executable covers:
    access history to name the requesting clinician and role, the history to
    report `truncated: false`, a doctor's `GET /auth/session` to list none of
    the withdrawn permissions, and a PIN use over HTTP to place one
-   `PATIENT_ACCESS_PIN_USED` inbox item (none for the replay); it grants
-   break-glass to the doctor role in its copy only for the activation;
+   `PATIENT_ACCESS_PIN_USED` inbox item (none for the replay);
    `patient_runtime` expects the history's additive `truncated`;
    `outreach_runtime` and `outreach_cookie_read_runtime` opt their disposable
    copies into Outreach (the doctor role's Outreach permissions and the
@@ -307,6 +307,83 @@ The executable covers:
    EHR's own patient-self transaction (nothing new without the release
    binding; only vitals with only that flag on), as `hid_ehr_api_runtime`
    against a real Identity child.
+   With 0097 (break-glass at launch, with limits; ADR-058 addendum): the role
+   assertions require exactly doctor, clinician and nurse to hold
+   `identity.break-glass.write`; the additional suites include
+   `break-glass-launch.integration.sql` (which sets `break_glass_enabled`
+   itself through the administrator command inside its transaction, so it
+   passes whatever the restored control holds, and needs an active
+   `emergency` and no `healthcare-operations` row), and `schema`, `emergency` and
+   `emergency-contacts` rely on the migrated grant; `patient_safety_runtime`
+   no longer inserts the `emergency` code or grants the permission, requires
+   both from the migrations, and drives `POST /identity/break-glass` over
+   HTTP as a doctor signed in with an authenticator: `423
+   BREAK_GLASS_DISABLED` with nothing written while `break_glass_enabled` is
+   off, `201` and an unextended replay once its copy turns the control on
+   (as P11's operator step would), `423` again once it is off, and `403
+   PERMISSION_DENIED` for an org admin; and the non-superuser check's P10 and
+   P11 expect `emergency` and the three break-glass holders. The
+   non-superuser check also confirms 0097's precondition: before the first
+   bootstrap the administrator cannot read the control
+   (`PLATFORM_CONTROL_UNAVAILABLE`) and 0097 applies; after it, 0097's SQL run
+   again as the administrator in rolled-back transactions is refused
+   (`55000 BREAK_GLASS_CONTROL_ON`) with the control on and is a no-op with it
+   off.
+   With 0098 (clinician self sign-up, ADR-066): the additional suites include
+   `clinician-applications.integration.sql`, the role assertions cover the
+   new commands and keep `identity.workforce_change_role` from every runtime,
+   and P11's read-only check expects `clinician_signup_enabled` off.
+   `clinician_application_runtime` (`verify-clinician-application-runtime.mjs`,
+   new, after `staff_mfa_runtime`) runs the real controllers, services,
+   Turnstile verifier, MfaService and commands as `hid_identity_api_runtime`
+   on a disposable copy, with only Siteverify and delivery stubbed and a
+   virtual TOTP clock. It requires intake closed by default (`503
+   CLINICIAN_SIGNUP_CLOSED` with its fixed sentence, availability false, the
+   status start not gated) and opened only through `POST /admin/controls`,
+   and closed again by the provider portal or maintenance; Turnstile, Origin
+   and the signed-out rule to refuse before the service; identical start
+   answers for a fresh, a staff-held and a patient-held address and for an
+   applicant and four decoys, with a code only where one is due; the draft
+   cookie's attributes, the search's verified facilities and its 30-search
+   budget; submit to create an account, a pending staff record and an
+   application with no membership or session, to rotate the capability and
+   to replay; the applicant's sign-in to stay `403
+   NO_ACTIVE_FACILITY_MEMBERSHIP`; the authenticator set up before review
+   with no session, and neither the capability nor the draft to work at
+   `/auth/mfa/*`; no audit row to carry the email, name or licence; the
+   status page's authenticator step; the queue's permission and step-up,
+   the applicant's live code at step 1 (a wrong one counted; an insider, a
+   stale version and an approved application refused before the code, none
+   counted), the second Super Admin and the insider refusal, and five
+   platform-scoped audit events; the first staff sign-in after approval; a grant pinned to its own
+   application's attestation across two applications, and a rejection that
+   revokes nothing; a reserved attestation refused for a generic 0087 grant,
+   also overdue and unswept, until approval; expiry read before the sweep
+   and the sweeper skipping a locked row; races (a double submit, concurrent
+   starts, two approvals at once beside a sign-in, a double-submitted step 1
+   waiting on the applicant's account, withdraw against approve); a forged
+   capability refused on submit and apply-again with no quota charged, and
+   the platform cap counting the created application once; a ready
+   capability searching beside a session cookie; an approved clinician
+   whose authenticator was reset refused enrolment at the status page; and
+   faults (a revoked grant, a missing function) answered `503`, never
+   `401`. The non-superuser check gains an upgrade stage
+   (`clinician_signup_upgrade_path`): on a second database it migrates
+   through 0097 with `apply-migrations.mjs --through`, runs the previous
+   release's control-owner bootstrap block so `platform.control_enabled` is
+   owned by `hid_platform_control_reader` and the administrator holds only
+   its ADMIN OPTION, applies 0098 as that administrator, bootstraps and
+   verifies, and requires the function's owner unchanged, no INHERIT or SET
+   membership left, and the control read `false` by the runtime logins.
+   Before that, on the same database, 0098 runs in a rolled-back
+   transaction as an administrator named `HidAdmin` (a name that needs
+   quoting) that still owns the function, and must apply with no membership
+   taken (`clinician_signup_quoted_owner`). It also runs
+   `MIGRATION_RUNBOOK.md` §6's two P37 reviews of recent clinician approvals
+   (break-glass use and in-person checks) as that administrator; the
+   in-person review reads the checks, which force row-level security, as the
+   `system:auth` actor, and both answer no rows there
+   (`runbook_recent_approval_reviews`).
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
@@ -318,7 +395,7 @@ The executable covers:
    closed-record, retracted-vital-correction and retracted-document triggers
    and the vital status are installed and the upgraded
    role bootstrap grants the EHR runtime the permission decision they use; since 0091 no Lab, Pharmacy, OCR or
-   Outreach permission, break-glass or document upload; and since 0092 that
+   Outreach permission or document upload; since 0092 that
    the 7-argument enrollment activation command is gone and the upgraded role
    bootstrap grants the Identity runtime, and not `PUBLIC`, the new one; and
    since 0093 that the upgraded bootstrap grants the Identity runtime the
@@ -338,7 +415,10 @@ The executable covers:
    grants `SELECT` on it to the EHR runtime and not to the Lab runtimes,
    gives neither the Lab runtime nor the view's owner `ehr.patient_self_context`
    or the Lab runtime `USAGE` on `ehr`, and keeps `ehr.patient_self_context`
-   executable by exactly the EHR runtime and the test role), then
+   executable by exactly the EHR runtime and the test role; and since 0097
+   break-glass held by exactly doctor, clinician and nurse, exactly the
+   `direct-care` and `emergency` purposes, and `break_glass_enabled` still
+   off), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites
@@ -364,9 +444,15 @@ The executable covers:
    Outreach logins from the control rows, and the OCR worker login's claim
    must reach the function's own authorization check without the parameter
    privilege. It also runs `platform-control-owner.integration.sql` and
-   `function-parameter-settings.integration.sql`, removes its cluster, and is
-   recorded under `evidence.checks` as `non_superuser_database` (about 5 s
-   locally).
+   `function-parameter-settings.integration.sql`. On a second cluster laid out
+   as a new RDS instance (a `NOSUPERUSER CREATEROLE` master owns the database,
+   and the provisioned roles sign in with SCRAM-SHA-256 passwords), it runs
+   the provisioning task's script: `--administrator`, the 0015 grant, the
+   migrations and the revoke, the bootstrap, refusals that change nothing, the
+   ten runtime LOGINs verified with their own passwords, a rerun, a rotation
+   and `--verify-logins` (`AWS_DEPLOYMENT_RUNBOOK.md` §4). It removes both
+   clusters and is recorded under `evidence.checks` as
+   `non_superuser_database` (about 20 s locally).
 2. Seed a separate synthetic canonical patient/account/facility/membership,
    encounter, clinical note/revision and audit event before backup. Record
    per-table counts and deterministic sorted-row SHA-256 plus sequence state.

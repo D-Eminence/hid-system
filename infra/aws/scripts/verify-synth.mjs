@@ -65,7 +65,34 @@ for (const service of services) {
   assert.equal(service.Properties.NetworkConfiguration.AwsvpcConfiguration.AssignPublicIp, 'DISABLED')
   if (profile === 'sleep') assert.equal(service.Properties.DesiredCount, 0)
 }
-assert.equal(resources('AWS::ECS::TaskDefinition').length, 12)
+// Eleven services, the one-shot migration task and the one-shot database
+// provisioning task.
+assert.equal(resources('AWS::ECS::TaskDefinition').length, 13)
+// Every Node image runs on gcr.io/distroless/nodejs22-debian13: no /bin/sh,
+// and node is /nodejs/bin/node, off PATH. A CMD-SHELL or bare `node` check
+// fails every probe and ECS replaces the essential container. Only the
+// gateway (nginx-unprivileged with BusyBox sh and wget) may use CMD-SHELL.
+const healthChecked = resources('AWS::ECS::TaskDefinition')
+  .flatMap(task => task.Properties.ContainerDefinitions).filter(container => container.HealthCheck)
+assert.ok(healthChecked.length >= 10, 'every service with a health path has a container health check')
+for (const container of healthChecked) {
+  const command = container.HealthCheck.Command
+  if (container.Name === 'gateway') {
+    assert.deepEqual(container.Image, { Ref: 'GatewayImageUri' })
+    assert.equal(command[0], 'CMD-SHELL', 'the gateway keeps its BusyBox wget health check')
+    assert.match(command[1], /^wget -q -O \/dev\/null http:\/\/127\.0\.0\.1:3000\/gateway-health\/ready \|\| exit 1$/)
+    continue
+  }
+  assert.match(String(container.Image?.Ref), /^(?!Gateway)[A-Za-z]+ImageUri$/, `${container.Name} runs a distroless Node image`)
+  assert.equal(command[0], 'CMD', `${container.Name}'s health check must not need a shell (distroless)`)
+  assert.equal(command[1], '/nodejs/bin/node', `${container.Name}'s health check must name /nodejs/bin/node`)
+  assert.ok(command.every(part => !/^node\b/.test(part)), `${container.Name}'s health check must not run a bare node`)
+}
+for (const [name, port] of [['identity-api', 3001], ['notification-api', 3007]]) {
+  const command = healthChecked.find(container => container.Name === name)?.HealthCheck.Command
+  assert.deepEqual(command?.slice(0, 3), ['CMD', '/nodejs/bin/node', '-e'], `${name} health check is node -e in exec form`)
+  assert.ok(command[3].includes(`fetch('http://127.0.0.1:${port}/api/v1/health/ready')`), `${name} probes its own readiness`)
+}
 const identityApis = resources('AWS::ECS::TaskDefinition')
   .filter(task => String(task.Properties.Family).endsWith('-identity-api'))
   .flatMap(task => task.Properties.ContainerDefinitions).filter(container => container.Name === 'identity-api')
@@ -109,6 +136,70 @@ assert.equal(resources('AWS::EC2::VPCEndpoint')
   .filter(resource => resource.Properties.VpcEndpointType === 'Interface').length, contract.endpoints)
 
 const asleep = profile === 'sleep'
+// The one-shot migration task: its image's entrypoint is /nodejs/bin/node, so
+// the command names the script (a bare `--plan` is `node --plan`, refused).
+// DATABASE_URL and DATABASE_ADMIN_URL are both the migration administrator,
+// for apply-migrations, the role bootstrap and admin:bootstrap. Wherever it
+// can run it reaches RDS, the AWS endpoints and S3 (image layers), nothing else.
+const migrationContainers = resources('AWS::ECS::TaskDefinition')
+  .filter(task => String(task.Properties.Family).endsWith('-database-migration'))
+  .flatMap(task => task.Properties.ContainerDefinitions)
+assert.equal(migrationContainers.length, 1)
+assert.deepEqual(migrationContainers[0].Command, ['scripts/apply-migrations.mjs', '--plan'])
+const migrationAdministrator = { 'Fn::Join': ['', [{ Ref: 'MigrationDatabaseSecretArn' }, ':url::']] }
+assert.deepEqual(migrationContainers[0].Secrets.map(secret => [secret.Name, secret.ValueFrom])
+  .sort((left, right) => left[0].localeCompare(right[0])),
+[['DATABASE_ADMIN_URL', migrationAdministrator], ['DATABASE_URL', migrationAdministrator]])
+const [migrationGroupId] = Object.entries(regional.Resources)
+  .find(([id, resource]) => resource.Type === 'AWS::EC2::SecurityGroup' && id.startsWith('MigrationSecurityGroup'))
+const migrationEgress = resources('AWS::EC2::SecurityGroupEgress')
+  .filter(rule => JSON.stringify(rule.Properties.GroupId).includes(migrationGroupId)).map(rule => rule.Properties)
+assert.equal(migrationEgress.length, asleep ? 1 : 3, 'the migration task reaches RDS, and while live the endpoints and S3')
+assert.ok(migrationEgress.some(rule => rule.FromPort === 5432
+  && JSON.stringify(rule.DestinationSecurityGroupId).includes('DatabaseSecurityGroup')))
+if (!asleep) {
+  assert.ok(migrationEgress.some(rule => rule.FromPort === 443
+    && JSON.stringify(rule.DestinationSecurityGroupId ?? '').includes('AwsEndpointSecurityGroup')))
+  assert.ok(migrationEgress.some(rule => rule.FromPort === 443
+    && JSON.stringify(rule.DestinationPrefixListId ?? '').includes('S3PrefixListId')))
+}
+for (const rule of migrationEgress) assert.ok(rule.CidrIp === undefined && rule.CidrIpv6 === undefined)
+// The one-shot database provisioning task (MIGRATION_RUNBOOK.md §6.1, §6.3):
+// the migration image, a verify-only default command, no service, and exactly
+// the RDS master's username and password, the migration administrator's URL
+// and the ten runtime credentials' URLs. It runs with the migration security
+// group, so it adds no database ingress.
+const provisioningTasks = Object.entries(regional.Resources)
+  .filter(([, resource]) => resource.Type === 'AWS::ECS::TaskDefinition'
+    && String(resource.Properties.Family).endsWith('-database-provisioning'))
+assert.equal(provisioningTasks.length, 1)
+assert.ok(!services.some(service => JSON.stringify(service.Properties.TaskDefinition) === JSON.stringify({ Ref: provisioningTasks[0][0] })))
+const provisioningContainers = provisioningTasks[0][1].Properties.ContainerDefinitions
+assert.equal(provisioningContainers.length, 1)
+assert.deepEqual(provisioningContainers[0].Image, { Ref: 'MigrationImageUri' })
+assert.deepEqual(provisioningContainers[0].Command, ['scripts/provision-database-logins.mjs', '--verify-logins'])
+assert.equal(provisioningContainers[0].ReadonlyRootFilesystem, true)
+const masterSecret = regional.Outputs.BootstrapDatabaseSecretArn.Value
+const secretField = (secret, name) => ({ 'Fn::Join': ['', [secret, `:${name}::`]] })
+assert.deepEqual(provisioningContainers[0].Secrets.map(secret => [secret.Name, secret.ValueFrom])
+  .sort((left, right) => left[0].localeCompare(right[0])), [
+  ['DATABASE_ADMIN_URL', migrationAdministrator],
+  ['DATABASE_LOGIN_URL_EHR_API', secretField({ Ref: 'EhrApiDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_EHR_API_SCANNER', secretField({ Ref: 'EhrApiDatabaseSecretArn' }, 'scannerUrl')],
+  ['DATABASE_LOGIN_URL_EVENT_DISPATCHER', secretField({ Ref: 'EventDispatcherDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_IDENTITY_API', secretField({ Ref: 'IdentityApiDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_LAB_API', secretField({ Ref: 'LabApiDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_NOTIFICATION_WORKER', secretField({ Ref: 'NotificationWorkerDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_OCR_API', secretField({ Ref: 'OcrApiDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_OCR_WORKER', secretField({ Ref: 'OcrWorkerDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_OUTREACH_API', secretField({ Ref: 'OutreachApiDatabaseSecretArn' }, 'url')],
+  ['DATABASE_LOGIN_URL_PHARMACY_API', secretField({ Ref: 'PharmacyApiDatabaseSecretArn' }, 'url')],
+  ['DATABASE_MASTER_PASSWORD', secretField(masterSecret, 'password')],
+  ['DATABASE_MASTER_USERNAME', secretField(masterSecret, 'username')],
+])
+assert.deepEqual(provisioningContainers[0].Environment.map(entry => entry.Name).sort(),
+  ['DATABASE_SSL', 'DATABASE_SSL_ROOT_CERT_BASE64', 'NODE_ENV'])
+assert.ok(regional.Outputs.DatabaseProvisioningTaskDefinitionArn)
 assert.equal(resources('AWS::ElasticLoadBalancingV2::LoadBalancer').length, asleep ? 0 : 2)
 // The public API web ACL, and the workload issuer's NAT allowlist web ACL
 // wherever an in-stack issuer runs behind NAT gateways (staging live modes and
@@ -419,6 +510,22 @@ if (environment === 'production') {
       'production identity-api sends holder SMS only with the facility route on (ADR-062, ADR-063)')
   }
   assert.equal(patientSelfNinBinding, 'false', 'production identity-api must not enable the signed-in NIN binding')
+}
+
+// Identity's enrollment and in-person budgets are optional synth inputs
+// HID_<VARIABLE>: a supplied one reaches the Identity task exactly, one left
+// out is not emitted (Identity keeps its default). QOREID_TIMEOUT_MS is
+// HID_QOREID_TIMEOUT_MS or 5000.
+for (const name of ['PATIENT_ENROLLMENT_QOREID_DAILY_CAP', 'PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX',
+  'PATIENT_ENROLLMENT_QOREID_NETWORK_DAILY_MAX', 'PATIENT_ENROLLMENT_START_RATE_MAX_REQUESTS',
+  'ASSISTED_VERIFICATION_STAFF_DAILY_MAX', 'ASSISTED_VERIFICATION_FACILITY_DAILY_MAX']) {
+  assert.equal(identityFlag(name), process.env[`HID_${name}`], `Identity's ${name} must be exactly HID_${name}, or absent`)
+}
+assert.equal(identityFlag('QOREID_TIMEOUT_MS'), process.env.HID_QOREID_TIMEOUT_MS ?? '5000')
+for (const container of resources('AWS::ECS::TaskDefinition').flatMap(task => task.Properties.ContainerDefinitions)) {
+  if (container.Name === 'identity-api') continue
+  assert.ok(!(container.Environment ?? []).some(entry => /^(PATIENT_ENROLLMENT_|ASSISTED_VERIFICATION_|QOREID_TIMEOUT_MS$)/
+    .test(entry.Name)), `${container.Name} must not carry an Identity budget or the QoreID timeout`)
 }
 
 // Patient record release (owner decision 4 of 2026-10-16, D7): ehr-api's

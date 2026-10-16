@@ -383,6 +383,90 @@ begin
          and role_code <> 'platform_super_admin') then
     raise exception 'workforce provisioning privileges are inconsistent';
   end if;
+  -- Clinician self sign-up (0098, ADR-066): the public, capability and system
+  -- commands are executable by the Identity runtime (and the schema test
+  -- runtime) only; the administration commands by the Identity runtime only;
+  -- the internal helpers, the pinned 0087 grant and the guard by no runtime;
+  -- and no runtime reads or writes the five tables directly.
+  if exists (
+       select 1 from unnest(array[
+         'identity.clinician_signup_open()',
+         'platform.consume_clinician_application_quota(character,text,integer,integer,integer)',
+         'identity.begin_clinician_application_challenge(text,uuid,character,text,character)',
+         'identity.invalidate_clinician_application_challenge(uuid)',
+         'identity.verify_clinician_application_signup_code(uuid,character,text,character,character)',
+         'identity.verify_clinician_application_status_code(uuid,character,character,character)',
+         'identity.clinician_application_session(character)',
+         'identity.clinician_application_submit_probe(character,character,text,character,text,text,text,text,text,date,uuid,integer)',
+         'identity.count_clinician_application_submit_attempt(character)',
+         'identity.search_clinician_application_facilities(character,text)',
+         'identity.submit_clinician_application(character,character,text,character,text,character,text,text,text,text,text,date,uuid,integer,integer)',
+         'identity.bind_clinician_application_mfa_challenge(character,uuid)',
+         'identity.clinician_application_authenticator_ready(character,uuid,text)',
+         'identity.current_clinician_applications(character)',
+         'identity.withdraw_clinician_application(character,uuid,bigint)',
+         'identity.file_clinician_application(character,text,character,text,text,text,date,uuid,integer,integer)',
+         'identity.end_clinician_application_session(character)',
+         'identity.expire_clinician_applications(integer)',
+         'identity.prune_clinician_application_artifacts()']) command(signature)
+       where not has_function_privilege('hid_identity_api_runtime', command.signature, 'EXECUTE')
+          or not has_function_privilege('hid_schema_test_runtime', command.signature, 'EXECUTE')
+          or has_function_privilege('public', command.signature, 'EXECUTE')
+          or exists (
+            select 1 from unnest(array['hid_ehr_api_runtime', 'hid_ocr_api_runtime', 'hid_lab_api_runtime',
+              'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime', 'hid_notification_api_runtime']) runtime(role_name)
+            where has_function_privilege(runtime.role_name, command.signature, 'EXECUTE'))
+     ) or exists (
+       select 1 from unnest(array[
+         'identity.admin_list_clinician_applications(text,timestamptz,uuid,integer)',
+         'identity.admin_get_clinician_application(uuid)',
+         'identity.admin_clinician_application_attest_precheck(uuid,bigint,timestamptz,text,jsonb,text,text)',
+         'identity.admin_clinician_application_prior(text,text,character)',
+         'identity.admin_attest_clinician_application(uuid,bigint,timestamptz,text,jsonb,uuid,text,text,character)',
+         'identity.admin_approve_clinician_application(uuid,bigint,text,text,character)',
+         'identity.admin_reject_clinician_application(uuid,bigint,text,text,text,character)']) command(signature)
+       where not has_function_privilege('hid_identity_api_runtime', command.signature, 'EXECUTE')
+          or has_function_privilege('public', command.signature, 'EXECUTE')
+          or exists (
+            select 1 from unnest(array['hid_ehr_api_runtime', 'hid_ocr_api_runtime', 'hid_lab_api_runtime',
+              'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime', 'hid_notification_api_runtime',
+              'hid_schema_test_runtime']) runtime(role_name)
+            where has_function_privilege(runtime.role_name, command.signature, 'EXECUTE'))
+     ) or exists (
+       select 1 from unnest(array[
+         'identity.workforce_change_role(uuid,uuid,bigint,text,text,text,text,character,uuid)',
+         'identity.workforce_attestation_usable(uuid,uuid,uuid,uuid)', 'identity.clinician_licence_key(text,text)',
+         'identity.clinician_application_displayed_state(text,timestamptz)',
+         'identity.clinician_application_require_system()', 'identity.clinician_intake_require_open()',
+         'identity.clinician_application_require_not_maintenance()',
+         'identity.clinician_application_session_row(character,boolean)',
+         'identity.clinician_application_account_session(character,text[],text,boolean)',
+         'identity.clinician_application_account_stage(uuid)', 'identity.clinician_application_status_eligible(uuid)',
+         'identity.clinician_application_effective_stage(identity.clinician_application_sessions)',
+         'identity.clinician_application_account_usable(uuid)', 'identity.clinician_application_staff_enrolment_only(uuid)',
+         'platform.count_clinician_application_submission(integer)',
+         'identity.clinician_application_identity_refused(uuid)', 'identity.clinician_application_account_refusal(uuid)',
+         'identity.clinician_application_access_state(identity.clinician_applications)',
+         'identity.clinician_application_view(identity.clinician_applications)',
+         'identity.clinician_application_account_view(uuid,text)',
+         'identity.clinician_application_audit(text,text,text,text,jsonb)',
+         'identity.clinician_application_inner_key_free(uuid,text[],text)',
+         'identity.guard_clinician_application_change()']) helper(signature)
+       where has_function_privilege('public', helper.signature, 'EXECUTE')
+          or has_function_privilege('hid_identity_api_runtime', helper.signature, 'EXECUTE')
+          or has_function_privilege('hid_schema_test_runtime', helper.signature, 'EXECUTE')
+     ) or exists (
+       select 1
+       from unnest(array['identity.clinician_applications', 'identity.clinician_application_challenges',
+         'identity.clinician_application_sessions', 'identity.clinician_application_idempotency',
+         'platform.clinician_application_quota_counters']) application_table(table_name),
+         unnest(array['hid_identity_api_runtime', 'hid_ehr_api_runtime', 'hid_schema_test_runtime',
+           'hid_migration_admin', 'hid_api_runtime']) runtime(role_name),
+         unnest(array['SELECT', 'INSERT', 'UPDATE', 'DELETE']) privilege(name)
+       where has_table_privilege(runtime.role_name, application_table.table_name, privilege.name)
+     ) then
+    raise exception 'clinician self sign-up privileges are inconsistent';
+  end if;
   -- Self-NIN identifiers are written only by identity.bind_my_verified_nin, a
   -- definer owned by the table owner, which bypasses row-level security on
   -- this table. No policy may let another role insert one directly (0078).
@@ -814,15 +898,18 @@ begin
 end
 $$;
 
--- The launch module set (0084 and 0091, decision D17, ADR-058): Lab, Pharmacy,
--- OCR and Outreach are off, EHR lab ordering is off, break-glass is off (D9)
--- and document uploads are off. No role holds a permission of a module that
--- is off (lab.*, pharmacy.*, ocr.*, outreach.*), the EHR lab-ordering write,
--- identity.break-glass.write or ehr.document.write, so the routes that need
--- them answer 403 before any write and Health-id hides their navigation and
--- actions. The EHR reads and writes of the launch set stay. Re-enabling a
--- module takes its own reviewed migration that grants the permissions again
--- and changes this assertion with it.
+-- The launch module set (0084, 0091 and 0097, decision D17, ADR-058): Lab,
+-- Pharmacy, OCR and Outreach are off, EHR lab ordering is off and document
+-- uploads are off. No role holds a permission of a module that is off (lab.*,
+-- pharmacy.*, ocr.*, outreach.*), the EHR lab-ordering write or
+-- ehr.document.write, so the routes that need them answer 403 before any
+-- write and Health-id hides their navigation and actions. The EHR reads and
+-- writes of the launch set stay. Re-enabling a module takes its own reviewed
+-- migration that grants the permissions again and changes this assertion with
+-- it. Break-glass is the first (D9, owner decision of 2026-10-14, ADR-058
+-- addendum): 0097 grants identity.break-glass.write again to exactly the
+-- roles 0010 granted it to, doctor, clinician and nurse, and no other role may
+-- hold it; its platform control stays an operator's step.
 do $$
 declare
   holders text;
@@ -831,7 +918,8 @@ begin
     into holders
     from auth.role_permissions
    where permission_code ~ '^(lab|pharmacy|ocr|outreach)\.'
-      or permission_code in ('ehr.lab-request.write', 'identity.break-glass.write', 'ehr.document.write');
+      or permission_code in ('ehr.lab-request.write', 'ehr.document.write')
+      or (permission_code = 'identity.break-glass.write' and role_code not in ('doctor', 'clinician', 'nurse'));
   if holders is not null then
     raise exception 'a role holds a permission withdrawn by the launch module set: %', holders;
   end if;
@@ -847,7 +935,10 @@ begin
                  ('nurse', 'identity.consent.write'),
                  ('doctor', 'identity.patient-access-pin.verify'),
                  ('clinician', 'identity.patient-access-pin.verify'),
-                 ('nurse', 'identity.patient-access-pin.verify'))
+                 ('nurse', 'identity.patient-access-pin.verify'),
+                 ('doctor', 'identity.break-glass.write'),
+                 ('clinician', 'identity.break-glass.write'),
+                 ('nurse', 'identity.break-glass.write'))
          expected(role_code, permission_code)
    where not exists (select 1 from auth.role_permissions held
                       where held.role_code = expected.role_code and held.permission_code = expected.permission_code);

@@ -311,3 +311,82 @@ describe('Public patient enrollment QoreID lookup quota', () => {
     expect(() => getEnvironment()).toThrow(/PATIENT_ENROLLMENT_QOREID_NETWORK_HOURLY_MAX: /);
   });
 });
+
+describe('Clinician self sign-up limits (ADR-066)', () => {
+  const original = { ...process.env };
+  const operations = ['SIGNUP', 'STATUS', 'SEARCH', 'SUBMIT'] as const;
+  const keys = [
+    ...operations.flatMap((operation) => ['NETWORK_HOURLY', 'NETWORK_DAILY', 'PLATFORM_DAILY']
+      .map((limit) => `CLINICIAN_APPLICATION_${operation}_${limit}_LIMIT`)),
+    'CLINICIAN_APPLICATION_FACILITY_OPEN_LIMIT', 'CLINICIAN_APPLICATION_SWEEP_SECONDS',
+  ];
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) if (!(key in original)) delete process.env[key];
+    Object.assign(process.env, original);
+    resetEnvironmentForTests();
+  });
+
+  function local(values: Record<string, string> = {}): void {
+    for (const key of keys) delete process.env[key];
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+      CORS_ORIGINS: 'https://www.healthidentitydirectory.com', AUTH_MODE: 'local',
+      AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
+      AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
+    }, values);
+    resetEnvironmentForTests();
+  }
+
+  function values(): unknown[] {
+    const environment: Record<string, unknown> = getEnvironment();
+    return keys.map((key) => environment[key]);
+  }
+
+  it('defaults to the design values', () => {
+    local();
+    expect(values()).toEqual([20, 60, 1000, 20, 60, 2000, 120, 500, 20000, 5, 10, 200, 30, 900]);
+  });
+
+  it('accepts each limit at its bounds and refuses one outside them', () => {
+    const bounds: Record<string, [number, number]> = {
+      SIGNUP_NETWORK_HOURLY: [1, 200], SIGNUP_NETWORK_DAILY: [1, 2000], SIGNUP_PLATFORM_DAILY: [1, 100000],
+      STATUS_NETWORK_HOURLY: [1, 200], STATUS_NETWORK_DAILY: [1, 2000], STATUS_PLATFORM_DAILY: [1, 100000],
+      SEARCH_NETWORK_HOURLY: [1, 1000], SEARCH_NETWORK_DAILY: [1, 5000], SEARCH_PLATFORM_DAILY: [1, 100000],
+      SUBMIT_NETWORK_HOURLY: [1, 200], SUBMIT_NETWORK_DAILY: [1, 2000], SUBMIT_PLATFORM_DAILY: [1, 100000],
+    };
+    for (const [name, [minimum, maximum]] of Object.entries(bounds)) {
+      const key = `CLINICIAN_APPLICATION_${name}_LIMIT`;
+      const hourly = key.replace('_NETWORK_DAILY_', '_NETWORK_HOURLY_');
+      // A daily limit's minimum is its hourly one: set that to 1 to test the bound itself.
+      const pair = key.includes('_NETWORK_DAILY_') ? { [hourly]: '1' } : {};
+      local({ ...pair, [key]: String(minimum) });
+      expect((getEnvironment() as Record<string, unknown>)[key]).toBe(minimum);
+      local({ ...(key.includes('_NETWORK_HOURLY_') ? { [key.replace('_HOURLY_', '_DAILY_')]: String(bounds[name.replace('HOURLY', 'DAILY')]![1]) } : {}),
+        [key]: String(maximum) });
+      expect((getEnvironment() as Record<string, unknown>)[key]).toBe(maximum);
+      for (const outside of [minimum - 1, maximum + 1]) {
+        local({ ...pair, [key]: String(outside) });
+        expect(() => getEnvironment()).toThrow(new RegExp(`${key}: `));
+      }
+    }
+    for (const [key, minimum, maximum] of [['CLINICIAN_APPLICATION_FACILITY_OPEN_LIMIT', 1, 500],
+      ['CLINICIAN_APPLICATION_SWEEP_SECONDS', 60, 3600]] as const) {
+      local({ [key]: String(minimum) });
+      expect((getEnvironment() as Record<string, unknown>)[key]).toBe(minimum);
+      local({ [key]: String(maximum) });
+      expect((getEnvironment() as Record<string, unknown>)[key]).toBe(maximum);
+      for (const outside of [minimum - 1, maximum + 1]) {
+        local({ [key]: String(outside) });
+        expect(() => getEnvironment()).toThrow(new RegExp(`${key}: `));
+      }
+    }
+  });
+
+  it('refuses a network hourly limit above its daily one', () => {
+    for (const operation of operations) {
+      local({ [`CLINICIAN_APPLICATION_${operation}_NETWORK_HOURLY_LIMIT`]: '11',
+        [`CLINICIAN_APPLICATION_${operation}_NETWORK_DAILY_LIMIT`]: '10' });
+      expect(() => getEnvironment()).toThrow(new RegExp(`CLINICIAN_APPLICATION_${operation}_NETWORK_HOURLY_LIMIT: `));
+    }
+  });
+});

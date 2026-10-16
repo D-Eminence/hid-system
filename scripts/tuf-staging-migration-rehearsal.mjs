@@ -283,14 +283,23 @@ try {
     // Outreach permission, break-glass and document upload from every role.
     assert.deepEqual((await client.query(`select role_code, permission_code from auth.role_permissions
       where permission_code ~ '^(lab|pharmacy|ocr|outreach)\\.'
-         or permission_code in ('identity.break-glass.write', 'ehr.document.write')`)).rows, [],
+         or permission_code = 'ehr.document.write'`)).rows, [],
     'Upgrade must leave no role holding a permission of a module that is off at launch');
-    // The 0028 baseline holds no purpose-of-use code; 0082 seeds only
-    // direct-care (emergency and healthcare-operations await product decisions).
+    // 0097 (break-glass at launch with limits, D9) grants break-glass again to
+    // exactly the roles 0010 granted it to, and to no other role.
+    assert.deepEqual((await client.query(`select role_code from auth.role_permissions
+      where permission_code = 'identity.break-glass.write' order by role_code`)).rows.map((row) => row.role_code),
+    ['clinician', 'doctor', 'nurse'], 'Upgrade must grant break-glass to exactly doctor, clinician and nurse');
+    // The 0028 baseline holds no purpose-of-use code; 0082 seeds direct-care
+    // and 0097 emergency (healthcare-operations awaits decision N3).
     assert.deepEqual((await client.query(`select code, display, active, source_system
       from identity.purpose_of_use_codes order by code`)).rows,
-    [{ code:'direct-care', display:'Direct patient care', active:true, source_system:'hid' }],
-    'Upgrade must seed exactly the active direct-care purpose of use');
+    [{ code:'direct-care', display:'Direct patient care', active:true, source_system:'hid' },
+      { code:'emergency', display:'Emergency treatment', active:true, source_system:'hid' }],
+    'Upgrade must seed exactly the active direct-care and emergency purposes of use');
+    // 0097 leaves the platform control to an operator: break-glass stays off.
+    assert.equal((await client.query(`select platform.control_enabled('break_glass_enabled') as enabled`)).rows[0].enabled,
+      false, 'Upgrade must leave break_glass_enabled off for the operator');
     // 0090 (D-Eminence/hid-system#74) adds the retraction,
     // closed-encounter, closed-order, retracted-vital-correction and
     // retracted-document guards and the vital status, and the upgraded role
@@ -411,8 +420,9 @@ try {
     } finally { await client.query('rollback'); }
   });
   const upgradeAfter = await snapshot('hid_upgrade');
-  // identity.purpose_of_use_codes gains 0082's seed, and auth.role_permissions
-  // loses 0084's launch-withdrawn write permissions, both checked above.
+  // identity.purpose_of_use_codes gains 0082's and 0097's seeds, and
+  // auth.role_permissions loses 0084's and 0091's launch-withdrawn permissions
+  // and regains 0097's break-glass rows, all checked above.
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
     'auth.permissions', 'auth.role_permissions', 'identity.purpose_of_use_codes',
@@ -429,8 +439,9 @@ try {
   assert.deepEqual(await snapshot('hid_upgrade_restored'), upgradeBefore, 'Pre-schema backup must restore the exact 0028 state');
   evidence.checks.existing_schema_upgrade = {from:'0028',to:latestSchema,dry_run_unchanged:true,
     historical_tables_preserved:true,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
-    purpose_of_use_seeded:['direct-care'],launch_write_permissions_withdrawn:true,retraction_guards_installed:true,
+    purpose_of_use_seeded:['direct-care','emergency'],launch_write_permissions_withdrawn:true,retraction_guards_installed:true,
     launch_module_permissions_withdrawn:true,patient_activation_command_regranted:true,
+    break_glass_granted_to:['clinician','doctor','nurse'],break_glass_control_left_off:true,
     holder_commands_runtime_only:true,holder_columns_not_runtime_writable:true,
     assisted_registration_commands_runtime_only:true,patient_record_release_grants:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
@@ -526,6 +537,13 @@ try {
   evidence.checks.staff_mfa_runtime = JSON.parse(command(
     'exact-role staff MFA sign-in, enrolment proof, unassured-session refusal, recovery and reset HTTP workflow',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-staff-mfa-runtime.mjs')],
+    workflowEnvironment));
+  // Owner decision 2 (ADR-066, 0098): clinician self sign-up with the
+  // authenticator before review and two different Super Admins; nothing the
+  // applicant's browser holds works at /auth/mfa/*.
+  evidence.checks.clinician_application_runtime = JSON.parse(command(
+    'exact-role clinician self sign-up, authenticator before review, two-admin approval and first staff sign-in HTTP workflow',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-clinician-application-runtime.mjs')],
     workflowEnvironment));
   // Phase 4 Stage 9: the commands whose row locks their runtime roles could not
   // take, each through its real API as its runtime role, with concurrency,

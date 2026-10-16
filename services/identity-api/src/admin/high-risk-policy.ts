@@ -93,6 +93,16 @@ export const PLATFORM_ACTION_POLICIES = {
     idempotencyKey: true, approval: 'independent-attestation' },
   'platform.workforce.membership.end': { ...critical, permissions: ['platform.workforce.manage'], ifMatch: true,
     idempotencyKey: true, approval: 'none' },
+  // Clinician self sign-up review (ADR-066): step 1 verifies and attests,
+  // step 2 grants; a different Super Admin must take each step. The label is
+  // documentation: the SQL wrapper, the table CHECK and the pinned grant
+  // enforce the second person.
+  'platform.clinician-application.attest': { ...critical, permissions: ['platform.workforce.manage'], ifMatch: true,
+    idempotencyKey: true, approval: 'none' },
+  'platform.clinician-application.approve': { ...critical, permissions: ['platform.workforce.manage'], ifMatch: true,
+    idempotencyKey: true, approval: 'independent-attestation' },
+  'platform.clinician-application.reject': { ...high, permissions: ['platform.workforce.manage'], reason: true,
+    ifMatch: true, idempotencyKey: true, approval: 'none' },
   // Facility, provider onboarding and pricing.
   'platform.facility.status': { ...high, permissions: ['platform.facility.manage'], reason: true, ifMatch: true,
     idempotencyKey: true, approval: 'none' },

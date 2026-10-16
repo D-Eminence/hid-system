@@ -262,6 +262,11 @@ do $$ begin
   -- MFA state changes only in the 0069/0070 functions and guards: no OTP,
   -- recovery or patient command touches a factor. auth.staff_session_is_mfa
   -- (0094) reads a factor's status, as platform_step_up_is_fresh does.
+  -- Clinician self sign-up (0098, ADR-066) reads factors in exactly these
+  -- functions (the stage of an application capability, whether step 1
+  -- confirmed the applicant's own staff-proven factor in this transaction,
+  -- whether it is still the active one at step 2, and the administrator's
+  -- detail); none of them writes one.
   if exists (
     select 1 from pg_proc proc join pg_namespace ns on ns.oid = proc.pronamespace
     where ns.nspname in ('auth', 'identity', 'platform')
@@ -269,8 +274,26 @@ do $$ begin
       and proc.proname not in ('guard_mfa_factor_change', 'guard_session_assurance_change',
         'account_has_active_mfa', 'platform_step_up_is_fresh', 'admin_request_approval',
         'admin_decide_approval', 'staff_session_is_mfa')
+      and proc.oid not in (
+        'identity.clinician_application_account_stage(uuid)'::regprocedure,
+        'identity.clinician_application_account_refusal(uuid)'::regprocedure,
+        'identity.clinician_application_authenticator_ready(character,uuid,text)'::regprocedure,
+        'identity.admin_get_clinician_application(uuid)'::regprocedure,
+        'identity.admin_attest_clinician_application(uuid,bigint,timestamptz,text,jsonb,uuid,text,text,character)'::regprocedure,
+        'identity.admin_approve_clinician_application(uuid,bigint,text,text,character)'::regprocedure)
   ) then
     raise exception 'an unexpected database function references MFA factors';
+  end if;
+  -- A write in any form: with or without the schema (the functions' search
+  -- path includes auth), quoted, ONLY, MERGE or TRUNCATE.
+  if exists (
+    select 1 from pg_proc proc join pg_namespace ns on ns.oid = proc.pronamespace
+    where ns.nspname in ('auth', 'identity', 'platform')
+      and proc.proname like '%clinician%'
+      and regexp_replace(lower(proc.prosrc), '\s+', ' ', 'g')
+        ~ '(update( only)?|insert into|delete from( only)?|merge into|truncate( table)?( only)?) ("?auth"? ?\. ?)?"?mfa_(factors|recovery_codes)([^a-z0-9_]|$)'
+  ) then
+    raise exception 'a clinician application function writes an MFA factor or recovery code';
   end if;
 end $$;
 
