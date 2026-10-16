@@ -431,6 +431,8 @@ export class HidRegionalStack extends Stack {
       : new Map<WorkloadName, elasticloadbalancingv2.ApplicationTargetGroup>();
 
     const migration = this.createMigrationTask(runtimeSecrets, securityGroups, documentKey);
+    if (!database.secret) throw new Error('The RDS instance must keep its generated master secret');
+    const provisioning = this.createDatabaseProvisioningTask(runtimeSecrets, database.secret);
     migration.securityGroup.addEgressRule(databaseSecurityGroup, ec2.Port.tcp(5432), 'Migration PostgreSQL only');
     databaseSecurityGroup.addIngressRule(migration.securityGroup, ec2.Port.tcp(5432), 'Migration administrator only');
     if (this.configuration.interfaceEndpoints.length > 0) {
@@ -465,6 +467,7 @@ export class HidRegionalStack extends Stack {
     new CfnOutput(this, 'NotificationQueueArn', { value: this.notificationQueue.queueArn });
     new CfnOutput(this, 'MigrationTaskDefinitionArn', { value: migration.taskDefinition.taskDefinitionArn });
     new CfnOutput(this, 'MigrationSecurityGroupId', { value: migration.securityGroup.securityGroupId });
+    new CfnOutput(this, 'DatabaseProvisioningTaskDefinitionArn', { value: provisioning.taskDefinitionArn });
     new CfnOutput(this, 'ApplicationSubnetIds', {
       value: Fn.join(',', vpc.selectSubnets({ subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS }).subnetIds),
     });
@@ -1244,6 +1247,71 @@ export class HidRegionalStack extends Stack {
       description: 'One-shot migration job: RDS and operational AWS endpoints only',
     });
     return { taskDefinition, securityGroup };
+  }
+
+  /**
+   * The one-shot database provisioning job (MIGRATION_RUNBOOK.md §6.1, §6.3;
+   * AWS_DEPLOYMENT_RUNBOOK.md §4). A new RDS instance has only its master: the
+   * master creates the migration administrator and makes and revokes 0015's
+   * parameter grant, and the administrator creates the ten runtime LOGINs from
+   * the passwords in their secrets and verifies them. It runs the migration
+   * image with the migration security group (RDS, the AWS endpoints and S3
+   * only), so the database gains no ingress. It maps exactly the RDS master's
+   * username and password, the administrator's URL and each runtime
+   * credential's URL; the migration task never maps them. Its default command
+   * only verifies the runtime LOGINs; never run it as a service.
+   */
+  private createDatabaseProvisioningTask(runtimeSecrets: SecretMap, masterSecret: secretsmanager.ISecret): ecs.FargateTaskDefinition {
+    const executionRole = new iam.Role(this, 'DatabaseProvisioningExecutionRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      description: 'Image, log, and the RDS master, migration administrator and runtime LOGIN secrets for the one-shot provisioning job',
+      managedPolicies: [iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonECSTaskExecutionRolePolicy')],
+    });
+    const taskRole = new iam.Role(this, 'DatabaseProvisioningTaskRole', {
+      assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
+      description: 'No AWS API access; database authority is the RDS master and migration administrator secrets',
+    });
+    const taskDefinition = new ecs.FargateTaskDefinition(this, 'DatabaseProvisioningTaskDefinition', {
+      family: `hid-${this.configuration.name}-database-provisioning`,
+      cpu: 256,
+      memoryLimitMiB: 512,
+      executionRole,
+      taskRole,
+      runtimePlatform: { cpuArchitecture: ecs.CpuArchitecture.ARM64, operatingSystemFamily: ecs.OperatingSystemFamily.LINUX },
+    });
+    const logGroup = new logs.LogGroup(this, 'DatabaseProvisioningLogGroup', {
+      logGroupName: `/hid/${this.configuration.name}/database-provisioning`,
+      retention: this.configuration.logRetention,
+      removalPolicy: this.configuration.removalPolicy,
+    });
+    this.tagService(taskDefinition, 'database-provisioning');
+    this.tagService(logGroup, 'database-provisioning');
+    const secrets: Record<string, ecs.Secret> = {
+      DATABASE_MASTER_USERNAME: ecs.Secret.fromSecretsManager(masterSecret, 'username'),
+      DATABASE_MASTER_PASSWORD: ecs.Secret.fromSecretsManager(masterSecret, 'password'),
+      DATABASE_ADMIN_URL: ecs.Secret.fromSecretsManager(runtimeSecrets.migrationDatabase!, 'url'),
+    };
+    // db:verify-logins' variables (MIGRATION_RUNBOOK.md §6.3): each service's
+    // `url`, and the EHR scanner pool's `scannerUrl`.
+    for (const name of workloadNames.filter((item) => workloads[item].hasDatabase)) {
+      const variable = `DATABASE_LOGIN_URL_${name.toUpperCase().replaceAll('-', '_')}`;
+      secrets[variable] = ecs.Secret.fromSecretsManager(runtimeSecrets[`${name}Database`]!, 'url');
+      if (name === 'ehr-api') {
+        secrets[`${variable}_SCANNER`] = ecs.Secret.fromSecretsManager(runtimeSecrets[`${name}Database`]!, 'scannerUrl');
+      }
+    }
+    taskDefinition.addContainer('DatabaseProvisioningContainer', {
+      containerName: 'database-provisioning',
+      image: ecs.ContainerImage.fromRegistry(this.parameter('MigrationImageUri').valueAsString),
+      // The image's entrypoint is /nodejs/bin/node, so the command names the
+      // script. The other commands are overrides (AWS_DEPLOYMENT_RUNBOOK.md §4).
+      command: ['scripts/provision-database-logins.mjs', '--verify-logins'],
+      environment: { NODE_ENV: 'production', DATABASE_SSL: 'true', DATABASE_SSL_ROOT_CERT_BASE64: this.parameter('RdsCaBundleBase64').valueAsString },
+      secrets,
+      logging: ecs.LogDrivers.awsLogs({ logGroup, streamPrefix: 'provisioning' }),
+      readonlyRootFilesystem: true,
+    });
+    return taskDefinition;
   }
 
   private configureRuntimeScaling(

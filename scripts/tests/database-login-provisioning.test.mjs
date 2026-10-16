@@ -137,7 +137,7 @@ test('verification forbids the RDS master and the migration administrator', () =
 });
 
 // A client that answers the provisioning statements from a role catalogue.
-function fakeClient({ roles = {}, ledger = null, parameterPrivilege = [false], createPrivilege = true } = {}) {
+function fakeClient({ roles = {}, memberships = {}, ledger = null, parameterPrivilege = [false], createPrivilege = true } = {}) {
   const statements = [];
   const privileges = [...parameterPrivilege];
   return {
@@ -153,6 +153,10 @@ function fakeClient({ roles = {}, ledger = null, parameterPrivilege = [false], c
       if (text.includes('has_parameter_privilege')) return { rowCount: 1, rows: [{ allowed: privileges.shift() ?? false }] };
       if (text.includes('to_regclass')) return { rowCount: 1, rows: [{ present: ledger !== null }] };
       if (text.includes('from migration.schema_migrations')) return { rowCount: 1, rows: [ledger] };
+      if (text.includes('pg_auth_members') && text.includes('$1')) {
+        const granted = (memberships[params[0]] ?? []).map((role) => ({ role }));
+        return { rowCount: granted.length, rows: granted };
+      }
       if (text.includes('pg_auth_members')) return { rowCount: 0, rows: [] };
       return { rowCount: 0, rows: [] };
     },
@@ -258,5 +262,24 @@ test('the administrator creates or updates each runtime LOGIN and grants exactly
       /DATABASE_LOGIN_URL_OUTREACH_API: role hid_outreach_api_login exists with other attributes/);
     assert.equal(sqlOf(refused).at(-1), 'rollback');
     assert.ok(!sqlOf(refused).includes('commit'));
+  }
+});
+
+// An existing LOGIN that already reaches another role (the administrator, an
+// owner, another aggregate) is refused before its password is set, so the
+// service's secret never signs in to a role with more than its aggregate.
+test('an existing runtime LOGIN that is a member of another role is refused before any change', async () => {
+  const administrator = loginFromUrl(adminUrl, 'DATABASE_ADMIN_URL');
+  const plan = runtimeLoginPlan(runtimeEnvironment(), administrator, 'hid_platform_bootstrap');
+  const login = loginNames['event-dispatcher'];
+  const own = fakeClient({ roles: { [login]: runtimeAttributes }, memberships: { [login]: ['hid_event_dispatcher'] } });
+  await provisionRuntimeLogins(own, plan);
+  assert.equal(sqlOf(own).at(-1), 'commit');
+  for (const other of [['hid_migration_admin'], ['hid_event_dispatcher', 'hid_ocr_worker']]) {
+    const refused = fakeClient({ roles: { [login]: runtimeAttributes }, memberships: { [login]: other } });
+    await assert.rejects(provisionRuntimeLogins(refused, plan),
+      /DATABASE_LOGIN_URL_EVENT_DISPATCHER: role hid_event_dispatcher_login is already a member of hid_/);
+    assert.equal(sqlOf(refused).at(-1), 'rollback');
+    assert.ok(!sqlOf(refused).some((text) => text.startsWith(`alter role "${login}"`)));
   }
 });

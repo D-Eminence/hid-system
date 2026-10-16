@@ -206,7 +206,9 @@ test('workflow confines build authority to reusable owner-approved staging envir
 test('image platforms agree with existing ECS and broker runtime contracts', async () => {
   const regional = await readFile(new URL('../../infra/aws/src/hid-regional-stack.ts', import.meta.url), 'utf8')
   const tasks = [...regional.matchAll(/runtimePlatform: \{ cpuArchitecture: ecs\.CpuArchitecture\.([A-Z0-9_]+)/g)]
-  assert.equal(tasks.length, 2) // Shared service constructor and separate migration task.
+  // Shared service constructor, the separate migration task and the separate
+  // database provisioning task (which runs the migration image).
+  assert.equal(tasks.length, 3)
   assert.ok(tasks.every(match => match[1] === 'ARM64'))
   assert.ok(stagingImageBuildPlan(config(), '123').every(item => item.platform === 'linux/arm64'))
   const brokerDockerfile = await readFile(new URL('../../tools/tuf-release/Dockerfile.signing-broker', import.meta.url), 'utf8')
