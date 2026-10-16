@@ -1047,7 +1047,7 @@ begin
      is distinct from array['ehr.import_legacy_medical_history(uuid,uuid,text,jsonb)']
      or exists (select 1 from pg_proc where proowner in (commands, importer) and (not prosecdef
           or proconfig is distinct from case when proowner = importer
-            then array['search_path=pg_catalog, pg_temp', 'TimeZone=UTC']
+            then array['search_path=pg_catalog, pg_temp', 'TimeZone=UTC', 'plan_cache_mode=force_custom_plan']
             else array['search_path=pg_catalog, pg_temp'] end))
      or exists (select 1 from pg_class where relowner in (commands, importer))
      or exists (select 1 from pg_namespace where nspowner in (commands, importer)) then

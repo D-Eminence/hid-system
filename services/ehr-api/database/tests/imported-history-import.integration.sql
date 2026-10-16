@@ -455,8 +455,8 @@ select pg_temp.import_record('the repeats left every imported row as it was', 't
 select pg_temp.import_record('a later history whose record differs', '55000:IMPORTED_HISTORY_DIFFERS',
   pg_temp.import_attempt(pg_temp.ea('5', 1), pg_temp.history(60,
     pg_temp.variant('medical_records', pg_temp.ea('6', 1), '{"title":"Synthetic changed history"}'))));
-select pg_temp.import_record('the import command pins its search path and time zone',
-  '{"search_path=pg_catalog, pg_temp",TimeZone=UTC}',
+select pg_temp.import_record('the import command pins its search path, time zone and per-call plans',
+  '{"search_path=pg_catalog, pg_temp",TimeZone=UTC,plan_cache_mode=force_custom_plan}',
   (select proconfig::text from pg_proc where oid = 'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb)'::regprocedure));
 
 -- 4. The import's time grows linearly with the versions: 4 times the versions
@@ -484,6 +484,11 @@ begin
         from generate_series(1, records) r, generate_series(1, 4) v) items));
 end
 $$;
+-- As on a new database, where autovacuum analyzes the imported tables
+-- while they are empty: a plan cached for an empty table must not decide how
+-- every later row is read. (ANALYZE's relpages and reltuples outlive the
+-- rollback, as autovacuum's would.)
+analyze ehr.imported_medical_records, ehr.imported_medical_record_versions, ehr.imported_medical_record_files;
 do $$
 declare
   small_run text := pg_temp.scaled_history(80, 400);
@@ -493,19 +498,32 @@ declare
   large_ms double precision;
   small_result text;
   large_result text;
+  scans_before bigint;
+  scans bigint;
 begin
   started := clock_timestamp();
   small_result := pg_temp.import_apply(pg_temp.ea('5', 1), small_run);
   small_ms := extract(epoch from clock_timestamp() - started) * 1000;
+  scans_before := (select coalesce(sum(seq_scan), 0) from pg_stat_xact_user_tables
+                     where relid in ('ehr.imported_medical_records'::regclass,
+                       'ehr.imported_medical_record_versions'::regclass, 'ehr.imported_medical_record_files'::regclass));
   started := clock_timestamp();
   large_result := pg_temp.import_apply(pg_temp.ea('5', 1), large_run);
   large_ms := extract(epoch from clock_timestamp() - started) * 1000;
+  -- Each stored row is read by its key, whatever plan was cached while the
+  -- tables were small: a sequential scan per row makes the import quadratic.
+  scans := (select coalesce(sum(seq_scan), 0) from pg_stat_xact_user_tables
+              where relid in ('ehr.imported_medical_records'::regclass,
+                'ehr.imported_medical_record_versions'::regclass, 'ehr.imported_medical_record_files'::regclass))
+           - scans_before;
+  perform pg_temp.import_record('the import reads stored rows by key, not by a scan per row', 'true',
+    (scans < 10)::text);
   perform pg_temp.import_record('scaled imports insert every row', '400,1600,0|1600,6400,0',
     small_result || '|' || large_result);
   perform pg_temp.import_record('4 times the versions take under 8 times as long', 'true',
     (large_ms < 8 * greatest(small_ms, 25))::text);
-  raise notice 'imported history import: 1600 versions in % ms, 6400 versions in % ms', round(small_ms::numeric),
-    round(large_ms::numeric);
+  raise notice 'imported history import: 1600 versions in % ms, 6400 versions in % ms (% sequential scans)',
+    round(small_ms::numeric), round(large_ms::numeric), scans;
 end $$;
 
 do $$

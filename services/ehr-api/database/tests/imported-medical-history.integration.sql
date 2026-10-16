@@ -614,7 +614,7 @@ select pg_temp.imported_record('the staff binding function: invoker, stable, pin
            from aclexplode(proc.proacl) privilege where privilege.grantee <> proc.proowner)
      from pg_proc proc where proc.oid = to_regprocedure('ehr.imported_history_staff_patient()')));
 select pg_temp.imported_record('function owners, definer and pinned search_path',
-  'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb):hid_imported_history_importer:true:{"search_path=pg_catalog, pg_temp",TimeZone=UTC},'
+  'ehr.import_legacy_medical_history(uuid,uuid,text,jsonb):hid_imported_history_importer:true:{"search_path=pg_catalog, pg_temp",TimeZone=UTC,plan_cache_mode=force_custom_plan},'
   || 'ehr.imported_history_staff_read_allowed(uuid):hid_imported_history_commands:true:{"search_path=pg_catalog, pg_temp"},'
   || 'identity.my_imported_history_sharing(text,uuid):hid_imported_history_commands:true:{"search_path=pg_catalog, pg_temp"},'
   || 'identity.set_my_imported_history_sharing(text,uuid,boolean):hid_imported_history_commands:true:{"search_path=pg_catalog, pg_temp"}',
