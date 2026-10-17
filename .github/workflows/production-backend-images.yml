@@ -248,7 +248,7 @@ jobs:
       GITHUB_TOKEN: ${{ github.token }}
       RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
       RELEASE_KMS_KEY_ARN: ${{ vars.RELEASE_KMS_KEY_ARN }}
-      RELEASE_LEASE_TABLE: hid-production-deployment-leases
+      RELEASE_LEASE_TABLE: hid-staging-deployment-leases
       RELEASE_ALERT_TOPIC_ARN: arn:aws:sns:eu-west-1:659225405023:hid-staging-operations-alerts
       RELEASE_CONFIG_JSON: ${{ vars.RELEASE_CONFIG_JSON }}
     steps:
