@@ -454,17 +454,29 @@ update ehr.record_chat_daily_budget set used_tokens = 0
 set local session_replication_role = origin;
 
 -- An expired lease is free: the next reservation settles it as expired and
--- counts its reserved tokens as used.
+-- counts its reserved tokens as used, on the budget day the lease was
+-- reserved in. In the first minute of a UTC day (where the hour guard at the
+-- top leaves a run that began at 23:59) that day is yesterday, so the
+-- fixture reserves on the lease's own day and the case sums both days.
 set local session_replication_role = replica;
 insert into ehr.record_chat_reservations(id,audience,account_id,patient_id,reserved_tokens,created_at,expires_at)
 values ('5c4a7a00-0000-4000-8000-000000000001','patient','5c4a7100-0000-4000-8000-000000000002',
   '5c4a7200-0000-4000-8000-000000000002',7000,statement_timestamp()-interval '61 seconds',
   statement_timestamp()-interval '1 second');
+create temporary table chat_stale_days on commit drop as
+  select (statement_timestamp() at time zone 'UTC')::date as day
+  union select (created_at at time zone 'UTC')::date from ehr.record_chat_reservations
+   where id = '5c4a7a00-0000-4000-8000-000000000001';
+insert into ehr.record_chat_daily_budget(day)
+  select (created_at at time zone 'UTC')::date from ehr.record_chat_reservations
+   where id = '5c4a7a00-0000-4000-8000-000000000001'
+  on conflict (day) do nothing;
 update ehr.record_chat_daily_budget set reserved_tokens = reserved_tokens + 7000
- where day = (statement_timestamp() at time zone 'UTC')::date;
+ where day = (select (created_at at time zone 'UTC')::date from ehr.record_chat_reservations
+               where id = '5c4a7a00-0000-4000-8000-000000000001');
 set local session_replication_role = origin;
-insert into chat_budget_before select reserved_tokens, used_tokens from ehr.record_chat_daily_budget
- where day = (statement_timestamp() at time zone 'UTC')::date;
+insert into chat_budget_before select sum(reserved_tokens), sum(used_tokens) from ehr.record_chat_daily_budget
+ where day in (select day from chat_stale_days);
 set local role hid_ehr_api_runtime;
 select pg_temp.bind_self(2);
 select pg_temp.record('a request after a stale lease', 'ok', pg_temp.outcome(
@@ -473,9 +485,10 @@ select pg_temp.record('a request after a stale lease', 'ok', pg_temp.outcome(
 reset role;
 select pg_temp.record('the stale lease is settled as expired and its tokens used', 'expired|-6000,7000',
   (select outcome from ehr.record_chat_reservations where id = '5c4a7a00-0000-4000-8000-000000000001')
-  || '|' || (select (budget.reserved_tokens - before.reserved) || ',' || (budget.used_tokens - before.used)
+  || '|' || (select (sum(budget.reserved_tokens) - before.reserved) || ',' || (sum(budget.used_tokens) - before.used)
     from ehr.record_chat_daily_budget budget, chat_budget_before before
-    where budget.day = (statement_timestamp() at time zone 'UTC')::date));
+    where budget.day in (select day from chat_stale_days)
+    group by before.reserved, before.used));
 -- Settling the lease again, as a late settlement for it would, changes nothing.
 delete from chat_budget_before;
 insert into chat_budget_before select reserved_tokens, used_tokens from ehr.record_chat_daily_budget
