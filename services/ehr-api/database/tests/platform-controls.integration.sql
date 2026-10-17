@@ -8,7 +8,9 @@ begin;
 -- Outreach portal and break-glass. 0039 seeded all three on, and before 0091
 -- only an operator's audited change (P11) turned them off. 0098 (ADR-066)
 -- seeds clinician self sign-up off. The other three controls keep their
--- seeded launch state.
+-- seeded launch state. Patient record chat's kill switch,
+-- record_chat_enabled, is seeded off by its migration (owner decision 1 of
+-- 2026-10-16) and turned on only by an administrator's audited change.
 do $$
 declare
   states text;
@@ -16,7 +18,8 @@ begin
   select string_agg(format('%s=%s', control_key, enabled::text), ', ' order by control_key) into states
     from platform.control_settings;
   if states is distinct from 'break_glass_enabled=false, clinician_signup_enabled=false, maintenance_mode=false, '
-      || 'outreach_portal_enabled=false, patient_portal_enabled=true, provider_portal_enabled=true, uploads_enabled=false' then
+      || 'outreach_portal_enabled=false, patient_portal_enabled=true, provider_portal_enabled=true, '
+      || 'record_chat_enabled=false, uploads_enabled=false' then
     raise exception 'the launch controls are not in their launch state: %', states;
   end if;
 end $$;
@@ -46,8 +49,8 @@ declare
   result record;
 begin
   select count(*) into listed from platform.admin_list_controls();
-  if listed <> 7 then
-    raise exception 'admin_list_controls returned % controls instead of 7', listed;
+  if listed <> 8 then
+    raise exception 'admin_list_controls returned % controls instead of 8', listed;
   end if;
   select c.row_version, c.enabled into before_version, before_enabled
     from platform.admin_list_controls() c where c.control_key = 'outreach_portal_enabled';
@@ -100,6 +103,19 @@ begin
   if result.enabled is distinct from before_enabled or result.row_version <> before_version + 2 or result.replayed then
     raise exception 'admin_set_control did not restore the control: %', row_to_json(result);
   end if;
+
+  -- Patient record chat's kill switch is changed only through the same
+  -- audited command: on, then off again.
+  select * into result from platform.admin_set_control(
+    'record_chat_enabled', true, 1, 'Controls suite turns record chat on');
+  if result.control_key <> 'record_chat_enabled' or not result.enabled or result.row_version <> 2 or result.replayed then
+    raise exception 'admin_set_control did not turn record chat on: %', row_to_json(result);
+  end if;
+  select * into result from platform.admin_set_control(
+    'record_chat_enabled', false, 2, 'Controls suite turns record chat off');
+  if result.enabled or result.row_version <> 3 or result.replayed then
+    raise exception 'admin_set_control did not turn record chat off: %', row_to_json(result);
+  end if;
 end $$;
 
 -- A platform administrator without the control permissions can neither list nor change controls.
@@ -130,6 +146,12 @@ begin
         and actor_account_id = 'c7200000-0000-4000-8000-000000000001'
         and control_key = 'outreach_portal_enabled') <> 2 then
     raise exception 'platform control changes were not recorded exactly once each';
+  end if;
+  if (select count(*) from platform.control_events
+      where correlation_id = 'platform-controls-0001'
+        and actor_account_id = 'c7200000-0000-4000-8000-000000000001'
+        and control_key = 'record_chat_enabled') <> 2 then
+    raise exception 'the record chat control changes were not recorded exactly once each';
   end if;
   if exists (select 1 from platform.control_events where correlation_id = 'platform-controls-0002') then
     raise exception 'a refused control change was recorded';

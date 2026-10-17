@@ -414,6 +414,26 @@ The executable covers:
    pass (`verify-non-superuser-database.mjs`, step `imported_history_import`)
    runs the same rehearsal as the `NOSUPERUSER NOBYPASSRLS CREATEROLE`
    administrator and checks that no `hid_migration_admin` membership is left.
+   With 0100 (patient record chat, ADR-068): the additional suites include
+   `patient-record-chat.integration.sql` (the patient's own history under
+   patient-self row-level security against every other context, the legal
+   hold that keeps it, the limit commands' quotas, leases and budget, their
+   catalogue, the kill switch read again by the reservation),
+   run in both passes. `record_chat_runtime` runs
+   `verify-record-chat-runtime.mjs` after the imported history verifier, against a
+   local fake Messages API on 127.0.0.1 (nothing leaves the machine): flag
+   off and kill switch off send nothing, one answered question sends one
+   request with the configured model and geography and only the minimised
+   extract, replay, validation, refusal, failure, the in-flight lease, a
+   record changed and a history cleared during the call, earlier exchanges
+   whose cited records were amended or withdrawn (never sent again, replayed
+   or shown), a legal hold that keeps the history, another patient, a staff
+   session, the hourly quota, the audit rows and a late settlement racing the
+   next reservation (two runtime connections; the lease counted once), as
+   `hid_ehr_api_runtime` against a real Identity child. The verifier accepts
+   only the rehearsal's own socket, as every runtime verifier does
+   (`scripts/tests/runtime-verifier-socket-guard.test.mjs`); a developer's
+   own cluster is reached only through an untracked copy.
    These results are local synthetic evidence, not deployed application
    validation.
    Separately build a synthetic `0028` database with historical staff sessions,
@@ -445,10 +465,15 @@ The executable covers:
    grants `SELECT` on it to the EHR runtime and not to the Lab runtimes,
    gives neither the Lab runtime nor the view's owner `ehr.patient_self_context`
    or the Lab runtime `USAGE` on `ehr`, and keeps `ehr.patient_self_context`
-   executable by exactly the EHR runtime and the test role; and since 0097
+   executable by exactly the EHR runtime and the test role; since 0097
    break-glass held by exactly doctor, clinician and nurse, exactly the
    `direct-care` and `emergency` purposes, and `break_glass_enabled` still
-   off), then
+   off; and since 0100
+   (`record_chat_grants`) that the upgraded bootstrap gives the EHR runtime
+   the chat history without `UPDATE`, the two chat commands and the legal
+   hold check (none of them to `PUBLIC`), no runtime a privilege on
+   the limit tables, and that `record_chat_enabled` and
+   `clinician_signup_enabled` are off), then
    restore its pre-schema backup to an independent database for exact comparison.
    A separate restored copy transfers schema/function ownership to a synthetic
    NOLOGIN, NOSUPERUSER, NOBYPASSRLS owner and repeats the new command suites

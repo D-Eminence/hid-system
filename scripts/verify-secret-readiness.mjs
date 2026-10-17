@@ -28,6 +28,10 @@ const serverSecretName = [
   'NPM_TOKEN',
   'NOVU_API_KEY',
   'QOREID_(?:API_KEY|CLIENT_ID|CLIENT_SECRET|TOKEN)',
+  // Patient record chat's Claude API key and disclosure digest key, and the
+  // ambient names the Anthropic SDK reads (ehr-api refuses them beside chat).
+  'RECORD_CHAT_(?:ANTHROPIC_API_KEY|AUDIT_DIGEST_KEY_B64)',
+  'ANTHROPIC_(?:API_KEY|AUTH_TOKEN)',
   'OAUTH(?:_[A-Z0-9]+)?_CLIENT_SECRET',
   'OIDC_CLIENT_SECRET',
   'PGPASSWORD',

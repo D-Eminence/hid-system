@@ -6,8 +6,9 @@ import type { IdentityApiService } from '../../integrations/identity-api.service
  * The patient-self authorization of this request's own session: Identity
  * confirms it (cookie or bearer, ehr-api workload) and it must still name the
  * same patient, account, subject and session. Every patient-self read
- * (the record summary, a document download, the imported history) runs in
- * the transaction DatabaseService.withPatientTransaction opens with it.
+ * (the record summary, a document download, the imported history, record
+ * chat before and after its model call) runs in the transaction
+ * DatabaseService.withPatientTransaction opens with it.
  */
 export async function authorizeOwnSession(identity: Pick<IdentityApiService, 'authorizeSelf'>, request: HidRequest) {
   const actor = requirePatientSession(request);

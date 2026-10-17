@@ -31,6 +31,11 @@ export class DomainProblem extends HttpException {
      * identifiers, no clinical content (A17-EHR-AUDIT).
      */
     public readonly auditDetails?: Readonly<Record<string, unknown>>,
+    /**
+     * Whole seconds after which the client may try again, answered as the
+     * Retry-After header (a 429 quota or a 503 that names when it ends).
+     */
+    public readonly retryAfterSeconds?: number,
   ) {
     super(detail, status);
   }
@@ -109,6 +114,10 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       ...(domainProblem?.errors ? { errors: domainProblem.errors } : {}),
     };
 
+    const retryAfter = domainProblem?.retryAfterSeconds;
+    if (retryAfter !== undefined && Number.isInteger(retryAfter) && retryAfter > 0) {
+      response.setHeader('Retry-After', String(retryAfter));
+    }
     response.status(status).type('application/problem+json').json(problem);
   }
 

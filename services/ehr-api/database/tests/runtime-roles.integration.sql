@@ -1421,6 +1421,69 @@ begin
 end
 $$;
 
+-- Patient record chat (owner decision 1 of 2026-10-16). The EHR runtime
+-- reads, writes and deletes the patient's own history (row-level security
+-- binds every row to the patient-self transaction) and never updates it; it
+-- runs the two limit commands and the legal hold check of its own history,
+-- and reaches no limit table. No other role, the schema-test role and the
+-- imported history's two technical owners included, holds any privilege on
+-- the chat tables or commands; PUBLIC executes none of the commands.
+do $$
+declare
+  other_roles text[] := array[
+    'public', 'hid_identity_runtime', 'hid_api_runtime', 'hid_identity_api_runtime', 'hid_ocr_api_runtime',
+    'hid_audit_writer', 'hid_document_scanner', 'hid_ocr_runtime', 'hid_ocr_worker',
+    'hid_lab_runtime', 'hid_lab_api_runtime', 'hid_pharmacy_runtime',
+    'hid_pharmacy_api_runtime', 'hid_outreach_runtime', 'hid_outreach_api_runtime', 'hid_migration_admin',
+    'hid_schema_test_runtime', 'hid_event_delivery_commands', 'hid_event_dispatcher', 'hid_notification_runtime',
+    'hid_notification_api_runtime', 'hid_notification_worker', 'hid_ocr_queue_metrics',
+    'hid_platform_control_reader', 'hid_lab_release_reader',
+    'hid_imported_history_commands', 'hid_imported_history_importer'];
+  history text[] := array['ehr.patient_chat_conversations', 'ehr.patient_chat_messages'];
+  limits text[] := array['ehr.record_chat_usage_counters', 'ehr.record_chat_reservations',
+    'ehr.record_chat_daily_budget'];
+  commands text[] := array['ehr.reserve_record_chat(text,uuid,integer,bigint)',
+    'ehr.settle_record_chat(uuid,integer,integer,integer,integer,text)', 'ehr.record_chat_history_on_hold(uuid)'];
+begin
+  -- PUBLIC and the 28 group roles listed at the top of this file, less the
+  -- EHR runtime and its API role, each an existing NOLOGIN role.
+  if cardinality(other_roles) <> 27
+     or (select count(*) from pg_roles role_row
+          where role_row.rolname = any (other_roles) and not role_row.rolcanlogin) <> 26 then
+    raise exception 'the record chat check must name every group role but the EHR runtime and its API role';
+  end if;
+  if exists (select 1 from unnest(history) relation(name)
+              where not has_table_privilege('hid_ehr_runtime', relation.name, 'SELECT')
+                 or not has_table_privilege('hid_ehr_runtime', relation.name, 'INSERT')
+                 or not has_table_privilege('hid_ehr_runtime', relation.name, 'DELETE')
+                 or has_table_privilege('hid_ehr_runtime', relation.name, 'UPDATE,TRUNCATE,REFERENCES,TRIGGER')
+                 or has_any_column_privilege('hid_ehr_runtime', relation.name, 'UPDATE,REFERENCES')) then
+    raise exception 'the EHR runtime must select, insert and delete the record chat history and never update it';
+  end if;
+  if exists (select 1 from unnest(limits) relation(name)
+              where has_table_privilege('hid_ehr_runtime', relation.name,
+                      'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                 or has_any_column_privilege('hid_ehr_runtime', relation.name, 'SELECT,INSERT,UPDATE,REFERENCES')) then
+    raise exception 'the EHR runtime must reach the record chat limits through their commands only';
+  end if;
+  if exists (select 1 from unnest(commands) command(signature)
+              where not has_function_privilege('hid_ehr_runtime', command.signature, 'EXECUTE')
+                 or not has_function_privilege('hid_ehr_api_runtime', command.signature, 'EXECUTE')) then
+    raise exception 'the EHR runtime must execute the record chat commands';
+  end if;
+  if exists (
+       select 1 from unnest(other_roles) runtime(role_name), unnest(history || limits) relation(name)
+        where has_table_privilege(runtime.role_name, relation.name,
+                'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+           or has_any_column_privilege(runtime.role_name, relation.name, 'SELECT,INSERT,UPDATE,REFERENCES'))
+     or exists (
+       select 1 from unnest(other_roles) runtime(role_name), unnest(commands) command(signature)
+        where has_function_privilege(runtime.role_name, command.signature, 'EXECUTE')) then
+    raise exception 'a role other than the EHR runtime can reach the record chat tables or commands';
+  end if;
+end
+$$;
+
 select
   rolname,
   rolcanlogin,

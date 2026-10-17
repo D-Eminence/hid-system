@@ -1485,6 +1485,78 @@ test('in staging the imported history switches depend on each other: staff read 
   /HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED=true needs HID_IMPORTED_HISTORY_SHARING_ENABLED=true/);
 });
 
+test('patient record chat is an explicit synth input that defaults to false and needs its settings and approval when on', () => {
+  const productionTopic = { operationalAlarmTopicArn: productionTopicArn };
+  assert.deepEqual(environmentConfig('production').recordChat, { patientEnabled: false });
+  assert.deepEqual(environmentConfig('staging', 'economy').recordChat, { patientEnabled: false });
+  // Off: the one flag, false, and nothing else of record chat anywhere.
+  for (const template of [regional, stagingRegional, sleepRegional, developmentRegional]) {
+    assert.equal(containerOf(template, 'ehr-api').environment.RECORD_CHAT_PATIENT_ENABLED, 'false');
+    assert.equal(template.Parameters.RecordChatSecretArn, undefined);
+    for (const name of workloadNames) {
+      const container = containerOf(template, name);
+      const named = [...Object.keys(container.environment), ...container.secrets.map(item => item.Name)];
+      assert.deepEqual(named.filter(item => /RECORD_CHAT|ANTHROPIC/.test(item) && item !== 'RECORD_CHAT_PATIENT_ENABLED'),
+        [], name);
+      if (name !== 'ehr-api') assert.equal(container.environment.RECORD_CHAT_PATIENT_ENABLED, undefined, name);
+    }
+  }
+  // A placeholder model id and approval: the model comes only from configuration.
+  const settings = { recordChatPatientEnabled: 'true', recordChatModelId: 'synthetic-test-model',
+    recordChatInferenceGeo: 'us', recordChatNoticeVersion: 'notice-1', recordChatDailyTokenBudget: '2000000',
+    recordChatProcessingApproval: 'ADR-999@2026-10-01' };
+  // mode null: no staging mode (production).
+  const refused = (options: Record<string, string | undefined>, pattern: RegExp, environment = 'staging',
+    mode: string | null = 'economy') => assert.throws(() => environmentConfig(environment, mode ?? undefined, undefined,
+    undefined, { ...(environment === 'production' ? productionTopic : {}), ...options }), pattern);
+  refused({ recordChatPatientEnabled: 'yes' }, /HID_RECORD_CHAT_PATIENT_ENABLED must be true or false/);
+  refused({ ...settings, recordChatModelId: undefined }, /HID_RECORD_CHAT_MODEL_ID.*no default/);
+  refused({ ...settings, recordChatModelId: 'Has Spaces' }, /HID_RECORD_CHAT_MODEL_ID/);
+  refused({ ...settings, recordChatInferenceGeo: undefined }, /HID_RECORD_CHAT_INFERENCE_GEO/);
+  refused({ ...settings, recordChatInferenceGeo: 'eu' }, /HID_RECORD_CHAT_INFERENCE_GEO/);
+  refused({ ...settings, recordChatNoticeVersion: undefined }, /HID_RECORD_CHAT_NOTICE_VERSION/);
+  refused({ ...settings, recordChatDailyTokenBudget: '0' }, /HID_RECORD_CHAT_DAILY_TOKEN_BUDGET/);
+  refused({ ...settings, recordChatDailyTokenBudget: '20000001' }, /HID_RECORD_CHAT_DAILY_TOKEN_BUDGET/);
+  // Every deployed ehr-api runs NODE_ENV=production, so every environment needs the approval.
+  for (const approval of [undefined, 'ADR-65@2026-10-01', 'ADR-999@2026-02-30', 'ADR-999@2999-01-01']) {
+    refused({ ...settings, recordChatProcessingApproval: approval }, /HID_RECORD_CHAT_PROCESSING_APPROVAL/);
+    refused({ ...settings, recordChatProcessingApproval: approval }, /HID_RECORD_CHAT_PROCESSING_APPROVAL/,
+      'production', null);
+  }
+  // Off is always allowed, as a redeploy that turns chat off: the other settings are neither checked nor passed.
+  assert.deepEqual(environmentConfig('staging', 'sleep', undefined, undefined, { ...settings,
+    recordChatPatientEnabled: 'false', recordChatInferenceGeo: 'eu', recordChatProcessingApproval: undefined }).recordChat,
+  { patientEnabled: false });
+  // The sleep profile has no NAT egress to reach the processor.
+  refused(settings, /HID_RECORD_CHAT_PATIENT_ENABLED=true needs NAT egress/, 'staging', 'sleep');
+  const staging = environmentConfig('staging', 'economy', undefined, undefined, settings);
+  assert.deepEqual(staging.recordChat, { patientEnabled: true, modelId: 'synthetic-test-model', inferenceGeo: 'us',
+    noticeVersion: 'notice-1', dailyTokenBudget: 2000000, processingApproval: 'ADR-999@2026-10-01' });
+  assert.equal(environmentConfig('production', undefined, undefined, undefined, { ...productionTopic, ...settings })
+    .recordChat.patientEnabled, true);
+  // The regional stack refuses the same for a configuration built by hand.
+  assert.throws(() => new HidRegionalStack(new App(), 'RecordChatUnapproved', { configuration: { ...staging,
+    recordChat: { ...staging.recordChat, processingApproval: undefined } } }), /HID_RECORD_CHAT_PROCESSING_APPROVAL/);
+  const template = Template.fromStack(new HidRegionalStack(new App(), 'RecordChatStaging', { configuration: staging }))
+    .toJSON() as typeof regional;
+  const parameter = template.Parameters.RecordChatSecretArn;
+  assert.ok(parameter, 'record chat needs its secret parameter when on');
+  assert.equal(parameter.NoEcho, true);
+  assert.match(String(parameter.Description), /anthropicApiKey/);
+  assert.match(String(parameter.Description), /auditDigestKeyB64/);
+  const ehr = containerOf(template, 'ehr-api');
+  assert.deepEqual(Object.fromEntries(Object.entries(ehr.environment).filter(([name]) => name.startsWith('RECORD_CHAT_'))), {
+    RECORD_CHAT_PATIENT_ENABLED: 'true', RECORD_CHAT_MODEL_ID: 'synthetic-test-model', RECORD_CHAT_INFERENCE_GEO: 'us',
+    RECORD_CHAT_NOTICE_VERSION: 'notice-1', RECORD_CHAT_DAILY_TOKEN_BUDGET: '2000000',
+    RECORD_CHAT_PROCESSING_APPROVAL: 'ADR-999@2026-10-01' });
+  assert.deepEqual(ehr.secrets.map(item => item.Name).filter(name => name.startsWith('RECORD_CHAT_')).sort(),
+    ['RECORD_CHAT_ANTHROPIC_API_KEY', 'RECORD_CHAT_AUDIT_DIGEST_KEY_B64']);
+  assert.deepEqual(Object.keys(ehr.environment).filter(name => name.startsWith('ANTHROPIC_')), []);
+  for (const name of workloadNames.filter(item => item !== 'ehr-api')) {
+    assert.doesNotMatch(JSON.stringify(containerOf(template, name)), /RECORD_CHAT|ANTHROPIC/, name);
+  }
+});
+
 test('NIN-only enrollment and the NIN holder routes are explicit synth inputs that default to false (ADR-062)', () => {
   const productionTopic = { operationalAlarmTopicArn: 'arn:aws:sns:eu-west-1:000000000000:hid-production-operational-alerts' };
   const production = environmentConfig('production');

@@ -44,6 +44,7 @@ import {
   assertNinOwnershipRoutes,
   assertPatientRecordRelease,
   assertImportedHistory,
+  assertRecordChat,
   type HidEnvironmentConfig,
   identityBudgetInputs,
   operationalAlarmTopic,
@@ -135,6 +136,7 @@ export class HidRegionalStack extends Stack {
     assertIdentityBudgets(this.configuration.identityBudgets);
     assertPatientRecordRelease(this.configuration);
     assertImportedHistory(this.configuration);
+    assertRecordChat(this.configuration);
 
     validateDatabaseConnectionBudget(
       this.configuration.profile,
@@ -553,6 +555,12 @@ export class HidRegionalStack extends Stack {
         : 'Secrets Manager JSON secret containing sesFromAddress for staging email OTP')
       : 'Secrets Manager JSON secret holding exactly the otp-email-sms fields sesFromAddress, termiiBaseUrl, termiiApiKey '
         + `and termiiSenderId (email OTP through SES, SMS OTP through Termii)${novu ? ', plus novuApiKey for the notification worker' : ''}`);
+    if (this.configuration.recordChat.patientEnabled) {
+      // Patient record chat: read by ehr-api only, and only while record chat is on.
+      this.requiredParameter('RecordChatSecretArn', 'Secrets Manager JSON secret for ehr-api patient record chat with '
+        + 'the fields anthropicApiKey (the Claude API key of the approved processing account) and auditDigestKeyB64 '
+        + '(32 random bytes in base64 keying the disclosure digest, never reused across environments)');
+    }
     if (this.configuration.name === 'staging') {
       const novuApiUrl = this.requiredParameter('StagingNovuApiUrl',
         'API endpoint of the confirmed isolated Novu staging environment; no implicit region selection');
@@ -701,6 +709,9 @@ export class HidRegionalStack extends Stack {
     };
     if (this.configuration.qoreIdEnabled) {
       imported.qoreid = this.importSecret('QoreIdCredentialsSecret', 'QoreIdCredentialsSecretArn');
+    }
+    if (this.configuration.recordChat.patientEnabled) {
+      imported.recordChat = this.importSecret('RecordChatSecret', 'RecordChatSecretArn');
     }
     for (const name of workloadNames.filter((item) => workloads[item].hasDatabase)) {
       imported[`${name}Database`] = this.importSecret(`${pascal(name)}DatabaseSecret`, `${pascal(name)}DatabaseSecretArn`);
@@ -965,7 +976,8 @@ export class HidRegionalStack extends Stack {
           ...patientReleaseEnvironment(this.configuration.patientRecordRelease),
           // Imported legacy medical history (ADR-067, P38): the patient's and the staff read.
           EHR_PATIENT_RELEASE_IMPORTED_HISTORY: String(this.configuration.importedHistory.patientRead),
-          EHR_STAFF_IMPORTED_HISTORY_ENABLED: String(this.configuration.importedHistory.staffRead) };
+          EHR_STAFF_IMPORTED_HISTORY_ENABLED: String(this.configuration.importedHistory.staffRead),
+          ...recordChatEnvironment(this.configuration.recordChat) };
       case 'lab-api':
         return { ...commonApi, ...base, PORT: '3003', IDENTITY_API_URL: urls['identity-api']!,
           IDENTITY_SERVICE_IDENTITY_MODE: 'jwt', LAB_SERVICE_IDENTITY_MODE: 'jwt',
@@ -1082,6 +1094,11 @@ export class HidRegionalStack extends Stack {
     }
     if (name === 'ehr-api') {
       output.WORKLOAD_DATABASE_URL = ecs.Secret.fromSecretsManager(secrets[`${name}Database`]!, 'scannerUrl');
+      // Record chat off: ehr-api reads nothing of the record chat secret.
+      if (this.configuration.recordChat.patientEnabled) {
+        output.RECORD_CHAT_ANTHROPIC_API_KEY = ecs.Secret.fromSecretsManager(secrets.recordChat!, 'anthropicApiKey');
+        output.RECORD_CHAT_AUDIT_DIGEST_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.recordChat!, 'auditDigestKeyB64');
+      }
     }
     if (name === 'notification-api') {
       // Exactly the fields the delivery profile reads: email-only (staging)
@@ -1899,5 +1916,23 @@ function patientReleaseEnvironment(release: HidEnvironmentConfig['patientRecordR
     EHR_PATIENT_RELEASE_PRESCRIPTIONS: String(release.prescriptions),
     EHR_PATIENT_RELEASE_LAB_RESULTS: String(release.labResults),
     EHR_PATIENT_RELEASE_DOCUMENTS: String(release.documents),
+  };
+}
+
+/**
+ * ehr-api's patient record chat settings (owner decision 1 of 2026-10-16). Off: the false flag only.
+ * On: the settings ehr-api requires; the API key and the digest key come from
+ * RecordChatSecretArn, and no base URL is set, so ehr-api uses the
+ * first-party API origin.
+ */
+function recordChatEnvironment(chat: HidEnvironmentConfig['recordChat']): Record<string, string> {
+  if (!chat.patientEnabled) return { RECORD_CHAT_PATIENT_ENABLED: 'false' };
+  return {
+    RECORD_CHAT_PATIENT_ENABLED: 'true',
+    RECORD_CHAT_MODEL_ID: chat.modelId!,
+    RECORD_CHAT_INFERENCE_GEO: chat.inferenceGeo!,
+    RECORD_CHAT_NOTICE_VERSION: chat.noticeVersion!,
+    RECORD_CHAT_DAILY_TOKEN_BUDGET: String(chat.dailyTokenBudget!),
+    RECORD_CHAT_PROCESSING_APPROVAL: chat.processingApproval!,
   };
 }

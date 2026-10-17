@@ -622,6 +622,23 @@ grant execute on function platform.current_actor_subject(),
   identity.has_active_consent_grant(uuid, text, uuid, uuid, text, text, timestamptz),
   ehr.context_allows(uuid, uuid, text) to hid_ehr_runtime;
 
+-- Patient record chat (owner decision 1 of 2026-10-16). The EHR runtime
+-- reads, writes and deletes the patient's own history under its patient-self
+-- row-level security and never updates it (no UPDATE privilege and no UPDATE
+-- policy). It reaches the abuse and cost limits only through the two
+-- security-definer commands, owned by the migration administrator as 0049's
+-- QoreID quota command is; no runtime role, the schema-test role included,
+-- holds any privilege on the limit tables (runtime-roles.integration.sql).
+-- ehr.record_chat_history_on_hold, also the administrator's, tells the
+-- patient's own transaction whether a legal hold keeps the history.
+grant select, insert, delete on ehr.patient_chat_conversations, ehr.patient_chat_messages to hid_ehr_runtime;
+grant execute on function ehr.reserve_record_chat(text, uuid, integer, bigint),
+  ehr.settle_record_chat(uuid, integer, integer, integer, integer, text),
+  ehr.record_chat_history_on_hold(uuid) to hid_ehr_runtime;
+revoke all on function ehr.reserve_record_chat(text, uuid, integer, bigint),
+  ehr.settle_record_chat(uuid, integer, integer, integer, integer, text),
+  ehr.record_chat_history_on_hold(uuid) from public;
+
 -- Append-only audit is isolated from both domain roles. Environment-specific
 -- Identity, EHR, or transitional API logins inherit this role separately.
 grant usage on schema audit to hid_audit_writer;

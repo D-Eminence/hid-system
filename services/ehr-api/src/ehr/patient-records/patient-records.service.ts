@@ -142,6 +142,15 @@ export class PatientRecordsService {
     }
   }
 
+  /**
+   * The patient-self authorization of this request's own session
+   * (patient-self-authorization.ts), for the readers that reach it through
+   * this service: record chat, before and after its model call.
+   */
+  authorizeOwnSession(request: HidRequest) {
+    return authorizeOwnSession(this.identity, request);
+  }
+
   /** The configured bucket; storage that is not configured is unavailable, not a missing document. */
   private storageBucket(): string {
     try {

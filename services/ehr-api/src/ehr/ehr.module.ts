@@ -15,6 +15,14 @@ import { ClinicalInfrastructureModule } from './shared/clinical-infrastructure.m
 import { getEnvironment } from '../config/environment';
 import { StorageModule } from '../storage/storage.module';
 import { configuredPatientRelease, PatientRecordRelease } from './patient-records/patient-release';
+import {
+  ClaudeRecordChatClient, DISABLED_RECORD_CHAT_PROCESSOR, RECORD_CHAT_PROCESSOR,
+} from './record-chat/claude-record-chat.client';
+import { PatientRecordChatController } from './record-chat/patient-record-chat.controller';
+import { PatientRecordChatService } from './record-chat/patient-record-chat.service';
+import {
+  RECORD_CHAT_CONFIG, enabledRecordChatConfig, recordChatConfig, type RecordChatConfig,
+} from './record-chat/record-chat.config';
 
 @Module({
   imports: [
@@ -28,13 +36,19 @@ import { configuredPatientRelease, PatientRecordRelease } from './patient-record
     LabRequestsModule,
     StorageModule,
   ],
-  controllers: [PatientRecordsController, ImportedHistoryController],
+  controllers: [PatientRecordsController, ImportedHistoryController, PatientRecordChatController],
   providers: [
     PatientRecordsService,
     // Imported legacy medical history (ADR-067): the patient's own read is a
     // category of the release set below; the staff read has its own switch.
     ImportedHistoryService,
     StaffImportedHistoryEnabledGuard,
+    PatientRecordChatService,
+    // Patient record chat (owner decision 1 of 2026-10-16): off unless
+    // RECORD_CHAT_PATIENT_ENABLED; the Claude client is built only then.
+    { provide: RECORD_CHAT_CONFIG, useFactory: () => recordChatConfig(getEnvironment()) },
+    { provide: RECORD_CHAT_PROCESSOR, inject: [RECORD_CHAT_CONFIG], useFactory: (config: RecordChatConfig) =>
+      (config.patientEnabled ? new ClaudeRecordChatClient(enabledRecordChatConfig(config)) : DISABLED_RECORD_CHAT_PROCESSOR) },
     // The patient record release this deployment configures (one flag per
     // category, the imported history included, default off): the single
     // release set every patient reader uses.
