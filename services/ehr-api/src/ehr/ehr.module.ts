@@ -20,6 +20,8 @@ import {
 } from './record-chat/claude-record-chat.client';
 import { PatientRecordChatController } from './record-chat/patient-record-chat.controller';
 import { PatientRecordChatService } from './record-chat/patient-record-chat.service';
+import { StaffRecordChatController } from './record-chat/staff-record-chat.controller';
+import { StaffRecordChatService } from './record-chat/staff-record-chat.service';
 import {
   RECORD_CHAT_CONFIG, enabledRecordChatConfig, recordChatConfig, type RecordChatConfig,
 } from './record-chat/record-chat.config';
@@ -36,7 +38,8 @@ import {
     LabRequestsModule,
     StorageModule,
   ],
-  controllers: [PatientRecordsController, ImportedHistoryController, PatientRecordChatController],
+  controllers: [PatientRecordsController, ImportedHistoryController, PatientRecordChatController,
+    StaffRecordChatController],
   providers: [
     PatientRecordsService,
     // Imported legacy medical history (ADR-067): the patient's own read is a
@@ -44,11 +47,13 @@ import {
     ImportedHistoryService,
     StaffImportedHistoryEnabledGuard,
     PatientRecordChatService,
+    // Staff record chat (ADR-069): off unless RECORD_CHAT_STAFF_ENABLED; shares the processor and settings.
+    StaffRecordChatService,
     // Patient record chat (owner decision 1 of 2026-10-16): off unless
-    // RECORD_CHAT_PATIENT_ENABLED; the Claude client is built only then.
+    // RECORD_CHAT_PATIENT_ENABLED or RECORD_CHAT_STAFF_ENABLED; the Claude client is built only then.
     { provide: RECORD_CHAT_CONFIG, useFactory: () => recordChatConfig(getEnvironment()) },
     { provide: RECORD_CHAT_PROCESSOR, inject: [RECORD_CHAT_CONFIG], useFactory: (config: RecordChatConfig) =>
-      (config.patientEnabled ? new ClaudeRecordChatClient(enabledRecordChatConfig(config)) : DISABLED_RECORD_CHAT_PROCESSOR) },
+      (config.patientEnabled || config.staffEnabled ? new ClaudeRecordChatClient(enabledRecordChatConfig(config)) : DISABLED_RECORD_CHAT_PROCESSOR) },
     // The patient record release this deployment configures (one flag per
     // category, the imported history included, default off): the single
     // release set every patient reader uses.

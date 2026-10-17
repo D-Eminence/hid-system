@@ -27,7 +27,7 @@ const RESERVATION = '5c4a7c00-0000-4000-8000-0000000000f1';
 const CONVERSATION = '5c4a7c00-0000-4000-8000-0000000000c1';
 
 const enabled: RecordChatConfig = {
-  patientEnabled: true, modelId: MODEL, apiKey: 'synthetic-api-key-0123456789abcdef', baseUrl: 'https://api.anthropic.com',
+  patientEnabled: true, staffEnabled: false, modelId: MODEL, apiKey: 'synthetic-api-key-0123456789abcdef', baseUrl: 'https://api.anthropic.com',
   inferenceGeo: 'us', maxOutputTokens: 4096, deadlineMs: 25_000, maxRetries: 0, maxEvidenceChars: 40_000,
   dailyTokenBudget: 2_000_000, noticeVersion: 'notice-1', auditDigestKey: Buffer.alloc(32, 9),
 };

@@ -578,15 +578,20 @@ assert.ok(!importedHistory.IMPORTED_HISTORY_SHARING_ENABLED || importedHistory.E
 // is true. Off, ehr-api receives the false flag and nothing else of record
 // chat, and no task reads the record chat secret. No task receives an
 // ANTHROPIC_* variable: ehr-api refuses to start beside one.
-const recordChatEnabled = (process.env.HID_RECORD_CHAT_PATIENT_ENABLED ?? 'false') === 'true'
+// Staff record chat (ADR-069) is its own flag, HID_RECORD_CHAT_STAFF_ENABLED, and shares every other setting.
+const recordChatPatient = (process.env.HID_RECORD_CHAT_PATIENT_ENABLED ?? 'false') === 'true'
+const recordChatStaff = (process.env.HID_RECORD_CHAT_STAFF_ENABLED ?? 'false') === 'true'
+const recordChatEnabled = recordChatPatient || recordChatStaff
 assert.equal(ehrApis[0].Environment.find(entry => entry.Name === 'RECORD_CHAT_PATIENT_ENABLED')?.Value,
-  String(recordChatEnabled), 'RECORD_CHAT_PATIENT_ENABLED')
+  String(recordChatPatient), 'RECORD_CHAT_PATIENT_ENABLED')
+assert.equal(ehrApis[0].Environment.find(entry => entry.Name === 'RECORD_CHAT_STAFF_ENABLED')?.Value,
+  String(recordChatStaff), 'RECORD_CHAT_STAFF_ENABLED')
 assert.deepEqual((ehrApis[0].Secrets ?? []).map(entry => entry.Name).filter(name => name.startsWith('RECORD_CHAT_')).sort(),
   recordChatEnabled ? ['RECORD_CHAT_ANTHROPIC_API_KEY', 'RECORD_CHAT_AUDIT_DIGEST_KEY_B64'] : [])
 assert.equal(Boolean(regional.Parameters.RecordChatSecretArn), recordChatEnabled, 'RecordChatSecretArn')
 if (!recordChatEnabled) {
   assert.deepEqual(ehrApis[0].Environment.map(entry => entry.Name)
-    .filter(name => name.startsWith('RECORD_CHAT_') && name !== 'RECORD_CHAT_PATIENT_ENABLED'), [])
+    .filter(name => name.startsWith('RECORD_CHAT_') && !['RECORD_CHAT_PATIENT_ENABLED', 'RECORD_CHAT_STAFF_ENABLED'].includes(name)), [])
 }
 for (const container of resources('AWS::ECS::TaskDefinition').flatMap(task => task.Properties.ContainerDefinitions)) {
   const names = [...(container.Environment ?? []), ...(container.Secrets ?? [])].map(entry => entry.Name)

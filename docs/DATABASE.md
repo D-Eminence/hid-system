@@ -636,6 +636,8 @@ append-only, and have their own patient-self and staff policies
 | `ehr.record_chat_usage_counters` | Patient record chat: requests per account and hour or day; ids and counts only. |
 | `ehr.record_chat_reservations` | Patient record chat: leases and their token outcome; ids and numbers only. |
 | `ehr.record_chat_daily_budget` | Patient record chat: tokens reserved and used per UTC day. |
+| `ehr.staff_record_chat_conversations` | Staff record chat (0101, ADR-069): one conversation per staff account, patient and facility (below). |
+| `ehr.staff_record_chat_messages` | Staff record chat: the staff member's questions and validated replies about one patient, never updated, deleted with the conversation. |
 
 The five record chat tables are not clinical records: the two history tables
 have patient-self row-level security only (no consent or staff path), no
@@ -5243,7 +5245,7 @@ ids, counts and token numbers, and no text.
 | `ehr.record_chat_usage_counters` | `(audience, account_id, bucket_period, bucket_start)`: requests per account per UTC hour and day |
 | `ehr.record_chat_reservations` | one lease per question: account, patient, reserved tokens, `expires_at` at most 60 s after creation, and once settled the outcome and token usage; at most one unsettled lease per audience and account (partial unique index) |
 | `ehr.record_chat_daily_budget` | per UTC day, tokens reserved and used |
-| `ehr.reserve_record_chat(audience, patient, tokens, daily budget)` | `patient` audience only (`22023`); proves the caller with `ehr.patient_self_context` (`42501`); reads `record_chat_enabled` again through `platform.control_enabled` (`55000 RECORD_CHAT_PAUSED`), so turning the kill switch off is atomic with the lease and the disclosure audit row; prunes at most 100 counters older than 48 hours and 100 leases older than 2 days (settled, or never settled by an account that did not come back), skipping rows another call holds; settles the caller's expired lease as `expired` (its tokens count as used), selecting it `FOR UPDATE SKIP LOCKED` and moving the budget only when this call settled it, so a late settlement racing the reservation never counts a lease twice; refuses a second unsettled lease (`P4091`); counts the request against 10 an hour and 30 a day (`P4290`, detail the seconds until the bucket resets); reserves the tokens against the configured budget capped at 20,000,000 (`P5030`). Any refusal rolls the whole call back |
+| `ehr.reserve_record_chat(audience, patient, tokens, daily budget)` | `patient` audience (and since 0101 `staff`, below; any other `22023`); proves the caller with `ehr.patient_self_context` (`42501`); reads `record_chat_enabled` again through `platform.control_enabled` (`55000 RECORD_CHAT_PAUSED`), so turning the kill switch off is atomic with the lease and the disclosure audit row; prunes at most 100 counters older than 48 hours and 100 leases older than 2 days (settled, or never settled by an account that did not come back), skipping rows another call holds; settles the caller's expired lease as `expired` (its tokens count as used), selecting it `FOR UPDATE SKIP LOCKED` and moving the budget only when this call settled it, so a late settlement racing the reservation never counts a lease twice; refuses a second unsettled lease (`P4091`); counts the request against 10 an hour and 30 a day (`P4290`, detail the seconds until the bucket resets); reserves the tokens against the configured budget capped at 20,000,000 (`P5030`). Any refusal rolls the whole call back |
 | `ehr.settle_record_chat(reservation, input, output, cache read, cache write, outcome)` | the same binding and account (`42501`); outcomes `answered`, `no_evidence`, `declined`, `unverified`, `failed`, `sources_changed`, `conversation_changed` (`expired` is the reservation's own); moves the reservation to used tokens; `false` when already settled, then changing nothing. A lease whose patient-self binding ended during the call cannot be settled by it and expires, charged its reserved tokens |
 
 **Locks.** `ACCESS EXCLUSIVE` on `platform.control_settings` first (every
@@ -5251,7 +5253,7 @@ control read waits until the commit, as for 0091), then `SHARE ROW EXCLUSIVE`
 on `identity.patients` for the conversation's foreign key; each within the
 runner's 5 s lock timeout. No existing row changes.
 
-**Not included:** the staff audience's tables and use, any embedding, chunk,
+**Not included:** the staff audience's tables and use (0101, below), any embedding, chunk,
 extraction or vector object, any Lab or record table policy, any permission,
 any retention class, any change to `platform.legal_holds`, and any change to
 `ehr.patient_self_context` or `identity.patient_self_session` (their grants
@@ -5264,3 +5266,92 @@ and it fails asking for a rerun if a run still crossed one.
 `verify-non-superuser-database.mjs` also applies the latest migration as RDS
 does, on a database migrated to the one before it whose functions and view
 already belong to their technical owners.
+
+## Staff record chat (0101)
+
+Owner decision 1 of 2026-10-16 (ADR-069): a clinician who may read a patient's
+record for direct care asks a question about that patient and the Claude API
+answers it. The EHR service reads only what that member may already read, at
+the facility they selected, inside the transaction Identity authorized; this
+migration adds the permission, the staff proof, the staff history and the
+staff audience of the limit commands. It adds no control: `record_chat_enabled`
+(0100) pauses both audiences. The EHR flag `RECORD_CHAT_STAFF_ENABLED` is off.
+
+**The permission.** `ehr.record-chat.use`, held by `doctor`, `clinician` and
+`nurse`, not by the receptionist. The route needs it, and the database checks it
+again.
+
+**The staff proof.** `ehr.staff_record_chat_context(patient)` (`SECURITY
+DEFINER`, `STABLE`, owned by the migration administrator, `search_path =
+pg_catalog, pg_temp`, `EXECUTE` to the EHR runtime only) is true only in a staff
+transaction whose purpose is `direct-care` (a break-glass grant exists only for
+the purpose `emergency`, so it never matches), with an active standard consent of
+the selected membership at the selected facility (`ehr.context_allows`) and the
+membership holding `ehr.record-chat.use` (`auth.membership_has_permission`). It
+reads no table of its own.
+
+**The history.**
+
+| Table | Columns and rules |
+|---|---|
+| `ehr.staff_record_chat_conversations` | `id`, `patient_id` (references `identity.patients`), `facility_id`, `account_id`, `membership_id` (`(membership_id, facility_id, account_id)` references `identity.staff_facility_memberships`), `created_at`; unique `(patient_id, facility_id, account_id)`: one per staff account, patient and facility |
+| `ehr.staff_record_chat_messages` | the same columns and checks as `ehr.patient_chat_messages` (`id`, `idempotency_key`, `request_sha256`, `question`, `reply`, `source_bindings`, `created_at`) with `conversation_id`, `patient_id`, `facility_id` and `account_id` in one foreign key to the conversation (`ON DELETE CASCADE`) and `membership_id`; idempotency key unique per conversation; index on `(patient_id, facility_id, account_id, created_at desc, id desc)` |
+
+Both force row-level security. Their policies admit `SELECT`, `INSERT` and
+`DELETE` only, each requiring `facility_id = platform.current_facility_id()`,
+`account_id = platform.current_account_id()` and
+`ehr.staff_record_chat_context(patient_id)`; `INSERT` also
+`membership_id = platform.current_membership_id()`; `DELETE` also `not
+ehr.staff_record_chat_history_on_hold(patient_id)`. There is no `UPDATE`
+policy or privilege, so a stored exchange is never rewritten. Only the staff
+member who asked reads it: the patient's own history is a different table, and
+another clinician with the same consent, another facility, another purpose and
+an administrator see nothing. The EHR runtime holds `SELECT`, `INSERT` and
+`DELETE` on both (`runtime-grants.sql`). Retention is an open owner decision:
+no expiry, purge command or retention class; the member deletes their history
+(`DELETE /api/v1/ehr/patients/:patientId/chat/history`) and EHR stores at most
+50 exchanges per patient.
+
+`ehr.staff_record_chat_history_on_hold(patient)` (`SECURITY DEFINER`, `STABLE`,
+owned by the migration administrator, `EXECUTE` to the EHR runtime only) is true
+while an active `platform.legal_holds` row names the patient or the staff account
+of the transaction; for any other caller (a patient-self transaction, another
+purpose, no actor) it is true (held), so the delete policies fail closed. It tells
+a staff direct-care transaction whether a hold exists on the patient; only the EHR
+runtime can call it.
+
+**The staff audience of the limit commands.** 0101 replaces
+`ehr.reserve_record_chat` and `ehr.settle_record_chat` (`CREATE OR REPLACE`: the
+signature, owner and privileges are kept; the patient audience is unchanged):
+
+- `ehr.reserve_record_chat('staff', patient, tokens, daily budget)` proves the
+  caller with `ehr.staff_record_chat_context` (`42501`), leases and counts by
+  the staff account (`platform.current_account_id()`), reads `record_chat_enabled`
+  again (`55000 RECORD_CHAT_PAUSED`), refuses a second unsettled lease of the
+  account (`P4091`), counts the request against proposed limits of 20 an hour and
+  100 a day (`P4290`, detail the seconds until the bucket resets) and reserves
+  tokens against the one daily budget shared with the patients' (hard ceiling
+  20,000,000, `P5030`).
+- `ehr.settle_record_chat` settles a staff lease only for the staff account that
+  holds it, while its staff proof still holds (`42501` otherwise: a lease whose
+  consent ended during the call expires and is charged its reserved tokens).
+
+**Locks.** Row locks on `auth.permissions` and `auth.role_permissions` for the
+permission, and `SHARE ROW EXCLUSIVE` on `identity.patients`, `auth.accounts` and
+`identity.staff_facility_memberships` for the foreign keys; each within the
+runner's 5 s lock timeout. No existing row changes.
+
+**Not included:** imported legacy history (never chat evidence, ADR-067), Lab,
+any embedding, chunk, extraction or vector object (not approved), any retention
+class or purge command, any new control, and any change to a clinical record
+table's policies.
+
+**Tests.** `staff-record-chat.integration.sql` (rollback-only, fixture ids
+`5c4b...`) covers the proof (consent, permission, purpose, break-glass), the
+history's scope, the legal hold, the staff limits and the catalogue; like the
+patient suite it waits for the next UTC hour within a minute of a boundary.
+`runtime-roles.integration.sql` covers the grants, and
+`verify-non-superuser-database.mjs` runs the suite on a database whose
+administrator is neither a superuser nor `BYPASSRLS`, and on the RDS-path database.
+`verify-staff-record-chat-runtime.mjs` covers the HTTP behaviour through the real
+Identity API (release checklist S4ac).

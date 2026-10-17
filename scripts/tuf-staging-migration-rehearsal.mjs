@@ -561,6 +561,11 @@ try {
   evidence.checks.record_chat_runtime = JSON.parse(command(
     'exact-role patient record chat against a local fake model endpoint', process.execPath,
     [join(repository, 'services/ehr-api/scripts/verify-record-chat-runtime.mjs')], workflowEnvironment));
+  // Staff record chat (ADR-069, 0101): a doctor's question about one patient, authorized through Identity with a
+  // staff cookie session, answered from what the doctor may read at the facility, through the same fake endpoint.
+  evidence.checks.staff_record_chat_runtime = JSON.parse(command(
+    'exact-role staff record chat against a local fake model endpoint', process.execPath,
+    [join(repository, 'services/ehr-api/scripts/verify-staff-record-chat-runtime.mjs')], workflowEnvironment));
   evidence.checks.outreach_cookie_read_runtime = JSON.parse(command(
     'exact-role Outreach reads and writes authorized through Identity with a browser cookie session', process.execPath,
     [join(repository, 'services/outreach-api/scripts/verify-outreach-cookie-read-runtime.mjs')], workflowEnvironment));

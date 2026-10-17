@@ -169,4 +169,39 @@ describe('EHR patient record chat configuration', () => {
     configure(production, { RECORD_CHAT_PATIENT_ENABLED: 'false' });
     expect(getEnvironment().RECORD_CHAT_PATIENT_ENABLED).toBe(false);
   });
+  describe('staff record chat (ADR-069)', () => {
+    const staff = { ...chat, RECORD_CHAT_PATIENT_ENABLED: 'false', RECORD_CHAT_STAFF_ENABLED: 'true' } as const;
+
+    it('is off by default and independent of the patient flag', () => {
+      configure(local);
+      expect(getEnvironment().RECORD_CHAT_STAFF_ENABLED).toBe(false);
+      expect(recordChatConfig(getEnvironment())).toMatchObject({ patientEnabled: false, staffEnabled: false });
+      configure(local, chat);
+      expect(recordChatConfig(getEnvironment())).toMatchObject({ patientEnabled: true, staffEnabled: false });
+      configure(local, staff);
+      expect(recordChatConfig(getEnvironment())).toMatchObject({ patientEnabled: false, staffEnabled: true, modelId: MODEL });
+    });
+
+    it.each([
+      'RECORD_CHAT_MODEL_ID', 'RECORD_CHAT_ANTHROPIC_API_KEY', 'RECORD_CHAT_INFERENCE_GEO',
+      'RECORD_CHAT_AUDIT_DIGEST_KEY_B64', 'RECORD_CHAT_NOTICE_VERSION', 'RECORD_CHAT_DAILY_TOKEN_BUDGET',
+    ])('refuses to start with the staff flag on and %s missing, as for the patient flag', (key) => {
+      configure(local, { ...staff, [key]: undefined });
+      expect(() => getEnvironment()).toThrow(new RegExp(key));
+    });
+
+    it('refuses ambient ANTHROPIC_* variables while only the staff flag is on', () => {
+      configure(local, { ...staff, ANTHROPIC_API_KEY: 'ambient-key' });
+      expect(() => getEnvironment()).toThrow(/ANTHROPIC_API_KEY: Ambient ANTHROPIC_\* variables are refused/);
+      configure(local, { ANTHROPIC_API_KEY: 'ambient-key' });
+      expect(() => getEnvironment()).not.toThrow();
+    });
+
+    it('needs the recorded processing approval in a deployed environment, as the patient flag does', () => {
+      configure(production, staff);
+      expect(() => getEnvironment()).toThrow(/RECORD_CHAT_PROCESSING_APPROVAL/);
+      configure(production, { ...staff, ...approval });
+      expect(getEnvironment().RECORD_CHAT_STAFF_ENABLED).toBe(true);
+    });
+  });
 });

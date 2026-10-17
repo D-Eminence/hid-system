@@ -35,7 +35,7 @@
 // - the notification worker's claim-bound recipient lookup (0095, ADR-064) as
 //   the worker login, which reads no patient or login table, and its refusal
 //   for the Identity and dispatcher logins;
-// - the release checklist's read-only P10, P11, P35, P36 and P39 checks, taken from
+// - the release checklist's read-only P10, P11, P35, P36, P39 and P40 checks, taken from
 //   docs/PHASE_4_STAGE_5_RELEASE_READINESS.md, as the administrator, as an
 //   operator runs them on RDS;
 // - the daily reviews of P37 (break-glass use and in-person checks by
@@ -737,8 +737,22 @@ try {
     'record_chat_history_on_hold|t|{"search_path=pg_catalog, pg_temp"}',
     'reserve_record_chat|t|{"search_path=pg_catalog, pg_temp"}',
     'settle_record_chat|t|{"search_path=pg_catalog, pg_temp"}'], `P39 check: ${p39.join('; ')}`);
+  // P40 (staff record chat, ADR-069): the permission's holders, the staff proof,
+  // the staff legal hold check and the two limit commands security definer with
+  // a pinned search path, and the staff history under forced row-level security
+  // with its three policies each.
+  const p40 = await checklistCheck('P40 check (read-only)');
+  assert.deepEqual(p40, ['permission|clinician,doctor,nurse',
+    'reserve_record_chat|t|{"search_path=pg_catalog, pg_temp"}',
+    'settle_record_chat|t|{"search_path=pg_catalog, pg_temp"}',
+    'staff_record_chat_context|t|{"search_path=pg_catalog, pg_temp"}',
+    'staff_record_chat_history_on_hold|t|{"search_path=pg_catalog, pg_temp"}',
+    'staff_record_chat_conversations|t|staff_record_chat_conversations_delete:d,staff_record_chat_conversations_insert:a,'
+      + 'staff_record_chat_conversations_read:r',
+    'staff_record_chat_messages|t|staff_record_chat_messages_delete:d,staff_record_chat_messages_insert:a,'
+      + 'staff_record_chat_messages_read:r'], `P40 check: ${p40.join('; ')}`);
   evidence.steps.release_checklist_checks = { run_as: admin, p10: p10.map((line) => line.split('|').slice(0, 4).join('|')),
-    p11, p35, p36: p36Release.length, p39 };
+    p11, p35, p36: p36Release.length, p39, p40 };
 
   // 0095 (ADR-064): the worker login claims an Identity event and learns the
   // patient's verified login email through the claim, as the real login of
@@ -1288,14 +1302,14 @@ try {
   // NOSUPERUSER NOBYPASSRLS administrator, against their forced row-level
   // security as the EHR runtime.
   const suites = ['platform-control-owner.integration.sql', 'function-parameter-settings.integration.sql',
-    'patient-record-chat.integration.sql'];
+    'patient-record-chat.integration.sql', 'staff-record-chat.integration.sql'];
   for (const name of suites) suite(name, superuser);
   // On the RDS-path database the latest migration ran after the one before
   // it, with every technical owner, the imported history's two included,
   // already holding its objects: both imported history suites must still
   // pass there, so the latest migration undid nothing of the one before it.
   const rdsPathSuites = ['imported-medical-history.integration.sql', 'imported-history-import.integration.sql',
-    'patient-record-chat.integration.sql'];
+    'patient-record-chat.integration.sql', 'staff-record-chat.integration.sql'];
   for (const name of rdsPathSuites) suite(name, superuser, `${database}_rds`);
   evidence.steps.suites = suites;
   evidence.steps.rds_path_suites = rdsPathSuites;

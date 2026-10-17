@@ -6133,7 +6133,7 @@ under release checklist P39 (4) to (6)):
   and the DPO's sign-off for legacy data reaching the processor (P38 covers
   its display only), reading it only through the imported-history read the
   patient already sees.
-- Staff chat, its audience and its permission are a later change.
+- Staff chat, its audience and its permission are a later change: ADR-069 (migration 0101).
 
 Deviation from the design:
 
@@ -6201,3 +6201,211 @@ Residual risks:
 Related: ADR-018; ADR-058 (PSELF-RLS); ADR-065 (patient record release);
 `INTERFACE_CONTRACT.md` §11, "Patient record chat"; `DATABASE.md`, "Patient
 record chat"; release checklist P39 and S4ab.
+
+
+# ADR-069: Staff record chat through the Claude API
+
+Status: Accepted in source (migration 0101). Not merged, not deployed. Off:
+the EHR flag `RECORD_CHAT_STAFF_ENABLED` defaults to false, the platform
+control `record_chat_enabled` (0100) is seeded false and pauses this audience
+as it pauses the patient's, and every deployed ehr-api refuses either flag
+without the operator's attestation of a processing approval. This ADR records
+the design and its proposed defaults; it is not that approval ("The production
+gate", ADR-068, which applies unchanged).
+
+Date: 2026-10-17
+
+Context:
+
+- On 2026-10-16 the owner approved (decision 1) record chat through the Claude
+  API for patients and for staff. ADR-068 built the patient's part and left
+  "Staff chat, its audience and its permission" as a later change. This is that
+  change. The staff chat of the PR #8 branches (`staging-novu-ci-20261005`,
+  its migration numbered 0070 there) is **not** ported: it retrieved records
+  through Bedrock embeddings, pgvector chunks and Textract OCR, which the owner
+  did not approve (ADR-068, "Options considered"), and it was built on that
+  branch's own patient chat. Staff chat is rebuilt on ADR-068's design with the
+  same processor, extract, validation, audit and limits, and the staging
+  routes' shape (`/ehr/patients/:patientId/chat`) is kept so Health-id's
+  screens follow it.
+- On main a clinician reads a patient's record only through the clinical
+  routes: Identity's authorization for the member, patient, facility and
+  purpose (`ClinicalRepository.run`), then facility-scoped row-level security
+  under the patient's consent (`ehr.context_allows`). Break-glass is a consent
+  grant for the purpose `emergency` and is never a direct-care read.
+
+Decision:
+
+- **Who may ask.** A staff session whose membership holds the new permission
+  `ehr.record-chat.use` (seeded for doctor, clinician and nurse, the roles
+  that read notes; not the receptionist), for one patient, at the facility
+  the member selected, for direct care only. `X-Purpose-Of-Use: direct-care`
+  is required (`400 PURPOSE_OF_USE_REQUIRED`); a break-glass authorization is
+  refused (`403 BREAK_GLASS_EXCLUDED`, audited, before any transaction);
+  without an active standard consent `403 CONSENT_REQUIRED`. A patient
+  session is refused by the permission check. The database repeats the
+  decision (`ehr.staff_record_chat_context`) for every history row and every
+  lease.
+- **Evidence: what that member may already read.** `readStaffEvidence`, inside
+  the transaction Identity authorized, reads this patient's records at this
+  facility for encounters that are in progress, on hold or completed:
+  encounters (`ehr.encounter.read`), current signed or amended notes
+  (`ehr.note.read`), vitals as first recorded (`ehr.vital.read`; a corrected
+  vital is left out while D8 is open), diagnoses not entered in error without
+  the clinician's free-text notes (`ehr.diagnosis.read`), active, on-hold and
+  completed prescriptions (`ehr.prescription.read`) and the metadata of clean
+  documents (`ehr.document.read`). A category the member lacks the permission
+  for is not read and is named as withheld. Never read, and always named as
+  withheld (`labRequests`, `labResults`): Lab (it is not routed at launch and
+  its permissions are withdrawn, 0091), every other facility's records, the
+  imported legacy history (ADR-067), the content or file names of documents,
+  and storage locations. There is no embedding, vector store, chunking or OCR:
+  the deterministic selection, the allowlisted fields, the identifier filter,
+  the budgets and the facility ordinals are ADR-068's, unchanged
+  (`buildPatientExtract`); the user turn names `audience: "staff"`.
+- **The processor and what leaves the system.** One module, one key, one
+  model id, one inference geography, one approval, one audit digest key and
+  the same settings as the patient's (`RECORD_CHAT_*`); the same one Messages
+  API request per question, no tools, no retries. Only the system prompt
+  differs (`STAFF_SYSTEM_PROMPT`): the reader is a clinician, the model
+  summarizes and locates and does not diagnose or advise treatment, and it
+  states that Lab, other facilities, imported history and document content are
+  not part of the extract. The extract of a clinician's question holds exactly
+  the fields ADR-068 lists for the kinds it reads; the staff chat adds none.
+  Free text can still name the patient or others, and the pattern filter does
+  not remove names (ADR-068, open owner and DPO question P39 (4), which covers
+  this audience too).
+- **Nothing from the model is kept unless it validates.** `validateAnswer` and
+  the fixed texts of ADR-068 apply unchanged; the staff texts are worded for a
+  clinician. The cited records are read again before the answer is stored and
+  must be unchanged (`409 CHAT_SOURCES_CHANGED`); a history cleared during the
+  call stores nothing (`409 CHAT_CONVERSATION_CHANGED`).
+- **Authorization each request.** Identity's decision for this member,
+  patient, facility and purpose before the read, and again before the save
+  (`ClinicalRepository.run`, twice): consent withdrawn, a membership ended or
+  a session revoked during the call discards the answer (`403
+  CONSENT_REQUIRED` or Identity's refusal; the lease expires, 60 s, and is
+  charged its reserved tokens). A replay with the same key answers the stored
+  reply only while every record it cites is still readable by this member with
+  the same content hash. Any other failure of the save settles the lease as
+  failed in a short fallback transaction and answers `503
+  RECORD_CHAT_UNAVAILABLE`.
+- **Audit names the processor, never PHI.** The disclosure row
+  (`ehr.record-chat.disclosure`, `audience: "staff"`) is written in the same
+  transaction as the lease and before the request, with the staff actor,
+  membership, organization, facility and purpose `direct-care`; the answer row
+  (`ehr.record-chat.answer`) and the replay row as in ADR-068. Each
+  transaction also writes `ehr.record-chat.staff.read` and
+  `ehr.record-chat.staff.save` (counts only), and history reads and clears are
+  `ehr.record-chat.staff.history.read` and `.clear`; refusals (consent,
+  break-glass, conflicts, limits) are audited by `ClinicalRepository.run`.
+  Each detail key is allowlisted; no question, answer or record text reaches
+  an audit row or a log.
+- **Limits.** The same two administrator-owned commands (0100, replaced by
+  0101 with the audience `'staff'`): one lease in flight per staff account,
+  the daily token budget **shared** with the patients' (one budget, hard
+  ceiling 20,000,000), the kill switch `record_chat_enabled` (no new control:
+  one switch pauses both audiences), and proposed per-account quotas of 20
+  questions an hour and 100 a day (`429 RECORD_CHAT_RATE_LIMITED`,
+  `Retry-After`). Four calls in flight per EHR process **for staff**, beside
+  the patient's four (a process-local cap per audience).
+- **The history.** A conversation per staff account, patient and facility,
+  its exchanges (question, validated reply, the cited records' bindings), at
+  most 50 (`409 CHAT_HISTORY_FULL`). Only that staff member reads it: not the
+  patient (their own `GET /ehr/me/chat/history` holds none of it), not another
+  clinician with the same consent, not an administrator, not another facility.
+  `GET /ehr/patients/:patientId/chat/history` leaves out an exchange whose
+  cited records this member can no longer read or whose content changed;
+  `DELETE` removes the member's whole conversation about the patient, unless a
+  legal hold (`platform.legal_holds`) names the patient or the staff account
+  (`409 CHAT_HISTORY_ON_HOLD`). Row-level security: `SELECT`, `INSERT` and
+  `DELETE` only, for that account at the facility, while
+  `ehr.staff_record_chat_context` holds; no `UPDATE`. The history routes stay
+  available while chat is off.
+- **Database ownership.** `ehr.staff_record_chat_context` and
+  `ehr.staff_record_chat_history_on_hold` are owned by the migration
+  administrator as `ehr.record_chat_history_on_hold` is; the first reads no
+  table (it calls `ehr.context_allows` and `auth.membership_has_permission`),
+  the second reads `platform.legal_holds`. The bootstrap gains no role, and
+  the patient-self functions and 0100's grants are unchanged.
+- **Flags.** `RECORD_CHAT_STAFF_ENABLED` (synth input
+  `HID_RECORD_CHAT_STAFF_ENABLED`) is independent of the patient's flag and
+  shares the processor settings, the record chat secret, the NAT egress
+  requirement, the processing approval and the `ANTHROPIC_*` refusal: either
+  flag on is "record chat on". With it off ehr-api answers `503
+  RECORD_CHAT_DISABLED` before anything is read, and no task holds the key
+  unless the patient's flag is on.
+
+Proposed defaults (open owner questions; none is an owner decision until the
+owner, and where named the DPO, signs it off under release checklist P39 and
+P40):
+
+- The staff quotas (20 an hour, 100 a day per account) and the shared daily
+  token budget. The owner sets them.
+- Retention of the staff history: no expiry and no purge; the member deletes
+  it, at most 50 exchanges per patient, and a legal hold keeps it. Whether a
+  clinician's questions to a processor about a patient are part of the
+  patient's record, and for how long they are kept, is the owner's and the
+  DPO's decision (P40 (3)); it is a working aid, not a clinical record.
+- Whether the clinician acknowledges a notice. The question carries the same
+  `noticeVersion` as the patient's; whether a clinician's acknowledgement
+  stands in for the facility's lawful basis is the DPO's ruling.
+- Names, and identifiers in forms the filter does not match, in free text of
+  notes reach the processor: as ADR-068.
+- Lab results and Lab requests are not evidence. Adding them is a later change
+  with its own review: Lab is not routed at launch, and its read policy and
+  break-glass rule are an open decision (ADR-058, 0097).
+- A clinician sees records of one facility at a time, the facility they
+  selected. A summary across the patient's facilities is not built.
+
+Options considered:
+
+- Porting the PR #8 staff chat (migration 0070, embeddings, pgvector, Textract):
+  rejected; not approved, and built on a retrieval design the owner declined.
+- A separate staff platform control: rejected; one kill switch for both
+  audiences is the safer default and adds no ninth control key (every later
+  migration naming the controls would have to start from nine).
+- Staff chat over a patient's whole record across facilities: rejected;
+  facility-scoped consent is how every staff read works.
+- Staff reading the patient's chat history, or the patient reading the
+  clinician's: rejected; the history is the asker's own working copy.
+- Letting break-glass reach staff chat: rejected; break-glass is an
+  emergency summary, not a direct-care assistant (as imported history).
+
+Consequences:
+
+- With the flag off nothing changes for patients, staff or Health-id; the
+  migration adds a permission, two functions, two tables and a staff audience
+  to two existing commands, and no control.
+- Turning staff chat on needs, in order: the owner's processing approval and
+  its ADR (not this one), the sign-offs of the proposed defaults, the model
+  evaluation for the clinician prompt, the workspace settings, the record chat
+  secret, `HID_RECORD_CHAT_STAFF_ENABLED` and the other synth inputs, the
+  Health-id staff screens and notice, and then the platform control (release
+  checklist P40, S4ac).
+- An EHR build with this change needs 0101 and the bootstrap first: its staff
+  history routes (available while chat is off) fail without them.
+
+Residual risks:
+
+- The processor receives the clinician's extract (minimised, but health data)
+  under the owner's approval; its handling is governed by the processing
+  agreement, not by this code.
+- The identifier filter is pattern based, and an answer can be wrong while
+  still citing real records; the validator checks form and citations, not
+  clinical correctness. A clinician relying on an answer without reading the
+  cited record is a human-factors risk the evaluation (P40 (2)) must cover.
+- A process crash after the request, a failed fallback save, or a consent
+  that ended during the call leaves the lease to expire (60 s) and charges its
+  reserved tokens; the member's next question within those 60 s answers `429
+  RECORD_CHAT_BUSY`.
+- A staff member's history of a patient stays until the member or a hold
+  decides: a member who leaves keeps nothing reachable (no live session can
+  read it), but the rows stay until an owner decision on retention.
+- `ehr.staff_record_chat_history_on_hold` answers any staff direct-care
+  transaction whether the patient or that account is under a hold; only the
+  EHR runtime can call it.
+
+Related: ADR-018; ADR-058; ADR-065; ADR-067; ADR-068; `INTERFACE_CONTRACT.md`
+§11, "Staff record chat"; `DATABASE.md`, "Staff record chat"; release
+checklist P40 and S4ac.

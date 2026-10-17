@@ -112,6 +112,7 @@ const acceptedMigrations = new Map([
   ['0098_clinician_self_signup.sql', '5f784d5d472a11209f8cc43956b4eb267404254fa745a96174b4c6e4d16cfe3c'],
   ['0099_imported_medical_history.sql', 'ceaae61dc3f0879c195643bd1fc456ea04426e1cc601cd07dbcb19e589a5636d'],
   ['0100_patient_record_chat.sql', 'd0d048c21490486252bcd78e16a9f0af079f1d796d5943273ccb862ff567862f'],
+  ['0101_staff_record_chat.sql', 'bedcb5e1274228344f0e5b970cd9881af42094105b2277daab95d043014b8613'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

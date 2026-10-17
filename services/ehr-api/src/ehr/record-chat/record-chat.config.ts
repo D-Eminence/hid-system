@@ -8,6 +8,8 @@ import { RECORD_CHAT_FIRST_PARTY_ORIGIN, type Environment } from '../../config/e
  */
 export interface RecordChatConfig {
   readonly patientEnabled: boolean;
+  /** Staff record chat (ADR-069); shares every other setting with the patient's. */
+  readonly staffEnabled: boolean;
   readonly modelId?: string;
   readonly apiKey?: string;
   readonly baseUrl: string;
@@ -24,7 +26,6 @@ export interface RecordChatConfig {
 
 /** The settings a model request needs, present when the flag is on. */
 export interface EnabledRecordChatConfig extends RecordChatConfig {
-  readonly patientEnabled: true;
   readonly modelId: string;
   readonly apiKey: string;
   readonly inferenceGeo: 'us' | 'global';
@@ -35,13 +36,15 @@ export interface EnabledRecordChatConfig extends RecordChatConfig {
 
 export const RECORD_CHAT_CONFIG = Symbol('RECORD_CHAT_CONFIG');
 
-export function recordChatConfig(environment: Pick<Environment, 'RECORD_CHAT_PATIENT_ENABLED' | 'RECORD_CHAT_MODEL_ID'
+export function recordChatConfig(environment: Pick<Environment, 'RECORD_CHAT_PATIENT_ENABLED' | 'RECORD_CHAT_STAFF_ENABLED'
+  | 'RECORD_CHAT_MODEL_ID'
   | 'RECORD_CHAT_ANTHROPIC_API_KEY' | 'RECORD_CHAT_API_BASE_URL' | 'RECORD_CHAT_INFERENCE_GEO'
   | 'RECORD_CHAT_MAX_OUTPUT_TOKENS' | 'RECORD_CHAT_EFFORT' | 'RECORD_CHAT_DEADLINE_MS' | 'RECORD_CHAT_MAX_RETRIES'
   | 'RECORD_CHAT_MAX_EVIDENCE_CHARS' | 'RECORD_CHAT_DAILY_TOKEN_BUDGET' | 'RECORD_CHAT_NOTICE_VERSION'
   | 'RECORD_CHAT_AUDIT_DIGEST_KEY_B64'>): RecordChatConfig {
   return {
     patientEnabled: environment.RECORD_CHAT_PATIENT_ENABLED,
+    staffEnabled: environment.RECORD_CHAT_STAFF_ENABLED,
     ...(environment.RECORD_CHAT_MODEL_ID ? { modelId: environment.RECORD_CHAT_MODEL_ID } : {}),
     ...(environment.RECORD_CHAT_ANTHROPIC_API_KEY ? { apiKey: environment.RECORD_CHAT_ANTHROPIC_API_KEY } : {}),
     // Always explicit, so the SDK never falls back to ANTHROPIC_BASE_URL.
@@ -60,9 +63,9 @@ export function recordChatConfig(environment: Pick<Environment, 'RECORD_CHAT_PAT
   };
 }
 
-/** The enabled settings; throws if a setting environment.ts requires is missing. */
+/** The enabled settings (for either audience); throws if a setting environment.ts requires is missing. */
 export function enabledRecordChatConfig(config: RecordChatConfig): EnabledRecordChatConfig {
-  if (!config.patientEnabled || !config.modelId || !config.apiKey || !config.inferenceGeo
+  if (!(config.patientEnabled || config.staffEnabled) || !config.modelId || !config.apiKey || !config.inferenceGeo
     || config.dailyTokenBudget === undefined || !config.noticeVersion || config.auditDigestKey?.length !== 32) {
     throw new Error('Record chat is not configured');
   }

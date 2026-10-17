@@ -639,6 +639,18 @@ revoke all on function ehr.reserve_record_chat(text, uuid, integer, bigint),
   ehr.settle_record_chat(uuid, integer, integer, integer, integer, text),
   ehr.record_chat_history_on_hold(uuid) from public;
 
+-- Staff record chat (ADR-069). The EHR runtime reads, writes and deletes a
+-- staff member's own history under staff row-level security
+-- (ehr.staff_record_chat_context) and never updates it. It reaches the same
+-- limit commands as the patient chat (the staff audience); the proof
+-- function and the legal hold check are the administrator's, as
+-- ehr.record_chat_history_on_hold is.
+grant select, insert, delete on ehr.staff_record_chat_conversations, ehr.staff_record_chat_messages to hid_ehr_runtime;
+grant execute on function ehr.staff_record_chat_context(uuid),
+  ehr.staff_record_chat_history_on_hold(uuid) to hid_ehr_runtime;
+revoke all on function ehr.staff_record_chat_context(uuid),
+  ehr.staff_record_chat_history_on_hold(uuid) from public;
+
 -- Append-only audit is isolated from both domain roles. Environment-specific
 -- Identity, EHR, or transitional API logins inherit this role separately.
 grant usage on schema audit to hid_audit_writer;

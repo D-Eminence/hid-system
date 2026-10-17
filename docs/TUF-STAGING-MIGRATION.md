@@ -414,6 +414,11 @@ The executable covers:
    pass (`verify-non-superuser-database.mjs`, step `imported_history_import`)
    runs the same rehearsal as the `NOSUPERUSER NOBYPASSRLS CREATEROLE`
    administrator and checks that no `hid_migration_admin` membership is left.
+   With 0101 (staff record chat, ADR-069): the additional suites also include
+   `staff-record-chat.integration.sql` (the staff proof under consent,
+   permission, purpose and break-glass, the staff history against every other
+   context, the legal hold, the staff limits and the catalogue), and the
+   rehearsal runs `verify-staff-record-chat-runtime.mjs` after the patient's.
    With 0100 (patient record chat, ADR-068): the additional suites include
    `patient-record-chat.integration.sql` (the patient's own history under
    patient-self row-level security against every other context, the legal

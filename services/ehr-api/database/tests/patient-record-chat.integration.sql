@@ -13,7 +13,7 @@
 -- ceiling, an expired lease freed and its tokens counted as used, settlement
 -- by the lease's own patient only. The runtime reads none of the limit
 -- tables. The kill switch record_chat_enabled exists and is off. No retention
--- class, purge command or permission is added (retention is an open owner
+-- class or purge command is added, and no permission (the staff record chat adds one later) (retention is an open owner
 -- decision).
 --
 -- Fixtures are synthetic (ids 5c4a7...), inserted as the suite runner with
@@ -352,8 +352,13 @@ select pg_temp.record('the runtime reads the daily budget', '42501', pg_temp.out
   $sql$select count(*) from ehr.record_chat_daily_budget$sql$));
 select pg_temp.record('the runtime resets its counters', '42501', pg_temp.outcome(
   $sql$delete from ehr.record_chat_usage_counters$sql$));
-select pg_temp.record('the staff audience is not built', '22023:RECORD_CHAT_AUDIENCE_INVALID', pg_temp.refusal(
-  $sql$select ehr.reserve_record_chat('staff', '5c4a7200-0000-4000-8000-000000000001', 1000, 1000000)$sql$));
+-- The staff audience exists since the staff record chat migration, and proves
+-- its caller by the staff context (staff-record-chat.integration.sql): a
+-- patient-self session is not that, whatever it names.
+select pg_temp.record('the staff audience from a patient-self session', '42501:RECORD_CHAT_PERMISSION_DENIED',
+  pg_temp.refusal($sql$select ehr.reserve_record_chat('staff', '5c4a7200-0000-4000-8000-000000000001', 1000, 1000000)$sql$));
+select pg_temp.record('an unknown audience', '22023:RECORD_CHAT_AUDIENCE_INVALID', pg_temp.refusal(
+  $sql$select ehr.reserve_record_chat('admin', '5c4a7200-0000-4000-8000-000000000001', 1000, 1000000)$sql$));
 select pg_temp.record('a reservation for another patient', '42501:RECORD_CHAT_PERMISSION_DENIED', pg_temp.refusal(
   $sql$select ehr.reserve_record_chat('patient', '5c4a7200-0000-4000-8000-000000000002', 1000, 1000000)$sql$));
 select pg_temp.record('a reservation of no tokens', '22023:RECORD_CHAT_RESERVATION_INVALID', pg_temp.refusal(
@@ -618,8 +623,9 @@ select pg_temp.record('no record chat retention class or purge command', '0,0,0'
   || ',' || (select count(*)::text from pg_proc where proname like '%prune_record_chat%')
   || ',' || (select count(*)::text from pg_attribute where attrelid = 'ehr.patient_chat_messages'::regclass
     and attname = 'expires_at'));
-select pg_temp.record('no record chat permission is seeded', '0',
-  (select count(*)::text from auth.permissions where code like 'ehr.record-chat%'));
+-- The patient chat needs no permission; the staff record chat seeds one.
+select pg_temp.record('the only record chat permission is the staff one', 'ehr.record-chat.use',
+  (select string_agg(code, ',' order by code) from auth.permissions where code like 'ehr.record-chat%'));
 reset role;
 
 do $$

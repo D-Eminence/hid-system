@@ -43,7 +43,7 @@ role already resolves that secret, so the key adds no IAM statement.
 Provider fields are injected only into Notification API/Worker as required.
 Only the `ehr-api` container receives `RECORD_CHAT_ANTHROPIC_API_KEY` and
 `RECORD_CHAT_AUDIT_DIGEST_KEY_B64`, from the `RecordChatSecretArn` secret, and
-only while `HID_RECORD_CHAT_PATIENT_ENABLED` is true (ADR-068); with it off no
+only while `HID_RECORD_CHAT_PATIENT_ENABLED` or `HID_RECORD_CHAT_STAFF_ENABLED` is true (ADR-068, ADR-069); with both off no
 task references that secret and the parameter does not exist. No task receives
 an `ANTHROPIC_*` variable. The EHR execution role reads the secret through the
 container definition, as for its database secret, and the Claude API call
