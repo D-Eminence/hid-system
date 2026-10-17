@@ -3,7 +3,7 @@ on:
   pull_request:
     paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/staging-novu-runtime-assessment.json', '.github/workflows/staging-backend-images.yml']
   push:
-    branches: [staging, staging-novu-ci-20261005]
+    branches: [staging]
     paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/staging-novu-runtime-assessment.json', '.github/workflows/staging-backend-images.yml']
   workflow_dispatch:
     inputs:
@@ -19,6 +19,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   select:
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/staging'
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}

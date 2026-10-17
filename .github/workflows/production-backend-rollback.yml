@@ -1,0 +1,85 @@
+name: Approved production backend rollback
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Exact healthy release ID from the encrypted release inventory
+        required: true
+        type: string
+permissions:
+  contents: read
+concurrency:
+  group: production-backend-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  prepare:
+    if: github.ref == 'refs/heads/staging-novu-ci-20261005'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      candidate_sha256: ${{ steps.candidate.outputs.candidate_sha256 }}
+    env:
+      RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
+      RELEASE_KMS_KEY_ARN: ${{ vars.RELEASE_KMS_KEY_ARN }}
+      RELEASE_ID: ${{ inputs.release_id }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: ${{ vars.PRODUCTION_RELEASE_READ_ROLE_ARN }}
+          aws-region: eu-west-1
+          allowed-account-ids: '659225405023'
+          unset-current-credentials: true
+      - id: candidate
+        name: Read exact healthy rollback receipt using metadata read permission only
+        run: python3 scripts/production_deployment.py rollback-candidate --release-id "$RELEASE_ID"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: production-backend-rollback-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/candidate.json
+          retention-days: 7
+          if-no-files-found: error
+  rollback:
+    needs: prepare
+    if: vars.PRODUCTION_DEPLOYMENT_ENABLED == 'true' && github.ref == 'refs/heads/staging-novu-ci-20261005'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: production-backend
+    permissions:
+      contents: read
+      actions: read
+      deployments: read
+      id-token: write
+    env:
+      PRODUCTION_DEPLOYMENT_ENABLED: ${{ vars.PRODUCTION_DEPLOYMENT_ENABLED }}
+      EXPECTED_CANDIDATE_SHA256: ${{ needs.prepare.outputs.candidate_sha256 }}
+      GITHUB_TOKEN: ${{ github.token }}
+      RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
+      RELEASE_KMS_KEY_ARN: ${{ vars.RELEASE_KMS_KEY_ARN }}
+      RELEASE_LEASE_TABLE: hid-staging-deployment-leases
+      RELEASE_ALERT_TOPIC_ARN: arn:aws:sns:eu-west-1:659225405023:hid-staging-operations-alerts
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: production-backend-rollback-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - name: Verify exact rollback approval before requesting deploy credentials
+        run: python scripts/verify-production-approval.py release/candidate.json
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: ${{ vars.PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-1
+          allowed-account-ids: '659225405023'
+          role-duration-seconds: 7200
+          unset-current-credentials: true
+      - name: Restore recorded versions, verify health and reconcile inventory
+        run: python3 scripts/production_deployment.py rollback

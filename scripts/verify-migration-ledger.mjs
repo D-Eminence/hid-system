@@ -76,6 +76,15 @@ const acceptedMigrations = new Map([
   ['0060_patient_access_pin_profile_status.sql', '1a0b5ca25f815dcd8714cdd569e8fe336b48d8a8c53362a8e42dbe986d407f50'],
   ['0061_imported_medical_records.sql', '6a9fa6b845963521ea58c7ade0e19fb51b8ff5034de5dec42f3ded342525b7df'],
   ['0062_customer_history_access.sql', 'cabb4443cccf8cfd1c7aba76425cc135264d541b04255dd902b2c3c44adea271'],
+  ['0063_notification_verified_recipient.sql', '8366e4fcaee52cb2bab10bd92b1f627c4bf67c879cec03c7b7611c4728aa90d1'],
+  ['0064_standalone_platform_administration.sql', 'e15a1168835f3b227f337a3dd58f78812c7fc5e877e83a960e40b437d819cbdd'],
+  ['0066_patient_chat_history.sql', 'fb1d550bdfab01d32bbf6aa6ca2f24391d742b5052bc6c0ac09c491eb587ba10'],
+  ['0067_patient_chat_evidence.sql', '35b7d7893b5ae2394e1cedb67f5c44a0a05e080fcadb99723483b366a225665f'],
+  ['0068_patient_attachment_extraction.sql', '5600501c91607d24a9519d78b544315cb98eec23ebfee2093700788be6353d09'],
+  ['0069_patient_document_evidence.sql', '905ff6052f1569e86063d903bdf29e2400b5abf4814116b9777d5119436fbe17'],
+  ['0070_staff_patient_chat.sql', '4bab7ab29ea43397975bb492775e78739c441d73fdaa70e8b5ff19fd75c123c6'],
+  ['0071_standard_patient_access_runtime.sql', 'acc46753ce05759217b569ab64e0fe03643ff634473b90d8022608dd3a984d28'],
+  ['0072_standard_consent_column_resolution.sql', 'ff56abd5d6a98f045ce66a8ab27b5a5981aa94d76b6d0e26af02e75556f185c7'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

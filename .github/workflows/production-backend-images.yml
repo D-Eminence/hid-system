@@ -1,0 +1,277 @@
+name: Production backend candidates
+on:
+  pull_request:
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/staging-*-runtime-assessment.json', '.github/workflows/production-backend-images.yml']
+  push:
+    branches: [staging-novu-ci-20261005]
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/staging-*-runtime-assessment.json', '.github/workflows/production-backend-images.yml']
+  workflow_dispatch:
+    inputs:
+      component:
+        description: Backend component name, or all
+        type: choice
+        default: notification-worker
+        options: [notification-worker, database-migration, novu-update, admin-update, identity-api, ehr-api, lab-api, pharmacy-api, ocr-api, ocr-worker, outreach-api, notification-api, event-dispatcher, gateway, support-api, all]
+permissions:
+  contents: read
+concurrency:
+  group: production-backend-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  select:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      has_changes: ${{ steps.matrix.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify retained database and workload source compatibility
+        run: |
+          node --test scripts/production-backend-build.test.mjs
+          python3 -m unittest discover -s scripts -p 'test_production*.py'
+          python3 scripts/production_release_compatibility.py --repository . --baseline e078bd53a1601c1d2e533108169a96ec2e7dbd0f --candidate "$GITHUB_SHA" --output production-source-admission.json
+      - id: matrix
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+          REQUESTED_COMPONENT: ${{ inputs.component || 'changed' }}
+        run: node scripts/production-backend-build.mjs matrix
+  build:
+    needs: select
+    if: needs.select.outputs.has_changes == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    env:
+      COMPONENT: ${{ matrix.component }}
+      BUILD_EVIDENCE_DIR: build-evidence/${{ matrix.component }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - name: Verify production workload token agent on Linux
+        if: matrix.component == 'identity-api'
+        run: |
+          npm --prefix services/workload-token-agent test
+      - name: Locked service tests and type checks
+        if: matrix.component != 'gateway' && matrix.component != 'database-migration'
+        shell: bash
+        run: |
+          npm --prefix "services/$COMPONENT" ci
+          if [ -x "services/$COMPONENT/node_modules/.bin/tsc" ]; then
+            "services/$COMPONENT/node_modules/.bin/tsc" -p packages/api-client/tsconfig.json
+          fi
+          npm --prefix "services/$COMPONENT" run typecheck --if-present
+          npm --prefix "services/$COMPONENT" test
+      - name: Verify immutable migration ledger and restricted database rehearsal
+        if: matrix.component == 'database-migration'
+        run: |
+          node scripts/verify-migration-ledger.mjs
+          npm --prefix services/ehr-api ci
+          npm --prefix services/lab-api ci
+          services/ehr-api/node_modules/.bin/tsc -p packages/api-client/tsconfig.json
+          node services/ehr-api/scripts/test-notification-recipient.mjs
+          node services/ehr-api/scripts/test-platform-administration.mjs
+          npm --prefix services/ehr-api run build
+          npm --prefix services/lab-api run build
+          node services/ehr-api/scripts/test-patient-evidence-runtime.mjs
+      - name: Build ARM64 image without cloud credentials
+        run: node scripts/production-backend-build.mjs build "$COMPONENT"
+      - name: Install checksum-verified official Syft and Grype binaries
+        run: node scripts/install-production-scanners.mjs
+      - name: Generate final image SPDX SBOM
+        run: syft "docker:hid-ci/$COMPONENT:$GITHUB_SHA" --output "spdx-json=$BUILD_EVIDENCE_DIR/sbom.spdx.json"
+      - id: distro
+        name: Read OS distribution from the exact image
+        run: node scripts/production-backend-build.mjs distro "$COMPONENT"
+      - name: Scan exact runtime; no inherited suppression policy
+        env:
+          IMAGE_DISTRO: ${{ steps.distro.outputs.distro }}
+        run: |
+          set +e
+          grype "sbom:$BUILD_EVIDENCE_DIR/sbom.spdx.json" --distro "$IMAGE_DISTRO" --output json --fail-on high > "$BUILD_EVIDENCE_DIR/grype.raw.json"
+          scan_status=$?
+          set -e
+          cp "$BUILD_EVIDENCE_DIR/grype.raw.json" "$BUILD_EVIDENCE_DIR/grype.json"
+          exit "$scan_status"
+      - name: Report scan failures and retain diagnostics
+        if: failure()
+        run: node scripts/production-backend-build.mjs findings "$COMPONENT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: failure()
+        with:
+          name: production-scan-${{ matrix.component }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build-evidence/${{ matrix.component }}/sbom.spdx.json
+            build-evidence/${{ matrix.component }}/grype.json
+            build-evidence/${{ matrix.component }}/distribution.json
+            build-evidence/${{ matrix.component }}/grype.raw.json
+            build-evidence/${{ matrix.component }}/runtime-assessment.json
+            build-evidence/${{ matrix.component }}/runtime.vex.json
+          retention-days: 7
+          if-no-files-found: warn
+      - name: Bind image archive to source, scan and SBOM
+        run: node scripts/production-backend-build.mjs pack "$COMPONENT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: production-build-${{ matrix.component }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build-evidence/${{ matrix.component }}/
+          retention-days: 7
+          if-no-files-found: error
+          compression-level: 0
+  verify-publisher:
+    needs: select
+    if: github.event_name != 'pull_request' && needs.select.outputs.has_changes == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: arn:aws:iam::659225405023:role/hid-staging-github-ecr-build
+          aws-region: eu-west-1
+          allowed-account-ids: '659225405023'
+          role-duration-seconds: 900
+          unset-current-credentials: true
+      - name: Verify branch OIDC and staging repository access
+        run: |
+          test "$(aws sts get-caller-identity --query Account --output text)" = '659225405023'
+          aws ecr describe-repositories --repository-names staging/hid/notification-worker --query 'repositories[0].repositoryName' --output text
+  publish:
+    needs: [select, build, verify-publisher]
+    if: github.event_name != 'pull_request' && needs.select.outputs.has_changes == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    env:
+      COMPONENT: ${{ matrix.component }}
+      BUILD_EVIDENCE_DIR: build-evidence/${{ matrix.component }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: production-build-${{ matrix.component }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build-evidence/${{ matrix.component }}/
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: arn:aws:iam::659225405023:role/hid-staging-github-ecr-build
+          aws-region: eu-west-1
+          allowed-account-ids: '659225405023'
+          role-duration-seconds: 1800
+          unset-current-credentials: true
+      - name: Publish the tested image and verify its immutable digest
+        run: node scripts/production-backend-build.mjs publish "$COMPONENT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: production-digest-${{ matrix.component }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            build-evidence/${{ matrix.component }}/publication.json
+            build-evidence/${{ matrix.component }}/sbom.spdx.json
+            build-evidence/${{ matrix.component }}/grype.json
+            build-evidence/${{ matrix.component }}/grype.raw.json
+            build-evidence/${{ matrix.component }}/runtime-assessment.json
+            build-evidence/${{ matrix.component }}/runtime.vex.json
+          retention-days: 30
+          if-no-files-found: error
+
+  candidate:
+    needs: [select, build, publish]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/staging-novu-ci-20261005' && github.repository_id == '1317340803'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      candidate_sha256: ${{ steps.candidate.outputs.candidate_sha256 }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: production-digest-*-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release-evidence
+      - name: Admit exact publication set and write approval report
+        id: candidate
+        env:
+          SELECTED_COMPONENTS: ${{ needs.select.outputs.matrix }}
+          EVENT_BASE_SHA: ${{ github.event.before }}
+        run: |
+          export BASE_SHA="${EVENT_BASE_SHA:-$(git rev-parse HEAD^)}"
+          node scripts/production-deployment.mjs candidate
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: production-backend-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release/candidate.json
+          retention-days: 7
+          if-no-files-found: error
+
+  deploy:
+    needs: candidate
+    if: vars.PRODUCTION_DEPLOYMENT_ENABLED == 'true' && github.ref == 'refs/heads/staging-novu-ci-20261005'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    environment: production-backend
+    permissions:
+      contents: read
+      actions: read
+      deployments: read
+      id-token: write
+    env:
+      PRODUCTION_DEPLOYMENT_ENABLED: ${{ vars.PRODUCTION_DEPLOYMENT_ENABLED }}
+      EXPECTED_CANDIDATE_SHA256: ${{ needs.candidate.outputs.candidate_sha256 }}
+      GITHUB_TOKEN: ${{ github.token }}
+      RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
+      RELEASE_KMS_KEY_ARN: ${{ vars.RELEASE_KMS_KEY_ARN }}
+      RELEASE_LEASE_TABLE: hid-production-deployment-leases
+      RELEASE_ALERT_TOPIC_ARN: arn:aws:sns:eu-west-1:659225405023:hid-staging-operations-alerts
+      RELEASE_CONFIG_JSON: ${{ vars.RELEASE_CONFIG_JSON }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: '22.23.2'
+          package-manager-cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: production-backend-candidate-${{ github.run_id }}-${{ github.run_attempt }}
+          path: release
+      - name: Verify reviewer protection and exact approved candidate
+        run: python3 scripts/verify-production-approval.py release/candidate.json
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
+        with:
+          role-to-assume: ${{ vars.PRODUCTION_DEPLOY_ROLE_ARN }}
+          aws-region: eu-west-1
+          allowed-account-ids: '659225405023'
+          role-duration-seconds: 7200
+          unset-current-credentials: true
+      - name: Deploy, verify exact images and restore previous release on failure
+        run: node scripts/production-deployment.mjs deploy
