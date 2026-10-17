@@ -97,6 +97,7 @@ The target runtime supports local credentials and approved OIDC only.
 | `database/migrations/0098_clinician_self_signup.sql` | Clinician self sign-up with two-admin approval (owner decision 2 of 2026-10-14; ADR-066, CLIN-SIGNUP; branch `claude/clinician-self-signup`). Adds the control `clinician_signup_enabled` (seeded off), the application, challenge, capability, idempotency and quota tables (RLS, no runtime privilege), the reserved-attestation predicate, the internal pinned grant `identity.workforce_change_role` (0087's body plus the pin; `identity.admin_change_workforce_role` delegates with no pin) and the public and administration commands (`DATABASE.md`, "Clinician self sign-up applications (0098)"). It replaces `platform.control_enabled` (0040's body plus the key) while keeping its technical owner `hid_platform_control_reader`: a runner that does not own it grants itself that role (`INHERIT`, no `SET`) for the transaction with the ADMIN OPTION it holds as the role's creator (the bootstrap's administrator), revokes it, and fails closed if it cannot or if the owner would change (§6.1). Locks, in order, under the runner's 5 s lock timeout: `ACCESS EXCLUSIVE` on `platform.control_settings` (every guard's control read waits), then `SHARE ROW EXCLUSIVE` on `auth.accounts`, `identity.facilities`, `identity.staff`, `identity.staff_facility_memberships` and `identity.staff_credential_attestations` (the new foreign keys; writes to them wait). A transaction that holds a row lock on one of those and then reads a control can deadlock with it; PostgreSQL aborts one, and an aborted 0098 rolls back whole and is run again. Run it off-peak. Run `db:bootstrap` and `db:verify-roles` of the same release after it: the bootstrap grants the new commands. An older Identity runs on it unchanged; the new Identity on a database without it answers the new routes 503 (`PHASE_4_STAGE_5_RELEASE_READINESS.md` §2, §5, P37) |
 | `database/migrations/0099_imported_medical_history.sql` | Imported legacy medical history (owner decision 3 of 2026-10-16, ADR-067; numbered after 0098). Refuses a database holding the PR #8 branch's 0061/0062 objects; adds three append-only imported tables, the patient's sharing choice and its log, their patient-self and staff policies, the session-bound sharing commands and `ehr.import_legacy_medical_history` (sealed staging rows only; `hid_migration_admin` only), and the permission `ehr.imported-history.read`. Moves no data (§10.1) |
 | `database/migrations/0100_patient_record_chat.sql` | Patient record chat (owner decision 1 of 2026-10-16, ADR-068; numbered after 0099, which the ledger must hold first). Adds the platform control `record_chat_enabled`, seeded off (the control CHECK, `platform.control_enabled` with its owner kept and `platform.admin_set_control` gain the key and keep every earlier key, `clinician_signup_enabled` included, and every control row keeps its value; any CHECK other than the seven keys of 0039 and 0098 stops it with `55000`); the patient's chat history `ehr.patient_chat_conversations` and `ehr.patient_chat_messages` (forced row-level security, patient-self `SELECT`, `INSERT` and `DELETE` policies only, no update, no retention class); the limit tables `ehr.record_chat_usage_counters`, `ehr.record_chat_reservations` and `ehr.record_chat_daily_budget`, reached only through the admin-owned security-definer commands `ehr.reserve_record_chat` (which also reads the kill switch again) and `ehr.settle_record_chat`; and `ehr.record_chat_history_on_hold`, a third admin-owned definer through which the delete policies keep the history while a legal hold names the patient or the account. `ACCESS EXCLUSIVE` on `platform.control_settings` first, to the commit (control reads wait), then `SHARE ROW EXCLUSIVE` on `identity.patients`; no row changes (release checklist §5 step 30c). Run `db:bootstrap` and `db:verify-roles` straight after it: the EHR runtime gets the history privileges and `EXECUTE` on the three commands, no role a privilege on the limit tables. `RECORD_CHAT_PATIENT_ENABLED` and the control stay off until release checklist P39. |
+| `database/migrations/0101_staff_record_chat.sql` | Staff record chat (owner decision 1 of 2026-10-16, ADR-069; numbered after 0100). Adds the permission `ehr.record-chat.use` (doctor, clinician, nurse), `ehr.staff_record_chat_context` and `ehr.staff_record_chat_history_on_hold`, the staff history (`ehr.staff_record_chat_conversations` and `ehr.staff_record_chat_messages`, forced row-level security, `SELECT`, `INSERT` and `DELETE` for the asking account only) and the audience `'staff'` of `ehr.reserve_record_chat` and `ehr.settle_record_chat` (replaced in place). No control, no role and no existing row changes; the EHR flag `RECORD_CHAT_STAFF_ENABLED` is off. Run the role bootstrap after it (grants for the two tables and two functions). Forward-only and safe under any earlier EHR or Identity build, which never reads its objects. |
 | `database/runtime-grants.sql` | Idempotent least-privilege runtime roles. Runs as a superuser or as the non-superuser administrator that created the roles (RDS); checks the roles' attributes instead of re-asserting them (§6) |
 | `database/runtime-login-assertions.sql` and `scripts/verify-runtime-logins.mjs` | `npm run db:verify-logins`: checks each runtime credential's own LOGIN, connected with that credential's URL (§6) |
 | `scripts/provision-database-logins.mjs` and `scripts/database-login-provisioning.mjs` | `npm run db:provision`: the RDS master's steps (the migration administrator, and the 0015 parameter grant and revoke) and the ten runtime LOGINs from their secrets' URLs, then `db:verify-logins`; in AWS the one-shot provisioning task (§6). Refuses an administrator or runtime LOGIN named after a HID group role |
@@ -447,7 +448,7 @@ service straight after its LOGIN gets the new password
 service that connects to the database also refuses to start over a superuser,
 `BYPASSRLS` or owner connection.
 
-Confirm the candidate ledger reaches `0100`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0101`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 After the legacy import, record (read-only, counts only, no identifiers) how
 many imported patient accounts have `email_verified_at` null and no verified
@@ -789,7 +790,7 @@ with synthetic data (`rehearse-imported-history-import.mjs`).
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify the ledger at `0100`, runtime grants (`db:verify-roles`) and logins
+6. Verify the ledger at `0101`, runtime grants (`db:verify-roles`) and logins
    (`db:verify-logins`), RLS and purpose/deny behavior, and list the
    purpose-of-use codes (release checklist P10; after `0097` `direct-care` and
    `emergency`). After `0097`, confirm the
@@ -854,7 +855,12 @@ with synthetic data (`rehearse-imported-history-import.mjs`).
    routes of that EHR build fail. 0100 replaces `platform.control_enabled`
    as 0098 does, so it also needs the bootstrap's administrator (the ADMIN
    OPTION on `hid_platform_control_reader`, §6.1). Run the P39 check before
-   `RECORD_CHAT_PATIENT_ENABLED` is set.
+   `RECORD_CHAT_PATIENT_ENABLED` is set. After `0101` (staff record chat),
+   likewise: the bootstrap grants the EHR runtime `SELECT`, `INSERT` and
+   `DELETE` on the staff history and `EXECUTE` on the staff proof and its
+   legal hold check, and nothing on the limit tables; until it runs, the staff
+   history routes of that EHR build fail. Run the P40 check before
+   `RECORD_CHAT_STAFF_ENABLED` is set.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts. A migrated staff account signs in with
    its password, then enrols an authenticator with the code emailed to it

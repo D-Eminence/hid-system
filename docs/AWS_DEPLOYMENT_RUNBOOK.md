@@ -85,6 +85,13 @@ switch. Set them on staging only after release checklist P38 (1), the written
 sign-off, in the order patient read, sharing, staff read, and turn them off in
 reverse. The EHR and Identity production profiles refuse them as well.
 
+Staff record chat (ADR-069, migration 0101) is a second flag on the same
+settings: `HID_RECORD_CHAT_STAFF_ENABLED` sets ehr-api's
+`RECORD_CHAT_STAFF_ENABLED` and defaults to `false`. Either flag on is "record
+chat on": it needs every setting below, the `RecordChatSecretArn` secret, the
+processing approval and NAT egress, and the other containers still receive none
+of it. With both off, ehr-api receives the two false flags and nothing else.
+
 Patient record chat (ADR-068, migration 0100): the synth input
 `HID_RECORD_CHAT_PATIENT_ENABLED` sets ehr-api's `RECORD_CHAT_PATIENT_ENABLED`
 and defaults to `false`; off, ehr-api receives the false flag and nothing else

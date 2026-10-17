@@ -343,6 +343,10 @@ Responsibilities:
 * the patient's record chat (ADR-068): a question about the patient's own
   released records answered by the Claude API, an external processor that
   receives a minimised extract of those records; off by default
+* the staff's record chat (ADR-069): a clinician's question about one patient
+  they may read for direct care, answered from what that member may already
+  read at the selected facility through the same processor and limits; off by
+  default, never under break-glass, and the history is the asker's own
 
 Every clinical record must include as appropriate:
 

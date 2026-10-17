@@ -62,6 +62,7 @@ const NOTICE_VERSION = /^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$/;
 interface RecordChatSettings {
   NODE_ENV: string;
   RECORD_CHAT_PATIENT_ENABLED: boolean;
+  RECORD_CHAT_STAFF_ENABLED: boolean;
   RECORD_CHAT_MODEL_ID?: string;
   RECORD_CHAT_ANTHROPIC_API_KEY?: string;
   RECORD_CHAT_API_BASE_URL?: string;
@@ -98,7 +99,7 @@ function validDigestKey(value: string | undefined): boolean {
  * API origin.
  */
 export function recordChatIssues(environment: RecordChatSettings): Array<{ path: string[]; message: string }> {
-  if (!environment.RECORD_CHAT_PATIENT_ENABLED) return [];
+  if (!environment.RECORD_CHAT_PATIENT_ENABLED && !environment.RECORD_CHAT_STAFF_ENABLED) return [];
   const issues: Array<{ path: string[]; message: string }> = [];
   const refuse = (key: keyof RecordChatSettings, message: string) => issues.push({ path: [key], message });
   if (!environment.RECORD_CHAT_MODEL_ID || !MODEL_ID_SHAPE.test(environment.RECORD_CHAT_MODEL_ID)) {
@@ -206,6 +207,11 @@ const environmentSchema = z
     // Off by default. Nothing below has a model default: the model id comes
     // only from RECORD_CHAT_MODEL_ID in the deployment's configuration.
     RECORD_CHAT_PATIENT_ENABLED: booleanString,
+    // Staff record chat (ADR-069): a clinician's question about one patient
+    // they may read for direct care. Off by default and independent of the
+    // patient flag, but it shares every RECORD_CHAT_* setting below (one
+    // processor, one key, one model, one approval) and the platform control.
+    RECORD_CHAT_STAFF_ENABLED: booleanString,
     RECORD_CHAT_MODEL_ID: optionalString,
     RECORD_CHAT_ANTHROPIC_API_KEY: optionalString,
     RECORD_CHAT_API_BASE_URL: optionalUrl,
@@ -402,8 +408,9 @@ export function getEnvironment(): Environment {
   // workload identity federation, a base URL, extra headers, a log level).
   // Record chat passes every option explicitly, and refuses to start beside
   // any of them, so no ambient credential, endpoint or header is ever used.
-  const chatEnabled = result.success ? result.data.RECORD_CHAT_PATIENT_ENABLED
-    : process.env.RECORD_CHAT_PATIENT_ENABLED === 'true';
+  const chatEnabled = result.success
+    ? result.data.RECORD_CHAT_PATIENT_ENABLED || result.data.RECORD_CHAT_STAFF_ENABLED
+    : process.env.RECORD_CHAT_PATIENT_ENABLED === 'true' || process.env.RECORD_CHAT_STAFF_ENABLED === 'true';
   if (chatEnabled) {
     for (const name of Object.keys(process.env).filter((key) => key.startsWith('ANTHROPIC_')).sort()) {
       issues.push(`${name}: Ambient ANTHROPIC_* variables are refused while record chat is enabled; `

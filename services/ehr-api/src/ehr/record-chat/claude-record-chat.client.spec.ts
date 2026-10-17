@@ -12,7 +12,7 @@ import type { EnabledRecordChatConfig } from './record-chat.config';
 // A placeholder that is clearly not a real model id.
 const MODEL = 'synthetic-test-model';
 const config: EnabledRecordChatConfig = {
-  patientEnabled: true, modelId: MODEL, apiKey: 'synthetic-api-key-0123456789abcdef', baseUrl: 'https://api.anthropic.com',
+  patientEnabled: true, staffEnabled: false, modelId: MODEL, apiKey: 'synthetic-api-key-0123456789abcdef', baseUrl: 'https://api.anthropic.com',
   inferenceGeo: 'us', maxOutputTokens: 4096, deadlineMs: 25_000, maxRetries: 0, maxEvidenceChars: 40_000,
   dailyTokenBudget: 2_000_000, noticeVersion: 'notice-1', auditDigestKey: Buffer.alloc(32, 1),
 };

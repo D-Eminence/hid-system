@@ -927,7 +927,9 @@ patient-only EHR routes, `GET /api/v1/ehr/me/chat/availability`, `POST
 EHR's guard answers any other session `403 PATIENT_SESSION_REQUIRED` before
 the handler runs and records `auth.authorization.denied` (§7). Before
 D-Eminence/hid-system#74 a staff session there got `503 DEPENDENCY_UNAVAILABLE` and nothing was
-audited.
+audited. Staff record chat (ADR-069, off by default) is a separate set of four
+staff routes under `/api/v1/ehr/patients/:patientId/chat` (§11, "Staff record
+chat"); a patient session is refused there by the permission guard.
 These routes accept no browser-selected patient identity. Patient record access
 is read-only and owning-service disclosure/audit is atomic. The internal
 `GET /api/v1/identity/service/patient-self-authorization` requires both the
@@ -3014,6 +3016,83 @@ exchanges actually sent),
 hold keeps the history); refused requests are audited as
 `ehr.record-chat.ask`, `ehr.record-chat.history.read.request` and
 `ehr.record-chat.history.clear.request`.
+
+### Staff record chat
+
+A clinician asks a question about one patient they may read for direct care
+and the Claude API answers it (owner decision 1 of 2026-10-16, ADR-069). Off
+by default: `RECORD_CHAT_STAFF_ENABLED` (synth input
+`HID_RECORD_CHAT_STAFF_ENABLED`), independent of the patient's flag, and the
+platform control `record_chat_enabled`, which pauses both audiences. It is the
+patient's chat (above) with a different reader: the request and answer shapes,
+the statuses, `blocks`, `sources` (kinds `encounter`, `note`, `diagnosis`,
+`prescription`, `vital`, `document`; never `lab_result`), `coverage`, the
+`Idempotency-Key`, the `noticeVersion` and the error codes are the same. Every
+route needs a staff session whose membership holds `ehr.record-chat.use`
+(doctor, clinician, nurse), the facility header, and `X-Purpose-Of-Use:
+direct-care` (`400 PURPOSE_OF_USE_REQUIRED` otherwise; an `emergency` purpose
+is refused the same way and a break-glass authorization `403
+BREAK_GLASS_EXCLUDED`, audited). A patient session or a member without the
+permission is refused `403` by the permission guard. Responses are
+`Cache-Control: private, no-store`; cookie writes need `Origin` and
+`X-CSRF-Token`.
+
+- `GET /api/v1/ehr/patients/:patientId/chat/availability`: `{ available:
+  false }` while the flag or the control is off; otherwise `{ available: true,
+  processor: "anthropic", inferenceGeo, noticeVersion, historyLimit: 50,
+  maxQuestionLength: 1000, released, withheld }`, `released` being the
+  categories this member's permissions let chat read (`encounters`, `notes`,
+  `vitals`, `diagnoses`, `prescriptions`, `documents`) and `withheld` the rest
+  plus `labRequests` and `labResults`, which are never read. It names no
+  patient and makes no Identity or model call.
+- `POST /api/v1/ehr/patients/:patientId/chat` with `Idempotency-Key` and `{
+  question, noticeVersion }`: `200` with `{ status, answer, blocks, sources,
+  coverage, conversationId, messageId, processor: "anthropic", createdAt,
+  idempotentReplay }`, as for the patient. The evidence is what this member
+  may read of this patient at this facility (ADR-069): encounters in progress,
+  on hold or completed with their signed notes, vitals as first recorded,
+  diagnoses not entered in error, active, on-hold and completed
+  prescriptions and clean documents' metadata, each only with its read
+  permission; never Lab, imported history, other facilities' records,
+  document content or the clinician's diagnosis notes. A replay answers the
+  stored reply only while every record it cites is still readable by this
+  member with the same content (`409 CHAT_SOURCES_CHANGED` otherwise).
+- `GET /api/v1/ehr/patients/:patientId/chat/history`: `{ conversationId: uuid |
+  null, exchanges, limit: 50 }`, the asking member's own exchanges about this
+  patient at this facility, newest first, each `{ messageId, question, reply: {
+  status, answer, blocks, sources }, createdAt }`; one citing a record this
+  member can no longer read, or whose content changed, is left out. Nobody
+  else reads it: not the patient, not another clinician, not another
+  facility. Available while chat is off.
+- `DELETE /api/v1/ehr/patients/:patientId/chat/history`: deletes the member's
+  conversation about the patient and its exchanges; `200 { cleared: true,
+  deletedCount }`. `409 CHAT_HISTORY_ON_HOLD`, audited, deletes nothing while
+  an active legal hold names the patient or the staff account. Available
+  while chat is off.
+
+Order of checks for a question, after the session guard and the body's shape
+(`400 VALIDATION_FAILED`): the flag (`503 RECORD_CHAT_DISABLED`), the control
+(`503 RECORD_CHAT_PAUSED`, `503 PLATFORM_CONTROL_UNAVAILABLE`), the purpose
+(`400 PURPOSE_OF_USE_REQUIRED`), the question (`400 INVALID_QUESTION`), the
+notice (`428 CHAT_NOTICE_REQUIRED`), the key (`400
+IDEMPOTENCY_KEY_REQUIRED`), four calls in flight per EHR process for staff
+(`429 RECORD_CHAT_BUSY`, `Retry-After: 5`), then Identity's authorization of
+the member for the patient (`403 CONSENT_REQUIRED` without an active standard
+consent at the facility, `403 BREAK_GLASS_EXCLUDED` under break-glass).
+Different from the patient's table: `403 CONSENT_REQUIRED` also when consent
+ended during the call or at the lease (nothing stored; the lease expires),
+`429 RECORD_CHAT_RATE_LIMITED` is 20 questions this hour or 100 today per
+staff account (proposed), and there is no `PATIENT_ACCESS_DENIED`.
+
+Audit events (codes, counts and digests only; no question, answer or record
+text), with the staff actor, membership, organization, facility and purpose
+`direct-care`: `ehr.record-chat.disclosure` (before every request, `audience:
+"staff"`), `ehr.record-chat.answer`, `ehr.record-chat.replay`,
+`ehr.record-chat.staff.read` and `ehr.record-chat.staff.save` (the two
+transactions of a question, counts only), `ehr.record-chat.staff.history.read`
+and `ehr.record-chat.staff.history.clear`; refusals are audited `denied` or
+`failure` with the status and code, and failed requests as
+`ehr.record-chat.staff.ask`.
 
 ## 12. Lab
 

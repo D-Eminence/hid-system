@@ -30,6 +30,7 @@ const configuration = environmentConfig(
     importedHistoryStaffRead: process.env.HID_EHR_STAFF_IMPORTED_HISTORY_ENABLED,
     importedHistorySharing: process.env.HID_IMPORTED_HISTORY_SHARING_ENABLED,
     recordChatPatientEnabled: process.env.HID_RECORD_CHAT_PATIENT_ENABLED,
+    recordChatStaffEnabled: process.env.HID_RECORD_CHAT_STAFF_ENABLED,
     recordChatModelId: process.env.HID_RECORD_CHAT_MODEL_ID,
     recordChatInferenceGeo: process.env.HID_RECORD_CHAT_INFERENCE_GEO,
     recordChatNoticeVersion: process.env.HID_RECORD_CHAT_NOTICE_VERSION,

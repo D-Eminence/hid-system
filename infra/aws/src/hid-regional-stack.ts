@@ -555,8 +555,8 @@ export class HidRegionalStack extends Stack {
         : 'Secrets Manager JSON secret containing sesFromAddress for staging email OTP')
       : 'Secrets Manager JSON secret holding exactly the otp-email-sms fields sesFromAddress, termiiBaseUrl, termiiApiKey '
         + `and termiiSenderId (email OTP through SES, SMS OTP through Termii)${novu ? ', plus novuApiKey for the notification worker' : ''}`);
-    if (this.configuration.recordChat.patientEnabled) {
-      // Patient record chat: read by ehr-api only, and only while record chat is on.
+    if (recordChatOn(this.configuration.recordChat)) {
+      // Record chat (patient and staff): read by ehr-api only, and only while record chat is on.
       this.requiredParameter('RecordChatSecretArn', 'Secrets Manager JSON secret for ehr-api patient record chat with '
         + 'the fields anthropicApiKey (the Claude API key of the approved processing account) and auditDigestKeyB64 '
         + '(32 random bytes in base64 keying the disclosure digest, never reused across environments)');
@@ -710,7 +710,7 @@ export class HidRegionalStack extends Stack {
     if (this.configuration.qoreIdEnabled) {
       imported.qoreid = this.importSecret('QoreIdCredentialsSecret', 'QoreIdCredentialsSecretArn');
     }
-    if (this.configuration.recordChat.patientEnabled) {
+    if (recordChatOn(this.configuration.recordChat)) {
       imported.recordChat = this.importSecret('RecordChatSecret', 'RecordChatSecretArn');
     }
     for (const name of workloadNames.filter((item) => workloads[item].hasDatabase)) {
@@ -1095,7 +1095,7 @@ export class HidRegionalStack extends Stack {
     if (name === 'ehr-api') {
       output.WORKLOAD_DATABASE_URL = ecs.Secret.fromSecretsManager(secrets[`${name}Database`]!, 'scannerUrl');
       // Record chat off: ehr-api reads nothing of the record chat secret.
-      if (this.configuration.recordChat.patientEnabled) {
+      if (recordChatOn(this.configuration.recordChat)) {
         output.RECORD_CHAT_ANTHROPIC_API_KEY = ecs.Secret.fromSecretsManager(secrets.recordChat!, 'anthropicApiKey');
         output.RECORD_CHAT_AUDIT_DIGEST_KEY_B64 = ecs.Secret.fromSecretsManager(secrets.recordChat!, 'auditDigestKeyB64');
       }
@@ -1925,10 +1925,16 @@ function patientReleaseEnvironment(release: HidEnvironmentConfig['patientRecordR
  * RecordChatSecretArn, and no base URL is set, so ehr-api uses the
  * first-party API origin.
  */
+/** Record chat is on for either audience: the processor settings, the secret and the egress are then needed. */
+function recordChatOn(chat: HidEnvironmentConfig['recordChat']): boolean {
+  return chat.patientEnabled || chat.staffEnabled;
+}
+
 function recordChatEnvironment(chat: HidEnvironmentConfig['recordChat']): Record<string, string> {
-  if (!chat.patientEnabled) return { RECORD_CHAT_PATIENT_ENABLED: 'false' };
+  if (!recordChatOn(chat)) return { RECORD_CHAT_PATIENT_ENABLED: 'false', RECORD_CHAT_STAFF_ENABLED: 'false' };
   return {
-    RECORD_CHAT_PATIENT_ENABLED: 'true',
+    RECORD_CHAT_PATIENT_ENABLED: String(chat.patientEnabled),
+    RECORD_CHAT_STAFF_ENABLED: String(chat.staffEnabled),
     RECORD_CHAT_MODEL_ID: chat.modelId!,
     RECORD_CHAT_INFERENCE_GEO: chat.inferenceGeo!,
     RECORD_CHAT_NOTICE_VERSION: chat.noticeVersion!,

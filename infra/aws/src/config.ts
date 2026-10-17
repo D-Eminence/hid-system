@@ -120,6 +120,9 @@ export interface HidEnvironmentConfig {
   // budget and the recorded external-processing approval (every deployed
   // ehr-api runs NODE_ENV=production), NAT egress, and the RecordChatSecretArn
   // parameter; turned off, ehr-api receives the false flag and nothing else.
+  // Staff record chat (ADR-069) is its own flag, HID_RECORD_CHAT_STAFF_ENABLED
+  // (default false), and takes every one of those settings, the secret and the
+  // approval: either flag on is "record chat on".
   readonly recordChat: RecordChatSettings;
   // The exact ARN of the operator-created, KMS-encrypted SNS topic
   // hid-<env>-operational-alerts that every alarm notifies (D4, ADR-053).
@@ -175,6 +178,8 @@ export interface ImportedHistory {
 /** Patient record chat's synth settings; with patientEnabled false nothing else is set. */
 export interface RecordChatSettings {
   readonly patientEnabled: boolean;
+  /** Staff record chat (ADR-069): a clinician's question about one patient they may read for direct care. */
+  readonly staffEnabled: boolean;
   readonly modelId?: string;
   readonly inferenceGeo?: 'us' | 'global';
   readonly noticeVersion?: string;
@@ -188,6 +193,7 @@ export interface SynthOptions {
   readonly importedHistoryStaffRead?: string;
   readonly importedHistorySharing?: string;
   readonly recordChatPatientEnabled?: string;
+  readonly recordChatStaffEnabled?: string;
   readonly recordChatModelId?: string;
   readonly recordChatInferenceGeo?: string;
   readonly recordChatNoticeVersion?: string;
@@ -569,34 +575,37 @@ export function assertRecordChat(configuration: {
   readonly name: EnvironmentName; readonly natGateways: number; readonly recordChat: RecordChatSettings;
 }): void {
   const chat = configuration.recordChat;
-  if (!chat.patientEnabled) return;
+  if (!chat.patientEnabled && !chat.staffEnabled) return;
+  // Named for the flag that is on (the patient's when both are), so a refusal names the setting to change.
+  const flag = chat.patientEnabled ? 'HID_RECORD_CHAT_PATIENT_ENABLED=true' : 'HID_RECORD_CHAT_STAFF_ENABLED=true';
   if (!chat.modelId || !RECORD_CHAT_MODEL_ID.test(chat.modelId)) {
-    throw new Error('HID_RECORD_CHAT_PATIENT_ENABLED=true needs HID_RECORD_CHAT_MODEL_ID, the model id (there is no default)');
+    throw new Error(`${flag} needs HID_RECORD_CHAT_MODEL_ID, the model id (there is no default)`);
   }
   if (chat.inferenceGeo !== 'us' && chat.inferenceGeo !== 'global') {
-    throw new Error('HID_RECORD_CHAT_PATIENT_ENABLED=true needs HID_RECORD_CHAT_INFERENCE_GEO, us or global');
+    throw new Error(`${flag} needs HID_RECORD_CHAT_INFERENCE_GEO, us or global`);
   }
   if (!chat.noticeVersion || !RECORD_CHAT_NOTICE_VERSION.test(chat.noticeVersion)) {
-    throw new Error('HID_RECORD_CHAT_PATIENT_ENABLED=true needs HID_RECORD_CHAT_NOTICE_VERSION (1-40 characters)');
+    throw new Error(`${flag} needs HID_RECORD_CHAT_NOTICE_VERSION (1-40 characters)`);
   }
   if (!Number.isInteger(chat.dailyTokenBudget) || chat.dailyTokenBudget! < 1 || chat.dailyTokenBudget! > 20_000_000) {
-    throw new Error('HID_RECORD_CHAT_PATIENT_ENABLED=true needs HID_RECORD_CHAT_DAILY_TOKEN_BUDGET, 1 to 20000000 tokens');
+    throw new Error(`${flag} needs HID_RECORD_CHAT_DAILY_TOKEN_BUDGET, 1 to 20000000 tokens`);
   }
   if (!validRecordChatApproval(chat.processingApproval)) {
-    throw new Error(`HID_RECORD_CHAT_PATIENT_ENABLED=true needs HID_RECORD_CHAT_PROCESSING_APPROVAL in ${configuration.name}: `
+    throw new Error(`${flag} needs HID_RECORD_CHAT_PROCESSING_APPROVAL in ${configuration.name}: `
       + 'the ADR that records the processing agreement, geography, retention and quotas, and its acceptance date '
       + '(ADR-NNN@YYYY-MM-DD, not in the future)');
   }
   if (configuration.natGateways < 1) {
-    throw new Error('HID_RECORD_CHAT_PATIENT_ENABLED=true needs NAT egress to reach the processor; '
+    throw new Error(`${flag} needs NAT egress to reach the processor; `
       + 'this profile has no NAT gateway');
   }
 }
 
 function recordChatSettings(options: SynthOptions): RecordChatSettings {
   const patientEnabled = booleanInput('HID_RECORD_CHAT_PATIENT_ENABLED', options.recordChatPatientEnabled, 'false');
+  const staffEnabled = booleanInput('HID_RECORD_CHAT_STAFF_ENABLED', options.recordChatStaffEnabled, 'false');
   // Off is always allowed: the other settings are then neither checked nor passed on.
-  if (!patientEnabled) return { patientEnabled };
+  if (!patientEnabled && !staffEnabled) return { patientEnabled, staffEnabled };
   const budget = options.recordChatDailyTokenBudget;
   if (budget !== undefined && !/^[1-9]\d{0,7}$/.test(budget)) {
     throw new Error('HID_RECORD_CHAT_DAILY_TOKEN_BUDGET must be a whole number of tokens, 1 to 20000000');
@@ -606,7 +615,7 @@ function recordChatSettings(options: SynthOptions): RecordChatSettings {
     throw new Error('HID_RECORD_CHAT_INFERENCE_GEO must be us or global');
   }
   return {
-    patientEnabled,
+    patientEnabled, staffEnabled,
     ...(options.recordChatModelId !== undefined ? { modelId: options.recordChatModelId } : {}),
     ...(geo !== undefined ? { inferenceGeo: geo } : {}),
     ...(options.recordChatNoticeVersion !== undefined ? { noticeVersion: options.recordChatNoticeVersion } : {}),

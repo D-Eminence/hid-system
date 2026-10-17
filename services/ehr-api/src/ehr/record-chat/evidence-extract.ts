@@ -381,9 +381,10 @@ export function bindingsStillReleased(bindings: readonly SourceBinding[], releas
  * The user turn's text blocks: the extract, the earlier turns (context, not
  * evidence) and the question, each as JSON data with sorted keys.
  */
-export function userTurnBlocks(extract: PatientExtract, priorTurns: readonly PriorTurn[], question: string): string[] {
+export function userTurnBlocks(extract: PatientExtract, priorTurns: readonly PriorTurn[], question: string,
+  audience: 'patient' | 'staff' = 'patient'): string[] {
   return [
-    canonicalJson({ extract: { audience: 'patient', coverage: extract.coverage, labComparisons: extract.labComparisons,
+    canonicalJson({ extract: { audience, coverage: extract.coverage, labComparisons: extract.labComparisons,
       records: extract.records } }),
     ...(priorTurns.length ? [canonicalJson({ priorTurns: priorTurns.map((turn) => ({
       question: redactIdentifiers(turn.question), answer: redactIdentifiers(turn.answer) })) })] : []),
