@@ -21,8 +21,8 @@ const backends = [
 const apps = ['web', 'ehr', 'lab', 'pharmacy', 'ocr', 'outreach', 'admin']
 const bases = { web: '/', ehr: '/ehr/', lab: '/lab/', pharmacy: '/pharmacy/',
   ocr: '/migrate/', outreach: '/outreach/', admin: '/admin/' }
-const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:939d6f1671529d230f50b563578e9b5d206af58f038b10ebd7e1233023d4e167'
-const unprivilegedNginxRuntime = 'nginxinc/nginx-unprivileged@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3'
+const distrolessNodeRuntime = 'gcr.io/distroless/nodejs22-debian13@sha256:55e7cd155c86d8956af63fec0a9d0790dd6d0ba98c7d38e63c0866557ee7aff8'
+const unprivilegedNginxRuntime = 'nginxinc/nginx-unprivileged@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01'
 
 const textExtensions = new Set([
   '', '.cjs', '.conf', '.css', '.env', '.example', '.html', '.js', '.json', '.jsx',
@@ -201,7 +201,10 @@ for (const [route, upstream] of [
   ['/api/v1/outreach', 'OUTREACH_API_UPSTREAM'],
 ]) {
   const escaped = route.replaceAll('/', '\\/')
-  assert.match(gatewayConfig, new RegExp(`${escaped}[^\\n]*proxy_pass \\$\\{${upstream}\\}`),
+  const nginxVariable = `hid_${upstream.split('_')[0].toLowerCase()}_upstream`
+  assert.match(gatewayConfig, new RegExp(`set \\$${nginxVariable} "\\$\\{${upstream}\\}";`),
+    `gateway resolver variable must bind exactly ${upstream}`)
+  assert.match(gatewayConfig, new RegExp(`location\\s+(?:=\\s+)?${escaped}\\s*\\{[^\\n]*proxy_pass \\$${nginxVariable};`),
     `production gateway ownership mismatch for ${route}`)
 }
 assert.doesNotMatch(gatewayConfig, /3010|EVENT_DISPATCHER/, 'dispatcher must not be browser-routed')
