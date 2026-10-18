@@ -403,7 +403,15 @@ jobs:
           const paths=execFileSync('git',['ls-files','-z','**/package-lock.json'],{encoding:'utf8'}).split('\0').filter(Boolean);
           for(const path of paths) execFileSync('npm',['--prefix',dirname(path),'ci'],{stdio:'inherit'});
           NODE
+      - name: Prepare PostgreSQL 16 and pgvector for the disposable rehearsal
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-16 postgresql-server-dev-16 postgresql-16-pgvector
+          test -x /usr/lib/postgresql/16/bin/pg_config
+          test -f "$(/usr/lib/postgresql/16/bin/pg_config --sharedir)/extension/vector.control"
       - name: Run and record complete workspace gates
+        env:
+          PG_CONFIG: /usr/lib/postgresql/16/bin/pg_config
         run: node release/scripts/run-workspace-gates.mjs
       - name: Retain workspace evidence even after failure
         if: ${{ always() }}

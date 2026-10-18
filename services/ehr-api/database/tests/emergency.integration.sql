@@ -96,7 +96,8 @@ insert into identity.patients (
 insert into identity.purpose_of_use_codes (code, display, source_system) values
   ('direct-care', 'Direct patient care', 'schema-test'),
   ('emergency', 'Emergency treatment', 'schema-test'),
-  ('healthcare-operations', 'Healthcare operations', 'schema-test');
+  ('healthcare-operations', 'Healthcare operations', 'schema-test')
+on conflict (code) do nothing;
 
 
 create function pg_temp.reject_emergency_audit() returns trigger language plpgsql as $$

@@ -164,8 +164,12 @@ function restore(db, archive) {
 try {
   evidence.source_sha = command('source SHA', 'git', ['rev-parse', 'HEAD']).trim();
   evidence.worktree_dirty = command('worktree status', 'git', ['status', '--porcelain']).length > 0;
-  pgBindir = command('PostgreSQL bindir', 'pg_config', ['--bindir']).trim();
+  const pgConfig = process.env.PG_CONFIG || 'pg_config';
+  pgBindir = command('PostgreSQL bindir', pgConfig, ['--bindir']).trim();
   evidence.postgresql = command('PostgreSQL version', join(pgBindir, 'postgres'), ['--version']).trim();
+  const sharedir = command('PostgreSQL sharedir', pgConfig, ['--sharedir']).trim();
+  const vectorControl = await readFile(join(sharedir, 'extension/vector.control'));
+  evidence.pgvector_control_sha256 = sha256(vectorControl);
   command('immutable migration ledger', process.execPath, ['scripts/verify-migration-ledger.mjs']);
   const files = (await readdir(join(service, 'database/migrations'))).filter((name) => /^\d{4}_.+\.sql$/.test(name)).sort();
   evidence.migration_ledger = await Promise.all(files.map(async (name) => ({
@@ -232,6 +236,12 @@ try {
         'synthetic-upgrade-case-001','{}');
       commit;`);
   });
+  await withClient('hid_upgrade', client => client.query(`
+    insert into identity.purpose_of_use_codes(code,display,active,source_system)
+    values ('synthetic-history','Historical synthetic purpose',false,'synthetic')`));
+  const upgradePurposesBefore = await withClient('hid_upgrade', async client =>
+    (await client.query('select to_jsonb(p) as value from identity.purpose_of_use_codes p order by code')).rows);
+  assert(!upgradePurposesBefore.some(row => row.value.code === 'direct-care'));
   const upgradeBefore = await snapshot('hid_upgrade');
   const upgradeBackup = join(evidenceDirectory, 'pre-schema-upgrade.dump');
   command('backup synthetic schema 0028 before upgrade', join(pgBindir, 'pg_dump'),
@@ -270,9 +280,18 @@ try {
     } finally { await client.query('rollback'); }
   });
   const upgradeAfter = await snapshot('hid_upgrade');
+  await withClient('hid_upgrade', async client => {
+    assert.deepEqual((await client.query(`select to_jsonb(p) as value from identity.purpose_of_use_codes p
+      where code <> 'direct-care' order by code`)).rows, upgradePurposesBefore,
+    'Upgrade must preserve every historical purpose registry row');
+    assert.deepEqual((await client.query(`select code,display,active,source_system
+      from identity.purpose_of_use_codes where code='direct-care'`)).rows,
+    [{code:'direct-care',display:'Direct patient care',active:true,source_system:'hid'}],
+    'Migration 0071 must add exactly its declared direct-care purpose');
+  });
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
-    'auth.permissions', 'auth.role_permissions',
+    'auth.permissions', 'auth.role_permissions', 'identity.purpose_of_use_codes',
   ]);
   for (const [name, value] of Object.entries(upgradeBefore)) {
     if (!expectedChanged.has(name)) assert.deepEqual(upgradeAfter[name], value, `Upgrade changed historical ${name}`);
@@ -280,7 +299,8 @@ try {
   restore('hid_upgrade_restored', upgradeBackup);
   assert.deepEqual(await snapshot('hid_upgrade_restored'), upgradeBefore, 'Pre-schema backup must restore the exact 0028 state');
   evidence.checks.existing_schema_upgrade = {from:'0028',to:latestSchema,dry_run_unchanged:true,
-    historical_tables_preserved:true,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
+    historical_tables_preserved:true,historical_purposes_preserved:true,direct_care_seed_verified:true,
+    old_sessions_remain_staff:true,unbound_old_otp_denied:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
   command('create synthetic database', join(pgBindir, 'createdb'), [database]);

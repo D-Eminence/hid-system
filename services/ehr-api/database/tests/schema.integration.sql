@@ -104,7 +104,8 @@ insert into identity.patients (
 insert into identity.purpose_of_use_codes (code, display, source_system) values
   ('direct-care', 'Direct patient care', 'schema-test'),
   ('emergency', 'Emergency treatment', 'schema-test'),
-  ('healthcare-operations', 'Healthcare operations', 'schema-test');
+  ('healthcare-operations', 'Healthcare operations', 'schema-test')
+on conflict (code) do nothing;
 
 insert into migration.runs (
   id, source_system, source_snapshot, mode, status, started_by
@@ -2604,17 +2605,24 @@ begin
   exception when serialization_failure then null;
   end;
 
-  begin
-    perform identity.admin_transition_facility(
+  select * into command_result from identity.admin_transition_facility(
       '10000000-0000-4000-8000-000000000002',
       (select row_version from identity.facilities
         where id = '10000000-0000-4000-8000-000000000002'),
-      'suspended', 'Schema last reachable administrator facility check',
+      'suspended', 'Schema standalone administrator facility check',
       'schema-admin-facility-command-0003', repeat('3', 64)::character(64)
     );
-    raise exception 'last reachable platform Super Admin facility was suspended';
-  exception when check_violation then null;
-  end;
+  if command_result.lifecycle_status <> 'suspended'
+     or not auth.account_has_platform_permission(
+       '20000000-0000-4000-8000-000000000001', 'platform.facility.manage'
+     ) then
+    raise exception 'hospital suspension incorrectly removed standalone platform authority';
+  end if;
+  perform identity.admin_transition_facility(
+    '10000000-0000-4000-8000-000000000002', command_result.row_version,
+    'verified', 'Schema restore suspended facility after standalone check',
+    'schema-admin-facility-command-0004', repeat('4', 64)::character(64)
+  );
 
   begin
     perform auth.admin_change_platform_role(
