@@ -44,6 +44,36 @@ describe('TurnstileService', () => {
     global.fetch = jest.fn().mockResolvedValue(new Response(JSON.stringify(value), { status }));
   }
 
+  it.each(['patient-login', 'patient-reset-start', 'legacy-recovery', 'patient-enrollment'] as const)(
+    'accepts %s on the production patient app only with matching verified evidence', async (action) => {
+      result({ success: true, hostname: 'app.healthidentitydirectory.com', action });
+      await expect(new TurnstileService().verify({ token: 'patient-proof', action,
+        origin: 'https://app.healthidentitydirectory.com' })).resolves.toBeUndefined();
+      result({ success: true, hostname: 'www.healthidentitydirectory.com', action });
+      await expect(new TurnstileService().verify({ token: 'wrong-host-proof', action,
+        origin: 'https://app.healthidentitydirectory.com' })).rejects.toMatchObject({ code: 'TURNSTILE_HOSTNAME_MISMATCH' });
+    });
+
+  it.each(['book-demo', 'organization-application', 'organization-completion'] as const)(
+    'accepts public action %s on the production root website', async (action) => {
+      result({ success: true, hostname: 'healthidentitydirectory.com', action });
+      await expect(new TurnstileService().verify({ token: 'public-proof', action,
+        origin: 'https://healthidentitydirectory.com' })).resolves.toBeUndefined();
+    });
+
+  it.each([
+    ['https://app.healthidentitydirectory.com', 'admin-login'],
+    ['https://healthidentitydirectory.com', 'patient-login'],
+    ['https://app.healthidentitydirectory.com.attacker.test', 'patient-login'],
+    ['https://app.healthidentitydirectory.com:444', 'patient-login'],
+    ['http://app.healthidentitydirectory.com', 'patient-login'],
+  ] as const)('rejects unexpected production context %s / %s before contacting the verifier', async (origin, action) => {
+    const verifier = jest.fn(); global.fetch = verifier;
+    await expect(new TurnstileService().verify({ token: 'proof', origin, action }))
+      .rejects.toMatchObject({ code: 'TURNSTILE_CONTEXT_MISMATCH' });
+    expect(verifier).not.toHaveBeenCalled();
+  });
+
   it('requires a token', async () => {
     await expect(new TurnstileService().verifyLogin({ ...request, token: '' })).rejects.toMatchObject({ code: 'TURNSTILE_REQUIRED' });
   });

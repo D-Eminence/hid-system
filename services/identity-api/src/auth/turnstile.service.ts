@@ -23,6 +23,10 @@ function deploymentActions(value: Record<string, readonly TurnstileAction[]>): R
 
 const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Readonly<Record<string, readonly TurnstileAction[]>>>> = Object.freeze({
   production: deploymentActions({
+    'app.healthidentitydirectory.com': [
+      'patient-login', 'patient-reset-start', 'legacy-recovery', 'patient-enrollment',
+    ],
+    'healthidentitydirectory.com': ['book-demo', 'organization-application', 'organization-completion'],
     'www.healthidentitydirectory.com': [
       'patient-login', 'staff-login', 'admin-login', 'patient-reset-start',
       'staff-reset', 'admin-reset', 'legacy-recovery', 'book-demo', 'organization-application',
@@ -135,7 +139,7 @@ export class TurnstileService {
     }
     const deployment = this.environment.HID_DEPLOYMENT_ENV;
     const allowedActions = deployment ? ACTIONS_BY_DEPLOYMENT[deployment][parsed.hostname] : undefined;
-    if (parsed.origin !== origin || parsed.protocol !== 'https:' || !allowedActions?.includes(action)) {
+    if (parsed.origin !== origin || parsed.protocol !== 'https:' || parsed.port !== '' || !allowedActions?.includes(action)) {
       throw new DomainProblem(403, 'TURNSTILE_CONTEXT_MISMATCH', 'The security check context is not allowed');
     }
     return { hostname: parsed.hostname, action };
