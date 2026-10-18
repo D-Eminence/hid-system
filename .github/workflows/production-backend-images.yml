@@ -87,6 +87,11 @@ jobs:
           node services/ehr-api/scripts/test-patient-evidence-runtime.mjs
       - name: Build ARM64 image without cloud credentials
         run: node scripts/production-backend-build.mjs build "$COMPONENT"
+      - name: Verify updated gateway configuration and unprivileged runtime
+        if: matrix.component == 'gateway'
+        run: |
+          test "$(docker image inspect "hid-ci/gateway:$GITHUB_SHA" --format '{{.Config.User}}')" = '101'
+          docker run --rm --network none "hid-ci/gateway:$GITHUB_SHA" nginx -t
       - name: Install checksum-verified official Syft and Grype binaries
         run: node scripts/install-production-scanners.mjs
       - name: Generate final image SPDX SBOM

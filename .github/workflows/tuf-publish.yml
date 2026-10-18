@@ -36,7 +36,7 @@ jobs:
           package-manager-cache: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
-          go-version: 1.26.8
+          go-version: 1.26.9
           check-latest: false
           cache: false
       - name: Install locked tooling without cloud authority

@@ -1,14 +1,14 @@
 # syntax=docker/dockerfile:1.7
 
-FROM nginxinc/nginx-unprivileged@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3 AS configuration
+FROM nginxinc/nginx-unprivileged@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01 AS configuration
 COPY gateway/nginx.conf.template /tmp/default.conf.template
 COPY gateway/proxy-headers.conf /tmp/hid-proxy-headers.conf
 
-FROM nginxinc/nginx-unprivileged@sha256:334d92979f15aaecd5dd50af5105e1230e2bb70765d45b1e2f964e7c5eda81c3 AS runtime
-# Patch only the vulnerable regex library from the base's signed Alpine 3.24
-# repository. Keep Nginx and its runtime contract pinned; fail if unavailable.
+FROM nginxinc/nginx-unprivileged@sha256:782bb89768cc87b7f95c18b95baa1af250e5d451f26794f59363540161147c01 AS runtime
+# Pin fixes from the base's signed Alpine 3.24 repository. Keep the existing
+# unprivileged runtime and regex pin; fail if a reviewed package is unavailable.
 USER 0
-RUN apk add --no-cache 'pcre2=10.49-r0'
+RUN apk add --no-cache 'pcre2=10.49-r0' 'libexpat=2.9.0-r0' 'zlib=1.3.2-r1'
 ENV IDENTITY_API_UPSTREAM=http://identity-api:3001 \
     EHR_API_UPSTREAM=http://ehr-api:3002 \
     LAB_API_UPSTREAM=http://lab-api:3003 \

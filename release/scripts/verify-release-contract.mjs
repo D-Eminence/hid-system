@@ -667,6 +667,9 @@ export async function verifyMachineConfiguration(configuration) {
   const expectedLast = [...numbers].sort().at(-1)
   exact(migration.last, expectedLast, 'components config.migration.last')
   for (let number = 1; number <= Number(expectedLast); number += 1) {
+    // Novu never used 0065. Full filenames/checksums below remain authoritative;
+    // do not renumber historical SQL to manufacture a contiguous numeric series.
+    if (number === 65) continue
     if (!numbers.includes(String(number).padStart(4, '0'))) fail('components config.migration.files', 'missing migration prefix')
   }
   const migrationDirectory = resolve(repositoryRoot, 'services', 'ehr-api', 'database', 'migrations')
