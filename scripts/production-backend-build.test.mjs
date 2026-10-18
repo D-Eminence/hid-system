@@ -1,6 +1,6 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {selectComponents,componentConfig,components,assertScan,runtimePolicyPath,assertPublicationContext} from './production-backend-build.mjs';
+import {selectComponents,componentConfig,components,assertScan,runtimePolicyPath,assertPublicationContext,assertAssessmentBinding} from './production-backend-build.mjs';
 
 test('publication accepts only the approved Novu backend branch and exact repository context',()=>{
   const env={GITHUB_REPOSITORY:'D-Eminence/hid-system',GITHUB_REPOSITORY_ID:'1317340803',
@@ -15,21 +15,21 @@ test('production workflow edits rebuild every backend component',()=>{
   assert.deepEqual(selectComponents(['.github/workflows/production-backend-images.yml']),components);
   assert.deepEqual(selectComponents(['.github/workflows/production-backend-rollback.yml']),components);
 });
-test('EHR uses its own exact native inventory assessment without changing migration policy',()=>{
-  assert.equal(runtimePolicyPath('ehr-api'),'security/staging-ehr-runtime-assessment.json');
-  assert.equal(runtimePolicyPath('database-migration'),'security/staging-novu-runtime-assessment.json');
+test('production EHR and migration use the independent production inventory policy',()=>{
+  assert.equal(runtimePolicyPath('ehr-api'),'security/production-runtime-assessment.json');
+  assert.equal(runtimePolicyPath('database-migration'),'security/production-runtime-assessment.json');
 });
-test('Identity has its own assessed image policy; old Novu evidence remains bound to its original policy',()=>{
-  assert.equal(runtimePolicyPath('identity-api'),'security/staging-identity-runtime-assessment.json');
-  assert.equal(runtimePolicyPath('notification-worker'),'security/staging-novu-runtime-assessment.json');
-  assert.equal(runtimePolicyPath('database-migration'),'security/staging-novu-runtime-assessment.json');
+test('production Identity and workers do not inherit staging assessment policies',()=>{
+  assert.equal(runtimePolicyPath('identity-api'),'security/production-runtime-assessment.json');
+  assert.equal(runtimePolicyPath('notification-worker'),'security/production-runtime-assessment.json');
+  assert.equal(runtimePolicyPath('database-migration'),'security/production-runtime-assessment.json');
 });
 test('frontend-only changes do not build backend images',()=>assert.deepEqual(selectComponents(['apps/web/src/App.tsx']),[]));
 test('Novu worker changes select only its image',()=>assert.deepEqual(selectComponents(['services/notification-worker/src/worker.ts']),['notification-worker']));
 test('scoped Novu dispatch builds only worker and migration',()=>assert.deepEqual(selectComponents([],'novu-update'),['notification-worker','database-migration']));
 test('scoped admin correction builds only Identity and migration',()=>assert.deepEqual(selectComponents([],'admin-update'),['identity-api','database-migration']));
 test('patient chat release builds exactly its three APIs and compatible migration runner',()=>assert.deepEqual(selectComponents([],'patient-chat-update'),['identity-api','ehr-api','lab-api','database-migration']));
-test('Lab assessment is separate and remains bound to its reviewed component inventory',()=>assert.equal(runtimePolicyPath('lab-api'),'security/staging-lab-runtime-assessment.json'));
+test('production policy edits rebuild every component for fresh native verification',()=>assert.deepEqual(selectComponents(['security/production-runtime-assessment.json']),components));
 test('database changes also rebuild the migration runner',()=>assert.deepEqual(selectComponents(['services/ehr-api/database/migrations/0063_example.sql']),['ehr-api','database-migration']));
 test('shared client and CI changes select the complete backend matrix',()=>assert.deepEqual(selectComponents(['packages/api-client/src/index.ts']),components));
 test('reject unknown/path-injection components',()=>assert.throws(()=>componentConfig('../production')));
@@ -58,4 +58,13 @@ test('only verified not-affected VEX matches can pass; unknowns and changed pack
   assert.throws(()=>assertScan(report,{...assessment,expires_at:'invalid'}, {...policy,expires_at:'invalid'}));
   assert.throws(()=>assertScan(report,{...assessment,glibc_affected_imports:1},policy));
   assert.throws(()=>assertScan({...report,matches:[m]},assessment,policy));
+});
+
+test('production applicability cannot transfer between images, sources, components or raw reports',()=>{
+  const source='a'.repeat(40),image='sha256:'+'b'.repeat(64),raw='c'.repeat(64);
+  const assessment={assessment_scope:'production',component:'ehr-api',source_commit:source,image_id:image,raw_scan_sha256:raw};
+  assertAssessmentBinding(assessment,'ehr-api',source,image,raw);
+  for(const change of [{assessment_scope:'staging'},{component:'identity-api'},
+    {source_commit:'d'.repeat(40)},{image_id:'sha256:'+'e'.repeat(64)},{raw_scan_sha256:'f'.repeat(64)}])
+    assert.throws(()=>assertAssessmentBinding({...assessment,...change},'ehr-api',source,image,raw));
 });

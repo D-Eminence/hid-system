@@ -11,8 +11,7 @@ export function assertPublicationContext(e) {
     ||e.GITHUB_REPOSITORY_OWNER_ID!=='182018869'||!['push','workflow_dispatch'].includes(e.GITHUB_EVENT_NAME)
     ||e.GITHUB_REF!=='refs/heads/staging-novu-ci-20261005') throw Error('Publication context rejected');
 }
-export const runtimePolicyPath = c => c === 'identity-api'
-  ? 'security/staging-identity-runtime-assessment.json' : c === 'ehr-api' ? 'security/staging-ehr-runtime-assessment.json' : c === 'lab-api' ? 'security/staging-lab-runtime-assessment.json' : 'security/staging-novu-runtime-assessment.json';
+export const runtimePolicyPath = () => 'security/production-runtime-assessment.json';
 const run = (command,args,options={}) => (execFileSync(command,args,{encoding:'utf8',stdio:['ignore','pipe','inherit'],...options})??'').trim();
 export function selectComponents(paths, requested='changed') {
   if(requested==='patient-chat-update') return ['identity-api','ehr-api','lab-api','database-migration'];
@@ -22,6 +21,7 @@ export function selectComponents(paths, requested='changed') {
   if(requested!=='changed') { if(!components.includes(requested)) throw Error('Unknown backend component'); return [requested]; }
   const result=new Set();
   for(const p of paths){
+    if(p==='security/production-runtime-assessment.json') return components;
     if(p==='security/staging-novu-runtime-assessment.json'){
       result.add('notification-worker');result.add('database-migration');continue;
     }
@@ -58,6 +58,11 @@ export function assertScan(report, assessment=null, policy=null) {
   }
 }
 const hashFile=p=>createHash('sha256').update(readFileSync(p)).digest('hex');
+export function assertAssessmentBinding(assessment, component, source, imageId, rawHash) {
+  if(assessment.assessment_scope!=='production'||assessment.component!==component
+    ||assessment.source_commit!==source||assessment.image_id!==imageId||assessment.raw_scan_sha256!==rawHash)
+    throw Error('Production assessment image/source/raw scan binding differs');
+}
 function context(){
   const e=process.env, sha=run('git',['rev-parse','HEAD']);
   if(!/^[a-f0-9]{40}$/.test(sha) || e.GITHUB_SHA && e.GITHUB_SHA!==sha) throw Error('Source mismatch');
@@ -114,6 +119,7 @@ function main(){
   const assessment=existsSync(`${directory}/runtime-assessment.json`)?JSON.parse(readFileSync(`${directory}/runtime-assessment.json`)):null;
   const policy=assessment?JSON.parse(readFileSync(runtimePolicyPath(c))):null;
   if(assessment&&(assessment.component!==c||assessment.policy_sha256!==hashFile(runtimePolicyPath(c)))) throw Error('Runtime assessment policy binding changed');
+  if(assessment) assertAssessmentBinding(assessment,c,source.source_commit,assessment.image_id,hashFile(`${directory}/grype.raw.json`));
   assertScan(scan,assessment,policy);
   if(mode==='pack') {
     const image=JSON.parse(run('docker',['image','inspect',local]))[0];
@@ -146,7 +152,8 @@ function main(){
   const image=JSON.parse(run('docker',['image','inspect',local]))[0];
   if(image.Id!==receipt.image_id||image.Architecture!=='arm64'||image.Config.Labels?.['org.opencontainers.image.revision']!==source.source_commit) throw Error('Loaded image mismatch');
   if(assessment){
-    run('python3',['scripts/assess-staging-runtime.py',c,local,`${directory}/grype.raw.json`,`${directory}/publish-verification`],{stdio:'inherit'});
+    assertAssessmentBinding(assessment,c,source.source_commit,image.Id,hashFile(`${directory}/grype.raw.json`));
+    run('python3',['scripts/assess-production-runtime.py',c,local,`${directory}/grype.raw.json`,`${directory}/publish-verification`],{stdio:'inherit'});
     const verified=JSON.parse(readFileSync(`${directory}/publish-verification/runtime-assessment.json`));
     for(const key of ['image_id','policy_sha256','native_inventory_sha256'])
       if(verified[key]!==assessment[key]) throw Error('Loaded native runtime assessment differs');

@@ -5,7 +5,7 @@ a = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(a)
 
 class AssessmentGuards(unittest.TestCase):
-    def exercise(self, mutate=lambda policy, scan, metadata: None, changed_binary=False, affected_import=False):
+    def exercise(self, mutate=lambda policy, scan, metadata: None, changed_binary=False, affected_import=False, production=False):
         with tempfile.TemporaryDirectory() as directory:
             root=pathlib.Path(directory); (root/'security').mkdir()
             binary=b'\x7fELF'+b'fixture native binary'
@@ -17,7 +17,8 @@ class AssessmentGuards(unittest.TestCase):
                               'artifact':{'name':'libc6','version':'exact','purl':'pkg:deb/libc6@exact'}}]}
             metadata={'Id':'sha256:'+'a'*64,'Architecture':'arm64','Os':'linux'}
             mutate(policy,scan,metadata)
-            (root/'security/staging-novu-runtime-assessment.json').write_text(json.dumps(policy))
+            selected=root/('security/production-runtime-assessment.json' if production else 'security/staging-novu-runtime-assessment.json')
+            selected.write_text(json.dumps(policy))
             def docker(*args):
                 return json.dumps([metadata]) if args[1:3]==('image','inspect') else 'fixture-container'
             def export(args,**kwargs):
@@ -28,12 +29,18 @@ class AssessmentGuards(unittest.TestCase):
                         archive.addfile(member,io.BytesIO(payload))
             with mock.patch.object(a,'ROOT',root),mock.patch.object(a,'run',docker),mock.patch.object(a.subprocess,'run',export),\
                     mock.patch.object(a,'elf_imports',return_value=['strfmon'] if affected_import else []):
-                a.assess('notification-worker','fixture-image',scan,root/'evidence')
+                a.assess('notification-worker','fixture-image',scan,root/'evidence',
+                         policy_file=selected if production else None,
+                         author='HID production assessment' if production else 'HID staging runtime assessment')
             receipt=json.loads((root/'evidence/runtime-assessment.json').read_text())
             self.assertEqual(receipt['image_id'],metadata['Id'])
             self.assertEqual(receipt['raw_high_matches'],1)
+            self.assertEqual(receipt['policy_sha256'],hashlib.sha256(selected.read_bytes()).hexdigest())
+            self.assertEqual(json.loads((root/'evidence/runtime.vex.json').read_text())['author'],
+                             'HID production assessment' if production else 'HID staging runtime assessment')
 
     def test_exact_reviewed_image_passes(self): self.exercise()
+    def test_production_policy_override_is_exact_and_does_not_fall_back_to_staging(self): self.exercise(production=True)
     def test_identity_policy_is_separate(self):
         self.assertEqual(a.policy_path('identity-api'), a.ROOT/'security/staging-identity-runtime-assessment.json')
         self.assertEqual(a.policy_path('notification-worker'), a.ROOT/'security/staging-novu-runtime-assessment.json')

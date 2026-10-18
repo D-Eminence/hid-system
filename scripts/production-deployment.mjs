@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
-import { assertScan, runtimePolicyPath } from './production-backend-build.mjs';
+import { assertScan, runtimePolicyPath, assertAssessmentBinding } from './production-backend-build.mjs';
 
 const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
 export function validatePublication(directory) {
@@ -13,6 +13,8 @@ export function validatePublication(directory) {
     ? JSON.parse(readFileSync(path.join(directory, 'runtime-assessment.json'))) : null;
   const policy = assessment ? JSON.parse(readFileSync(runtimePolicyPath(receipt.component))) : null;
   assertScan(scan, assessment, policy);
+  if (assessment) assertAssessmentBinding(assessment,receipt.component,receipt.source_commit,
+    receipt.image_id,hash(path.join(directory,'grype.raw.json')));
   if (assessment && (receipt.assessment_sha256 !== hash(path.join(directory, 'runtime-assessment.json'))
       || assessment.policy_sha256 !== hash(runtimePolicyPath(receipt.component)))) {
     throw Error('ASSESSMENT_BINDING_DIFFERS');

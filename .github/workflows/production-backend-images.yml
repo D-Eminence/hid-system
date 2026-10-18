@@ -1,10 +1,10 @@
 name: Production backend candidates
 on:
   pull_request:
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/staging-*-runtime-assessment.json', '.github/workflows/production-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', '.github/workflows/production-backend-images.yml']
   push:
     branches: [staging-novu-ci-20261005]
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/staging-*-runtime-assessment.json', '.github/workflows/production-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'config/production-schema-compatibility.json', 'security/production-runtime-assessment.json', '.github/workflows/production-backend-images.yml']
   workflow_dispatch:
     inputs:
       component:
@@ -33,6 +33,7 @@ jobs:
         run: |
           node --test scripts/production-backend-build.test.mjs
           python3 -m unittest discover -s scripts -p 'test_production*.py'
+          python3 -m unittest discover -s scripts -p 'assess*runtime_test.py'
           python3 scripts/production_release_compatibility.py --repository . --baseline e078bd53a1601c1d2e533108169a96ec2e7dbd0f --candidate "$GITHUB_SHA" --output production-source-admission.json
       - id: matrix
         env:
@@ -99,7 +100,7 @@ jobs:
       - id: distro
         name: Read OS distribution from the exact image
         run: node scripts/production-backend-build.mjs distro "$COMPONENT"
-      - name: Scan exact runtime; no inherited suppression policy
+      - name: Scan exact runtime and verify production-specific applicability
         env:
           IMAGE_DISTRO: ${{ steps.distro.outputs.distro }}
         run: |
@@ -108,7 +109,12 @@ jobs:
           scan_status=$?
           set -e
           cp "$BUILD_EVIDENCE_DIR/grype.raw.json" "$BUILD_EVIDENCE_DIR/grype.json"
-          exit "$scan_status"
+          if [ "$scan_status" -eq 2 ] && [ "$COMPONENT" != 'gateway' ]; then
+            python3 scripts/assess-production-runtime.py "$COMPONENT" "hid-ci/$COMPONENT:$GITHUB_SHA" "$BUILD_EVIDENCE_DIR/grype.raw.json" "$BUILD_EVIDENCE_DIR"
+            grype "sbom:$BUILD_EVIDENCE_DIR/sbom.spdx.json" --distro "$IMAGE_DISTRO" --vex "$BUILD_EVIDENCE_DIR/runtime.vex.json" --output json --fail-on high > "$BUILD_EVIDENCE_DIR/grype.json"
+          elif [ "$scan_status" -ne 0 ]; then
+            exit "$scan_status"
+          fi
       - name: Report scan failures and retain diagnostics
         if: failure()
         run: node scripts/production-backend-build.mjs findings "$COMPONENT"
@@ -123,6 +129,7 @@ jobs:
             build-evidence/${{ matrix.component }}/grype.raw.json
             build-evidence/${{ matrix.component }}/runtime-assessment.json
             build-evidence/${{ matrix.component }}/runtime.vex.json
+            build-evidence/${{ matrix.component }}/native-inventory.json
           retention-days: 7
           if-no-files-found: warn
       - name: Bind image archive to source, scan and SBOM

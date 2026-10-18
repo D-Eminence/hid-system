@@ -40,8 +40,9 @@ def elf_imports(data):
                 result.append(names[name:names.find(b'\0', name)].decode('utf8'))
     return result
 
-def assess(component, image, scan, directory):
-    policy = json.loads(policy_path(component).read_text())
+def assess(component, image, scan, directory, *, policy_file=None, author='HID staging runtime assessment'):
+    selected_policy = policy_file or policy_path(component)
+    policy = json.loads(selected_policy.read_text())
     if datetime.datetime.now(datetime.timezone.utc) >= datetime.datetime.fromisoformat(policy['expires_at']):
         raise RuntimeError('Runtime assessment expired; re-assess before publication')
     if component not in policy['elf_inventory']:
@@ -67,6 +68,10 @@ def assess(component, image, scan, directory):
                     data = prefix + stream.read()
                     inventory[member.name] = hashlib.sha256(data).hexdigest()
                     imports.extend(elf_imports(data))
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / 'native-inventory.json').write_text(json.dumps({
+        'component': component, 'image_id': metadata['Id'], 'platform': 'linux/arm64',
+        'elf_inventory': inventory}, sort_keys=True, indent=2) + '\n')
     if inventory != policy['elf_inventory'][component]:
         raise RuntimeError('Native binary inventory changed; new assessment required')
     forbidden = ('strfmon', 'strfmon_l', '__strfmon_l', 'ns_printrr', 'ns_printrrf', 'fp_nquery')
@@ -93,14 +98,14 @@ def assess(component, image, scan, directory):
     timestamp = datetime.datetime.now(datetime.timezone.utc).isoformat()
     output = {'schema': 'hid.image-runtime-assessment/v1', 'component': component,
               'image_id': metadata['Id'], 'assessed_at': timestamp, 'expires_at': policy['expires_at'],
-              'policy_sha256': hashlib.sha256(policy_path(component).read_bytes()).hexdigest(),
+              'policy_sha256': hashlib.sha256(selected_policy.read_bytes()).hexdigest(),
               'native_inventory_sha256': hashlib.sha256(json.dumps(inventory, sort_keys=True).encode()).hexdigest(),
               'native_binary_count': len(inventory), 'glibc_affected_imports': 0,
               'raw_high_matches': len(reviewed), 'reviewed_not_affected': reviewed,
               'scope': 'Exact image only; original findings retained; no risk-acceptance waiver'}
     vex = {'@context': 'https://openvex.dev/ns/v0.2.0',
            '@id': 'https://healthidentitydirectory.com/security/assessments/' + metadata['Id'].split(':')[1],
-           'author': 'HID staging runtime assessment', 'timestamp': timestamp, 'version': 1,
+           'author': author, 'timestamp': timestamp, 'version': 1,
            'statements': statements}
     directory.mkdir(parents=True, exist_ok=True)
     (directory / 'runtime-assessment.json').write_text(json.dumps(output, indent=2) + '\n')
