@@ -2,7 +2,14 @@
 *.tfstate
 *.tfstate.*
 *.tfvars
+!/infra/terraform/environments/development.tfvars
+!/infra/terraform/environments/staging.tfvars
+!/infra/terraform/environments/production.tfvars
 *.tfplan
 crash.log
 tmp/
-
+hid-application/
+integration/
+/infra/terraform/migration-compatibility/
+**/__pycache__/
+*.pyc

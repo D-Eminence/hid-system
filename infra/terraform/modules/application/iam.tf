@@ -1,4 +1,15 @@
+# EHR document read/write permissions
 data "aws_iam_policy_document" "ehr_documents" {
+  statement {
+    sid       = "PatientAttachmentTextExtraction"
+    actions   = ["textract:StartDocumentTextDetection", "textract:GetDocumentTextDetection"]
+    resources = ["*"]
+    condition {
+      test     = "StringEquals"
+      variable = "aws:RequestedRegion"
+      values   = [var.aws_region]
+    }
+  }
   statement {
     sid       = "DocumentBucketMetadata"
     actions   = ["s3:ListBucket", "s3:GetBucketVersioning"]
@@ -28,6 +39,7 @@ resource "aws_iam_role_policy" "ehr_documents" {
   policy = data.aws_iam_policy_document.ehr_documents.json
 }
 
+# OCR document read and Textract permissions
 data "aws_iam_policy_document" "ocr_documents" {
   statement {
     actions   = ["s3:ListBucket"]
@@ -64,32 +76,77 @@ resource "aws_iam_role_policy" "ocr_documents" {
   policy = data.aws_iam_policy_document.ocr_documents.json
 }
 
+# Service-specific AWS API permissions
 resource "aws_iam_role_policy" "event_dispatcher" {
   count = var.enable_runtime ? 1 : 0
   name  = "event-bus"
   role  = aws_iam_role.task["event-dispatcher"].id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{
-    Effect = "Allow", Action = ["events:PutEvents"], Resource = var.event_bus_arn
-  }] })
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["events:DescribeEventBus", "events:PutEvents"]
+      Resource = var.event_bus_arn
+    }]
+  })
 }
 
 resource "aws_iam_role_policy" "notification_api" {
   count = var.enable_runtime ? 1 : 0
   name  = "ses-email"
   role  = aws_iam_role.task["notification-api"].id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{
-    Effect    = "Allow", Action = ["ses:SendEmail"], Resource = "*"
-    Condition = { StringEquals = { "aws:RequestedRegion" = var.aws_region } }
-  }] })
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["ses:SendEmail"]
+      Resource = "*"
+      Condition = {
+        StringEquals = {
+          "aws:RequestedRegion" = var.aws_region
+        }
+      }
+    }]
+  })
 }
 
 resource "aws_iam_role_policy" "notification_worker" {
   count = var.enable_runtime ? 1 : 0
   name  = "notification-queue"
   role  = aws_iam_role.task["notification-worker"].id
-  policy = jsonencode({ Version = "2012-10-17", Statement = [{
-    Effect   = "Allow"
-    Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:ChangeMessageVisibility", "sqs:GetQueueAttributes", "sqs:GetQueueUrl"]
-    Resource = var.notification_queue_arn
-  }] })
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:ChangeMessageVisibility",
+          "sqs:GetQueueAttributes",
+          "sqs:GetQueueUrl",
+        ]
+        Resource = var.notification_queue_arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt"]
+        Resource = var.notification_queue_kms_key_arn
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy" "support_lex" {
+  count = var.enable_runtime && var.enable_support_bot ? 1 : 0
+  name  = "support-lex"
+  role  = aws_iam_role.task["support-api"].id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect   = "Allow"
+      Action   = ["lex:RecognizeText"]
+      Resource = var.support_bot_alias_arn
+    }]
+  })
 }

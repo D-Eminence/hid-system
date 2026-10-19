@@ -2,6 +2,8 @@ aws_region          = "eu-west-1"
 expected_account_id = "123456789012"
 environment         = "staging"
 staging_mode        = "sleep"
+# Use one during connected staging acceptance; zero keeps economy workers idle.
+staging_worker_min_capacity = 0
 
 availability_zones       = ["eu-west-1a", "eu-west-1b"]
 public_subnet_cidrs      = ["10.30.0.0/24", "10.30.1.0/24"]
@@ -13,5 +15,12 @@ enable_runtime     = false
 enable_ingress     = false
 enable_backup_plan = false
 
+# Account 659225405023 already has the staging secret containers. Set this to
+# true there so Terraform references them without changing their lifecycle.
+use_existing_secrets = true
+
+# This is an initial foundation example. After RDS is created, keep
+# enable_database = true when moving to sleep; setting it false would plan a
+# database destroy, which the data module prevents.
 # Use economy or fidelity only after reviewing the cost and capacity plan.
 # Staging creates its KMS backed workload identity issuer when runtime is enabled.

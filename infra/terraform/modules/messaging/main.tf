@@ -1,3 +1,4 @@
+# Notification delivery queues
 resource "aws_sqs_queue" "dead_letter" {
   name                      = "${var.name_prefix}-notification-dead-letter"
   kms_master_key_id         = var.queue_kms_key_arn
@@ -19,6 +20,7 @@ resource "aws_cloudwatch_event_bus" "platform" {
   name = var.name_prefix
 }
 
+# Route ordinary domain events to the notification worker queue.
 resource "aws_cloudwatch_event_rule" "ordinary_notifications" {
   name           = "${var.name_prefix}-ordinary-notifications"
   description    = "Minimum necessary ordinary events; authentication OTP never enters this path"
@@ -78,6 +80,8 @@ data "aws_iam_policy_document" "eventbridge_queue" {
   }
 }
 
+# Queue resource policies restrict delivery to the exact EventBridge rule and
+# require encrypted transport.
 resource "aws_sqs_queue_policy" "eventbridge" {
   queue_url = aws_sqs_queue.notification.id
   policy    = data.aws_iam_policy_document.eventbridge_queue.json

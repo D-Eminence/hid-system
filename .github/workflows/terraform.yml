@@ -15,14 +15,24 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   validate:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "22"
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_wrapper: false
+      - run: python -m unittest discover -s scripts -p 'test_deployment*.py'
+        working-directory: infra/terraform
+      - run: node --test tests/workload-issuer.test.mjs
+        working-directory: infra/terraform
       - run: terraform fmt -check -recursive
         working-directory: infra/terraform
       - run: terraform init -backend=false
@@ -37,13 +47,20 @@ jobs:
     needs: validate
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
     defaults:
       run:
         working-directory: infra/terraform
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
-      - uses: aws-actions/configure-aws-credentials@v4
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
+        with:
+          terraform_wrapper: false
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
         with:
           role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
@@ -60,4 +77,15 @@ jobs:
           TFVARS: ${{ secrets.TFVARS }}
         run: printf '%s' "$TFVARS" > "environments/${{ inputs.environment }}.tfvars"
       - name: Plan
-        run: terraform plan -input=false -var-file="environments/${{ inputs.environment }}.tfvars" -out=deployment.tfplan
+        env:
+          ENVIRONMENT: ${{ inputs.environment }}
+          RELEASE_MANAGED: ${{ vars.STAGING_RELEASE_MANAGED }}
+          RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
+          RELEASE_KMS_KEY_ARN: ${{ vars.RELEASE_KMS_KEY_ARN }}
+          RELEASE_LEASE_TABLE: hid-staging-deployment-leases
+        run: |
+          if [ "$ENVIRONMENT" = staging ] && [ "$RELEASE_MANAGED" = true ]; then
+            python scripts/release_infrastructure.py plan --var-file "environments/staging.tfvars" --manifest release-review.json
+          else
+            terraform plan -input=false -var-file="environments/$ENVIRONMENT.tfvars" -out=deployment.tfplan
+          fi

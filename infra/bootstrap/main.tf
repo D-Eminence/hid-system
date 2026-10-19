@@ -14,6 +14,12 @@ terraform {
 provider "aws" {
   region              = var.aws_region
   allowed_account_ids = [var.expected_account_id]
+
+  default_tags {
+    tags = {
+      aws-apn-id = "pc:elrusap42k3opao8syw9gd5s1"
+    }
+  }
 }
 
 variable "aws_region" {

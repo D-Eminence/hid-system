@@ -1,17 +1,26 @@
 locals {
   cash_notifications = {
-    actual_50   = ["ACTUAL", 50], actual_80 = ["ACTUAL", 80], actual_100 = ["ACTUAL", 100]
-    forecast_80 = ["FORECASTED", 80], forecast_100 = ["FORECASTED", 100]
+    actual_50    = ["ACTUAL", 50]
+    actual_80    = ["ACTUAL", 80]
+    actual_100   = ["ACTUAL", 100]
+    forecast_80  = ["FORECASTED", 80]
+    forecast_100 = ["FORECASTED", 100]
   }
   gross_actual_notifications = {
-    actual_50 = ["ACTUAL", 50], actual_75 = ["ACTUAL", 75], actual_90 = ["ACTUAL", 90], actual_100 = ["ACTUAL", 100]
+    actual_50  = ["ACTUAL", 50]
+    actual_75  = ["ACTUAL", 75]
+    actual_90  = ["ACTUAL", 90]
+    actual_100 = ["ACTUAL", 100]
   }
   gross_forecast_notifications = {
-    forecast_80 = ["FORECASTED", 80], forecast_100 = ["FORECASTED", 100]
+    forecast_80  = ["FORECASTED", 80]
+    forecast_100 = ["FORECASTED", 100]
   }
   sns_subscribers = var.notification_sns_arn == "" ? [] : [var.notification_sns_arn]
 }
 
+# Monthly budget views are separated because AWS limits the number of
+# notifications that can be attached to one budget.
 resource "aws_budgets_budget" "cash" {
   name         = "hid-monthly-cash-exposure"
   budget_type  = "COST"
@@ -84,6 +93,7 @@ resource "aws_budgets_budget" "gross_forecast" {
   }
 }
 
+# Cost anomaly detection covers both AWS services and HID-tagged resources.
 resource "aws_ce_anomaly_monitor" "services" {
   name              = "hid-account-service-cost-anomalies"
   monitor_type      = "DIMENSIONAL"

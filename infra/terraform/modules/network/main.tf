@@ -1,7 +1,11 @@
 locals {
-  az_map = { for index, az in var.availability_zones : tostring(index) => az }
+  az_map = {
+    for index, availability_zone in var.availability_zones :
+    tostring(index) => availability_zone
+  }
 }
 
+# VPC and subnet tiers
 resource "aws_vpc" "main" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
@@ -50,6 +54,7 @@ resource "aws_route_table" "public" {
   tags   = { Name = "${var.name_prefix}-edge" }
 }
 
+# Public internet routing
 resource "aws_route" "public" {
   route_table_id         = aws_route_table.public.id
   destination_cidr_block = "0.0.0.0/0"
@@ -70,6 +75,7 @@ resource "aws_eip" "nat" {
   depends_on = [aws_internet_gateway.main]
 }
 
+# Private application egress through NAT
 resource "aws_nat_gateway" "main" {
   count = var.nat_gateway_count
 
@@ -109,6 +115,7 @@ resource "aws_route_table_association" "database" {
   route_table_id = aws_route_table.database.id
 }
 
+# Private access to AWS services
 resource "aws_security_group" "endpoints" {
   name_prefix = "${var.name_prefix}-endpoints-"
   description = "Private AWS service endpoints"

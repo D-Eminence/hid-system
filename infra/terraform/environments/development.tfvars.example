@@ -12,6 +12,6 @@ enable_runtime     = false
 enable_ingress     = false
 enable_backup_plan = false
 
-# Add all eleven digest-qualified image URIs, the migration image, RDS CA
+# Add all eleven base digest-qualified image URIs (and support-api if enabled), the migration image, RDS CA
 # bundle, workload identity settings, certificates, and the origin secret
 # before enabling the runtime and ingress gates.

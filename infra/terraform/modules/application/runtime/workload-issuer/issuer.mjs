@@ -15,12 +15,13 @@ const json = (statusCode, payload, publicCache = false) => ({
 const encoded = value => Buffer.from(JSON.stringify(value)).toString('base64url');
 
 export function issuerConfiguration(environment) {
-  if (environment.HID_DEPLOYMENT_ENV !== 'staging') throw new Error('Workload issuer is staging only');
+  const deployment = environment.HID_DEPLOYMENT_ENV;
+  if (!['staging', 'production'].includes(deployment)) throw new Error('Invalid workload issuer environment');
   const issuer = environment.WORKLOAD_ISSUER_URL;
   const parsed = new URL(issuer);
   if (parsed.protocol !== 'https:' || parsed.username || parsed.password || parsed.port || parsed.search || parsed.hash
-    || parsed.pathname !== '/staging' || !/^[a-z0-9]+\.execute-api\.[a-z0-9-]+\.amazonaws\.com$/.test(parsed.hostname)) {
-    throw new Error('Invalid staging issuer URL');
+    || parsed.pathname !== `/${deployment}` || !/^[a-z0-9]+\.execute-api\.[a-z0-9-]+\.amazonaws\.com$/.test(parsed.hostname)) {
+    throw new Error('Invalid workload issuer URL');
   }
   const apiId = environment.WORKLOAD_API_ID;
   if (!apiId || parsed.hostname.split('.')[0] !== apiId) throw new Error('Issuer API binding is missing');
@@ -34,7 +35,7 @@ export function issuerConfiguration(environment) {
   const rules = policy.map(rule => {
     const role = rolePattern.exec(rule?.role_arn ?? rule?.roleArn ?? '');
     if (!role || role[2] !== key[2] || typeof rule.subject !== 'string'
-      || !/^hid:staging:[a-z-]+$/.test(rule.subject) || !Array.isArray(rule.audiences)
+      || !new RegExp(`^hid:${deployment}:[a-z-]+$`).test(rule.subject) || !Array.isArray(rule.audiences)
       || rule.audiences.length < 1 || rule.audiences.length > 4 || rule.audiences.some(audience => !audiences.has(audience))) {
       throw new Error('Invalid workload caller policy');
     }
@@ -45,7 +46,7 @@ export function issuerConfiguration(environment) {
     return Object.freeze({ roleArn: role[0], principal, subject: rule.subject, audiences: Object.freeze([...new Set(rule.audiences)]) });
   });
   return Object.freeze({
-    issuer, apiId, hostname: parsed.hostname, accountId: key[2], keyId,
+    deployment, issuer, apiId, hostname: parsed.hostname, accountId: key[2], keyId,
     kid: key[3], ttlSeconds: 300, rules: Object.freeze(rules),
   });
 }
@@ -90,7 +91,7 @@ export function createIssuer(configuration, dependencies) {
   };
   return async event => {
     const context = event?.requestContext;
-    if (context?.apiId !== configuration.apiId || context?.stage !== 'staging'
+    if (context?.apiId !== configuration.apiId || context?.stage !== configuration.deployment
       || context?.accountId !== configuration.accountId || context?.domainName !== configuration.hostname
       || context.httpMethod !== event?.httpMethod || context.resourcePath !== event?.resource) {
       return json(403, { code: 'WORKLOAD_CALLER_DENIED' });

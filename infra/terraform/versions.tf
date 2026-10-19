@@ -1,9 +1,13 @@
 terraform {
-  required_version = ">= 1.6.0"
+  required_version = ">= 1.7.0"
 
   backend "s3" {}
 
   required_providers {
+    external = {
+      source  = "hashicorp/external"
+      version = "~> 2.3"
+    }
     aws = {
       source  = "hashicorp/aws"
       version = "~> 6.0"
@@ -11,6 +15,10 @@ terraform {
     archive = {
       source  = "hashicorp/archive"
       version = "~> 2.7"
+    }
+    awscc = {
+      source  = "hashicorp/awscc"
+      version = "~> 1.100"
     }
   }
 }
@@ -22,11 +30,16 @@ provider "aws" {
   default_tags {
     tags = {
       Project            = "HID"
-      Environment        = var.environment
+      Environment        = local.resource_environment
       ManagedBy          = "Terraform"
       Owner              = "HID"
       CostCenter         = "HID"
       DataClassification = "healthcare-restricted"
+      aws-apn-id         = local.partner_apn_id
     }
   }
+}
+
+provider "awscc" {
+  region = var.aws_region
 }

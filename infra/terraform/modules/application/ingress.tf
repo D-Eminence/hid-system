@@ -1,3 +1,4 @@
+# Private TLS routing between owner services
 resource "aws_route53_zone" "internal" {
   count = var.enable_ingress ? 1 : 0
   name  = local.private_zone_name
@@ -12,7 +13,6 @@ resource "aws_security_group" "internal_lb" {
   name_prefix = "${var.name_prefix}-internal-lb-"
   description = "Internal HTTPS boundary for service-to-service calls"
   vpc_id      = var.vpc_id
-  egress      = []
 }
 
 resource "aws_lb" "internal" {
@@ -22,7 +22,7 @@ resource "aws_lb" "internal" {
   load_balancer_type         = "application"
   security_groups            = [aws_security_group.internal_lb[0].id]
   subnets                    = var.application_subnet_ids
-  enable_deletion_protection = var.environment == "production"
+  enable_deletion_protection = local.runtime_environment == "production"
   drop_invalid_header_fields = true
 }
 
@@ -39,8 +39,11 @@ resource "aws_lb_listener" "internal_https" {
 
     fixed_response {
       content_type = "application/json"
-      message_body = jsonencode({ title = "Not found", status = 404 })
-      status_code  = "404"
+      message_body = jsonencode({
+        title  = "Not found"
+        status = 404
+      })
+      status_code = "404"
     }
   }
 }
@@ -72,8 +75,20 @@ resource "aws_lb_listener_rule" "internal" {
   priority     = 10 + index(sort(keys(local.internal_workloads)), each.key)
 
   action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.internal[each.key].arn
+    type = "forward"
+    forward {
+      target_group {
+        arn    = aws_lb_target_group.internal[each.key].arn
+        weight = local.production_ecs_active ? 0 : 100
+      }
+      dynamic "target_group" {
+        for_each = local.production_ecs_enabled ? [1] : []
+        content {
+          arn    = aws_lb_target_group.production_internal[each.key].arn
+          weight = local.production_ecs_active ? 100 : 0
+        }
+      }
+    }
   }
 
   condition {
@@ -118,7 +133,7 @@ resource "aws_vpc_security_group_egress_rule" "internal_lb_to_workload" {
 }
 
 resource "aws_vpc_security_group_egress_rule" "workload_to_internal_lb" {
-  for_each = var.enable_ingress ? { for name, workload in local.runtime_workloads : name => workload if !contains(["gateway", "ocr-worker", "event-dispatcher"], name) } : {}
+  for_each = var.enable_ingress ? local.internal_lb_callers : {}
 
   security_group_id            = aws_security_group.workload[each.key].id
   referenced_security_group_id = aws_security_group.internal_lb[0].id
@@ -128,7 +143,7 @@ resource "aws_vpc_security_group_egress_rule" "workload_to_internal_lb" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "internal_lb_from_workload" {
-  for_each = var.enable_ingress ? { for name, workload in local.runtime_workloads : name => workload if !contains(["gateway", "ocr-worker", "event-dispatcher"], name) } : {}
+  for_each = var.enable_ingress ? local.internal_lb_callers : {}
 
   security_group_id            = aws_security_group.internal_lb[0].id
   referenced_security_group_id = aws_security_group.workload[each.key].id
@@ -137,12 +152,12 @@ resource "aws_vpc_security_group_ingress_rule" "internal_lb_from_workload" {
   to_port                      = 443
 }
 
+# Public API origin used by the Cloudflare Worker
 resource "aws_security_group" "public_lb" {
   count       = var.enable_ingress ? 1 : 0
   name_prefix = "${var.name_prefix}-public-lb-"
   description = "Cloudflare API origin over HTTPS; WAF authenticates the origin header"
   vpc_id      = var.vpc_id
-  egress      = []
 }
 
 resource "aws_vpc_security_group_ingress_rule" "public_https_ipv4" {
@@ -182,14 +197,15 @@ resource "aws_vpc_security_group_ingress_rule" "gateway_from_public_lb" {
 }
 
 resource "aws_lb" "public" {
-  count                      = var.enable_ingress ? 1 : 0
-  name                       = substr("${var.name_prefix}-public", 0, 32)
-  internal                   = false
-  load_balancer_type         = "application"
-  security_groups            = [aws_security_group.public_lb[0].id]
-  subnets                    = var.public_subnet_ids
-  ip_address_type            = "dualstack"
-  enable_deletion_protection = var.environment == "production"
+  count              = var.enable_ingress ? 1 : 0
+  name               = substr("${var.name_prefix}-public", 0, 32)
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.public_lb[0].id]
+  subnets            = var.public_subnet_ids
+  # Economy staging subnets have only IPv4 CIDRs.
+  ip_address_type            = var.environment == "staging" ? "ipv4" : "dualstack"
+  enable_deletion_protection = local.runtime_environment == "production"
   drop_invalid_header_fields = true
 }
 
@@ -225,8 +241,11 @@ resource "aws_lb_listener" "public_https" {
 
     fixed_response {
       content_type = "application/json"
-      message_body = jsonencode({ title = "Service unavailable", status = 503 })
-      status_code  = "503"
+      message_body = jsonencode({
+        title  = "Service unavailable"
+        status = 503
+      })
+      status_code = "503"
     }
   }
 }
@@ -237,8 +256,20 @@ resource "aws_lb_listener_rule" "gateway" {
   priority     = 1
 
   action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.gateway[0].arn
+    type = "forward"
+    forward {
+      target_group {
+        arn    = aws_lb_target_group.gateway[0].arn
+        weight = local.production_ecs_active ? 0 : 100
+      }
+      dynamic "target_group" {
+        for_each = local.production_ecs_enabled ? [1] : []
+        content {
+          arn    = aws_lb_target_group.production_gateway[0].arn
+          weight = local.production_ecs_active ? 100 : 0
+        }
+      }
+    }
   }
 
   condition {
@@ -248,6 +279,8 @@ resource "aws_lb_listener_rule" "gateway" {
   }
 }
 
+# WAF blocks direct origin traffic without the independent Cloudflare secret,
+# then applies managed protections and rate limiting.
 resource "aws_wafv2_web_acl" "origin" {
   count = var.enable_ingress ? 1 : 0
   name  = "${var.name_prefix}-api-origin"

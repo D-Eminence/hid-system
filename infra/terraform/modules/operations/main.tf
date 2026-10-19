@@ -1,6 +1,55 @@
+# Shared operational alert channel
 resource "aws_sns_topic" "alerts" {
   name              = "${var.name_prefix}-operations-alerts"
-  kms_master_key_id = "alias/aws/sns"
+  kms_master_key_id = aws_kms_key.alerts.arn
+}
+
+# CloudWatch requires permission on the encryption key used by its SNS target.
+# An AWS managed key cannot be edited to grant the scoped service permission.
+resource "aws_kms_key" "alerts" {
+  description             = "Encrypted operational alerts for ${var.name_prefix}"
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      { Sid       = "AccountAdministration", Effect = "Allow",
+        Principal = { AWS = "arn:aws:iam::${var.aws_account_id}:root" },
+      Action = "kms:*", Resource = "*" },
+      { Sid       = "ScopedCloudWatchAlerts", Effect = "Allow",
+        Principal = { Service = "cloudwatch.amazonaws.com" },
+        Action    = ["kms:Decrypt", "kms:GenerateDataKey*"], Resource = "*",
+        Condition = {
+          StringEquals = { "aws:SourceAccount" = var.aws_account_id }
+          ArnLike      = { "aws:SourceArn" = "arn:aws:cloudwatch:${var.aws_region}:${var.aws_account_id}:alarm:${var.name_prefix}-*" }
+      } }
+    ]
+  })
+}
+
+resource "aws_kms_alias" "alerts" {
+  name          = "alias/${var.name_prefix}-operations-alerts"
+  target_key_id = aws_kms_key.alerts.key_id
+}
+
+resource "aws_sns_topic_policy" "alerts" {
+  arn = aws_sns_topic.alerts.arn
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      { Sid       = "AccountAdministration", Effect = "Allow",
+        Principal = { AWS = "arn:aws:iam::${var.aws_account_id}:root" },
+        Action = ["sns:GetTopicAttributes", "sns:SetTopicAttributes", "sns:AddPermission", "sns:RemovePermission",
+      "sns:DeleteTopic", "sns:Subscribe", "sns:ListSubscriptionsByTopic", "sns:Publish"], Resource = aws_sns_topic.alerts.arn },
+      { Sid       = "ScopedCloudWatchPublish", Effect = "Allow",
+        Principal = { Service = "cloudwatch.amazonaws.com" },
+        Action    = "sns:Publish", Resource = aws_sns_topic.alerts.arn,
+        Condition = {
+          StringEquals = { "aws:SourceAccount" = var.aws_account_id }
+          ArnLike      = { "aws:SourceArn" = "arn:aws:cloudwatch:${var.aws_region}:${var.aws_account_id}:alarm:${var.name_prefix}-*" }
+      } }
+    ]
+  })
 }
 
 resource "aws_sns_topic_subscription" "email" {
@@ -10,6 +59,7 @@ resource "aws_sns_topic_subscription" "email" {
   endpoint  = var.alert_email
 }
 
+# PostgreSQL health and capacity alarms
 resource "aws_cloudwatch_metric_alarm" "database_cpu" {
   count = var.enable_database ? 1 : 0
 
@@ -59,6 +109,7 @@ resource "aws_cloudwatch_metric_alarm" "database_connections" {
   alarm_actions       = [aws_sns_topic.alerts.arn]
 }
 
+# Optional daily PostgreSQL backup plan
 data "aws_iam_policy_document" "backup_assume" {
   statement {
     actions = ["sts:AssumeRole"]

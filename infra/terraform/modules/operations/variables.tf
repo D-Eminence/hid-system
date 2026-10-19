@@ -30,3 +30,28 @@ variable "enable_backup_plan" {
 variable "alert_email" {
   type = string
 }
+variable "aws_account_id" {
+  type = string
+}
+variable "aws_region" {
+  type = string
+}
+variable "ecs_cluster_name" {
+  type = string
+}
+variable "runtime_services" {
+  type    = map(number)
+  default = {}
+}
+variable "load_balancer_targets" {
+  type    = map(object({ load_balancer = string, target_group = string }))
+  default = {}
+}
+variable "notification_queue_names" {
+  type    = map(string)
+  default = {}
+}
+variable "provider_log_groups" {
+  type    = map(string)
+  default = {}
+}
