@@ -23,6 +23,11 @@ export class PatientEnrollmentController {
     private readonly turnstile: TurnstileService,
     private readonly google: GoogleAuthenticationService) {}
 
+  @Get('availability')
+  availability(@Req() request: HidRequest) {
+    return this.enrollments.availability(request.correlationId);
+  }
+
   @Post()
   @HttpCode(200)
   @AuditAction('identity.patient-enrollment.start')

@@ -149,6 +149,7 @@ describe('PatientEnrollmentService', () => {
       NIN_ENCRYPTION_KEY_B64: Buffer.alloc(32, 2).toString('base64'),
       CONTACT_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 4).toString('base64'),
       OTP_HMAC_KEY_B64: Buffer.alloc(32, 3).toString('base64'),
+      QOREID_CLIENT_ID: 'fixture-client', QOREID_CLIENT_SECRET: 'fixture-secret',
     });
     resetEnvironmentForTests();
   });
@@ -158,6 +159,50 @@ describe('PatientEnrollmentService', () => {
     Object.assign(process.env, originalEnvironment);
     resetEnvironmentForTests();
     jest.restoreAllMocks();
+  });
+
+  it.each([
+    ['false', 'false'], ['true', 'false'],
+  ])('reports closed for provider flags %s/%s without database or verification work', async (qoreid, enrollment) => {
+    process.env.QOREID_ENABLED = qoreid;
+    process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = enrollment;
+    resetEnvironmentForTests();
+    const f = fixture();
+    await expect(f.service.availability(correlationId)).resolves.toEqual({ open: false });
+    expect(f.queries).toEqual([]);
+    expect(f.provider.verifyNin).not.toHaveBeenCalled();
+    expect(f.notification.deliver).not.toHaveBeenCalled();
+  });
+
+  it.each([true, false])('reports only reconciliation readiness (%s), without consuming a NIN or contacting a provider', async ready => {
+    process.env.QOREID_ENABLED = 'true';
+    process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'true';
+    resetEnvironmentForTests();
+    const f = fixture(); f.ready = ready;
+    await expect(f.service.availability(correlationId)).resolves.toEqual({ open: ready });
+    expect(f.queries).toEqual([{ sql: 'select identity.public_patient_enrollment_ready() as ready', values: [] }]);
+    expect(f.provider.verifyNin).not.toHaveBeenCalled();
+    expect(f.notification.deliver).not.toHaveBeenCalled();
+  });
+
+  it('does not announce registration open when enrollment configuration is missing', async () => {
+    process.env.QOREID_ENABLED = 'true';
+    process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'true';
+    delete process.env.NIN_ENCRYPTION_KEY_B64;
+    resetEnvironmentForTests();
+    const f = fixture();
+    await expect(f.service.availability(correlationId)).rejects.toMatchObject({ code: 'ENROLLMENT_CONFIGURATION_UNAVAILABLE' });
+    expect(f.queries).toEqual([]);
+  });
+
+  it('propagates a readiness outage instead of announcing registration open', async () => {
+    process.env.QOREID_ENABLED = 'true';
+    process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'true';
+    resetEnvironmentForTests();
+    const f = fixture();
+    jest.spyOn(f.client, 'query').mockImplementationOnce(() => { throw new Error('readiness unavailable'); });
+    await expect(f.service.availability(correlationId)).rejects.toThrow('readiness unavailable');
+    expect(f.provider.verifyNin).not.toHaveBeenCalled();
   });
 
   it('starts with NIN alone and stores opaque encrypted evidence', async () => {

@@ -46,6 +46,18 @@ export class PatientEnrollmentService {
     private readonly hidCodes: HidCodeGenerator,
     private readonly google: GoogleAuthenticationService) {}
 
+  async availability(correlationId: string): Promise<{ open: boolean }> {
+    if (!this.env.QOREID_ENABLED || !this.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED) {
+      return { open: false };
+    }
+    this.assertConfigured();
+    return this.database.withSystemTransaction(correlationId, async (client) => {
+      const readiness = await client.query<{ ready: boolean }>(
+        'select identity.public_patient_enrollment_ready() as ready');
+      return { open: readiness.rows[0]?.ready === true };
+    });
+  }
+
   async start(nin: string, idempotencyKey: string, remoteIp: string | undefined,
     correlationId: string, googleCookie?: string) {
     this.assertConfigured();

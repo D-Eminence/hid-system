@@ -24,7 +24,7 @@ function request(cookie?: string, requestOrigin: string | undefined = origin,
 
 describe('PatientEnrollmentController', () => {
   let service: {
-    start: jest.Mock; current: jest.Mock; startContact: jest.Mock;
+    start: jest.Mock; availability: jest.Mock; current: jest.Mock; startContact: jest.Mock;
     verifyContact: jest.Mock; activate: jest.Mock; bindGoogle: jest.Mock;
   };
   let turnstile: { verify: jest.Mock };
@@ -41,7 +41,7 @@ describe('PatientEnrollmentController', () => {
     });
     resetEnvironmentForTests();
     service = { start: jest.fn().mockResolvedValue({ cookie: 'opaque-enrollment-cookie',
-      progress: { stage: 'verify_contact' } }), current: jest.fn(), startContact: jest.fn(),
+      progress: { stage: 'verify_contact' } }), availability: jest.fn().mockResolvedValue({ open: false }), current: jest.fn(), startContact: jest.fn(),
       verifyContact: jest.fn(), bindGoogle: jest.fn().mockResolvedValue({ bound: true }),
       activate: jest.fn().mockResolvedValue({ stage: 'active', hidCode: 'HID-TEST' }) };
     turnstile = { verify: jest.fn().mockResolvedValue(undefined) };
@@ -57,6 +57,14 @@ describe('PatientEnrollmentController', () => {
     for (const key of Object.keys(process.env)) if (!(key in originalEnvironment)) delete process.env[key];
     Object.assign(process.env, originalEnvironment);
     resetEnvironmentForTests();
+  });
+
+  it('reads only public availability without requiring an enrollment cookie or Turnstile', async () => {
+    await expect(controller.availability({ correlationId } as HidRequest)).resolves.toEqual({ open: false });
+    expect(service.availability).toHaveBeenCalledWith(correlationId);
+    expect(service.start).not.toHaveBeenCalled();
+    expect(turnstile.verify).not.toHaveBeenCalled();
+    expect(google.onboardingStatus).not.toHaveBeenCalled();
   });
 
   it('requires an approved origin before Turnstile or provider work', async () => {
