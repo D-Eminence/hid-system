@@ -38,6 +38,12 @@ export interface HidRequest extends Request {
   facilityId?: string;
   authTransport?: 'bearer' | 'cookie';
   purposeOfUse?: PurposeOfUse;
+  /**
+   * The browser read (GET, HEAD or OPTIONS) an authenticated workload reported
+   * on a @DelegatedBrowserRequest route. Set only when the guard skipped the
+   * cookie-write Origin and CSRF check for that reason.
+   */
+  delegatedBrowserMethod?: string;
 }
 
 export type PurposeOfUse = 'direct-care' | 'emergency' | 'healthcare-operations';

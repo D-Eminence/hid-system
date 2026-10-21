@@ -18,11 +18,12 @@ export const NoAudit = (): MethodDecorator & ClassDecorator => SetMetadata(NO_AU
 export const AuditFailuresOnly = (): MethodDecorator & ClassDecorator => SetMetadata(AUDIT_FAILURES_ONLY, true);
 export const DELEGATED_BROWSER_REQUEST = Symbol('DELEGATED_BROWSER_REQUEST');
 /**
- * A route through which another HID service (EHR, OCR, Lab or Pharmacy) asks
- * Identity about the browser request it is serving, forwarding
+ * A route through which another HID service (EHR, OCR, Lab, Pharmacy or
+ * Outreach) asks Identity about the browser request it is serving, forwarding
  * the browser's cookie on its own POST. The guard trusts the browser method the
  * service reports in X-HID-Original-Method only after that workload has
  * authenticated, and then applies the browser-write Origin and CSRF check only
- * when the reported method is unsafe.
+ * when the reported method is unsafe. When it skips the check it records the
+ * reported method in request.delegatedBrowserMethod.
  */
 export const DelegatedBrowserRequest = (): MethodDecorator => SetMetadata(DELEGATED_BROWSER_REQUEST, true);

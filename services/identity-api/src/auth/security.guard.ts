@@ -195,14 +195,15 @@ export class SecurityGuard implements CanActivate {
   }
 
   /**
-   * EHR, OCR, Lab and Pharmacy authorize the browser request they
+   * EHR, OCR, Lab, Pharmacy and Outreach authorize the browser request they
    * serve by POSTing to Identity with the browser's cookie. Origin and CSRF
    * protect browser writes, but a same-origin browser GET carries neither, so
    * on a delegation route the browser method the service reports decides
    * whether the write check applies. The report counts only on a route marked
    * for delegation and only once the calling workload has authenticated here;
    * an unauthenticated caller, an unsafe or missing method, or any failure
-   * leaves the write check in force.
+   * leaves the write check in force. A skip is recorded on the request so the
+   * route can refuse to authorize a write on the strength of a reported read.
    */
   private async delegatedSafeBrowserRequest(request: HidRequest, context: ExecutionContext): Promise<boolean> {
     const reported = request.header('x-hid-original-method');
@@ -211,6 +212,7 @@ export class SecurityGuard implements CanActivate {
     try {
       await this.workloadAuth.authenticateService(request.header('x-hid-internal-caller'),
         request.header('x-hid-service-authorization'), request.header('x-hid-service-token'));
+      request.delegatedBrowserMethod = reported;
       return true;
     } catch {
       return false;
