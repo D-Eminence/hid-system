@@ -209,7 +209,8 @@ promotion_backend_key   = "health-identity/production/terraform.tfstate"
 
 production_workload_token_agent_image_uri = "659225405023.dkr.ecr.eu-west-1.amazonaws.com/staging/hid/identity-api@sha256:cf283173794afbe709d95a2a0a849afdfec1452dec96ad25edbf45ddf07a82e7"
 
-enable_deployment_automation = false
+enable_deployment_automation        = false
+production_deployment_approval_mode = "automatic"
 
 deployment_automation_bootstrap = false
 

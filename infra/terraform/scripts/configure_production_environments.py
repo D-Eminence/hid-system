@@ -14,7 +14,7 @@ REVIEWER='yinkaowolabi091-web'
 REVIEWER_ID=246086814
 TARGETS={
     'hid-system':('1317340803','production-backend','staging-novu-ci-20261005'),
-    'Health-id':('1396718647','production-frontend','main'),
+    'health':('1428636965','production-frontend','main'),
 }
 
 class SetupError(RuntimeError):pass
@@ -37,12 +37,16 @@ def request(path,method='GET',body=None,login='aderojuolabode'):
     except urllib.error.HTTPError as error:raise SetupError('GITHUB_HTTP_'+str(error.code)) from None
     except urllib.error.URLError:raise SetupError('GITHUB_TRANSPORT_UNAVAILABLE') from None
 
-def validate(environment,branches,branch):
+def validate(environment,branches,branch,mode='protected'):
+    if mode not in ('automatic','protected'):raise SetupError('INVALID_PRODUCTION_APPROVAL_MODE')
     rules=[r for r in environment.get('protection_rules',[]) if r.get('type')=='required_reviewers']
-    if len(rules)!=1 or not rules[0].get('prevent_self_review'):raise SetupError('SELF_REVIEW_PROTECTION_REQUIRED')
-    reviewers=rules[0].get('reviewers',[])
-    if len(reviewers)!=1 or reviewers[0].get('type')!='User' or reviewers[0].get('reviewer',{}).get('id')!=REVIEWER_ID:
-        raise SetupError('EXACT_HID_REVIEWER_REQUIRED')
+    if mode=='protected':
+        if len(rules)!=1 or not rules[0].get('prevent_self_review'):raise SetupError('SELF_REVIEW_PROTECTION_REQUIRED')
+        reviewers=rules[0].get('reviewers',[])
+        if len(reviewers)!=1 or reviewers[0].get('type')!='User' or reviewers[0].get('reviewer',{}).get('id')!=REVIEWER_ID:
+            raise SetupError('EXACT_HID_REVIEWER_REQUIRED')
+    elif any(r.get('type')!='branch_policy' for r in environment.get('protection_rules',[])):
+        raise SetupError('AUTOMATIC_ENVIRONMENT_HAS_PROTECTION_RULES')
     if environment.get('can_admins_bypass') is not False:raise SetupError('ADMIN_BYPASS_MUST_BE_DISABLED')
     policy=environment.get('deployment_branch_policy') or {}
     if policy!={'protected_branches':False,'custom_branch_policies':True}:raise SetupError('EXPLICIT_BRANCH_POLICY_REQUIRED')
@@ -50,9 +54,11 @@ def validate(environment,branches,branch):
     if len(values)!=1 or values[0].get('name')!=branch or values[0].get('type','branch')!='branch':
         raise SetupError('EXACT_DEPLOYMENT_BRANCH_REQUIRED')
 
-def run(api,configure=False):
-    reviewer=api('users/'+REVIEWER)
-    if reviewer.get('id')!=REVIEWER_ID:raise SetupError('REVIEWER_IDENTITY_CHANGED')
+def run(api,configure=False,mode='protected'):
+    if mode not in ('automatic','protected'):raise SetupError('INVALID_PRODUCTION_APPROVAL_MODE')
+    if mode=='protected':
+        reviewer=api('users/'+REVIEWER)
+        if reviewer.get('id')!=REVIEWER_ID:raise SetupError('REVIEWER_IDENTITY_CHANGED')
     metadata={repo:api('repos/D-Eminence/'+repo) for repo in TARGETS}
     for repo,(repo_id,_,_) in TARGETS.items():
         meta=metadata[repo]
@@ -63,11 +69,12 @@ def run(api,configure=False):
     for repo,(_,env,branch) in TARGETS.items():
         prefix='repos/D-Eminence/'+repo;path=prefix+'/environments/'+env
         if configure:
-            access=api(prefix+'/collaborators/'+REVIEWER+'/permission')
-            if access.get('permission') not in ('read','triage','write','maintain','admin'):
-                raise SetupError('REVIEWER_REPOSITORY_ACCESS_REQUIRED')
-            api(path,'PUT',{'wait_timer':0,'prevent_self_review':True,'can_admins_bypass':False,
-                'reviewers':[{'type':'User','id':REVIEWER_ID}],
+            if mode=='protected':
+                access=api(prefix+'/collaborators/'+REVIEWER+'/permission')
+                if access.get('permission') not in ('read','triage','write','maintain','admin'):
+                    raise SetupError('REVIEWER_REPOSITORY_ACCESS_REQUIRED')
+            api(path,'PUT',{'wait_timer':0,'prevent_self_review':mode=='protected','can_admins_bypass':False,
+                'reviewers':[{'type':'User','id':REVIEWER_ID}] if mode=='protected' else [],
                 'deployment_branch_policy':{'protected_branches':False,'custom_branch_policies':True}})
             rules=api(path+'/deployment-branch-policies?per_page=100')['branch_policies']
             if not any(v.get('name')==branch and v.get('type','branch')=='branch' for v in rules):
@@ -79,19 +86,23 @@ def run(api,configure=False):
             exists=any(v['name']=='PRODUCTION_DEPLOYMENT_ENABLED' for v in variables)
             api(prefix+'/actions/variables'+('/PRODUCTION_DEPLOYMENT_ENABLED' if exists else ''),
                 'PATCH' if exists else 'POST',{'name':'PRODUCTION_DEPLOYMENT_ENABLED','value':'false'})
+            exists=any(v['name']=='PRODUCTION_APPROVAL_MODE' for v in variables)
+            api(prefix+'/actions/variables'+('/PRODUCTION_APPROVAL_MODE' if exists else ''),
+                'PATCH' if exists else 'POST',{'name':'PRODUCTION_APPROVAL_MODE','value':mode})
         environment=api(path)
-        validate(environment,api(path+'/deployment-branch-policies?per_page=100'),branch)
-        result.append({'repository':'D-Eminence/'+repo,'environment':env,'branch':branch,'reviewer':REVIEWER,
+        validate(environment,api(path+'/deployment-branch-policies?per_page=100'),branch,mode)
+        result.append({'repository':'D-Eminence/'+repo,'environment':env,'branch':branch,'mode':mode,'reviewer':REVIEWER if mode=='protected' else None,
                        'verified':True,'deployment_enabled':False if configure else 'not changed'})
     return result
 
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('--configure',action='store_true')
-    parser.add_argument('--github-login',default='aderojuolabode');args=parser.parse_args()
+    parser.add_argument('--github-login',default='aderojuolabode')
+    parser.add_argument('--mode',choices=['automatic','protected'],default='protected');args=parser.parse_args()
     try:
-        value=run(lambda path,method='GET',body=None:request(path,method,body,args.github_login),args.configure)
+        value=run(lambda path,method='GET',body=None:request(path,method,body,args.github_login),args.configure,args.mode)
         print(json.dumps({'status':'verified','environments':value}))
     except SetupError as error:
         print(json.dumps({'status':'blocked','code':str(error),'deployment_enabled':False,
-            'note':'A private frontend requires GitHub entitlement for native required reviewers. No visibility or plan change is performed.'}))
+            'note':'Repository admin access and the selected environment policy are required. Deployment remains disabled.'}))
         raise SystemExit(1)

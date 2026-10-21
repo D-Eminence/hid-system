@@ -44,29 +44,30 @@ mock_provider "external" {
 run "production_automation_bootstrap" {
   command = plan
   variables {
-    expected_account_id             = "659225405023"
-    environment                     = "production"
-    promote_existing_staging        = true
-    use_existing_secrets            = true
-    staging_mode                    = "sleep"
-    staging_worker_min_capacity     = 1
-    availability_zones              = ["eu-west-1a", "eu-west-1b"]
-    public_subnet_cidrs             = ["10.30.0.0/24", "10.30.1.0/24"]
-    application_subnet_cidrs        = ["10.30.10.0/24", "10.30.11.0/24"]
-    database_subnet_cidrs           = ["10.30.20.0/24", "10.30.21.0/24"]
-    enable_database                 = true
-    enable_runtime                  = true
-    enable_migration_task           = true
-    enable_deployment_automation    = true
-    deployment_automation_bootstrap = true
-    enable_ingress                  = true
-    enable_backup_plan              = true
-    staging_novu_api_url            = "https://eu.api.novu.co"
-    notification_delivery_profile   = "email-sms-brevo"
-    enable_ai                       = true
-    ai_allow_eu_processing          = true
-    enable_support_bot              = true
-    support_contact                 = "mailto:support@example.invalid"
+    expected_account_id                 = "659225405023"
+    environment                         = "production"
+    promote_existing_staging            = true
+    production_deployment_approval_mode = "automatic"
+    use_existing_secrets                = true
+    staging_mode                        = "sleep"
+    staging_worker_min_capacity         = 1
+    availability_zones                  = ["eu-west-1a", "eu-west-1b"]
+    public_subnet_cidrs                 = ["10.30.0.0/24", "10.30.1.0/24"]
+    application_subnet_cidrs            = ["10.30.10.0/24", "10.30.11.0/24"]
+    database_subnet_cidrs               = ["10.30.20.0/24", "10.30.21.0/24"]
+    enable_database                     = true
+    enable_runtime                      = true
+    enable_migration_task               = true
+    enable_deployment_automation        = true
+    deployment_automation_bootstrap     = true
+    enable_ingress                      = true
+    enable_backup_plan                  = true
+    staging_novu_api_url                = "https://eu.api.novu.co"
+    notification_delivery_profile       = "email-sms-brevo"
+    enable_ai                           = true
+    ai_allow_eu_processing              = true
+    enable_support_bot                  = true
+    support_contact                     = "mailto:support@example.invalid"
     support_faqs = {
       Help = {
         utterances = ["I need help", "How do I get help"]
@@ -106,5 +107,9 @@ run "production_automation_bootstrap" {
   assert {
     condition     = output.deployment_automation_configuration.lease_table == "hid-staging-deployment-leases" && output.deployment_automation_configuration.index_key == "production/current.json"
     error_message = "Physical table is retained while the production index is independently scoped."
+  }
+  assert {
+    condition     = output.deployment_automation_configuration.approval_mode == "automatic" && output.deployment_automation_configuration.github_subject_prefixes.frontend == "repo:D-Eminence@182018869/health@1428636965"
+    error_message = "Production must admit only the new frontend identity and record its explicit deployment policy."
   }
 }

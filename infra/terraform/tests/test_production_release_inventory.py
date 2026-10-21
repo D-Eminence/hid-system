@@ -31,7 +31,7 @@ class InventoryTests(unittest.TestCase):
         aws=mock.Mock()
         def call(service,operation,args):
             if operation=='describe-services':
-                component=args['services'][0].removeprefix('hid-staging-')
+                component=args['services'][0].removeprefix('hid-production-')
                 return {'services':[{'status':'ACTIVE','desiredCount':1,'runningCount':1,'pendingCount':0,
                     'deployments':[{'rolloutState':'COMPLETED'}],'taskDefinition':component}]}
             component=args['taskDefinition']
@@ -141,7 +141,8 @@ class InventoryTests(unittest.TestCase):
     def test_failed_build_cannot_supply_bootstrap_verifier(self):
         with tempfile.TemporaryDirectory() as folder, mock.patch.object(i.subprocess,'check_output',return_value='a'*40), \
              mock.patch.object(i.subprocess,'run',return_value=mock.Mock(returncode=0)), \
-             mock.patch.object(i.gates,'request',return_value={'head_sha':'a'*40,'head_branch':'main','conclusion':'failure'}):
+             mock.patch.object(i.gates,'request',side_effect=[{'id':1428636965,'owner':{'id':182018869}},
+                {'head_sha':'a'*40,'head_branch':'main','conclusion':'failure'}]):
             with self.assertRaisesRegex(i.ReleaseError,'SUCCESSFUL_FRONTEND_BUILD_REQUIRED'):
                 i.Frontends(folder,pathlib.Path(folder)/'missing.zip','123')
     def test_frontend_artifact_tampering_blocks_before_import(self):
@@ -151,12 +152,34 @@ class InventoryTests(unittest.TestCase):
                  'event':'push','path':'.github/workflows/production-frontends.yml'}
             with mock.patch.object(i.subprocess,'check_output',return_value='a'*40), \
                  mock.patch.object(i.subprocess,'run',return_value=mock.Mock(returncode=0)), \
-                 mock.patch.object(i.gates,'request',side_effect=[run,{'object':{'sha':'a'*40}},
+                 mock.patch.object(i.gates,'request',side_effect=[{'id':1428636965,'owner':{'id':182018869}},run,
                     {'artifacts':[{'name':'production-frontends-'+'a'*40,'expired':False,'digest':'sha256:'+'b'*64}]}]):
                 with self.assertRaisesRegex(i.ReleaseError,'GITHUB_FRONTEND_ARCHIVE_DIGEST_DIFFERS'):
                     i.Frontends(folder,path,'123')
     def test_bootstrap_retains_then_creates_and_reads_back_index(self):self.bootstrap_case()
     def test_last_second_live_drift_denies_index_write(self):self.bootstrap_case(drift=True)
     def test_existing_index_is_never_overwritten(self):self.bootstrap_case(existing=True)
+
+    def test_mixed_portal_baseline_preserves_every_source(self):
+        dependencies={'declared':True,'backend_commits':{'identity-api':'a'*40}}
+        groups=[]
+        for n,apps in enumerate([['admin'],['web'],[a for a in i.HOSTS if a not in ('admin','web')]]):
+            group=mock.Mock();group.entries={a:{} for a in apps};group.dependencies=dependencies
+            group.fingerprint={'source_commit':str(n)*40,'apps':apps}
+            group.check.return_value={a:{'verified':True} for a in apps}
+            group.preserve.side_effect=lambda store,lease,rows:rows
+            groups.append(group)
+        baseline=i.FrontendSet(groups)
+        self.assertEqual(set(baseline.check()),set(i.HOSTS))
+        self.assertEqual(len(baseline.fingerprint['groups']),3)
+        baseline.compatibility({'backend':{}})
+        for group in groups:group.compatibility.assert_called_once()
+        with self.assertRaisesRegex(i.ReleaseError,'DUPLICATE_BASELINE_PORTAL'):
+            i.FrontendSet(groups+[groups[0]])
+        with self.assertRaisesRegex(i.ReleaseError,'COMPLETE_FRONTEND_BASELINE'):
+            i.FrontendSet(groups[:1])
+        groups[0].dependencies={'declared':True,'backend_commits':{'identity-api':'b'*40}}
+        with self.assertRaisesRegex(i.ReleaseError,'BASELINE_DEPENDENCY_CONFLICT'):
+            i.FrontendSet(groups)
 
 if __name__=='__main__':unittest.main()

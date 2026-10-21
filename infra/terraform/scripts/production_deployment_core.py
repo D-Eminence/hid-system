@@ -1,4 +1,4 @@
-"""Portable production release admission, protected approval, AWS storage and lease primitives.
+"""Portable production release admission, deployment policy, AWS storage and lease primitives.
 No workstation profiles, customer data, third-party packages or deployment on import.
 """
 import copy
@@ -19,12 +19,12 @@ import uuid
 
 ACCOUNT = "659225405023"
 REGION = "eu-west-1"
-CLUSTER = "hid-staging"
+CLUSTER = "hid-production"
 OWNER_ID = "182018869"
 TARGETS = {
     "backend": {"repo": "D-Eminence/hid-system", "id": "1317340803",
                 "branch": "staging-novu-ci-20261005", "environment": "production-backend"},
-    "frontend": {"repo": "D-Eminence/Health-id", "id": "1396718647",
+    "frontend": {"repo": "D-Eminence/health", "id": "1428636965",
                  "branch": "main", "environment": "production-frontend"},
 }
 COMPONENTS = ("identity-api","ehr-api","lab-api","pharmacy-api","ocr-api","ocr-worker",
@@ -85,10 +85,12 @@ def context(kind, env=None):
     require(env.get("GITHUB_EVENT_NAME") in ("push","workflow_dispatch"), "UNTRUSTED_EVENT")
     require(re.fullmatch(r"[a-f0-9]{40}", env.get("GITHUB_SHA", "")), "EXACT_COMMIT_REQUIRED")
     require(all(re.fullmatch(r"[1-9][0-9]*", env.get(k, "")) for k in ("GITHUB_RUN_ID","GITHUB_RUN_ATTEMPT")), "EXACT_RUN_REQUIRED")
+    mode = env.get("PRODUCTION_APPROVAL_MODE", "protected")
+    require(mode in ("automatic", "protected"), "INVALID_PRODUCTION_APPROVAL_MODE")
     return {"kind": kind, "repository": target["repo"], "repository_id": target["id"],
             "owner_id": OWNER_ID, "branch": target["branch"], "environment": target["environment"],
             "source_commit": env["GITHUB_SHA"], "run_id": env["GITHUB_RUN_ID"],
-            "run_attempt": env["GITHUB_RUN_ATTEMPT"]}
+            "run_attempt": env["GITHUB_RUN_ATTEMPT"], "approval_mode": mode}
 
 def make_candidate(ctx, components, evidence, checks, schema=None, dependencies=None, rollback_ref=None):
     require(bool(components) and len(components) == len(set(components)), "EXACT_COMPONENT_SET_REQUIRED")
@@ -173,6 +175,24 @@ class GitHub:
         require(candidate["run_attempt"] == "1", "NEW_WORKFLOW_RUN_REQUIRED_FOR_APPROVAL")
         require(os.environ.get("PRODUCTION_DEPLOYMENT_ENABLED") == "true", "DEPLOYMENT_DISABLED")
         settings = self.get("environments/"+candidate["environment"])
+        mode = os.environ.get("PRODUCTION_APPROVAL_MODE", "protected")
+        require(mode in ("automatic", "protected"), "INVALID_PRODUCTION_APPROVAL_MODE")
+        require(candidate.get("approval_mode", "protected") == mode, "CANDIDATE_APPROVAL_MODE_DIFFERS")
+        if mode == "automatic":
+            # An explicit automatic policy still binds the environment, branch,
+            # successful remote jobs and current source before cloud credentials.
+            require(not [r for r in settings.get("protection_rules", [])
+                         if r.get("type") != "branch_policy"], "AUTOMATIC_ENVIRONMENT_HAS_PROTECTION_RULES")
+            require(settings.get("can_admins_bypass") is False, "ADMIN_BYPASS_NOT_ALLOWED")
+            require(settings.get("deployment_branch_policy") == {
+                "custom_branch_policies": True, "protected_branches": False}, "EXPLICIT_BRANCH_PROTECTION_REQUIRED")
+            policies = self.get("environments/"+candidate["environment"]+"/deployment-branch-policies?per_page=100")
+            branches = policies.get("branch_policies", [])
+            require(len(branches) == 1 and branches[0].get("name") == candidate["branch"]
+                    and branches[0].get("type", "branch") == "branch", "DEPLOYMENT_BRANCH_RULE_DIFFERS")
+            self.assert_checks(candidate)
+            self.assert_current_source(candidate)
+            return {"mode": "automatic", "reviewer_ids": [], "environment_id": settings["id"]}
         rules = [r for r in settings.get("protection_rules",[]) if r.get("type") == "required_reviewers"]
         require(len(rules) == 1 and rules[0].get("prevent_self_review") is True, "ENFORCED_REVIEWER_GATE_REQUIRED")
         require(settings.get("can_admins_bypass") is False, "ADMIN_BYPASS_NOT_ALLOWED")
@@ -325,7 +345,7 @@ def validate_index(index):
     require(set(index.get("backend",{})) == set(COMPONENTS), "COMPLETE_BACKEND_INDEX_REQUIRED")
     for component, row in index["backend"].items():
         image(component, row.get("image_uri",""))
-        require(re.fullmatch("arn:aws:ecs:"+REGION+":"+ACCOUNT+":task-definition/hid-staging-"+component+r":[1-9][0-9]*",
+        require(re.fullmatch("arn:aws:ecs:"+REGION+":"+ACCOUNT+":task-definition/hid-production-"+component+r":[1-9][0-9]*",
                              row.get("task_definition","")), "INDEX_TASK_DEFINITION_DIFFERS")
         require(re.fullmatch(r"[a-f0-9]{64}", row.get("config_sha256", "")), "INDEX_CONFIGURATION_HASH_REQUIRED")
     image("database-migration", index.get("migration_image_uri", ""))
@@ -367,7 +387,7 @@ REGISTER_FIELDS = ("family","taskRoleArn","executionRoleArn","networkMode","cont
 
 def task_payload(task, component, uri):
     image(component, uri)
-    family = "hid-staging-"+component
+    family = ("hid-staging-" if component == "database-migration" else "hid-production-")+component
     require(task.get("family") == family and task.get("networkMode") == "awsvpc"
             and task.get("runtimePlatform",{}).get("cpuArchitecture") == "ARM64", "UNEXPECTED_TASK_PLATFORM")
     require(all(task.get(role,"").startswith("arn:aws:iam::"+ACCOUNT+":role/hid-staging-")
@@ -387,7 +407,7 @@ def task_config_hash(task, component):
     return sha(canonical(value))
 
 def summarize(candidate, path=None):
-    lines = ["# HID production release candidate", "", "**Manual approval is required before deployment.**", "",
+    lines = ["# HID production release candidate", "", "Deployment policy: "+candidate.get("approval_mode", "protected"), "",
         "Repository: "+candidate["repository"], "Commit: "+candidate["source_commit"],
         "Run/attempt: "+candidate["run_id"]+"/"+candidate["run_attempt"],
         "Release: "+candidate["release_id"], "Operation: "+candidate.get("operation","deploy"),
@@ -397,7 +417,7 @@ def summarize(candidate, path=None):
         "Schema changes: "+str(candidate["schema_change"].get("changed",False)),
         "Backend dependencies: "+json.dumps(candidate.get("backend_dependencies",{}),sort_keys=True), "",
         "Build results do not certify untested application features.",
-        "Prior verified release is rechecked after approval before any mutation.", ""]
+        "Prior verified release is rechecked after policy verification before any mutation.", ""]
     for component, evidence in candidate["evidence"].items():
         lines.append(component+": "+(evidence.get("image_uri") or evidence.get("sha256","")))
     text = "\n".join(lines)+"\n"

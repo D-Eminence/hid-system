@@ -30,20 +30,26 @@ PROFILED_SERVICES={'identity-api','ehr-api','lab-api','pharmacy-api','ocr-api','
 
 class Frontends:
     """Verify current CI archives and reuse the published exact-byte HTTP checks."""
-    def __init__(self,checkout,artifact,run_id):
+    def __init__(self,checkout,artifact,run_id,apps=None,repository='D-Eminence/health'):
         self.root=pathlib.Path(checkout).resolve();self.artifact=pathlib.Path(artifact).resolve()
+        repositories={'D-Eminence/health':1428636965,'D-Eminence/Health-id':1396718647}
+        require(repository in repositories,'UNTRUSTED_BASELINE_FRONTEND_REPOSITORY')
         require(re.fullmatch(r'[1-9][0-9]*',str(run_id)),'EXACT_FRONTEND_BUILD_RUN_REQUIRED')
         git=['git','-c','safe.directory='+self.root.as_posix()]
         head=subprocess.check_output(git+['rev-parse','HEAD'],cwd=self.root,text=True).strip()
         require(subprocess.run(git+['diff','--quiet','HEAD','--','scripts','config','package-lock.json','infra/cloudflare/src'],
                                cwd=self.root,capture_output=True).returncode==0,'CLEAN_FRONTEND_VERIFIER_REQUIRED')
-        prefix='repos/D-Eminence/Health-id/'
+        prefix='repos/'+repository+'/'
+        metadata=gates.request(prefix.rstrip('/'))
+        require(metadata.get('id')==repositories[repository] and metadata.get('owner',{}).get('id')==182018869,
+                'BASELINE_REPOSITORY_IDENTITY_CHANGED')
         run=gates.request(prefix+'actions/runs/'+str(run_id))
         require(run.get('head_sha')==head and run.get('head_branch')=='main'
                 and run.get('conclusion')=='success' and run.get('run_attempt')==1
                 and run.get('event') in ('push','workflow_dispatch')
                 and run.get('path')=='.github/workflows/production-frontends.yml','SUCCESSFUL_FRONTEND_BUILD_REQUIRED')
-        require(gates.request(prefix+'git/ref/heads/main')['object']['sha']==head,'FRONTEND_SOURCE_SUPERSEDED')
+        # A rollback baseline may legitimately run older sources. The successful
+        # run, exact commit and archive digest are verified, not relabeled latest.
         artifacts=gates.request(prefix+'actions/runs/'+str(run_id)+'/artifacts?per_page=100')['artifacts']
         matches=[r for r in artifacts if r.get('name')=='production-frontends-'+head and not r.get('expired')]
         require(len(matches)==1 and matches[0].get('digest')=='sha256:'+file_sha(self.artifact),
@@ -71,9 +77,12 @@ class Frontends:
             sys.path.remove(scripts)
             if previous is None:sys.modules.pop('staging_release',None)
             else:sys.modules['staging_release']=previous
-        self.entries={row['app']:row for row in entries};self.source=head;self.run_id=str(run_id)
+        selected=set(HOSTS) if apps is None else set(apps)
+        require(bool(selected) and selected<=set(HOSTS) and (apps is None or len(apps)==len(selected)),
+                'EXACT_BASELINE_PORTAL_SELECTION_REQUIRED')
+        self.entries={row['app']:row for row in entries if row['app'] in selected};self.source=head;self.run_id=str(run_id)
         self.dependencies=json.loads((self.root/'config/production-release-dependencies.json').read_bytes())
-        self.fingerprint={'source_commit':head,'run_id':str(run_id),'artifact_sha256':file_sha(self.artifact),
+        self.fingerprint={'repository':repository,'source_commit':head,'run_id':str(run_id),'apps':sorted(selected),'artifact_sha256':file_sha(self.artifact),
                           'manifest_sha256':file_sha(folder/'manifest.json')}
 
     def check(self):
@@ -90,7 +99,39 @@ class Frontends:
             require(file_sha(path)==entry['sha256'],'BOOTSTRAP_ARCHIVE_CHANGED')
             lease.assert_owned()
             archive=store.upload('production/archives/bootstrap-'+self.run_id+'/'+app+'.zip',path)
-            result[app].update(source_commit=self.source,archive=archive)
+            result[app].update(source_repository=self.fingerprint['repository'],source_commit=self.source,archive=archive)
+        return result
+
+class FrontendSet:
+    """Complete per-portal baseline, preserving each admitted historical source."""
+    def __init__(self,groups):
+        require(bool(groups),'COMPLETE_FRONTEND_BASELINE_REQUIRED')
+        self.groups=groups;seen=set();dependencies=None
+        for group in groups:
+            apps=set(group.entries)
+            require(not seen.intersection(apps),'DUPLICATE_BASELINE_PORTAL')
+            seen.update(apps)
+            # Do not silently replace an old portal's exact backend pins with a
+            # newer contract. Conflicts need an explicitly reviewed compatibility
+            # decision before bootstrap can admit the existing mixed release.
+            if dependencies is None:dependencies=group.dependencies
+            require(group.dependencies==dependencies,'BASELINE_DEPENDENCY_CONFLICT_REVIEW_REQUIRED')
+        require(seen==set(HOSTS),'COMPLETE_FRONTEND_BASELINE_REQUIRED')
+        self.dependencies=dependencies
+        self.fingerprint={'groups':[g.fingerprint for g in groups]}
+        self.run_id=sha(canonical(self.fingerprint))[:24]
+
+    def check(self):
+        result={}
+        for group in self.groups:result.update(group.check())
+        return result
+
+    def compatibility(self,index):
+        for group in self.groups:group.compatibility(index)
+
+    def preserve(self,store,lease,frontend):
+        result=copy.deepcopy(frontend)
+        for group in self.groups:result=group.preserve(store,lease,result)
         return result
 
 class Cloud:
@@ -132,7 +173,7 @@ def live_workers(cloud):
 def live_backend(aws):
     result={}
     for component in COMPONENTS:
-        body=aws.call('ecs','describe-services',{'cluster':CLUSTER,'services':['hid-staging-'+component]})
+        body=aws.call('ecs','describe-services',{'cluster':CLUSTER,'services':['hid-production-'+component]})
         require(not body.get('failures') and len(body.get('services',[]))==1,'LIVE_PRODUCTION_SERVICE_MISSING')
         service=body['services'][0]
         require(service.get('status')=='ACTIVE' and service.get('desiredCount')==service.get('runningCount')==1
@@ -189,7 +230,7 @@ def collect(aws,cloud,configuration,origin_version,publications):
 
 def prepare(aws,cloud,configuration,origin_version,publications,output,frontends=None):
     require(frontends is not None,'VERIFIED_FRONTEND_ARCHIVES_REQUIRED')
-    aws.account();gates.run(gates.request,False)
+    aws.account();gates.run(gates.request,False,configuration.get('approval_mode','protected'))
     value=collect(aws,cloud,configuration,origin_version,publications)
     frontends.compatibility(value)
     checks=frontends.check()
@@ -231,7 +272,7 @@ def bootstrap(aws,cloud,configuration,publications,path,accepted_hash,frontends=
             and manifest['publications_sha256']==sha(canonical(publications)),'BOOTSTRAP_INPUTS_CHANGED')
     require(frontends is not None and manifest.get('frontend_evidence')==frontends.fingerprint,
             'VERIFIED_FRONTEND_ARCHIVES_REQUIRED')
-    aws.account();gates.run(gates.request,False)
+    aws.account();gates.run(gates.request,False,configuration.get('approval_mode','protected'))
     store=Store(aws,configuration['release_bucket'],configuration['release_kms_key_arn'])
     lease=Lease(aws,'production-bootstrap-'+uuid.uuid4().hex,table=configuration['lease_table']).acquire()
     reconciled=True
@@ -255,7 +296,7 @@ def bootstrap(aws,cloud,configuration,publications,path,accepted_hash,frontends=
         require(frontends.check()==manifest['frontend_checks'],'BOOTSTRAP_HTTP_HEALTH_CHANGED')
         require(collect(aws,cloud,configuration,manifest['origin_version'],publications)==manifest['index'],
                 'BOOTSTRAP_LIVE_STATE_CHANGED_BEFORE_INDEX')
-        initial_release='frontend-'+frontends.run_id+'-1-'+sha(canonical(actual['frontend']))[:16]
+        initial_release='frontend-bootstrap-'+sha(canonical(frontends.fingerprint))[:24]
         actual['frontend_release']=initial_release
         lease.assert_owned()
         store.put('production/releases/'+initial_release+'/complete.json',{
@@ -275,13 +316,20 @@ if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('mode',choices=['prepare','bootstrap'])
     parser.add_argument('--configuration',required=True);parser.add_argument('--publications',required=True)
     parser.add_argument('--manifest',required=True);parser.add_argument('--confirmed-origin-version');parser.add_argument('--accepted-sha256')
-    parser.add_argument('--frontend-checkout',required=True);parser.add_argument('--frontend-artifact',required=True)
-    parser.add_argument('--frontend-run-id',required=True)
+    parser.add_argument('--frontend-checkout');parser.add_argument('--frontend-artifact')
+    parser.add_argument('--frontend-run-id');parser.add_argument('--frontend-groups')
     args=parser.parse_args()
     try:
         configuration=json.loads(pathlib.Path(args.configuration).read_bytes())
         publications=json.loads(pathlib.Path(args.publications).read_bytes());aws=AWS();cloud=Cloud()
-        frontends=Frontends(args.frontend_checkout,args.frontend_artifact,args.frontend_run_id)
+        if args.frontend_groups:
+            require(not any([args.frontend_checkout,args.frontend_artifact,args.frontend_run_id]),'ONE_FRONTEND_BASELINE_INPUT_REQUIRED')
+            groups=json.loads(pathlib.Path(args.frontend_groups).read_bytes())
+            require(isinstance(groups,list),'FRONTEND_BASELINE_GROUPS_REQUIRED')
+            frontends=FrontendSet([Frontends(g['checkout'],g['artifact'],g['run_id'],g['apps'],g['repository']) for g in groups])
+        else:
+            require(all([args.frontend_checkout,args.frontend_artifact,args.frontend_run_id]),'FRONTEND_BASELINE_INPUTS_REQUIRED')
+            frontends=Frontends(args.frontend_checkout,args.frontend_artifact,args.frontend_run_id)
         result=prepare(aws,cloud,configuration,args.confirmed_origin_version,publications,args.manifest,frontends) if args.mode=='prepare' else \
             bootstrap(aws,cloud,configuration,publications,args.manifest,args.accepted_sha256,frontends)
         print(json.dumps(result))

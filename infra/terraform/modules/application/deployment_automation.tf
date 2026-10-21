@@ -4,7 +4,7 @@ locals {
   release_bucket_name = "${var.name_prefix}-releases-${var.deployment_account_id}-${var.aws_region}"
   github_subject_prefixes = {
     backend  = "repo:D-Eminence@182018869/hid-system@1317340803"
-    frontend = "repo:D-Eminence@182018869/Health-id@1396718647"
+    frontend = "repo:D-Eminence@182018869/health@1428636965"
   }
   release_environment        = var.deployment_release_environment
   deployment_environments    = { backend = "${local.release_environment}-backend", frontend = "${local.release_environment}-frontend" }
@@ -212,6 +212,8 @@ resource "aws_iam_role_policy" "deployment_backend" {
       { Effect = "Allow", Action = ["ecr:DescribeImages", "ecr:GetLifecyclePolicy", "ecr:BatchGetImage", "ecr:PutImage"],
       Resource = local.automation_repository_arns },
       { Effect = "Allow", Action = ["elasticloadbalancing:DescribeTargetHealth"], Resource = "*" },
+      { Effect = "Allow", Action = ["servicediscovery:ListInstances"],
+      Resource = [for service in aws_service_discovery_service.workload : service.arn] },
       { Effect = "Allow", Action = ["logs:GetLogEvents"],
       Resource = "arn:aws:logs:${var.aws_region}:${var.deployment_account_id}:log-group:/hid/staging/database-migration:log-stream:migration/database-migration/*" }
     ]
@@ -257,6 +259,8 @@ output "deployment_automation_configuration" {
     read_role_arn             = aws_iam_role.release_read[0].arn
     deploy_role_arns          = { for kind, role in aws_iam_role.deployment : kind => role.arn }
     environments              = local.deployment_environments
+    approval_mode             = var.production_deployment_approval_mode
+    github_subject_prefixes   = local.github_subject_prefixes
     branches                  = local.deployment_branches
     migration_task_definition = aws_ecs_task_definition.migration[0].arn
     migration_network = {

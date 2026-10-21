@@ -1,6 +1,6 @@
 # Health ID DevOps handover
 
-Last verified: 19 October 2026. This is the operational baseline at handover;
+Last updated: 21 October 2026. Runtime baseline was checked again on 21 October;
 read back current cloud state before any release. Resource identifiers and secret
 references below are configuration, not secret values. Do not put credentials,
 patient data, Terraform state or deployment plans in Git.
@@ -11,7 +11,7 @@ patient data, Terraform state or deployment plans in Git.
 | --- | --- | --- |
 | Infrastructure source for handover | D-Eminence/hid-system | dev |
 | Approved backend release source | D-Eminence/hid-system | staging-novu-ci-20261005 |
-| Frontend release source | D-Eminence/Health-id | main |
+| Frontend release source | D-Eminence/health | main |
 
 This guide and the selected infrastructure source belong on dev. Backend main is
 not the approved production build source. Changing branches requires reviewing
@@ -168,20 +168,27 @@ artifact and metadata privately if a later manual release needs them.
 
 ### Current production release policy
 
-Both repositories have `PRODUCTION_DEPLOYMENT_ENABLED=false`.
+Backend has `PRODUCTION_DEPLOYMENT_ENABLED=false`. The new frontend repository
+has no deployment variables or environments configured; an unset deployment flag
+also leaves deployment disabled. The old Health-id repository is historical
+frontend release evidence, not the new production build source.
 Terraform also has `enable_deployment_automation=false`,
 `deployment_automation_bootstrap=false` and `enforce_release_index=false`.
 Builds are automatic; production releases are performed manually by an operator.
-The intended native protected-environment approval gate is not activated or
-proved. A manual workflow dispatch is not itself an enforced reviewer gate.
+The prepared implementation supports `PRODUCTION_APPROVAL_MODE=automatic` or
+`protected`, defaulting to protected when unset. Automatic mode requires successful
+remote checks, an exact current commit/candidate and one exact deployment branch;
+it rejects an environment with reviewer/wait/custom protection rules. Protected
+mode retains run-bound reviewer verification. The policy is included in the
+candidate hash, so changing policy requires a fresh build. Automatic mode has
+been requested; the production pipeline has not been activated.
 
-The deferred production release helpers still retain the pre-move `hid-staging`
-cluster target in `scripts/production_deployment_core.py`, including consumers
-such as the release inventory helper. They are not the current manual ECS
-deployment procedure. Before activation, reconcile every cluster/service target
-with `hid-production` across the infrastructure and application release tooling,
-then test admission, deployment and rollback. Do not run bootstrap/release-index
-helpers against the live stack merely because their unit tests pass.
+Production release helpers have been prepared for `hid-production`, retaining
+the staging-named schema task, IAM roles, secrets and ECR repositories. The
+backend controller also checks that current task IPs are present in Cloud Map.
+Prepared code and passing unit tests do not establish a live deployment or
+release-index bootstrap. Do not invoke bootstrap simply to bypass an admission
+failure.
 
 The infrastructure `.github/workflows/terraform.yml` validates on relevant pull
 requests and can plan through manual dispatch. It does not apply infrastructure.
@@ -190,10 +197,54 @@ Its dispatch job expects environment configuration including
 local tfvars alone does not configure those GitHub environment values.
 
 Do not enable automatic production deployment until the repository admin and
-DevOps engineer configure and verify reviewer protection, branch restrictions,
+DevOps engineer configure and verify the selected deployment policy, branch restrictions,
 OIDC trust, release index/lease bootstrap, release storage, deploy credentials
 and rollback behaviour. Intended environment names are `production-backend`
 and `production-frontend`. Leave the flags off until those controls are proved.
+
+### Owner setup for automatic mode
+
+Write access is verified for aderojuolabode in the new repository; admin access
+is not granted. An authenticated repository owner/admin must configure both
+environments. From the updated infrastructure source, in `infra/terraform`:
+
+```powershell
+python scripts/configure_production_environments.py --configure --mode automatic --github-login D-Eminence
+```
+
+Use the owner's own authentication; never share credentials. This command checks
+admin access to both repositories before writes, creates/configures
+`hid-system/production-backend` for `staging-novu-ci-20261005` and
+`health/production-frontend` for main, writes the explicit automatic policy and
+leaves both deployment enable flags false. It does not install AWS resources,
+bootstrap release state or deploy applications. Required role/storage variables
+must then be populated from the reviewed Terraform automation outputs.
+
+For reviewer gating later, disable deployments, run the same setup with
+`--mode protected`, verify the designated reviewer's access and environment
+protection, then admit a fresh candidate before re-enabling deployment.
+
+The new immutable frontend OIDC subject prefix was read back as
+`repo:D-Eminence@182018869/health@1428636965`. AWS trust must match it exactly;
+repository permissions do not copy from Health-id.
+
+### Initial release baseline needs explicit compatibility review
+
+Current portals use three historical frontend source commits. Their original
+dependency files pin different Identity API commits, while production now runs
+e41a35d. The inventory helper preserves per-portal sources and refuses duplicate,
+missing or conflicting baseline groups. Do not replace those historical pins
+with invented provenance to bootstrap the index. Admit a reviewed compatibility
+baseline before activation, retaining the exact existing Worker versions and
+archives. The known Cloudflare analytics insertion must also be admitted exactly
+for HTTP byte checks; arbitrary HTML differences must remain blocked.
+
+After index activation, production infrastructure changes use
+`scripts/production_release_infrastructure.py plan/apply` with the release bucket,
+KMS key and lease table configured in the operator environment. Its apply requires
+the exact reviewed manifest hash, resolves all live digests and reconciles new
+task revisions under the same deployment lease. Set `PRODUCTION_RELEASE_MANAGED`
+for the Terraform workflow only after this process is initialized and verified.
 
 ## 6. Manual backend release
 

@@ -243,6 +243,16 @@ variable "enable_deployment_automation" {
   default     = false
 }
 
+variable "production_deployment_approval_mode" {
+  description = "Production release policy; protected requires reviewers, automatic requires successful candidate checks and exact branch admission."
+  type        = string
+  default     = "protected"
+  validation {
+    condition     = contains(["automatic", "protected"], var.production_deployment_approval_mode)
+    error_message = "Production approval mode must be automatic or protected."
+  }
+}
+
 variable "enforce_release_index" {
   description = "Require the bootstrapped verified release index and shared lease for automation-managed Terraform operations."
   type        = bool

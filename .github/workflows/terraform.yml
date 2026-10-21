@@ -31,6 +31,10 @@ jobs:
           terraform_wrapper: false
       - run: python -m unittest discover -s scripts -p 'test_deployment*.py'
         working-directory: infra/terraform
+      - run: python -m unittest discover -s scripts -p 'test_production*.py'
+        working-directory: infra/terraform
+      - run: python -m unittest discover -s tests -p 'test_production*.py'
+        working-directory: infra/terraform
       - run: node --test tests/workload-issuer.test.mjs
         working-directory: infra/terraform
       - run: terraform fmt -check -recursive
@@ -80,11 +84,14 @@ jobs:
         env:
           ENVIRONMENT: ${{ inputs.environment }}
           RELEASE_MANAGED: ${{ vars.STAGING_RELEASE_MANAGED }}
+          PRODUCTION_RELEASE_MANAGED: ${{ vars.PRODUCTION_RELEASE_MANAGED }}
           RELEASE_BUCKET: ${{ vars.RELEASE_BUCKET }}
           RELEASE_KMS_KEY_ARN: ${{ vars.RELEASE_KMS_KEY_ARN }}
           RELEASE_LEASE_TABLE: hid-staging-deployment-leases
         run: |
-          if [ "$ENVIRONMENT" = staging ] && [ "$RELEASE_MANAGED" = true ]; then
+          if [ "$ENVIRONMENT" = production ] && [ "$PRODUCTION_RELEASE_MANAGED" = true ]; then
+            python scripts/production_release_infrastructure.py plan --var-file "environments/production.tfvars" --manifest release-review.json
+          elif [ "$ENVIRONMENT" = staging ] && [ "$RELEASE_MANAGED" = true ]; then
             python scripts/release_infrastructure.py plan --var-file "environments/staging.tfvars" --manifest release-review.json
           else
             terraform plan -input=false -var-file="environments/$ENVIRONMENT.tfvars" -out=deployment.tfplan
