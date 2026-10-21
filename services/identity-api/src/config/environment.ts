@@ -93,6 +93,15 @@ const environmentSchema = z.object({
   // QoreID's POST endpoints do not publish an idempotency contract. Keep
   // retries explicitly disabled rather than risking duplicate verification.
   QOREID_MAX_RETRIES: z.coerce.number().int().min(0).max(0).default(0),
+  // One budget of wrong public-enrollment contact codes per recipient, across
+  // its challenges and enrollments: the PATIENT_ENROLLMENT_CONTACT_FAILURE_MAX-th
+  // wrong code within the window refuses every code for that recipient, a
+  // correct one too, for one window. The defaults follow the documented budget
+  // for a six-digit code (the fifth failure in 15 minutes blocks for 15
+  // minutes); the bounds allow at most ten failures per 15 minutes. Never
+  // keyed by client IP.
+  PATIENT_ENROLLMENT_CONTACT_FAILURE_MAX: z.coerce.number().int().min(2).max(10).default(5),
+  PATIENT_ENROLLMENT_CONTACT_FAILURE_WINDOW_SECONDS: z.coerce.number().int().min(900).max(86_400).default(900),
   IDENTITY_SERVICE_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: optionalSecret,
   IDENTITY_LAB_INTERNAL_SERVICE_TOKEN: optionalSecret,
