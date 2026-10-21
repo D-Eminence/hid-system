@@ -86,7 +86,7 @@ class ECS:
         self.aws, self.lease = aws, lease
 
     def service(self, component):
-        body = self.aws.call("ecs","describe-services",{"cluster":CLUSTER,"services":["hid-staging-"+component]})
+        body = self.aws.call("ecs","describe-services",{"cluster":CLUSTER,"services":["hid-production-"+component]})
         require(not body.get("failures") and len(body.get("services",[])) == 1, "STAGING_SERVICE_MISSING")
         value = body["services"][0]
         require(value["serviceArn"].startswith("arn:aws:ecs:"+REGION+":"+ACCOUNT+":service/"+CLUSTER+"/")
@@ -96,6 +96,24 @@ class ECS:
     def definition(self, arn):
         require(arn.startswith("arn:aws:ecs:"+REGION+":"+ACCOUNT+":task-definition/hid-staging-"), "FOREIGN_TASK_DEFINITION")
         return self.aws.call("ecs","describe-task-definition",{"taskDefinition":arn})["taskDefinition"]
+
+    def verify_discovery(self, service, tasks):
+        registries = service.get("serviceRegistries", [])
+        if not registries:
+            return
+        addresses = {d["value"] for task in tasks for attachment in task.get("attachments", [])
+                     for d in attachment.get("details", []) if d.get("name") == "privateIPv4Address"}
+        require(len(addresses) == len(tasks), "CURRENT_TASK_NETWORK_ADDRESSES_REQUIRED")
+        for registry in registries:
+            arn = registry.get("registryArn", "")
+            require(arn.startswith("arn:aws:servicediscovery:"+REGION+":"+ACCOUNT+":service/"),
+                    "FOREIGN_DISCOVERY_REGISTRY")
+            instances = self.aws.call("servicediscovery", "list-instances", {
+                "ServiceId": arn.rsplit("/", 1)[-1], "MaxResults": 100})
+            require(not instances.get("NextToken"), "DISCOVERY_INVENTORY_PAGINATION_REQUIRED")
+            registered = {row.get("Attributes", {}).get("AWS_INSTANCE_IPV4")
+                          for row in instances.get("Instances", [])}
+            require(addresses <= registered, "CURRENT_TASK_DISCOVERY_REGISTRATION_MISSING")
 
     def healthy(self, component, expected, deadline=900):
         end = time.monotonic()+deadline
@@ -125,6 +143,7 @@ class ECS:
                     require(container.get("image") == primary["image"], "RUNNING_IMAGE_DIFFERS")
                     if "healthCheck" in primary:
                         require(container.get("healthStatus") == "HEALTHY", "CONTAINER_NOT_HEALTHY")
+                self.verify_discovery(service, tasks["tasks"])
                 for lb in service.get("loadBalancers",[]):
                     targets = self.aws.call("elbv2","describe-target-health",{"TargetGroupArn":lb["targetGroupArn"]})
                     # Container checks prove task health; target checks also require enough healthy registrations.
@@ -183,7 +202,7 @@ class ECS:
 
     def update(self, component, arn):
         self.lease.assert_owned()
-        self.aws.call("ecs","update-service",{"cluster":CLUSTER,"service":"hid-staging-"+component,
+        self.aws.call("ecs","update-service",{"cluster":CLUSTER,"service":"hid-production-"+component,
             "taskDefinition":arn},mutation=True)
         return self.healthy(component,arn)
 

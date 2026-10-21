@@ -78,6 +78,16 @@ class BackendControllerTests(unittest.TestCase):
         self.assertEqual(len(calls),1); self.assertTrue(lease.released)
         self.assertTrue(objects[c.INDEX_KEY]['backend']['identity-api']['task_definition'].endswith(':2'))
 
+    def test_discovery_requires_current_task_addresses_not_retired_registrations(self):
+        aws=FakeAWS();aws.call=lambda *args,**kwargs:{'Instances':[{'Attributes':{'AWS_INSTANCE_IPV4':'10.0.0.9'}}]}
+        ecs=b.ECS(aws,FakeLease())
+        service={'serviceRegistries':[{'registryArn':'arn:aws:servicediscovery:'+c.REGION+':'+c.ACCOUNT+':service/srv-fixture'}]}
+        tasks=[{'attachments':[{'details':[{'name':'privateIPv4Address','value':'10.0.0.8'}]}]}]
+        with self.assertRaisesRegex(c.ReleaseError,'DISCOVERY_REGISTRATION_MISSING'):ecs.verify_discovery(service,tasks)
+        tasks[0]['attachments'][0]['details'][0]['value']='10.0.0.9'
+        ecs.verify_discovery(service,tasks)
+        with self.assertRaisesRegex(c.ReleaseError,'NETWORK_ADDRESSES_REQUIRED'):ecs.verify_discovery(service,[{}])
+
     def test_circuit_breaker_restoring_old_revision_is_not_success(self):
         ecs=b.ECS(FakeAWS(),FakeLease()); old={'taskDefinition':'old','desiredCount':1,'runningCount':0,'pendingCount':1,'deployments':[{'rolloutState':'IN_PROGRESS'}]}
         expected=dict(old,taskDefinition='new'); settled=dict(old,pendingCount=0,deployments=[{'rolloutState':'COMPLETED'}])

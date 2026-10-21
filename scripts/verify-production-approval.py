@@ -1,4 +1,4 @@
-"""Verify run-bound protected approval before acquiring cloud credentials."""
+"""Verify run-bound deployment policy before acquiring cloud credentials."""
 import json
 import os
 from pathlib import Path
@@ -11,4 +11,4 @@ if __name__ == '__main__':
     require(file_sha(path) == os.environ.get('EXPECTED_CANDIDATE_SHA256'), 'APPROVED_ARTIFACT_CHANGED')
     validate_candidate(candidate, ctx)
     GitHub(ctx['repository']).assert_approval(candidate)
-    print('Exact production candidate and protected approval verified')
+    print('Exact production candidate and deployment policy verified')

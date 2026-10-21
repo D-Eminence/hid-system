@@ -8,6 +8,8 @@ on:
         type: string
 permissions:
   contents: read
+env:
+  PRODUCTION_APPROVAL_MODE: ${{ vars.PRODUCTION_APPROVAL_MODE || 'protected' }}
 concurrency:
   group: production-backend-${{ github.ref }}
   cancel-in-progress: false
