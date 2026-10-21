@@ -168,9 +168,10 @@ artifact and metadata privately if a later manual release needs them.
 
 ### Current production release policy
 
-Backend has `PRODUCTION_DEPLOYMENT_ENABLED=false`. The new frontend repository
-has no deployment variables or environments configured; an unset deployment flag
-also leaves deployment disabled. The old Health-id repository is historical
+Backend has `PRODUCTION_DEPLOYMENT_ENABLED=false`; the new frontend repository
+has an unset deployment flag, which also leaves deployment disabled. Both
+`production-backend` and `production-frontend` environments now exist with their
+exact branch restrictions and admin bypass disabled. The old Health-id repository is historical
 frontend release evidence, not the new production build source.
 Terraform also has `enable_deployment_automation=false`,
 `deployment_automation_bootstrap=false` and `enforce_release_index=false`.
@@ -205,8 +206,16 @@ and `production-frontend`. Leave the flags off until those controls are proved.
 ### Owner setup for automatic mode
 
 Write access is verified for aderojuolabode in the new repository; admin access
-is not granted. An authenticated repository owner/admin must configure both
-environments. From the updated infrastructure source, in `infra/terraform`:
+is not granted. The owner has created both environments. Verify their current
+branch-only configuration from `infra/terraform`:
+
+```powershell
+python scripts/configure_production_environments.py --mode automatic --github-login aderojuolabode
+```
+
+Verification does not install deployment resources or change enable flags. If
+an environment needs reconfiguration, an authenticated repository owner/admin
+can run:
 
 ```powershell
 python scripts/configure_production_environments.py --configure --mode automatic --github-login D-Eminence
@@ -230,10 +239,13 @@ repository permissions do not copy from Health-id.
 
 ### Initial release baseline needs explicit compatibility review
 
-Current portals use three historical frontend source commits. Their original
-dependency files pin different Identity API commits, while production now runs
-e41a35d. The inventory helper preserves per-portal sources and refuses duplicate,
-missing or conflicting baseline groups. Do not replace those historical pins
+Seven application portals now use the dependency release `2890789`; the public
+site remains on `1c64962`. Original dependency files pin different Identity API
+commits, while production runs `e41a35d`. Gateway packaging was patched at
+`8ef35c2`, preserving its configuration and API contract from `844935c`. The
+manual release recorded that packaging compatibility without rewriting original
+source pins. The inventory helper preserves per-portal sources and refuses
+duplicate, missing or conflicting baseline groups. Do not replace historical pins
 with invented provenance to bootstrap the index. Admit a reviewed compatibility
 baseline before activation, retaining the exact existing Worker versions and
 archives. The known Cloudflare analytics insertion must also be admitted exactly
@@ -308,17 +320,48 @@ Live services and portals intentionally have different source versions:
 | Component | Deployed source |
 | --- | --- |
 | Identity API | `e41a35d534cc63301fe3b10dc6931ac811a25f5f` |
-| Other eleven backend services | `844935c4e7b42da96f31d8c1229c79925f2b020f` |
-| Patient Worker | `51f319705f3ba83d44f826707ef234aa4e5c0c1f` |
-| Admin Worker | `7b19a9d902258d5b89db5519e3b008e1455e0a41` |
-| Other six frontend Workers | `1c6496222bfcfe262a29065899fa37539bdaf5a6` |
+| Gateway | `8ef35c2aa563e6b7e47ff036c1ef87b4874be6ae` |
+| Other ten backend services | `844935c4e7b42da96f31d8c1229c79925f2b020f` |
+| Seven application Workers (patient, admin, EHR, lab, pharmacy, migrate, outreach) | `28907892c30e479963e7f1184ac39b902858a7b3` |
+| Public website Worker | `1c6496222bfcfe262a29065899fa37539bdaf5a6` |
 
 Identity runs task definition `hid-production-identity-api:4` with digest
 `sha256:add68ac7e6e64a35872bab9400026082fcc98f51fd697fd2fcd0bb9a6efc1110`.
-Patient Worker version is `40475664-c746-453b-9038-c68a8b2ca0f4`; Admin version
-is `d9f33306-89e6-4425-8396-69a2a0b97888`. Read back current versions before
-using these as rollback targets. A later dependency metadata commit on main
-does not mean all eight portals have been redeployed.
+Gateway runs `hid-production-gateway:2` with digest
+`sha256:a3673c4ec0bba33fe2bc2c5649ed709709aa589155fcf6c35528d51d20ebf4e4`.
+Its prior `hid-production-gateway:1` remains active for rollback, with digest
+`sha256:b94dfdcfec4d645f6429af8d733d9c427c87baa1ead7abb07f74fad22049f340`.
+Both digests carry their `retain-<digest hex>` tags under the existing ECR
+retention policy. Preserve those tags while the images are live or rollback
+targets; do not rely on the ordinary CI tag retention alone.
+No database migration accompanied this dependency release. The eleven other
+backend task definitions and the public website version were preserved.
+
+The 21 October dependency release passed frontend CI, all production candidate
+checks, native ARM64 image scanning and the complete TUF/workspace gates:
+
+- [Frontend CI](https://github.com/D-Eminence/health/actions/runs/39684462714)
+- [Frontend candidate](https://github.com/D-Eminence/health/actions/runs/39684462720)
+- [Backend candidate](https://github.com/D-Eminence/hid-system/actions/runs/39684518249)
+- [TUF and workspace gates](https://github.com/D-Eminence/hid-system/actions/runs/39684518447)
+
+Application Worker versions for this release:
+
+| Portal | Current version | Previous rollback version |
+| --- | --- | --- |
+| web | `b5215c5a-4411-4c1c-aab4-7a89c212cf59` | `40475664-c746-453b-9038-c68a8b2ca0f4` |
+| admin | `c94580cf-3828-4064-91f8-82a72eeffbf7` | `d9f33306-89e6-4425-8396-69a2a0b97888` |
+| ehr | `5add43fc-3610-4c5a-9f9a-0b577a16c91b` | `d1b2bf5c-d018-443b-92f7-e9b07091bf35` |
+| lab | `8c63eb8f-cae5-4db1-8bda-ce4b4e5a1de2` | `66dad941-0143-4bc3-b533-3b92c2c3b522` |
+| pharmacy | `f041151e-e1b8-48ad-9bae-933b1e7b3a5d` | `bef29850-e443-47d8-8a30-75fa2971962d` |
+| ocr | `336d31bf-2f1e-4211-a581-53e1c753e54f` | `f9197181-52b7-41b4-b8a4-0c112fd0c06c` |
+| outreach | `d66e2002-6184-4517-9cf5-1b3fa3dfddf3` | `3fb3bcc7-20cc-411c-92da-39777f9979d9` |
+
+Read back current versions and compatibility before using rollback targets.
+Live entry assets, canonical deep links, denied unsigned sessions and no-store
+headers were verified; signed-in clinical journeys were not repeated for this
+packaging release. Automatic deployment remains disabled pending its separate
+activation.
 
 ## 8. Verification and rollback
 
