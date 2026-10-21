@@ -2,7 +2,7 @@
 
 This module contains the repository-owned, noninteractive release verifier and
 deterministic frontend artifact tooling. It is pinned to `go-tuf/v2` v2.4.2.
-Release builds use Go 1.26.9 with distribution, binary and container hashes in
+Release builds use Go 1.26.10 with distribution, binary and container hashes in
 `toolchain/production-build.json`. Run `node scripts/verify-production-toolchain.mjs`
 with that Go on PATH (or set `HID_TUF_BUILD_GO`), then run
 `node ../../release/scripts/go-vulnerability-gate.mjs` before building.
