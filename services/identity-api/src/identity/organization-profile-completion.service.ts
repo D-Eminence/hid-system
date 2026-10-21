@@ -1,8 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { type BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
 import { createHmac, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import type { QueryResultRow } from 'pg';
 import { NotificationOtpClient } from '../auth/notification-otp.client';
+import { AFTER_RESPONSE_SHUTDOWN_GRACE_MS, AfterResponseTasks } from '../common/after-response-tasks';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
@@ -30,13 +31,25 @@ interface CompletionProfileRow extends QueryResultRow {
 }
 
 @Injectable()
-export class OrganizationProfileCompletionService {
+export class OrganizationProfileCompletionService implements BeforeApplicationShutdown {
   private readonly environment = getEnvironment();
   private readonly key = this.environment.OTP_HMAC_KEY_B64
     ? Buffer.from(this.environment.OTP_HMAC_KEY_B64, 'base64') : localCompletionKey;
+  private readonly deliveries = new AfterResponseTasks(new Logger(OrganizationProfileCompletionService.name),
+    'Organization completion code delivery or its invalidation failed');
 
   constructor(private readonly database: DatabaseService,
     private readonly notification: NotificationOtpClient) {}
+
+  /** Waits for the deliveries started so far, and any started meanwhile. */
+  settleDeliveries(): Promise<void> {
+    return this.deliveries.settle();
+  }
+
+  /** Runs before DatabaseService ends the pool, so a failed delivery can still invalidate its challenge. */
+  beforeApplicationShutdown(): Promise<void> {
+    return this.deliveries.settle(AFTER_RESPONSE_SHUTDOWN_GRACE_MS);
+  }
 
   async start(input: StartOrganizationProfileCompletionDto, remoteIp: string | undefined,
     correlationId: string) {
@@ -60,14 +73,21 @@ export class OrganizationProfileCompletionService {
       });
     } catch (error) { throw this.databaseProblem(error); }
     if (recipient) {
-      const delivered = await this.notification.deliver({
-        challengeId, recipient, code, purpose: 'EMAIL_VERIFY', channel: 'email', correlationId,
-      }).catch(() => ({ outcome: 'unknown' as const }));
-      if (delivered.outcome === 'definitive_failure') {
-        await this.database.withSystemTransaction(correlationId, (client) =>
-          client.query('select identity.invalidate_organization_profile_completion_challenge($1)',
-            [challengeId])).catch(() => undefined);
-      }
+      // Only an eligible application has a code to deliver, so the response
+      // does not wait for it: its timing would tell that the CAC number and
+      // administrator email match an application. The delivery request starts
+      // here, synchronously; a definitive failure invalidates the challenge
+      // after the response.
+      this.deliveries.run(correlationId, async () => {
+        const delivered = await this.notification.deliver({
+          challengeId, recipient, code, purpose: 'EMAIL_VERIFY', channel: 'email', correlationId,
+        }).catch(() => ({ outcome: 'unknown' as const }));
+        if (delivered.outcome === 'definitive_failure') {
+          await this.database.withSystemTransaction(correlationId, (client) =>
+            client.query('select identity.invalidate_organization_profile_completion_challenge($1)',
+              [challengeId]));
+        }
+      });
     }
     return { accepted: true as const, challengeId, expiresInSeconds: 600, resendAfterSeconds: 60 };
   }
