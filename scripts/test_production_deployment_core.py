@@ -169,6 +169,25 @@ class CoreTests(unittest.TestCase):
             path.write_text('select 2;')
             with self.assertRaisesRegex(c.ReleaseError,'CONTENT'): c.schema_contract(root,[name])
 
+    def test_schema_accepts_the_reviewed_role_bootstrap_only_with_a_migration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=pathlib.Path(folder); migration='services/ehr-api/database/migrations/0099_add.sql'
+            grants=c.RUNTIME_GRANTS; suite='services/ehr-api/database/tests/new.integration.sql'
+            for name,text in ((migration,'select 1;'),(grants,'grant select on t to r;'),(suite,'select 1;')):
+                (root/name).parent.mkdir(parents=True,exist_ok=True); (root/name).write_text(text)
+            (root/'config').mkdir()
+            def declare(*names):
+                c.atomic_json(root/'config/production-schema-compatibility.json',{'schema':'hid.schema-compatibility/v1',
+                    'backward_compatible':True,'reviewed_by':'HID reviewer','evidence':'existing check',
+                    'files':{n:c.file_sha(root/n) for n in names}})
+            declare(migration,grants)
+            contract=c.schema_contract(root,[migration,grants])
+            self.assertEqual(c.migration_files(contract),[migration])
+            declare(grants)
+            with self.assertRaisesRegex(c.ReleaseError,'RUNTIME_GRANTS_NEED_A_MIGRATION'): c.schema_contract(root,[grants])
+            declare(migration,suite)
+            with self.assertRaisesRegex(c.ReleaseError,'CONTENT'): c.schema_contract(root,[migration,suite])
+
     def automatic_candidate(self):
         return c.make_candidate(dict(ctx(), approval_mode='automatic'), ['identity-api'],
             {'identity-api': {'image_uri': image('identity-api')}}, {'select': 'success'})

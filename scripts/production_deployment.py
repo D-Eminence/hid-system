@@ -9,8 +9,8 @@ import time
 import urllib.request
 from production_deployment_core import (ACCOUNT, REGION, CLUSTER, COMPONENTS, INDEX_KEY, REGISTER_FIELDS, AWS,
     GitHub, Lease, Store, ReleaseError, atomic_json, canonical, changed_paths, context, file_sha, git,
-    image, make_candidate, notify, require, schema_contract, sha, summarize, task_config_hash,
-    task_payload, validate_candidate, validate_index)
+    image, make_candidate, migration_files, notify, require, RUNTIME_GRANTS, schema_contract, sha, summarize,
+    task_config_hash, task_payload, validate_candidate, validate_index)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 ORDER = ("identity-api","notification-api","ehr-api","lab-api","pharmacy-api","ocr-api",
@@ -51,7 +51,9 @@ def candidate():
         base = os.environ["BASE_SHA"]
         for name in contract["files"]:
             # Changed applied files or RDS substitutions are outside this automatic additive path.
-            require(git("diff","--diff-filter=A","--name-only",base,"HEAD","--",name,cwd=ROOT) == name,
+            # The role bootstrap file is the one existing file a reviewed change may modify.
+            change = "M" if name == RUNTIME_GRANTS else "A"
+            require(git("diff","--diff-filter="+change,"--name-only",base,"HEAD","--",name,cwd=ROOT) == name,
                     "ONLY_NEW_REVIEWED_SCHEMA_FILES_ALLOWED")
     checks = {"select":"success","build":"success","verify-publisher":"success","publish":"success"}
     release = make_candidate(ctx, selected, records, checks, schema=contract)
@@ -243,7 +245,7 @@ class ECS:
             raise ReleaseError("MIGRATION_TIMEOUT")
         pending, names = run("plan","before")
         if pending:
-            require(contract.get("changed") and set(names) == {pathlib.PurePosixPath(p).name for p in contract["files"]},
+            require(contract.get("changed") and set(names) == {pathlib.PurePosixPath(p).name for p in migration_files(contract)},
                     "UNREVIEWED_PENDING_MIGRATIONS")
             run("dry-run")
             run("apply")

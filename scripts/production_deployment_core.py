@@ -433,6 +433,17 @@ def notify(aws, candidate, state):
         "Message":json.dumps({"release":candidate["release_id"],"repository":candidate["repository"],
             "commit":candidate["source_commit"],"state":state,"components":candidate["components"]})},mutation=True)
 
+MIGRATIONS = "services/ehr-api/database/migrations/"
+# The role bootstrap revokes every runtime grant before it applies this file,
+# so a migration that grants to a runtime role needs the same grant here, or a
+# later bootstrap removes it. The release never applies this file (it runs only
+# scripts/apply-migrations.mjs); it is declared and reviewed with the new
+# migration that carries the grant to provisioned roles.
+RUNTIME_GRANTS = "services/ehr-api/database/runtime-grants.sql"
+
+def migration_files(contract):
+    return [name for name in contract.get("files", {}) if name.startswith(MIGRATIONS)]
+
 def schema_contract(root, changed_paths):
     affected = [p for p in changed_paths if p.startswith("services/ehr-api/database/")]
     if not affected: return {"changed":False}
@@ -443,8 +454,9 @@ def schema_contract(root, changed_paths):
             and value.get("reviewed_by") and value.get("evidence"), "REVIEWED_BACKWARD_COMPATIBILITY_REQUIRED")
     require(set(value.get("files",{})) == set(affected), "EXACT_SCHEMA_CHANGE_DECLARATION_REQUIRED")
     for name, digest in value["files"].items():
-        require(name.startswith("services/ehr-api/database/migrations/") and file_sha(pathlib.Path(root)/name) == digest,
+        require((name.startswith(MIGRATIONS) or name == RUNTIME_GRANTS) and file_sha(pathlib.Path(root)/name) == digest,
                 "SCHEMA_DECLARATION_CONTENT_DIFFERS")
+    require(RUNTIME_GRANTS not in value["files"] or migration_files(value), "RUNTIME_GRANTS_NEED_A_MIGRATION")
     return {"changed":True,"contract_sha256":file_sha(metadata),"files":value["files"],
             "backward_compatible":True,"evidence":value["evidence"],"reviewed_by":value["reviewed_by"]}
 
