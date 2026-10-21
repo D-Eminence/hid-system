@@ -59,7 +59,7 @@ describe('EHR request context purpose of use', () => {
     const request = guardedRequest({ 'x-purpose-of-use': purpose });
     expect(requireRequestContext(request)).toMatchObject({ purposeOfUse: purpose, facilityId,
       membershipId: actor.facility.membershipId, correlationId: 'correlation-ehr-purpose-0001',
-      authorization: 'Bearer synthetic' });
+      authorization: 'Bearer synthetic', requestMethod: 'GET' });
     expect(request.purposeOfUse).toBe(purpose);
   });
 

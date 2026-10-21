@@ -30,8 +30,9 @@ export class IdentityService {
     context: DataAccessContext): Promise<AuthorizationDecision> {
     const decision = await this.client.authorizePatient(patientId, scope, context.purposeOfUse,
       { authorization: context.authorization, cookie: context.userCookie,
-        csrfToken: context.csrfToken, origin: context.origin, correlationId: context.correlationId,
-        facilityId: context.facilityId, purposeOfUse: context.purposeOfUse })
+        csrfToken: context.csrfToken, origin: context.origin, requestMethod: context.requestMethod,
+        correlationId: context.correlationId, facilityId: context.facilityId,
+        purposeOfUse: context.purposeOfUse })
       .catch((error) => { if (error instanceof IdentityApiProblem) throw new DomainProblem(error.status,
         error.code ?? 'IDENTITY_AUTHORIZATION_DENIED', error.message); throw new DomainProblem(503,
         'IDENTITY_SERVICE_UNAVAILABLE', 'Identity authorization service is unavailable'); });

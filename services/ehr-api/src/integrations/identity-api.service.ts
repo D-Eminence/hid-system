@@ -75,6 +75,7 @@ export class IdentityApiService {
       cookie: context.userCookie,
       csrfToken: context.csrfToken,
       origin: context.origin,
+      requestMethod: context.requestMethod,
     }));
   }
 
