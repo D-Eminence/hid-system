@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0072",
-    "count": 73,
+    "last": "0073",
+    "count": 74,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -389,6 +389,10 @@
       {
         "name": "0072_standard_consent_column_resolution.sql",
         "sha256": "ff56abd5d6a98f045ce66a8ab27b5a5981aa94d76b6d0e26af02e75556f185c7"
+      },
+      {
+        "name": "0073_runtime_command_repairs.sql",
+        "sha256": "adeed7dffcb6b82d4119ef8cd2c7eef51368d977146e651e66a344134a050e48"
       }
     ]
   },
