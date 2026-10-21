@@ -86,6 +86,7 @@ const acceptedMigrations = new Map([
   ['0071_standard_patient_access_runtime.sql', 'acc46753ce05759217b569ab64e0fe03643ff634473b90d8022608dd3a984d28'],
   ['0072_standard_consent_column_resolution.sql', 'ff56abd5d6a98f045ce66a8ab27b5a5981aa94d76b6d0e26af02e75556f185c7'],
   ['0073_runtime_command_repairs.sql', 'adeed7dffcb6b82d4119ef8cd2c7eef51368d977146e651e66a344134a050e48'],
+  ['0074_outreach_runtime_account_lookup.sql', 'ce3b2cca873128f62e9e6da4e75aace853e7b52c7178dd2f50bf94e11de0e7dd'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

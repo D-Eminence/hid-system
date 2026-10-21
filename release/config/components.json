@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0073",
-    "count": 74,
+    "last": "0074",
+    "count": 75,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -393,6 +393,10 @@
       {
         "name": "0073_runtime_command_repairs.sql",
         "sha256": "adeed7dffcb6b82d4119ef8cd2c7eef51368d977146e651e66a344134a050e48"
+      },
+      {
+        "name": "0074_outreach_runtime_account_lookup.sql",
+        "sha256": "ce3b2cca873128f62e9e6da4e75aace853e7b52c7178dd2f50bf94e11de0e7dd"
       }
     ]
   },
