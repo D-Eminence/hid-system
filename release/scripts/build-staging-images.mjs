@@ -15,7 +15,7 @@ const SHA = /^[a-f0-9]{40}$/, DIGEST = /^[a-f0-9]{64}$/
 const COMPONENTS = ['identity-api', 'ehr-api', 'lab-api', 'pharmacy-api', 'ocr-api', 'ocr-worker',
   'outreach-api', 'notification-api', 'notification-worker', 'event-dispatcher', 'gateway', 'database-migration']
 const BROKER_BASES = {
-  GO_BUILD_IMAGE: 'docker.io/library/golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c',
+  GO_BUILD_IMAGE: 'docker.io/library/golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af',
   LAMBDA_RUNTIME_IMAGE: 'public.ecr.aws/lambda/provided:al2023@sha256:7dea43facdd67ffd71aa540527b6af413dfdae0133a0423ee9c329bf1e5adb6c',
 }
 const hash = bytes => createHash('sha256').update(bytes).digest('hex')
