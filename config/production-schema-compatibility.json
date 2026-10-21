@@ -2,12 +2,13 @@
   "schema": "hid.schema-compatibility/v1",
   "backward_compatible": true,
   "reviewed_by": "",
-  "evidence": "Additive after 0072: no table, column or applied migration is removed or rewritten; the code at e41a35d keeps working on the new schema. 0073 drops the unused patient_identifiers_self_nin_insert policy and repairs lab.validate_work_item_child; 0074 grants auth.account_id_for_subject to hid_outreach_runtime; 0075 replaces identity.access_patient_with_pin with one statement removed; 0076 adds auth.otp_start_cooldowns; 0077 makes the Lab, Pharmacy, OCR and Outreach write guards refuse an unresolved session. Built 0001-0077 on PostgreSQL 16 in production order (0001-0072, role bootstrap, then 0073-0077); every suite in services/ehr-api/database/tests and services/ehr-api/test/database passes, and the database-migration checks of production-backend-images.yml pass. reviewed_by is left for the owner to set after review.",
+  "evidence": "Additive after 0072: no table, column or applied migration is removed or rewritten; the code at e41a35d keeps working on the new schema. 0073 drops the unused patient_identifiers_self_nin_insert policy and repairs lab.validate_work_item_child; 0074 grants auth.account_id_for_subject to hid_outreach_runtime; 0075 replaces identity.access_patient_with_pin with one statement removed; 0076 adds auth.otp_start_cooldowns; 0077 makes the Lab, Pharmacy, OCR and Outreach write guards refuse an unresolved session. runtime-grants.sql adds the same grants as 0074 and 0076 for a later role bootstrap; the release does not apply it. Built 0001-0077 on PostgreSQL 16 in production order (0001-0072, role bootstrap, then 0073-0077) and in new-installation order (0001-0077, then role bootstrap); every suite in services/ehr-api/database/tests and services/ehr-api/test/database passes, and the database-migration checks of production-backend-images.yml pass. reviewed_by is left for the owner to set after review.",
   "files": {
     "services/ehr-api/database/migrations/0073_runtime_command_repairs.sql": "adeed7dffcb6b82d4119ef8cd2c7eef51368d977146e651e66a344134a050e48",
-    "services/ehr-api/database/migrations/0074_outreach_runtime_account_lookup.sql": "ce3b2cca873128f62e9e6da4e75aace853e7b52c7178dd2f50bf94e11de0e7dd",
+    "services/ehr-api/database/migrations/0074_outreach_runtime_account_lookup.sql": "f8bb0d943f6dea1d2c2ffe1882464484067c490a256c21ad2d28e8065094dc83",
     "services/ehr-api/database/migrations/0075_patient_access_pin_actor_window.sql": "69023c99d699f01aea20f5fdeea0a0ba3d41e3da2b3f7f0efb8f92ad9f2f3c69",
-    "services/ehr-api/database/migrations/0076_uniform_recovery_start_cooldown.sql": "0542b7f8c9bbad41f542b57708244b6716e89f539e65eef7c99b432d00b1667d",
-    "services/ehr-api/database/migrations/0077_fail_closed_session_guards_and_ocr_worker_leases.sql": "b243b7a0161ea386aba2e477db9f62669571bd9440fe50321ab74f86e089bc79"
+    "services/ehr-api/database/migrations/0076_uniform_recovery_start_cooldown.sql": "45aa44de0b26ebe8574326d296924dff55142b41b4dc45a098c60e059a622140",
+    "services/ehr-api/database/migrations/0077_fail_closed_session_guards_and_ocr_worker_leases.sql": "b243b7a0161ea386aba2e477db9f62669571bd9440fe50321ab74f86e089bc79",
+    "services/ehr-api/database/runtime-grants.sql": "f14cb6481ee4d3cb7cb7f25ce86cae8806962dd587b730cef49f5a713bc351c5"
   }
 }

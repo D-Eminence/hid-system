@@ -8,13 +8,13 @@ numbers. Fixes therefore come over one pull request at a time, onto this
 branch's own code, and every schema change is a new migration numbered after
 0072.
 
-Production admits only new migration files under `services/ehr-api/database/`
-(`scripts/production_deployment_core.py`, `schema_contract`), each declared with
-its SHA-256 in `config/production-schema-compatibility.json` and a named
-reviewer. So these ports leave every existing file there unchanged: database
-suites ported from `main` run from `services/ehr-api/test/database/`, which the
-container database acceptance script runs after the suites in
-`services/ehr-api/database/tests/`.
+Production admits only new migration files under `services/ehr-api/database/`,
+plus `runtime-grants.sql` (below), each declared with its SHA-256 in
+`config/production-schema-compatibility.json` and a named reviewer
+(`scripts/production_deployment_core.py`, `schema_contract`). So these ports
+leave every other existing file there unchanged: database suites ported from
+`main` run from `services/ehr-api/test/database/`, which the container database
+acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 
 ## Ported
 
@@ -25,7 +25,7 @@ container database acceptance script runs after the suites in
 | #51 | A Lab result history read without `lab.execution.read` returns released revisions only; adds `GET /lab/ehr-orders/:id/released-results` | — |
 | #53 | Lab, Pharmacy and EHR reuse one remote JWKS set per process | — |
 | #34 | Fourteen row locks in Identity, Lab, OCR, Outreach and Pharmacy needed UPDATE privileges their runtime roles lack (42501); SERIALIZABLE retry per service | 0073 (main 0078) |
-| #33 (grant) | Every Outreach runtime write failed: its RLS policies call `auth.account_id_for_subject`, which the runtime could not execute | 0074 |
+| #33 (grant) | Every Outreach runtime write failed: its RLS policies call `auth.account_id_for_subject`, which the runtime could not execute | 0074, runtime-grants.sql |
 | #56 | EHR can send a saved active lab request to Lab again; Lab answers acceptance refusals 4xx | — |
 | #59 | Only the account that created a document upload intent completes it | — |
 | #60 | A missing purpose of use is 400, not 500; an owning service refusing OCR's workload identity is 503 | — |
@@ -34,7 +34,7 @@ container database acceptance script runs after the suites in
 | #38 | EHR, OCR, Lab and Pharmacy cookie GETs pass Identity's delegated check without a CSRF token | — |
 | #43 | Outreach cookie reads pass without CSRF; Identity authorizes `outreach.campaign.read`; campaign writes stay refused | — |
 | #45 | A correct patient PIN no longer clears the staff member's PIN failure window | 0075 (main 0079) |
-| #55 | Recovery starts answer alike whether or not the account exists; wrong recovery codes share one budget per account | 0076 (main 0081) |
+| #55 | Recovery starts answer alike whether or not the account exists; wrong recovery codes share one budget per account | 0076 (main 0081), runtime-grants.sql |
 | #61 | Wrong public-enrollment contact codes share one budget per recipient | — |
 | #33 | Lab, Pharmacy, OCR and Outreach write guards fail closed on an unresolved session; OCR worker leases | 0077 (main 0077) |
 | #31 | Lab authorizes the patient before listing a specimen's executions | — |
@@ -46,24 +46,23 @@ container database acceptance script runs after the suites in
 - Needs `main`'s Phase 4 platform administration (0061–0072 on `main`), which this branch replaces with its own (0064): #18, #24, #25, #27, #32, #49, #81.
 - Rewrites Identity's sign-in, refresh and sign-out on `main`'s token service: #39, #42, #50, #76. Port it as its own change with `main`'s HTTP session verifiers.
 - Edits a suite in `services/ehr-api/database/tests/`, which production refuses: #48 (0080 also restates `main`'s 0077 bodies).
-- Needs grants in `runtime-grants.sql`: #30.
+- Needs more grants in `runtime-grants.sql` and its own review: #30.
 - Launch features and their infrastructure (#63–#98 except those above) were not part of this batch.
 
-## Grants that runtime-grants.sql still needs
+## Grants and the role bootstrap
 
-0074 and 0076 grant to roles that already exist, which repairs production.
-`runtime-grants.sql` revokes every grant before it applies its own, so a later
-role bootstrap would remove them until it carries the same statements:
+0074 and 0076 grant to roles that already exist, which repairs production: a
+release runs only `scripts/apply-migrations.mjs`. `runtime-grants.sql` revokes
+every runtime grant before it applies its own, so it carries the same three
+grants too, or a later role bootstrap, and every new installation (the
+container acceptance and the CI migration rehearsal bootstrap after the
+migrations), would remove them.
 
-```sql
--- with the hid_outreach_runtime function grants
-grant execute on function auth.account_id_for_subject(text) to hid_outreach_runtime;
--- with the hid_identity_runtime and hid_schema_test_runtime table grants
-grant select, insert, update on auth.otp_start_cooldowns to hid_identity_runtime;
-grant select, insert, update on auth.otp_start_cooldowns to hid_schema_test_runtime;
-```
-
-Until then the container database acceptance script, which bootstraps roles
-after the migrations, fails at `otp-recovery-start-cooldown.integration.sql`
-and `runtime-command-privileges.integration.sql`. `main`'s Outreach
-`runtime-function-grants.spec.ts` belongs with that change.
+The production release used to refuse any change under
+`services/ehr-api/database/` other than a new migration. It now also accepts a
+modified `runtime-grants.sql` when the compatibility declaration lists it with
+its SHA-256 next to at least one new migration
+(`scripts/production_deployment_core.py`, `RUNTIME_GRANTS`). The release still
+never applies that file, and its pending-migration check compares the plan with
+the declared migrations only. Every other file there, database test suites
+included, is still refused.

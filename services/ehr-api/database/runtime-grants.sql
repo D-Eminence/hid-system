@@ -357,6 +357,9 @@ grant select on auth.accounts, auth.roles, auth.permissions,
 grant select, insert, update on auth.sessions to hid_identity_runtime;
 grant select, insert, update, delete on auth.login_attempts to hid_identity_runtime;
 grant select, insert, update on auth.otp_challenges, auth.otp_rate_limits to hid_identity_runtime;
+-- Recovery start cooldowns (0076): no DELETE; each row is overwritten by the
+-- identifier's next start.
+grant select, insert, update on auth.otp_start_cooldowns to hid_identity_runtime;
 grant insert on auth.session_events to hid_identity_runtime;
 grant select on identity.organizations, identity.facilities, identity.staff,
   identity.staff_facility_memberships, identity.purpose_of_use_codes,
@@ -499,6 +502,10 @@ grant execute on function platform.current_actor_subject(), platform.current_acc
   auth.membership_has_permission(text, uuid, uuid, text),
   outreach.context_allows(uuid,text),
   outreach.registration_campaign_member(uuid,uuid) to hid_outreach_runtime;
+-- Outreach RLS policies and its invoker-rights event trigger call
+-- platform.current_account_id() as the runtime, and that SQL function calls
+-- auth.account_id_for_subject(text), which is revoked from PUBLIC below (0074).
+grant execute on function auth.account_id_for_subject(text) to hid_outreach_runtime;
 
 -- Notification persistence contains no message bodies or OTP credentials.
 -- Authentication challenges stay exclusively with the Identity runtime.
@@ -614,6 +621,7 @@ grant select, insert, update on auth.accounts, auth.account_roles to hid_schema_
 grant select on auth.roles, auth.permissions, auth.role_permissions to hid_schema_test_runtime;
 grant select, insert, update on auth.sessions to hid_schema_test_runtime;
 grant select, insert, update on auth.otp_challenges, auth.otp_rate_limits to hid_schema_test_runtime;
+grant select, insert, update on auth.otp_start_cooldowns to hid_schema_test_runtime;
 grant select, insert on auth.admin_command_idempotency to hid_schema_test_runtime;
 grant select, insert, update on identity.organizations, identity.facilities,
   identity.staff, identity.staff_facility_memberships, identity.patients,

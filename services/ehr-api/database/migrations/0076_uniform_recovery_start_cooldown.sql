@@ -20,10 +20,9 @@
 -- runtime get SELECT, INSERT and UPDATE, no DELETE, and each identifier keeps
 -- one row per purpose, overwritten by its next start.
 --
--- main grants these in runtime-grants.sql; production admits only new
--- migration files, so this migration grants them to roles that are already
--- provisioned. runtime-grants.sql still needs the same grants before roles are
--- bootstrapped again: a bootstrap resets table grants.
+-- runtime-grants.sql carries the same grants for a role bootstrap; this
+-- migration grants them to roles that are already provisioned, since a release
+-- applies only migrations.
 
 create table auth.otp_start_cooldowns (
   purpose text not null check (purpose in (

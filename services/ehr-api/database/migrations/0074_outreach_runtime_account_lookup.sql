@@ -8,12 +8,10 @@
 -- registration case events, patient mappings and command idempotency, and its
 -- idempotency read, failed with 42501 "permission denied for function
 -- account_id_for_subject". main fixed this in runtime-grants.sql
--- (D-Eminence/hid-system#33); this grant repairs an installation whose roles
--- are already provisioned. Applied migrations 0001 through 0073 are immutable.
---
--- runtime-grants.sql still lacks this grant: a later role bootstrap resets
--- function grants and would remove it, so the same named grant must be added
--- there before roles are bootstrapped again.
+-- (D-Eminence/hid-system#33), which now carries the same grant for a role
+-- bootstrap; this migration repairs an installation whose roles are already
+-- provisioned, since a release applies only migrations. Applied migrations
+-- 0001 through 0073 are immutable.
 do $$
 begin
   if exists (select 1 from pg_roles where rolname='hid_outreach_runtime') then

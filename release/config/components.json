@@ -396,7 +396,7 @@
       },
       {
         "name": "0074_outreach_runtime_account_lookup.sql",
-        "sha256": "ce3b2cca873128f62e9e6da4e75aace853e7b52c7178dd2f50bf94e11de0e7dd"
+        "sha256": "f8bb0d943f6dea1d2c2ffe1882464484067c490a256c21ad2d28e8065094dc83"
       },
       {
         "name": "0075_patient_access_pin_actor_window.sql",
@@ -404,7 +404,7 @@
       },
       {
         "name": "0076_uniform_recovery_start_cooldown.sql",
-        "sha256": "0542b7f8c9bbad41f542b57708244b6716e89f539e65eef7c99b432d00b1667d"
+        "sha256": "45aa44de0b26ebe8574326d296924dff55142b41b4dc45a098c60e059a622140"
       },
       {
         "name": "0077_fail_closed_session_guards_and_ocr_worker_leases.sql",
