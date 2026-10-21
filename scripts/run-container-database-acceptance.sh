@@ -96,6 +96,14 @@ PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
 PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
   "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
   -v ON_ERROR_STOP=1 -f "$acceptance_repository/services/ehr-api/database/tests/patient-access-pin.integration.sql" >/dev/null
+# Suites ported from main live outside services/ehr-api/database/, which the
+# production release admits only new reviewed migration files into.
+for acceptance_ported_suite in "$acceptance_repository"/services/ehr-api/test/database/*.integration.sql; do
+  [[ -e "$acceptance_ported_suite" ]] || continue
+  PGSSLMODE=verify-full PGSSLROOTCERT="$acceptance_root/server.crt" \
+    "$acceptance_pg_bindir/psql" -h localhost -p "$acceptance_port" -U "$acceptance_admin" -d hid \
+    -v ON_ERROR_STOP=1 -f "$acceptance_ported_suite" >/dev/null
+done
 env NODE_ENV=test DATABASE_URL="$acceptance_admin_url" DATABASE_SSL=true \
   DATABASE_SSL_ROOT_CERT_BASE64="$acceptance_ca_base64" \
   npm --prefix "$acceptance_repository/services/ehr-api" run db:plan
