@@ -25,7 +25,7 @@ def image(name,digest='a'):
 def index():
     return {'schema':'hid.production-index/v1','account':c.ACCOUNT,'region':c.REGION,
         'environment':'production','verified':True,'backend':{n:{'image_uri':image(n),
-        'task_definition':'arn:aws:ecs:'+c.REGION+':'+c.ACCOUNT+':task-definition/hid-staging-'+n+':1',
+        'task_definition':'arn:aws:ecs:'+c.REGION+':'+c.ACCOUNT+':task-definition/hid-production-'+n+':1',
         'config_sha256':'b'*64,'source_commit':'c'*40} for n in c.COMPONENTS},
         'migration_image_uri':image('database-migration'),
         'migration_task_definition':'arn:aws:ecs:'+c.REGION+':'+c.ACCOUNT+':task-definition/hid-staging-database-migration:1',
@@ -68,7 +68,7 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(c.ReleaseError): c.validate_index(value)
 
     def test_exact_configuration_clone_preserves_secret_sidecar_and_health(self):
-        task={'family':'hid-staging-identity-api','networkMode':'awsvpc','runtimePlatform':{'cpuArchitecture':'ARM64'},
+        task={'family':'hid-production-identity-api','networkMode':'awsvpc','runtimePlatform':{'cpuArchitecture':'ARM64'},
             'taskRoleArn':'arn:aws:iam::'+c.ACCOUNT+':role/hid-staging-task',
             'executionRoleArn':'arn:aws:iam::'+c.ACCOUNT+':role/hid-staging-exec',
             'containerDefinitions':[{'name':'identity-api','image':image('identity-api'),'secrets':[{'name':'KEY','valueFrom':'staging-reference'}],
@@ -168,5 +168,73 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(c.schema_contract(root,[name])['changed'])
             path.write_text('select 2;')
             with self.assertRaisesRegex(c.ReleaseError,'CONTENT'): c.schema_contract(root,[name])
+
+    def automatic_candidate(self):
+        return c.make_candidate(dict(ctx(), approval_mode='automatic'), ['identity-api'],
+            {'identity-api': {'image_uri': image('identity-api')}}, {'select': 'success'})
+
+    def automatic_reader(self, branch=None, rules=None):
+        settings={'id':7,'can_admins_bypass':False,
+            'protection_rules':rules or [],
+            'deployment_branch_policy':{'custom_branch_policies':True,'protected_branches':False}}
+        def read(path):
+            if path.endswith('deployment-branch-policies?per_page=100'):
+                return {'branch_policies':[{'name':branch or ctx()['branch'],'type':'branch'}]}
+            if path.endswith('/approvals'):
+                raise AssertionError('Automatic mode must not claim reviewer approval')
+            return settings
+        return read
+
+    def test_automatic_mode_checks_remote_jobs_and_current_source(self):
+        value=self.automatic_candidate();gh=c.GitHub(value['repository'],token='test')
+        with patch.dict(os.environ,{'PRODUCTION_DEPLOYMENT_ENABLED':'true','PRODUCTION_APPROVAL_MODE':'automatic'}), \
+             patch.object(gh,'get',side_effect=self.automatic_reader()), \
+             patch.object(gh,'assert_checks') as checks,patch.object(gh,'assert_current_source') as current:
+            result=gh.assert_approval(value)
+            self.assertEqual(result,{'mode':'automatic','reviewer_ids':[],'environment_id':7})
+            checks.assert_called_once_with(value);current.assert_called_once_with(value)
+
+    def test_automatic_mode_cannot_ignore_an_existing_gate_or_wrong_branch(self):
+        value=self.automatic_candidate();gh=c.GitHub(value['repository'],token='test')
+        cases=[self.automatic_reader(branch='main'),
+               self.automatic_reader(rules=[{'type':'required_reviewers'}]),
+               self.automatic_reader(rules=[{'type':'wait_timer'}])]
+        for reader in cases:
+            with patch.dict(os.environ,{'PRODUCTION_DEPLOYMENT_ENABLED':'true','PRODUCTION_APPROVAL_MODE':'automatic'}), \
+                 patch.object(gh,'get',side_effect=reader),patch.object(gh,'assert_checks') as checks:
+                with self.assertRaises(c.ReleaseError):gh.assert_approval(value)
+                checks.assert_not_called()
+
+    def test_automatic_mode_rejects_failed_remote_checks_and_superseded_sources(self):
+        value=self.automatic_candidate();gh=c.GitHub(value['repository'],token='test')
+        for method in ('assert_checks','assert_current_source'):
+            with patch.dict(os.environ,{'PRODUCTION_DEPLOYMENT_ENABLED':'true','PRODUCTION_APPROVAL_MODE':'automatic'}), \
+                 patch.object(gh,'get',side_effect=self.automatic_reader()), \
+                 patch.object(gh,'assert_checks'),patch.object(gh,'assert_current_source'), \
+                 patch.object(gh,method,side_effect=c.ReleaseError('REMOTE_CHECK_FAILED')):
+                with self.assertRaisesRegex(c.ReleaseError,'REMOTE_CHECK_FAILED'):gh.assert_approval(value)
+
+    def test_policy_is_bound_into_candidate_and_cannot_change_during_run(self):
+        value=self.automatic_candidate();gh=c.GitHub(value['repository'],token='test')
+        with self.assertRaisesRegex(c.ReleaseError,'CANDIDATE_SOURCE_OR_RUN_DIFFERS'):
+            c.validate_candidate(value,ctx())
+        with patch.dict(os.environ,{'PRODUCTION_DEPLOYMENT_ENABLED':'true','PRODUCTION_APPROVAL_MODE':'protected'}), \
+             patch.object(gh,'get',return_value={'protection_rules':[]}):
+            with self.assertRaisesRegex(c.ReleaseError,'CANDIDATE_APPROVAL_MODE_DIFFERS'):gh.assert_approval(value)
+
+    def test_only_new_frontend_repository_identity_is_admitted(self):
+        target=c.TARGETS['frontend']
+        self.assertEqual((target['repo'],target['id']),('D-Eminence/health','1428636965'))
+        env={'GITHUB_ACTIONS':'true','GITHUB_REPOSITORY':'D-Eminence/Health-id',
+            'GITHUB_REPOSITORY_ID':'1396718647','GITHUB_REPOSITORY_OWNER_ID':c.OWNER_ID,
+            'GITHUB_REF':'refs/heads/main','GITHUB_EVENT_NAME':'push','GITHUB_SHA':'a'*40,
+            'GITHUB_RUN_ID':'42','GITHUB_RUN_ATTEMPT':'1'}
+        with self.assertRaisesRegex(c.ReleaseError,'UNTRUSTED_REPOSITORY'):c.context('frontend',env)
+
+    def test_production_inventory_rejects_retired_runtime_family(self):
+        self.assertEqual(c.CLUSTER,'hid-production')
+        value=index();value['backend']['identity-api']['task_definition']=value['backend']['identity-api']['task_definition'].replace('hid-production-','hid-staging-')
+        with self.assertRaisesRegex(c.ReleaseError,'INDEX_TASK_DEFINITION_DIFFERS'):c.validate_index(value)
+
 
 if __name__=='__main__': unittest.main()

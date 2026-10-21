@@ -14,6 +14,8 @@ on:
         options: [notification-worker, database-migration, novu-update, admin-update, identity-api, ehr-api, lab-api, pharmacy-api, ocr-api, ocr-worker, outreach-api, notification-api, event-dispatcher, gateway, support-api, all]
 permissions:
   contents: read
+env:
+  PRODUCTION_APPROVAL_MODE: ${{ vars.PRODUCTION_APPROVAL_MODE || 'protected' }}
 concurrency:
   group: production-backend-${{ github.ref }}
   cancel-in-progress: false
@@ -276,7 +278,7 @@ jobs:
         with:
           name: production-backend-candidate-${{ github.run_id }}-${{ github.run_attempt }}
           path: release
-      - name: Verify reviewer protection and exact approved candidate
+      - name: Verify deployment policy and exact candidate
         run: python3 scripts/verify-production-approval.py release/candidate.json
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
         with:
