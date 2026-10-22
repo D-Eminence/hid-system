@@ -65,9 +65,14 @@ Sources: [zlib](https://security-tracker.debian.org/tracker/CVE-2026-85091),
 These are scanner findings, not a claim that each is exploitable through HID.
 No blanket ignore, severity downgrade or security exception is applied.
 
-The scoped Novu update now has an exact-image not-affected assessment in
-`security/STAGING_NOVU_RUNTIME_ASSESSMENT.md`. Its expiring OpenVEX is generated
-only after native-binary/package checks, and is rechecked before publication.
+Every staging image with High scan findings (all but the gateway, whose scan is
+clean) is admitted against the same exact-image not-affected assessment as
+production, `security/production-runtime-assessment.json`, which covers all
+twelve assessed components. Editing it rebuilds every staging image.
+The earlier per-component staging assessments (first for the Novu update, see
+`security/STAGING_NOVU_RUNTIME_ASSESSMENT.md`) are kept only as the native
+evidence that assessment cites. The expiring OpenVEX is generated only after
+native-binary/package checks, and is rechecked before publication.
 Both raw and assessed findings are retained. `component=novu-update` builds and
 publishes only the worker and migration images; no frontend is rebuilt.
 Publication remains blocked until supported patches or evidence-backed affectedness

@@ -1,12 +1,14 @@
 import { createDecipheriv, createHmac, randomBytes, randomInt, randomUUID, timingSafeEqual } from 'node:crypto';
-import { Injectable } from '@nestjs/common';
+import { type BeforeApplicationShutdown, Injectable, Logger } from '@nestjs/common';
 import * as argon2 from 'argon2';
 import type { PoolClient } from 'pg';
+import { AFTER_RESPONSE_SHUTDOWN_GRACE_MS, AfterResponseTasks } from '../common/after-response-tasks';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import type { RecoveryOtpPurpose } from './dto/otp.dto';
 import { NotificationOtpClient, type OtpDeliveryOutcome } from './notification-otp.client';
+import { consumeRateLimit, lockRateLimitBucket, rateLimitBlocked } from './rate-limit';
 
 interface AccountRow {
   id: string;
@@ -17,7 +19,8 @@ interface AccountRow {
   phone_key_version: string | null;
 }
 interface RecoveryRecipient { channel: 'email' | 'sms'; value: string }
-interface ActiveChallengeRow { id: string; created_at: Date; }
+interface ActiveChallengeRow { id: string; cooling: boolean }
+interface StartCooldownRow { challenge_id: string; cooling: boolean }
 interface ChallengeRow {
   id: string;
   account_id: string;
@@ -39,16 +42,37 @@ export function generateSixDigitOtp(draw: (minimum: number, maximum: number) => 
   return draw(0, 1_000_000).toString().padStart(6, '0');
 }
 
+/**
+ * Recovery codes (POST /auth/otp/start, verify, complete). A start answers
+ * every identifier alike (CODEX.md §27): the same 202 body, before any code is
+ * delivered, and within the resend cooldown the challengeId it gave the same
+ * purpose and identifier before, whether or not an account exists
+ * (auth.otp_start_cooldowns, 0081). Wrong codes count against one budget per
+ * account across all its challenges and purposes; once spent, every code is
+ * refused and no code is sent until the window ends.
+ */
 @Injectable()
-export class OtpService {
+export class OtpService implements BeforeApplicationShutdown {
   private readonly environment = getEnvironment();
   private readonly key = this.environment.OTP_HMAC_KEY_B64
     ? Buffer.from(this.environment.OTP_HMAC_KEY_B64, 'base64') : undefined;
+  private readonly deliveries = new AfterResponseTasks(new Logger(OtpService.name),
+    'Recovery code delivery or its bookkeeping failed');
 
   constructor(
     private readonly database: DatabaseService,
     private readonly notification: NotificationOtpClient,
   ) {}
+
+  /** Waits for the deliveries started so far, and any started meanwhile. */
+  settleDeliveries(): Promise<void> {
+    return this.deliveries.settle();
+  }
+
+  /** Runs before DatabaseService ends the pool, so deliveries can record their outcome. */
+  beforeApplicationShutdown(): Promise<void> {
+    return this.deliveries.settle(AFTER_RESPONSE_SHUTDOWN_GRACE_MS);
+  }
 
   async start(input: {
     identifier: string;
@@ -65,6 +89,9 @@ export class OtpService {
     this.assertConfigured();
     const identifier = input.identifier.trim();
     const ipHmac = this.hmac('ip', input.remoteIp ?? 'unavailable');
+    // Email addresses and HIDs are both matched without regard to case.
+    const identifierHmac = this.hmac('otp-start', input.purpose, identifier.toLowerCase());
+    const cooldownSeconds = this.environment.OTP_RESEND_COOLDOWN_SECONDS;
     const code = generateSixDigitOtp();
     const candidateChallengeId = randomUUID();
 
@@ -107,17 +134,44 @@ export class OtpService {
         ? await this.consumeRateLimit(client, 'account', this.hmac('account', account.id)) : false;
       if (recipientLimited || ipLimited || accountLimited) return { kind: 'rate_limited' };
 
+      // The cooldown of this purpose and identifier, kept whether or not an
+      // account exists, so a repeat is answered alike. The recipient bucket's
+      // transaction lock above already serializes the starts of one
+      // identifier. Both cooldowns below use the database clock.
+      const previous = (await client.query<StartCooldownRow>(
+        `select challenge_id::text,
+                started_at > clock_timestamp() - ($3 * interval '1 second') as cooling
+           from auth.otp_start_cooldowns
+          where purpose = $1 and identifier_hmac = $2`,
+        [input.purpose, identifierHmac, cooldownSeconds],
+      )).rows[0];
+      if (previous?.cooling) return { kind: 'cooldown', id: previous.challenge_id };
+      await client.query(
+        `insert into auth.otp_start_cooldowns (purpose, identifier_hmac, challenge_id, started_at)
+         values ($1, $2, $3, clock_timestamp())
+         on conflict (purpose, identifier_hmac) do update
+           set challenge_id = excluded.challenge_id, started_at = excluded.started_at`,
+        [input.purpose, identifierHmac, candidateChallengeId],
+      );
+
+      // Run for unknown identifiers too (it finds nothing), as before.
       const active = (await client.query<ActiveChallengeRow>(
-        `select id::text, created_at from auth.otp_challenges
+        `select id::text, created_at > clock_timestamp() - ($3 * interval '1 second') as cooling
+           from auth.otp_challenges
           where account_id = $1 and purpose = $2
             and consumed_at is null and invalidated_at is null
           order by created_at desc limit 1 for update`,
-        [account?.id ?? null, input.purpose],
+        [account?.id ?? null, input.purpose, cooldownSeconds],
       )).rows[0];
-      if (active && active.created_at.getTime() + this.environment.OTP_RESEND_COOLDOWN_SECONDS * 1000 > Date.now()) {
-        return { kind: 'cooldown', id: active.id };
-      }
       if (!account || !recipient) return { kind: 'none' };
+      // An account whose code budget is spent is answered like an unknown
+      // identifier and sent nothing. A read only: start never counts it.
+      if (await rateLimitBlocked(client, 'account', this.verifyFailureBucket(account.id))) return { kind: 'none' };
+      // A challenge still cooling that this identifier did not start (the
+      // account's other identifier did) is not revealed and not resent. The
+      // identifier's own challenge, written just after its cooldown row, does
+      // not hold back its own retry once that cooldown has ended.
+      if (active?.cooling && active.id !== previous?.challenge_id) return { kind: 'none' };
       await client.query(
         `update auth.otp_challenges set invalidated_at = clock_timestamp(),
             invalidation_reason = 'resend', row_version = row_version + 1
@@ -141,12 +195,19 @@ export class OtpService {
 
     if (challenge.kind === 'rate_limited') throw this.rateLimited();
     if (challenge.kind === 'challenge') {
-      const delivery = await this.notification.deliver({
-        challengeId: challenge.id, recipient: challenge.recipient.value, code, purpose: input.purpose,
-        channel: challenge.recipient.channel,
-        correlationId: input.correlationId,
+      // Only a real account has a code to deliver, so the response does not
+      // wait for it: its timing would tell that the account exists. The
+      // delivery request starts here, synchronously; its outcome is recorded
+      // after the response.
+      const { id, recipient } = challenge;
+      this.deliveries.run(input.correlationId, async () => {
+        const delivery = await this.notification.deliver({
+          challengeId: id, recipient: recipient.value, code, purpose: input.purpose,
+          channel: recipient.channel,
+          correlationId: input.correlationId,
+        });
+        await this.recordDelivery(id, delivery);
       });
-      await this.recordDelivery(challenge.id, delivery);
     }
 
     return {
@@ -195,6 +256,17 @@ export class OtpService {
         await this.invalidate(client, challenge.id, 'attempts_exhausted');
         return 'invalid' as const;
       }
+      // The account's failure budget, across all its challenges and purposes.
+      // Lock order: this challenge row, then the budget's transaction lock.
+      // Start only reads the budget and complete never touches it, and no
+      // other challenge is locked here, so no cycle can form. A spent budget
+      // refuses every code, a correct one too.
+      const failureBucket = this.verifyFailureBucket(challenge.account_id);
+      await lockRateLimitBucket(client, 'account', failureBucket);
+      if (await rateLimitBlocked(client, 'account', failureBucket)) {
+        await this.invalidate(client, challenge.id, 'attempts_exhausted');
+        return 'invalid' as const;
+      }
       const suppliedVerifier = this.hmac('otp', input.purpose, challenge.recipient_hmac, input.code);
       if (!this.equalHex(challenge.verifier_hmac, suppliedVerifier)) {
         await client.query(
@@ -209,6 +281,12 @@ export class OtpService {
             where id = $1`,
           [challenge.id],
         );
+        // The OTP_VERIFY_FAILURE_MAX-th failure in the window blocks the
+        // budget (a request window allows that many minus one).
+        await consumeRateLimit(client, 'account', failureBucket, {
+          windowSeconds: this.environment.OTP_VERIFY_FAILURE_WINDOW_SECONDS,
+          maxRequests: this.environment.OTP_VERIFY_FAILURE_MAX - 1,
+        });
         return 'invalid' as const;
       }
 
@@ -266,36 +344,16 @@ export class OtpService {
     return { completed: true };
   }
 
-  private async consumeRateLimit(client: PoolClient, scope: 'ip' | 'account' | 'recipient', bucket: string): Promise<boolean> {
-    // Serialize even an absent bucket: row locks alone lose concurrent first attempts.
-    await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))',
-      [`otp-rate:${scope}:${bucket}`]);
-    const result = await client.query<{ request_count: number; window_started_at: Date; blocked_until: Date | null }>(
-      `select request_count, window_started_at, blocked_until
-         from auth.otp_rate_limits where scope = $1 and bucket_hmac = $2 for update`,
-      [scope, bucket],
-    );
-    const current = result.rows[0];
-    const now = Date.now();
-    if (current?.blocked_until && current.blocked_until.getTime() > now) return true;
-    const windowExpired = !current
-      || current.window_started_at.getTime() + this.environment.OTP_RATE_WINDOW_SECONDS * 1000 <= now;
-    const nextCount = windowExpired ? 1 : current.request_count + 1;
-    const blocked = nextCount > this.environment.OTP_RATE_MAX_REQUESTS;
-    await client.query(
-      `insert into auth.otp_rate_limits (
-         scope, bucket_hmac, window_started_at, request_count, blocked_until, updated_at
-       ) values ($1, $2, clock_timestamp(), 1, null, clock_timestamp())
-       on conflict (scope, bucket_hmac) do update set
-         window_started_at = case when $3 then clock_timestamp()
-           else auth.otp_rate_limits.window_started_at end,
-         request_count = $4,
-         blocked_until = case when $5 then clock_timestamp() + ($6 * interval '1 second')
-           else null end,
-         updated_at = clock_timestamp()`,
-      [scope, bucket, windowExpired, nextCount, blocked, this.environment.OTP_RATE_WINDOW_SECONDS],
-    );
-    return blocked;
+  /** Its own HMAC domain, apart from the account's start bucket hmac('account', id). */
+  private verifyFailureBucket(accountId: string): string {
+    return this.hmac('otp-verify-failure', accountId);
+  }
+
+  private consumeRateLimit(client: PoolClient, scope: 'ip' | 'account' | 'recipient', bucket: string): Promise<boolean> {
+    return consumeRateLimit(client, scope, bucket, {
+      windowSeconds: this.environment.OTP_RATE_WINDOW_SECONDS,
+      maxRequests: this.environment.OTP_RATE_MAX_REQUESTS,
+    });
   }
 
   private async recordDelivery(challengeId: string, delivery: { outcome: OtpDeliveryOutcome; provider?: string }): Promise<void> {

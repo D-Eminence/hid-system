@@ -1,10 +1,10 @@
 name: Staging backend images
 on:
   pull_request:
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/staging-novu-runtime-assessment.json', '.github/workflows/staging-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/production-runtime-assessment.json', '.github/workflows/staging-backend-images.yml']
   push:
     branches: [staging]
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/staging-novu-runtime-assessment.json', '.github/workflows/staging-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/production-runtime-assessment.json', '.github/workflows/staging-backend-images.yml']
   workflow_dispatch:
     inputs:
       component:
@@ -123,6 +123,7 @@ jobs:
             build-evidence/${{ matrix.component }}/grype.raw.json
             build-evidence/${{ matrix.component }}/runtime-assessment.json
             build-evidence/${{ matrix.component }}/runtime.vex.json
+            build-evidence/${{ matrix.component }}/native-inventory.json
           retention-days: 7
           if-no-files-found: warn
       - name: Bind image archive to source, scan and SBOM

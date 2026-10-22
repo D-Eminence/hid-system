@@ -15,9 +15,12 @@ import tempfile
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 
+# Staging builds the same images as production, so it admits them against the
+# same reviewed assessment, which covers every component. The older
+# staging-*-runtime-assessment.json files stay as the native evidence that
+# assessment cites in native_evidence_provenance.
 def policy_path(component):
-    return ROOT / 'security' / ('staging-identity-runtime-assessment.json'
-        if component == 'identity-api' else 'staging-ehr-runtime-assessment.json' if component == 'ehr-api' else 'staging-lab-runtime-assessment.json' if component == 'lab-api' else 'staging-novu-runtime-assessment.json')
+    return ROOT / 'security' / 'production-runtime-assessment.json'
 
 def run(*args):
     return subprocess.check_output(args, text=True).strip()

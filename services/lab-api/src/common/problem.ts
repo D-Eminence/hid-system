@@ -21,16 +21,32 @@ export interface ProblemDetails {
 }
 
 export class DomainProblem extends HttpException {
+  /**
+   * `options.cause` keeps the error a problem stands for (for example the
+   * database refusal a service maps) for logs and tests; it is never sent to
+   * the client, and the filter logs only its SQLSTATE.
+   */
   constructor(
     status: number,
     public readonly code: string,
     detail: string,
     public readonly errors?: ProblemDetails['errors'],
+    options?: { cause?: unknown },
   ) {
-    super(detail, status);
+    super(detail, status, options);
   }
 }
 
+/** A PostgreSQL SQLSTATE: five digits or upper-case letters. */
+const SQLSTATE = /^[0-9A-Z]{5}$/;
+
+/**
+ * The filter maps no database error: one that reaches it is `500` with a fixed
+ * detail. A command that knows what one of its own refusals means maps it to
+ * its own problem (only EHR-order acceptance does, lab-work-items.service.ts),
+ * so every other command keeps answering `500`, which OCR stores for its Lab
+ * import as retryable.
+ */
 @Catch()
 export class ProblemDetailsFilter implements ExceptionFilter {
   private readonly logger = new Logger(ProblemDetailsFilter.name);
@@ -48,6 +64,19 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       ? 'The service could not complete the request.'
       : this.safeMessage(exception);
     const code = domainProblem?.code ?? this.defaultCode(status);
+    const refusedBy = domainProblem ? this.databaseCause(domainProblem) : undefined;
+
+    if (refusedBy) {
+      this.logger.warn({
+        message: 'Database refusal answered with a domain problem',
+        sqlState: refusedBy,
+        correlationId: request.correlationId,
+        status,
+        code,
+        method: request.method,
+        route: request.route?.path ?? 'unresolved',
+      });
+    }
 
     if (status >= 500) {
       this.logger.error({
@@ -105,6 +134,14 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       503: 'DEPENDENCY_UNAVAILABLE',
     };
     return byStatus[status] ?? 'INTERNAL_ERROR';
+  }
+
+  /** The SQLSTATE of the database error a domain problem stands for, never its message. */
+  private databaseCause(problem: DomainProblem): string | undefined {
+    const cause: unknown = problem.cause;
+    if (typeof cause !== 'object' || cause === null) return undefined;
+    const sqlState = (cause as { code?: unknown }).code;
+    return typeof sqlState === 'string' && SQLSTATE.test(sqlState) ? sqlState : undefined;
   }
 
   private bodyParserStatus(exception: unknown): number | undefined {

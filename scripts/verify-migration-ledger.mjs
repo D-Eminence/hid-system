@@ -85,6 +85,11 @@ const acceptedMigrations = new Map([
   ['0070_staff_patient_chat.sql', '4bab7ab29ea43397975bb492775e78739c441d73fdaa70e8b5ff19fd75c123c6'],
   ['0071_standard_patient_access_runtime.sql', 'acc46753ce05759217b569ab64e0fe03643ff634473b90d8022608dd3a984d28'],
   ['0072_standard_consent_column_resolution.sql', 'ff56abd5d6a98f045ce66a8ab27b5a5981aa94d76b6d0e26af02e75556f185c7'],
+  ['0073_runtime_command_repairs.sql', 'adeed7dffcb6b82d4119ef8cd2c7eef51368d977146e651e66a344134a050e48'],
+  ['0074_outreach_runtime_account_lookup.sql', 'f8bb0d943f6dea1d2c2ffe1882464484067c490a256c21ad2d28e8065094dc83'],
+  ['0075_patient_access_pin_actor_window.sql', '69023c99d699f01aea20f5fdeea0a0ba3d41e3da2b3f7f0efb8f92ad9f2f3c69'],
+  ['0076_uniform_recovery_start_cooldown.sql', '45aa44de0b26ebe8574326d296924dff55142b41b4dc45a098c60e059a622140'],
+  ['0077_fail_closed_session_guards_and_ocr_worker_leases.sql', 'b243b7a0161ea386aba2e477db9f62669571bd9440fe50321ab74f86e089bc79'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

@@ -143,7 +143,9 @@ class BackendControllerTests(unittest.TestCase):
                     {'message':'0099_add.sql '+('a'*64)}]}
                 raise AssertionError(operation)
         ecs=b.ECS(AWS(),FakeLease())
-        contract={'changed':True,'files':{'services/ehr-api/database/migrations/0099_add.sql':'a'*64}}
+        # The declared role bootstrap file is not a migration the plan reports.
+        contract={'changed':True,'files':{'services/ehr-api/database/migrations/0099_add.sql':'a'*64,
+            c.RUNTIME_GRANTS:'b'*64}}
         with patch.object(ecs,'definition',return_value=task),patch.object(ecs,'protect_image'):
             ecs.migrate(image('database-migration','b'),contract,{'migration_task_definition':task['taskDefinitionArn'],
                 'migration_network':index()['migration_network']},'release')

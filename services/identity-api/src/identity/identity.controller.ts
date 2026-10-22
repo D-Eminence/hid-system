@@ -1,5 +1,5 @@
 import { Body, Controller, Post, Req,Get,Param,ParseUUIDPipe,Header } from '@nestjs/common';
-import { AuditAction, Public, RequirePermissions } from '../common/decorators';
+import { AuditAction, DelegatedBrowserRequest, Public, RequirePermissions } from '../common/decorators';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
 import { AuthorizationCheckDto } from './dto/authorization-check.dto';
 import { AuthorizeOutreachDto } from './dto/authorize-outreach.dto';
@@ -53,6 +53,7 @@ export class IdentityController {
   }
 
   @Post('service/authorization/check')
+  @DelegatedBrowserRequest()
   @RequirePermissions('identity.authorization.check')
   @AuditAction('identity.service.authorization.check.request')
   async authorizeService(@Body() input: AuthorizationCheckDto, @Req() request: HidRequest) {
@@ -82,6 +83,7 @@ export class IdentityController {
   }
 
   @Post('outreach/authorize')
+  @DelegatedBrowserRequest()
   @AuditAction('identity.outreach.authorization.request')
   async authorizeOutreach(@Body() input: AuthorizeOutreachDto, @Req() request: HidRequest) {
     await this.workloadAuth.authenticateOutreach(
@@ -89,6 +91,12 @@ export class IdentityController {
       request.header('x-hid-service-authorization'),
       request.header('x-hid-service-token'),
     );
+    // Outreach validates browser writes only here, so a request that skipped
+    // the cookie-write check as a reported read can authorize only a read.
+    if (request.delegatedBrowserMethod && !input.permission.endsWith('.read')) {
+      throw new DomainProblem(403, 'CSRF_VALIDATION_FAILED',
+        'An Outreach write requires a valid origin and CSRF token');
+    }
     const context = requireRequestContext(request, 'direct-care');
     if (!context.actor.permissions.includes(input.permission)) {
       throw new DomainProblem(403, 'PERMISSION_DENIED', 'Required Outreach permission is missing');

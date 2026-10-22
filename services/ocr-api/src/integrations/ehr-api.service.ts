@@ -3,6 +3,7 @@ import { EhrApiClient, EhrApiProblem, type EhrOcrClinicalNoteImport } from '@hid
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
+import { workloadAuthenticationRefusal } from './owning-service-auth';
 import { ServiceWorkloadIdentityService } from './service-workload-identity.service';
 
 @Injectable()
@@ -48,7 +49,7 @@ export class EhrApiService {
     catch (error) {
       if (error instanceof EhrApiProblem) {
         const payload = error.payload as { code?: unknown; detail?: unknown };
-        throw new DomainProblem(error.status,
+        throw workloadAuthenticationRefusal('EHR', error.status, payload?.code) ?? new DomainProblem(error.status,
           typeof payload?.code === 'string' ? payload.code : 'EHR_SERVICE_ERROR',
           typeof payload?.detail === 'string' ? payload.detail : 'EHR service request failed');
       }
