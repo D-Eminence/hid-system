@@ -17,6 +17,7 @@ import { assertCandidateClassification, assertPublishableCandidate, clinicalNote
   expectedPublicationOperation, importedLabCandidate,
   importedMedicationCandidate } from './ocr-publication-policy';
 import { LabApiService } from '../integrations/lab-api.service';
+import { OcrPublicationSwitch } from './ocr-publication-switch';
 import { PharmacyApiService } from '../integrations/pharmacy-api.service';
 
 interface OcrJobRow extends QueryResultRow {
@@ -99,6 +100,7 @@ export class OcrService {
     private readonly ehrApi: EhrApiService,
     private readonly labApi: LabApiService,
     private readonly pharmacyApi: PharmacyApiService,
+    private readonly publicationSwitch: OcrPublicationSwitch,
   ) {}
 
   async createJob(input: CreateOcrJobDto, idempotencyHeader: string | undefined, context: DataAccessContext) {
@@ -383,6 +385,9 @@ export class OcrService {
 
   async createPublication(validationId: string, input: CreateOcrPublicationDto,
     idempotencyHeader: string | undefined, context: DataAccessContext) {
+    if (!this.publicationSwitch.enabled) {
+      throw new DomainProblem(503, 'OCR_PUBLICATION_PAUSED', 'OCR publication is paused');
+    }
     const idempotencyKey = requireIdempotencyKey(idempotencyHeader);
     const digest = requestDigest('ocr.publication.create', { validationId, ...input });
     const publication = await this.database.withTransaction(context, async (client) => {

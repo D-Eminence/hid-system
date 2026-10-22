@@ -50,6 +50,7 @@ const environmentSchema = z.object({
   PHARMACY_SERVICE_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   PHARMACY_INTERNAL_SERVICE_TOKEN: optionalSecret,
   PHARMACY_OCR_WORKLOAD_TOKEN_FILE: optionalString,
+  OCR_PUBLICATION_ENABLED: booleanString,
 }).superRefine((environment, context) => {
   const modes = [
     ['IDENTITY_SERVICE_IDENTITY_MODE', 'IDENTITY_OCR_INTERNAL_SERVICE_TOKEN', 'IDENTITY_OCR_WORKLOAD_TOKEN_FILE'],
