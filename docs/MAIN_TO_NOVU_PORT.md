@@ -38,6 +38,11 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | #61 | Wrong public-enrollment contact codes share one budget per recipient | — |
 | #33 | Lab, Pharmacy, OCR and Outreach write guards fail closed on an unresolved session; OCR worker leases | 0077 (main 0077) |
 | #31 | Lab authorizes the patient before listing a specimen's executions | — |
+| #18 | The admin console's Platform controls page: the Identity runtime may run both control commands, and `platform.admin_set_control` no longer fails with 42702; its refusals answer 409/403/400 | 0078 (main 0071), runtime-grants.sql |
+| #18 | The admin console's Audit page: `audit.list_platform_events` returns `patient_id` in its declared column instead of failing with 42804 | 0079 (main 0067) |
+| #88 | CAC sign-up reads the Java-printed registration date that QoreID's CAC Basic v2 returns in production | — |
+| #88 | Termii receives the SMS recipient as international digits without `+`, as its API documents | — |
+| — | This branch only: OCR publication answers 503 `OCR_PUBLICATION_PAUSED` until `OCR_PUBLICATION_ENABLED=true` on ocr-api. It ships before the migration that lets publication commit, so no running ocr-api (during a rollout or after a rollback) can publish before the owner decides | — |
 
 ## Not ported, and why
 

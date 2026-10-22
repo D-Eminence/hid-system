@@ -10,6 +10,7 @@ import type { LabApiService } from '../integrations/lab-api.service';
 import type { PharmacyApiService } from '../integrations/pharmacy-api.service';
 import type { CreateOcrPublicationDto } from './dto/create-ocr-publication.dto';
 import type { ValidateOcrJobDto } from './dto/validate-ocr-job.dto';
+import type { OcrPublicationSwitch } from './ocr-publication-switch';
 import { OcrService } from './ocr.service';
 
 const context = {
@@ -56,6 +57,7 @@ interface Options {
   auditFails?: boolean;
   reusable?: boolean;
   outboxError?: Error;
+  publicationPaused?: boolean;
   publishLost?: boolean;
   replayed?: Record<string, unknown>;
   claimRefused?: boolean;
@@ -153,7 +155,8 @@ function harness(options: Options = {}) {
     if (options.auditFails) throw new Error('audit insert failed');
   }) } as unknown as AuditService;
   const service = new OcrService(database, identity, audit, ehrApi,
-    (options.labApi ?? {}) as LabApiService, {} as PharmacyApiService);
+    (options.labApi ?? {}) as LabApiService, {} as PharmacyApiService,
+    { enabled: options.publicationPaused !== true } as OcrPublicationSwitch);
   return { service, clients, database, audit, identity, ehrApi, order };
 }
 
@@ -436,5 +439,23 @@ describe('OCR validation refuses a candidate that publication would refuse', () 
 
     await expect(service.validate(jobId, body({ acceptedFields: {} }), 'ocr-validate-key-000105', context))
       .rejects.toMatchObject({ code: 'OCR_JOB_NOT_FOUND' });
+  });
+});
+
+// OCR publication writes validated OCR evidence into EHR, Lab and Pharmacy.
+// It stays paused until the owner sets OCR_PUBLICATION_ENABLED=true, and this
+// release ships the switch before a later migration lets publication commit.
+describe('OCR publication switch', () => {
+  it('answers 503 OCR_PUBLICATION_PAUSED and starts no transaction while publication is paused', async () => {
+    const { service, database, audit } = harness({ jobRow: { ...job, status: 'validated', row_version: '5' },
+      publicationPaused: true });
+    const failure = await service.createPublication(validationId, { validationVersion: 1,
+      patientConfirmationId: confirmationId, targetOperation: 'retain_validated_document',
+      purpose: 'direct-care' }, 'ocr-publish-key-000009', context).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(DomainProblem);
+    expect(failure).toMatchObject({ code: 'OCR_PUBLICATION_PAUSED' });
+    expect((failure as DomainProblem).getStatus()).toBe(503);
+    expect(database.withTransaction).not.toHaveBeenCalled();
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
   });
 });

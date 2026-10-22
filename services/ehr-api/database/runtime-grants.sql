@@ -397,7 +397,9 @@ grant execute on function platform.current_actor_subject(),
   auth.admin_change_platform_role(uuid, bigint, text, text, text, text, character),
   auth.admin_revoke_account_sessions(uuid, text, text, character),
   audit.list_facility_events(integer, bigint),
-  audit.list_platform_events(integer, bigint, text, uuid, text, text, text, timestamptz, timestamptz)
+  audit.list_platform_events(integer, bigint, text, uuid, text, text, text, timestamptz, timestamptz),
+  platform.admin_list_controls(),
+  platform.admin_set_control(text, boolean, bigint, text)
   to hid_identity_runtime;
 
 -- EHR owns only clinical persistence. Its single Identity capability is the
@@ -694,6 +696,8 @@ grant execute on function platform.current_actor_subject(),
   auth.admin_revoke_account_sessions(uuid, text, text, character),
   audit.list_facility_events(integer, bigint),
   audit.list_platform_events(integer, bigint, text, uuid, text, text, text, timestamptz, timestamptz),
+  platform.admin_list_controls(),
+  platform.admin_set_control(text, boolean, bigint, text),
   ehr.context_allows(uuid, uuid, text),
   ocr.claim_next_job(text),
   ocr.record_extraction(uuid, text, text, text, text, text, jsonb, numeric, jsonb, text),

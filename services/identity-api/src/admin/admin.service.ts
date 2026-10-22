@@ -72,14 +72,16 @@ export class AdminService {
 
   async setPlatformControl(context: PlatformAdminContext, input: PlatformControlCommandDto, expectedVersion: number) {
     return this.database.withPlatformTransaction(context, async (client) => {
-      const result = await client.query(`select * from platform.admin_set_control($1,$2,$3,$4)`,
-        [input.controlKey, input.enabled, expectedVersion, input.reason.trim()]);
-      const row = result.rows[0];
-      if (!row) throw new DomainProblem(503, 'ADMIN_CONTROL_UNAVAILABLE', 'Platform control could not be updated');
-      await this.audit.recordWithClient(client, this.auditEvent(context, 'admin.platform-control.change',
-        'platform-control', row.control_key, input.reason,
-        { enabled: row.enabled, version: Number(row.row_version), replayed: row.replayed }));
-      return { controlKey: row.control_key, enabled: row.enabled, version: Number(row.row_version), replayed: row.replayed };
+      try {
+        const result = await client.query(`select * from platform.admin_set_control($1,$2,$3,$4)`,
+          [input.controlKey, input.enabled, expectedVersion, input.reason.trim()]);
+        const row = result.rows[0];
+        if (!row) throw new DomainProblem(503, 'ADMIN_CONTROL_UNAVAILABLE', 'Platform control could not be updated');
+        await this.audit.recordWithClient(client, this.auditEvent(context, 'admin.platform-control.change',
+          'platform-control', row.control_key, input.reason,
+          { enabled: row.enabled, version: Number(row.row_version), replayed: row.replayed }));
+        return { controlKey: row.control_key, enabled: row.enabled, version: Number(row.row_version), replayed: row.replayed };
+      } catch (error) { throw this.commandError(error); }
     });
   }
 
