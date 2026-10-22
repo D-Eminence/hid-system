@@ -13,6 +13,8 @@ from production_deployment_core import (ACCOUNT, REGION, CLUSTER, COMPONENTS, IN
     task_config_hash, task_payload, validate_candidate, validate_index)
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+PENDING_LINE = re.compile(r"(\d+) pending migration\(s\)")
+PLAN_LINE = re.compile(r"(\d{4}_[a-z0-9_]+\.sql) ([a-f0-9]{64})")
 ORDER = ("identity-api","notification-api","ehr-api","lab-api","pharmacy-api","ocr-api",
          "outreach-api","notification-worker","event-dispatcher","ocr-worker","support-api","gateway")
 
@@ -45,8 +47,8 @@ def candidate():
             "sbom_sha256":receipt["sbom_sha256"],"scan_sha256":receipt["scan_sha256"]}
     require(set(records) == set(selected), "COMPLETE_PUBLICATION_SET_REQUIRED")
     paths = changed_paths(ROOT)
-    contract = schema_contract(ROOT, paths)
-    if contract.get("changed"):
+    contract = schema_contract(ROOT, paths, carry="database-migration" in records)
+    if contract.get("changed") and not contract.get("carried"):
         require("database-migration" in records, "MIGRATION_IMAGE_REQUIRED")
         base = os.environ["BASE_SHA"]
         for name in contract["files"]:
@@ -246,16 +248,17 @@ class ECS:
                 if item["lastStatus"] == "STOPPED":
                     require(all(c.get("exitCode") == 0 for c in item["containers"]), "MIGRATION_FAILED")
                     log = self.migration_logs(arn)
-                    pending = [int(m.group(1)) for e in log if (m := re.fullmatch(r"(\d+) pending migration\(s\)",e["message"]))]
-                    names = [m.group(1) for e in log if (m := re.fullmatch(r"(\d{4}_[a-z0-9_]+\.sql) [a-f0-9]{64}",e["message"]))]
-                    require(len(pending) == 1, "MIGRATION_PLAN_EVIDENCE_MISSING")
-                    return pending[0], names
+                    pending = [int(m.group(1)) for e in log if (m := PENDING_LINE.fullmatch(e["message"]))]
+                    plan = [(m.group(1), m.group(2)) for e in log if (m := PLAN_LINE.fullmatch(e["message"]))]
+                    require(len(pending) == 1 and len(plan) == pending[0], "MIGRATION_PLAN_EVIDENCE_MISSING")
+                    return pending[0], plan
                 time.sleep(5)
             raise ReleaseError("MIGRATION_TIMEOUT")
-        pending, names = run("plan","before")
+        pending, plan = run("plan","before")
         if pending:
-            require(contract.get("changed") and set(names) == {pathlib.PurePosixPath(p).name for p in migration_files(contract)},
-                    "UNREVIEWED_PENDING_MIGRATIONS")
+            # Bind the exact bytes the image will apply to the reviewed declaration.
+            declared = {(pathlib.PurePosixPath(p).name, contract["files"][p]) for p in migration_files(contract)}
+            require(contract.get("changed") and set(plan) == declared, "UNREVIEWED_PENDING_MIGRATIONS")
             run("dry-run")
             run("apply")
         require(run("plan","after")[0] == 0, "PENDING_MIGRATIONS_REMAIN")
@@ -269,7 +272,9 @@ class ECS:
             try:
                 events = self.aws.call("logs","get-log-events",{"logGroupName":"/hid/staging/database-migration",
                     "logStreamName":"migration/database-migration/"+arn.split("/")[-1],"startFromHead":True}).get("events",[])
-                if any(re.fullmatch(r"\d+ pending migration\(s\)",e["message"]) for e in events): return events
+                # Wait for every plan line, not just the count, before trusting the plan.
+                counts = [int(m.group(1)) for e in events if (m := PENDING_LINE.fullmatch(e["message"]))]
+                if counts and sum(1 for e in events if PLAN_LINE.fullmatch(e["message"])) >= counts[0]: return events
             except ReleaseError as error:
                 if str(error) != "AWS_ResourceNotFoundException": raise
             time.sleep(5)
@@ -282,7 +287,8 @@ def deploy(mode="deploy", rollback_id=None):
     require(file_sha(path) == os.environ.get("EXPECTED_CANDIDATE_SHA256"), "APPROVED_ARTIFACT_CHANGED")
     validate_candidate(candidate,ctx)
     github = GitHub(ctx["repository"])
-    approval = github.assert_approval(candidate)
+    # The approval step before cloud credentials already waited for GitHub's job records to settle.
+    approval = github.assert_approval(candidate, settle=120)
     aws = AWS()
     aws.account()
     store = Store(aws)
