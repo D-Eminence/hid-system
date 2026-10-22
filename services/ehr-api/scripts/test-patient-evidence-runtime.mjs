@@ -40,7 +40,17 @@ try {
   await admin.query(`insert into auth.accounts(id,subject,email) values ($1,'chat-synthetic-a','a@example.test'),($2,'chat-synthetic-b','b@example.test')`,[accountA,accountB]);
   await admin.query(`insert into identity.patients(id,account_id,hid_code,first_name,last_name,full_name) values
     ($1,$2,'HID-CHATA2','Synthetic','A','Synthetic A'),($3,$4,'HID-CHATB2','Synthetic','B','Synthetic B')`,[a,accountA,b,accountB]);
-  let authorization={patientId:a,accountId:accountA,subject:'chat-synthetic-a',sessionId:randomUUID(),expiresAt:new Date(Date.now()+30000).toISOString()};
+  // The patient-self context is bound to a live patient session (0083), as
+  // Identity's self authorization returns one.
+  const liveSession=async(account,patient)=>{const id=randomUUID();
+    await admin.query(`insert into auth.sessions(id,account_id,family_id,refresh_token_sha256,access_jti,account_token_version,
+      authentication_method,issued_at,expires_at,absolute_expires_at,session_kind,patient_id)
+      select $1::uuid,a.id,$1::uuid,md5($1::uuid::text)||md5($1::uuid::text),gen_random_uuid(),a.token_version,'password',
+      clock_timestamp(),clock_timestamp()+interval '1 hour',clock_timestamp()+interval '2 hours','patient',$2::uuid
+      from auth.accounts a where a.id=$3::uuid`,[id,patient,account]);
+    return id;};
+  const sessionA=await liveSession(accountA,a),sessionB=await liveSession(accountB,b);
+  let authorization={patientId:a,accountId:accountA,subject:'chat-synthetic-a',sessionId:sessionA,expiresAt:new Date(Date.now()+30000).toISOString()};
   const database={withPatientTransaction:async(auth,correlation,operation)=>{
     await runtime.query('begin');
     try {await runtime.query(`select set_config('app.patient_id',$1,true),set_config('app.account_id',$2,true),
@@ -65,7 +75,7 @@ try {
   assert.equal((await history.read(request)).exchanges.length,10);
   assert.equal((await admin.query('select count(*)::int as count from ehr.patient_chat_messages where patient_id=$1',[a])).rows[0].count,10);
   assert.equal((await history.context(request,generation)).exchanges.length,4);
-  authorization={...authorization,patientId:b,accountId:accountB,subject:'chat-synthetic-b'};
+  authorization={...authorization,patientId:b,accountId:accountB,subject:'chat-synthetic-b',sessionId:sessionB};
   assert.equal((await history.read(request)).exchanges.length,0);
   const bGeneration=await history.start(request,authorization);
   assert.equal((await history.context(request,bGeneration)).exchanges.length,0);
@@ -76,7 +86,7 @@ try {
   await assert.rejects(database.withPatientTransaction(authorization,'cross-insert',client=>client.query(
     'insert into ehr.patient_chat_messages(patient_id,generation,question,reply,source_bindings) values ($1,$2,$3,$4,$5)',
     [a,generation,'Forbidden question',JSON.stringify(reply),'[]'])),{code:'42501'});
-  authorization={...authorization,patientId:a,accountId:accountA,subject:'chat-synthetic-a'};
+  authorization={...authorization,patientId:a,accountId:accountA,subject:'chat-synthetic-a',sessionId:sessionA};
   await history.clear(request);
   assert.equal((await history.read(request)).exchanges.length,0);
   await assert.rejects(history.save(request,generation,'Late result',reply),/conversation was cleared/);
@@ -160,12 +170,12 @@ try {
     values($1,'import',$2,$3,$4,0,'synthetic-model',(array_fill(0::real,array[1024]))::public.vector)`,[a,imported.id,imported.version,imported.hash]);
     assert.equal((await client.query('select count(*)::int count from ehr.patient_evidence_chunks')).rows[0].count,1);
   });
-  authorization={...authorization,patientId:b,accountId:accountB,subject:'chat-synthetic-b'};
+  authorization={...authorization,patientId:b,accountId:accountB,subject:'chat-synthetic-b',sessionId:sessionB};
   assert.equal((await evidence.snapshot(request)).records.some(r=>r.id===importId),false);
   await database.withPatientTransaction(authorization,'synthetic-other-vector',async client=>{
     assert.equal((await client.query('select count(*)::int count from ehr.patient_evidence_chunks')).rows[0].count,0);
   });
-  authorization={...authorization,patientId:a,accountId:accountA,subject:'chat-synthetic-a'};
+  authorization={...authorization,patientId:a,accountId:accountA,subject:'chat-synthetic-a',sessionId:sessionA};
 
   // Existing full native-schema fixture exercises real clinical/Lab triggers.
   const schemaFixture=(await readFile(path.join(import.meta.dirname,'../database/tests/schema.integration.sql'),'utf8'))
@@ -195,6 +205,7 @@ try {
     'synthetic-evidence-release-01',repeat('d',64),'synthetic-lab-release-evidence' from lab.results where id='f2000000-0000-4000-8000-000000000002';commit;`,[verification,verifier,verifierMembership]);
   await admin.query(`create role lab_evidence_test login inherit nosuperuser nobypassrls password '${password}';grant hid_lab_api_runtime to lab_evidence_test;`);
   const labRuntime=await connect('lab_evidence_test');
+  const labPatientSession=await liveSession('20000000-0000-4000-8000-000000000002','50000000-0000-4000-8000-000000000001');
   try {
     const {PATIENT_LAB_QUERY}=require('../../lab-api/dist/lab/patient-results.service.js');
     const staffLabRead=async(patient,facility='10000000-0000-4000-8000-000000000002')=>{
@@ -214,7 +225,7 @@ try {
     await labRuntime.query(`select set_config('app.actor_subject','patient:test-person',true),set_config('app.account_id','20000000-0000-4000-8000-000000000002',true),
       set_config('app.patient_id','50000000-0000-4000-8000-000000000001',true),set_config('app.session_id',$1,true),
       set_config('app.self_authorized_until',$2,true),set_config('app.correlation_id','synthetic-lab-evidence-read',true),
-      set_config('app.purpose_of_use','patient-self',true),set_config('app.facility_id','',true),set_config('app.membership_id','',true)`,[randomUUID(),new Date(Date.now()+30000).toISOString()]);
+      set_config('app.purpose_of_use','patient-self',true),set_config('app.facility_id','',true),set_config('app.membership_id','',true)`,[labPatientSession,new Date(Date.now()+30000).toISOString()]);
     const result=(await labRuntime.query(PATIENT_LAB_QUERY,['50000000-0000-4000-8000-000000000001',''])).rows;
     assert.equal(result.length,1);assert.equal(result[0].fields.numericValue,'12.7');assert.equal(result[0].fields.unit,'g/dL');
     assert.equal((await labRuntime.query(PATIENT_LAB_QUERY,[a,''])).rows.length,0,'Other patient cannot be selected by changing SQL parameter');
@@ -231,7 +242,7 @@ try {
     await labRuntime.query(`select set_config('app.actor_subject','patient:test-person',true),set_config('app.account_id','20000000-0000-4000-8000-000000000002',true),
       set_config('app.patient_id','50000000-0000-4000-8000-000000000001',true),set_config('app.session_id',$1,true),
       set_config('app.self_authorized_until',$2,true),set_config('app.correlation_id','synthetic-lab-invalidation-read',true),
-      set_config('app.purpose_of_use','patient-self',true)`,[randomUUID(),new Date(Date.now()+30000).toISOString()]);
+      set_config('app.purpose_of_use','patient-self',true)`,[labPatientSession,new Date(Date.now()+30000).toISOString()]);
     assert.equal((await labRuntime.query(PATIENT_LAB_QUERY,['50000000-0000-4000-8000-000000000001',''])).rows.length,0,'Invalidated current version withheld');
     await labRuntime.query('rollback');
     assert.equal((await staffLabRead('50000000-0000-4000-8000-000000000001')).length,0,'Invalidated current version withheld from staff');

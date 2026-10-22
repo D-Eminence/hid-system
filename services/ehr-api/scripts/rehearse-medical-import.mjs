@@ -70,7 +70,14 @@ export async function rehearseMedicalImport(client,securityAdmin) {
       return results;
     } finally { await securityAdmin.query('rollback'); }
   }
-  const self={'app.patient_id':patient.id,'app.account_id':patient.auth_user_id,'app.session_id':randomUUID(),'app.actor_subject':`synthetic-medical-${patient.auth_user_id}`,
+  // The patient-self context is bound to a live patient session (0083).
+  const selfSession=randomUUID();
+  await client.query(`insert into auth.sessions(id,account_id,family_id,refresh_token_sha256,access_jti,account_token_version,
+      authentication_method,issued_at,expires_at,absolute_expires_at,session_kind,patient_id)
+      select $1::uuid,a.id,$1::uuid,md5($1::uuid::text)||md5($1::uuid::text),gen_random_uuid(),a.token_version,'password',
+      clock_timestamp(),clock_timestamp()+interval '1 hour',clock_timestamp()+interval '2 hours','patient',$2::uuid
+      from auth.accounts a where a.id=$3::uuid`,[selfSession,patient.id,patient.auth_user_id]);
+  const self={'app.patient_id':patient.id,'app.account_id':patient.auth_user_id,'app.session_id':selfSession,'app.actor_subject':`synthetic-medical-${patient.auth_user_id}`,
     'app.correlation_id':'synthetic-medical-self','app.purpose_of_use':'patient-self','app.self_authorized_until':new Date(Date.now()+30000).toISOString()};
   assert.deepEqual(await runtimeRead(self),[17,17,4]);
   assert.deepEqual(await runtimeRead({...self,'app.patient_id':randomUUID()}),[0,0,0]);
