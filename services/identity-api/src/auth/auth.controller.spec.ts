@@ -13,6 +13,7 @@ jest.mock('jose', () => ({
   },
 }));
 
+import { UnauthorizedException } from '@nestjs/common';
 import type { Response } from 'express';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
@@ -333,6 +334,23 @@ describe('AuthController Google exchange', () => {
     expect(JSON.stringify(sessionAudit.record.mock.calls)).not.toContain('g'.repeat(64));
     expect(JSON.stringify(sessionAudit.record.mock.calls)).not.toContain(challenge.nonce);
     expect(response.clearCookie).toHaveBeenCalledWith(nonceCookie, expect.any(Object));
+  });
+
+  it('answers a refusal raised while issuing the session with the one Google denial, audited as denied', async () => {
+    const challenge = issueNonce(controller);
+    google.login.mockRejectedValue(new UnauthorizedException('Patient account is unavailable'));
+    const request = requestFor({ cookies: { [nonceCookie]: challenge.cookie } });
+    const response = responseFor();
+
+    const error = await controller.exchangeGoogleIdToken(googleInput('patient-login'), request, response)
+      .catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(DomainProblem);
+    expect(error).toMatchObject({ code: 'GOOGLE_SIGN_IN_DENIED' });
+    expect((error as DomainProblem).getStatus()).toBe(401);
+    expect(JSON.stringify((error as DomainProblem).getResponse())).not.toContain('Patient account is unavailable');
+    expect(sessionAudit.record).toHaveBeenCalledWith(expect.objectContaining({
+      eventType: 'login_failed', outcome: 'denied',
+    }));
   });
 
   it('rejects a forged raw nonce cookie with the same generic denial before token verification', async () => {

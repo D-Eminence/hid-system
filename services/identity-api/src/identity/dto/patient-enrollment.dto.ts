@@ -1,9 +1,10 @@
-import { IsIn, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
+import { IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
 
 export class StartPatientEnrollmentDto {
   @IsString() @Matches(/^\d{11}$/) nin!: string;
   @IsIn(['patient-enrollment']) turnstileAction!: 'patient-enrollment';
-  @IsString() @MaxLength(2048) turnstileToken!: string;
+  // Optional here so a missing token answers 400 TURNSTILE_REQUIRED (TS-8).
+  @IsOptional() @IsString() @MaxLength(2048) turnstileToken?: string;
 }
 
 export class PatientEnrollmentContactDto {

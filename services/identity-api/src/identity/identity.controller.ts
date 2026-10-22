@@ -62,6 +62,12 @@ export class IdentityController {
       request.header('x-hid-service-authorization'),
       request.header('x-hid-service-token'),
     );
+    // The guard skipped the browser-write Origin and CSRF check for a read the
+    // calling service reported, so this request authorizes only a read (A18,
+    // main D-Eminence/hid-system#76).
+    if (request.delegatedBrowserMethod && input.scope !== 'read_records') {
+      throw new DomainProblem(403, 'CSRF_VALIDATION_FAILED', 'A write authorization requires a valid origin and CSRF token');
+    }
     const context = requireRequestContext(request, input.purpose);
     return this.identity.authorize(input.patientId, input.scope, input.purpose, context);
   }

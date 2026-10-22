@@ -10,7 +10,6 @@ import type { VerifyPatientAccessPinDto } from './dto/verify-patient-access-pin.
 
 export interface AccessRequestRow extends QueryResultRow {
   accessRequestId: string;
-  patientId: string;
   status: 'pending';
   scope: 'read_records' | 'write_records';
   purpose: string;
@@ -59,13 +58,14 @@ export interface VerifiedPatientPinAccess {
 export class ConsentService {
   constructor(private readonly database: DatabaseService) {}
 
-  async createAccessRequest(context: DataAccessContext, input: CreateAccessRequestDto) {
+  // The clinician learns the request, not the patient: the answer carries no
+  // patient id before the patient consents (main D-Eminence/hid-system#69).
+  async createAccessRequest(context: DataAccessContext, input: CreateAccessRequestDto): Promise<AccessRequestRow> {
     try {
       return await this.database.withTransaction(context, async (client) => {
         const result = await client.query<AccessRequestRow>(
           `select
              access_request_id as "accessRequestId",
-             subject_patient_id as "patientId",
              request_status as status,
              request_scope as scope,
              request_purpose as purpose,
@@ -75,7 +75,12 @@ export class ConsentService {
            from identity.create_access_request($1, $2, $3, $4)`,
           [input.hid, input.scope, input.reason, input.durationMinutes],
         );
-        return this.requireRow(result.rows[0]);
+        const row = this.requireRow(result.rows[0]);
+        // Exactly these fields, whatever else a row may carry.
+        return {
+          accessRequestId: row.accessRequestId, status: row.status, scope: row.scope, purpose: row.purpose,
+          durationMinutes: row.durationMinutes, requestedAt: row.requestedAt, existingRequest: row.existingRequest,
+        };
       });
     } catch (error) {
       throw this.translate(error);

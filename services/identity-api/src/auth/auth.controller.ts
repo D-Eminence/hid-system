@@ -18,6 +18,18 @@ import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { TurnstileService } from './turnstile.service';
 
+/**
+ * The one answer to a refused credential at sign-in (LOGIN-DETAIL-ORACLE,
+ * main D-Eminence/hid-system#76). A refusal raised after the password was
+ * verified (an account that is not a patient, an inactive staff membership,
+ * credentials changed during sign-in) gets the same 401 detail as a wrong
+ * password, so the answer never confirms a correct password; the internal
+ * reason stays out of the response. Other refusals keep their answer.
+ */
+function credentialRefusal(error: unknown): unknown {
+  return error instanceof UnauthorizedException ? new UnauthorizedException('Invalid credentials') : error;
+}
+
 @Controller('auth')
 @AuditFailuresOnly()
 export class AuthController {
@@ -129,15 +141,21 @@ export class AuthController {
       response.setHeader('x-csrf-token', result.csrfToken);
       return this.sessionResponse(result.actor, result.expiresAt);
     } catch (error) {
+      // A refusal raised while issuing the session (an account that is not a
+      // patient, deactivated meanwhile) gets the one Google denial, not its
+      // internal reason (LOGIN-DETAIL-ORACLE), and is audited as the denial it is.
+      const answered = error instanceof UnauthorizedException
+        ? new DomainProblem(401, 'GOOGLE_SIGN_IN_DENIED', 'Google sign-in could not be completed for this HID account')
+        : error;
       await this.sessionAudit.record({
         correlationId: request.correlationId,
         eventType: 'login_failed',
-        outcome: error instanceof DomainProblem && error.getStatus() < 500 ? 'denied' : 'failure',
+        outcome: answered instanceof DomainProblem && answered.getStatus() < 500 ? 'denied' : 'failure',
         sourceIp: request.ip,
         userAgent: request.header('user-agent'),
         details: { authentication_method: 'oidc', identity_provider: 'google' },
       });
-      throw error;
+      throw answered;
     } finally {
       this.clearGoogleNonceCookie(response);
     }
@@ -206,7 +224,7 @@ export class AuthController {
           userAgent: request.header('user-agent'),
         });
       }
-      throw error;
+      throw credentialRefusal(error);
     }
   }
 
