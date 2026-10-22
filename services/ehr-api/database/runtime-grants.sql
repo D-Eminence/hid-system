@@ -463,6 +463,9 @@ grant execute on function ocr.claim_worker_job(text, integer),
   ocr.renew_worker_claim(uuid, uuid, integer),
   ocr.complete_worker_job(uuid, uuid, text, text, text, text, text, jsonb, numeric, jsonb, text),
   ocr.fail_worker_job(uuid, uuid, text, text, boolean, integer, text) to hid_ocr_worker;
+-- 0082: the worker reads queue depth and age only through this aggregate
+-- command; it still has no table privileges.
+grant execute on function ocr.worker_queue_metrics() to hid_ocr_worker;
 
 grant usage on schema platform,identity,lab to hid_lab_runtime;
 grant select,insert on lab.imported_evidence,lab.imported_observations,lab.work_items,
@@ -742,6 +745,7 @@ revoke all on function auth.account_id_for_subject(text),
   ocr.renew_worker_claim(uuid, uuid, integer),
   ocr.complete_worker_job(uuid, uuid, text, text, text, text, text, jsonb, numeric, jsonb, text),
   ocr.fail_worker_job(uuid, uuid, text, text, boolean, integer, text),
+  ocr.worker_queue_metrics(),
   ehr.append_document_scan_event(uuid, text, text, text, text, text, text, text, text, text),
   lab.context_allows(uuid,uuid,text),
   pharmacy.context_allows(uuid,uuid,text),

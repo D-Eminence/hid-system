@@ -43,15 +43,18 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | #88 | CAC sign-up reads the Java-printed registration date that QoreID's CAC Basic v2 returns in production | — |
 | #88 | Termii receives the SMS recipient as international digits without `+`, as its API documents | — |
 | — | This branch only: OCR publication answers 503 `OCR_PUBLICATION_PAUSED` until `OCR_PUBLICATION_ENABLED=true` on ocr-api. It ships before the migration that lets publication commit, so no running ocr-api (during a rollout or after a rollback) can publish before the owner decides | — |
+| #32 (7B) | The OCR patient-confirmation and validation guards refuse a missing source, extraction, account or membership, and bind the confirming account and membership to the session | 0080 (main 0076) |
+| #30 | OCR patient confirmation and publication can write their outbox events (every one failed with 42501); a repeated confirmation answers 409 `OCR_PATIENT_ALREADY_CONFIRMED` | 0081 (main 0075) |
+| #30 | The OCR worker reports queue depth and age through `ocr.worker_queue_metrics()`, owned like `ocr.claim_worker_job` (main's dedicated owner role is not ported) | 0082 (main 0075), runtime-grants.sql |
+| #30 | Every OCR audit event names the source document's patient; finding a job, listing validations and listing publications are audited | — |
 
 ## Not ported, and why
 
 - Already on this branch: #26 (0071 grants the list), #58 (0071 seeds `direct-care`).
 - Does not apply: #52. This branch's record summary reads only encounters, notes and imported records.
-- Needs `main`'s Phase 4 platform administration (0061–0072 on `main`), which this branch replaces with its own (0064): #18, #24, #25, #27, #32, #49, #81.
+- Needs `main`'s Phase 4 platform administration (0061–0072 on `main`), which this branch replaces with its own (0064): the rest of #18 (its control and audit repairs are ported above), #24, #25, #27, #32 7A (its OCR guards are ported above), #49, #81.
 - Rewrites Identity's sign-in, refresh and sign-out on `main`'s token service: #39, #42, #50, #76. Port it as its own change with `main`'s HTTP session verifiers.
 - Edits a suite in `services/ehr-api/database/tests/`, which production refuses: #48 (0080 also restates `main`'s 0077 bodies).
-- Needs more grants in `runtime-grants.sql` and its own review: #30.
 - Launch features and their infrastructure (#63–#98 except those above) were not part of this batch.
 
 ## Grants and the role bootstrap
