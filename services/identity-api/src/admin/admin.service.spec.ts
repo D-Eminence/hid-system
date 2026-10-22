@@ -66,6 +66,38 @@ describe('AdminService governed commands', () => {
     expect((error as DomainProblem).code).toBe('VERSION_CONFLICT');
   });
 
+  it('changes a platform control and audits it once', async () => {
+    const { service, client, audit } = harness({ control_key: 'uploads_enabled', enabled: false,
+      row_version: '4', replayed: false });
+    await expect(service.setPlatformControl(context,
+      { controlKey: 'uploads_enabled', enabled: false, reason: '  Pause uploads for review  ' }, 3))
+      .resolves.toEqual({ controlKey: 'uploads_enabled', enabled: false, version: 4, replayed: false });
+    expect(client.query).toHaveBeenCalledWith(expect.stringContaining('platform.admin_set_control'),
+      ['uploads_enabled', false, 3, 'Pause uploads for review']);
+    expect(audit.recordWithClient).toHaveBeenCalledTimes(1);
+    expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      action: 'admin.platform-control.change', resourceId: 'uploads_enabled',
+    }));
+  });
+
+  // The control command raises ADMIN_* errors (0078); the page needs the same
+  // safe answers as every other governed command, not an unhandled 500.
+  it.each([
+    ['ADMIN_VERSION_CONFLICT', 409, 'VERSION_CONFLICT'],
+    ['ADMIN_PERMISSION_DENIED', 403, 'PERMISSION_DENIED'],
+    ['ADMIN_INVALID_CONTROL', 400, 'ADMIN_COMMAND_INVALID'],
+  ] as const)('maps a control command %s to %i', async (message, status, code) => {
+    const { service, client, audit } = harness({});
+    client.query.mockRejectedValue(new Error(message));
+    const error = await service.setPlatformControl(context,
+      { controlKey: 'uploads_enabled', enabled: false, reason: 'Pause uploads for review' }, 3)
+      .catch((failure: unknown) => failure);
+    expect(error).toBeInstanceOf(DomainProblem);
+    expect((error as DomainProblem).getStatus()).toBe(status);
+    expect((error as DomainProblem).code).toBe(code);
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
   it.each([
     ['grant', true],
     ['revoke', false],

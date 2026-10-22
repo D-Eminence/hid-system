@@ -34,6 +34,8 @@ interface AccessTokenLease {
 }
 
 const MAX_TOKEN_USE_SECONDS = 5_400;
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const WEEKDAYS = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
 
 export function qoreIdAdapterConfigurationFromEnvironment(): QoreIdAdapterConfiguration {
   const environment = getEnvironment();
@@ -439,11 +441,12 @@ export class QoreIdVerificationAdapter {
     if (typeof value !== 'string') return undefined;
     const input = value.trim();
     if (/^\d{4}-\d{2}-\d{2}$/.test(input)) return this.validDate(input);
+    const printed = this.javaPrintedDate(input);
+    if (printed !== null) return printed;
     const match = /^(\d{1,2})-([A-Za-z]{3})-(\d{2}|\d{4})$/.exec(input);
     if (!match) return undefined;
     const [, day = '', monthText = '', yearText = ''] = match;
-    const month = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec']
-      .indexOf(monthText.toLowerCase()) + 1;
+    const month = MONTHS.indexOf(monthText.toLowerCase()) + 1;
     if (!month) return undefined;
     const yearNumber = Number(yearText);
     const currentYear = new Date().getUTCFullYear();
@@ -451,6 +454,28 @@ export class QoreIdVerificationAdapter {
       ? (yearNumber <= currentYear % 100 ? 2000 : 1900) + yearNumber
       : yearNumber;
     return this.validDate(`${year}-${String(month).padStart(2, '0')}-${day.padStart(2, '0')}`);
+  }
+
+  /**
+   * CAC Basic v2 prints registrationDate as Java's Date#toString
+   * ("Fri Oct 02 00:00:00 GMT 1987"). The registry records a calendar date, so
+   * this keeps the printed day, month and year and does not shift time zones.
+   * Answers null when the input is not in that form, and undefined when it is
+   * but names no real date (bad time, impossible day, or a weekday that does
+   * not match the date).
+   */
+  private javaPrintedDate(input: string): string | null | undefined {
+    const match = /^([A-Za-z]{3}) ([A-Za-z]{3}) (\d{1,2}) (\d{2}):(\d{2}):(\d{2}) [A-Za-z]{1,5}(?:[+-]\d{2}:?\d{2})? (\d{4})$/
+      .exec(input);
+    if (!match) return null;
+    const [, weekdayText = '', monthText = '', day = '', hours = '', minutes = '', seconds = '', year = ''] = match;
+    const month = MONTHS.indexOf(monthText.toLowerCase()) + 1;
+    const weekday = WEEKDAYS.indexOf(weekdayText.toLowerCase());
+    if (!month || weekday < 0 || Number(hours) > 23 || Number(minutes) > 59 || Number(seconds) > 59) {
+      return undefined;
+    }
+    const iso = this.validDate(`${year}-${String(month).padStart(2, '0')}-${day.padStart(2, '0')}`);
+    return iso && new Date(`${iso}T00:00:00Z`).getUTCDay() === weekday ? iso : undefined;
   }
 
   private safeCacRegistrationNumber(value: unknown): string | undefined {

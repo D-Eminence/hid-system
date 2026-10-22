@@ -238,6 +238,74 @@ describe('QoreID verification adapter', () => {
     expect(result.cacBinding).toBeUndefined();
   });
 
+  // QoreID's CAC Basic v2 production response prints registrationDate in the
+  // registry's Java Date#toString form ("EEE MMM dd HH:mm:ss zzz yyyy") and
+  // companyType as an upper-case enum, with a bare numeric rcNumber. Invented
+  // values; only the shape follows the observed response.
+  const productionShapeCac = {
+    status: 'ACTIVE', rcNumber: '1234', address: '9 Example Road , Example Town ,Example State',
+    registrationDate: 'Fri Oct 02 00:00:00 GMT 1987', companyName: 'SYNTHETIC REGISTRY LTD',
+    companyType: 'PRIVATE_COMPANY_LIMITED_BY_SHARES',
+  };
+
+  it('binds the CAC Basic v2 production shape with a Java-style registration date', async () => {
+    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response({
+      ...verifiedCacResponse, cac: productionShapeCac,
+    }));
+    const result = await new QoreIdVerificationAdapter(configuration,
+      fetch as unknown as typeof globalThis.fetch).verifyCac('RC1234');
+    expect(result).toMatchObject({ state: 'verified', verifiedRegistrationNumber: 'RC1234', cacBinding: {
+      registrationNumber: 'RC1234', providerRegistrationNumber: '1234',
+      companyName: 'SYNTHETIC REGISTRY LTD', entityType: 'PRIVATE_COMPANY_LIMITED_BY_SHARES',
+      registrationDate: '1987-10-02', address: '9 Example Road , Example Town ,Example State',
+      registryStatus: 'ACTIVE',
+    } });
+    expect(result.cacIncompleteProfile).toBeUndefined();
+  });
+
+  it.each([
+    ['Mon Jan 05 00:00:00 WAT 2015', '2015-01-05'],
+    ['Thu Feb 29 13:45:10 UTC 2024', '2024-02-29'],
+    ['Sat Jul 4 00:00:00 GMT+01:00 1998', '1998-07-04'],
+    ['  wed dec 31 23:59:59 gmt 1980  ', '1980-12-31'],
+  ])('reads the printed calendar date of %p without shifting time zones', async (printed, iso) => {
+    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response({
+      ...verifiedCacResponse, cac: { ...productionShapeCac, registrationDate: printed },
+    }));
+    const result = await new QoreIdVerificationAdapter(configuration,
+      fetch as unknown as typeof globalThis.fetch).verifyCac('RC1234');
+    expect(result.cacBinding).toMatchObject({ registrationDate: iso });
+  });
+
+  it.each([
+    'Thu Oct 02 00:00:00 GMT 1987',
+    'Fri Feb 30 00:00:00 GMT 1987',
+    'Fri Oct 02 24:00:00 GMT 1987',
+    'Fri Oct 02 00:00 GMT 1987',
+    'Fri Oct 02 00:00:00 1987',
+    'Fri Oct 02 00:00:00 GMT 87',
+    'Fri Oct 02 00:00:00 GMT 1987 extra',
+  ])('rejects a malformed Java-style registration date %p', async (printed) => {
+    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response({
+      ...verifiedCacResponse, cac: { ...productionShapeCac, registrationDate: printed },
+    }));
+    await expect(new QoreIdVerificationAdapter(configuration,
+      fetch as unknown as typeof globalThis.fetch).verifyCac('RC1234'))
+      .rejects.toMatchObject({ status: 502, code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+  });
+
+  it('keeps a struck-off company in the production shape incomplete rather than failed', async () => {
+    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response({
+      ...verifiedCacResponse, cac: { ...productionShapeCac, status: 'STRUCK-OFF' },
+    }));
+    const result = await new QoreIdVerificationAdapter(configuration,
+      fetch as unknown as typeof globalThis.fetch).verifyCac('RC1234');
+    expect(result).toMatchObject({ state: 'verified', verifiedRegistrationNumber: 'RC1234',
+      cacIncompleteProfile: { submittedRegistrationNumber: 'RC1234', registryStatus: 'STRUCK-OFF',
+        registrationDate: '1987-10-02', entityType: 'PRIVATE_COMPANY_LIMITED_BY_SHARES' } });
+    expect(result.cacBinding).toBeUndefined();
+  });
+
   it('preserves a non-active registry status without treating the CAC check as failed', async () => {
     const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response({
       ...verifiedCacResponse, cac: { ...verifiedCacResponse.cac, status: 'Inactive' },

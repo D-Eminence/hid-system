@@ -9,7 +9,9 @@ export class TermiiSmsProvider implements OtpProvider {
     try {
       const response = await this.transport(new URL('/api/sms/send', this.environment.TERMII_BASE_URL), {
         method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ api_key: this.environment.TERMII_API_KEY, to: message.recipient, from: this.environment.TERMII_SENDER_ID, sms: genericOtpText(message.code), type: 'plain', channel: this.environment.TERMII_CHANNEL }),
+        // Termii documents `to` as international digits without '+'; the
+        // recipient arrives in E.164 (deliver-otp.dto).
+        body: JSON.stringify({ api_key: this.environment.TERMII_API_KEY, to: internationalDigits(message.recipient), from: this.environment.TERMII_SENDER_ID, sms: genericOtpText(message.code), type: 'plain', channel: this.environment.TERMII_CHANNEL }),
         signal: AbortSignal.timeout(this.environment.NOTIFICATION_PROVIDER_TIMEOUT_MS),
       });
       const payload = await safeJson(response);
@@ -18,5 +20,6 @@ export class TermiiSmsProvider implements OtpProvider {
   }
 }
 
+function internationalDigits(value: string): string { return value.startsWith('+') ? value.slice(1) : value; }
 async function safeJson(response: Response): Promise<Record<string, unknown>> { try { const value = await response.json(); return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {}; } catch { return {}; } }
 function stringField(value: Record<string, unknown>, key: string) { return typeof value[key] === 'string' ? value[key] : null; }
