@@ -5,7 +5,7 @@ test('every staging component is admitted against the reviewed production invent
   for(const c of components) assert.equal(runtimePolicyPath(c),'security/production-runtime-assessment.json');
 });
 test('production policy edits rebuild every staging component for fresh native verification',()=>assert.deepEqual(selectComponents(['security/production-runtime-assessment.json']),components));
-test('retired staging policies no longer select or admit any image',()=>{
+test('retired staging policies no longer select any image',()=>{
   for(const p of ['security/staging-novu-runtime-assessment.json','security/staging-ehr-runtime-assessment.json',
     'security/staging-identity-runtime-assessment.json','security/staging-lab-runtime-assessment.json'])
     assert.deepEqual(selectComponents([p]),[]);
