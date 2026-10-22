@@ -61,13 +61,21 @@ def candidate():
         with open(os.environ["GITHUB_OUTPUT"],"a") as output:
             output.write("candidate_sha256="+file_sha(ROOT/"release/candidate.json")+"\n")
 
+def rollback_receipt(store,release_id,version=None):
+    require(re.fullmatch(r"backend-(?:[0-9]+-[0-9]+-[a-f0-9]{16}|bootstrap-[a-f0-9]{24})",release_id or ""), "RECORDED_ROLLBACK_RELEASE_REQUIRED")
+    old,meta = store.read("production/releases/"+release_id+"/complete.json",version)
+    require(old.get("status") == "success" and old.get("kind") == "backend", "HEALTHY_ROLLBACK_RECEIPT_REQUIRED")
+    if release_id.startswith("backend-bootstrap-"):
+        require(old.get("operation") == "bootstrap-inventory" and old.get("deployment_performed") is False
+                and re.fullmatch(r"[a-f0-9]{64}",old.get("inventory_manifest_sha256","")), "VERIFIED_BOOTSTRAP_RECEIPT_REQUIRED")
+    return old,meta
+
+
 def rollback_candidate(release_id):
     ctx = context("backend")
-    require(re.fullmatch(r"backend-[0-9]+-[0-9]+-[a-f0-9]{16}",release_id or ""), "RECORDED_ROLLBACK_RELEASE_REQUIRED")
     aws = AWS()
     aws.account()
-    old,meta = Store(aws).read("production/releases/"+release_id+"/complete.json")
-    require(old.get("status") == "success" and old.get("kind") == "backend", "HEALTHY_ROLLBACK_RECEIPT_REQUIRED")
+    old,meta = rollback_receipt(Store(aws),release_id)
     desired = old["after"]
     require(set(desired) == set(COMPONENTS), "COMPLETE_ROLLBACK_TARGET_REQUIRED")
     for name,row in desired.items(): image(name,row["image_uri"])
@@ -94,7 +102,8 @@ class ECS:
         return value
 
     def definition(self, arn):
-        require(arn.startswith("arn:aws:ecs:"+REGION+":"+ACCOUNT+":task-definition/hid-staging-"), "FOREIGN_TASK_DEFINITION")
+        families = "hid-production-(?:"+"|".join(COMPONENTS)+")|hid-staging-database-migration"
+        require(re.fullmatch("arn:aws:ecs:"+REGION+":"+ACCOUNT+":task-definition/(?:"+families+r"):[1-9][0-9]*",arn or ""), "FOREIGN_TASK_DEFINITION")
         return self.aws.call("ecs","describe-task-definition",{"taskDefinition":arn})["taskDefinition"]
 
     def verify_discovery(self, service, tasks):
@@ -292,8 +301,7 @@ def deploy(mode="deploy", rollback_id=None):
         if mode == "rollback":
             require(candidate.get("operation") == "rollback", "ROLLBACK_APPROVAL_REQUIRED")
             rollback_id = candidate["rollback_ref"]["release_id"]
-            require(re.fullmatch(r"backend-[0-9]+-[0-9]+-[a-f0-9]{16}",rollback_id or ""), "RECORDED_ROLLBACK_RELEASE_REQUIRED")
-            old,_ = store.read("production/releases/"+rollback_id+"/complete.json",candidate["rollback_ref"]["version_id"])
+            old,_ = rollback_receipt(store,rollback_id,candidate["rollback_ref"]["version_id"])
             require(sha(canonical(old)) == candidate["rollback_ref"]["sha256"], "ROLLBACK_RECEIPT_CHANGED")
             require(old.get("status") == "success" and old.get("kind") == "backend", "HEALTHY_ROLLBACK_RECEIPT_REQUIRED")
             require(desired == {name:row["image_uri"] for name,row in old["after"].items()}, "ROLLBACK_TARGET_CHANGED")
@@ -325,7 +333,9 @@ def deploy(mode="deploy", rollback_id=None):
         metadata = old["after"] if mode == "rollback" else index["backend"]
         new_backend = {n:{**metadata[n],**row} for n,row in after.items()}
         if mode != "rollback":
-            for name in updated: new_backend[name]["source_commit"] = candidate["source_commit"]
+            for name in updated:
+                new_backend[name].update(source_commit=candidate["source_commit"],
+                    publication_sha256=candidate["evidence"][name]["publication_sha256"])
         new_index.update(backend=new_backend,backend_release=candidate["release_id"],verified=True)
         if migration_arn:
             new_index["migration_task_definition"] = migration_arn
