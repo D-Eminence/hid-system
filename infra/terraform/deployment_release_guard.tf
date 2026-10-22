@@ -36,7 +36,7 @@ resource "terraform_data" "release_guard" {
       error_message = "Release index changed or the shared deployment lease was lost; regenerate the plan."
     }
     precondition {
-      condition     = !var.enforce_release_index || try(jsondecode(data.external.release_state[0].result.image_uris) == var.image_uris && data.external.release_state[0].result.migration_image_uri == var.migration_image_uri, false)
+      condition     = !var.enforce_release_index || try(tomap(jsondecode(data.external.release_state[0].result.image_uris)) == var.image_uris && data.external.release_state[0].result.migration_image_uri == var.migration_image_uri, false)
       error_message = "Terraform image inputs differ from the verified live release; refusing an old-image rollback."
     }
   }

@@ -88,7 +88,7 @@ class InventoryTests(unittest.TestCase):
             i.retain(aws,mock.Mock(),'ehr-api',row['image_uri'])
         self.assertTrue(all(not call.kwargs.get('mutation') for call in aws.call.mock_calls))
     def bootstrap_case(self,drift=False,existing=False):
-        events=[];index={'backend':{c:{'task_definition':'observed-task'} for c in i.COMPONENTS},'frontend':{}}
+        events=[];index={'backend':{c:{'task_definition':'observed-task'} for c in i.COMPONENTS},'frontend':{},'migration_task_definition':'observed-migration'}
         store=mock.Mock()
         def put(key,value):
             events.append('conditional-index-create')
@@ -97,7 +97,10 @@ class InventoryTests(unittest.TestCase):
             return {'VersionId':'verified-version'}
         def receipt_or_index(key,value):
             if key.endswith('/complete.json'):
-                self.assertEqual(value['operation'],'bootstrap-inventory');return {'VersionId':'receipt-version'}
+                self.assertEqual(value['operation'],'bootstrap-inventory')
+                self.assertFalse(value['deployment_performed'])
+                events.append(value['kind']+'-baseline-receipt')
+                return {'VersionId':'receipt-version'}
             return put(key,value)
         store.put.side_effect=receipt_or_index
         store.read.side_effect=lambda *args:(copy.deepcopy(index),{'VersionId':'verified-version'})
@@ -131,6 +134,8 @@ class InventoryTests(unittest.TestCase):
         else:
             self.assertEqual(events[-1],'conditional-index-create')
             self.assertEqual(events.count('retain'),13)
+            self.assertEqual(events.count('backend-baseline-receipt'),1)
+            self.assertEqual(events.count('frontend-baseline-receipt'),1)
             lease.release.assert_called_with(reconciled=not existing)
         self.assertTrue(all(not call.kwargs.get('mutation') for call in aws.call.mock_calls))
     def test_prepare_requires_verified_archives_before_cloud_access(self):

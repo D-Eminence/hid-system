@@ -58,7 +58,7 @@ internal_certificate_arn = "arn:aws:acm:eu-west-1:659225405023:certificate/25d0d
 image_uris = {
   "ehr-api"             = "659225405023.dkr.ecr.eu-west-1.amazonaws.com/staging/hid/ehr-api@sha256:b11d851899ff9ef3ea7416e025b78a84dab7d95a0f229864a482a2f0c665cad2"
   "event-dispatcher"    = "659225405023.dkr.ecr.eu-west-1.amazonaws.com/staging/hid/event-dispatcher@sha256:1a9eb27fb53ab4e3fe451ff1c1aa112e26bdcc62db1027548b2c41c365354022"
-  "gateway"             = "659225405023.dkr.ecr.eu-west-1.amazonaws.com/staging/hid/gateway@sha256:a3673c4ec0bba33fe2bc2c5649ed709709aa589155fcf6c35528d51d20ebf4e4"
+  "gateway"             = "659225405023.dkr.ecr.eu-west-1.amazonaws.com/staging/hid/gateway@sha256:1178f584d25a0e5abda59dd2294d940d1b1ef4a09b4ea04ea86e083599af23bc"
   "identity-api"        = "659225405023.dkr.ecr.eu-west-1.amazonaws.com/staging/hid/identity-api@sha256:add68ac7e6e64a35872bab9400026082fcc98f51fd697fd2fcd0bb9a6efc1110"
   "lab-api"             = "659225405023.dkr.ecr.eu-west-1.amazonaws.com/staging/hid/lab-api@sha256:e2c384c80f1252d0010e957c1fc5474f0513fb6bc77e932a2701d93df1de651a"
   "notification-api"    = "659225405023.dkr.ecr.eu-west-1.amazonaws.com/staging/hid/notification-api@sha256:4ed90cceeb710660ba4a39e28f2e2f380d93f5d140680b55a408bbac005bc122"
@@ -209,11 +209,11 @@ promotion_backend_key   = "health-identity/production/terraform.tfstate"
 
 production_workload_token_agent_image_uri = "659225405023.dkr.ecr.eu-west-1.amazonaws.com/staging/hid/identity-api@sha256:cf283173794afbe709d95a2a0a849afdfec1452dec96ad25edbf45ddf07a82e7"
 
-enable_deployment_automation        = false
+enable_deployment_automation        = true
 production_deployment_approval_mode = "automatic"
 
 deployment_automation_bootstrap = false
 
-enforce_release_index = false
+enforce_release_index = true
 
 ecs_migration_phase = "retired"

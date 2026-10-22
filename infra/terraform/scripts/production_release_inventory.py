@@ -298,6 +298,13 @@ def bootstrap(aws,cloud,configuration,publications,path,accepted_hash,frontends=
                 'BOOTSTRAP_LIVE_STATE_CHANGED_BEFORE_INDEX')
         initial_release='frontend-bootstrap-'+sha(canonical(frontends.fingerprint))[:24]
         actual['frontend_release']=initial_release
+        backend_release='backend-bootstrap-'+sha(canonical(manifest['index']['backend']))[:24]
+        actual['backend_release']=backend_release
+        lease.assert_owned()
+        store.put('production/releases/'+backend_release+'/complete.json',{
+            'schema':'hid.release-receipt/v1','kind':'backend','status':'success','operation':'bootstrap-inventory',
+            'after':actual['backend'],'migration_task_definition':actual['migration_task_definition'],
+            'inventory_manifest_sha256':accepted_hash,'deployment_performed':False})
         lease.assert_owned()
         store.put('production/releases/'+initial_release+'/complete.json',{
             'schema':'hid.release-receipt/v1','kind':'frontend','status':'success','operation':'bootstrap-inventory',

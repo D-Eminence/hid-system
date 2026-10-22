@@ -59,7 +59,7 @@ module "application" {
   deployment_release_environment = var.promote_existing_staging ? "production" : (var.environment == "production" ? "production" : "staging")
   deployment_release_valid = !var.enforce_release_index || try(
     data.external.release_state[0].result.valid == "true" &&
-    jsondecode(data.external.release_state[0].result.image_uris) == var.image_uris &&
+    tomap(jsondecode(data.external.release_state[0].result.image_uris)) == var.image_uris &&
   data.external.release_state[0].result.migration_image_uri == var.migration_image_uri, false)
 
   # Prepare the repository independently of Lex/content/runtime activation.

@@ -1,6 +1,6 @@
 # Health ID DevOps handover
 
-Last updated: 21 October 2026. Runtime baseline was checked again on 21 October;
+Last updated: 22 October 2026. Runtime baseline was checked again on 22 October;
 read back current cloud state before any release. Resource identifiers and secret
 references below are configuration, not secret values. Do not put credentials,
 patient data, Terraform state or deployment plans in Git.
@@ -119,8 +119,11 @@ terraform init -reconfigure `
   -backend-config="use_lockfile=true"
 terraform fmt -check -recursive
 terraform validate
-terraform plan -input=false -var-file="environments/production.tfvars" -out=production.tfplan
-terraform show production.tfplan
+$env:RELEASE_BUCKET = "hid-staging-releases-659225405023-eu-west-1"
+$env:RELEASE_KMS_KEY_ARN = "arn:aws:kms:eu-west-1:659225405023:key/2d4e52a0-14fb-4165-921a-f78b95f4b710"
+$env:RELEASE_LEASE_TABLE = "hid-staging-deployment-leases"
+$env:TF_VAR_cloudflare_origin_secret = (aws secretsmanager get-secret-value --secret-id /hid/staging/cloudflare-origin --region eu-west-1 --output json | ConvertFrom-Json).SecretString
+python scripts/production_release_infrastructure.py plan --var-file environments/production.tfvars --manifest private-release-review.json
 ```
 
 Confirm STS reports the expected account before initialization. The retained
@@ -133,16 +136,16 @@ Current production inputs retain `promote_existing_staging=true`,
 `activate_production_runtime=true` and `ecs_migration_phase="retired"`.
 These are established ownership settings, not instructions to rerun cutover.
 
-Review the saved plan before applying that exact file:
+Review the generated plan and private review manifest. Apply only its accepted SHA256; the helper reacquires the lease, resolves current images and regenerates the saved plan before mutation:
 
 ```powershell
-terraform apply production.tfplan
+python scripts/production_release_infrastructure.py apply --var-file environments/production.tfvars --manifest private-release-review.json --accepted-review-sha256 "<reviewed manifest SHA256>"
 ```
 
-Saved plans can contain sensitive data. Store them privately and exclude them
-from Git. The environment tfvars are currently ignored by a wildcard; the
-publication change must explicitly admit the reviewed files. Secret values
-must remain outside those files.
+Deployment plans and review manifests can contain sensitive operational data.
+Store them privately and exclude them from Git. The reviewed production tfvars
+are tracked configuration; secret values must remain outside those files.
+Remove TF_VAR_cloudflare_origin_secret from the operator shell after use.
 
 ## 5. Build flow and deployment controls
 
@@ -168,200 +171,122 @@ artifact and metadata privately if a later manual release needs them.
 
 ### Current production release policy
 
-Backend has `PRODUCTION_DEPLOYMENT_ENABLED=false`; the new frontend repository
-has an unset deployment flag, which also leaves deployment disabled. Both
-`production-backend` and `production-frontend` environments now exist with their
-exact branch restrictions and admin bypass disabled. The old Health-id repository is historical
-frontend release evidence, not the new production build source.
-Terraform also has `enable_deployment_automation=false`,
-`deployment_automation_bootstrap=false` and `enforce_release_index=false`.
-Builds are automatic; production releases are performed manually by an operator.
-The prepared implementation supports `PRODUCTION_APPROVAL_MODE=automatic` or
-`protected`, defaulting to protected when unset. Automatic mode requires successful
-remote checks, an exact current commit/candidate and one exact deployment branch;
-it rejects an environment with reviewer/wait/custom protection rules. Protected
-mode retains run-bound reviewer verification. The policy is included in the
-candidate hash, so changing policy requires a fresh build. Automatic mode has
-been requested; the production pipeline has not been activated.
+Automatic production build and deployment are enabled in both repositories:
+`PRODUCTION_APPROVAL_MODE=automatic` and `PRODUCTION_DEPLOYMENT_ENABLED=true`.
+The exact branch restrictions and disabled admin bypass are verified for
+`production-backend` and `production-frontend`. This mode requires no reviewer
+approval. The policy is bound into each candidate; changing it requires a fresh
+build. Remote checks, exact current source and immutable candidate verification
+remain mandatory.
 
-Production release helpers have been prepared for `hid-production`, retaining
-the staging-named schema task, IAM roles, secrets and ECR repositories. The
-backend controller also checks that current task IPs are present in Cloud Map.
-Prepared code and passing unit tests do not establish a live deployment or
-release-index bootstrap. Do not invoke bootstrap simply to bypass an admission
-failure.
+Successful controlled deployments:
 
-The infrastructure `.github/workflows/terraform.yml` validates on relevant pull
-requests and can plan through manual dispatch. It does not apply infrastructure.
-Its dispatch job expects environment configuration including
-`AWS_TERRAFORM_ROLE_ARN`, `AWS_REGION`, `TF_STATE_BUCKET` and `TFVARS`; publishing
-local tfvars alone does not configure those GitHub environment values.
+- [Backend gateway deployment](https://github.com/D-Eminence/hid-system/actions/runs/39751158762)
+- [Frontend deployment](https://github.com/D-Eminence/health/actions/runs/39752594270)
 
-Do not enable automatic production deployment until the repository admin and
-DevOps engineer configure and verify the selected deployment policy, branch restrictions,
-OIDC trust, release index/lease bootstrap, release storage, deploy credentials
-and rollback behaviour. Intended environment names are `production-backend`
-and `production-frontend`. Leave the flags off until those controls are proved.
+Both controllers and the infrastructure helper use one persistent DynamoDB lease
+and a versioned encrypted release index. Releases cannot mutate concurrently.
+Failure restores the release's recorded changes; uncertain reconciliation retains
+the lease for operator recovery. A build does not certify untested features.
 
-### Owner setup for automatic mode
+Release bucket: `hid-staging-releases-659225405023-eu-west-1`. Index: `production/current.json`.
+Lease table: `hid-staging-deployment-leases`. Immutable receipts and versioned
+frontend archives are encrypted; physical staging names are retained deliberately.
+Separate deploy roles use the exact immutable repository/environment OIDC
+subjects. Rollback preparation uses a metadata read-only role. Cloudflare
+credentials remain in AWS Secrets Manager.
 
-Write access is verified for aderojuolabode in the new repository; admin access
-is not granted. The owner has created both environments. Verify their current
-branch-only configuration from `infra/terraform`:
+Terraform uses `enable_deployment_automation=true`,
+`deployment_automation_bootstrap=false` and `enforce_release_index=true`.
+The initial baseline came from actual healthy resources, original source-bound
+image receipts and a coordinated frontend release at `2e3c2b2`. Both backend and
+frontend healthy bootstrap receipts are preserved. Never rerun bootstrap to
+bypass a compatibility or index failure.
+
+### Later approval gates
+
+Disable both deploy flags before changing policy. An authenticated repository
+owner/admin can configure supported reviewer protection with:
 
 ```powershell
-python scripts/configure_production_environments.py --mode automatic --github-login aderojuolabode
+python scripts/configure_production_environments.py --configure --mode protected --github-login D-Eminence
 ```
 
-Verification does not install deployment resources or change enable flags. If
-an environment needs reconfiguration, an authenticated repository owner/admin
-can run:
+Verify reviewer access and exact branch restrictions, then admit fresh candidates
+before re-enabling. Automatic mode rejects reviewer/wait/custom protection rules;
+protected mode requires run-bound approval. Do not mix candidate policy modes.
 
-```powershell
-python scripts/configure_production_environments.py --configure --mode automatic --github-login D-Eminence
-```
+The infrastructure `.github/workflows/terraform.yml` validates pull requests and
+can plan through manual dispatch; it does not apply infrastructure. Its dispatch
+needs separately configured `AWS_TERRAFORM_ROLE_ARN`, `AWS_REGION`,
+`TF_STATE_BUCKET` and `TFVARS`. Application activation does not configure those
+separate infrastructure credentials. If that dispatch is used, configure
+`PRODUCTION_RELEASE_MANAGED=true` and verify its role can read release state and
+use the shared lease. Operators use the guarded helper in section 4.
 
-Use the owner's own authentication; never share credentials. This command checks
-admin access to both repositories before writes, creates/configures
-`hid-system/production-backend` for `staging-novu-ci-20261005` and
-`health/production-frontend` for main, writes the explicit automatic policy and
-leaves both deployment enable flags false. It does not install AWS resources,
-bootstrap release state or deploy applications. Required role/storage variables
-must then be populated from the reviewed Terraform automation outputs.
+## 6. Backend releases
 
-For reviewer gating later, disable deployments, run the same setup with
-`--mode protected`, verify the designated reviewer's access and environment
-protection, then admit a fresh candidate before re-enabling deployment.
+Push to `D-Eminence/hid-system`, branch `staging-novu-ci-20261005`.
+Matching paths select affected components; shared package/build/controller
+changes can select all components. The workflow tests, scans and publishes
+admitted ARM64 images, prepares an exact candidate, and deploys automatically to
+`hid-production`. Unrelated documentation may build nothing. Manual dispatch can
+select one component or an explicit supported group.
 
-The new immutable frontend OIDC subject prefix was read back as
-`repo:D-Eminence@182018869/health@1428636965`. AWS trust must match it exactly;
-repository permissions do not copy from Health-id.
+Watch the deploy job, resulting receipt and actual task/image state. Preserve
+unchanged services, agents and configuration. Schema changes require the existing
+exact reviewed compatibility contract and migration checks. Routine image updates
+do not replay legacy import tasks.
 
-### Initial release baseline needs explicit compatibility review
+The encrypted index is the live release authority. For infrastructure changes,
+resolve and reconcile current digests/task definitions under the shared lease
+using section 4. Do not directly apply stale checked-in image pins.
 
-Seven application portals now use the dependency release `2890789`; the public
-site remains on `1c64962`. Original dependency files pin different Identity API
-commits, while production runs `e41a35d`. Gateway packaging was patched at
-`8ef35c2`, preserving its configuration and API contract from `844935c`. The
-manual release recorded that packaging compatibility without rewriting original
-source pins. The inventory helper preserves per-portal sources and refuses
-duplicate, missing or conflicting baseline groups. Do not replace historical pins
-with invented provenance to bootstrap the index. Admit a reviewed compatibility
-baseline before activation, retaining the exact existing Worker versions and
-archives. The known Cloudflare analytics insertion must also be admitted exactly
-for HTTP byte checks; arbitrary HTML differences must remain blocked.
+## 7. Frontend releases
 
-After index activation, production infrastructure changes use
-`scripts/production_release_infrastructure.py plan/apply` with the release bucket,
-KMS key and lease table configured in the operator environment. Its apply requires
-the exact reviewed manifest hash, resolves all live digests and reconciles new
-task revisions under the same deployment lease. Set `PRODUCTION_RELEASE_MANAGED`
-for the Terraform workflow only after this process is initialized and verified.
+Push to `D-Eminence/health` main. The production workflow validates/builds all
+eight portals, preserves exact archives, uploads immutable Worker versions,
+activates/verifies them, and records the release. Origin secrets, API settings
+and domains are preserved. Frontend ZIPs contain static builds, not Docker images.
+S3 release archives survive Actions artifact expiry.
 
-## 6. Manual backend release
+`config/production-release-dependencies.json` must match current deployed source
+commits for its eight declared backend services. After a backend release, update
+those reviewed pins when needed before the next frontend release. Do not invent
+provenance or disable this compatibility guard. Undeclared/incompatible candidates
+stop before Worker mutation. Only the exact known analytics insertion is admitted
+for HTML checks; arbitrary differences remain blocked.
 
-1. Select a successful production candidate from the approved backend branch.
-   Record commit, Actions run, selected components, tests, scans and schema
-   compatibility report. A green build does not replace feature acceptance.
-2. Verify each selected ECR image exists and capture its immutable digest.
-   Keep a private before-state record of all live task definitions and digests.
-3. Update only the selected entries in production.tfvars `image_uris` using
-   `<account>.dkr.ecr.eu-west-1.amazonaws.com/<repository>@sha256:<digest>`.
-   Do not replace unchanged services with an older batch of images.
-4. Keep workload token agent image inputs independent of an Identity API
-   update. Change schema runner or agent inputs only when included in the
-   reviewed release scope.
-5. Review schema requirements before rollout. Run a separately admitted
-   migration only if required; do not run schema or legacy import tasks for
-   every image update. Stop if backward compatibility is not established.
-6. Generate and inspect the production Terraform plan using section 4.
-   Apply the exact reviewed plan, then verify rollout and application behaviour.
-7. Record deployed image digests, resulting task revisions, operator, time,
-   validation and rollback targets in the private release record.
-
-Example service rollout check; run for every updated component:
-
-```powershell
-aws ecs wait services-stable --cluster hid-production --services hid-production-identity-api --region eu-west-1
-aws ecs describe-services --cluster hid-production --services hid-production-identity-api --region eu-west-1
-```
-
-Read the actual running task image digest as well as the service task definition.
-Investigate deployment events, container exits and unhealthy targets before
-declaring success. Background workers require queue/processing checks too.
-
-## 7. Manual frontend release
-
-1. Select the successful production frontend artifact for the exact approved
-   main commit. Inspect its manifests, compiled Worker metadata and backend/
-   schema dependency admission. Do not rebuild from a later checkout and call
-   it the same release.
-2. Record the selected portal's active Worker version and keep the release
-   artifact. Check the correct Cloudflare account and custom domain.
-3. Use the frontend repository's pinned tooling and inspected Wrangler
-   configuration to deploy the selected portal's static assets AND compiled
-   Worker to its production Worker name. Preserve API origin settings, bindings,
-   route/domain configuration and secrets. Do not upload only the browser ZIP
-   or deploy every portal when the release concerns one portal.
-4. Confirm the active Worker version, HTML/assets and same-origin API behaviour.
-   Test authenticated journeys with an authorized test account, then record
-   the new version and validation.
-
-The previous manual rollout helpers and detailed receipts are private local
-operational evidence, not a published deployment tool. A fresh workstation
-must inspect the admitted artifact and its source configuration; this guide
-does not imply a one-command manual frontend release script is already shipped.
-The checked-in automatic deployment command remains gated as described above.
+Monitor the deploy job through live byte/deep-link verification and receipt
+creation. Signed-in clinical acceptance is a separate feature check. The www
+redirect is an existing separately managed Worker.
 
 ### Live source baseline at handover
-
-Live services and portals intentionally have different source versions:
 
 | Component | Deployed source |
 | --- | --- |
 | Identity API | `e41a35d534cc63301fe3b10dc6931ac811a25f5f` |
-| Gateway | `8ef35c2aa563e6b7e47ff036c1ef87b4874be6ae` |
+| Gateway | `7bb7cdb7360faa556c186af5b363163da324fe07` |
 | Other ten backend services | `844935c4e7b42da96f31d8c1229c79925f2b020f` |
-| Seven application Workers (patient, admin, EHR, lab, pharmacy, migrate, outreach) | `28907892c30e479963e7f1184ac39b902858a7b3` |
-| Public website Worker | `1c6496222bfcfe262a29065899fa37539bdaf5a6` |
+| All eight frontend Workers | `c1d851d621e78fb511a3bb8df292135a36c050c7` |
 
-Identity runs task definition `hid-production-identity-api:4` with digest
-`sha256:add68ac7e6e64a35872bab9400026082fcc98f51fd697fd2fcd0bb9a6efc1110`.
-Gateway runs `hid-production-gateway:2` with digest
-`sha256:a3673c4ec0bba33fe2bc2c5649ed709709aa589155fcf6c35528d51d20ebf4e4`.
-Its prior `hid-production-gateway:1` remains active for rollback, with digest
-`sha256:b94dfdcfec4d645f6429af8d733d9c427c87baa1ead7abb07f74fad22049f340`.
-Both digests carry their `retain-<digest hex>` tags under the existing ECR
-retention policy. Preserve those tags while the images are live or rollback
-targets; do not rely on the ordinary CI tag retention alone.
-No database migration accompanied this dependency release. The eleven other
-backend task definitions and the public website version were preserved.
+Gateway task: `hid-production-gateway:4`. Image:
+`659225405023.dkr.ecr.eu-west-1.amazonaws.com/staging/hid/gateway@sha256:1178f584d25a0e5abda59dd2294d940d1b1ef4a09b4ea04ea86e083599af23bc`. Identity remains `hid-production-identity-api:4`.
+No database migration accompanied activation. Keep live/rollback image retention
+tags and versioned frontend archives. Do not remove `retain-<digest hex>` tags
+while images are live or rollback targets.
 
-The 21 October dependency release passed frontend CI, all production candidate
-checks, native ARM64 image scanning and the complete TUF/workspace gates:
+Initial healthy rollback release IDs:
 
-- [Frontend CI](https://github.com/D-Eminence/health/actions/runs/39684462714)
-- [Frontend candidate](https://github.com/D-Eminence/health/actions/runs/39684462720)
-- [Backend candidate](https://github.com/D-Eminence/hid-system/actions/runs/39684518249)
-- [TUF and workspace gates](https://github.com/D-Eminence/hid-system/actions/runs/39684518447)
+- Backend: `backend-bootstrap-847c9787da705cd2f95ce158`
+- Frontend: `frontend-bootstrap-641e6e542b09e514d2e5082b`
 
-Application Worker versions for this release:
-
-| Portal | Current version | Previous rollback version |
-| --- | --- | --- |
-| web | `b5215c5a-4411-4c1c-aab4-7a89c212cf59` | `40475664-c746-453b-9038-c68a8b2ca0f4` |
-| admin | `c94580cf-3828-4064-91f8-82a72eeffbf7` | `d9f33306-89e6-4425-8396-69a2a0b97888` |
-| ehr | `5add43fc-3610-4c5a-9f9a-0b577a16c91b` | `d1b2bf5c-d018-443b-92f7-e9b07091bf35` |
-| lab | `8c63eb8f-cae5-4db1-8bda-ce4b4e5a1de2` | `66dad941-0143-4bc3-b533-3b92c2c3b522` |
-| pharmacy | `f041151e-e1b8-48ad-9bae-933b1e7b3a5d` | `bef29850-e443-47d8-8a30-75fa2971962d` |
-| ocr | `336d31bf-2f1e-4211-a581-53e1c753e54f` | `f9197181-52b7-41b4-b8a4-0c112fd0c06c` |
-| outreach | `d66e2002-6184-4517-9cf5-1b3fa3dfddf3` | `3fb3bcc7-20cc-411c-92da-39777f9979d9` |
-
-Read back current versions and compatibility before using rollback targets.
-Live entry assets, canonical deep links, denied unsigned sessions and no-store
-headers were verified; signed-in clinical journeys were not repeated for this
-packaging release. Automatic deployment remains disabled pending its separate
-activation.
+These are verified inventory receipts, not invented GitHub build IDs. Read back
+live state and compatibility before rollback. Failure recovery/lease-loss guards
+have regression tests; no deliberate production outage was introduced for a
+rollback drill. Exact assets, health and unsigned session checks passed; strict image guards
+were verified with matching and mismatching Terraform map values. Signed-in
+clinical acceptance was not repeated for this packaging/deployment activation.
 
 ## 8. Verification and rollback
 
@@ -379,22 +304,24 @@ After a release, check all affected paths, not only task health:
 
 ### Application rollback
 
-Backend: restore the recorded previous component image digests in the current
-production inputs, review a new Terraform plan and apply it. Preserve unrelated
-newer releases and workload agents. Verify schema compatibility before rollback.
-Using the current production cluster is the normal application rollback; the
-retired staging cluster is not a warm standby.
+Use the current approved branch and its rollback workflow:
 
-Frontend: restore the recorded previous version of the affected Cloudflare
-Worker, then verify assets, configuration and backend compatibility. Retain
-rollback versions and bindings; do not assume expired Actions artifacts can
-still be downloaded.
+- Backend: `production-backend-rollback.yml` in `hid-system`.
+- Frontend: `production-frontend-rollback.yml` in `health`.
 
-Application rollback does not undo a database migration. Do not restore an old
-database or state snapshot over live writes as a routine rollback. A database
-recovery requires a separately reviewed restore/cutover plan and reconciliation
-of writes since the recovery point. Preserve backups and rehearse restoration
-on isolated resources before relying on recovery timings.
+Select an exact prior healthy release ID from encrypted receipts. Preparation
+reads immutable receipt metadata with the read-only role, creates a fresh
+policy-bound candidate, then deployment rechecks live state/configuration,
+secret version and compatibility under the shared lease. Frontend rollback
+verifies exact archived bytes. The initial bootstrap IDs above provide first
+release rollback targets. Backend rollback restores the chosen receipt's complete
+backend image set; review all affected components.
+
+Do not roll back schema or restore a database snapshot for an ordinary application
+rollback. Resolve changed configuration/compatibility explicitly. If reconciliation
+retains a lease, inspect its holder/generation, intent/complete/failed receipts and
+live resources before recovery. Never delete a busy lease or blindly replace the
+index with an old snapshot.
 
 ## 9. Secrets and integrations
 
@@ -445,19 +372,28 @@ To close registration, review and apply a scoped change setting the NIN-only
 flag false, then verify availability. Keep the truthful owner attestation and
 mapping metadata; later registrations or NIN bindings may depend on them.
 
+### Validation observation
+
+The final production frontend build/deploy and full CI passed on their first
+attempt. The separate staging artifact workflow passed on its second attempt
+following an intermittent OCR field-focus test failure. No UI assertions were
+weakened. Investigate that test if it recurs; a retry is not a feature acceptance
+check.
+
 ## 11. Handover acceptance and remaining work
 
-- Publish the reviewed infrastructure source and this guide to dev. Select
-  reusable scripts and tests by dependency; exclude historical migration/debug
-  tooling, local evidence, plans, exports, caches and credentials.
+- The reviewed infrastructure source and this guide are published to dev.
+  Historical migration/debug tooling, local evidence, plans, exports, caches
+  and credentials are excluded from the handover publication.
 - Transfer private release receipts, migration attestations, backup inventory
   and recovery evidence through an approved restricted channel. These are not
   included in this Git guide. Local tmp folders must not be the only retained
   copy after the original workstation is handed over.
 - Verify the receiving engineer's AWS, Cloudflare and repository access, alert
   ownership, current state access and rollback materials.
-- Native production approval/automated deployment activation remains deferred;
-  production stays on manual releases. Termii and Pierflow remain deferred.
+- Automatic application deployment is activated. Required-reviewer approval can
+  be configured later through the supported protected mode. Termii and Pierflow
+  remain deferred.
 - Independent staging can be created later with isolated state and a suitably
   protected test database. Do not point disposable tests at production data or
   apply the historical staging inputs as an independent environment.

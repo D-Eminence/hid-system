@@ -14,7 +14,7 @@ output "ecs_migration_configuration" {
 
 check "ecs_production_move" {
   assert {
-    condition     = var.ecs_migration_phase == "legacy" || (var.promote_existing_staging && var.activate_production_runtime && !var.enable_deployment_automation)
-    error_message = "The manual ECS move requires the retained live production stack and disabled deployment automation."
+    condition     = var.ecs_migration_phase == "legacy" || (var.promote_existing_staging && var.activate_production_runtime && (var.ecs_migration_phase == "retired" || !var.enable_deployment_automation))
+    error_message = "The manual ECS move requires the retained live production stack; deployment automation must remain disabled until the old cluster is retired."
   }
 }
