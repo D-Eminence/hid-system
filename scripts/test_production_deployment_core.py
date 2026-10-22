@@ -119,6 +119,7 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(c.ReleaseError): lease.assert_owned()
         count=len(aws.calls); lease.release(reconciled=False); self.assertEqual(len(aws.calls),count)
 
+    @patch.dict(os.environ, {'PRODUCTION_APPROVAL_MODE': 'protected'})
     def test_approval_requires_enabled_native_gate_and_new_run(self):
         value=self.candidate(); gh=c.GitHub(value['repository'],token='test')
         with patch.dict(os.environ,{'PRODUCTION_DEPLOYMENT_ENABLED':'false'}):
@@ -128,6 +129,7 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(c.ReleaseError,'NEW_WORKFLOW_RUN'):
             gh.assert_approval(dict(value,run_attempt='2'))
 
+    @patch.dict(os.environ, {'PRODUCTION_APPROVAL_MODE': 'protected'})
     def test_approval_rejects_bypass_self_approval_and_wrong_branch(self):
         value=self.candidate(); gh=c.GitHub(value['repository'],token='test')
         settings={'id':7,'can_admins_bypass':False,'deployment_branch_policy':{'custom_branch_policies':True,'protected_branches':False},
