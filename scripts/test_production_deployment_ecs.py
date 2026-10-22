@@ -22,6 +22,31 @@ class FakeLease:
 
 
 class BackendControllerTests(unittest.TestCase):
+    def test_definition_accepts_only_production_components_and_retained_migration(self):
+        aws = unittest.mock.Mock()
+        aws.call.return_value = {'taskDefinition': {'verified': True}}
+        ecs = b.ECS(aws, FakeLease())
+        prefix = 'arn:aws:ecs:'+c.REGION+':'+c.ACCOUNT+':task-definition/'
+        for family in ['hid-production-'+name for name in c.COMPONENTS]+['hid-staging-database-migration']:
+            self.assertEqual(ecs.definition(prefix+family+':1'), {'verified': True})
+        aws.reset_mock()
+        for arn in [prefix+'hid-staging-gateway:1', prefix+'hid-production-unknown:1',
+                    prefix+'hid-production-gateway:0', (prefix+'hid-production-gateway:1').replace(c.ACCOUNT, '999999999999')]:
+            with self.assertRaisesRegex(c.ReleaseError, 'FOREIGN_TASK_DEFINITION'):
+                ecs.definition(arn)
+        aws.call.assert_not_called()
+
+    def test_bootstrap_rollback_receipt_requires_verified_inventory(self):
+        store = unittest.mock.Mock()
+        receipt = {'kind': 'backend', 'status': 'success', 'operation': 'bootstrap-inventory',
+                   'deployment_performed': False, 'inventory_manifest_sha256': 'a'*64}
+        store.read.return_value = (receipt, {'VersionId': 'v1'})
+        release = 'backend-bootstrap-'+'b'*24
+        self.assertEqual(b.rollback_receipt(store, release)[0], receipt)
+        receipt['deployment_performed'] = True
+        with self.assertRaisesRegex(c.ReleaseError, 'VERIFIED_BOOTSTRAP'):
+            b.rollback_receipt(store, release)
+
     def execute(self, failure=False, alert_failure=False, loss=False):
         baseline=index(); state={n:brow.copy() for n,brow in baseline['backend'].items()}
         physical=lambda:{n:{k:r[k] for k in ('image_uri','task_definition','config_sha256')} for n,r in state.items()}
@@ -42,7 +67,7 @@ class BackendControllerTests(unittest.TestCase):
                     raise c.ReleaseError('HEALTH_CHECK_FAILED')
                 lease.assert_owned()
             def definition(self,arn): return {'containerDefinitions':[{'name':'database-migration','image':image('database-migration')}]}
-        candidate=c.make_candidate(ctx(),['identity-api'],{'identity-api':{'image_uri':image('identity-api','b')}},{'select':'success'})
+        candidate=c.make_candidate(ctx(),['identity-api'],{'identity-api':{'image_uri':image('identity-api','b'), 'publication_sha256':'d'*64}},{'select':'success'})
         with tempfile.TemporaryDirectory() as folder:
             root=pathlib.Path(folder); c.atomic_json(root/'release/candidate.json',candidate)
             env={'EXPECTED_CANDIDATE_SHA256':c.file_sha(root/'release/candidate.json')}
@@ -70,6 +95,7 @@ class BackendControllerTests(unittest.TestCase):
         baseline,state,objects,calls,lease=self.execute()
         current=objects[c.INDEX_KEY]
         self.assertEqual(current['backend']['identity-api']['source_commit'],'a'*40)
+        self.assertEqual(current['backend']['identity-api']['publication_sha256'],'d'*64)
         self.assertEqual(current['backend']['ehr-api'],baseline['backend']['ehr-api'])
         self.assertTrue(lease.released)
 

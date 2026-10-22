@@ -1,4 +1,5 @@
 import copy
+from io import BytesIO
 import datetime as dt
 import json
 import os
@@ -83,6 +84,36 @@ class CoreTests(unittest.TestCase):
         task['containerDefinitions'].append({'name':'unexpected','image':'latest'})
         with self.assertRaises(c.ReleaseError): c.task_payload(task,'identity-api',image('identity-api','b'))
 
+    def test_repository_metadata_uses_canonical_api_url(self):
+        urls = []
+        def open_request(request, timeout):
+            urls.append(request.full_url)
+            return BytesIO(b'{"id":1317340803}')
+        with patch.object(c.urllib.request, 'urlopen', side_effect=open_request):
+            github = c.GitHub('D-Eminence/hid-system', token='synthetic')
+            self.assertEqual(github.get('')['id'], 1317340803)
+            github.get('branches/staging-novu-ci-20261005')
+        self.assertEqual(urls, ['https://api.github.com/repos/D-Eminence/hid-system',
+            'https://api.github.com/repos/D-Eminence/hid-system/branches/staging-novu-ci-20261005'])
+
+    def test_streaming_get_object_passes_explicit_routes_and_preserves_version_owner(self):
+        observed = []
+        def runner(command, **kwargs):
+            observed.append(command)
+            self.assertEqual(command[command.index('--bucket')+1], 'expected-bucket')
+            self.assertEqual(command[command.index('--key')+1], 'production/current.json')
+            self.assertNotIn('--cli-input-json', command)
+            self.assertEqual(command[command.index('--version-id')+1], 'exact-version')
+            self.assertEqual(command[command.index('--expected-bucket-owner')+1], c.ACCOUNT)
+            return type('Result', (), {'returncode': 0, 'stdout': '{}', 'stderr': ''})()
+        c.AWS(runner).call('s3api', 'get-object', {'Bucket': 'expected-bucket', 'Key': 'production/current.json',
+            'VersionId': 'exact-version', 'ExpectedBucketOwner': c.ACCOUNT}, extra=['output-file'])
+        self.assertEqual(len(observed), 1)
+        with self.assertRaisesRegex(c.ReleaseError, 'INVALID_STREAMING_READ_ARGUMENTS'):
+            c.AWS(runner).call('s3api', 'get-object', {'Bucket': 'expected-bucket', 'Key': 'production/current.json',
+                'ExpectedBucketOwner': c.ACCOUNT, 'UnexpectedConstraint': 'must-not-disappear'}, extra=['output-file'])
+        self.assertEqual(len(observed), 1)
+
     def test_s3_stream_body_owner_and_conditional_writes(self):
         class Fake:
             def call(self,s,o,args,**kw):
@@ -119,6 +150,7 @@ class CoreTests(unittest.TestCase):
         with self.assertRaises(c.ReleaseError): lease.assert_owned()
         count=len(aws.calls); lease.release(reconciled=False); self.assertEqual(len(aws.calls),count)
 
+    @patch.dict(os.environ, {'PRODUCTION_APPROVAL_MODE': 'protected'})
     def test_approval_requires_enabled_native_gate_and_new_run(self):
         value=self.candidate(); gh=c.GitHub(value['repository'],token='test')
         with patch.dict(os.environ,{'PRODUCTION_DEPLOYMENT_ENABLED':'false'}):
@@ -128,6 +160,7 @@ class CoreTests(unittest.TestCase):
         with self.assertRaisesRegex(c.ReleaseError,'NEW_WORKFLOW_RUN'):
             gh.assert_approval(dict(value,run_attempt='2'))
 
+    @patch.dict(os.environ, {'PRODUCTION_APPROVAL_MODE': 'protected'})
     def test_approval_rejects_bypass_self_approval_and_wrong_branch(self):
         value=self.candidate(); gh=c.GitHub(value['repository'],token='test')
         settings={'id':7,'can_admins_bypass':False,'deployment_branch_policy':{'custom_branch_policies':True,'protected_branches':False},
