@@ -224,6 +224,16 @@ class AWS:
         env = dict(os.environ, AWS_REGION=REGION, AWS_DEFAULT_REGION=REGION,
                    AWS_PAGER="", AWS_RETRY_MODE="standard", AWS_MAX_ATTEMPTS="1" if mutation else "3")
         # Capture all CLI output. Secret/error payloads never go to a runner log.
+        # The streaming GetObject CLI handler does not accept --cli-input-json.
+        # Translate only this closed release-read contract; never drop constraints.
+        if service == "s3api" and operation == "get-object" and arguments is not None:
+            flags = {"Bucket":"--bucket", "Key":"--key", "VersionId":"--version-id",
+                     "ExpectedBucketOwner":"--expected-bucket-owner"}
+            require({"Bucket", "Key", "ExpectedBucketOwner"} <= set(arguments) <= set(flags)
+                    and all(isinstance(v,str) and v for v in arguments.values()), "INVALID_STREAMING_READ_ARGUMENTS")
+            for key, flag in flags.items():
+                if key in arguments: command += [flag, arguments[key]]
+            return self._run(command,env,extra)
         if arguments is not None:
             with tempfile.TemporaryDirectory() as folder:
                 path = pathlib.Path(folder)/"input.json"

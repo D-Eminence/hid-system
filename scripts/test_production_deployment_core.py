@@ -83,6 +83,24 @@ class CoreTests(unittest.TestCase):
         task['containerDefinitions'].append({'name':'unexpected','image':'latest'})
         with self.assertRaises(c.ReleaseError): c.task_payload(task,'identity-api',image('identity-api','b'))
 
+    def test_streaming_get_object_passes_explicit_routes_and_preserves_version_owner(self):
+        observed = []
+        def runner(command, **kwargs):
+            observed.append(command)
+            self.assertEqual(command[command.index('--bucket')+1], 'expected-bucket')
+            self.assertEqual(command[command.index('--key')+1], 'production/current.json')
+            self.assertNotIn('--cli-input-json', command)
+            self.assertEqual(command[command.index('--version-id')+1], 'exact-version')
+            self.assertEqual(command[command.index('--expected-bucket-owner')+1], c.ACCOUNT)
+            return type('Result', (), {'returncode': 0, 'stdout': '{}', 'stderr': ''})()
+        c.AWS(runner).call('s3api', 'get-object', {'Bucket': 'expected-bucket', 'Key': 'production/current.json',
+            'VersionId': 'exact-version', 'ExpectedBucketOwner': c.ACCOUNT}, extra=['output-file'])
+        self.assertEqual(len(observed), 1)
+        with self.assertRaisesRegex(c.ReleaseError, 'INVALID_STREAMING_READ_ARGUMENTS'):
+            c.AWS(runner).call('s3api', 'get-object', {'Bucket': 'expected-bucket', 'Key': 'production/current.json',
+                'ExpectedBucketOwner': c.ACCOUNT, 'UnexpectedConstraint': 'must-not-disappear'}, extra=['output-file'])
+        self.assertEqual(len(observed), 1)
+
     def test_s3_stream_body_owner_and_conditional_writes(self):
         class Fake:
             def call(self,s,o,args,**kw):
