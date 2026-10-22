@@ -1,4 +1,5 @@
 import copy
+from io import BytesIO
 import datetime as dt
 import json
 import os
@@ -82,6 +83,18 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(c.task_config_hash(payload,'identity-api'),c.task_config_hash(task,'identity-api'))
         task['containerDefinitions'].append({'name':'unexpected','image':'latest'})
         with self.assertRaises(c.ReleaseError): c.task_payload(task,'identity-api',image('identity-api','b'))
+
+    def test_repository_metadata_uses_canonical_api_url(self):
+        urls = []
+        def open_request(request, timeout):
+            urls.append(request.full_url)
+            return BytesIO(b'{"id":1317340803}')
+        with patch.object(c.urllib.request, 'urlopen', side_effect=open_request):
+            github = c.GitHub('D-Eminence/hid-system', token='synthetic')
+            self.assertEqual(github.get('')['id'], 1317340803)
+            github.get('branches/staging-novu-ci-20261005')
+        self.assertEqual(urls, ['https://api.github.com/repos/D-Eminence/hid-system',
+            'https://api.github.com/repos/D-Eminence/hid-system/branches/staging-novu-ci-20261005'])
 
     def test_streaming_get_object_passes_explicit_routes_and_preserves_version_owner(self):
         observed = []

@@ -126,7 +126,7 @@ class GitHub:
 
     def get(self, suffix):
         require(not suffix.startswith("/") and ".." not in suffix, "INVALID_GITHUB_PATH")
-        request = urllib.request.Request("https://api.github.com/repos/"+self.repo+"/"+suffix,
+        request = urllib.request.Request("https://api.github.com/repos/"+self.repo+("/"+suffix if suffix else ""),
             headers={"Authorization":"Bearer "+self.token, "Accept":"application/vnd.github+json",
                      "X-GitHub-Api-Version":"2022-11-28", "User-Agent":"HID-Production-Release/1"})
         try:
