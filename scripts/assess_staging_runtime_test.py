@@ -17,7 +17,7 @@ class AssessmentGuards(unittest.TestCase):
                               'artifact':{'name':'libc6','version':'exact','purl':'pkg:deb/libc6@exact'}}]}
             metadata={'Id':'sha256:'+'a'*64,'Architecture':'arm64','Os':'linux'}
             mutate(policy,scan,metadata)
-            selected=root/('security/production-runtime-assessment.json' if production else 'security/staging-novu-runtime-assessment.json')
+            selected=root/'security'/('override-runtime-assessment.json' if production else 'production-runtime-assessment.json')
             selected.write_text(json.dumps(policy))
             def docker(*args):
                 return json.dumps([metadata]) if args[1:3]==('image','inspect') else 'fixture-container'
@@ -40,11 +40,11 @@ class AssessmentGuards(unittest.TestCase):
                              'HID production assessment' if production else 'HID staging runtime assessment')
 
     def test_exact_reviewed_image_passes(self): self.exercise()
-    def test_production_policy_override_is_exact_and_does_not_fall_back_to_staging(self): self.exercise(production=True)
-    def test_identity_policy_is_separate(self):
-        self.assertEqual(a.policy_path('identity-api'), a.ROOT/'security/staging-identity-runtime-assessment.json')
-        self.assertEqual(a.policy_path('notification-worker'), a.ROOT/'security/staging-novu-runtime-assessment.json')
-        self.assertEqual(a.policy_path('lab-api'), a.ROOT/'security/staging-lab-runtime-assessment.json')
+    def test_policy_file_override_is_exact_and_does_not_fall_back_to_policy_path(self): self.exercise(production=True)
+    def test_every_component_uses_the_production_policy(self):
+        for component in ('identity-api','ehr-api','lab-api','pharmacy-api','ocr-api','ocr-worker','outreach-api',
+                          'notification-api','notification-worker','event-dispatcher','support-api','database-migration'):
+            self.assertEqual(a.policy_path(component), a.ROOT/'security/production-runtime-assessment.json')
     def test_native_drift_blocks(self):
         with self.assertRaisesRegex(RuntimeError,'inventory changed'):self.exercise(changed_binary=True)
     def test_affected_import_blocks(self):

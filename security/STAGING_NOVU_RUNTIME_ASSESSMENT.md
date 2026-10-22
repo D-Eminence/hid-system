@@ -1,5 +1,14 @@
 # Exact-image assessment for the Novu staging update
 
+> Staging no longer admits images against this file. Since 2026-10-22 every
+> staging image, like every production image, is admitted against
+> `production-runtime-assessment.json` (assessed 2026-10-18, expires
+> 2026-11-17), which covers all twelve assessed components. This file and the
+> other `staging-*-runtime-assessment.json` files are kept unchanged as the
+> native evidence that assessment cites in `native_evidence_provenance`. Its
+> SHA-256 values are over these files with CRLF line endings; no check reads
+> them, and editing these files no longer changes what staging admits.
+
 Assessed 2026-10-05; expires 2026-11-04. Covers only the notification worker
 and database migration runner with the exact native file inventories in
 `staging-novu-runtime-assessment.json`. This is a not-affected assessment,

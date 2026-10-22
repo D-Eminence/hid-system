@@ -1,10 +1,10 @@
 name: Staging backend images
 on:
   pull_request:
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/staging-novu-runtime-assessment.json', '.github/workflows/staging-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/production-runtime-assessment.json', '.github/workflows/staging-backend-images.yml']
   push:
     branches: [staging]
-    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/staging-novu-runtime-assessment.json', '.github/workflows/staging-backend-images.yml']
+    paths: ['services/**', 'packages/**', 'gateway/**', 'scripts/**', 'security/production-runtime-assessment.json', '.github/workflows/staging-backend-images.yml']
   workflow_dispatch:
     inputs:
       component:
