@@ -30,6 +30,8 @@ TARGETS = {
 COMPONENTS = ("identity-api","ehr-api","lab-api","pharmacy-api","ocr-api","ocr-worker",
               "outreach-api","notification-api","notification-worker","event-dispatcher","gateway","support-api")
 INDEX_KEY = "production/current.json"
+CHECK_SETTLE_SECONDS = 1200
+CHECK_POLL_SECONDS = 20
 
 class ReleaseError(RuntimeError):
     pass
@@ -147,8 +149,23 @@ class GitHub:
                 return values
         raise ReleaseError("JOB_PAGINATION_LIMIT")
 
-    def assert_checks(self, candidate):
-        rows = self.jobs(candidate)
+    def assert_checks(self, candidate, settle=CHECK_SETTLE_SECONDS, poll=CHECK_POLL_SECONDS):
+        # GitHub can report a finished job as queued or in progress for minutes,
+        # so wait for every required job to show a conclusion before judging.
+        # A concluded job that did not succeed still fails at once.
+        matrix = set()
+        if candidate["kind"] == "backend" and candidate.get("operation") != "rollback":
+            matrix = {prefix+" ("+component+")" for component in candidate["components"] for prefix in ("build", "publish")}
+        end = time.monotonic()+settle
+        while True:
+            rows = self.jobs(candidate)
+            required = [r for r in rows if r.get("name") in matrix or any(
+                r.get("name") == prefix or r.get("name","").startswith(prefix+" (") for prefix in candidate["checks"])]
+            require(all(r.get("conclusion") in (None, "success") for r in required), "REMOTE_REQUIRED_JOB_FAILED_OR_MISSING")
+            if all(r.get("conclusion") is not None for r in required):
+                break
+            require(time.monotonic() < end, "REMOTE_REQUIRED_JOB_STATUS_UNSETTLED")
+            time.sleep(poll)
         required = candidate["checks"]
         for prefix in required:
             matched = [r for r in rows if r.get("name") == prefix or r.get("name","").startswith(prefix+" (")]
@@ -170,7 +187,7 @@ class GitHub:
                 and str(run.get("run_attempt")) == candidate["run_attempt"]
                 and run.get("event") in ("push","workflow_dispatch"), "REMOTE_RUN_DIFFERS")
 
-    def assert_approval(self, candidate):
+    def assert_approval(self, candidate, settle=CHECK_SETTLE_SECONDS):
         # Review history is run-scoped. Never reuse an older attempt's approval.
         require(candidate["run_attempt"] == "1", "NEW_WORKFLOW_RUN_REQUIRED_FOR_APPROVAL")
         require(os.environ.get("PRODUCTION_DEPLOYMENT_ENABLED") == "true", "DEPLOYMENT_DISABLED")
@@ -190,7 +207,7 @@ class GitHub:
             branches = policies.get("branch_policies", [])
             require(len(branches) == 1 and branches[0].get("name") == candidate["branch"]
                     and branches[0].get("type", "branch") == "branch", "DEPLOYMENT_BRANCH_RULE_DIFFERS")
-            self.assert_checks(candidate)
+            self.assert_checks(candidate, settle=settle)
             self.assert_current_source(candidate)
             return {"mode": "automatic", "reviewer_ids": [], "environment_id": settings["id"]}
         rules = [r for r in settings.get("protection_rules",[]) if r.get("type") == "required_reviewers"]
@@ -211,7 +228,7 @@ class GitHub:
             and r.get("user",{}).get("id") in allowed
             and any(e.get("id") == settings["id"] for e in r.get("environments",[]))]
         require(bool(matches), "RECORDED_AUTHORIZED_APPROVAL_REQUIRED")
-        self.assert_checks(candidate)
+        self.assert_checks(candidate, settle=settle)
         self.assert_current_source(candidate)
         return {"reviewer_ids":sorted({r["user"]["id"] for r in matches}), "environment_id":settings["id"]}
 
@@ -424,7 +441,10 @@ def summarize(candidate, path=None):
         "Expires: "+candidate["expires_at"], "",
         "Components: "+", ".join(candidate["components"]), "",
         "Existing required checks: "+", ".join(k+"="+v for k,v in candidate["checks"].items()),
-        "Schema changes: "+str(candidate["schema_change"].get("changed",False)),
+        "Schema changes: "+str(candidate["schema_change"].get("changed",False))
+            +(" (reviewed declaration carried forward; applies only if production's pending migrations are exactly: "
+              +", ".join(pathlib.PurePosixPath(p).name for p in migration_files(candidate["schema_change"]))+")"
+              if candidate["schema_change"].get("carried") else ""),
         "Backend dependencies: "+json.dumps(candidate.get("backend_dependencies",{}),sort_keys=True), "",
         "Build results do not certify untested application features.",
         "Prior verified release is rechecked after policy verification before any mutation.", ""]
@@ -454,17 +474,28 @@ RUNTIME_GRANTS = "services/ehr-api/database/runtime-grants.sql"
 def migration_files(contract):
     return [name for name in contract.get("files", {}) if name.startswith(MIGRATIONS)]
 
-def schema_contract(root, changed_paths):
+def schema_contract(root, changed_paths, carry=False):
     affected = [p for p in changed_paths if p.startswith("services/ehr-api/database/")]
-    if not affected: return {"changed":False}
     metadata = pathlib.Path(root)/"config/production-schema-compatibility.json"
+    if not affected:
+        # A release that fails after its schema is reviewed leaves those migrations
+        # pending, and the next release diffs from the failed commit, so it would
+        # never declare them. Carry the reviewed declaration instead: migrate()
+        # still applies only when production's pending set equals its migrations.
+        if not carry or not metadata.exists(): return {"changed":False}
+        try:
+            contract = schema_contract(root, list(json.loads(metadata.read_text()).get("files",{})))
+        except (ReleaseError, ValueError, OSError, AttributeError, TypeError, RecursionError):
+            return {"changed":False}
+        return dict(contract, carried=True) if migration_files(contract) else {"changed":False}
     require(metadata.exists(), "SCHEMA_COMPATIBILITY_EVIDENCE_REQUIRED")
     value = json.loads(metadata.read_text())
     require(value.get("schema") == "hid.schema-compatibility/v1" and value.get("backward_compatible") is True
             and value.get("reviewed_by") and value.get("evidence"), "REVIEWED_BACKWARD_COMPATIBILITY_REQUIRED")
     require(set(value.get("files",{})) == set(affected), "EXACT_SCHEMA_CHANGE_DECLARATION_REQUIRED")
     for name, digest in value["files"].items():
-        require((name.startswith(MIGRATIONS) or name == RUNTIME_GRANTS) and file_sha(pathlib.Path(root)/name) == digest,
+        require((re.fullmatch(re.escape(MIGRATIONS)+r"\d{4}_[a-z0-9_]+\.sql", name) or name == RUNTIME_GRANTS)
+                and file_sha(pathlib.Path(root)/name) == digest,
                 "SCHEMA_DECLARATION_CONTENT_DIFFERS")
     require(RUNTIME_GRANTS not in value["files"] or migration_files(value), "RUNTIME_GRANTS_NEED_A_MIGRATION")
     return {"changed":True,"contract_sha256":file_sha(metadata),"files":value["files"],

@@ -66,3 +66,22 @@ its SHA-256 next to at least one new migration
 never applies that file, and its pending-migration check compares the plan with
 the declared migrations only. Every other file there, database test suites
 included, is still refused.
+
+## Release recovery after the first deploy attempts
+
+Both deploys of 568967b stopped at the approval step, before cloud credentials.
+GitHub Actions was degraded, and its jobs API still showed finished jobs as
+queued or in progress. The follow-up changes the release so this cannot block
+it again, and so the reviewed migrations still deploy from a later commit:
+
+- The approval step waits up to 20 minutes for every required job to show a
+  conclusion. Any concluded job that is not a success still fails at once. The
+  second check inside the deploy waits only 2 minutes.
+- When a release's diff has no schema change but it includes the migration
+  image, it carries the reviewed declaration in
+  `config/production-schema-compatibility.json` forward. Migrations run only if
+  production's pending set equals the declared files, by name and SHA-256, as
+  printed by the migration plan. So 0073–0077 deploy from a commit after
+  568967b, and a release that failed before migrating can be retried.
+- Declared migration paths must be `migrations/NNNN_name.sql` with no
+  subdirectories, and the plan is read only once all its lines have arrived.

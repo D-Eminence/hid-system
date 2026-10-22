@@ -184,6 +184,21 @@ class CoreTests(unittest.TestCase):
         with patch.object(gh,'jobs',return_value=[{'name':name,'conclusion':'success'} for name in ['select','build (identity-api)','publish (identity-api)']]):
             gh.assert_checks(value)
 
+    def test_remote_checks_wait_for_github_to_settle_but_never_pass_unfinished_jobs(self):
+        value=self.candidate(); gh=c.GitHub(value['repository'],token='test')
+        names=['select','build (identity-api)','publish (identity-api)']
+        done=[{'name':name,'status':'completed','conclusion':'success'} for name in names]
+        stale=[dict(row,status='in_progress',conclusion=None) if row['name']=='build (identity-api)' else row for row in done]
+        with patch.object(gh,'jobs',side_effect=[stale,stale,done]) as jobs,patch.object(c.time,'sleep') as sleep:
+            gh.assert_checks(value,settle=60,poll=7)
+        self.assertEqual(jobs.call_count,3); sleep.assert_called_with(7)
+        failed=[dict(stale[0],conclusion='failure')]+stale[1:]
+        with patch.object(gh,'jobs',return_value=failed),patch.object(c.time,'sleep') as sleep:
+            with self.assertRaisesRegex(c.ReleaseError,'REMOTE_REQUIRED_JOB_FAILED_OR_MISSING'): gh.assert_checks(value,settle=60,poll=7)
+        sleep.assert_not_called()
+        with patch.object(gh,'jobs',return_value=stale),patch.object(c.time,'sleep'):
+            with self.assertRaisesRegex(c.ReleaseError,'REMOTE_REQUIRED_JOB_STATUS_UNSETTLED'): gh.assert_checks(value,settle=0,poll=7)
+
     def test_remote_superseded_branch_rejected(self):
         value=self.candidate(); gh=c.GitHub(value['repository'],token='test')
         with patch.object(gh,'get',side_effect=[{'id':int(value['repository_id']),'owner':{'id':int(c.OWNER_ID)}},{'commit':{'sha':'b'*40}}]):
@@ -221,6 +236,33 @@ class CoreTests(unittest.TestCase):
             declare(migration,suite)
             with self.assertRaisesRegex(c.ReleaseError,'CONTENT'): c.schema_contract(root,[migration,suite])
 
+    def test_schema_carries_only_a_complete_reviewed_declaration_when_the_diff_has_no_schema_change(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=pathlib.Path(folder); migration='services/ehr-api/database/migrations/0099_add.sql'; grants=c.RUNTIME_GRANTS
+            for name,text in ((migration,'select 1;'),(grants,'grant select on t to r;')):
+                (root/name).parent.mkdir(parents=True,exist_ok=True); (root/name).write_text(text)
+            (root/'config').mkdir(); metadata=root/'config/production-schema-compatibility.json'
+            self.assertEqual(c.schema_contract(root,['scripts/x.py'],carry=True),{'changed':False})
+            def declare(*names,**fields):
+                c.atomic_json(metadata,{'schema':'hid.schema-compatibility/v1','backward_compatible':True,
+                    'reviewed_by':'HID reviewer','evidence':'existing check','files':{n:c.file_sha(root/n) for n in names},**fields})
+            declare(migration,grants)
+            self.assertEqual(c.schema_contract(root,['scripts/x.py']),{'changed':False})
+            carried=c.schema_contract(root,['scripts/x.py'],carry=True)
+            self.assertTrue(carried['changed'] and carried['carried'])
+            self.assertEqual(c.migration_files(carried),[migration])
+            self.assertNotIn('carried',c.schema_contract(root,[migration,grants],carry=True))
+            nested='services/ehr-api/database/migrations/../tests/0099_add.sql'
+            (root/'services/ehr-api/database/tests').mkdir(); (root/nested).write_text('select 1;')
+            declare(nested)
+            with self.assertRaisesRegex(c.ReleaseError,'CONTENT'): c.schema_contract(root,[nested])
+            for broken in (lambda: declare(nested), lambda: declare(migration,grants,reviewed_by=''), lambda: declare(grants),
+                           lambda: (declare(migration),(root/migration).write_text('select 2;')),
+                           lambda: metadata.write_text('[]'), lambda: metadata.write_text('{')):
+                broken()
+                self.assertEqual(c.schema_contract(root,['scripts/x.py'],carry=True),{'changed':False})
+                (root/migration).write_text('select 1;')
+
     def automatic_candidate(self):
         return c.make_candidate(dict(ctx(), approval_mode='automatic'), ['identity-api'],
             {'identity-api': {'image_uri': image('identity-api')}}, {'select': 'success'})
@@ -244,7 +286,7 @@ class CoreTests(unittest.TestCase):
              patch.object(gh,'assert_checks') as checks,patch.object(gh,'assert_current_source') as current:
             result=gh.assert_approval(value)
             self.assertEqual(result,{'mode':'automatic','reviewer_ids':[],'environment_id':7})
-            checks.assert_called_once_with(value);current.assert_called_once_with(value)
+            checks.assert_called_once_with(value,settle=c.CHECK_SETTLE_SECONDS);current.assert_called_once_with(value)
 
     def test_automatic_mode_cannot_ignore_an_existing_gate_or_wrong_branch(self):
         value=self.automatic_candidate();gh=c.GitHub(value['repository'],token='test')

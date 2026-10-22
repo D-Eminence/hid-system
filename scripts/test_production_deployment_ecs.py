@@ -125,6 +125,10 @@ class BackendControllerTests(unittest.TestCase):
         ecs=b.ECS(aws,FakeLease())
         with patch.object(aws,'call',side_effect=[c.ReleaseError('AWS_ResourceNotFoundException'),{'events':[]},{'events':[{'message':'0 pending migration(s)'}]}]),patch.object(b.time,'sleep'):
             self.assertEqual(len(ecs.migration_logs('task/id')),1)
+        # A split delivery shows the count before every plan line; keep reading until all arrive.
+        partial=[{'message':'2 pending migration(s)'},{'message':'0099_a.sql '+'a'*64}]
+        with patch.object(aws,'call',side_effect=[{'events':partial},{'events':partial+[{'message':'0100_b.sql '+'b'*64}]}]),patch.object(b.time,'sleep'):
+            self.assertEqual(len(ecs.migration_logs('task/id')),3)
 
     def test_schema_plan_dry_run_apply_and_final_plan_use_distinct_tasks(self):
         task={'family':'hid-staging-database-migration','networkMode':'awsvpc','runtimePlatform':{'cpuArchitecture':'ARM64'},
@@ -139,8 +143,8 @@ class BackendControllerTests(unittest.TestCase):
                 if operation=='run-task':
                     starts.append(args); return {'tasks':[{'taskArn':'task/'+str(len(starts))}]}
                 if operation=='describe-tasks': return {'tasks':[{'lastStatus':'STOPPED','containers':[{'exitCode':0}]}]}
-                if operation=='get-log-events': return {'events':[{'message':str(0 if len(starts)==4 else 1)+' pending migration(s)'},
-                    {'message':'0099_add.sql '+('a'*64)}]}
+                if operation=='get-log-events': return {'events':[{'message':'0 pending migration(s)'}] if len(starts)==4 else
+                    [{'message':'1 pending migration(s)'},{'message':'0099_add.sql '+('a'*64)}]}
                 raise AssertionError(operation)
         ecs=b.ECS(AWS(),FakeLease())
         # The declared role bootstrap file is not a migration the plan reports.
@@ -153,5 +157,14 @@ class BackendControllerTests(unittest.TestCase):
         commands=[r['overrides']['containerOverrides'][0]['command'] for r in starts]
         self.assertEqual(commands,[['scripts/apply-migrations.mjs','--plan'],['scripts/apply-migrations.mjs','--dry-run'],
             ['scripts/apply-migrations.mjs'],['scripts/apply-migrations.mjs','--plan']])
+        # A plan whose bytes differ from the declaration, or a declaration that is not reviewed, applies nothing.
+        for changed in ({**contract,'files':{**contract['files'],'services/ehr-api/database/migrations/0099_add.sql':'c'*64}},
+                        {'changed':False}):
+            starts.clear()
+            with patch.object(ecs,'definition',return_value=task),patch.object(ecs,'protect_image'):
+                with self.assertRaisesRegex(c.ReleaseError,'UNREVIEWED_PENDING_MIGRATIONS'):
+                    ecs.migrate(image('database-migration','b'),changed,{'migration_task_definition':task['taskDefinitionArn'],
+                        'migration_network':index()['migration_network']},'release')
+            self.assertEqual(len(starts),1)
 
 if __name__=='__main__': unittest.main()
