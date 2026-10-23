@@ -26,6 +26,7 @@ interface EnrollmentRow extends QueryResultRow {
   contact_lookup_hmac: string | null;
   contact_verified_at: Date | null;
   activated_at: Date | null;
+  created_at: Date;
 }
 interface ChallengeRow extends QueryResultRow {
   id: string; verifier_hmac: string; expires_at: Date; created_at: Date;
@@ -43,6 +44,14 @@ const ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;
  * or a lost response within the window still shows the HID.
  */
 const HID_REDISPLAY_WINDOW_MS = 15 * 60 * 1000;
+/**
+ * How long after the enrollment's first start (a same-key resume does not
+ * extend it) GET /current may show the name on the NIN record again, for a
+ * reload. After it only a start, which needs the NIN, shows it,
+ * so a shared device does not show it to the next person for the
+ * enrollment's whole 24 hours.
+ */
+const RECORD_NAME_REDISPLAY_WINDOW_MS = 15 * 60 * 1000;
 /** The account password hash activation stores; the database command checks this form. */
 const PASSWORD_HASH_OPTIONS = { type: argon2.argon2id, memoryCost: 65_536, timeCost: 3, parallelism: 1 };
 
@@ -128,7 +137,7 @@ export class PatientEnrollmentService {
         await this.database.withSystemTransaction(correlationId, (client) =>
           this.google.bindPendingInTransaction(client, googleCookie, existing.id, tokenHmac));
       }
-      return { cookie: `${existing.id}.${token}`, progress: await this.progress(existing, correlationId) };
+      return { cookie: `${existing.id}.${token}`, progress: await this.progress(existing, correlationId, true) };
     }
 
     // Verification is not retried after transport or result failures. The
@@ -177,14 +186,16 @@ export class PatientEnrollmentService {
         if (googleCookie) await this.google.bindPendingInTransaction(client, googleCookie, id, tokenHmac);
       });
     } catch (error) { throw this.mapDatabaseError(error); }
+    const recordName = this.recordName(verified);
     return { cookie: `${id}.${token}`, progress: { stage: 'verify_contact' as const,
       expiresAt: new Date(Date.now() + ENROLLMENT_TTL_MS).toISOString(),
-      googleOnboardingRequired: Boolean(googleCookie) } };
+      googleOnboardingRequired: Boolean(googleCookie), ...(recordName ? { recordName } : {}) } };
   }
 
   async current(cookie: string | undefined, correlationId: string) {
     const row = await this.requireEnrollment(cookie, correlationId);
-    return this.progress(row, correlationId);
+    return this.progress(row, correlationId, row.created_at instanceof Date
+      && row.created_at.getTime() + RECORD_NAME_REDISPLAY_WINDOW_MS > Date.now());
   }
 
   async bindGoogle(cookie: string | undefined, googleCookie: string | undefined,
@@ -382,7 +393,8 @@ export class PatientEnrollmentService {
       'Health ID activation is unavailable');
   }
 
-  private async progress(row: EnrollmentRow, correlationId: string) {
+  /** `withRecordName`: whether this answer may carry the name on the NIN record (a start, or a reload soon after). */
+  private async progress(row: EnrollmentRow, correlationId: string, withRecordName = false) {
     const googleRequirement = await this.database.withSystemTransaction(correlationId, (client) =>
       client.query<{ required: boolean; capability_expires_at: Date | null }>(
         'select * from auth.google_onboarding_enrollment_requirement($1,$2)',
@@ -402,8 +414,10 @@ export class PatientEnrollmentService {
         'Enrollment evidence is unavailable');
       return { stage: 'active' as const, hidCode: result.rows[0].hid_code, ...googleProgress };
     }
+    const recordName = withRecordName ? this.storedRecordName(row) : undefined;
     const base = { stage: row.state, expiresAt: row.expires_at.toISOString(),
-      ...(row.contact_channel ? { contactChannel: row.contact_channel } : {}), ...googleProgress };
+      ...(row.contact_channel ? { contactChannel: row.contact_channel } : {}),
+      ...(recordName ? { recordName } : {}), ...googleProgress };
     if (row.state === 'set_password') return base;
     const active = await this.database.withSystemTransaction(correlationId, (client) =>
       client.query<ChallengeRow>(
@@ -418,6 +432,29 @@ export class PatientEnrollmentService {
       expiresInSeconds: Math.max(0, Math.floor((challenge.expires_at.getTime() - Date.now()) / 1000)),
       resendAfterSeconds: Math.max(0, Math.floor((challenge.created_at.getTime()
         + this.env.OTP_RESEND_COOLDOWN_SECONDS * 1000 - Date.now()) / 1000)) };
+  }
+
+  /**
+   * The name on the NIN record, as the registry gives it (first, middle and
+   * last), so the person can check that the NIN they typed is theirs before
+   * they go on (owner decision: the full name). Only a start's answer, and
+   * GET /current within 15 minutes of the enrollment's first start, carry it,
+   * and only before activation.
+   */
+  private recordName(identity: { firstName?: unknown; middleName?: unknown; lastName?: unknown }) {
+    return [identity.firstName, identity.middleName, identity.lastName]
+      .filter((part): part is string => typeof part === 'string')
+      .map((part) => part.trim().replace(/\s+/g, ' '))
+      .filter(Boolean).join(' ') || undefined;
+  }
+
+  /** The stored enrollment's record name; left out, never a failure, if the profile cannot be read. */
+  private storedRecordName(row: EnrollmentRow) {
+    try {
+      return this.recordName(JSON.parse(this.decrypt(row.id, 'profile', row.profile_ciphertext)) as Record<string, unknown>);
+    } catch {
+      return undefined;
+    }
   }
 
   private async requireEnrollment(cookie: string | undefined, correlationId: string): Promise<EnrollmentRow> {

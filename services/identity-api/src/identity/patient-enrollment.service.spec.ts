@@ -79,13 +79,17 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
     if (sql.includes('from identity.public_patient_enrollments where id=$1')) {
       return { rows: enrollment && values[0] === enrollment.id ? [enrollment] : [] };
     }
+    // The HID an active enrollment shows (progress at 'active').
+    if (sql.includes('select hid_code from identity.patients')) {
+      return { rows: enrollment?.state === 'active' ? [{ hid_code: 'HID-TEST-00000001' }] : [] };
+    }
     if (sql.includes('insert into identity.public_patient_enrollments')) {
       if (enrollment) throw Object.assign(new Error('duplicate enrollment'), { code: '23505' });
       enrollment = {
         id: values[0], nin_lookup_hmac: values[1], nin_last4: values[2],
         nin_ciphertext: values[3], profile_ciphertext: values[4], profile_sha256: values[5],
         provider_reference: values[7], request_hmac: values[8], token_hmac: values[9],
-        state: 'verify_contact', expires_at: new Date(Date.now() + 86_400_000),
+        state: 'verify_contact', expires_at: new Date(Date.now() + 86_400_000), created_at: new Date(),
         contact_channel: null, contact_hmac: null, contact_lookup_hmac: null, contact_ciphertext: null,
         contact_verified_at: null,
       };
@@ -1101,5 +1105,78 @@ describe('PatientEnrollmentService', () => {
       residence: { address1: '1 Fixture Street', town: 'Fixture Town' } });
     await expect(g.service.start(nin, requestKey, '203.0.113.10', correlationId))
       .rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
+  });
+
+  describe('the name on the NIN record, for the person to check it is theirs', () => {
+    it('answers a start with the full name as the record gives it, and stores it only encrypted', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      expect(started.progress).toMatchObject({ stage: 'verify_contact', recordName: 'Amina Fixture Okafor' });
+      const insert = f.queries.find(({ sql }) => sql.includes('insert into identity.public_patient_enrollments'))!;
+      expect(JSON.stringify(insert.values.map((value) => Buffer.isBuffer(value) ? value.toString('hex') : value)))
+        .not.toContain('Amina');
+    });
+
+    it('shows it again while the enrollment is pending: on resume, at the contact step and at the password step', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
+        .resolves.toMatchObject({ progress: { recordName: 'Amina Fixture Okafor' } });
+      await expect(f.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ stage: 'verify_contact', recordName: 'Amina Fixture Okafor' });
+      const contact = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
+        '203.0.113.10', correlationId);
+      await expect(f.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ stage: 'verify_contact', challengeId: contact.challengeId,
+          recordName: 'Amina Fixture Okafor' });
+      const deliveredCode = f.notification.deliver.mock.calls[0]?.[0].code as string;
+      await f.service.verifyContact(started.cookie, contact.challengeId, deliveredCode, correlationId);
+      await expect(f.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ stage: 'set_password', recordName: 'Amina Fixture Okafor' });
+    });
+
+    it('gives a name without a middle name, and single spaces', async () => {
+      const f = fixture();
+      const { middleName: _middle, ...noMiddle } = identity;
+      f.provider.verifyNin.mockResolvedValue({ ...noMiddle, firstName: '  Amina ', lastName: 'Okafor   Bello' });
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      expect(started.progress).toMatchObject({ recordName: 'Amina Okafor Bello' });
+    });
+
+    it('leaves the name out, and still answers, when the stored record cannot be read', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      Object.assign(f.enrollment!, { profile_ciphertext: Buffer.alloc(40, 9) });
+      const progress = await f.service.current(started.cookie, correlationId);
+      expect(progress).toMatchObject({ stage: 'verify_contact' });
+      expect(progress).not.toHaveProperty('recordName');
+    });
+
+    it('is not part of the answer once the enrollment is active, not even within 15 minutes of the start', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      Object.assign(f.enrollment!, { state: 'active', patient_id: 'patient-7', activated_at: new Date(Date.now() - 60_000) });
+      const progress = await f.service.current(cookie, correlationId);
+      expect(progress).toMatchObject({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      expect(progress).not.toHaveProperty('recordName');
+    });
+
+    it('is shown on a reload for 15 minutes after the start only, so the next person on a shared device does not see it', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      Object.assign(f.enrollment!, { created_at: new Date(Date.now() - 14 * 60_000) });
+      await expect(f.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ recordName: 'Amina Fixture Okafor' });
+      Object.assign(f.enrollment!, { created_at: new Date(Date.now() - 15 * 60_000 - 1_000) });
+      const later = await f.service.current(started.cookie, correlationId);
+      expect(later).toMatchObject({ stage: 'verify_contact' });
+      expect(later).not.toHaveProperty('recordName');
+      // A start, which needs the NIN and the page's own key, still shows it, and does not reopen the reload window.
+      await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
+        .resolves.toMatchObject({ progress: { recordName: 'Amina Fixture Okafor' } });
+      expect(await f.service.current(started.cookie, correlationId)).not.toHaveProperty('recordName');
+    });
   });
 });
