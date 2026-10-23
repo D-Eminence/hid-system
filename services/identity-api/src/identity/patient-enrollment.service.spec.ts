@@ -317,7 +317,7 @@ describe('PatientEnrollmentService', () => {
     f.bound = true;
     await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
       .rejects.toMatchObject({ code: 'NIN_ALREADY_REGISTERED' });
-    // The gate is checked first and was open; the registry lookup is never made.
+    // The gate is checked first and was open; QoreID is never asked.
     expect(f.provider.assertAvailable).toHaveBeenCalledTimes(1);
     expect(f.provider.assertAvailable.mock.invocationCallOrder[0])
       .toBeLessThan((f.client.query as unknown as jest.Mock).mock.invocationCallOrder[0] ?? 0);

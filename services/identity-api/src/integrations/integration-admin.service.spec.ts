@@ -96,7 +96,8 @@ describe('IntegrationAdminService', () => {
     expect(result.items).toEqual([expect.objectContaining({
       provider: 'qoreid', enabled: true, managementMode: 'runtime', activeCapabilities: ['provider_cac'],
       operationGates: [
-        expect.objectContaining({ operation: 'existing_patient_nin', state: 'closed' }),
+        expect.objectContaining({ operation: 'existing_patient_nin', state: 'closed',
+          detail: expect.stringContaining('That gate is off until the owner decides.') }),
         expect.objectContaining({ operation: 'patient_nin_enrollment', state: 'closed' }),
         expect.objectContaining({ operation: 'provider_cac', state: 'open' }),
       ],
@@ -149,6 +150,8 @@ describe('IntegrationAdminService', () => {
         { operation: 'provider_cac', state: 'open' },
       ],
     });
+    // The detail describes the state shown beside it.
+    expect(result.items[0]?.operationGates[0]?.detail).not.toContain('off until the owner decides');
   });
 
   it('shows NIN enrollment closed, and says why, without the enrollment keys', async () => {

@@ -286,7 +286,8 @@ export class IntegrationAdminService {
               (route.active_provider === row.provider || route.fallback_provider === row.provider))));
       const operationGates = row.provider === 'qoreid' ? [
         { operation: 'existing_patient_nin', state: existingPatientNinOpen ? 'open' : 'closed',
-          detail: 'Existing-patient NIN binding requires the general QoreID gate, an enabled provider and its separate deployment gate, which stays off until the owner decides.' },
+          detail: 'Existing-patient NIN binding requires the general QoreID gate, an enabled provider and its separate deployment gate.'
+            + (env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED ? '' : ' That gate is off until the owner decides.') },
         { operation: 'patient_nin_enrollment', state: enrollmentOpen ? 'open' : 'closed',
           detail: 'NIN-only enrollment also requires its separate deployment gate, the enrollment keys and a ready enrollment database.'
             + (enrollmentKeys ? '' : ' The enrollment keys are not configured.')
