@@ -1,5 +1,14 @@
 # HID Cloudflare frontend edge
 
+> **Not the production frontend.** D-Eminence/health `main` releases the
+> production Workers (`scripts/deploy-production-workers.py`) and reads back
+> what each host serves. The Worker configurations under `workers/` name the
+> same production Workers and hostnames, and `hid-apex-redirect` would take
+> over the apex, where health serves the public site. So
+> `wrangler deploy --env production` from here would replace the live frontend
+> with this repository's build. Never run it. The dry runs below publish
+> nothing. This note does not cover the TUF Workers or their scripts.
+
 The seven application directories under `workers/` are independent Cloudflare
 Workers Static Assets deployments. Each builds one canonical application (Migrate
 is root-served at `migrate.healthidentitydirectory.com`), has one exact custom domain, and invokes the shared
