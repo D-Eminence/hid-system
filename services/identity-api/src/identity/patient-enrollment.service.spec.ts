@@ -79,13 +79,17 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
     if (sql.includes('from identity.public_patient_enrollments where id=$1')) {
       return { rows: enrollment && values[0] === enrollment.id ? [enrollment] : [] };
     }
+    // The HID an active enrollment shows (progress at 'active').
+    if (sql.includes('select hid_code from identity.patients')) {
+      return { rows: enrollment?.state === 'active' ? [{ hid_code: 'HID-TEST-00000001' }] : [] };
+    }
     if (sql.includes('insert into identity.public_patient_enrollments')) {
       if (enrollment) throw Object.assign(new Error('duplicate enrollment'), { code: '23505' });
       enrollment = {
         id: values[0], nin_lookup_hmac: values[1], nin_last4: values[2],
         nin_ciphertext: values[3], profile_ciphertext: values[4], profile_sha256: values[5],
         provider_reference: values[7], request_hmac: values[8], token_hmac: values[9],
-        state: 'verify_contact', expires_at: new Date(Date.now() + 86_400_000),
+        state: 'verify_contact', expires_at: new Date(Date.now() + 86_400_000), created_at: new Date(),
         contact_channel: null, contact_hmac: null, contact_lookup_hmac: null, contact_ciphertext: null,
         contact_verified_at: null,
       };
@@ -1148,11 +1152,30 @@ describe('PatientEnrollmentService', () => {
       expect(progress).not.toHaveProperty('recordName');
     });
 
-    it('is not part of the answer once the enrollment is active', async () => {
+    it('is not part of the answer once the enrollment is active, not even within 15 minutes of the start', async () => {
       const f = fixture();
       const cookie = await verifiedEnrollment(f);
       await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
         .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      Object.assign(f.enrollment!, { state: 'active', patient_id: 'patient-7', activated_at: new Date(Date.now() - 60_000) });
+      const progress = await f.service.current(cookie, correlationId);
+      expect(progress).toMatchObject({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      expect(progress).not.toHaveProperty('recordName');
+    });
+
+    it('is shown on a reload for 15 minutes after the start only, so the next person on a shared device does not see it', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      Object.assign(f.enrollment!, { created_at: new Date(Date.now() - 14 * 60_000) });
+      await expect(f.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ recordName: 'Amina Fixture Okafor' });
+      Object.assign(f.enrollment!, { created_at: new Date(Date.now() - 15 * 60_000 - 1_000) });
+      const later = await f.service.current(started.cookie, correlationId);
+      expect(later).toMatchObject({ stage: 'verify_contact' });
+      expect(later).not.toHaveProperty('recordName');
+      // A start, which needs the NIN and the page's own key, still shows it.
+      await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
+        .resolves.toMatchObject({ progress: { recordName: 'Amina Fixture Okafor' } });
     });
   });
 });

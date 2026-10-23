@@ -26,6 +26,7 @@ interface EnrollmentRow extends QueryResultRow {
   contact_lookup_hmac: string | null;
   contact_verified_at: Date | null;
   activated_at: Date | null;
+  created_at: Date;
 }
 interface ChallengeRow extends QueryResultRow {
   id: string; verifier_hmac: string; expires_at: Date; created_at: Date;
@@ -43,6 +44,13 @@ const ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;
  * or a lost response within the window still shows the HID.
  */
 const HID_REDISPLAY_WINDOW_MS = 15 * 60 * 1000;
+/**
+ * How long after a start GET /current may show the name on the NIN record
+ * again, for a reload. After it only a start, which needs the NIN, shows it,
+ * so a shared device does not show it to the next person for the
+ * enrollment's whole 24 hours.
+ */
+const RECORD_NAME_REDISPLAY_WINDOW_MS = 15 * 60 * 1000;
 /** The account password hash activation stores; the database command checks this form. */
 const PASSWORD_HASH_OPTIONS = { type: argon2.argon2id, memoryCost: 65_536, timeCost: 3, parallelism: 1 };
 
@@ -128,7 +136,7 @@ export class PatientEnrollmentService {
         await this.database.withSystemTransaction(correlationId, (client) =>
           this.google.bindPendingInTransaction(client, googleCookie, existing.id, tokenHmac));
       }
-      return { cookie: `${existing.id}.${token}`, progress: await this.progress(existing, correlationId) };
+      return { cookie: `${existing.id}.${token}`, progress: await this.progress(existing, correlationId, true) };
     }
 
     // Verification is not retried after transport or result failures. The
@@ -185,7 +193,8 @@ export class PatientEnrollmentService {
 
   async current(cookie: string | undefined, correlationId: string) {
     const row = await this.requireEnrollment(cookie, correlationId);
-    return this.progress(row, correlationId);
+    return this.progress(row, correlationId, row.created_at instanceof Date
+      && row.created_at.getTime() + RECORD_NAME_REDISPLAY_WINDOW_MS > Date.now());
   }
 
   async bindGoogle(cookie: string | undefined, googleCookie: string | undefined,
@@ -383,7 +392,8 @@ export class PatientEnrollmentService {
       'Health ID activation is unavailable');
   }
 
-  private async progress(row: EnrollmentRow, correlationId: string) {
+  /** `withRecordName`: whether this answer may carry the name on the NIN record (a start, or a reload soon after). */
+  private async progress(row: EnrollmentRow, correlationId: string, withRecordName = false) {
     const googleRequirement = await this.database.withSystemTransaction(correlationId, (client) =>
       client.query<{ required: boolean; capability_expires_at: Date | null }>(
         'select * from auth.google_onboarding_enrollment_requirement($1,$2)',
@@ -403,7 +413,7 @@ export class PatientEnrollmentService {
         'Enrollment evidence is unavailable');
       return { stage: 'active' as const, hidCode: result.rows[0].hid_code, ...googleProgress };
     }
-    const recordName = this.storedRecordName(row);
+    const recordName = withRecordName ? this.storedRecordName(row) : undefined;
     const base = { stage: row.state, expiresAt: row.expires_at.toISOString(),
       ...(row.contact_channel ? { contactChannel: row.contact_channel } : {}),
       ...(recordName ? { recordName } : {}), ...googleProgress };
@@ -426,8 +436,8 @@ export class PatientEnrollmentService {
   /**
    * The name on the NIN record, as the registry gives it (first, middle and
    * last), so the person can check that the NIN they typed is theirs before
-   * they go on (owner decision: the full name). Only a start's answer and the
-   * browser holding that enrollment's cookie receive it, and only before
+   * they go on (owner decision: the full name). Only a start's answer, and
+   * GET /current within 15 minutes of the start, carry it, and only before
    * activation.
    */
   private recordName(identity: { firstName?: unknown; middleName?: unknown; lastName?: unknown }) {
