@@ -27,17 +27,24 @@ const qoreidRow = {
   row_version: '3', capabilities: ['patient_nin', 'provider_cac'],
 };
 
-function harness(queryResult: (sql: string, values?: unknown[]) => { rows: unknown[] } | Promise<{ rows: unknown[] }>) {
+const enrollmentKeys = { NIN_LOOKUP_HMAC_KEY_B64: Buffer.alloc(32, 1).toString('base64'),
+  NIN_ENCRYPTION_KEY_B64: Buffer.alloc(32, 2).toString('base64') };
+
+function harness(queryResult: (sql: string, values?: unknown[]) => { rows: unknown[] } | Promise<{ rows: unknown[] }>,
+  enrollmentReady: () => Promise<{ rows: unknown[] }> = async () => ({ rows: [{ ready: true }] })) {
   const client = { query: jest.fn(queryResult) };
+  const systemClient = { query: jest.fn(enrollmentReady) };
   const database = { withPlatformTransaction: jest.fn(async (_context, operation) =>
-    operation(client as unknown as PoolClient)) };
+    operation(client as unknown as PoolClient)),
+  withSystemTransaction: jest.fn(async (_correlationId, operation) =>
+    operation(systemClient as unknown as PoolClient)) };
   const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) };
   const qoreid = { testConnection: jest.fn().mockResolvedValue(undefined) };
   const runtime = { consumePlatformQuota: jest.fn().mockResolvedValue(undefined) };
   const service = new IntegrationAdminService(database as unknown as DatabaseService,
     audit as unknown as AuditService, qoreid as unknown as QoreIdVerificationAdapter,
     runtime as unknown as IntegrationRuntimeService);
-  return { service, client, database, audit, qoreid, runtime };
+  return { service, client, systemClient, database, audit, qoreid, runtime };
 }
 
 function listRows(sql: string): { rows: unknown[] } {
@@ -53,7 +60,10 @@ describe('IntegrationAdminService', () => {
     AUTH_LOGIN_PEPPER: process.env.AUTH_LOGIN_PEPPER,
     QOREID_ENABLED: process.env.QOREID_ENABLED, QOREID_CLIENT_ID: process.env.QOREID_CLIENT_ID,
     QOREID_CLIENT_SECRET: process.env.QOREID_CLIENT_SECRET,
-    QOREID_NIN_ONLY_ENROLLMENT_ENABLED: process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED };
+    QOREID_NIN_ONLY_ENROLLMENT_ENABLED: process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED,
+    QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: process.env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED,
+    NIN_LOOKUP_HMAC_KEY_B64: process.env.NIN_LOOKUP_HMAC_KEY_B64,
+    NIN_ENCRYPTION_KEY_B64: process.env.NIN_ENCRYPTION_KEY_B64 };
 
   beforeEach(() => {
     Object.assign(process.env, {
@@ -65,6 +75,8 @@ describe('IntegrationAdminService', () => {
       QOREID_CLIENT_SECRET: 'test-client-secret',
       QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false',
     });
+    for (const key of ['QOREID_PATIENT_SELF_NIN_BINDING_ENABLED', 'NIN_LOOKUP_HMAC_KEY_B64',
+      'NIN_ENCRYPTION_KEY_B64']) delete process.env[key];
     resetEnvironmentForTests();
   });
 
@@ -79,10 +91,13 @@ describe('IntegrationAdminService', () => {
   it('returns capability state and masked credential metadata without exposing deployment secrets', async () => {
     const { service, database } = harness(listRows);
     const result = await service.list(context);
+    // NIN-only enrollment is off: its readiness is not read.
+    expect(database.withSystemTransaction).not.toHaveBeenCalled();
     expect(result.items).toEqual([expect.objectContaining({
       provider: 'qoreid', enabled: true, managementMode: 'runtime', activeCapabilities: ['provider_cac'],
       operationGates: [
-        expect.objectContaining({ operation: 'existing_patient_nin', state: 'open' }),
+        expect.objectContaining({ operation: 'existing_patient_nin', state: 'closed',
+          detail: expect.stringContaining('That gate is off until the owner decides.') }),
         expect.objectContaining({ operation: 'patient_nin_enrollment', state: 'closed' }),
         expect.objectContaining({ operation: 'provider_cac', state: 'open' }),
       ],
@@ -105,7 +120,25 @@ describe('IntegrationAdminService', () => {
   });
 
   it('shows the NIN-only gate separately from configured CAC Basic V2', async () => {
-    process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'true';
+    Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true' }, enrollmentKeys);
+    resetEnvironmentForTests();
+    const { service, database, systemClient } = harness(listRows);
+    const result = await service.list(context);
+    expect(result.items[0]).toMatchObject({
+      activeCapabilities: ['patient_nin', 'provider_cac'],
+      operationGates: [
+        { operation: 'existing_patient_nin', state: 'closed' },
+        { operation: 'patient_nin_enrollment', state: 'open' },
+        { operation: 'provider_cac', state: 'open' },
+      ],
+    });
+    // Read as a start reads it: in its own system transaction, after the platform read.
+    expect(database.withSystemTransaction).toHaveBeenCalledWith(context.correlationId, expect.any(Function));
+    expect(systemClient.query).toHaveBeenCalledWith('select identity.public_patient_enrollment_ready() as ready');
+  });
+
+  it('opens existing-patient NIN binding only with its own deployment gate', async () => {
+    process.env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED = 'true';
     resetEnvironmentForTests();
     const { service } = harness(listRows);
     const result = await service.list(context);
@@ -113,10 +146,84 @@ describe('IntegrationAdminService', () => {
       activeCapabilities: ['patient_nin', 'provider_cac'],
       operationGates: [
         { operation: 'existing_patient_nin', state: 'open' },
-        { operation: 'patient_nin_enrollment', state: 'open' },
+        { operation: 'patient_nin_enrollment', state: 'closed' },
         { operation: 'provider_cac', state: 'open' },
       ],
     });
+    // The detail describes the state shown beside it.
+    expect(result.items[0]?.operationGates[0]?.detail).not.toContain('off until the owner decides');
+  });
+
+  it('shows NIN enrollment closed, and says why, without the enrollment keys', async () => {
+    process.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED = 'true';
+    resetEnvironmentForTests();
+    const { service, database } = harness(listRows);
+    const result = await service.list(context);
+    expect(result.items[0]?.activeCapabilities).toEqual(['provider_cac']);
+    expect(result.items[0]?.operationGates[1]).toMatchObject({ operation: 'patient_nin_enrollment', state: 'closed',
+      detail: expect.stringContaining('The enrollment keys are not configured.') });
+    expect(result.items[0]?.operationGates[1]?.detail).not.toContain('The enrollment database is not ready.');
+    expect(database.withSystemTransaction).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, () => Promise<{ rows: unknown[] }>, string, string]>([
+    ['not ready', async () => ({ rows: [{ ready: false }] }), 'The enrollment database is not ready.',
+      'The enrollment readiness could not be read.'],
+    ['unreadable', async () => { throw new Error('connection refused'); }, 'The enrollment readiness could not be read.',
+      'The enrollment database is not ready.'],
+  ])('shows NIN enrollment closed while the enrollment database is %s, says so, and keeps the catalog',
+    async (_label, readiness, said, notSaid) => {
+      Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true' }, enrollmentKeys);
+      resetEnvironmentForTests();
+      const { service } = harness(listRows, readiness);
+      const result = await service.list(context);
+      expect(result.items[0]).toMatchObject({ provider: 'qoreid', activeCapabilities: ['provider_cac'],
+        availableActions: expect.arrayContaining(['audit', 'pause', 'test']) });
+      expect(result.items[0]?.operationGates[1]).toMatchObject({ operation: 'patient_nin_enrollment', state: 'closed',
+        detail: expect.stringContaining(said) });
+      expect(result.items[0]?.operationGates[1]?.detail).not.toContain(notSaid);
+    });
+
+  it('reads readiness only after the platform read has checked the caller, and not when it refuses', async () => {
+    Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true' }, enrollmentKeys);
+    resetEnvironmentForTests();
+    const allowed = harness(listRows);
+    await allowed.service.list(context);
+    expect((allowed.database.withPlatformTransaction as jest.Mock).mock.invocationCallOrder[0])
+      .toBeLessThan((allowed.database.withSystemTransaction as jest.Mock).mock.invocationCallOrder[0] ?? 0);
+
+    const refused = harness(async () => { throw new Error('ADMIN_PERMISSION_DENIED private role detail'); });
+    await expect(refused.service.list(context)).rejects.toMatchObject({ code: 'PERMISSION_DENIED', status: 403 });
+    expect(refused.database.withSystemTransaction).not.toHaveBeenCalled();
+  });
+
+  it('pauses, routes and lists audit history without waiting on the readiness read', async () => {
+    Object.assign(process.env, { QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'true' }, enrollmentKeys);
+    resetEnvironmentForTests();
+    const termii = { ...qoreidRow, provider: 'termii', display_name: 'Termii', capabilities: ['sms'] };
+    const { service, database, client } = harness((sql) => {
+      if (sql.includes('admin_set_integration_provider')) return { rows: [{
+        provider: 'qoreid', enabled: false, configuration: {}, row_version: '4', replayed: false,
+      }] };
+      if (sql.includes('admin_set_integration_route')) return { rows: [{
+        capability: 'sms', active_provider: 'termii', fallback_provider: null, row_version: '2', replayed: false,
+      }] };
+      if (sql.includes('admin_list_integration_providers')) return { rows: [qoreidRow, termii] };
+      if (sql.includes('admin_list_integration_routes')) return { rows: [{ capability: 'sms',
+        active_provider: 'termii', fallback_provider: null, row_version: '1' }] };
+      return listRows(sql);
+    });
+    await service.changeProvider(context, 'qoreid', 3, 'pause', 'Provider maintenance', undefined, 'pause-qoreid-0002');
+    await service.auditHistory(context, 'qoreid');
+    await expect(service.changeRoute(context, 'sms', 1, 'select', 'termii', 'Primary SMS', 'route-sms-0001'))
+      .resolves.toMatchObject({ capability: 'sms', activeProvider: 'termii', version: 2 });
+    expect(client.query).toHaveBeenCalledWith(expect.stringContaining('admin_set_integration_route'), expect.anything());
+    // Another provider's status shows no NIN enrollment gate.
+    await service.get(context, 'termii');
+    expect(database.withSystemTransaction).not.toHaveBeenCalled();
+    // The status a client reads of QoreID still shows the gate.
+    await service.get(context, 'qoreid');
+    expect(database.withSystemTransaction).toHaveBeenCalledTimes(1);
   });
 
   it('distinguishes configured credentials from a closed deployment gate', async () => {

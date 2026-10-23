@@ -49,6 +49,13 @@ export class QoreIdVerificationService {
 
   async verifyPatientNin(request: HidRequest, nin: string): Promise<VerificationResponse> {
     const actor = requirePatient(request.actor);
+    // This route binds a NIN on a name and date-of-birth match, with no proof
+    // that the patient holds the NIN. Off unless configured on, and refused
+    // before any lookup, quota charge or evidence write.
+    if (!getEnvironment().QOREID_PATIENT_SELF_NIN_BINDING_ENABLED) {
+      throw new DomainProblem(503, 'QOREID_PATIENT_NIN_BINDING_DISABLED',
+        'Verifying a NIN from your account is not available');
+    }
     let verifiedProfile: QoreIdNinBinding | undefined;
     const persist = (result: EvidenceResult, reference?: string, failure?: VerificationFailureCategory) =>
       result === 'verified'

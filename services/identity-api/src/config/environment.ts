@@ -86,6 +86,11 @@ const environmentSchema = z.object({
   // The public NIN documentation still requires name claims. This separate
   // gate must remain false until QoreID confirms the NIN-only contract.
   QOREID_NIN_ONLY_ENROLLMENT_ENABLED: booleanString,
+  // The signed-in "Verify NIN" (POST /identity/me/verification/nin) binds a NIN
+  // on a name and date-of-birth match, without proof that the patient holds
+  // it. False answers 503 before any lookup, quota charge or evidence write;
+  // only the owner turns it on.
+  QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: booleanString,
   QOREID_BASE_URL: z.string().url().default('https://api.qoreid.com'),
   QOREID_CLIENT_ID: optionalString,
   QOREID_CLIENT_SECRET: optionalString,

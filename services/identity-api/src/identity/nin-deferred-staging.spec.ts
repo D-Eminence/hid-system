@@ -193,6 +193,17 @@ describe('explicitly deferred staging NIN', () => {
     expect(invalid.status).toBe(400);
     expect(database.withSystemTransaction).not.toHaveBeenCalled();
 
+    // The signed-in binding proves no holder, so it is off by default and
+    // refused before any database access or lookup.
+    const bindingOff = await request(app!.getHttpServer()).post('/api/v1/identity/me/verification/nin')
+      .set('authorization', 'Bearer synthetic-token').send({ nin: '12345678901' });
+    expect(bindingOff.status).toBe(503);
+    expect(bindingOff.body.code).toBe('QOREID_PATIENT_NIN_BINDING_DISABLED');
+    expect(JSON.stringify(bindingOff.body)).not.toContain('12345678901');
+    expect(database.withSystemTransaction).not.toHaveBeenCalled();
+    expect(globalThis.fetch).not.toHaveBeenCalled();
+
+    process.env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED = 'true'; resetEnvironmentForTests();
     const disabled = await request(app!.getHttpServer()).post('/api/v1/identity/me/verification/nin')
       .set('authorization', 'Bearer synthetic-token').send({ nin: '12345678901' });
     expect(disabled.status).toBe(503);

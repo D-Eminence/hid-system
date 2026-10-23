@@ -22,6 +22,7 @@ import type { AuditService } from '../audit/audit.service';
 import { AuthController } from './auth.controller';
 import type { AuthService } from './auth.service';
 import type { AuthSessionAuditService } from './auth-session-audit.service';
+import type { PatientLoginDto } from './dto/patient-login.dto';
 import type { GoogleAuthenticationService } from './google-authentication.service';
 import type { TokenService } from './token.service';
 import type { TurnstileService } from './turnstile.service';
@@ -351,6 +352,43 @@ describe('AuthController Google exchange', () => {
     expect(sessionAudit.record).toHaveBeenCalledWith(expect.objectContaining({
       eventType: 'login_failed', outcome: 'denied',
     }));
+  });
+
+  // A pending enrollment lives only in the hid_enrollment cookie, and this
+  // branch refuses a second start key for a NIN while its enrollment is
+  // pending. So a sign-in, refresh or sign-out must not expire that cookie,
+  // or a patient who signs in or out mid-enrollment could not enroll that NIN
+  // for up to 24 hours (MAIN_TO_NOVU_PORT.md, #50 not ported).
+  it('never expires the enrollment cookie at sign-in, refresh or sign-out', async () => {
+    const issued = { actor, accessToken: 'access-token', refreshToken: 'refresh-token',
+      csrfToken: 'csrf-token', expiresAt: new Date('2030-01-01T00:00:00.000Z'),
+      refreshExpiresAt: new Date('2030-01-02T00:00:00.000Z') };
+    const auth = { login: jest.fn().mockResolvedValue(issued),
+      refresh: jest.fn().mockResolvedValueOnce(issued).mockRejectedValueOnce(new UnauthorizedException('Refresh session ended')),
+      revoke: jest.fn().mockResolvedValue(undefined) };
+    const sessions = new AuthController(auth as unknown as AuthService,
+      { verifyRefreshCsrf: jest.fn().mockReturnValue(true) } as unknown as TokenService,
+      { record: jest.fn(), recordLoginFailure: jest.fn() } as unknown as AuthSessionAuditService,
+      audit as unknown as AuditService, {} as WorkloadAuthService,
+      turnstile as unknown as TurnstileService, google as unknown as GoogleAuthenticationService);
+    const enrollmentTouched = (response: ReturnType<typeof responseFor>) => [
+      ...response.cookie.mock.calls, ...response.clearCookie.mock.calls].filter(([name]) => name === 'hid_enrollment');
+    const cookies = { hid_access_refresh: 'refresh-token', hid_access_csrf: 'csrf-token' };
+
+    const signedIn = responseFor();
+    await sessions.patientLogin({ email: 'person@example.test', password: 'a-strong-test-password',
+      turnstileToken: 'turnstile-token', turnstileAction: 'patient-login' } as PatientLoginDto, requestFor(), signedIn);
+    expect(signedIn.cookie).toHaveBeenCalledWith('hid_access', 'access-token', expect.any(Object));
+    const refreshed = responseFor();
+    await sessions.refresh(requestFor({ cookies }), refreshed);
+    const refused = responseFor();
+    await expect(sessions.refresh(requestFor({ cookies }), refused)).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(refused.clearCookie).toHaveBeenCalledWith('hid_access', expect.any(Object));
+    const signedOut = responseFor();
+    await sessions.logout(requestFor({ actor }), signedOut);
+    expect(signedOut.clearCookie).toHaveBeenCalledWith('hid_access', expect.any(Object));
+
+    for (const response of [signedIn, refreshed, refused, signedOut]) expect(enrollmentTouched(response)).toEqual([]);
   });
 
   it('rejects a forged raw nonce cookie with the same generic denial before token verification', async () => {

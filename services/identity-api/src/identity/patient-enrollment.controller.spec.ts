@@ -101,13 +101,17 @@ describe('PatientEnrollmentController', () => {
     expect(service.verifyContact).toHaveBeenCalledWith('opaque-value', challenge, '123456', correlationId);
   });
 
-  it('rejects duplicate enrollment cookies and retains replay recovery after activation', async () => {
+  it('rejects duplicate enrollment cookies and keeps the enrollment cookie for replay after activation', async () => {
     await controller.current(request('hid_enrollment=first; hid_enrollment=second'));
     expect(service.current).toHaveBeenCalledWith(undefined, correlationId);
+    const response = { clearCookie: jest.fn() };
     await controller.activate({ password: 'a-strong-test-password' },
-      request('hid_enrollment=opaque-value'), { clearCookie: jest.fn() } as unknown as Response);
+      request('hid_enrollment=opaque-value'), response as unknown as Response);
     expect(service.activate).toHaveBeenCalledWith('opaque-value', 'a-strong-test-password',
       correlationId, undefined);
+    // Activation keeps the enrollment cookie, so a reload or a lost response can
+    // show the HID again; the service refuses it 15 minutes after activation.
+    expect(response.clearCookie).not.toHaveBeenCalled();
   });
 
   it('binds pending Google proof to enrollment and clears it only after successful activation', async () => {
