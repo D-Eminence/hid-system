@@ -1173,9 +1173,10 @@ describe('PatientEnrollmentService', () => {
       const later = await f.service.current(started.cookie, correlationId);
       expect(later).toMatchObject({ stage: 'verify_contact' });
       expect(later).not.toHaveProperty('recordName');
-      // A start, which needs the NIN and the page's own key, still shows it.
+      // A start, which needs the NIN and the page's own key, still shows it, and does not reopen the reload window.
       await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
         .resolves.toMatchObject({ progress: { recordName: 'Amina Fixture Okafor' } });
+      expect(await f.service.current(started.cookie, correlationId)).not.toHaveProperty('recordName');
     });
   });
 });

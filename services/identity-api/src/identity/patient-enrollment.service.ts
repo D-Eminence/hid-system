@@ -45,8 +45,9 @@ const ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;
  */
 const HID_REDISPLAY_WINDOW_MS = 15 * 60 * 1000;
 /**
- * How long after a start GET /current may show the name on the NIN record
- * again, for a reload. After it only a start, which needs the NIN, shows it,
+ * How long after the enrollment's first start (a same-key resume does not
+ * extend it) GET /current may show the name on the NIN record again, for a
+ * reload. After it only a start, which needs the NIN, shows it,
  * so a shared device does not show it to the next person for the
  * enrollment's whole 24 hours.
  */
@@ -437,8 +438,8 @@ export class PatientEnrollmentService {
    * The name on the NIN record, as the registry gives it (first, middle and
    * last), so the person can check that the NIN they typed is theirs before
    * they go on (owner decision: the full name). Only a start's answer, and
-   * GET /current within 15 minutes of the start, carry it, and only before
-   * activation.
+   * GET /current within 15 minutes of the enrollment's first start, carry it,
+   * and only before activation.
    */
   private recordName(identity: { firstName?: unknown; middleName?: unknown; lastName?: unknown }) {
     return [identity.firstName, identity.middleName, identity.lastName]
