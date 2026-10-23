@@ -1102,4 +1102,57 @@ describe('PatientEnrollmentService', () => {
     await expect(g.service.start(nin, requestKey, '203.0.113.10', correlationId))
       .rejects.toMatchObject({ code: 'QOREID_PROVIDER_RESPONSE_INVALID' });
   });
+
+  describe('the name on the NIN record, for the person to check it is theirs', () => {
+    it('answers a start with the full name as the record gives it, and stores it only encrypted', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      expect(started.progress).toMatchObject({ stage: 'verify_contact', recordName: 'Amina Fixture Okafor' });
+      const insert = f.queries.find(({ sql }) => sql.includes('insert into identity.public_patient_enrollments'))!;
+      expect(JSON.stringify(insert.values.map((value) => Buffer.isBuffer(value) ? value.toString('hex') : value)))
+        .not.toContain('Amina');
+    });
+
+    it('shows it again while the enrollment is pending: on resume, at the contact step and at the password step', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
+        .resolves.toMatchObject({ progress: { recordName: 'Amina Fixture Okafor' } });
+      await expect(f.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ stage: 'verify_contact', recordName: 'Amina Fixture Okafor' });
+      const contact = await f.service.startContact(started.cookie, 'email', 'patient@example.test',
+        '203.0.113.10', correlationId);
+      await expect(f.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ stage: 'verify_contact', challengeId: contact.challengeId,
+          recordName: 'Amina Fixture Okafor' });
+      const deliveredCode = f.notification.deliver.mock.calls[0]?.[0].code as string;
+      await f.service.verifyContact(started.cookie, contact.challengeId, deliveredCode, correlationId);
+      await expect(f.service.current(started.cookie, correlationId))
+        .resolves.toMatchObject({ stage: 'set_password', recordName: 'Amina Fixture Okafor' });
+    });
+
+    it('gives a name without a middle name, and single spaces', async () => {
+      const f = fixture();
+      const { middleName: _middle, ...noMiddle } = identity;
+      f.provider.verifyNin.mockResolvedValue({ ...noMiddle, firstName: '  Amina ', lastName: 'Okafor   Bello' });
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      expect(started.progress).toMatchObject({ recordName: 'Amina Okafor Bello' });
+    });
+
+    it('leaves the name out, and still answers, when the stored record cannot be read', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      Object.assign(f.enrollment!, { profile_ciphertext: Buffer.alloc(40, 9) });
+      const progress = await f.service.current(started.cookie, correlationId);
+      expect(progress).toMatchObject({ stage: 'verify_contact' });
+      expect(progress).not.toHaveProperty('recordName');
+    });
+
+    it('is not part of the answer once the enrollment is active', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+    });
+  });
 });
