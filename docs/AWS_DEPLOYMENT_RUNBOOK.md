@@ -356,6 +356,24 @@ Before raising task counts, prove in staging:
   and
 - telemetry redaction with PostHog autocapture/replay disabled.
 
+### Termii on its DND route
+
+Production sends SMS OTPs through Termii. notification-api's `TERMII_CHANNEL`
+defaults to `generic`, which Termii documents as promotional: an OTP on it may
+fail or be blocked, and it never reaches a number on the Do-Not-Disturb
+register. Before an SMS OTP is relied on, a platform administrator with
+`platform.integration.manage` sets Termii's channel to `dnd` on the admin
+console's Integrations page, with a reason. The page sends
+`POST /api/v1/admin/integrations/termii/configuration` with the provider's
+current version as `If-Match`, an `Idempotency-Key` and
+`{"reason": "<why>", "configuration": {"channel": "dnd"}}`. The configuration
+replaces the stored one, so keep a sender ID that is set there; without one,
+notification-api's own `TERMII_SENDER_ID` is used.
+`GET /api/v1/admin/integrations/termii` must then show `configuration.channel`
+`dnd`; Identity passes that configuration with each send. Then send a synthetic
+sign-up OTP by SMS to a test handset with DND active and confirm that the code
+arrived.
+
 ## 8. Cloudflare rollout
 
 For each frontend, bind the exact selected-environment custom hostname, static
