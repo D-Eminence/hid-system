@@ -42,6 +42,7 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | #18 | The admin console's Audit page: `audit.list_platform_events` returns `patient_id` in its declared column instead of failing with 42804 | 0079 (main 0067) |
 | #88 | CAC sign-up reads the Java-printed registration date that QoreID's CAC Basic v2 returns in production | — |
 | #88 | Termii receives the SMS recipient as international digits without `+`, as its API documents | — |
+| #76 A24 (search only) | `POST /admin/principals/search` takes the user search (a name or an email address) in its body, so request-line access logs do not keep it; `GET /admin/principals` stays. The production admin console's Users & roles search uses it. Not ported: main's `@HighRiskAction` policy and the export's POST form (this branch has no `platform.principal.export`) | — |
 | — | This branch only: OCR publication answers 503 `OCR_PUBLICATION_PAUSED` until `OCR_PUBLICATION_ENABLED=true` on ocr-api. It ships before the migration that lets publication commit, so no running ocr-api (during a rollout or after a rollback) can publish before the owner decides | — |
 | #32 (7B) | The OCR patient-confirmation and validation guards refuse a missing source, extraction, account or membership, and bind the confirming account and membership to the session | 0080 (main 0076) |
 | #30 | OCR patient confirmation and publication can write their outbox events (every one failed with 42501); a repeated confirmation answers 409 `OCR_PATIENT_ALREADY_CONFIRMED` | 0081 (main 0075) |
@@ -69,7 +70,7 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 - Needs `main`'s Phase 4 platform administration (0061–0072 on `main`), which
   this branch replaces with its own (0064): the rest of #18 (its control and
   audit repairs are ported above), #24, #32 7A (its OCR guards are ported
-  above), #49, #81, #76 A24, #80 A20, and the platform branches of #25, #27 and
+  above), #49, #81, #76 A24 (its search is ported above), #80 A20, and the platform branches of #25, #27 and
   #39 (`admin_revoke_session_family`, `PlatformSecurityService`,
   `platformSessionEnded`). Platform administrator MFA would bring them back as
   its own change.
