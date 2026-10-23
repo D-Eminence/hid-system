@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0082",
-    "count": 83,
+    "last": "0083",
+    "count": 84,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -429,6 +429,10 @@
       {
         "name": "0082_ocr_worker_queue_metrics.sql",
         "sha256": "ca631a4082a8978c2185d4908c31a93ea813cef76ffbd6218d15e2720708e96b"
+      },
+      {
+        "name": "0083_bind_patient_self_context_to_live_session.sql",
+        "sha256": "1591165d3ede78a2b4c52a221dccb08e52304ec70548245522edc5c97c9a4270"
       }
     ]
   },
