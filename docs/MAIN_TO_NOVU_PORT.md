@@ -48,6 +48,11 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | #30 | The OCR worker reports queue depth and age through `ocr.worker_queue_metrics()`, owned like `ocr.claim_worker_job` (main's dedicated owner role is not ported) | 0082 (main 0075), runtime-grants.sql |
 | #30 | Every OCR audit event names the source document's patient; finding a job, listing validations and listing publications are audited | — |
 | #75 (PSELF-RLS) | Patient-self reads, index writes and chat history are bound to the patient's own live session; a context naming another patient or a revoked, expired or made-up session reads nothing. The session check is inline (main's nested call costs about 500 µs per row) | 0083 (main 0091 section 3) |
+| #69 (PSEARCH-1, create answer) | Creating an access request no longer returns the patient id to the clinician before the patient consents. The staff request list (`GET /identity/access-requests`) still names the patient of a pending request; withholding it there needs main's 0086 list function, not ported | — |
+| #76 (LOGIN-DETAIL-ORACLE) | Every credential refusal at sign-in answers 401 "Invalid credentials", so the detail never confirms a correct password; a Google refusal while issuing the session is 401 `GOOGLE_SIGN_IN_DENIED`, audited as denied | — |
+| #76 (A18) | A delegated browser read cannot authorize `write_records` (403 `CSRF_VALIDATION_FAILED`) | — |
+| #79 (TS-2, TS-3, TS-8) | Turnstile retries Siteverify once (same idempotency key), answers its configuration errors as 503 `TURNSTILE_UNAVAILABLE`, logs one safe line per refusal, and a missing token answers 400 `TURNSTILE_REQUIRED` on enrollment, organization application and completion, and demo requests | — |
+| #41 | Staff password recovery: Identity accepts `staff-reset` on the production portal (app.), where /provider/recover is served; www only redirects to the public site. health sends staff recovery to app. (D-Eminence/health, "Send staff password recovery to the portal"). The portal's own staff sign-in (`staff-login` on app.) stays refused, as on main: an owner decision | — |
 
 ## Not ported, and why
 

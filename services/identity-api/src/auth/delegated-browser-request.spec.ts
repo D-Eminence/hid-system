@@ -229,3 +229,40 @@ describe('IdentityController.authorizeOutreach', () => {
       .resolves.toMatchObject({ authorized: true });
   });
 });
+
+describe('IdentityController.authorizeService (A18)', () => {
+  const patientId = '50000000-0000-4000-8000-00000000000a';
+  function controller() {
+    const identity = { authorize: jest.fn().mockResolvedValue({ allowed: true }) };
+    const workloadAuth = { authenticateService: jest.fn().mockResolvedValue({ subject: 'local:ehr-api' }) };
+    return { identity, subject: new IdentityController(identity as never, workloadAuth as unknown as WorkloadAuthService) };
+  }
+  function handlerRequest(delegatedBrowserMethod?: string): HidRequest {
+    return { correlationId: 'service-authorize-test', actor: doctor, facilityId,
+      membershipId: '40000000-0000-4000-8000-00000000000a', purposeOfUse: 'direct-care',
+      ...(delegatedBrowserMethod ? { delegatedBrowserMethod } : {}),
+      header: (name: string) => ({ 'x-hid-internal-caller': 'ehr-api' } as Record<string, string>)[name.toLowerCase()],
+    } as unknown as HidRequest;
+  }
+
+  it('authorizes a read for a delegated read', async () => {
+    const { subject, identity } = controller();
+    await expect(subject.authorizeService({ patientId, scope: 'read_records', purpose: 'direct-care' },
+      handlerRequest('GET'))).resolves.toEqual({ allowed: true });
+    expect(identity.authorize).toHaveBeenCalledWith(patientId, 'read_records', 'direct-care', expect.any(Object));
+  });
+
+  it('refuses a write when the browser-write check was skipped for a reported read', async () => {
+    const { subject, identity } = controller();
+    expect((await refusal(subject.authorizeService({ patientId, scope: 'write_records', purpose: 'direct-care' },
+      handlerRequest('GET')))).code).toBe('CSRF_VALIDATION_FAILED');
+    expect(identity.authorize).not.toHaveBeenCalled();
+  });
+
+  it('authorizes a write when the request passed the browser-write check (or used a bearer token)', async () => {
+    const { subject, identity } = controller();
+    await expect(subject.authorizeService({ patientId, scope: 'write_records', purpose: 'direct-care' },
+      handlerRequest())).resolves.toEqual({ allowed: true });
+    expect(identity.authorize).toHaveBeenCalledWith(patientId, 'write_records', 'direct-care', expect.any(Object));
+  });
+});

@@ -57,12 +57,15 @@ describe('ConsentService', () => {
       durationMinutes: 60,
     });
 
-    expect(result).toMatchObject({
-      status: 'pending',
-      scope: 'read_records',
+    // Exactly the request: no patient id before the patient consents, even when the row carries one.
+    expect(result).toEqual({
+      accessRequestId: '40000000-0000-4000-8000-000000000001', status: 'pending', scope: 'read_records',
+      purpose: 'direct-care', durationMinutes: 60, requestedAt: new Date('2026-08-06T00:00:00.000Z'),
       existingRequest: false,
     });
+    expect(result).not.toHaveProperty('patientId');
     expect(result).not.toHaveProperty('firstName');
+    expect(String(query.mock.calls[0]![0])).not.toContain('subject_patient_id');
     expect(query).toHaveBeenCalledWith(
       expect.stringContaining('identity.create_access_request'),
       ['HID-ABCDEFGH', 'read_records', 'Direct treatment request', 60],
