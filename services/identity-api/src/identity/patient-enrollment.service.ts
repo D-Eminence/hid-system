@@ -13,6 +13,7 @@ import { DatabaseService } from '../database/database.service';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
 import { createContactLookupHmac } from './contact-lookup';
+import { enrollmentKeysConfigured } from './enrollment-keys';
 import { PUBLIC_PATIENT_IDENTITY_PROVIDER, type PublicPatientIdentityProvider,
   type VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
 
@@ -24,6 +25,7 @@ interface EnrollmentRow extends QueryResultRow {
   contact_hmac: string | null; contact_channel: 'phone' | 'email' | null;
   contact_lookup_hmac: string | null;
   contact_verified_at: Date | null;
+  activated_at: Date | null;
 }
 interface ChallengeRow extends QueryResultRow {
   id: string; verifier_hmac: string; expires_at: Date; created_at: Date;
@@ -33,12 +35,23 @@ interface ChallengeRow extends QueryResultRow {
 type ContactChannel = 'phone' | 'email';
 const localOtpKey = randomBytes(32);
 const ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * How long after activation the enrollment cookie may show the HID again
+ * (GET /current, an activation replay). After it the enrollment answers 404,
+ * as an unknown one does, so a shared device does not show the last
+ * enrollee's HID to the next person. Activation keeps the cookie, so a reload
+ * or a lost response within the window still shows the HID.
+ */
+const HID_REDISPLAY_WINDOW_MS = 15 * 60 * 1000;
+/** The account password hash activation stores; the database command checks this form. */
+const PASSWORD_HASH_OPTIONS = { type: argon2.argon2id, memoryCost: 65_536, timeCost: 3, parallelism: 1 };
 
 @Injectable()
 export class PatientEnrollmentService {
   private readonly env = getEnvironment();
   private readonly otpKey = this.env.OTP_HMAC_KEY_B64
     ? Buffer.from(this.env.OTP_HMAC_KEY_B64, 'base64') : localOtpKey;
+  private replayPlaceholder?: Promise<string>;
 
   constructor(private readonly database: DatabaseService,
     private readonly ninProtector: NinIdentifierProtector,
@@ -47,11 +60,15 @@ export class PatientEnrollmentService {
     private readonly hidCodes: HidCodeGenerator,
     private readonly google: GoogleAuthenticationService) {}
 
+  /**
+   * Whether a start would now pass the checks it makes before it reads a NIN:
+   * the enrollment keys, the QoreID gate (a runtime pause included) and the
+   * database's readiness. It reads no NIN, cookie or rate bucket and writes
+   * nothing; per-request refusals (rate limits, a registered NIN) are not
+   * predicted.
+   */
   async availability(correlationId: string): Promise<{ open: boolean }> {
-    if (!this.env.QOREID_ENABLED || !this.env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED) {
-      return { open: false };
-    }
-    this.assertConfigured();
+    if (!this.configured() || !await this.provider.isAvailable()) return { open: false };
     return this.database.withSystemTransaction(correlationId, async (client) => {
       const readiness = await client.query<{ ready: boolean }>(
         'select identity.public_patient_enrollment_ready() as ready');
@@ -66,6 +83,11 @@ export class PatientEnrollmentService {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
       throw new DomainProblem(400, 'IDEMPOTENCY_KEY_INVALID', 'A valid idempotency key is required');
     }
+    // The QoreID gate comes before anything that reads the registry: while it
+    // is closed, a bound, a pending and an unknown NIN get the same 503, and no
+    // rate bucket is charged. A same-key resume is refused too; GET /current
+    // still answers with the cookie.
+    await this.provider.assertAvailable();
     const lookupHmac = this.ninProtector.lookup(nin);
     const requestHmac = this.hmac('patient-enrollment-request', idempotencyKey);
     const token = this.hmacBuffer('patient-enrollment-cookie', idempotencyKey).toString('base64url');
@@ -89,7 +111,11 @@ export class PatientEnrollmentService {
     });
     if (preflight.limited) throw this.rateLimited();
     if (!preflight.ready) throw this.reconciliationRequired();
-    if (preflight.keyed && !this.equalHex(preflight.keyed.nin_lookup_hmac, lookupHmac)) {
+    // The key of an enrollment already activated is refused as reused, before
+    // the duplicate checks: only the page that holds it can send it, and the
+    // client says that registration was completed.
+    if (preflight.keyed && (!this.equalHex(preflight.keyed.nin_lookup_hmac, lookupHmac)
+      || preflight.keyed.state === 'active')) {
       throw new DomainProblem(409, 'IDEMPOTENCY_KEY_REUSED',
         'This enrollment retry key belongs to a different request');
     }
@@ -310,11 +336,23 @@ export class PatientEnrollmentService {
     }
     if (!row.contact_ciphertext) throw new DomainProblem(409, 'ENROLLMENT_STAGE_INVALID',
       'Contact verification is required');
+    // Activations and replays share one budget per enrollment, charged only
+    // after the cookie has proved the enrollment, so a guessed enrollment id
+    // cannot spend another browser's. Every attempt from here counts, whatever
+    // its outcome (one that fails later may already have hashed), so the budget
+    // is the contact step's per-enrollment size, leaving room for transient
+    // failures. Its own bucket: not the contact step's.
+    const limited = await this.database.withSystemTransaction(correlationId, (client) =>
+      this.consumeRate(client, 'enrollment', this.hmac('patient-enrollment-activate', row.id),
+        this.env.OTP_RATE_MAX_REQUESTS * 3));
+    if (limited) throw this.rateLimited();
     const profileJson = this.decrypt(row.id, 'profile', row.profile_ciphertext);
     const contact = this.decrypt(row.id, 'contact', row.contact_ciphertext);
     const contactLookupHmac = createContactLookupHmac(row.contact_channel!, contact);
-    const hash = await argon2.hash(password, { type: argon2.argon2id,
-      memoryCost: 65_536, timeCost: 3, parallelism: 1 });
+    // Two first activations that race still hash twice; the command lets one
+    // activate and replays the other.
+    const hash = row.state === 'active' ? await this.replayPlaceholderHash()
+      : await argon2.hash(password, PASSWORD_HASH_OPTIONS);
     const tokenHmac = this.cookieTokenHmac(cookie);
     for (let attempt = 0; attempt < 8; attempt += 1) {
       try {
@@ -387,7 +425,7 @@ export class PatientEnrollmentService {
     const result = await this.database.withSystemTransaction(correlationId, (client) =>
       client.query<EnrollmentRow>('select * from identity.public_patient_enrollments where id=$1', [parsed.id]));
     const row = result.rows[0];
-    if (!row || row.expires_at.getTime() <= Date.now()
+    if (!row || row.expires_at.getTime() <= Date.now() || this.redisplayEnded(row)
       || !this.equalHex(row.token_hmac, this.hmac('patient-enrollment-token', parsed.token))) {
       throw new DomainProblem(404, 'ENROLLMENT_NOT_FOUND', 'No pending enrollment was found');
     }
@@ -400,12 +438,18 @@ export class PatientEnrollmentService {
     return this.database.withSystemTransaction(correlationId, async (client) => {
       const row = (await client.query<EnrollmentRow>(
         'select * from identity.public_patient_enrollments where id=$1 for update', [parsed.id])).rows[0];
-      if (!row || row.expires_at.getTime() <= Date.now()
+      if (!row || row.expires_at.getTime() <= Date.now() || this.redisplayEnded(row)
         || !this.equalHex(row.token_hmac, this.hmac('patient-enrollment-token', parsed.token))) {
         throw new DomainProblem(404, 'ENROLLMENT_NOT_FOUND', 'No pending enrollment was found');
       }
       return operation(client, row);
     });
+  }
+
+  /** An active enrollment shows its HID for 15 minutes after activation, then is gone. */
+  private redisplayEnded(row: EnrollmentRow) {
+    return row.state === 'active' && (!(row.activated_at instanceof Date)
+      || row.activated_at.getTime() + HID_REDISPLAY_WINDOW_MS <= Date.now());
   }
 
   private parseCookie(cookie: string | undefined) {
@@ -425,11 +469,11 @@ export class PatientEnrollmentService {
     const validText = (value: unknown, limit: number) => value === undefined
       || (typeof value === 'string' && value.trim().length >= 1
         && value.length <= limit && !/[\x00-\x1f\x7f]/.test(value));
+    // A residence the record gives in part keeps the parts it gives.
     const residence = identity.residence;
-    const validResidence = residence === undefined || (residence !== null
+    const validResidence = (residence === undefined && identity.address === undefined) || (residence !== null
       && typeof residence === 'object' && !Array.isArray(residence)
-      && validText(residence.address1, 1000) && residence.address1 !== undefined
-      && identity.address === residence.address1
+      && validText(residence.address1, 1000) && identity.address === residence.address1
       && validText(residence.town, 120) && validText(residence.lga, 120)
       && validText(residence.state, 120));
     const date = typeof identity.dateOfBirth === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(identity.dateOfBirth)
@@ -521,9 +565,26 @@ export class PatientEnrollmentService {
     return this.hmac('patient-enrollment-ip', remoteIp);
   }
 
+  /**
+   * What a replay of an active enrollment passes as its password hash. The
+   * activation command returns the stored HID before it reads the hash and
+   * sets no credential (0058), so a replay costs no argon2id run. A real
+   * argon2id hash of random bytes, computed at the first replay, kept for the
+   * process and never stored, keeps the argument well formed whatever the
+   * command's branch order. A failed computation is tried again next time.
+   */
+  private replayPlaceholderHash(): Promise<string> {
+    this.replayPlaceholder ??= argon2.hash(randomBytes(32), PASSWORD_HASH_OPTIONS)
+      .catch((error: unknown) => { this.replayPlaceholder = undefined; throw error; });
+    return this.replayPlaceholder;
+  }
+
+  private configured(): boolean {
+    return enrollmentKeysConfigured(this.env);
+  }
+
   private assertConfigured() {
-    if (!this.env.NIN_LOOKUP_HMAC_KEY_B64 || !this.env.NIN_ENCRYPTION_KEY_B64
-      || (this.env.NODE_ENV === 'production' && !this.env.OTP_HMAC_KEY_B64)) {
+    if (!this.configured()) {
       throw new DomainProblem(503, 'ENROLLMENT_CONFIGURATION_UNAVAILABLE',
         'Patient identity enrollment is temporarily unavailable');
     }

@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'node:crypto';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../audit/audit.service';
@@ -7,6 +7,7 @@ import { DomainProblem } from '../common/problem';
 import type { PlatformAdminContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
+import { enrollmentKeysConfigured } from '../identity/enrollment-keys';
 import { QoreIdVerificationAdapter } from '../identity/qoreid-verification.adapter';
 import { IntegrationRuntimeService } from './integration-runtime.service';
 
@@ -16,6 +17,8 @@ interface ProviderRow extends QueryResultRow {
   last_tested_at: Date | null; last_successful_test_at: Date | null; last_failed_test_at: Date | null;
   row_version: string; capabilities: string[];
 }
+/** The enrollment database's readiness as the catalog read it, or why it was not read. */
+type EnrollmentReadiness = 'ready' | 'not-ready' | 'unreadable' | 'not-read';
 interface RouteRow extends QueryResultRow {
   capability: string; active_provider: string; fallback_provider: string | null; row_version: string;
 }
@@ -48,23 +51,69 @@ const publicSettings: Record<string, Record<string, RegExp>> = {
 
 @Injectable()
 export class IntegrationAdminService {
+  private readonly logger = new Logger(IntegrationAdminService.name);
+
   constructor(private readonly database: DatabaseService, private readonly audit: AuditService,
     private readonly qoreid: QoreIdVerificationAdapter,
     private readonly runtime: IntegrationRuntimeService) {}
 
   async list(context: PlatformAdminContext) {
+    return this.readCatalog(context, true);
+  }
+
+  /**
+   * The catalog. `withEnrollmentReadiness` reads the enrollment database's
+   * readiness for the NIN enrollment gate; the commands' preflights below
+   * need no gate, skip it, and so never wait on that read (a pause included).
+   */
+  private async readCatalog(context: PlatformAdminContext, withEnrollmentReadiness: boolean) {
     try {
-      return await this.database.withPlatformTransaction(context, async (client) => {
+      const { providers, routing } = await this.database.withPlatformTransaction(context, async (client) => {
         const providers = await client.query<ProviderRow>('select * from platform.admin_list_integration_providers()');
         const routing = await client.query<RouteRow>('select * from platform.admin_list_integration_routes()');
-        return this.catalog(providers.rows, routing.rows);
+        return { providers: providers.rows, routing: routing.rows };
       }, { readOnly: true });
+      // Read only where it decides the NIN enrollment gate.
+      const env = getEnvironment();
+      const enrollmentReadiness: EnrollmentReadiness = withEnrollmentReadiness
+        && providers.some((row) => row.provider === 'qoreid')
+        && env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED && enrollmentKeysConfigured(env)
+        ? await this.readEnrollmentReadiness(context.correlationId) : 'not-read';
+      return this.catalog(providers, routing, enrollmentReadiness);
     } catch (error) { throw this.mapError(error); }
   }
 
+  /**
+   * The database readiness a public enrollment start checks
+   * (identity.public_patient_enrollment_ready(), 0058), read as the enrollment
+   * service reads it: after the platform read has checked the caller, in its
+   * own system transaction, because the function answers only Identity's
+   * system context. A failed read shows NIN enrollment closed, says the read
+   * failed, and keeps the catalog available.
+   */
+  private async readEnrollmentReadiness(correlationId: string): Promise<EnrollmentReadiness> {
+    try {
+      const readiness = await this.database.withSystemTransaction(correlationId, (client) =>
+        client.query<{ ready: boolean }>('select identity.public_patient_enrollment_ready() as ready'));
+      return readiness.rows[0]?.ready === true ? 'ready' : 'not-ready';
+    } catch (error) {
+      // The database error class only (a SQLSTATE or driver code), never its message.
+      const code = (error as { code?: unknown } | null)?.code;
+      const safeCode = typeof code === 'string' && /^[A-Z0-9_]{1,64}$/.test(code) ? code : 'unknown';
+      this.logger.warn(`Patient enrollment readiness could not be read for the integration status `
+        + `(correlation ${correlationId}, code ${safeCode})`);
+      return 'unreadable';
+    }
+  }
+
   async get(context: PlatformAdminContext, provider: string) {
+    // Only QoreID's status shows the NIN enrollment gate.
+    return this.findProvider(context, provider, provider === 'qoreid');
+  }
+
+  private async findProvider(context: PlatformAdminContext, provider: string, withEnrollmentReadiness: boolean) {
     this.assertProvider(provider);
-    const catalog = await this.list(context);
+    const catalog = await this.readCatalog(context, withEnrollmentReadiness);
     const found = catalog.items.find((item) => item.provider === provider);
     if (!found) throw new DomainProblem(404, 'INTEGRATION_NOT_FOUND', 'Integration was not found');
     return found;
@@ -72,7 +121,7 @@ export class IntegrationAdminService {
 
   async auditHistory(context: PlatformAdminContext, provider: string) {
     this.assertProvider(provider);
-    await this.get(context, provider);
+    await this.findProvider(context, provider, false);
     try {
       return await this.database.withPlatformTransaction(context, async (client) => {
         const result = await client.query<EventRow>(
@@ -89,7 +138,7 @@ export class IntegrationAdminService {
     action: 'enable' | 'pause' | 'configure', reason: string,
     requestedConfiguration: Record<string, unknown> | undefined, idempotencyKey: string) {
     this.assertProvider(provider);
-    const current = await this.get(context, provider);
+    const current = await this.findProvider(context, provider, false);
     if (action === 'configure' && !configurable.has(provider)) {
       throw new DomainProblem(409, 'INTEGRATION_CONFIGURATION_EXTERNAL',
         'This integration has no dashboard-editable settings');
@@ -123,7 +172,7 @@ export class IntegrationAdminService {
     if (!routes.has(capability) || (provider !== null && !providerKey.test(provider))) {
       throw new DomainProblem(400, 'INTEGRATION_ROUTE_INVALID', 'Provider route is invalid');
     }
-    const catalog = await this.list(context);
+    const catalog = await this.readCatalog(context, false);
     const current = catalog.capabilities.find((item) => item.capability === capability);
     if (!current) throw new DomainProblem(404, 'INTEGRATION_ROUTE_NOT_FOUND', 'Provider route was not found');
     const active = action === 'select' ? provider : current.activeProvider;
@@ -216,7 +265,7 @@ export class IntegrationAdminService {
     return null;
   }
 
-  private catalog(providers: ProviderRow[], routing: RouteRow[]) {
+  private catalog(providers: ProviderRow[], routing: RouteRow[], enrollmentReadiness: EnrollmentReadiness) {
     const env = getEnvironment();
     const items = providers.map((row) => {
       const qoreidOpen = row.provider === 'qoreid' && row.enabled && this.qoreidConfigured();
@@ -225,17 +274,24 @@ export class IntegrationAdminService {
         : row.credential_source === 'none'
           ? { state: 'unsupported', masked: null, rotationSupported: false }
           : { state: 'external', masked: '••••', rotationSupported: false };
-      const activeCapabilities = row.capabilities.filter((capability) =>
-        row.enabled && (capability === 'patient_nin' || capability === 'provider_cac'
-          ? qoreidOpen && (capability === 'provider_cac' || env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED)
-          : routing.some((route) => route.capability === capability &&
-            (route.active_provider === row.provider || route.fallback_provider === row.provider))));
+      const existingPatientNinOpen = qoreidOpen && env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED;
+      // What a start and the availability read check before they read a NIN.
+      const enrollmentKeys = enrollmentKeysConfigured(env);
+      const enrollmentOpen = qoreidOpen && env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED && enrollmentKeys
+        && enrollmentReadiness === 'ready';
+      const activeCapabilities = row.capabilities.filter((capability) => row.enabled && (
+        capability === 'patient_nin' ? existingPatientNinOpen || enrollmentOpen
+          : capability === 'provider_cac' ? qoreidOpen
+            : routing.some((route) => route.capability === capability &&
+              (route.active_provider === row.provider || route.fallback_provider === row.provider))));
       const operationGates = row.provider === 'qoreid' ? [
-        { operation: 'existing_patient_nin', state: qoreidOpen ? 'open' : 'closed',
-          detail: 'Existing-patient NIN evidence requires the general QoreID gate and an enabled provider.' },
-        { operation: 'patient_nin_enrollment',
-          state: qoreidOpen && env.QOREID_NIN_ONLY_ENROLLMENT_ENABLED ? 'open' : 'closed',
-          detail: 'NIN-only enrollment also requires its separate deployment gate.' },
+        { operation: 'existing_patient_nin', state: existingPatientNinOpen ? 'open' : 'closed',
+          detail: 'Existing-patient NIN binding requires the general QoreID gate, an enabled provider and its separate deployment gate, which stays off until the owner decides.' },
+        { operation: 'patient_nin_enrollment', state: enrollmentOpen ? 'open' : 'closed',
+          detail: 'NIN-only enrollment also requires its separate deployment gate, the enrollment keys and a ready enrollment database.'
+            + (enrollmentKeys ? '' : ' The enrollment keys are not configured.')
+            + (enrollmentReadiness === 'not-ready' ? ' The enrollment database is not ready.'
+              : enrollmentReadiness === 'unreadable' ? ' The enrollment readiness could not be read.' : '') },
         { operation: 'provider_cac', state: qoreidOpen ? 'open' : 'closed',
           detail: 'CAC Basic V2 requires the general QoreID gate and an enabled provider. OAuth connection tests do not prove legal-profile completeness or staging readiness.' },
       ] : [];

@@ -11,7 +11,23 @@ export interface VerifiedPublicPatientIdentity extends QoreIdNinEnrollmentBindin
   providerReference: string;
 }
 
+/** The refusals of a closed gate. Any other failure is a fault, not an answer. */
+const CLOSED_GATE_CODES = new Set(['QOREID_DISABLED', 'QOREID_NIN_ONLY_DISABLED', 'INTEGRATION_PAUSED']);
+
 export interface PublicPatientIdentityProvider {
+  /**
+   * The enrollment gate: refuses with 503 unless QoreID and NIN-only enrollment
+   * are enabled and QoreID is not paused at runtime. It reads no NIN, so every
+   * NIN gets the same answer while the gate is closed.
+   */
+  assertAvailable(): Promise<void>;
+  /**
+   * The same gate as an answer: false where assertAvailable refuses because
+   * the gate is closed, true where it passes. A fault reading the runtime state
+   * is thrown, not answered.
+   */
+  isAvailable(): Promise<boolean>;
+  /** Checks the gate again, then asks QoreID. */
   verifyNin(nin: string): Promise<VerifiedPublicPatientIdentity>;
 }
 
@@ -21,7 +37,7 @@ export class QoreIdPublicPatientIdentityProvider implements PublicPatientIdentit
   constructor(private readonly adapter: QoreIdVerificationAdapter,
     private readonly integrations: IntegrationRuntimeService) {}
 
-  async verifyNin(nin: string): Promise<VerifiedPublicPatientIdentity> {
+  async assertAvailable(): Promise<void> {
     const environment = getEnvironment();
     if (!environment.QOREID_ENABLED) {
       throw new DomainProblem(503, 'QOREID_DISABLED', 'Patient identity enrollment is temporarily unavailable');
@@ -31,6 +47,20 @@ export class QoreIdPublicPatientIdentityProvider implements PublicPatientIdentit
         'Patient identity enrollment is temporarily unavailable');
     }
     await this.integrations.assertAvailable('qoreid', 'patient_nin');
+  }
+
+  async isAvailable(): Promise<boolean> {
+    try {
+      await this.assertAvailable();
+      return true;
+    } catch (error) {
+      if (error instanceof DomainProblem && CLOSED_GATE_CODES.has(error.code)) return false;
+      throw error;
+    }
+  }
+
+  async verifyNin(nin: string): Promise<VerifiedPublicPatientIdentity> {
+    await this.assertAvailable();
     const result = await this.adapter.verifyNinEnrollment(nin);
     if (result.state !== 'verified') {
       throw new DomainProblem(422, 'NIN_NOT_VERIFIED', 'The NIN could not be verified');

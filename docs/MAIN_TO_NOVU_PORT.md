@@ -53,6 +53,12 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | #76 (A18) | A delegated browser read cannot authorize `write_records` (403 `CSRF_VALIDATION_FAILED`) | — |
 | #79 (TS-2, TS-3, TS-8) | Turnstile retries Siteverify once (same idempotency key), answers its configuration errors as 503 `TURNSTILE_UNAVAILABLE`, logs one safe line per refusal, and a missing token answers 400 `TURNSTILE_REQUIRED` on enrollment, organization application and completion, and demo requests | — |
 | #41 | Staff password recovery: Identity accepts `staff-reset` on the production portal (app.), where /provider/recover is served; www only redirects to the public site. health sends staff recovery to app. (D-Eminence/health, "Send staff password recovery to the portal"). The portal's own staff sign-in (`staff-login` on app.) stays refused, as on main: an owner decision | — |
+| #68 (ENR-4, FE-4) | Public enrollment checks the QoreID gate (QoreID and NIN-only enrollment on, QoreID not paused at runtime) before it reads the registry, so while the gate is closed a registered, a pending and an unknown NIN get the same 503 and no rate bucket is charged. Availability answers `{ open: false }`, not 503, when QoreID is paused or the enrollment keys are missing. `main`'s boot-time refusal of NIN-only enrollment in production is not ported | — |
+| #84 (adapter) | A QoreID NIN record with no usable phone, a null photo or a partial residence enrolls; what is unusable is left out instead of answering 502. Such records were refused only by this parsing, so more NINs can now enroll without the NIN holder proof, which is not ported (owner decision) | — |
+| #84 (signed-in NIN binding) | `POST /identity/me/verification/nin` binds a NIN on a name and date-of-birth match, without proof of holding it. It now answers 503 `QOREID_PATIENT_NIN_BINDING_DISABLED` before any lookup, quota charge or evidence write unless `QOREID_PATIENT_SELF_NIN_BINDING_ENABLED=true`. No production screen calls it. `main`'s production refusal of the flag is not ported: turning it on is the owner's decision | — |
+| #86 (Integrations page) | The admin Integrations page shows NIN enrollment open only with its gate, the enrollment keys and a ready enrollment database, and existing-patient NIN binding only with its own flag | — |
+| #50 (enrollment) | Activation is budgeted per enrollment (`OTP_RATE_MAX_REQUESTS` × 3 per window, then 429 `ENROLLMENT_RATE_LIMITED`) once the cookie has proved it. A replay of an active enrollment never hashes the presented password; the placeholder hash the command needs is computed once per process | — |
+| #68 (N2(b), service half) | The enrollment cookie shows the new HID (`GET /current`, an activation replay) for 15 minutes after activation only, then answers 404 as an unknown enrollment. Before, a shared device showed it to the next person for up to 24 hours. A start with the key of an activated enrollment answers 409 `IDEMPOTENCY_KEY_REUSED`, as on `main`, so the page says the registration was completed. Not ported: `main`'s 0085 check of the same in the activation command (the service refuses before it calls the command), and `main`'s expiry of the cookie in the activation response, so a reload within the 15 minutes still shows the HID, which a patient who verified only a phone needs to sign in and to recover the account | — |
 
 ## Not ported, and why
 
@@ -109,9 +115,17 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
   Lab, Pharmacy, OCR, Outreach, break-glass, document-write and lab-order
   permissions): production serves these portals, and staff chat reads Lab
   results. Their fixes are ported instead.
+- #50's expiry of the enrollment cookie at every sign-in, refresh and
+  sign-out: here a second start for a NIN is refused while its first
+  enrollment is pending (on `main` each start key makes its own, since #84 and
+  #85), so expiring the cookie before activation could lock that NIN out of
+  enrollment for up to 24 hours. After activation, #68's 15-minute window
+  (above) covers what it protects. health's enrollment copy says that a
+  sign-in or sign-out in the browser ends an enrollment; here it does not,
+  before this port or after it.
 - Rewrites Identity's sign-in, refresh and sign-out on `main`'s token service:
-  #39, #42, #50, and #76 apart from the items ported above. Port each onto this
-  branch's token service as its own change.
+  #39, #42, the rest of #50, and #76 apart from the items ported above. Port
+  each onto this branch's token service as its own change.
 - Edits a suite in `services/ehr-api/database/tests/`, which production
   refuses: #48 as `main` made it (0080 also restates `main`'s 0077 bodies). A
   port orders its guards so the suite needs no edit.
@@ -144,8 +158,10 @@ Still open, with what each one holds back:
   `NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN`, and whether
   `NIN_ENCRYPTION_KEY_B64` and `OTP_HMAC_KEY_B64` are set; also whether
   `audit.events` shows use of `POST /identity/me/verification/nin`. Holds the
-  enrollment port, the database role guard, NIN holder proof and emergency
-  contacts.
+  database role guard, NIN holder proof and emergency contacts. The enrollment
+  port did not wait for it: without the keys a start already refused and
+  availability now says closed, and no production screen calls the NIN
+  binding route it switches off.
 - #48: accepted, undispensed pharmacy work whose prescription has since changed
   becomes undispensable at once. Needs the read-only count first.
 - Accounts disabled before the admin transition fix, with no recorded prior
