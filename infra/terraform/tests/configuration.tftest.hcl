@@ -378,3 +378,265 @@ run "production_runtime_issues_own_workload_tokens" {
     error_message = "Full delivery must include Brevo email and SMS sender bindings in the container secret specification."
   }
 }
+
+run "emergency_contact_keys_absent_by_default" {
+  command = plan
+
+  variables {
+    expected_account_id      = "123456789012"
+    environment              = "production"
+    availability_zones       = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+    public_subnet_cidrs      = ["10.40.0.0/24", "10.40.1.0/24", "10.40.2.0/24"]
+    application_subnet_cidrs = ["10.40.10.0/24", "10.40.11.0/24", "10.40.12.0/24"]
+    database_subnet_cidrs    = ["10.40.20.0/24", "10.40.21.0/24", "10.40.22.0/24"]
+  }
+
+  assert {
+    condition = (
+      contains(keys(module.application.emergency_contact_environment), "identity-api") &&
+      contains(keys(module.application.emergency_contact_environment), "notification-api") &&
+      alltrue([for name, environment in module.application.emergency_contact_environment : length(environment) == 0])
+    )
+    error_message = "With both switches off no container may receive an emergency-contact key, not even as false."
+  }
+
+  assert {
+    condition = (
+      !output.emergency_contacts.notification_enabled &&
+      !output.emergency_contacts.delivery_enabled &&
+      output.emergency_contacts.dispatch_seconds == null &&
+      length(output.emergency_contacts.channels) == 0 &&
+      output.emergency_contacts.pilot_account_count == 0
+    )
+    error_message = "The reviewed plan must show both emergency-contact switches off by default."
+  }
+}
+
+run "emergency_contact_notification_switch_only" {
+  command = plan
+
+  variables {
+    expected_account_id                    = "123456789012"
+    environment                            = "production"
+    availability_zones                     = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+    public_subnet_cidrs                    = ["10.40.0.0/24", "10.40.1.0/24", "10.40.2.0/24"]
+    application_subnet_cidrs               = ["10.40.10.0/24", "10.40.11.0/24", "10.40.12.0/24"]
+    database_subnet_cidrs                  = ["10.40.20.0/24", "10.40.21.0/24", "10.40.22.0/24"]
+    notification_delivery_profile          = "email-brevo"
+    emergency_contact_notification_enabled = true
+  }
+
+  assert {
+    condition = (
+      length(module.application.emergency_contact_environment["notification-api"]) == 1 &&
+      module.application.emergency_contact_environment["notification-api"]["EMERGENCY_CONTACT_DELIVERY_ENABLED"] == "true" &&
+      alltrue([for name, environment in module.application.emergency_contact_environment : length(environment) == 0 if name != "notification-api"])
+    )
+    error_message = "The notification switch must add only EMERGENCY_CONTACT_DELIVERY_ENABLED=true, and only to notification-api."
+  }
+
+  assert {
+    condition     = output.emergency_contacts.notification_enabled && !output.emergency_contacts.delivery_enabled && output.emergency_contacts.dispatch_seconds == null
+    error_message = "The reviewed plan must show notification delivery on and identity delivery still off."
+  }
+}
+
+run "emergency_contact_delivery_email_brevo" {
+  command = plan
+
+  variables {
+    expected_account_id                    = "123456789012"
+    environment                            = "production"
+    availability_zones                     = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+    public_subnet_cidrs                    = ["10.40.0.0/24", "10.40.1.0/24", "10.40.2.0/24"]
+    application_subnet_cidrs               = ["10.40.10.0/24", "10.40.11.0/24", "10.40.12.0/24"]
+    database_subnet_cidrs                  = ["10.40.20.0/24", "10.40.21.0/24", "10.40.22.0/24"]
+    notification_delivery_profile          = "email-brevo"
+    emergency_contact_notification_enabled = true
+    emergency_contact_delivery_enabled     = true
+  }
+
+  assert {
+    condition = (
+      length(module.application.emergency_contact_environment["identity-api"]) == 3 &&
+      module.application.emergency_contact_environment["identity-api"]["EMERGENCY_CONTACT_DELIVERY_ENABLED"] == "true" &&
+      module.application.emergency_contact_environment["identity-api"]["PATIENT_LIFECYCLE_SWEEP_SECONDS"] == "60" &&
+      module.application.emergency_contact_environment["identity-api"]["EMERGENCY_CONTACT_CHANNELS"] == "email" &&
+      length(module.application.emergency_contact_environment["notification-api"]) == 1 &&
+      alltrue([for name, environment in module.application.emergency_contact_environment : length(environment) == 0 if !contains(["identity-api", "notification-api"], name)])
+    )
+    error_message = "Identity delivery on email-brevo must add delivery, a 60-second dispatch and email only, with no pilot list for every patient."
+  }
+
+  assert {
+    condition = (
+      output.emergency_contacts.notification_enabled &&
+      output.emergency_contacts.delivery_enabled &&
+      output.emergency_contacts.dispatch_seconds == 60 &&
+      join(",", output.emergency_contacts.channels) == "email" &&
+      output.emergency_contacts.pilot_account_count == 0
+    )
+    error_message = "The reviewed plan must show both switches on, a 60-second dispatch, email and every patient."
+  }
+}
+
+run "emergency_contact_sms_profile_and_pilot_accounts" {
+  command = plan
+
+  variables {
+    expected_account_id                    = "123456789012"
+    environment                            = "production"
+    availability_zones                     = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+    public_subnet_cidrs                    = ["10.40.0.0/24", "10.40.1.0/24", "10.40.2.0/24"]
+    application_subnet_cidrs               = ["10.40.10.0/24", "10.40.11.0/24", "10.40.12.0/24"]
+    database_subnet_cidrs                  = ["10.40.20.0/24", "10.40.21.0/24", "10.40.22.0/24"]
+    notification_delivery_profile          = "email-sms-brevo"
+    emergency_contact_notification_enabled = true
+    emergency_contact_delivery_enabled     = true
+    emergency_contact_dispatch_seconds     = 120
+    emergency_contact_pilot_account_ids    = ["AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE", "11111111-2222-4333-9444-55555555aaaa"]
+  }
+
+  assert {
+    condition = (
+      module.application.emergency_contact_environment["identity-api"]["EMERGENCY_CONTACT_CHANNELS"] == "email,sms" &&
+      module.application.emergency_contact_environment["identity-api"]["PATIENT_LIFECYCLE_SWEEP_SECONDS"] == "120" &&
+      module.application.emergency_contact_environment["identity-api"]["EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS"] == "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee,11111111-2222-4333-9444-55555555aaaa"
+    )
+    error_message = "The SMS profile must offer email and SMS, and pilot account IDs must be joined in lowercase."
+  }
+
+  assert {
+    condition     = join(",", output.emergency_contacts.channels) == "email,sms" && output.emergency_contacts.pilot_account_count == 2 && output.emergency_contacts.dispatch_seconds == 120
+    error_message = "The reviewed plan must show the pilot account count, never the IDs, with both channels."
+  }
+}
+
+run "emergency_contact_channels_follow_full_profile" {
+  command = plan
+
+  variables {
+    expected_account_id                    = "123456789012"
+    environment                            = "production"
+    availability_zones                     = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+    public_subnet_cidrs                    = ["10.40.0.0/24", "10.40.1.0/24", "10.40.2.0/24"]
+    application_subnet_cidrs               = ["10.40.10.0/24", "10.40.11.0/24", "10.40.12.0/24"]
+    database_subnet_cidrs                  = ["10.40.20.0/24", "10.40.21.0/24", "10.40.22.0/24"]
+    emergency_contact_notification_enabled = true
+    emergency_contact_delivery_enabled     = true
+  }
+
+  assert {
+    condition     = module.application.emergency_contact_environment["identity-api"]["EMERGENCY_CONTACT_CHANNELS"] == "email,sms"
+    error_message = "The default full production profile sends SMS, so contacts may use email and SMS."
+  }
+}
+
+run "emergency_contact_channels_follow_email_only_profile" {
+  command = plan
+
+  variables {
+    expected_account_id                    = "123456789012"
+    environment                            = "production"
+    availability_zones                     = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+    public_subnet_cidrs                    = ["10.40.0.0/24", "10.40.1.0/24", "10.40.2.0/24"]
+    application_subnet_cidrs               = ["10.40.10.0/24", "10.40.11.0/24", "10.40.12.0/24"]
+    database_subnet_cidrs                  = ["10.40.20.0/24", "10.40.21.0/24", "10.40.22.0/24"]
+    notification_delivery_profile          = "email-only"
+    emergency_contact_notification_enabled = true
+    emergency_contact_delivery_enabled     = true
+  }
+
+  assert {
+    condition     = module.application.emergency_contact_environment["identity-api"]["EMERGENCY_CONTACT_CHANNELS"] == "email"
+    error_message = "A profile without SMS must offer email only."
+  }
+}
+
+run "reject_identity_delivery_without_notification" {
+  command = plan
+
+  variables {
+    expected_account_id                = "123456789012"
+    environment                        = "production"
+    availability_zones                 = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+    public_subnet_cidrs                = ["10.40.0.0/24", "10.40.1.0/24", "10.40.2.0/24"]
+    application_subnet_cidrs           = ["10.40.10.0/24", "10.40.11.0/24", "10.40.12.0/24"]
+    database_subnet_cidrs              = ["10.40.20.0/24", "10.40.21.0/24", "10.40.22.0/24"]
+    emergency_contact_delivery_enabled = true
+  }
+
+  expect_failures = [terraform_data.deployment_guard]
+}
+
+run "reject_malformed_pilot_account_id" {
+  command = plan
+
+  variables {
+    expected_account_id                 = "123456789012"
+    environment                         = "production"
+    availability_zones                  = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+    public_subnet_cidrs                 = ["10.40.0.0/24", "10.40.1.0/24", "10.40.2.0/24"]
+    application_subnet_cidrs            = ["10.40.10.0/24", "10.40.11.0/24", "10.40.12.0/24"]
+    database_subnet_cidrs               = ["10.40.20.0/24", "10.40.21.0/24", "10.40.22.0/24"]
+    emergency_contact_pilot_account_ids = ["patient-1"]
+  }
+
+  expect_failures = [var.emergency_contact_pilot_account_ids]
+}
+
+run "reject_duplicate_pilot_account_ids" {
+  command = plan
+
+  variables {
+    expected_account_id                 = "123456789012"
+    environment                         = "production"
+    availability_zones                  = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+    public_subnet_cidrs                 = ["10.40.0.0/24", "10.40.1.0/24", "10.40.2.0/24"]
+    application_subnet_cidrs            = ["10.40.10.0/24", "10.40.11.0/24", "10.40.12.0/24"]
+    database_subnet_cidrs               = ["10.40.20.0/24", "10.40.21.0/24", "10.40.22.0/24"]
+    emergency_contact_pilot_account_ids = ["AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE", "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"]
+  }
+
+  expect_failures = [var.emergency_contact_pilot_account_ids]
+}
+
+run "reject_more_than_twenty_pilot_accounts" {
+  command = plan
+
+  variables {
+    expected_account_id      = "123456789012"
+    environment              = "production"
+    availability_zones       = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+    public_subnet_cidrs      = ["10.40.0.0/24", "10.40.1.0/24", "10.40.2.0/24"]
+    application_subnet_cidrs = ["10.40.10.0/24", "10.40.11.0/24", "10.40.12.0/24"]
+    database_subnet_cidrs    = ["10.40.20.0/24", "10.40.21.0/24", "10.40.22.0/24"]
+    emergency_contact_pilot_account_ids = [
+      "00000000-0000-4000-8000-000000000001", "00000000-0000-4000-8000-000000000002", "00000000-0000-4000-8000-000000000003",
+      "00000000-0000-4000-8000-000000000004", "00000000-0000-4000-8000-000000000005", "00000000-0000-4000-8000-000000000006",
+      "00000000-0000-4000-8000-000000000007", "00000000-0000-4000-8000-000000000008", "00000000-0000-4000-8000-000000000009",
+      "00000000-0000-4000-8000-000000000010", "00000000-0000-4000-8000-000000000011", "00000000-0000-4000-8000-000000000012",
+      "00000000-0000-4000-8000-000000000013", "00000000-0000-4000-8000-000000000014", "00000000-0000-4000-8000-000000000015",
+      "00000000-0000-4000-8000-000000000016", "00000000-0000-4000-8000-000000000017", "00000000-0000-4000-8000-000000000018",
+      "00000000-0000-4000-8000-000000000019", "00000000-0000-4000-8000-000000000020", "00000000-0000-4000-8000-000000000021",
+    ]
+  }
+
+  expect_failures = [var.emergency_contact_pilot_account_ids]
+}
+
+run "reject_zero_dispatch_interval" {
+  command = plan
+
+  variables {
+    expected_account_id                = "123456789012"
+    environment                        = "production"
+    availability_zones                 = ["eu-west-1a", "eu-west-1b", "eu-west-1c"]
+    public_subnet_cidrs                = ["10.40.0.0/24", "10.40.1.0/24", "10.40.2.0/24"]
+    application_subnet_cidrs           = ["10.40.10.0/24", "10.40.11.0/24", "10.40.12.0/24"]
+    database_subnet_cidrs              = ["10.40.20.0/24", "10.40.21.0/24", "10.40.22.0/24"]
+    emergency_contact_dispatch_seconds = 0
+  }
+
+  expect_failures = [var.emergency_contact_dispatch_seconds]
+}

@@ -43,6 +43,10 @@ resource "terraform_data" "deployment_guard" {
       error_message = "NIN-only enrollment requires QoreID enablement and accepted source readiness."
     }
     precondition {
+      condition     = !var.emergency_contact_delivery_enabled || var.emergency_contact_notification_enabled
+      error_message = "Identity emergency-contact delivery requires notification-api delivery; switch emergency_contact_notification_enabled on first and off last."
+    }
+    precondition {
       condition     = var.environment == "staging" || var.staging_mode == "sleep"
       error_message = "staging_mode is only meaningful for staging; leave it at sleep elsewhere."
     }

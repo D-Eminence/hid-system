@@ -444,6 +444,46 @@ variable "staging_novu_api_url" {
   }
 }
 
+variable "emergency_contact_notification_enabled" {
+  description = "Let notification-api send emergency-contact verification codes and emergency-access alerts (EMERGENCY_CONTACT_DELIVERY_ENABLED). Switch on before, and off after, emergency_contact_delivery_enabled."
+  type        = bool
+  default     = false
+}
+
+variable "emergency_contact_delivery_enabled" {
+  description = "Let identity-api accept emergency contacts, send their verification codes and dispatch emergency-access alerts (EMERGENCY_CONTACT_DELIVERY_ENABLED). Requires emergency_contact_notification_enabled."
+  type        = bool
+  default     = false
+}
+
+variable "emergency_contact_dispatch_seconds" {
+  description = "Seconds between identity-api emergency-access alert dispatch runs (PATIENT_LIFECYCLE_SWEEP_SECONDS); used only while emergency_contact_delivery_enabled."
+  type        = number
+  default     = 60
+
+  validation {
+    condition     = var.emergency_contact_dispatch_seconds >= 1 && var.emergency_contact_dispatch_seconds <= 3600 && floor(var.emergency_contact_dispatch_seconds) == var.emergency_contact_dispatch_seconds
+    error_message = "emergency_contact_dispatch_seconds must be a whole number from 1 to 3600."
+  }
+}
+
+variable "emergency_contact_pilot_account_ids" {
+  description = "Patient account UUIDs, at most 20, that alone may use emergency contacts while identity delivery is on (EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS). Empty means every patient."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = (
+      length(var.emergency_contact_pilot_account_ids) <= 20 &&
+      length(distinct([for id in var.emergency_contact_pilot_account_ids : lower(id)])) == length(var.emergency_contact_pilot_account_ids) &&
+      alltrue([for id in var.emergency_contact_pilot_account_ids :
+        can(regex("^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[1-8][0-9A-Fa-f]{3}-[89ABab][0-9A-Fa-f]{3}-[0-9A-Fa-f]{12}$", id))
+      ])
+    )
+    error_message = "emergency_contact_pilot_account_ids must be at most 20 unique patient account UUIDs."
+  }
+}
+
 variable "alert_email" {
   type    = string
   default = ""

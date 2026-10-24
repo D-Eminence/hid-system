@@ -185,6 +185,20 @@ locals {
     )
   }
 
+  # Emergency-contact keys exist only while their switch is on, so with both
+  # switches off the task definitions are exactly as they were before them.
+  emergency_contact_channels = contains(["email-sms-brevo", "full"], local.notification_profile) ? "email,sms" : "email"
+  emergency_contact_identity_environment = var.emergency_contact_delivery_enabled ? merge({
+    EMERGENCY_CONTACT_DELIVERY_ENABLED = "true"
+    PATIENT_LIFECYCLE_SWEEP_SECONDS    = tostring(var.emergency_contact_dispatch_seconds)
+    EMERGENCY_CONTACT_CHANNELS         = local.emergency_contact_channels
+    }, length(var.emergency_contact_pilot_account_ids) > 0 ? {
+    EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS = join(",", [for id in var.emergency_contact_pilot_account_ids : lower(id)])
+  } : {}) : {}
+  emergency_contact_notification_environment = var.emergency_contact_notification_enabled ? {
+    EMERGENCY_CONTACT_DELIVERY_ENABLED = "true"
+  } : {}
+
   workload_environment = {
     identity-api = merge(local.common_api_environment, local.workload_token_files.identity-api, {
       # The separate staging public website calls only Identity's public APIs.
@@ -225,7 +239,7 @@ locals {
       ADMIN_OCR_STATUS_URL               = local.service_urls.ocr-api
       ADMIN_OUTREACH_STATUS_URL          = local.service_urls.outreach-api
       ADMIN_EVENT_DISPATCHER_STATUS_URL  = local.service_urls.event-dispatcher
-    })
+    }, local.emergency_contact_identity_environment)
 
     ehr-api = merge(local.common_api_environment, local.workload_token_files.ehr-api, {
       PORT                                    = "3002"
@@ -311,7 +325,7 @@ locals {
       WORKLOAD_AUDIENCE                   = "hid-notification-api"
       IDENTITY_CALLER_SUBJECT             = lookup(local.identity_subjects, "identity", "")
       AWS_REGION                          = var.aws_region
-    }, { NOTIFICATION_DELIVERY_PROFILE = local.notification_profile })
+    }, { NOTIFICATION_DELIVERY_PROFILE = local.notification_profile }, local.emergency_contact_notification_environment)
 
     notification-worker = merge({
       NODE_ENV                                          = "production"

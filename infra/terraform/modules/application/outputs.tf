@@ -24,6 +24,28 @@ output "notification_delivery_configuration" {
   } : null
 }
 
+output "emergency_contact_configuration" {
+  description = "Emergency-contact switch state read from the container environments; never the pilot account IDs."
+  value = {
+    notification_enabled = try(local.workload_environment["notification-api"].EMERGENCY_CONTACT_DELIVERY_ENABLED == "true", false)
+    delivery_enabled     = try(local.workload_environment["identity-api"].EMERGENCY_CONTACT_DELIVERY_ENABLED == "true", false)
+    dispatch_seconds     = try(tonumber(local.workload_environment["identity-api"].PATIENT_LIFECYCLE_SWEEP_SECONDS), null)
+    channels             = try(split(",", local.workload_environment["identity-api"].EMERGENCY_CONTACT_CHANNELS), [])
+    # Zero means every patient.
+    pilot_account_count = try(length(split(",", local.workload_environment["identity-api"].EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS)), 0)
+  }
+}
+
+output "emergency_contact_environment" {
+  description = "Emergency-contact keys in each workload's container environment, for tests; not exported by the root module."
+  value = {
+    for name, environment in local.workload_environment : name => {
+      for key, value in environment : key => value
+      if startswith(key, "EMERGENCY_CONTACT_") || key == "PATIENT_LIFECYCLE_SWEEP_SECONDS"
+    }
+  }
+}
+
 output "operational_target_dimensions" {
   value = var.enable_ingress ? merge({
     for name, group in local.active_internal_groups : name => {
