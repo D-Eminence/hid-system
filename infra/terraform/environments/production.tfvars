@@ -28,7 +28,11 @@ notification_delivery_profile = "email-brevo"
 
 # Emergency contacts, approved by the owner on 24 October 2026. Apply
 # notification-api first; see DEVOPS_HANDOVER.md "Emergency contacts".
+# No pilot list: every patient.
 emergency_contact_notification_enabled = true
+emergency_contact_delivery_enabled     = true
+emergency_contact_dispatch_seconds     = 60
+emergency_contact_pilot_account_ids    = []
 
 google_oidc_client_ids = ["690536667193-l90c5cqm86g5pt5o93dpvplms2h507l6.apps.googleusercontent.com"]
 
