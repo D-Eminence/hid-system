@@ -24,6 +24,11 @@ output "notification_delivery_configuration" {
   description = "Notification profile and secret binding names only, when runtime is enabled."
 }
 
+output "emergency_contacts" {
+  value       = module.application.emergency_contact_configuration
+  description = "Emergency-contact switches, dispatch interval, channels and pilot account count; never the account IDs."
+}
+
 output "database_endpoint" {
   value       = module.data.database_endpoint
   description = "Private PostgreSQL endpoint when enabled."

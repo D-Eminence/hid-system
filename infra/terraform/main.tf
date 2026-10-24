@@ -141,6 +141,12 @@ module "application" {
   production_deployment_approval_mode = var.production_deployment_approval_mode
   deployment_account_id               = var.expected_account_id
   deployment_alert_kms_key_arn        = module.operations.alert_topic_kms_key_arn
+
+  # Emergency-contact delivery. Each switch adds its keys only while on.
+  emergency_contact_notification_enabled = var.emergency_contact_notification_enabled
+  emergency_contact_delivery_enabled     = var.emergency_contact_delivery_enabled
+  emergency_contact_dispatch_seconds     = var.emergency_contact_dispatch_seconds
+  emergency_contact_pilot_account_ids    = var.emergency_contact_pilot_account_ids
 }
 
 # 5. Private Bedrock access for the EHR patient-record chat.

@@ -29,6 +29,26 @@ variable "notification_delivery_profile" {
   default = ""
 }
 
+variable "emergency_contact_notification_enabled" {
+  type    = bool
+  default = false
+}
+
+variable "emergency_contact_delivery_enabled" {
+  type    = bool
+  default = false
+}
+
+variable "emergency_contact_dispatch_seconds" {
+  type    = number
+  default = 60
+}
+
+variable "emergency_contact_pilot_account_ids" {
+  type    = list(string)
+  default = []
+}
+
 variable "name_prefix" {
   type = string
 }
