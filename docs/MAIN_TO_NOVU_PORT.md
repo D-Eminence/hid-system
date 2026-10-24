@@ -514,7 +514,8 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   `codeSent: false` within the 60 seconds (naming the code just sent, which
   then verifies), after the code was used (no code named), at the hour's
   limit (naming the 5th code, which verifies) and at the email's 10 a day,
-  with nothing delivered. Unlike `main`'s, it can also run against a disposable copy of a
+  with nothing delivered, and 409 for an application support rejected while
+  its start waited. Unlike `main`'s, it can also run against a disposable copy of a
   database on a loopback test cluster (`HID_PROVIDER_RUNTIME_LOCAL_CLUSTER=loopback`,
   `NODE_ENV=test`), which proves the same flow on a database built in
   production's order.

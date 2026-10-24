@@ -1013,6 +1013,50 @@ try {
   await completion.settleDeliveries();
   assert.equal(recipients.length, deliveriesBeforeRecipient, 'A start at the recipient limit delivered a code');
   noCode.recipient_limit = { codeSent: false, challengeId: 'absent', resendAfterSeconds: recipientLimited.body.resendAfterSeconds };
+  // R14: an application closed while its start was on the way (support
+  // rejects it while the start waits on the code's recipient lock) answers
+  // 409 PROVIDER_ENROLLMENT_REQUIRES_REVIEW, as a retry would, not codeSent
+  // false; nothing is delivered. The code's 60 seconds have passed, so only
+  // the closure stops it.
+  const RACE_CLOSE_NETWORK = '198.51.100.63';
+  const cacClosing = 'RC9900063223'; const emailClosing = email('closing');
+  const closingFirst = await start(enrollment({ cacRegistrationNumber: cacClosing, administratorEmail: emailClosing }),
+    RACE_CLOSE_NETWORK);
+  assert.equal(closingFirst.body.codeSent, true);
+  await ageCodes(cacClosing, 61);
+  await completion.settleDeliveries();
+  const deliveriesBeforeClosing = recipients.length;
+  const recipientLock = await owner.connect();
+  let closingStart;
+  try {
+    await recipientLock.query('begin');
+    const lockPid = (await recipientLock.query('select pg_backend_pid() pid')).rows[0].pid;
+    await recipientLock.query("select pg_advisory_xact_lock(hashtextextended('org-completion-recipient:' || $1, 0))",
+      [emailClosing]);
+    closingStart = start(enrollment({ cacRegistrationNumber: cacClosing, administratorEmail: emailClosing }),
+      RACE_CLOSE_NETWORK).then(response => response);
+    const deadline = Date.now() + 10_000;
+    while ((await owner.query('select count(*)::int n from pg_stat_activity where $1 = any(pg_blocking_pids(pid))',
+      [lockPid])).rows[0].n === 0) {
+      assert(Date.now() < deadline, 'The start did not wait on the recipient lock');
+      await new Promise(resolveWait => setTimeout(resolveWait, 25));
+    }
+    const closing = (await owner.query(`select id, row_version from identity.organization_applications
+      where cac_registration_number=$1`, [cacClosing])).rows[0];
+    const rejectedMeanwhile = await adminPost(superAdmin, `/admin/self-service-applications/${closing.id}/reject`,
+      { reason: 'Runtime verifier closes it while its start waits' }, { 'If-Match': `"${closing.row_version}"` });
+    assert.equal(rejectedMeanwhile.status, 200, `reject while waiting: ${JSON.stringify(rejectedMeanwhile.body)}`);
+    await recipientLock.query('commit');
+  } catch (error) {
+    await recipientLock.query('rollback').catch(() => undefined);
+    throw error;
+  } finally {
+    recipientLock.release();
+  }
+  expectProblem(await closingStart, 409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
+  await completion.settleDeliveries();
+  assert.equal(recipients.length, deliveriesBeforeClosing, 'A start for a closed application delivered a code');
+  noCode.closed_meanwhile = 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW';
 
   // A8 with C9: an unactivated application holds its CAC and product for 24
   // hours. Within them another email is sent to review; after them the next
@@ -1191,7 +1235,7 @@ try {
   assert.equal(await count(`select count(*)::int n from identity.organization_profile_completion_challenges
     where application_id=$1 and invalidated_at is null`, [squatApplication.id]), 0, 'The rejected application kept a code');
   assert.deepEqual((await owner.query(`select actor_type, actor_account_id, reason from audit.events
-    where action='admin.self-service-application.reject'`)).rows,
+    where action='admin.self-service-application.reject' and resource_id=$1`, [squatApplication.id])).rows,
   [{ actor_type: 'platform', actor_account_id: superAdmin.accountId, reason: rejectReason }]);
   expectProblem(await start(enrollment({ cacRegistrationNumber: cacSquat, administratorEmail: emailSquat }),
     '198.51.100.36'), 409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
