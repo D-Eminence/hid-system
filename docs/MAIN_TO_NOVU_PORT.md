@@ -304,13 +304,36 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   `provider-self-service-control`, `provider-self-service-lapse`,
   `self-service-facility-review` and `provider-self-service-rollback`, which
   runs the previous Identity's own SQL on the new schema).
+- `services/identity-api/scripts/verify-provider-enrollment-runtime.mjs` (main's
+  verifier rewritten for this branch) runs in the migration rehearsal as
+  `hid_identity_api_runtime`, with local stubs for Siteverify, QoreID and
+  notification delivery, on production's hosts (`app.`, `ehr.`, `admin.`). It
+  proves: the shipped gate answers 423 on all three routes and availability is
+  false; a standalone platform administrator opens the control; the provider
+  portal off or maintenance on closes it again; start, the emailed code, verify
+  and activate, then `GET /auth/session`, `POST /auth/facility` and a fresh
+  password sign-in on `ehr.`; a second sitting resumes without a QoreID lookup;
+  #81's answers; the lapse after 24 hours frees the CAC; the 200-a-day platform
+  cap refuses the 201st lookup; support's list and review as a standalone
+  administrator, with its version conflict; and closing the control refuses a
+  held session. Unlike `main`'s, it can also run against a disposable copy of a
+  database on a loopback test cluster (`HID_PROVIDER_RUNTIME_LOCAL_CLUSTER=loopback`,
+  `NODE_ENV=test`), which proves the same flow on a database built in
+  production's order.
+- `POST /auth/login` and the activation set the session cookies through one
+  helper, `setSessionCookies` (`AuthController.setCookies` is a pure extraction
+  of it, C18), so the two cannot drift.
 - Follow-ups, each its own decision: the governed submit still attaches a
   governed applicant to a fresh self-service application for the same CAC and
   product, and the admin application list does not show `approval_mode`; the
   governed admin commands still need a facility membership (`0046`); no
   command releases a bound CAC after a fraud finding; a self-signed-up
-  facility has one user; and staff MFA, once ported, must say what it does to
-  these administrators.
+  facility has one user; staff MFA, once ported, must say what it does to
+  these administrators; and an activated administrator holds
+  `organization.manage`, so it can also run the existing organization CAC
+  check (`POST /api/v1/identity/organizations/verification/cac/:context`),
+  which is charged to that account's 0049 quota (5 an hour, 15 a day, 10 a day
+  per organization) and not to the 200-a-day self sign-up cap (CRITIC C13).
 
 ## Not ported, and why
 
