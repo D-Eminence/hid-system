@@ -26,6 +26,10 @@ staging_prelaunch_sizing    = false
 staging_novu_api_url          = "https://api.novu.co"
 notification_delivery_profile = "email-brevo"
 
+# Emergency contacts, approved by the owner on 24 October 2026. Apply
+# notification-api first; see DEVOPS_HANDOVER.md "Emergency contacts".
+emergency_contact_notification_enabled = true
+
 google_oidc_client_ids = ["690536667193-l90c5cqm86g5pt5o93dpvplms2h507l6.apps.googleusercontent.com"]
 
 qoreid_enabled                     = true
