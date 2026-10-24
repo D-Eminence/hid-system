@@ -26,9 +26,15 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: "22"
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
-        with:
-          terraform_wrapper: false
+      - name: Install the checksum-verified Terraform CLI
+        env:
+          TERRAFORM_VERSION: "1.13.4"
+          TERRAFORM_SHA256: 98aa516201e948306698efd9954ab4cc0d1227c2578ba56245898b5f679e590b
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/terraform.zip" "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+          echo "${TERRAFORM_SHA256}  $RUNNER_TEMP/terraform.zip" | sha256sum -c -
+          unzip -q -o "$RUNNER_TEMP/terraform.zip" -d "$RUNNER_TEMP/terraform-cli"
+          echo "$RUNNER_TEMP/terraform-cli" >> "$GITHUB_PATH"
       - run: python -m unittest discover -s scripts -p 'test_deployment*.py'
         working-directory: infra/terraform
       - run: python -m unittest discover -s scripts -p 'test_production*.py'
@@ -50,7 +56,8 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     needs: validate
     runs-on: ubuntu-latest
-    environment: ${{ inputs.environment }}
+    # Never empty: on pull_request this job is skipped and inputs are empty.
+    environment: ${{ inputs.environment || 'development' }}
     permissions:
       contents: read
       id-token: write
@@ -61,9 +68,15 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
           persist-credentials: false
-      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd
-        with:
-          terraform_wrapper: false
+      - name: Install the checksum-verified Terraform CLI
+        env:
+          TERRAFORM_VERSION: "1.13.4"
+          TERRAFORM_SHA256: 98aa516201e948306698efd9954ab4cc0d1227c2578ba56245898b5f679e590b
+        run: |
+          curl -fsSL --retry 3 -o "$RUNNER_TEMP/terraform.zip" "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+          echo "${TERRAFORM_SHA256}  $RUNNER_TEMP/terraform.zip" | sha256sum -c -
+          unzip -q -o "$RUNNER_TEMP/terraform.zip" -d "$RUNNER_TEMP/terraform-cli"
+          echo "$RUNNER_TEMP/terraform-cli" >> "$GITHUB_PATH"
       - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a
         with:
           role-to-assume: ${{ secrets.AWS_TERRAFORM_ROLE_ARN }}
