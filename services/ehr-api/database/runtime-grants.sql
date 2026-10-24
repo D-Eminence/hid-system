@@ -790,6 +790,34 @@ revoke all on function identity.current_patient_account(text),
   identity.authorize_patient_self(text,uuid), identity.patient_self_access_history(text,uuid),
   ehr.patient_self_context(uuid) from public;
 
+-- Patient emergency contacts (0084), as that migration grants them. Every
+-- patient command resolves the patient through identity.patient_self_session,
+-- delivery requires the Identity system context, and the two support commands
+-- their platform permission. The audit helper and the trigger function are
+-- never granted, no runtime role reads the contact tables, and Identity reads
+-- the facility alert phones for the admin facility view.
+grant execute on function identity.list_my_emergency_contacts(text,uuid),
+  identity.add_my_emergency_contact(text,uuid,uuid,text,text,bytea,text,text,boolean),
+  identity.update_my_emergency_contact(text,uuid,uuid,bigint,text,bytea,text,text,boolean),
+  identity.deactivate_my_emergency_contact(text,uuid,uuid),
+  identity.start_my_emergency_contact_verification(text,uuid,uuid,uuid,text,text,integer,integer),
+  identity.record_my_emergency_contact_verification_delivery(text,uuid,uuid,text,text),
+  identity.complete_my_emergency_contact_verification(text,uuid,uuid,uuid,text),
+  identity.claim_emergency_contact_notifications(text,integer,integer),
+  identity.record_emergency_contact_notification_outcome(uuid,text,text,text,text),
+  identity.admin_set_facility_alert_phone(uuid,bigint,text,text,text,character),
+  identity.admin_opt_out_emergency_contact(text,text,text,text,character)
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant select on identity.facility_alert_phones to hid_identity_runtime;
+revoke all on function identity.audit_emergency_contact_event(text,text,uuid,text,uuid,jsonb),
+  identity.on_emergency_access_contact_notification()
+  from public;
+revoke all on identity.facility_alert_phones from public;
+revoke all on identity.patient_emergency_contacts, identity.emergency_contact_verifications,
+  identity.emergency_contact_notifications
+  from public, hid_identity_runtime, hid_ehr_runtime, hid_api_runtime, hid_identity_api_runtime,
+    hid_ehr_api_runtime, hid_notification_runtime, hid_notification_worker;
+
 -- Governed enrollment creates only a pending-reset account for a resolved case.
 grant execute on function identity.enroll_registered_patient(uuid, bigint, text, text, text, char)
   to hid_identity_runtime;

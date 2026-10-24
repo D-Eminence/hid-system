@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0083",
-    "count": 84,
+    "last": "0084",
+    "count": 85,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -433,6 +433,10 @@
       {
         "name": "0083_bind_patient_self_context_to_live_session.sql",
         "sha256": "1591165d3ede78a2b4c52a221dccb08e52304ec70548245522edc5c97c9a4270"
+      },
+      {
+        "name": "0084_patient_emergency_contacts.sql",
+        "sha256": "4cd331440a1f15f36b109dd3b9f9fee60de43fbfd188395ae9a32f58c51b0e40"
       }
     ]
   },

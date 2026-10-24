@@ -124,3 +124,57 @@ describe('Notification API delivery profile validation', () => {
     expect(getEnvironment()).toMatchObject({ BREVO_API_KEY: expect.any(String) });
   });
 });
+
+describe('Notification API emergency-contact settings', () => {
+  const original = process.env;
+  const production = () => ({
+    NODE_ENV: 'production', HID_DEPLOYMENT_ENV: 'production',
+    NOTIFICATION_PROVIDER_MODE: 'live', NOTIFICATION_DELIVERY_PROFILE: 'email-brevo',
+    NOTIFICATION_WORKLOAD_IDENTITY_MODE: 'jwt',
+    WORKLOAD_ISSUER_URL: 'https://issuer.example.test',
+    WORKLOAD_JWKS_URL: 'https://issuer.example.test/jwks.json',
+    IDENTITY_CALLER_SUBJECT: 'hid:production:identity-api',
+    AWS_REGION: 'eu-west-1', SES_FROM_ADDRESS: 'security@example.test',
+    BREVO_API_KEY: 'invented-test-credential', BREVO_EMAIL_FROM: 'security@example.test',
+  });
+
+  beforeEach(() => { process.env = production(); resetEnvironmentForTests(); });
+  afterEach(() => { process.env = original; resetEnvironmentForTests(); });
+
+  it('defaults to delivery off and the Health ID support phone and email', () => {
+    expect(getEnvironment()).toMatchObject({
+      EMERGENCY_CONTACT_DELIVERY_ENABLED: false,
+      EMERGENCY_CONTACT_SUPPORT_PHONE: '+2347026717252',
+      EMERGENCY_CONTACT_SUPPORT_EMAIL: 'support@healthidentitydirectory.com',
+    });
+  });
+
+  it.each([['true', true], ['false', false]])('accepts EMERGENCY_CONTACT_DELIVERY_ENABLED=%s in production', (value, enabled) => {
+    process.env.EMERGENCY_CONTACT_DELIVERY_ENABLED = value;
+    expect(getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED).toBe(enabled);
+  });
+
+  it.each(['yes', '1', 'TRUE'])('refuses EMERGENCY_CONTACT_DELIVERY_ENABLED=%s', value => {
+    process.env.EMERGENCY_CONTACT_DELIVERY_ENABLED = value;
+    expect(() => getEnvironment()).toThrow('EMERGENCY_CONTACT_DELIVERY_ENABLED');
+  });
+
+  it('accepts a configured support phone and email, and treats empty values as unset', () => {
+    Object.assign(process.env, { EMERGENCY_CONTACT_SUPPORT_PHONE: '+447700900123', EMERGENCY_CONTACT_SUPPORT_EMAIL: 'help@example.test' });
+    expect(getEnvironment()).toMatchObject({ EMERGENCY_CONTACT_SUPPORT_PHONE: '+447700900123', EMERGENCY_CONTACT_SUPPORT_EMAIL: 'help@example.test' });
+    Object.assign(process.env, { EMERGENCY_CONTACT_SUPPORT_PHONE: ' ', EMERGENCY_CONTACT_SUPPORT_EMAIL: '' });
+    resetEnvironmentForTests();
+    expect(getEnvironment()).toMatchObject({ EMERGENCY_CONTACT_SUPPORT_PHONE: '+2347026717252',
+      EMERGENCY_CONTACT_SUPPORT_EMAIL: 'support@healthidentitydirectory.com' });
+  });
+
+  it.each(['07026717252', '+234 702 671 7252', '2347026717252', '+0123456789'])('refuses the support phone %p', value => {
+    process.env.EMERGENCY_CONTACT_SUPPORT_PHONE = value;
+    expect(() => getEnvironment()).toThrow('EMERGENCY_CONTACT_SUPPORT_PHONE: must be an E.164 phone number');
+  });
+
+  it.each(['support', 'support@', 'support healthidentitydirectory.com'])('refuses the support email %p', value => {
+    process.env.EMERGENCY_CONTACT_SUPPORT_EMAIL = value;
+    expect(() => getEnvironment()).toThrow('EMERGENCY_CONTACT_SUPPORT_EMAIL');
+  });
+});

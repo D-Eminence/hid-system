@@ -1,6 +1,6 @@
 import { SESv2Client, SendEmailCommand } from '@aws-sdk/client-sesv2';
 import type { Environment } from '../config/environment';
-import { genericOtpText, type OtpMessage, type OtpProvider, type ProviderResult } from './provider.types';
+import { messageContent, type OtpMessage, type OtpProvider, type ProviderResult } from './provider.types';
 
 export class SesEmailProvider implements OtpProvider {
   readonly name = 'ses' as const;
@@ -11,7 +11,7 @@ export class SesEmailProvider implements OtpProvider {
       const response = await this.client.send(new SendEmailCommand({
         FromEmailAddress: this.environment.SES_FROM_ADDRESS,
         Destination: { ToAddresses: [message.recipient] },
-        Content: { Simple: { Subject: { Data: 'Your HID verification code', Charset: 'UTF-8' }, Body: { Text: { Data: genericOtpText(message.code), Charset: 'UTF-8' } } } },
+        Content: { Simple: { Subject: { Data: messageContent(message).subject, Charset: 'UTF-8' }, Body: { Text: { Data: messageContent(message).text, Charset: 'UTF-8' } } } },
       }), { abortSignal: AbortSignal.timeout(this.environment.NOTIFICATION_PROVIDER_TIMEOUT_MS) });
       return response.MessageId ? { outcome: 'accepted', provider: this.name, providerMessageId: response.MessageId }
         : { outcome: 'unknown', provider: this.name, safeCode: 'missing_message_id' };

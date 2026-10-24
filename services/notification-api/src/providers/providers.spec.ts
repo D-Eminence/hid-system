@@ -3,7 +3,7 @@ import { resetEnvironmentForTests, getEnvironment } from '../config/environment'
 import { BrevoFallbackProvider } from './brevo.provider';
 import { MetaWhatsAppProvider } from './meta.provider';
 import { SesEmailProvider } from './ses.provider';
-import { genericOtpText } from './provider.types';
+import { emergencyContactAlertContent, genericOtpText, isTemplateOtp, messageContent } from './provider.types';
 import { TermiiSmsProvider } from './termii.provider';
 
 describe('OTP provider adapters', () => {
@@ -71,6 +71,48 @@ describe('OTP provider adapters', () => {
   it('Brevo adapter treats timeout as unknown', async () => {
     const transport = jest.fn().mockRejectedValue(new DOMException('timeout','AbortError'));
     await expect(new BrevoFallbackProvider(getEnvironment(), transport).send({ ...base, channel:'sms' })).resolves.toMatchObject({ outcome:'unknown', provider:'brevo' });
+  });
+
+  it('messageContent keeps the generic OTP wording for generic purposes', () => {
+    for (const purpose of ['PASSWORD_RESET', 'SIGNUP_VERIFY', 'EMAIL_VERIFY', 'LEGACY_ACCOUNT_RECOVERY']) {
+      expect(messageContent({ ...base, channel:'sms', purpose })).toEqual({ subject:'Your HID verification code', text:genericOtpText('012345') });
+      expect(isTemplateOtp({ ...base, channel:'whatsapp', purpose })).toBe(true);
+    }
+  });
+
+  it('messageContent gives emergency-contact codes their own wording and passes fixed content through', () => {
+    expect(messageContent({ ...base, channel:'email', purpose:'EMERGENCY_CONTACT_VERIFY' })).toEqual({
+      subject:'Health ID emergency contact verification',
+      text:'Someone is adding you as their emergency contact on Health ID. If you agree, read this code to them: 012345. It expires shortly. If you were not expecting this, ignore this message.',
+    });
+    const content = { subject:'Health ID emergency access notice', text:'Fixed alert text.' };
+    expect(messageContent({ ...base, channel:'email', code:'', purpose:'EMERGENCY_CONTACT_ALERT', content })).toBe(content);
+    expect(isTemplateOtp({ ...base, channel:'whatsapp', purpose:'EMERGENCY_CONTACT_VERIFY' })).toBe(false);
+    expect(isTemplateOtp({ ...base, channel:'whatsapp', code:'', purpose:'EMERGENCY_CONTACT_ALERT', content })).toBe(false);
+  });
+
+  it('SES and Brevo send an alert with its own subject and text', async () => {
+    const content = emergencyContactAlertContent({ patientFullName:'Amina Okafor', patientHidSuffix:'EF23', clinicianName:null,
+      facilityName:'Lagos General', facilityPhone:null, occurredAt:new Date('2026-10-23T13:35:00.000Z'),
+      supportPhone:'+2347026717252', supportEmail:'support@healthidentitydirectory.com' });
+    const alert = { ...base, channel:'email' as const, recipient:'contact@example.test', code:'', purpose:'EMERGENCY_CONTACT_ALERT', content };
+    const client = { send: jest.fn().mockResolvedValue({ MessageId:'ses-id' }) } as unknown as SESv2Client;
+    await expect(new SesEmailProvider(getEnvironment(), client).send(alert)).resolves.toMatchObject({ outcome:'accepted' });
+    expect((client.send as jest.Mock).mock.calls[0][0].input.Content).toEqual({ Simple: {
+      Subject: { Data:'Health ID emergency access notice', Charset:'UTF-8' }, Body: { Text: { Data:content.text, Charset:'UTF-8' } } } });
+
+    const transport = jest.fn().mockResolvedValue(new Response('{"messageId":"email-id"}', { status: 201 }));
+    await expect(new BrevoFallbackProvider(getEnvironment(), transport).send(alert)).resolves.toMatchObject({ outcome:'accepted' });
+    expect(JSON.parse(String(transport.mock.calls[0]![1].body))).toEqual({
+      sender: { email:'security@example.test' }, to: [{ email:'contact@example.test' }],
+      subject:'Health ID emergency access notice', textContent:content.text,
+    });
+  });
+
+  it('Brevo SMS sends the emergency-contact verification wording', async () => {
+    const transport = jest.fn().mockResolvedValue(new Response('{"messageId":1}', { status: 201 }));
+    await new BrevoFallbackProvider(getEnvironment(), transport).send({ ...base, channel:'sms', purpose:'EMERGENCY_CONTACT_VERIFY' });
+    expect(JSON.parse(String(transport.mock.calls[0]![1].body)).content).toBe(messageContent({ ...base, channel:'sms', purpose:'EMERGENCY_CONTACT_VERIFY' }).text);
   });
 
   it('Brevo fails closed when the selected fallback channel has no configured sender', async () => {

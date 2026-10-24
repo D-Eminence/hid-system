@@ -68,6 +68,57 @@ describe('Identity production database transport', () => {
     expect(getEnvironment().QOREID_ENABLED).toBe(true);
     expect(getEnvironment().QOREID_MAX_RETRIES).toBe(0);
   });
+
+  it('keeps emergency-contact delivery off by default and accepts it in production (main refuses it there)', () => {
+    production(); resetEnvironmentForTests();
+    expect(getEnvironment()).toMatchObject({ EMERGENCY_CONTACT_DELIVERY_ENABLED: false,
+      EMERGENCY_CONTACT_CHANNELS: ['email'], EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS: [],
+      PATIENT_LIFECYCLE_SWEEP_SECONDS: 300, EMERGENCY_CONTACT_ALERT_TIMEOUT_MS: 12_000 });
+
+    production(); process.env.EMERGENCY_CONTACT_DELIVERY_ENABLED = 'true'; resetEnvironmentForTests();
+    expect(getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED).toBe(true);
+    expect(getEnvironment().HID_DEPLOYMENT_ENV).toBe('production');
+  });
+
+  it('reads emergency-contact channels as a non-empty subset of email and SMS', () => {
+    for (const [value, channels] of [['', ['email']], ['sms', ['sms']], [' email , sms ', ['email', 'sms']]] as const) {
+      production(); process.env.EMERGENCY_CONTACT_CHANNELS = value; resetEnvironmentForTests();
+      expect(getEnvironment().EMERGENCY_CONTACT_CHANNELS).toEqual(channels);
+    }
+    for (const value of ['whatsapp', 'email,', 'email,email', ',']) {
+      production(); process.env.EMERGENCY_CONTACT_CHANNELS = value; resetEnvironmentForTests();
+      expect(() => getEnvironment()).toThrow(/EMERGENCY_CONTACT_CHANNELS/);
+    }
+  });
+
+  it('reads the emergency-contact pilot as at most 20 distinct account UUIDs, empty meaning every patient', () => {
+    const ids = Array.from({ length: 21 }, (_, index) => `70000000-0000-4000-8000-${String(index).padStart(12, '0')}`);
+    production(); process.env.EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS = ' '; resetEnvironmentForTests();
+    expect(getEnvironment().EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS).toEqual([]);
+    production(); process.env.EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS = ` ${ids[0]!.toUpperCase()} ,${ids[1]}`;
+    resetEnvironmentForTests();
+    expect(getEnvironment().EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS).toEqual([ids[0], ids[1]]);
+    production(); process.env.EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS = ids.slice(0, 20).join(','); resetEnvironmentForTests();
+    expect(getEnvironment().EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS).toHaveLength(20);
+    for (const value of [ids.join(','), `${ids[0]},${ids[0]}`, 'not-a-uuid', `${ids[0]},`,
+      '70000000-0000-4000-8000-00000000001', '70000000-0000-4000-c000-000000000001']) {
+      production(); process.env.EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS = value; resetEnvironmentForTests();
+      expect(() => getEnvironment()).toThrow(/EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS/);
+    }
+  });
+
+  it('bounds the dispatch interval and the alert timeout', () => {
+    for (const [key, value] of [['PATIENT_LIFECYCLE_SWEEP_SECONDS', '0'], ['PATIENT_LIFECYCLE_SWEEP_SECONDS', '3600'],
+      ['EMERGENCY_CONTACT_ALERT_TIMEOUT_MS', '1000'], ['EMERGENCY_CONTACT_ALERT_TIMEOUT_MS', '20000']] as const) {
+      production(); process.env[key] = value; resetEnvironmentForTests();
+      expect(getEnvironment()[key]).toBe(Number(value));
+    }
+    for (const [key, value] of [['PATIENT_LIFECYCLE_SWEEP_SECONDS', '-1'], ['PATIENT_LIFECYCLE_SWEEP_SECONDS', '3601'],
+      ['EMERGENCY_CONTACT_ALERT_TIMEOUT_MS', '999'], ['EMERGENCY_CONTACT_ALERT_TIMEOUT_MS', '20001']] as const) {
+      production(); process.env[key] = value; resetEnvironmentForTests();
+      expect(() => getEnvironment()).toThrow(new RegExp(key));
+    }
+  });
 });
 
 describe('Public patient enrollment contact-code failure budget', () => {

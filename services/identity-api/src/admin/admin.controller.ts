@@ -9,7 +9,8 @@ import { AdminOperationsService } from './admin-operations.service';
 import { AdminService } from './admin.service';
 import { PricingService } from './pricing.service';
 import { PricePricingCommandDto, ProductPricingCommandDto } from './dto/pricing-command.dto';
-import { AccountStatusCommandDto, FacilityStatusCommandDto, PlatformControlCommandDto, PlatformRoleCommandDto,
+import { AccountStatusCommandDto, EmergencyContactOptOutCommandDto, FacilityAlertPhoneCommandDto,
+  FacilityStatusCommandDto, PlatformControlCommandDto, PlatformRoleCommandDto,
   RevokeSessionsCommandDto } from './dto/admin-command.dto';
 import { ExportPrincipalsDto, ListFacilitiesDto, ListIdentityReviewsDto, ListPlatformAuditDto,
   ListPrincipalsDto } from './dto/admin-list.dto';
@@ -75,6 +76,25 @@ export class AdminController {
     @Body() input: FacilityStatusCommandDto, @Req() request: HidRequest) {
     return this.admin.transitionFacility(requireAdminContext(request), facilityId, this.expectedVersion(ifMatch),
       input, requireIdempotencyKey(key));
+  }
+
+  @Post('facilities/:facilityId/alert-phone')
+  @RequirePermissions('platform.facility.manage')
+  @AuditAction('admin.facility.alert-phone.request')
+  setFacilityAlertPhone(@Param('facilityId', new ParseUUIDPipe({ version: '4' })) facilityId: string,
+    @Headers('if-match') ifMatch: string | undefined, @Headers('idempotency-key') key: string | undefined,
+    @Body() input: FacilityAlertPhoneCommandDto, @Req() request: HidRequest) {
+    return this.admin.setFacilityAlertPhone(requireAdminContext(request), facilityId, this.expectedVersion(ifMatch),
+      input, requireIdempotencyKey(key));
+  }
+
+  @Post('emergency-contacts/opt-out')
+  @HttpCode(200)
+  @RequirePermissions('platform.emergency-contact.manage')
+  @AuditAction('admin.emergency-contact.opt-out.request')
+  optOutEmergencyContact(@Headers('idempotency-key') key: string | undefined,
+    @Body() input: EmergencyContactOptOutCommandDto, @Req() request: HidRequest) {
+    return this.admin.optOutEmergencyContact(requireAdminContext(request), input, requireIdempotencyKey(key));
   }
 
   @Get('principals')
