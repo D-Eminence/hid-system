@@ -36,6 +36,14 @@ const schema = z.object({
   BREVO_EMAIL_FROM: z.preprocess(empty, z.string().email().optional()),
   BREVO_SMS_SENDER: optional,
   BREVO_WHATSAPP_SENDER: optional,
+  // Emergency-contact verification codes and emergency-access alerts reach
+  // people who are not Health ID users. Off by default; there is no
+  // production refusal, so the owner can switch it on in production.
+  EMERGENCY_CONTACT_DELIVERY_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  // Health ID support, named in every alert for stopping alerts and, when the
+  // facility has no alert phone, for questions. Configured in this service only.
+  EMERGENCY_CONTACT_SUPPORT_PHONE: z.preprocess(empty, z.string().trim().regex(/^\+[1-9]\d{7,14}$/, 'must be an E.164 phone number').default('+2347026717252')),
+  EMERGENCY_CONTACT_SUPPORT_EMAIL: z.preprocess(empty, z.string().trim().email().max(254).default('support@healthidentitydirectory.com')),
 }).superRefine((value, context) => {
   if (value.NOTIFICATION_PROVIDER_MODE === 'test' && value.NODE_ENV !== 'test') {
     context.addIssue({ code: 'custom', path: ['NOTIFICATION_PROVIDER_MODE'], message: 'Deterministic notification providers are test-only' });

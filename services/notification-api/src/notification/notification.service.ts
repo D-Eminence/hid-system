@@ -2,12 +2,13 @@ import { BadRequestException, Inject, Injectable, Optional, ServiceUnavailableEx
 import { getEnvironment, type Environment } from '../config/environment';
 import { BrevoFallbackProvider } from '../providers/brevo.provider';
 import { MetaWhatsAppProvider } from '../providers/meta.provider';
-import type { OtpMessage, OtpProvider, ProviderResult } from '../providers/provider.types';
+import { emergencyContactAlertContent, type OtpMessage, type OtpProvider, type ProviderResult } from '../providers/provider.types';
 import { SesEmailProvider } from '../providers/ses.provider';
 import { TermiiSmsProvider } from '../providers/termii.provider';
 
 const NOTIFICATION_PROVIDER_OVERRIDES = Symbol('NOTIFICATION_PROVIDER_OVERRIDES');
 type ProviderName = 'ses' | 'termii' | 'meta-whatsapp' | 'brevo';
+export type DeliveryResult = { primary: ProviderResult; fallback?: ProviderResult; outcome: ProviderResult['outcome'] };
 type DeliveryPlan = { capability: OtpMessage['channel']; primary: ProviderName; fallback: ProviderName | null;
   configuration: Partial<Record<ProviderName, Record<string, string>>> };
 const supported: Record<OtpMessage['channel'], readonly ProviderName[]> = {
@@ -44,7 +45,38 @@ export class NotificationService {
     this.fallback = providers?.fallback ?? new BrevoFallbackProvider(this.environment);
   }
 
-  async deliverOtp(message: OtpMessage, rawPlan?: unknown): Promise<{ primary: ProviderResult; fallback?: ProviderResult; outcome: ProviderResult['outcome'] }> {
+  deliverOtp(message: OtpMessage, rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver(message, rawPlan);
+  }
+
+  /**
+   * Renders the fixed emergency-access alert and delivers it like an OTP: the
+   * same profile checks (email-brevo refuses SMS), delivery plan and fallback.
+   */
+  deliverEmergencyContactAlert(input: {
+    channel: 'email' | 'sms';
+    recipient: string;
+    patientFullName: string;
+    patientHidSuffix: string;
+    clinicianName: string | null;
+    facilityName: string | null;
+    facilityPhone: string | null;
+    occurredAt: Date;
+    idempotencyKey: string;
+  }, rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: input.channel, recipient: input.recipient, code: '', purpose: 'EMERGENCY_CONTACT_ALERT',
+      idempotencyKey: input.idempotencyKey,
+      content: emergencyContactAlertContent({
+        patientFullName: input.patientFullName, patientHidSuffix: input.patientHidSuffix,
+        clinicianName: input.clinicianName, facilityName: input.facilityName, facilityPhone: input.facilityPhone,
+        occurredAt: input.occurredAt, supportPhone: this.environment.EMERGENCY_CONTACT_SUPPORT_PHONE,
+        supportEmail: this.environment.EMERGENCY_CONTACT_SUPPORT_EMAIL,
+      }),
+    }, rawPlan);
+  }
+
+  private async deliver(message: OtpMessage, rawPlan?: unknown): Promise<DeliveryResult> {
     const profile = this.environment.NOTIFICATION_DELIVERY_PROFILE;
     if (profile === 'email-sms-brevo' && message.channel === 'whatsapp') {
       throw new BadRequestException('This delivery profile does not support WhatsApp OTP');

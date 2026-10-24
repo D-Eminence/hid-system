@@ -1,11 +1,13 @@
 import type { Environment } from '../config/environment';
-import { classifyHttp, type OtpMessage, type OtpProvider, type ProviderResult } from './provider.types';
+import { classifyHttp, isTemplateOtp, type OtpMessage, type OtpProvider, type ProviderResult } from './provider.types';
 
 export class MetaWhatsAppProvider implements OtpProvider {
   readonly name = 'meta-whatsapp' as const;
   constructor(private readonly environment: Environment, private readonly transport: typeof fetch = fetch) {}
   async send(message: OtpMessage): Promise<ProviderResult> {
     const env = this.environment;
+    // The approved WhatsApp template carries an OTP only; other content is never sent through it.
+    if (!isTemplateOtp(message)) return { outcome: 'definitive_failure', provider: this.name, safeCode: 'unsupported_message' };
     if (message.channel !== 'whatsapp' || !env.META_PHONE_NUMBER_ID || !env.META_ACCESS_TOKEN || !env.META_OTP_TEMPLATE_NAME) return { outcome: 'definitive_failure', provider: this.name, safeCode: 'not_configured' };
     const endpoint = new URL(`/${env.META_GRAPH_API_VERSION}/${encodeURIComponent(env.META_PHONE_NUMBER_ID)}/messages`, env.META_GRAPH_BASE_URL);
     try {

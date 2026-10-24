@@ -1,5 +1,5 @@
 import type { Environment } from '../config/environment';
-import { classifyHttp, genericOtpText, type OtpMessage, type OtpProvider, type ProviderResult } from './provider.types';
+import { classifyHttp, messageContent, type OtpMessage, type OtpProvider, type ProviderResult } from './provider.types';
 
 const BREVO_API_URL = 'https://api.brevo.com';
 
@@ -25,14 +25,14 @@ export class BrevoFallbackProvider implements OtpProvider {
   }
 
   private request(message: OtpMessage): { path: string; body: object } | null {
-    const text = genericOtpText(message.code);
+    const { subject, text } = messageContent(message);
     if (message.channel === 'email' && this.environment.BREVO_EMAIL_FROM) {
       return {
         path: '/v3/smtp/email',
         body: {
           sender: { email: this.environment.BREVO_EMAIL_FROM },
           to: [{ email: message.recipient }],
-          subject: 'Your HID verification code',
+          subject,
           textContent: text,
         },
       };
