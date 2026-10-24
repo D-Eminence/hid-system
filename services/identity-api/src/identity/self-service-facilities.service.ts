@@ -100,9 +100,11 @@ export class SelfServiceFacilitiesService {
     if (code === 'P0002') return new DomainProblem(404, 'SELF_SERVICE_FACILITY_NOT_FOUND',
       'Self-signed-up facility was not found');
     if (code === '40001') return new DomainProblem(409, 'VERSION_CONFLICT', 'Application changed; reload before retrying');
-    // Already reviewed: a unique-style 23505, or 23514 as the admin reject
-    // answers a closed application.
-    if (code === '23505' || code === '23514') return new DomainProblem(409, 'SELF_SERVICE_FACILITY_ALREADY_REVIEWED',
+    // Already reviewed: identity.admin_review_self_service_facility raises
+    // 23505 SELF_SERVICE_FACILITY_ALREADY_REVIEWED (0086), before it compares
+    // the version. Nothing else in these commands raises 23505; any other
+    // integrity refusal (23514) is not an answer about the review.
+    if (code === '23505') return new DomainProblem(409, 'SELF_SERVICE_FACILITY_ALREADY_REVIEWED',
       'This facility sign-up was already reviewed');
     if (code === '22023') return new DomainProblem(400, 'SELF_SERVICE_FACILITY_REQUEST_INVALID',
       'Facility sign-up review request is invalid');
