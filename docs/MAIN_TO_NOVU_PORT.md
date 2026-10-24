@@ -61,6 +61,108 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | #50 (enrollment) | Activation is budgeted per enrollment (`OTP_RATE_MAX_REQUESTS` × 3 per window, then 429 `ENROLLMENT_RATE_LIMITED`) once the cookie has proved it. A replay of an active enrollment never hashes the presented password; the placeholder hash the command needs is computed once per process | — |
 | — | This branch only (owner decision): a public enrollment's start answers `recordName`, the full name on the NIN record (first, middle and last), so the person can check that the NIN they typed is theirs; health shows it under "NIN verified". `GET /identity/patient-enrollments/current` answers it too, for a reload, but only within 15 minutes of the enrollment's first start (a same-key resume does not extend it) and never after activation, so a shared device does not show it to the next person for the enrollment's whole 24 hours. It is never logged and is stored only in the encrypted profile | — |
 | #68 (N2(b), service half) | The enrollment cookie shows the new HID (`GET /current`, an activation replay) for 15 minutes after activation only, then answers 404 as an unknown enrollment. Before, a shared device showed it to the next person for up to 24 hours. A start with the key of an activated enrollment answers 409 `IDEMPOTENCY_KEY_REUSED`, as on `main`, so the page says the registration was completed. Not ported: `main`'s 0085 check of the same in the activation command (the service refuses before it calls the command), and `main`'s expiry of the cookie in the activation response, so a reload within the 15 minutes still shows the HID, which a patient who verified only a phone needs to sign in and to recover the account | — |
+| #16 (emergency contacts, with e1757ba) | A patient keeps up to five emergency contacts, each stored encrypted and verified by a code the contact reads back; when a clinician uses break-glass, each verified contact with alerts on gets one alert. It ships switched off: adding a contact and sending a code answer 409 `EMERGENCY_CONTACT_DELIVERY_UNAVAILABLE` until `EMERGENCY_CONTACT_DELIVERY_ENABLED=true`, and no message can be sent. It differs from `main` as listed below the table | 0084 (main 0065), runtime-grants.sql |
+
+Emergency contacts differ from `main` (#16 and e1757ba) in these ways. Owner
+decisions of 2026-10-23 are marked "owner".
+
+- D1: `EMERGENCY_CONTACT_DELIVERY_ENABLED` (Identity and notification-api)
+  defaults to false and has no production refusal. `main` refuses it in
+  production, so turning it on would crash-loop both services.
+- D2: while delivery is off, or the account is outside
+  `EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS` (D6), adding a contact and sending a
+  code answer 409 `EMERGENCY_CONTACT_DELIVERY_UNAVAILABLE`. Listing, editing and
+  removing keep working. On `main` adding is allowed and the code answers 503;
+  the gateway replaces every upstream 502, 503 and 504.
+- D3: a code that cannot be delivered answers 422
+  `EMERGENCY_CONTACT_VERIFICATION_UNDELIVERABLE` (`main`: 502).
+- D4: `GET /identity/me/emergency-contacts/availability` answers
+  `{ delivery, channels }` so the card can tell whether the feature is on.
+- D5 (owner): `EMERGENCY_CONTACT_CHANNELS`, default `email`. Production's
+  `email-brevo` cannot send SMS, so SMS comes next.
+- D6: `EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS` limits adding contacts and sending
+  codes to the listed accounts while it is set.
+- D7 (owner): the alert gives the patient's full name, the last four characters
+  of the Health ID ("Health ID ending EF23", never the whole HID, which is a
+  sign-in identifier), the clinician's name, the facility, the facility's alert
+  phone or else Health ID support, the fixed reason "for emergency care" (never
+  the reason the clinician typed), the time in WAT, and how to stop the alerts.
+  `main` sends the first name, the facility and the time.
+- D8 (owner): a facility's alert phone is kept in `identity.facility_alert_phones`,
+  set by `identity.admin_set_facility_alert_phone` through
+  `POST /admin/facilities/:facilityId/alert-phone` (`platform.facility.manage`).
+  A bad phone answers 400 `ADMIN_INVALID_FACILITY_PHONE`. It is a side table
+  because a new checked column would lock `identity.facilities` exclusively.
+- D9: notification-api's alert route answers 503 while its flag is off (`main`:
+  403), so a flag mismatch between the services retries the alert instead of
+  closing it. The code purpose keeps 403.
+- D10: the Identity sweeper only dispatches alerts. Account deletion is not
+  ported.
+- D11: editing, removing and starting a verification lock the contact
+  `FOR NO KEY UPDATE` (`main`: `FOR UPDATE`), so a patient's own edit never
+  makes break-glass wait on the alert intent's foreign key.
+- D12: the trigger's failure audit is guarded, so an audit outage that affects
+  only these rows still lets break-glass commit (on `main` it aborted
+  break-glass). A grant the trigger cannot see is audited as `intent-failed`
+  with `grant_unavailable` instead of being skipped silently.
+- D13: both messages say "Health ID" (`main`: "HID").
+- D14: the alert call times out after 12 s. The code call stays at 5 s.
+- One migration, 0084, holds what the plan split into two: the dry run takes
+  every lock together anyway, and a release that applied only the first of two
+  files could not be retried. The trigger is its last statement.
+  Its first statement takes the SHARE ROW EXCLUSIVE locks on facilities,
+  accounts, patients, consent grants and the outbox, in that order (the order
+  organization approval, registration, NIN registration and break-glass write
+  them), so none of them can deadlock with it.
+- Erase on removal (owner): removing a contact, and support's opt-out, set its
+  ciphertext, key version and destination HMAC to null in the same update and
+  close its pending alerts unsent (`contact_deactivated`). A notice leased at
+  removal is closed by its outcome or by the next claim. Only a record that
+  the contact existed is kept. `main` keeps the encrypted name and destination.
+  The removal reasons also allow `account_deleted`, for a later account deletion.
+- Opt-out through Health ID support (owner): `identity.admin_opt_out_emergency_contact`
+  through `POST /admin/emergency-contacts/opt-out`, with the new permission
+  `platform.emergency-contact.manage` (support_admin and every role that holds
+  `platform.principal.manage`), removes every contact with that channel and
+  destination, for every patient, and tells each patient in the inbox
+  (`EMERGENCY_CONTACT_OPTED_OUT`, without the contact's name or address).
+  Support sees only the counts, and the audit row never holds the destination.
+  `main` has no opt-out.
+- The delivery claim returns the Health ID's last four characters, the
+  clinician and the facility phone through left joins, so a missing staff row
+  or phone never stops an alert. A notice whose patient it cannot see is closed
+  and audited (`patient_unavailable`) instead of being retried until its
+  attempts run out.
+- Identity claims 5 alerts at a time with a 120 s lease, up to 5 batches per
+  tick, and refuses an alert timeout above 20 s, so a lease never expires while
+  its batch is still being sent (on `main`, 10 alerts with a 60 s lease could be
+  sent twice). The claim's limit counts only the alerts it leases, so the
+  notices it closes on the way cut a batch short only when one call meets more
+  than 500 of them (on `main` each took a slot).
+- The trigger has `WHEN (new.event_type = 'EmergencyAccessActivated')`, so other
+  outbox events never call it. Its system audit rows name no facility and carry
+  channels and counts only, so a facility's audit read does not learn a
+  patient's contacts.
+- The ported database suite runs from
+  `services/ehr-api/test/database/emergency-contacts.integration.sql` (container
+  acceptance), and `services/identity-api/scripts/verify-emergency-contacts-runtime.mjs`
+  runs in the migration rehearsal.
+- `EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS` accepts any UUID version, so an account
+  id that is not version 4 cannot stop Identity at boot.
+- The alert's date spells the month from a fixed table ("Sep", not Node's
+  "Sept"), and a `+234` number with ten digits after it is shown as
+  `+234 XXX XXX XXXX`; any other number is shown as given.
+- `POST /admin/facilities/:facilityId/alert-phone` answers 201, as the facility
+  status command does. An idempotent replay of either new admin command writes
+  no second audit row.
+- The opt-out's idempotency digest is taken over the destination HMAC, never the
+  destination, and its audit row carries a fixed reason, since support's typed
+  reason may quote the destination.
+- `main`'s workload-token handling for notification calls is ported: a code is
+  not sent without a valid token, and an alert is retried.
+- notification-api does not deduplicate by idempotency key (as on `main`): an
+  alert whose outcome was unknown (a timeout, say) is sent again on retry. The
+  lease keeps two Identity tasks from sending the same one.
 
 ## Not ported, and why
 
@@ -186,8 +288,12 @@ Still open, with what each one holds back:
   origin secret.
 - Platform administrator MFA, two-person approval, governed clinician
   provisioning, staff MFA and clinician sign-up.
-- Patient features held behind controls: revoking access, emergency contacts,
-  account deletion and hospital self-activation.
+- Patient features held behind controls: revoking access, account deletion and
+  hospital self-activation.
+- Emergency contacts (ported above, switched off): storing contacts' names and
+  destinations, the alert wording, production delivery and the pilot accounts.
+  Alerts also need an active `emergency` purpose of use, which no migration on
+  this branch seeds; without it break-glass is refused.
 - Duplicate active memberships for one account and facility: the read-only
   query decides whether one-membership enforcement can ship.
 
