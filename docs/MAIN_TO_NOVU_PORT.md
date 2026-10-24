@@ -62,6 +62,7 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | — | This branch only (owner decision): a public enrollment's start answers `recordName`, the full name on the NIN record (first, middle and last), so the person can check that the NIN they typed is theirs; health shows it under "NIN verified". `GET /identity/patient-enrollments/current` answers it too, for a reload, but only within 15 minutes of the enrollment's first start (a same-key resume does not extend it) and never after activation, so a shared device does not show it to the next person for the enrollment's whole 24 hours. It is never logged and is stored only in the encrypted profile | — |
 | #68 (N2(b), service half) | The enrollment cookie shows the new HID (`GET /current`, an activation replay) for 15 minutes after activation only, then answers 404 as an unknown enrollment. Before, a shared device showed it to the next person for up to 24 hours. A start with the key of an activated enrollment answers 409 `IDEMPOTENCY_KEY_REUSED`, as on `main`, so the page says the registration was completed. Not ported: `main`'s 0085 check of the same in the activation command (the service refuses before it calls the command), and `main`'s expiry of the cookie in the activation response, so a reload within the 15 minutes still shows the HID, which a patient who verified only a phone needs to sign in and to recover the account | — |
 | #16 (emergency contacts, with e1757ba) | A patient keeps up to five emergency contacts, each stored encrypted and verified by a code the contact reads back; when a clinician uses break-glass, each verified contact with alerts on gets one alert. It ships switched off: adding a contact and sending a code answer 409 `EMERGENCY_CONTACT_DELIVERY_UNAVAILABLE` until `EMERGENCY_CONTACT_DELIVERY_ENABLED=true`, and no message can be sent. It differs from `main` as listed below the table | 0084 (main 0065), runtime-grants.sql |
+| main 0097 section 2 with #18 0c4de59 and 17abba5 (plan waves W14, Identity part, and W30) | Staff can use break-glass in production (owner decision of 2026-10-24, below). 0085 seeds the active `emergency` purpose of use `identity.activate_break_glass` requires, as `main`'s 0097 does (ON CONFLICT DO NOTHING: an operator's row, active or not, is kept as it is). Identity runs `platform.require_control_enabled('break_glass_enabled')` inside the activation transaction, before the command: the control off answers 423 `BREAK_GLASS_DISABLED` and writes nothing, an unreadable control 503 `PLATFORM_CONTROL_UNAVAILABLE`, and a missing or deactivated `emergency` purpose also 423 `BREAK_GLASS_DISABLED` (it was 400 `INVALID_CONSENT_COMMAND`). Every other 55000 stays 409 and every other 22023 stays 400. It differs from `main` as listed below the table | 0085 (main 0097) |
 
 Emergency contacts differ from `main` (#16 and e1757ba) in these ways. Owner
 decisions of 2026-10-23 are marked "owner".
@@ -164,6 +165,38 @@ decisions of 2026-10-23 are marked "owner".
   alert whose outcome was unknown (a timeout, say) is sent again on retry. The
   lease keeps two Identity tasks from sending the same one.
 
+Break-glass in production differs from `main` (0097, 0c4de59, 17abba5) in
+these ways, all from the owner's decision to enable it now:
+
+- 0085 is only 0097's section 2, the `emergency` row. 0097's section 1
+  (granting `identity.break-glass.write` again to doctor, clinician and nurse)
+  is not needed: 0091's withdrawal was never ported, so 0010's grant to those
+  three roles stands. 0097's section 0 (refusing to run while
+  `break_glass_enabled` is on) and `main`'s control starting off (0091) are not
+  ported: the control stays as 0039 seeded it (on) or as an administrator set
+  it, so break-glass works as soon as 0085 and this Identity are deployed,
+  unless an administrator has turned the control off.
+- Staff break-glass works without staff MFA (`main`'s D9 and its P11 operator
+  step require it), and `main`'s other launch limits are accepted as they are:
+  cross-facility imported records and the N3 document routes.
+- The EHR break-glass route (`services/ehr-api/src/consent/consent.service.ts`)
+  is not changed: it checks the control before its transaction and answers 423
+  `PLATFORM_CONTROL_DISABLED` while it is off, and a missing `emergency`
+  purpose still 400 `INVALID_CONSENT_COMMAND`. The staff UI calls Identity's
+  route.
+- The staff UI (health) maps 400 `INVALID_CONSENT_COMMAND` to "Emergency access
+  may not be enabled" and has no 423 mapping; a 423 shows the problem's detail
+  ("Emergency access is currently disabled by the platform administrator" or
+  "Emergency access is not enabled on this platform").
+- `platform.require_control_enabled` is SECURITY DEFINER and granted to
+  PUBLIC, so a staff session without `platform.control.read` passes it while
+  the function's owner can read `platform.control_settings`, as Identity's
+  guard's portal check on every staff request needs too. Under an owner that
+  does not bypass row-level security a staff context gets 503
+  `PLATFORM_CONTROL_UNAVAILABLE` from both
+  (`services/ehr-api/test/database/break-glass-launch.integration.sql`);
+  production's control reads work (#63 under "Not ported").
+
 ## Not ported, and why
 
 - Already on this branch: #26 (0071 grants the list), #58 (0071 seeds `direct-care`).
@@ -252,6 +285,12 @@ Decided by the owner, D-Eminence:
   (below).
 - OCR patient confirmation is live; publication stays paused
   (`OCR_PUBLICATION_ENABLED` is not `true`) until a synthetic-patient test.
+- Break-glass is enabled in production now (2026-10-24, "Enable break-glass
+  now"): 0085 seeds the `emergency` purpose and Identity enforces
+  `break_glass_enabled`, which the release does not change (0039 seeded it
+  on). The owner accepted that staff have no MFA (`main` requires it, D9) and
+  `main`'s other launch limits (cross-facility imported records; the N3
+  document routes).
 - Staff password recovery runs on the portal (#41, ported above), and staff
   sign-in on the portal sends staff to ehr.
 
@@ -271,8 +310,15 @@ Still open, with what each one holds back:
 - Accounts disabled before the admin transition fix, with no recorded prior
   status: re-enabled as `pending_reset` (`main`'s rule) or backfilled. Needs
   the count first.
-- Break-glass: confirm `break_glass_enabled` before Identity enforces it, and
-  whether the `emergency` purpose launches before staff MFA.
+- Break-glass (enabled, above): before merging, read `GET /admin/controls`
+  and confirm that `break_glass_enabled` is on; if it is off, the release waits
+  for the owner. 0085 commits before the new Identity serves, and the previous
+  Identity, which does not check the control, serves break-glass during the
+  rollout and after any rollback to it (the schema stays), so with the control
+  off staff could still use break-glass in those windows. After the deploy,
+  confirm that 0085 left an active `emergency` row (the read-only query in
+  0085's header); an operator's earlier inactive row is kept and keeps
+  break-glass refused.
 - D7: patients see signed notes only once their encounter is completed.
 - Patients see the requesting clinician's name and role, and get an inbox
   notice on every Access-PIN use.
@@ -292,8 +338,8 @@ Still open, with what each one holds back:
   hospital self-activation.
 - Emergency contacts (ported above, switched off): storing contacts' names and
   destinations, the alert wording, production delivery and the pilot accounts.
-  Alerts also need an active `emergency` purpose of use, which no migration on
-  this branch seeds; without it break-glass is refused.
+  Alerts also need an active `emergency` purpose of use, which 0085 seeds;
+  without it break-glass is refused.
 - Duplicate active memberships for one account and facility: the read-only
   query decides whether one-membership enforcement can ship.
 

@@ -59,6 +59,23 @@ within the configured 5–240 minute bounds, permits at most ten new activations
 per account per hour, and atomically emits `EmergencyAccessActivated.v1` for
 notification and review. Idempotent replay does not extend expiry. Expiry,
 revocation and failed authorization/audit prevent further disclosure.
+Identity's activation (`POST /api/v1/identity/break-glass`) also requires the
+platform `break_glass_enabled` control, checked inside the activation
+transaction before the command: while it is off, activation answers
+`423 BREAK_GLASS_DISABLED` ("Emergency access is currently disabled by the
+platform administrator") and writes no grant, and while the control cannot be
+read, `503 PLATFORM_CONTROL_UNAVAILABLE`. It also requires an active
+`emergency` purpose of use, which 0085 seeds; without it (an operator
+deactivated the code) activation also answers `423 BREAK_GLASS_DISABLED`
+("Emergency access is not enabled on this platform"), where it answered
+`400 INVALID_CONSENT_COMMAND`. Other refusals are unchanged: a session
+without `identity.consent.write` and `identity.break-glass.write`
+`403 PERMISSION_DENIED`, before either check; a membership or context the
+command refuses `403 CONSENT_COMMAND_DENIED`; an invalid duration or reason
+`400 INVALID_CONSENT_COMMAND`; an unknown HID
+`404 CONSENT_RESOURCE_NOT_FOUND`; the hourly limit
+`429 EMERGENCY_RATE_LIMITED`; and a state conflict
+`409 CONSENT_COMMAND_CONFLICT`.
 
 Recovery completion atomically consumes the account/token-bound OTP credential,
 sets an Argon2 password and revokes sessions. Disabled, stale, expired and replayed
