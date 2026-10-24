@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0085",
-    "count": 86,
+    "last": "0086",
+    "count": 87,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -441,6 +441,10 @@
       {
         "name": "0085_emergency_purpose_of_use.sql",
         "sha256": "618e56311d3f74210a95accebea770d0337653563ae5c84c45d29172c1bc0969"
+      },
+      {
+        "name": "0086_provider_self_service_onboarding.sql",
+        "sha256": "6f7d917f585d986aac117d7377ac2776b7f11cf95e3e55bdbe3a261a9749d4d8"
       }
     ]
   },
