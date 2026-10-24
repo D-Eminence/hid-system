@@ -304,6 +304,9 @@ try {
   // checks. Start checks it after Turnstile; nothing is written or charged.
   assert.deepEqual(await availability(), { open: false });
   const closedCac = 'RC9900063200';
+  const startFailures = () => count(`select count(*)::int n from audit.events
+    where action='api.identity.provider-enrollment.start' and outcome='failure'`);
+  const startFailuresBefore = await startFailures();
   const siteverifyBeforeClosed = siteverifyRequests.length;
   expectProblem(await start(enrollment({ cacRegistrationNumber: closedCac, administratorEmail: email('closed') }),
     '198.51.100.90'), 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
@@ -320,8 +323,7 @@ try {
   assert.equal(qoreidCacLookups.length, 0, 'A closed gate reached QoreID');
   assert.equal(await count('select count(*)::int n from identity.organization_applications'), 0, 'A closed gate wrote an application');
   assert.equal(await count('select count(*)::int n from platform.public_application_quota_counters'), 0, 'A closed gate charged the application quota');
-  assert.equal(await count(`select count(*)::int n from audit.events where action='api.identity.provider-enrollment.start'
-    and outcome='failure'`), 1, 'The closed start was not audited as the request failure (C7)');
+  assert.equal(await startFailures(), startFailuresBefore + 1, 'The closed start was not audited as the request failure (C7)');
   gate.closed = { availability: false, start: 423, verify: 423, activate: 423, turnstileBeforeGate: true,
     writes: 0, qoreidLookups: 0 };
 
@@ -637,6 +639,24 @@ try {
   assert.deepEqual({ ...(await application(cacTaken)), id: undefined }, { id: undefined,
     status: 'ready_for_review', verification_result: 'verified', approval_mode: 'self_service' });
   security.activation_email_registered = 'PROVIDER_EMAIL_ALREADY_REGISTERED';
+
+  // Owner Q8: a second product for an already registered CAC goes to review.
+  // The pharmacy sign-up for cacA is a new application (its own product), is
+  // verified and emailed, and its activation is refused 409
+  // ORGANIZATION_REVIEW_REQUIRED (the CAC is already bound); nothing is created.
+  const SECOND_PRODUCT_NETWORK = '198.51.100.24';
+  const secondProduct = await start(enrollment({ productCode: 'pharmacy', organizationType: 'pharmacy',
+    cacRegistrationNumber: cacA, administratorEmail: email('second-product') }), SECOND_PRODUCT_NETWORK);
+  assert.equal(secondProduct.status, 200, `second product start failed: ${JSON.stringify(secondProduct.body)}`);
+  assert.equal(qoreidCacLookups.at(-1), cacA);
+  const secondVerified = await verify({ challengeId: secondProduct.body.challengeId,
+    code: await codeFor(secondProduct.body.challengeId) });
+  assert.equal(secondVerified.status, 200);
+  const footprintBeforeSecond = await footprint();
+  expectProblem(await activate(cookies(secondVerified).find(value => value.startsWith('hid_provider_enrollment=')),
+    password), 409, 'ORGANIZATION_REVIEW_REQUIRED');
+  assert.deepEqual(await footprint(), footprintBeforeSecond, 'A second product activation created or changed something');
+  security.second_product_same_cac = 'ORGANIZATION_REVIEW_REQUIRED';
 
   // Start's race with the governed path: a governed organization application
   // for the same CAC and product holds the shared 'org-application:' lock
