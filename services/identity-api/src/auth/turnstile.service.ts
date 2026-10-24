@@ -8,7 +8,8 @@ type LoginAction = NonNullable<LoginDto['turnstileAction']>;
 export type TurnstileAction = LoginAction | 'patient-reset-start' | 'staff-reset'
   | 'admin-reset' | 'legacy-recovery' | 'book-demo' | 'organization-application'
   | 'organization-completion'
-  | 'patient-enrollment';
+  | 'patient-enrollment'
+  | 'provider-enrollment';
 
 interface SiteverifyResponse {
   success?: unknown;
@@ -26,8 +27,12 @@ const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Readonly<
     // The portal serves staff recovery at /provider/recover (staff-reset), and
     // product hosts redirect their /provider/recover there; www only redirects
     // to the public site (main D-Eminence/hid-system#41).
+    // Facility self sign-up (provider-enrollment, P4) runs on the portal host
+    // only: www is not a production CORS origin, and product hosts accept only
+    // their own sign-in actions.
     'app.healthidentitydirectory.com': [
       'patient-login', 'patient-reset-start', 'staff-reset', 'legacy-recovery', 'patient-enrollment',
+      'provider-enrollment',
     ],
     'healthidentitydirectory.com': ['book-demo', 'organization-application', 'organization-completion'],
     'www.healthidentitydirectory.com': [
@@ -52,6 +57,7 @@ const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Readonly<
       'staff-reset', 'admin-reset', 'legacy-recovery', 'book-demo', 'organization-application',
       'organization-completion',
       'patient-enrollment',
+      'provider-enrollment',
     ],
     'ehr.staging.healthidentitydirectory.com': ['ehr-login', 'staff-login'],
     'lab.staging.healthidentitydirectory.com': ['lab-login'],

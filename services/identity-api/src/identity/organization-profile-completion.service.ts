@@ -3,11 +3,13 @@ import { createHmac, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { isIP } from 'node:net';
 import type { QueryResultRow } from 'pg';
 import { NotificationOtpClient } from '../auth/notification-otp.client';
+import { assertPasswordLength, hashAccountPassword } from '../auth/password-hash';
 import { AFTER_RESPONSE_SHUTDOWN_GRACE_MS, AfterResponseTasks } from '../common/after-response-tasks';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import type { CompleteOrganizationProfileDto, StartOrganizationProfileCompletionDto } from './dto/organization-application.dto';
+import { selfServiceGateRefusal } from './provider-self-service-gate';
 
 const localCompletionKey = randomBytes(32);
 type FieldSource = 'qoreid' | 'user_provided' | null;
@@ -51,8 +53,15 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
     return this.deliveries.settle(AFTER_RESPONSE_SHUTDOWN_GRACE_MS);
   }
 
+  /**
+   * Sends the emailed code. Every call charges the public application quota
+   * (0049) once, keyed by publicApplicationDigest: here, unless the caller
+   * already charged it in its own transaction. Facility self sign-up charges
+   * it with its submit (P4 A7) and passes publicApplicationQuotaCharged, so a
+   * start costs one, not two (CRITIC C8).
+   */
   async start(input: StartOrganizationProfileCompletionDto, remoteIp: string | undefined,
-    correlationId: string) {
+    correlationId: string, options: { publicApplicationQuotaCharged?: boolean } = {}) {
     this.assertConfigured();
     const challengeId = randomUUID();
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
@@ -61,9 +70,11 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
     let recipient: string | null;
     try {
       recipient = await this.database.withSystemTransaction(correlationId, async (client) => {
-        await client.query('select platform.consume_public_application_quota($1)', [
-          this.networkDigest(remoteIp),
-        ]);
+        if (!options.publicApplicationQuotaCharged) {
+          await client.query('select platform.consume_public_application_quota($1)', [
+            this.networkDigest(remoteIp),
+          ]);
+        }
         const found = await client.query<{ recipient_email: string | null }>(
           'select identity.begin_organization_profile_completion($1,$2,$3,$4,$5) as recipient_email',
           [registrationNumber, email, input.productCode, challengeId,
@@ -137,6 +148,64 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
     } catch (error) { throw this.databaseProblem(error); }
   }
 
+  /**
+   * Facility self sign-up's activation: sets the administrator's password and
+   * creates the organization, facility, account and membership in one runtime
+   * command, which also returns the login email. The session is checked first
+   * (P4 A9): a token that names no live session is refused 401 before the
+   * 64 MiB argon2id hash is computed.
+   */
+  async activate(token: string | undefined, password: string, correlationId: string) {
+    assertPasswordLength(password);
+    const sessionHash = this.sessionHash(token);
+    try {
+      const live = await this.database.withSystemTransaction(correlationId, (client) =>
+        client.query<{ application_status: string }>(
+          'select application_status from identity.current_organization_profile_completion($1)',
+          [sessionHash]));
+      if (!live.rows[0]) throw this.invalidSession();
+    } catch (error) {
+      throw this.activationProblem(error);
+    }
+    const passwordHash = await hashAccountPassword(password);
+    try {
+      const result = await this.database.withSystemTransaction(correlationId, (client) =>
+        client.query<{
+          organization_id: string;
+          facility_id: string;
+          account_id: string;
+          row_version: string;
+          hid_subject: string;
+          account_email: string;
+        }>(
+          // The login email is returned by the same transaction that creates the
+          // account; nothing is read after the activation commits.
+          'select * from identity.activate_self_service_provider_enrollment($1,$2)',
+          [sessionHash, passwordHash],
+        ));
+      const row = result.rows[0];
+      if (!row) throw new DomainProblem(503, 'PROVIDER_ENROLLMENT_ACTIVATION_UNAVAILABLE',
+        'Provider account activation is temporarily unavailable');
+      return {
+        organizationId: row.organization_id,
+        facilityId: row.facility_id,
+        accountId: row.account_id,
+        email: row.account_email,
+      };
+    } catch (error) {
+      throw this.activationProblem(error);
+    }
+  }
+
+  /**
+   * The public application quota digest of a client address (0049): the same
+   * key start charges, for a caller that charges it in its own transaction.
+   */
+  publicApplicationDigest(remoteIp: string | undefined): string {
+    this.assertConfigured();
+    return this.networkDigest(remoteIp);
+  }
+
   private profile(row: CompletionProfileRow) {
     return { status: row.application_status, profileState: row.profile_state,
       version: Number(row.row_version), productCode: row.product_code,
@@ -186,6 +255,26 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
   private invalidSession() {
     return new DomainProblem(401, 'ORGANIZATION_COMPLETION_SESSION_INVALID',
       'Organization profile completion session is invalid or expired');
+  }
+
+  /**
+   * The activation's answers. Self sign-up closed (the control off, or not
+   * deployed) is 423, never 400 or 503 (CRITIC C1, C19). The activation
+   * refuses an administrator email that already belongs to an account or
+   * staff record with this exact unique violation; the caller has proved
+   * control of that mailbox with the emailed code, so the answer tells a
+   * stranger nothing, and start makes no such check. Any other unique
+   * violation keeps the general answer.
+   */
+  private activationProblem(error: unknown): DomainProblem {
+    const closed = selfServiceGateRefusal(error);
+    if (closed) return closed;
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === '23505'
+      && 'message' in error && error.message === 'Administrator email already belongs to an account') {
+      return new DomainProblem(409, 'PROVIDER_EMAIL_ALREADY_REGISTERED',
+        'The administrator email is already associated with an HID account');
+    }
+    return this.databaseProblem(error);
   }
 
   private databaseProblem(error: unknown): DomainProblem {

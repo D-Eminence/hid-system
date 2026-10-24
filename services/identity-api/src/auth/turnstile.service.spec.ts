@@ -158,6 +158,43 @@ describe('TurnstileService', () => {
     })).resolves.toBeUndefined();
   });
 
+  // Facility self sign-up (P4) runs on the portal host: production app.* and
+  // staging's portal. www is not a production CORS origin; product hosts and
+  // admin.* accept only their own actions.
+  it('accepts provider-enrollment only on the production portal and the staging portal', async () => {
+    result({ success: true, hostname: 'app.healthidentitydirectory.com', action: 'provider-enrollment' });
+    await expect(new TurnstileService().verify({ token: 'provider-proof', action: 'provider-enrollment',
+      origin: 'https://app.healthidentitydirectory.com', remoteIp: '203.0.113.4' })).resolves.toBeUndefined();
+    result({ success: true, hostname: 'www.healthidentitydirectory.com', action: 'provider-enrollment' });
+    await expect(new TurnstileService().verify({ token: 'wrong-host-proof', action: 'provider-enrollment',
+      origin: 'https://app.healthidentitydirectory.com' })).rejects.toMatchObject({ code: 'TURNSTILE_HOSTNAME_MISMATCH' });
+    result({ success: true, hostname: 'app.healthidentitydirectory.com', action: 'patient-enrollment' });
+    await expect(new TurnstileService().verify({ token: 'wrong-action-proof', action: 'provider-enrollment',
+      origin: 'https://app.healthidentitydirectory.com' })).rejects.toMatchObject({ code: 'TURNSTILE_ACTION_MISMATCH' });
+
+    global.fetch = jest.fn();
+    for (const host of ['ehr.healthidentitydirectory.com', 'lab.healthidentitydirectory.com',
+      'pharmacy.healthidentitydirectory.com', 'admin.healthidentitydirectory.com',
+      'healthidentitydirectory.com', 'www.healthidentitydirectory.com', 'staging.healthidentitydirectory.com']) {
+      await expect(new TurnstileService().verify({ token: 'provider-proof', action: 'provider-enrollment',
+        origin: `https://${host}` })).rejects.toMatchObject({ status: 403, code: 'TURNSTILE_CONTEXT_MISMATCH' });
+    }
+    expect(global.fetch).not.toHaveBeenCalled();
+
+    process.env.HID_DEPLOYMENT_ENV = 'staging';
+    resetEnvironmentForTests();
+    result({ success: true, hostname: 'staging.healthidentitydirectory.com', action: 'provider-enrollment' });
+    await expect(new TurnstileService().verify({ token: 'staging-provider-proof', action: 'provider-enrollment',
+      origin: 'https://staging.healthidentitydirectory.com' })).resolves.toBeUndefined();
+    global.fetch = jest.fn();
+    for (const host of ['ehr.staging.healthidentitydirectory.com', 'admin.staging.healthidentitydirectory.com',
+      'www.staging.healthidentitydirectory.com', 'app.healthidentitydirectory.com']) {
+      await expect(new TurnstileService().verify({ token: 'provider-proof', action: 'provider-enrollment',
+        origin: `https://${host}` })).rejects.toMatchObject({ status: 403, code: 'TURNSTILE_CONTEXT_MISMATCH' });
+    }
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
   it('answers a missing, empty or oversized token, Origin or action before calling Cloudflare', async () => {
     global.fetch = jest.fn();
     const service = new TurnstileService();

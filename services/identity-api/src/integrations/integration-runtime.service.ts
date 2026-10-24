@@ -94,6 +94,27 @@ export class IntegrationRuntimeService implements OnModuleInit, OnModuleDestroy 
     } catch (error) { throw this.quotaError(error); }
   }
 
+  /** Accountless facility self sign-up has no account to charge. Its CAC
+   * lookup is charged to the keyed client-network digest (5 per hour, 15 per
+   * day), the application (3 per day) and the platform-wide daily cap
+   * (PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP) in one command (main 0063 with
+   * P4's third argument); the account-scoped operations above are unchanged.
+   * A denial is committed with its audit event and returns false. */
+  async consumeSelfServiceCacQuota(correlationId: string, applicationId: string,
+    networkDigest: string, platformDailyLimit: number): Promise<void> {
+    let admitted: boolean | undefined;
+    try {
+      admitted = await this.database.withSystemTransaction(correlationId, async (client) => {
+        const result = await client.query<{ admitted: boolean }>(
+          'select platform.consume_self_service_cac_quota($1,$2,$3) as admitted',
+          [applicationId, networkDigest, platformDailyLimit]);
+        return result.rows[0]?.admitted;
+      });
+    } catch (error) { throw this.quotaError(error); }
+    if (admitted === false) throw this.quotaError({ code: 'P4290' });
+    if (admitted !== true) throw this.quotaError(undefined);
+  }
+
   async consumeQuotaWithClient(client: PoolClient, operation: QoreIdQuotaOperation,
     targetId: string | null = null, sessionId: string | null = null,
     idempotencyHash: string | null = null, requestSha256: string | null = null): Promise<void> {

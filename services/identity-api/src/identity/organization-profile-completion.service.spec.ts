@@ -1,4 +1,5 @@
 import type { Response } from 'express';
+import * as passwordHash from '../auth/password-hash';
 import * as environment from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import type { NotificationOtpClient } from '../auth/notification-otp.client';
@@ -177,5 +178,147 @@ describe('organization applicant profile completion', () => {
       .rejects.toMatchObject({ code: 'ORIGIN_DENIED' });
     expect(completion.start).toHaveBeenCalledTimes(1);
     expect(() => controller.save({}, undefined, request)).toThrow(expect.objectContaining({ code: 'IF_MATCH_REQUIRED' }));
+  });
+});
+
+describe('facility self sign-up activation and its quota (P4)', () => {
+  const token = 'A'.repeat(43);
+  const password = 'Synthetic-Provider-Password-2026';
+  const liveSession = { rows: [{ application_status: 'ready_for_review' }] };
+  const activatedRow = {
+    organization_id: 'org-1', facility_id: 'facility-1', account_id: 'account-1', row_version: '7',
+    hid_subject: 'org-onboarding:account-1', account_email: 'admin@example.invalid',
+  };
+  const service = (query: jest.Mock) => {
+    const database = { withSystemTransaction: jest.fn(async (_id, work) => work({ query })) };
+    return { database, service: new OrganizationProfileCompletionService(database as unknown as DatabaseService,
+      { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted' }) } as unknown as NotificationOtpClient) };
+  };
+
+  beforeEach(() => {
+    jest.spyOn(environment, 'getEnvironment').mockReturnValue({
+      NODE_ENV: 'test', OTP_HMAC_KEY_B64: Buffer.alloc(32, 9).toString('base64'),
+      CORS_ORIGINS: 'https://app.healthidentitydirectory.com', AUTH_COOKIE_SECURE: true,
+    } as environment.Environment);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it('checks the session, then activates through one runtime command that also returns the login email', async () => {
+    const query = jest.fn().mockResolvedValueOnce(liveSession).mockResolvedValueOnce({ rows: [activatedRow] });
+    const { service: completion, database } = service(query);
+    await expect(completion.activate(token, password, correlationId))
+      .resolves.toEqual({ organizationId: 'org-1', facilityId: 'facility-1', accountId: 'account-1',
+        email: 'admin@example.invalid' });
+    // The session check reads; the activation is one command, and nothing is
+    // read after it commits.
+    expect(database.withSystemTransaction).toHaveBeenCalledTimes(2);
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[0]?.[0]).toContain('identity.current_organization_profile_completion($1)');
+    expect(query.mock.calls[1]?.[0]).toContain('identity.activate_self_service_provider_enrollment($1,$2)');
+    expect(query.mock.calls[0]?.[1]).toEqual([expect.stringMatching(/^[a-f0-9]{64}$/)]);
+    expect(query.mock.calls[1]?.[1]).toEqual([query.mock.calls[0]?.[1]?.[0], expect.stringMatching(/^\$argon2id\$v=19\$m=65536,t=3,p=1\$/)]);
+  });
+
+  it('refuses a session that is not live 401 before hashing the password (A9)', async () => {
+    const hash = jest.spyOn(passwordHash, 'hashAccountPassword');
+    for (const failure of [
+      () => jest.fn().mockResolvedValueOnce({ rows: [] }),
+      () => jest.fn().mockRejectedValueOnce(Object.assign(new Error('Completion authorization is required'), { code: '42501' })),
+    ]) {
+      const query = failure();
+      const { service: completion } = service(query);
+      await expect(completion.activate(token, password, correlationId))
+        .rejects.toMatchObject({ status: 401, code: 'ORGANIZATION_COMPLETION_SESSION_INVALID' });
+      expect(query).toHaveBeenCalledTimes(1);
+    }
+    // A malformed or missing token is refused before any database read.
+    const query = jest.fn();
+    const { service: completion, database } = service(query);
+    for (const value of [undefined, 'short', `${'A'.repeat(42)}!`]) {
+      await expect(completion.activate(value, password, correlationId))
+        .rejects.toMatchObject({ status: 401, code: 'ORGANIZATION_COMPLETION_SESSION_INVALID' });
+    }
+    await expect(completion.activate(token, 'too-short', correlationId))
+      .rejects.toMatchObject({ status: 400, code: 'PASSWORD_INVALID' });
+    expect(database.withSystemTransaction).not.toHaveBeenCalled();
+    expect(hash).not.toHaveBeenCalled();
+  });
+
+  it('answers an administrator email that already has an account 409 PROVIDER_EMAIL_ALREADY_REGISTERED', async () => {
+    // 0061 raises this after the caller proved control of the mailbox with the emailed code.
+    const conflict = Object.assign(new Error('Administrator email already belongs to an account'), { code: '23505' });
+    const query = jest.fn().mockResolvedValueOnce(liveSession).mockRejectedValueOnce(conflict);
+    await expect(service(query).service.activate(token, password, correlationId))
+      .rejects.toMatchObject({ status: 409, code: 'PROVIDER_EMAIL_ALREADY_REGISTERED',
+        message: 'The administrator email is already associated with an HID account' });
+  });
+
+  it('keeps every other unique violation, and the governed completion steps, at 503', async () => {
+    const otherUnique = Object.assign(new Error('duplicate key value violates unique constraint "accounts_email_key"'),
+      { code: '23505' });
+    const sameMessage = Object.assign(new Error('Administrator email already belongs to an account'), { code: '23505' });
+    const query = jest.fn().mockResolvedValueOnce(liveSession).mockRejectedValueOnce(otherUnique);
+    const { service: completion } = service(query);
+    const unavailable = { status: 503, code: 'ORGANIZATION_COMPLETION_UNAVAILABLE' };
+    await expect(completion.activate(token, password, correlationId)).rejects.toMatchObject(unavailable);
+    // The governed completion steps never answer with a provider enrollment code.
+    for (const error of [otherUnique, sameMessage]) {
+      query.mockReset().mockRejectedValue(error);
+      await expect(completion.start(input, '203.0.113.44', correlationId)).rejects.toMatchObject(unavailable);
+      await expect(completion.verify('8ce75fc3-0bda-4300-b198-f5688df65d6c', '123456', correlationId))
+        .rejects.toMatchObject(unavailable);
+      await expect(completion.current(token, correlationId)).rejects.toMatchObject(unavailable);
+      await expect(completion.complete(token, 3, { address: 'Synthetic Registry Office' }, correlationId))
+        .rejects.toMatchObject(unavailable);
+    }
+  });
+
+  it.each([
+    ['55000', 'PLATFORM_CONTROL_DISABLED:provider_self_service_enabled'],
+    ['55000', 'PLATFORM_CONTROL_UNAVAILABLE'],
+    ['22023', 'PLATFORM_CONTROL_INVALID'],
+  ])('answers the activation command\'s %s %s 423 PROVIDER_ENROLLMENT_UNAVAILABLE, never 400 or 503 (C19)',
+    async (code, message) => {
+      const query = jest.fn().mockResolvedValueOnce(liveSession)
+        .mockRejectedValueOnce(Object.assign(new Error(message), { code }));
+      await expect(service(query).service.activate(token, password, correlationId))
+        .rejects.toMatchObject({ status: 423, code: 'PROVIDER_ENROLLMENT_UNAVAILABLE' });
+    });
+
+  it('keeps the governed completion\'s own answers for its other refusals', async () => {
+    for (const [code, status, answer] of [['23514', 409, 'ORGANIZATION_REVIEW_REQUIRED'],
+      ['40001', 409, 'VERSION_CONFLICT'], ['42501', 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID'],
+      ['P0002', 503, 'ORGANIZATION_COMPLETION_UNAVAILABLE']] as const) {
+      const query = jest.fn().mockResolvedValueOnce(liveSession)
+        .mockRejectedValueOnce(Object.assign(new Error('synthetic refusal'), { code }));
+      await expect(service(query).service.activate(token, password, correlationId))
+        .rejects.toMatchObject({ status, code: answer });
+    }
+    const query = jest.fn().mockResolvedValueOnce(liveSession).mockResolvedValueOnce({ rows: [] });
+    await expect(service(query).service.activate(token, password, correlationId))
+      .rejects.toMatchObject({ status: 503, code: 'PROVIDER_ENROLLMENT_ACTIVATION_UNAVAILABLE' });
+  });
+
+  it('charges the public application quota at start unless the caller already charged it (C8)', async () => {
+    const query = jest.fn().mockResolvedValue({ rows: [] });
+    const { service: completion } = service(query);
+    await completion.start(input, '203.0.113.44', correlationId);
+    const charged = query.mock.calls.filter(([sql]) => String(sql).includes('consume_public_application_quota'));
+    expect(charged).toHaveLength(1);
+    // The digest a caller charges itself is the one start charges.
+    expect(charged[0]?.[1]).toEqual([completion.publicApplicationDigest('203.0.113.44')]);
+    query.mockClear();
+    await expect(completion.start(input, '203.0.113.44', correlationId, { publicApplicationQuotaCharged: true }))
+      .resolves.toMatchObject({ accepted: true });
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('consume_public_application_quota'))).toBe(false);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('begin_organization_profile_completion'))).toBe(true);
+  });
+
+  it('has no public application digest without a client address', () => {
+    const { service: completion } = service(jest.fn());
+    for (const ip of [undefined, 'not-an-address']) {
+      expect(() => completion.publicApplicationDigest(ip))
+        .toThrow(expect.objectContaining({ code: 'APPLICATION_RATE_LIMIT_UNAVAILABLE' }));
+    }
   });
 });

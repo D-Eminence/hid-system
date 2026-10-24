@@ -3,6 +3,7 @@ import { validate } from 'class-validator';
 import { CreateDemoRequestDto } from '../commercial/demo-request.dto';
 import { StartOrganizationProfileCompletionDto, SubmitOrganizationApplicationDto } from '../identity/dto/organization-application.dto';
 import { StartPatientEnrollmentDto } from '../identity/dto/patient-enrollment.dto';
+import { StartProviderEnrollmentDto } from '../identity/dto/provider-enrollment.dto';
 
 // TS-8 (main D-Eminence/hid-system#79): a missing Turnstile token reaches
 // TurnstileService, which answers 400 TURNSTILE_REQUIRED, instead of failing
@@ -10,6 +11,7 @@ import { StartPatientEnrollmentDto } from '../identity/dto/patient-enrollment.dt
 // still be a string of at most 2048 characters.
 const dtos = [
   ['StartPatientEnrollmentDto', StartPatientEnrollmentDto],
+  ['StartProviderEnrollmentDto', StartProviderEnrollmentDto],
   ['SubmitOrganizationApplicationDto', SubmitOrganizationApplicationDto],
   ['StartOrganizationProfileCompletionDto', StartOrganizationProfileCompletionDto],
   ['CreateDemoRequestDto', CreateDemoRequestDto],

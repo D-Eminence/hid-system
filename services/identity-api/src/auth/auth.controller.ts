@@ -14,6 +14,7 @@ import { PatientLoginDto } from './dto/patient-login.dto';
 import { SelectFacilityDto } from './dto/select-facility.dto';
 import { GoogleAuthenticationService } from './google-authentication.service';
 import type { LoginResult } from './auth.types';
+import { setSessionCookies } from './session-cookies';
 import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { TurnstileService } from './turnstile.service';
@@ -382,19 +383,7 @@ export class AuthController {
   }
 
   private setCookies(response: Response, result: LoginResult): void {
-    const common = {
-      secure: this.environment.AUTH_COOKIE_SECURE,
-      sameSite: 'strict' as const,
-    };
-    response.cookie(this.environment.AUTH_COOKIE_NAME, result.accessToken, {
-      ...common, httpOnly: true, path: '/', expires: result.expiresAt,
-    });
-    response.cookie(`${this.environment.AUTH_COOKIE_NAME}_refresh`, result.refreshToken, {
-      ...common, httpOnly: true, path: '/api/v1/auth', expires: result.refreshExpiresAt,
-    });
-    response.cookie(`${this.environment.AUTH_COOKIE_NAME}_csrf`, result.csrfToken, {
-      ...common, httpOnly: false, path: '/', expires: result.refreshExpiresAt,
-    });
+    setSessionCookies(response, result, this.environment);
   }
 
   private clearCookies(response: Response): void {

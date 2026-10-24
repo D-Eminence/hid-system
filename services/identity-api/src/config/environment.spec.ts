@@ -1,4 +1,4 @@
-import { getEnvironment, resetEnvironmentForTests } from './environment';
+import { getEnvironment, PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP_DEFAULT, resetEnvironmentForTests } from './environment';
 
 describe('Identity production database transport', () => {
   const original = { ...process.env };
@@ -166,3 +166,44 @@ describe('Public patient enrollment contact-code failure budget', () => {
     }
   });
 });
+
+describe('Facility self sign-up daily QoreID cap (PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP)', () => {
+  const original = { ...process.env };
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) if (!(key in original)) delete process.env[key];
+    Object.assign(process.env, original);
+    resetEnvironmentForTests();
+  });
+
+  function cap(value: string | undefined): unknown {
+    delete process.env.PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP;
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+      CORS_ORIGINS: 'https://app.healthidentitydirectory.com', AUTH_MODE: 'local',
+      AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
+      AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
+    }, value === undefined ? {} : { PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP: value });
+    resetEnvironmentForTests();
+    return getEnvironment().PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP;
+  }
+
+  it('defaults to 200 when unset or empty', () => {
+    expect(PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP_DEFAULT).toBe(200);
+    expect(cap(undefined)).toBe(200);
+    expect(cap('')).toBe(200);
+    expect(cap('   ')).toBe(200);
+  });
+
+  it('accepts an integer from 1 to 100000', () => {
+    for (const [value, parsed] of [['1', 1], ['37', 37], [' 500 ', 500], ['100000', 100_000]] as const) {
+      expect(cap(value)).toBe(parsed);
+    }
+  });
+
+  it('turns any other value into null (self sign-up closed) without refusing to boot', () => {
+    for (const value of ['0', '100001', '-5', '2.5', '1e3', 'abc', '0x10', '200 lookups', '9999999']) {
+      expect(cap(value)).toBeNull();
+    }
+  });
+});
+
