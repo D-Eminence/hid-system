@@ -19,7 +19,14 @@
 //      table or schema privilege: whatever the file grants, the migrations
 //      already granted. Then the bootstrap and the runtime-roles suite run;
 //   4. hid_clean is installed from scratch and rehearses the synthetic
-//      additions, the patient-self suite and the medical import, as before.
+//      additions, the patient-self suite and the medical import, as before;
+//   5. the release changes no existing table's row-level security or FORCE
+//      setting, and hid_noforce, the baseline with FORCE lifted on
+//      platform.control_settings (a state production's table may be in,
+//      since its accountless control reads work under an owner that does not
+//      bypass row-level security), is released the same way: FORCE stays
+//      off and the Identity runtime still reads platform.control_enabled
+//      from an accountless connection.
 // It runs in a disposable Docker PostgreSQL (HID_REHEARSAL_POSTGRES_IMAGE,
 // pgvector/pgvector:pg16 by default) or, when HID_REHEARSAL_ADMIN_URL names a
 // superuser of a disposable local PostgreSQL 16 with pgvector, in uniquely
@@ -49,6 +56,7 @@ const localAdminUrl = process.env.HID_REHEARSAL_ADMIN_URL;
 const migrator = localAdminUrl ? `hid_rehearsal_migrator_${runId}` : 'rehearsal_migrator';
 const upgradeDatabase = localAdminUrl ? `hid_rehearsal_${runId}_upgrade` : 'hid_upgrade';
 const cleanDatabase = localAdminUrl ? `hid_rehearsal_${runId}_clean` : 'hid_clean';
+const noForceDatabase = localAdminUrl ? `hid_rehearsal_${runId}_noforce` : 'hid_noforce';
 const applicationSchemas = ['platform', 'auth', 'identity', 'ehr', 'audit', 'ocr', 'lab', 'pharmacy',
   'outreach', 'integration', 'migration'];
 let started = false;
@@ -94,6 +102,20 @@ async function connect(user, database) {
   return client;
 }
 async function close(client) { clients.delete(client); await client.end(); }
+// Each application table's row-level security and FORCE setting.
+async function rowSecurity(client) {
+  const result = await client.query(`
+    select relation.oid::regclass::text as name,
+      relation.relrowsecurity::text || '/' || relation.relforcerowsecurity::text as setting
+      from pg_class relation join pg_namespace namespace on namespace.oid = relation.relnamespace
+     where namespace.nspname = any($1) and relation.relkind in ('r', 'p')
+     order by 1`, [applicationSchemas]);
+  return Object.fromEntries(result.rows.map(row => [row.name, row.setting]));
+}
+function changedRowSecurity(before, after) {
+  return Object.keys(before).filter(name => before[name] !== after[name])
+    .map(name => `${name}: ${before[name]} -> ${after[name] ?? 'dropped'}`);
+}
 // Every runtime role's EXECUTE, table, sequence and schema privileges in the
 // application schemas, other than those it holds as the object's owner
 // (runtime-grants.sql hands the delivery commands to hid_event_delivery_commands
@@ -173,7 +195,7 @@ try {
     'The rehearsal administrator must be a superuser of a disposable server');
   await admin.query(`create role ${migrator} login nosuperuser nobypassrls createrole password '${password}'`);
   localCreated = true;
-  for (const database of [upgradeDatabase, cleanDatabase]) {
+  for (const database of [upgradeDatabase, cleanDatabase, noForceDatabase]) {
     await admin.query(`create database ${database} owner ${migrator}`);
     const setup = await connect(server.admin, database);
     try {
@@ -201,6 +223,7 @@ try {
   assert.match(plan, new RegExp(`^${declared.length} pending migration\\(s\\)`));
   for (const name of declared) assert.ok(plan.includes(name), `The plan does not list ${name}`);
   const privilegesBeforeRelease = await runtimePrivileges(securityAdmin);
+  const rowSecurityBeforeRelease = await rowSecurity(securityAdmin);
   run(url(upgradeDatabase), ['--dry-run']);
   assert.equal((await upgrade.query('select count(*)::int as n from migration.schema_migrations')).rows[0].n, baseline.length);
   assert.deepEqual(await runtimePrivileges(securityAdmin), privilegesBeforeRelease, 'The dry run changed a runtime privilege');
@@ -209,6 +232,8 @@ try {
   assert.equal(after.length, files.length);
   for (const recorded of before) assert.deepEqual(after.find(row => row.version === recorded.version), recorded);
   assert.match(run(url(upgradeDatabase), ['--plan']), /0 pending migration\(s\)/);
+  assert.deepEqual(changedRowSecurity(rowSecurityBeforeRelease, await rowSecurity(securityAdmin)), [],
+    'The release changed an existing table\'s row-level security or FORCE setting');
 
   // 3. The migrations granted what this commit's runtime-grants.sql grants.
   const privilegesAfterRelease = await runtimePrivileges(securityAdmin);
@@ -236,12 +261,35 @@ try {
   const medicalImport = await rehearseMedicalImport(bridgeClient,medicalAdmin);
   await close(medicalAdmin);
   await close(bridgeClient);
+
+  // 5. The release on a baseline whose platform.control_settings no longer
+  // forces row-level security.
+  run(url(noForceDatabase), [], baselineDirectory);
+  const noForceAdmin = await connect(server.admin, noForceDatabase);
+  await noForceAdmin.query(baselineGrants);
+  await noForceAdmin.query('alter table platform.control_settings no force row level security');
+  const rowSecurityBeforeNoForce = await rowSecurity(noForceAdmin);
+  assert.equal(rowSecurityBeforeNoForce['platform.control_settings'], 'true/false');
+  run(url(noForceDatabase), ['--dry-run']);
+  run(url(noForceDatabase));
+  assert.deepEqual(changedRowSecurity(rowSecurityBeforeNoForce, await rowSecurity(noForceAdmin)), [],
+    'The release changed a table\'s row-level security or FORCE setting on a baseline without FORCE');
+  await noForceAdmin.query('begin');
+  await noForceAdmin.query('set local role hid_identity_api_runtime');
+  const controls = (await noForceAdmin.query(`select platform.control_enabled('maintenance_mode') as maintenance,
+    platform.control_enabled('patient_portal_enabled') as patient_portal`)).rows[0];
+  await noForceAdmin.query('rollback');
+  assert.equal(typeof controls.maintenance, 'boolean');
+  assert.equal(typeof controls.patient_portal, 'boolean');
+  await close(noForceAdmin);
   process.stdout.write(JSON.stringify({ status: 'passed', baseline: baseline.length, integrated: files.length,
     declared, baselineRuntimeGrants: baselineRevision,
     releaseOrder: 'baseline, role bootstrap, dry run of all pending migrations, migrations',
     upgradeDryRunRolledBack: true, appliedChecksumsPreserved: true,
     migrationGrantsMatchRuntimeGrants: privilegesAfterRelease.length, cleanInstall: true,
     migratorSuperuser: false, migratorBypassRls: false,
+    rowSecurityUnchanged: Object.keys(rowSecurityBeforeRelease).length,
+    noForceBaseline: { controlSettingsForce: false, accountlessControlRead: true },
     runtimeGrants: 'passed with separate local security administrator', source: 'synthetic-empty-baseline',
     additiveBridge: additions, medicalImport, liveStagingCopyRehearsal: 'still required' }) + '\n');
 } finally {
@@ -251,7 +299,7 @@ try {
     const cleanup = new pg.Client({ connectionString: localAdminUrl });
     await cleanup.connect();
     try {
-      for (const database of [upgradeDatabase, cleanDatabase]) {
+      for (const database of [upgradeDatabase, cleanDatabase, noForceDatabase]) {
         await cleanup.query(`drop database if exists ${database} with (force)`);
       }
       await cleanup.query(`drop role if exists ${migrator}`);

@@ -5,13 +5,14 @@
 --
 --   1. within 24 hours an open self-service application holds its CAC and
 --      product: another email needs manual resolution (main's 23514);
---   2. after 24 hours the next self-service submit for that CAC and product,
---      by any email, rejects it (reviewed_at set, the lapse reason, no
+--   2. after 24 hours the next self-service submit for that CAC and product
+--      by another email rejects it (reviewed_at set, the lapse reason, no
 --      reviewer, row_version bumped), invalidates every email challenge and
 --      completion session it had, audits identity.organization.self-service.lapse
 --      without CAC or email, and opens a new application; the old session can
 --      no longer activate, and a verified (ready_for_review) application lapses
---      the same way;
+--      the same way; its own email resumes it instead, without renewing it
+--      (review fix R3), so its holder cannot extend the hold;
 --   3. an activated (approved) self-service application never lapses: the CAC
 --      stays registered; a governed (admin_review) application never lapses;
 --   4. the governed submit lapses a stale self-service application too and
@@ -176,10 +177,17 @@ begin
     raise exception 'A lapsed application''s email code verified';
   end if;
 
-  -- The same email lapses its own stale application too, and resumes the new one.
+  -- R3: the stale application's own email resumes it and renews nothing;
+  -- another email then lapses it.
   if identity.submit_self_service_organization_application('laboratory', 'laboratory',
-       'RC9900066002', 'Pending Lab Admin', 'pending@lapse.invalid') = current_setting('hid.test.pending')::uuid then
-    raise exception 'A stale application was resumed by its own email';
+       'RC9900066002', 'Pending Lab Admin', 'pending@lapse.invalid') <> current_setting('hid.test.pending')::uuid
+     or (select application.application_status from identity.public_get_organization_application(
+           'RC9900066002', 'pending@lapse.invalid', 'laboratory') application) <> 'pending_verification' then
+    raise exception 'A stale application was not resumed by its own email';
+  end if;
+  if identity.submit_self_service_organization_application('laboratory', 'laboratory',
+       'RC9900066002', 'Other Lab Admin', 'other.lab@lapse.invalid') = current_setting('hid.test.pending')::uuid then
+    raise exception 'Another email did not lapse a stale application its own email had resumed';
   end if;
 
   -- 3. An activated application is never lapsed; a governed one neither.

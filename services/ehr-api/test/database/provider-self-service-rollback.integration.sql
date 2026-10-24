@@ -15,7 +15,10 @@
 --     completion start, invalidate, verify, current and complete;
 --   services/identity-api/src/identity/qoreid-verification.service.ts
 --     the existing-organization CAC binding match, here for an administrator
---     who signed up through 0086 before the rollback;
+--     who signed up through 0086 before the rollback, and its quota charge
+--     (consume_qoreid_quota 'existing_cac'), which 0086 refuses (42501, the
+--     previous Identity's 403 PERMISSION_DENIED) until support has reviewed
+--     the self-signed-up organization (review fix R7);
 --   services/identity-api/src/admin/admin.service.ts and auth/security.guard.ts
 --     the platform control list, change and reads.
 --
@@ -256,6 +259,7 @@ begin
     '$argon2id$v=19$m=65536,t=3,p=1$' || repeat('a', 22) || '$' || repeat('b', 43));
   perform set_config('hid.test.rollback_self_account', activated.account_id::text, true);
   perform set_config('hid.test.rollback_self_facility', activated.facility_id::text, true);
+  perform set_config('hid.test.rollback_self_organization', activated.organization_id::text, true);
 end $$;
 reset role;
 select set_config('hid.test.rollback_self_membership',
@@ -277,6 +281,14 @@ begin
   if matched is not true then
     raise exception 'The previous Identity does not recognise a self-signed-up organization''s CAC binding';
   end if;
+  begin
+    execute 'select platform.consume_qoreid_quota($1,$2,$3,$4,$5)'
+      using 'existing_cac'::text, current_setting('hid.test.rollback_self_organization')::uuid,
+        null::uuid, null::char(64), null::char(64);
+    raise exception 'An unreviewed self-signed-up organization charged a CAC lookup through the previous Identity';
+  exception when insufficient_privilege then
+    if sqlerrm <> 'QOREID_QUOTA_SELF_SERVICE_REVIEW_REQUIRED' then raise; end if;
+  end;
 end $$;
 reset role;
 

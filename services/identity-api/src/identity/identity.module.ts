@@ -31,7 +31,8 @@ import { PatientEnrollmentService } from './patient-enrollment.service';
 import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
 import { ProviderEnrollmentController } from './provider-enrollment.controller';
 import { ProviderEnrollmentService } from './provider-enrollment.service';
-import { AdminSelfServiceFacilitiesController } from './self-service-facilities.controller';
+import { AdminSelfServiceApplicationsController,
+  AdminSelfServiceFacilitiesController } from './self-service-facilities.controller';
 import { SelfServiceFacilitiesService } from './self-service-facilities.service';
 
 @Module({
@@ -41,7 +42,7 @@ import { SelfServiceFacilitiesService } from './self-service-facilities.service'
     AdminOrganizationApplicationsController,
     PatientEnrollmentController,
     ProviderEnrollmentController,
-    AdminSelfServiceFacilitiesController],
+    AdminSelfServiceFacilitiesController, AdminSelfServiceApplicationsController],
   providers: [
     IdentityService,
     NinRegistrationService,

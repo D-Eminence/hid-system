@@ -36,7 +36,8 @@ describe('provider enrollment over HTTP', () => {
   let app: INestApplication;
   const database = { query: jest.fn(), withSystemTransaction: jest.fn() };
   const integrations = { assertAvailable: jest.fn(), consumeSelfServiceCacQuota: jest.fn() };
-  const completion = { verify: jest.fn(), activate: jest.fn(), start: jest.fn(), publicApplicationDigest: jest.fn() };
+  const completion = { verify: jest.fn(), activate: jest.fn(), start: jest.fn(), publicApplicationDigest: jest.fn(),
+    publicApplicationNetworkDigest: jest.fn() };
   const turnstile = { verify: jest.fn() };
   const auth = { login: jest.fn() };
 
@@ -131,28 +132,31 @@ describe('provider enrollment over HTTP', () => {
     expect(turnstile.verify).not.toHaveBeenCalled();
   });
 
-  it('answers availability 200, closed on any fault and open only when everything is', async () => {
+  it('answers availability 200: closed when switched off, unavailable on a fault, open only when everything is', async () => {
+    // R10: a fault is not "closed", so the page says "try again shortly", not "not open".
     database.query.mockRejectedValueOnce(new Error('database down'));
     const down = await request(app.getHttpServer()).get(`${base}/availability`);
-    expect([down.status, down.body]).toEqual([200, { open: false }]);
+    expect([down.status, down.body]).toEqual([200, { open: false, reason: 'unavailable' }]);
     const off = await request(app.getHttpServer()).get(`${base}/availability`);
-    expect([off.status, off.body]).toEqual([200, { open: false }]);
+    expect([off.status, off.body]).toEqual([200, { open: false, reason: 'closed' }]);
     database.query.mockResolvedValue(controls(open));
     integrations.assertAvailable.mockRejectedValueOnce(new DomainProblem(503, 'INTEGRATION_PAUSED', 'paused'));
     const paused = await request(app.getHttpServer()).get(`${base}/availability`);
-    expect([paused.status, paused.body]).toEqual([200, { open: false }]);
+    expect([paused.status, paused.body]).toEqual([200, { open: false, reason: 'closed' }]);
     const openNow = await request(app.getHttpServer()).get(`${base}/availability`);
     expect([openNow.status, openNow.body]).toEqual([200, { open: true }]);
   });
 
   it('answers 423 when the control is switched off between the gate and the submit command', async () => {
     database.query.mockResolvedValue(controls(open));
-    completion.publicApplicationDigest.mockReturnValue('b'.repeat(64));
-    // The submit command's own platform.require_control_enabled refuses.
-    database.withSystemTransaction.mockRejectedValue(
+    completion.publicApplicationNetworkDigest.mockReturnValue('b'.repeat(64));
+    // The quota charge commits; the submit command's own
+    // platform.require_control_enabled then refuses.
+    database.withSystemTransaction.mockResolvedValueOnce(undefined).mockRejectedValueOnce(
       Object.assign(new Error('PLATFORM_CONTROL_DISABLED:provider_self_service_enabled'), { code: '55000' }));
     const answer = await request(app.getHttpServer()).post(base).set('Origin', origin).send(startBody);
     expect([answer.status, answer.body.code]).toEqual([423, 'PROVIDER_ENROLLMENT_UNAVAILABLE']);
+    expect(database.withSystemTransaction).toHaveBeenCalledTimes(2);
     expect(turnstile.verify).toHaveBeenCalledWith(expect.objectContaining({ action: 'provider-enrollment', origin }));
   });
 

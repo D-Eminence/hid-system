@@ -5,8 +5,9 @@
 --
 --   1. identity.admin_list_self_service_facilities lists one row per
 --      activated self-service application (approved by the activation
---      command, with no human reviewer), newest activation first, at most 200,
---      filtered by 'unreviewed', 'reviewed' or 'all', with the CAC masked as
+--      command, with no human reviewer), at most 200, filtered by
+--      'unreviewed' (oldest activation first, review fix R12), 'reviewed' or
+--      'all' (newest activation first), with the CAC masked as
 --      the governed application list masks it and the facility's and
 --      account's current status; pending, lapsed, governed and
 --      administrator-approved applications are not listed;
@@ -160,13 +161,14 @@ declare
 begin
   select array_agg(item.application_id order by ordinality) into listed
     from identity.admin_list_self_service_facilities('unreviewed') with ordinality item;
-  if listed is distinct from array[second_application, first_application] then
-    raise exception 'The unreviewed list is not the two activated facilities, newest first: %', listed;
+  if listed is distinct from array[first_application, second_application] then
+    raise exception 'The unreviewed list is not the two activated facilities, oldest first: %', listed;
   end if;
   if (select array_agg(item.application_id order by ordinality)
-        from identity.admin_list_self_service_facilities('all') with ordinality item) is distinct from listed
+        from identity.admin_list_self_service_facilities('all') with ordinality item)
+       is distinct from array[second_application, first_application]
      or exists (select 1 from identity.admin_list_self_service_facilities('reviewed')) then
-    raise exception 'The all and reviewed lists are wrong before any review';
+    raise exception 'The all (newest first) and reviewed lists are wrong before any review';
   end if;
   select * into first_row from identity.admin_list_self_service_facilities('all') item
    where item.application_id = first_application;
@@ -185,7 +187,9 @@ begin
      or first_row.activated_at is null
      or first_row.row_version is null
      or first_row.reviewed_at is not null or first_row.reviewed_by_account_id is not null
-     or first_row.review_note is not null then
+     or first_row.review_note is not null
+     or first_row.released_at is not null or first_row.released_by_account_id is not null
+     or first_row.release_reason is not null then
     raise exception 'The listed facility is wrong: %', row_to_json(first_row);
   end if;
   perform set_config('hid.test.ssr_activated_1', first_row.activated_at::text, true);
@@ -386,7 +390,10 @@ do $$
 declare runtime_role text; signature text;
 begin
   foreach signature in array array['identity.admin_list_self_service_facilities(text)',
-      'identity.admin_review_self_service_facility(uuid,bigint,text)'] loop
+      'identity.admin_review_self_service_facility(uuid,bigint,text)',
+      'identity.admin_release_self_service_facility(uuid,bigint,text)',
+      'identity.admin_list_open_self_service_applications()',
+      'identity.admin_reject_self_service_application(uuid,bigint,text)'] loop
     foreach runtime_role in array array['hid_identity_runtime', 'hid_identity_api_runtime'] loop
       if not has_function_privilege(runtime_role, signature, 'EXECUTE') then
         raise exception '% cannot execute %', runtime_role, signature;
@@ -462,7 +469,8 @@ begin
 end $$;
 reset role;
 
--- 1 (limit). At most 200 rows, newest activation first.
+-- 1 (limit). At most 200 rows: 'all' newest activation first; 'unreviewed'
+-- oldest first, so the most overdue are never hidden behind 200 newer ones.
 insert into identity.organizations (id, name, slug)
 select ('c8750000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid, 'Bulk Org ' || n, 'bulk-org-' || n
   from generate_series(1, 205) n;
@@ -498,9 +506,16 @@ begin
     raise exception 'The list is not the newest 200 activations: % rows, first %, last %',
       cardinality(listed), listed[1], listed[200];
   end if;
-  if (select count(*) from identity.admin_list_self_service_facilities('unreviewed')) <> 200
-     or (select count(*) from identity.admin_list_self_service_facilities('reviewed')) <> 2 then
+  if (select count(*) from identity.admin_list_self_service_facilities('reviewed')) <> 2 then
     raise exception 'The state filters do not apply before the limit';
+  end if;
+  select array_agg(item.application_id order by ordinality) into listed
+    from identity.admin_list_self_service_facilities('unreviewed') with ordinality item;
+  if cardinality(listed) <> 200
+     or listed[1] <> 'c8770000-0000-4000-8000-000000000001'
+     or listed[200] <> 'c8770000-0000-4000-8000-000000000200' then
+    raise exception 'The unreviewed list is not the oldest 200 activations: % rows, first %, last %',
+      cardinality(listed), listed[1], listed[200];
   end if;
 end $$;
 reset role;

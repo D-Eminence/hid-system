@@ -32,6 +32,16 @@ interface CompletionProfileRow extends QueryResultRow {
   profile_registry_status_source: FieldSource;
 }
 
+/** The administrator details facility self sign-up sends with its emailed code (P4 review fix R6). */
+export interface SelfServiceCompletionDetails {
+  administratorName: string;
+  organizationType: 'clinic' | 'hospital' | 'laboratory' | 'pharmacy' | 'other';
+}
+
+/** identity.prepare_self_service_provider_activation's answers (0086, review fix R1). */
+type ActivationPreCheck = 'ready' | 'session_invalid' | 'attempts_exceeded' | 'not_ready'
+  | 'email_registered' | 'cac_bound' | 'name_exists';
+
 @Injectable()
 export class OrganizationProfileCompletionService implements BeforeApplicationShutdown {
   private readonly environment = getEnvironment();
@@ -57,11 +67,17 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
    * Sends the emailed code. Every call charges the public application quota
    * (0049) once, keyed by publicApplicationDigest: here, unless the caller
    * already charged it in its own transaction. Facility self sign-up charges
-   * it with its submit (P4 A7) and passes publicApplicationQuotaCharged, so a
-   * start costs one, not two (CRITIC C8).
+   * it before its submit (P4 A7 and review fix R4) and passes
+   * publicApplicationQuotaCharged, so a start costs one, not two (CRITIC C8).
+   * Facility self sign-up also passes selfService: its code is sent by
+   * identity.begin_self_service_provider_enrollment, which stores the
+   * administrator name and organization type with the code (the activation
+   * takes them from the code that opened its session, R6) and sends at most
+   * 10 codes a day to one administrator email (R5).
    */
   async start(input: StartOrganizationProfileCompletionDto, remoteIp: string | undefined,
-    correlationId: string, options: { publicApplicationQuotaCharged?: boolean } = {}) {
+    correlationId: string,
+    options: { publicApplicationQuotaCharged?: boolean; selfService?: SelfServiceCompletionDetails } = {}) {
     this.assertConfigured();
     const challengeId = randomUUID();
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
@@ -75,11 +91,17 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
             this.networkDigest(remoteIp),
           ]);
         }
-        const found = await client.query<{ recipient_email: string | null }>(
-          'select identity.begin_organization_profile_completion($1,$2,$3,$4,$5) as recipient_email',
-          [registrationNumber, email, input.productCode, challengeId,
-            this.hmac('otp', challengeId, code)],
-        );
+        const found = options.selfService
+          ? await client.query<{ recipient_email: string | null }>(
+            'select identity.begin_self_service_provider_enrollment($1,$2,$3,$4,$5,$6,$7) as recipient_email',
+            [registrationNumber, email, input.productCode, challengeId, this.hmac('otp', challengeId, code),
+              options.selfService.administratorName, options.selfService.organizationType],
+          )
+          : await client.query<{ recipient_email: string | null }>(
+            'select identity.begin_organization_profile_completion($1,$2,$3,$4,$5) as recipient_email',
+            [registrationNumber, email, input.productCode, challengeId,
+              this.hmac('otp', challengeId, code)],
+          );
         return found.rows[0]?.recipient_email ?? null;
       });
     } catch (error) { throw this.databaseProblem(error); }
@@ -151,22 +173,30 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
   /**
    * Facility self sign-up's activation: sets the administrator's password and
    * creates the organization, facility, account and membership in one runtime
-   * command, which also returns the login email. The session is checked first
-   * (P4 A9): a token that names no live session is refused 401 before the
-   * 64 MiB argon2id hash is computed.
+   * command, which also returns the login email.
+   *
+   * The 64 MiB argon2id hash is computed only after the pre-check
+   * identity.prepare_self_service_provider_activation has answered 'ready'
+   * in its own committed transaction (P4 A9 and review fix R1): it refuses a
+   * token that names no live session, charges one of the session's 5
+   * attempts, and answers an activation that can never succeed (email
+   * already registered, CAC already bound, legal name already used,
+   * application not ready) at once, ending the session. So a session costs at
+   * most 5 hashes, and a request that is certain to fail costs none.
    */
   async activate(token: string | undefined, password: string, correlationId: string) {
     assertPasswordLength(password);
     const sessionHash = this.sessionHash(token);
+    let preCheck: ActivationPreCheck | undefined;
     try {
-      const live = await this.database.withSystemTransaction(correlationId, (client) =>
-        client.query<{ application_status: string }>(
-          'select application_status from identity.current_organization_profile_completion($1)',
-          [sessionHash]));
-      if (!live.rows[0]) throw this.invalidSession();
+      const result = await this.database.withSystemTransaction(correlationId, (client) =>
+        client.query<{ verdict: ActivationPreCheck }>(
+          'select identity.prepare_self_service_provider_activation($1) as verdict', [sessionHash]));
+      preCheck = result.rows[0]?.verdict;
     } catch (error) {
       throw this.activationProblem(error);
     }
+    if (preCheck !== 'ready') throw this.preCheckProblem(preCheck);
     const passwordHash = await hashAccountPassword(password);
     try {
       const result = await this.database.withSystemTransaction(correlationId, (client) =>
@@ -204,6 +234,23 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
   publicApplicationDigest(remoteIp: string | undefined): string {
     this.assertConfigured();
     return this.networkDigest(remoteIp);
+  }
+
+  /**
+   * The public application quota digest of a client network that the caller
+   * has already normalized: an IPv4 address (the same digest as
+   * publicApplicationDigest gives that address) or an IPv6 /64 prefix such as
+   * '2001:db8:1:2::/64'. Facility self sign-up charges the quota to the
+   * network, so rotating IPv6 addresses inside one allocation does not reset
+   * it (P4 review fix R5).
+   */
+  publicApplicationNetworkDigest(network: string): string {
+    this.assertConfigured();
+    if (!network || (isIP(network) !== 4 && !/^[0-9a-f]{1,4}(:[0-9a-f]{1,4}){3}::\/64$/.test(network))) {
+      throw new DomainProblem(503, 'APPLICATION_RATE_LIMIT_UNAVAILABLE',
+        'Organization profile completion is temporarily unavailable');
+    }
+    return this.hmac('ip', network);
   }
 
   private profile(row: CompletionProfileRow) {
@@ -255,6 +302,31 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
   private invalidSession() {
     return new DomainProblem(401, 'ORGANIZATION_COMPLETION_SESSION_INVALID',
       'Organization profile completion session is invalid or expired');
+  }
+
+  /**
+   * The pre-check's refusals (R1). A session that is not live, or whose
+   * attempts are spent (it has just been ended), answers 401 as any invalid
+   * session does: the applicant must confirm the email again. The rest end
+   * the session with the answer the activation itself would give.
+   */
+  private preCheckProblem(verdict: ActivationPreCheck | undefined): DomainProblem {
+    switch (verdict) {
+      case 'session_invalid':
+      case 'attempts_exceeded':
+        return this.invalidSession();
+      case 'email_registered':
+        return new DomainProblem(409, 'PROVIDER_EMAIL_ALREADY_REGISTERED',
+          'The administrator email is already associated with an HID account');
+      case 'not_ready':
+      case 'cac_bound':
+      case 'name_exists':
+        return new DomainProblem(409, 'ORGANIZATION_REVIEW_REQUIRED',
+          'Organization profile completion is unavailable');
+      default:
+        return new DomainProblem(503, 'ORGANIZATION_COMPLETION_UNAVAILABLE',
+          'Organization profile completion is temporarily unavailable');
+    }
   }
 
   /**

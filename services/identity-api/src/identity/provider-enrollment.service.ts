@@ -28,6 +28,16 @@ interface ControlRow {
 
 const localNetworkKey = randomBytes(32);
 
+/**
+ * Availability's answer. Closed carries why (P4 review fix R10): 'closed'
+ * when sign-up is switched off or not configured (the control, the provider
+ * portal, maintenance, the daily cap, QOREID_ENABLED, the OTP key, QoreID's
+ * provider_cac runtime gate), 'unavailable' when the answer could not be
+ * determined (a database or other fault). The page shows "not open" only for
+ * 'closed', and "try again shortly" for 'unavailable'.
+ */
+export type ProviderEnrollmentAvailability = { open: true } | { open: false; reason: 'closed' | 'unavailable' };
+
 // Shown to the applicant as it is. It must be true for both cases the adapter
 // answers with cacIncompleteProfile: a record missing legal fields, and a
 // complete record whose company is not active. The governed organization
@@ -106,18 +116,26 @@ export class ProviderEnrollmentService {
    * Whether a start would now pass the checks it makes before any
    * per-request decision: the gate, QOREID_ENABLED, the QoreID provider_cac
    * runtime gate and, in production, the OTP key. It reads no application and
-   * writes nothing; any fault answers closed, never an error.
+   * writes nothing, and never answers an error: closed is { open: false,
+   * reason: 'closed' } when sign-up is switched off or not configured, and
+   * { open: false, reason: 'unavailable' } for any fault (R10).
    */
-  async availability(): Promise<{ open: boolean }> {
+  async availability(): Promise<ProviderEnrollmentAvailability> {
+    const closed = { open: false as const, reason: 'closed' as const };
     try {
       const environment = getEnvironment();
-      if (!environment.QOREID_ENABLED) return { open: false };
-      if (environment.NODE_ENV === 'production' && !environment.OTP_HMAC_KEY_B64) return { open: false };
+      if (!environment.QOREID_ENABLED) return closed;
+      if (environment.NODE_ENV === 'production' && !environment.OTP_HMAC_KEY_B64) return closed;
       await this.assertSelfServiceOpen();
       await this.integrations.assertAvailable('qoreid', 'provider_cac');
       return { open: true };
-    } catch {
-      return { open: false };
+    } catch (error) {
+      if (error instanceof DomainProblem && (
+        (error.getStatus() === 423 && error.code === 'PROVIDER_ENROLLMENT_UNAVAILABLE')
+        || error.code === 'INTEGRATION_PAUSED')) {
+        return closed;
+      }
+      return { open: false, reason: 'unavailable' };
     }
   }
 
@@ -131,21 +149,34 @@ export class ProviderEnrollmentService {
     }
     const platformDailyLimit = selfServiceDailyCap(environment);
     if (platformDailyLimit === null) throw selfServiceClosed();
-    // Derived from the server-observed address before anything is written.
-    const networkDigest = this.networkDigest(request.ip);
-    const applicationDigest = this.completion.publicApplicationDigest(request.ip);
+    // Derived from the server-observed address before anything is written:
+    // the client network (an IPv4 address or an IPv6 /64) keys both the CAC
+    // lookup quota and the public application quota (R5), so rotating IPv6
+    // addresses inside one allocation resets neither.
+    const network = this.quotaNetworkOrUnavailable(request.ip);
+    const networkDigest = this.networkDigest(network);
+    const applicationDigest = this.completion.publicApplicationNetworkDigest(network);
+
+    // The public application quota (0049) is charged first, in its own
+    // committed transaction (P4 A7, review fix R4): every start costs one of
+    // the network's 10 an hour and 30 a day, including one the submit then
+    // refuses (409 PROVIDER_ENROLLMENT_REQUIRES_REVIEW), so probing which
+    // CACs have an application costs quota. It is the start's only charge:
+    // the email code below does not charge it again (C8).
+    try {
+      await this.database.withSystemTransaction(request.correlationId, (client) =>
+        client.query('select platform.consume_public_application_quota($1)', [applicationDigest]));
+    } catch (error) {
+      throw this.mapDatabaseError(error);
+    }
 
     let applicationId: string | undefined;
     try {
       applicationId = await this.database.withSystemTransaction(request.correlationId, async (client) => {
-        // The public application quota (0049) is charged with the submit, as the
-        // governed submit does, so holding a CAC costs quota (P4 A7). It is the
-        // start's only charge: the email code below does not charge it again.
-        await client.query('select platform.consume_public_application_quota($1)', [applicationDigest]);
         const result = await client.query<{ application_id: string }>(
-          'select identity.submit_self_service_organization_application($1,$2,$3,$4,$5) as application_id',
+          'select identity.submit_self_service_organization_application($1,$2,$3,$4,$5,$6) as application_id',
           [input.productCode, input.organizationType, input.cacRegistrationNumber,
-            input.administratorName, input.administratorEmail.trim().toLowerCase()],
+            input.administratorName, input.administratorEmail.trim().toLowerCase(), networkDigest],
         );
         return result.rows[0]?.application_id;
       });
@@ -262,13 +293,23 @@ export class ProviderEnrollmentService {
       'Provider enrollment is temporarily unavailable');
   }
 
-  private networkDigest(remoteIp: string | undefined): string {
+  private quotaNetworkOrUnavailable(remoteIp: string | undefined): string {
     const environment = getEnvironment();
     const network = quotaNetwork(remoteIp);
     if (!network || (environment.NODE_ENV === 'production' && !environment.OTP_HMAC_KEY_B64)) {
       throw new DomainProblem(503, 'PROVIDER_ENROLLMENT_RATE_LIMIT_UNAVAILABLE',
         'Provider enrollment is temporarily unavailable');
     }
+    return network;
+  }
+
+  /**
+   * The keyed digest of a client network for the CAC lookup quota and for
+   * the application (whose network may not reopen its CAC and product for 7
+   * days after support or the lapse closes it, R3).
+   */
+  private networkDigest(network: string): string {
+    const environment = getEnvironment();
     const key = environment.OTP_HMAC_KEY_B64
       ? Buffer.from(environment.OTP_HMAC_KEY_B64, 'base64') : localNetworkKey;
     return createHmac('sha256', key)
@@ -276,6 +317,11 @@ export class ProviderEnrollmentService {
       .update(network, 'utf8').digest('hex');
   }
 
+  /**
+   * The emailed code. The administrator name and organization type of this
+   * request go with it, and the activation takes them from the code that
+   * proved the mailbox (R6).
+   */
   private startEmailVerification(input: StartProviderEnrollmentDto, request: HidRequest) {
     return this.completion.start({
       productCode: input.productCode,
@@ -283,6 +329,9 @@ export class ProviderEnrollmentService {
       administratorEmail: input.administratorEmail,
       turnstileAction: 'organization-completion',
       turnstileToken: input.turnstileToken,
-    }, request.ip, request.correlationId, { publicApplicationQuotaCharged: true });
+    }, request.ip, request.correlationId, {
+      publicApplicationQuotaCharged: true,
+      selfService: { administratorName: input.administratorName, organizationType: input.organizationType },
+    });
   }
 }

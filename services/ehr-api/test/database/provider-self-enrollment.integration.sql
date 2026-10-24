@@ -7,7 +7,7 @@
 --   1. only the self-service-aware review check remains; a self-service
 --      approval without a reviewer is admitted and a governed (admin_review)
 --      approval without one is refused by that check;
---   2. both Identity runtimes may execute the four public commands and the
+--   2. both Identity runtimes may execute the six public commands and the
 --      quota command; nobody may execute the owner-only activation or the
 --      lapse helper; the self-service commands take the governed path's
 --      advisory-lock keys (A11);
@@ -157,9 +157,11 @@ declare
 begin
   foreach runtime_role in array array['hid_identity_runtime', 'hid_identity_api_runtime', 'hid_schema_test_runtime'] loop
     foreach signature in array array[
-      'identity.submit_self_service_organization_application(text,text,text,text,text)',
+      'identity.submit_self_service_organization_application(text,text,text,text,text,char)',
       'identity.public_get_organization_application(text,text,text)',
       'identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text)',
+      'identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text)',
+      'identity.prepare_self_service_provider_activation(char)',
       'identity.activate_self_service_provider_enrollment(char,text)',
       'platform.consume_self_service_cac_quota(uuid,char,integer)'
     ] loop
@@ -173,7 +175,7 @@ begin
       'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime', 'hid_ocr_api_runtime'] loop
     foreach signature in array array[
       'identity.activate_self_service_organization_application(char,text)',
-      'identity.lapse_stale_self_service_organization_application(text,text)'
+      'identity.lapse_stale_self_service_organization_application(text,text,text)'
     ] loop
       if has_function_privilege(runtime_role, signature, 'EXECUTE') then
         raise exception 'The owner-only command % is executable by %', signature, runtime_role;
@@ -183,9 +185,11 @@ begin
   foreach runtime_role in array array['hid_ehr_runtime', 'hid_ehr_api_runtime', 'hid_api_runtime',
       'hid_lab_api_runtime', 'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime', 'hid_ocr_api_runtime'] loop
     foreach signature in array array[
-      'identity.submit_self_service_organization_application(text,text,text,text,text)',
+      'identity.submit_self_service_organization_application(text,text,text,text,text,char)',
       'identity.public_get_organization_application(text,text,text)',
       'identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text)',
+      'identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text)',
+      'identity.prepare_self_service_provider_activation(char)',
       'identity.activate_self_service_provider_enrollment(char,text)'
     ] loop
       if has_function_privilege(runtime_role, signature, 'EXECUTE') then
@@ -195,18 +199,20 @@ begin
   end loop;
   if exists (select 1 from pg_proc proc, lateral aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
               where proc.oid in (
-                'identity.submit_self_service_organization_application(text,text,text,text,text)'::regprocedure,
+                'identity.submit_self_service_organization_application(text,text,text,text,text,char)'::regprocedure,
                 'identity.public_get_organization_application(text,text,text)'::regprocedure,
                 'identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text)'::regprocedure,
                 'identity.activate_self_service_organization_application(char,text)'::regprocedure,
-                'identity.lapse_stale_self_service_organization_application(text,text)'::regprocedure,
+                'identity.lapse_stale_self_service_organization_application(text,text,text)'::regprocedure,
+                'identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text)'::regprocedure,
+                'identity.prepare_self_service_provider_activation(char)'::regprocedure,
                 'identity.activate_self_service_provider_enrollment(char,text)'::regprocedure,
                 'platform.consume_self_service_cac_quota(uuid,char,integer)'::regprocedure)
                 and acl.grantee = 0) then
     raise exception 'A provider self-enrollment command is executable by PUBLIC';
   end if;
   -- A11: the governed path's lock keys, so both paths serialize on one CAC.
-  if (select prosrc from pg_proc where oid = 'identity.submit_self_service_organization_application(text,text,text,text,text)'::regprocedure)
+  if (select prosrc from pg_proc where oid = 'identity.submit_self_service_organization_application(text,text,text,text,text,char)'::regprocedure)
        not like '%''org-application:'' || normalized_cac || '':'' || requested_product%'
      or (select prosrc from pg_proc where oid = 'identity.activate_self_service_organization_application(char,text)'::regprocedure)
        not like '%''org-cac:'' || application.cac_registration_number%'
@@ -306,9 +312,10 @@ begin
   if verified then raise exception 'A wrong OTP verified the provider email'; end if;
   verified := identity.verify_organization_profile_completion_challenge(challenge_id, code_hmac, session_hmac);
   if not verified then raise exception 'The correct OTP did not verify the provider email'; end if;
-  -- A9: Identity checks the session before argon2 with this command.
-  if not exists (select 1 from identity.current_organization_profile_completion(session_hmac)) then
-    raise exception 'The verified completion session is not readable before activation';
+  -- A9 and R1: Identity checks the session, and charges the attempt, before
+  -- argon2 with this command, in its own committed transaction.
+  if identity.prepare_self_service_provider_activation(session_hmac) is distinct from 'ready' then
+    raise exception 'The verified completion session is not ready before activation';
   end if;
 
   begin
@@ -318,7 +325,7 @@ begin
   exception when insufficient_privilege then null;
   end;
   begin
-    perform identity.lapse_stale_self_service_organization_application('RC9900062101', 'ehr');
+    perform identity.lapse_stale_self_service_organization_application('RC9900062101', 'ehr', null);
     raise exception 'The runtime role called the owner-only lapse helper';
   exception when insufficient_privilege then null;
   end;
@@ -341,7 +348,8 @@ begin
     raise exception 'A consumed enrollment session activated a second time';
   exception when insufficient_privilege then null;
   end;
-  if exists (select 1 from identity.current_organization_profile_completion(session_hmac)) then
+  if exists (select 1 from identity.current_organization_profile_completion(session_hmac))
+     or identity.prepare_self_service_provider_activation(session_hmac) <> 'session_invalid' then
     raise exception 'The consumed session still reads as a live completion';
   end if;
   begin
@@ -466,6 +474,11 @@ begin
     if sqlerrm <> 'Administrator email already belongs to an account' then raise; end if;
   end;
   perform set_config('hid.test.second_session', session_hmac, true);
+  -- R1: Identity's pre-check answers it before any hash and ends the session.
+  if identity.prepare_self_service_provider_activation(session_hmac) <> 'email_registered'
+     or identity.prepare_self_service_provider_activation(session_hmac) <> 'session_invalid' then
+    raise exception 'The activation pre-check did not refuse the registered email once and end the session';
+  end if;
 end $$;
 
 -- 6. Closing the control again refuses activation of a verified session and

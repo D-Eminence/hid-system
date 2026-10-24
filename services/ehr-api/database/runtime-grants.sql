@@ -918,23 +918,33 @@ grant execute on function identity.submit_organization_application(text,text,tex
 
 -- Accountless provider self-enrollment (0086, main 0061-0063), as that
 -- migration grants it. The runtime activates only through the wrapper that
--- returns the login email in the same transaction; the underlying activation
--- command and the lapse helper stay owner-only. The CAC lookup is charged
--- through the network, application and platform-day quota command, never the
--- account-scoped `application_cac` path, and no runtime holds a privilege on
--- its counter tables. Support's list and review of activated self-service
--- facilities are platform administration commands for the Identity runtime only.
-grant execute on function identity.submit_self_service_organization_application(text,text,text,text,text),
+-- returns the login email in the same transaction, after the activation
+-- pre-check that charges the session's attempt budget; the underlying
+-- activation command and the lapse helper stay owner-only. The emailed code
+-- is sent through the self-service command that stores the requested
+-- administrator details and limits codes per recipient. The CAC lookup is
+-- charged through the network, application and platform-day quota command,
+-- never the account-scoped `application_cac` path, and no runtime holds a
+-- privilege on its counter tables. Support's list, review and release of
+-- activated self-service facilities, and its list and rejection of open
+-- self-service applications, are platform administration commands for the
+-- Identity runtime only.
+grant execute on function identity.submit_self_service_organization_application(text,text,text,text,text,char),
   identity.public_get_organization_application(text,text,text),
   identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text),
+  identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text),
+  identity.prepare_self_service_provider_activation(char),
   identity.activate_self_service_provider_enrollment(char,text),
   platform.consume_self_service_cac_quota(uuid,char,integer)
   to hid_identity_runtime, hid_schema_test_runtime;
 grant execute on function identity.admin_list_self_service_facilities(text),
-  identity.admin_review_self_service_facility(uuid,bigint,text)
+  identity.admin_review_self_service_facility(uuid,bigint,text),
+  identity.admin_release_self_service_facility(uuid,bigint,text),
+  identity.admin_list_open_self_service_applications(),
+  identity.admin_reject_self_service_application(uuid,bigint,text)
   to hid_identity_runtime;
 revoke all on function identity.activate_self_service_organization_application(char,text),
-  identity.lapse_stale_self_service_organization_application(text,text)
+  identity.lapse_stale_self_service_organization_application(text,text,text)
   from public;
 revoke all on platform.self_service_cac_quota_counters,
   platform.self_service_cac_platform_quota_counters from public;

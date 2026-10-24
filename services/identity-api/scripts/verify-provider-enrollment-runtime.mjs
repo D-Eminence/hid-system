@@ -10,7 +10,13 @@
 // synthetic. A Novu rewrite of main's verifier of the same name: the
 // activation answers a staff session (P71, owner decision 2: a password, no
 // authenticator), the gate (provider_self_service_enabled), the platform
-// daily QoreID cap, the 24-hour lapse and support's review are added.
+// daily QoreID cap, the 24-hour lapse and support's review are added, and the
+// fixes of the adversarial review: the database's own gate driven through
+// Identity (a request parked behind a lock while the control closes), the
+// activation pre-check and its attempt budget, the administrator details of
+// the code that proved the mailbox, the quota charged per network before the
+// submit, support's release of a fraudulent sign-up and its list and
+// rejection of open applications, and availability's reason.
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { createHmac, randomUUID } from 'node:crypto';
@@ -84,7 +90,8 @@ const { ProviderEnrollmentService } = load('identity/provider-enrollment.service
 const { OrganizationProfileCompletionService } = load('identity/organization-profile-completion.service.ts');
 const { AdminOrganizationApplicationsController } = load('identity/organization-applications.controller.ts');
 const { OrganizationApplicationsService } = load('identity/organization-applications.service.ts');
-const { AdminSelfServiceFacilitiesController } = load('identity/self-service-facilities.controller.ts');
+const { AdminSelfServiceFacilitiesController, AdminSelfServiceApplicationsController } =
+  load('identity/self-service-facilities.controller.ts');
 const { SelfServiceFacilitiesService } = load('identity/self-service-facilities.service.ts');
 const { AdminController } = load('admin/admin.controller.ts');
 const { AdminService } = load('admin/admin.service.ts');
@@ -176,7 +183,8 @@ const qoreidFetch = async (url, init) => {
 
 // The digests the Identity API must store, keyed with the server-only OTP HMAC
 // key, never the address: the CAC lookup's client network (IPv4 address or
-// IPv6 /64) and the public application quota's client address.
+// IPv6 /64), which the application also keeps, and the public application
+// quota's client network (the same IPv4 address or IPv6 /64, review fix R5).
 const networkKey = Buffer.from(process.env.OTP_HMAC_KEY_B64, 'base64');
 const digest = network => createHmac('sha256', networkKey)
   .update('provider-self-service-cac-network\0', 'utf8').update(network, 'utf8').digest('hex');
@@ -203,7 +211,7 @@ try {
   await owner.query("update platform.integration_providers set enabled=true, row_version=row_version+1 where provider='qoreid'");
   const module = await Test.createTestingModule({
     controllers: [AuthController, ProviderEnrollmentController, AdminOrganizationApplicationsController,
-      AdminSelfServiceFacilitiesController, AdminController],
+      AdminSelfServiceFacilitiesController, AdminSelfServiceApplicationsController, AdminController],
     providers: [DatabaseService, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
       AuditService, WorkloadAuthService, TurnstileService, IntegrationRuntimeService,
@@ -302,7 +310,8 @@ try {
   // 0. The gate ships closed (0086 seeds provider_self_service_enabled off):
   // availability is false and every route answers 423 after its own request
   // checks. Start checks it after Turnstile; nothing is written or charged.
-  assert.deepEqual(await availability(), { open: false });
+  // Availability says why it is closed (R10).
+  assert.deepEqual(await availability(), { open: false, reason: 'closed' });
   const closedCac = 'RC9900063200';
   const startFailures = () => count(`select count(*)::int n from audit.events
     where action='api.identity.provider-enrollment.start' and outcome='failure'`);
@@ -386,7 +395,7 @@ try {
   };
   for (const [controlKey, closing] of [['maintenance_mode', true], ['provider_portal_enabled', false]]) {
     await setControl(controlKey, closing, 1);
-    assert.deepEqual(await availability(), { open: false }, `${controlKey} did not close availability`);
+    assert.deepEqual(await availability(), { open: false, reason: 'closed' }, `${controlKey} did not close availability`);
     expectProblem(await verify({ challengeId: randomUUID(), code: '000000' }), 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
     expectProblem(await start(enrollment({ cacRegistrationNumber: closedCac, administratorEmail: email('closed') }),
       '198.51.100.90'), 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
@@ -395,6 +404,16 @@ try {
   assert.deepEqual(await availability(), { open: true });
   assert.equal(await count('select count(*)::int n from identity.organization_applications'), 0, 'A closed gate wrote an application');
   gate.a13 = { maintenance_mode_on: 423, provider_portal_off: 423 };
+  // R10: a fault reading the controls is not "closed" (the page says "try
+  // again shortly"): the runtime briefly loses EXECUTE on control_enabled.
+  await owner.query('revoke execute on function platform.control_enabled(text) from public');
+  try {
+    assert.deepEqual(await availability(), { open: false, reason: 'unavailable' });
+  } finally {
+    await owner.query('grant execute on function platform.control_enabled(text) to public');
+  }
+  assert.deepEqual(await availability(), { open: true });
+  gate.availability = { closed: 'closed', fault: 'unavailable', open: true };
   gate.opened = { by: 'standalone platform_super_admin', command: 'POST /admin/controls', staleVersion: 409,
     version: 2, availability: true };
 
@@ -579,8 +598,10 @@ try {
   expectProblem(await start(enrollment({ cacRegistrationNumber: cacA, administratorEmail: email('c') })),
     409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
   assert.equal(qoreidCacLookups.length, lookupsBeforeDuplicate, 'A duplicate CAC reached QoreID');
-  assert.deepEqual(await applicationCharges(MAIN), { hour: 2, day: 2 }, 'A refused submit charged the application quota');
+  // R4: the quota is charged before the submit, so a refused start costs one too.
+  assert.deepEqual(await applicationCharges(MAIN), { hour: 4, day: 4 }, 'A refused submit was not charged the application quota');
   security.duplicate_cac = 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW';
+  quota.refused_start_charged = true;
 
   // #81. A verified CAC whose record is too sparse to register automatically
   // is answered 409 PROVIDER_CAC_PROFILE_INCOMPLETE with a detail the browser
@@ -638,7 +659,16 @@ try {
   assert.deepEqual(await footprint(), footprintBefore, 'A refused activation created or changed something');
   assert.deepEqual({ ...(await application(cacTaken)), id: undefined }, { id: undefined,
     status: 'ready_for_review', verification_result: 'verified', approval_mode: 'self_service' });
+  // R1: the pre-check answered it before any hash (no attempt charged) and
+  // ended the session, so retrying costs nothing either.
+  const sessionState = async challenge => (await owner.query(`select activation_attempts,
+      invalidated_at is not null as ended from identity.organization_profile_completion_challenges where id=$1`,
+  [challenge])).rows[0];
+  assert.deepEqual(await sessionState(startedTaken.body.challengeId), { activation_attempts: 0, ended: true });
+  expectProblem(await activate(takenCookie, 'Synthetic-Provider-Password-2027'), 401,
+    'ORGANIZATION_COMPLETION_SESSION_INVALID');
   security.activation_email_registered = 'PROVIDER_EMAIL_ALREADY_REGISTERED';
+  session.precheck_email_registered = { attempts: 0, sessionEnded: true, retry: 401 };
 
   // Owner Q8: a second product for an already registered CAC goes to review.
   // The pharmacy sign-up for cacA is a new application (its own product), is
@@ -653,9 +683,11 @@ try {
     code: await codeFor(secondProduct.body.challengeId) });
   assert.equal(secondVerified.status, 200);
   const footprintBeforeSecond = await footprint();
-  expectProblem(await activate(cookies(secondVerified).find(value => value.startsWith('hid_provider_enrollment=')),
-    password), 409, 'ORGANIZATION_REVIEW_REQUIRED');
+  const secondCookie = cookies(secondVerified).find(value => value.startsWith('hid_provider_enrollment='));
+  expectProblem(await activate(secondCookie, password), 409, 'ORGANIZATION_REVIEW_REQUIRED');
   assert.deepEqual(await footprint(), footprintBeforeSecond, 'A second product activation created or changed something');
+  assert.deepEqual(await sessionState(secondProduct.body.challengeId), { activation_attempts: 0, ended: true });
+  expectProblem(await activate(secondCookie, password), 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID');
   security.second_product_same_cac = 'ORGANIZATION_REVIEW_REQUIRED';
 
   // Start's race with the governed path: a governed organization application
@@ -701,7 +733,8 @@ try {
   assert.equal(qoreidCacLookups.length, lookupsBeforeRace, 'A start conflict reached QoreID');
   await completion.settleDeliveries();
   assert.equal(recipients.length, deliveriesBeforeRace, 'A start conflict sent an email code');
-  assert.deepEqual(await applicationCharges(RACE_NETWORK), {}, 'A start conflict charged the application quota');
+  assert.deepEqual(await applicationCharges(RACE_NETWORK), { hour: 2, day: 2 },
+    'A start conflict was not charged the application quota (R4)');
   security.start_governed_race = 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW';
 
   // 11 and the owner's second sitting. The first sitting verifies the email
@@ -735,7 +768,9 @@ try {
   await owner.query(`update identity.organization_profile_completion_challenges
     set created_at = created_at - interval '2 minutes'
     where application_id = (select id from identity.organization_applications where cac_registration_number=$1)`, [cacB]);
-  const resumedAgain = await start(enrollment({ cacRegistrationNumber: cacB, administratorEmail: emailB }));
+  // R6: the sitting that proves the mailbox sends another name and type.
+  const resumedAgain = await start(enrollment({ cacRegistrationNumber: cacB, administratorEmail: emailB,
+    administratorName: 'Dr Ada Obi', organizationType: 'hospital' }));
   assert.equal(resumedAgain.status, 200, `second resume failed: ${JSON.stringify(resumedAgain.body)}`);
   assert.equal(qoreidCacLookups.length, lookupsBeforeResume, 'Verified evidence was looked up again');
   const sittingTwo = await verify({ challengeId: resumedAgain.body.challengeId,
@@ -745,8 +780,15 @@ try {
   const activatedB = await activate(sittingTwoCookie, password);
   assert.equal(activatedB.status, 200, `second sitting activation failed: ${JSON.stringify(activatedB.body)}`);
   assert.equal(activatedB.body.actor.accountId, activatedB.body.accountId);
+  assert.deepEqual((await owner.query(`select a.display_name, s.full_name, app.administrator_name, app.organization_type
+      from auth.accounts a join identity.staff s on s.account_id = a.id
+      join identity.organization_applications app on app.first_admin_account_id = a.id where a.id=$1`,
+  [activatedB.body.accountId])).rows, [{ display_name: 'Dr Ada Obi', full_name: 'Dr Ada Obi',
+    administrator_name: 'Dr Ada Obi', organization_type: 'hospital' }],
+  'The account did not keep the details sent with the code that proved the mailbox');
+  session.details_from_proving_code = { administratorName: 'Dr Ada Obi', organizationType: 'hospital' };
   expectProblem(await activate(sittingOneCookie, password), 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID');
-  assert.deepEqual(await applicationCharges(MAIN), { hour: 5, day: 5 }, 'Each start charges the application quota once');
+  assert.deepEqual(await applicationCharges(MAIN), { hour: 7, day: 7 }, 'Each start charges the application quota once');
   session.resume = { qoreidLookups: 0, cacQuotaCharged: false, newCode: true, activation: 200,
     firstSittingSessionAfterActivation: 401 };
 
@@ -799,6 +841,11 @@ try {
     administratorEmail: email('v6-7') }), '2001:db8:aa:bc::1');
   assert.equal(otherPrefix.status, 200, `another /64: ${JSON.stringify(otherPrefix.body)}`);
   quota.ipv6_prefix_hourly_limit = { prefix: 64, limit: 5, refusedOnAttempt: 6, status: 429 };
+  // R5: the public application quota is charged to the /64 too, never to the address.
+  assert.deepEqual(await applicationCharges('2001:db8:aa:bb::/64'), { hour: 6, day: 6 });
+  assert.deepEqual(await applicationCharges('2001:db8:aa:bb::1'), {});
+  assert.deepEqual(await applicationCharges('2001:db8:aa:bc::/64'), { hour: 1, day: 1 });
+  quota.ipv6_application_quota = { key: '/64', charges: 6 };
 
   // A8 with C9: an unactivated application holds its CAC and product for 24
   // hours. Within them another email is sent to review; after them the next
@@ -821,6 +868,22 @@ try {
       set created_at = created_at - interval '25 hours'
     where cac_registration_number=$1 and administrator_email=$2 returning id, row_version`,
   [cacLapse, emailSquatter])).rows[0];
+  // R3: the squatter's own email resumes its stale application without
+  // renewing it, and its network cannot take the CAC over with another email
+  // (that attempt changes nothing); only someone else's submit lapses it.
+  const lookupsBeforeSquatterResume = qoreidCacLookups.length;
+  const squatterResumed = await start(enrollment({ cacRegistrationNumber: cacLapse, administratorEmail: emailSquatter }),
+    '198.51.100.30');
+  assert.equal(squatterResumed.status, 200, `squatter resume failed: ${JSON.stringify(squatterResumed.body)}`);
+  expectProblem(await start(enrollment({ cacRegistrationNumber: cacLapse, administratorEmail: email('squatter-two') }),
+    '198.51.100.30'), 409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
+  assert.equal(qoreidCacLookups.length, lookupsBeforeSquatterResume, 'A squatter resume reached QoreID');
+  assert.deepEqual((await owner.query(`select status, row_version, created_at < clock_timestamp() - interval '24 hours' stale
+      from identity.organization_applications where id=$1`, [stale.id])).rows[0],
+  { status: 'ready_for_review', row_version: stale.row_version, stale: true },
+  'The squatter renewed its hold, or its network lapsed it');
+  lapse.own_email_resumes_without_renewal = true;
+  lapse.own_network_new_email = 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW';
   const freed = await start(enrollment({ cacRegistrationNumber: cacLapse, administratorEmail: emailOwner }), '198.51.100.31');
   assert.equal(freed.status, 200, `start after the lapse failed: ${JSON.stringify(freed.body)}`);
   assert.equal(qoreidCacLookups.at(-1), cacLapse, 'The new application was not verified with QoreID');
@@ -847,6 +910,206 @@ try {
   lapse.within_window_other_email = 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW';
   lapse.after_window = { previous: 'rejected', challengesInvalidated: true, audited: true,
     previousSession: 401, newApplication: 'activated' };
+
+  // R2: support releases a fraudulent self sign-up. Say the owner's sign-up
+  // above was an impostor's: support suspends the facility and disables the
+  // account with the existing commands, then releases it, and the real
+  // company signs up the same CAC and product.
+  const identityReviewer = await standalone('identity-review', ['identity_review_admin']);
+  const facilitiesPath = '/admin/self-service-facilities';
+  const impostor = (await owner.query(`select id, row_version from identity.organization_applications
+    where organization_id=$1`, [activatedLapse.body.organizationId])).rows[0];
+  const releasePath = `${facilitiesPath}/${impostor.id}/release`;
+  const releaseReason = 'Impostor confirmed: the administrator email is not the company';
+  expectProblem(await adminPost(superAdmin, releasePath, { reason: releaseReason },
+    { 'If-Match': `"${impostor.row_version}"` }), 409, 'SELF_SERVICE_FACILITY_RELEASE_REQUIRES_SUSPENSION');
+  expectProblem(await adminPost(identityReviewer, releasePath, { reason: releaseReason },
+    { 'If-Match': `"${impostor.row_version}"` }), 403, 'PERMISSION_DENIED');
+  const facilityVersion = (await owner.query('select row_version from identity.facilities where id=$1',
+    [activatedLapse.body.facilityId])).rows[0].row_version;
+  const suspended = await adminPost(superAdmin, `/admin/facilities/${activatedLapse.body.facilityId}/status`,
+    { status: 'suspended', reason: releaseReason },
+    { 'If-Match': `"${facilityVersion}"`, 'Idempotency-Key': `verifier-suspend-${randomUUID()}` });
+  assert([200, 201].includes(suspended.status), `suspending failed: ${JSON.stringify(suspended.body)}`);
+  const accountVersion = (await owner.query('select row_version from auth.accounts where id=$1',
+    [activatedLapse.body.accountId])).rows[0].row_version;
+  const disabled = await adminPost(superAdmin, `/admin/principals/${activatedLapse.body.accountId}/status`,
+    { status: 'disabled', reason: releaseReason },
+    { 'If-Match': `"${accountVersion}"`, 'Idempotency-Key': `verifier-disable-${randomUUID()}` });
+  assert([200, 201].includes(disabled.status), `disabling failed: ${JSON.stringify(disabled.body)}`);
+  expectProblem(await adminPost(superAdmin, releasePath, { reason: releaseReason },
+    { 'If-Match': `"${Number(impostor.row_version) + 1}"` }), 409, 'VERSION_CONFLICT');
+  const released = await adminPost(superAdmin, releasePath, { reason: `  ${releaseReason}  ` },
+    { 'If-Match': `"${impostor.row_version}"` });
+  assert.equal(released.status, 200, `release failed: ${JSON.stringify(released.body)}`);
+  assert.deepEqual(Object.keys(released.body).sort(), ['applicationId', 'releasedAt', 'version']);
+  assert.equal(released.body.version, Number(impostor.row_version) + 1);
+  expectProblem(await adminPost(superAdmin, releasePath, { reason: releaseReason },
+    { 'If-Match': `"${released.body.version}"` }), 409, 'SELF_SERVICE_FACILITY_ALREADY_RELEASED');
+  assert.deepEqual((await owner.query(`select app.status, app.self_service_release_reason reason,
+      app.self_service_released_by_account_id releaser, o.active organization_active,
+      o.name = 'Released self sign-up ' || replace(o.id::text, '-', '') organization_renamed,
+      (select count(*)::int from identity.organization_cac_registrations c where c.cac_registration_number=$2) bindings,
+      (select string_agg(p.status, ',') from identity.organization_products p where p.organization_id=o.id) products,
+      (select count(*)::int from auth.account_roles r where r.account_id=app.first_admin_account_id
+        and r.revoked_at is null) live_roles
+    from identity.organization_applications app join identity.organizations o on o.id=app.organization_id
+    where app.id=$1`, [impostor.id, cacLapse])).rows,
+  [{ status: 'rejected', reason: releaseReason, releaser: superAdmin.accountId, organization_active: false,
+    organization_renamed: true, bindings: 0, products: 'suspended', live_roles: 0 }]);
+  assert.deepEqual((await owner.query(`select actor_type, actor_account_id, facility_id, organization_id, reason
+    from audit.events where action='admin.self-service-facility.release'`)).rows,
+  [{ actor_type: 'platform', actor_account_id: superAdmin.accountId, facility_id: null, organization_id: null,
+    reason: releaseReason }]);
+  // The released email, or its network, cannot reopen the CAC and product for 7 days.
+  expectProblem(await start(enrollment({ cacRegistrationNumber: cacLapse, administratorEmail: emailOwner }),
+    '198.51.100.33'), 409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
+  expectProblem(await start(enrollment({ cacRegistrationNumber: cacLapse, administratorEmail: email('owner-two') }),
+    '198.51.100.31'), 409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
+  // The real company signs up the same CAC and product, with its legal name.
+  const emailReal = email('real-company');
+  const lookupsBeforeReal = qoreidCacLookups.length;
+  const realStarted = await start(enrollment({ cacRegistrationNumber: cacLapse, administratorEmail: emailReal,
+    administratorName: 'Real Company Administrator', organizationType: 'hospital' }), '198.51.100.34');
+  assert.equal(realStarted.status, 200, `the real company's start failed: ${JSON.stringify(realStarted.body)}`);
+  assert.deepEqual(qoreidCacLookups.slice(lookupsBeforeReal), [cacLapse]);
+  const realVerified = await verify({ challengeId: realStarted.body.challengeId,
+    code: await codeFor(realStarted.body.challengeId) });
+  assert.equal(realVerified.status, 200);
+  const activatedReal = await activate(cookies(realVerified).find(value => value.startsWith('hid_provider_enrollment=')),
+    password);
+  assert.equal(activatedReal.status, 200, `the real company's activation failed: ${JSON.stringify(activatedReal.body)}`);
+  assert.deepEqual((await owner.query(`select o.name, o.active, c.organization_id = o.id bound
+      from identity.organizations o join identity.organization_cac_registrations c on c.cac_registration_number=$2
+    where o.id=$1`, [activatedReal.body.organizationId, cacLapse])).rows,
+  [{ name: `Runtime Clinic ${cacLapse} Ltd`, active: true, bound: true }]);
+  review.release = { requiresSuspension: 409, identityReviewer: 403, staleVersion: 409, status: 200, again: 409,
+    bindingRemoved: true, organizationRenamed: true, releasedEmailOrNetwork: 409, realCompanyActivated: 200 };
+
+  // R3: support sees the open self-service applications, oldest first, and
+  // closes one that holds a company's CAC; its email and network then cannot
+  // reopen it for 7 days, while the real company can.
+  const openPath = '/admin/self-service-applications';
+  const cacSquat = 'RC9900063602'; const emailSquat = email('squat'); const SQUAT_NETWORK = '198.51.100.35';
+  const squatStarted = await start(enrollment({ cacRegistrationNumber: cacSquat, administratorEmail: emailSquat }),
+    SQUAT_NETWORK);
+  assert.equal(squatStarted.status, 200, `squat start failed: ${JSON.stringify(squatStarted.body)}`);
+  const squatApplication = (await owner.query(`select id, row_version, created_at from identity.organization_applications
+    where cac_registration_number=$1`, [cacSquat])).rows[0];
+  const openListed = await adminGet(identityReviewer, openPath);
+  assert.equal(openListed.status, 200, `open list failed: ${JSON.stringify(openListed.body)}`);
+  const submittedTimes = openListed.body.items.map(item => Date.parse(item.submittedAt));
+  assert.deepEqual(submittedTimes, [...submittedTimes].sort((left, right) => left - right), 'The open list is not oldest first');
+  assert.deepEqual(openListed.body.items.find(item => item.applicationId === squatApplication.id), {
+    applicationId: squatApplication.id, version: Number(squatApplication.row_version), productCode: 'ehr',
+    organizationType: 'clinic', cacHint: 'RC********02', organizationName: `Runtime Clinic ${cacSquat} Ltd`,
+    administratorName: 'Synthetic Provider Admin', administratorEmail: emailSquat, status: 'ready_for_review',
+    verificationResult: 'verified', emailVerified: false, submittedAt: squatApplication.created_at.toISOString(),
+    lapsesAt: new Date(squatApplication.created_at.getTime() + 24 * 3600 * 1000).toISOString() });
+  assert(!openListed.body.items.some(item => item.applicationId === impostor.id), 'A released application is listed as open');
+  const rejectPath = `${openPath}/${squatApplication.id}/reject`;
+  const rejectReason = 'Holds a company CAC with an unrelated email';
+  expectProblem(await adminPost(superAdmin, rejectPath, { reason: rejectReason }), 428, 'IF_MATCH_REQUIRED');
+  expectProblem(await adminPost(identityReviewer, rejectPath, { reason: rejectReason },
+    { 'If-Match': `"${squatApplication.row_version}"` }), 403, 'PERMISSION_DENIED');
+  expectProblem(await adminPost(superAdmin, rejectPath, { reason: rejectReason },
+    { 'If-Match': `"${Number(squatApplication.row_version) + 1}"` }), 409, 'VERSION_CONFLICT');
+  const rejected = await adminPost(superAdmin, rejectPath, { reason: rejectReason },
+    { 'If-Match': `"${squatApplication.row_version}"` });
+  assert.equal(rejected.status, 200, `reject failed: ${JSON.stringify(rejected.body)}`);
+  assert.deepEqual(Object.keys(rejected.body).sort(), ['applicationId', 'rejectedAt', 'version']);
+  expectProblem(await adminPost(superAdmin, rejectPath, { reason: rejectReason },
+    { 'If-Match': `"${rejected.body.version}"` }), 404, 'SELF_SERVICE_APPLICATION_NOT_FOUND');
+  assert(!(await adminGet(superAdmin, openPath)).body.items.some(item => item.applicationId === squatApplication.id));
+  assert.equal(await count(`select count(*)::int n from identity.organization_profile_completion_challenges
+    where application_id=$1 and invalidated_at is null`, [squatApplication.id]), 0, 'The rejected application kept a code');
+  assert.deepEqual((await owner.query(`select actor_type, actor_account_id, reason from audit.events
+    where action='admin.self-service-application.reject'`)).rows,
+  [{ actor_type: 'platform', actor_account_id: superAdmin.accountId, reason: rejectReason }]);
+  expectProblem(await start(enrollment({ cacRegistrationNumber: cacSquat, administratorEmail: emailSquat }),
+    '198.51.100.36'), 409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
+  expectProblem(await start(enrollment({ cacRegistrationNumber: cacSquat, administratorEmail: email('squat-two') }),
+    SQUAT_NETWORK), 409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
+  const squatFreed = await start(enrollment({ cacRegistrationNumber: cacSquat, administratorEmail: email('squat-real') }),
+    '198.51.100.37');
+  assert.equal(squatFreed.status, 200, `the real company could not start: ${JSON.stringify(squatFreed.body)}`);
+  review.open_applications = { list: 'oldest first', identityReviewer: 'list only', reject: 200, missingIfMatch: 428,
+    staleVersion: 409, again: 404, rejectedEmailOrNetwork: 409, realCompany: 200 };
+
+  // The database's own gate, driven through Identity (R11). A request passes
+  // Identity's gate, then waits behind a lock the verifier holds; the control
+  // is closed meanwhile with the admin command; once released, the
+  // database's own platform.require_control_enabled refuses it: 423, nothing
+  // written. For start, the wait is on the public application quota (its
+  // charge commits first, then the submit refuses); for activation, on the
+  // session's row, which the pre-check locks before it reads the control.
+  const controlVersion = async () => (await adminGet(superAdmin, '/admin/controls')).body
+    .find(control => control.controlKey === 'provider_self_service_enabled').version;
+  const setSelfService = async (enabled, reason) => {
+    const changed = await adminPost(superAdmin, '/admin/controls',
+      { controlKey: 'provider_self_service_enabled', enabled, reason }, { 'If-Match': `"${await controlVersion()}"` });
+    assert.equal(changed.status, 201, `control change failed: ${JSON.stringify(changed.body)}`);
+  };
+  const parked = async (lockSql, lockValues, send) => {
+    const holder = await owner.connect();
+    let pending;
+    try {
+      await holder.query('begin');
+      const holderPid = (await holder.query('select pg_backend_pid() pid')).rows[0].pid;
+      await holder.query(lockSql, lockValues);
+      pending = send().then(response => response);
+      const deadline = Date.now() + 10_000;
+      while ((await owner.query('select count(*)::int n from pg_stat_activity where $1 = any(pg_blocking_pids(pid))',
+        [holderPid])).rows[0].n === 0) {
+        assert(Date.now() < deadline, 'The request did not wait behind the lock');
+        await new Promise(resolveWait => setTimeout(resolveWait, 25));
+      }
+      await setSelfService(false, 'Runtime verifier closes sign-up while a request waits');
+      await holder.query('commit');
+    } catch (error) {
+      await holder.query('rollback').catch(() => undefined);
+      throw error;
+    } finally {
+      holder.release();
+    }
+    return pending;
+  };
+  const cacGate = 'RC9900063211';
+  const lookupsBeforeGate = qoreidCacLookups.length;
+  const gateStart = await parked('lock table platform.public_application_quota_counters in share mode', [],
+    () => start(enrollment({ cacRegistrationNumber: cacGate, administratorEmail: email('gate') }), '198.51.100.38'));
+  expectProblem(gateStart, 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
+  assert.equal(await count('select count(*)::int n from identity.organization_applications where cac_registration_number=$1',
+    [cacGate]), 0, 'The database gate let a submit through');
+  assert.equal(qoreidCacLookups.length, lookupsBeforeGate);
+  assert.deepEqual(await applicationCharges('198.51.100.38'), { hour: 1, day: 1 }, 'The charge before the submit did not commit');
+  await setSelfService(true, 'Runtime verifier reopens sign-up');
+  gate.database_gate_start = 423;
+  // A verified session, then its activation parked on the session's row.
+  const cacBudget = 'RC9900063212';
+  const budgetStarted = await start(enrollment({ cacRegistrationNumber: cacBudget, administratorEmail: email('budget') }),
+    '198.51.100.39');
+  assert.equal(budgetStarted.status, 200);
+  const budgetVerified = await verify({ challengeId: budgetStarted.body.challengeId,
+    code: await codeFor(budgetStarted.body.challengeId) });
+  assert.equal(budgetVerified.status, 200);
+  const budgetCookie = cookies(budgetVerified).find(value => value.startsWith('hid_provider_enrollment='));
+  const accountsBeforeGate = await count('select count(*)::int n from auth.accounts');
+  const gateActivation = await parked(
+    'select id from identity.organization_profile_completion_challenges where id=$1 for update',
+    [budgetStarted.body.challengeId], () => activate(budgetCookie, password));
+  expectProblem(gateActivation, 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
+  assert.deepEqual(await sessionState(budgetStarted.body.challengeId), { activation_attempts: 0, ended: false });
+  assert.equal(await count('select count(*)::int n from auth.accounts'), accountsBeforeGate);
+  await setSelfService(true, 'Runtime verifier reopens sign-up');
+  gate.database_gate_activate = 423;
+  // R1: a session whose 5 attempts are spent is ended without a hash: 401.
+  await owner.query('update identity.organization_profile_completion_challenges set activation_attempts=5 where id=$1',
+    [budgetStarted.body.challengeId]);
+  expectProblem(await activate(budgetCookie, password), 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID');
+  assert.deepEqual(await sessionState(budgetStarted.body.challengeId), { activation_attempts: 5, ended: true });
+  assert.equal(await count('select count(*)::int n from auth.accounts'), accountsBeforeGate);
+  session.activation_budget = { attempts: 5, sixth: 401, sessionEnded: true };
 
   // A6 (owner, Q2): 200 accountless CAC lookups a day across every self
   // sign-up, the code default. The day's counter is set to 199: the next lookup
@@ -921,14 +1184,16 @@ try {
   quota.reviewer_path = 'account_quota_unchanged';
 
   // Owner guard (alert + daily review): every activated self-service facility
-  // is listed for support, newest first, until a standalone platform
-  // administrator (no facility membership) marks it reviewed at its version.
-  const facilities = '/admin/self-service-facilities';
+  // is listed for support until a standalone platform administrator (no
+  // facility membership) marks it reviewed at its version; the unreviewed
+  // list is oldest activation first (R12), the reviewed and all lists newest
+  // first, and a released sign-up is listed as handled.
+  const facilities = facilitiesPath;
   const listed = await adminGet(superAdmin, facilities);
   assert.equal(listed.status, 200, `support list failed: ${JSON.stringify(listed.body)}`);
   assert.deepEqual(listed.body.items.map(item => item.facilityId),
-    [activatedLapse.body.facilityId, activatedB.body.facilityId, facilityId], 'Newest activation first');
-  const itemA = listed.body.items.at(-1);
+    [facilityId, activatedB.body.facilityId, activatedReal.body.facilityId], 'Oldest unreviewed activation first');
+  const itemA = listed.body.items[0];
   const applicationA = (await owner.query(`select id, row_version, reviewed_at from identity.organization_applications
     where organization_id=$1`, [organizationId])).rows[0];
   assert.deepEqual(itemA, { applicationId: applicationA.id, version: Number(applicationA.row_version),
@@ -936,9 +1201,13 @@ try {
     facilityName: `Runtime Clinic ${cacA} Ltd`, facilityLifecycleStatus: 'verified', productCode: 'ehr',
     organizationType: 'clinic', cacHint: 'RC********01', administratorName: 'Synthetic Provider Admin',
     administratorEmail: emailA, administratorAccountId: accountId, administratorAccountStatus: 'active',
-    activatedAt: applicationA.reviewed_at.toISOString(), reviewedAt: null, reviewedByAccountId: null, reviewNote: null });
+    activatedAt: applicationA.reviewed_at.toISOString(), reviewedAt: null, reviewedByAccountId: null, reviewNote: null,
+    releasedAt: null, releasedByAccountId: null, releaseReason: null });
   assert.deepEqual((await adminGet(superAdmin, `${facilities}?state=unreviewed`)).body, listed.body);
-  assert.deepEqual((await adminGet(superAdmin, `${facilities}?state=reviewed`)).body, { items: [] });
+  const handled = (await adminGet(superAdmin, `${facilities}?state=reviewed`)).body.items;
+  assert.deepEqual(handled.map(item => [item.facilityId, item.releasedAt, item.releaseReason, item.facilityLifecycleStatus,
+    item.administratorAccountStatus]), [[activatedLapse.body.facilityId, released.body.releasedAt, releaseReason,
+    'suspended', 'disabled']]);
   expectProblem(await adminGet(superAdmin, `${facilities}?state=pending`), 400, 'VALIDATION_FAILED');
   const note = 'Checked: the email domain matches the company website';
   const reviewPath = `${facilities}/${applicationA.id}/review`;
@@ -958,11 +1227,14 @@ try {
   expectProblem(await adminPost(superAdmin, reviewPath, { note }, { 'If-Match': `"${marked.body.version}"` }),
     409, 'SELF_SERVICE_FACILITY_ALREADY_REVIEWED');
   const unreviewedAfter = (await adminGet(superAdmin, facilities)).body.items.map(item => item.facilityId);
-  assert.deepEqual(unreviewedAfter, [activatedLapse.body.facilityId, activatedB.body.facilityId]);
+  assert.deepEqual(unreviewedAfter, [activatedB.body.facilityId, activatedReal.body.facilityId]);
   const reviewedAfter = (await adminGet(superAdmin, `${facilities}?state=reviewed`)).body.items;
-  assert.deepEqual(reviewedAfter.map(item => [item.facilityId, item.reviewNote, item.reviewedByAccountId, item.version,
-    item.reviewedAt]), [[facilityId, note, superAdmin.accountId, marked.body.version, marked.body.reviewedAt]]);
-  assert.equal((await adminGet(superAdmin, `${facilities}?state=all`)).body.items.length, 3);
+  assert.deepEqual(reviewedAfter.map(item => item.facilityId), [activatedLapse.body.facilityId, facilityId],
+    'The reviewed list is not newest activation first');
+  assert.deepEqual(reviewedAfter.filter(item => item.facilityId === facilityId).map(item => [item.reviewNote,
+    item.reviewedByAccountId, item.version, item.reviewedAt]),
+  [[note, superAdmin.accountId, marked.body.version, marked.body.reviewedAt]]);
+  assert.equal((await adminGet(superAdmin, `${facilities}?state=all`)).body.items.length, 4);
   const reviewAudit = (await owner.query(`select actor_type, actor_account_id, facility_id, organization_id,
       outcome, reason, details from audit.events where action='admin.self-service-facility.review'`)).rows;
   assert.deepEqual(reviewAudit, [{ actor_type: 'platform', actor_account_id: superAdmin.accountId, facility_id: null,
@@ -972,14 +1244,13 @@ try {
     and outcome='failure' and actor_account_id=$1`, [superAdmin.accountId]) >= 3, 'Refused reviews were not audited');
   // The permission split of the governed list and reject: an identity reviewer
   // can list but not review; a facility user without platform authority can do neither.
-  const identityReviewer = await standalone('identity-review', ['identity_review_admin']);
   assert.equal((await adminGet(identityReviewer, facilities)).status, 200);
   const applicationB = (await owner.query('select id, row_version from identity.organization_applications where organization_id=$1',
     [activatedB.body.organizationId])).rows[0];
   expectProblem(await adminPost(identityReviewer, `${facilities}/${applicationB.id}/review`,
     { note }, { 'If-Match': `"${applicationB.row_version}"` }), 403, 'PERMISSION_DENIED');
   expectProblem(await adminGet({ cookie: header(cookies(activatedB)) }, facilities), 403, 'PERMISSION_DENIED');
-  review.list = { unreviewed: 3, newestFirst: true, cacHint: itemA.cacHint };
+  review.list = { unreviewed: 3, unreviewedOldestFirst: true, reviewedNewestFirst: true, cacHint: itemA.cacHint };
   review.mark = { by: 'standalone platform_super_admin (no staff record, no membership)', status: 200,
     staleVersion: 409, missingIfMatch: 428, alreadyReviewed: 409, notSelfService: 404, audit: 'platform' };
   review.permissions = { identity_review_admin: 'list only', facility_user: 403 };
@@ -1000,21 +1271,24 @@ try {
   assert.equal(heldVerified.status, 200);
   const closedReason = 'Close facility self sign-up after the runtime verifier';
   const closed = await adminPost(superAdmin, '/admin/controls',
-    { controlKey: 'provider_self_service_enabled', enabled: false, reason: closedReason }, { 'If-Match': '"2"' });
+    { controlKey: 'provider_self_service_enabled', enabled: false, reason: closedReason },
+    { 'If-Match': `"${await controlVersion()}"` });
   assert.equal(closed.status, 201, `closing the control failed: ${JSON.stringify(closed.body)}`);
-  assert.deepEqual(await availability(), { open: false });
+  assert.deepEqual(await availability(), { open: false, reason: 'closed' });
   expectProblem(await activate(cookies(heldVerified).find(value => value.startsWith('hid_provider_enrollment=')), password),
     423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
   expectProblem(await start(enrollment({ cacRegistrationNumber: cacTaken, administratorEmail: emailA }), TAKEN_NETWORK),
     423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
   gate.closed_again = { availability: false, heldSessionActivate: 423, start: 423 };
 
-  assert.equal(await count(`select count(*)::int n from audit.events where action='identity.organization.self-service.activate'`), 3);
+  assert.equal(await count(`select count(*)::int n from audit.events where action='identity.organization.self-service.activate'`), 4);
   process.stdout.write(JSON.stringify({ status: 'passed', runtimeRole, database: rehearsal ? 'rehearsal' : 'loopback',
     flow: ['gate_closed', 'control_opened_by_platform_admin', 'origin', 'turnstile', 'accountless_start',
       'qoreid_cac_lookup', 'verified_cac', 'email_otp', 'otp_verification', 'activation', 'organization', 'facility',
       'org_admin_membership', 'account', 'ehr_product', 'staff_session', 'session_read', 'facility_selection',
-      'password_sign_in', 'resume_without_lookup', 'lapse', 'platform_cap', 'support_review', 'control_closed'],
+      'password_sign_in', 'resume_without_lookup', 'details_from_proving_code', 'activation_precheck', 'lapse',
+      'support_release', 'real_company_after_release', 'open_applications', 'database_gate', 'activation_budget',
+      'platform_cap', 'support_review', 'control_closed'],
     gate, security, quota, session, lapse, review, qoreidCacLookups: qoreidCacLookups.length,
     siteverifyCalls: siteverifyRequests.length }) + '\n');
 } finally {

@@ -11,7 +11,7 @@ import { getEnvironment } from '../config/environment';
 import { ActivateProviderEnrollmentDto, StartProviderEnrollmentDto,
   VerifyProviderEnrollmentDto } from './dto/provider-enrollment.dto';
 import { OrganizationProfileCompletionService } from './organization-profile-completion.service';
-import { ProviderEnrollmentService } from './provider-enrollment.service';
+import { type ProviderEnrollmentAvailability, ProviderEnrollmentService } from './provider-enrollment.service';
 
 const COOKIE_NAME = 'hid_provider_enrollment';
 const COOKIE_PATH = '/api/v1/identity/provider-enrollments';
@@ -42,13 +42,19 @@ export class ProviderEnrollmentController {
     private readonly auth: AuthService,
   ) {}
 
-  /** Whether self sign-up is open: { open }. Never an error; any fault is { open: false }. */
+  /**
+   * Whether self sign-up is open: { open: true }, or { open: false, reason }
+   * with reason 'closed' (switched off or not configured) or 'unavailable'
+   * (the answer could not be determined; try again shortly). Never an error.
+   */
   @Get('availability')
-  async availability(): Promise<{ open: boolean }> {
+  async availability(): Promise<ProviderEnrollmentAvailability> {
     try {
-      return { open: (await this.enrollments.availability()).open === true };
+      const answer = await this.enrollments.availability();
+      if (answer.open === true) return { open: true };
+      return { open: false, reason: answer.reason === 'closed' ? 'closed' : 'unavailable' };
     } catch {
-      return { open: false };
+      return { open: false, reason: 'unavailable' };
     }
   }
 

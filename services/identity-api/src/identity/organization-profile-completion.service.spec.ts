@@ -184,7 +184,8 @@ describe('organization applicant profile completion', () => {
 describe('facility self sign-up activation and its quota (P4)', () => {
   const token = 'A'.repeat(43);
   const password = 'Synthetic-Provider-Password-2026';
-  const liveSession = { rows: [{ application_status: 'ready_for_review' }] };
+  // identity.prepare_self_service_provider_activation's answer for a live session within its budget.
+  const liveSession = { rows: [{ verdict: 'ready' }] };
   const activatedRow = {
     organization_id: 'org-1', facility_id: 'facility-1', account_id: 'account-1', row_version: '7',
     hid_subject: 'org-onboarding:account-1', account_email: 'admin@example.invalid',
@@ -203,27 +204,29 @@ describe('facility self sign-up activation and its quota (P4)', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  it('checks the session, then activates through one runtime command that also returns the login email', async () => {
+  it('runs the pre-check, then activates through one runtime command that also returns the login email', async () => {
     const query = jest.fn().mockResolvedValueOnce(liveSession).mockResolvedValueOnce({ rows: [activatedRow] });
     const { service: completion, database } = service(query);
     await expect(completion.activate(token, password, correlationId))
       .resolves.toEqual({ organizationId: 'org-1', facilityId: 'facility-1', accountId: 'account-1',
         email: 'admin@example.invalid' });
-    // The session check reads; the activation is one command, and nothing is
-    // read after it commits.
+    // The pre-check is its own committed transaction (it charges the
+    // session's attempt); the activation is one command, and nothing is read
+    // after it commits.
     expect(database.withSystemTransaction).toHaveBeenCalledTimes(2);
     expect(query).toHaveBeenCalledTimes(2);
-    expect(query.mock.calls[0]?.[0]).toContain('identity.current_organization_profile_completion($1)');
+    expect(query.mock.calls[0]?.[0]).toContain('identity.prepare_self_service_provider_activation($1)');
     expect(query.mock.calls[1]?.[0]).toContain('identity.activate_self_service_provider_enrollment($1,$2)');
     expect(query.mock.calls[0]?.[1]).toEqual([expect.stringMatching(/^[a-f0-9]{64}$/)]);
     expect(query.mock.calls[1]?.[1]).toEqual([query.mock.calls[0]?.[1]?.[0], expect.stringMatching(/^\$argon2id\$v=19\$m=65536,t=3,p=1\$/)]);
   });
 
-  it('refuses a session that is not live 401 before hashing the password (A9)', async () => {
+  it('refuses a session that is not live, or whose 5 attempts are spent, 401 before hashing the password (A9, R1)', async () => {
     const hash = jest.spyOn(passwordHash, 'hashAccountPassword');
     for (const failure of [
-      () => jest.fn().mockResolvedValueOnce({ rows: [] }),
-      () => jest.fn().mockRejectedValueOnce(Object.assign(new Error('Completion authorization is required'), { code: '42501' })),
+      () => jest.fn().mockResolvedValueOnce({ rows: [{ verdict: 'session_invalid' }] }),
+      () => jest.fn().mockResolvedValueOnce({ rows: [{ verdict: 'attempts_exceeded' }] }),
+      () => jest.fn().mockRejectedValueOnce(Object.assign(new Error('Self-service activation context is required'), { code: '42501' })),
     ]) {
       const query = failure();
       const { service: completion } = service(query);
@@ -241,6 +244,32 @@ describe('facility self sign-up activation and its quota (P4)', () => {
     await expect(completion.activate(token, 'too-short', correlationId))
       .rejects.toMatchObject({ status: 400, code: 'PASSWORD_INVALID' });
     expect(database.withSystemTransaction).not.toHaveBeenCalled();
+    expect(hash).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['email_registered', 409, 'PROVIDER_EMAIL_ALREADY_REGISTERED'],
+    ['cac_bound', 409, 'ORGANIZATION_REVIEW_REQUIRED'],
+    ['name_exists', 409, 'ORGANIZATION_REVIEW_REQUIRED'],
+    ['not_ready', 409, 'ORGANIZATION_REVIEW_REQUIRED'],
+    ['an unknown answer', 503, 'ORGANIZATION_COMPLETION_UNAVAILABLE'],
+  ])('answers the pre-check\'s %s at once, without hashing the password or activating (R1)', async (verdict, status, code) => {
+    const hash = jest.spyOn(passwordHash, 'hashAccountPassword');
+    const query = jest.fn().mockResolvedValueOnce({ rows: verdict === 'an unknown answer' ? [] : [{ verdict }] });
+    await expect(service(query).service.activate(token, password, correlationId)).rejects.toMatchObject({ status, code });
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(hash).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['55000', 'PLATFORM_CONTROL_DISABLED:provider_self_service_enabled'],
+    ['55000', 'PLATFORM_CONTROL_UNAVAILABLE'],
+    ['22023', 'PLATFORM_CONTROL_INVALID'],
+  ])('answers the pre-check\'s %s %s 423 PROVIDER_ENROLLMENT_UNAVAILABLE before hashing', async (code, message) => {
+    const hash = jest.spyOn(passwordHash, 'hashAccountPassword');
+    const query = jest.fn().mockRejectedValueOnce(Object.assign(new Error(message), { code }));
+    await expect(service(query).service.activate(token, password, correlationId))
+      .rejects.toMatchObject({ status: 423, code: 'PROVIDER_ENROLLMENT_UNAVAILABLE' });
     expect(hash).not.toHaveBeenCalled();
   });
 
@@ -320,5 +349,34 @@ describe('facility self sign-up activation and its quota (P4)', () => {
       expect(() => completion.publicApplicationDigest(ip))
         .toThrow(expect.objectContaining({ code: 'APPLICATION_RATE_LIMIT_UNAVAILABLE' }));
     }
+  });
+
+  it('keys a client network\'s public application digest: an IPv4 address as start does, an IPv6 /64 (R5)', () => {
+    const { service: completion } = service(jest.fn());
+    expect(completion.publicApplicationNetworkDigest('203.0.113.44'))
+      .toBe(completion.publicApplicationDigest('203.0.113.44'));
+    const prefix = completion.publicApplicationNetworkDigest('2001:db8:1:2::/64');
+    expect(prefix).toMatch(/^[a-f0-9]{64}$/);
+    expect(prefix).not.toBe(completion.publicApplicationDigest('2001:db8:1:2::1'));
+    for (const network of ['', '2001:db8:1:2::1', '2001:db8::/48', 'not-a-network']) {
+      expect(() => completion.publicApplicationNetworkDigest(network))
+        .toThrow(expect.objectContaining({ code: 'APPLICATION_RATE_LIMIT_UNAVAILABLE' }));
+    }
+  });
+
+  it('sends facility self sign-up\'s code through the self-service command with the requested details (R5, R6)', async () => {
+    const query = jest.fn().mockResolvedValue({ rows: [{ recipient_email: 'admin@example.invalid' }] });
+    const { service: completion } = service(query);
+    const started = await completion.start(input, '203.0.113.44', correlationId, { publicApplicationQuotaCharged: true,
+      selfService: { administratorName: 'Dr Ada Obi', organizationType: 'hospital' } });
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0]?.[0])
+      .toContain('identity.begin_self_service_provider_enrollment($1,$2,$3,$4,$5,$6,$7)');
+    expect(query.mock.calls[0]?.[1]).toEqual(['RC1234567', 'admin@example.invalid', 'ehr', started.challengeId,
+      expect.stringMatching(/^[a-f0-9]{64}$/), 'Dr Ada Obi', 'hospital']);
+    // The governed completion keeps 0056's command.
+    query.mockClear();
+    await completion.start(input, '203.0.113.44', correlationId);
+    expect(query.mock.calls.map(([sql]) => String(sql)).join('\n')).not.toContain('begin_self_service_provider_enrollment');
   });
 });

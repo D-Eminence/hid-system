@@ -207,8 +207,10 @@ describe('ProviderEnrollmentController', () => {
   describe('availability', () => {
     it('reads the service with no Origin, cookie, Turnstile or gate call', async () => {
       await expect(controller.availability()).resolves.toEqual({ open: true });
-      enrollments.availability.mockResolvedValue({ open: false });
-      await expect(controller.availability()).resolves.toEqual({ open: false });
+      enrollments.availability.mockResolvedValue({ open: false, reason: 'closed' });
+      await expect(controller.availability()).resolves.toEqual({ open: false, reason: 'closed' });
+      enrollments.availability.mockResolvedValue({ open: false, reason: 'unavailable' });
+      await expect(controller.availability()).resolves.toEqual({ open: false, reason: 'unavailable' });
       expect(turnstile.verify).not.toHaveBeenCalled();
       expect(enrollments.start).not.toHaveBeenCalled();
     });
@@ -219,9 +221,10 @@ describe('ProviderEnrollmentController', () => {
       ['a 503 problem', () => enrollments.availability.mockRejectedValue(
         new DomainProblem(503, 'PROVIDER_ENROLLMENT_UNAVAILABLE', 'unavailable'))],
       ['a malformed answer', () => enrollments.availability.mockResolvedValue({ open: 'yes' })],
-    ])('answers { open: false } on %s, never an error', async (_label, arrange) => {
+      ['a closed answer without a reason', () => enrollments.availability.mockResolvedValue({ open: false })],
+    ])('answers { open: false, reason: unavailable } on %s, never an error (R10)', async (_label, arrange) => {
       arrange();
-      await expect(controller.availability()).resolves.toEqual({ open: false });
+      await expect(controller.availability()).resolves.toEqual({ open: false, reason: 'unavailable' });
     });
   });
 });

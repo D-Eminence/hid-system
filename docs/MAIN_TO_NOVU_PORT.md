@@ -222,9 +222,17 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
 - A1: `provider_self_service_enabled`, seeded off. `identity.submit_self_service_organization_application`
   and the activation wrapper `identity.activate_self_service_provider_enrollment`
   require it (55000 `PLATFORM_CONTROL_DISABLED:provider_self_service_enabled`),
-  and Identity checks it before any write. The seed lifts FORCE row-level
-  security for its own insert only, as `main`'s 0098 does (the table has no
-  INSERT policy). The control is read from Identity's accountless context
+  and Identity checks it before any write. The table has no INSERT policy, so
+  the seed reads the table's FORCE row-level security setting and, only if it
+  is on, lifts it for its own insert and restores it, as `main`'s 0098 does; a
+  table without FORCE is left without it (review fix R8: turning FORCE on
+  where an operator had lifted it would make every accountless control read
+  fail under an owner that does not bypass row-level security, closing every
+  portal). `services/ehr-api/scripts/test-staging-schema-upgrade.mjs` checks
+  that a release changes no existing table's row-level security or FORCE
+  setting, also from a baseline with FORCE lifted on `platform.control_settings`,
+  where the Identity runtime must still read the controls. The control is read
+  from Identity's accountless context
   exactly as the security guard's portal check reads it, so it needs the same
   owner that can read the table; under a NOBYPASSRLS owner the gate stays
   closed (55000 `PLATFORM_CONTROL_UNAVAILABLE`).
@@ -235,7 +243,10 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   would make the self sign-up gate raise 22023 (closed). Likewise a later
   replacement of `platform.prune_verification_quotas` must keep 0086's two
   counter tables (A4 here is "the 0049 body live at merge, plus 0086's
-  tables"; 0086 refused to run if the live body pruned anything else).
+  tables"; 0086 refused to run if the live body pruned anything else), and a
+  later replacement of `platform.consume_qoreid_quota` must keep 0086's
+  refusal of an unreviewed self-signed-up organization's `existing_cac`
+  lookup (R7; 0086 refused to run unless the live body was 0049's).
 - A4: the prune keeps 0049's body and adds 0086's tables; `main`'s 0085 body
   is not ported (it deletes from a table this branch does not have).
 - A5: the runtime grants are made in 0086 as well as in `runtime-grants.sql`,
@@ -247,28 +258,63 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   Identity reads `PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP` (1–100000, code
   default 200); an invalid value closes the gate instead of stopping Identity.
   `main`'s two-argument command does not exist here.
-- A7 with C8: the public application quota is charged once, in the submit
-  transaction, and not again when the same start sends the email code.
-- A8 with C9 (owner, Q3): an unactivated self-service application lapses 24
-  hours after it was submitted. The next submit for its CAC and product, by
-  any email, on the self-service or the governed path, rejects it (reviewed_at,
+- A7 with C8, and review fixes R4 and R5: the public application quota is
+  charged once per start, in its own committed transaction before the submit,
+  and not again when the same start sends the email code. So a start the
+  submit refuses (409 `PROVIDER_ENROLLMENT_REQUIRES_REVIEW`) also costs one of
+  the 10 an hour and 30 a day. It is keyed by the client network (an IPv4
+  address or an IPv6 /64, the CAC lookup's key), not the raw address, so
+  rotating IPv6 addresses inside one allocation resets neither quota. Owner
+  re-decision available: #81's 409 `PROVIDER_ENROLLMENT_REQUIRES_REVIEW` tells
+  any caller who passes Turnstile whether a CAC and product already has a
+  governed or self-service application or is registered (the governed public
+  intake answers the same `{accepted}` whatever exists); the quota now bounds
+  such probes, and a uniform answer with no code sent is the alternative.
+- R5: at most 10 emailed codes a day reach one administrator email across
+  every self-service application (`identity.begin_self_service_provider_enrollment`,
+  on top of 0056's 60 seconds, 5 an hour and 15 a day per application); past it
+  start still answers `accepted` and sends nothing.
+- R6: the administrator name and organization type the activated account,
+  staff record and application keep are those sent with the request whose
+  emailed code opened the activating session (stored on its challenge), not
+  those of whichever request opened the application; `main` keeps the
+  first submitter's.
+- A8 with C9 (owner, Q3), and review fix R3: an unactivated self-service
+  application lapses 24 hours after it was submitted. The next submit for its
+  CAC and product by another email, on the self-service or the governed path
+  (the stale application's own email resumes it instead, without renewing
+  it, so a squatter cannot extend its hold), rejects it (reviewed_at,
   the reason "Self-service application lapsed: not activated within 24 hours of
   submission", no reviewer, row_version bumped), invalidates its email codes and
   completion sessions, audits `identity.organization.self-service.lapse` and
   opens a new application. An activated application and a governed application
   never lapse. `main` never expires these rows. The governed submit still
   returns a fresh (under 24 hours) self-service application for the same CAC
-  and product, as before (follow-up below).
-- A9: activation checks the completion session with
-  `identity.current_organization_profile_completion` before hashing the
-  password.
+  and product, as before (follow-up below). R3: the application keeps the keyed
+  digest of the network that opened it, and for 7 days after a self-service
+  application is closed (lapsed, rejected by support or released by support)
+  a new application for its CAC and product is refused (409, as any conflict)
+  to its email and to its network.
+- A9 with review fix R1: before hashing the password, activation runs
+  `identity.prepare_self_service_provider_activation` in its own committed
+  transaction. It refuses a token that names no live session (401), charges
+  one of the session's 5 attempts (the 6th ends it, 401), and answers an
+  activation that can never succeed (email already registered 409
+  `PROVIDER_EMAIL_ALREADY_REGISTERED`; CAC bound, legal name used or the
+  application not a ready self-service one, 409 `ORGANIZATION_REVIEW_REQUIRED`)
+  at once, ending the session. So a session costs at most 5 argon2id hashes,
+  and an activation certain to fail costs none. It reads the control after
+  locking the session.
 - A10: activation sets the account's `email_verified_at` and
   `password_changed_at`.
 - A11: submit takes the governed submit's lock key `org-application:` and
   activation the governed approval's `org-cac:`, so the two paths serialize on
   one CAC (`main` uses `self-service-org-` keys).
-- A12: `GET /api/v1/identity/provider-enrollments/availability` answers
-  `{ open }`, and `{ open: false }` on any error.
+- A12 with review fix R10: `GET /api/v1/identity/provider-enrollments/availability`
+  answers `{ open: true }`, `{ open: false, reason: 'closed' }` when sign-up is
+  switched off or not configured, and `{ open: false, reason: 'unavailable' }`
+  on any fault, never an error, so the page can say "try again shortly" rather
+  than "not open" during an outage.
 - A13: the gate also requires `provider_portal_enabled` on and
   `maintenance_mode` off, which the security guard does not enforce on public
   routes.
@@ -298,12 +344,42 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   standalone platform administrator can use them, as 0064's commands; the
   review is audited as the platform administrator
   (`admin.self-service-facility.review`). Suspending the facility and
-  disabling the account use the existing commands. `main` has no review.
+  disabling the account use the existing commands. The unreviewed list is
+  oldest activation first, so none is hidden behind 200 newer ones (R12); the
+  reviewed and all lists are newest first. `main` has no review.
+- R2: support's release of a fraudulent sign-up,
+  `identity.admin_release_self_service_facility` (`platform.facility.manage`),
+  served as `POST /api/v1/admin/self-service-facilities/:applicationId/release`
+  (`If-Match`, `{ reason }`). Suspend and disable stop an impostor but leave
+  the CAC bound, the product registered, the application approved and the
+  organization holding the company's legal name, so the real company could
+  neither sign up nor be approved by review. Once every facility of the
+  organization is inactive and the administrator's account is disabled
+  (otherwise 409 `SELF_SERVICE_FACILITY_RELEASE_REQUIRES_SUSPENSION`), the
+  release closes the application, removes the CAC binding, suspends the
+  products, deactivates the organization and renames it "Released self
+  sign-up <id>" (out of the legal-name checks), revokes the facility roles and
+  memberships, deactivates the staff record and audits
+  `admin.self-service-facility.release`; the list shows it as handled.
+- R3: support's list of open self-service applications,
+  `identity.admin_list_open_self_service_applications` (`GET
+  /api/v1/admin/self-service-applications`, oldest first) and its rejection,
+  `identity.admin_reject_self_service_application` (`POST
+  /api/v1/admin/self-service-applications/:applicationId/reject`), both
+  without a facility membership.
+- R7 (CRITIC C13): an organization that signed itself up makes no
+  organization CAC lookup (`POST /api/v1/identity/organizations/verification/cac/:context`,
+  403 `PERMISSION_DENIED`, nothing charged) until support has reviewed it, so
+  an unreviewed facility cannot spend paid lookups outside the 200-a-day cap.
+  0086 replaces `platform.consume_qoreid_quota` with 0049's body plus that
+  refusal.
 - The ported database suites run from `services/ehr-api/test/database/`
   (`provider-self-enrollment`, `provider-self-service-cac-quota`,
   `provider-self-service-control`, `provider-self-service-lapse`,
   `self-service-facility-review` and `provider-self-service-rollback`, which
-  runs the previous Identity's own SQL on the new schema).
+  runs the previous Identity's own SQL on the new schema), with the review
+  fixes' `provider-self-service-activation`, `self-service-facility-release`
+  and `self-service-open-applications`.
 - `services/identity-api/scripts/verify-provider-enrollment-runtime.mjs` (main's
   verifier rewritten for this branch) runs in the migration rehearsal as
   `hid_identity_api_runtime`, with local stubs for Siteverify, QoreID and
@@ -316,7 +392,15 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   #81's answers; the lapse after 24 hours frees the CAC; the 200-a-day platform
   cap refuses the 201st lookup; support's list and review as a standalone
   administrator, with its version conflict; and closing the control refuses a
-  held session. Unlike `main`'s, it can also run against a disposable copy of a
+  held session. It also proves the review fixes: the database's own gate
+  through Identity (a start parked on the public application quota, and an
+  activation parked on its session's row, while the control is closed, answer
+  423 from the database's refusal with nothing written; R11), the activation
+  pre-check and its 5-attempt budget, the details of the code that proved the
+  mailbox, the charge of a refused start and the IPv6 /64 key, the squatter's
+  own resume and network, support's release followed by the real company's
+  sign-up, the open-application list and rejection, and availability's
+  reason. Unlike `main`'s, it can also run against a disposable copy of a
   database on a loopback test cluster (`HID_PROVIDER_RUNTIME_LOCAL_CLUSTER=loopback`,
   `NODE_ENV=test`), which proves the same flow on a database built in
   production's order.
@@ -326,14 +410,17 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
 - Follow-ups, each its own decision: the governed submit still attaches a
   governed applicant to a fresh self-service application for the same CAC and
   product, and the admin application list does not show `approval_mode`; the
-  governed admin commands still need a facility membership (`0046`); no
-  command releases a bound CAC after a fraud finding; a self-signed-up
-  facility has one user; staff MFA, once ported, must say what it does to
-  these administrators; and an activated administrator holds
-  `organization.manage`, so it can also run the existing organization CAC
-  check (`POST /api/v1/identity/organizations/verification/cac/:context`),
-  which is charged to that account's 0049 quota (5 an hour, 15 a day, 10 a day
-  per organization) and not to the 200-a-day self sign-up cap (CRITIC C13).
+  governed admin commands still need a facility membership (`0046`), so a
+  governed public application can hold a CAC and product until an
+  administrator with a membership rejects it; a self-signed-up facility has
+  one user; staff MFA, once ported, must say what it does to these
+  administrators; once support has reviewed a self-signed-up organization,
+  its administrator's organization CAC check is charged to that account's
+  0049 quota (5 an hour, 15 a day, 10 a day per organization), outside the
+  200-a-day self sign-up cap; a released impostor's account keeps its email,
+  so that email cannot become another facility's administrator; and the
+  website's console needs the release and open-application pages, and the
+  sign-up page needs availability's reason.
 
 ## Not ported, and why
 
@@ -486,7 +573,11 @@ Still open, with what each one holds back:
   declaration, after the read-only preflights (no closed organization
   application without a review reason, reviewer or review time, which 0086
   refuses; one reviewer check and one control-key check; the owner of
-  `platform.control_settings` and `platform.control_enabled`), then opens the
+  `platform.control_settings` and `platform.control_enabled`; and
+  `platform.control_settings`'s row-level security and FORCE settings with its
+  owner's `rolsuper` and `rolbypassrls`: stop and find out why if row-level
+  security and FORCE are both on and the owner has neither, since production's
+  accountless control reads could not then work as they do), then opens the
   control with the audited admin command.
 - Emergency contacts (ported above, switched off): storing contacts' names and
   destinations, the alert wording, production delivery and the pilot accounts.

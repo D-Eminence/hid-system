@@ -16,7 +16,8 @@ import type { ActorContext, HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { AdminOrganizationApplicationsController } from './organization-applications.controller';
-import { AdminSelfServiceFacilitiesController } from './self-service-facilities.controller';
+import { AdminSelfServiceApplicationsController,
+  AdminSelfServiceFacilitiesController } from './self-service-facilities.controller';
 import { SelfServiceFacilitiesService } from './self-service-facilities.service';
 
 const applicationId = 'a0000000-0000-4000-8000-000000000086';
@@ -28,6 +29,7 @@ const row = {
   administrator_email: 'provider@example.invalid', administrator_account_id: 'd0000000-0000-4000-8000-000000000086',
   administrator_account_status: 'active', activated_at: new Date('2026-10-24T09:15:00.000Z'),
   reviewed_at: null, reviewed_by_account_id: null, review_note: null,
+  released_at: null, released_by_account_id: null, release_reason: null,
 };
 const item = {
   applicationId, version: 5, organizationId: row.organization_id, organizationName: 'Synthetic Clinic Ltd',
@@ -35,7 +37,20 @@ const item = {
   productCode: 'ehr', organizationType: 'hospital', cacHint: 'RC…4567', administratorName: 'Synthetic Provider Admin',
   administratorEmail: 'provider@example.invalid', administratorAccountId: row.administrator_account_id,
   administratorAccountStatus: 'active', activatedAt: '2026-10-24T09:15:00.000Z', reviewedAt: null,
-  reviewedByAccountId: null, reviewNote: null,
+  reviewedByAccountId: null, reviewNote: null, releasedAt: null, releasedByAccountId: null, releaseReason: null,
+};
+const openRow = {
+  application_id: applicationId, row_version: '3', product_code: 'ehr', organization_type: 'hospital',
+  cac_hint: 'RC…4567', organization_name: 'Synthetic Clinic Ltd', administrator_name: 'Squatter',
+  administrator_email: 'squatter@example.invalid', application_status: 'ready_for_review',
+  verification_result: 'verified', email_verified: true,
+  submitted_at: new Date('2026-10-24T08:00:00.000Z'), lapses_at: new Date('2026-10-25T08:00:00.000Z'),
+};
+const openItem = {
+  applicationId, version: 3, productCode: 'ehr', organizationType: 'hospital', cacHint: 'RC…4567',
+  organizationName: 'Synthetic Clinic Ltd', administratorName: 'Squatter', administratorEmail: 'squatter@example.invalid',
+  status: 'ready_for_review', verificationResult: 'verified', emailVerified: true,
+  submittedAt: '2026-10-24T08:00:00.000Z', lapsesAt: '2026-10-25T08:00:00.000Z',
 };
 
 // A standalone platform administrator: platform authority, no facility membership.
@@ -65,6 +80,64 @@ describe('self-signed-up facility review: service', () => {
     expect(answer.items[0]).toEqual(item);
     expect(answer.items[1]).toMatchObject({ applicationId: 'other', version: 9, reviewedAt: '2026-10-24T12:00:00.000Z',
       reviewedByAccountId: 'reviewer', reviewNote: 'Checked the email domain' });
+  });
+
+  it('lists a released sign-up with its release (R2)', async () => {
+    const query = jest.fn().mockResolvedValue({ rows: [{ ...row, released_at: new Date('2026-10-25T10:00:00.000Z'),
+      released_by_account_id: 'releaser', release_reason: 'Impostor confirmed' }] });
+    const answer = await serviceWith(query).service.list(context, 'reviewed');
+    expect(answer.items[0]).toEqual({ ...item, releasedAt: '2026-10-25T10:00:00.000Z',
+      releasedByAccountId: 'releaser', releaseReason: 'Impostor confirmed' });
+  });
+
+  it('releases a sign-up with the expected version and answers the new version (R2)', async () => {
+    const query = jest.fn().mockResolvedValue({ rows: [{ application_id: applicationId,
+      released_at: new Date('2026-10-25T10:00:00.000Z'), row_version: '7' }] });
+    const { service, database } = serviceWith(query);
+    await expect(service.release(context, applicationId, 6, 'Impostor confirmed by support'))
+      .resolves.toEqual({ applicationId, releasedAt: '2026-10-25T10:00:00.000Z', version: 7 });
+    expect(database.withPlatformTransaction).toHaveBeenCalledWith(context, expect.any(Function));
+    expect(query).toHaveBeenCalledWith('select * from identity.admin_release_self_service_facility($1,$2,$3)',
+      [applicationId, 6, 'Impostor confirmed by support']);
+  });
+
+  it.each([
+    ['P0002', 'x', 404, 'SELF_SERVICE_FACILITY_NOT_FOUND'],
+    ['40001', 'x', 409, 'VERSION_CONFLICT'],
+    ['23505', 'SELF_SERVICE_FACILITY_ALREADY_RELEASED', 409, 'SELF_SERVICE_FACILITY_ALREADY_RELEASED'],
+    ['23514', 'SELF_SERVICE_FACILITY_RELEASE_REQUIRES_SUSPENSION', 409, 'SELF_SERVICE_FACILITY_RELEASE_REQUIRES_SUSPENSION'],
+    ['23514', 'new row violates check constraint', 503, 'SELF_SERVICE_FACILITY_UNAVAILABLE'],
+    ['22023', 'x', 400, 'SELF_SERVICE_FACILITY_REQUEST_INVALID'],
+    ['42501', 'x', 403, 'PERMISSION_DENIED'],
+  ])('maps the release command\'s %s (%s) to %i %s', async (code, message, status, answer) => {
+    const { service } = serviceWith(jest.fn().mockRejectedValue(Object.assign(new Error(message), { code })));
+    await expect(service.release(context, applicationId, 6, 'Impostor confirmed by support'))
+      .rejects.toMatchObject({ status, code: answer });
+  });
+
+  it('lists open self-service applications and rejects one at its version (R3)', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [openRow] }).mockResolvedValueOnce({ rows: [{
+      application_id: applicationId, rejected_at: new Date('2026-10-24T09:00:00.000Z'), row_version: '4' }] });
+    const { service, database } = serviceWith(query);
+    await expect(service.listOpenApplications(context)).resolves.toEqual({ items: [openItem] });
+    expect(database.withPlatformTransaction).toHaveBeenNthCalledWith(1, context, expect.any(Function), { readOnly: true });
+    expect(query).toHaveBeenNthCalledWith(1, 'select * from identity.admin_list_open_self_service_applications()');
+    await expect(service.rejectOpenApplication(context, applicationId, 3, 'Squat on a real company'))
+      .resolves.toEqual({ applicationId, rejectedAt: '2026-10-24T09:00:00.000Z', version: 4 });
+    expect(query).toHaveBeenNthCalledWith(2, 'select * from identity.admin_reject_self_service_application($1,$2,$3)',
+      [applicationId, 3, 'Squat on a real company']);
+  });
+
+  it.each([
+    ['P0002', 404, 'SELF_SERVICE_APPLICATION_NOT_FOUND'],
+    ['40001', 409, 'VERSION_CONFLICT'],
+    ['22023', 400, 'SELF_SERVICE_FACILITY_REQUEST_INVALID'],
+    ['42501', 403, 'PERMISSION_DENIED'],
+    ['23514', 503, 'SELF_SERVICE_FACILITY_UNAVAILABLE'],
+  ])('maps the reject command\'s %s to %i %s', async (code, status, answer) => {
+    const { service } = serviceWith(jest.fn().mockRejectedValue(Object.assign(new Error('private'), { code })));
+    await expect(service.rejectOpenApplication(context, applicationId, 3, 'Squat on a real company'))
+      .rejects.toMatchObject({ status, code: answer });
   });
 
   it('records a review with the expected version and answers the new version', async () => {
@@ -126,6 +199,20 @@ describe('self-signed-up facility review: route metadata', () => {
     expect(meta(AUDIT_ACTION, review.list)).toBe('admin.self-service-facilities.list');
     expect(meta(AUDIT_ACTION, review.review)).toBe('admin.self-service-facility.review');
   });
+
+  it('guards the release and the open applications like the list and review (R2, R3)', () => {
+    const open = AdminSelfServiceApplicationsController.prototype;
+    for (const key of [FACILITY_OPTIONAL, AUDIT_FAILURES_ONLY]) {
+      expect(meta(key, AdminSelfServiceApplicationsController)).toBe(true);
+    }
+    expect(meta(PUBLIC_ROUTE, AdminSelfServiceApplicationsController)).toBeUndefined();
+    expect(meta(REQUIRED_PERMISSIONS, review.release)).toEqual(['platform.facility.manage']);
+    expect(meta(REQUIRED_PERMISSIONS, open.list)).toEqual(['platform.identity-review.read']);
+    expect(meta(REQUIRED_PERMISSIONS, open.reject)).toEqual(['platform.facility.manage']);
+    expect(meta(AUDIT_ACTION, review.release)).toBe('admin.self-service-facility.release');
+    expect(meta(AUDIT_ACTION, open.list)).toBe('admin.self-service-applications.list');
+    expect(meta(AUDIT_ACTION, open.reject)).toBe('admin.self-service-application.reject');
+  });
 });
 
 describe('self-signed-up facility review over HTTP, as a standalone platform administrator', () => {
@@ -150,7 +237,7 @@ describe('self-signed-up facility review over HTTP, as a standalone platform adm
     tokens.verify.mockResolvedValue({ actor: standaloneAdmin(allPermissions), claims: {} });
     audit.record.mockResolvedValue(undefined);
     const moduleRef = await Test.createTestingModule({
-      controllers: [AdminSelfServiceFacilitiesController],
+      controllers: [AdminSelfServiceFacilitiesController, AdminSelfServiceApplicationsController],
       providers: [SelfServiceFacilitiesService, { provide: DatabaseService, useValue: database }],
     }).compile();
     app = moduleRef.createNestApplication({ logger: false });
@@ -238,6 +325,53 @@ describe('self-signed-up facility review over HTTP, as a standalone platform adm
         .set('Authorization', 'Bearer synthetic').set('If-Match', '5').send({ note: 'Email domain matches' });
       expect([refused.status, refused.body.code]).toEqual([status, answer]);
     }
+  });
+
+  it('releases a sign-up with If-Match and a trimmed reason (R2)', async () => {
+    query.mockResolvedValue({ rows: [{ application_id: applicationId,
+      released_at: new Date('2026-10-25T10:00:00.000Z'), row_version: '7' }] });
+    const answer = await request(app.getHttpServer()).post(`${base}/${applicationId}/release`)
+      .set('Authorization', 'Bearer synthetic').set('If-Match', '"6"')
+      .send({ reason: '  Impostor confirmed by support  ' });
+    expect(answer.status).toBe(200);
+    expect(answer.body).toEqual({ applicationId, releasedAt: '2026-10-25T10:00:00.000Z', version: 7 });
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('admin_release_self_service_facility($1,$2,$3)'),
+      [applicationId, 6, 'Impostor confirmed by support']);
+    const noVersion = await request(app.getHttpServer()).post(`${base}/${applicationId}/release`)
+      .set('Authorization', 'Bearer synthetic').send({ reason: 'Impostor confirmed by support' });
+    expect([noVersion.status, noVersion.body.code]).toEqual([428, 'IF_MATCH_REQUIRED']);
+    const shortReason = await request(app.getHttpServer()).post(`${base}/${applicationId}/release`)
+      .set('Authorization', 'Bearer synthetic').set('If-Match', '"6"').send({ reason: 'short' });
+    expect([shortReason.status, shortReason.body.code]).toEqual([400, 'VALIDATION_FAILED']);
+    query.mockRejectedValueOnce(Object.assign(new Error('SELF_SERVICE_FACILITY_RELEASE_REQUIRES_SUSPENSION'),
+      { code: '23514' }));
+    const active = await request(app.getHttpServer()).post(`${base}/${applicationId}/release`)
+      .set('Authorization', 'Bearer synthetic').set('If-Match', '"6"').send({ reason: 'Impostor confirmed by support' });
+    expect([active.status, active.body.code]).toEqual([409, 'SELF_SERVICE_FACILITY_RELEASE_REQUIRES_SUSPENSION']);
+  });
+
+  it('lists open self-service applications and rejects one with If-Match (R3)', async () => {
+    const applications = '/api/v1/admin/self-service-applications';
+    query.mockResolvedValueOnce({ rows: [openRow] });
+    const listed = await request(app.getHttpServer()).get(applications).set('Authorization', 'Bearer synthetic');
+    expect([listed.status, listed.body]).toEqual([200, { items: [openItem] }]);
+    query.mockResolvedValueOnce({ rows: [{ application_id: applicationId,
+      rejected_at: new Date('2026-10-24T09:00:00.000Z'), row_version: '4' }] });
+    const rejected = await request(app.getHttpServer()).post(`${applications}/${applicationId}/reject`)
+      .set('Authorization', 'Bearer synthetic').set('If-Match', '"3"').send({ reason: ' Squat on a real company ' });
+    expect([rejected.status, rejected.body]).toEqual([200,
+      { applicationId, rejectedAt: '2026-10-24T09:00:00.000Z', version: 4 }]);
+    expect(query).toHaveBeenLastCalledWith(expect.stringContaining('admin_reject_self_service_application($1,$2,$3)'),
+      [applicationId, 3, 'Squat on a real company']);
+    query.mockRejectedValueOnce(Object.assign(new Error('private'), { code: 'P0002' }));
+    const gone = await request(app.getHttpServer()).post(`${applications}/${applicationId}/reject`)
+      .set('Authorization', 'Bearer synthetic').set('If-Match', '"3"').send({ reason: 'Squat on a real company' });
+    expect([gone.status, gone.body.code]).toEqual([404, 'SELF_SERVICE_APPLICATION_NOT_FOUND']);
+    tokens.verify.mockResolvedValue({ actor: standaloneAdmin(['platform.admin.access', 'platform.identity-review.read']),
+      claims: {} });
+    const withoutManage = await request(app.getHttpServer()).post(`${applications}/${applicationId}/reject`)
+      .set('Authorization', 'Bearer synthetic').set('If-Match', '"3"').send({ reason: 'Squat on a real company' });
+    expect([withoutManage.status, withoutManage.body.code]).toEqual([403, 'PERMISSION_DENIED']);
   });
 
   it('refuses an administrator without the list or review permission 403 before the database', async () => {

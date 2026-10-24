@@ -15,3 +15,15 @@ export class ReviewSelfServiceFacilityDto {
   @Transform(trim) @IsString() @MinLength(8) @MaxLength(500)
   note!: string;
 }
+
+/** Support's reason for releasing a fraudulent self sign-up (R2): 8-500 characters, trimmed. */
+export class ReleaseSelfServiceFacilityDto {
+  @Transform(trim) @IsString() @MinLength(8) @MaxLength(500)
+  reason!: string;
+}
+
+/** Support's reason for closing an open self-service application (R3): 8-500 characters, trimmed. */
+export class RejectSelfServiceApplicationDto {
+  @Transform(trim) @IsString() @MinLength(8) @MaxLength(500)
+  reason!: string;
+}

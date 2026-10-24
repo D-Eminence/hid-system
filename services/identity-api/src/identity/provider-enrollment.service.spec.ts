@@ -46,6 +46,7 @@ function setup(options: { quota?: jest.Mock; controls?: jest.Mock } = {}) {
   const completion = {
     start: jest.fn().mockResolvedValue({ accepted: true, challengeId: 'c0000000-0000-4000-8000-000000000071' }),
     publicApplicationDigest: jest.fn().mockReturnValue(applicationDigest),
+    publicApplicationNetworkDigest: jest.fn().mockReturnValue(applicationDigest),
   };
   const service = new ProviderEnrollmentService(database as unknown as DatabaseService,
     integrations as unknown as IntegrationRuntimeService, qoreid as unknown as QoreIdVerificationAdapter,
@@ -138,14 +139,30 @@ describe('accountless provider CAC lookup quota', () => {
   });
 });
 
-describe('the public application quota is charged once per start (CRITIC C8)', () => {
+describe('the public application quota is charged once per start (CRITIC C8, review fix R4)', () => {
   beforeEach(() => {
     jest.spyOn(environment, 'getEnvironment').mockReturnValue(testEnvironment());
   });
   afterEach(() => jest.restoreAllMocks());
 
-  it('charges it in the submit transaction, before the submit, and tells the email step it is charged', async () => {
-    const { service, query, database, completion, qoreid } = setup();
+  // The statements each system transaction ran, in order.
+  const transactions = (context: ReturnType<typeof setup>) => {
+    const grouped: string[][] = [];
+    context.database.withSystemTransaction.mockImplementation(async (_correlation, work) => {
+      const statements: string[] = [];
+      grouped.push(statements);
+      return work({ query: async (sql: string, values?: readonly unknown[]) => {
+        statements.push(sql);
+        return context.query(sql, values);
+      } });
+    });
+    return grouped;
+  };
+
+  it('charges it first, in its own committed transaction, then submits, and tells the email step it is charged', async () => {
+    const context = setup();
+    const { service, query, completion, qoreid } = context;
+    const grouped = transactions(context);
     qoreid.verifyCac.mockResolvedValue({ state: 'verified', providerReference: '990070',
       verifiedRegistrationNumber: input.cacRegistrationNumber,
       cacBinding: { registrationNumber: input.cacRegistrationNumber, providerRegistrationNumber: '1234567',
@@ -153,19 +170,60 @@ describe('the public application quota is charged once per start (CRITIC C8)', (
         registrationDate: '2021-01-01', address: '1 Synthetic Registry Road, Lagos', registryStatus: 'ACTIVE' } });
     await expect(service.start(input, request('203.0.113.44'))).resolves.toMatchObject({ accepted: true });
     const calls = sqlCalls(query);
-    const charge = calls.findIndex((sql) => sql.includes('consume_public_application_quota'));
-    const submit = calls.findIndex((sql) => sql.includes('submit_self_service_organization_application'));
     expect(calls.filter((sql) => sql.includes('consume_public_application_quota'))).toHaveLength(1);
-    expect(charge).toBe(0);
-    expect(submit).toBe(1);
     expect(query.mock.calls[0]?.[1]).toEqual([applicationDigest]);
-    // The charge and the submit share the first system transaction.
-    expect(database.withSystemTransaction.mock.calls.length).toBeGreaterThanOrEqual(2);
-    expect(completion.publicApplicationDigest).toHaveBeenCalledWith('203.0.113.44');
+    // The charge is its own transaction; the submit is the next one.
+    expect(grouped[0]).toEqual(['select platform.consume_public_application_quota($1)']);
+    expect(grouped[1]).toHaveLength(1);
+    expect(grouped[1]?.[0]).toContain('submit_self_service_organization_application($1,$2,$3,$4,$5,$6)');
+    expect(completion.publicApplicationNetworkDigest).toHaveBeenCalledWith('203.0.113.44');
+    expect(completion.publicApplicationDigest).not.toHaveBeenCalled();
     expect(completion.start).toHaveBeenCalledTimes(1);
     expect(completion.start).toHaveBeenCalledWith(expect.objectContaining({
       productCode: 'ehr', cacRegistrationNumber: 'RC1234567', turnstileAction: 'organization-completion' }),
-    '203.0.113.44', 'provider-enrollment-test', { publicApplicationQuotaCharged: true });
+    '203.0.113.44', 'provider-enrollment-test', { publicApplicationQuotaCharged: true,
+      selfService: { administratorName: 'Synthetic Provider Admin', organizationType: 'clinic' } });
+  });
+
+  it('keeps the charge when the submit refuses the start (409), so probing which CACs have applications costs quota', async () => {
+    const context = setup();
+    const committed: string[] = [];
+    context.database.withSystemTransaction.mockImplementation(async (_correlation, work) => {
+      const statements: string[] = [];
+      const result = await work({ query: async (sql: string, values?: readonly unknown[]) => {
+        statements.push(sql);
+        return context.query(sql, values);
+      } });
+      committed.push(...statements);
+      return result;
+    });
+    context.query.mockImplementation(async (sql: string) => {
+      if (sql.includes('submit_self_service_organization_application')) {
+        throw Object.assign(new Error('This organization application requires manual resolution'), { code: '23514' });
+      }
+      return { rows: [] };
+    });
+    await expect(context.service.start(input, request('203.0.113.44')))
+      .rejects.toMatchObject({ status: 409, code: 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW' });
+    expect(committed).toEqual(['select platform.consume_public_application_quota($1)']);
+    expect(context.qoreid.verifyCac).not.toHaveBeenCalled();
+  });
+
+  it('keys the charge, and the application\'s network, by the client network: an IPv6 /64, an IPv4 address', async () => {
+    const { service, query, completion, integrations } = setup();
+    for (const ip of ['2001:db8:1:2::1', '2001:db8:1:2:ffff::9', '203.0.113.44']) {
+      await expect(service.start(input, request(ip))).rejects.toMatchObject({ code: 'CAC_NOT_VERIFIED' });
+    }
+    expect(completion.publicApplicationNetworkDigest.mock.calls.map(([network]) => network))
+      .toEqual(['2001:db8:1:2::/64', '2001:db8:1:2::/64', '203.0.113.44']);
+    // The submit stores the same keyed network digest the CAC lookup is charged to.
+    const submitted = query.mock.calls.filter(([sql]) => String(sql).includes('submit_self_service_organization_application'))
+      .map(([, values]) => (values as unknown[])[5]);
+    const charged = integrations.consumeSelfServiceCacQuota.mock.calls.map((call) => call[2]);
+    expect(submitted).toEqual(charged);
+    expect(submitted[0]).toBe(submitted[1]);
+    expect(submitted[0]).not.toBe(submitted[2]);
+    for (const digest of submitted) expect(digest).toMatch(/^[a-f0-9]{64}$/);
   });
 
   it('charges it once on the resume path too, with no QoreID lookup', async () => {
@@ -183,7 +241,8 @@ describe('the public application quota is charged once per start (CRITIC C8)', (
     expect(integrations.consumeSelfServiceCacQuota).not.toHaveBeenCalled();
     expect(qoreid.verifyCac).not.toHaveBeenCalled();
     expect(completion.start).toHaveBeenCalledWith(expect.anything(), '203.0.113.44', 'provider-enrollment-test',
-      { publicApplicationQuotaCharged: true });
+      { publicApplicationQuotaCharged: true,
+        selfService: { administratorName: 'Synthetic Provider Admin', organizationType: 'clinic' } });
   });
 
   it('answers an exhausted public application quota 429 APPLICATION_RATE_LIMITED with no submit or QoreID', async () => {
@@ -212,6 +271,7 @@ describe('the facility self sign-up gate', () => {
   const nothingWritten = (context: ReturnType<typeof setup>) => {
     expect(context.database.withSystemTransaction).not.toHaveBeenCalled();
     expect(context.completion.publicApplicationDigest).not.toHaveBeenCalled();
+    expect(context.completion.publicApplicationNetworkDigest).not.toHaveBeenCalled();
     expect(context.integrations.consumeSelfServiceCacQuota).not.toHaveBeenCalled();
     expect(context.integrations.assertAvailable).not.toHaveBeenCalled();
     expect(context.qoreid.verifyCac).not.toHaveBeenCalled();
@@ -314,30 +374,45 @@ describe('facility self sign-up availability', () => {
 
   it.each([
     ['the control is off', () => setup({ controls: jest.fn().mockResolvedValue({ rows: [{ ...openControls, self_service: false }] }) })],
-    ['the controls cannot be read', () => setup({ controls: jest.fn().mockRejectedValue(new Error('down')) })],
+    ['maintenance mode is on', () => setup({ controls: jest.fn().mockResolvedValue({ rows: [{ ...openControls, maintenance: true }] }) })],
     ['the control is unknown', () => setup({ controls: jest.fn().mockRejectedValue(
       Object.assign(new Error('PLATFORM_CONTROL_INVALID'), { code: '22023' })) })],
+    ['the control row is missing', () => setup({ controls: jest.fn().mockRejectedValue(
+      Object.assign(new Error('PLATFORM_CONTROL_UNAVAILABLE'), { code: '55000' })) })],
     ['QoreID provider_cac is paused', () => {
       const context = setup();
       context.integrations.assertAvailable.mockRejectedValue(new DomainProblem(503, 'INTEGRATION_PAUSED', 'paused'));
       return context;
     }],
-  ])('is closed, never an error, when %s', async (_label, build) => {
-    await expect(build().service.availability()).resolves.toEqual({ open: false });
+  ])('is closed (reason closed), never an error, when %s', async (_label, build) => {
+    await expect(build().service.availability()).resolves.toEqual({ open: false, reason: 'closed' });
   });
 
   it.each([
     ['QOREID_ENABLED is false', { QOREID_ENABLED: false }],
     ['production has no OTP key', { NODE_ENV: 'production' as const, OTP_HMAC_KEY_B64: undefined }],
     ['the daily cap is invalid', { PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP: null }],
-  ])('is closed when %s', async (_label, overrides) => {
+  ])('is closed (reason closed) when %s', async (_label, overrides) => {
     jest.spyOn(environment, 'getEnvironment').mockReturnValue(testEnvironment(overrides as Partial<environment.Environment>));
-    await expect(setup().service.availability()).resolves.toEqual({ open: false });
+    await expect(setup().service.availability()).resolves.toEqual({ open: false, reason: 'closed' });
   });
 
-  it('is closed when the configuration cannot be read', async () => {
+  // R10: a fault is not "sign-up is closed"; the page says "try again shortly".
+  it.each([
+    ['the controls cannot be read', () => setup({ controls: jest.fn().mockRejectedValue(new Error('database down')) })],
+    ['the QoreID runtime gate cannot be read', () => {
+      const context = setup();
+      context.integrations.assertAvailable.mockRejectedValue(
+        new DomainProblem(503, 'INTEGRATION_UNAVAILABLE', 'Delivery provider is temporarily unavailable'));
+      return context;
+    }],
+  ])('is unavailable (reason unavailable), never an error, when %s', async (_label, build) => {
+    await expect(build().service.availability()).resolves.toEqual({ open: false, reason: 'unavailable' });
+  });
+
+  it('is unavailable when the configuration cannot be read', async () => {
     jest.spyOn(environment, 'getEnvironment').mockImplementation(() => { throw new Error('Invalid Identity service configuration'); });
-    await expect(setup().service.availability()).resolves.toEqual({ open: false });
+    await expect(setup().service.availability()).resolves.toEqual({ open: false, reason: 'unavailable' });
   });
 });
 
