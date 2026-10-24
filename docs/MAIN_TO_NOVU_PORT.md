@@ -63,6 +63,7 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | #68 (N2(b), service half) | The enrollment cookie shows the new HID (`GET /current`, an activation replay) for 15 minutes after activation only, then answers 404 as an unknown enrollment. Before, a shared device showed it to the next person for up to 24 hours. A start with the key of an activated enrollment answers 409 `IDEMPOTENCY_KEY_REUSED`, as on `main`, so the page says the registration was completed. Not ported: `main`'s 0085 check of the same in the activation command (the service refuses before it calls the command), and `main`'s expiry of the cookie in the activation response, so a reload within the 15 minutes still shows the HID, which a patient who verified only a phone needs to sign in and to recover the account | — |
 | #16 (emergency contacts, with e1757ba) | A patient keeps up to five emergency contacts, each stored encrypted and verified by a code the contact reads back; when a clinician uses break-glass, each verified contact with alerts on gets one alert. It shipped switched off and is switched on through the code defaults after the owner's approval of 2026-10-24 (D1). Switched off, adding a contact and sending a code answer 409 `EMERGENCY_CONTACT_DELIVERY_UNAVAILABLE` and no message can be sent. It differs from `main` as listed below the table | 0084 (main 0065), runtime-grants.sql |
 | main 0097 section 2 with #18 0c4de59 and 17abba5 (plan waves W14, Identity part, and W30) | Staff can use break-glass in production (owner decision of 2026-10-24, below). 0085 seeds the active `emergency` purpose of use `identity.activate_break_glass` requires, as `main`'s 0097 does (ON CONFLICT DO NOTHING: an operator's row, active or not, is kept as it is). Identity runs `platform.require_control_enabled('break_glass_enabled')` inside the activation transaction, before the command: the control off answers 423 `BREAK_GLASS_DISABLED` and writes nothing, an unreadable control 503 `PLATFORM_CONTROL_UNAVAILABLE`, and a missing or deactivated `emergency` purpose also 423 `BREAK_GLASS_DISABLED` (it was 400 `INVALID_CONSENT_COMMAND`). Every other 55000 stays 409 and every other 22023 stays 400. It differs from `main` as listed below the table | 0085 (main 0097) |
+| #81, main 0061–0063 with db49a0d, 46a173f and 08c906f, and P71's activation (plan wave P4) | Facility self sign-up (owner decision D14): a hospital, laboratory or pharmacy signs itself up through "Setup Your Facility" with a CAC lookup, an email code and a password, without an administrator approving it first, and support reviews every new facility within a business day (owner decision of 2026-10-24). It shipped closed: the platform control `provider_self_service_enabled` is seeded off and is opened with the audited admin command. Administrators finish with a password and get a staff session, as P71 did; staff MFA is not ported (owner decision 2). #81's answers are kept. It differs from `main` as listed below the table | 0086 (main 0061–0063), runtime-grants.sql |
 
 Emergency contacts differ from `main` (#16 and e1757ba) in these ways. Owner
 decisions of 2026-10-23 are marked "owner".
@@ -208,6 +209,109 @@ these ways, all from the owner's decision to enable it now:
   (`services/ehr-api/test/database/break-glass-launch.integration.sql`);
   production's control reads work (#63 under "Not ported").
 
+Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
+08c906f, #81 and P71's activation) in these ways. Owner decisions of
+2026-10-23 and 2026-10-24 are marked "owner".
+
+- One migration, 0086, holds main's three and this branch's additions; its
+  control section is its last statements, so the ACCESS EXCLUSIVE lock on
+  `platform.control_settings` is held only for the CHECK swap, the seed and the
+  `control_enabled` replace, and a release that cannot take that lock leaves
+  nothing applied (the plan's separate control migration would have left the
+  self-service commands requiring a key `control_enabled` rejects).
+- A1: `provider_self_service_enabled`, seeded off. `identity.submit_self_service_organization_application`
+  and the activation wrapper `identity.activate_self_service_provider_enrollment`
+  require it (55000 `PLATFORM_CONTROL_DISABLED:provider_self_service_enabled`),
+  and Identity checks it before any write. The seed lifts FORCE row-level
+  security for its own insert only, as `main`'s 0098 does (the table has no
+  INSERT policy). The control is read from Identity's accountless context
+  exactly as the security guard's portal check reads it, so it needs the same
+  owner that can read the table; under a NOBYPASSRLS owner the gate stays
+  closed (55000 `PLATFORM_CONTROL_UNAVAILABLE`).
+- Every later migration that changes the `control_key` CHECK or
+  `platform.control_enabled` must carry `provider_self_service_enabled` with
+  the six others: 0086 refused to run unless both named exactly the six live
+  keys, and a later copy of `main`'s 0098 or another control wave without it
+  would make the self sign-up gate raise 22023 (closed). Likewise a later
+  replacement of `platform.prune_verification_quotas` must keep 0086's two
+  counter tables (A4 here is "the 0049 body live at merge, plus 0086's
+  tables"; 0086 refused to run if the live body pruned anything else).
+- A4: the prune keeps 0049's body and adds 0086's tables; `main`'s 0085 body
+  is not ported (it deletes from a table this branch does not have).
+- A5: the runtime grants are made in 0086 as well as in `runtime-grants.sql`,
+  since a release never applies that file.
+- A6 (owner, Q2): a platform-wide daily cap on accountless CAC lookups, the
+  third argument of `platform.consume_self_service_cac_quota(uuid,char,integer)`
+  (1–100000, else 22023), with its own counter table, charged last so a network
+  or application denial never spends it, and audited as `platform_day`.
+  Identity reads `PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP` (1–100000, code
+  default 200); an invalid value closes the gate instead of stopping Identity.
+  `main`'s two-argument command does not exist here.
+- A7 with C8: the public application quota is charged once, in the submit
+  transaction, and not again when the same start sends the email code.
+- A8 with C9 (owner, Q3): an unactivated self-service application lapses 24
+  hours after it was submitted. The next submit for its CAC and product, by
+  any email, on the self-service or the governed path, rejects it (reviewed_at,
+  the reason "Self-service application lapsed: not activated within 24 hours of
+  submission", no reviewer, row_version bumped), invalidates its email codes and
+  completion sessions, audits `identity.organization.self-service.lapse` and
+  opens a new application. An activated application and a governed application
+  never lapse. `main` never expires these rows. The governed submit still
+  returns a fresh (under 24 hours) self-service application for the same CAC
+  and product, as before (follow-up below).
+- A9: activation checks the completion session with
+  `identity.current_organization_profile_completion` before hashing the
+  password.
+- A10: activation sets the account's `email_verified_at` and
+  `password_changed_at`.
+- A11: submit takes the governed submit's lock key `org-application:` and
+  activation the governed approval's `org-cac:`, so the two paths serialize on
+  one CAC (`main` uses `self-service-org-` keys).
+- A12: `GET /api/v1/identity/provider-enrollments/availability` answers
+  `{ open }`, and `{ open: false }` on any error.
+- A13: the gate also requires `provider_portal_enabled` on and
+  `maintenance_mode` off, which the security guard does not enforce on public
+  routes.
+- The gate answers 423 `PROVIDER_ENROLLMENT_UNAVAILABLE` on every route (C1:
+  the gateway turns every 5xx into 503 `UPSTREAM_UNAVAILABLE`), and 55000
+  `PLATFORM_CONTROL_DISABLED:provider_self_service_enabled` and the gate's
+  22023 answer the same 423. Other upstream failures keep `main`'s 5xx codes.
+- Turnstile accepts `provider-enrollment` on production `app.` and staging
+  `staging.` only (`main`: www and staging).
+- Activation is P71's (owner, decision 2): `AuthService.login(..., 'staff')`,
+  the three session cookies and `x-csrf-token`, answering `actor`; no MFA, and
+  `hid_enrollment` is not cleared (this branch's decision under #50).
+- All four products may sign themselves up (owner, Q5); a laboratory or
+  pharmacy administrator gets the provider portal only until staff management
+  exists. A second product for an already registered CAC goes to admin review
+  (owner, Q8), and one email cannot be both a patient account and a facility
+  administrator (409, owner, Q7).
+- Support's review (owner, Q1, "alert + daily review"): three review columns on
+  the application (`self_service_reviewed_at`, `self_service_reviewed_by_account_id`,
+  `self_service_review_note`, all set together, only on an approved
+  self-service application) and two commands,
+  `identity.admin_list_self_service_facilities` (`platform.identity-review.read`)
+  and `identity.admin_review_self_service_facility` (`platform.facility.manage`),
+  served as `GET /api/v1/admin/self-service-facilities` and
+  `POST /api/v1/admin/self-service-facilities/:applicationId/review`. Unlike
+  the governed application commands they need no facility membership, so a
+  standalone platform administrator can use them, as 0064's commands; the
+  review is audited as the platform administrator
+  (`admin.self-service-facility.review`). Suspending the facility and
+  disabling the account use the existing commands. `main` has no review.
+- The ported database suites run from `services/ehr-api/test/database/`
+  (`provider-self-enrollment`, `provider-self-service-cac-quota`,
+  `provider-self-service-control`, `provider-self-service-lapse`,
+  `self-service-facility-review` and `provider-self-service-rollback`, which
+  runs the previous Identity's own SQL on the new schema).
+- Follow-ups, each its own decision: the governed submit still attaches a
+  governed applicant to a fresh self-service application for the same CAC and
+  product, and the admin application list does not show `approval_mode`; the
+  governed admin commands still need a facility membership (`0046`); no
+  command releases a bound CAC after a fraud finding; a self-signed-up
+  facility has one user; and staff MFA, once ported, must say what it does to
+  these administrators.
+
 ## Not ported, and why
 
 - Already on this branch: #26 (0071 grants the list), #58 (0071 seeds `direct-care`).
@@ -216,7 +320,7 @@ these ways, all from the owner's decision to enable it now:
 - Needs `main`'s Phase 4 platform administration (0061–0072 on `main`), which
   this branch replaces with its own (0064): the rest of #18 (its control and
   audit repairs are ported above), #24, #32 7A (its OCR guards are ported
-  above), #49, #81, #76 A24 (its search is ported above), #80 A20, and the platform branches of #25, #27 and
+  above), #49, #76 A24 (its search is ported above), #80 A20, and the platform branches of #25, #27 and
   #39 (`admin_revoke_session_family`, `PlatformSecurityService`,
   `platformSessionEnded`). Platform administrator MFA would bring them back as
   its own change.
@@ -304,6 +408,13 @@ Decided by the owner, D-Eminence:
   document routes).
 - Staff password recovery runs on the portal (#41, ported above), and staff
   sign-in on the portal sends staff to ehr.
+- Facility self sign-up (D14, 2026-10-23, and 2026-10-24): hospitals,
+  laboratories and pharmacies sign themselves up, finishing with a password
+  (no authenticator); every new facility appears for support, who review it
+  within a business day and suspend the facility and disable the account if it
+  looks wrong; all four products; 200 CAC lookups a day across all sign-ups;
+  unactivated applications lapse after 24 hours; the control ships off and is
+  switched on right after the deploy and its closed-state checks, with no pilot.
 
 Still open, with what each one holds back:
 
@@ -345,8 +456,15 @@ Still open, with what each one holds back:
   origin secret.
 - Platform administrator MFA, two-person approval, governed clinician
   provisioning, staff MFA and clinician sign-up.
-- Patient features held behind controls: revoking access, account deletion and
-  hospital self-activation.
+- Patient features held behind controls: revoking access and account
+  deletion. (Hospital self-activation is ported above as facility self sign-up,
+  behind `provider_self_service_enabled`.)
+- Facility self sign-up (ported above, switched off): the owner signs the 0086
+  declaration, after the read-only preflights (no closed organization
+  application without a review reason, reviewer or review time, which 0086
+  refuses; one reviewer check and one control-key check; the owner of
+  `platform.control_settings` and `platform.control_enabled`), then opens the
+  control with the audited admin command.
 - Emergency contacts (ported above, switched off): storing contacts' names and
   destinations, the alert wording, production delivery and the pilot accounts.
   Alerts also need an active `emergency` purpose of use, which 0085 seeds;
