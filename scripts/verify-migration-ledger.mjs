@@ -97,6 +97,7 @@ const acceptedMigrations = new Map([
   ['0082_ocr_worker_queue_metrics.sql', 'ca631a4082a8978c2185d4908c31a93ea813cef76ffbd6218d15e2720708e96b'],
   ['0083_bind_patient_self_context_to_live_session.sql', '1591165d3ede78a2b4c52a221dccb08e52304ec70548245522edc5c97c9a4270'],
   ['0084_patient_emergency_contacts.sql', '4cd331440a1f15f36b109dd3b9f9fee60de43fbfd188395ae9a32f58c51b0e40'],
+  ['0085_emergency_purpose_of_use.sql', '618e56311d3f74210a95accebea770d0337653563ae5c84c45d29172c1bc0969'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

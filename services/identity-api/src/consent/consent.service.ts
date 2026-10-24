@@ -157,6 +157,12 @@ export class ConsentService {
   async activateBreakGlass(context: DataAccessContext, input: CreateBreakGlassDto) {
     try {
       return await this.database.withTransaction(context, async (client) => {
+        // The platform administrative control is the authoritative switch for
+        // emergency access; it is checked inside the activation transaction
+        // (main #18 0c4de59). platform.require_control_enabled (0040) is
+        // SECURITY DEFINER and granted to PUBLIC, so a staff session reads it
+        // without platform.control.read.
+        await client.query('select platform.require_control_enabled($1)', ['break_glass_enabled']);
         const result = await client.query<BreakGlassRow>(
           `select
              access_request_id as "accessRequestId",
@@ -171,8 +177,25 @@ export class ConsentService {
         return this.requireRow(result.rows[0]);
       });
     } catch (error) {
-      throw this.translate(error);
+      throw this.translateBreakGlass(error);
     }
+  }
+
+  /**
+   * identity.activate_break_glass (0031) refuses with 22023 and this message
+   * when no active 'emergency' purpose of use exists. The route always runs it
+   * with the emergency purpose, so here the refusal means emergency access is
+   * not enabled on the platform: 0085 seeds 'emergency', so on a migrated
+   * database it means an operator deactivated the code, or the database
+   * predates 0085. It is answered like the disabled platform control (main
+   * 17abba5, with its 0097). Every other 22023 (duration, reason) stays 400.
+   */
+  private translateBreakGlass(error: unknown): unknown {
+    if (isDatabaseError(error) && error.code === '22023'
+      && (error as unknown as { message?: unknown }).message === 'Break-glass requires the emergency purpose of use') {
+      return new DomainProblem(423, 'BREAK_GLASS_DISABLED', 'Emergency access is not enabled on this platform');
+    }
+    return this.translate(error);
   }
 
   /**
@@ -247,6 +270,17 @@ export class ConsentService {
   private translate(error: unknown): unknown {
     if (error instanceof DomainProblem) return error;
     if (!isDatabaseError(error)) return error;
+    const raw = (error as unknown as { message?: unknown }).message;
+    const message = typeof raw === 'string' ? raw : '';
+    // platform.require_control_enabled (0040): the control is off, or its row
+    // cannot be read (missing, or hidden by row-level security). Every other
+    // 55000 stays a 409 conflict.
+    if (error.code === '55000' && message === 'PLATFORM_CONTROL_DISABLED:break_glass_enabled') {
+      return new DomainProblem(423, 'BREAK_GLASS_DISABLED', 'Emergency access is currently disabled by the platform administrator');
+    }
+    if (error.code === '55000' && message === 'PLATFORM_CONTROL_UNAVAILABLE') {
+      return new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
+    }
     switch (error.code) {
       case 'P0001':
         return new DomainProblem(429, 'EMERGENCY_RATE_LIMITED', 'Too many emergency activations. Contact your facility emergency access administrator.');

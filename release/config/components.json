@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0084",
-    "count": 85,
+    "last": "0085",
+    "count": 86,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -437,6 +437,10 @@
       {
         "name": "0084_patient_emergency_contacts.sql",
         "sha256": "4cd331440a1f15f36b109dd3b9f9fee60de43fbfd188395ae9a32f58c51b0e40"
+      },
+      {
+        "name": "0085_emergency_purpose_of_use.sql",
+        "sha256": "618e56311d3f74210a95accebea770d0337653563ae5c84c45d29172c1bc0969"
       }
     ]
   },

@@ -241,7 +241,7 @@ try {
     values ('synthetic-history','Historical synthetic purpose',false,'synthetic')`));
   const upgradePurposesBefore = await withClient('hid_upgrade', async client =>
     (await client.query('select to_jsonb(p) as value from identity.purpose_of_use_codes p order by code')).rows);
-  assert(!upgradePurposesBefore.some(row => row.value.code === 'direct-care'));
+  assert(!upgradePurposesBefore.some(row => ['direct-care', 'emergency'].includes(row.value.code)));
   const upgradeBefore = await snapshot('hid_upgrade');
   const upgradeBackup = join(evidenceDirectory, 'pre-schema-upgrade.dump');
   command('backup synthetic schema 0028 before upgrade', join(pgBindir, 'pg_dump'),
@@ -282,12 +282,16 @@ try {
   const upgradeAfter = await snapshot('hid_upgrade');
   await withClient('hid_upgrade', async client => {
     assert.deepEqual((await client.query(`select to_jsonb(p) as value from identity.purpose_of_use_codes p
-      where code <> 'direct-care' order by code`)).rows, upgradePurposesBefore,
+      where code not in ('direct-care','emergency') order by code`)).rows, upgradePurposesBefore,
     'Upgrade must preserve every historical purpose registry row');
     assert.deepEqual((await client.query(`select code,display,active,source_system
       from identity.purpose_of_use_codes where code='direct-care'`)).rows,
     [{code:'direct-care',display:'Direct patient care',active:true,source_system:'hid'}],
     'Migration 0071 must add exactly its declared direct-care purpose');
+    assert.deepEqual((await client.query(`select code,display,active,source_system
+      from identity.purpose_of_use_codes where code='emergency'`)).rows,
+    [{code:'emergency',display:'Emergency treatment',active:true,source_system:'hid'}],
+    'Migration 0085 must add exactly its declared emergency purpose');
   });
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
@@ -300,7 +304,7 @@ try {
   assert.deepEqual(await snapshot('hid_upgrade_restored'), upgradeBefore, 'Pre-schema backup must restore the exact 0028 state');
   evidence.checks.existing_schema_upgrade = {from:'0028',to:latestSchema,dry_run_unchanged:true,
     historical_tables_preserved:true,historical_purposes_preserved:true,direct_care_seed_verified:true,
-    old_sessions_remain_staff:true,unbound_old_otp_denied:true,
+    emergency_seed_verified:true,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
   command('create synthetic database', join(pgBindir, 'createdb'), [database]);

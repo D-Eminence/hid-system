@@ -1,0 +1,58 @@
+-- The emergency purpose of use, so that staff can use break-glass in
+-- production (main D-Eminence/hid-system 0097 section 2; owner decision of
+-- 2026-10-24, "Enable break-glass now"). Applied migrations 0001 through 0084
+-- are immutable.
+--
+-- identity.activate_break_glass (latest body 0031) refuses with 22023 "Break-
+-- glass requires the emergency purpose of use" unless an active 'emergency'
+-- row exists in identity.purpose_of_use_codes; the access request and grant it
+-- writes reference that code (0008), and identity.has_active_consent_grant
+-- (0012) honours an emergency read only while the code is active. No migration
+-- on this branch seeds it (0071 seeds only direct-care), so break-glass, and
+-- with it 0084's emergency-contact alerts, cannot be used. The owner chose to
+-- enable break-glass now, accepting that staff sign in without MFA (main
+-- requires it, D9) and main's other launch limits (cross-facility imported
+-- records; the N3 document routes).
+--
+-- 'emergency' ("Emergency treatment", active, source hid) is inserted exactly
+-- as main's 0097 inserts it and as 0071 inserts direct-care: ON CONFLICT (code)
+-- DO NOTHING. A row an operator already inserted, or deactivated, is kept
+-- exactly as it is; this migration never reactivates a code.
+--
+-- Not changed:
+-- - The control. platform.control_settings break_glass_enabled stays as it is
+--   (0039 seeded it true; an administrator may have changed it with the
+--   audited admin command). Identity checks it inside the activation
+--   transaction and answers 423 BREAK_GLASS_DISABLED while it is off; a
+--   migration has no actor for a control event.
+-- - The permission. 0010 granted identity.break-glass.write to doctor,
+--   clinician and nurse, and no migration on this branch withdrew it (main's
+--   0091 withdrawal and 0097 re-grant are not ported). No role, permission or
+--   grant to a database role changes, and runtime-grants.sql does not change.
+-- - Every other purpose: healthcare-operations stays unseeded (N3).
+--
+-- No NOTICE when the row exists but is inactive. The release applies this file
+-- through scripts/apply-migrations.mjs, whose node-postgres client has no
+-- notice listener and drops every NOTICE, and PostgreSQL's default
+-- log_min_messages (warning) keeps a NOTICE out of the server log as well, so
+-- nobody running the release would see it. Failing instead would stop the
+-- release over an operator's deliberate choice. The state is visible where it
+-- matters: Identity answers 423 BREAK_GLASS_DISABLED to every activation while
+-- the code is inactive, and the read-only check after the deploy is
+--   select code, active from identity.purpose_of_use_codes where code = 'emergency';
+--
+-- Locks: ROW EXCLUSIVE on identity.purpose_of_use_codes and its primary key
+-- index, until commit; one row at most is written and no table is scanned. The
+-- table has no row-level security, no policy, no rule and no user trigger; its
+-- only triggers are the internal foreign-key action triggers of
+-- identity.access_requests.purpose_of_use and identity.consent_grants
+-- .purpose_of_use (ON DELETE RESTRICT, ON UPDATE NO ACTION), which fire on
+-- UPDATE and DELETE of a code, never on INSERT, so the referencing tables are
+-- neither read nor locked. ROW EXCLUSIVE conflicts only with SHARE and
+-- stronger locks, which no runtime takes on this table: readers (activation,
+-- standard access requests, PIN grants, the consent reads) and the referencing
+-- inserts' FOR KEY SHARE row locks never wait. The runner applies this file in
+-- one transaction with a 5 s lock_timeout.
+insert into identity.purpose_of_use_codes (code, display, active, source_system)
+values ('emergency', 'Emergency treatment', true, 'hid')
+on conflict (code) do nothing;
