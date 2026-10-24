@@ -16,7 +16,10 @@
 // activation pre-check and its attempt budget, the administrator details of
 // the code that proved the mailbox, the quota charged per network before the
 // submit, support's release of a fraudulent sign-up and its list and
-// rejection of open applications, and availability's reason.
+// rejection of open applications, and availability's reason. And the
+// website's second contract: the confirmation read before the password
+// (GET profile, R13) and start's answer when no code is sent (codeSent
+// false, the code in force and the wait, R14).
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { createHmac, randomUUID } from 'node:crypto';
@@ -266,6 +269,14 @@ try {
     for (const [name, value] of Object.entries(extra)) call = call.set(name, value);
     return call.send(body);
   };
+  // The confirmation read is a GET: browsers send no Origin on a same-origin
+  // GET, so the verifier sends none.
+  const profile = (enrollmentCookie, extra = {}) => {
+    let call = http.get(`${ENROLL}/profile`);
+    if (enrollmentCookie) call = call.set('Cookie', enrollmentCookie);
+    for (const [name, value] of Object.entries(extra)) call = call.set(name, value);
+    return call;
+  };
   const activate = (enrollmentCookie, password, extra = {}) => {
     let call = http.post(`${ENROLL}/activate`).set('Origin', origin);
     if (enrollmentCookie) call = call.set('Cookie', enrollmentCookie);
@@ -306,6 +317,8 @@ try {
   const session = {};
   const lapse = {};
   const review = {};
+  const confirmation = {};
+  const noCode = {};
 
   // 0. The gate ships closed (0086 seeds provider_self_service_enabled off):
   // availability is false and every route answers 423 after its own request
@@ -324,16 +337,20 @@ try {
   expectProblem(await activate(undefined, 'xxxxxxxxxxxx'), 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
   expectProblem(await activate('hid_provider_enrollment=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA', 'xxxxxxxxxxxx'),
     423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
+  expectProblem(await profile(), 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
+  expectProblem(await profile('hid_provider_enrollment=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'),
+    423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
   // Request checks still come first while closed (C6): DTO, Origin, signed-in browser.
   expectProblem(await verify({ challengeId: 'not-a-uuid', code: '000000' }), 400, 'VALIDATION_FAILED');
   expectProblem(await http.post(`${ENROLL}/verify`).send({ challengeId: randomUUID(), code: '000000' }), 403, 'ORIGIN_DENIED');
   expectProblem(await activate(undefined, 'xxxxxxxxxxxx', { Cookie: `${cookieName}_csrf=x` }),
     409, 'PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT');
+  expectProblem(await profile(`${cookieName}_csrf=x`), 409, 'PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT');
   assert.equal(qoreidCacLookups.length, 0, 'A closed gate reached QoreID');
   assert.equal(await count('select count(*)::int n from identity.organization_applications'), 0, 'A closed gate wrote an application');
   assert.equal(await count('select count(*)::int n from platform.public_application_quota_counters'), 0, 'A closed gate charged the application quota');
   assert.equal(await startFailures(), startFailuresBefore + 1, 'The closed start was not audited as the request failure (C7)');
-  gate.closed = { availability: false, start: 423, verify: 423, activate: 423, turnstileBeforeGate: true,
+  gate.closed = { availability: false, start: 423, verify: 423, activate: 423, profile: 423, turnstileBeforeGate: true,
     writes: 0, qoreidLookups: 0 };
 
   // A standalone platform administrator: a platform role, no staff record and
@@ -397,6 +414,7 @@ try {
     await setControl(controlKey, closing, 1);
     assert.deepEqual(await availability(), { open: false, reason: 'closed' }, `${controlKey} did not close availability`);
     expectProblem(await verify({ challengeId: randomUUID(), code: '000000' }), 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
+    expectProblem(await profile(), 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
     expectProblem(await start(enrollment({ cacRegistrationNumber: closedCac, administratorEmail: email('closed') }),
       '198.51.100.90'), 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
     await setControl(controlKey, !closing, 2);
@@ -464,9 +482,8 @@ try {
   // and each start charges the public application quota once (A7, C8).
   const started = await start(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA }));
   assert.equal(started.status, 200, `start failed: ${JSON.stringify(started.body)}`);
-  assert.equal(started.body.accepted, true);
-  assert.equal(started.body.expiresInSeconds, 600);
-  assert.equal(started.body.resendAfterSeconds, 60);
+  assert.deepEqual({ ...started.body, challengeId: undefined }, { accepted: true, codeSent: true, challengeId: undefined,
+    expiresInSeconds: 600, resendAfterSeconds: 60 });
   assert.deepEqual(qoreidCacLookups, [NOT_VERIFIED, cacA]);
   assert(qoreidTokens >= 1, 'The QoreID adapter did not authenticate');
   const challengeId = started.body.challengeId;
@@ -478,6 +495,31 @@ try {
   assert.deepEqual(await networkCounters(MAIN), { hour: 2, day: 2 });
   assert.deepEqual(await applicationCharges(MAIN), { hour: 2, day: 2 }, 'A start must charge the application quota exactly once');
   quota.public_application_quota_per_start = 1;
+
+  // R14: the same sign-up started again within 60 seconds of its code (another
+  // tab, or a reload, on another network here so MAIN's counters stay as they
+  // are) sends no new code and says so: codeSent false, the code in force (the
+  // one just sent, which the next step verifies) and the wait. No QoreID lookup.
+  const NO_CODE_NETWORK = '198.51.100.60';
+  const deliveriesBeforeNoCode = recipients.length;
+  const lookupsBeforeNoCode = qoreidCacLookups.length;
+  const startedAgain = await start(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA }),
+    NO_CODE_NETWORK);
+  assert.equal(startedAgain.status, 200, `start again failed: ${JSON.stringify(startedAgain.body)}`);
+  assert.deepEqual(Object.keys(startedAgain.body).sort(),
+    ['accepted', 'challengeId', 'codeSent', 'expiresInSeconds', 'resendAfterSeconds']);
+  assert.equal(startedAgain.body.accepted, true);
+  assert.equal(startedAgain.body.codeSent, false, 'A start within 60 seconds answered as if it sent a code');
+  assert.equal(startedAgain.body.challengeId, challengeId, 'The code in force is not the one just sent');
+  assert(startedAgain.body.expiresInSeconds > 0 && startedAgain.body.expiresInSeconds <= 600);
+  assert(startedAgain.body.resendAfterSeconds >= 1 && startedAgain.body.resendAfterSeconds <= 60,
+    `resendAfterSeconds ${startedAgain.body.resendAfterSeconds}`);
+  await completion.settleDeliveries();
+  assert.equal(recipients.length, deliveriesBeforeNoCode, 'A start that sent no code delivered one');
+  assert.equal(qoreidCacLookups.length, lookupsBeforeNoCode, 'A start that sent no code reached QoreID');
+  assert.deepEqual(await applicationCharges(NO_CODE_NETWORK), { hour: 1, day: 1 }, 'A start that sent no code was not charged');
+  noCode.cooldown = { status: 200, codeSent: false, challengeId: 'the code in force', delivered: 0,
+    resendAfterSeconds: startedAgain.body.resendAfterSeconds };
 
   // 9-10. Wrong code fails; the emailed code verifies and sets the enrollment cookie.
   const wrongCode = (await codeFor(challengeId)) === '000000' ? '111111' : '000000';
@@ -492,6 +534,39 @@ try {
     /; Secure/i, /; SameSite=Strict/i]) assert.match(enrollmentSetCookie, attribute);
   assert.doesNotMatch(enrollmentSetCookie, /; Domain=/i);
   const enrollmentCookie = enrollmentSetCookie.split(';')[0];
+
+  // R13: before the password, the applicant reads what the activation will
+  // register: the verified legal name, the CAC number as entered, the product,
+  // the organization type and the administrator. A GET with no Origin and the
+  // enrollment cookie only. It is never cached, sets no cookie and changes
+  // nothing: no attempt charged, the session still live.
+  const sessionState = async challenge => (await owner.query(`select activation_attempts,
+      invalidated_at is not null as ended from identity.organization_profile_completion_challenges where id=$1`,
+  [challenge])).rows[0];
+  expectProblem(await profile(), 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID');
+  expectProblem(await profile('hid_provider_enrollment=not-a-session'), 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID');
+  expectProblem(await profile(`hid_provider_enrollment=${'A'.repeat(43)}`), 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID');
+  const confirmed = await profile(enrollmentCookie);
+  assert.equal(confirmed.status, 200, `confirmation read failed: ${JSON.stringify(confirmed.body)}`);
+  assert.deepEqual(confirmed.body, { organizationName: `Runtime Clinic ${cacA} Ltd`, registrationNumber: cacA,
+    productCode: 'ehr', organizationType: 'clinic', administratorName: 'Synthetic Provider Admin',
+    administratorEmail: emailA });
+  assert.match(confirmed.headers['cache-control'] ?? '', /no-store/);
+  assert.equal(confirmed.headers['set-cookie'], undefined, 'The confirmation read set a cookie');
+  assert.deepEqual(await sessionState(challengeId), { activation_attempts: 0, ended: false });
+  expectProblem(await profile(`${enrollmentCookie}; ${cookieName}_csrf=x`), 409, 'PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT');
+  // A start after the code was used, within its 60 seconds, sends none and
+  // has no code in force to name.
+  const afterVerify = await start(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA }), NO_CODE_NETWORK);
+  assert.equal(afterVerify.status, 200, `start after verify failed: ${JSON.stringify(afterVerify.body)}`);
+  assert.equal(afterVerify.body.codeSent, false);
+  assert.equal(afterVerify.body.challengeId, undefined, 'A used code was named as the code in force');
+  assert.equal(afterVerify.body.expiresInSeconds, undefined);
+  assert(afterVerify.body.resendAfterSeconds >= 1 && afterVerify.body.resendAfterSeconds <= 60);
+  assert.deepEqual(await sessionState(challengeId), { activation_attempts: 0, ended: false });
+  noCode.after_verify = { codeSent: false, challengeId: 'absent', sessionKept: true };
+  confirmation.read = { status: 200, origin: 'none', noCookie: 401, malformed: 401, unknownSession: 401,
+    signedIn: 409, cached: false, attemptsCharged: 0, sessionEnded: false };
 
   // 12-16. Activation creates the organization, facility, EHR product, account
   // and org-admin membership, and signs the administrator in with the
@@ -586,8 +661,10 @@ try {
     { Authorization: 'Bearer synthetic' }), 409, 'PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT');
   security.signed_in_caller = 'PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT';
 
-  // The consumed enrollment session cannot activate again.
+  // The consumed enrollment session cannot activate again, nor be read.
   expectProblem(await activate(enrollmentCookie, password), 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID');
+  expectProblem(await profile(enrollmentCookie), 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID');
+  confirmation.after_activation = 401;
   security.replayed_activation = 'ORGANIZATION_COMPLETION_SESSION_INVALID';
 
   // 8 (#81). A registered CAC is sent to review, for its own or another
@@ -661,9 +738,6 @@ try {
     status: 'ready_for_review', verification_result: 'verified', approval_mode: 'self_service' });
   // R1: the pre-check answered it before any hash (no attempt charged) and
   // ended the session, so retrying costs nothing either.
-  const sessionState = async challenge => (await owner.query(`select activation_attempts,
-      invalidated_at is not null as ended from identity.organization_profile_completion_challenges where id=$1`,
-  [challenge])).rows[0];
   assert.deepEqual(await sessionState(startedTaken.body.challengeId), { activation_attempts: 0, ended: true });
   expectProblem(await activate(takenCookie, 'Synthetic-Provider-Password-2027'), 401,
     'ORGANIZATION_COMPLETION_SESSION_INVALID');
@@ -684,6 +758,10 @@ try {
   assert.equal(secondVerified.status, 200);
   const footprintBeforeSecond = await footprint();
   const secondCookie = cookies(secondVerified).find(value => value.startsWith('hid_provider_enrollment='));
+  const secondConfirmed = await profile(secondCookie);
+  assert.equal(secondConfirmed.status, 200);
+  assert.deepEqual([secondConfirmed.body.organizationName, secondConfirmed.body.productCode,
+    secondConfirmed.body.organizationType], [`Runtime Clinic ${cacA} Ltd`, 'pharmacy', 'pharmacy']);
   expectProblem(await activate(secondCookie, password), 409, 'ORGANIZATION_REVIEW_REQUIRED');
   assert.deepEqual(await footprint(), footprintBeforeSecond, 'A second product activation created or changed something');
   assert.deepEqual(await sessionState(secondProduct.body.challengeId), { activation_attempts: 0, ended: true });
@@ -777,6 +855,16 @@ try {
     code: await codeFor(resumedAgain.body.challengeId) });
   assert.equal(sittingTwo.status, 200, `second sitting verify failed: ${JSON.stringify(sittingTwo.body)}`);
   const sittingTwoCookie = cookies(sittingTwo).find(value => value.startsWith('hid_provider_enrollment='));
+  // The confirmation shows the details the account will keep: those of the
+  // code that proved the mailbox (R6), not the first sitting's.
+  const sittingTwoConfirmed = await profile(sittingTwoCookie);
+  assert.equal(sittingTwoConfirmed.status, 200);
+  assert.deepEqual(sittingTwoConfirmed.body, { organizationName: `Runtime Clinic ${cacB} Ltd`, registrationNumber: cacB,
+    productCode: 'ehr', organizationType: 'hospital', administratorName: 'Dr Ada Obi', administratorEmail: emailB });
+  const sittingOneConfirmed = await profile(sittingOneCookie);
+  assert.deepEqual([sittingOneConfirmed.body.administratorName, sittingOneConfirmed.body.organizationType],
+    ['Synthetic Provider Admin', 'clinic']);
+  confirmation.details_of_proving_code = { administratorName: 'Dr Ada Obi', organizationType: 'hospital' };
   const activatedB = await activate(sittingTwoCookie, password);
   assert.equal(activatedB.status, 200, `second sitting activation failed: ${JSON.stringify(activatedB.body)}`);
   assert.equal(activatedB.body.actor.accountId, activatedB.body.accountId);
@@ -846,6 +934,85 @@ try {
   assert.deepEqual(await applicationCharges('2001:db8:aa:bb::1'), {});
   assert.deepEqual(await applicationCharges('2001:db8:aa:bc::/64'), { hour: 1, day: 1 });
   quota.ipv6_application_quota = { key: '/64', charges: 6 };
+
+  // R14: at a limit no code is sent, and start says so. One sign-up gets 5
+  // codes in an hour (each past the 60 seconds); the 6th start sends none and
+  // names the 5th code, still in force and still verifiable, with the wait
+  // until the first is an hour old (0056).
+  const LIMIT_NETWORK = '198.51.100.61';
+  const cacLimit = 'RC9900063221'; const emailLimit = email('limit');
+  const ageCodes = (cac, seconds) => owner.query(`update identity.organization_profile_completion_challenges
+      set created_at = created_at - make_interval(secs => $2)
+    where application_id = (select id from identity.organization_applications where cac_registration_number=$1)`,
+  [cac, seconds]);
+  const waitFor = async (cac, offset, interval) => Number((await owner.query(`select ceil(extract(epoch from
+      challenge.created_at + $3::interval - clock_timestamp()))::int as wait
+    from identity.organization_profile_completion_challenges challenge
+    join identity.organization_applications application on application.id = challenge.application_id
+    where application.cac_registration_number = $1
+    order by challenge.created_at desc offset $2 limit 1`, [cac, offset, interval])).rows[0].wait);
+  const limitCodes = [];
+  for (let index = 1; index <= 5; index += 1) {
+    if (index > 1) await ageCodes(cacLimit, 61);
+    const sent = await start(enrollment({ cacRegistrationNumber: cacLimit, administratorEmail: emailLimit }), LIMIT_NETWORK);
+    assert.equal(sent.status, 200, `limit code ${index}: ${JSON.stringify(sent.body)}`);
+    assert.equal(sent.body.codeSent, true, `Code ${index} of the hour was not sent`);
+    limitCodes.push(sent.body.challengeId);
+    if (index === 5) {
+      // The 5th code's own answer already gives the hour's wait, not 60 seconds.
+      assert(sent.body.resendAfterSeconds > 3000, `after the 5th code resendAfterSeconds ${sent.body.resendAfterSeconds}`);
+    }
+  }
+  await ageCodes(cacLimit, 61);
+  await completion.settleDeliveries();
+  const deliveriesBeforeLimit = recipients.length;
+  const limited = await start(enrollment({ cacRegistrationNumber: cacLimit, administratorEmail: emailLimit }), LIMIT_NETWORK);
+  assert.equal(limited.status, 200, `the 6th start failed: ${JSON.stringify(limited.body)}`);
+  assert.equal(limited.body.codeSent, false, 'A 6th code in an hour was reported as sent');
+  assert.equal(limited.body.challengeId, limitCodes[4], 'The code in force is not the 5th');
+  assert(limited.body.expiresInSeconds > 0 && limited.body.expiresInSeconds <= 600);
+  const hourWait = await waitFor(cacLimit, 4, '1 hour');
+  assert(Math.abs(limited.body.resendAfterSeconds - hourWait) <= 2 && hourWait > 3000,
+    `resendAfterSeconds ${limited.body.resendAfterSeconds}, expected about ${hourWait}`);
+  await completion.settleDeliveries();
+  assert.equal(recipients.length, deliveriesBeforeLimit, 'A start at the hourly limit delivered a code');
+  const limitVerified = await verify({ challengeId: limited.body.challengeId, code: await codeFor(limitCodes[4]) });
+  assert.equal(limitVerified.status, 200, 'The code in force could not be verified');
+  noCode.hourly_limit = { codesSent: 5, sixth: { codeSent: false, challengeId: 'the 5th code', verifies: true },
+    resendAfterSeconds: limited.body.resendAfterSeconds };
+  // R5: ten codes reached the administrator email in the last day (none in
+  // force); the next start sends none, names no code, and gives the wait
+  // until the 10th newest is a day old.
+  const RECIPIENT_NETWORK = '198.51.100.62';
+  const cacRecipient = 'RC9900063222'; const emailRecipient = email('recipient');
+  const firstRecipient = await start(enrollment({ cacRegistrationNumber: cacRecipient, administratorEmail: emailRecipient }),
+    RECIPIENT_NETWORK);
+  assert.equal(firstRecipient.body.codeSent, true);
+  // Its code is two hours old, so expired too.
+  await owner.query(`update identity.organization_profile_completion_challenges
+      set created_at = created_at - interval '2 hours', expires_at = created_at - interval '2 hours' + interval '10 minutes'
+    where application_id = (select id from identity.organization_applications where cac_registration_number=$1)`,
+  [cacRecipient]);
+  await owner.query(`insert into identity.organization_profile_completion_challenges
+      (id, application_id, code_hmac, created_at, expires_at)
+    select gen_random_uuid(), application.id, encode(sha256(('verifier-recipient-' || n)::bytea), 'hex'),
+      clock_timestamp() - make_interval(hours => 2, mins => n), clock_timestamp() - make_interval(hours => 2, mins => n)
+        + interval '10 minutes'
+      from identity.organization_applications application, generate_series(1, 9) n
+     where application.cac_registration_number = $1`, [cacRecipient]);
+  await completion.settleDeliveries();
+  const deliveriesBeforeRecipient = recipients.length;
+  const recipientLimited = await start(enrollment({ cacRegistrationNumber: cacRecipient,
+    administratorEmail: emailRecipient }), RECIPIENT_NETWORK);
+  assert.equal(recipientLimited.status, 200, `recipient start failed: ${JSON.stringify(recipientLimited.body)}`);
+  assert.deepEqual(Object.keys(recipientLimited.body).sort(), ['accepted', 'codeSent', 'resendAfterSeconds']);
+  assert.equal(recipientLimited.body.codeSent, false);
+  const dayWait = await waitFor(cacRecipient, 9, '1 day');
+  assert(Math.abs(recipientLimited.body.resendAfterSeconds - dayWait) <= 2 && dayWait > 70_000,
+    `resendAfterSeconds ${recipientLimited.body.resendAfterSeconds}, expected about ${dayWait}`);
+  await completion.settleDeliveries();
+  assert.equal(recipients.length, deliveriesBeforeRecipient, 'A start at the recipient limit delivered a code');
+  noCode.recipient_limit = { codeSent: false, challengeId: 'absent', resendAfterSeconds: recipientLimited.body.resendAfterSeconds };
 
   // A8 with C9: an unactivated application holds its CAC and product for 24
   // hours. Within them another email is sent to review; after them the next
@@ -1275,11 +1442,13 @@ try {
     { 'If-Match': `"${await controlVersion()}"` });
   assert.equal(closed.status, 201, `closing the control failed: ${JSON.stringify(closed.body)}`);
   assert.deepEqual(await availability(), { open: false, reason: 'closed' });
+  expectProblem(await profile(cookies(heldVerified).find(value => value.startsWith('hid_provider_enrollment='))),
+    423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
   expectProblem(await activate(cookies(heldVerified).find(value => value.startsWith('hid_provider_enrollment=')), password),
     423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
   expectProblem(await start(enrollment({ cacRegistrationNumber: cacTaken, administratorEmail: emailA }), TAKEN_NETWORK),
     423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
-  gate.closed_again = { availability: false, heldSessionActivate: 423, start: 423 };
+  gate.closed_again = { availability: false, heldSessionProfile: 423, heldSessionActivate: 423, start: 423 };
 
   assert.equal(await count(`select count(*)::int n from audit.events where action='identity.organization.self-service.activate'`), 4);
   process.stdout.write(JSON.stringify({ status: 'passed', runtimeRole, database: rehearsal ? 'rehearsal' : 'loopback',
@@ -1288,8 +1457,8 @@ try {
       'org_admin_membership', 'account', 'ehr_product', 'staff_session', 'session_read', 'facility_selection',
       'password_sign_in', 'resume_without_lookup', 'details_from_proving_code', 'activation_precheck', 'lapse',
       'support_release', 'real_company_after_release', 'open_applications', 'database_gate', 'activation_budget',
-      'platform_cap', 'support_review', 'control_closed'],
-    gate, security, quota, session, lapse, review, qoreidCacLookups: qoreidCacLookups.length,
+      'platform_cap', 'support_review', 'control_closed', 'confirmation_read', 'no_code_answer'],
+    gate, security, quota, session, lapse, review, confirmation, noCode, qoreidCacLookups: qoreidCacLookups.length,
     siteverifyCalls: siteverifyRequests.length }) + '\n');
 } finally {
   await app?.close();

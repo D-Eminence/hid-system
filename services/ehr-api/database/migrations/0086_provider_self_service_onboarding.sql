@@ -57,6 +57,17 @@
 --   R8  the seed keeps platform.control_settings's FORCE row-level security
 --       state as it finds it;
 --   R12 support's unreviewed list shows the oldest activation first.
+-- The website's second contract (each recorded in docs/MAIN_TO_NOVU_PORT.md)
+-- added two read-only commands:
+--   R13 the confirmation read: before the password, the applicant sees the
+--       verified legal name the activation will register, with the CAC
+--       number, product, organization type and administrator it will keep,
+--       so a mistyped CAC number that names another real company can be
+--       caught before any account exists;
+--   R14 the emailed code's state: whether start's code went out, the code
+--       still in force and the wait before a new one, so start can say that
+--       no code was sent (R5's and 0056's limits) instead of answering as if
+--       one had been.
 -- main's 0061 interim review check and its re-add of the status check (same
 -- values as 0046) are not ported, nor main's later migrations or staff MFA.
 --
@@ -865,7 +876,9 @@ $$;
 --   * at most 10 codes a day reach one administrator email across every
 --     self-service application, on top of 0056's limits per application
 --     (R5); past it no code is sent and null is returned, as for 0056's own
---     limits, so the answer says nothing about the limit.
+--     limits. Identity then reads identity.self_service_provider_code_state
+--     in the same transaction (R14) and answers that no code was sent, with
+--     the code still in force and the wait before a new one.
 -- The recipient's advisory lock serializes the count with the insert.
 create function identity.begin_self_service_provider_enrollment(
   requested_cac_number text,
@@ -1032,6 +1045,170 @@ begin
 end;
 $$;
 
+-- R13: the confirmation read. Before the password, Identity shows the
+-- applicant what the activation will register, so a mistyped CAC number that
+-- names another, real company can be caught before any account exists: the
+-- verified legal name the organization and facility will take
+-- (qoreid_organization_name), the CAC number as the applicant entered it (the
+-- application's, which the activation also requires to equal QoreID's), the
+-- product, and the organization type and administrator name the account will
+-- keep (R6: those sent with the request whose code opened this session), with
+-- the administrator email. It answers for a live completion session of a
+-- verified self-service application ready for activation, and returns no row
+-- for any other session (Identity answers 401). It reads only: it locks
+-- nothing, charges no activation attempt and ends no session. Like the
+-- commands, it needs the control on.
+create function identity.current_self_service_provider_enrollment(
+  requested_session_hmac char(64)
+) returns table (
+  organization_name text,
+  cac_registration_number text,
+  product_code text,
+  organization_type text,
+  administrator_name text,
+  administrator_email text
+)
+language plpgsql security definer
+set search_path = pg_catalog, identity, platform, pg_temp
+as $$
+begin
+  if platform.current_actor_subject() is distinct from 'system:auth'
+     or platform.current_correlation_id() is null
+     or requested_session_hmac is null
+     or requested_session_hmac !~ '^[a-f0-9]{64}$' then
+    raise exception using errcode = '42501', message = 'Self-service enrollment context is required';
+  end if;
+
+  perform platform.require_control_enabled('provider_self_service_enabled');
+
+  return query
+    select application.qoreid_organization_name, application.cac_registration_number,
+      application.product_code,
+      coalesce(challenge.requested_organization_type, application.organization_type),
+      coalesce(challenge.requested_administrator_name, application.administrator_name),
+      application.administrator_email
+    from identity.organization_profile_completion_challenges challenge
+    join identity.organization_applications application on application.id = challenge.application_id
+    where challenge.session_hmac = requested_session_hmac
+      and challenge.consumed_at is not null
+      and challenge.invalidated_at is null
+      and challenge.session_expires_at > clock_timestamp()
+      and application.approval_mode = 'self_service'
+      and application.status = 'ready_for_review'
+      and application.verification_result = 'verified'
+      and application.verified_at is not null
+      and application.provider_verified_registration_number = application.cac_registration_number
+      and application.qoreid_registry_status = 'active'
+      and application.qoreid_organization_name is not null;
+end;
+$$;
+
+-- R14: the emailed code's state, for start's answer. Identity runs it in the
+-- start's own transaction right after begin_self_service_provider_enrollment,
+-- which returns null both when a limit stops the code (0056's 60 seconds, 5 an
+-- hour and 15 a day per application; R5's 10 a day per administrator email)
+-- and when the application is no longer open, so the answer can say that no
+-- code was sent rather than answer as if one had been. For the open, verified
+-- self-service application of this CAC number, product and administrator email
+-- (the conditions 0056 sends a code for) it returns:
+--   application_open      false when there is none (activated, lapsed or
+--                         rejected meanwhile; the rest is then null);
+--   challenge_id          the code in force: this application's newest code
+--                         that can still be entered (not used, not
+--                         invalidated, not expired, under 5 wrong tries),
+--                         else null;
+--   expires_in_seconds    how long that code can still be entered;
+--   resend_after_seconds  how long until a start can send a new code: the
+--                         latest of those limits' ends, each counted as
+--                         0056 and R5 count it; 0 when one would be sent now.
+-- It reads only; it locks and changes nothing.
+create function identity.self_service_provider_code_state(
+  requested_cac_number text,
+  requested_email text,
+  requested_product text
+) returns table (
+  application_open boolean,
+  challenge_id uuid,
+  expires_in_seconds integer,
+  resend_after_seconds integer
+)
+language plpgsql security definer
+set search_path = pg_catalog, identity, platform, pg_temp
+as $$
+declare
+  normalized_email text := lower(btrim(coalesce(requested_email, '')));
+  observed_at timestamptz := clock_timestamp();
+  open_application uuid;
+  in_force_id uuid;
+  in_force_expires_at timestamptz;
+  resend_at timestamptz;
+begin
+  if platform.current_actor_subject() is distinct from 'system:auth'
+     or platform.current_correlation_id() is null then
+    raise exception using errcode = '42501', message = 'Self-service enrollment context is required';
+  end if;
+
+  select application.id into open_application
+    from identity.organization_applications application
+   where application.cac_registration_number = requested_cac_number
+     and application.product_code = requested_product
+     and application.administrator_email = normalized_email
+     and application.approval_mode = 'self_service'
+     and application.status in ('pending_verification', 'ready_for_review')
+     and application.verification_result = 'verified'
+     and application.provider_verified_registration_number = application.cac_registration_number
+     and application.provider_reference ~ '^[0-9]+$'
+   order by application.created_at desc
+   limit 1;
+  if open_application is null then
+    return query select false, null::uuid, null::integer, null::integer;
+    return;
+  end if;
+
+  select challenge.id, challenge.expires_at into in_force_id, in_force_expires_at
+    from identity.organization_profile_completion_challenges challenge
+   where challenge.application_id = open_application
+     and challenge.consumed_at is null
+     and challenge.invalidated_at is null
+     and challenge.expires_at > observed_at
+     and challenge.failed_attempts < 5
+   order by challenge.created_at desc
+   limit 1;
+
+  -- Each limit ends when its window's oldest counted code leaves it: the
+  -- 60 seconds after the newest code; the 5th newest code in the last hour
+  -- plus an hour; the 15th newest in the last day plus a day; the email's
+  -- 10th newest self-service code in the last day plus a day.
+  resend_at := greatest(
+    (select max(prior.created_at) + interval '60 seconds'
+       from identity.organization_profile_completion_challenges prior
+      where prior.application_id = open_application),
+    (select prior.created_at + interval '1 hour'
+       from identity.organization_profile_completion_challenges prior
+      where prior.application_id = open_application
+        and prior.created_at > observed_at - interval '1 hour'
+      order by prior.created_at desc offset 4 limit 1),
+    (select prior.created_at + interval '1 day'
+       from identity.organization_profile_completion_challenges prior
+      where prior.application_id = open_application
+        and prior.created_at > observed_at - interval '1 day'
+      order by prior.created_at desc offset 14 limit 1),
+    (select prior.created_at + interval '1 day'
+       from identity.organization_applications application
+       join identity.organization_profile_completion_challenges prior on prior.application_id = application.id
+      where application.administrator_email = normalized_email
+        and application.approval_mode = 'self_service'
+        and prior.created_at > observed_at - interval '1 day'
+      order by prior.created_at desc offset 9 limit 1));
+
+  return query select true, in_force_id,
+    case when in_force_id is null then null::integer
+      else greatest(0, floor(extract(epoch from in_force_expires_at - observed_at)))::integer end,
+    case when resend_at is null or resend_at <= observed_at then 0
+      else ceil(extract(epoch from resend_at - observed_at))::integer end;
+end;
+$$;
+
 -- C9: the governed submit (0052) lapses a stale self-service application the
 -- same way before it looks for an open application, so neither path stays
 -- blocked by an abandoned self-service row. Otherwise 0052's body, signature,
@@ -1103,7 +1280,9 @@ revoke all on function identity.public_get_organization_application(text,text,te
   identity.submit_self_service_organization_application(text,text,text,text,text,char),
   identity.activate_self_service_provider_enrollment(char,text),
   identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text),
-  identity.prepare_self_service_provider_activation(char)
+  identity.prepare_self_service_provider_activation(char),
+  identity.current_self_service_provider_enrollment(char),
+  identity.self_service_provider_code_state(text,text,text)
   from public;
 
 -- 3. QoreID CAC lookup quota for accountless self-service (main 0063, 08c906f).
@@ -1945,6 +2124,8 @@ begin
       identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text),
       identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text),
       identity.prepare_self_service_provider_activation(char),
+      identity.current_self_service_provider_enrollment(char),
+      identity.self_service_provider_code_state(text,text,text),
       identity.activate_self_service_provider_enrollment(char,text),
       platform.consume_self_service_cac_quota(uuid,char,integer),
       identity.admin_list_self_service_facilities(text),
@@ -1960,6 +2141,8 @@ begin
       identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text),
       identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text),
       identity.prepare_self_service_provider_activation(char),
+      identity.current_self_service_provider_enrollment(char),
+      identity.self_service_provider_code_state(text,text,text),
       identity.activate_self_service_provider_enrollment(char,text),
       platform.consume_self_service_cac_quota(uuid,char,integer)
       to hid_schema_test_runtime;

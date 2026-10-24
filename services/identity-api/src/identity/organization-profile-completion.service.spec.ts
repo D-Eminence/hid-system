@@ -365,18 +365,138 @@ describe('facility self sign-up activation and its quota (P4)', () => {
   });
 
   it('sends facility self sign-up\'s code through the self-service command with the requested details (R5, R6)', async () => {
-    const query = jest.fn().mockResolvedValue({ rows: [{ recipient_email: 'admin@example.invalid' }] });
-    const { service: completion } = service(query);
+    const query = jest.fn().mockResolvedValueOnce({ rows: [{ recipient_email: 'admin@example.invalid' }] })
+      .mockResolvedValueOnce({ rows: [{ application_open: true, challenge_id: 'in-force', expires_in_seconds: 600,
+        resend_after_seconds: 60 }] });
+    const { service: completion, database } = service(query);
     const started = await completion.start(input, '203.0.113.44', correlationId, { publicApplicationQuotaCharged: true,
       selfService: { administratorName: 'Dr Ada Obi', organizationType: 'hospital' } });
-    expect(query).toHaveBeenCalledTimes(1);
+    // The code and its state are read in one transaction (R14).
+    expect(database.withSystemTransaction).toHaveBeenCalledTimes(1);
+    expect(query).toHaveBeenCalledTimes(2);
     expect(query.mock.calls[0]?.[0])
       .toContain('identity.begin_self_service_provider_enrollment($1,$2,$3,$4,$5,$6,$7)');
     expect(query.mock.calls[0]?.[1]).toEqual(['RC1234567', 'admin@example.invalid', 'ehr', started.challengeId,
       expect.stringMatching(/^[a-f0-9]{64}$/), 'Dr Ada Obi', 'hospital']);
-    // The governed completion keeps 0056's command.
+    expect(query.mock.calls[1]?.[0]).toContain('identity.self_service_provider_code_state($1,$2,$3)');
+    expect(query.mock.calls[1]?.[1]).toEqual(['RC1234567', 'admin@example.invalid', 'ehr']);
+    expect(started).toEqual({ accepted: true, codeSent: true, challengeId: expect.stringMatching(/^[0-9a-f-]{36}$/),
+      expiresInSeconds: 600, resendAfterSeconds: 60 });
+    // The governed completion keeps 0056's command and its uniform answer.
     query.mockClear();
-    await completion.start(input, '203.0.113.44', correlationId);
+    query.mockResolvedValue({ rows: [{ recipient_email: null }] });
+    const governed = await completion.start(input, '203.0.113.44', correlationId);
     expect(query.mock.calls.map(([sql]) => String(sql)).join('\n')).not.toContain('begin_self_service_provider_enrollment');
+    expect(query.mock.calls.map(([sql]) => String(sql)).join('\n')).not.toContain('self_service_provider_code_state');
+    expect(governed).toEqual({ accepted: true, challengeId: expect.any(String), expiresInSeconds: 600,
+      resendAfterSeconds: 60 });
+  });
+
+  describe('facility self sign-up\'s answer when no code is sent (R14)', () => {
+    const selfService = { administratorName: 'Dr Ada Obi', organizationType: 'hospital' as const };
+    const startWith = async (state: Record<string, unknown> | undefined, recipient: string | null = null) => {
+      const query = jest.fn().mockResolvedValueOnce({ rows: [{ recipient_email: recipient }] })
+        .mockResolvedValueOnce({ rows: state ? [state] : [] });
+      const deliver = jest.fn().mockResolvedValue({ outcome: 'accepted' });
+      const database = { withSystemTransaction: jest.fn(async (_id, work) => work({ query })) };
+      const completion = new OrganizationProfileCompletionService(database as unknown as DatabaseService,
+        { deliver } as unknown as NotificationOtpClient);
+      const answer = completion.start(input, '203.0.113.44', correlationId,
+        { publicApplicationQuotaCharged: true, selfService });
+      await answer.catch(() => undefined);
+      await completion.settleDeliveries();
+      return { answer, deliver };
+    };
+
+    it('says no code was sent, names the code still in force and the wait, and delivers nothing', async () => {
+      const { answer, deliver } = await startWith({ application_open: true,
+        challenge_id: 'c8ca0000-0000-4000-8000-000000000015', expires_in_seconds: 417, resend_after_seconds: 3295 });
+      await expect(answer).resolves.toEqual({ accepted: true, codeSent: false,
+        challengeId: 'c8ca0000-0000-4000-8000-000000000015', expiresInSeconds: 417, resendAfterSeconds: 3295 });
+      expect(deliver).not.toHaveBeenCalled();
+    });
+
+    it('leaves the challenge out when no code is in force', async () => {
+      const { answer, deliver } = await startWith({ application_open: true, challenge_id: null,
+        expires_in_seconds: null, resend_after_seconds: 75_000 });
+      await expect(answer).resolves.toEqual({ accepted: true, codeSent: false, resendAfterSeconds: 75_000 });
+      expect(deliver).not.toHaveBeenCalled();
+    });
+
+    it('never answers a wait shorter than a second', async () => {
+      const { answer } = await startWith({ application_open: true, challenge_id: null, expires_in_seconds: null,
+        resend_after_seconds: 0 });
+      await expect(answer).resolves.toEqual({ accepted: true, codeSent: false, resendAfterSeconds: 1 });
+    });
+
+    it('answers 409 PROVIDER_ENROLLMENT_REQUIRES_REVIEW when the application closed since start read it', async () => {
+      for (const state of [{ application_open: false, challenge_id: null, expires_in_seconds: null,
+        resend_after_seconds: null }, undefined]) {
+        const { answer, deliver } = await startWith(state);
+        await expect(answer).rejects.toMatchObject({ status: 409, code: 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW' });
+        expect(deliver).not.toHaveBeenCalled();
+      }
+    });
+
+    it('gives the wait the state reads after a sent code, such as the hour\'s limit after the 5th', async () => {
+      const { answer, deliver } = await startWith({ application_open: true, challenge_id: 'new',
+        expires_in_seconds: 600, resend_after_seconds: 3540 }, 'admin@example.invalid');
+      await expect(answer).resolves.toEqual({ accepted: true, codeSent: true, challengeId: expect.any(String),
+        expiresInSeconds: 600, resendAfterSeconds: 3540 });
+      expect(deliver).toHaveBeenCalledTimes(1);
+      expect(deliver.mock.calls[0]?.[0]).toMatchObject({ recipient: 'admin@example.invalid', purpose: 'EMAIL_VERIFY' });
+    });
+  });
+
+  describe('facility self sign-up\'s confirmation read (R13)', () => {
+    const row = { organization_name: 'Confirm Hospital Ltd', cac_registration_number: 'RC1234567',
+      product_code: 'ehr', organization_type: 'hospital', administrator_name: 'Dr Ada Obi',
+      administrator_email: 'admin@example.invalid' };
+
+    it('reads the session\'s registration through one read-only command and answers it camelCased', async () => {
+      const query = jest.fn().mockResolvedValueOnce({ rows: [row] });
+      const { service: completion, database } = service(query);
+      await expect(completion.selfServiceProfile(token, correlationId)).resolves.toEqual({
+        organizationName: 'Confirm Hospital Ltd', registrationNumber: 'RC1234567', productCode: 'ehr',
+        organizationType: 'hospital', administratorName: 'Dr Ada Obi', administratorEmail: 'admin@example.invalid' });
+      expect(database.withSystemTransaction).toHaveBeenCalledTimes(1);
+      expect(query).toHaveBeenCalledTimes(1);
+      expect(query.mock.calls[0]?.[0]).toBe('select * from identity.current_self_service_provider_enrollment($1)');
+      expect(query.mock.calls[0]?.[1]).toEqual([expect.stringMatching(/^[a-f0-9]{64}$/)]);
+      // The same session hash the activation uses.
+      const activationQuery = jest.fn().mockResolvedValueOnce({ rows: [{ verdict: 'session_invalid' }] });
+      await service(activationQuery).service.activate(token, password, correlationId).catch(() => undefined);
+      expect(activationQuery.mock.calls[0]?.[1]).toEqual(query.mock.calls[0]?.[1]);
+    });
+
+    it('answers no live session 401 ORGANIZATION_COMPLETION_SESSION_INVALID', async () => {
+      const query = jest.fn().mockResolvedValueOnce({ rows: [] })
+        .mockRejectedValueOnce(Object.assign(new Error('Self-service enrollment context is required'), { code: '42501' }));
+      const { service: completion } = service(query);
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await expect(completion.selfServiceProfile(token, correlationId))
+          .rejects.toMatchObject({ status: 401, code: 'ORGANIZATION_COMPLETION_SESSION_INVALID' });
+      }
+      // A missing or malformed cookie is refused before any database read.
+      const unread = jest.fn();
+      const { service: untouched, database } = service(unread);
+      for (const value of [undefined, 'short', `${'A'.repeat(42)}!`]) {
+        await expect(untouched.selfServiceProfile(value, correlationId))
+          .rejects.toMatchObject({ status: 401, code: 'ORGANIZATION_COMPLETION_SESSION_INVALID' });
+      }
+      expect(database.withSystemTransaction).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['55000', 'PLATFORM_CONTROL_DISABLED:provider_self_service_enabled', 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE'],
+      ['55000', 'PLATFORM_CONTROL_UNAVAILABLE', 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE'],
+      ['22023', 'PLATFORM_CONTROL_INVALID', 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE'],
+      ['42883', 'function identity.current_self_service_provider_enrollment(unknown) does not exist', 503,
+        'ORGANIZATION_COMPLETION_UNAVAILABLE'],
+    ])('answers the command\'s %s %s %s %s', async (code, message, status, answer) => {
+      const query = jest.fn().mockRejectedValueOnce(Object.assign(new Error(message), { code }));
+      await expect(service(query).service.selfServiceProfile(token, correlationId))
+        .rejects.toMatchObject({ status, code: answer });
+    });
   });
 });

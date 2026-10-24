@@ -25,7 +25,8 @@ const COOKIE_PATH = '/api/v1/identity/provider-enrollments';
  * while the platform control provider_self_service_enabled is off.
  *
  * Request validation runs first (the global ValidationPipe), then each route
- * checks Origin, that the browser holds no HID session, and the gate.
+ * checks Origin (each POST; the profile GET relies on its cookie, below),
+ * that the browser holds no HID session, and the gate.
  */
 @Controller('identity/provider-enrollments')
 @Public()
@@ -58,6 +59,37 @@ export class ProviderEnrollmentController {
     }
   }
 
+  /**
+   * What the password step shows before the account exists (P4 round 2, R13):
+   * { organizationName, registrationNumber, productCode, organizationType,
+   * administratorName, administratorEmail }, the verified legal name the
+   * activation will register with the CAC number as entered, so an applicant
+   * who mistyped it sees another company's name before any account is made.
+   * It reads the enrollment cookie set by verify and changes nothing; no live
+   * session answers 401 ORGANIZATION_COMPLETION_SESSION_INVALID.
+   *
+   * No Origin check: browsers send no Origin on a same-origin GET. The cookie
+   * is the guard: HttpOnly, SameSite=Strict and scoped to this path, so no
+   * other site can send it, and CORS lets only HID's own origins read an
+   * answer (a disallowed Origin is refused before any route runs). The
+   * signed-in check and the gate apply as on the other routes.
+   */
+  @Get('profile')
+  @AuditAction('identity.provider-enrollment.profile')
+  async profile(@Req() request: HidRequest) {
+    this.assertAccountless(request);
+    await this.enrollments.assertSelfServiceOpen();
+    return this.completion.selfServiceProfile(singleCookie(request, COOKIE_NAME), request.correlationId);
+  }
+
+  /**
+   * Starts or resumes a sign-up and sends the emailed code: 200 { accepted:
+   * true, codeSent, challengeId?, expiresInSeconds?, resendAfterSeconds }.
+   * codeSent false (R14) means no new code went out (0056's 60 seconds, 5 an
+   * hour or 15 a day for the sign-up, or R5's 10 a day for the email);
+   * challengeId then names the code still in force, if any, and
+   * resendAfterSeconds the wait before a new one.
+   */
   @Post()
   @HttpCode(200)
   @AuditAction('identity.provider-enrollment.start')

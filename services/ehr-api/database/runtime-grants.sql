@@ -922,7 +922,9 @@ grant execute on function identity.submit_organization_application(text,text,tex
 -- pre-check that charges the session's attempt budget; the underlying
 -- activation command and the lapse helper stay owner-only. The emailed code
 -- is sent through the self-service command that stores the requested
--- administrator details and limits codes per recipient. The CAC lookup is
+-- administrator details and limits codes per recipient, and two read-only
+-- commands answer what the password step shows before the account exists and
+-- whether start's code went out. The CAC lookup is
 -- charged through the network, application and platform-day quota command,
 -- never the account-scoped `application_cac` path, and no runtime holds a
 -- privilege on its counter tables. Support's list, review and release of
@@ -934,6 +936,8 @@ grant execute on function identity.submit_self_service_organization_application(
   identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text),
   identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text),
   identity.prepare_self_service_provider_activation(char),
+  identity.current_self_service_provider_enrollment(char),
+  identity.self_service_provider_code_state(text,text,text),
   identity.activate_self_service_provider_enrollment(char,text),
   platform.consume_self_service_cac_quota(uuid,char,integer)
   to hid_identity_runtime, hid_schema_test_runtime;

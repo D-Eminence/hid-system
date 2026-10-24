@@ -20,6 +20,8 @@ const startInput = {
 };
 const verifyInput = { challengeId: '8ce75fc3-0bda-4300-b198-f5688df65d6c', code: '123456' };
 const closed = () => new DomainProblem(423, 'PROVIDER_ENROLLMENT_UNAVAILABLE', 'Facility self sign-up is not open');
+const profile = { organizationName: 'Confirm Hospital Ltd', registrationNumber: 'RC1234567', productCode: 'ehr',
+  organizationType: 'hospital', administratorName: 'Dr Ada Obi', administratorEmail: 'provider@example.invalid' };
 
 // requestOrigin null sends no Origin header.
 function request(cookie?: string, requestOrigin: string | null = origin, authorization?: string): HidRequest {
@@ -41,7 +43,7 @@ const loginResult = {
 
 describe('ProviderEnrollmentController', () => {
   let enrollments: { start: jest.Mock; assertSelfServiceOpen: jest.Mock; availability: jest.Mock };
-  let completion: { verify: jest.Mock; activate: jest.Mock };
+  let completion: { verify: jest.Mock; activate: jest.Mock; selfServiceProfile: jest.Mock };
   let turnstile: { verify: jest.Mock };
   let auth: { login: jest.Mock };
   let controller: ProviderEnrollmentController;
@@ -65,6 +67,7 @@ describe('ProviderEnrollmentController', () => {
       verify: jest.fn().mockResolvedValue({ verified: true, cookie: 'opaque-provider-value' }),
       activate: jest.fn().mockResolvedValue({ email: 'provider@example.invalid',
         organizationId: 'organization-1', facilityId: 'facility-1', accountId: 'account-1' }),
+      selfServiceProfile: jest.fn().mockResolvedValue(profile),
     };
     turnstile = { verify: jest.fn().mockResolvedValue(undefined) };
     auth = { login: jest.fn().mockResolvedValue(loginResult) };
@@ -148,6 +151,9 @@ describe('ProviderEnrollmentController', () => {
         response() as unknown as Response)).rejects.toMatchObject(conflict);
       await expect(controller.activate({ password: 'a-strong-test-password' }, request(cookie, origin, authorization),
         response() as unknown as Response)).rejects.toMatchObject(conflict);
+      await expect(controller.profile(request(cookie ? `${cookie}; hid_provider_enrollment=x` : cookie, null,
+        authorization))).rejects.toMatchObject(conflict);
+      expect(completion.selfServiceProfile).not.toHaveBeenCalled();
       expect(turnstile.verify).not.toHaveBeenCalled();
       expect(enrollments.start).not.toHaveBeenCalled();
       expect(enrollments.assertSelfServiceOpen).not.toHaveBeenCalled();
@@ -201,6 +207,43 @@ describe('ProviderEnrollmentController', () => {
       expect(auth.login).not.toHaveBeenCalled();
       expect(res.cookie).not.toHaveBeenCalled();
       expect(res.clearCookie).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the confirmation read (R13)', () => {
+    it('answers the session\'s registration from the enrollment cookie, with no Origin needed', async () => {
+      for (const requestOrigin of [null, origin]) {
+        completion.selfServiceProfile.mockClear();
+        await expect(controller.profile(request('theme=dark; hid_provider_enrollment=opaque-provider-value',
+          requestOrigin))).resolves.toEqual(profile);
+        expect(completion.selfServiceProfile).toHaveBeenCalledWith('opaque-provider-value', correlationId);
+      }
+      expect(enrollments.assertSelfServiceOpen).toHaveBeenCalledTimes(2);
+      expect(enrollments.assertSelfServiceOpen.mock.invocationCallOrder[0])
+        .toBeLessThan(completion.selfServiceProfile.mock.invocationCallOrder[0]!);
+      expect(turnstile.verify).not.toHaveBeenCalled();
+    });
+
+    it('passes no cookie value when hid_provider_enrollment is missing or repeated', async () => {
+      for (const cookie of [undefined, 'hid_provider_enrollment=one; hid_provider_enrollment=two']) {
+        completion.selfServiceProfile.mockClear();
+        await controller.profile(request(cookie, null));
+        expect(completion.selfServiceProfile).toHaveBeenCalledWith(undefined, correlationId);
+      }
+    });
+
+    it('answers 423 while closed, before the session is read', async () => {
+      enrollments.assertSelfServiceOpen.mockRejectedValue(closed());
+      await expect(controller.profile(request('hid_provider_enrollment=opaque-provider-value', null)))
+        .rejects.toMatchObject({ status: 423, code: 'PROVIDER_ENROLLMENT_UNAVAILABLE' });
+      expect(completion.selfServiceProfile).not.toHaveBeenCalled();
+    });
+
+    it('passes the session\'s 401 through', async () => {
+      completion.selfServiceProfile.mockRejectedValue(new DomainProblem(401, 'ORGANIZATION_COMPLETION_SESSION_INVALID',
+        'Organization profile completion session is invalid or expired'));
+      await expect(controller.profile(request(undefined, null)))
+        .rejects.toMatchObject({ status: 401, code: 'ORGANIZATION_COMPLETION_SESSION_INVALID' });
     });
   });
 

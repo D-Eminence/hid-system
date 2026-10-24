@@ -272,8 +272,8 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   such probes, and a uniform answer with no code sent is the alternative.
 - R5: at most 10 emailed codes a day reach one administrator email across
   every self-service application (`identity.begin_self_service_provider_enrollment`,
-  on top of 0056's 60 seconds, 5 an hour and 15 a day per application); past it
-  start still answers `accepted` and sends nothing.
+  on top of 0056's 60 seconds, 5 an hour and 15 a day per application). Past
+  any of these limits start sends nothing and says so (R14 below).
 - R6: the administrator name and organization type the activated account,
   staff record and application keep are those sent with the request whose
   emailed code opened the activating session (stored on its challenge), not
@@ -373,13 +373,122 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   an unreviewed facility cannot spend paid lookups outside the 200-a-day cap.
   0086 replaces `platform.consume_qoreid_quota` with 0049's body plus that
   refusal.
+- A mistyped CAC number can register another company. QoreID's lookup proves
+  that the number belongs to a real, active company, not that the applicant
+  works there, and the emailed code proves only the applicant's own mailbox.
+  An applicant who mistypes a digit and lands on another company's number
+  would, at activation, register that company under its verified legal name,
+  with the applicant as its administrator and the CAC number bound to it, so
+  the company itself could then neither sign up nor be approved by review.
+  `main` has the same exposure and shows nothing before the account is made.
+  This branch mitigates it three ways: the confirmation read (R13 below), so
+  the password step says "You're registering <verified legal name>, CAC number
+  <as entered>" and offers "This isn't my organization" before any account
+  exists; support's daily review of every activated self sign-up (owner
+  guard), whose console tells support to treat a legal name that is not the
+  administrator's own organization as a wrong sign-up; and support's release
+  (R2), which frees the CAC number and the legal name once the facility is
+  suspended and the account disabled. The administrator email is not freed
+  (below).
+- R13 (the website's second contract): `GET
+  /api/v1/identity/provider-enrollments/profile` answers, for the enrollment
+  cookie that verify set, `{ organizationName, registrationNumber,
+  productCode, organizationType, administratorName, administratorEmail }`:
+  the verified legal name the activation will register, the CAC number as
+  entered, and the product, organization type and administrator the account
+  will keep (R6: those of the code that opened the session). It is served by
+  a new read-only command, `identity.current_self_service_provider_enrollment(char)`,
+  which needs the control, locks nothing, charges no activation attempt and
+  ends no session. 0056's `identity.current_organization_profile_completion`
+  was not reused: it has no administrator name, email or type, it answers
+  the governed review profile's name rather than the one the activation
+  registers, and it answers a governed application's session too. The route
+  checks the signed-in browser (409) and the gate (423) as the others do; no
+  live session of a ready self-service application answers 401
+  `ORGANIZATION_COMPLETION_SESSION_INVALID`. It takes no Origin header,
+  because browsers send none on a same-origin GET: the cookie is the guard
+  (HttpOnly, SameSite=Strict, host-only and scoped to
+  `/api/v1/identity/provider-enrollments`), CORS lets only HID's own origins
+  read the answer, and a disallowed Origin is refused before any route runs,
+  as 0056's own `GET …/completion/profile` already relies on. `main` has no
+  such read.
+- R14 (the website's second contract): start says when it sent no code.
+  `begin_self_service_provider_enrollment` returns null both when a limit
+  holds the code back and when the application is no longer open, and start
+  used to answer `{ accepted, challengeId, expiresInSeconds: 600,
+  resendAfterSeconds: 60 }` either way, with a challenge that did not exist,
+  so the page said a code was sent when none was and the code that was in
+  force could no longer be entered. Start now runs the new read-only
+  `identity.self_service_provider_code_state(text,text,text)` in the same
+  transaction and answers 200 `{ accepted: true, codeSent, challengeId?,
+  expiresInSeconds?, resendAfterSeconds }`: `codeSent: false` names the code
+  still in force (the newest that can still be entered, as the recovery
+  start's cooldown names its earlier challenge), when there is one, and the
+  seconds until a start can send a new one under 0056's 60 seconds, 5 an hour
+  and 15 a day and R5's 10 a day per email; after a sent code
+  `resendAfterSeconds` is that same wait (60 normally, up to an hour after the
+  5th code of an hour). An application that closed since start read it (it
+  was activated, lapsed or rejected meanwhile) answers 409
+  `PROVIDER_ENROLLMENT_REQUIRES_REVIEW`, as a retry would. The shape is a 200
+  with a field, not a 429, because the start was accepted and charged, the
+  answer carries the code in force, and this branch's problem details carry
+  no extension members or `Retry-After`. It is additive: a page that ignores
+  `codeSent` still verifies the code in force. Telling the caller that no code
+  went out reveals nothing new: start has already confirmed the application to
+  this caller, and R5's wait can only say that the email received 10
+  self-service codes in a day. The governed completion's start keeps its
+  uniform answer. `main` answers as this branch used to.
+- A released wrong sign-up keeps its administrator email (a decision, not
+  built): the disabled account keeps the address and the deactivated staff
+  record keeps it too (`staff_email_ci_uq` covers every staff row), and both
+  activation and governed approval refuse an email held by any account that is
+  not deleted or by any staff record. A command that frees it was evaluated
+  and not built, because it is not both small and safe: (1) it may touch only
+  an account that did nothing beyond activating, and that cannot be
+  established from a few tables: an account and its facility are referenced
+  by 101 foreign keys to `auth.accounts` and 53 to `identity.facilities` across
+  the identity, auth, audit, EHR, lab, pharmacy, OCR, outreach, notification,
+  migration and platform schemas, so a check that misses one would detach an account from
+  records it wrote; (2) freeing needs two changes no command makes today:
+  rewriting the staff record's email (NOT NULL, unique across all staff rows)
+  and removing the account's email or setting it to `deleted`, a status no
+  admin command sets and whose handling by sign-in, recovery and the principal
+  lists is unverified; (3) undoing it means restoring an address someone may
+  have used since. Support's procedure instead: confirm with the organization
+  that the sign-up named the wrong company; suspend the facility
+  (`POST /admin/facilities/:id/status`), disable the account
+  (`POST /admin/principals/:id/status`) and revoke its sessions
+  (`POST /admin/principals/:id/sessions/revoke`); release it
+  (`POST /admin/self-service-facilities/:applicationId/release`), which frees
+  the CAC number and the legal name at once; then the administrator signs up
+  the right organization with the correct CAC number and another email address
+  they control (another mailbox of the organization). The released email's
+  7-day refusal (R3) applies to the released CAC number and product only, not
+  to a correct CAC number. If an organization must use that same email, that
+  is an owner decision and a reviewed one-off database change, not a support
+  action.
+- Round-1 review fixes, each absent on `main` and recorded above: R1 the
+  activation pre-check and its 5-attempt budget (A9); R2 support's release; R3
+  the own-email resume, the submitting network, the 7-day refusal and support's
+  open-application list and rejection (A8 and R3); R4 the public application
+  quota charged before the submit (A7); R5 10 codes a day per email; R6 the
+  proving code's administrator details; R7 no organization CAC lookup before
+  support's review; R8 the seed keeps FORCE as it finds it (A1); R9 the
+  declaration's text (no behaviour); R10 availability's `reason` (A12); R11
+  the verifier drives the database's own gate (verifier bullet below); R12
+  the unreviewed list oldest first (support's review). The integration step's
+  fix is also this branch's only: support's review command answers only its
+  23505 as `SELF_SERVICE_FACILITY_ALREADY_REVIEWED`, and any other integrity
+  refusal (23514) as 503 `SELF_SERVICE_FACILITY_UNAVAILABLE` (`main` has no
+  review command). R13 and R14 above come from the website's second contract.
 - The ported database suites run from `services/ehr-api/test/database/`
   (`provider-self-enrollment`, `provider-self-service-cac-quota`,
   `provider-self-service-control`, `provider-self-service-lapse`,
   `self-service-facility-review` and `provider-self-service-rollback`, which
   runs the previous Identity's own SQL on the new schema), with the review
   fixes' `provider-self-service-activation`, `self-service-facility-release`
-  and `self-service-open-applications`.
+  and `self-service-open-applications`, and R13's and R14's
+  `provider-self-service-confirmation`.
 - `services/identity-api/scripts/verify-provider-enrollment-runtime.mjs` (main's
   verifier rewritten for this branch) runs in the migration rehearsal as
   `hid_identity_api_runtime`, with local stubs for Siteverify, QoreID and
@@ -400,7 +509,12 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   mailbox, the charge of a refused start and the IPv6 /64 key, the squatter's
   own resume and network, support's release followed by the real company's
   sign-up, the open-application list and rejection, and availability's
-  reason. Unlike `main`'s, it can also run against a disposable copy of a
+  reason; and R13 and R14: the confirmation read with no Origin (its 401s,
+  409, 423 and the proving code's details, nothing charged), and start's
+  `codeSent: false` within the 60 seconds (naming the code just sent, which
+  then verifies), after the code was used (no code named), at the hour's
+  limit (naming the 5th code, which verifies) and at the email's 10 a day,
+  with nothing delivered. Unlike `main`'s, it can also run against a disposable copy of a
   database on a loopback test cluster (`HID_PROVIDER_RUNTIME_LOCAL_CLUSTER=loopback`,
   `NODE_ENV=test`), which proves the same flow on a database built in
   production's order.
@@ -417,10 +531,10 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   administrators; once support has reviewed a self-signed-up organization,
   its administrator's organization CAC check is charged to that account's
   0049 quota (5 an hour, 15 a day, 10 a day per organization), outside the
-  200-a-day self sign-up cap; a released impostor's account keeps its email,
-  so that email cannot become another facility's administrator; and the
-  website's console needs the release and open-application pages, and the
-  sign-up page needs availability's reason.
+  200-a-day self sign-up cap; a released sign-up's account keeps its email
+  (the decision and support's procedure are above); and the website's console
+  needs the release and open-application pages, and the sign-up page needs
+  availability's reason and start's `codeSent`.
 
 ## Not ported, and why
 

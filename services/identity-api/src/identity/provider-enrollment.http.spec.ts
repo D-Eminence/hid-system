@@ -37,7 +37,7 @@ describe('provider enrollment over HTTP', () => {
   const database = { query: jest.fn(), withSystemTransaction: jest.fn() };
   const integrations = { assertAvailable: jest.fn(), consumeSelfServiceCacQuota: jest.fn() };
   const completion = { verify: jest.fn(), activate: jest.fn(), start: jest.fn(), publicApplicationDigest: jest.fn(),
-    publicApplicationNetworkDigest: jest.fn() };
+    publicApplicationNetworkDigest: jest.fn(), selfServiceProfile: jest.fn() };
   const turnstile = { verify: jest.fn() };
   const auth = { login: jest.fn() };
 
@@ -103,7 +103,9 @@ describe('provider enrollment over HTTP', () => {
     const verify = await request(app.getHttpServer()).post(`${base}/verify`).set('Origin', origin).send(verifyBody);
     const activate = await request(app.getHttpServer()).post(`${base}/activate`).set('Origin', origin)
       .set('Cookie', `hid_provider_enrollment=${'A'.repeat(43)}`).send({ password: 'x'.repeat(12) });
-    for (const answer of [start, verify, activate]) {
+    const profile = await request(app.getHttpServer()).get(`${base}/profile`)
+      .set('Cookie', `hid_provider_enrollment=${'A'.repeat(43)}`);
+    for (const answer of [start, verify, activate, profile]) {
       expect(answer.status).toBe(423);
       expect(answer.body).toMatchObject({ status: 423, code: 'PROVIDER_ENROLLMENT_UNAVAILABLE',
         detail: 'Facility self sign-up is not open' });
@@ -114,7 +116,28 @@ describe('provider enrollment over HTTP', () => {
     expect(database.withSystemTransaction).not.toHaveBeenCalled();
     expect(completion.verify).not.toHaveBeenCalled();
     expect(completion.activate).not.toHaveBeenCalled();
+    expect(completion.selfServiceProfile).not.toHaveBeenCalled();
     expect(auth.login).not.toHaveBeenCalled();
+  });
+
+  it('serves the confirmation read on a GET with no Origin, from the enrollment cookie (R13)', async () => {
+    database.query.mockResolvedValue(controls(open));
+    const shown = { organizationName: 'Confirm Hospital Ltd', registrationNumber: 'RC1234567', productCode: 'pharmacy',
+      organizationType: 'pharmacy', administratorName: 'Dr Ada Obi', administratorEmail: 'provider@example.invalid' };
+    completion.selfServiceProfile.mockResolvedValue(shown);
+    const answer = await request(app.getHttpServer()).get(`${base}/profile`)
+      .set('Cookie', `hid_provider_enrollment=${'A'.repeat(43)}`);
+    expect([answer.status, answer.body]).toEqual([200, shown]);
+    expect(completion.selfServiceProfile.mock.calls.map(([cookie]) => cookie)).toEqual(['A'.repeat(43)]);
+    // A signed-in browser is refused as on the other routes, before the session is read.
+    completion.selfServiceProfile.mockClear();
+    const signedIn = await request(app.getHttpServer()).get(`${base}/profile`)
+      .set('Cookie', `hid_access_csrf=x; hid_provider_enrollment=${'A'.repeat(43)}`);
+    expect([signedIn.status, signedIn.body.code]).toEqual([409, 'PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT']);
+    expect(completion.selfServiceProfile).not.toHaveBeenCalled();
+    // The read writes nothing and the route sets no cookie.
+    expect(answer.headers['set-cookie']).toBeUndefined();
+    expect(database.withSystemTransaction).not.toHaveBeenCalled();
   });
 
   it('answers 423 before the migration (unknown control key), not 400 or 5xx', async () => {

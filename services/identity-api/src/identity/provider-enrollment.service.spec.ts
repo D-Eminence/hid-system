@@ -236,7 +236,11 @@ describe('the public application quota is charged once per start (CRITIC C8, rev
       }
       return { rows: [] };
     });
-    await expect(service.start(input, request('203.0.113.44'))).resolves.toMatchObject({ accepted: true });
+    // The emailed code's answer is start's answer, including one that sent no code (R14).
+    const noCode = { accepted: true, codeSent: false, challengeId: 'c0000000-0000-4000-8000-000000000071',
+      expiresInSeconds: 412, resendAfterSeconds: 37 };
+    completion.start.mockResolvedValueOnce(noCode);
+    await expect(service.start(input, request('203.0.113.44'))).resolves.toEqual(noCode);
     expect(sqlCalls(query).filter((sql) => sql.includes('consume_public_application_quota'))).toHaveLength(1);
     expect(integrations.consumeSelfServiceCacQuota).not.toHaveBeenCalled();
     expect(qoreid.verifyCac).not.toHaveBeenCalled();

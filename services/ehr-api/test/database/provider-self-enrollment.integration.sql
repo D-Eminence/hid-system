@@ -162,6 +162,8 @@ begin
       'identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text)',
       'identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text)',
       'identity.prepare_self_service_provider_activation(char)',
+      'identity.current_self_service_provider_enrollment(char)',
+      'identity.self_service_provider_code_state(text,text,text)',
       'identity.activate_self_service_provider_enrollment(char,text)',
       'platform.consume_self_service_cac_quota(uuid,char,integer)'
     ] loop
@@ -190,6 +192,8 @@ begin
       'identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text)',
       'identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text)',
       'identity.prepare_self_service_provider_activation(char)',
+      'identity.current_self_service_provider_enrollment(char)',
+      'identity.self_service_provider_code_state(text,text,text)',
       'identity.activate_self_service_provider_enrollment(char,text)'
     ] loop
       if has_function_privilege(runtime_role, signature, 'EXECUTE') then
@@ -206,6 +210,8 @@ begin
                 'identity.lapse_stale_self_service_organization_application(text,text,text)'::regprocedure,
                 'identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text)'::regprocedure,
                 'identity.prepare_self_service_provider_activation(char)'::regprocedure,
+                'identity.current_self_service_provider_enrollment(char)'::regprocedure,
+                'identity.self_service_provider_code_state(text,text,text)'::regprocedure,
                 'identity.activate_self_service_provider_enrollment(char,text)'::regprocedure,
                 'platform.consume_self_service_cac_quota(uuid,char,integer)'::regprocedure)
                 and acl.grantee = 0) then
