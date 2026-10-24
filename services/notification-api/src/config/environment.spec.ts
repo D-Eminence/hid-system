@@ -141,9 +141,9 @@ describe('Notification API emergency-contact settings', () => {
   beforeEach(() => { process.env = production(); resetEnvironmentForTests(); });
   afterEach(() => { process.env = original; resetEnvironmentForTests(); });
 
-  it('defaults to delivery off and the Health ID support phone and email', () => {
+  it('defaults to delivery on (owner approval, 2026-10-24) and the Health ID support phone and email', () => {
     expect(getEnvironment()).toMatchObject({
-      EMERGENCY_CONTACT_DELIVERY_ENABLED: false,
+      EMERGENCY_CONTACT_DELIVERY_ENABLED: true,
       EMERGENCY_CONTACT_SUPPORT_PHONE: '+2347026717252',
       EMERGENCY_CONTACT_SUPPORT_EMAIL: 'support@healthidentitydirectory.com',
     });

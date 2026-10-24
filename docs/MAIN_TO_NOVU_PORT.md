@@ -61,15 +61,26 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | #50 (enrollment) | Activation is budgeted per enrollment (`OTP_RATE_MAX_REQUESTS` × 3 per window, then 429 `ENROLLMENT_RATE_LIMITED`) once the cookie has proved it. A replay of an active enrollment never hashes the presented password; the placeholder hash the command needs is computed once per process | — |
 | — | This branch only (owner decision): a public enrollment's start answers `recordName`, the full name on the NIN record (first, middle and last), so the person can check that the NIN they typed is theirs; health shows it under "NIN verified". `GET /identity/patient-enrollments/current` answers it too, for a reload, but only within 15 minutes of the enrollment's first start (a same-key resume does not extend it) and never after activation, so a shared device does not show it to the next person for the enrollment's whole 24 hours. It is never logged and is stored only in the encrypted profile | — |
 | #68 (N2(b), service half) | The enrollment cookie shows the new HID (`GET /current`, an activation replay) for 15 minutes after activation only, then answers 404 as an unknown enrollment. Before, a shared device showed it to the next person for up to 24 hours. A start with the key of an activated enrollment answers 409 `IDEMPOTENCY_KEY_REUSED`, as on `main`, so the page says the registration was completed. Not ported: `main`'s 0085 check of the same in the activation command (the service refuses before it calls the command), and `main`'s expiry of the cookie in the activation response, so a reload within the 15 minutes still shows the HID, which a patient who verified only a phone needs to sign in and to recover the account | — |
-| #16 (emergency contacts, with e1757ba) | A patient keeps up to five emergency contacts, each stored encrypted and verified by a code the contact reads back; when a clinician uses break-glass, each verified contact with alerts on gets one alert. It ships switched off: adding a contact and sending a code answer 409 `EMERGENCY_CONTACT_DELIVERY_UNAVAILABLE` until `EMERGENCY_CONTACT_DELIVERY_ENABLED=true`, and no message can be sent. It differs from `main` as listed below the table | 0084 (main 0065), runtime-grants.sql |
+| #16 (emergency contacts, with e1757ba) | A patient keeps up to five emergency contacts, each stored encrypted and verified by a code the contact reads back; when a clinician uses break-glass, each verified contact with alerts on gets one alert. It shipped switched off and is switched on through the code defaults after the owner's approval of 2026-10-24 (D1). Switched off, adding a contact and sending a code answer 409 `EMERGENCY_CONTACT_DELIVERY_UNAVAILABLE` and no message can be sent. It differs from `main` as listed below the table | 0084 (main 0065), runtime-grants.sql |
 | main 0097 section 2 with #18 0c4de59 and 17abba5 (plan waves W14, Identity part, and W30) | Staff can use break-glass in production (owner decision of 2026-10-24, below). 0085 seeds the active `emergency` purpose of use `identity.activate_break_glass` requires, as `main`'s 0097 does (ON CONFLICT DO NOTHING: an operator's row, active or not, is kept as it is). Identity runs `platform.require_control_enabled('break_glass_enabled')` inside the activation transaction, before the command: the control off answers 423 `BREAK_GLASS_DISABLED` and writes nothing, an unreadable control 503 `PLATFORM_CONTROL_UNAVAILABLE`, and a missing or deactivated `emergency` purpose also 423 `BREAK_GLASS_DISABLED` (it was 400 `INVALID_CONSENT_COMMAND`). Every other 55000 stays 409 and every other 22023 stays 400. It differs from `main` as listed below the table | 0085 (main 0097) |
 
 Emergency contacts differ from `main` (#16 and e1757ba) in these ways. Owner
 decisions of 2026-10-23 are marked "owner".
 
 - D1: `EMERGENCY_CONTACT_DELIVERY_ENABLED` (Identity and notification-api)
-  defaults to false and has no production refusal. `main` refuses it in
-  production, so turning it on would crash-loop both services.
+  has no production refusal; `main` refuses it in production, so turning it on
+  would crash-loop both services. D-Eminence approved production delivery for
+  every patient on 2026-10-24 (contacts' details stored encrypted) and asked for
+  it without an infrastructure apply. Production's task definitions set none of
+  these keys, so the code defaults decide, and they are switched on in two
+  releases because a release updates identity-api before notification-api:
+  first notification-api's default becomes true (Identity still answers
+  "delivery off"), then Identity's, with its dispatch interval
+  `PATIENT_LIFECYCLE_SWEEP_SECONDS` at 60 s (O9). Only an explicit `false`
+  switches a service off: `dev`'s Terraform leaves the key out when its switch
+  is off, which now means on, so until it writes `"false"` the off switch is a
+  release that flips Identity's default back (Identity first, then
+  notification-api).
 - D2: while delivery is off, or the account is outside
   `EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS` (D6), adding a contact and sending a
   code answer 409 `EMERGENCY_CONTACT_DELIVERY_UNAVAILABLE`. Listing, editing and
