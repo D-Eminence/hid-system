@@ -185,8 +185,10 @@ locals {
     )
   }
 
-  # Emergency-contact keys exist only while their switch is on, so with both
-  # switches off the task definitions are exactly as they were before them.
+  # Since hid-system staging-novu-ci-20261005 #112/#113, both services default
+  # emergency-contact delivery to on when the key is absent (owner approval of
+  # 2026-10-24). The flag is therefore always written explicitly: a switch set
+  # to false writes "false", which is the only value that turns a service off.
   emergency_contact_channels = contains(["email-sms-brevo", "full"], local.notification_profile) ? "email,sms" : "email"
   emergency_contact_identity_environment = var.emergency_contact_delivery_enabled ? merge({
     EMERGENCY_CONTACT_DELIVERY_ENABLED = "true"
@@ -194,10 +196,12 @@ locals {
     EMERGENCY_CONTACT_CHANNELS         = local.emergency_contact_channels
     }, length(var.emergency_contact_pilot_account_ids) > 0 ? {
     EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS = join(",", [for id in var.emergency_contact_pilot_account_ids : lower(id)])
-  } : {}) : {}
-  emergency_contact_notification_environment = var.emergency_contact_notification_enabled ? {
-    EMERGENCY_CONTACT_DELIVERY_ENABLED = "true"
-  } : {}
+    } : {}) : {
+    EMERGENCY_CONTACT_DELIVERY_ENABLED = "false"
+  }
+  emergency_contact_notification_environment = {
+    EMERGENCY_CONTACT_DELIVERY_ENABLED = tostring(var.emergency_contact_notification_enabled)
+  }
 
   workload_environment = {
     identity-api = merge(local.common_api_environment, local.workload_token_files.identity-api, {

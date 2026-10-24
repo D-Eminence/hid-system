@@ -150,32 +150,30 @@ Remove TF_VAR_cloudflare_origin_secret from the operator shell after use.
 ### Emergency contacts
 
 The owner approved production delivery on 24 October 2026 for every patient
-(`emergency_contact_pilot_account_ids = []`). The backend (PR #109, migration
-0084) and frontend are live with delivery off. Two switches turn it on, one
-service per apply, because ECS rolls services in parallel. Check out each commit
-on dev in turn and use the plan/apply helper above:
+(`emergency_contact_pilot_account_ids = []`), and asked for it without waiting
+for an infrastructure apply. The backend (hid-system `staging-novu-ci-20261005`
+#109, #112 and #113) therefore switched delivery on through the code defaults:
+both services treat an absent `EMERGENCY_CONTACT_DELIVERY_ENABLED` as on, and
+Identity dispatches alerts every 60 s by default. Production's task definitions
+did not set these keys, so delivery is on without any apply.
 
-| Step | Commit on dev | Plan may change only |
+This Terraform always writes the flag explicitly, because only `"false"` turns
+a service off:
+
+| Switch | Renders on notification-api | Renders on identity-api |
 | --- | --- | --- |
-| Check | "Add emergency-contact delivery switches" (both off) | nothing |
-| 4a | "Switch on notification-api emergency-contact delivery" (`emergency_contact_notification_enabled = true`) | notification-api |
-| 4b | "Switch on identity-api emergency-contact delivery" (`emergency_contact_delivery_enabled = true`, dispatch every 60 s) | identity-api |
+| both on (`production.tfvars` today) | `EMERGENCY_CONTACT_DELIVERY_ENABLED=true` | `EMERGENCY_CONTACT_DELIVERY_ENABLED=true`, `EMERGENCY_CONTACT_CHANNELS` (`email` on `email-brevo`), `PATIENT_LIFECYCLE_SWEEP_SECONDS` |
+| identity off | `true` | `EMERGENCY_CONTACT_DELIVERY_ENABLED=false` |
+| both off | `EMERGENCY_CONTACT_DELIVERY_ENABLED=false` | `EMERGENCY_CONTACT_DELIVERY_ENABLED=false` |
 
-- Check: switched-off keys are absent, so this plan must not change any task
-  definition. If it does, stop: something else differs, for example Terraform
-  catching up with backend releases made since the last infrastructure apply.
-  Review that difference, which must keep each live image, and apply it on its
-  own before 4a.
-- 4a and 4b: the plan replaces `aws_ecs_task_definition.production["<service>"]`
-  and the retained `aws_ecs_task_definition.workload["<service>"]`, and updates
-  `aws_ecs_service.production["<service>"]` in place. Nothing else changes, and
-  the image does not change. The only container difference is the added
-  environment: 4a adds `EMERGENCY_CONTACT_DELIVERY_ENABLED` to notification-api;
-  4b adds `EMERGENCY_CONTACT_DELIVERY_ENABLED`, `EMERGENCY_CONTACT_CHANNELS`
-  (`email` on `email-brevo`) and `PATIENT_LIFECYCLE_SWEEP_SECONDS` to
-  identity-api. The `emergency_contacts` output shows the switch state. Finish
-  and check 4a before planning 4b.
-- After each apply, list the keys by name only:
+- The next routine apply from dev adds the "on" keys above to both services'
+  task definitions. It changes no behaviour: they match the code defaults. The
+  plan replaces `aws_ecs_task_definition.production["<service>"]` and the
+  retained `aws_ecs_task_definition.workload["<service>"]` and updates
+  `aws_ecs_service.production["<service>"]` in place for identity-api and
+  notification-api, with no image change. The `emergency_contacts` output
+  shows the switch state.
+- After an apply, list the keys by name only:
 
   ```powershell
   foreach ($service in "notification-api", "identity-api") {
@@ -186,18 +184,19 @@ on dev in turn and use the plan/apply helper above:
   ```
 
   Unauthenticated, `GET https://app.healthidentitydirectory.com/api/v1/identity/me/emergency-contacts/availability`
-  must return 401, not a 5xx. After 4b a patient session receives
+  must return 401, not a 5xx; a patient session receives
   `{"delivery":true,"channels":["email"]}`.
 - Off switch: identity first, then notification, each as its own reviewed
   commit to `environments/production.tfvars` on dev. Commit
   `emergency_contact_delivery_enabled = false`, plan and apply from that commit
-  (only identity-api changes), and push it to dev before the apply or straight
-  after it. Then do the same with `emergency_contact_notification_enabled =
-  false` (only notification-api changes). Never apply the off switch from a
-  local edit, a copy of the file or an older commit: dev would still say on,
-  and the next routine apply from dev would switch delivery back on. After the
-  rollout, `production.tfvars` on dev must always match what is applied.
-  Terraform refuses identity delivery while notification-api's is off.
+  (only identity-api changes, to `EMERGENCY_CONTACT_DELIVERY_ENABLED=false`),
+  and push it to dev before the apply or straight after it. Then do the same
+  with `emergency_contact_notification_enabled = false`. Never apply the off
+  switch from a local edit, a copy of the file or an older commit: dev would
+  still say on, and the next routine apply from dev would switch delivery back
+  on. Terraform refuses identity delivery while notification-api's is off.
+  Without an apply, the backend's own off switch is a release that flips
+  Identity's default back.
 - While identity delivery is off, emergency access still records an alert for
   each verified contact. Each expires unsent 24 h after the access began;
   switching delivery back on within that window sends the pending alerts late.

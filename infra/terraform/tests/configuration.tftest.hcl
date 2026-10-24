@@ -379,7 +379,7 @@ run "production_runtime_issues_own_workload_tokens" {
   }
 }
 
-run "emergency_contact_keys_absent_by_default" {
+run "emergency_contact_keys_explicitly_off_by_default" {
   command = plan
 
   variables {
@@ -393,11 +393,11 @@ run "emergency_contact_keys_absent_by_default" {
 
   assert {
     condition = (
-      contains(keys(module.application.emergency_contact_environment), "identity-api") &&
-      contains(keys(module.application.emergency_contact_environment), "notification-api") &&
-      alltrue([for name, environment in module.application.emergency_contact_environment : length(environment) == 0])
+      module.application.emergency_contact_environment["identity-api"] == { EMERGENCY_CONTACT_DELIVERY_ENABLED = "false" } &&
+      module.application.emergency_contact_environment["notification-api"] == { EMERGENCY_CONTACT_DELIVERY_ENABLED = "false" } &&
+      alltrue([for name, environment in module.application.emergency_contact_environment : length(environment) == 0 if !contains(["identity-api", "notification-api"], name)])
     )
-    error_message = "With both switches off no container may receive an emergency-contact key, not even as false."
+    error_message = "With both switches off both services must receive EMERGENCY_CONTACT_DELIVERY_ENABLED=false explicitly (the services default to on), and no other container any key."
   }
 
   assert {
@@ -428,11 +428,11 @@ run "emergency_contact_notification_switch_only" {
 
   assert {
     condition = (
-      length(module.application.emergency_contact_environment["notification-api"]) == 1 &&
-      module.application.emergency_contact_environment["notification-api"]["EMERGENCY_CONTACT_DELIVERY_ENABLED"] == "true" &&
-      alltrue([for name, environment in module.application.emergency_contact_environment : length(environment) == 0 if name != "notification-api"])
+      module.application.emergency_contact_environment["notification-api"] == { EMERGENCY_CONTACT_DELIVERY_ENABLED = "true" } &&
+      module.application.emergency_contact_environment["identity-api"] == { EMERGENCY_CONTACT_DELIVERY_ENABLED = "false" } &&
+      alltrue([for name, environment in module.application.emergency_contact_environment : length(environment) == 0 if !contains(["identity-api", "notification-api"], name)])
     )
-    error_message = "The notification switch must add only EMERGENCY_CONTACT_DELIVERY_ENABLED=true, and only to notification-api."
+    error_message = "The notification switch alone must set notification-api to true and keep identity-api explicitly false."
   }
 
   assert {
