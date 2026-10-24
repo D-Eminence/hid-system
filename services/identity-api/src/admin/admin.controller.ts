@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Headers, Param, ParseUUIDPipe, Post, Query, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Query, Req, Res } from '@nestjs/common';
 import type { Response } from 'express';
 import { AuditAction, AuditFailuresOnly, FacilityOptional, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
@@ -82,6 +82,18 @@ export class AdminController {
   @AuditAction('admin.principals.list.request')
   principals(@Query() query: ListPrincipalsDto, @Req() request: HidRequest) {
     return this.admin.listPrincipals(requireAdminContext(request), query);
+  }
+
+  /**
+   * The same search with its terms (a name or an email address) in the body, out of the request
+   * lines that access logs keep (main A24). The production admin console searches here.
+   */
+  @Post('principals/search')
+  @HttpCode(200)
+  @RequirePermissions('platform.principal.read')
+  @AuditAction('admin.principals.list.request')
+  searchPrincipals(@Body() input: ListPrincipalsDto, @Req() request: HidRequest) {
+    return this.admin.listPrincipals(requireAdminContext(request), input);
   }
 
   @Get('principals/export')

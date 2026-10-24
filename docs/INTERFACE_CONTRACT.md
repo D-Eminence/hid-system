@@ -705,13 +705,17 @@ GET /api/v1/admin/overview
 GET /api/v1/admin/facilities?page=&pageSize=&status=&query=
 GET /api/v1/admin/facilities/:facilityId
 GET /api/v1/admin/principals?query=&page=&pageSize=&status=
+POST /api/v1/admin/principals/search   {query, page?, pageSize?, status?}
 GET /api/v1/admin/identity/reviews?page=&pageSize=&status=
 GET /api/v1/admin/audit/events?limit=&beforeSequenceId=&actor=&facilityId=&action=&correlationId=&outcome=&from=&to=
 GET /api/v1/admin/operations/services
 GET /api/v1/admin/operations/events
 ```
 
-Principal search requires at least two characters. Facility, principal, and
+Principal search requires at least two characters. `POST principals/search`
+answers `200` with the same page as `GET principals`; it keeps the search term
+(a name or an email address) out of URLs and request-line access logs, and is
+the form browsers use. Facility, principal, and
 review page sizes are bounded to 100; audit pages are bounded to 200 and use a
 descending sequence cursor. Raw NIN, password material, tokens, event payloads,
 patient audit identifiers, and free-form audit details are absent.
