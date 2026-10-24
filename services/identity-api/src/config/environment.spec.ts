@@ -69,15 +69,16 @@ describe('Identity production database transport', () => {
     expect(getEnvironment().QOREID_MAX_RETRIES).toBe(0);
   });
 
-  it('keeps emergency-contact delivery off by default and accepts it in production (main refuses it there)', () => {
+  it('turns emergency-contact delivery on by default in production, every 60 s, and lets it be switched off (main refuses it there)', () => {
+    // Production's task definitions set none of these keys (owner approval, 2026-10-24).
     production(); resetEnvironmentForTests();
-    expect(getEnvironment()).toMatchObject({ EMERGENCY_CONTACT_DELIVERY_ENABLED: false,
+    expect(getEnvironment()).toMatchObject({ EMERGENCY_CONTACT_DELIVERY_ENABLED: true,
       EMERGENCY_CONTACT_CHANNELS: ['email'], EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS: [],
-      PATIENT_LIFECYCLE_SWEEP_SECONDS: 300, EMERGENCY_CONTACT_ALERT_TIMEOUT_MS: 12_000 });
-
-    production(); process.env.EMERGENCY_CONTACT_DELIVERY_ENABLED = 'true'; resetEnvironmentForTests();
-    expect(getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED).toBe(true);
+      PATIENT_LIFECYCLE_SWEEP_SECONDS: 60, EMERGENCY_CONTACT_ALERT_TIMEOUT_MS: 12_000 });
     expect(getEnvironment().HID_DEPLOYMENT_ENV).toBe('production');
+
+    production(); process.env.EMERGENCY_CONTACT_DELIVERY_ENABLED = 'false'; resetEnvironmentForTests();
+    expect(getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED).toBe(false);
   });
 
   it('reads emergency-contact channels as a non-empty subset of email and SMS', () => {

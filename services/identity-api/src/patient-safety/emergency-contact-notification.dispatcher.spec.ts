@@ -44,8 +44,8 @@ function dispatcherWith(deliverEmergencyContactAlert: jest.Mock) {
 }
 
 describe('EmergencyContactNotificationDispatcher', () => {
-  describe('with delivery disabled (default and production)', () => {
-    usePatientSafetyTestEnvironment();
+  describe('with delivery disabled (switched off, also in production)', () => {
+    usePatientSafetyTestEnvironment({ EMERGENCY_CONTACT_DELIVERY_ENABLED: 'false' });
 
     it('claims nothing and sends nothing', async () => {
       const deliverEmergencyContactAlert = jest.fn();
@@ -358,7 +358,7 @@ describe('PatientLifecycleSweeper', () => {
   });
 
   describe('with delivery disabled', () => {
-    usePatientSafetyTestEnvironment({ ...outsideTests, PATIENT_LIFECYCLE_SWEEP_SECONDS: '0' });
+    usePatientSafetyTestEnvironment({ ...outsideTests, EMERGENCY_CONTACT_DELIVERY_ENABLED: 'false', PATIENT_LIFECYCLE_SWEEP_SECONDS: '0' });
 
     it('starts no timer and warns about nothing', () => {
       const interval = jest.spyOn(global, 'setInterval');

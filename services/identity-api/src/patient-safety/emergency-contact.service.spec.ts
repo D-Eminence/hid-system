@@ -66,8 +66,8 @@ describe('EmergencyContactProtector', () => {
 });
 
 describe('EmergencyContactService', () => {
-  describe('with delivery disabled (default)', () => {
-    usePatientSafetyTestEnvironment();
+  describe('with delivery disabled (switched off)', () => {
+    usePatientSafetyTestEnvironment({ EMERGENCY_CONTACT_DELIVERY_ENABLED: 'false' });
 
     it('requires a patient session', async () => {
       const { query, database } = fakeDatabase();
@@ -141,7 +141,7 @@ describe('EmergencyContactService', () => {
   });
 
   describe('with delivery disabled and no contact keys', () => {
-    usePatientSafetyTestEnvironment({ NIN_ENCRYPTION_KEY_B64: '', OTP_HMAC_KEY_B64: '' });
+    usePatientSafetyTestEnvironment({ EMERGENCY_CONTACT_DELIVERY_ENABLED: 'false', NIN_ENCRYPTION_KEY_B64: '', OTP_HMAC_KEY_B64: '' });
 
     it('answers the delivery refusal, not the key outage, while delivery is off', async () => {
       const { database } = fakeDatabase();

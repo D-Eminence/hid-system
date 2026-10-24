@@ -81,10 +81,15 @@ const environmentSchema = z.object({
   NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN: optionalSecret,
   NOTIFICATION_IDENTITY_WORKLOAD_TOKEN_FILE: optionalString,
   // Emergency-contact verification codes and emergency-access alerts reach
-  // people who are not Health ID users. Off unless the owner switches it on;
-  // unlike main, production is not refused (it would crash-loop sign-in).
-  // While off, adding a contact and sending a code answer 409.
-  EMERGENCY_CONTACT_DELIVERY_ENABLED: booleanString,
+  // people who are not Health ID users. On by default: D-Eminence approved
+  // production delivery for every patient on 2026-10-24, and production's task
+  // definitions do not set the key; notification-api switched on one release
+  // earlier. Only an explicit EMERGENCY_CONTACT_DELIVERY_ENABLED=false switches
+  // it off (while off, adding a contact and sending a code answer 409). dev's
+  // Terraform does not write "false" yet, so until it does the off switch is a
+  // release that flips this default back. Unlike main, production is not
+  // refused (it would crash-loop sign-in).
+  EMERGENCY_CONTACT_DELIVERY_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
   // The channels a contact may be added and alerted on. Production's
   // email-brevo profile cannot send SMS.
   EMERGENCY_CONTACT_CHANNELS: emergencyContactChannels,
@@ -92,8 +97,8 @@ const environmentSchema = z.object({
   // and every other patient is told delivery is off. Empty means every patient.
   EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS: pilotAccountIds,
   // Interval for dispatching emergency-contact notifications while delivery is
-  // enabled. Zero disables it.
-  PATIENT_LIFECYCLE_SWEEP_SECONDS: z.coerce.number().int().min(0).max(3600).default(300),
+  // enabled (owner decision O9: every 60 s). Zero disables it.
+  PATIENT_LIFECYCLE_SWEEP_SECONDS: z.coerce.number().int().min(0).max(3600).default(60),
   // notification-api may spend two provider timeouts on one alert. The
   // dispatcher sends five alerts under a 120-second lease, so five of these
   // must stay below it (20 s at most).
