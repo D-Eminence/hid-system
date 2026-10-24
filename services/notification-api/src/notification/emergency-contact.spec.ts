@@ -130,6 +130,11 @@ describe('Emergency-contact notification delivery', () => {
   };
 
   describe('while delivery is disabled', () => {
+    beforeEach(() => {
+      process.env.EMERGENCY_CONTACT_DELIVERY_ENABLED = 'false';
+      resetEnvironmentForTests();
+    });
+
     it('answers the alert route 503 EMERGENCY_CONTACT_DELIVERY_DISABLED, so identity-api retries it', async () => {
       const sent = provider('termii');
       const error = await controller(sent).emergencyContactAlert(alert, request, 'emergency-contact:0001').catch((caught: unknown) => caught);
@@ -149,11 +154,12 @@ describe('Emergency-contact notification delivery', () => {
       expect(sent.send).toHaveBeenCalledTimes(1);
     });
 
-    it('is the default', () => {
-      delete process.env.EMERGENCY_CONTACT_DELIVERY_ENABLED;
-      resetEnvironmentForTests();
-      expect(getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED).toBe(false);
-    });
+  });
+
+  it('is enabled by default (owner approval, 2026-10-24): production sets no key', () => {
+    delete process.env.EMERGENCY_CONTACT_DELIVERY_ENABLED;
+    resetEnvironmentForTests();
+    expect(getEnvironment().EMERGENCY_CONTACT_DELIVERY_ENABLED).toBe(true);
   });
 
   describe('while delivery is enabled', () => {

@@ -37,9 +37,13 @@ const schema = z.object({
   BREVO_SMS_SENDER: optional,
   BREVO_WHATSAPP_SENDER: optional,
   // Emergency-contact verification codes and emergency-access alerts reach
-  // people who are not Health ID users. Off by default; there is no
-  // production refusal, so the owner can switch it on in production.
-  EMERGENCY_CONTACT_DELIVERY_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  // people who are not Health ID users. On by default: D-Eminence approved
+  // production delivery on 2026-10-24, and production's task definition does
+  // not set the key. Only an explicit EMERGENCY_CONTACT_DELIVERY_ENABLED=false
+  // switches it off. dev's Terraform does not write "false" yet (it leaves the
+  // key out when its switch is off), so until it does the off switch is a
+  // release that flips this default back. Switch identity-api off first.
+  EMERGENCY_CONTACT_DELIVERY_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
   // Health ID support, named in every alert for stopping alerts and, when the
   // facility has no alert phone, for questions. Configured in this service only.
   EMERGENCY_CONTACT_SUPPORT_PHONE: z.preprocess(empty, z.string().trim().regex(/^\+[1-9]\d{7,14}$/, 'must be an E.164 phone number').default('+2347026717252')),
