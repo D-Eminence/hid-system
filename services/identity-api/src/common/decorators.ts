@@ -1,4 +1,4 @@
-import { SetMetadata } from '@nestjs/common';
+import { applyDecorators, SetMetadata } from '@nestjs/common';
 
 export const PUBLIC_ROUTE = Symbol('PUBLIC_ROUTE');
 export const PATIENT_ALLOWED = Symbol('PATIENT_ALLOWED');
@@ -27,3 +27,15 @@ export const DELEGATED_BROWSER_REQUEST = Symbol('DELEGATED_BROWSER_REQUEST');
  * reported method in request.delegatedBrowserMethod.
  */
 export const DelegatedBrowserRequest = (): MethodDecorator => SetMetadata(DELEGATED_BROWSER_REQUEST, true);
+export const PATIENT_ONLY = Symbol('PATIENT_ONLY');
+/**
+ * A route only a patient session may use: patient allowed, facility optional,
+ * and any other session refused by SecurityGuard with 403
+ * PATIENT_SESSION_REQUIRED before the handler runs. The guard audits that
+ * refusal as an auth.authorization.denied event with no facility, which the
+ * audit layer accepts. Refused in the handler instead, it was recorded as a
+ * staff api.* request with no facility, which the audit layer refuses, and the
+ * answer became 503 with nothing recorded (A9).
+ */
+export const PatientOnly = (): MethodDecorator & ClassDecorator =>
+  applyDecorators(SetMetadata(PATIENT_ONLY, true), PatientAllowed(), FacilityOptional());

@@ -14,6 +14,7 @@ import {
   FACILITY_OPTIONAL,
   PUBLIC_ROUTE,
   PATIENT_ALLOWED,
+  PATIENT_ONLY,
   REQUIRED_PERMISSIONS,
 } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
@@ -50,6 +51,11 @@ export class SecurityGuard implements CanActivate {
       await this.enforceRuntimeControls(request);
       if (verified.actor.kind === 'patient' && !this.metadata<boolean>(PATIENT_ALLOWED, context)) {
         throw new DomainProblem(403, 'PATIENT_SCOPE_DENIED', 'This operation requires workforce authorization');
+      }
+      // A patient-only route refuses any other session here, before a handler
+      // runs, so the refusal is answered and audited as one (A9).
+      if (verified.actor.kind !== 'patient' && this.metadata<boolean>(PATIENT_ONLY, context)) {
+        throw new DomainProblem(403, 'PATIENT_SESSION_REQUIRED', 'An active patient session is required');
       }
       if (transport === 'cookie' && !SAFE_METHODS.has(request.method)
         && !(await this.delegatedSafeBrowserRequest(request, context))) {

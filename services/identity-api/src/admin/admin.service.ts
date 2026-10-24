@@ -5,16 +5,22 @@ import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { PlatformAdminContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
-import type { AccountStatusCommandDto, FacilityStatusCommandDto,
-  PlatformRoleCommandDto, RevokeSessionsCommandDto } from './dto/admin-command.dto';
+import { normalizeContactForLookup } from '../identity/contact-lookup';
+import { EmergencyContactProtector } from '../patient-safety/emergency-contact-protector';
+import type { AccountStatusCommandDto, EmergencyContactOptOutCommandDto, FacilityAlertPhoneCommandDto,
+  FacilityStatusCommandDto, PlatformRoleCommandDto, RevokeSessionsCommandDto } from './dto/admin-command.dto';
 import type { ListFacilitiesDto, ListIdentityReviewsDto,
   ListPlatformAuditDto, ListPrincipalsDto } from './dto/admin-list.dto';
 import type { PlatformControlCommandDto } from './dto/admin-command.dto';
+
+/** The opt-out's audit reason: the recipient asked support to stop their emergency-access alerts. */
+const OPT_OUT_AUDIT_REASON = 'Emergency-access alerts stopped at the recipient\'s request';
 
 interface FacilityRow extends QueryResultRow {
   id: string; organizationId: string; organizationName: string; name: string; code: string;
   status: string; version: string; statusReason: string | null; statusChangedAt: Date | null;
   createdAt: Date; membershipCount: string;
+  alertPhoneE164?: string | null; alertPhoneUpdatedAt?: Date | null;
 }
 
 interface PrincipalRow extends QueryResultRow {
@@ -34,10 +40,13 @@ interface FacilityCommandRow extends CommandRow { facility_id: string; lifecycle
 interface AccountCommandRow extends CommandRow { account_id: string; account_status: string; row_version: string }
 interface RoleCommandRow extends CommandRow { account_id: string; role_code: string; active: boolean; account_version: string }
 interface SessionCommandRow extends CommandRow { account_id: string; revoked_count: number }
+interface AlertPhoneCommandRow extends CommandRow { facility_id: string; phone_e164: string | null; facility_version: string }
+interface OptOutCommandRow extends CommandRow { contact_count: number; patient_count: number }
 
 @Injectable()
 export class AdminService {
-  constructor(private readonly database: DatabaseService, private readonly audit: AuditService) {}
+  constructor(private readonly database: DatabaseService, private readonly audit: AuditService,
+    private readonly emergencyContacts: EmergencyContactProtector) {}
 
   session(context: PlatformAdminContext) {
     return {
@@ -139,13 +148,16 @@ export class AdminService {
         facility.row_version::text as version, facility.status_reason as "statusReason",
         facility.status_changed_at as "statusChangedAt", facility.created_at as "createdAt",
         (select count(*) from identity.staff_facility_memberships membership
-          where membership.facility_id = facility.id and membership.active)::text as "membershipCount"
+          where membership.facility_id = facility.id and membership.active)::text as "membershipCount",
+        alert_phone.phone_e164 as "alertPhoneE164", alert_phone.updated_at as "alertPhoneUpdatedAt"
       from identity.facilities facility
       join identity.organizations organization on organization.id = facility.organization_id
+      left join identity.facility_alert_phones alert_phone on alert_phone.facility_id = facility.id
       where facility.id = $1`, [facilityId]);
       const row = result.rows[0];
       if (!row) throw new DomainProblem(404, 'ADMIN_FACILITY_NOT_FOUND', 'Facility was not found');
-      return { ...row, version: Number(row.version), membershipCount: Number(row.membershipCount) };
+      return { ...row, version: Number(row.version), membershipCount: Number(row.membershipCount),
+        alertPhoneE164: row.alertPhoneE164 ?? null, alertPhoneUpdatedAt: row.alertPhoneUpdatedAt ?? null };
     }, { readOnly: true });
   }
 
@@ -165,6 +177,61 @@ export class AdminService {
           { status: input.status, version: Number(row.row_version) }));
         return { facilityId: row.facility_id, status: row.lifecycle_status,
           version: Number(row.row_version), replayed: row.replayed };
+      } catch (error) { throw this.commandError(error); }
+    });
+  }
+
+  /**
+   * The phone an emergency-contact alert gives for this facility. It bumps the
+   * facility version like a status change; the audit row records whether the
+   * phone was cleared, never its digits.
+   */
+  async setFacilityAlertPhone(context: PlatformAdminContext, facilityId: string, expectedVersion: number,
+    input: FacilityAlertPhoneCommandDto, idempotencyKey: string) {
+    const phone = input.phone === null ? null : facilityAlertPhone(input.phone);
+    const digest = this.digest({ facilityId, expectedVersion, phone, reason: input.reason });
+    return this.database.withPlatformTransaction(context, async (client) => {
+      try {
+        const result = await client.query<AlertPhoneCommandRow>(
+          `select * from identity.admin_set_facility_alert_phone($1, $2, $3, $4, $5, $6)`,
+          [facilityId, expectedVersion, phone, input.reason.trim(), idempotencyKey, digest],
+        );
+        const row = result.rows[0];
+        if (!row) throw new DomainProblem(503, 'ADMIN_COMMAND_UNAVAILABLE', 'Facility command is unavailable');
+        if (!row.replayed) await this.audit.recordWithClient(client, this.auditEvent(context,
+          'admin.facility.alert-phone.change', 'facility', facilityId, input.reason,
+          { version: Number(row.facility_version), cleared: row.phone_e164 === null }));
+        return { facilityId: row.facility_id, alertPhoneE164: row.phone_e164,
+          version: Number(row.facility_version), replayed: row.replayed };
+      } catch (error) { throw this.commandError(error); }
+    });
+  }
+
+  /**
+   * Support removes, across every patient, the emergency contacts at a
+   * destination whose holder asked to stop receiving alerts. The destination
+   * is normalized and keyed with the contacts' own destination HMAC; neither
+   * it nor a plain digest of it reaches the database, a log or the audit row,
+   * and support learns only how many contacts and patients were affected.
+   */
+  async optOutEmergencyContact(context: PlatformAdminContext, input: EmergencyContactOptOutCommandDto,
+    idempotencyKey: string) {
+    const destinationHmac = this.emergencyContacts.destinationHmac(input.channel,
+      this.emergencyContacts.normalizeDestination(input.channel, input.destination));
+    const digest = this.digest({ channel: input.channel, destinationHmac, reason: input.reason });
+    return this.database.withPlatformTransaction(context, async (client) => {
+      try {
+        const result = await client.query<OptOutCommandRow>(
+          `select * from identity.admin_opt_out_emergency_contact($1, $2, $3, $4, $5)`,
+          [input.channel, destinationHmac, input.reason.trim(), idempotencyKey, digest],
+        );
+        const row = result.rows[0];
+        if (!row) throw new DomainProblem(503, 'ADMIN_COMMAND_UNAVAILABLE', 'Emergency-contact command is unavailable');
+        // The typed reason may quote the destination, which no audit row may hold: the row carries a fixed one.
+        if (!row.replayed) await this.audit.recordWithClient(client, this.auditEvent(context,
+          'admin.emergency-contact.opt-out', 'emergency-contact', null, OPT_OUT_AUDIT_REASON,
+          { channel: input.channel, contacts: row.contact_count, patients: row.patient_count }));
+        return { contacts: row.contact_count, patients: row.patient_count, replayed: row.replayed };
       } catch (error) { throw this.commandError(error); }
     });
   }
@@ -375,7 +442,22 @@ export class AdminService {
     if (message.includes('ADMIN_LAST_SUPER_ADMIN')) return new DomainProblem(409, 'LAST_SUPER_ADMIN', 'At least one active platform Super Admin must remain');
     if (message.includes('NOT_FOUND') || message.includes('NOT_ACTIVE')) return new DomainProblem(404, 'ADMIN_RESOURCE_NOT_FOUND', 'The requested administration resource was not found');
     if (message.includes('ALREADY_ACTIVE') || message.includes('NO_STATE_CHANGE')) return new DomainProblem(409, 'ADMIN_STATE_CONFLICT', 'The requested state is already active');
+    if (message.includes('ADMIN_INVALID_FACILITY_PHONE')) return invalidFacilityPhone();
     if (message.includes('ADMIN_INVALID') || message.includes('ADMIN_REASON_REQUIRED')) return new DomainProblem(400, 'ADMIN_COMMAND_INVALID', 'The administration command is invalid');
     return new DomainProblem(503, 'ADMIN_COMMAND_UNAVAILABLE', 'The administration command could not be completed');
+  }
+}
+
+function invalidFacilityPhone(): DomainProblem {
+  return new DomainProblem(400, 'ADMIN_INVALID_FACILITY_PHONE',
+    'Enter the facility phone in international format (+234...) or as an 11-digit number starting with 0');
+}
+
+/** National `0…` or E.164, separators removed; anything else is the facility phone's own refusal. */
+function facilityAlertPhone(raw: string): string {
+  try {
+    return normalizeContactForLookup('phone', raw.replace(/[\s().-]/g, ''));
+  } catch {
+    throw invalidFacilityPhone();
   }
 }

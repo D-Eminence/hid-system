@@ -8,6 +8,14 @@ const optionalString = z.preprocess(emptyToUndefined, z.string().trim().min(1).o
 const optionalUrl = z.preprocess(emptyToUndefined, z.string().url().optional());
 const optionalSecret = z.preprocess(emptyToUndefined, z.string().min(32).optional());
 const booleanString = z.enum(['true', 'false']).default('false').transform((value) => value === 'true');
+const uniqueValues = (values: readonly string[]) => new Set(values).size === values.length;
+const emergencyContactChannels = z.preprocess(emptyToUndefined, z.string().default('email'))
+  .transform((value) => value.split(',').map((channel) => channel.trim()))
+  .pipe(z.array(z.enum(['email', 'sms'])).min(1).refine(uniqueValues, 'Channels must be unique'));
+const pilotAccountIds = z.preprocess(emptyToUndefined, z.string().optional())
+  .transform((value) => value ? value.split(',').map((accountId) => accountId.trim().toLowerCase()) : [])
+  .pipe(z.array(z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    'Pilot account IDs must be UUIDs')).max(20).refine(uniqueValues, 'Pilot account IDs must be unique'));
 
 function validProxyCidr(value: string): boolean {
   const [address, prefix, extra] = value.split('/');
@@ -72,6 +80,24 @@ const environmentSchema = z.object({
   NOTIFICATION_SERVICE_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN: optionalSecret,
   NOTIFICATION_IDENTITY_WORKLOAD_TOKEN_FILE: optionalString,
+  // Emergency-contact verification codes and emergency-access alerts reach
+  // people who are not Health ID users. Off unless the owner switches it on;
+  // unlike main, production is not refused (it would crash-loop sign-in).
+  // While off, adding a contact and sending a code answer 409.
+  EMERGENCY_CONTACT_DELIVERY_ENABLED: booleanString,
+  // The channels a contact may be added and alerted on. Production's
+  // email-brevo profile cannot send SMS.
+  EMERGENCY_CONTACT_CHANNELS: emergencyContactChannels,
+  // When set, only these accounts (at most 20) may add contacts or send codes,
+  // and every other patient is told delivery is off. Empty means every patient.
+  EMERGENCY_CONTACT_PILOT_ACCOUNT_IDS: pilotAccountIds,
+  // Interval for dispatching emergency-contact notifications while delivery is
+  // enabled. Zero disables it.
+  PATIENT_LIFECYCLE_SWEEP_SECONDS: z.coerce.number().int().min(0).max(3600).default(300),
+  // notification-api may spend two provider timeouts on one alert. The
+  // dispatcher sends five alerts under a 120-second lease, so five of these
+  // must stay below it (20 s at most).
+  EMERGENCY_CONTACT_ALERT_TIMEOUT_MS: z.coerce.number().int().min(1000).max(20_000).default(12_000),
   OIDC_ISSUER_URL: optionalUrl,
   OIDC_AUDIENCE: optionalString,
   OIDC_JWKS_URL: optionalUrl,

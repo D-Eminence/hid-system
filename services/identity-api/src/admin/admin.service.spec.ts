@@ -1,8 +1,11 @@
+import { Logger } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import type { AuditService } from '../audit/audit.service';
-import type { DataAccessContext } from '../common/request-context';
+import type { DataAccessContext, PlatformAdminContext } from '../common/request-context';
 import { DomainProblem } from '../common/problem';
 import type { DatabaseService } from '../database/database.service';
+import { EmergencyContactProtector } from '../patient-safety/emergency-contact-protector';
+import { usePatientSafetyTestEnvironment } from '../../test/patient-safety.fixtures';
 import { AdminService } from './admin.service';
 
 const context: DataAccessContext = {
@@ -20,13 +23,13 @@ const context: DataAccessContext = {
   },
 };
 
-function harness(row: Readonly<Record<string, unknown>>) {
+function harness(row: Readonly<Record<string, unknown>>, protector = {} as EmergencyContactProtector) {
   const client = { query: jest.fn().mockResolvedValue({ rows: [row], rowCount: 1 }) };
   const database = { withPlatformTransaction: jest.fn(async (_context, operation) =>
     operation(client as unknown as PoolClient)) };
   const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) };
-  const service = new AdminService(database as unknown as DatabaseService, audit as unknown as AuditService);
-  return { service, client, audit };
+  const service = new AdminService(database as unknown as DatabaseService, audit as unknown as AuditService, protector);
+  return { service, client, audit, database };
 }
 
 describe('AdminService governed commands', () => {
@@ -135,7 +138,8 @@ describe('AdminService governed commands', () => {
       return operation(client as unknown as PoolClient);
     }) };
     const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) };
-    const service = new AdminService(database as unknown as DatabaseService, audit as unknown as AuditService);
+    const service = new AdminService(database as unknown as DatabaseService, audit as unknown as AuditService,
+      {} as EmergencyContactProtector);
 
     await expect(service.exportPrincipals(context, {} as never)).resolves.toContain(
       '"Admin, Test"'
@@ -164,5 +168,204 @@ describe('AdminService governed commands', () => {
     expect(revoked.audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       action: 'admin.account.sessions-revoked', reason: 'Governed session revocation',
     }));
+  });
+});
+
+const platformContext: PlatformAdminContext = {
+  correlationId: 'admin-test-correlation', purposeOfUse: 'healthcare-operations',
+  actor: { ...context.actor, id: 'staff:support', subject: 'staff:support', facilityIds: [], roles: [],
+    platformRoles: ['support_admin'],
+    platformPermissions: ['platform.admin.access', 'platform.facility.manage', 'platform.emergency-contact.manage'] },
+};
+const facilityId = '10000000-0000-4000-8000-000000000002';
+
+async function problem(promise: Promise<unknown>): Promise<DomainProblem> {
+  const error = await promise.catch((failure: unknown) => failure);
+  expect(error).toBeInstanceOf(DomainProblem);
+  return error as DomainProblem;
+}
+
+describe('AdminService facility alert phone', () => {
+  it.each([
+    ['0803 000 0000', '+2348030000000'],
+    ['+234 803 000 0000', '+2348030000000'],
+    ['(0803) 000-0000', '+2348030000000'],
+    ['+447700900123', '+447700900123'],
+  ])('normalizes %p, stores it and audits whether it was cleared, never its digits', async (phone, stored) => {
+    const { service, client, audit } = harness({ facility_id: facilityId, phone_e164: stored,
+      facility_version: '4', replayed: false });
+    await expect(service.setFacilityAlertPhone(platformContext, facilityId, 3,
+      { phone, reason: '  Facility front desk line  ' }, 'admin-alert-phone-0001'))
+      .resolves.toEqual({ facilityId, alertPhoneE164: stored, version: 4, replayed: false });
+    const [sql, parameters] = client.query.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain('identity.admin_set_facility_alert_phone($1, $2, $3, $4, $5, $6)');
+    expect(parameters.slice(0, 5)).toEqual([facilityId, 3, stored, 'Facility front desk line', 'admin-alert-phone-0001']);
+    expect(parameters[5]).toMatch(/^[0-9a-f]{64}$/);
+    expect(audit.recordWithClient).toHaveBeenCalledTimes(1);
+    const event = audit.recordWithClient.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(event).toMatchObject({ action: 'admin.facility.alert-phone.change', actorType: 'platform',
+      resourceType: 'facility', resourceId: facilityId, reason: 'Facility front desk line',
+      details: { version: 4, cleared: false } });
+    expect(JSON.stringify(event)).not.toMatch(/803|7700900/);
+  });
+
+  it('clears the phone with null', async () => {
+    const { service, client, audit } = harness({ facility_id: facilityId, phone_e164: null, facility_version: '5', replayed: false });
+    await expect(service.setFacilityAlertPhone(platformContext, facilityId, 4,
+      { phone: null, reason: 'Number no longer staffed' }, 'admin-alert-phone-0002'))
+      .resolves.toEqual({ facilityId, alertPhoneE164: null, version: 5, replayed: false });
+    expect((client.query.mock.calls[0] as [string, unknown[]])[1][2]).toBeNull();
+    expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+      details: { version: 5, cleared: true } }));
+  });
+
+  it('does not audit an idempotent replay twice', async () => {
+    const { service, audit } = harness({ facility_id: facilityId, phone_e164: '+2348030000000', facility_version: '4', replayed: true });
+    await expect(service.setFacilityAlertPhone(platformContext, facilityId, 3,
+      { phone: '08030000000', reason: 'Facility front desk line' }, 'admin-alert-phone-0001'))
+      .resolves.toMatchObject({ replayed: true });
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
+  it.each(['not a phone', '12345', '+0803000000', '0803000000', ''])(
+    'refuses %p as 400 ADMIN_INVALID_FACILITY_PHONE before any database work', async (phone) => {
+      const { service, database } = harness({});
+      const refused = await problem(service.setFacilityAlertPhone(platformContext, facilityId, 3,
+        { phone, reason: 'Facility front desk line' }, 'admin-alert-phone-0003'));
+      expect([refused.getStatus(), refused.code]).toEqual([400, 'ADMIN_INVALID_FACILITY_PHONE']);
+      expect(database.withPlatformTransaction).not.toHaveBeenCalled();
+    });
+
+  it.each([
+    ['ADMIN_INVALID_FACILITY_PHONE', 400, 'ADMIN_INVALID_FACILITY_PHONE'],
+    ['ADMIN_PERMISSION_DENIED', 403, 'PERMISSION_DENIED'],
+    ['ADMIN_VERSION_CONFLICT', 409, 'VERSION_CONFLICT'],
+    ['ADMIN_IDEMPOTENCY_CONFLICT', 409, 'IDEMPOTENCY_CONFLICT'],
+    ['ADMIN_FACILITY_NOT_FOUND', 404, 'ADMIN_RESOURCE_NOT_FOUND'],
+    ['ADMIN_NO_STATE_CHANGE', 409, 'ADMIN_STATE_CONFLICT'],
+  ] as const)('maps the command error %s to %i %s', async (message, status, code) => {
+    const { service, client, audit } = harness({});
+    client.query.mockRejectedValue(Object.assign(new Error(message), { code: '22023' }));
+    const refused = await problem(service.setFacilityAlertPhone(platformContext, facilityId, 3,
+      { phone: '08030000000', reason: 'Facility front desk line' }, 'admin-alert-phone-0004'));
+    expect([refused.getStatus(), refused.code]).toEqual([status, code]);
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
+  it('returns the facility alert phone with the admin facility read', async () => {
+    const updatedAt = new Date('2026-10-23T10:00:00Z');
+    const { service, client } = harness({ id: facilityId, organizationId: 'organization', organizationName: 'Org',
+      name: 'Lagos General', code: 'LGH', status: 'verified', version: '4', statusReason: null, statusChangedAt: null,
+      createdAt: updatedAt, membershipCount: '3', alertPhoneE164: '+2348030000000', alertPhoneUpdatedAt: updatedAt });
+    await expect(service.facility(platformContext, facilityId)).resolves.toMatchObject({
+      version: 4, membershipCount: 3, alertPhoneE164: '+2348030000000', alertPhoneUpdatedAt: updatedAt });
+    expect(String(client.query.mock.calls[0]?.[0])).toContain('left join identity.facility_alert_phones');
+  });
+
+  it('answers null for a facility that never had an alert phone', async () => {
+    const { service } = harness({ id: facilityId, version: '1', membershipCount: '0', alertPhoneE164: null,
+      alertPhoneUpdatedAt: null });
+    await expect(service.facility(platformContext, facilityId))
+      .resolves.toMatchObject({ alertPhoneE164: null, alertPhoneUpdatedAt: null });
+  });
+});
+
+describe('AdminService emergency-contact opt-out', () => {
+  usePatientSafetyTestEnvironment();
+
+  it.each([
+    ['email', ' Chidi@Example.TEST ', 'chidi@example.test'],
+    ['sms', '0803 123 4567', '+2348031234567'],
+  ] as const)('normalizes and keys a %s destination, and never sends, logs or audits it', async (channel, destination, normalized) => {
+    const protector = new EmergencyContactProtector();
+    const { service, client, audit } = harness({ contact_count: 2, patient_count: 2, replayed: false }, protector);
+    const logged = (['log', 'warn', 'error', 'debug', 'verbose'] as const)
+      .map((level) => jest.spyOn(Logger.prototype, level).mockImplementation(() => undefined));
+    const written = jest.spyOn(process.stdout, 'write');
+    try {
+      await expect(service.optOutEmergencyContact(platformContext, { channel, destination,
+        reason: 'Contact called support to stop alerts' }, 'admin-opt-out-key-0001'))
+        .resolves.toEqual({ contacts: 2, patients: 2, replayed: false });
+      for (const spy of [...logged, written]) {
+        expect(JSON.stringify(spy.mock.calls)).not.toContain(normalized);
+      }
+    } finally {
+      for (const spy of [...logged, written]) spy.mockRestore();
+    }
+    const [sql, parameters] = client.query.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain('identity.admin_opt_out_emergency_contact($1, $2, $3, $4, $5)');
+    expect(parameters.slice(0, 4)).toEqual([channel, protector.destinationHmac(channel, normalized),
+      'Contact called support to stop alerts', 'admin-opt-out-key-0001']);
+    expect(parameters[4]).toMatch(/^[0-9a-f]{64}$/);
+    expect(audit.recordWithClient).toHaveBeenCalledTimes(1);
+    const event = audit.recordWithClient.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect(event).toMatchObject({ action: 'admin.emergency-contact.opt-out', actorType: 'platform',
+      resourceType: 'emergency-contact', details: { channel, contacts: 2, patients: 2 } });
+    expect(Object.keys(event.details as object).sort()).toEqual(['channel', 'contacts', 'patients']);
+    expect(event.reason).toBe("Emergency-access alerts stopped at the recipient's request");
+    const everything = JSON.stringify([client.query.mock.calls, audit.recordWithClient.mock.calls]);
+    for (const value of [destination.trim(), normalized, normalized.slice(1), '8031234567']) {
+      expect(everything).not.toContain(value);
+    }
+  });
+
+  it('never audits the typed reason, which may quote the destination', async () => {
+    const { service, audit } = harness({ contact_count: 1, patient_count: 1, replayed: false }, new EmergencyContactProtector());
+    await service.optOutEmergencyContact(platformContext, { channel: 'email', destination: 'chidi@example.test',
+      reason: 'chidi@example.test asked us to stop the alerts' }, 'admin-opt-out-key-0009');
+    expect(JSON.stringify(audit.recordWithClient.mock.calls)).not.toContain('chidi@example.test');
+  });
+
+  it('keys the same destination to the same request digest however it is typed', async () => {
+    const protector = new EmergencyContactProtector();
+    const first = harness({ contact_count: 1, patient_count: 1, replayed: false }, protector);
+    const second = harness({ contact_count: 1, patient_count: 1, replayed: true }, protector);
+    await first.service.optOutEmergencyContact(platformContext, { channel: 'sms', destination: '08031234567',
+      reason: 'Contact called support to stop alerts' }, 'admin-opt-out-key-0002');
+    await expect(second.service.optOutEmergencyContact(platformContext, { channel: 'sms', destination: '+234 803 123 4567',
+      reason: 'Contact called support to stop alerts' }, 'admin-opt-out-key-0002')).resolves.toMatchObject({ replayed: true });
+    expect((first.client.query.mock.calls[0] as [string, unknown[]])[1])
+      .toEqual((second.client.query.mock.calls[0] as [string, unknown[]])[1]);
+    expect(second.audit.recordWithClient).not.toHaveBeenCalled();
+  });
+
+  it('answers zero counts when no contact matches', async () => {
+    const { service } = harness({ contact_count: 0, patient_count: 0, replayed: false }, new EmergencyContactProtector());
+    await expect(service.optOutEmergencyContact(platformContext, { channel: 'email', destination: 'nobody@example.test',
+      reason: 'Contact called support to stop alerts' }, 'admin-opt-out-key-0003'))
+      .resolves.toEqual({ contacts: 0, patients: 0, replayed: false });
+  });
+
+  it('refuses an invalid destination before any database work', async () => {
+    const { service, database } = harness({}, new EmergencyContactProtector());
+    const refused = await problem(service.optOutEmergencyContact(platformContext, { channel: 'sms', destination: 'not a phone',
+      reason: 'Contact called support to stop alerts' }, 'admin-opt-out-key-0004'));
+    expect([refused.getStatus(), refused.code]).toEqual([400, 'EMERGENCY_CONTACT_DESTINATION_INVALID']);
+    expect(database.withPlatformTransaction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['ADMIN_PERMISSION_DENIED', 403, 'PERMISSION_DENIED'],
+    ['ADMIN_INVALID_REASON', 400, 'ADMIN_COMMAND_INVALID'],
+    ['ADMIN_IDEMPOTENCY_CONFLICT', 409, 'IDEMPOTENCY_CONFLICT'],
+  ] as const)('maps the command error %s to %i %s, without an audit row', async (message, status, code) => {
+    const { service, client, audit } = harness({}, new EmergencyContactProtector());
+    client.query.mockRejectedValue(Object.assign(new Error(message), { code: '42501' }));
+    const refused = await problem(service.optOutEmergencyContact(platformContext, { channel: 'email',
+      destination: 'chidi@example.test', reason: 'Contact called support to stop alerts' }, 'admin-opt-out-key-0005'));
+    expect([refused.getStatus(), refused.code]).toEqual([status, code]);
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+});
+
+describe('AdminService emergency-contact opt-out without contact keys', () => {
+  usePatientSafetyTestEnvironment({ OTP_HMAC_KEY_B64: '' });
+
+  it('answers 503 and runs no command', async () => {
+    const { service, database } = harness({}, new EmergencyContactProtector());
+    const refused = await problem(service.optOutEmergencyContact(platformContext, { channel: 'email',
+      destination: 'chidi@example.test', reason: 'Contact called support to stop alerts' }, 'admin-opt-out-key-0006'));
+    expect([refused.getStatus(), refused.code]).toEqual([503, 'EMERGENCY_CONTACTS_UNAVAILABLE']);
+    expect(database.withPlatformTransaction).not.toHaveBeenCalled();
   });
 });
