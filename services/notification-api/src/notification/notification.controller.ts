@@ -5,6 +5,7 @@ import { WorkloadAuthService } from '../auth/workload-auth.service';
 import { getEnvironment } from '../config/environment';
 import { DeliverEmergencyContactAlertDto } from './dto/deliver-emergency-contact-alert.dto';
 import { DeliverOtpDto, OtpPurpose, validateRecipient } from './dto/deliver-otp.dto';
+import { DeliverStaffInvitationDto } from './dto/deliver-staff-invitation.dto';
 import { type DeliveryResult, NotificationService } from './notification.service';
 
 @Controller('notifications')
@@ -54,6 +55,30 @@ export class NotificationController {
       patientHidSuffix: input.patientHidSuffix, clinicianName: input.clinicianName ?? null,
       facilityName: input.facilityName ?? null, facilityPhone: input.facilityPhone ?? null,
       occurredAt: new Date(input.occurredAt), idempotencyKey,
+    }, input.plan);
+    return this.response(result);
+  }
+
+  /**
+   * A facility staff invitation (P4b): fixed fields, email only, workload
+   * authentication and idempotency key exactly as the alert. There is no
+   * delivery switch here: Identity's staff_invitations_enabled control gates
+   * every invitation before it calls this route.
+   */
+  @Post('staff-invitation') @HttpCode(202)
+  async staffInvitation(@Body() input: DeliverStaffInvitationDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    await this.auth.authenticate(request.header('x-hid-internal-caller'), request.header('x-hid-service-authorization'), request.header('x-hid-service-token'));
+    if (!idempotencyKey || !/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(idempotencyKey)) {
+      throw new BadRequestException('A valid idempotency key is required');
+    }
+    if (input.channel !== 'email' || !validateRecipient('email', input.recipient)) {
+      throw new BadRequestException('Recipient does not match the selected channel');
+    }
+    const result = await this.notifications.deliverStaffInvitation({
+      recipient: input.recipient, facilityName: input.facilityName ?? null, roleCode: input.roleCode,
+      invitationId: input.invitationId, token: input.token, code: input.code,
+      expiresAt: new Date(input.expiresAt), idempotencyKey,
     }, input.plan);
     return this.response(result);
   }
