@@ -37,7 +37,8 @@ export class LabAccessionsService {
       const workResult=await client.query<{id:string;patient_id:string;facility_id:string;priority:LabAccessionResult['priority'];status:string}>(
         `select id::text,patient_id::text,facility_id::text,priority,status from lab.work_items where id=$1`,[workItemId]);
       const work=workResult.rows[0];
-      if(!work) throw new DomainProblem(404,'LAB_WORK_ITEM_NOT_FOUND','Lab work item was not found');
+      if(!work) return this.routeAccess.hiddenWorkItem(client,workItemId,'write_records',
+        ()=>new DomainProblem(404,'LAB_WORK_ITEM_NOT_FOUND','Lab work item was not found'));
       if(work.facility_id!==context.facilityId||work.status!=='accepted') throw new DomainProblem(409,'LAB_WORK_ITEM_NOT_ACCESSIONABLE','Lab work item is not accessionable at this facility');
       const basis=await this.routeAccess.authorize(client,context,'work_item',work.id,work.patient_id,'write_records',operationDenied);
       // Accessions are insert-only (0019 trigger; no UPDATE for the runtime role, so

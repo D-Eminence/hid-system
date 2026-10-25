@@ -81,6 +81,21 @@ export class LabOrderRouteAccess {
     }
   }
 
+  /**
+   * The answer for a work item this session cannot see. A route-backed item at
+   * this facility is hidden by the strict policy once its route stops allowing
+   * the action; C11 finds it through its route, so the member is told why: work
+   * on routes is paused (423) or the route is closed (409). Anything else is
+   * the command's own not-found answer.
+   */
+  async hiddenWorkItem(client: PoolClient, workItemId: string, action: RecordAction, notFound: () => DomainProblem):
+  Promise<never> {
+    const access = await this.outcome(client, 'work_item', workItemId, action);
+    if (access.outcome === 'paused') throw crossFacilityWorkPaused();
+    if (access.outcome === 'closed') throw orderRouteClosed();
+    throw notFound();
+  }
+
   /** C11's answer for the resource. */
   async outcome(client: PoolClient, resource: LabRouteResource, resourceId: string, action: RecordAction): Promise<AccessRow> {
     const result = await client.query<AccessRow>(

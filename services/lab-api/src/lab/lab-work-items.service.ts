@@ -125,7 +125,8 @@ export class LabWorkItemsService {
     return this.database.withTransaction(context, async (client) => {
       const result = await client.query<WorkItemRow>(`${WORK_ITEM_SELECT} where id=$1`, [workItemId]);
       const row = result.rows[0];
-      if (!row) throw new DomainProblem(404, 'LAB_WORK_ITEM_NOT_FOUND', 'Lab work item was not found');
+      if (!row) return this.routeAccess.hiddenWorkItem(client, workItemId, 'read_records',
+        () => new DomainProblem(404, 'LAB_WORK_ITEM_NOT_FOUND', 'Lab work item was not found'));
       const basis = await this.routeAccess.authorize(client, context, 'work_item', row.id, row.patient_id, 'read_records',
         workItemDenied);
       await this.audit.recordWithClient(client, this.auditEvent(context,row,'lab.work-item.read', basisDetails(basis)));

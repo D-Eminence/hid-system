@@ -179,8 +179,7 @@ export class PharmacyService {
   async getWorkItem(context: DataAccessContext, id: string) {
     return this.database.withTransaction(context, async (client) => {
       const row = (await client.query<WorkItemRow>(`${WORK_ITEM_SELECT} where w.id=$1`, [id])).rows[0];
-      if (!row) throw new DomainProblem(404, 'PHARMACY_WORK_ITEM_NOT_FOUND',
-        'Pharmacy work item was not found');
+      if (!row) return this.routeAccess.hiddenWorkItem(client, id, 'read_records', workItemNotFound);
       const basis = await this.routeAccess.authorize(client, context, 'work_item', row.id, row.patient_id, 'read_records');
       await this.audit.recordWithClient(client, context, 'pharmacy.work-item.read', {
         patientId: row.patient_id, resourceType: 'pharmacy-work-item', resourceId: row.id,
@@ -194,8 +193,7 @@ export class PharmacyService {
     return this.database.withTransaction(context, async (client) => {
       const work = (await client.query<WorkItemRow>(`${WORK_ITEM_SELECT} where w.id=$1`,
         [workItemId])).rows[0];
-      if (!work) throw new DomainProblem(404, 'PHARMACY_WORK_ITEM_NOT_FOUND',
-        'Pharmacy work item was not found');
+      if (!work) return this.routeAccess.hiddenWorkItem(client, workItemId, 'write_records', workItemNotFound);
       const basis = await this.routeAccess.authorize(client, context, 'work_item', work.id, work.patient_id, 'write_records');
       if (Number(work.row_version) !== input.expectedWorkItemVersion) throw new DomainProblem(412,
         'PHARMACY_WORK_ITEM_VERSION_CONFLICT', 'Dispensing must bind to the exact accepted work-item version');
@@ -400,4 +398,8 @@ export class PharmacyService {
       validationVersion: row.validation_version, publicationId: row.publication_id,
       version: Number(row.row_version), createdAt: row.created_at };
   }
+}
+
+function workItemNotFound(): DomainProblem {
+  return new DomainProblem(404, 'PHARMACY_WORK_ITEM_NOT_FOUND', 'Pharmacy work item was not found');
 }
