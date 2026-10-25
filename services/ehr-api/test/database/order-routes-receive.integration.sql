@@ -661,7 +661,8 @@ reset role;
 -- 2. Acceptance.
 set local role hid_lab_api_runtime;
 select pg_temp.as_signup_admin(1);
-select pg_temp.assert('a date-of-birth mismatch', (select accepted.result = 'patient_mismatch' and accepted.attempts_left = 4
+select pg_temp.assert('a date-of-birth mismatch without the reference (names no route: the route keeps its 5)',
+  (select accepted.result = 'patient_mismatch' and accepted.attempts_left = 5
     and accepted.patient_full_name is null and accepted.work_item_id is null and accepted.route_row_version = 1
   from lab.accept_order_route(current_setting('hid.test.route_1')::uuid, 1, 'date_of_birth', '1990-04-13',
     'p4c-receive-acc-0001a', repeat('a', 64)) accepted));
@@ -724,9 +725,10 @@ begin
       and outbox.payload = jsonb_build_object('workItemId', item.id, 'sourceEhrOrderId', route.source_lab_request_id,
         'sourceEhrOrderVersion', route.source_order_version, 'status', 'accepted')));
   perform pg_temp.assert('identification attempts recorded without the identifier',
-    (select array_agg(attempt.identifier_kind || ':' || attempt.outcome order by attempt.attempted_at)
+    (select array_agg(attempt.identifier_kind || ':' || attempt.outcome || ':' || attempt.identifies_route
+        order by attempt.attempted_at)
        from ehr.order_route_accept_attempts attempt where attempt.route_id = route.id)
-    = array['date_of_birth:mismatch', 'health_id:match']);
+    = array['date_of_birth:mismatch:false', 'health_id:match:true']);
   perform pg_temp.assert('A told with the patient; the patient told', exists (select 1 from audit.events event
       where event.action = 'ehr.order-route.accepted' and event.facility_id = route.ordering_facility_id
         and event.patient_id = route.patient_id and event.actor_type = 'system')
@@ -761,9 +763,9 @@ select pg_temp.assert('the lock: event, A''s row with the patient, the patient t
     and item.notification_code = 'ORDER_ROUTE_ACCEPT_LOCKED'));
 -- The member's budget: 20 mismatches a day (owner SQL seeds 15 more).
 insert into ehr.order_route_accept_attempts (route_id, receiving_facility_id, account_id, membership_id, identifier_kind,
-  outcome)
+  outcome, identifies_route)
 select current_setting('hid.test.route_3')::uuid, current_setting('hid.test.facility_1')::uuid,
-  current_setting('hid.test.account_1')::uuid, current_setting('hid.test.membership_1')::uuid, 'health_id', 'mismatch'
+  current_setting('hid.test.account_1')::uuid, current_setting('hid.test.membership_1')::uuid, 'health_id', 'mismatch', true
   from generate_series(1, 15);
 set local role hid_lab_api_runtime;
 select pg_temp.as_signup_admin(1);
@@ -1071,6 +1073,102 @@ select pg_temp.assert('residual: the chain branch is per patient', lab.context_a
   and not lab.work_item_allows('e4c30000-0000-4000-8000-000000000001', current_setting('hid.test.facility_1')::uuid,
     null, 'read_records'));
 reset role;
+
+-- 7. A date of birth names a route only with the route's reference (P2,
+-- owner Q3). Without it, a wrong date may be an honest pick of another
+-- patient's row of several: it counts against the member's day and the
+-- route's 20 in all, never the route's 5, and tells no one until the 20th
+-- locks it. With the reference it counts as a Health ID does. A reference
+-- that is not the route's is refused and recorded nowhere. LB2 (31) at L1.
+set local role hid_ehr_api_runtime;
+select set_config('hid.test.lr_' || n, pg_temp.lab_request(1, 'active')::text, true) from generate_series(9, 11) n;
+select set_config('hid.test.route_' || n, pg_temp.send(11, 'lab_request', current_setting('hid.test.lr_' || n)::uuid,
+  current_setting('hid.test.facility_1')::uuid, 'p4c-receive-send-' || lpad(n::text, 4, '0'))::text, true)
+  from generate_series(9, 11) n;
+reset role;
+select set_config('hid.test.reference_' || n, (select route.reference::text from ehr.order_routes route
+  where route.id = current_setting('hid.test.route_' || n)::uuid), true) from generate_series(9, 11) n;
+set local role hid_lab_api_runtime;
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select pg_temp.assert('dates of birth without the reference keep the route''s 5', (select array_agg(accepted.result || ':'
+    || accepted.attempts_left order by n)
+  from generate_series(1, 4) n
+  cross join lateral lab.accept_order_route(current_setting('hid.test.route_9')::uuid, 1, 'date_of_birth', '1971-01-01',
+    'p4c-receive-dob-' || lpad(n::text, 6, '0'), repeat('7', 64)) accepted)
+  = array['patient_mismatch:5', 'patient_mismatch:5', 'patient_mismatch:5', 'patient_mismatch:5']);
+select pg_temp.check('another route''s reference', format($s$select * from lab.accept_order_route(%L, 1, 'date_of_birth',
+  '1990-04-12', 'p4c-receive-dobref-01', %L, %L)$s$, current_setting('hid.test.route_9'), repeat('7', 64),
+  current_setting('hid.test.reference_10')), 'P0001 ORDER_ROUTE_REFERENCE_MISMATCH');
+select pg_temp.check('a malformed reference', format($s$select * from lab.accept_order_route(%L, 1, 'date_of_birth',
+  '1990-04-12', 'p4c-receive-dobref-02', %L, 'REF-1')$s$, current_setting('hid.test.route_9'), repeat('7', 64)),
+  '22023 ORDER_ROUTE_INVALID');
+select pg_temp.assert('a wrong date with the reference counts as a named try', (select accepted.result = 'patient_mismatch'
+    and accepted.attempts_left = 4
+  from lab.accept_order_route(current_setting('hid.test.route_9')::uuid, 1, 'date_of_birth', '1971-01-02',
+    'p4c-receive-dobref-03', repeat('7', 64), lower(current_setting('hid.test.reference_9'))) accepted));
+select pg_temp.assert('the right date with the reference accepts', (select accepted.result = 'accepted'
+    and accepted.patient_full_name = 'Patience Okafor'
+  from lab.accept_order_route(current_setting('hid.test.route_9')::uuid, 1, 'date_of_birth', '1990-04-12',
+    'p4c-receive-dobref-04', repeat('7', 64), current_setting('hid.test.reference_9')) accepted));
+reset role;
+select pg_temp.assert('route 9''s tries: four unnamed, one named, a match; the refused reference recorded nowhere',
+  (select array_agg(attempt.outcome || ':' || attempt.identifies_route order by attempt.attempted_at)
+     from ehr.order_route_accept_attempts attempt where attempt.route_id = current_setting('hid.test.route_9')::uuid)
+  = array['mismatch:false', 'mismatch:false', 'mismatch:false', 'mismatch:false', 'mismatch:true', 'match:true']);
+select pg_temp.assert('the unnamed dates locked nothing and told no one', not exists (select 1
+    from ehr.order_route_events event where event.route_id = current_setting('hid.test.route_9')::uuid
+      and event.event_type = 'accept_locked')
+  and not exists (select 1 from notification.inbox_items item
+    where item.resource_id = current_setting('hid.test.route_9')::uuid and item.notification_code = 'ORDER_ROUTE_ACCEPT_LOCKED')
+  and not exists (select 1 from audit.events event where event.action = 'ehr.order-route.accept-locked'
+    and event.resource_id = current_setting('hid.test.route_9')));
+-- The cap: 19 unnamed wrong dates on route 10 two days ago (owner SQL, so no
+-- member's day counts them); the 20th locks it and tells the patient.
+insert into ehr.order_route_accept_attempts (route_id, receiving_facility_id, account_id, membership_id, identifier_kind,
+  outcome, identifies_route, attempted_at)
+select current_setting('hid.test.route_10')::uuid, current_setting('hid.test.facility_1')::uuid,
+  current_setting('hid.test.account_1')::uuid, current_setting('hid.test.membership_1')::uuid, 'date_of_birth',
+  'mismatch', false, clock_timestamp() - interval '2 days'
+  from generate_series(1, 19);
+set local role hid_lab_api_runtime;
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select pg_temp.assert('Incoming counts the cap', (select incoming.attempts_left = 1 and not incoming.accept_locked
+  from lab.list_order_routes('incoming', null) incoming where incoming.route_id = current_setting('hid.test.route_10')::uuid));
+select pg_temp.assert('the 20th wrong date in all locks the route', (select accepted.result || ':' || accepted.attempts_left
+  from lab.accept_order_route(current_setting('hid.test.route_10')::uuid, 1, 'date_of_birth', '1971-01-03',
+    'p4c-receive-cap-0001', repeat('8', 64)) accepted) = 'accept_locked:0');
+reset role;
+select pg_temp.assert('the cap''s lock: event, A''s row, the patient told',
+  exists (select 1 from ehr.order_route_events event where event.route_id = current_setting('hid.test.route_10')::uuid
+    and event.event_type = 'accept_locked')
+  and exists (select 1 from audit.events event where event.action = 'ehr.order-route.accept-locked'
+    and event.resource_id = current_setting('hid.test.route_10'))
+  and exists (select 1 from notification.inbox_items item where item.resource_id = current_setting('hid.test.route_10')::uuid
+    and item.notification_code = 'ORDER_ROUTE_ACCEPT_LOCKED'));
+-- The patient's deny directive is checked again at acceptance (SPEC-FINAL
+-- P15.1): a directive naming L1, written after route 11 was sent (owner SQL;
+-- no runtime writes directives), refuses the acceptance and writes nothing.
+insert into identity.consent_directives (id, patient_id, current_version) values
+  ('e4c80000-0000-4000-8000-0000000000d1', 'e4c30000-0000-4000-8000-000000000001', 1);
+insert into identity.consent_directive_versions (id, directive_id, patient_id, version_no, status, provision_type,
+  grantee_type, grantee_id, starts_at, source_reference, reason, content_sha256)
+values (gen_random_uuid(), 'e4c80000-0000-4000-8000-0000000000d1', 'e4c30000-0000-4000-8000-000000000001', 1,
+  'active', 'deny', 'facility', current_setting('hid.test.facility_1')::uuid, clock_timestamp() - interval '1 minute',
+  'p4c-suite', 'The patient asked not to use this laboratory', repeat('5', 64));
+set local role hid_lab_api_runtime;
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select pg_temp.check('a deny directive written after the send', format($s$select * from lab.accept_order_route(%L, 1,
+  'health_id', 'HID-P4CPATP', 'p4c-receive-deny-0001', %L)$s$, current_setting('hid.test.route_11'), repeat('9', 64)),
+  'P0001 ORDER_ROUTE_PATIENT_DENIED');
+reset role;
+select pg_temp.assert('the refused acceptance wrote nothing', (select route.state = 'sent' and route.row_version = 1
+    and route.lab_work_item_id is null
+  from ehr.order_routes route where route.id = current_setting('hid.test.route_11')::uuid)
+  and not exists (select 1 from ehr.order_route_accept_attempts attempt
+    where attempt.route_id = current_setting('hid.test.route_11')::uuid)
+  and not exists (select 1 from lab.work_items item where item.order_route_id = current_setting('hid.test.route_11')::uuid)
+  and (select count(*) from ehr.order_route_events event
+    where event.route_id = current_setting('hid.test.route_11')::uuid) = 1);
 
 select pg_temp.report();
 rollback;

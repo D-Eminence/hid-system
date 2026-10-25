@@ -172,19 +172,19 @@
 -- identity.organization_applications (new columns, the review check swap,
 -- partial indexes) and on identity.organization_profile_completion_challenges
 -- (three new columns), and SHARE ROW EXCLUSIVE on auth.accounts (the reviewer
--- and release foreign keys), all from the first statements; ACCESS EXCLUSIVE
--- on platform.control_settings, the hot-path table every authenticated request
--- reads, only in the control section, which is the last statements of this
--- file. Replacing platform.consume_qoreid_quota and
+-- and release foreign keys), all from the first statements. Replacing
+-- platform.consume_qoreid_quota and
 -- identity.begin_organization_profile_completion takes no table lock.
 -- Section 5 takes, until commit, SHARE ROW EXCLUSIVE (blocks writes, not
 -- reads) on auth.account_roles (its trigger, and the attestations' foreign
--- key), identity.consent_grants (its trigger), and auth.roles,
--- identity.facilities, identity.staff and identity.staff_facility_memberships
--- (the new tables' foreign keys), and ROW EXCLUSIVE on auth.roles,
--- auth.permissions and auth.role_permissions (its inserts); no request path
--- writes them per request. The new tables and functions lock nothing else
--- that already exists.
+-- key), and auth.roles, identity.facilities, identity.staff and
+-- identity.staff_facility_memberships (the new tables' foreign keys), and ROW
+-- EXCLUSIVE on auth.roles, auth.permissions and auth.role_permissions (its
+-- inserts). The request paths that write one of these (sign-in's legacy
+-- password upgrade, recovery and patient enrollment write auth.accounts;
+-- support's role and account commands write auth.account_roles) wait for the
+-- rest of the file; none of them reads platform.control_settings first. The
+-- new tables and functions lock nothing else that already exists.
 -- Section 6 adds, until commit, only SHARE ROW EXCLUSIVE locks already held
 -- (identity.facilities, auth.accounts, identity.staff_facility_memberships,
 -- for the new tables' foreign keys), a trigger on
@@ -192,11 +192,19 @@
 -- EXCLUSIVE on auth.permissions and auth.role_permissions, until its last
 -- part (6.7), which takes ACCESS EXCLUSIVE on lab.work_items,
 -- pharmacy.work_items, ehr.lab_requests, ehr.encounters, ehr.prescriptions,
--- lab.result_releases, lab.result_invalidations, pharmacy.dispensings and
--- pharmacy.dispensing_reversals all at once with a NOWAIT retry (it never
--- waits while holding one of them; 5 seconds of busy tables stop the release
--- with nothing applied), and holds them to commit. Nothing before 6.7 locks
--- any of these nine. The control section still comes last.
+-- lab.result_releases, lab.result_invalidations, pharmacy.dispensings,
+-- pharmacy.dispensing_reversals and platform.control_settings (the hot-path
+-- table every authenticated request reads), and SHARE ROW EXCLUSIVE on
+-- identity.consent_grants (P4b's probation trigger, created right after),
+-- all at once with a NOWAIT retry (it never waits while holding one of them;
+-- 5 seconds of busy tables stop the release with nothing applied), and holds
+-- them to commit. Nothing before 6.7 locks any of these eleven, and nothing
+-- after it waits for a lock: the control section, still the last statements
+-- of the file, works under 6.7's lock. The previous Identity's emergency
+-- activation reads platform.control_settings and then inserts into
+-- identity.consent_grants in one transaction; taking both tables in 6.7's one
+-- NOWAIT attempt is what keeps it from deadlocking with this migration (it
+-- only makes an attempt retry).
 --
 -- Applied migrations 0001 through 0085 are immutable.
 
@@ -3334,7 +3342,15 @@ create trigger account_roles_review_gate
 
 -- 5.6 The first 30 days (Q4): at most 5 break-glass grants per facility in a
 -- rolling 24 hours. identity.activate_break_glass is unchanged; a replay
--- reuses its active grant and inserts nothing, so it is never refused.
+-- reuses its active grant and inserts nothing, so it is never refused. The
+-- trigger serializes a facility's activations on a per-facility advisory
+-- lock only; it reads the application without its row lock (a review,
+-- release or early end racing an activation decides nothing it needs). The
+-- trigger itself (consent_grants_self_service_probation) is created in 6.7,
+-- after the lock block: creating it takes SHARE ROW EXCLUSIVE on
+-- identity.consent_grants, which the previous Identity's break-glass
+-- transaction writes after reading platform.control_settings, so it is taken
+-- there, with NOWAIT, together with platform.control_settings (V1).
 create function identity.enforce_self_service_break_glass_probation()
 returns trigger
 language plpgsql security definer
@@ -3354,10 +3370,6 @@ begin
 end;
 $$;
 revoke all on function identity.enforce_self_service_break_glass_probation() from public;
-create trigger consent_grants_self_service_probation
-  before insert on identity.consent_grants
-  for each row when (new.break_glass)
-  execute function identity.enforce_self_service_break_glass_probation();
 
 -- 5.7 Staff invitations. Secrets are stored only as keyed hashes computed by
 -- Identity: the link token (link_token_hmac, 256 random bits the inviter
@@ -5817,8 +5829,13 @@ begin
     perform identity.grant_self_service_administrator_role(current_row, member, requested_role,
       administrator_licence_body, normalized_number, actor_account, 'Administrator access changed by platform support');
   end if;
+  -- The method support used for this change is kept in the change's audit
+  -- row only: self_service_verification_method stays the review's, which
+  -- P4c's default listing for orders between facilities reads (H3), so a
+  -- change of the administrator's own access never lists or unlists the
+  -- facility.
   update identity.organization_applications app
-     set self_service_granted_role = requested_role, self_service_verification_method = requested_method,
+     set self_service_granted_role = requested_role,
          updated_at = observed, row_version = app.row_version + 1
    where app.id = current_row.id
    returning app.* into current_row;
@@ -6120,7 +6137,9 @@ revoke all on function identity.record_self_service_administrator_licence(text,t
 -- pharmacy.dispensing_reversals: the new tables have no foreign key to them
 -- until 6.7, every function that reads them is PL/pgSQL (not analysed at
 -- creation), and replacing a function locks no table. 6.7 takes all nine at
--- once with a NOWAIT retry and holds them to commit.
+-- once with a NOWAIT retry, together with platform.control_settings and
+-- identity.consent_grants (which nothing before it locks either), and holds
+-- them to commit.
 
 -- 6.0 Section 5's objects this section builds on (they are created above in
 -- this file; the check guards a later edit of section 5).
@@ -6162,12 +6181,13 @@ returns table (
   access_cap_days integer,
   read_after_cancel_days integer,
   mismatches_per_route integer,
-  mismatches_per_member_per_day integer
+  mismatches_per_member_per_day integer,
+  mismatches_per_route_any integer
 )
 language sql immutable parallel safe
 set search_path = pg_catalog, pg_temp
 as $$
-  select 100, 200, 500, 5, 60, 7, 30, 14, 45, 7, 5, 20
+  select 100, 200, 500, 5, 60, 7, 30, 14, 45, 7, 5, 20, 20
 $$;
 
 -- The receive permission, the destination's organization type and the
@@ -6460,7 +6480,14 @@ create table ehr.order_route_accept_attempts (
   membership_id uuid not null references identity.staff_facility_memberships(id) on delete restrict,
   identifier_kind text not null check (identifier_kind in ('health_id', 'date_of_birth')),
   outcome text not null check (outcome in ('match', 'mismatch')),
-  attempted_at timestamptz not null default clock_timestamp()
+  -- Whether the attempt named this route: a Health ID (the counter finds the
+  -- patient's orders by it), or a date of birth given with this route's
+  -- reference (which the patient sees in the app). A date of birth alone
+  -- names no route: the counter may have picked another patient's order.
+  identifies_route boolean not null,
+  attempted_at timestamptz not null default clock_timestamp(),
+  constraint order_route_accept_attempts_identifies_ck
+    check (identifies_route or identifier_kind = 'date_of_birth')
 );
 create index order_route_accept_attempts_route_idx on ehr.order_route_accept_attempts (route_id, outcome);
 create index order_route_accept_attempts_member_idx on ehr.order_route_accept_attempts (membership_id, attempted_at);
@@ -6476,6 +6503,27 @@ revoke all on ehr.order_route_accept_attempts from public;
 create trigger order_route_accept_attempts_no_mutation
   before update or delete on ehr.order_route_accept_attempts
   for each row execute function platform.reject_mutation();
+
+-- How many more wrong identifications a route takes before its acceptance
+-- locks here (P2, owner Q3): 5 that named it (a Health ID, or a date of birth
+-- with its reference), and at most 20 in all, counting dates of birth given
+-- without the reference (an honest counter picking the wrong row of several
+-- must not lock another patient's order at once, nor tell that patient it
+-- could not confirm them; 20 still bounds guessing on one route).
+create function ehr.order_route_attempts_left(target_route_id uuid)
+returns integer
+language sql stable
+set search_path = pg_catalog, ehr, pg_temp
+as $$
+  select greatest(0, least(
+      limits.mismatches_per_route - count(*) filter (where attempt.identifies_route),
+      limits.mismatches_per_route_any - count(*)))::integer
+    from ehr.order_route_limits() limits
+    left join ehr.order_route_accept_attempts attempt
+      on attempt.route_id = target_route_id and attempt.outcome = 'mismatch'
+   group by limits.mismatches_per_route, limits.mismatches_per_route_any
+$$;
+revoke all on function ehr.order_route_attempts_left(uuid) from public;
 
 -- T5. Results that came back to A (append-only), copied in B's transaction.
 create table lab.order_route_result_reports (
@@ -7767,7 +7815,17 @@ $$;
 
 -- C5. The patient's orders sent to other facilities (newest first, at most
 -- 100): what was sent and to whom, the clinician's attestation, and Stop
--- while it can still be stopped.
+-- while it can still be stopped. A route whose order was marked entered in
+-- error (ended so, or its lab request or prescription now entered_in_error)
+-- keeps its record of the disclosure (reference, kind, state, dates, both
+-- facilities) but answers no content beyond the reference, no attestation
+-- text and no attesting clinician, and entered_in_error true: such an order
+-- may have been written in another patient's chart, and the record view
+-- already hides it (0067's patient-self policies, which this definer, as an
+-- owner that does not bypass row-level security, reads under: the source
+-- order is visible to the session's patient only when it is neither a draft
+-- nor entered in error, so an invisible source is treated as entered in
+-- error, failing closed).
 create function ehr.patient_list_order_routes()
 returns table (
   route_id uuid,
@@ -7790,7 +7848,8 @@ returns table (
   attestation_text_version text,
   attestation_text text,
   attested_by_name text,
-  actions text[]
+  actions text[],
+  entered_in_error boolean
 )
 language plpgsql stable security definer
 set search_path = pg_catalog, ehr, identity, platform, pg_temp
@@ -7799,6 +7858,20 @@ declare
   session_patient uuid := ehr.order_route_patient();
 begin
   return query
+    with listed as (
+      select route.id as listed_id,
+             coalesce(route.ended_kind = 'entered_in_error', false)
+             or (route.kind = 'lab_request'
+               and not exists (select 1 from ehr.lab_requests source
+                                where source.id = route.source_lab_request_id
+                                  and source.status not in ('draft', 'entered_in_error')))
+             or (route.kind = 'prescription'
+               and not exists (select 1 from ehr.prescriptions source
+                                where source.id = route.source_prescription_id
+                                  and source.status not in ('draft', 'entered_in_error'))) as in_error
+        from ehr.order_routes route
+       where route.patient_id = session_patient
+    )
     select route.id, route.reference::text, route.kind, route.row_version, ehr.order_route_effective_state(route),
       route.created_at, route.respond_by, route.accepted_at, route.completed_at, route.ended_at, route.ended_kind,
       route.decline_reason,
@@ -7806,7 +7879,9 @@ begin
       route.receiving_facility_id,
       (select facility.name from identity.facilities facility where facility.id = route.receiving_facility_id),
       identity.order_route_registered_address(route.receiving_facility_id),
-      case when route.kind = 'lab_request' then
+      case when listed.in_error then
+        jsonb_build_object('reference', route.reference)
+      when route.kind = 'lab_request' then
         jsonb_build_object('reference', route.reference, 'ordererName', route.orderer_name,
           'ordererLicenceBody', route.orderer_licence_body, 'ordererLicenceNumber', route.orderer_licence_number,
           'testCodeSystem', route.test_code_system, 'testCode', route.test_code, 'testDisplay', route.test_display,
@@ -7822,13 +7897,15 @@ begin
           'prescribedAt', route.prescribed_at)
       end,
       route.attestation_text_version,
-      (select text_row.text from ehr.order_route_attestation_texts text_row
-        where text_row.version = route.attestation_text_version),
-      route.attested_by_name,
-      case when route.state = 'sent' and clock_timestamp() < route.respond_by then array['withdraw']
-           else array[]::text[] end
+      case when not listed.in_error then
+        (select text_row.text from ehr.order_route_attestation_texts text_row
+          where text_row.version = route.attestation_text_version) end,
+      case when not listed.in_error then route.attested_by_name end,
+      case when route.state = 'sent' and clock_timestamp() < route.respond_by and not listed.in_error
+           then array['withdraw'] else array[]::text[] end,
+      listed.in_error
       from ehr.order_routes route
-     where route.patient_id = session_patient
+      join listed on listed.listed_id = route.id
      order by route.created_at desc, route.id desc
      limit 100;
 end;
@@ -8042,9 +8119,7 @@ begin
         case when visible.level = 'preview' then route.ends_on end,
         case when visible.level = 'preview' then route.prescribed_at end,
         route.created_at, route.respond_by, route.accept_locked_at is not null,
-        greatest(0, (select limits.mismatches_per_route from ehr.order_route_limits() limits)
-          - (select count(*)::integer from ehr.order_route_accept_attempts attempt
-              where attempt.route_id = route.id and attempt.outcome = 'mismatch')),
+        ehr.order_route_attempts_left(route.id),
         null::timestamptz, null::timestamptz, null::uuid
         from ehr.order_routes route
         cross join lateral (select ehr.order_route_receiving_view(route) as level) visible
@@ -8167,9 +8242,7 @@ begin
     case when level <> 'metadata' then route.ends_on end,
     case when level <> 'metadata' then route.prescribed_at end,
     route.created_at, route.respond_by, route.accept_locked_at is not null,
-    greatest(0, (select limits.mismatches_per_route from ehr.order_route_limits() limits)
-      - (select count(*)::integer from ehr.order_route_accept_attempts attempt
-          where attempt.route_id = route.id and attempt.outcome = 'mismatch')),
+    ehr.order_route_attempts_left(route.id),
     route.accepted_at, route.completed_at, route.ended_at,
     case when level = 'full' then coalesce(route.lab_work_item_id, route.pharmacy_work_item_id) end,
     card.full_name, card.sex, card.date_of_birth, card.health_id_last4;
@@ -8199,8 +8272,13 @@ end;
 $$;
 
 -- C9 / C15. Acceptance at the counter, with the patient's Health ID or date
--- of birth (P2). A mismatch is recorded and answered (5 lock the route here;
--- 20 a day stop the member); a match accepts the route and creates the work
+-- of birth (P2), and optionally the route's reference (which the patient
+-- sees in the app). A reference that is not this route's is refused at once
+-- and recorded nowhere (the counter picked another row; it learns nothing it
+-- does not already see). A mismatch is recorded and answered: 5 that named
+-- this route (a Health ID, or a date of birth with its reference), or 20 in
+-- all, lock the route here (ehr.order_route_attempts_left), and 20 a day
+-- stop the member; a match accepts the route and creates the work
 -- item bound to it, in one savepoint: if a same-facility hand-off won the
 -- order first (unique violation), the route is withdrawn (order_in_work) and
 -- that is the answer (R10). Identity and free text are answered only while
@@ -8213,7 +8291,8 @@ create function ehr.accept_receiving_order_route(
   requested_identifier text,
   requested_acceptance_reason text,
   requested_idempotency_key text,
-  requested_request_sha256 char(64)
+  requested_request_sha256 char(64),
+  requested_reference text default null
 ) returns table (
   result text,
   attempts_left integer,
@@ -8244,8 +8323,10 @@ declare
   card record;
   normalized_identifier text;
   identifier_date date;
+  wanted_reference text := upper(btrim(requested_reference));
+  identifies boolean;
   matched boolean;
-  mismatches integer;
+  left_after integer;
   new_work_item uuid := gen_random_uuid();
   accepted_now timestamptz;
   readable boolean;
@@ -8256,9 +8337,11 @@ begin
      or not coalesce(requested_idempotency_key ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$', false)
      or not coalesce(requested_request_sha256 ~ '^[0-9a-f]{64}$', false)
      or (requested_kind = 'prescription'
-       and not coalesce(length(btrim(requested_acceptance_reason)) between 8 and 500, false)) then
+       and not coalesce(length(btrim(requested_acceptance_reason)) between 8 and 500, false))
+     or (requested_reference is not null and not coalesce(wanted_reference ~ '^[0-9A-F]{8}$', false)) then
     raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
   end if;
+  identifies := requested_identifier_kind = 'health_id' or requested_reference is not null;
   if requested_identifier_kind = 'health_id' then
     normalized_identifier := ehr.order_route_health_id(requested_identifier);
     if normalized_identifier is null then
@@ -8328,6 +8411,9 @@ begin
   if current_route.accept_locked_at is not null then
     raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_ACCEPT_LOCKED';
   end if;
+  if requested_reference is not null and wanted_reference <> current_route.reference then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_REFERENCE_MISMATCH';
+  end if;
   select facility.* into ordering_facility from identity.facilities facility
    where facility.id = current_route.ordering_facility_id;
   if not ordering_facility.active or ordering_facility.lifecycle_status <> 'verified'
@@ -8352,14 +8438,13 @@ begin
     when 'health_id' then patient_row.hid_code = normalized_identifier
     else patient_row.dob = identifier_date end;
   insert into ehr.order_route_accept_attempts (route_id, receiving_facility_id, account_id, membership_id,
-    identifier_kind, outcome)
+    identifier_kind, outcome, identifies_route)
   values (current_route.id, actor.actor_facility_id, actor.actor_account_id, actor.actor_membership_id,
-    requested_identifier_kind, case when matched then 'match' else 'mismatch' end);
+    requested_identifier_kind, case when matched then 'match' else 'mismatch' end, identifies);
 
   if not matched then
-    select count(*)::integer into mismatches from ehr.order_route_accept_attempts attempt
-     where attempt.route_id = current_route.id and attempt.outcome = 'mismatch';
-    if mismatches >= limits.mismatches_per_route then
+    left_after := ehr.order_route_attempts_left(current_route.id);
+    if left_after = 0 then
       changed := current_route;
       changed.accept_locked_at := clock_timestamp();
       written := ehr.write_order_route_change(current_route, changed, 'accept_locked', 'receiving', 'patient_mismatch');
@@ -8369,7 +8454,7 @@ begin
         null::date, null::text, null::text, null::text, null::text, null::text, false;
       return;
     end if;
-    return query select 'patient_mismatch'::text, limits.mismatches_per_route - mismatches, current_route.row_version,
+    return query select 'patient_mismatch'::text, left_after, current_route.row_version,
       null::uuid, null::text, null::text, null::date, null::text, null::text, null::text, null::text, null::text, false;
     return;
   end if;
@@ -8772,7 +8857,7 @@ $$;
 
 create function lab.accept_order_route(requested_route_id uuid, expected_version bigint,
   requested_identifier_kind text, requested_identifier text, requested_idempotency_key text,
-  requested_request_sha256 char(64))
+  requested_request_sha256 char(64), requested_reference text default null)
 returns table (
   result text, attempts_left integer, route_row_version bigint, work_item_id uuid, patient_full_name text,
   patient_sex text, patient_date_of_birth date, patient_health_id_last4 text, clinical_information text,
@@ -8787,7 +8872,7 @@ as $$
     accepted.orderer_licence_number, accepted.replayed
     from ehr.accept_receiving_order_route('lab_request', requested_route_id, expected_version,
       requested_identifier_kind, requested_identifier, null, requested_idempotency_key,
-      requested_request_sha256) accepted
+      requested_request_sha256, requested_reference) accepted
 $$;
 
 create function lab.decline_order_route(requested_route_id uuid, expected_version bigint, requested_reason text)
@@ -8862,7 +8947,7 @@ $$;
 
 create function pharmacy.accept_order_route(requested_route_id uuid, expected_version bigint,
   requested_identifier_kind text, requested_identifier text, requested_acceptance_reason text,
-  requested_idempotency_key text, requested_request_sha256 char(64))
+  requested_idempotency_key text, requested_request_sha256 char(64), requested_reference text default null)
 returns table (
   result text, attempts_left integer, route_row_version bigint, work_item_id uuid, patient_full_name text,
   patient_sex text, patient_date_of_birth date, patient_health_id_last4 text, instructions text,
@@ -8877,7 +8962,7 @@ as $$
     accepted.orderer_licence_number, accepted.replayed
     from ehr.accept_receiving_order_route('prescription', requested_route_id, expected_version,
       requested_identifier_kind, requested_identifier, requested_acceptance_reason, requested_idempotency_key,
-      requested_request_sha256) accepted
+      requested_request_sha256, requested_reference) accepted
 $$;
 
 create function pharmacy.decline_order_route(requested_route_id uuid, expected_version bigint, requested_reason text)
@@ -8911,7 +8996,7 @@ revoke all on function ehr.order_route_receiver(text),
   ehr.list_receiving_order_routes(text,text,text),
   ehr.get_receiving_order_route(text,uuid),
   ehr.lock_receiving_route(text,uuid,uuid,uuid),
-  ehr.accept_receiving_order_route(text,uuid,bigint,text,text,text,text,char),
+  ehr.accept_receiving_order_route(text,uuid,bigint,text,text,text,text,char,text),
   ehr.decline_receiving_order_route(text,uuid,bigint,text),
   ehr.order_route_item_access(text,uuid,text),
   ehr.receiving_order_route_cards(text,uuid[]),
@@ -8919,12 +9004,12 @@ revoke all on function ehr.order_route_receiver(text),
   pharmacy.order_route_access_for(text,uuid,text),
   lab.list_order_routes(text,text),
   lab.get_order_route(uuid),
-  lab.accept_order_route(uuid,bigint,text,text,text,char),
+  lab.accept_order_route(uuid,bigint,text,text,text,char,text),
   lab.decline_order_route(uuid,bigint,text),
   lab.order_route_cards(uuid[]),
   pharmacy.list_order_routes(text,text),
   pharmacy.get_order_route(uuid),
-  pharmacy.accept_order_route(uuid,bigint,text,text,text,text,char),
+  pharmacy.accept_order_route(uuid,bigint,text,text,text,text,char,text),
   pharmacy.decline_order_route(uuid,bigint,text),
   pharmacy.order_route_cards(uuid[])
   from public;
@@ -9576,7 +9661,8 @@ create constraint trigger order_routes_first_event
 -- when past respond_by); an accepted lab request leaving active, or any
 -- change of an accepted prescription, cancels it (entered in error ends
 -- access now); an edit of an active accepted lab request, or any change after
--- completion, is an event (entered in error ends access now).
+-- completion, is an event (entered in error ends access now, and the patient
+-- is told ORDER_ROUTE_CANCELLED).
 create function ehr.sync_order_routes_on_order_change()
 returns trigger
 language plpgsql security definer
@@ -9621,6 +9707,11 @@ begin
       select * into closed from ehr.close_order_route(route_row.id, 'entered_in_error', 'ordering', true);
       perform ehr.order_route_system_audit(closed.closed, 'receiving', 'ehr.order-route.order-changed', true,
         jsonb_build_object('orderVersion', new.row_version));
+      -- The patient is told, as for a sent or accepted route closed so; C5
+      -- then shows the route without its content.
+      if closed.outcome = 'access_ended' then
+        perform ehr.order_route_notify_patient(closed.closed, 'ORDER_ROUTE_CANCELLED');
+      end if;
     else
       changed := route_row;
       written := ehr.write_order_route_change(route_row, changed,
@@ -9881,15 +9972,33 @@ revoke all on function ehr.guard_order_route_mutation(), ehr.require_order_route
   pharmacy.return_order_route_dispensing(), pharmacy.return_order_route_reversal()
   from public;
 
--- 6.7 The clinical tables. From here to commit this migration holds ACCESS
--- EXCLUSIVE on the nine tables, taken all at once and never waited for: a
--- busy table makes the attempt fail at once (NOWAIT), the failed attempt's
+-- 6.7 The clinical tables, the controls and the consent grants. From here to
+-- commit this migration holds ACCESS EXCLUSIVE on the nine tables and on
+-- platform.control_settings, and SHARE ROW EXCLUSIVE on
+-- identity.consent_grants, all taken at once and never waited for: a busy
+-- table makes the attempt fail at once (NOWAIT), the failed attempt's
 -- subtransaction releases whatever it took, and the loop tries again 100 ms
--- later, so the migration never waits while holding one of them (no
--- deadlock, V1) and no reader queues behind it (V2). After 50 attempts (5
+-- later, so the migration never waits while holding one of them and no
+-- reader queues behind a waiting lock of it (V1, V2). After 50 attempts (5
 -- seconds) it stops the release with nothing applied (this is one file, one
 -- transaction); the same approved release can be run again. Every reader of
--- clinical pages, Lab and Pharmacy waits for the rest of this file only.
+-- clinical pages, Lab and Pharmacy, and every authenticated request's
+-- control read, waits for the rest of this file only.
+--
+-- platform.control_settings and identity.consent_grants are taken here, not
+-- later, because the previous Identity's emergency activation reads
+-- platform.control_settings (platform.require_control_enabled, ACCESS SHARE
+-- to commit) and then inserts into identity.consent_grants in one
+-- transaction. Before this layout, section 5 created the probation trigger
+-- (SHARE ROW EXCLUSIVE on identity.consent_grants) and the control section
+-- below waited for ACCESS EXCLUSIVE on platform.control_settings while
+-- holding it and the nine: such an activation started in between deadlocked
+-- with the migration (40P01), and every control read queued behind the
+-- waiting lock until the deadlock was detected. Now nothing before this block
+-- locks either table, and nothing after it waits for a lock an activation can
+-- hold: an activation in flight only makes an attempt fail and retry. No other
+-- running service reads a control inside a transaction (checked against
+-- 57a94db: the guards and the EHR's checks read with a pool statement).
 do $$
 declare
   attempt integer := 0;
@@ -9898,8 +10007,10 @@ begin
     attempt := attempt + 1;
     begin
       lock table lab.work_items, pharmacy.work_items, ehr.lab_requests, ehr.encounters, ehr.prescriptions,
-        lab.result_releases, lab.result_invalidations, pharmacy.dispensings, pharmacy.dispensing_reversals
+        lab.result_releases, lab.result_invalidations, pharmacy.dispensings, pharmacy.dispensing_reversals,
+        platform.control_settings
         in access exclusive mode nowait;
+      lock table identity.consent_grants in share row exclusive mode nowait;
       exit;
     exception when lock_not_available then
       if attempt >= 50 then
@@ -9911,6 +10022,12 @@ begin
   end loop;
 end
 $$;
+
+-- P4b's probation trigger (5.6), under the lock the block above holds.
+create trigger consent_grants_self_service_probation
+  before insert on identity.consent_grants
+  for each row when (new.break_glass)
+  execute function identity.enforce_self_service_break_glass_probation();
 
 -- Lab work items bound to a route: the route column and its unique index;
 -- the facility rule (a route-backed item is at another facility than the
@@ -10118,7 +10235,7 @@ begin
   if exists (select 1 from pg_roles where rolname = 'hid_lab_runtime') then
     grant execute on function lab.list_order_routes(text,text),
       lab.get_order_route(uuid),
-      lab.accept_order_route(uuid,bigint,text,text,text,char),
+      lab.accept_order_route(uuid,bigint,text,text,text,char,text),
       lab.decline_order_route(uuid,bigint,text),
       lab.order_route_access_for(text,uuid,text),
       lab.order_route_cards(uuid[]),
@@ -10128,7 +10245,7 @@ begin
   if exists (select 1 from pg_roles where rolname = 'hid_pharmacy_runtime') then
     grant execute on function pharmacy.list_order_routes(text,text),
       pharmacy.get_order_route(uuid),
-      pharmacy.accept_order_route(uuid,bigint,text,text,text,text,char),
+      pharmacy.accept_order_route(uuid,bigint,text,text,text,text,char,text),
       pharmacy.decline_order_route(uuid,bigint,text),
       pharmacy.order_route_access_for(text,uuid,text),
       pharmacy.order_route_cards(uuid[]),
@@ -10155,13 +10272,13 @@ begin
       ehr.order_route_attestation_text(text),
       lab.list_order_routes(text,text),
       lab.get_order_route(uuid),
-      lab.accept_order_route(uuid,bigint,text,text,text,char),
+      lab.accept_order_route(uuid,bigint,text,text,text,char,text),
       lab.decline_order_route(uuid,bigint,text),
       lab.order_route_access_for(text,uuid,text),
       lab.order_route_cards(uuid[]),
       pharmacy.list_order_routes(text,text),
       pharmacy.get_order_route(uuid),
-      pharmacy.accept_order_route(uuid,bigint,text,text,text,text,char),
+      pharmacy.accept_order_route(uuid,bigint,text,text,text,text,char,text),
       pharmacy.decline_order_route(uuid,bigint,text),
       pharmacy.order_route_access_for(text,uuid,text),
       pharmacy.order_route_cards(uuid[]),
@@ -10173,21 +10290,25 @@ begin
 end
 $$;
 
--- 8. The controls (last). These statements take ACCESS EXCLUSIVE on
+-- 8. The controls (last). These statements need ACCESS EXCLUSIVE on
 -- platform.control_settings, which every non-admin authenticated request
--- reads through platform.control_enabled, and hold it until commit; nothing
--- follows them. The live key list is asserted first (C10): the CHECK
--- constraint and platform.control_enabled must name exactly the six keys of
--- 0039 and 0040, as this branch has them, so a migration that changed either
--- first makes this one stop instead of dropping its keys. This migration's
--- keys, provider_self_service_enabled (P4), staff_invitations_enabled (P4b),
--- cross_facility_orders_enabled and cross_facility_route_access_enabled
--- (P4c), are added at the end of the three lists below (the CHECK, the seed
--- and control_enabled). Every later control migration must carry all four
+-- reads through platform.control_enabled; 6.7 already holds it (taken with
+-- the nine clinical tables, NOWAIT), so none of them waits for a lock, and it
+-- is held until commit; nothing follows them. The live key list is asserted
+-- first (C10): the CHECK constraint and platform.control_enabled must name
+-- exactly the six keys of 0039 and 0040, as this branch has them, so a
+-- migration that changed either first makes this one stop instead of dropping
+-- its keys. This migration's keys, provider_self_service_enabled (P4),
+-- staff_invitations_enabled (P4b), cross_facility_orders_enabled and
+-- cross_facility_route_access_enabled (P4c), are added at the end of the
+-- three lists below (the CHECK, the seed and control_enabled). Every later control migration must carry all four
 -- keys in its CHECK and in control_enabled. Section 6's commands and route
--- predicates read controls inside clinical transactions (V11): a later
--- migration that locks platform.control_settings while it holds clinical
--- locks must take it with a NOWAIT retry, as 6.7 takes the clinical tables.
+-- predicates read controls inside clinical transactions (V11), and the
+-- Identity's emergency activation reads one and then writes
+-- identity.consent_grants: a later migration that locks
+-- platform.control_settings while it holds clinical locks or a lock on
+-- identity.consent_grants must take it in the same NOWAIT attempt, as 6.7
+-- does.
 do $$
 declare
   live_keys constant text[] := array['break_glass_enabled', 'maintenance_mode', 'outreach_portal_enabled',

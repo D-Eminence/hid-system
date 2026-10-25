@@ -1017,7 +1017,7 @@ grant execute on function ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,u
   to hid_ehr_runtime, hid_schema_test_runtime;
 grant execute on function lab.list_order_routes(text,text),
   lab.get_order_route(uuid),
-  lab.accept_order_route(uuid,bigint,text,text,text,char),
+  lab.accept_order_route(uuid,bigint,text,text,text,char,text),
   lab.decline_order_route(uuid,bigint,text),
   lab.order_route_access_for(text,uuid,text),
   lab.order_route_cards(uuid[]),
@@ -1025,7 +1025,7 @@ grant execute on function lab.list_order_routes(text,text),
   to hid_lab_runtime, hid_schema_test_runtime;
 grant execute on function pharmacy.list_order_routes(text,text),
   pharmacy.get_order_route(uuid),
-  pharmacy.accept_order_route(uuid,bigint,text,text,text,text,char),
+  pharmacy.accept_order_route(uuid,bigint,text,text,text,text,char,text),
   pharmacy.decline_order_route(uuid,bigint,text),
   pharmacy.order_route_access_for(text,uuid,text),
   pharmacy.order_route_cards(uuid[]),

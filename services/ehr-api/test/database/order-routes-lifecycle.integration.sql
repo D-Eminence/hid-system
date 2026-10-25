@@ -1128,5 +1128,86 @@ select gen_random_uuid(), source_order.patient_id, source_order.facility_id, sou
   from rx_order_copy source_order$s$, '23514 PRESCRIPTION_ROUTED');
 reset role;
 
+-- 7. Lapsed windows. Lab route 17 is sent and ages past respond_by: neither
+-- the orderer's withdrawal nor B's decline may relabel it. Lab route 18 and
+-- prescription route 7 are accepted and age past their work window with
+-- nothing returned: they read expired everywhere, support's close finds them
+-- closed, and a dispensing on route 7 is refused by the database itself.
+set local role hid_ehr_api_runtime;
+select set_config('hid.test.lr_' || n, pg_temp.lab_request(1, 'active')::text, true) from generate_series(17, 18) n;
+select set_config('hid.test.rx_7', pg_temp.prescription(1, 'active')::text, true);
+select set_config('hid.test.lroute_' || n, pg_temp.send(11, 'lab_request', current_setting('hid.test.lr_' || n)::uuid,
+  current_setting('hid.test.facility_1')::uuid, 'p4c-life-send-lab-' || lpad(n::text, 4, '0'))::text, true)
+  from generate_series(17, 18) n;
+select set_config('hid.test.rroute_7', pg_temp.send(11, 'prescription', current_setting('hid.test.rx_7')::uuid,
+  current_setting('hid.test.facility_2')::uuid, 'p4c-life-send-rx-0007')::text, true);
+reset role;
+set local role hid_lab_api_runtime;
+select set_config('hid.test.litem_18', pg_temp.accept_lab(current_setting('hid.test.lroute_18')::uuid, 1)::text, true);
+reset role;
+set local role hid_pharmacy_api_runtime;
+select set_config('hid.test.ritem_7', pg_temp.accept_rx(current_setting('hid.test.rroute_7')::uuid)::text, true);
+reset role;
+select pg_temp.age_route(current_setting('hid.test.lroute_17')::uuid, interval '8 days', interval '0');
+select pg_temp.age_route(route.id, interval '31 days', interval '31 days')
+  from ehr.order_routes route where route.id in (current_setting('hid.test.lroute_18')::uuid,
+    current_setting('hid.test.rroute_7')::uuid);
+set local role hid_ehr_api_runtime;
+select pg_temp.as_staff(11, 'e4c21000-0000-4000-8000-000000000001');
+select pg_temp.check('the orderer''s withdrawal past respond_by', format($s$select * from ehr.withdraw_order_route(%L,
+  'lab_request', %L, 1, 'sent_in_error')$s$, current_setting('hid.test.lroute_17'), current_setting('hid.test.lr_17')),
+  'P0001 ORDER_ROUTE_NOT_PENDING');
+select pg_temp.assert('C3 reads the lapsed routes as expired', (select array_agg(listed.summary ->> 'effectiveState'
+      order by listed.route_id)
+    from (select * from ehr.list_order_routes_for_order('lab_request', 'e4c30000-0000-4000-8000-000000000001',
+            current_setting('hid.test.lr_17')::uuid)
+          union all
+          select * from ehr.list_order_routes_for_order('lab_request', 'e4c30000-0000-4000-8000-000000000001',
+            current_setting('hid.test.lr_18')::uuid)
+          union all
+          select * from ehr.list_order_routes_for_order('prescription', 'e4c30000-0000-4000-8000-000000000001',
+            current_setting('hid.test.rx_7')::uuid)) listed)
+  = array['expired', 'expired', 'expired']);
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select pg_temp.check('B''s decline past respond_by', format($s$select * from lab.decline_order_route(%L, 1,
+  'test_not_offered')$s$, current_setting('hid.test.lroute_17')), 'P0001 ORDER_ROUTE_EXPIRED');
+reset role;
+select pg_temp.assert('the lapsed sent route is unchanged', (select route.state = 'sent' and route.row_version = 1
+    and route.ended_at is null and ehr.order_route_effective_state(route) = 'expired'
+  from ehr.order_routes route where route.id = current_setting('hid.test.lroute_17')::uuid));
+set local role hid_ehr_api_runtime;
+select pg_temp.as_patient(1);
+select pg_temp.assert('C5 reads the lapsed routes as expired', (select array_agg(listed.effective_state)
+    from ehr.patient_list_order_routes() listed
+   where listed.route_id in (current_setting('hid.test.lroute_17')::uuid, current_setting('hid.test.lroute_18')::uuid,
+     current_setting('hid.test.rroute_7')::uuid))
+  = array['expired', 'expired', 'expired']);
+reset role;
+select set_config('hid.test.version_18', (pg_temp.route(current_setting('hid.test.lroute_18')::uuid)).row_version::text,
+  true);
+select set_config('hid.test.lapsed_references', (select string_agg(route.reference::text, ',' order by route.reference)
+  from ehr.order_routes route where route.id in (current_setting('hid.test.lroute_17')::uuid,
+    current_setting('hid.test.lroute_18')::uuid, current_setting('hid.test.rroute_7')::uuid)), true);
+set local role hid_identity_api_runtime;
+select pg_temp.as_platform(1);
+select pg_temp.assert('C21 reads the lapsed routes as expired', (select array_agg(found.effective_state)
+    from unnest(string_to_array(current_setting('hid.test.lapsed_references'), ',')) wanted(reference)
+    cross join lateral identity.admin_find_order_routes(wanted.reference, null) found)
+  = array['expired', 'expired', 'expired']);
+select pg_temp.as_platform(3);
+select pg_temp.check('support''s close of an accepted route past its window', format($s$select * from
+  identity.admin_close_order_route(%L, %s, 'The patient asked support to stop it')$s$, current_setting('hid.test.lroute_18'),
+  current_setting('hid.test.version_18')), '23505 ORDER_ROUTE_ALREADY_CLOSED');
+reset role;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_staff(33, current_setting('hid.test.facility_2')::uuid);
+select pg_temp.check('a dispensing past the work window', format($s$select pg_temp.dispense(%L, 'p4c-life-dispense-07')$s$,
+  current_setting('hid.test.ritem_7')), '23514 ORDER_ROUTE_CLOSED');
+reset role;
+select pg_temp.assert('nothing dispensed on route 7', not exists (select 1 from pharmacy.dispensings dispensing
+  where dispensing.work_item_id = current_setting('hid.test.ritem_7')::uuid));
+
 select pg_temp.report();
 rollback;

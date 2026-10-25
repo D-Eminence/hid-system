@@ -757,6 +757,16 @@ do $$ begin
           where id = current_setting('hid.test.u_app_4')::uuid) <> 'none' then
     raise exception 'The administrator-role changes left the wrong state';
   end if;
+  -- The review's method stays (P4c's default listing reads it); each
+  -- change's method is in the change's audit row only.
+  if (select self_service_verification_method from identity.organization_applications
+        where id = current_setting('hid.test.u_app_4')::uuid) <> 'officer_match'
+     or (select array_agg(details ->> 'verificationMethod' order by details ->> 'verificationMethod') from audit.events
+          where action = 'admin.self-service-facility.administrator-role'
+            and resource_id = current_setting('hid.test.u_app_4'))
+        is distinct from array['in_person', 'other', 'regulator_register'] then
+    raise exception 'An administrator-role change replaced the review''s verification method';
+  end if;
 end $$;
 
 -- 6. The first 30 days: 5 break-glass grants a day at a reviewed facility.
@@ -1114,6 +1124,23 @@ begin
   if (select state.review_state from identity.organization_self_service_state(current_setting('hid.test.u_org_9')::uuid) state)
      <> 'released' then
     raise exception 'The released organization is not in the released state';
+  end if;
+end $$;
+
+-- 10. The first 30 days end exactly 30 days after support's review (owner
+-- SQL moves facility 4's review back; it never ended its first 30 days).
+update identity.organization_applications set self_service_reviewed_at = clock_timestamp() - interval '29 days'
+ where id = current_setting('hid.test.u_app_4')::uuid;
+do $$ begin
+  if not identity.self_service_on_probation(current_setting('hid.test.u_facility_4')::uuid) then
+    raise exception 'The first 30 days ended before 30 days';
+  end if;
+end $$;
+update identity.organization_applications set self_service_reviewed_at = clock_timestamp() - interval '30 days'
+ where id = current_setting('hid.test.u_app_4')::uuid;
+do $$ begin
+  if identity.self_service_on_probation(current_setting('hid.test.u_facility_4')::uuid) then
+    raise exception 'The first 30 days had not ended at 30 days';
   end if;
 end $$;
 

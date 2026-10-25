@@ -1251,5 +1251,81 @@ select pg_temp.check('directory as a nurse', $s$select * from identity.search_or
   '42501 ORDER_ROUTE_PERMISSION_DENIED');
 reset role;
 
+-- 8. A change of the administrator's own access never lists or unlists the
+-- facility (H3 reads the method support recorded at its review; the change's
+-- method is kept in the change's audit row). Sign-ups 8 laboratory LC
+-- (reviewed by its CAC contact, so listed by default) and 9 laboratory LQ
+-- (reviewed as 'other', so not listed); neither has a listing setting (T7).
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject', 'system:auth', true),
+  set_config('app.correlation_id', 'p4c-send-signup-8', true),
+  set_config('app.purpose_of_use', '', true), set_config('app.facility_id', '', true),
+  set_config('app.membership_id', '', true);
+select pg_temp.p4c_sign_up(8, 'laboratory', 'laboratory', 'RC9945008', 'Chika Contact Admin', 'chika@p4c-contact.invalid',
+  'P4c Contact Check Laboratory Ltd');
+select pg_temp.p4c_sign_up(9, 'laboratory', 'laboratory', 'RC9945009', 'Quadri Other Admin', 'quadri@p4c-other2.invalid',
+  'P4c Second Other Laboratory Ltd');
+select pg_temp.as_platform(1);
+select identity.admin_review_self_service_facility(current_setting('hid.test.app_' || n)::uuid,
+  (select application.row_version from identity.admin_list_self_service_facilities('unreviewed') application
+    where application.application_id = current_setting('hid.test.app_' || n)::uuid),
+  'Support reviewed this laboratory for the suite', 'lab', method, 'MLSCN', 'MLS/1000' || n)
+  from (values (8, 'cac_registered_contact'), (9, 'other')) r(n, method);
+reset role;
+select set_config('hid.test.membership_' || n,
+  (select membership.id::text from identity.staff_facility_memberships membership
+    where membership.account_id = current_setting('hid.test.account_' || n)::uuid), true),
+  set_config('hid.test.subject_' || n,
+  (select account.subject from auth.accounts account where account.id = current_setting('hid.test.account_' || n)::uuid),
+  true)
+  from generate_series(8, 9) n;
+select pg_temp.assert('before: LC listed and eligible, LQ neither, no listing setting',
+  identity.order_route_destination_listed(current_setting('hid.test.facility_8')::uuid)
+  and identity.order_route_destination_eligible(current_setting('hid.test.facility_8')::uuid, 'lab_request')
+  and not identity.order_route_destination_listed(current_setting('hid.test.facility_9')::uuid)
+  and not identity.order_route_destination_eligible(current_setting('hid.test.facility_9')::uuid, 'lab_request')
+  and not exists (select 1 from identity.order_route_destination_settings setting
+    where setting.facility_id in (current_setting('hid.test.facility_8')::uuid, current_setting('hid.test.facility_9')::uuid)));
+-- A route to LC waits for acceptance.
+set local role hid_ehr_api_runtime;
+select set_config('hid.test.active_lc', pg_temp.lab_request(1, 'active')::text, true);
+select set_config('hid.test.route_lc', pg_temp.send(11, 'lab_request', current_setting('hid.test.active_lc')::uuid,
+  current_setting('hid.test.facility_8')::uuid, 'p4c-send-admin-role-01', 'order-route-lab-attestation-v2')::text, true);
+reset role;
+-- Support changes both administrators' access: LC's to another licence,
+-- checked "other"; LQ's to another licence, checked on the register.
+set local role hid_identity_api_runtime;
+select pg_temp.as_platform(1);
+select pg_temp.assert('support changes both administrators'' access', (select array_agg(changed.granted_role order by r.n)
+    from (values (8, 'MLS/20008', 'other'), (9, 'MLS/20009', 'regulator_register')) r(n, number, method)
+    cross join lateral identity.admin_set_self_service_administrator_role(current_setting('hid.test.app_' || r.n)::uuid,
+      (select application.row_version from identity.admin_list_self_service_facilities('reviewed') application
+        where application.application_id = current_setting('hid.test.app_' || r.n)::uuid),
+      'lab', 'MLSCN', r.number, r.method, 'The administrator''s licence was renewed') changed)
+  = array['lab', 'lab']);
+reset role;
+select pg_temp.assert('after: the listing and eligibility unchanged, still no listing setting',
+  identity.order_route_destination_listed(current_setting('hid.test.facility_8')::uuid)
+  and identity.order_route_destination_eligible(current_setting('hid.test.facility_8')::uuid, 'lab_request')
+  and not identity.order_route_destination_listed(current_setting('hid.test.facility_9')::uuid)
+  and not identity.order_route_destination_eligible(current_setting('hid.test.facility_9')::uuid, 'lab_request')
+  and not exists (select 1 from identity.order_route_destination_settings setting
+    where setting.facility_id in (current_setting('hid.test.facility_8')::uuid, current_setting('hid.test.facility_9')::uuid)));
+select pg_temp.assert('the review''s method kept; the change''s method in its audit row',
+  (select array_agg(application.self_service_verification_method order by application.id = current_setting('hid.test.app_9')::uuid)
+     from identity.organization_applications application
+    where application.id in (current_setting('hid.test.app_8')::uuid, current_setting('hid.test.app_9')::uuid))
+  = array['cac_registered_contact', 'other']
+  and (select array_agg(event.details ->> 'verificationMethod' order by event.resource_id = current_setting('hid.test.app_9'))
+     from audit.events event where event.action = 'admin.self-service-facility.administrator-role'
+      and event.resource_id in (current_setting('hid.test.app_8'), current_setting('hid.test.app_9')))
+  = array['other', 'regulator_register']);
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(8);
+select pg_temp.assert('the route waiting at LC can still be accepted', (select accepted.result = 'accepted'
+  from lab.accept_order_route(current_setting('hid.test.route_lc')::uuid, 1, 'health_id', 'HID-P4CPATP',
+    'p4c-send-admin-role-acc1', repeat('a', 64)) accepted));
+reset role;
+
 select pg_temp.report();
 rollback;

@@ -696,5 +696,65 @@ select pg_temp.assert('C5 shows the withdrawals', (select array_agg(listed.ended
   = array['entered_in_error', 'order_changed']);
 reset role;
 
+-- 4. An order marked entered in error (it may be another patient's, written
+-- in this chart by mistake): C5 keeps the route as the record of what went
+-- where, but answers no content beyond the reference, no attestation text and
+-- no attesting clinician, as the record view hides the order (0067). Route 5
+-- (withdrawn as entered_in_error), route 4 (withdrawn as order_changed, its
+-- order marked entered in error afterwards) and route 2 (completed at L1,
+-- then its order marked entered in error: access ends and the patient is
+-- told).
+select set_config('hid.test.item_2', (select route.lab_work_item_id::text from ehr.order_routes route
+  where route.id = current_setting('hid.test.route_2')::uuid), true);
+select set_config('hid.test.result_2', pg_temp.lab_chain(current_setting('hid.test.item_2')::uuid, 'chain2', 13.1)::text,
+  true);
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select pg_temp.check('route 2''s result released', format($s$select pg_temp.release(%L, 1, %L, 'p4c-patient-release-01')$s$,
+  current_setting('hid.test.result_2'), current_setting('hid.test.chain2_verification_1')), 'ok');
+reset role;
+select pg_temp.assert('route 2 completed', (select route.state = 'completed' and route.ended_at is null
+  from ehr.order_routes route where route.id = current_setting('hid.test.route_2')::uuid));
+set local role hid_ehr_api_runtime;
+select pg_temp.as_staff(11, 'e4c21000-0000-4000-8000-000000000001');
+select set_config('app.change_reason', 'Written in the wrong patient''s chart', true);
+update ehr.lab_requests set status = 'entered_in_error'
+ where id in (current_setting('hid.test.lr_2')::uuid, current_setting('hid.test.lr_4')::uuid);
+reset role;
+select pg_temp.assert('the completed route''s access ended now', (select route.state = 'completed'
+    and route.ended_at is not null and route.ended_kind = 'entered_in_error' and route.access_ends_at <= clock_timestamp()
+  from ehr.order_routes route where route.id = current_setting('hid.test.route_2')::uuid));
+select pg_temp.assert('the patient told of the completed route''s closure', exists (select 1
+  from notification.inbox_items item where item.resource_id = current_setting('hid.test.route_2')::uuid
+    and item.notification_code = 'ORDER_ROUTE_CANCELLED'));
+select pg_temp.assert('a withdrawn route''s later entered in error tells no one again', (select count(*)
+  from notification.inbox_items item where item.resource_id = current_setting('hid.test.route_4')::uuid) = 2);
+set local role hid_ehr_api_runtime;
+select pg_temp.as_patient(1);
+select pg_temp.assert('the patient cannot read the entered-in-error orders themselves', (select count(*)
+  from ehr.lab_requests request where request.id in (current_setting('hid.test.lr_2')::uuid,
+    current_setting('hid.test.lr_4')::uuid, current_setting('hid.test.lr_5')::uuid)) = 0);
+select pg_temp.assert('C5 keeps each entered-in-error route without its content', (select count(*) = 3
+    and bool_and(listed.entered_in_error and listed.content = jsonb_build_object('reference', listed.reference)
+      and listed.attestation_text is null and listed.attested_by_name is null and listed.actions = array[]::text[]
+      and listed.receiving_facility_name = 'P4c Sign-up Laboratory Ltd'
+      and listed.ordering_facility_name = 'P4c General Hospital' and listed.created_at is not null)
+  from ehr.patient_list_order_routes() listed
+ where listed.route_id in (current_setting('hid.test.route_2')::uuid, current_setting('hid.test.route_4')::uuid,
+   current_setting('hid.test.route_5')::uuid)));
+select pg_temp.assert('C5 keeps the states of the entered-in-error routes', (select array_agg(listed.effective_state
+      || ':' || listed.ended_kind order by listed.effective_state, listed.ended_kind)
+    from ehr.patient_list_order_routes() listed
+   where listed.route_id in (current_setting('hid.test.route_2')::uuid, current_setting('hid.test.route_4')::uuid,
+     current_setting('hid.test.route_5')::uuid))
+  = array['completed:entered_in_error', 'withdrawn:entered_in_error', 'withdrawn:order_changed']);
+select pg_temp.assert('C5 still shows the other routes in full', (select count(*) = 3
+    and bool_and(not listed.entered_in_error and listed.attestation_text is not null and listed.attested_by_name = 'Ada Doctor'
+      and listed.content ? 'ordererName')
+  from ehr.patient_list_order_routes() listed
+ where listed.route_id in (current_setting('hid.test.route_1')::uuid, current_setting('hid.test.route_3')::uuid,
+   current_setting('hid.test.rxroute_1')::uuid)));
+reset role;
+
 select pg_temp.report();
 rollback;

@@ -585,14 +585,14 @@ select signature::regprocedure, grantees from (values
   ('ehr.order_route_attestation_text(text)', array['hid_ehr_runtime', 'hid_schema_test_runtime']),
   ('lab.list_order_routes(text,text)', array['hid_lab_runtime', 'hid_schema_test_runtime']),
   ('lab.get_order_route(uuid)', array['hid_lab_runtime', 'hid_schema_test_runtime']),
-  ('lab.accept_order_route(uuid,bigint,text,text,text,character)', array['hid_lab_runtime', 'hid_schema_test_runtime']),
+  ('lab.accept_order_route(uuid,bigint,text,text,text,character,text)', array['hid_lab_runtime', 'hid_schema_test_runtime']),
   ('lab.decline_order_route(uuid,bigint,text)', array['hid_lab_runtime', 'hid_schema_test_runtime']),
   ('lab.order_route_access_for(text,uuid,text)', array['hid_lab_runtime', 'hid_schema_test_runtime']),
   ('lab.order_route_cards(uuid[])', array['hid_lab_runtime', 'hid_schema_test_runtime']),
   ('lab.work_item_allows(uuid,uuid,uuid,text)', array['hid_lab_runtime', 'hid_schema_test_runtime']),
   ('pharmacy.list_order_routes(text,text)', array['hid_pharmacy_runtime', 'hid_schema_test_runtime']),
   ('pharmacy.get_order_route(uuid)', array['hid_pharmacy_runtime', 'hid_schema_test_runtime']),
-  ('pharmacy.accept_order_route(uuid,bigint,text,text,text,text,character)', array['hid_pharmacy_runtime', 'hid_schema_test_runtime']),
+  ('pharmacy.accept_order_route(uuid,bigint,text,text,text,text,character,text)', array['hid_pharmacy_runtime', 'hid_schema_test_runtime']),
   ('pharmacy.decline_order_route(uuid,bigint,text)', array['hid_pharmacy_runtime', 'hid_schema_test_runtime']),
   ('pharmacy.order_route_access_for(text,uuid,text)', array['hid_pharmacy_runtime', 'hid_schema_test_runtime']),
   ('pharmacy.order_route_cards(uuid[])', array['hid_pharmacy_runtime', 'hid_schema_test_runtime']),
@@ -618,8 +618,8 @@ select expected.signature, coalesce((select array_agg(acl.grantee::regrole::text
    where p.oid = expected.signature and acl.privilege_type = 'EXECUTE' and acl.grantee <> p.proowner),
     array[]::text[]) as grantees
   from expected_execute expected;
-select pg_temp.assert('section 6 has its 68 functions, with the two inbox functions 70',
-  (select count(*) from expected_execute) = 70, (select count(*) from expected_execute)::text);
+select pg_temp.assert('section 6 has its 69 functions, with the two inbox functions 71',
+  (select count(*) from expected_execute) = 71, (select count(*) from expected_execute)::text);
 select pg_temp.assert('EXECUTE exactly as section 7 grants it', not exists (select 1 from expected_execute expected
     join actual_execute actual using (signature) where actual.grantees <> expected.grantees),
   (select string_agg(expected.signature::text || ' ' || actual.grantees::text, '; ') from expected_execute expected
@@ -628,16 +628,16 @@ select pg_temp.assert('PUBLIC executes none', not exists (select 1 from expected
     aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
    where p.oid = expected.signature and acl.grantee = 0));
 select pg_temp.assert('every helper, view function and trigger function is the owner''s alone',
-  (select count(*) from expected_execute where cardinality(grantees) = 0) = 42
+  (select count(*) from expected_execute where cardinality(grantees) = 0) = 43
   and not exists (select 1 from expected_execute expected, pg_roles runtime
     where cardinality(expected.grantees) = 0 and runtime.rolname ~ '^hid_.*runtime$'
       and has_function_privilege(runtime.oid, expected.signature, 'EXECUTE')));
 select pg_temp.assert('the API runtimes reach the commands through their parents',
   has_function_privilege('hid_ehr_api_runtime', 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', 'EXECUTE')
-  and has_function_privilege('hid_lab_api_runtime', 'lab.accept_order_route(uuid,bigint,text,text,text,character)', 'EXECUTE')
-  and has_function_privilege('hid_pharmacy_api_runtime', 'pharmacy.accept_order_route(uuid,bigint,text,text,text,text,character)', 'EXECUTE')
+  and has_function_privilege('hid_lab_api_runtime', 'lab.accept_order_route(uuid,bigint,text,text,text,character,text)', 'EXECUTE')
+  and has_function_privilege('hid_pharmacy_api_runtime', 'pharmacy.accept_order_route(uuid,bigint,text,text,text,text,character,text)', 'EXECUTE')
   and has_function_privilege('hid_identity_api_runtime', 'identity.admin_close_order_route(uuid,bigint,text)', 'EXECUTE')
-  and not has_function_privilege('hid_ehr_api_runtime', 'lab.accept_order_route(uuid,bigint,text,text,text,character)', 'EXECUTE')
+  and not has_function_privilege('hid_ehr_api_runtime', 'lab.accept_order_route(uuid,bigint,text,text,text,character,text)', 'EXECUTE')
   and not has_function_privilege('hid_lab_api_runtime', 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', 'EXECUTE')
   and not has_function_privilege('hid_identity_api_runtime', 'ehr.close_order_route(uuid,text,text,boolean)', 'EXECUTE')
   and not has_function_privilege('hid_ehr_api_runtime', 'identity.admin_close_order_route(uuid,bigint,text)', 'EXECUTE')
@@ -874,15 +874,25 @@ select pg_temp.assert('P4.2: no row written for a facility carries an account or
         route.accepted_by_membership_id, route.declined_by_account_id, route.declined_by_membership_id,
         route.ended_by_account_id]) participant
         where participant is not null and event.details::text like '%' || participant::text || '%')));
+-- The details carry random uuids (route, result, dispensing, setting and
+-- facility ids), whose hex can spell 'ada' or '718-7': they are removed
+-- before the scan, so only a real word or value can fail it.
+create function pg_temp.without_uuids(details jsonb) returns text language sql immutable as $f$
+  select regexp_replace(details::text, '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}', '', 'gi')
+$f$;
 select pg_temp.assert('no details carry a name, text, value, licence or identifier', not exists (select 1
   from audit.events event, unnest(array['Ada', 'Patience', 'Okafor', 'Kemi', 'Haemoglobin', '718-7', 'Amoxicillin',
       'amoxicillin', 'whole-blood', 'Fever', 'Take after food', '10.4', '11.2', 'g/dL', 'MDCN', 'MLS/', 'PCN/', 'HID-',
       'P4CPAT', '1990-04-12', 'Sign-up', 'Hospital', 'Laboratory', 'Pharmacy', 'specimen', 'Wrong strength']) word
   where (event.resource_type = 'order-route' or event.action like '%order-route%')
-    and event.details::text ilike '%' || word || '%'),
+    and pg_temp.without_uuids(event.details) ilike '%' || word || '%'),
   (select string_agg(distinct event.action || ' ' || event.details::text, '; ') from audit.events event
     where (event.resource_type = 'order-route' or event.action like '%order-route%')
-      and event.details::text ~* '(ada|patience|haemoglobin|amoxicillin|mdcn|hid-|laboratory|pharmacy)'));
+      and pg_temp.without_uuids(event.details) ~* '(ada|patience|haemoglobin|amoxicillin|mdcn|hid-|laboratory|pharmacy)'));
+select pg_temp.assert('the scan ignores a uuid that spells ada, and still finds the word',
+  pg_temp.without_uuids(jsonb_build_object('routeId', '0c394cf4-fc47-409a-8ada-1eeae9ff79f4')) not ilike '%ada%'
+  and pg_temp.without_uuids(jsonb_build_object('routeId', '0c394cf4-fc47-409a-8ada-1eeae9ff79f4', 'name', 'Ada'))
+    ilike '%ada%');
 select pg_temp.assert('the rows the run wrote', (select array_agg(distinct event.action order by event.action)
     from audit.events event where event.resource_type = 'order-route' or event.action like '%order-route%')
   @> array['admin.order-route-destination.set', 'admin.order-route.close', 'ehr.order-route.accepted', 'ehr.order-route.closed', 'ehr.order-route.declined', 'ehr.order-route.dispensing-returned',
