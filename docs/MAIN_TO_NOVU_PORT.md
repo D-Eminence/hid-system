@@ -786,8 +786,12 @@ Still open, with what each one holds back:
   `platform.control_settings`'s row-level security and FORCE settings with its
   owner's `rolsuper` and `rolbypassrls`: stop and find out why if row-level
   security and FORCE are both on and the owner has neither, since production's
-  accountless control reads could not then work as they do), then opens the
-  control with the audited admin command.
+  accountless control reads could not then work as they do; and the md5 of the
+  live sources of `platform.consume_qoreid_quota` and
+  `identity.begin_organization_profile_completion`, which 0086 requires to be
+  0049's `dca2fbb737f2c747148eacc7d6e66c5f` and 0056's
+  `6c94f9fca935f41a1bbcc313d9447d04`, else its dry run stops the release with
+  nothing changed), then opens the control with the audited admin command.
 - Emergency contacts (ported above, switched off): storing contacts' names and
   destinations, the alert wording, production delivery and the pilot accounts.
   Alerts also need an active `emergency` purpose of use, which 0085 seeds;
