@@ -511,7 +511,8 @@ try {
   assert.deepEqual(opened.body, { controlKey: 'provider_self_service_enabled', enabled: true, version: 2, replayed: false });
   assert.equal(await count(`select count(*)::int n from audit.events where action='admin.platform-control.change'
     and actor_account_id=$1`, [superAdmin.accountId]), 1, 'Opening the control was not audited');
-  assert.deepEqual(await availability(), { open: true });
+  // Open, with P4c's orders between facilities still off (0086 seeds cross_facility_orders_enabled off).
+  assert.deepEqual(await availability(), { open: true, crossFacilityOrders: false });
   // A13: the gate also needs the provider portal on and maintenance off, which
   // the security guard does not enforce on these public routes.
   const setControl = async (controlKey, enabled, version) => {
@@ -529,7 +530,7 @@ try {
       '198.51.100.90'), 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE');
     await setControl(controlKey, !closing, 2);
   }
-  assert.deepEqual(await availability(), { open: true });
+  assert.deepEqual(await availability(), { open: true, crossFacilityOrders: false });
   assert.equal(await count('select count(*)::int n from identity.organization_applications'), 0, 'A closed gate wrote an application');
   gate.a13 = { maintenance_mode_on: 423, provider_portal_off: 423 };
   // R10: a fault reading the controls is not "closed" (the page says "try
@@ -540,7 +541,7 @@ try {
   } finally {
     await owner.query('grant execute on function platform.control_enabled(text) to public');
   }
-  assert.deepEqual(await availability(), { open: true });
+  assert.deepEqual(await availability(), { open: true, crossFacilityOrders: false });
   gate.availability = { closed: 'closed', fault: 'unavailable', open: true };
   gate.opened = { by: 'standalone platform_super_admin', command: 'POST /admin/controls', staleVersion: 409,
     version: 2, availability: true };

@@ -1136,6 +1136,31 @@ The services' part of P4c (all new; routes under `/api/v1`, errors
   `ORDER_ROUTE_UNAVAILABLE` (a retry answers the real state); support's
   lookup by Health ID puts it in the query string, as the route contract
   says, so gateway access logs may keep it (flagged for the owner).
+- Found by the integration's end-to-end run and fixed:
+  - A route-backed work item that the strict policy hides (its route paused
+    by `cross_facility_route_access_enabled`, or closed) answered 404 on
+    `GET work-items/:id`, Lab's accession and Pharmacy's dispensing; these
+    now ask the database about the hidden item and answer 423
+    `CROSS_FACILITY_ORDERS_UNAVAILABLE` or 409 `ORDER_ROUTE_CLOSED`, as the
+    route contract says. A chain row (an accession, specimen, execution,
+    result or dispensing) is found only through rows the session can read, so
+    while route access is off it is refused (403 or 404), not "paused".
+  - A port of `main`'s binding (not P4c, but every cross-facility order
+    needs it): a patient's own decisions on access requests
+    (`GET /api/v1/identity/me/access-requests`, `POST
+    …/access-requests/:requestId/approve` and `…/deny`) took the staff
+    request context, so the patient app (which sends no purpose header)
+    got 400 `PURPOSE_OF_USE_REQUIRED`, and with the header 500 (a patient
+    has no facility): no patient could see, approve or deny a clinician's
+    request, so no write grant could be created through the app. They are
+    now patient-only and bound to the patient session (`main` does the
+    same); `main`'s recent-authentication and recovery-hold checks on
+    approval are not ported (the owner's decision).
+- The runtime verifier `services/ehr-api/scripts/verify-order-routes-runtime.mjs`
+  (run by the TUF rehearsal after the provider verifier) boots Identity,
+  EHR, Lab and Pharmacy from their own code, each as its exact runtime role,
+  and drives P4c end to end over HTTP with fixtures from P4's sign-up, P4b's
+  review and invitations and the patient's approval in the app.
 
 ## Not ported, and why
 

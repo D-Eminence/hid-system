@@ -352,6 +352,9 @@ try {
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-emergency-contacts-runtime.mjs')], workflowEnvironment));
   evidence.checks.provider_enrollment_runtime = JSON.parse(command('exact-role facility self sign-up workflow, gate, cap and review',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-provider-enrollment-runtime.mjs')], workflowEnvironment));
+  // P4c: Identity, EHR, Lab and Pharmacy booted from their own code, each as its exact runtime role.
+  evidence.checks.order_routes_runtime = JSON.parse(command('exact-role cross-facility lab requests and prescriptions',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-order-routes-runtime.mjs')], workflowEnvironment));
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
   const before = await snapshot(database);
