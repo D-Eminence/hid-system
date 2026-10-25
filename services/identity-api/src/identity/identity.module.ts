@@ -41,6 +41,8 @@ import { StaffInvitationsPublicController } from './staff-invitations-public.con
 import { StaffInvitationsSignedInController } from './staff-invitations-signed-in.controller';
 import { StaffInvitationsService } from './staff-invitations.service';
 import { StaffReauthenticationService } from './staff-reauthentication.service';
+import { OrderDestinationsController } from './order-destinations.controller';
+import { OrderDestinationsService } from './order-destinations.service';
 
 @Module({
   imports: [AuthModule, TurnstileModule, IntegrationModule],
@@ -54,7 +56,9 @@ import { StaffReauthenticationService } from './staff-reauthentication.service';
     // signed-in/preview, signed-in/accept) never match :invitationId/resend or
     // :invitationId/revoke.
     StaffInvitationsSignedInController, StaffInvitationsPublicController, FacilityStaffController,
-    AdminFacilityStaffController],
+    AdminFacilityStaffController,
+    // The directory of laboratories and pharmacies an order can go to (P4c).
+    OrderDestinationsController],
   providers: [
     IdentityService,
     NinRegistrationService,
@@ -82,6 +86,7 @@ import { StaffReauthenticationService } from './staff-reauthentication.service';
     StaffInvitationsService,
     FacilityStaffService,
     StaffReauthenticationService,
+    OrderDestinationsService,
     QoreIdPublicPatientIdentityProvider,
     { provide: PUBLIC_PATIENT_IDENTITY_PROVIDER, useExisting: QoreIdPublicPatientIdentityProvider },
     PostgresIdentityProvider,

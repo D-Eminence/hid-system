@@ -44,15 +44,18 @@ export class ProviderEnrollmentController {
   ) {}
 
   /**
-   * Whether self sign-up is open: { open: true }, or { open: false, reason }
-   * with reason 'closed' (switched off or not configured) or 'unavailable'
-   * (the answer could not be determined; try again shortly). Never an error.
+   * Whether self sign-up is open: { open: true, crossFacilityOrders }, or
+   * { open: false, reason } with reason 'closed' (switched off or not
+   * configured) or 'unavailable' (the answer could not be determined; try
+   * again shortly). Never an error. crossFacilityOrders (P4c) says whether
+   * orders between facilities are on, for the copy shown to laboratories and
+   * pharmacies.
    */
   @Get('availability')
   async availability(): Promise<ProviderEnrollmentAvailability> {
     try {
       const answer = await this.enrollments.availability();
-      if (answer.open === true) return { open: true };
+      if (answer.open === true) return { open: true, crossFacilityOrders: answer.crossFacilityOrders === true };
       return { open: false, reason: answer.reason === 'closed' ? 'closed' : 'unavailable' };
     } catch {
       return { open: false, reason: 'unavailable' };

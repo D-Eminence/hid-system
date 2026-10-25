@@ -371,9 +371,36 @@ describe('facility self sign-up availability', () => {
 
   it('is open when the gate, QoreID and its provider_cac runtime gate are open', async () => {
     const { service, integrations, database } = setup();
-    await expect(service.availability()).resolves.toEqual({ open: true });
+    await expect(service.availability()).resolves.toEqual({ open: true, crossFacilityOrders: false });
     expect(integrations.assertAvailable).toHaveBeenCalledWith('qoreid', 'provider_cac');
     expect(database.withSystemTransaction).not.toHaveBeenCalled();
+  });
+
+  // P4c (SPEC-FINAL §9.4): the open answer says whether orders between
+  // facilities are on, read on its own so it never closes sign-up.
+  it('says whether orders between facilities are on, read apart from the sign-up gate', async () => {
+    const controls = jest.fn(async (sql: string) => (sql.includes("'cross_facility_orders_enabled'")
+      ? { rows: [{ enabled: true }] } : { rows: [openControls] }));
+    const { service } = setup({ controls });
+    await expect(service.availability()).resolves.toEqual({ open: true, crossFacilityOrders: true });
+    const gate = controls.mock.calls.map(([sql]) => String(sql)).find((sql) => sql.includes('provider_self_service_enabled'));
+    expect(gate).not.toContain('cross_facility');
+  });
+
+  it('stays open, with crossFacilityOrders false, when that control cannot be read (the key unknown before 0086)', async () => {
+    const controls = jest.fn(async (sql: string) => {
+      if (sql.includes("'cross_facility_orders_enabled'")) {
+        throw Object.assign(new Error('PLATFORM_CONTROL_INVALID'), { code: '22023' });
+      }
+      return { rows: [openControls] };
+    });
+    await expect(setup({ controls }).service.availability()).resolves.toEqual({ open: true, crossFacilityOrders: false });
+  });
+
+  it('reads no cross-facility control when sign-up is closed', async () => {
+    const controls = jest.fn().mockResolvedValue({ rows: [{ ...openControls, self_service: false }] });
+    await expect(setup({ controls }).service.availability()).resolves.toEqual({ open: false, reason: 'closed' });
+    expect(controls.mock.calls.some(([sql]) => String(sql).includes('cross_facility'))).toBe(false);
   });
 
   it.each([

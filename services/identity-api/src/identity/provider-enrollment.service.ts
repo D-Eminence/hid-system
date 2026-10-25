@@ -36,7 +36,8 @@ const localNetworkKey = randomBytes(32);
  * determined (a database or other fault). The page shows "not open" only for
  * 'closed', and "try again shortly" for 'unavailable'.
  */
-export type ProviderEnrollmentAvailability = { open: true } | { open: false; reason: 'closed' | 'unavailable' };
+export type ProviderEnrollmentAvailability = { open: true; crossFacilityOrders: boolean }
+  | { open: false; reason: 'closed' | 'unavailable' };
 
 // Shown to the applicant as it is. It must be true for both cases the adapter
 // answers with cacIncompleteProfile: a record missing legal fields, and a
@@ -128,7 +129,7 @@ export class ProviderEnrollmentService {
       if (environment.NODE_ENV === 'production' && !environment.OTP_HMAC_KEY_B64) return closed;
       await this.assertSelfServiceOpen();
       await this.integrations.assertAvailable('qoreid', 'provider_cac');
-      return { open: true };
+      return { open: true, crossFacilityOrders: await this.crossFacilityOrdersEnabled() };
     } catch (error) {
       if (error instanceof DomainProblem && (
         (error.getStatus() === 423 && error.code === 'PROVIDER_ENROLLMENT_UNAVAILABLE')
@@ -136,6 +137,22 @@ export class ProviderEnrollmentService {
         return closed;
       }
       return { open: false, reason: 'unavailable' };
+    }
+  }
+
+  /**
+   * Whether orders between facilities are on (P4c, SPEC-FINAL §9.4), for the
+   * sign-up page's copy for laboratories and pharmacies. Read on its own, so
+   * it never closes sign-up: false when it cannot be read (the key unknown
+   * before the migration, or any fault).
+   */
+  private async crossFacilityOrdersEnabled(): Promise<boolean> {
+    try {
+      const result = await this.database.query<{ enabled: boolean | null }>(
+        `select platform.control_enabled('cross_facility_orders_enabled') as enabled`);
+      return result.rows[0]?.enabled === true;
+    } catch {
+      return false;
     }
   }
 

@@ -167,7 +167,7 @@ describe('provider enrollment over HTTP', () => {
     const paused = await request(app.getHttpServer()).get(`${base}/availability`);
     expect([paused.status, paused.body]).toEqual([200, { open: false, reason: 'closed' }]);
     const openNow = await request(app.getHttpServer()).get(`${base}/availability`);
-    expect([openNow.status, openNow.body]).toEqual([200, { open: true }]);
+    expect([openNow.status, openNow.body]).toEqual([200, { open: true, crossFacilityOrders: false }]);
   });
 
   it('answers 423 when the control is switched off between the gate and the submit command', async () => {

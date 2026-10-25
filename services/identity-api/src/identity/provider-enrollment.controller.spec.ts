@@ -249,7 +249,10 @@ describe('ProviderEnrollmentController', () => {
 
   describe('availability', () => {
     it('reads the service with no Origin, cookie, Turnstile or gate call', async () => {
-      await expect(controller.availability()).resolves.toEqual({ open: true });
+      // P4c: the open answer carries crossFacilityOrders, false unless the service says true.
+      await expect(controller.availability()).resolves.toEqual({ open: true, crossFacilityOrders: false });
+      enrollments.availability.mockResolvedValue({ open: true, crossFacilityOrders: true });
+      await expect(controller.availability()).resolves.toEqual({ open: true, crossFacilityOrders: true });
       enrollments.availability.mockResolvedValue({ open: false, reason: 'closed' });
       await expect(controller.availability()).resolves.toEqual({ open: false, reason: 'closed' });
       enrollments.availability.mockResolvedValue({ open: false, reason: 'unavailable' });
