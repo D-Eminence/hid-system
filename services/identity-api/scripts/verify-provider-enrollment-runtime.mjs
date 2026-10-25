@@ -1580,7 +1580,12 @@ try {
   const capped = await start(enrollment({ cacRegistrationNumber: 'RC9900063702',
     administratorEmail: email('cap-201') }), '198.51.100.41');
   expectProblem(capped, 429, 'VERIFICATION_QUOTA_EXCEEDED');
-  assert.doesNotMatch(JSON.stringify(capped.body), /platform|day|cap|200/i, 'The cap refusal exposed its limit');
+  // The request's own identifiers (instance, correlationId) are random UUIDs, which contain "200" about once in 200
+  // runs; they say nothing of the limit, so the rest of the problem is what is searched.
+  const cappedProblem = Object.fromEntries(Object.entries(capped.body)
+    .filter(([key]) => key !== 'instance' && key !== 'correlationId'));
+  assert.ok(Object.keys(cappedProblem).length >= 3, 'The cap refusal has no problem fields left to check');
+  assert.doesNotMatch(JSON.stringify(cappedProblem), /platform|day|cap|200/i, 'The cap refusal exposed its limit');
   assert.equal(qoreidCacLookups.length, lookupsBeforeCap, 'A capped lookup reached QoreID');
   assert.deepEqual(await networkCounters('198.51.100.41'), {}, 'A capped lookup was charged to its network');
   assert.equal(await count(`select sum(attempt_count)::int n from platform.self_service_cac_platform_quota_counters
