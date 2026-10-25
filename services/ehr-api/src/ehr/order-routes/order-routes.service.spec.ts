@@ -342,6 +342,22 @@ describe('OrderRoutesService patient routes (C5, C6)', () => {
     expect(audits).toEqual([expect.objectContaining({ actorType: 'patient', patientId, action: 'ehr.order-route.patient-list',
       purposeOfUse: 'patient-self', details: { resultCount: 1 } })]);
     expect(audits[0]).not.toHaveProperty('facilityId');
+    expect(answer.items[0]?.enteredInError).toBe(false);
+  });
+
+  it('answers an entered-in-error route as C5 gives it: the record, no content, no attestation, no actions', async () => {
+    const { service, identity } = harness({ 'ehr.patient_list_order_routes': [{ route_id: routeId, reference: '123E4567',
+      kind: 'lab_request', row_version: 2, effective_state: 'withdrawn', ended_kind: 'entered_in_error',
+      receiving_facility_id: receivingFacilityId, receiving_facility_name: 'Receiving Laboratory',
+      ordering_facility_name: 'Ordering Hospital', created_at: '2026-10-25T09:00:00Z', respond_by: '2026-11-01T09:00:00Z',
+      content: { reference: '123E4567' }, attestation_text_version: 'order-route-lab-attestation-v1', attestation_text: null,
+      attested_by_name: null, actions: [], entered_in_error: true }] });
+    identity.authorizeSelf.mockResolvedValue(authorization);
+    const answer = await service.patientList(patientRequest());
+    const [item] = answer.items;
+    expect(item).toMatchObject({ id: routeId, effectiveState: 'withdrawn', endedKind: 'entered_in_error', enteredInError: true,
+      attestationText: null, attestedByName: null, actions: [], receivingFacilityName: 'Receiving Laboratory' });
+    expect(Object.values(item!.content).every((value) => value === null)).toBe(true);
   });
 
   it('shows what crossed about the orderer and reads dates as stored, whatever the time zone', async () => {

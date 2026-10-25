@@ -89,6 +89,13 @@ export interface PatientOrderRoute extends OrderRouteSummary {
   attestationText: string | null;
   attestedByName: string | null;
   actions: 'withdraw'[];
+  /**
+   * The order was marked entered in error (it may have been written in
+   * another patient's chart): C5 then answers the route as the record of what
+   * went where, with no content beyond its reference, no attestation text and
+   * no attesting clinician.
+   */
+  enteredInError: boolean;
 }
 
 type Source = Readonly<Record<string, unknown>>;
@@ -369,6 +376,7 @@ export function patientOrderRoute(source: Source): PatientOrderRoute {
     // Stop is offered only while the route waits for acceptance; the database
     // decides (C5) and refuses a late Stop (C6), this only never widens it.
     actions: summary.effectiveState === 'sent' ? patientActions(field(source, 'actions')) : [],
+    enteredInError: flag(field(source, 'enteredInError', 'entered_in_error')) === true,
   };
 }
 
