@@ -872,7 +872,9 @@ set local role hid_ehr_api_runtime;
 select pg_temp.as_staff(18, 'e4c21000-0000-4000-8000-000000000001');
 select pg_temp.assert('DR has no consent', not ehr.context_allows('e4c30000-0000-4000-8000-000000000001',
   'e4c21000-0000-4000-8000-000000000001', 'read_records'));
-select pg_temp.assert('C2 without consent', (select withdrawn.state = 'withdrawn' and withdrawn.row_version = 2
+select pg_temp.assert('C2 without consent, answering the route''s patient',
+  (select withdrawn.state = 'withdrawn' and withdrawn.row_version = 2
+      and withdrawn.patient_id = 'e4c30000-0000-4000-8000-000000000001'
   from ehr.withdraw_order_route(current_setting('hid.test.lroute_10')::uuid, 'lab_request',
     current_setting('hid.test.lr_10')::uuid, 1, 'sent_in_error') withdrawn));
 reset role;

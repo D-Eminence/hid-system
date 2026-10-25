@@ -959,7 +959,10 @@ recorded by their builds.
   a day, 500 open per destination); the order is snapshotted with the
   orderer's licence from a facility attestation whose doctor grant is still
   in force. The receiving facility gets a `system` row without the patient,
-  the patient the inbox item `ORDER_ROUTE_SENT`.
+  the patient the inbox item `ORDER_ROUTE_SENT`. The orderer's withdrawal
+  (`ehr.withdraw_order_route`) needs no consent grant and answers the
+  route's patient, which the EHR checks against the path before its audit
+  row names a patient (a mismatch answers 404 and rolls the withdrawal back).
 - Eligibility (`identity.order_route_destination_eligible`, checked in the
   directory, at send and at acceptance after locking the receiving
   organization's application): an active, verified facility of an active
@@ -1043,7 +1046,7 @@ recorded by their builds.
   once with NOWAIT, retrying every 100 ms, and stops the release with
   nothing applied after 50 attempts (55P03, "the clinical order tables
   stayed busy for 5 seconds; run the release again at a quieter time").
-  Measured on PostgreSQL 16 (build report, `p4c/build/db.md`): about 40 ms
+  Measured on PostgreSQL 16 (the schema declaration's evidence): about 40 ms
   from 6.7 to commit on an empty database and about 200 ms with 50,000 work
   items in each list; under 20 to 300 transactions a second on the nine
   tables the release applied in 0.5 to 1.0 s with no failed transaction;
@@ -1068,6 +1071,71 @@ recorded by their builds.
   `patient-notification-inbox-runtime`; `provider-self-service-control` and
   `provider-self-service-rollback` changed for the ten keys and the previous
   EHR, Lab and Pharmacy SQL.
+
+The services' part of P4c (all new; routes under `/api/v1`, errors
+`application/problem+json` keyed on `code`, every id a v4 UUID):
+
+- ehr-api: `POST`/`GET patients/:patientId/encounters/:encounterId/lab-requests/:requestId/order-routes`
+  and `POST …/order-routes/:routeId/withdraw`, the same three under
+  `prescriptions/:prescriptionId`, `GET order-route-attestation?kind=`,
+  `GET me/order-routes` and `POST me/order-routes/:routeId/withdraw` (the
+  patient's Stop, the only patient write). Send and an order's routes run in
+  the clinical repository (Identity's write or read consent, the staff audit
+  row with the patient; the send's row carries the attestation version and
+  `patientAgreement`); withdraw and the attestation text are plain staff
+  transactions with their own rows; the patient's routes are patient-self
+  transactions. Every staff order-route route answers 403 `PERMISSION_DENIED`
+  unless the purpose is `direct-care`. The lab-request and prescription lists
+  and reads gain `orderRoute` (C4, only under `direct-care`) and
+  `crossFacilityOrders` (a pool read after the transaction, false on any
+  error); the lab request's row lock is `for no key update`; an update of a
+  routed request never hands it to this facility's Lab (`labHandoff
+  {state:'not_sent', code:'ORDER_ROUTED'}`); `sendToLab` and the
+  pharmacist's hand-off answer 409 `LAB_REQUEST_ROUTED` /
+  `PRESCRIPTION_ROUTED`. An order counts as routed while its latest route is
+  live or was ever accepted (one work item per order, ever).
+- lab-api and pharmacy-api: `GET order-routes?view=incoming|recent[&healthId=]`
+  (default `incoming`), `GET order-routes/:routeId`, `POST …/accept`
+  (`Idempotency-Key`; the Health ID upper-cased and trimmed, or a calendar
+  date; pharmacy adds a reason of 8-500) and `POST …/decline`, for
+  `lab.order-route.receive` / `pharmacy.order-route.receive`, READ COMMITTED.
+  A mismatch, the lock and `order_in_work` commit with their audit row and
+  are answered after the commit (409, with `attemptsLeft` as a problem
+  member). Every per-item route asks the database about the resource it acts
+  on (`lab.order_route_access_for` / `pharmacy.order_route_access_for`):
+  `allowed` goes on with `basis: 'order-route'` in its audit row, `closed` is
+  409 `ORDER_ROUTE_CLOSED`, `paused` 423 `CROSS_FACILITY_ORDERS_UNAVAILABLE`,
+  `none` asks Identity as before. Route-backed work rows carry the route card
+  and, while the route allows a read, the patient's name, sex, date of birth
+  and Health ID's last 4, and never the other facility's order, prescription
+  or encounter id. A Lab release refused by the return trigger is 409
+  `ORDER_ROUTE_CLOSED`; a refused dispensing on a route-backed item is 409
+  `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE`.
+- identity-api: `GET identity/order-destinations?kind=laboratory|pharmacy&query=`
+  (`ehr.order-route.send`, run under `direct-care`; 60 searches per
+  membership an hour in an `account` bucket keyed by an HMAC of the
+  membership with the OTP key, counted in its own transaction before the
+  search; the audit row names the kind and the count, never the query);
+  support's `GET admin/facilities/:facilityId/order-route-summary`,
+  `POST admin/facilities/:facilityId/order-destination`,
+  `GET admin/order-routes?reference=|healthId=` and
+  `POST admin/order-routes/:routeId/close` (`If-Match`), `@FacilityOptional`,
+  reads audited on success and failure, writes on failure only (their
+  platform rows come from the commands); `POST admin/controls` accepts the
+  two new keys; the sign-up availability's open answer gains
+  `crossFacilityOrders`, read on its own so an unknown key never closes
+  sign-up. The patient inbox routes need no code change.
+- Choices recorded from the services' build (services report D1-D19):
+  validation of the directory, the lookup, the identifiers and the
+  attestation kind answers the spec's own codes rather than
+  `VALIDATION_FAILED`; a send replay answers the receiver's availability as
+  unknown (null); the withdraw answer carries only what the withdrawal
+  returns; the patient's content includes what crossed about the orderer;
+  `date` values are read by their calendar fields so no process time zone
+  moves them; a unique violation or deadlock on a send answers 503
+  `ORDER_ROUTE_UNAVAILABLE` (a retry answers the real state); support's
+  lookup by Health ID puts it in the query string, as the route contract
+  says, so gateway access logs may keep it (flagged for the owner).
 
 ## Not ported, and why
 

@@ -7566,14 +7566,17 @@ end;
 $$;
 
 -- C2. The orderer withdraws a sent route: any member at A holding
--- ehr.order-route.send, no consent needed (it discloses nothing, P7.1).
+-- ehr.order-route.send, no consent needed (it discloses nothing, P7.1). It
+-- answers the route's patient too: the EHR reads nothing under consent here,
+-- so it checks the path's patient against this one before its audit row
+-- names a patient (a mismatch rolls the withdrawal back).
 create function ehr.withdraw_order_route(
   requested_route_id uuid,
   requested_kind text,
   requested_order_id uuid,
   expected_version bigint,
   requested_reason text
-) returns table (row_version bigint, state text, ended_at timestamptz)
+) returns table (row_version bigint, state text, ended_at timestamptz, patient_id uuid)
 language plpgsql security definer
 set search_path = pg_catalog, ehr, identity, auth, notification, platform, pg_temp
 as $$
@@ -7609,7 +7612,7 @@ begin
   written := ehr.write_order_route_change(current_route, changed, 'withdrawn', 'ordering', requested_reason);
   perform ehr.order_route_system_audit(written, 'receiving', 'ehr.order-route.withdrawn', false, null);
   perform ehr.order_route_notify_patient(written, 'ORDER_ROUTE_WITHDRAWN');
-  return query select written.row_version, written.state, written.ended_at;
+  return query select written.row_version, written.state, written.ended_at, written.patient_id;
 end;
 $$;
 
