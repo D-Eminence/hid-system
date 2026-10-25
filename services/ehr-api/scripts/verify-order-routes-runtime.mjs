@@ -420,8 +420,38 @@ try {
     assert.equal(approved.status, 'approved');
     return requestId;
   };
+  // The approval's guards, as main's (REC-NOTIFY): refused for 24 hours after an OTP account recovery,
+  // and from a session family first issued more than 10 minutes ago. Owner SQL seeds a consumed
+  // recovery challenge, then ages the patient's session families; the request stays pending each time.
+  const guarded = expectStatus(await call(identity, doctor, 'POST', '/identity/access-requests',
+    { hid: patient.hid, scope: 'read_records', reason: 'Synthetic consultation for the approval guards', durationMinutes: 60 }),
+  201, 'access request for the guards').accessRequestId;
+  const recovery = randomUUID();
+  await owner.query(`insert into auth.otp_challenges (id, account_id, recipient_hmac, purpose, channel, verifier_hmac,
+      verifier_key_version, expires_at, max_attempts, created_at, verified_at, completion_token_hmac, completion_expires_at,
+      consumed_at)
+    values ($1, $2, repeat('a', 64), 'PASSWORD_RESET', 'email', repeat('b', 64), 'verifier-v1',
+      clock_timestamp() + interval '5 minutes', 5, clock_timestamp() - interval '6 minutes', clock_timestamp() - interval '5 minutes',
+      repeat('c', 64), clock_timestamp() + interval '5 minutes', clock_timestamp() - interval '5 minutes')`, [recovery, patientAccount]);
+  const held = expectProblem(await patientCall(identity, 'POST', `/identity/access-requests/${guarded}/approve`), 403,
+    'PATIENT_RECENT_RECOVERY_HOLD');
+  await owner.query('delete from auth.otp_challenges where id = $1', [recovery]);
+  await owner.query(`update auth.sessions set issued_at = issued_at - interval '11 minutes'
+    where account_id = $1 and revoked_at is null`, [patientAccount]);
+  const stale = expectProblem(await patientCall(identity, 'POST', `/identity/access-requests/${guarded}/approve`), 403,
+    'PATIENT_RECENT_AUTH_REQUIRED');
+  assert.equal(stale.detail ?? stale.message ?? stale.title, 'For your security, sign out, sign in again, and approve within 10 minutes.',
+    JSON.stringify(stale));
+  await owner.query(`update auth.sessions set issued_at = issued_at + interval '11 minutes'
+    where account_id = $1 and revoked_at is null`, [patientAccount]);
+  assert.equal((await one('select status from identity.access_requests where id = $1', [guarded])).status, 'pending');
+  const deniedGuarded = expectStatus(await patientCall(identity, 'POST', `/identity/access-requests/${guarded}/deny`,
+    { reason: 'Not needed for the verifier' }), 200, 'deny is not held');
+  assert.equal(deniedGuarded.status, 'denied');
+  evidence.approvalGuards = { afterRecovery: { status: 403, code: held.code }, staleSession: { status: 403, code: stale.code },
+    requestStayedPending: true, denyUnguarded: 200 };
   await approvedAccess(doctor, 'write_records');
-  step('the patient approved the doctor\'s write access in the app');
+  step('the patient approved the doctor\'s write access in the app, after the recovery hold and fresh sign-in checks');
 
   // ── The doctor's records at the hospital ──
   const ehrCall = (who, method, path, body, extra) => call(ehr, who, method, `/ehr/patients/${patient.id}${path}`, body, extra);
@@ -648,14 +678,30 @@ try {
   const accept = (who, base, routeId, version, identifier, extra = {}) => call(base, who, 'POST',
     `/${base === lab ? 'lab' : 'pharmacy'}/order-routes/${routeId}/accept`,
     { expectedVersion: version, patientIdentifier: identifier, ...(extra.body ?? {}) }, { key: extra.key ?? freshKey('accept') });
-  const mismatch = expectProblem(await accept(labAdmin, lab, route1.id, 1, { kind: 'date_of_birth', value: '1990-01-01' }),
+  // A date of birth alone names no order (the counter may have picked another patient's row): it keeps the
+  // order's 5 tries. With the order's reference it names this order and counts; another order's reference is
+  // refused and counts nothing.
+  const unnamed = expectProblem(await accept(labAdmin, lab, route1.id, 1, { kind: 'date_of_birth', value: '1990-01-01' }),
     409, 'ORDER_ROUTE_PATIENT_MISMATCH');
+  assert.equal(unnamed.attemptsLeft, 5);
+  expectProblem(await accept(labAdmin, lab, route1.id, 1, { kind: 'date_of_birth', value: '1990-01-01' },
+    { body: { reference: 'FFFFFFFF' === route1.reference ? 'EEEEEEEE' : 'FFFFFFFF' } }), 409, 'ORDER_ROUTE_REFERENCE_MISMATCH');
+  const mismatch = expectProblem(await accept(labAdmin, lab, route1.id, 1, { kind: 'date_of_birth', value: '1990-01-01' },
+    { body: { reference: route1.reference.toLowerCase() } }), 409, 'ORDER_ROUTE_PATIENT_MISMATCH');
   assert.equal(mismatch.attemptsLeft, 4);
-  const byHealthId = expectStatus(await call(lab, labAdmin, 'GET', `/lab/order-routes?view=incoming&healthId=${patient.hid.toLowerCase()}`),
-    200, 'by Health ID');
+  assert.deepEqual(await all(`select outcome, identifies_route from ehr.order_route_accept_attempts where route_id = $1
+    order by attempted_at`, [route1.id]), [{ outcome: 'mismatch', identifies_route: false },
+    { outcome: 'mismatch', identifies_route: true }]);
+  // Find by Health ID with the Health ID in the body (CODEX §26); the GET's healthId still answers (deprecated).
+  const byHealthId = expectStatus(await call(lab, labAdmin, 'POST', '/lab/order-routes/search',
+    { view: 'incoming', healthId: patient.hid.toLowerCase() }), 200, 'by Health ID');
   assert.deepEqual(byHealthId.items.map(item => [item.id, item.attemptsLeft]), [[route1.id, 4]]);
-  assert.deepEqual(expectStatus(await call(lab, labAdmin, 'GET', `/lab/order-routes?view=incoming&healthId=${healthIdOf()}`), 200,
-    'other Health ID').items, []);
+  assert.deepEqual(expectStatus(await call(lab, labAdmin, 'POST', '/lab/order-routes/search',
+    { view: 'incoming', healthId: healthIdOf() }), 200, 'other Health ID').items, []);
+  expectProblem(await call(lab, labAdmin, 'POST', '/lab/order-routes/search', { view: 'incoming' }), 400, 'VALIDATION_FAILED');
+  assert.deepEqual(expectStatus(await call(lab, labAdmin, 'GET',
+    `/lab/order-routes?view=incoming&healthId=${patient.hid.toLowerCase()}`), 200, 'deprecated GET').items.map(item => item.id),
+  [route1.id]);
   expectProblem(await accept(labAdmin, lab, route1.id, 1, { kind: 'date_of_birth', value: '1987-02-30' }), 400,
     'ORDER_ROUTE_INVALID');
   const acceptKey = freshKey('accept-lr1');
@@ -678,9 +724,11 @@ try {
     and resource_id=$1`, [route1.id]), [{ facility_id: hospital.facilityId, patient_id: patient.id }]);
   assert.deepEqual(await all(`select outcome, patient_id from audit.events where action='lab.order-route.accept'
     and resource_id=$1 order by occurred_at, sequence_id`, [route1.id]),
-  [{ outcome: 'denied', patient_id: null }, { outcome: 'success', patient_id: patient.id },
-    { outcome: 'success', patient_id: patient.id }]);
-  evidence.receive = { wrongDateOfBirth: { status: 409, attemptsLeft: 4 }, findByHealthId: true,
+  [{ outcome: 'denied', patient_id: null }, { outcome: 'denied', patient_id: null },
+    { outcome: 'success', patient_id: patient.id }, { outcome: 'success', patient_id: patient.id }]);
+  evidence.receive = { wrongDateOfBirthAlone: { status: 409, attemptsLeft: 5 },
+    wrongDateOfBirthWithReference: { status: 409, attemptsLeft: 4 }, otherReference: 'ORDER_ROUTE_REFERENCE_MISMATCH',
+    findByHealthId: 'POST search (body); deprecated GET still answers',
     invalidDate: 400, accepted: { status: 201, patient: 'name, sex, date of birth, Health ID last 4',
       clinicalInformation: 'after acceptance', licenceNumber: 'after acceptance' }, replay: 'same work item',
     acceptedAgain: 'ORDER_ROUTE_NOT_PENDING', audit: { mismatch: 'denied, no patient', accepted: 'with the patient' } };
@@ -728,6 +776,14 @@ try {
   assert.deepEqual(routedItem.patient, { fullName: patient.fullName, sex: patient.sex, dateOfBirth: patient.dob,
     healthIdLast4: patient.hid.slice(-4) });
   assertNone(routedItem, [patient.hid, lr1.id, encounter.id], 'routed work row');
+  // The list showed the patient's identity, so it names the patient in the audit (ids only, basis order-route).
+  const listRows = await all(`select patient_id, actor_account_id, resource_type, details from audit.events
+    where action = 'lab.work-item.list' and facility_id = $1 and actor_account_id = $2`,
+  [laboratory.facilityId, labMember.accountId]);
+  assert.deepEqual(listRows.map(row => [row.patient_id, row.resource_type, row.details.basis, row.details.orderRouteIds]),
+    [[patient.id, 'lab-work-item', 'order-route', [route1.id]]], JSON.stringify(listRows));
+  assertNone(listRows, [patient.fullName, patient.dob, patient.hid], 'work-list audit');
+  evidence.workListAudit = { rowsNamingThePatient: listRows.length, basis: 'order-route', idsOnly: true };
   expectStatus(await labCall(labMember, 'GET', `/work-items/${accepted.workItemId}`), 200, 'routed item');
   const accession = expectStatus(await labCall(labMember, 'POST', `/work-items/${accepted.workItemId}/accession`,
     { requirements: [{ specimenType: 'blood' }], reason: 'Synthetic accession of an order from another facility' },
@@ -751,7 +807,10 @@ try {
     reason: 'Verified by a second laboratory member' }, { key: freshKey('verify') }), 201, 'verify');
   expectStatus(await labCall(labAdmin, 'POST', `/results/${resultId}/release`, { expectedResultVersion: 1, occurredAt: now(),
     reason: 'Released to the ordering facility' }, { key: freshKey('release') }), 201, 'release');
-  const basisRows = await all(`select action, details->>'basis' as basis, details->>'orderRouteId' as route_id
+  // Each row's route: orderRouteId on a command's row, orderRouteIds on the work list's row naming the patient.
+  const basisRows = await all(`select action, details->>'basis' as basis,
+      coalesce(details->>'orderRouteId', case when jsonb_array_length(details->'orderRouteIds') = 1
+        then details->'orderRouteIds'->>0 end) as route_id
     from audit.events where actor_account_id=$1 and facility_id=$2 and action like 'lab.%' and action not like 'lab.order-route.%'
     order by sequence_id`, [labMember.accountId, laboratory.facilityId]);
   assert(basisRows.length >= 5 && basisRows.every(row => row.basis === 'order-route' && row.route_id === route1.id),
@@ -980,12 +1039,13 @@ try {
   assert.deepEqual([myExpired.effectiveState, myExpired.actions], ['expired', []]);
   const expiredView = expectStatus(await ehrCall(doctor, 'GET', routesPath('lab_request', lr5.id)), 200, 'expired').items[0];
   assert.deepEqual([expiredView.effectiveState, expiredView.resendAllowed], ['expired', true]);
-  // Five wrong tries lock that order there.
+  // Five wrong tries that name the order (a date of birth with its reference) lock that order there.
   const lr6 = await newLabRequest();
   const route6 = expectStatus(await send(doctor, 'lab_request', lr6, laboratory.facilityId, labVersion), 201, 'send lr6').route;
   const countdown = [];
   for (let attempt = 1; attempt <= 5; attempt += 1) {
-    const wrong = await accept(labAdmin, lab, route6.id, 1, { kind: 'date_of_birth', value: `1991-01-0${attempt}` });
+    const wrong = await accept(labAdmin, lab, route6.id, 1, { kind: 'date_of_birth', value: `1991-01-0${attempt}` },
+      { body: { reference: route6.reference } });
     assert.equal(wrong.status, 409);
     countdown.push(`${wrong.body.code}:${wrong.body.attemptsLeft}`);
   }
@@ -997,6 +1057,52 @@ try {
   assert.deepEqual([lockedView.effectiveState, lockedView.acceptLocked], ['sent', true]);
   assert.deepEqual(await all(`select facility_id, patient_id from audit.events where action='ehr.order-route.accept-locked'
     and resource_id=$1`, [route6.id]), [{ facility_id: hospital.facilityId, patient_id: patient.id }]);
+  // The patient's deny directive is checked again at acceptance (SPEC-FINAL P15.1): one naming the laboratory,
+  // written after the send (owner SQL; no route writes directives), refuses the acceptance and writes nothing;
+  // a superseding inactive version ends it (directives are append-only).
+  const lrDeny = await newLabRequest();
+  const routeDeny = expectStatus(await send(doctor, 'lab_request', lrDeny, laboratory.facilityId, labVersion), 201, 'send lrDeny').route;
+  const directive = randomUUID();
+  // One statement each (the directive's current-version key is checked at the statement's end).
+  await owner.query(`with directive as (insert into identity.consent_directives (id, patient_id, current_version)
+      values ($2, $3, 1) returning id)
+    insert into identity.consent_directive_versions (id, directive_id, patient_id, version_no, status,
+      provision_type, grantee_type, grantee_id, starts_at, source_reference, reason, content_sha256)
+    select $1, directive.id, $3, 1, 'active', 'deny', 'facility', $4, clock_timestamp() - interval '1 minute',
+      'order-route-verifier', 'The patient asked not to use this laboratory', repeat('5', 64) from directive`,
+  [randomUUID(), directive, patient.id, laboratory.facilityId]);
+  expectProblem(await accept(labAdmin, lab, routeDeny.id, 1, { kind: 'health_id', value: patient.hid }), 409,
+    'ORDER_ROUTE_PATIENT_DENIED');
+  assert.deepEqual(await one(`select route.state, route.row_version::int as version,
+      (select count(*)::int from ehr.order_route_accept_attempts attempt where attempt.route_id = route.id) as attempts
+    from ehr.order_routes route where route.id = $1`, [routeDeny.id]), { state: 'sent', version: 1, attempts: 0 });
+  await owner.query(`with superseding as (insert into identity.consent_directive_versions (id, directive_id, patient_id,
+      version_no, status, provision_type, grantee_type, grantee_id, starts_at, source_reference, reason, content_sha256,
+      supersedes_version)
+    values ($1, $2, $3, 2, 'inactive', 'deny', 'facility', $4, clock_timestamp() - interval '1 minute', 'order-route-verifier',
+      'The patient lifted the refusal', repeat('6', 64), 1) returning directive_id)
+    update identity.consent_directives set current_version = 2 where id = (select directive_id from superseding)`,
+  [randomUUID(), directive, patient.id, laboratory.facilityId]);
+  expectStatus(await ehrCall(doctor, 'POST', `${routesPath('lab_request', lrDeny.id)}/${routeDeny.id}/withdraw`,
+    { expectedVersion: 1, reason: 'sent_in_error' }), 200, 'withdraw the refused route');
+  // An order marked entered in error (it may be another patient's): the patient keeps the route as the record of
+  // what went where, without its content, the attestation text or the attesting clinician.
+  const lrError = await newLabRequest();
+  const routeError = expectStatus(await send(doctor, 'lab_request', lrError, laboratory.facilityId, labVersion), 201,
+    'send lrError').route;
+  const lrErrorNow = await one('select row_version::int as version from ehr.lab_requests where id = $1', [lrError.id]);
+  expectStatus(await ehrCall(doctor, 'PATCH', `${enc}/lab-requests/${lrError.id}`, { expectedRowVersion: lrErrorNow.version,
+    changeReason: 'Written in the wrong patient\'s chart', status: 'entered_in_error' }), 200, 'entered in error');
+  const myError = expectStatus(await patientCall(ehr, 'GET', '/ehr/me/order-routes'), 200, 'my routes').items
+    .find(item => item.id === routeError.id);
+  assert.deepEqual([myError.effectiveState, myError.endedKind, myError.enteredInError, myError.attestationText,
+    myError.attestedByName, myError.actions], ['withdrawn', 'entered_in_error', true, null, null, []], JSON.stringify(myError));
+  assert(Object.values(myError.content).every(value => value === null), JSON.stringify(myError.content));
+  assertNone(myError, [clinicalNote, hospital.administratorName, 'MDCN/70011'], 'entered-in-error route');
+  assert(expectStatus(await patientCall(ehr, 'GET', '/ehr/me/order-routes'), 200, 'my routes').items
+    .filter(item => item.id !== routeError.id).every(item => item.enteredInError === false), 'only that route is redacted');
+  evidence.directiveAtAcceptance = { refused: 'ORDER_ROUTE_PATIENT_DENIED', written: 'nothing' };
+  evidence.enteredInError = { patientSees: 'reference, state and facilities only', enteredInError: true };
   const codes = expectStatus(await patientCall(identity, 'GET', '/identity/me/notifications?limit=100'), 200, 'inbox')
     .map(item => item.notificationCode);
   for (const code of ['ORDER_ROUTE_SENT', 'ORDER_ROUTE_ACCEPTED', 'ORDER_ROUTE_DECLINED', 'ORDER_ROUTE_WITHDRAWN',
@@ -1009,7 +1115,7 @@ try {
     expiry: { incoming: 'gone', accept: 'ORDER_ROUTE_EXPIRED', patient: 'expired, no Stop', resendAllowed: true },
     lock: { countdown, afterLock: 'ORDER_ROUTE_ACCEPT_LOCKED', orderingView: 'acceptLocked', auditAtA: true },
     inbox: ['SENT', 'ACCEPTED', 'DECLINED', 'WITHDRAWN', 'ACCEPT_LOCKED', 'CANCELLED'] };
-  step('decline, withdraw without consent, the patient\'s Stop, expiry and the five-try lock');
+  step('decline, withdraw without consent, the patient\'s Stop, expiry, the five-try lock, a directive at acceptance and an order entered in error');
 
   // ── 9b. Windows close access ──
   await age(`update ehr.order_routes set writes_end_at = clock_timestamp() - interval '1 minute',
@@ -1170,9 +1276,14 @@ try {
   assert.deepEqual(byReference.map(item => [item.routeId, item.effectiveState, item.receivingFacilityName]),
     [[rxRoute3.id, 'sent', pharmacyFacility.name]]);
   assertNone(byReference, [...identityValues, ...clinicalOnly, medicine.medicationDisplay], 'support\'s lookup');
-  const byHealthIdSupport = expectStatus(await adminCall('GET', `/admin/order-routes?healthId=${patient.hid}`), 200, 'find by HID')
-    .items;
+  // The Health ID in the body (CODEX §26); the GET's healthId still answers (deprecated) until the console moves.
+  const byHealthIdSupport = expectStatus(await adminCall('POST', '/admin/order-routes/search', { healthId: patient.hid }), 200,
+    'find by HID').items;
   assert(byHealthIdSupport.some(item => item.routeId === rxRoute3.id) && byHealthIdSupport.length <= 20);
+  assert.deepEqual(expectStatus(await adminCall('GET', `/admin/order-routes?healthId=${patient.hid}`), 200, 'deprecated GET')
+    .items.map(item => item.routeId), byHealthIdSupport.map(item => item.routeId));
+  expectProblem(await adminCall('POST', '/admin/order-routes/search', { reference: rxRoute3.reference, healthId: patient.hid }),
+    400, 'ORDER_ROUTE_LOOKUP_INVALID');
   expectProblem(await adminCall('GET', '/admin/order-routes'), 400, 'ORDER_ROUTE_LOOKUP_INVALID');
   expectProblem(await adminCall('GET', `/admin/order-routes?reference=${rxRoute3.reference}&healthId=${patient.hid}`), 400,
     'ORDER_ROUTE_LOOKUP_INVALID');
