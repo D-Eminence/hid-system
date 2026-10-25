@@ -7,6 +7,7 @@ import { ClinicalNotesModule } from './clinical-notes/clinical-notes.module';
 import { DiagnosesModule } from './diagnoses/diagnoses.module';
 import { EncountersModule } from './encounters/encounters.module';
 import { LabRequestsModule } from './lab-requests/lab-requests.module';
+import { OrderRoutesModule } from './order-routes/order-routes.module';
 import { PrescriptionsModule } from './prescriptions/prescriptions.module';
 import { VitalsModule } from './vitals/vitals.module';
 import { OcrIntegrationModule } from './ocr-integration/ocr-integration.module';
@@ -33,6 +34,7 @@ import { PatientAttachmentTextService } from './patient-records/patient-attachme
     DiagnosesModule,
     PrescriptionsModule,
     LabRequestsModule,
+    OrderRoutesModule,
   ],
   controllers: [PatientRecordsController,StaffPatientChatController],
   providers: [StaffChatScopeService,StaffEvidenceService,StaffChatHistoryService,PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService],

@@ -7,6 +7,8 @@ import { AcceptPrescriptionForPharmacyDto, CreatePrescriptionDto, OrderStatus,
   TimelineQueryDto, UpdatePrescriptionDto } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { PharmacyApiService } from '../../integrations/pharmacy-api.service';
+import { OrderRouteReader } from '../order-routes/order-route-reader';
+import { routeInForce, withOrderRoute } from '../order-routes/order-route.mapping';
 
 export interface PrescriptionRow extends QueryResultRow {
   id: string;
@@ -53,12 +55,18 @@ export class PrescriptionsService {
   constructor(
     private readonly repository: ClinicalRepository,
     private readonly pharmacyApi: PharmacyApiService,
+    private readonly orderRoutes: OrderRouteReader,
   ) {}
 
-  list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
+  /**
+   * One page of the encounter's prescriptions, each with its latest route to
+   * another facility (`orderRoute`), and whether orders between facilities
+   * are on (`crossFacilityOrders`, a pool read after the transaction).
+   */
+  async list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
     const scope = { list: 'ehr.prescriptions', patientId, encounterId };
     const cursor = decodeTimelineCursor(query.cursor, scope);
-    return this.repository.run(
+    const page = await this.repository.run(
       context, patientId, 'read_records',
       { action: 'ehr.prescription.list', resourceType: 'prescription', resourceId: encounterId },
       async (client) => {
@@ -70,17 +78,25 @@ export class PrescriptionsService {
           [encounterId, patientId, context.facilityId, cursor?.sortAt ?? null, cursor?.id ?? null, query.limit + 1],
         );
         const page = timelinePage(result.rows, query.limit, scope);
-        return { value: page, details: { resultCount: page.items.length } };
+        const routes = await this.orderRoutes.summaries(client, context, 'prescription', patientId,
+          page.items.map((item) => item.id));
+        return { value: { ...page, items: page.items.map((item) => withOrderRoute(item, routes)) },
+          details: { resultCount: page.items.length } };
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
+    return { ...page, crossFacilityOrders: await this.orderRoutes.crossFacilityOrdersEnabled() };
   }
 
   get(context: DataAccessContext, patientId: string, encounterId: string, prescriptionId: string) {
     return this.repository.run(
       context, patientId, 'read_records',
       { action: 'ehr.prescription.read', resourceType: 'prescription', resourceId: prescriptionId },
-      async (client) => ({ value: this.single(await this.find(client, context, patientId, encounterId, prescriptionId)) }),
+      async (client) => {
+        const row = this.single(await this.find(client, context, patientId, encounterId, prescriptionId));
+        const routes = await this.orderRoutes.summaries(client, context, 'prescription', patientId, [row.id]);
+        return { value: withOrderRoute(row, routes) };
+      },
       (client) => this.repository.exists(client, 'prescriptions', prescriptionId, patientId, context.facilityId, encounterId),
     );
   }
@@ -192,6 +208,13 @@ export class PrescriptionsService {
             'PRESCRIPTION_NOT_ELIGIBLE',
             'Only an active prescription can enter Pharmacy work',
           );
+        }
+        // P4c (§7.5): a prescription with a route to another facility in
+        // force is not taken into this facility's Pharmacy; its validator
+        // refuses it too.
+        if (routeInForce(await this.orderRoutes.summary(client, context, 'prescription', patientId, prescriptionId))) {
+          throw new DomainProblem(409, 'PRESCRIPTION_ROUTED',
+            'This prescription has been sent to another pharmacy; withdraw it there first');
         }
         return {
           value: current,

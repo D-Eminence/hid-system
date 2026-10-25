@@ -12,6 +12,8 @@ import {
 } from '../shared/clinical.dto';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { LabApiService } from '../../integrations/lab-api.service';
+import { OrderRouteReader } from '../order-routes/order-route-reader';
+import { routeInForce, withOrderRoute } from '../order-routes/order-route.mapping';
 
 export interface LabRequestRow extends QueryResultRow {
   id: string;
@@ -63,7 +65,10 @@ export type LabHandoff =
   | { state: 'accepted' }
   | { state: 'already_accepted'; code: 'LAB_ORDER_ALREADY_ACCEPTED' }
   | { state: 'failed'; status: number; code: string }
-  | { state: 'not_sent'; code: 'LAB_PERMISSION_ABSENT' };
+  | { state: 'not_sent'; code: 'LAB_PERMISSION_ABSENT' }
+  // P4c (SPEC-FINAL §7.5, V8): the request had a route to another facility in
+  // force before this update, so it is never handed to this facility's Lab.
+  | { state: 'not_sent'; code: 'ORDER_ROUTED' };
 
 type HandoffOutcome = { handoff: LabHandoff; workItem: unknown };
 
@@ -94,12 +99,19 @@ export class LabRequestsService {
   constructor(
     private readonly repository: ClinicalRepository,
     private readonly labApi: LabApiService,
+    private readonly orderRoutes: OrderRouteReader,
   ) {}
 
-  list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
+  /**
+   * One page of the encounter's lab requests. Each item carries its latest
+   * route to another facility (`orderRoute`, null when none; left out when it
+   * cannot be read) and the page whether orders between facilities are on
+   * (`crossFacilityOrders`, a pool read after the clinical transaction).
+   */
+  async list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
     const scope = { list: 'ehr.lab-requests', patientId, encounterId };
     const cursor = decodeTimelineCursor(query.cursor, scope);
-    return this.repository.run(
+    const page = await this.repository.run(
       context, patientId, 'read_records',
       { action: 'ehr.lab-request.list', resourceType: 'lab-request', resourceId: encounterId },
       async (client) => {
@@ -111,17 +123,25 @@ export class LabRequestsService {
           [encounterId, patientId, context.facilityId, cursor?.sortAt ?? null, cursor?.id ?? null, query.limit + 1],
         );
         const page = timelinePage(result.rows, query.limit, scope);
-        return { value: page, details: { resultCount: page.items.length } };
+        const routes = await this.orderRoutes.summaries(client, context, 'lab_request', patientId,
+          page.items.map((item) => item.id));
+        const items = page.items.map((item) => withOrderRoute(item, routes));
+        return { value: { ...page, items }, details: { resultCount: page.items.length } };
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
+    return { ...page, crossFacilityOrders: await this.orderRoutes.crossFacilityOrdersEnabled() };
   }
 
   get(context: DataAccessContext, patientId: string, encounterId: string, requestId: string) {
     return this.repository.run(
       context, patientId, 'read_records',
       { action: 'ehr.lab-request.read', resourceType: 'lab-request', resourceId: requestId },
-      async (client) => ({ value: this.single(await this.find(client, context, patientId, encounterId, requestId)) }),
+      async (client) => {
+        const row = this.single(await this.find(client, context, patientId, encounterId, requestId));
+        const routes = await this.orderRoutes.summaries(client, context, 'lab_request', patientId, [row.id]);
+        return { value: withOrderRoute(row, routes) };
+      },
       (client) => this.repository.exists(client, 'lab_requests', requestId, patientId, context.facilityId, encounterId),
     );
   }
@@ -196,6 +216,12 @@ export class LabRequestsService {
         }
         if (current.status !== OrderStatus.Active) {
           throw new DomainProblem(409, 'LAB_REQUEST_NOT_ELIGIBLE', 'Only an active lab request can be sent to Lab');
+        }
+        // P4c (§7.5): a request with a route to another facility in force is
+        // not handed to this facility's Lab; Lab's validator refuses it too.
+        if (routeInForce(await this.orderRoutes.summary(client, context, 'lab_request', patientId, requestId))) {
+          throw new DomainProblem(409, 'LAB_REQUEST_ROUTED',
+            'This lab request has been sent to another laboratory; withdraw it there first');
         }
         return { value: current, resourceId: requestId, details: { labRequestVersion: Number(current.rowVersion) } };
       },
@@ -278,7 +304,7 @@ export class LabRequestsService {
     if (input.priority === undefined && input.status === undefined && input.clinicalInformation === undefined) {
       throw new DomainProblem(400, 'EMPTY_UPDATE', 'At least one clinical field must be supplied');
     }
-    const row = await this.repository.run(
+    const { row, routedBefore, orderRoute } = await this.repository.run(
       context, patientId, 'write_records',
       { action: 'ehr.lab-request.update', resourceType: 'lab-request', resourceId: requestId },
       async (client) => {
@@ -286,6 +312,9 @@ export class LabRequestsService {
         if (input.status && input.status !== current.status && !TRANSITIONS[current.status].includes(input.status)) {
           throw new DomainProblem(409, 'INVALID_LAB_REQUEST_TRANSITION', 'Lab request status transition is not allowed');
         }
+        // Read under the row lock, which C1 takes first, so no route can be
+        // sent between this read and the update (SPEC-FINAL §8.9).
+        const before = await this.orderRoutes.summary(client, context, 'lab_request', patientId, requestId);
         await this.repository.setChangeReason(client, input.changeReason);
         const result = await client.query<CreatedLabRequestRow>(
           `update ehr.lab_requests set
@@ -300,12 +329,22 @@ export class LabRequestsService {
         );
         const row = result.rows[0];
         if (!row) throw new DomainProblem(412, 'VERSION_CONFLICT', 'Lab request changed since it was loaded');
-        return { value: row, resourceId: requestId, details: { rowVersion: row.rowVersion } };
+        // The route as the order-change trigger left it (§7.2): withdrawn,
+        // cancelled or unchanged.
+        const after = before ? await this.orderRoutes.summary(client, context, 'lab_request', patientId, requestId)
+          : before;
+        return { value: { row, routedBefore: routeInForce(before), orderRoute: after },
+          resourceId: requestId, details: { rowVersion: row.rowVersion } };
       },
       (client) => this.repository.exists(client, 'lab_requests', requestId, patientId, context.facilityId, encounterId),
     );
-    const { createdAtExact: _exact, ...updated } = row;
+    const { createdAtExact: _exact, ...fields } = row;
+    const updated = orderRoute === undefined ? fields : { ...fields, orderRoute };
     if (row.status !== OrderStatus.Active) return { ...updated, labWorkItem: null, labHandoff: null };
+    if (routedBefore) {
+      const routed: LabHandoff = { state: 'not_sent', code: 'ORDER_ROUTED' };
+      return { ...updated, labWorkItem: null, labHandoff: routed };
+    }
     if (!context.actor.permissions.includes('lab.work-item.accept')) {
       const notSent: LabHandoff = { state: 'not_sent', code: 'LAB_PERMISSION_ABSENT' };
       return { ...updated, labWorkItem: null, labHandoff: notSent };
@@ -340,10 +379,16 @@ export class LabRequestsService {
     return result.rows[0];
   }
 
+  /**
+   * The request's row lock: FOR NO KEY UPDATE (P4c, FEAS K1). Lab's work-item
+   * insert at another facility takes FOR KEY SHARE on this row through its
+   * foreign key; FOR UPDATE would wait for it, and with the route lock taken
+   * in the other order the two would deadlock.
+   */
   private async lock(client: PoolClient, context: DataAccessContext, patientId: string, encounterId: string, id: string) {
     const result = await client.query<LabRequestRow>(
       `select ${COLUMNS} from ehr.lab_requests
-       where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4 for update`,
+       where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4 for no key update`,
       [id, encounterId, patientId, context.facilityId],
     );
     return this.single(result.rows[0]);

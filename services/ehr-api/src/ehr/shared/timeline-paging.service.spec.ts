@@ -19,6 +19,9 @@ const context = { correlationId: 'correlation-123456', facilityId } as DataAcces
 const microseconds = '2026-10-11T08:00:00.123456Z';
 const ids = ['a0000000-0000-4000-8000-000000000003', 'a0000000-0000-4000-8000-000000000002', 'a0000000-0000-4000-8000-000000000001'];
 
+// The order-route reader with no routes (P4c): the page is read as before.
+const noRoutes = { summaries: async () => new Map(), crossFacilityOrdersEnabled: async () => false };
+
 interface ListCase {
   label: string;
   list: string;
@@ -36,9 +39,9 @@ const cases: ListCase[] = [
   { label: 'diagnoses', list: 'ehr.diagnoses', column: 'created_at', field: 'createdAt', cursorParameter: 4,
     page: (r, q) => new DiagnosesService(r as never).list(context, patientId, encounterId, q) },
   { label: 'lab requests', list: 'ehr.lab-requests', column: 'created_at', field: 'createdAt', cursorParameter: 4,
-    page: (r, q) => new LabRequestsService(r as never, {} as never).list(context, patientId, encounterId, q) },
+    page: (r, q) => new LabRequestsService(r as never, {} as never, noRoutes as never).list(context, patientId, encounterId, q) },
   { label: 'prescriptions', list: 'ehr.prescriptions', column: 'created_at', field: 'createdAt', cursorParameter: 4,
-    page: (r, q) => new PrescriptionsService(r as never, {} as never).list(context, patientId, encounterId, q) },
+    page: (r, q) => new PrescriptionsService(r as never, {} as never, noRoutes as never).list(context, patientId, encounterId, q) },
   { label: 'vitals', list: 'ehr.vitals', column: 'recorded_at', field: 'recordedAt', cursorParameter: 4,
     page: (r, q) => new VitalsService(r as never).list(context, patientId, encounterId, q) },
 ];
