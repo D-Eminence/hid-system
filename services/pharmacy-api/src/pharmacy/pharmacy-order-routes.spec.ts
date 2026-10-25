@@ -281,6 +281,27 @@ describe('Pharmacy per-item routes authorize the resource they act on (P12)', ()
     await expect(ITEM_ROUTES[1]![4](h.service)).rejects.toMatchObject({ code: '23514' });
   });
 
+  it('answers the same-facility acceptance of a routed prescription 409 PRESCRIPTION_ROUTED, any other 23514 unchanged', async () => {
+    const accept = { patientId, orderingFacilityId: facilityId, sourceEhrPrescriptionId: prescriptionId,
+      sourceEhrPrescriptionVersion: 2, sourceEncounterId: encounterId, sourceStatus: 'active' as const,
+      medicationDisplay: 'Amoxicillin', frequency: 'tds', instructions: 'After food', prescribedBy: patientId,
+      prescribedAt: '2026-10-25T08:00:00.000Z', acceptanceReason: 'Accepted after review' };
+    for (const [message, expected] of [['PRESCRIPTION_ROUTED', { status: 409, code: 'PRESCRIPTION_ROUTED' }],
+      ['Pharmacy acceptance patient, facility, prescription status, or actor context is invalid', { code: '23514' }]] as const) {
+      const query = jest.fn(async (sql: string) => {
+        if (sql.includes('insert into pharmacy.work_items')) throw databaseError('23514', message);
+        return { rows: [] };
+      });
+      const database = { withTransaction: async <T>(_c: unknown, fn: (c: PoolClient) => Promise<T>) =>
+        fn({ query } as unknown as PoolClient) };
+      const identity = { authorize: jest.fn().mockResolvedValue({ allowed: true, breakGlass: false }) };
+      const service = new PharmacyService(database as never, identity as never, { recordWithClient: jest.fn() } as never,
+        new PharmacyOrderRouteAccess(identity as never), new PharmacyOrderRouteCards(database as never));
+      await expect(service.acceptPrescription({ ...context, actor: { ...context.actor,
+        permissions: ['pharmacy.work-item.accept'] } }, accept, key)).rejects.toMatchObject(expected);
+    }
+  });
+
   it('passes a serialization failure of a route-backed dispensing on to the retry', async () => {
     const h = pharmacyHarness({ outcome: 'allowed', route_id: routeId }, undefined, true, databaseError('40001', 'serialize'));
     await expect(ITEM_ROUTES[1]![4](h.service)).rejects.toMatchObject({ code: '40001' });

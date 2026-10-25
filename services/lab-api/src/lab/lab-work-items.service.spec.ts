@@ -130,6 +130,16 @@ describe('LabWorkItemsService.acceptEhrOrder', () => {
     expect((refusal as { getResponse?: () => unknown }).getResponse?.()).not.toMatch(/does not match/);
     expect((refusal as { cause?: unknown }).cause).toBe(guard);
   });
+
+  // P4c (SPEC-FINAL §7.5): the guard refuses an order with a live route to
+  // another facility's laboratory with the message LAB_REQUEST_ROUTED.
+  it('answers the guard\'s LAB_REQUEST_ROUTED refusal with 409 LAB_REQUEST_ROUTED, as the EHR answers it', async () => {
+    const guard = Object.assign(new Error('LAB_REQUEST_ROUTED'), { code: '23514' });
+    const { service } = harness([], guard);
+    const refusal = await service.acceptEhrOrder(context, command(1)).catch((error: unknown) => error);
+    expect(refusal).toMatchObject({ code: 'LAB_REQUEST_ROUTED', status: 409 });
+    expect((refusal as { cause?: unknown }).cause).toBe(guard);
+  });
 });
 
 /**

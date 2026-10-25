@@ -82,6 +82,18 @@ function routedDispensingRefusal(error: unknown): DomainProblem | undefined {
     'This prescription can no longer be dispensed here') : undefined;
 }
 
+/**
+ * P4c (SPEC-FINAL §7.5): the same-facility acceptance of a prescription with
+ * a live route to another facility's pharmacy is refused by
+ * pharmacy.validate_work_item with 23514 PRESCRIPTION_ROUTED, answered 409 by
+ * that code, as the EHR answers it. Any other error is passed on unchanged.
+ */
+function routedPrescriptionRefusal(error: unknown): DomainProblem | undefined {
+  const { code, message } = (typeof error === 'object' && error !== null ? error : {}) as { code?: unknown; message?: unknown };
+  return code === '23514' && message === 'PRESCRIPTION_ROUTED' ? new DomainProblem(409, 'PRESCRIPTION_ROUTED',
+    'This prescription has been sent to another pharmacy; withdraw it there first') : undefined;
+}
+
 @Injectable()
 export class PharmacyService {
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityService,
@@ -122,7 +134,7 @@ export class PharmacyService {
         input.doseQuantity ?? null, input.doseUnit ?? null, input.routeCode ?? null, input.frequency,
         input.instructions, input.startsOn ?? null, input.endsOn ?? null, input.prescribedBy,
         input.prescribedAt, context.actor.accountId, context.membershipId, input.acceptanceReason,
-        key, digest, context.correlationId]);
+        key, digest, context.correlationId]).catch((error: unknown) => { throw routedPrescriptionRefusal(error) ?? error; });
       const row = inserted.rows[0];
       if (!row) throw new DomainProblem(503, 'PHARMACY_WORK_ITEM_NOT_CREATED',
         'Pharmacy could not accept the prescription');

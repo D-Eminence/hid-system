@@ -144,8 +144,9 @@ export function adminOrderRouteProblem(error: unknown, scope: 'facility' | 'look
       return scope === 'route' ? new DomainProblem(404, 'ORDER_ROUTE_NOT_FOUND', 'The order route was not found')
         : new DomainProblem(404, 'ADMIN_FACILITY_NOT_FOUND', 'Facility was not found');
     case '22023':
-      return scope === 'lookup' ? lookupInvalid()
-        : new DomainProblem(400, 'ORDER_ROUTE_ADMIN_INVALID', 'The reason must be 8 to 500 characters');
+      if (scope === 'lookup') return lookupInvalid();
+      return new DomainProblem(400, message === 'ORDER_ROUTE_DESTINATION_INVALID' || message === 'ORDER_ROUTE_CLOSE_INVALID'
+        ? message : 'ORDER_ROUTE_ADMIN_INVALID', 'The reason must be 8 to 500 characters');
     case '40001':
       return new DomainProblem(409, 'VERSION_CONFLICT', 'The order route changed; reload before retrying');
     case '23505':

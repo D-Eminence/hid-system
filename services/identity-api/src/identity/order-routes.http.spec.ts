@@ -310,7 +310,8 @@ describe('order-route routes in Identity over HTTP', () => {
       expect(sqlCalls('identity.admin_close_order_route')[0]?.values).toEqual([routeId, 3, 'The patient asked us to stop it']);
       for (const [state, message, status, code] of [['40001', 'Order route version conflict', 409, 'VERSION_CONFLICT'],
         ['23505', 'ORDER_ROUTE_ALREADY_CLOSED', 409, 'ORDER_ROUTE_ALREADY_CLOSED'], ['P0002', 'not found', 404, 'ORDER_ROUTE_NOT_FOUND'],
-        ['42501', 'ADMIN_PERMISSION_DENIED', 403, 'PERMISSION_DENIED'], ['22023', 'reason', 400, 'ORDER_ROUTE_ADMIN_INVALID']] as const) {
+        ['42501', 'ADMIN_PERMISSION_DENIED', 403, 'PERMISSION_DENIED'], ['22023', 'reason', 400, 'ORDER_ROUTE_ADMIN_INVALID'],
+        ['22023', 'ORDER_ROUTE_CLOSE_INVALID', 400, 'ORDER_ROUTE_CLOSE_INVALID']] as const) {
         handlers['identity.admin_close_order_route'] = () => { throw databaseError(state, message); };
         const refused = await close('3');
         expect([refused.status, refused.body.code]).toEqual([status, code]);

@@ -211,8 +211,14 @@ function workItemInsertRefusal(error: unknown): DomainProblem | undefined {
   switch (sqlState(error)) {
     // lab.validate_work_item (0077): not the EHR order's current active version
     // exactly as EHR holds it (a changed or no longer active order, another time
-    // or field). Never retried.
+    // or field). Never retried. P4c (SPEC-FINAL §7.5): an order with a live
+    // route to another facility's laboratory is refused with the message
+    // LAB_REQUEST_ROUTED, answered by that code as the EHR answers it.
     case '23514':
+      if ((error as { message?: unknown }).message === 'LAB_REQUEST_ROUTED') {
+        return new DomainProblem(409, 'LAB_REQUEST_ROUTED',
+          'This lab request has been sent to another laboratory; withdraw it there first', undefined, { cause: error });
+      }
       return new DomainProblem(409, 'LAB_ORDER_NOT_CURRENT',
         'Lab accepts only the current version of an active EHR order, exactly as the EHR holds it', undefined,
         { cause: error });
