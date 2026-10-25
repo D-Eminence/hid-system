@@ -766,14 +766,65 @@ their builds; the items Identity carries are listed here too.
   and an account disable in either order grant nothing to a disabled account,
   with no deadlock.
 - Identity's P4b items (its build records the detail): the staff context's
-  `facility.selfService`; password re-entry for invite, role change and
-  removal (the sign-in check and lockout); the invitation email through
-  notification-api's fixed template, with no person's name, the facility
-  name dropped when it looks like a domain and the origin from the
-  deployment; Turnstile action `staff-invitation` on `app.` and `staging.`
-  only; 429 `EMERGENCY_PROBATION_LIMITED`; emergency-contact alerts drop a
-  domain-like clinician name everywhere (V1); the withdrawal route. The
-  website treats a 404 from any new route as "not available yet".
+  `facility.selfService` (`{ review: 'pending'|'reviewed', organizationType }`,
+  only at a self-signed-up facility; the previous membership query is
+  wrapped unchanged, with one definer state read per membership row);
+  password re-entry for invite, role change and removal (the sign-in check
+  and lockout, against the session's own account; 403
+  `STAFF_REAUTHENTICATION_FAILED`, counted as a failed sign-in); the
+  recovery hold (403 `STAFF_RECENT_RECOVERY_HOLD`) on invite, resend and role
+  change within 24 hours of an OTP recovery, not on removal or revocation (a
+  future hold on other staff commands takes the same marker); the
+  invitation email through notification-api's fixed template, with no
+  person's name, the facility name dropped when it looks like a domain and
+  the origin from the deployment; Turnstile action `staff-invitation` on
+  `app.` and `staging.` only; 429 `EMERGENCY_PROBATION_LIMITED`;
+  emergency-contact alerts drop a domain-like clinician name everywhere
+  (V1); the withdrawal route. The website treats a 404 from any new route as
+  "not available yet". Routes: support's review now answers `grantedRole`
+  and `sessionsRevoked` and needs `platform.facility.unlock`; new
+  `POST /api/v1/admin/self-service-facilities/:id/administrator-role` and
+  `.../end-probation` (If-Match); the staff routes `GET
+  /api/v1/identity/facility-staff`, `POST .../facility-staff/administrator-licence`,
+  `POST .../staff-invitations` (Idempotency-Key), `.../:id/resend`,
+  `.../:id/revoke`, `POST .../facility-staff/:membershipId/end` and
+  `.../role` (`workforce.manage`, the body's `expectedVersion`); the
+  signed-in `POST .../staff-invitations/signed-in/preview` and `.../accept`
+  (no facility header, no permission, no interceptor row: a refusal writes
+  no facility audit row, only the guard's facility-less denial for a bad
+  Origin or CSRF token, as on every route); the public `POST
+  .../staff-invitations/open` and `.../accept` (the `hid_staff_invitation`
+  cookie; no session is issued); support's `GET /api/v1/admin/facilities/:id/staff`
+  and `GET /api/v1/admin/staff-invitations?reference=` (`platform.principal.read`,
+  audited on success). notification-api gains `POST
+  /api/v1/notifications/staff-invitation` (fixed fields, email only); an
+  older notification-api answers 404, which Identity records as a
+  definitive failure, so invitations are switched on only after the
+  all-13 release. Identity's choices the spec left open: a replayed invite
+  answers `deliveryOutcome: 'unknown'` (the command keeps no outcome for a
+  replay); a resend reads the invitee's email from the facility's own list
+  (pending plus 30 days), so an invitation that expired more than 30 days
+  ago answers 404; the attestation version is the constant
+  `facility-staff-attestation-v1` (a new text needs an Identity change); a
+  401 from notification-api is `unknown`, not a definitive failure, so it
+  never counts towards the delivery pause; a receptionist's licence fields
+  may be absent or null; support's staff read answers flat rows with
+  `attestedByAccountId` and `attestedByName`, and 404
+  `ADMIN_FACILITY_NOT_FOUND` for an unknown facility; the new Identity calls
+  `identity.organization_self_service_state` on every staff request, so it
+  needs 0086 (the release applies migrations before services).
+- Deviations from `main` (besides the owner's, below): the licence bodies
+  MLSCN and PCN, whose number formats no repository states (the pattern is
+  the general one); no licence expiry is collected; duplicate licence
+  numbers are not refused (support sees `sameLicenceElsewhere`). "Governed
+  clinician provisioning" stays on the not-ported list.
+- Limitations: one administrator per facility (no invitable role manages
+  staff; support changes the administrator's clinical access); no staff MFA;
+  a laboratory's work comes only from tests ordered at the same facility and
+  a pharmacy sees only prescriptions written there, until cross-facility
+  orders (P4c); a governed second product for a self-signed-up company needs
+  support's review of the sign-up first (the governed approval reuses the
+  organization only through an active `org_admin` row).
 - Locks until commit (measured with `pg_locks` on a copy of the 0085
   production-order database, four runs): besides P4's, SHARE ROW EXCLUSIVE
   (writes wait, reads do not) on `auth.account_roles` and
@@ -825,8 +876,31 @@ their builds; the items Identity carries are listed here too.
   (`identity.registration.write`, held by `org_admin`, nurses and
   receptionists, engages the policy that reads every patient row); cross-facility
   lab orders and prescriptions are the next change (P4c), and a stand-alone
-  laboratory's or pharmacy's workspace has no orders until then; the runtime
-  verifier's P4b extension is the integration build's.
+  laboratory's or pharmacy's workspace has no orders until then; invitation
+  data retention (a purge of invitee names and emails after 90 days, S22e)
+  is a separate change; registry checks of licences are not built.
+- Runtime verifier (`services/identity-api/scripts/verify-provider-enrollment-runtime.mjs`,
+  in the migration rehearsal): P4's flow with the restricted role and the
+  new review, then a P4b section run as the Identity runtime over HTTP: the
+  applicant's withdrawal; the pending administrator's six permissions and
+  refusals (patient lookup, registration, break-glass, consent, invite); the
+  review gate against the runtime role directly (no table privilege), the
+  owner and a definer writer called as the runtime role, at a pending and a
+  released organization; the own licence; review refusals and the unlock
+  with sign-out for a hospital (doctor), laboratory (lab), pharmacy
+  (pharmacist), an `other` sign-up (no clinical access, then a doctor by
+  support's administrator-role change) and a least-privilege reviewer; the
+  first 30 days' emergency cap and its early end; invitations closed and
+  opened, the email checked by a local stub of notification-api's route
+  with that route's own DTO and template; open by link and typed code with
+  their counters, supersession and network limit; accept as a new account
+  and sign-in on the role's host; existing staff signed in (link and typed);
+  a patient's or a platform account's email; an account appearing or
+  changing meanwhile; removal, dormant re-acceptance and role change; expiry
+  and revocation; the recipient, cross-facility, first-30-days and
+  delivery-pause limits and the recovery hold; a governed facility
+  unchanged; release after review; support's reads; an audit scan; and the
+  staff context's cost.
 - Tests (`services/ehr-api/test/database/`, rollback-only): new
   `self-service-review-unlock`, `staff-invitations`,
   `staff-invitation-acceptance`, `facility-staff-management`,
