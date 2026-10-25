@@ -51,9 +51,8 @@ export function normalizedIdentifier(kind: 'health_id' | 'date_of_birth', value:
   return trimmed;
 }
 
-/** The Health ID a counter finds a patient's orders by, upper-cased and checked, or null for none. */
-function healthIdFilter(value: string | undefined): string | null {
-  if (value === undefined) return null;
+/** The Health ID a counter finds a patient's orders by (the search's body), upper-cased and checked. */
+function healthIdFilter(value: string): string {
   const healthId = value.trim().toUpperCase();
   if (!HEALTH_ID.test(healthId)) throw invalid('The Health ID is not in the form HID-XXXXXX');
   return healthId;
@@ -79,9 +78,9 @@ export class PharmacyOrderRoutesService {
   constructor(private readonly database: DatabaseService, private readonly audit: AuditService,
     private readonly cards: PharmacyOrderRouteCards) {}
 
-  /** GET pharmacy/order-routes: Incoming or Recent; its healthId parameter is deprecated (CODEX §26). */
+  /** GET pharmacy/order-routes: Incoming or Recent, never by a Health ID (one in its URL is refused, CODEX §26). */
   async list(context: DataAccessContext, query: ListOrderRoutesQueryDto) {
-    return this.listed(context, query.view ?? 'incoming', healthIdFilter(query.healthId));
+    return this.listed(context, query.view ?? 'incoming', null);
   }
 
   /** POST pharmacy/order-routes/search: the same, found by the patient's Health ID from the body, never a URL. */

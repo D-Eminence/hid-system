@@ -6,19 +6,15 @@ const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? valu
 export const ORDER_ROUTE_VIEWS = ['incoming', 'recent'] as const;
 
 /**
- * GET pharmacy/order-routes (SPEC-FINAL §10.2): Incoming or Recent. The
- * healthId query parameter is kept for the website build that still sends it
- * (deprecated): a Health ID in a URL is in the request line access logs keep
- * (CODEX §26). The gateway no longer logs query strings; the website moves to
- * POST pharmacy/order-routes/search, and then this parameter is refused.
+ * GET pharmacy/order-routes (SPEC-FINAL §10.2): Incoming or Recent. It takes
+ * no Health ID: a Health ID in a URL is in the request line access logs and
+ * browser history keep (CODEX §26), so a healthId query parameter is refused
+ * 400 HEALTH_ID_NOT_ACCEPTED_IN_URL before the guard (health-id-in-url.ts).
+ * Find by Health ID is POST pharmacy/order-routes/search.
  */
 export class ListOrderRoutesQueryDto {
   @IsOptional() @IsIn(ORDER_ROUTE_VIEWS)
   view?: (typeof ORDER_ROUTE_VIEWS)[number];
-
-  /** Deprecated: finds incoming orders by the patient's Health ID (P2: never by date of birth). Use the POST. */
-  @IsOptional() @IsString() @MinLength(1) @MaxLength(64)
-  healthId?: string;
 }
 
 /** POST pharmacy/order-routes/search: the same lists, found by the patient's Health ID in the body (P2: never by date of birth). */

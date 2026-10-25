@@ -68,8 +68,9 @@ describe('Pharmacy order-route routes (SPEC-FINAL §10.2)', () => {
     expect(await errors(DeclineOrderRouteDto, { expectedVersion: 1, reason: 'Out of stock' })).toEqual(['reason']);
     expect(await errors(AcceptOrderRouteDto, { ...accept, reference: '123e4567' })).toEqual([]);
     expect(await errors(AcceptOrderRouteDto, { ...accept, reference: 7 })).toEqual(['reference']);
-    // The GET's healthId stays, deprecated, for the website build that still sends it.
-    expect(await errors(ListOrderRoutesQueryDto, { view: 'incoming', healthId: 'HID-ABC234' })).toEqual([]);
+    // The GET takes no Health ID (CODEX §26): the middleware refuses it first (health-id-in-url.spec.ts), and
+    // validation would still refuse it as an unknown key.
+    expect(await errors(ListOrderRoutesQueryDto, { view: 'incoming', healthId: 'HID-ABC234' })).toEqual(['healthId']);
     expect(await errors(SearchOrderRoutesDto, { view: 'recent', healthId: 'HID-ABC234' })).toEqual([]);
     expect(await errors(SearchOrderRoutesDto, { view: 'incoming' })).toEqual(['healthId']);
   });
@@ -131,8 +132,9 @@ describe('PharmacyOrderRoutesService (C13-C16)', () => {
     await expect(h.service.search(context, { view: 'recent', healthId: 'HID-0O1I' }))
       .rejects.toMatchObject({ status: 400, code: 'ORDER_ROUTE_INVALID' });
     expect(h.statements).toHaveLength(1);
-    await h.service.list(context, { view: 'incoming', healthId: 'HID-ABC234' });
-    expect(h.statements[1]?.values).toEqual(['incoming', 'HID-ABC234']);
+    // The GET's list never filters by a Health ID, whatever reaches it.
+    await h.service.list(context, { view: 'incoming', healthId: 'HID-ABC234' } as never);
+    expect(h.statements[1]?.values).toEqual(['incoming', null]);
   });
 
   it('shows an accepted route\'s instructions and patient only as the database gives them, naming the patient on the row', async () => {

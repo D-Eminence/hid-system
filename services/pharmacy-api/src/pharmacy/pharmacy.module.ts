@@ -6,7 +6,8 @@ import { PharmacyOrderRoutesController } from './pharmacy-order-routes.controlle
 import { PharmacyOrderRoutesService } from './pharmacy-order-routes.service';
 import { PharmacyOrderRouteAccess } from './order-route-access';
 import { PharmacyOrderRouteCards } from './order-route-cards';
+import { HealthIdInUrlRefusalModule } from './health-id-in-url';
 
-@Module({ imports: [PharmacyIdentityModule], controllers: [PharmacyController, PharmacyOrderRoutesController],
+@Module({ imports: [PharmacyIdentityModule, HealthIdInUrlRefusalModule], controllers: [PharmacyController, PharmacyOrderRoutesController],
   providers: [PharmacyService, PharmacyOrderRoutesService, PharmacyOrderRouteAccess, PharmacyOrderRouteCards] })
 export class PharmacyModule {}
