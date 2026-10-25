@@ -163,6 +163,32 @@ export class ProviderEnrollmentController {
     };
   }
 
+  /**
+   * "This isn't my organization" (P4b, P4 leftover 1): the applicant closes
+   * their own open self-service application from the verified session (the
+   * enrollment cookie), so a mistyped CAC number stops being held at once.
+   * It ends the session and the application's codes, is audited, and sets no
+   * 7-day refusal for the email or network. 200 { withdrawn: true }, the
+   * cookie cleared; no live session answers 401
+   * ORGANIZATION_COMPLETION_SESSION_INVALID, like the other routes.
+   */
+  @Post('withdraw')
+  @HttpCode(200)
+  @AuditAction('identity.provider-enrollment.withdraw')
+  async withdraw(@Req() request: HidRequest, @Res({ passthrough: true }) response: Response) {
+    this.assertOrigin(request);
+    this.assertAccountless(request);
+    await this.enrollments.assertSelfServiceOpen();
+    await this.completion.withdrawSelfService(singleCookie(request, COOKIE_NAME), request.correlationId);
+    response.clearCookie(COOKIE_NAME, {
+      secure: this.environment.AUTH_COOKIE_SECURE,
+      sameSite: 'strict',
+      httpOnly: true,
+      path: COOKIE_PATH,
+    });
+    return { withdrawn: true as const };
+  }
+
   private assertAccountless(request: HidRequest): void {
     assertAccountless(request, this.environment.AUTH_COOKIE_NAME, { code: 'PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT',
       detail: 'Sign out before starting or continuing provider enrollment' });

@@ -289,6 +289,29 @@ export class OrganizationProfileCompletionService implements BeforeApplicationSh
     };
   }
 
+  /**
+   * Facility self sign-up's withdrawal (P4b, P4 leftover 1: "This isn't my
+   * organization"): identity.withdraw_self_service_provider_enrollment closes
+   * the open self-service application of the enrollment session's cookie,
+   * ends its sessions and codes and audits it, with no 7-day refusal. It
+   * answers true when it closed one; anything else (no live session of an
+   * open self-service application) is 401, as an invalid session. The control
+   * off answers 423.
+   */
+  async withdrawSelfService(token: string | undefined, correlationId: string): Promise<void> {
+    const sessionHash = this.sessionHash(token);
+    let withdrawn = false;
+    try {
+      const result = await this.database.withSystemTransaction(correlationId, (client) =>
+        client.query<{ withdrawn: boolean | null }>(
+          'select identity.withdraw_self_service_provider_enrollment($1) as withdrawn', [sessionHash]));
+      withdrawn = result.rows[0]?.withdrawn === true;
+    } catch (error) {
+      throw selfServiceGateRefusal(error) ?? this.databaseProblem(error);
+    }
+    if (!withdrawn) throw this.invalidSession();
+  }
+
   async complete(token: string | undefined, expectedVersion: number,
     input: CompleteOrganizationProfileDto, correlationId: string) {
     const sessionHash = this.sessionHash(token);

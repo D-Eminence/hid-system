@@ -499,4 +499,44 @@ describe('facility self sign-up activation and its quota (P4)', () => {
         .rejects.toMatchObject({ status, code: answer });
     });
   });
+
+  // P4b (P4 leftover 1): "This isn't my organization".
+  describe('facility self sign-up\'s withdrawal', () => {
+    it('closes the session\'s application through one command keyed by the same session hash', async () => {
+      const query = jest.fn().mockResolvedValueOnce({ rows: [{ withdrawn: true }] });
+      const { service: completion, database } = service(query);
+      await expect(completion.withdrawSelfService(token, correlationId)).resolves.toBeUndefined();
+      expect(database.withSystemTransaction).toHaveBeenCalledTimes(1);
+      expect(query.mock.calls[0]?.[0]).toBe('select identity.withdraw_self_service_provider_enrollment($1) as withdrawn');
+      const readQuery = jest.fn().mockResolvedValueOnce({ rows: [] });
+      await service(readQuery).service.selfServiceProfile(token, correlationId).catch(() => undefined);
+      expect(query.mock.calls[0]?.[1]).toEqual(readQuery.mock.calls[0]?.[1]);
+    });
+
+    it('answers nothing withdrawn 401, and a missing or malformed cookie 401 before any database call', async () => {
+      for (const rows of [[{ withdrawn: false }], [{ withdrawn: null }], []]) {
+        await expect(service(jest.fn().mockResolvedValueOnce({ rows })).service.withdrawSelfService(token, correlationId))
+          .rejects.toMatchObject({ status: 401, code: 'ORGANIZATION_COMPLETION_SESSION_INVALID' });
+      }
+      const unread = jest.fn();
+      const { service: untouched, database } = service(unread);
+      for (const value of [undefined, 'short', `${'A'.repeat(42)}!`]) {
+        await expect(untouched.withdrawSelfService(value, correlationId))
+          .rejects.toMatchObject({ status: 401, code: 'ORGANIZATION_COMPLETION_SESSION_INVALID' });
+      }
+      expect(database.withSystemTransaction).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['55000', 'PLATFORM_CONTROL_DISABLED:provider_self_service_enabled', 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE'],
+      ['22023', 'PLATFORM_CONTROL_INVALID', 423, 'PROVIDER_ENROLLMENT_UNAVAILABLE'],
+      ['42501', 'Self-service enrollment context is required', 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID'],
+      ['42883', 'function identity.withdraw_self_service_provider_enrollment(unknown) does not exist', 503,
+        'ORGANIZATION_COMPLETION_UNAVAILABLE'],
+    ])('answers the command\'s %s %s %s %s', async (code, message, status, answer) => {
+      const query = jest.fn().mockRejectedValueOnce(Object.assign(new Error(message), { code }));
+      await expect(service(query).service.withdrawSelfService(token, correlationId))
+        .rejects.toMatchObject({ status, code: answer });
+    });
+  });
 });

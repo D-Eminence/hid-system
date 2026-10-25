@@ -37,7 +37,7 @@ describe('provider enrollment over HTTP', () => {
   const database = { query: jest.fn(), withSystemTransaction: jest.fn() };
   const integrations = { assertAvailable: jest.fn(), consumeSelfServiceCacQuota: jest.fn() };
   const completion = { verify: jest.fn(), activate: jest.fn(), start: jest.fn(), publicApplicationDigest: jest.fn(),
-    publicApplicationNetworkDigest: jest.fn(), selfServiceProfile: jest.fn() };
+    publicApplicationNetworkDigest: jest.fn(), selfServiceProfile: jest.fn(), withdrawSelfService: jest.fn() };
   const turnstile = { verify: jest.fn() };
   const auth = { login: jest.fn() };
 
@@ -207,5 +207,39 @@ describe('provider enrollment over HTTP', () => {
     expect(named('hid_enrollment')).toBeUndefined();
     expect(cookies).toHaveLength(4);
     expect(cookies.some((cookie) => /Domain=/i.test(cookie))).toBe(false);
+  });
+
+  // P4b (P4 leftover 1): "This isn't my organization" withdraws the sign-up.
+  it('withdraws the session\'s sign-up: Origin, signed-in check, gate, then the cookie; clears it', async () => {
+    const cookie = `hid_provider_enrollment=${'A'.repeat(43)}`;
+    const closed = await request(app.getHttpServer()).post(`${base}/withdraw`).set('Origin', origin).set('Cookie', cookie);
+    expect([closed.status, closed.body.code]).toEqual([423, 'PROVIDER_ENROLLMENT_UNAVAILABLE']);
+    const noOrigin = await request(app.getHttpServer()).post(`${base}/withdraw`).set('Cookie', cookie);
+    expect([noOrigin.status, noOrigin.body.code]).toEqual([403, 'ORIGIN_DENIED']);
+    const signedIn = await request(app.getHttpServer()).post(`${base}/withdraw`).set('Origin', origin)
+      .set('Cookie', `hid_access_csrf=x; ${cookie}`);
+    expect([signedIn.status, signedIn.body.code]).toEqual([409, 'PROVIDER_ENROLLMENT_REQUIRES_SIGN_OUT']);
+    expect(completion.withdrawSelfService).not.toHaveBeenCalled();
+
+    database.query.mockResolvedValue(controls(open));
+    completion.withdrawSelfService.mockResolvedValueOnce(undefined);
+    const withdrawn = await request(app.getHttpServer()).post(`${base}/withdraw`).set('Origin', origin).set('Cookie', cookie);
+    expect([withdrawn.status, withdrawn.body]).toEqual([200, { withdrawn: true }]);
+    expect(completion.withdrawSelfService.mock.calls[0]?.[0]).toBe('A'.repeat(43));
+    const cookies = withdrawn.headers['set-cookie'] as unknown as string[];
+    expect(cookies).toHaveLength(1);
+    expect(cookies[0]).toMatch(/^hid_provider_enrollment=; Path=\/api\/v1\/identity\/provider-enrollments; Expires=Thu, 01 Jan 1970 00:00:00 GMT; HttpOnly; Secure; SameSite=Strict$/);
+
+    completion.withdrawSelfService.mockRejectedValueOnce(new DomainProblem(401, 'ORGANIZATION_COMPLETION_SESSION_INVALID',
+      'Organization profile completion session is invalid or expired'));
+    const noSession = await request(app.getHttpServer()).post(`${base}/withdraw`).set('Origin', origin);
+    expect([noSession.status, noSession.body.code]).toEqual([401, 'ORGANIZATION_COMPLETION_SESSION_INVALID']);
+    expect(completion.withdrawSelfService.mock.calls[1]?.[0]).toBeUndefined();
+    expect(noSession.headers['set-cookie']).toBeUndefined();
+    // A body is not read: the session is the only input.
+    completion.withdrawSelfService.mockResolvedValueOnce(undefined);
+    const withBody = await request(app.getHttpServer()).post(`${base}/withdraw`).set('Origin', origin).set('Cookie', cookie)
+      .send({ applicationId: 'someone-else' });
+    expect(withBody.status).toBe(200);
   });
 });
