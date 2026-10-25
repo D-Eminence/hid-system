@@ -1201,8 +1201,21 @@ select pg_temp.check('support''s close of an accepted route past its window', fo
   identity.admin_close_order_route(%L, %s, 'The patient asked support to stop it')$s$, current_setting('hid.test.lroute_18'),
   current_setting('hid.test.version_18')), '23505 ORDER_ROUTE_ALREADY_CLOSED');
 reset role;
+-- The dispensing validator's own window check: PB2 gets P's consent at PH1
+-- (owner SQL), so the route-backed item stays visible past its route's
+-- window (without it the strict policy hides the item from an owner that
+-- does not bypass row-level security, and the validator refuses it as
+-- unknown instead), and the validator refuses it as closed.
+insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id, scope, status,
+  reason, starts_at, expires_at, break_glass, purpose_of_use)
+values (gen_random_uuid(), 'e4c30000-0000-4000-8000-000000000001', 'e4c12000-0000-4000-8000-000000000033',
+  'e4c10000-0000-4000-8000-000000000033', 'e4c13000-0000-4000-8000-000000000033', current_setting('hid.test.facility_2')::uuid,
+  'write_records', 'active', 'P4c suite consent at the pharmacy', clock_timestamp() - interval '1 hour',
+  clock_timestamp() + interval '30 days', false, 'direct-care');
 set local role hid_pharmacy_api_runtime;
 select pg_temp.as_staff(33, current_setting('hid.test.facility_2')::uuid);
+select pg_temp.assert('the item stays visible under consent', exists (select 1 from pharmacy.work_items item
+  where item.id = current_setting('hid.test.ritem_7')::uuid));
 select pg_temp.check('a dispensing past the work window', format($s$select pg_temp.dispense(%L, 'p4c-life-dispense-07')$s$,
   current_setting('hid.test.ritem_7')), '23514 ORDER_ROUTE_CLOSED');
 reset role;
