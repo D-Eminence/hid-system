@@ -146,8 +146,10 @@
 --     pharmacy, attesting that the patient agreed and naming it (no in-app
 --     approval); the patient is told in the inbox at once and can stop it
 --     until the receiving facility accepts; the receiving facility confirms
---     the patient's Health ID or date of birth to accept (5 wrong tries lock
---     that order there), which creates the Lab or Pharmacy work item there,
+--     the patient's Health ID or date of birth to accept (5 wrong tries that
+--     name the order, a Health ID or a date of birth with the order's
+--     reference, or 20 in all, lock that order there), which creates the Lab
+--     or Pharmacy work item there,
 --     bound to the route; its members holding the receive permission then
 --     work it for a limited time (30 days; 14 after the first result or
 --     dispensing, at most 45) without a consent grant; results and dispensing
@@ -164,6 +166,21 @@
 --     (main's grant; never made on this branch).
 -- Same-facility hand-offs are unchanged except that they are refused while
 -- the order has a live route.
+-- The review of P4c changed (each recorded in docs/MAIN_TO_NOVU_PORT.md):
+--   * the lock layout: platform.control_settings and identity.consent_grants
+--     are taken in 6.7's one NOWAIT attempt with the nine clinical tables,
+--     and P4b's probation trigger is created there, so the previous
+--     Identity's emergency activation (a control read, then a consent-grant
+--     insert) can no longer deadlock with this migration;
+--   * the patient's list (C5): an order marked entered in error is listed
+--     without its content, attestation text or attesting clinician; a
+--     completed route closed so tells the patient;
+--   * acceptance: an optional reference names the order with a date of
+--     birth; a date of birth alone counts only towards the member's day and
+--     the order's 20 in all, so honest wrong picks never lock another
+--     patient's order at once nor tell that patient;
+--   * section 5's administrator-role change no longer overwrites the
+--     review's verification method, which the default listing reads.
 -- main's 0061 interim review check and its re-add of the status check (same
 -- values as 0046) are not ported, nor main's later migrations or staff MFA.
 --
