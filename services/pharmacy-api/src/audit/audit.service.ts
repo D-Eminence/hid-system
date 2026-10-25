@@ -10,15 +10,20 @@ export interface PharmacyAuditResource {
 
 @Injectable()
 export class AuditService {
+  /**
+   * A staff row in the command's transaction. `outcome` is `success` unless a
+   * refusal that commits is recorded (P4c: a counted identifier mismatch).
+   */
   async recordWithClient(client: PoolClient, context: DataAccessContext, action: string,
-    resource: PharmacyAuditResource, details: Readonly<Record<string, unknown>> = {}): Promise<void> {
+    resource: PharmacyAuditResource, details: Readonly<Record<string, unknown>> = {},
+    outcome: 'success' | 'denied' | 'failure' = 'success'): Promise<void> {
     await client.query(`insert into audit.events (
       correlation_id,actor_type,actor_subject,actor_account_id,actor_membership_id,
       organization_id,facility_id,patient_id,action,resource_type,resource_id,outcome,
       purpose_of_use,details,provenance,source_system
-    ) values ($1,'staff',$2,$3,$4,$5,$6,$7,$8,$9,$10,'success',$11,$12::jsonb,'application','pharmacy-api')`,
+    ) values ($1,'staff',$2,$3,$4,$5,$6,$7,$8,$9,$10,$13,$11,$12::jsonb,'application','pharmacy-api')`,
     [context.correlationId, context.actor.subject, context.actor.accountId, context.membershipId,
       context.actor.facility?.organizationId ?? null, context.facilityId, resource.patientId ?? null, action,
-      resource.resourceType, resource.resourceId, context.purposeOfUse, JSON.stringify(details)]);
+      resource.resourceType, resource.resourceId, context.purposeOfUse, JSON.stringify(details), outcome]);
   }
 }

@@ -10,6 +10,8 @@ import { IdentityService } from '../identity/identity.service';
 import type { AcceptEhrPrescriptionDto } from './dto/accept-ehr-prescription.dto';
 import type { CreateDispensingDto, ReverseDispensingDto } from './dto/dispensing.dto';
 import type { OcrMedicationImportDto } from './dto/ocr-medication-import.dto';
+import { PharmacyOrderRouteAccess, basisDetails } from './order-route-access';
+import { PharmacyOrderRouteCards, type OrderRouteCard } from './order-route-cards';
 
 interface WorkItemRow extends QueryResultRow {
   id: string; patient_id: string; facility_id: string; ordering_facility_id: string;
@@ -22,6 +24,8 @@ interface WorkItemRow extends QueryResultRow {
   row_version: string; created_at: Date; request_sha256?: string;
   dispensing_id?: string | null; dispensing_status?: 'dispensed' | null;
   reversal_id?: string | null;
+  /** Set when the work item came from another facility's order route (P4c). */
+  order_route_id?: string | null;
 }
 
 interface DispensingRow extends QueryResultRow {
@@ -64,10 +68,25 @@ const DISPENSING_SELECT = `select d.*,r.id::text as reversal_id,r.reversed_at
 // race (40001 or 23505), and DatabaseService runs it again, when it replays
 // the winner or refuses the request (Phase 4 Stage 9).
 
+/**
+ * The dispensing validator refuses a dispensing on an order route from
+ * another facility that is not accepted, or past its work window, or whose
+ * prescription changed (P4c, SPEC-FINAL §8.5, V9): 23514 on the insert of a
+ * route-backed work item's dispensing, answered 409 as the website already
+ * handles it (Operations.tsx). A serialization failure is passed on to
+ * DatabaseService's retry; same-facility work is unchanged.
+ */
+function routedDispensingRefusal(error: unknown): DomainProblem | undefined {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  return code === '23514' ? new DomainProblem(409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE',
+    'This prescription can no longer be dispensed here') : undefined;
+}
+
 @Injectable()
 export class PharmacyService {
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityService,
-    private readonly audit: AuditService) {}
+    private readonly audit: AuditService, private readonly routeAccess: PharmacyOrderRouteAccess,
+    private readonly routeCards: PharmacyOrderRouteCards) {}
 
   async acceptPrescription(context: DataAccessContext, input: AcceptEhrPrescriptionDto, key: string) {
     if (input.orderingFacilityId !== context.facilityId) throw new DomainProblem(403,
@@ -124,15 +143,25 @@ export class PharmacyService {
     }, { isolationLevel: 'SERIALIZABLE' });
   }
 
+  /**
+   * The work list. Row-level security shows this facility's rows the member
+   * may read: under consent, or bound to an order route that allows a read
+   * now (P4c, strict policy). A route-backed row carries its route card and,
+   * while the route allows a read, its patient (C18). The answer says whether
+   * orders between facilities and work on them are on (FEAS R4, V11).
+   */
   async listWorkItems(context: DataAccessContext) {
-    return this.database.withTransaction(context, async (client) => {
+    const page = await this.database.withTransaction(context, async (client) => {
       const result = await client.query<WorkItemRow>(`${WORK_ITEM_SELECT}
         order by w.accepted_at asc,w.id asc limit 200`);
       await this.audit.recordWithClient(client, context, 'pharmacy.work-item.list', {
         resourceType: 'pharmacy-work-item-collection', resourceId: context.facilityId,
       }, { returnedCount: result.rows.length });
-      return { items: result.rows.map((row) => this.projectWorkItem(row)) };
+      const cards = await this.routeCards.cards(client, result.rows.filter((row) => row.order_route_id).map((row) => row.id),
+        context.correlationId);
+      return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id))) };
     });
+    return { ...page, ...(await this.routeCards.flags()) };
   }
 
   async getWorkItem(context: DataAccessContext, id: string) {
@@ -140,11 +169,12 @@ export class PharmacyService {
       const row = (await client.query<WorkItemRow>(`${WORK_ITEM_SELECT} where w.id=$1`, [id])).rows[0];
       if (!row) throw new DomainProblem(404, 'PHARMACY_WORK_ITEM_NOT_FOUND',
         'Pharmacy work item was not found');
-      await this.authorize(row.patient_id, context, 'read_records');
+      const basis = await this.routeAccess.authorize(client, context, 'work_item', row.id, row.patient_id, 'read_records');
       await this.audit.recordWithClient(client, context, 'pharmacy.work-item.read', {
         patientId: row.patient_id, resourceType: 'pharmacy-work-item', resourceId: row.id,
-      });
-      return this.projectWorkItem(row);
+      }, basisDetails(basis));
+      const cards = row.order_route_id ? await this.routeCards.cards(client, [row.id], context.correlationId) : undefined;
+      return this.projectWorkItem(row, cards?.get(row.id));
     });
   }
 
@@ -154,7 +184,7 @@ export class PharmacyService {
         [workItemId])).rows[0];
       if (!work) throw new DomainProblem(404, 'PHARMACY_WORK_ITEM_NOT_FOUND',
         'Pharmacy work item was not found');
-      await this.authorize(work.patient_id, context, 'write_records');
+      const basis = await this.routeAccess.authorize(client, context, 'work_item', work.id, work.patient_id, 'write_records');
       if (Number(work.row_version) !== input.expectedWorkItemVersion) throw new DomainProblem(412,
         'PHARMACY_WORK_ITEM_VERSION_CONFLICT', 'Dispensing must bind to the exact accepted work-item version');
       const digest = requestDigest('pharmacy.dispensing.create', { workItemId, ...input });
@@ -174,7 +204,8 @@ export class PharmacyService {
       [randomUUID(), work.id, input.expectedWorkItemVersion, work.patient_id, work.facility_id,
         work.medication_code_system, work.medication_code, work.medication_display,
         input.quantityDispensed, input.quantityUnit, context.actor.accountId, context.membershipId,
-        input.reason, key, digest, context.correlationId]);
+        input.reason, key, digest, context.correlationId])
+        .catch((error: unknown) => { throw (work.order_route_id ? routedDispensingRefusal(error) : undefined) ?? error; });
       const row = inserted.rows[0];
       if (!row) throw new DomainProblem(503, 'PHARMACY_DISPENSING_NOT_CREATED',
         'Pharmacy could not record the dispensing');
@@ -183,7 +214,8 @@ export class PharmacyService {
         { dispensingId: row.id, workItemId: row.work_item_id, status: 'dispensed' });
       await this.audit.recordWithClient(client, context, 'pharmacy.dispensing.create', {
         patientId: row.patient_id, resourceType: 'medication-dispensing', resourceId: row.id,
-      }, { workItemId: row.work_item_id, workItemVersion: Number(row.work_item_version), status: 'dispensed' });
+      }, { workItemId: row.work_item_id, workItemVersion: Number(row.work_item_version), status: 'dispensed',
+        ...basisDetails(basis) });
       return this.projectDispensing(row);
     }, { isolationLevel: 'SERIALIZABLE' });
   }
@@ -192,10 +224,10 @@ export class PharmacyService {
     return this.database.withTransaction(context, async (client) => {
       const row = (await client.query<DispensingRow>(`${DISPENSING_SELECT} where d.id=$1`, [id])).rows[0];
       if (!row) throw new DomainProblem(404, 'PHARMACY_DISPENSING_NOT_FOUND', 'Dispensing was not found');
-      await this.authorize(row.patient_id, context, 'read_records');
+      const basis = await this.routeAccess.authorize(client, context, 'dispensing', row.id, row.patient_id, 'read_records');
       await this.audit.recordWithClient(client, context, 'pharmacy.dispensing.read', {
         patientId: row.patient_id, resourceType: 'medication-dispensing', resourceId: row.id,
-      });
+      }, basisDetails(basis));
       return this.projectDispensing(row);
     });
   }
@@ -206,7 +238,8 @@ export class PharmacyService {
         where d.id=$1`, [dispensingId])).rows[0];
       if (!dispensing) throw new DomainProblem(404, 'PHARMACY_DISPENSING_NOT_FOUND',
         'Dispensing was not found');
-      await this.authorize(dispensing.patient_id, context, 'write_records');
+      const basis = await this.routeAccess.authorize(client, context, 'dispensing', dispensing.id, dispensing.patient_id,
+        'write_records');
       if (Number(dispensing.row_version) !== input.expectedDispensingVersion) throw new DomainProblem(412,
         'PHARMACY_DISPENSING_VERSION_CONFLICT', 'Reversal must bind to the exact dispensing version');
       const digest = requestDigest('pharmacy.dispensing.reverse', { dispensingId, ...input });
@@ -233,7 +266,8 @@ export class PharmacyService {
         { reversalId: row.id, dispensingId: row.dispensing_id, workItemId: row.work_item_id, status: 'reversed' });
       await this.audit.recordWithClient(client, context, 'pharmacy.dispensing.reverse', {
         patientId: row.patient_id, resourceType: 'medication-dispensing-reversal', resourceId: row.id,
-      }, { dispensingId: row.dispensing_id, dispensingVersion: Number(row.dispensing_version), status: 'reversed' });
+      }, { dispensingId: row.dispensing_id, dispensingVersion: Number(row.dispensing_version), status: 'reversed',
+        ...basisDetails(basis) });
       return this.projectReversal(row);
     }, { isolationLevel: 'SERIALIZABLE' });
   }
@@ -308,11 +342,19 @@ export class PharmacyService {
       facilityId, patientId, correlationId, JSON.stringify(payload)]);
   }
 
-  private projectWorkItem(row: WorkItemRow) {
-    return { id: row.id, patientId: row.patient_id, facilityId: row.facility_id,
-      sourceEhrPrescriptionId: row.source_ehr_prescription_id,
+  /**
+   * A work item as Pharmacy answers it. A route-backed one (P4c) never carries
+   * the other facility's prescription or encounter id (PRIV P4.3); it carries
+   * its route card, and its patient only while the route allows a read.
+   */
+  private projectWorkItem(row: WorkItemRow, card?: OrderRouteCard) {
+    const source = row.order_route_id ? {} : { sourceEhrPrescriptionId: row.source_ehr_prescription_id,
+      sourceEncounterId: row.source_encounter_id };
+    const route = row.order_route_id && card
+      ? { orderRoute: card.orderRoute, ...(card.patient ? { patient: card.patient } : {}) } : {};
+    return { id: row.id, patientId: row.patient_id, facilityId: row.facility_id, ...source,
       sourceEhrPrescriptionVersion: Number(row.source_ehr_prescription_version),
-      sourceEncounterId: row.source_encounter_id, status: 'accepted' as const,
+      status: 'accepted' as const, ...route,
       medication: { codeSystem: row.medication_code_system, code: row.medication_code,
         display: row.medication_display }, doseQuantity: row.dose_quantity === null ? null : Number(row.dose_quantity),
       doseUnit: row.dose_unit, routeCode: row.route_code, frequency: row.frequency,
