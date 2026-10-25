@@ -702,13 +702,16 @@ their builds; the items Identity carries are listed here too.
 - After review support can change the administrator's role
   (`identity.admin_set_self_service_administrator_role`, the same evidence,
   sessions revoked `facility_access_changed`, audited
-  `admin.self-service-facility.administrator-role` and
+  `admin.self-service-facility.administrator-role`, whose details keep the
+  change's verification method (the application keeps the review's), and
   `identity.facility-access.change`) and end the first 30 days early
   (`identity.admin_end_self_service_probation`,
   `admin.self-service-facility.probation-end`).
 - The first 30 days after review (owner): at most 5 break-glass grants per
   facility in a rolling 24 hours (trigger `consent_grants_self_service_probation`
-  on `identity.consent_grants`, P0001 `EMERGENCY_PROBATION_LIMIT`; Identity
+  on `identity.consent_grants`, created in 0086 section 6.7 under its NOWAIT
+  lock and serialized per facility by an advisory lock, P0001
+  `EMERGENCY_PROBATION_LIMIT`; Identity
   answers 429 `EMERGENCY_PROBATION_LIMITED`, and a rolled-back Identity its
   429 `EMERGENCY_RATE_LIMITED`), and invitations limited to 10 a day and 20
   emails a day (30 and 60 after). A replayed break-glass reuses its grant and
@@ -978,8 +981,16 @@ recorded by their builds.
 - Receive (`lab.*`/`pharmacy.*_order_route*`, the Lab and Pharmacy
   runtimes): Incoming shows no patient, clinical information, instructions,
   licence number or source ids; acceptance matches the Health ID or the date
-  of birth, counts mismatches (five lock that order there with a row at the
-  ordering facility and the patient's notice; 20 a day stop the member),
+  of birth, optionally with the order's reference (which the patient sees in
+  the app), and counts mismatches: five that name the order (a Health ID, or
+  a date of birth with its reference) or 20 in all lock that order there
+  with a row at the ordering facility and the patient's notice, and 20 a day
+  stop the member; a date of birth without the reference names no order (the
+  counter may have picked another patient's row of several), so it counts
+  only towards the member's day and the order's 20 and tells no one until a
+  lock; a reference that is not the order's is refused
+  (`ORDER_ROUTE_REFERENCE_MISMATCH`) and counted nowhere; the patient's deny
+  directive is checked again at acceptance;
   refuses a suspended ordering facility (V10), creates the work item bound to
   the route and answers the patient card; a same-facility hand-off that took
   the order first makes the acceptance withdraw the route (`order_in_work`,
@@ -1006,7 +1017,7 @@ recorded by their builds.
   request is cancelled when it leaves `active` (an edit while active is an
   event, the receiver keeps what it accepted); an accepted prescription is
   cancelled by any change; a completed route records the change, and entered
-  in error ends its access.
+  in error ends its access and tells the patient (`ORDER_ROUTE_CANCELLED`).
 - Release and support: releasing a self-signed-up organization closes its
   live routes both ways (a trigger on `self_service_released_at`), with a
   `system` row at each counterpart, the patients' notices and one platform
@@ -1016,7 +1027,12 @@ recorded by their builds.
   or unlists a destination (`admin.order-route-destination.set`).
 - The patient (owner Q2): the portal lists the orders sent for them with
   every field that crossed and the attestation, and Stop withdraws a sent
-  route; notices `ORDER_ROUTE_SENT`, `_WITHDRAWN`, `_ACCEPTED`, `_DECLINED`,
+  route; an order marked entered in error (closed so, or its lab request or
+  prescription now `entered_in_error`, which the record view already hides)
+  stays listed as the record of what went where but answers no content beyond
+  its reference, no attestation text and no attesting clinician, with
+  `enteredInError` true (it may be another patient's, written in this chart
+  by mistake); notices `ORDER_ROUTE_SENT`, `_WITHDRAWN`, `_ACCEPTED`, `_DECLINED`,
   `_ACCEPT_LOCKED` and `_CANCELLED` carry only the route, kind and facility
   names.
 - The patient inbox grant, a port of `main`'s
@@ -1032,18 +1048,35 @@ recorded by their builds.
   directory and acceptance) and `cross_facility_route_access_enabled`
   (seeded on; work on accepted routes, switched off only to stop it
   everywhere). Every later control migration must carry all four keys of
-  0086 in its CHECK and in `platform.control_enabled`. V11's rule: no
-  running service reads `platform.control_settings` inside a clinical
-  transaction today, so 0086's control section after its clinical locks
-  cannot deadlock; P4c's own commands do read controls inside clinical
-  transactions, so a later migration that locks `platform.control_settings`
-  while holding clinical locks must take it with the same NOWAIT retry.
+  0086 in its CHECK and in `platform.control_enabled`. V11's rule: of the
+  running services (57a94db) only Identity's emergency activation reads a
+  control inside a transaction (`platform.require_control_enabled`, then an
+  insert into `identity.consent_grants`); the guards and the EHR read with a
+  pool statement. 0086 therefore takes `platform.control_settings` (ACCESS
+  EXCLUSIVE) and `identity.consent_grants` (SHARE ROW EXCLUSIVE, for P4b's
+  probation trigger, now created right after) in 6.7's one NOWAIT attempt
+  with the nine clinical tables, and nothing after 6.7 waits for a lock. The
+  first build created that trigger in section 5 and waited for
+  `platform.control_settings` in the control section while holding the nine
+  and `consent_grants`: an activation started in between deadlocked with the
+  migration (40P01; either side could be the victim, so the clinician's
+  activation could fail or the release stop), and every control read queued
+  behind the waiting lock until the deadlock was detected (about 1 s). The
+  build's race harness reproduced it in 6 of 6 runs and shows none since.
+  P4c's own commands also read controls inside clinical transactions, so a
+  later migration that locks `platform.control_settings` while holding
+  clinical locks or a lock on `identity.consent_grants` must take it in the
+  same NOWAIT attempt.
 - Locks: nothing before section 6.7 locks the nine clinical tables
   (`lab.work_items`, `pharmacy.work_items`, `ehr.lab_requests`,
   `ehr.encounters`, `ehr.prescriptions`, `lab.result_releases`,
   `lab.result_invalidations`, `pharmacy.dispensings`,
-  `pharmacy.dispensing_reversals`); 6.7 takes all nine ACCESS EXCLUSIVE at
-  once with NOWAIT, retrying every 100 ms, and stops the release with
+  `pharmacy.dispensing_reversals`), `platform.control_settings` or
+  `identity.consent_grants`; 6.7 takes the nine and
+  `platform.control_settings` ACCESS EXCLUSIVE and `identity.consent_grants`
+  SHARE ROW EXCLUSIVE at once with NOWAIT, retrying every 100 ms, so every
+  authenticated request's control read waits from 6.7 to commit (not behind
+  a waiting lock), and stops the release with
   nothing applied after 50 attempts (55P03, "the clinical order tables
   stayed busy for 5 seconds; run the release again at a quieter time").
   Measured on PostgreSQL 16 (the schema declaration's evidence): about 40 ms
@@ -1094,10 +1127,13 @@ The services' part of P4c (all new; routes under `/api/v1`, errors
   pharmacist's hand-off answer 409 `LAB_REQUEST_ROUTED` /
   `PRESCRIPTION_ROUTED`. An order counts as routed while its latest route is
   live or was ever accepted (one work item per order, ever).
-- lab-api and pharmacy-api: `GET order-routes?view=incoming|recent[&healthId=]`
-  (default `incoming`), `GET order-routes/:routeId`, `POST …/accept`
+- lab-api and pharmacy-api: `GET order-routes?view=incoming|recent`
+  (default `incoming`; its `healthId` parameter is deprecated, see below),
+  `POST order-routes/search` (`{ view?, healthId }`, the Health ID in the
+  body), `GET order-routes/:routeId`, `POST …/accept`
   (`Idempotency-Key`; the Health ID upper-cased and trimmed, or a calendar
-  date; pharmacy adds a reason of 8-500) and `POST …/decline`, for
+  date, and an optional `reference` (the order's 8 characters); pharmacy adds
+  a reason of 8-500) and `POST …/decline`, for
   `lab.order-route.receive` / `pharmacy.order-route.receive`, READ COMMITTED.
   A mismatch, the lock and `order_in_work` commit with their audit row and
   are answered after the commit (409, with `attemptsLeft` as a problem
@@ -1108,7 +1144,10 @@ The services' part of P4c (all new; routes under `/api/v1`, errors
   `none` asks Identity as before. Route-backed work rows carry the route card
   and, while the route allows a read, the patient's name, sex, date of birth
   and Health ID's last 4, and never the other facility's order, prescription
-  or encounter id. A Lab release refused by the return trigger is 409
+  or encounter id; a work list that shows a patient's identity writes one
+  audit row per patient shown (`lab.work-item.list` /
+  `pharmacy.work-item.list`, naming the patient, with the work item and route
+  ids and `basis: 'order-route'`). A Lab release refused by the return trigger is 409
   `ORDER_ROUTE_CLOSED`; a refused dispensing on a route-backed item is 409
   `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE`.
 - identity-api: `GET identity/order-destinations?kind=laboratory|pharmacy&query=`
@@ -1118,7 +1157,9 @@ The services' part of P4c (all new; routes under `/api/v1`, errors
   search; the audit row names the kind and the count, never the query);
   support's `GET admin/facilities/:facilityId/order-route-summary`,
   `POST admin/facilities/:facilityId/order-destination`,
-  `GET admin/order-routes?reference=|healthId=` and
+  `GET admin/order-routes?reference=` (its `healthId` parameter is
+  deprecated), `POST admin/order-routes/search` (`{ reference }` or
+  `{ healthId }`, same permissions and audit action) and
   `POST admin/order-routes/:routeId/close` (`If-Match`), `@FacilityOptional`,
   reads audited on success and failure, writes on failure only (their
   platform rows come from the commands); `POST admin/controls` accepts the
@@ -1133,9 +1174,21 @@ The services' part of P4c (all new; routes under `/api/v1`, errors
   returns; the patient's content includes what crossed about the orderer;
   `date` values are read by their calendar fields so no process time zone
   moves them; a unique violation or deadlock on a send answers 503
-  `ORDER_ROUTE_UNAVAILABLE` (a retry answers the real state); support's
-  lookup by Health ID puts it in the query string, as the route contract
-  says, so gateway access logs may keep it (flagged for the owner).
+  `ORDER_ROUTE_UNAVAILABLE` (a retry answers the real state).
+- Found by the review and fixed (P4c's backend fix):
+  - Health IDs in GET query strings (Lab and Pharmacy "Find by Health ID",
+    support's lookup) reached the gateway's access log, whose stock `main`
+    format keeps the request line with its query (CODEX §26). The gateway now
+    logs `$request_method $uri $server_protocol`, never the query string,
+    for every route; and each lookup has a POST that takes the Health ID in
+    its body. The GETs still take `healthId` for the website build that
+    sends it (deprecated): once the website calls the POSTs, the GETs should
+    refuse it.
+  - A change of the self-signed-up administrator's own access
+    (`identity.admin_set_self_service_administrator_role`) also overwrote
+    `self_service_verification_method`, which P4c's default listing reads, so
+    it listed or unlisted the facility for orders without any listing record.
+    The change's method is now kept in its audit row only.
 - Found by the integration's end-to-end run and fixed:
   - A route-backed work item that the strict policy hides (its route paused
     by `cross_facility_route_access_enabled`, or closed) answered 404 on
@@ -1154,8 +1207,16 @@ The services' part of P4c (all new; routes under `/api/v1`, errors
     has no facility): no patient could see, approve or deny a clinician's
     request, so no write grant could be created through the app. They are
     now patient-only and bound to the patient session (`main` does the
-    same); `main`'s recent-authentication and recovery-hold checks on
-    approval are not ported (the owner's decision).
+    same). `main`'s two checks on approval are ported too (the review found
+    the approval live without them, and a write grant is what lets a
+    clinician send the patient's order to another facility): an approval is
+    refused for 24 hours after an OTP account recovery (403
+    `PATIENT_RECENT_RECOVERY_HOLD`, checked first) and from a session family
+    first issued more than 10 minutes ago (403
+    `PATIENT_RECENT_AUTH_REQUIRED`, "For your security, sign out, sign in
+    again, and approve within 10 minutes."), in the approval's transaction;
+    the denial and the list stay unguarded. As in `main`, setting an Access
+    PIN is held for 24 hours after a recovery as well (revoking it is not).
 - The runtime verifier `services/ehr-api/scripts/verify-order-routes-runtime.mjs`
   (run by the TUF rehearsal after the provider verifier) boots Identity,
   EHR, Lab and Pharmacy from their own code, each as its exact runtime role,
