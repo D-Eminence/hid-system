@@ -18,7 +18,13 @@ export class CloseOrderRouteDto {
   reason!: string;
 }
 
-/** Support finds order routes by their reference or by the patient's Health ID (C21): exactly one. */
+/**
+ * Support finds order routes by their reference or by the patient's Health ID
+ * (C21): exactly one. The body of POST admin/order-routes/search, so a Health
+ * ID goes in no URL, whose request line access logs keep (CODEX §26, as POST
+ * principals/search and P4's CAC search); also the GET's query (deprecated
+ * for the Health ID).
+ */
 export class FindOrderRoutesDto {
   @IsOptional() @Transform(trim) @IsString() @MaxLength(64)
   reference?: string;

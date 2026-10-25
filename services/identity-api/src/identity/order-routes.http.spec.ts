@@ -60,6 +60,8 @@ describe('order-route routes in Identity: metadata', () => {
       .toEqual([['platform.admin.access', 'platform.facility.read'], 'admin.order-route-summary.read']);
     expect([meta(REQUIRED_PERMISSIONS, reads.find), meta(AUDIT_ACTION, reads.find)])
       .toEqual([['platform.admin.access', 'platform.principal.read'], 'admin.order-routes.find']);
+    expect([meta(REQUIRED_PERMISSIONS, reads.search), meta(AUDIT_ACTION, reads.search)])
+      .toEqual([['platform.admin.access', 'platform.principal.read'], 'admin.order-routes.find']);
     expect([meta(REQUIRED_PERMISSIONS, writes.setDestination), meta(AUDIT_ACTION, writes.setDestination)])
       .toEqual([['platform.admin.access', 'platform.facility.manage', 'platform.facility.unlock'], 'admin.order-route-destination.set']);
     expect([meta(REQUIRED_PERMISSIONS, writes.close), meta(AUDIT_ACTION, writes.close)])
@@ -261,15 +263,36 @@ describe('order-route routes in Identity over HTTP', () => {
         receivingFacilityId: laboratoryId, receivingFacilityName: 'Synthetic Laboratory', createdAt: '2026-10-25T09:00:00.000Z',
         acceptedAt: '2026-10-25T10:00:00.000Z', endedAt: null, endedKind: null }]);
       expect(sqlCalls('identity.admin_find_order_routes')[0]?.values).toEqual(['7000000A', null]);
+      // The Health ID goes in a POST body (CODEX §26); the GET's healthId is deprecated but still answered.
+      const byHealthId = await request(server()).post('/api/v1/admin/order-routes/search')
+        .set('Authorization', 'Bearer synthetic').send({ healthId: ' hid-abc234 ' });
+      expect([byHealthId.status, byHealthId.body.items[0]?.routeId]).toEqual([200, routeId]);
       await request(server()).get('/api/v1/admin/order-routes?healthId=hid-abc234').set('Authorization', 'Bearer synthetic');
-      expect(sqlCalls('identity.admin_find_order_routes')[1]?.values).toEqual([null, 'HID-ABC234']);
+      expect(sqlCalls('identity.admin_find_order_routes').slice(1).map((call) => call.values))
+        .toEqual([[null, 'HID-ABC234'], [null, 'HID-ABC234']]);
+      const byReference = await request(server()).post('/api/v1/admin/order-routes/search')
+        .set('Authorization', 'Bearer synthetic').send({ reference: '7000000a' });
+      expect([byReference.status, sqlCalls('identity.admin_find_order_routes')[3]?.values]).toEqual([200, ['7000000A', null]]);
       for (const query of ['', 'reference=7000000A&healthId=HID-ABC234', 'reference=7000000', 'reference=GGGGGGGG',
         'healthId=ABC234']) {
         const invalid = await request(server()).get(`/api/v1/admin/order-routes?${query}`).set('Authorization', 'Bearer synthetic');
         expect([invalid.status, invalid.body.code]).toEqual([400, 'ORDER_ROUTE_LOOKUP_INVALID']);
       }
-      expect(sqlCalls('identity.admin_find_order_routes')).toHaveLength(2);
+      for (const body of [{}, { reference: '7000000A', healthId: 'HID-ABC234' }, { healthId: 'ABC234' }]) {
+        const invalid = await request(server()).post('/api/v1/admin/order-routes/search')
+          .set('Authorization', 'Bearer synthetic').send(body);
+        expect([invalid.status, invalid.body.code]).toEqual([400, 'ORDER_ROUTE_LOOKUP_INVALID']);
+      }
+      const unknownField = await request(server()).post('/api/v1/admin/order-routes/search')
+        .set('Authorization', 'Bearer synthetic').send({ healthId: 'HID-ABC234', dateOfBirth: '1990-01-01' });
+      expect([unknownField.status, unknownField.body.code]).toEqual([400, 'VALIDATION_FAILED']);
+      expect(sqlCalls('identity.admin_find_order_routes')).toHaveLength(4);
       expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'api.admin.order-routes.find', outcome: 'failure' }));
+      expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'api.admin.order-routes.find', outcome: 'success' }));
+      admin(['platform.admin.access']);
+      const denied = await request(server()).post('/api/v1/admin/order-routes/search')
+        .set('Authorization', 'Bearer synthetic').send({ healthId: 'HID-ABC234' });
+      expect([denied.status, denied.body.code]).toEqual([403, 'PERMISSION_DENIED']);
     });
 
     it('lists or unlists a facility for orders, with a reason; failures audited only', async () => {

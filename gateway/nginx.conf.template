@@ -1,9 +1,17 @@
 limit_req_zone $binary_remote_addr zone=hid_chat:1m rate=6r/m;
+# The access log keeps the path, never the query string: $request (the stock
+# "main" format's request line) would keep a patient's Health ID or a search a
+# browser sent in a GET query (CODEX §26). This file is included in the http
+# context, where log_format must be; the server's access_log below replaces
+# the inherited "main" log for every location (health checks stay off).
+log_format hid_uri '$remote_addr - [$time_local] "$request_method $uri $server_protocol" $status $body_bytes_sent '
+                   '$request_time "$http_user_agent"';
 
 server {
   listen 3000;
   server_name _;
   server_tokens off;
+  access_log /var/log/nginx/access.log hid_uri;
   # Common API timeout is inherited; chat locations override it individually.
   proxy_read_timeout 30s;
   # The origin-authenticated edge overwrites this header. Only the private ALB

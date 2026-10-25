@@ -26,11 +26,26 @@ export class AdminOrderRouteReadsController {
     return this.routes.summary(requireAdminContext(request), facilityId);
   }
 
+  /** By reference, or (deprecated, CODEX §26) by a Health ID in the query: the console moves to the POST. */
   @Get('order-routes')
   @RequirePermissions('platform.admin.access', 'platform.principal.read')
   @AuditAction('admin.order-routes.find')
   find(@Query() query: FindOrderRoutesDto, @Req() request: HidRequest) {
     return this.routes.find(requireAdminContext(request), query.reference || undefined, query.healthId || undefined);
+  }
+
+  /**
+   * The lookup with the reference or the Health ID in the body, so the
+   * patient's Health ID is in no request line the gateway or an edge logs
+   * (CODEX §26, as POST principals/search). Same permissions, audit action
+   * and answer as the GET.
+   */
+  @Post('order-routes/search')
+  @HttpCode(200)
+  @RequirePermissions('platform.admin.access', 'platform.principal.read')
+  @AuditAction('admin.order-routes.find')
+  search(@Body() input: FindOrderRoutesDto, @Req() request: HidRequest) {
+    return this.routes.find(requireAdminContext(request), input.reference || undefined, input.healthId || undefined);
   }
 }
 
