@@ -133,6 +133,37 @@
 -- Governed and legacy organizations are unchanged: no self-service
 -- application, so the gate allows their role rows, the staff context adds
 -- nothing and no staff command serves them.
+-- Section 6 (P4c, owner decisions of 2026-10-25, fifth and sixth sets:
+-- cross-facility lab requests and prescriptions in this release, the doctor
+-- sends, the doctor's word only; recorded in docs/MAIN_TO_NOVU_PORT.md) adds:
+--   * the permissions ehr.order-route.send (doctor, clinician),
+--     lab.order-route.receive (lab) and pharmacy.order-route.receive
+--     (pharmacist), and the clinician's attestation texts (one per kind);
+--   * the order route (ehr.order_routes) with its append-only events,
+--     identification attempts, result and dispensing reports and support's
+--     listing settings; a clinician at the ordering facility sends a lab
+--     request or prescription to a reviewed or governed laboratory or
+--     pharmacy, attesting that the patient agreed and naming it (no in-app
+--     approval); the patient is told in the inbox at once and can stop it
+--     until the receiving facility accepts; the receiving facility confirms
+--     the patient's Health ID or date of birth to accept (5 wrong tries lock
+--     that order there), which creates the Lab or Pharmacy work item there,
+--     bound to the route; its members holding the receive permission then
+--     work it for a limited time (30 days; 14 after the first result or
+--     dispensing, at most 45) without a consent grant; results and dispensing
+--     come back to the ordering facility as append-only reports;
+--   * route-backed Lab and Pharmacy work items (a column, a facility rule,
+--     keys by the ordering facility and strict policies), a route branch in
+--     lab.context_allows and pharmacy.context_allows, the work-item and
+--     dispensing validators, a mirror of order changes, the release of a
+--     self-signed-up organization closing its routes both ways, and support's
+--     find, close and listing commands;
+--   * the controls cross_facility_orders_enabled (seeded OFF) and
+--     cross_facility_route_access_enabled (seeded ON);
+--   * the patient inbox's two functions granted to the Identity runtime
+--     (main's grant; never made on this branch).
+-- Same-facility hand-offs are unchanged except that they are refused while
+-- the order has a live route.
 -- main's 0061 interim review check and its re-add of the status check (same
 -- values as 0046) are not ported, nor main's later migrations or staff MFA.
 --
@@ -154,6 +185,18 @@
 -- auth.permissions and auth.role_permissions (its inserts); no request path
 -- writes them per request. The new tables and functions lock nothing else
 -- that already exists.
+-- Section 6 adds, until commit, only SHARE ROW EXCLUSIVE locks already held
+-- (identity.facilities, auth.accounts, identity.staff_facility_memberships,
+-- for the new tables' foreign keys), a trigger on
+-- identity.organization_applications (already ACCESS EXCLUSIVE) and ROW
+-- EXCLUSIVE on auth.permissions and auth.role_permissions, until its last
+-- part (6.7), which takes ACCESS EXCLUSIVE on lab.work_items,
+-- pharmacy.work_items, ehr.lab_requests, ehr.encounters, ehr.prescriptions,
+-- lab.result_releases, lab.result_invalidations, pharmacy.dispensings and
+-- pharmacy.dispensing_reversals all at once with a NOWAIT retry (it never
+-- waits while holding one of them; 5 seconds of busy tables stop the release
+-- with nothing applied), and holds them to commit. Nothing before 6.7 locks
+-- any of these nine. The control section still comes last.
 --
 -- Applied migrations 0001 through 0085 are immutable.
 
@@ -183,6 +226,90 @@ begin
   if unreviewable <> 0 then
     raise exception '0086: % closed organization application(s) have no review reason of 8 or more characters, reviewer or review time; the self-service review check would refuse them. Resolve them before this release',
       unreviewable;
+  end if;
+end
+$$;
+
+-- P4c (section 6): refuse rather than overwrite. The vocabulary and the route
+-- tables must not exist yet; no trigger may already carry one of section 6's
+-- names; the five functions section 6 replaces must still have the bodies it
+-- was written against (md5 of pg_proc.prosrc, measured on 0001-0085 in both
+-- build orders); and the constraints and policies it drops must be exactly
+-- the ones it expects, by name and by definition. Reading the catalog takes
+-- no lock on the clinical tables.
+do $$
+declare
+  mismatch text;
+begin
+  if exists (select 1 from auth.permissions permission
+              where permission.code in ('ehr.order-route.send', 'lab.order-route.receive', 'pharmacy.order-route.receive'))
+     or to_regclass('ehr.order_routes') is not null
+     or to_regclass('ehr.order_route_events') is not null then
+    raise exception '0086: the cross-facility order vocabulary or route tables already exist; this release would overwrite them';
+  end if;
+  if exists (select 1 from pg_trigger trigger_row
+              where not trigger_row.tgisinternal
+                and trigger_row.tgname in ('order_routes_guard', 'order_routes_first_event',
+                  'lab_requests_order_routes_sync', 'prescriptions_order_routes_sync',
+                  'organization_applications_order_routes_release', 'result_releases_order_route_return',
+                  'result_invalidations_order_route_return', 'dispensings_order_route_return',
+                  'dispensing_reversals_order_route_return')) then
+    raise exception '0086: a trigger with a cross-facility order name already exists';
+  end if;
+  select string_agg(format('%s md5 %s', expected.proc, md5(proc.prosrc)), '; ') into mismatch
+    from (values ('lab.context_allows(uuid,uuid,text)'::regprocedure, 'ccf4522a10bad47d698161bfc41e841b'),
+                 ('pharmacy.context_allows(uuid,uuid,text)'::regprocedure, '001c21c70dab5dc0538a6cec4e94f8e8'),
+                 ('lab.validate_work_item()'::regprocedure, '8d3d104c486ff968ab1160ee1493e375'),
+                 ('pharmacy.validate_work_item()'::regprocedure, '5240c48243ff831fb30a470b80cd6a57'),
+                 ('pharmacy.validate_dispensing()'::regprocedure, '1a30589c96b4aa8176a5b5a77bc0629d'))
+         expected(proc, digest)
+    join pg_proc proc on proc.oid = expected.proc
+   where md5(proc.prosrc) <> expected.digest;
+  if mismatch is not null then
+    raise exception '0086: a function section 6 replaces has another body than 0017, 0023 or 0077 gave it: %', mismatch;
+  end if;
+  select string_agg(format('%s.%s', expected.relation, expected.name), ', ') into mismatch
+    from (values ('lab.work_items'::regclass, 'work_items_check', 'CHECK ((facility_id = ordering_facility_id))'),
+                 ('lab.work_items'::regclass, 'work_items_source_ehr_order_id_patient_id_facility_id_fkey',
+                  'FOREIGN KEY (source_ehr_order_id, patient_id, facility_id) REFERENCES ehr.lab_requests(id, patient_id, facility_id) ON DELETE RESTRICT'),
+                 ('lab.work_items'::regclass, 'work_items_source_encounter_id_patient_id_facility_id_fkey',
+                  'FOREIGN KEY (source_encounter_id, patient_id, facility_id) REFERENCES ehr.encounters(id, patient_id, facility_id) ON DELETE RESTRICT'))
+         expected(relation, name, definition)
+   where not exists (select 1 from pg_constraint constraint_row
+                      where constraint_row.conrelid = expected.relation
+                        and constraint_row.conname = expected.name
+                        and pg_get_constraintdef(constraint_row.oid) = expected.definition);
+  if mismatch is not null then
+    raise exception '0086: lab.work_items does not have the constraints section 6 replaces, by name and definition: %', mismatch;
+  end if;
+  if (select count(*) from pg_constraint constraint_row
+       where constraint_row.conrelid = 'pharmacy.work_items'::regclass and constraint_row.contype = 'c'
+         and pg_get_constraintdef(constraint_row.oid) = 'CHECK ((facility_id = ordering_facility_id))') <> 1
+     or exists (select 1 from pg_constraint constraint_row
+                 where constraint_row.conrelid = 'pharmacy.work_items'::regclass and constraint_row.contype = 'f'
+                   and constraint_row.confrelid in ('ehr.prescriptions'::regclass, 'ehr.encounters'::regclass)) then
+    raise exception '0086: pharmacy.work_items must have exactly one CHECK ((facility_id = ordering_facility_id)) and no foreign key to an EHR table';
+  end if;
+  select string_agg(format('%s.%s', expected.relation, expected.name), ', ') into mismatch
+    from (values ('lab.work_items'::regclass, 'lab_work_items_read', 'r',
+                  'lab.context_allows(patient_id, facility_id, ''read_records''::text)', null::text),
+                 ('lab.work_items'::regclass, 'lab_work_items_insert', 'a',
+                  null, 'lab.context_allows(patient_id, facility_id, ''write_records''::text)'),
+                 ('pharmacy.work_items'::regclass, 'pharmacy_work_items_read', 'r',
+                  'pharmacy.context_allows(patient_id, facility_id, ''read_records''::text)', null),
+                 ('pharmacy.work_items'::regclass, 'pharmacy_work_items_insert', 'a',
+                  null, 'pharmacy.context_allows(patient_id, facility_id, ''write_records''::text)'))
+         expected(relation, name, command, qual, with_check)
+   where not exists (select 1 from pg_policy policy
+                      where policy.polrelid = expected.relation and policy.polname = expected.name
+                        and policy.polcmd = expected.command::"char" and policy.polpermissive
+                        and policy.polroles = array[0::oid]
+                        and pg_get_expr(policy.polqual, policy.polrelid) is not distinct from expected.qual
+                        and pg_get_expr(policy.polwithcheck, policy.polrelid) is not distinct from expected.with_check);
+  if mismatch is not null
+     or (select count(*) from pg_policy policy
+          where policy.polrelid in ('lab.work_items'::regclass, 'pharmacy.work_items'::regclass)) <> 4 then
+    raise exception '0086: the work-item policies are not exactly the four of 0018 and 0023: %', coalesce(mismatch, 'another policy exists');
   end if;
 end
 $$;
@@ -5955,7 +6082,3932 @@ revoke all on function identity.record_self_service_administrator_licence(text,t
   identity.admin_find_staff_invitations(text)
   from public;
 
--- 6. Runtime grants (A5). runtime-grants.sql carries the same grants for a
+-- 6. Cross-facility orders (P4c; owner decisions of 2026-10-25, fifth and
+-- sixth sets: "build cross-facility orders now", the doctor sends, the
+-- doctor's word only). A clinician at the ordering facility (A) sends a lab
+-- request or a prescription to a reviewed or governed laboratory or pharmacy
+-- at another facility (B), attesting that the patient agreed, naming B; the
+-- patient is told in the inbox at once and may stop it until B accepts; B
+-- confirms the patient's Health ID or date of birth to accept, which creates
+-- the Lab or Pharmacy work item at B bound to the route; B's members holding
+-- the receive permission then work it without a consent grant, for a limited
+-- time; results and dispensing come back to A as append-only reports.
+-- Route states (ehr.order_routes.state; the effective state of every read
+-- also turns a sent route past respond_by, and an accepted route past its
+-- work window, into expired):
+--   sent       sent with the attestation; B sees a preview; 7 days to accept;
+--   accepted   B accepted; 30 days to work (writes_end_at = access_ends_at);
+--   completed  the first released result or dispensing came back; both
+--              windows become least(completed + 14 days, accepted + 45 days);
+--   declined, withdrawn, expired   ended before acceptance (ended_kind);
+--   cancelled  ended after acceptance: writes end now, reads 7 more days.
+-- Live = sent, accepted, completed; at most one live route per order, at
+-- most 5 routes per order, none after a route was ever accepted. Windows are
+-- absolute hours (7 days = 168 hours), so no session time zone moves them.
+-- Lock order at run time: at A, the order row FOR NO KEY UPDATE, then the
+-- ordering and the receiving organization's self-service application FOR
+-- SHARE (identity.lock_self_service_application), then the order's routes FOR
+-- UPDATE in id order; at B, its own application FOR SHARE, then the route FOR
+-- UPDATE, then the work-item and report inserts; the patient's Stop and
+-- support's close take the route only; the release holds its application FOR
+-- UPDATE, then the routes; a Lab release or a dispensing takes the route
+-- after its own rows, never an application. No path takes a route before an
+-- application or an order row, and none takes FOR UPDATE on an
+-- ehr.lab_requests or ehr.encounters row while it holds a route.
+-- Until 6.7 nothing here locks lab.work_items, pharmacy.work_items,
+-- ehr.lab_requests, ehr.encounters, ehr.prescriptions, lab.result_releases,
+-- lab.result_invalidations, pharmacy.dispensings or
+-- pharmacy.dispensing_reversals: the new tables have no foreign key to them
+-- until 6.7, every function that reads them is PL/pgSQL (not analysed at
+-- creation), and replacing a function locks no table. 6.7 takes all nine at
+-- once with a NOWAIT retry and holds them to commit.
+
+-- 6.0 Section 5's objects this section builds on (they are created above in
+-- this file; the check guards a later edit of section 5).
+do $$
+begin
+  if to_regprocedure('identity.organization_self_service_state(uuid)') is null
+     or to_regprocedure('identity.lock_self_service_application(uuid)') is null
+     or to_regprocedure('identity.self_service_on_probation(uuid)') is null
+     or to_regclass('identity.staff_licence_attestations') is null then
+    raise exception '0086 section 6 needs section 5''s state, lock and probation functions and its licence attestations';
+  end if;
+end
+$$;
+
+-- 6.1 Vocabulary. Without ON CONFLICT: an existing row stops the release
+-- (the preconditions in section 0 refuse it first). The restricted
+-- administrator (org_admin_awaiting_review) gets none of them.
+insert into auth.permissions (code, description) values
+  ('ehr.order-route.send', 'Send a lab request or prescription to a laboratory or pharmacy at another facility'),
+  ('lab.order-route.receive', 'Receive, accept and work lab requests other facilities send'),
+  ('pharmacy.order-route.receive', 'Receive, accept and work prescriptions other facilities send');
+insert into auth.role_permissions (role_code, permission_code) values
+  ('doctor', 'ehr.order-route.send'),
+  ('clinician', 'ehr.order-route.send'),
+  ('lab', 'lab.order-route.receive'),
+  ('pharmacist', 'pharmacy.order-route.receive');
+
+-- The limits (owner-only, immutable).
+create function ehr.order_route_limits()
+returns table (
+  sends_per_member_per_day integer,
+  sends_per_pair_per_day integer,
+  open_per_destination integer,
+  routes_per_order integer,
+  searches_per_member_per_hour integer,
+  respond_days integer,
+  work_days integer,
+  after_completion_days integer,
+  access_cap_days integer,
+  read_after_cancel_days integer,
+  mismatches_per_route integer,
+  mismatches_per_member_per_day integer
+)
+language sql immutable parallel safe
+set search_path = pg_catalog, pg_temp
+as $$
+  select 100, 200, 500, 5, 60, 7, 30, 14, 45, 7, 5, 20
+$$;
+
+-- The receive permission, the destination's organization type and the
+-- kind's EHR write permission, by route kind (NULL for anything else).
+create function ehr.order_route_receive_permission(requested_kind text)
+returns text
+language sql immutable parallel safe
+set search_path = pg_catalog, pg_temp
+as $$
+  select case requested_kind when 'lab_request' then 'lab.order-route.receive'
+                             when 'prescription' then 'pharmacy.order-route.receive' end
+$$;
+
+create function ehr.order_route_destination_type(requested_kind text)
+returns text
+language sql immutable parallel safe
+set search_path = pg_catalog, pg_temp
+as $$
+  select case requested_kind when 'lab_request' then 'laboratory' when 'prescription' then 'pharmacy' end
+$$;
+
+create function ehr.order_route_write_permission(requested_kind text)
+returns text
+language sql immutable parallel safe
+set search_path = pg_catalog, pg_temp
+as $$
+  select case requested_kind when 'lab_request' then 'ehr.lab-request.write'
+                             when 'prescription' then 'ehr.prescription.write' end
+$$;
+
+revoke all on function ehr.order_route_limits(), ehr.order_route_receive_permission(text),
+  ehr.order_route_destination_type(text), ehr.order_route_write_permission(text) from public;
+
+-- The clinician's attestation texts (T4, append-only; owner decision Q2 of
+-- the sixth set: the doctor's word only). The website fills {patient},
+-- {orderingFacility} and {receivingFacility}; the route stores the version
+-- the clinician confirmed. The current text of a kind is its newest row.
+-- The wording is the DPO's to approve before the switch-on.
+create table ehr.order_route_attestation_texts (
+  version text primary key check (version ~ '^order-route-(lab|prescription)-attestation-v[0-9]+$'),
+  kind text not null check (kind in ('lab_request', 'prescription')),
+  text text not null check (length(text) between 20 and 1000
+    and position('{patient}' in text) > 0 and position('{receivingFacility}' in text) > 0),
+  created_at timestamptz not null default clock_timestamp(),
+  constraint order_route_attestation_texts_kind_ck check (
+    (kind = 'lab_request') = (version like 'order-route-lab-%')),
+  constraint order_route_attestation_texts_version_kind_uq unique (version, kind)
+);
+alter table ehr.order_route_attestation_texts enable row level security;
+alter table ehr.order_route_attestation_texts force row level security;
+create policy order_route_attestation_texts_command_read on ehr.order_route_attestation_texts
+  for select using (true);
+create policy order_route_attestation_texts_command_insert on ehr.order_route_attestation_texts
+  for insert with check (true);
+create policy order_route_attestation_texts_command_update on ehr.order_route_attestation_texts
+  for update using (true) with check (true);
+create policy order_route_attestation_texts_command_delete on ehr.order_route_attestation_texts
+  for delete using (true);
+revoke all on ehr.order_route_attestation_texts from public;
+insert into ehr.order_route_attestation_texts (version, kind, text) values
+  ('order-route-lab-attestation-v1', 'lab_request',
+   'I confirm that {patient} agreed that {orderingFacility} sends this test request to {receivingFacility}. I told them that once {receivingFacility} accepts it, it sees their name, sex, date of birth and Health ID, the test and what I wrote about it, and sends the result back to {orderingFacility}; and that the Health ID app shows them where it went and lets them stop it until {receivingFacility} accepts it.'),
+  ('order-route-prescription-attestation-v1', 'prescription',
+   'I confirm that {patient} agreed that {orderingFacility} sends this prescription to {receivingFacility}. I told them that once {receivingFacility} accepts it, it sees their name, sex, date of birth and Health ID, the medicine, how to take it and my instructions, and tells {orderingFacility} what it dispensed; and that the Health ID app shows them where it went and lets them stop it until {receivingFacility} accepts it.');
+create trigger order_route_attestation_texts_no_mutation
+  before update or delete on ehr.order_route_attestation_texts
+  for each row execute function platform.reject_mutation();
+
+-- 6.2 The route tables. uuid keys only; forced row-level security with four
+-- permissive policies (so the guard and no-mutation triggers fire for every
+-- role, including an owner that does not bypass row-level security); no
+-- runtime table privilege: the commands below are the only path. Foreign keys
+-- to the nine clinical tables are added in 6.7.
+
+-- T1. The route: a stable header, its snapshot of the order as sent, the
+-- clinician's attestation, and the transition columns, each set once. Only
+-- ehr.write_order_route_change updates it, an event first (T2).
+create table ehr.order_routes (
+  id uuid primary key,
+  reference char(8) generated always as (upper(left(replace(id::text, '-', ''), 8))) stored,
+  kind text not null check (kind in ('lab_request', 'prescription')),
+  patient_id uuid not null,
+  ordering_organization_id uuid not null,
+  ordering_facility_id uuid not null,
+  source_lab_request_id uuid,
+  source_prescription_id uuid,
+  source_encounter_id uuid not null,
+  source_order_version bigint not null check (source_order_version > 0),
+  receiving_organization_id uuid not null,
+  receiving_facility_id uuid not null,
+  state text not null check (state in ('sent', 'accepted', 'completed', 'declined', 'withdrawn', 'expired', 'cancelled')),
+  sent_by_account_id uuid not null,
+  sent_by_membership_id uuid not null,
+  created_at timestamptz not null,
+  respond_by timestamptz not null,
+  patient_agreement text not null check (patient_agreement = 'clinician_attested'),
+  attestation_text_version text not null,
+  attested_by_name text not null check (attested_by_name = btrim(attested_by_name)
+    and length(attested_by_name) between 2 and 200),
+  attested_receiving_facility_name text not null check (
+    attested_receiving_facility_name = btrim(attested_receiving_facility_name)
+    and length(attested_receiving_facility_name) between 1 and 200),
+  orderer_account_id uuid not null references auth.accounts(id) on delete restrict,
+  orderer_membership_id uuid not null,
+  orderer_name text not null check (orderer_name = btrim(orderer_name) and length(orderer_name) between 2 and 200),
+  orderer_licence_body text check (orderer_licence_body is null or orderer_licence_body = 'MDCN'),
+  orderer_licence_number text check (orderer_licence_number is null
+    or (orderer_licence_number ~ '^[A-Z0-9][A-Z0-9/. -]{1,98}[A-Z0-9]$' and orderer_licence_number !~ '  ')),
+  test_code_system text check (test_code_system is null or length(test_code_system) between 1 and 255),
+  test_code text check (test_code is null or length(test_code) between 1 and 100),
+  test_display text check (test_display is null or length(test_display) between 1 and 500),
+  priority text check (priority is null or priority in ('routine', 'urgent', 'asap', 'stat')),
+  specimen_type_code text check (specimen_type_code is null or length(specimen_type_code) <= 100),
+  clinical_information text check (clinical_information is null or char_length(clinical_information) <= 4000),
+  requested_at timestamptz,
+  medication_code_system text check (medication_code_system is null or length(medication_code_system) <= 255),
+  medication_code text check (medication_code is null or length(medication_code) <= 100),
+  medication_display text check (medication_display is null or length(medication_display) between 1 and 500),
+  dose_quantity numeric(12,4) check (dose_quantity is null or dose_quantity > 0),
+  dose_unit text check (dose_unit is null or length(dose_unit) <= 80),
+  route_code text check (route_code is null or length(route_code) <= 100),
+  frequency text check (frequency is null or length(frequency) between 1 and 240),
+  instructions text check (instructions is null or length(instructions) between 1 and 4000),
+  starts_on date,
+  ends_on date,
+  prescribed_at timestamptz,
+  accepted_at timestamptz,
+  accepted_by_account_id uuid references auth.accounts(id) on delete restrict,
+  accepted_by_membership_id uuid,
+  accept_idempotency_key text check (accept_idempotency_key is null
+    or accept_idempotency_key ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$'),
+  accept_request_sha256 char(64) check (accept_request_sha256 is null or accept_request_sha256 ~ '^[0-9a-f]{64}$'),
+  accept_locked_at timestamptz,
+  lab_work_item_id uuid,
+  pharmacy_work_item_id uuid,
+  declined_at timestamptz,
+  declined_by_account_id uuid references auth.accounts(id) on delete restrict,
+  declined_by_membership_id uuid,
+  decline_reason text check (decline_reason is null or decline_reason in
+    ('test_not_offered', 'medicine_unavailable', 'cannot_meet_priority', 'patient_not_seen', 'other')),
+  ended_at timestamptz,
+  ended_kind text check (ended_kind is null or ended_kind in ('orderer', 'patient', 'order_changed',
+    'entered_in_error', 'receiving_released', 'ordering_released', 'support', 'order_in_work', 'not_accepted')),
+  ended_by_account_id uuid references auth.accounts(id) on delete restrict,
+  completed_at timestamptz,
+  writes_end_at timestamptz,
+  access_ends_at timestamptz,
+  idempotency_key text not null check (idempotency_key ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$'),
+  request_sha256 char(64) not null check (request_sha256 ~ '^[0-9a-f]{64}$'),
+  correlation_id text not null check (length(correlation_id) between 8 and 128),
+  updated_at timestamptz not null default clock_timestamp(),
+  row_version bigint not null default 1 check (row_version > 0),
+  constraint order_routes_ordering_facility_fk foreign key (ordering_facility_id, ordering_organization_id)
+    references identity.facilities(id, organization_id) on delete restrict,
+  constraint order_routes_receiving_facility_fk foreign key (receiving_facility_id, receiving_organization_id)
+    references identity.facilities(id, organization_id) on delete restrict,
+  constraint order_routes_distinct_facilities_ck check (receiving_facility_id <> ordering_facility_id),
+  constraint order_routes_sender_fk foreign key (sent_by_membership_id, ordering_facility_id, sent_by_account_id)
+    references identity.staff_facility_memberships(id, facility_id, account_id) on delete restrict,
+  constraint order_routes_orderer_fk foreign key (orderer_membership_id, ordering_facility_id, orderer_account_id)
+    references identity.staff_facility_memberships(id, facility_id, account_id) on delete restrict,
+  constraint order_routes_acceptor_fk foreign key (accepted_by_membership_id, receiving_facility_id, accepted_by_account_id)
+    references identity.staff_facility_memberships(id, facility_id, account_id) on delete restrict,
+  constraint order_routes_decliner_fk foreign key (declined_by_membership_id, receiving_facility_id, declined_by_account_id)
+    references identity.staff_facility_memberships(id, facility_id, account_id) on delete restrict,
+  constraint order_routes_attestation_text_fk foreign key (attestation_text_version, kind)
+    references ehr.order_route_attestation_texts(version, kind) on delete restrict,
+  constraint order_routes_idempotency_uq unique (sent_by_account_id, ordering_facility_id, idempotency_key),
+  constraint order_routes_respond_by_ck check (respond_by = created_at + interval '168 hours'),
+  constraint order_routes_kind_ck check (
+    (kind = 'lab_request' and source_lab_request_id is not null and source_prescription_id is null
+      and test_code_system is not null and test_code is not null and test_display is not null
+      and priority is not null and requested_at is not null
+      and medication_code_system is null and medication_code is null and medication_display is null
+      and dose_quantity is null and dose_unit is null and route_code is null and frequency is null
+      and instructions is null and starts_on is null and ends_on is null and prescribed_at is null
+      and pharmacy_work_item_id is null)
+    or (kind = 'prescription' and source_prescription_id is not null and source_lab_request_id is null
+      and medication_display is not null and frequency is not null and instructions is not null
+      and prescribed_at is not null
+      and test_code_system is null and test_code is null and test_display is null and priority is null
+      and specimen_type_code is null and clinical_information is null and requested_at is null
+      and lab_work_item_id is null)),
+  constraint order_routes_licence_ck check ((orderer_licence_body is null) = (orderer_licence_number is null)),
+  constraint order_routes_dose_ck check ((dose_quantity is null) = (dose_unit is null)),
+  constraint order_routes_dates_ck check (ends_on is null or starts_on is null or ends_on >= starts_on),
+  constraint order_routes_acceptance_ck check (
+    (accepted_at is null and accepted_by_account_id is null and accepted_by_membership_id is null
+      and accept_idempotency_key is null and accept_request_sha256 is null
+      and lab_work_item_id is null and pharmacy_work_item_id is null
+      and writes_end_at is null and access_ends_at is null
+      and state in ('sent', 'declined', 'withdrawn', 'expired'))
+    or (accepted_at is not null and accepted_by_account_id is not null and accepted_by_membership_id is not null
+      and accept_idempotency_key is not null and accept_request_sha256 is not null
+      and ((kind = 'lab_request' and lab_work_item_id is not null)
+        or (kind = 'prescription' and pharmacy_work_item_id is not null))
+      and writes_end_at is not null and access_ends_at is not null
+      and writes_end_at <= access_ends_at and access_ends_at <= accepted_at + interval '1080 hours'
+      and state in ('accepted', 'completed', 'cancelled'))),
+  constraint order_routes_decline_ck check (
+    ((state = 'declined') = (declined_at is not null))
+    and ((declined_at is null and declined_by_account_id is null and declined_by_membership_id is null
+          and decline_reason is null)
+      or (declined_at is not null and declined_by_account_id is not null and declined_by_membership_id is not null
+          and decline_reason is not null))),
+  constraint order_routes_completion_ck check ((state = 'completed') = (completed_at is not null)),
+  constraint order_routes_end_ck check (
+    (ended_at is null) = (ended_kind is null)
+    and (ended_by_account_id is null or ended_at is not null)
+    and coalesce(case state
+      when 'withdrawn' then ended_kind in ('orderer', 'patient', 'order_changed', 'entered_in_error',
+        'receiving_released', 'ordering_released', 'support', 'order_in_work')
+      when 'expired' then ended_kind = 'not_accepted'
+      when 'cancelled' then ended_kind in ('order_changed', 'entered_in_error', 'receiving_released',
+        'ordering_released', 'support')
+      when 'completed' then ended_kind is null or ended_kind in ('entered_in_error', 'receiving_released',
+        'ordering_released', 'support')
+      else ended_kind is null end, false)),
+  constraint order_routes_accept_lock_ck check (accept_locked_at is null or accepted_at is null)
+);
+create unique index order_routes_live_lab_request_uq on ehr.order_routes (source_lab_request_id)
+  where state in ('sent', 'accepted', 'completed') and source_lab_request_id is not null;
+create unique index order_routes_live_prescription_uq on ehr.order_routes (source_prescription_id)
+  where state in ('sent', 'accepted', 'completed') and source_prescription_id is not null;
+create index order_routes_lab_request_idx on ehr.order_routes (source_lab_request_id)
+  where source_lab_request_id is not null;
+create index order_routes_prescription_idx on ehr.order_routes (source_prescription_id)
+  where source_prescription_id is not null;
+create index order_routes_receiving_idx on ehr.order_routes (receiving_facility_id, state, created_at);
+create index order_routes_access_idx on ehr.order_routes (receiving_facility_id, patient_id, kind)
+  where state in ('accepted', 'completed', 'cancelled');
+create index order_routes_ordering_idx on ehr.order_routes (ordering_facility_id, created_at);
+create index order_routes_patient_idx on ehr.order_routes (patient_id, created_at desc);
+create index order_routes_sender_idx on ehr.order_routes (sent_by_membership_id, created_at);
+create index order_routes_pair_idx on ehr.order_routes (ordering_facility_id, receiving_facility_id, created_at);
+create index order_routes_reference_idx on ehr.order_routes (reference);
+create index order_routes_lab_work_item_idx on ehr.order_routes (lab_work_item_id) where lab_work_item_id is not null;
+create index order_routes_pharmacy_work_item_idx on ehr.order_routes (pharmacy_work_item_id)
+  where pharmacy_work_item_id is not null;
+create index order_routes_ordering_organization_idx on ehr.order_routes (ordering_organization_id);
+create index order_routes_receiving_organization_idx on ehr.order_routes (receiving_organization_id);
+alter table ehr.order_routes enable row level security;
+alter table ehr.order_routes force row level security;
+create policy order_routes_command_read on ehr.order_routes for select using (true);
+create policy order_routes_command_insert on ehr.order_routes for insert with check (true);
+create policy order_routes_command_update on ehr.order_routes for update using (true) with check (true);
+create policy order_routes_command_delete on ehr.order_routes for delete using (true);
+revoke all on ehr.order_routes from public;
+
+-- T2. The route's events (append-only): one per version of the route, with
+-- the state and windows after it. Actor ids are stored and never returned
+-- across facilities.
+create table ehr.order_route_events (
+  id uuid primary key default gen_random_uuid(),
+  route_id uuid not null references ehr.order_routes(id) on delete restrict,
+  event_version bigint not null check (event_version > 0),
+  event_type text not null check (event_type in ('created', 'withdrawn', 'expired', 'accept_locked', 'accepted',
+    'declined', 'cancelled', 'completed', 'result_returned', 'result_marked_in_error', 'dispensing_returned',
+    'dispensing_reversed', 'order_changed_after_acceptance', 'order_changed_after_completion', 'access_ended')),
+  side text not null check (side in ('ordering', 'receiving', 'patient', 'platform', 'system')),
+  actor_account_id uuid references auth.accounts(id) on delete restrict,
+  actor_membership_id uuid references identity.staff_facility_memberships(id) on delete restrict,
+  reason_code text check (reason_code is null or reason_code ~ '^[a-z][a-z_]{1,39}$'),
+  state_after text not null check (state_after in ('sent', 'accepted', 'completed', 'declined', 'withdrawn',
+    'expired', 'cancelled')),
+  writes_end_at_after timestamptz,
+  access_ends_at_after timestamptz,
+  correlation_id text not null check (length(correlation_id) between 8 and 128),
+  occurred_at timestamptz not null default clock_timestamp(),
+  constraint order_route_events_version_uq unique (route_id, event_version)
+);
+alter table ehr.order_route_events enable row level security;
+alter table ehr.order_route_events force row level security;
+create policy order_route_events_command_read on ehr.order_route_events for select using (true);
+create policy order_route_events_command_insert on ehr.order_route_events for insert with check (true);
+create policy order_route_events_command_update on ehr.order_route_events for update using (true) with check (true);
+create policy order_route_events_command_delete on ehr.order_route_events for delete using (true);
+revoke all on ehr.order_route_events from public;
+create trigger order_route_events_no_mutation
+  before update or delete on ehr.order_route_events
+  for each row execute function platform.reject_mutation();
+
+-- T3. Identification attempts at acceptance (append-only). The identifier
+-- itself is never stored.
+create table ehr.order_route_accept_attempts (
+  id uuid primary key default gen_random_uuid(),
+  route_id uuid not null references ehr.order_routes(id) on delete restrict,
+  receiving_facility_id uuid not null references identity.facilities(id) on delete restrict,
+  account_id uuid not null references auth.accounts(id) on delete restrict,
+  membership_id uuid not null references identity.staff_facility_memberships(id) on delete restrict,
+  identifier_kind text not null check (identifier_kind in ('health_id', 'date_of_birth')),
+  outcome text not null check (outcome in ('match', 'mismatch')),
+  attempted_at timestamptz not null default clock_timestamp()
+);
+create index order_route_accept_attempts_route_idx on ehr.order_route_accept_attempts (route_id, outcome);
+create index order_route_accept_attempts_member_idx on ehr.order_route_accept_attempts (membership_id, attempted_at);
+alter table ehr.order_route_accept_attempts enable row level security;
+alter table ehr.order_route_accept_attempts force row level security;
+create policy order_route_accept_attempts_command_read on ehr.order_route_accept_attempts for select using (true);
+create policy order_route_accept_attempts_command_insert on ehr.order_route_accept_attempts
+  for insert with check (true);
+create policy order_route_accept_attempts_command_update on ehr.order_route_accept_attempts
+  for update using (true) with check (true);
+create policy order_route_accept_attempts_command_delete on ehr.order_route_accept_attempts for delete using (true);
+revoke all on ehr.order_route_accept_attempts from public;
+create trigger order_route_accept_attempts_no_mutation
+  before update or delete on ehr.order_route_accept_attempts
+  for each row execute function platform.reject_mutation();
+
+-- T5. Results that came back to A (append-only), copied in B's transaction.
+create table lab.order_route_result_reports (
+  id uuid primary key default gen_random_uuid(),
+  route_id uuid not null references ehr.order_routes(id) on delete restrict,
+  work_item_id uuid not null,
+  result_id uuid not null,
+  result_version bigint not null check (result_version > 0),
+  kind text not null check (kind in ('released', 'entered_in_error')),
+  test_code_system text not null,
+  test_code text not null,
+  test_name text not null,
+  result_type text check (result_type is null or result_type in ('numeric', 'text')),
+  numeric_value numeric,
+  text_value text,
+  unit text,
+  reference_range text,
+  abnormal_flag text,
+  revision_kind text,
+  correction_reason text,
+  occurred_at timestamptz not null,
+  performing_facility_id uuid not null references identity.facilities(id) on delete restrict,
+  recorded_at timestamptz not null default clock_timestamp(),
+  constraint order_route_result_reports_uq unique (result_id, result_version, kind),
+  constraint order_route_result_reports_kind_ck check (
+    (kind = 'released' and result_type is not null and revision_kind is not null)
+    or (kind = 'entered_in_error' and result_type is null and numeric_value is null and text_value is null))
+);
+create index order_route_result_reports_route_idx on lab.order_route_result_reports (route_id, recorded_at);
+alter table lab.order_route_result_reports enable row level security;
+alter table lab.order_route_result_reports force row level security;
+create policy order_route_result_reports_command_read on lab.order_route_result_reports for select using (true);
+create policy order_route_result_reports_command_insert on lab.order_route_result_reports
+  for insert with check (true);
+create policy order_route_result_reports_command_update on lab.order_route_result_reports
+  for update using (true) with check (true);
+create policy order_route_result_reports_command_delete on lab.order_route_result_reports for delete using (true);
+revoke all on lab.order_route_result_reports from public;
+create trigger order_route_result_reports_no_mutation
+  before update or delete on lab.order_route_result_reports
+  for each row execute function platform.reject_mutation();
+
+-- T6. Dispensing that came back to A (append-only).
+create table pharmacy.order_route_dispensing_reports (
+  id uuid primary key default gen_random_uuid(),
+  route_id uuid not null references ehr.order_routes(id) on delete restrict,
+  work_item_id uuid not null,
+  dispensing_id uuid not null,
+  reversal_id uuid,
+  kind text not null check (kind in ('dispensed', 'reversed')),
+  medication_code_system text,
+  medication_code text,
+  medication_display text not null,
+  quantity_dispensed numeric(12,4) not null check (quantity_dispensed > 0),
+  quantity_unit text not null,
+  occurred_at timestamptz not null,
+  performing_facility_id uuid not null references identity.facilities(id) on delete restrict,
+  recorded_at timestamptz not null default clock_timestamp(),
+  constraint order_route_dispensing_reports_uq unique (dispensing_id, kind),
+  constraint order_route_dispensing_reports_reversal_ck check ((kind = 'reversed') = (reversal_id is not null))
+);
+create index order_route_dispensing_reports_route_idx on pharmacy.order_route_dispensing_reports (route_id, recorded_at);
+alter table pharmacy.order_route_dispensing_reports enable row level security;
+alter table pharmacy.order_route_dispensing_reports force row level security;
+create policy order_route_dispensing_reports_command_read on pharmacy.order_route_dispensing_reports
+  for select using (true);
+create policy order_route_dispensing_reports_command_insert on pharmacy.order_route_dispensing_reports
+  for insert with check (true);
+create policy order_route_dispensing_reports_command_update on pharmacy.order_route_dispensing_reports
+  for update using (true) with check (true);
+create policy order_route_dispensing_reports_command_delete on pharmacy.order_route_dispensing_reports
+  for delete using (true);
+revoke all on pharmacy.order_route_dispensing_reports from public;
+create trigger order_route_dispensing_reports_no_mutation
+  before update or delete on pharmacy.order_route_dispensing_reports
+  for each row execute function platform.reject_mutation();
+
+-- T7. Support's listing lever (append-only; the newest row of a facility
+-- decides; without one, the default of identity.order_route_destination_listed).
+create table identity.order_route_destination_settings (
+  id uuid primary key default gen_random_uuid(),
+  facility_id uuid not null,
+  organization_id uuid not null,
+  listed boolean not null,
+  reason text not null check (reason = btrim(reason) and length(reason) between 8 and 500),
+  set_by_account_id uuid not null references auth.accounts(id) on delete restrict,
+  set_at timestamptz not null default clock_timestamp(),
+  correlation_id text not null check (length(correlation_id) between 8 and 128),
+  constraint order_route_destination_settings_facility_fk foreign key (facility_id, organization_id)
+    references identity.facilities(id, organization_id) on delete restrict
+);
+create index order_route_destination_settings_facility_idx
+  on identity.order_route_destination_settings (facility_id, set_at desc);
+alter table identity.order_route_destination_settings enable row level security;
+alter table identity.order_route_destination_settings force row level security;
+create policy order_route_destination_settings_command_read on identity.order_route_destination_settings
+  for select using (true);
+create policy order_route_destination_settings_command_insert on identity.order_route_destination_settings
+  for insert with check (true);
+create policy order_route_destination_settings_command_update on identity.order_route_destination_settings
+  for update using (true) with check (true);
+create policy order_route_destination_settings_command_delete on identity.order_route_destination_settings
+  for delete using (true);
+revoke all on identity.order_route_destination_settings from public;
+create trigger order_route_destination_settings_no_mutation
+  before update or delete on identity.order_route_destination_settings
+  for each row execute function platform.reject_mutation();
+
+-- 6.3 Helpers (owner-only; only lab.work_item_allows and
+-- pharmacy.work_item_allows, which the strict work-item policies call, are
+-- granted, in section 7).
+
+-- The staff actor of a route command: a staff session (subject, account,
+-- membership and facility resolve to an active membership) with a
+-- correlation ID, and, for every command that touches patient data, the
+-- direct-care purpose (P10: no route command serves break-glass or another
+-- purpose); else 42501.
+create function ehr.order_route_staff_actor(require_direct_care boolean)
+returns table (
+  actor_subject text,
+  actor_account_id uuid,
+  actor_membership_id uuid,
+  actor_facility_id uuid,
+  actor_organization_id uuid
+)
+language plpgsql stable
+set search_path = pg_catalog, ehr, identity, auth, platform, pg_temp
+as $$
+declare
+  claimed_subject text := platform.current_actor_subject();
+  claimed_account uuid := auth.account_id_for_subject(platform.current_actor_subject());
+  claimed_membership uuid := platform.current_membership_id();
+  claimed_facility uuid := platform.current_facility_id();
+  facility_organization uuid;
+begin
+  if claimed_subject is null or claimed_account is null or claimed_membership is null or claimed_facility is null
+     or platform.current_correlation_id() is null
+     or (require_direct_care and platform.current_purpose_of_use() is distinct from 'direct-care')
+     or not identity.has_active_membership(claimed_subject, claimed_membership, claimed_facility) then
+    raise exception using errcode = '42501', message = 'Order route staff context is required';
+  end if;
+  select facility.organization_id into facility_organization
+    from identity.facilities facility where facility.id = claimed_facility;
+  return query select claimed_subject, claimed_account, claimed_membership, claimed_facility, facility_organization;
+end;
+$$;
+
+-- The platform actor of support's commands (as section 5's admin commands): a
+-- platform administrator's subject with no facility, a correlation ID and the
+-- healthcare-operations purpose, holding platform.admin.access and the named
+-- permissions; else 42501 ADMIN_PERMISSION_DENIED.
+create function identity.order_route_platform_actor(required_permissions text[])
+returns uuid
+language plpgsql stable
+set search_path = pg_catalog, identity, auth, platform, pg_temp
+as $$
+declare
+  claimed_account uuid := platform.current_account_id();
+  required text;
+begin
+  if claimed_account is null
+     or platform.current_correlation_id() is null
+     or platform.current_purpose_of_use() is distinct from 'healthcare-operations'
+     or not auth.account_has_platform_permission(claimed_account, 'platform.admin.access') then
+    raise exception using errcode = '42501', message = 'ADMIN_PERMISSION_DENIED';
+  end if;
+  foreach required in array required_permissions loop
+    if not auth.account_has_platform_permission(claimed_account, required) then
+      raise exception using errcode = '42501', message = 'ADMIN_PERMISSION_DENIED';
+    end if;
+  end loop;
+  return claimed_account;
+end;
+$$;
+
+-- H3. Whether support lists a facility for orders from other facilities: the
+-- newest setting (T7) if any; else a governed facility (no self-service
+-- application) is listed, and a self-signed-up one only when support's
+-- review recorded a real check (P6; 'other' is not listed by default).
+create function identity.order_route_destination_listed(target_facility_id uuid)
+returns boolean
+language sql stable
+set search_path = pg_catalog, identity, pg_temp
+as $$
+  select coalesce(
+    (select setting.listed
+       from identity.order_route_destination_settings setting
+      where setting.facility_id = target_facility_id
+      order by setting.set_at desc, setting.id desc
+      limit 1),
+    (select coalesce(application.id is null
+          or application.self_service_verification_method in
+            ('cac_registered_contact', 'officer_match', 'regulator_register', 'in_person'), false)
+       from identity.facilities facility
+       left join lateral (
+         select candidate.id, candidate.self_service_verification_method
+           from identity.organization_applications candidate
+          where candidate.organization_id = facility.organization_id
+            and candidate.approval_mode = 'self_service'
+            and candidate.reviewed_by_account_id is null
+            and (candidate.status = 'approved' or candidate.self_service_released_at is not null)
+          order by candidate.reviewed_at desc, candidate.id desc
+          limit 1) application on true
+      where facility.id = target_facility_id),
+    false)
+$$;
+
+-- H4. Whether a facility may receive a route of this kind now: active and
+-- verified with an active organization; reviewed (self-service) or governed
+-- (an approved admin_review application and no self-service one; pending,
+-- released and legacy organizations are refused); an active product at this
+-- facility whose source application is approved as a laboratory (lab
+-- requests) or pharmacy (prescriptions); listed (H3); and at least one active
+-- member holding the kind's receive permission. That it is not the ordering
+-- facility is the caller's check (and T1's). Callers lock the receiving
+-- organization's application FOR SHARE first.
+create function identity.order_route_destination_eligible(target_facility_id uuid, requested_kind text)
+returns boolean
+language plpgsql stable security definer
+set search_path = pg_catalog, identity, auth, ehr, pg_temp
+as $$
+declare
+  destination_type text := ehr.order_route_destination_type(requested_kind);
+  receive_permission text := ehr.order_route_receive_permission(requested_kind);
+  facility_row identity.facilities%rowtype;
+  found_state text;
+begin
+  if target_facility_id is null or destination_type is null then
+    return false;
+  end if;
+  select facility.* into facility_row from identity.facilities facility where facility.id = target_facility_id;
+  if facility_row.id is null or not facility_row.active or facility_row.lifecycle_status <> 'verified'
+     or not exists (select 1 from identity.organizations organization
+                     where organization.id = facility_row.organization_id and organization.active) then
+    return false;
+  end if;
+  select state_row.review_state into found_state
+    from identity.organization_self_service_state(facility_row.organization_id) state_row;
+  if found_state is not null then
+    if found_state <> 'reviewed' then
+      return false;
+    end if;
+  elsif not exists (select 1 from identity.organization_applications governed
+                     where governed.organization_id = facility_row.organization_id
+                       and governed.approval_mode = 'admin_review'
+                       and governed.status = 'approved') then
+    return false;
+  end if;
+  if not exists (select 1 from identity.organization_products product
+                   join identity.organization_applications source_application
+                     on source_application.id = product.source_application_id
+                  where product.facility_id = target_facility_id
+                    and product.organization_id = facility_row.organization_id
+                    and product.status = 'active'
+                    and source_application.status = 'approved'
+                    and source_application.organization_type = destination_type) then
+    return false;
+  end if;
+  if not identity.order_route_destination_listed(target_facility_id) then
+    return false;
+  end if;
+  return exists (
+    select 1
+      from identity.staff_facility_memberships membership
+      join auth.accounts account on account.id = membership.account_id
+     where membership.facility_id = target_facility_id
+       and membership.active
+       and auth.membership_has_permission(account.subject, membership.id, target_facility_id, receive_permission));
+end;
+$$;
+
+-- H5. An active deny directive of the patient that names the facility, its
+-- organization or everyone, for read_records under direct-care (the clause of
+-- identity.has_active_consent_grant, 0012). Checked at send and acceptance.
+create function identity.patient_denies_order_route(target_patient_id uuid, target_facility_id uuid)
+returns boolean
+language sql stable
+set search_path = pg_catalog, identity, pg_temp
+as $$
+  select exists (
+    select 1
+      from identity.consent_directives directive
+      join identity.consent_directive_versions directive_version
+        on directive_version.directive_id = directive.id
+       and directive_version.version_no = directive.current_version
+      join identity.facilities facility on facility.id = target_facility_id
+     where directive.patient_id = target_patient_id
+       and directive_version.status = 'active'
+       and directive_version.provision_type = 'deny'
+       and directive_version.starts_at <= clock_timestamp()
+       and (directive_version.expires_at is null or directive_version.expires_at > clock_timestamp())
+       and (directive_version.facility_id is null or directive_version.facility_id = target_facility_id)
+       and (cardinality(directive_version.actions) = 0 or 'read_records' = any(directive_version.actions))
+       and (cardinality(directive_version.purposes) = 0 or 'direct-care' = any(directive_version.purposes))
+       and (directive_version.grantee_type = 'all'
+         or (directive_version.grantee_type = 'facility' and directive_version.grantee_id = target_facility_id)
+         or (directive_version.grantee_type = 'organization' and directive_version.grantee_id = facility.organization_id)))
+$$;
+
+-- H9. The effective state of a route: a sent route past respond_by, or an
+-- accepted route past its work window with nothing returned, is expired.
+create function ehr.order_route_effective_state(route ehr.order_routes)
+returns text
+language sql stable
+set search_path = pg_catalog, pg_temp
+as $$
+  select case
+    when route.state = 'sent' and clock_timestamp() >= route.respond_by then 'expired'
+    when route.state = 'accepted' and clock_timestamp() >= route.writes_end_at then 'expired'
+    else route.state end
+$$;
+
+-- The route-access control, read so that an unreadable control fails closed
+-- (an owner that cannot read platform.control_settings, or a missing row).
+create function ehr.order_route_access_open()
+returns boolean
+language plpgsql stable
+set search_path = pg_catalog, platform, pg_temp
+as $$
+begin
+  return coalesce(platform.control_enabled('cross_facility_route_access_enabled'), false);
+exception when object_not_in_prerequisite_state or invalid_parameter_value then
+  return false;
+end;
+$$;
+
+-- H6. Route access to a patient's rows at a receiving facility, for the Lab
+-- and Pharmacy chain tables (lab.context_allows and pharmacy.context_allows):
+-- direct-care; a route of that kind for this patient at this facility that
+-- allows the action now (write: accepted or completed, before writes_end_at;
+-- read: also cancelled, before access_ends_at); the route-access control on;
+-- the member holding the kind's receive permission. In this order (FEAS A2):
+-- the indexed route lookup first, the control and permission only when a
+-- route exists.
+create function ehr.order_route_access_allows(requested_kind text, row_patient_id uuid, row_facility_id uuid,
+  requested_action text)
+returns boolean
+language plpgsql stable security definer
+set search_path = pg_catalog, ehr, auth, platform, pg_temp
+as $$
+begin
+  if platform.current_purpose_of_use() is distinct from 'direct-care'
+     or not coalesce(requested_action in ('read_records', 'write_records'), false)
+     or row_patient_id is null or row_facility_id is null then
+    return false;
+  end if;
+  if not exists (
+    select 1 from ehr.order_routes route
+     where route.receiving_facility_id = row_facility_id
+       and route.patient_id = row_patient_id
+       and route.kind = requested_kind
+       and route.state in ('accepted', 'completed', 'cancelled')
+       and ((requested_action = 'write_records' and route.state in ('accepted', 'completed')
+             and clock_timestamp() < route.writes_end_at)
+         or (requested_action = 'read_records' and clock_timestamp() < route.access_ends_at))) then
+    return false;
+  end if;
+  if not ehr.order_route_access_open() then
+    return false;
+  end if;
+  return auth.membership_has_permission(platform.current_actor_subject(), platform.current_membership_id(),
+    row_facility_id, ehr.order_route_receive_permission(requested_kind));
+end;
+$$;
+
+-- H7. The same for one route (the work-item policies, the cards and the
+-- resource check): the route at this facility, which is the session's.
+create function ehr.order_route_allows(requested_route_id uuid, row_facility_id uuid, requested_action text)
+returns boolean
+language plpgsql stable security definer
+set search_path = pg_catalog, ehr, auth, platform, pg_temp
+as $$
+declare
+  route_kind text;
+begin
+  if platform.current_purpose_of_use() is distinct from 'direct-care'
+     or not coalesce(requested_action in ('read_records', 'write_records'), false)
+     or requested_route_id is null or row_facility_id is null
+     or row_facility_id is distinct from platform.current_facility_id() then
+    return false;
+  end if;
+  select route.kind into route_kind
+    from ehr.order_routes route
+   where route.id = requested_route_id
+     and route.receiving_facility_id = row_facility_id
+     and route.state in ('accepted', 'completed', 'cancelled')
+     and ((requested_action = 'write_records' and route.state in ('accepted', 'completed')
+           and clock_timestamp() < route.writes_end_at)
+       or (requested_action = 'read_records' and clock_timestamp() < route.access_ends_at));
+  if route_kind is null or not ehr.order_route_access_open() then
+    return false;
+  end if;
+  return auth.membership_has_permission(platform.current_actor_subject(), platform.current_membership_id(),
+    row_facility_id, ehr.order_route_receive_permission(route_kind));
+end;
+$$;
+
+-- H8. The strict work-item policies: the session's facility and either the
+-- member's own consent grant or, for a route-backed item, its route (H7).
+-- Granted to the Lab and Pharmacy runtimes and the schema test runtime, whose
+-- queries evaluate the policies.
+create function lab.work_item_allows(row_patient_id uuid, row_facility_id uuid, row_route_id uuid,
+  requested_action text)
+returns boolean
+language sql stable security definer
+set search_path = lab, identity, platform, pg_temp
+as $$
+  select row_facility_id = platform.current_facility_id()
+    and (identity.has_active_consent_grant(row_patient_id, platform.current_actor_subject(),
+          platform.current_membership_id(), row_facility_id, requested_action, platform.current_purpose_of_use())
+      or (row_route_id is not null and ehr.order_route_allows(row_route_id, row_facility_id, requested_action)))
+$$;
+
+create function pharmacy.work_item_allows(row_patient_id uuid, row_facility_id uuid, row_route_id uuid,
+  requested_action text)
+returns boolean
+language sql stable security definer
+set search_path = pharmacy, identity, platform, pg_temp
+as $$
+  select row_facility_id = platform.current_facility_id()
+    and (identity.has_active_consent_grant(row_patient_id, platform.current_actor_subject(),
+          platform.current_membership_id(), row_facility_id, requested_action, platform.current_purpose_of_use())
+      or (row_route_id is not null and ehr.order_route_allows(row_route_id, row_facility_id, requested_action)))
+$$;
+
+-- H10. The only writer of a route after its insert: the event first (its
+-- version, the state and windows after it, the session's actor), then the
+-- route itself, which the guard (order_routes_guard) checks against that
+-- event. The caller holds the route FOR UPDATE and passes the row as read and
+-- the row as it should become.
+create function ehr.write_order_route_change(current_route ehr.order_routes, changed_route ehr.order_routes,
+  change_event text, change_side text, change_reason_code text)
+returns ehr.order_routes
+language plpgsql volatile
+set search_path = pg_catalog, ehr, platform, pg_temp
+as $$
+declare
+  written ehr.order_routes%rowtype;
+begin
+  insert into ehr.order_route_events (route_id, event_version, event_type, side, actor_account_id,
+    actor_membership_id, reason_code, state_after, writes_end_at_after, access_ends_at_after, correlation_id)
+  values (current_route.id, current_route.row_version + 1, change_event, change_side, platform.current_account_id(),
+    platform.current_membership_id(), change_reason_code, changed_route.state, changed_route.writes_end_at,
+    changed_route.access_ends_at, platform.current_correlation_id());
+  update ehr.order_routes route
+     set state = changed_route.state,
+         accepted_at = changed_route.accepted_at,
+         accepted_by_account_id = changed_route.accepted_by_account_id,
+         accepted_by_membership_id = changed_route.accepted_by_membership_id,
+         accept_idempotency_key = changed_route.accept_idempotency_key,
+         accept_request_sha256 = changed_route.accept_request_sha256,
+         accept_locked_at = changed_route.accept_locked_at,
+         lab_work_item_id = changed_route.lab_work_item_id,
+         pharmacy_work_item_id = changed_route.pharmacy_work_item_id,
+         declined_at = changed_route.declined_at,
+         declined_by_account_id = changed_route.declined_by_account_id,
+         declined_by_membership_id = changed_route.declined_by_membership_id,
+         decline_reason = changed_route.decline_reason,
+         ended_at = changed_route.ended_at,
+         ended_kind = changed_route.ended_kind,
+         ended_by_account_id = changed_route.ended_by_account_id,
+         completed_at = changed_route.completed_at,
+         writes_end_at = changed_route.writes_end_at,
+         access_ends_at = changed_route.access_ends_at,
+         updated_at = clock_timestamp(),
+         row_version = route.row_version + 1
+   where route.id = current_route.id
+     and route.row_version = current_route.row_version
+  returning route.* into written;
+  if written.id is null then
+    raise exception using errcode = '40001', message = 'Order route changed concurrently';
+  end if;
+  return written;
+end;
+$$;
+
+-- H11. A system audit row at one side's facility (ordering or receiving),
+-- about the route; patient_id only when with_patient (P4.1: never on a row at
+-- B about a route B has not accepted); details carry ids and codes only.
+create function ehr.order_route_system_audit(route ehr.order_routes, audit_side text, audit_action text,
+  with_patient boolean, audit_details jsonb)
+returns void
+language plpgsql volatile
+set search_path = pg_catalog, ehr, audit, platform, pg_temp
+as $$
+begin
+  insert into audit.events (correlation_id, actor_type, organization_id, facility_id, patient_id, action, outcome,
+    resource_type, resource_id, purpose_of_use, provenance, source_system, details)
+  values (platform.current_correlation_id(), 'system',
+    case audit_side when 'ordering' then route.ordering_organization_id else route.receiving_organization_id end,
+    case audit_side when 'ordering' then route.ordering_facility_id else route.receiving_facility_id end,
+    case when with_patient then route.patient_id end,
+    audit_action, 'success', 'order-route', route.id::text, platform.current_purpose_of_use(),
+    'application', 'ehr-api',
+    jsonb_build_object('routeId', route.id, 'kind', route.kind, 'state', route.state)
+      || coalesce(audit_details, '{}'::jsonb));
+end;
+$$;
+
+-- H12. The patient's inbox notice: codes and facility names only (0037).
+create function ehr.order_route_notify_patient(route ehr.order_routes, notification_code text)
+returns uuid
+language plpgsql volatile
+set search_path = pg_catalog, ehr, identity, notification, pg_temp
+as $$
+begin
+  return notification.enqueue_patient_inbox_item(route.patient_id, notification_code, 'order-route', route.id,
+    jsonb_build_object('routeId', route.id, 'kind', route.kind,
+      'orderingFacilityName', (select facility.name from identity.facilities facility
+                                where facility.id = route.ordering_facility_id),
+      'receivingFacilityName', (select facility.name from identity.facilities facility
+                                 where facility.id = route.receiving_facility_id)));
+end;
+$$;
+
+-- H13. What B sees of the patient after acceptance: name, sex, date of birth
+-- and the last 4 characters of the Health ID.
+create function ehr.order_route_patient_card(target_patient_id uuid)
+returns table (full_name text, sex text, date_of_birth date, health_id_last4 text)
+language sql stable
+set search_path = pg_catalog, identity, pg_temp
+as $$
+  select patient.full_name, patient.gender, patient.dob, right(patient.hid_code, 4)
+    from identity.patients patient
+   where patient.id = target_patient_id
+$$;
+
+-- H14. Closing a route (the release, support, and the mirror for an
+-- entered-in-error order): locks it, then sent -> withdrawn (or expired when
+-- past respond_by), accepted -> cancelled (writes end now; reads end now, or
+-- in 7 days unless end_access_now), completed -> its windows end now
+-- (access_ended, only with end_access_now). Answers what happened:
+-- withdrawn, expired, cancelled, access_ended or unchanged.
+create function ehr.close_order_route(target_route_id uuid, close_kind text, close_side text, end_access_now boolean)
+returns table (outcome text, closed ehr.order_routes)
+language plpgsql volatile
+set search_path = pg_catalog, ehr, platform, pg_temp
+as $$
+declare
+  current_route ehr.order_routes%rowtype;
+  changed_route ehr.order_routes%rowtype;
+  closed_at timestamptz := clock_timestamp();
+begin
+  select route.* into current_route from ehr.order_routes route where route.id = target_route_id for update;
+  if current_route.id is null then
+    return query select 'unchanged'::text, current_route;
+    return;
+  end if;
+  changed_route := current_route;
+  if current_route.state = 'sent' then
+    changed_route.ended_at := closed_at;
+    changed_route.ended_by_account_id := platform.current_account_id();
+    if closed_at >= current_route.respond_by then
+      changed_route.state := 'expired';
+      changed_route.ended_kind := 'not_accepted';
+      changed_route.ended_by_account_id := null;
+      return query select 'expired'::text,
+        ehr.write_order_route_change(current_route, changed_route, 'expired', 'system', 'not_accepted');
+      return;
+    end if;
+    changed_route.state := 'withdrawn';
+    changed_route.ended_kind := close_kind;
+    return query select 'withdrawn'::text,
+      ehr.write_order_route_change(current_route, changed_route, 'withdrawn', close_side, close_kind);
+    return;
+  end if;
+  if current_route.state = 'accepted' then
+    changed_route.state := 'cancelled';
+    changed_route.ended_at := closed_at;
+    changed_route.ended_kind := close_kind;
+    changed_route.ended_by_account_id := platform.current_account_id();
+    changed_route.writes_end_at := least(current_route.writes_end_at, closed_at);
+    changed_route.access_ends_at := case when end_access_now then least(current_route.access_ends_at, closed_at)
+      else least(current_route.access_ends_at, closed_at + interval '168 hours') end;
+    changed_route.writes_end_at := least(changed_route.writes_end_at, changed_route.access_ends_at);
+    return query select 'cancelled'::text,
+      ehr.write_order_route_change(current_route, changed_route, 'cancelled', close_side, close_kind);
+    return;
+  end if;
+  if current_route.state = 'completed' and end_access_now and current_route.ended_at is null then
+    changed_route.ended_at := closed_at;
+    changed_route.ended_kind := close_kind;
+    changed_route.ended_by_account_id := platform.current_account_id();
+    changed_route.writes_end_at := least(current_route.writes_end_at, closed_at);
+    changed_route.access_ends_at := least(current_route.access_ends_at, closed_at);
+    return query select 'access_ended'::text,
+      ehr.write_order_route_change(current_route, changed_route, 'access_ended', close_side, close_kind);
+    return;
+  end if;
+  return query select 'unchanged'::text, current_route;
+end;
+$$;
+
+-- H15. A route's events for the ordering facility: type, side, time, reason
+-- and state after; never an actor.
+create function ehr.order_route_events_view(target_route_id uuid)
+returns jsonb
+language sql stable
+set search_path = pg_catalog, ehr, pg_temp
+as $$
+  select coalesce(jsonb_agg(jsonb_build_object('type', event.event_type, 'side', event.side,
+           'occurredAt', event.occurred_at, 'reasonCode', event.reason_code, 'stateAfter', event.state_after)
+           order by event.event_version), '[]'::jsonb)
+    from ehr.order_route_events event
+   where event.route_id = target_route_id
+$$;
+
+-- Whether the order may be sent again: no live route (effective), none ever
+-- accepted, no same-facility work item, fewer than 5 routes.
+create function ehr.order_route_resend_allowed(requested_kind text, requested_order_id uuid)
+returns boolean
+language plpgsql stable
+set search_path = pg_catalog, ehr, lab, pharmacy, pg_temp
+as $$
+declare
+  route_count integer;
+  blocked boolean;
+begin
+  select count(*), coalesce(bool_or(route.accepted_at is not null
+           or ehr.order_route_effective_state(route) in ('sent', 'accepted', 'completed')), false)
+    into route_count, blocked
+    from ehr.order_routes route
+   where (requested_kind = 'lab_request' and route.source_lab_request_id = requested_order_id)
+      or (requested_kind = 'prescription' and route.source_prescription_id = requested_order_id);
+  if blocked or route_count >= (select limits.routes_per_order from ehr.order_route_limits() limits) then
+    return false;
+  end if;
+  if requested_kind = 'lab_request' then
+    return not exists (select 1 from lab.work_items item where item.source_ehr_order_id = requested_order_id);
+  end if;
+  return not exists (select 1 from pharmacy.work_items item where item.source_ehr_prescription_id = requested_order_id);
+end;
+$$;
+
+-- The ordering facility's summary of one route (OrderRouteSummary, camelCase).
+create function ehr.order_route_summary(route ehr.order_routes, resend_allowed boolean)
+returns jsonb
+language sql stable
+set search_path = pg_catalog, ehr, identity, pg_temp
+as $$
+  select jsonb_build_object('id', route.id, 'reference', route.reference, 'kind', route.kind,
+    'version', route.row_version, 'effectiveState', ehr.order_route_effective_state(route),
+    'receivingFacility', jsonb_build_object('id', route.receiving_facility_id,
+      'name', (select facility.name from identity.facilities facility where facility.id = route.receiving_facility_id),
+      'available', identity.order_route_destination_eligible(route.receiving_facility_id, route.kind)),
+    'createdAt', route.created_at, 'respondBy', route.respond_by, 'acceptedAt', route.accepted_at,
+    'completedAt', route.completed_at, 'endedAt', route.ended_at, 'endedKind', route.ended_kind,
+    'declineReason', route.decline_reason, 'acceptLocked', route.accept_locked_at is not null,
+    'resendAllowed', resend_allowed)
+$$;
+
+-- The receiving facility's registered office (the CAC registered address of
+-- its organization, owner decision Q8), or NULL.
+create function identity.order_route_registered_address(target_facility_id uuid)
+returns text
+language sql stable
+set search_path = pg_catalog, identity, pg_temp
+as $$
+  select registration.verified_address
+    from identity.facilities facility
+    join identity.organization_cac_registrations registration
+      on registration.organization_id = facility.organization_id
+   where facility.id = target_facility_id
+   order by (registration.primary_facility_id = facility.id) desc, registration.created_at, registration.cac_registration_number
+   limit 1
+$$;
+
+revoke all on function ehr.order_route_staff_actor(boolean),
+  identity.order_route_platform_actor(text[]),
+  identity.order_route_destination_listed(uuid),
+  identity.order_route_destination_eligible(uuid,text),
+  identity.patient_denies_order_route(uuid,uuid),
+  ehr.order_route_effective_state(ehr.order_routes),
+  ehr.order_route_access_open(),
+  ehr.order_route_access_allows(text,uuid,uuid,text),
+  ehr.order_route_allows(uuid,uuid,text),
+  lab.work_item_allows(uuid,uuid,uuid,text),
+  pharmacy.work_item_allows(uuid,uuid,uuid,text),
+  ehr.write_order_route_change(ehr.order_routes,ehr.order_routes,text,text,text),
+  ehr.order_route_system_audit(ehr.order_routes,text,text,boolean,jsonb),
+  ehr.order_route_notify_patient(ehr.order_routes,text),
+  ehr.order_route_patient_card(uuid),
+  ehr.close_order_route(uuid,text,text,boolean),
+  ehr.order_route_events_view(uuid),
+  ehr.order_route_resend_allowed(text,uuid),
+  ehr.order_route_summary(ehr.order_routes,boolean),
+  identity.order_route_registered_address(uuid)
+  from public;
+
+-- 6.4 Commands. Conventions as section 5: business refusals raise P0001 with
+-- the API code as the message; 42501 for permission or context; P0002 for
+-- not found (also "not addressed to your facility"); 22023 for invalid input;
+-- 55000 PLATFORM_CONTROL_DISABLED:<key> from platform.require_control_enabled;
+-- a stale route version is P0001 ORDER_ROUTE_VERSION_CONFLICT (staff and
+-- patient routes) or 40001 (support's close, section 5's admin convention).
+-- Refusals that must keep a counter or a state (an identification mismatch,
+-- the acceptance lock, order_in_work) answer a result instead of raising.
+-- A refusal raises, so it stores nothing: a route that lapsed is shown
+-- expired by every read and stored expired by the next command that
+-- succeeds on it or its order.
+
+-- 6.4.1 EHR (the ordering facility; EXECUTE to the EHR runtime).
+
+-- C24. The current attestation text of a kind, for the send screen.
+create function ehr.order_route_sender_check(requested_kind text)
+returns void
+language plpgsql stable
+set search_path = pg_catalog, ehr, auth, platform, pg_temp
+as $$
+declare
+  actor record;
+  write_permission text := ehr.order_route_write_permission(requested_kind);
+begin
+  select * into actor from ehr.order_route_staff_actor(true);
+  if not auth.membership_has_permission(actor.actor_subject, actor.actor_membership_id, actor.actor_facility_id,
+           'ehr.order-route.send')
+     or (write_permission is not null
+       and not auth.membership_has_permission(actor.actor_subject, actor.actor_membership_id, actor.actor_facility_id,
+             write_permission)) then
+    raise exception using errcode = '42501', message = 'ORDER_ROUTE_PERMISSION_DENIED';
+  end if;
+  if write_permission is null then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+  end if;
+end;
+$$;
+
+create function ehr.order_route_attestation_text(requested_kind text)
+returns table (version text, text text)
+language sql volatile security definer
+set search_path = pg_catalog, ehr, platform, pg_temp
+as $$
+  select ehr.order_route_sender_check(requested_kind);
+  select platform.require_control_enabled('cross_facility_orders_enabled');
+  select text_row.version, text_row.text
+    from ehr.order_route_attestation_texts text_row
+   where text_row.kind = requested_kind
+   order by text_row.created_at desc, text_row.version desc
+   limit 1;
+$$;
+
+-- C1. Send an order: refusals in the order listed; then a draft is activated,
+-- the route is inserted sent with the order's snapshot and the clinician's
+-- attestation, event 1 is written, B gets a system row without the patient,
+-- and the patient's inbox gets ORDER_ROUTE_SENT.
+create function ehr.send_order_route(
+  requested_route_id uuid,
+  requested_kind text,
+  requested_patient_id uuid,
+  requested_order_id uuid,
+  requested_encounter_id uuid,
+  expected_order_version bigint,
+  requested_receiving_facility_id uuid,
+  requested_attestation_text_version text,
+  requested_idempotency_key text,
+  requested_request_sha256 char(64)
+) returns table (
+  route_id uuid,
+  reference text,
+  state text,
+  row_version bigint,
+  created_at timestamptz,
+  respond_by timestamptz,
+  receiving_facility_name text,
+  order_row_version bigint,
+  order_status text,
+  replayed boolean
+)
+language plpgsql security definer
+set search_path = pg_catalog, ehr, identity, auth, lab, pharmacy, notification, platform, pg_temp
+as $$
+declare
+  actor record;
+  limits record;
+  sent_at timestamptz;
+  write_permission text := ehr.order_route_write_permission(requested_kind);
+  prior ehr.order_routes%rowtype;
+  stale ehr.order_routes%rowtype;
+  changed ehr.order_routes%rowtype;
+  inserted ehr.order_routes%rowtype;
+  lab_order ehr.lab_requests%rowtype;
+  prescription_order ehr.prescriptions%rowtype;
+  order_found boolean := false;
+  order_version bigint;
+  order_state text;
+  order_creator uuid;
+  order_creator_membership uuid;
+  receiving_facility identity.facilities%rowtype;
+  previous_reason text;
+  sender_name text;
+  orderer_full_name text;
+  licence_body text;
+  licence_number text;
+  replay_version bigint;
+  replay_status text;
+begin
+  select * into actor from ehr.order_route_staff_actor(true);
+  if not auth.membership_has_permission(actor.actor_subject, actor.actor_membership_id, actor.actor_facility_id,
+           'ehr.order-route.send')
+     or (write_permission is not null
+       and not auth.membership_has_permission(actor.actor_subject, actor.actor_membership_id, actor.actor_facility_id,
+             write_permission)) then
+    raise exception using errcode = '42501', message = 'ORDER_ROUTE_PERMISSION_DENIED';
+  end if;
+  if write_permission is null or requested_route_id is null or requested_patient_id is null
+     or requested_order_id is null or requested_encounter_id is null or requested_receiving_facility_id is null
+     or expected_order_version is null or expected_order_version < 1
+     or not coalesce(requested_idempotency_key ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$', false)
+     or not coalesce(requested_request_sha256 ~ '^[0-9a-f]{64}$', false)
+     or not exists (select 1 from ehr.order_route_attestation_texts text_row
+                     where text_row.version = requested_attestation_text_version
+                       and text_row.kind = requested_kind) then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+  end if;
+  perform platform.require_control_enabled('cross_facility_orders_enabled');
+
+  -- Replay by the sender's idempotency key at this facility.
+  select route.* into prior
+    from ehr.order_routes route
+   where route.sent_by_account_id = actor.actor_account_id
+     and route.ordering_facility_id = actor.actor_facility_id
+     and route.idempotency_key = requested_idempotency_key;
+  if prior.id is not null then
+    if prior.request_sha256 is distinct from requested_request_sha256 then
+      raise exception using errcode = 'P0001', message = 'IDEMPOTENCY_KEY_REUSED';
+    end if;
+    if prior.kind = 'lab_request' then
+      select source_order.row_version, source_order.status into replay_version, replay_status
+        from ehr.lab_requests source_order where source_order.id = prior.source_lab_request_id;
+    else
+      select source_order.row_version, source_order.status into replay_version, replay_status
+        from ehr.prescriptions source_order where source_order.id = prior.source_prescription_id;
+    end if;
+    return query select prior.id, prior.reference::text, ehr.order_route_effective_state(prior), prior.row_version,
+      prior.created_at, prior.respond_by,
+      (select facility.name from identity.facilities facility where facility.id = prior.receiving_facility_id),
+      replay_version, replay_status, true;
+    return;
+  end if;
+
+  if requested_attestation_text_version is distinct from (
+       select text_row.version from ehr.order_route_attestation_texts text_row
+        where text_row.kind = requested_kind
+        order by text_row.created_at desc, text_row.version desc limit 1) then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_ATTESTATION_OUTDATED';
+  end if;
+
+  -- The order: the patient's, in that encounter, at this facility, under the
+  -- member's write consent; locked FOR NO KEY UPDATE (FEAS K1: a receiving
+  -- Lab's work-item insert takes FOR KEY SHARE on it through its new key).
+  if ehr.context_allows(requested_patient_id, actor.actor_facility_id, 'write_records') then
+    if requested_kind = 'lab_request' then
+      select source_order.* into lab_order
+        from ehr.lab_requests source_order
+       where source_order.id = requested_order_id and source_order.patient_id = requested_patient_id
+         and source_order.encounter_id = requested_encounter_id
+         and source_order.facility_id = actor.actor_facility_id
+       for no key update;
+      order_found := lab_order.id is not null;
+      order_version := lab_order.row_version;
+      order_state := lab_order.status;
+      order_creator := lab_order.created_by;
+      order_creator_membership := lab_order.created_by_membership_id;
+    else
+      select source_order.* into prescription_order
+        from ehr.prescriptions source_order
+       where source_order.id = requested_order_id and source_order.patient_id = requested_patient_id
+         and source_order.encounter_id = requested_encounter_id
+         and source_order.facility_id = actor.actor_facility_id
+       for no key update;
+      order_found := prescription_order.id is not null;
+      order_version := prescription_order.row_version;
+      order_state := prescription_order.status;
+      order_creator := prescription_order.created_by;
+      order_creator_membership := prescription_order.created_by_membership_id;
+    end if;
+  end if;
+  if not order_found then
+    raise exception using errcode = 'P0002', message = 'ORDER_NOT_FOUND';
+  end if;
+  if order_version <> expected_order_version then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_VERSION_CONFLICT';
+  end if;
+  if order_state not in ('draft', 'active') then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_ORDER_NOT_ELIGIBLE';
+  end if;
+
+  -- The ordering organization's application, then the receiving one's (V4).
+  select facility.* into receiving_facility from identity.facilities facility
+   where facility.id = requested_receiving_facility_id;
+  perform identity.lock_self_service_application(actor.actor_organization_id);
+  if receiving_facility.id is not null then
+    perform identity.lock_self_service_application(receiving_facility.organization_id);
+  end if;
+  if receiving_facility.id is null or receiving_facility.id = actor.actor_facility_id
+     or not identity.order_route_destination_eligible(receiving_facility.id, requested_kind) then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_DESTINATION_INELIGIBLE';
+  end if;
+
+  -- The order's routes, in id order; a sent route past respond_by is stored
+  -- expired here.
+  for stale in
+    select route.* from ehr.order_routes route
+     where (requested_kind = 'lab_request' and route.source_lab_request_id = requested_order_id)
+        or (requested_kind = 'prescription' and route.source_prescription_id = requested_order_id)
+     order by route.id
+     for update
+  loop
+    if stale.state = 'sent' and clock_timestamp() >= stale.respond_by then
+      changed := stale;
+      changed.state := 'expired';
+      changed.ended_at := clock_timestamp();
+      changed.ended_kind := 'not_accepted';
+      perform ehr.write_order_route_change(stale, changed, 'expired', 'system', 'not_accepted');
+    end if;
+  end loop;
+  if exists (select 1 from ehr.order_routes route
+              where ((requested_kind = 'lab_request' and route.source_lab_request_id = requested_order_id)
+                  or (requested_kind = 'prescription' and route.source_prescription_id = requested_order_id))
+                and route.state in ('sent', 'accepted', 'completed')) then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_ALREADY_SENT';
+  end if;
+  if exists (select 1 from ehr.order_routes route
+              where ((requested_kind = 'lab_request' and route.source_lab_request_id = requested_order_id)
+                  or (requested_kind = 'prescription' and route.source_prescription_id = requested_order_id))
+                and route.accepted_at is not null)
+     or (requested_kind = 'lab_request'
+       and exists (select 1 from lab.work_items item where item.source_ehr_order_id = requested_order_id))
+     or (requested_kind = 'prescription'
+       and exists (select 1 from pharmacy.work_items item where item.source_ehr_prescription_id = requested_order_id)) then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_ORDER_IN_WORK';
+  end if;
+  select * into limits from ehr.order_route_limits();
+  if (select count(*) from ehr.order_routes route
+       where (requested_kind = 'lab_request' and route.source_lab_request_id = requested_order_id)
+          or (requested_kind = 'prescription' and route.source_prescription_id = requested_order_id))
+     >= limits.routes_per_order then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_RESEND_LIMIT';
+  end if;
+  if identity.patient_denies_order_route(requested_patient_id, receiving_facility.id) then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_PATIENT_DENIED';
+  end if;
+
+  -- The limits, serialized per sender and then per destination.
+  perform pg_advisory_xact_lock(hashtextextended('order-route-sender:' || actor.actor_membership_id::text, 0));
+  perform pg_advisory_xact_lock(hashtextextended('order-route-destination:' || receiving_facility.id::text, 0));
+  if (select count(*) from ehr.order_routes route
+       where route.sent_by_membership_id = actor.actor_membership_id
+         and route.created_at > clock_timestamp() - interval '24 hours') >= limits.sends_per_member_per_day then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_SEND_LIMIT';
+  end if;
+  if (select count(*) from ehr.order_routes route
+       where route.ordering_facility_id = actor.actor_facility_id
+         and route.receiving_facility_id = receiving_facility.id
+         and route.created_at > clock_timestamp() - interval '24 hours') >= limits.sends_per_pair_per_day then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_PAIR_LIMIT';
+  end if;
+  if (select count(*) from ehr.order_routes route
+       where route.receiving_facility_id = receiving_facility.id
+         and route.state = 'sent'
+         and route.respond_by > clock_timestamp()) >= limits.open_per_destination then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_DESTINATION_BUSY';
+  end if;
+  -- V12: the patient must have an active account, or the notice and the
+  -- Stop of the sixth set could not reach them.
+  if not exists (select 1 from identity.patients patient
+                   join auth.accounts account on account.id = patient.account_id
+                  where patient.id = requested_patient_id and patient.status = 'active'
+                    and account.status = 'active') then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_PATIENT_APP_REQUIRED';
+  end if;
+
+  select left(btrim(staff.full_name), 200) into sender_name
+    from identity.staff staff where staff.account_id = actor.actor_account_id;
+  select left(btrim(staff.full_name), 200) into orderer_full_name
+    from identity.staff staff where staff.account_id = order_creator;
+  if coalesce(length(sender_name), 0) < 2 or coalesce(length(orderer_full_name), 0) < 2 then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+  end if;
+  -- The orderer's licence: the newest facility attestation of the ordering
+  -- membership in the doctor role whose role grant is still in force (P4b),
+  -- else none ("Licence not on record").
+  select attestation.licence_body, attestation.licence_number into licence_body, licence_number
+    from identity.staff_licence_attestations attestation
+    join auth.account_roles role_grant on role_grant.id = attestation.role_grant_id and role_grant.revoked_at is null
+   where attestation.membership_id = order_creator_membership
+     and attestation.role_code = 'doctor'
+   order by attestation.recorded_at desc, attestation.id desc
+   limit 1;
+
+  -- Activate a draft (the EHR's own versioning trigger records the change).
+  if order_state = 'draft' then
+    previous_reason := current_setting('app.change_reason', true);
+    perform set_config('app.change_reason', 'Activated to send to another facility', true);
+    if requested_kind = 'lab_request' then
+      update ehr.lab_requests source_order set status = 'active'
+       where source_order.id = requested_order_id
+      returning source_order.* into lab_order;
+      order_version := lab_order.row_version;
+    else
+      update ehr.prescriptions source_order set status = 'active'
+       where source_order.id = requested_order_id
+      returning source_order.* into prescription_order;
+      order_version := prescription_order.row_version;
+    end if;
+    perform set_config('app.change_reason', coalesce(previous_reason, ''), true);
+    order_state := 'active';
+  end if;
+
+  sent_at := clock_timestamp();
+  if requested_kind = 'lab_request' then
+    insert into ehr.order_routes as route (id, kind, patient_id, ordering_organization_id, ordering_facility_id,
+      source_lab_request_id, source_encounter_id, source_order_version, receiving_organization_id,
+      receiving_facility_id, state, sent_by_account_id, sent_by_membership_id, created_at, respond_by,
+      patient_agreement, attestation_text_version, attested_by_name, attested_receiving_facility_name,
+      orderer_account_id, orderer_membership_id, orderer_name, orderer_licence_body, orderer_licence_number,
+      test_code_system, test_code, test_display, priority, specimen_type_code, clinical_information, requested_at,
+      idempotency_key, request_sha256, correlation_id)
+    values (requested_route_id, 'lab_request', requested_patient_id, actor.actor_organization_id,
+      actor.actor_facility_id, lab_order.id, lab_order.encounter_id, order_version,
+      receiving_facility.organization_id, receiving_facility.id, 'sent', actor.actor_account_id,
+      actor.actor_membership_id, sent_at, sent_at + interval '168 hours', 'clinician_attested',
+      requested_attestation_text_version, sender_name, left(btrim(receiving_facility.name), 200),
+      lab_order.created_by, lab_order.created_by_membership_id, orderer_full_name, licence_body, licence_number,
+      lab_order.test_code_system, lab_order.test_code, lab_order.test_display, lab_order.priority,
+      lab_order.specimen_type_code, lab_order.clinical_information, lab_order.created_at,
+      requested_idempotency_key, requested_request_sha256, platform.current_correlation_id())
+    returning route.* into inserted;
+  else
+    insert into ehr.order_routes as route (id, kind, patient_id, ordering_organization_id, ordering_facility_id,
+      source_prescription_id, source_encounter_id, source_order_version, receiving_organization_id,
+      receiving_facility_id, state, sent_by_account_id, sent_by_membership_id, created_at, respond_by,
+      patient_agreement, attestation_text_version, attested_by_name, attested_receiving_facility_name,
+      orderer_account_id, orderer_membership_id, orderer_name, orderer_licence_body, orderer_licence_number,
+      medication_code_system, medication_code, medication_display, dose_quantity, dose_unit, route_code,
+      frequency, instructions, starts_on, ends_on, prescribed_at,
+      idempotency_key, request_sha256, correlation_id)
+    values (requested_route_id, 'prescription', requested_patient_id, actor.actor_organization_id,
+      actor.actor_facility_id, prescription_order.id, prescription_order.encounter_id, order_version,
+      receiving_facility.organization_id, receiving_facility.id, 'sent', actor.actor_account_id,
+      actor.actor_membership_id, sent_at, sent_at + interval '168 hours', 'clinician_attested',
+      requested_attestation_text_version, sender_name, left(btrim(receiving_facility.name), 200),
+      prescription_order.created_by, prescription_order.created_by_membership_id, orderer_full_name,
+      licence_body, licence_number,
+      prescription_order.medication_code_system, prescription_order.medication_code,
+      prescription_order.medication_display, prescription_order.dose_quantity, prescription_order.dose_unit,
+      prescription_order.route_code, prescription_order.frequency, prescription_order.instructions,
+      prescription_order.starts_on, prescription_order.ends_on, prescription_order.created_at,
+      requested_idempotency_key, requested_request_sha256, platform.current_correlation_id())
+    returning route.* into inserted;
+  end if;
+  insert into ehr.order_route_events (route_id, event_version, event_type, side, actor_account_id,
+    actor_membership_id, state_after, correlation_id)
+  values (inserted.id, 1, 'created', 'ordering', actor.actor_account_id, actor.actor_membership_id, 'sent',
+    platform.current_correlation_id());
+  perform ehr.order_route_system_audit(inserted, 'receiving', 'ehr.order-route.received', false, null);
+  perform ehr.order_route_notify_patient(inserted, 'ORDER_ROUTE_SENT');
+
+  return query select inserted.id, inserted.reference::text, inserted.state, inserted.row_version,
+    inserted.created_at, inserted.respond_by, receiving_facility.name, order_version, order_state, false;
+end;
+$$;
+
+-- The ordering side's lookup of one route of an order at the session
+-- facility (C2), locked FOR UPDATE.
+create function ehr.lock_ordering_route(requested_route_id uuid, requested_kind text, requested_order_id uuid,
+  ordering_facility uuid)
+returns ehr.order_routes
+language plpgsql volatile
+set search_path = pg_catalog, ehr, pg_temp
+as $$
+declare
+  locked ehr.order_routes%rowtype;
+begin
+  select route.* into locked
+    from ehr.order_routes route
+   where route.id = requested_route_id
+     and route.kind = requested_kind
+     and route.ordering_facility_id = ordering_facility
+     and ((requested_kind = 'lab_request' and route.source_lab_request_id = requested_order_id)
+       or (requested_kind = 'prescription' and route.source_prescription_id = requested_order_id))
+   for update;
+  if locked.id is null then
+    raise exception using errcode = 'P0002', message = 'ORDER_ROUTE_NOT_FOUND';
+  end if;
+  return locked;
+end;
+$$;
+
+-- C2. The orderer withdraws a sent route: any member at A holding
+-- ehr.order-route.send, no consent needed (it discloses nothing, P7.1).
+create function ehr.withdraw_order_route(
+  requested_route_id uuid,
+  requested_kind text,
+  requested_order_id uuid,
+  expected_version bigint,
+  requested_reason text
+) returns table (row_version bigint, state text, ended_at timestamptz)
+language plpgsql security definer
+set search_path = pg_catalog, ehr, identity, auth, notification, platform, pg_temp
+as $$
+declare
+  actor record;
+  current_route ehr.order_routes%rowtype;
+  changed ehr.order_routes%rowtype;
+  written ehr.order_routes%rowtype;
+begin
+  select * into actor from ehr.order_route_staff_actor(true);
+  if not auth.membership_has_permission(actor.actor_subject, actor.actor_membership_id, actor.actor_facility_id,
+           'ehr.order-route.send') then
+    raise exception using errcode = '42501', message = 'ORDER_ROUTE_PERMISSION_DENIED';
+  end if;
+  if not coalesce(requested_kind in ('lab_request', 'prescription'), false)
+     or not coalesce(requested_reason in ('sent_in_error', 'patient_request', 'other'), false)
+     or requested_route_id is null or requested_order_id is null or expected_version is null then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+  end if;
+  current_route := ehr.lock_ordering_route(requested_route_id, requested_kind, requested_order_id,
+    actor.actor_facility_id);
+  if current_route.row_version <> expected_version then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_VERSION_CONFLICT';
+  end if;
+  if current_route.state <> 'sent' or clock_timestamp() >= current_route.respond_by then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_NOT_PENDING';
+  end if;
+  changed := current_route;
+  changed.state := 'withdrawn';
+  changed.ended_at := clock_timestamp();
+  changed.ended_kind := 'orderer';
+  changed.ended_by_account_id := actor.actor_account_id;
+  written := ehr.write_order_route_change(current_route, changed, 'withdrawn', 'ordering', requested_reason);
+  perform ehr.order_route_system_audit(written, 'receiving', 'ehr.order-route.withdrawn', false, null);
+  perform ehr.order_route_notify_patient(written, 'ORDER_ROUTE_WITHDRAWN');
+  return query select written.row_version, written.state, written.ended_at;
+end;
+$$;
+
+-- The ordering side's read check (C3, C4): direct-care, the order the
+-- patient's at the session facility, and the member's read consent there.
+create function ehr.order_route_reader(requested_kind text, requested_patient_id uuid)
+returns uuid
+language plpgsql stable
+set search_path = pg_catalog, ehr, platform, pg_temp
+as $$
+declare
+  actor record;
+begin
+  select * into actor from ehr.order_route_staff_actor(true);
+  if not coalesce(requested_kind in ('lab_request', 'prescription'), false) or requested_patient_id is null then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+  end if;
+  if not ehr.context_allows(requested_patient_id, actor.actor_facility_id, 'read_records') then
+    raise exception using errcode = 'P0002', message = 'ORDER_NOT_FOUND';
+  end if;
+  return actor.actor_facility_id;
+end;
+$$;
+
+create function ehr.order_belongs_to(requested_kind text, requested_patient_id uuid, requested_order_id uuid,
+  ordering_facility uuid)
+returns boolean
+language plpgsql stable
+set search_path = pg_catalog, ehr, pg_temp
+as $$
+begin
+  if requested_kind = 'lab_request' then
+    return exists (select 1 from ehr.lab_requests source_order
+                    where source_order.id = requested_order_id and source_order.patient_id = requested_patient_id
+                      and source_order.facility_id = ordering_facility);
+  end if;
+  return exists (select 1 from ehr.prescriptions source_order
+                  where source_order.id = requested_order_id and source_order.patient_id = requested_patient_id
+                    and source_order.facility_id = ordering_facility);
+end;
+$$;
+
+-- C3. The routes of one order for its row (newest first, at most 10): the
+-- summary, the attestation, whether the receiving facility is available
+-- now, the events (no actors) and what came back.
+create function ehr.list_order_routes_for_order(requested_kind text, requested_patient_id uuid,
+  requested_order_id uuid)
+returns table (
+  route_id uuid,
+  summary jsonb,
+  attestation jsonb,
+  receiving_available boolean,
+  events jsonb,
+  reports jsonb
+)
+language plpgsql stable security definer
+set search_path = pg_catalog, ehr, identity, lab, pharmacy, platform, pg_temp
+as $$
+declare
+  ordering_facility uuid := ehr.order_route_reader(requested_kind, requested_patient_id);
+  resend boolean;
+begin
+  if not ehr.order_belongs_to(requested_kind, requested_patient_id, requested_order_id, ordering_facility) then
+    raise exception using errcode = 'P0002', message = 'ORDER_NOT_FOUND';
+  end if;
+  resend := ehr.order_route_resend_allowed(requested_kind, requested_order_id);
+  return query
+    select route.id, ehr.order_route_summary(route, resend),
+      jsonb_build_object('textVersion', route.attestation_text_version, 'attestedByName', route.attested_by_name,
+        'attestedAt', route.created_at, 'receivingFacilityName', route.attested_receiving_facility_name),
+      identity.order_route_destination_eligible(route.receiving_facility_id, route.kind),
+      ehr.order_route_events_view(route.id),
+      case when route.kind = 'lab_request' then
+        (select coalesce(jsonb_agg(jsonb_build_object('resultId', report.result_id,
+            'resultVersion', report.result_version, 'kind', report.kind,
+            'test', jsonb_build_object('codeSystem', report.test_code_system, 'code', report.test_code,
+              'name', report.test_name),
+            'resultType', report.result_type, 'numericValue', report.numeric_value, 'textValue', report.text_value,
+            'unit', report.unit, 'referenceRange', report.reference_range, 'abnormalFlag', report.abnormal_flag,
+            'revisionKind', report.revision_kind, 'correctionReason', report.correction_reason,
+            'occurredAt', report.occurred_at) order by report.recorded_at, report.id), '[]'::jsonb)
+           from lab.order_route_result_reports report where report.route_id = route.id)
+      else
+        (select coalesce(jsonb_agg(jsonb_build_object('dispensingId', report.dispensing_id, 'kind', report.kind,
+            'medication', jsonb_build_object('codeSystem', report.medication_code_system,
+              'code', report.medication_code, 'display', report.medication_display),
+            'quantityDispensed', report.quantity_dispensed, 'quantityUnit', report.quantity_unit,
+            'occurredAt', report.occurred_at) order by report.recorded_at, report.id), '[]'::jsonb)
+           from pharmacy.order_route_dispensing_reports report where report.route_id = route.id)
+      end
+      from ehr.order_routes route
+     where route.ordering_facility_id = ordering_facility
+       and ((requested_kind = 'lab_request' and route.source_lab_request_id = requested_order_id)
+         or (requested_kind = 'prescription' and route.source_prescription_id = requested_order_id))
+     order by route.created_at desc, route.id desc
+     limit 10;
+end;
+$$;
+
+-- C4. The latest route's summary for each order of a list (at most 200
+-- orders, all the patient's at the session facility): one row per requested
+-- order, summary NULL when it has none.
+create function ehr.order_route_summaries(requested_kind text, requested_patient_id uuid,
+  requested_order_ids uuid[])
+returns table (order_id uuid, summary jsonb)
+language plpgsql stable security definer
+set search_path = pg_catalog, ehr, identity, lab, pharmacy, platform, pg_temp
+as $$
+declare
+  ordering_facility uuid := ehr.order_route_reader(requested_kind, requested_patient_id);
+  requested uuid;
+begin
+  if requested_order_ids is null or cardinality(requested_order_ids) > 200
+     or array_position(requested_order_ids, null) is not null then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+  end if;
+  foreach requested in array requested_order_ids loop
+    if not ehr.order_belongs_to(requested_kind, requested_patient_id, requested, ordering_facility) then
+      raise exception using errcode = 'P0002', message = 'ORDER_NOT_FOUND';
+    end if;
+  end loop;
+  return query
+    select requested_order.id,
+      (select ehr.order_route_summary(route, ehr.order_route_resend_allowed(requested_kind, requested_order.id))
+         from ehr.order_routes route
+        where route.ordering_facility_id = ordering_facility
+          and ((requested_kind = 'lab_request' and route.source_lab_request_id = requested_order.id)
+            or (requested_kind = 'prescription' and route.source_prescription_id = requested_order.id))
+        order by route.created_at desc, route.id desc
+        limit 1)
+      from (select distinct unnest(requested_order_ids) as id) requested_order;
+end;
+$$;
+
+-- The patient of a patient-self session (C5, C6), else 42501.
+create function ehr.order_route_patient()
+returns uuid
+language plpgsql stable
+set search_path = pg_catalog, ehr, pg_temp
+as $$
+declare
+  claimed text := nullif(current_setting('app.patient_id', true), '');
+begin
+  if claimed is null
+     or claimed !~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+     or not ehr.patient_self_context(claimed::uuid) then
+    raise exception using errcode = '42501', message = 'PATIENT_SESSION_REQUIRED';
+  end if;
+  return claimed::uuid;
+end;
+$$;
+
+-- C5. The patient's orders sent to other facilities (newest first, at most
+-- 100): what was sent and to whom, the clinician's attestation, and Stop
+-- while it can still be stopped.
+create function ehr.patient_list_order_routes()
+returns table (
+  route_id uuid,
+  reference text,
+  kind text,
+  row_version bigint,
+  effective_state text,
+  created_at timestamptz,
+  respond_by timestamptz,
+  accepted_at timestamptz,
+  completed_at timestamptz,
+  ended_at timestamptz,
+  ended_kind text,
+  decline_reason text,
+  ordering_facility_name text,
+  receiving_facility_id uuid,
+  receiving_facility_name text,
+  receiving_registered_address text,
+  content jsonb,
+  attestation_text_version text,
+  attestation_text text,
+  attested_by_name text,
+  actions text[]
+)
+language plpgsql stable security definer
+set search_path = pg_catalog, ehr, identity, platform, pg_temp
+as $$
+declare
+  session_patient uuid := ehr.order_route_patient();
+begin
+  return query
+    select route.id, route.reference::text, route.kind, route.row_version, ehr.order_route_effective_state(route),
+      route.created_at, route.respond_by, route.accepted_at, route.completed_at, route.ended_at, route.ended_kind,
+      route.decline_reason,
+      (select facility.name from identity.facilities facility where facility.id = route.ordering_facility_id),
+      route.receiving_facility_id,
+      (select facility.name from identity.facilities facility where facility.id = route.receiving_facility_id),
+      identity.order_route_registered_address(route.receiving_facility_id),
+      case when route.kind = 'lab_request' then
+        jsonb_build_object('reference', route.reference, 'ordererName', route.orderer_name,
+          'ordererLicenceBody', route.orderer_licence_body, 'ordererLicenceNumber', route.orderer_licence_number,
+          'testCodeSystem', route.test_code_system, 'testCode', route.test_code, 'testDisplay', route.test_display,
+          'priority', route.priority, 'specimenTypeCode', route.specimen_type_code,
+          'clinicalInformation', route.clinical_information, 'requestedAt', route.requested_at)
+      else
+        jsonb_build_object('reference', route.reference, 'ordererName', route.orderer_name,
+          'ordererLicenceBody', route.orderer_licence_body, 'ordererLicenceNumber', route.orderer_licence_number,
+          'medicationCodeSystem', route.medication_code_system, 'medicationCode', route.medication_code,
+          'medicationDisplay', route.medication_display, 'doseQuantity', route.dose_quantity,
+          'doseUnit', route.dose_unit, 'routeCode', route.route_code, 'frequency', route.frequency,
+          'instructions', route.instructions, 'startsOn', route.starts_on, 'endsOn', route.ends_on,
+          'prescribedAt', route.prescribed_at)
+      end,
+      route.attestation_text_version,
+      (select text_row.text from ehr.order_route_attestation_texts text_row
+        where text_row.version = route.attestation_text_version),
+      route.attested_by_name,
+      case when route.state = 'sent' and clock_timestamp() < route.respond_by then array['withdraw']
+           else array[]::text[] end
+      from ehr.order_routes route
+     where route.patient_id = session_patient
+     order by route.created_at desc, route.id desc
+     limit 100;
+end;
+$$;
+
+-- C6. The patient's Stop of a sent route (the patient's only write): the
+-- route lock only (it checks no eligibility, so it takes no application).
+create function ehr.patient_stop_order_route(requested_route_id uuid, expected_version bigint)
+returns table (row_version bigint, state text, effective_state text)
+language plpgsql security definer
+set search_path = pg_catalog, ehr, identity, notification, audit, platform, pg_temp
+as $$
+declare
+  session_patient uuid := ehr.order_route_patient();
+  current_route ehr.order_routes%rowtype;
+  changed ehr.order_routes%rowtype;
+  written ehr.order_routes%rowtype;
+begin
+  if requested_route_id is null or expected_version is null then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+  end if;
+  if not exists (select 1 from ehr.order_routes route
+                  where route.id = requested_route_id and route.patient_id = session_patient) then
+    raise exception using errcode = 'P0002', message = 'ORDER_ROUTE_NOT_FOUND';
+  end if;
+  select route.* into current_route from ehr.order_routes route where route.id = requested_route_id for update;
+  if current_route.row_version <> expected_version then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_VERSION_CONFLICT';
+  end if;
+  if current_route.state <> 'sent' or clock_timestamp() >= current_route.respond_by then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_NOT_PENDING';
+  end if;
+  changed := current_route;
+  changed.state := 'withdrawn';
+  changed.ended_at := clock_timestamp();
+  changed.ended_kind := 'patient';
+  changed.ended_by_account_id := platform.current_account_id();
+  written := ehr.write_order_route_change(current_route, changed, 'withdrawn', 'patient', 'patient');
+  perform ehr.order_route_system_audit(written, 'ordering', 'ehr.order-route.patient-withdrawn', true, null);
+  perform ehr.order_route_system_audit(written, 'receiving', 'ehr.order-route.withdrawn', false, null);
+  perform ehr.order_route_notify_patient(written, 'ORDER_ROUTE_WITHDRAWN');
+  return query select written.row_version, written.state, ehr.order_route_effective_state(written);
+end;
+$$;
+
+revoke all on function ehr.order_route_sender_check(text),
+  ehr.order_route_attestation_text(text),
+  ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,char),
+  ehr.lock_ordering_route(uuid,text,uuid,uuid),
+  ehr.withdraw_order_route(uuid,text,uuid,bigint,text),
+  ehr.order_route_reader(text,uuid),
+  ehr.order_belongs_to(text,uuid,uuid,uuid),
+  ehr.list_order_routes_for_order(text,uuid,uuid),
+  ehr.order_route_summaries(text,uuid,uuid[]),
+  ehr.order_route_patient(),
+  ehr.patient_list_order_routes(),
+  ehr.patient_stop_order_route(uuid,bigint)
+  from public;
+
+-- 6.4.2 The receiving facility (Lab: EXECUTE to the Lab runtime; Pharmacy:
+-- the same commands under pharmacy.*, EXECUTE to the Pharmacy runtime). The
+-- shared bodies are owner-only helpers taking the route kind.
+
+-- The receiving actor: a staff session under direct-care holding the kind's
+-- receive permission at the session facility; else 42501.
+create function ehr.order_route_receiver(requested_kind text)
+returns table (
+  actor_subject text,
+  actor_account_id uuid,
+  actor_membership_id uuid,
+  actor_facility_id uuid,
+  actor_organization_id uuid
+)
+language plpgsql stable
+set search_path = pg_catalog, ehr, auth, platform, pg_temp
+as $$
+declare
+  actor record;
+begin
+  select * into actor from ehr.order_route_staff_actor(true);
+  if not auth.membership_has_permission(actor.actor_subject, actor.actor_membership_id, actor.actor_facility_id,
+           ehr.order_route_receive_permission(requested_kind)) then
+    raise exception using errcode = '42501', message = 'ORDER_ROUTE_PERMISSION_DENIED';
+  end if;
+  return query select actor.actor_subject, actor.actor_account_id, actor.actor_membership_id,
+    actor.actor_facility_id, actor.actor_organization_id;
+end;
+$$;
+
+-- A Health ID as typed at the counter: upper case, trimmed, the canonical
+-- pattern (0002), else NULL.
+create function ehr.order_route_health_id(requested_health_id text)
+returns text
+language sql immutable parallel safe
+set search_path = pg_catalog, pg_temp
+as $$
+  select case when upper(btrim(requested_health_id)) ~ '^HID-[A-HJ-NP-Z2-9]{6,32}$'
+              then upper(btrim(requested_health_id)) end
+$$;
+
+-- What the receiving facility may see of a route (P11, P2, P4; SPEC 4.1):
+--   preview   sent, before respond_by: the order without its free text and
+--             without the patient;
+--   full      accepted, completed or cancelled while the route allows a read
+--             now (H7): also the free text, the licence number and the patient;
+--   metadata  anything else: reference, kind, ordering facility, state, dates.
+-- With cross_facility_orders_enabled off, a preview is metadata only (P9.4).
+create function ehr.order_route_receiving_view(route ehr.order_routes)
+returns text
+language plpgsql stable
+set search_path = pg_catalog, ehr, platform, pg_temp
+as $$
+declare
+  orders_open boolean;
+begin
+  if route.state in ('accepted', 'completed', 'cancelled')
+     and ehr.order_route_allows(route.id, route.receiving_facility_id, 'read_records') then
+    return 'full';
+  end if;
+  if route.state = 'sent' and clock_timestamp() < route.respond_by then
+    begin
+      orders_open := coalesce(platform.control_enabled('cross_facility_orders_enabled'), false);
+    exception when object_not_in_prerequisite_state or invalid_parameter_value then
+      orders_open := false;
+    end;
+    if orders_open then
+      return 'preview';
+    end if;
+  end if;
+  return 'metadata';
+end;
+$$;
+
+-- C7 / C13. Incoming (sent, before respond_by, addressed here, oldest first,
+-- at most 200, optionally one patient's by Health ID) or recent (the last 30
+-- days, any state, metadata only, plus the work item and test or medicine for
+-- accepted ones).
+create function ehr.list_receiving_order_routes(requested_kind text, requested_view text, requested_health_id text)
+returns table (
+  route_id uuid,
+  reference text,
+  row_version bigint,
+  effective_state text,
+  view_level text,
+  ordering_facility_name text,
+  orderer_name text,
+  orderer_licence_body text,
+  test_code_system text,
+  test_code text,
+  test_name text,
+  priority text,
+  specimen_type_code text,
+  medication_code_system text,
+  medication_code text,
+  medication_display text,
+  dose_quantity numeric,
+  dose_unit text,
+  route_code text,
+  frequency text,
+  starts_on date,
+  ends_on date,
+  prescribed_at timestamptz,
+  sent_at timestamptz,
+  respond_by timestamptz,
+  accept_locked boolean,
+  attempts_left integer,
+  accepted_at timestamptz,
+  ended_at timestamptz,
+  work_item_id uuid
+)
+language plpgsql stable
+set search_path = pg_catalog, ehr, identity, platform, pg_temp
+as $$
+declare
+  actor record;
+  wanted_patient uuid;
+begin
+  select * into actor from ehr.order_route_receiver(requested_kind);
+  if not coalesce(requested_view in ('incoming', 'recent'), false)
+     or (requested_health_id is not null and ehr.order_route_health_id(requested_health_id) is null) then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+  end if;
+  perform platform.require_control_enabled('cross_facility_route_access_enabled');
+  if requested_health_id is not null then
+    select patient.id into wanted_patient
+      from identity.patients patient where patient.hid_code = ehr.order_route_health_id(requested_health_id);
+    if wanted_patient is null then
+      return;
+    end if;
+  end if;
+  if requested_view = 'incoming' then
+    return query
+      select route.id, route.reference::text, route.row_version, ehr.order_route_effective_state(route),
+        visible.level,
+        (select facility.name from identity.facilities facility where facility.id = route.ordering_facility_id),
+        case when visible.level = 'preview' then route.orderer_name end,
+        case when visible.level = 'preview' then route.orderer_licence_body end,
+        case when visible.level = 'preview' then route.test_code_system end,
+        case when visible.level = 'preview' then route.test_code end,
+        case when visible.level = 'preview' then route.test_display end,
+        case when visible.level = 'preview' then route.priority end,
+        case when visible.level = 'preview' then route.specimen_type_code end,
+        case when visible.level = 'preview' then route.medication_code_system end,
+        case when visible.level = 'preview' then route.medication_code end,
+        case when visible.level = 'preview' then route.medication_display end,
+        case when visible.level = 'preview' then route.dose_quantity end,
+        case when visible.level = 'preview' then route.dose_unit end,
+        case when visible.level = 'preview' then route.route_code end,
+        case when visible.level = 'preview' then route.frequency end,
+        case when visible.level = 'preview' then route.starts_on end,
+        case when visible.level = 'preview' then route.ends_on end,
+        case when visible.level = 'preview' then route.prescribed_at end,
+        route.created_at, route.respond_by, route.accept_locked_at is not null,
+        greatest(0, (select limits.mismatches_per_route from ehr.order_route_limits() limits)
+          - (select count(*)::integer from ehr.order_route_accept_attempts attempt
+              where attempt.route_id = route.id and attempt.outcome = 'mismatch')),
+        null::timestamptz, null::timestamptz, null::uuid
+        from ehr.order_routes route
+        cross join lateral (select ehr.order_route_receiving_view(route) as level) visible
+       where route.receiving_facility_id = actor.actor_facility_id
+         and route.kind = requested_kind
+         and route.state = 'sent'
+         and route.respond_by > clock_timestamp()
+         and (wanted_patient is null or route.patient_id = wanted_patient)
+       order by route.created_at, route.id
+       limit 200;
+    return;
+  end if;
+  return query
+    select route.id, route.reference::text, route.row_version, ehr.order_route_effective_state(route),
+      'metadata'::text,
+      (select facility.name from identity.facilities facility where facility.id = route.ordering_facility_id),
+      null::text, null::text, null::text, null::text,
+      case when route.accepted_at is not null then route.test_display end,
+      null::text, null::text, null::text, null::text,
+      case when route.accepted_at is not null then route.medication_display end,
+      null::numeric, null::text, null::text, null::text, null::date, null::date, null::timestamptz,
+      route.created_at, route.respond_by, route.accept_locked_at is not null, null::integer,
+      route.accepted_at, route.ended_at, coalesce(route.lab_work_item_id, route.pharmacy_work_item_id)
+      from ehr.order_routes route
+     where route.receiving_facility_id = actor.actor_facility_id
+       and route.kind = requested_kind
+       and route.created_at > clock_timestamp() - interval '720 hours'
+       and (wanted_patient is null or route.patient_id = wanted_patient)
+     order by route.created_at desc, route.id desc
+     limit 200;
+end;
+$$;
+
+-- C8 / C14. One route addressed here, by what the facility may see of it.
+create function ehr.get_receiving_order_route(requested_kind text, requested_route_id uuid)
+returns table (
+  route_id uuid,
+  reference text,
+  row_version bigint,
+  effective_state text,
+  view_level text,
+  ordering_facility_name text,
+  orderer_name text,
+  orderer_licence_body text,
+  orderer_licence_number text,
+  test_code_system text,
+  test_code text,
+  test_name text,
+  priority text,
+  specimen_type_code text,
+  clinical_information text,
+  medication_code_system text,
+  medication_code text,
+  medication_display text,
+  dose_quantity numeric,
+  dose_unit text,
+  route_code text,
+  frequency text,
+  instructions text,
+  starts_on date,
+  ends_on date,
+  prescribed_at timestamptz,
+  sent_at timestamptz,
+  respond_by timestamptz,
+  accept_locked boolean,
+  attempts_left integer,
+  accepted_at timestamptz,
+  completed_at timestamptz,
+  ended_at timestamptz,
+  work_item_id uuid,
+  patient_full_name text,
+  patient_sex text,
+  patient_date_of_birth date,
+  patient_health_id_last4 text
+)
+language plpgsql stable
+set search_path = pg_catalog, ehr, identity, platform, pg_temp
+as $$
+declare
+  actor record;
+  route ehr.order_routes%rowtype;
+  level text;
+  card record;
+begin
+  select * into actor from ehr.order_route_receiver(requested_kind);
+  perform platform.require_control_enabled('cross_facility_route_access_enabled');
+  select candidate.* into route from ehr.order_routes candidate
+   where candidate.id = requested_route_id and candidate.kind = requested_kind
+     and candidate.receiving_facility_id = actor.actor_facility_id;
+  if route.id is null then
+    raise exception using errcode = 'P0002', message = 'ORDER_ROUTE_NOT_FOUND';
+  end if;
+  level := ehr.order_route_receiving_view(route);
+  select null::text as full_name, null::text as sex, null::date as date_of_birth, null::text as health_id_last4
+    into card;
+  if level = 'full' then
+    select * into card from ehr.order_route_patient_card(route.patient_id);
+  end if;
+  return query select route.id, route.reference::text, route.row_version, ehr.order_route_effective_state(route),
+    level,
+    (select facility.name from identity.facilities facility where facility.id = route.ordering_facility_id),
+    case when level <> 'metadata' then route.orderer_name end,
+    case when level <> 'metadata' then route.orderer_licence_body end,
+    case when level = 'full' then route.orderer_licence_number end,
+    case when level <> 'metadata' then route.test_code_system end,
+    case when level <> 'metadata' then route.test_code end,
+    case when level <> 'metadata' then route.test_display end,
+    case when level <> 'metadata' then route.priority end,
+    case when level <> 'metadata' then route.specimen_type_code end,
+    case when level = 'full' then route.clinical_information end,
+    case when level <> 'metadata' then route.medication_code_system end,
+    case when level <> 'metadata' then route.medication_code end,
+    case when level <> 'metadata' then route.medication_display end,
+    case when level <> 'metadata' then route.dose_quantity end,
+    case when level <> 'metadata' then route.dose_unit end,
+    case when level <> 'metadata' then route.route_code end,
+    case when level <> 'metadata' then route.frequency end,
+    case when level = 'full' then route.instructions end,
+    case when level <> 'metadata' then route.starts_on end,
+    case when level <> 'metadata' then route.ends_on end,
+    case when level <> 'metadata' then route.prescribed_at end,
+    route.created_at, route.respond_by, route.accept_locked_at is not null,
+    greatest(0, (select limits.mismatches_per_route from ehr.order_route_limits() limits)
+      - (select count(*)::integer from ehr.order_route_accept_attempts attempt
+          where attempt.route_id = route.id and attempt.outcome = 'mismatch')),
+    route.accepted_at, route.completed_at, route.ended_at,
+    case when level = 'full' then coalesce(route.lab_work_item_id, route.pharmacy_work_item_id) end,
+    card.full_name, card.sex, card.date_of_birth, card.health_id_last4;
+end;
+$$;
+
+-- The receiving side's route, locked after its own application (C9, C10,
+-- C15, C16): addressed here and of this kind, else P0002.
+create function ehr.lock_receiving_route(requested_kind text, requested_route_id uuid, receiving_facility uuid,
+  receiving_organization uuid)
+returns ehr.order_routes
+language plpgsql volatile
+set search_path = pg_catalog, ehr, identity, pg_temp
+as $$
+declare
+  locked ehr.order_routes%rowtype;
+begin
+  if not exists (select 1 from ehr.order_routes route
+                  where route.id = requested_route_id and route.kind = requested_kind
+                    and route.receiving_facility_id = receiving_facility) then
+    raise exception using errcode = 'P0002', message = 'ORDER_ROUTE_NOT_FOUND';
+  end if;
+  perform identity.lock_self_service_application(receiving_organization);
+  select route.* into locked from ehr.order_routes route where route.id = requested_route_id for update;
+  return locked;
+end;
+$$;
+
+-- C9 / C15. Acceptance at the counter, with the patient's Health ID or date
+-- of birth (P2). A mismatch is recorded and answered (5 lock the route here;
+-- 20 a day stop the member); a match accepts the route and creates the work
+-- item bound to it, in one savepoint: if a same-facility hand-off won the
+-- order first (unique violation), the route is withdrawn (order_in_work) and
+-- that is the answer (R10). Identity and free text are answered only while
+-- the route allows a read (a replay re-checks it, P10.4).
+create function ehr.accept_receiving_order_route(
+  requested_kind text,
+  requested_route_id uuid,
+  expected_version bigint,
+  requested_identifier_kind text,
+  requested_identifier text,
+  requested_acceptance_reason text,
+  requested_idempotency_key text,
+  requested_request_sha256 char(64)
+) returns table (
+  result text,
+  attempts_left integer,
+  route_row_version bigint,
+  work_item_id uuid,
+  patient_full_name text,
+  patient_sex text,
+  patient_date_of_birth date,
+  patient_health_id_last4 text,
+  clinical_information text,
+  instructions text,
+  orderer_licence_body text,
+  orderer_licence_number text,
+  replayed boolean
+)
+language plpgsql volatile
+set search_path = pg_catalog, ehr, identity, auth, lab, pharmacy, notification, platform, pg_temp
+as $$
+declare
+  actor record;
+  limits record;
+  prior ehr.order_routes%rowtype;
+  current_route ehr.order_routes%rowtype;
+  changed ehr.order_routes%rowtype;
+  written ehr.order_routes%rowtype;
+  patient_row identity.patients%rowtype;
+  ordering_facility identity.facilities%rowtype;
+  card record;
+  normalized_identifier text;
+  identifier_date date;
+  matched boolean;
+  mismatches integer;
+  new_work_item uuid := gen_random_uuid();
+  accepted_now timestamptz;
+  readable boolean;
+begin
+  select * into actor from ehr.order_route_receiver(requested_kind);
+  if requested_route_id is null or expected_version is null or expected_version < 1
+     or not coalesce(requested_identifier_kind in ('health_id', 'date_of_birth'), false)
+     or not coalesce(requested_idempotency_key ~ '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$', false)
+     or not coalesce(requested_request_sha256 ~ '^[0-9a-f]{64}$', false)
+     or (requested_kind = 'prescription'
+       and not coalesce(length(btrim(requested_acceptance_reason)) between 8 and 500, false)) then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+  end if;
+  if requested_identifier_kind = 'health_id' then
+    normalized_identifier := ehr.order_route_health_id(requested_identifier);
+    if normalized_identifier is null then
+      raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+    end if;
+  else
+    if not coalesce(btrim(requested_identifier) ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$', false) then
+      raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+    end if;
+    begin
+      identifier_date := btrim(requested_identifier)::date;
+    exception when invalid_datetime_format or datetime_field_overflow then
+      raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+    end;
+    if to_char(identifier_date, 'YYYY-MM-DD') <> btrim(requested_identifier) then
+      raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+    end if;
+  end if;
+  perform platform.require_control_enabled('cross_facility_orders_enabled');
+  perform platform.require_control_enabled('cross_facility_route_access_enabled');
+
+  -- Replay by the acceptor's key at this facility.
+  select route.* into prior from ehr.order_routes route
+   where route.accepted_by_account_id = actor.actor_account_id
+     and route.receiving_facility_id = actor.actor_facility_id
+     and route.accept_idempotency_key = requested_idempotency_key;
+  if prior.id is not null then
+    if prior.accept_request_sha256 is distinct from requested_request_sha256 or prior.kind <> requested_kind
+       or prior.id <> requested_route_id then
+      raise exception using errcode = 'P0001', message = 'IDEMPOTENCY_KEY_REUSED';
+    end if;
+    readable := ehr.order_route_allows(prior.id, prior.receiving_facility_id, 'read_records');
+    select null::text as full_name, null::text as sex, null::date as date_of_birth, null::text as health_id_last4
+      into card;
+    if readable then
+      select * into card from ehr.order_route_patient_card(prior.patient_id);
+    end if;
+    return query select 'accepted'::text, null::integer, prior.row_version,
+      coalesce(prior.lab_work_item_id, prior.pharmacy_work_item_id),
+      card.full_name, card.sex, card.date_of_birth, card.health_id_last4,
+      case when readable then prior.clinical_information end,
+      case when readable then prior.instructions end,
+      case when readable then prior.orderer_licence_body end,
+      case when readable then prior.orderer_licence_number end, true;
+    return;
+  end if;
+
+  if not exists (select 1 from ehr.order_routes route
+                  where route.id = requested_route_id and route.kind = requested_kind
+                    and route.receiving_facility_id = actor.actor_facility_id) then
+    raise exception using errcode = 'P0002', message = 'ORDER_ROUTE_NOT_FOUND';
+  end if;
+  perform identity.lock_self_service_application(actor.actor_organization_id);
+  if not identity.order_route_destination_eligible(actor.actor_facility_id, requested_kind) then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_DESTINATION_INELIGIBLE';
+  end if;
+  select route.* into current_route from ehr.order_routes route where route.id = requested_route_id for update;
+  if current_route.row_version <> expected_version then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_VERSION_CONFLICT';
+  end if;
+  if current_route.state <> 'sent' then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_NOT_PENDING';
+  end if;
+  if clock_timestamp() >= current_route.respond_by then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_EXPIRED';
+  end if;
+  if current_route.accept_locked_at is not null then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_ACCEPT_LOCKED';
+  end if;
+  select facility.* into ordering_facility from identity.facilities facility
+   where facility.id = current_route.ordering_facility_id;
+  if not ordering_facility.active or ordering_facility.lifecycle_status <> 'verified'
+     or not exists (select 1 from identity.organizations organization
+                     where organization.id = ordering_facility.organization_id and organization.active) then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_ORDERING_FACILITY_UNAVAILABLE';
+  end if;
+  if identity.patient_denies_order_route(current_route.patient_id, actor.actor_facility_id) then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_PATIENT_DENIED';
+  end if;
+  select * into limits from ehr.order_route_limits();
+  if (select count(*) from ehr.order_route_accept_attempts attempt
+       where attempt.membership_id = actor.actor_membership_id and attempt.outcome = 'mismatch'
+         and attempt.attempted_at > clock_timestamp() - interval '24 hours') >= limits.mismatches_per_member_per_day then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_ACCEPT_LIMITED';
+  end if;
+  select patient.* into patient_row from identity.patients patient where patient.id = current_route.patient_id;
+  if requested_identifier_kind = 'date_of_birth' and patient_row.dob is null then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_HEALTH_ID_REQUIRED';
+  end if;
+  matched := case requested_identifier_kind
+    when 'health_id' then patient_row.hid_code = normalized_identifier
+    else patient_row.dob = identifier_date end;
+  insert into ehr.order_route_accept_attempts (route_id, receiving_facility_id, account_id, membership_id,
+    identifier_kind, outcome)
+  values (current_route.id, actor.actor_facility_id, actor.actor_account_id, actor.actor_membership_id,
+    requested_identifier_kind, case when matched then 'match' else 'mismatch' end);
+
+  if not matched then
+    select count(*)::integer into mismatches from ehr.order_route_accept_attempts attempt
+     where attempt.route_id = current_route.id and attempt.outcome = 'mismatch';
+    if mismatches >= limits.mismatches_per_route then
+      changed := current_route;
+      changed.accept_locked_at := clock_timestamp();
+      written := ehr.write_order_route_change(current_route, changed, 'accept_locked', 'receiving', 'patient_mismatch');
+      perform ehr.order_route_system_audit(written, 'ordering', 'ehr.order-route.accept-locked', true, null);
+      perform ehr.order_route_notify_patient(written, 'ORDER_ROUTE_ACCEPT_LOCKED');
+      return query select 'accept_locked'::text, 0, written.row_version, null::uuid, null::text, null::text,
+        null::date, null::text, null::text, null::text, null::text, null::text, false;
+      return;
+    end if;
+    return query select 'patient_mismatch'::text, limits.mismatches_per_route - mismatches, current_route.row_version,
+      null::uuid, null::text, null::text, null::date, null::text, null::text, null::text, null::text, null::text, false;
+    return;
+  end if;
+
+  begin
+    accepted_now := clock_timestamp();
+    changed := current_route;
+    changed.state := 'accepted';
+    changed.accepted_at := accepted_now;
+    changed.accepted_by_account_id := actor.actor_account_id;
+    changed.accepted_by_membership_id := actor.actor_membership_id;
+    changed.accept_idempotency_key := requested_idempotency_key;
+    changed.accept_request_sha256 := requested_request_sha256;
+    changed.writes_end_at := accepted_now + make_interval(hours => limits.work_days * 24);
+    changed.access_ends_at := changed.writes_end_at;
+    if requested_kind = 'lab_request' then
+      changed.lab_work_item_id := new_work_item;
+    else
+      changed.pharmacy_work_item_id := new_work_item;
+    end if;
+    written := ehr.write_order_route_change(current_route, changed, 'accepted', 'receiving', null);
+    if requested_kind = 'lab_request' then
+      insert into lab.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_order_id,
+        source_ehr_order_version, source_encounter_id, status, priority, test_code_system, test_code, test_name,
+        clinical_indication, requested_by, requested_at, accepted_by, accepted_by_membership_id, idempotency_key,
+        request_sha256, correlation_id, order_route_id)
+      values (new_work_item, written.patient_id, written.receiving_facility_id, written.ordering_facility_id,
+        written.source_lab_request_id, written.source_order_version, written.source_encounter_id, 'accepted',
+        written.priority, written.test_code_system, written.test_code, written.test_display,
+        written.clinical_information, written.orderer_account_id, written.requested_at, actor.actor_account_id,
+        actor.actor_membership_id, 'order-route:' || written.id::text, requested_request_sha256,
+        platform.current_correlation_id(), written.id);
+      insert into lab.work_item_requested_tests (work_item_id, facility_id, patient_id, "ordinal", code_system, code,
+        name)
+      values (new_work_item, written.receiving_facility_id, written.patient_id, 1, written.test_code_system,
+        written.test_code, written.test_display);
+      insert into lab.work_item_events (work_item_id, facility_id, patient_id, event_version, event_type, actor_id,
+        actor_membership_id, reason, correlation_id)
+      values (new_work_item, written.receiving_facility_id, written.patient_id, 1, 'accepted', actor.actor_account_id,
+        actor.actor_membership_id, 'Accepted from another facility through an order route',
+        platform.current_correlation_id());
+      insert into lab.outbox_events (event_type, aggregate_id, aggregate_version, facility_id, patient_id,
+        correlation_id, payload)
+      values ('LabWorkItemCreated', new_work_item, 1, written.receiving_facility_id, written.patient_id,
+        platform.current_correlation_id(),
+        jsonb_build_object('workItemId', new_work_item, 'sourceEhrOrderId', written.source_lab_request_id,
+          'sourceEhrOrderVersion', written.source_order_version, 'status', 'accepted'));
+    else
+      insert into pharmacy.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_prescription_id,
+        source_ehr_prescription_version, source_encounter_id, source_status, status, medication_code_system,
+        medication_code, medication_display, dose_quantity, dose_unit, route_code, frequency, instructions, starts_on,
+        ends_on, prescribed_by, prescribed_at, accepted_by, accepted_by_membership_id, acceptance_reason,
+        idempotency_key, request_sha256, correlation_id, order_route_id)
+      values (new_work_item, written.patient_id, written.receiving_facility_id, written.ordering_facility_id,
+        written.source_prescription_id, written.source_order_version, written.source_encounter_id, 'active',
+        'accepted', written.medication_code_system, written.medication_code, written.medication_display,
+        written.dose_quantity, written.dose_unit, written.route_code, written.frequency, written.instructions,
+        written.starts_on, written.ends_on, written.orderer_account_id, written.prescribed_at,
+        actor.actor_account_id, actor.actor_membership_id, btrim(requested_acceptance_reason),
+        'order-route:' || written.id::text, requested_request_sha256, platform.current_correlation_id(), written.id);
+      insert into pharmacy.work_item_events (work_item_id, patient_id, facility_id, event_version, event_type,
+        actor_id, actor_membership_id, reason, correlation_id)
+      values (new_work_item, written.patient_id, written.receiving_facility_id, 1, 'prescription_accepted',
+        actor.actor_account_id, actor.actor_membership_id, btrim(requested_acceptance_reason),
+        platform.current_correlation_id());
+      insert into pharmacy.outbox_events (event_type, aggregate_type, aggregate_id, aggregate_version, facility_id,
+        patient_id, correlation_id, payload)
+      values ('PharmacyWorkItemCreated', 'pharmacy-work-item', new_work_item, 1, written.receiving_facility_id,
+        written.patient_id, platform.current_correlation_id(),
+        jsonb_build_object('workItemId', new_work_item, 'sourceEhrPrescriptionId', written.source_prescription_id,
+          'sourceEhrPrescriptionVersion', written.source_order_version, 'status', 'accepted'));
+    end if;
+  exception when unique_violation then
+    -- A same-facility hand-off at the ordering facility won the order (R10):
+    -- the savepoint undid the acceptance; the route is withdrawn.
+    select route.* into current_route from ehr.order_routes route where route.id = requested_route_id;
+    changed := current_route;
+    changed.state := 'withdrawn';
+    changed.ended_at := clock_timestamp();
+    changed.ended_kind := 'order_in_work';
+    written := ehr.write_order_route_change(current_route, changed, 'withdrawn', 'system', 'order_in_work');
+    perform ehr.order_route_system_audit(written, 'ordering', 'ehr.order-route.withdrawn', true, null);
+    perform ehr.order_route_notify_patient(written, 'ORDER_ROUTE_WITHDRAWN');
+    return query select 'order_in_work'::text, null::integer, written.row_version, null::uuid, null::text,
+      null::text, null::date, null::text, null::text, null::text, null::text, null::text, false;
+    return;
+  end;
+  perform ehr.order_route_system_audit(written, 'ordering', 'ehr.order-route.accepted', true, null);
+  perform ehr.order_route_notify_patient(written, 'ORDER_ROUTE_ACCEPTED');
+  select * into card from ehr.order_route_patient_card(written.patient_id);
+  return query select 'accepted'::text, null::integer, written.row_version, new_work_item, card.full_name, card.sex,
+    card.date_of_birth, card.health_id_last4, written.clinical_information, written.instructions,
+    written.orderer_licence_body, written.orderer_licence_number, false;
+end;
+$$;
+
+-- C10 / C16. Decline before acceptance, with a reason code (no control: B
+-- may always decline).
+create function ehr.decline_receiving_order_route(requested_kind text, requested_route_id uuid,
+  expected_version bigint, requested_reason text)
+returns table (row_version bigint, state text)
+language plpgsql volatile
+set search_path = pg_catalog, ehr, identity, auth, notification, platform, pg_temp
+as $$
+declare
+  actor record;
+  current_route ehr.order_routes%rowtype;
+  changed ehr.order_routes%rowtype;
+  written ehr.order_routes%rowtype;
+begin
+  select * into actor from ehr.order_route_receiver(requested_kind);
+  if requested_route_id is null or expected_version is null
+     or not coalesce(requested_reason in ('test_not_offered', 'medicine_unavailable', 'cannot_meet_priority',
+       'patient_not_seen', 'other'), false) then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+  end if;
+  current_route := ehr.lock_receiving_route(requested_kind, requested_route_id, actor.actor_facility_id,
+    actor.actor_organization_id);
+  if current_route.row_version <> expected_version then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_VERSION_CONFLICT';
+  end if;
+  if current_route.state <> 'sent' then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_NOT_PENDING';
+  end if;
+  if clock_timestamp() >= current_route.respond_by then
+    raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_EXPIRED';
+  end if;
+  changed := current_route;
+  changed.state := 'declined';
+  changed.declined_at := clock_timestamp();
+  changed.declined_by_account_id := actor.actor_account_id;
+  changed.declined_by_membership_id := actor.actor_membership_id;
+  changed.decline_reason := requested_reason;
+  written := ehr.write_order_route_change(current_route, changed, 'declined', 'receiving', requested_reason);
+  perform ehr.order_route_system_audit(written, 'ordering', 'ehr.order-route.declined', true,
+    jsonb_build_object('reason', requested_reason));
+  perform ehr.order_route_notify_patient(written, 'ORDER_ROUTE_DECLINED');
+  return query select written.row_version, written.state;
+end;
+$$;
+
+-- C11 / C17's decision for one work item (route-backed or not).
+create function ehr.order_route_item_access(requested_kind text, item_route_id uuid, requested_action text)
+returns text
+language plpgsql stable
+set search_path = pg_catalog, ehr, platform, pg_temp
+as $$
+declare
+  route ehr.order_routes%rowtype;
+begin
+  if item_route_id is null then
+    return 'none';
+  end if;
+  select candidate.* into route from ehr.order_routes candidate
+   where candidate.id = item_route_id and candidate.kind = requested_kind
+     and candidate.receiving_facility_id = platform.current_facility_id();
+  if route.id is null then
+    return 'none';
+  end if;
+  if not ehr.order_route_access_open() then
+    return 'paused';
+  end if;
+  if ehr.order_route_allows(route.id, route.receiving_facility_id, requested_action) then
+    return 'allowed';
+  end if;
+  if requested_action = 'write_records'
+     and (route.state = 'cancelled' or (route.state = 'accepted' and clock_timestamp() >= route.writes_end_at)) then
+    return 'closed';
+  end if;
+  return 'none';
+end;
+$$;
+
+-- C11. Route access for the resource a Lab command acts on (P12): the
+-- database derives the work item from the resource. A resource the session
+-- cannot read (its own row-level security) or a work item without a route
+-- answers none (Identity's consent check, as today); route-backed: paused
+-- (route-access control off), allowed (the route allows the action now),
+-- closed (a write on a cancelled route, or on an accepted one past its
+-- window) or none (a read the route does not allow, or a write on a completed
+-- route past its window: the patient's consent decides, P3).
+create function lab.order_route_access_for(requested_resource_type text, requested_resource_id uuid,
+  requested_action text)
+returns table (outcome text, route_id uuid, work_item_id uuid)
+language plpgsql stable security definer
+set search_path = pg_catalog, lab, ehr, platform, pg_temp
+as $$
+declare
+  actor record;
+  item_id uuid;
+  item_route uuid;
+  item_facility uuid;
+  decision text;
+begin
+  select * into actor from ehr.order_route_staff_actor(false);
+  if not coalesce(requested_resource_type in ('work_item', 'accession', 'specimen', 'execution', 'result'), false)
+     or not coalesce(requested_action in ('read_records', 'write_records'), false)
+     or requested_resource_id is null then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+  end if;
+  -- A work item is found through its route (readable whatever the Lab
+  -- policies say, so a paused route answers paused); a chain row through the
+  -- rows the session can read.
+  if requested_resource_type = 'work_item' then
+    select route.lab_work_item_id, route.id, route.receiving_facility_id into item_id, item_route, item_facility
+      from ehr.order_routes route
+     where route.lab_work_item_id = requested_resource_id
+       and route.receiving_facility_id = actor.actor_facility_id;
+  elsif requested_resource_type = 'accession' then
+    select candidate.id, candidate.order_route_id, candidate.facility_id into item_id, item_route, item_facility
+      from lab.accessions accession
+      join lab.work_items candidate on candidate.id = accession.work_item_id
+     where accession.id = requested_resource_id
+       and lab.context_allows(accession.patient_id, accession.facility_id, 'read_records');
+  elsif requested_resource_type = 'specimen' then
+    select candidate.id, candidate.order_route_id, candidate.facility_id into item_id, item_route, item_facility
+      from lab.specimens specimen
+      join lab.accessions accession on accession.id = specimen.accession_id
+      join lab.work_items candidate on candidate.id = accession.work_item_id
+     where specimen.id = requested_resource_id
+       and lab.context_allows(specimen.patient_id, specimen.facility_id, 'read_records');
+  elsif requested_resource_type = 'execution' then
+    select candidate.id, candidate.order_route_id, candidate.facility_id into item_id, item_route, item_facility
+      from lab.test_executions execution
+      join lab.accessions accession on accession.id = execution.accession_id
+      join lab.work_items candidate on candidate.id = accession.work_item_id
+     where execution.id = requested_resource_id
+       and lab.context_allows(execution.patient_id, execution.facility_id, 'read_records');
+  else
+    select candidate.id, candidate.order_route_id, candidate.facility_id into item_id, item_route, item_facility
+      from lab.results result_row
+      join lab.test_executions execution on execution.id = result_row.execution_id
+      join lab.accessions accession on accession.id = execution.accession_id
+      join lab.work_items candidate on candidate.id = accession.work_item_id
+     where result_row.id = requested_resource_id
+       and lab.context_allows(result_row.patient_id, result_row.facility_id, 'read_records');
+  end if;
+  if item_id is null or item_facility is distinct from actor.actor_facility_id or item_route is null then
+    return query select 'none'::text, null::uuid, null::uuid;
+    return;
+  end if;
+  decision := ehr.order_route_item_access('lab_request', item_route, requested_action);
+  if decision = 'none' then
+    return query select 'none'::text, null::uuid, null::uuid;
+    return;
+  end if;
+  return query select decision, item_route, item_id;
+end;
+$$;
+
+-- C17. The same for a Pharmacy resource (a work item or a dispensing).
+create function pharmacy.order_route_access_for(requested_resource_type text, requested_resource_id uuid,
+  requested_action text)
+returns table (outcome text, route_id uuid, work_item_id uuid)
+language plpgsql stable security definer
+set search_path = pg_catalog, pharmacy, ehr, platform, pg_temp
+as $$
+declare
+  actor record;
+  item_id uuid;
+  item_route uuid;
+  item_facility uuid;
+  decision text;
+begin
+  select * into actor from ehr.order_route_staff_actor(false);
+  if not coalesce(requested_resource_type in ('work_item', 'dispensing'), false)
+     or not coalesce(requested_action in ('read_records', 'write_records'), false)
+     or requested_resource_id is null then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+  end if;
+  if requested_resource_type = 'work_item' then
+    select route.pharmacy_work_item_id, route.id, route.receiving_facility_id into item_id, item_route, item_facility
+      from ehr.order_routes route
+     where route.pharmacy_work_item_id = requested_resource_id
+       and route.receiving_facility_id = actor.actor_facility_id;
+  else
+    select candidate.id, candidate.order_route_id, candidate.facility_id into item_id, item_route, item_facility
+      from pharmacy.dispensings dispensing
+      join pharmacy.work_items candidate on candidate.id = dispensing.work_item_id
+     where dispensing.id = requested_resource_id
+       and pharmacy.context_allows(dispensing.patient_id, dispensing.facility_id, 'read_records');
+  end if;
+  if item_id is null or item_facility is distinct from actor.actor_facility_id or item_route is null then
+    return query select 'none'::text, null::uuid, null::uuid;
+    return;
+  end if;
+  decision := ehr.order_route_item_access('prescription', item_route, requested_action);
+  if decision = 'none' then
+    return query select 'none'::text, null::uuid, null::uuid;
+    return;
+  end if;
+  return query select decision, item_route, item_id;
+end;
+$$;
+
+-- C12 / C18. The route cards of route-backed work items the session can read
+-- (at most 200 ids): access work (the route allows writes now), read, or
+-- none; the licence number and the patient only while the route allows a read.
+create function ehr.receiving_order_route_cards(requested_kind text, requested_work_item_ids uuid[])
+returns table (
+  work_item_id uuid,
+  route_id uuid,
+  reference text,
+  effective_state text,
+  access text,
+  ordering_facility_name text,
+  orderer_name text,
+  orderer_licence_body text,
+  orderer_licence_number text,
+  patient_full_name text,
+  patient_sex text,
+  patient_date_of_birth date,
+  patient_health_id_last4 text
+)
+language plpgsql stable
+set search_path = pg_catalog, ehr, identity, lab, pharmacy, platform, pg_temp
+as $$
+declare
+  actor record;
+begin
+  select * into actor from ehr.order_route_staff_actor(false);
+  if requested_work_item_ids is null or cardinality(requested_work_item_ids) > 200 then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_INVALID';
+  end if;
+  return query
+    select item.item_id, route.id, route.reference::text, ehr.order_route_effective_state(route),
+      case when ehr.order_route_allows(route.id, route.receiving_facility_id, 'write_records') then 'work'
+           when ehr.order_route_allows(route.id, route.receiving_facility_id, 'read_records') then 'read'
+           else 'none' end,
+      (select facility.name from identity.facilities facility where facility.id = route.ordering_facility_id),
+      route.orderer_name, route.orderer_licence_body,
+      case when readable.allowed then route.orderer_licence_number end,
+      case when readable.allowed then card.full_name end,
+      case when readable.allowed then card.sex end,
+      case when readable.allowed then card.date_of_birth end,
+      case when readable.allowed then card.health_id_last4 end
+      from (
+        select candidate.id as item_id, candidate.order_route_id as item_route
+          from lab.work_items candidate
+         where requested_kind = 'lab_request' and candidate.id = any(requested_work_item_ids)
+           and candidate.order_route_id is not null and candidate.facility_id = actor.actor_facility_id
+           and lab.work_item_allows(candidate.patient_id, candidate.facility_id, candidate.order_route_id,
+             'read_records')
+        union all
+        select candidate.id, candidate.order_route_id
+          from pharmacy.work_items candidate
+         where requested_kind = 'prescription' and candidate.id = any(requested_work_item_ids)
+           and candidate.order_route_id is not null and candidate.facility_id = actor.actor_facility_id
+           and pharmacy.work_item_allows(candidate.patient_id, candidate.facility_id, candidate.order_route_id,
+             'read_records')
+      ) item
+      join ehr.order_routes route on route.id = item.item_route
+      cross join lateral (select ehr.order_route_allows(route.id, route.receiving_facility_id, 'read_records')
+                            as allowed) readable
+      left join lateral ehr.order_route_patient_card(route.patient_id) card on readable.allowed
+     order by item.item_id;
+end;
+$$;
+
+-- The Lab commands (C7-C12).
+create function lab.list_order_routes(requested_view text, requested_health_id text)
+returns table (
+  route_id uuid, reference text, row_version bigint, effective_state text, view_level text,
+  ordering_facility_name text, orderer_name text, orderer_licence_body text, test_code_system text, test_code text,
+  test_name text, priority text, specimen_type_code text, sent_at timestamptz, respond_by timestamptz,
+  accept_locked boolean, attempts_left integer, accepted_at timestamptz, ended_at timestamptz, work_item_id uuid
+)
+language sql stable security definer
+set search_path = pg_catalog, lab, ehr, pg_temp
+as $$
+  select listed.route_id, listed.reference, listed.row_version, listed.effective_state, listed.view_level,
+    listed.ordering_facility_name, listed.orderer_name, listed.orderer_licence_body, listed.test_code_system,
+    listed.test_code, listed.test_name, listed.priority, listed.specimen_type_code, listed.sent_at,
+    listed.respond_by, listed.accept_locked, listed.attempts_left, listed.accepted_at, listed.ended_at,
+    listed.work_item_id
+    from ehr.list_receiving_order_routes('lab_request', requested_view, requested_health_id) listed
+$$;
+
+create function lab.get_order_route(requested_route_id uuid)
+returns table (
+  route_id uuid, reference text, row_version bigint, effective_state text, view_level text,
+  ordering_facility_name text, orderer_name text, orderer_licence_body text, orderer_licence_number text,
+  test_code_system text, test_code text, test_name text, priority text, specimen_type_code text,
+  clinical_information text, sent_at timestamptz, respond_by timestamptz, accept_locked boolean,
+  attempts_left integer, accepted_at timestamptz, completed_at timestamptz, ended_at timestamptz,
+  work_item_id uuid, patient_full_name text, patient_sex text, patient_date_of_birth date,
+  patient_health_id_last4 text
+)
+language sql stable security definer
+set search_path = pg_catalog, lab, ehr, pg_temp
+as $$
+  select got.route_id, got.reference, got.row_version, got.effective_state, got.view_level,
+    got.ordering_facility_name, got.orderer_name, got.orderer_licence_body, got.orderer_licence_number,
+    got.test_code_system, got.test_code, got.test_name, got.priority, got.specimen_type_code,
+    got.clinical_information, got.sent_at, got.respond_by, got.accept_locked, got.attempts_left, got.accepted_at,
+    got.completed_at, got.ended_at, got.work_item_id, got.patient_full_name, got.patient_sex,
+    got.patient_date_of_birth, got.patient_health_id_last4
+    from ehr.get_receiving_order_route('lab_request', requested_route_id) got
+$$;
+
+create function lab.accept_order_route(requested_route_id uuid, expected_version bigint,
+  requested_identifier_kind text, requested_identifier text, requested_idempotency_key text,
+  requested_request_sha256 char(64))
+returns table (
+  result text, attempts_left integer, route_row_version bigint, work_item_id uuid, patient_full_name text,
+  patient_sex text, patient_date_of_birth date, patient_health_id_last4 text, clinical_information text,
+  orderer_licence_body text, orderer_licence_number text, replayed boolean
+)
+language sql volatile security definer
+set search_path = pg_catalog, lab, ehr, pg_temp
+as $$
+  select accepted.result, accepted.attempts_left, accepted.route_row_version, accepted.work_item_id,
+    accepted.patient_full_name, accepted.patient_sex, accepted.patient_date_of_birth,
+    accepted.patient_health_id_last4, accepted.clinical_information, accepted.orderer_licence_body,
+    accepted.orderer_licence_number, accepted.replayed
+    from ehr.accept_receiving_order_route('lab_request', requested_route_id, expected_version,
+      requested_identifier_kind, requested_identifier, null, requested_idempotency_key,
+      requested_request_sha256) accepted
+$$;
+
+create function lab.decline_order_route(requested_route_id uuid, expected_version bigint, requested_reason text)
+returns table (row_version bigint, state text)
+language sql volatile security definer
+set search_path = pg_catalog, lab, ehr, pg_temp
+as $$
+  select declined.row_version, declined.state
+    from ehr.decline_receiving_order_route('lab_request', requested_route_id, expected_version, requested_reason)
+      declined
+$$;
+
+create function lab.order_route_cards(requested_work_item_ids uuid[])
+returns table (
+  work_item_id uuid, route_id uuid, reference text, effective_state text, access text,
+  ordering_facility_name text, orderer_name text, orderer_licence_body text, orderer_licence_number text,
+  patient_full_name text, patient_sex text, patient_date_of_birth date, patient_health_id_last4 text
+)
+language sql stable security definer
+set search_path = pg_catalog, lab, ehr, pg_temp
+as $$
+  select card.work_item_id, card.route_id, card.reference, card.effective_state, card.access,
+    card.ordering_facility_name, card.orderer_name, card.orderer_licence_body, card.orderer_licence_number,
+    card.patient_full_name, card.patient_sex, card.patient_date_of_birth, card.patient_health_id_last4
+    from ehr.receiving_order_route_cards('lab_request', requested_work_item_ids) card
+$$;
+
+-- The Pharmacy commands (C13-C18).
+create function pharmacy.list_order_routes(requested_view text, requested_health_id text)
+returns table (
+  route_id uuid, reference text, row_version bigint, effective_state text, view_level text,
+  ordering_facility_name text, orderer_name text, orderer_licence_body text, medication_code_system text,
+  medication_code text, medication_display text, dose_quantity numeric, dose_unit text, route_code text,
+  frequency text, starts_on date, ends_on date, prescribed_at timestamptz, sent_at timestamptz,
+  respond_by timestamptz, accept_locked boolean, attempts_left integer, accepted_at timestamptz,
+  ended_at timestamptz, work_item_id uuid
+)
+language sql stable security definer
+set search_path = pg_catalog, pharmacy, ehr, pg_temp
+as $$
+  select listed.route_id, listed.reference, listed.row_version, listed.effective_state, listed.view_level,
+    listed.ordering_facility_name, listed.orderer_name, listed.orderer_licence_body, listed.medication_code_system,
+    listed.medication_code, listed.medication_display, listed.dose_quantity, listed.dose_unit, listed.route_code,
+    listed.frequency, listed.starts_on, listed.ends_on, listed.prescribed_at, listed.sent_at, listed.respond_by,
+    listed.accept_locked, listed.attempts_left, listed.accepted_at, listed.ended_at, listed.work_item_id
+    from ehr.list_receiving_order_routes('prescription', requested_view, requested_health_id) listed
+$$;
+
+create function pharmacy.get_order_route(requested_route_id uuid)
+returns table (
+  route_id uuid, reference text, row_version bigint, effective_state text, view_level text,
+  ordering_facility_name text, orderer_name text, orderer_licence_body text, orderer_licence_number text,
+  medication_code_system text, medication_code text, medication_display text, dose_quantity numeric,
+  dose_unit text, route_code text, frequency text, instructions text, starts_on date, ends_on date,
+  prescribed_at timestamptz, sent_at timestamptz, respond_by timestamptz, accept_locked boolean,
+  attempts_left integer, accepted_at timestamptz, completed_at timestamptz, ended_at timestamptz,
+  work_item_id uuid, patient_full_name text, patient_sex text, patient_date_of_birth date,
+  patient_health_id_last4 text
+)
+language sql stable security definer
+set search_path = pg_catalog, pharmacy, ehr, pg_temp
+as $$
+  select got.route_id, got.reference, got.row_version, got.effective_state, got.view_level,
+    got.ordering_facility_name, got.orderer_name, got.orderer_licence_body, got.orderer_licence_number,
+    got.medication_code_system, got.medication_code, got.medication_display, got.dose_quantity, got.dose_unit,
+    got.route_code, got.frequency, got.instructions, got.starts_on, got.ends_on, got.prescribed_at, got.sent_at,
+    got.respond_by, got.accept_locked, got.attempts_left, got.accepted_at, got.completed_at, got.ended_at,
+    got.work_item_id, got.patient_full_name, got.patient_sex, got.patient_date_of_birth,
+    got.patient_health_id_last4
+    from ehr.get_receiving_order_route('prescription', requested_route_id) got
+$$;
+
+create function pharmacy.accept_order_route(requested_route_id uuid, expected_version bigint,
+  requested_identifier_kind text, requested_identifier text, requested_acceptance_reason text,
+  requested_idempotency_key text, requested_request_sha256 char(64))
+returns table (
+  result text, attempts_left integer, route_row_version bigint, work_item_id uuid, patient_full_name text,
+  patient_sex text, patient_date_of_birth date, patient_health_id_last4 text, instructions text,
+  orderer_licence_body text, orderer_licence_number text, replayed boolean
+)
+language sql volatile security definer
+set search_path = pg_catalog, pharmacy, ehr, pg_temp
+as $$
+  select accepted.result, accepted.attempts_left, accepted.route_row_version, accepted.work_item_id,
+    accepted.patient_full_name, accepted.patient_sex, accepted.patient_date_of_birth,
+    accepted.patient_health_id_last4, accepted.instructions, accepted.orderer_licence_body,
+    accepted.orderer_licence_number, accepted.replayed
+    from ehr.accept_receiving_order_route('prescription', requested_route_id, expected_version,
+      requested_identifier_kind, requested_identifier, requested_acceptance_reason, requested_idempotency_key,
+      requested_request_sha256) accepted
+$$;
+
+create function pharmacy.decline_order_route(requested_route_id uuid, expected_version bigint, requested_reason text)
+returns table (row_version bigint, state text)
+language sql volatile security definer
+set search_path = pg_catalog, pharmacy, ehr, pg_temp
+as $$
+  select declined.row_version, declined.state
+    from ehr.decline_receiving_order_route('prescription', requested_route_id, expected_version, requested_reason)
+      declined
+$$;
+
+create function pharmacy.order_route_cards(requested_work_item_ids uuid[])
+returns table (
+  work_item_id uuid, route_id uuid, reference text, effective_state text, access text,
+  ordering_facility_name text, orderer_name text, orderer_licence_body text, orderer_licence_number text,
+  patient_full_name text, patient_sex text, patient_date_of_birth date, patient_health_id_last4 text
+)
+language sql stable security definer
+set search_path = pg_catalog, pharmacy, ehr, pg_temp
+as $$
+  select card.work_item_id, card.route_id, card.reference, card.effective_state, card.access,
+    card.ordering_facility_name, card.orderer_name, card.orderer_licence_body, card.orderer_licence_number,
+    card.patient_full_name, card.patient_sex, card.patient_date_of_birth, card.patient_health_id_last4
+    from ehr.receiving_order_route_cards('prescription', requested_work_item_ids) card
+$$;
+
+revoke all on function ehr.order_route_receiver(text),
+  ehr.order_route_health_id(text),
+  ehr.order_route_receiving_view(ehr.order_routes),
+  ehr.list_receiving_order_routes(text,text,text),
+  ehr.get_receiving_order_route(text,uuid),
+  ehr.lock_receiving_route(text,uuid,uuid,uuid),
+  ehr.accept_receiving_order_route(text,uuid,bigint,text,text,text,text,char),
+  ehr.decline_receiving_order_route(text,uuid,bigint,text),
+  ehr.order_route_item_access(text,uuid,text),
+  ehr.receiving_order_route_cards(text,uuid[]),
+  lab.order_route_access_for(text,uuid,text),
+  pharmacy.order_route_access_for(text,uuid,text),
+  lab.list_order_routes(text,text),
+  lab.get_order_route(uuid),
+  lab.accept_order_route(uuid,bigint,text,text,text,char),
+  lab.decline_order_route(uuid,bigint,text),
+  lab.order_route_cards(uuid[]),
+  pharmacy.list_order_routes(text,text),
+  pharmacy.get_order_route(uuid),
+  pharmacy.accept_order_route(uuid,bigint,text,text,text,text,char),
+  pharmacy.decline_order_route(uuid,bigint,text),
+  pharmacy.order_route_cards(uuid[])
+  from public;
+
+-- 6.4.3 Identity (the directory and support's tools; EXECUTE to the Identity
+-- runtime).
+
+-- C19. The directory: eligible facilities whose facility or organization
+-- name contains the query (3-80 characters; %, _ and \ match themselves),
+-- at most 10, by facility name. Each candidate's organization application is
+-- locked FOR SHARE before its eligibility is read, so a review or release in
+-- flight finishes first. The kind is the route kind or the destination type
+-- (lab_request or laboratory, prescription or pharmacy).
+create function identity.search_order_destinations(requested_kind text, requested_query text)
+returns table (
+  facility_id uuid,
+  facility_name text,
+  organization_name text,
+  registered_address text,
+  new_on_health_id boolean
+)
+language plpgsql volatile security definer
+set search_path = pg_catalog, identity, auth, ehr, platform, pg_temp
+as $$
+declare
+  actor record;
+  route_kind text := case requested_kind when 'lab_request' then 'lab_request' when 'laboratory' then 'lab_request'
+                       when 'prescription' then 'prescription' when 'pharmacy' then 'prescription' end;
+  pattern text;
+  candidate record;
+  found_count integer := 0;
+begin
+  select * into actor from ehr.order_route_staff_actor(false);
+  if not auth.membership_has_permission(actor.actor_subject, actor.actor_membership_id, actor.actor_facility_id,
+           'ehr.order-route.send') then
+    raise exception using errcode = '42501', message = 'ORDER_ROUTE_PERMISSION_DENIED';
+  end if;
+  perform platform.require_control_enabled('cross_facility_orders_enabled');
+  if route_kind is null or not coalesce(length(btrim(requested_query)) between 3 and 80, false) then
+    raise exception using errcode = '22023', message = 'ORDER_DESTINATION_QUERY_INVALID';
+  end if;
+  pattern := '%' || replace(replace(replace(btrim(requested_query), '\', '\\'), '%', '\%'), '_', '\_') || '%';
+  for candidate in
+    select facility.id, facility.name, facility.organization_id, organization.name as organization_name
+      from identity.facilities facility
+      join identity.organizations organization on organization.id = facility.organization_id
+     where facility.id <> actor.actor_facility_id
+       and facility.active
+       and organization.active
+       and (facility.name ilike pattern escape '\' or organization.name ilike pattern escape '\')
+       and exists (select 1 from identity.organization_products product
+                     join identity.organization_applications source_application
+                       on source_application.id = product.source_application_id
+                    where product.facility_id = facility.id and product.status = 'active'
+                      and source_application.organization_type = ehr.order_route_destination_type(route_kind))
+     order by facility.name, facility.id
+     limit 200
+  loop
+    perform identity.lock_self_service_application(candidate.organization_id);
+    if identity.order_route_destination_eligible(candidate.id, route_kind) then
+      found_count := found_count + 1;
+      return query select candidate.id, candidate.name, candidate.organization_name,
+        identity.order_route_registered_address(candidate.id), identity.self_service_on_probation(candidate.id);
+      exit when found_count >= 10;
+    end if;
+  end loop;
+end;
+$$;
+
+-- C20. Support's summary of a facility's orders with other facilities: its
+-- listing (value, by default or by support, reason, when), the routes it
+-- accepted and their patients over its lifetime, and per counterpart the last
+-- 30 days by effective state. No patient and no order content.
+create function identity.admin_order_route_summary(target_facility_id uuid)
+returns jsonb
+language plpgsql stable security definer
+set search_path = pg_catalog, identity, ehr, auth, platform, pg_temp
+as $$
+declare
+  latest identity.order_route_destination_settings%rowtype;
+  summary jsonb;
+begin
+  perform identity.order_route_platform_actor(array['platform.facility.read']);
+  if target_facility_id is null
+     or not exists (select 1 from identity.facilities facility where facility.id = target_facility_id) then
+    raise exception using errcode = 'P0002', message = 'ADMIN_FACILITY_NOT_FOUND';
+  end if;
+  select setting.* into latest from identity.order_route_destination_settings setting
+   where setting.facility_id = target_facility_id
+   order by setting.set_at desc, setting.id desc limit 1;
+  select jsonb_build_object(
+    'listed', jsonb_build_object('value', identity.order_route_destination_listed(target_facility_id),
+      'byDefault', latest.id is null, 'reason', latest.reason, 'setAt', latest.set_at),
+    'receivedAcceptedLifetime', (select count(*) from ehr.order_routes route
+      where route.receiving_facility_id = target_facility_id and route.accepted_at is not null),
+    'receivedPatientsLifetime', (select count(distinct route.patient_id) from ehr.order_routes route
+      where route.receiving_facility_id = target_facility_id and route.accepted_at is not null),
+    'counterparts', coalesce((
+      select jsonb_agg(jsonb_build_object('direction', counterpart.direction, 'facilityId', counterpart.facility_id,
+               'facilityName', counterpart.facility_name, 'last30Days', counterpart.states)
+             order by counterpart.direction, counterpart.facility_name, counterpart.facility_id)
+        from (
+          select grouped.direction, grouped.facility_id,
+            (select facility.name from identity.facilities facility where facility.id = grouped.facility_id)
+              as facility_name,
+            jsonb_object_agg(grouped.effective_state, grouped.route_count) as states
+            from (
+              select case when route.ordering_facility_id = target_facility_id then 'sent' else 'received' end
+                       as direction,
+                     case when route.ordering_facility_id = target_facility_id then route.receiving_facility_id
+                          else route.ordering_facility_id end as facility_id,
+                     ehr.order_route_effective_state(route) as effective_state,
+                     count(*) as route_count
+                from ehr.order_routes route
+               where (route.ordering_facility_id = target_facility_id
+                   or route.receiving_facility_id = target_facility_id)
+                 and route.created_at > clock_timestamp() - interval '720 hours'
+               group by 1, 2, 3) grouped
+           group by grouped.direction, grouped.facility_id) counterpart), '[]'::jsonb))
+    into summary;
+  return summary;
+end;
+$$;
+
+-- C21. Support finds routes by reference (8 hex, at most 5) or a patient's
+-- Health ID (at most 20), newest first.
+create function identity.admin_find_order_routes(requested_reference text, requested_health_id text)
+returns table (
+  route_id uuid,
+  reference text,
+  kind text,
+  row_version bigint,
+  effective_state text,
+  ordering_facility_id uuid,
+  ordering_facility_name text,
+  receiving_facility_id uuid,
+  receiving_facility_name text,
+  created_at timestamptz,
+  accepted_at timestamptz,
+  ended_at timestamptz,
+  ended_kind text
+)
+language plpgsql stable security definer
+set search_path = pg_catalog, identity, ehr, auth, platform, pg_temp
+as $$
+declare
+  wanted_reference text := upper(btrim(requested_reference));
+  wanted_patient uuid;
+begin
+  perform identity.order_route_platform_actor(array['platform.principal.read']);
+  if (requested_reference is null) = (requested_health_id is null)
+     or (requested_reference is not null and not coalesce(wanted_reference ~ '^[0-9A-F]{8}$', false))
+     or (requested_health_id is not null and ehr.order_route_health_id(requested_health_id) is null) then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_LOOKUP_INVALID';
+  end if;
+  if requested_health_id is not null then
+    select patient.id into wanted_patient from identity.patients patient
+     where patient.hid_code = ehr.order_route_health_id(requested_health_id);
+    if wanted_patient is null then
+      return;
+    end if;
+  end if;
+  return query
+    select route.id, route.reference::text, route.kind, route.row_version, ehr.order_route_effective_state(route),
+      route.ordering_facility_id,
+      (select facility.name from identity.facilities facility where facility.id = route.ordering_facility_id),
+      route.receiving_facility_id,
+      (select facility.name from identity.facilities facility where facility.id = route.receiving_facility_id),
+      route.created_at, route.accepted_at, route.ended_at, route.ended_kind
+      from ehr.order_routes route
+     where (requested_reference is not null and route.reference = wanted_reference)
+        or (wanted_patient is not null and route.patient_id = wanted_patient)
+     order by route.created_at desc, route.id desc
+     limit case when requested_reference is not null then 5 else 20 end;
+end;
+$$;
+
+-- C22. Support closes a live route: sent -> withdrawn, accepted ->
+-- cancelled, completed -> access ends; access ends now in every case.
+create function identity.admin_close_order_route(target_route_id uuid, expected_version bigint, close_reason text)
+returns table (route_id uuid, row_version bigint, state text)
+language plpgsql volatile security definer
+set search_path = pg_catalog, identity, ehr, auth, audit, notification, platform, pg_temp
+as $$
+declare
+  actor_account uuid := identity.order_route_platform_actor(array['platform.facility.manage']);
+  reason text := btrim(coalesce(close_reason, ''));
+  current_route ehr.order_routes%rowtype;
+  closed record;
+begin
+  if target_route_id is null or expected_version is null or length(reason) not between 8 and 500 then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_CLOSE_INVALID';
+  end if;
+  select route.* into current_route from ehr.order_routes route where route.id = target_route_id for update;
+  if current_route.id is null then
+    raise exception using errcode = 'P0002', message = 'ORDER_ROUTE_NOT_FOUND';
+  end if;
+  if current_route.row_version <> expected_version then
+    raise exception using errcode = '40001', message = 'Order route version conflict';
+  end if;
+  if ehr.order_route_effective_state(current_route) not in ('sent', 'accepted', 'completed')
+     or (current_route.state = 'completed'
+       and (current_route.ended_at is not null or clock_timestamp() >= current_route.access_ends_at)) then
+    raise exception using errcode = '23505', message = 'ORDER_ROUTE_ALREADY_CLOSED';
+  end if;
+  select * into closed from ehr.close_order_route(current_route.id, 'support', 'platform', true);
+  insert into audit.events (correlation_id, actor_type, actor_subject, actor_account_id, action, outcome,
+    resource_type, resource_id, purpose_of_use, reason, provenance, source_system, details)
+  values (platform.current_correlation_id(), 'platform', platform.current_actor_subject(), actor_account,
+    'admin.order-route.close', 'success', 'order-route', current_route.id::text, 'healthcare-operations', reason,
+    'application', 'identity-api',
+    jsonb_build_object('routeId', current_route.id, 'kind', current_route.kind,
+      'stateBefore', current_route.state, 'stateAfter', (closed.closed).state, 'outcome', closed.outcome,
+      'version', (closed.closed).row_version));
+  perform ehr.order_route_system_audit(closed.closed, 'ordering', 'ehr.order-route.closed', true,
+    jsonb_build_object('closedBy', 'support'));
+  if closed.outcome = 'withdrawn' then
+    perform ehr.order_route_system_audit(closed.closed, 'receiving', 'ehr.order-route.withdrawn', false,
+      jsonb_build_object('closedBy', 'support'));
+  else
+    perform ehr.order_route_system_audit(closed.closed, 'receiving', 'ehr.order-route.closed', true,
+      jsonb_build_object('closedBy', 'support'));
+  end if;
+  perform ehr.order_route_notify_patient(closed.closed, 'ORDER_ROUTE_CANCELLED');
+  return query select (closed.closed).id, (closed.closed).row_version, (closed.closed).state;
+end;
+$$;
+
+-- C23. Support lists or unlists a laboratory or pharmacy for orders from
+-- other facilities (P6). Accepted work is not affected.
+create function identity.admin_set_order_route_destination(target_facility_id uuid, requested_listed boolean,
+  set_reason text)
+returns table (facility_id uuid, listed boolean, set_at timestamptz)
+language plpgsql volatile security definer
+set search_path = pg_catalog, identity, auth, audit, platform, pg_temp
+as $$
+declare
+  actor_account uuid := identity.order_route_platform_actor(array['platform.facility.manage',
+    'platform.facility.unlock']);
+  reason text := btrim(coalesce(set_reason, ''));
+  facility_row identity.facilities%rowtype;
+  inserted identity.order_route_destination_settings%rowtype;
+begin
+  if target_facility_id is null or requested_listed is null or length(reason) not between 8 and 500 then
+    raise exception using errcode = '22023', message = 'ORDER_ROUTE_DESTINATION_INVALID';
+  end if;
+  select facility.* into facility_row from identity.facilities facility where facility.id = target_facility_id;
+  if facility_row.id is null
+     or not exists (select 1 from identity.organization_applications application
+                     where application.organization_id = facility_row.organization_id
+                       and application.organization_type in ('laboratory', 'pharmacy')) then
+    raise exception using errcode = 'P0002', message = 'ORDER_ROUTE_DESTINATION_NOT_FOUND';
+  end if;
+  perform pg_advisory_xact_lock(hashtextextended('order-route-destination-setting:' || target_facility_id::text, 0));
+  if identity.order_route_destination_listed(target_facility_id) = requested_listed then
+    raise exception using errcode = '23505', message = 'ORDER_ROUTE_DESTINATION_UNCHANGED';
+  end if;
+  insert into identity.order_route_destination_settings as setting (facility_id, organization_id, listed, reason,
+    set_by_account_id, correlation_id)
+  values (facility_row.id, facility_row.organization_id, requested_listed, reason, actor_account,
+    platform.current_correlation_id())
+  returning setting.* into inserted;
+  insert into audit.events (correlation_id, actor_type, actor_subject, actor_account_id, action, outcome,
+    resource_type, resource_id, purpose_of_use, reason, provenance, source_system, details)
+  values (platform.current_correlation_id(), 'platform', platform.current_actor_subject(), actor_account,
+    'admin.order-route-destination.set', 'success', 'facility', facility_row.id::text, 'healthcare-operations',
+    reason, 'application', 'identity-api',
+    jsonb_build_object('facilityId', facility_row.id, 'listed', requested_listed, 'settingId', inserted.id));
+  insert into audit.events (correlation_id, actor_type, organization_id, facility_id, action, outcome,
+    resource_type, resource_id, purpose_of_use, provenance, source_system, details)
+  values (platform.current_correlation_id(), 'system', facility_row.organization_id, facility_row.id,
+    'identity.order-route-destination.set', 'success', 'facility', facility_row.id::text, 'healthcare-operations',
+    'application', 'identity-api', jsonb_build_object('listed', requested_listed, 'settingId', inserted.id));
+  return query select inserted.facility_id, inserted.listed, inserted.set_at;
+end;
+$$;
+
+revoke all on function identity.search_order_destinations(text,text),
+  identity.admin_order_route_summary(uuid),
+  identity.admin_find_order_routes(text,text),
+  identity.admin_close_order_route(uuid,bigint,text),
+  identity.admin_set_order_route_destination(uuid,boolean,text)
+  from public;
+
+-- 6.5 Changed functions (CREATE OR REPLACE keeps each one's owner, grants,
+-- language, volatility, security and search path; ehr.order_routes is
+-- schema-qualified wherever a search path lacks ehr). No table lock.
+
+-- The Lab and Pharmacy chain tables' policies gain one branch: route access
+-- (H6) when the member's own consent does not allow the action.
+create or replace function lab.context_allows(row_patient_id uuid,row_facility_id uuid,requested_action text)
+returns boolean language sql stable security definer
+set search_path = lab,identity,platform,pg_temp as $$
+  select row_facility_id=platform.current_facility_id()
+    and (identity.has_active_consent_grant(row_patient_id,platform.current_actor_subject(),
+      platform.current_membership_id(),row_facility_id,requested_action,platform.current_purpose_of_use())
+      or ehr.order_route_access_allows('lab_request',row_patient_id,row_facility_id,requested_action))
+$$;
+
+create or replace function pharmacy.context_allows(
+  row_patient_id uuid,
+  row_facility_id uuid,
+  requested_action text
+) returns boolean language sql stable security definer
+set search_path = pharmacy, identity, platform, pg_temp as $$
+  select row_facility_id = platform.current_facility_id()
+    and (identity.has_active_consent_grant(
+      row_patient_id,
+      platform.current_actor_subject(),
+      platform.current_membership_id(),
+      row_facility_id,
+      requested_action,
+      platform.current_purpose_of_use()
+    )
+      or ehr.order_route_access_allows('prescription', row_patient_id, row_facility_id, requested_action))
+$$;
+
+-- A route-backed Lab work item must be exactly its accepted route's (C9
+-- inserts it after accepting the route, which it holds FOR UPDATE); a
+-- same-facility one keeps 0077's checks and is refused while the order has a
+-- live route (LAB_REQUEST_ROUTED; the unique work-item key stays the final
+-- arbiter, R10).
+create or replace function lab.validate_work_item()
+returns trigger language plpgsql security definer
+set search_path = lab, ehr, identity, auth, platform, pg_temp as $$
+declare source_row ehr.lab_requests%rowtype;
+  route_row ehr.order_routes%rowtype;
+  session_facility uuid := platform.current_facility_id();
+  actor_account uuid := platform.current_account_id();
+  actor_membership uuid := platform.current_membership_id();
+begin
+  if new.order_route_id is not null then
+    select route.* into route_row from ehr.order_routes route where route.id = new.order_route_id for update;
+    if route_row.id is null or session_facility is null
+       or actor_account is null or actor_membership is null
+       or route_row.kind is distinct from 'lab_request'
+       or route_row.state is distinct from 'accepted'
+       or route_row.lab_work_item_id is distinct from new.id
+       or route_row.patient_id is distinct from new.patient_id
+       or route_row.receiving_facility_id is distinct from new.facility_id
+       or route_row.ordering_facility_id is distinct from new.ordering_facility_id
+       or route_row.source_lab_request_id is distinct from new.source_ehr_order_id
+       or route_row.source_order_version is distinct from new.source_ehr_order_version
+       or route_row.source_encounter_id is distinct from new.source_encounter_id
+       or route_row.test_code_system is distinct from new.test_code_system
+       or route_row.test_code is distinct from new.test_code
+       or route_row.test_display is distinct from new.test_name
+       or route_row.priority is distinct from new.priority
+       or route_row.clinical_information is distinct from new.clinical_indication
+       or route_row.orderer_account_id is distinct from new.requested_by
+       or route_row.requested_at is distinct from new.requested_at
+       or route_row.accepted_by_account_id is distinct from new.accepted_by
+       or route_row.accepted_by_membership_id is distinct from new.accepted_by_membership_id
+       or new.facility_id is distinct from session_facility
+       or new.accepted_by is distinct from actor_account
+       or new.accepted_by_membership_id is distinct from actor_membership then
+      raise exception using errcode='23514',message='Lab work item does not match its accepted order route and actor context';
+    end if;
+    return new;
+  end if;
+  select * into source_row from ehr.lab_requests where id=new.source_ehr_order_id;
+  if source_row.id is null or session_facility is null
+     or actor_account is null or actor_membership is null
+     or source_row.patient_id is distinct from new.patient_id
+     or source_row.facility_id is distinct from new.facility_id
+     or source_row.encounter_id is distinct from new.source_encounter_id
+     or source_row.row_version is distinct from new.source_ehr_order_version
+     or source_row.status is distinct from 'active'
+     or source_row.test_code_system is distinct from new.test_code_system
+     or source_row.test_code is distinct from new.test_code
+     or source_row.test_display is distinct from new.test_name
+     or source_row.priority is distinct from new.priority
+     or source_row.clinical_information is distinct from new.clinical_indication
+     or source_row.created_by is distinct from new.requested_by
+     or source_row.created_at is distinct from new.requested_at
+     or new.facility_id is distinct from session_facility
+     or new.accepted_by is distinct from actor_account
+     or new.accepted_by_membership_id is distinct from actor_membership then
+    raise exception using errcode='23514',message='Lab work item does not match the exact active EHR order version and actor context';
+  end if;
+  perform 1 from ehr.order_routes route
+   where route.source_lab_request_id = new.source_ehr_order_id
+     and (route.state in ('accepted', 'completed') or (route.state = 'sent' and clock_timestamp() < route.respond_by))
+   for share;
+  if found then
+    raise exception using errcode='23514',message='LAB_REQUEST_ROUTED';
+  end if;
+  return new;
+end
+$$;
+
+-- The Pharmacy twin: a route-backed work item is exactly its accepted
+-- route's prescription snapshot; a same-facility one keeps 0077's checks and
+-- is refused while the prescription has a live route (PRESCRIPTION_ROUTED).
+create or replace function pharmacy.validate_work_item()
+returns trigger language plpgsql security definer
+set search_path = pharmacy, platform, pg_temp as $$
+declare
+  session_facility_id uuid := platform.current_facility_id();
+  session_account_id uuid := platform.current_account_id();
+  session_membership_id uuid := platform.current_membership_id();
+  route_row ehr.order_routes%rowtype;
+begin
+  if new.order_route_id is not null then
+    select route.* into route_row from ehr.order_routes route where route.id = new.order_route_id for update;
+    if route_row.id is null
+       or session_facility_id is null
+       or session_account_id is null
+       or session_membership_id is null
+       or route_row.kind is distinct from 'prescription'
+       or route_row.state is distinct from 'accepted'
+       or route_row.pharmacy_work_item_id is distinct from new.id
+       or route_row.patient_id is distinct from new.patient_id
+       or route_row.receiving_facility_id is distinct from new.facility_id
+       or route_row.ordering_facility_id is distinct from new.ordering_facility_id
+       or route_row.source_prescription_id is distinct from new.source_ehr_prescription_id
+       or route_row.source_order_version is distinct from new.source_ehr_prescription_version
+       or route_row.source_encounter_id is distinct from new.source_encounter_id
+       or route_row.medication_code_system is distinct from new.medication_code_system
+       or route_row.medication_code is distinct from new.medication_code
+       or route_row.medication_display is distinct from new.medication_display
+       or route_row.dose_quantity is distinct from new.dose_quantity
+       or route_row.dose_unit is distinct from new.dose_unit
+       or route_row.route_code is distinct from new.route_code
+       or route_row.frequency is distinct from new.frequency
+       or route_row.instructions is distinct from new.instructions
+       or route_row.starts_on is distinct from new.starts_on
+       or route_row.ends_on is distinct from new.ends_on
+       or route_row.orderer_account_id is distinct from new.prescribed_by
+       or route_row.prescribed_at is distinct from new.prescribed_at
+       or route_row.accepted_by_account_id is distinct from new.accepted_by
+       or route_row.accepted_by_membership_id is distinct from new.accepted_by_membership_id
+       or new.facility_id is distinct from session_facility_id
+       or new.accepted_by is distinct from session_account_id
+       or new.accepted_by_membership_id is distinct from session_membership_id
+       or new.source_status is distinct from 'active' then
+      raise exception using errcode = '23514',
+        message = 'Pharmacy work item does not match its accepted order route and actor context';
+    end if;
+    return new;
+  end if;
+  if session_facility_id is null
+     or session_account_id is null
+     or session_membership_id is null
+     or new.facility_id is distinct from new.ordering_facility_id
+     or new.facility_id is distinct from session_facility_id
+     or new.accepted_by is distinct from session_account_id
+     or new.accepted_by_membership_id is distinct from session_membership_id
+     or new.source_status is distinct from 'active' then
+    raise exception using errcode = '23514',
+      message = 'Pharmacy acceptance patient, facility, prescription status, or actor context is invalid';
+  end if;
+  perform 1 from ehr.order_routes route
+   where route.source_prescription_id = new.source_ehr_prescription_id
+     and (route.state in ('accepted', 'completed') or (route.state = 'sent' and clock_timestamp() < route.respond_by))
+   for share;
+  if found then
+    raise exception using errcode = '23514', message = 'PRESCRIPTION_ROUTED';
+  end if;
+  return new;
+end
+$$;
+
+-- A dispensing of a route-backed work item locks its route FOR UPDATE (V9: a
+-- concurrent cancellation makes the SERIALIZABLE dispensing fail and its
+-- retry be refused) and needs it accepted and inside its work window
+-- (ORDER_ROUTE_CLOSED); a same-facility dispensing is unchanged.
+create or replace function pharmacy.validate_dispensing()
+returns trigger language plpgsql security definer
+set search_path = pharmacy, platform, pg_temp as $$
+declare
+  parent_row pharmacy.work_items%rowtype;
+  route_row ehr.order_routes%rowtype;
+  session_facility_id uuid := platform.current_facility_id();
+  session_account_id uuid := platform.current_account_id();
+  session_membership_id uuid := platform.current_membership_id();
+begin
+  select * into parent_row from pharmacy.work_items where id = new.work_item_id;
+  if parent_row.order_route_id is not null then
+    select route.* into route_row from ehr.order_routes route where route.id = parent_row.order_route_id for update;
+    if route_row.id is null or route_row.state is distinct from 'accepted'
+       or not coalesce(clock_timestamp() < route_row.writes_end_at, false) then
+      raise exception using errcode = '23514', message = 'ORDER_ROUTE_CLOSED';
+    end if;
+  end if;
+  if parent_row.id is null
+     or session_facility_id is null
+     or session_account_id is null
+     or session_membership_id is null
+     or parent_row.patient_id is distinct from new.patient_id
+     or parent_row.facility_id is distinct from new.facility_id
+     or parent_row.row_version is distinct from new.work_item_version
+     or parent_row.medication_code_system is distinct from new.medication_code_system
+     or parent_row.medication_code is distinct from new.medication_code
+     or parent_row.medication_display is distinct from new.medication_display
+     or new.facility_id is distinct from session_facility_id
+     or new.dispensed_by is distinct from session_account_id
+     or new.dispensed_by_membership_id is distinct from session_membership_id then
+    raise exception using errcode = '23514',
+      message = 'Dispensing does not match its eligible Pharmacy work item and actor context';
+  end if;
+  return new;
+end
+$$;
+
+-- 6.6 Trigger functions (owner-only).
+
+-- The route guard (P5): no delete; immutable header, snapshot and
+-- attestation; each transition column set once; only the transitions of the
+-- state table; the windows only as section 4.2 allows (set at acceptance,
+-- set at completion, never longer afterwards); the version exactly one
+-- more; and an event of that version with the same state and windows.
+create function ehr.guard_order_route_mutation()
+returns trigger
+language plpgsql
+set search_path = pg_catalog, ehr, pg_temp
+as $$
+declare
+  allowed boolean := true;
+begin
+  if tg_op = 'DELETE' then
+    raise exception using errcode = '55000', message = 'ORDER_ROUTE_IMMUTABLE';
+  end if;
+  if (new.id, new.kind, new.patient_id, new.ordering_organization_id, new.ordering_facility_id,
+      new.source_lab_request_id, new.source_prescription_id, new.source_encounter_id, new.source_order_version,
+      new.receiving_organization_id, new.receiving_facility_id, new.sent_by_account_id, new.sent_by_membership_id,
+      new.created_at, new.respond_by, new.patient_agreement, new.attestation_text_version, new.attested_by_name,
+      new.attested_receiving_facility_name, new.orderer_account_id, new.orderer_membership_id, new.orderer_name,
+      new.orderer_licence_body, new.orderer_licence_number, new.test_code_system, new.test_code, new.test_display,
+      new.priority, new.specimen_type_code, new.clinical_information, new.requested_at, new.medication_code_system,
+      new.medication_code, new.medication_display, new.dose_quantity, new.dose_unit, new.route_code, new.frequency,
+      new.instructions, new.starts_on, new.ends_on, new.prescribed_at, new.idempotency_key, new.request_sha256,
+      new.correlation_id)
+     is distinct from
+     (old.id, old.kind, old.patient_id, old.ordering_organization_id, old.ordering_facility_id,
+      old.source_lab_request_id, old.source_prescription_id, old.source_encounter_id, old.source_order_version,
+      old.receiving_organization_id, old.receiving_facility_id, old.sent_by_account_id, old.sent_by_membership_id,
+      old.created_at, old.respond_by, old.patient_agreement, old.attestation_text_version, old.attested_by_name,
+      old.attested_receiving_facility_name, old.orderer_account_id, old.orderer_membership_id, old.orderer_name,
+      old.orderer_licence_body, old.orderer_licence_number, old.test_code_system, old.test_code, old.test_display,
+      old.priority, old.specimen_type_code, old.clinical_information, old.requested_at, old.medication_code_system,
+      old.medication_code, old.medication_display, old.dose_quantity, old.dose_unit, old.route_code, old.frequency,
+      old.instructions, old.starts_on, old.ends_on, old.prescribed_at, old.idempotency_key, old.request_sha256,
+      old.correlation_id) then
+    allowed := false;
+  end if;
+  -- Set once.
+  if (old.accepted_at is not null and new.accepted_at is distinct from old.accepted_at)
+     or (old.accepted_by_account_id is not null and new.accepted_by_account_id is distinct from old.accepted_by_account_id)
+     or (old.accepted_by_membership_id is not null
+       and new.accepted_by_membership_id is distinct from old.accepted_by_membership_id)
+     or (old.accept_idempotency_key is not null and new.accept_idempotency_key is distinct from old.accept_idempotency_key)
+     or (old.accept_request_sha256 is not null and new.accept_request_sha256 is distinct from old.accept_request_sha256)
+     or (old.accept_locked_at is not null and new.accept_locked_at is distinct from old.accept_locked_at)
+     or (old.lab_work_item_id is not null and new.lab_work_item_id is distinct from old.lab_work_item_id)
+     or (old.pharmacy_work_item_id is not null and new.pharmacy_work_item_id is distinct from old.pharmacy_work_item_id)
+     or (old.declined_at is not null and new.declined_at is distinct from old.declined_at)
+     or (old.declined_by_account_id is not null and new.declined_by_account_id is distinct from old.declined_by_account_id)
+     or (old.declined_by_membership_id is not null
+       and new.declined_by_membership_id is distinct from old.declined_by_membership_id)
+     or (old.decline_reason is not null and new.decline_reason is distinct from old.decline_reason)
+     or (old.ended_at is not null and new.ended_at is distinct from old.ended_at)
+     or (old.ended_kind is not null and new.ended_kind is distinct from old.ended_kind)
+     or (old.ended_by_account_id is not null and new.ended_by_account_id is distinct from old.ended_by_account_id)
+     or (old.completed_at is not null and new.completed_at is distinct from old.completed_at) then
+    allowed := false;
+  end if;
+  -- A set-once column changes only with its own transition.
+  if (old.accepted_at is null and new.accepted_at is not null and not (old.state = 'sent' and new.state = 'accepted'))
+     or (old.accept_locked_at is null and new.accept_locked_at is not null
+       and not (old.state = 'sent' and new.state = 'sent'))
+     or (old.declined_at is null and new.declined_at is not null and new.state <> 'declined')
+     or (old.completed_at is null and new.completed_at is not null and new.state <> 'completed') then
+    allowed := false;
+  end if;
+  if new.row_version is distinct from old.row_version + 1 then
+    allowed := false;
+  end if;
+  if (old.state, new.state) not in (('sent', 'sent'), ('sent', 'accepted'), ('sent', 'declined'),
+       ('sent', 'withdrawn'), ('sent', 'expired'), ('accepted', 'accepted'), ('accepted', 'completed'),
+       ('accepted', 'cancelled'), ('completed', 'completed')) then
+    allowed := false;
+  end if;
+  -- The windows (section 4.2, absolute hours).
+  if old.state = 'sent' and new.state = 'accepted' then
+    if new.writes_end_at is distinct from new.accepted_at + interval '720 hours'
+       or new.access_ends_at is distinct from new.writes_end_at then
+      allowed := false;
+    end if;
+  elsif old.state = 'accepted' and new.state = 'completed' then
+    if new.writes_end_at is distinct from least(new.completed_at + interval '336 hours',
+                                                new.accepted_at + interval '1080 hours')
+       or new.access_ends_at is distinct from new.writes_end_at then
+      allowed := false;
+    end if;
+  elsif old.state in ('accepted', 'completed') and new.state in ('cancelled', 'completed') then
+    if new.writes_end_at > old.writes_end_at or new.access_ends_at > old.access_ends_at then
+      allowed := false;
+    end if;
+  elsif (new.writes_end_at, new.access_ends_at) is distinct from (old.writes_end_at, old.access_ends_at) then
+    allowed := false;
+  end if;
+  if not exists (select 1 from ehr.order_route_events event
+                  where event.route_id = new.id
+                    and event.event_version = new.row_version
+                    and event.state_after = new.state
+                    and event.writes_end_at_after is not distinct from new.writes_end_at
+                    and event.access_ends_at_after is not distinct from new.access_ends_at) then
+    allowed := false;
+  end if;
+  if not allowed then
+    raise exception using errcode = '55000', message = 'ORDER_ROUTE_IMMUTABLE';
+  end if;
+  return new;
+end;
+$$;
+
+-- Event 1 must exist when the inserting transaction commits (P5), and a
+-- route is inserted sent at version 1. The check is deferred to commit, where
+-- it runs as the role that commits (the EHR runtime, which reads no route
+-- table), so it runs as the owner.
+create function ehr.require_order_route_first_event()
+returns trigger
+language plpgsql security definer
+set search_path = pg_catalog, ehr, pg_temp
+as $$
+begin
+  if new.state <> 'sent' or new.row_version <> 1
+     or not exists (select 1 from ehr.order_route_events event
+                     where event.route_id = new.id and event.event_version = 1
+                       and event.event_type = 'created' and event.state_after = 'sent') then
+    raise exception using errcode = '55000', message = 'ORDER_ROUTE_IMMUTABLE';
+  end if;
+  return null;
+end;
+$$;
+
+create trigger order_routes_guard
+  before update or delete on ehr.order_routes
+  for each row execute function ehr.guard_order_route_mutation();
+create constraint trigger order_routes_first_event
+  after insert on ehr.order_routes
+  deferrable initially deferred
+  for each row execute function ehr.require_order_route_first_event();
+
+-- The mirror (7.2), in the ordering facility's transaction, after any update
+-- of a routed lab request or prescription (the EHR holds the order's row
+-- lock; every update bumps row_version): a sent route is withdrawn (expired
+-- when past respond_by); an accepted lab request leaving active, or any
+-- change of an accepted prescription, cancels it (entered in error ends
+-- access now); an edit of an active accepted lab request, or any change after
+-- completion, is an event (entered in error ends access now).
+create function ehr.sync_order_routes_on_order_change()
+returns trigger
+language plpgsql security definer
+set search_path = pg_catalog, ehr, identity, audit, notification, platform, pg_temp
+as $$
+declare
+  route_row ehr.order_routes%rowtype;
+  changed ehr.order_routes%rowtype;
+  written ehr.order_routes%rowtype;
+  closed record;
+  order_kind text := case tg_table_name when 'lab_requests' then 'lab_request' else 'prescription' end;
+  in_error boolean := new.status = 'entered_in_error';
+  change_kind text := case when new.status = 'entered_in_error' then 'entered_in_error' else 'order_changed' end;
+begin
+  if not exists (select 1 from ehr.order_routes route
+                  where ((order_kind = 'lab_request' and route.source_lab_request_id = new.id)
+                      or (order_kind = 'prescription' and route.source_prescription_id = new.id))
+                    and route.state in ('sent', 'accepted', 'completed')) then
+    return null;
+  end if;
+  for route_row in
+    select route.* from ehr.order_routes route
+     where ((order_kind = 'lab_request' and route.source_lab_request_id = new.id)
+         or (order_kind = 'prescription' and route.source_prescription_id = new.id))
+       and route.state in ('sent', 'accepted', 'completed')
+     order by route.id
+     for update
+  loop
+    if route_row.state = 'sent' then
+      select * into closed from ehr.close_order_route(route_row.id, change_kind, 'ordering', true);
+      if closed.outcome = 'withdrawn' then
+        perform ehr.order_route_system_audit(closed.closed, 'receiving', 'ehr.order-route.withdrawn', false, null);
+        perform ehr.order_route_notify_patient(closed.closed, 'ORDER_ROUTE_WITHDRAWN');
+      end if;
+    elsif route_row.state = 'accepted'
+          and (order_kind = 'prescription' or new.status <> 'active' or in_error) then
+      select * into closed from ehr.close_order_route(route_row.id, change_kind, 'ordering', in_error);
+      perform ehr.order_route_system_audit(closed.closed, 'receiving', 'ehr.order-route.cancelled', true,
+        jsonb_build_object('orderVersion', new.row_version));
+      perform ehr.order_route_notify_patient(closed.closed, 'ORDER_ROUTE_CANCELLED');
+    elsif route_row.state = 'completed' and in_error and route_row.ended_at is null then
+      select * into closed from ehr.close_order_route(route_row.id, 'entered_in_error', 'ordering', true);
+      perform ehr.order_route_system_audit(closed.closed, 'receiving', 'ehr.order-route.order-changed', true,
+        jsonb_build_object('orderVersion', new.row_version));
+    else
+      changed := route_row;
+      written := ehr.write_order_route_change(route_row, changed,
+        case when route_row.state = 'accepted' then 'order_changed_after_acceptance'
+             else 'order_changed_after_completion' end, 'ordering', change_kind);
+      perform ehr.order_route_system_audit(written, 'receiving', 'ehr.order-route.order-changed', true,
+        jsonb_build_object('orderVersion', new.row_version));
+    end if;
+  end loop;
+  return null;
+end;
+$$;
+
+-- The release (7.3): when support releases a self-signed-up organization
+-- (identity.admin_release_self_service_facility sets self_service_released_at
+-- last, after the facilities are suspended and the administrator disabled),
+-- every live route of its facilities is closed, both ways, access ending now;
+-- each affected patient is told and each counterpart facility gets a system
+-- row; one platform row records the counts. Nothing is written for an
+-- organization that never had a route.
+create function ehr.close_order_routes_on_release()
+returns trigger
+language plpgsql security definer
+set search_path = pg_catalog, ehr, identity, audit, notification, platform, pg_temp
+as $$
+declare
+  route_row ehr.order_routes%rowtype;
+  closed record;
+  released_kind text;
+  withdrawn_count integer := 0;
+  cancelled_count integer := 0;
+  ended_count integer := 0;
+  accepted_lifetime integer;
+  patients_lifetime integer;
+begin
+  if new.organization_id is null
+     or not exists (select 1 from ehr.order_routes route
+                     where route.ordering_organization_id = new.organization_id
+                        or route.receiving_organization_id = new.organization_id) then
+    return null;
+  end if;
+  select count(*), count(distinct route.patient_id) into accepted_lifetime, patients_lifetime
+    from ehr.order_routes route
+   where route.receiving_organization_id = new.organization_id and route.accepted_at is not null;
+  for route_row in
+    select route.* from ehr.order_routes route
+     where (route.ordering_organization_id = new.organization_id
+         or route.receiving_organization_id = new.organization_id)
+       and (route.state in ('sent', 'accepted') or (route.state = 'completed' and route.ended_at is null))
+     order by route.id
+  loop
+    released_kind := case when route_row.receiving_organization_id = new.organization_id
+                          then 'receiving_released' else 'ordering_released' end;
+    select * into closed from ehr.close_order_route(route_row.id, released_kind, 'platform', true);
+    if closed.outcome in ('withdrawn', 'cancelled', 'access_ended') then
+      if closed.outcome = 'withdrawn' then
+        withdrawn_count := withdrawn_count + 1;
+      elsif closed.outcome = 'cancelled' then
+        cancelled_count := cancelled_count + 1;
+      else
+        ended_count := ended_count + 1;
+      end if;
+      if released_kind = 'receiving_released' then
+        perform ehr.order_route_system_audit(closed.closed, 'ordering', 'ehr.order-route.closed', true,
+          jsonb_build_object('closedBy', released_kind));
+      elsif closed.outcome = 'withdrawn' then
+        perform ehr.order_route_system_audit(closed.closed, 'receiving', 'ehr.order-route.withdrawn', false,
+          jsonb_build_object('closedBy', released_kind));
+      else
+        perform ehr.order_route_system_audit(closed.closed, 'receiving', 'ehr.order-route.closed', true,
+          jsonb_build_object('closedBy', released_kind));
+      end if;
+      perform ehr.order_route_notify_patient(closed.closed, 'ORDER_ROUTE_CANCELLED');
+    end if;
+  end loop;
+  insert into audit.events (correlation_id, actor_type, actor_subject, actor_account_id, action, outcome,
+    resource_type, resource_id, purpose_of_use, provenance, source_system, details)
+  values (platform.current_correlation_id(), 'platform', platform.current_actor_subject(),
+    platform.current_account_id(), 'admin.self-service-facility.release-order-routes', 'success',
+    'organization-application', new.id::text, 'healthcare-operations', 'application', 'identity-api',
+    jsonb_build_object('applicationId', new.id, 'withdrawn', withdrawn_count, 'cancelled', cancelled_count,
+      'accessEnded', ended_count, 'acceptedLifetime', accepted_lifetime, 'patientsLifetime', patients_lifetime));
+  return null;
+end;
+$$;
+
+create trigger organization_applications_order_routes_release
+  after update of self_service_released_at on identity.organization_applications
+  for each row
+  when (old.self_service_released_at is null and new.self_service_released_at is not null)
+  execute function ehr.close_order_routes_on_release();
+
+-- Results back to the ordering facility (6), in B's transaction. A release
+-- on a cancelled route, or on an accepted route past its work window, is
+-- refused (23514 ORDER_ROUTE_CLOSED) whatever consent the writer holds (P3);
+-- the first release completes the route and sets both windows; later ones
+-- (corrections) are reports and events that move nothing. A completed route
+-- past its window still files a release made under the patient's consent.
+create function lab.return_order_route_result()
+returns trigger
+language plpgsql security definer
+set search_path = pg_catalog, lab, ehr, platform, pg_temp
+as $$
+declare
+  item_route uuid;
+  item_id uuid;
+  test_system text;
+  test_code_value text;
+  test_name_value text;
+  revision lab.result_revisions%rowtype;
+  route_row ehr.order_routes%rowtype;
+  changed ehr.order_routes%rowtype;
+  written ehr.order_routes%rowtype;
+begin
+  select item.order_route_id, item.id, test.code_system, test.code, test.name
+    into item_route, item_id, test_system, test_code_value, test_name_value
+    from lab.test_executions execution
+    join lab.work_item_requested_tests test on test.id = execution.requested_test_id
+    join lab.work_items item on item.id = test.work_item_id
+   where execution.id = new.execution_id;
+  if item_route is null then
+    return null;
+  end if;
+  select route.* into route_row from ehr.order_routes route where route.id = item_route for update;
+  if route_row.state = 'cancelled'
+     or (route_row.state = 'accepted' and clock_timestamp() >= route_row.writes_end_at) then
+    raise exception using errcode = '23514', message = 'ORDER_ROUTE_CLOSED';
+  end if;
+  select candidate.* into revision from lab.result_revisions candidate
+   where candidate.result_id = new.result_id and candidate.version = new.result_version;
+  insert into lab.order_route_result_reports (route_id, work_item_id, result_id, result_version, kind,
+    test_code_system, test_code, test_name, result_type, numeric_value, text_value, unit, reference_range,
+    abnormal_flag, revision_kind, correction_reason, occurred_at, performing_facility_id)
+  values (route_row.id, item_id, new.result_id, new.result_version, 'released', test_system,
+    test_code_value, test_name_value, revision.result_type, revision.numeric_value, revision.text_value,
+    revision.unit, revision.reference_range, revision.abnormal_flag, revision.revision_kind,
+    revision.correction_reason, new.released_at, new.facility_id);
+  changed := route_row;
+  if route_row.state = 'accepted' then
+    changed.state := 'completed';
+    changed.completed_at := clock_timestamp();
+    changed.writes_end_at := least(changed.completed_at + interval '336 hours',
+                                   route_row.accepted_at + interval '1080 hours');
+    changed.access_ends_at := changed.writes_end_at;
+    written := ehr.write_order_route_change(route_row, changed, 'completed', 'receiving', null);
+  else
+    written := ehr.write_order_route_change(route_row, changed, 'result_returned', 'receiving', null);
+  end if;
+  perform ehr.order_route_system_audit(written, 'ordering', 'ehr.order-route.result-returned', true,
+    jsonb_build_object('resultId', new.result_id, 'version', new.result_version));
+  return null;
+end;
+$$;
+
+-- An invalidation of a result version that came back is reported too (never
+-- refused: clinical safety); one that never came back crosses nothing.
+create function lab.return_order_route_invalidation()
+returns trigger
+language plpgsql security definer
+set search_path = pg_catalog, lab, ehr, platform, pg_temp
+as $$
+declare
+  released lab.order_route_result_reports%rowtype;
+  route_row ehr.order_routes%rowtype;
+  written ehr.order_routes%rowtype;
+begin
+  select report.* into released from lab.order_route_result_reports report
+   where report.result_id = new.result_id and report.result_version = new.result_version
+     and report.kind = 'released';
+  if released.id is null then
+    return null;
+  end if;
+  select route.* into route_row from ehr.order_routes route where route.id = released.route_id for update;
+  insert into lab.order_route_result_reports (route_id, work_item_id, result_id, result_version, kind,
+    test_code_system, test_code, test_name, occurred_at, performing_facility_id)
+  values (released.route_id, released.work_item_id, new.result_id, new.result_version, 'entered_in_error',
+    released.test_code_system, released.test_code, released.test_name, new.occurred_at, new.facility_id);
+  written := ehr.write_order_route_change(route_row, route_row, 'result_marked_in_error', 'receiving', null);
+  perform ehr.order_route_system_audit(written, 'ordering', 'ehr.order-route.result-marked-in-error', true,
+    jsonb_build_object('resultId', new.result_id, 'version', new.result_version));
+  return null;
+end;
+$$;
+
+-- Dispensing back to the ordering facility; the dispensing validator has
+-- already locked the route and refused a closed one.
+create function pharmacy.return_order_route_dispensing()
+returns trigger
+language plpgsql security definer
+set search_path = pg_catalog, pharmacy, ehr, platform, pg_temp
+as $$
+declare
+  item_route uuid;
+  route_row ehr.order_routes%rowtype;
+  changed ehr.order_routes%rowtype;
+  written ehr.order_routes%rowtype;
+begin
+  select item.order_route_id into item_route from pharmacy.work_items item where item.id = new.work_item_id;
+  if item_route is null then
+    return null;
+  end if;
+  select route.* into route_row from ehr.order_routes route where route.id = item_route for update;
+  insert into pharmacy.order_route_dispensing_reports (route_id, work_item_id, dispensing_id, kind,
+    medication_code_system, medication_code, medication_display, quantity_dispensed, quantity_unit, occurred_at,
+    performing_facility_id)
+  values (route_row.id, new.work_item_id, new.id, 'dispensed', new.medication_code_system, new.medication_code,
+    new.medication_display, new.quantity_dispensed, new.quantity_unit, new.dispensed_at, new.facility_id);
+  changed := route_row;
+  if route_row.state = 'accepted' then
+    changed.state := 'completed';
+    changed.completed_at := clock_timestamp();
+    changed.writes_end_at := least(changed.completed_at + interval '336 hours',
+                                   route_row.accepted_at + interval '1080 hours');
+    changed.access_ends_at := changed.writes_end_at;
+    written := ehr.write_order_route_change(route_row, changed, 'completed', 'receiving', null);
+  else
+    written := ehr.write_order_route_change(route_row, changed, 'dispensing_returned', 'receiving', null);
+  end if;
+  perform ehr.order_route_system_audit(written, 'ordering', 'ehr.order-route.dispensing-returned', true,
+    jsonb_build_object('dispensingId', new.id, 'version', new.row_version));
+  return null;
+end;
+$$;
+
+-- A reversal is reported and never refused.
+create function pharmacy.return_order_route_reversal()
+returns trigger
+language plpgsql security definer
+set search_path = pg_catalog, pharmacy, ehr, platform, pg_temp
+as $$
+declare
+  dispensed pharmacy.order_route_dispensing_reports%rowtype;
+  route_row ehr.order_routes%rowtype;
+  written ehr.order_routes%rowtype;
+begin
+  select report.* into dispensed from pharmacy.order_route_dispensing_reports report
+   where report.dispensing_id = new.dispensing_id and report.kind = 'dispensed';
+  if dispensed.id is null then
+    return null;
+  end if;
+  select route.* into route_row from ehr.order_routes route where route.id = dispensed.route_id for update;
+  insert into pharmacy.order_route_dispensing_reports (route_id, work_item_id, dispensing_id, reversal_id, kind,
+    medication_code_system, medication_code, medication_display, quantity_dispensed, quantity_unit, occurred_at,
+    performing_facility_id)
+  values (dispensed.route_id, dispensed.work_item_id, new.dispensing_id, new.id, 'reversed',
+    dispensed.medication_code_system, dispensed.medication_code, dispensed.medication_display,
+    dispensed.quantity_dispensed, dispensed.quantity_unit, new.reversed_at, new.facility_id);
+  written := ehr.write_order_route_change(route_row, route_row, 'dispensing_reversed', 'receiving', null);
+  perform ehr.order_route_system_audit(written, 'ordering', 'ehr.order-route.dispensing-reversed', true,
+    jsonb_build_object('dispensingId', new.dispensing_id, 'reversalId', new.id));
+  return null;
+end;
+$$;
+
+revoke all on function ehr.guard_order_route_mutation(), ehr.require_order_route_first_event(),
+  ehr.sync_order_routes_on_order_change(), ehr.close_order_routes_on_release(),
+  lab.return_order_route_result(), lab.return_order_route_invalidation(),
+  pharmacy.return_order_route_dispensing(), pharmacy.return_order_route_reversal()
+  from public;
+
+-- 6.7 The clinical tables. From here to commit this migration holds ACCESS
+-- EXCLUSIVE on the nine tables, taken all at once and never waited for: a
+-- busy table makes the attempt fail at once (NOWAIT), the failed attempt's
+-- subtransaction releases whatever it took, and the loop tries again 100 ms
+-- later, so the migration never waits while holding one of them (no
+-- deadlock, V1) and no reader queues behind it (V2). After 50 attempts (5
+-- seconds) it stops the release with nothing applied (this is one file, one
+-- transaction); the same approved release can be run again. Every reader of
+-- clinical pages, Lab and Pharmacy waits for the rest of this file only.
+do $$
+declare
+  attempt integer := 0;
+begin
+  loop
+    attempt := attempt + 1;
+    begin
+      lock table lab.work_items, pharmacy.work_items, ehr.lab_requests, ehr.encounters, ehr.prescriptions,
+        lab.result_releases, lab.result_invalidations, pharmacy.dispensings, pharmacy.dispensing_reversals
+        in access exclusive mode nowait;
+      exit;
+    exception when lock_not_available then
+      if attempt >= 50 then
+        raise exception using errcode = '55P03',
+          message = '0086: the clinical order tables stayed busy for 5 seconds; run the release again at a quieter time';
+      end if;
+      perform pg_sleep(0.1);
+    end;
+  end loop;
+end
+$$;
+
+-- Lab work items bound to a route: the route column and its unique index;
+-- the facility rule (a route-backed item is at another facility than the
+-- ordering one, any other at the same); the EHR keys by the ordering
+-- facility (equal to the old ones for every existing row, whose facility is
+-- the ordering facility); the strict policies; and, last, the old check and
+-- keys. The new keys are validated (every existing row has facility_id =
+-- ordering_facility_id).
+alter table lab.work_items
+  add column order_route_id uuid references ehr.order_routes(id) on delete restrict;
+create unique index work_items_order_route_uq on lab.work_items (order_route_id) where order_route_id is not null;
+alter table lab.work_items
+  add constraint work_items_route_facility_ck check (
+    (order_route_id is null and facility_id = ordering_facility_id)
+    or (order_route_id is not null and facility_id <> ordering_facility_id)),
+  add constraint work_items_source_order_fk foreign key (source_ehr_order_id, patient_id, ordering_facility_id)
+    references ehr.lab_requests(id, patient_id, facility_id) on delete restrict,
+  add constraint work_items_source_encounter_fk foreign key (source_encounter_id, patient_id, ordering_facility_id)
+    references ehr.encounters(id, patient_id, facility_id) on delete restrict;
+drop policy lab_work_items_read on lab.work_items;
+drop policy lab_work_items_insert on lab.work_items;
+create policy lab_work_items_read on lab.work_items for select
+  using (lab.work_item_allows(patient_id, facility_id, order_route_id, 'read_records'));
+create policy lab_work_items_insert on lab.work_items for insert
+  with check (lab.work_item_allows(patient_id, facility_id, order_route_id, 'write_records'));
+alter table lab.work_items
+  drop constraint work_items_source_ehr_order_id_patient_id_facility_id_fkey,
+  drop constraint work_items_source_encounter_id_patient_id_facility_id_fkey,
+  drop constraint work_items_check;
+
+-- Pharmacy work items likewise (no EHR key exists, 0023).
+alter table pharmacy.work_items
+  add column order_route_id uuid references ehr.order_routes(id) on delete restrict;
+create unique index work_items_order_route_uq on pharmacy.work_items (order_route_id)
+  where order_route_id is not null;
+alter table pharmacy.work_items
+  add constraint work_items_route_facility_ck check (
+    (order_route_id is null and facility_id = ordering_facility_id)
+    or (order_route_id is not null and facility_id <> ordering_facility_id));
+drop policy pharmacy_work_items_read on pharmacy.work_items;
+drop policy pharmacy_work_items_insert on pharmacy.work_items;
+create policy pharmacy_work_items_read on pharmacy.work_items for select
+  using (pharmacy.work_item_allows(patient_id, facility_id, order_route_id, 'read_records'));
+create policy pharmacy_work_items_insert on pharmacy.work_items for insert
+  with check (pharmacy.work_item_allows(patient_id, facility_id, order_route_id, 'write_records'));
+do $$
+declare
+  old_check name;
+begin
+  select constraint_row.conname into strict old_check
+    from pg_constraint constraint_row
+   where constraint_row.conrelid = 'pharmacy.work_items'::regclass and constraint_row.contype = 'c'
+     and pg_get_constraintdef(constraint_row.oid) = 'CHECK ((facility_id = ordering_facility_id))';
+  execute format('alter table pharmacy.work_items drop constraint %I', old_check);
+end
+$$;
+
+-- The route's keys to the orders, the encounter and the work items (the
+-- work-item keys deferred: acceptance records the work item's id on the route
+-- before it inserts the work item), and the reports' keys to the work items.
+alter table ehr.order_routes
+  add constraint order_routes_source_lab_request_fk foreign key (source_lab_request_id, patient_id, ordering_facility_id)
+    references ehr.lab_requests(id, patient_id, facility_id) on delete restrict,
+  add constraint order_routes_source_prescription_fk
+    foreign key (source_prescription_id, patient_id, ordering_facility_id)
+    references ehr.prescriptions(id, patient_id, facility_id) on delete restrict,
+  add constraint order_routes_source_encounter_fk foreign key (source_encounter_id, patient_id, ordering_facility_id)
+    references ehr.encounters(id, patient_id, facility_id) on delete restrict,
+  add constraint order_routes_lab_work_item_fk foreign key (lab_work_item_id)
+    references lab.work_items(id) on delete restrict deferrable initially deferred,
+  add constraint order_routes_pharmacy_work_item_fk foreign key (pharmacy_work_item_id)
+    references pharmacy.work_items(id) on delete restrict deferrable initially deferred;
+alter table lab.order_route_result_reports
+  add constraint order_route_result_reports_work_item_fk foreign key (work_item_id)
+    references lab.work_items(id) on delete restrict;
+alter table pharmacy.order_route_dispensing_reports
+  add constraint order_route_dispensing_reports_work_item_fk foreign key (work_item_id)
+    references pharmacy.work_items(id) on delete restrict;
+
+-- The mirror and the return triggers.
+create trigger lab_requests_order_routes_sync
+  after update on ehr.lab_requests
+  for each row execute function ehr.sync_order_routes_on_order_change();
+create trigger prescriptions_order_routes_sync
+  after update on ehr.prescriptions
+  for each row execute function ehr.sync_order_routes_on_order_change();
+create trigger result_releases_order_route_return
+  after insert on lab.result_releases
+  for each row execute function lab.return_order_route_result();
+create trigger result_invalidations_order_route_return
+  after insert on lab.result_invalidations
+  for each row execute function lab.return_order_route_invalidation();
+create trigger dispensings_order_route_return
+  after insert on pharmacy.dispensings
+  for each row execute function pharmacy.return_order_route_dispensing();
+create trigger dispensing_reversals_order_route_return
+  after insert on pharmacy.dispensing_reversals
+  for each row execute function pharmacy.return_order_route_reversal();
+
+-- 7. Runtime grants (A5). runtime-grants.sql carries the same grants for a
 -- later role bootstrap; this grants them to the roles that already exist,
 -- since a release applies only migrations. The owner-only activation and the
 -- lapse helper are granted to no role, and no role receives a privilege on
@@ -6037,18 +10089,102 @@ begin
 end
 $$;
 
--- 7. The controls (last). These statements take ACCESS EXCLUSIVE on
+-- Section 6's commands (P4c): the EHR's to the EHR runtime, the Lab's and
+-- the Pharmacy's (and the strict work-item policies' functions, which those
+-- runtimes' queries evaluate) to theirs, the directory and support's to the
+-- Identity runtime; all but support's (and the Identity runtime's copy of
+-- the directory) also to the schema test runtime, whose rollback-only suite
+-- inserts work items under the new policies (FEAS R1). The helpers, trigger
+-- functions and tables go to no role. The patient inbox (0037) was never
+-- granted to the Identity runtime on this branch, so its patient inbox
+-- routes failed; main grants both functions in its runtime-grants.sql
+-- (eb9b1ca:services/ehr-api/database/runtime-grants.sql:1664-1665), and the
+-- order-route notices reach patients only through this inbox.
+do $$
+begin
+  if exists (select 1 from pg_roles where rolname = 'hid_ehr_runtime') then
+    grant execute on function ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,char),
+      ehr.withdraw_order_route(uuid,text,uuid,bigint,text),
+      ehr.list_order_routes_for_order(text,uuid,uuid),
+      ehr.order_route_summaries(text,uuid,uuid[]),
+      ehr.patient_list_order_routes(),
+      ehr.patient_stop_order_route(uuid,bigint),
+      ehr.order_route_attestation_text(text)
+      to hid_ehr_runtime;
+  end if;
+  if exists (select 1 from pg_roles where rolname = 'hid_lab_runtime') then
+    grant execute on function lab.list_order_routes(text,text),
+      lab.get_order_route(uuid),
+      lab.accept_order_route(uuid,bigint,text,text,text,char),
+      lab.decline_order_route(uuid,bigint,text),
+      lab.order_route_access_for(text,uuid,text),
+      lab.order_route_cards(uuid[]),
+      lab.work_item_allows(uuid,uuid,uuid,text)
+      to hid_lab_runtime;
+  end if;
+  if exists (select 1 from pg_roles where rolname = 'hid_pharmacy_runtime') then
+    grant execute on function pharmacy.list_order_routes(text,text),
+      pharmacy.get_order_route(uuid),
+      pharmacy.accept_order_route(uuid,bigint,text,text,text,text,char),
+      pharmacy.decline_order_route(uuid,bigint,text),
+      pharmacy.order_route_access_for(text,uuid,text),
+      pharmacy.order_route_cards(uuid[]),
+      pharmacy.work_item_allows(uuid,uuid,uuid,text)
+      to hid_pharmacy_runtime;
+  end if;
+  if exists (select 1 from pg_roles where rolname = 'hid_identity_runtime') then
+    grant execute on function identity.search_order_destinations(text,text),
+      identity.admin_order_route_summary(uuid),
+      identity.admin_find_order_routes(text,text),
+      identity.admin_close_order_route(uuid,bigint,text),
+      identity.admin_set_order_route_destination(uuid,boolean,text),
+      identity.list_my_notification_inbox(integer),
+      identity.mark_my_notification_read(uuid)
+      to hid_identity_runtime;
+  end if;
+  if exists (select 1 from pg_roles where rolname = 'hid_schema_test_runtime') then
+    grant execute on function ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,char),
+      ehr.withdraw_order_route(uuid,text,uuid,bigint,text),
+      ehr.list_order_routes_for_order(text,uuid,uuid),
+      ehr.order_route_summaries(text,uuid,uuid[]),
+      ehr.patient_list_order_routes(),
+      ehr.patient_stop_order_route(uuid,bigint),
+      ehr.order_route_attestation_text(text),
+      lab.list_order_routes(text,text),
+      lab.get_order_route(uuid),
+      lab.accept_order_route(uuid,bigint,text,text,text,char),
+      lab.decline_order_route(uuid,bigint,text),
+      lab.order_route_access_for(text,uuid,text),
+      lab.order_route_cards(uuid[]),
+      pharmacy.list_order_routes(text,text),
+      pharmacy.get_order_route(uuid),
+      pharmacy.accept_order_route(uuid,bigint,text,text,text,text,char),
+      pharmacy.decline_order_route(uuid,bigint,text),
+      pharmacy.order_route_access_for(text,uuid,text),
+      pharmacy.order_route_cards(uuid[]),
+      identity.search_order_destinations(text,text),
+      lab.work_item_allows(uuid,uuid,uuid,text),
+      pharmacy.work_item_allows(uuid,uuid,uuid,text)
+      to hid_schema_test_runtime;
+  end if;
+end
+$$;
+
+-- 8. The controls (last). These statements take ACCESS EXCLUSIVE on
 -- platform.control_settings, which every non-admin authenticated request
 -- reads through platform.control_enabled, and hold it until commit; nothing
 -- follows them. The live key list is asserted first (C10): the CHECK
 -- constraint and platform.control_enabled must name exactly the six keys of
 -- 0039 and 0040, as this branch has them, so a migration that changed either
 -- first makes this one stop instead of dropping its keys. This migration's
--- keys, provider_self_service_enabled (P4) and staff_invitations_enabled
--- (P4b), are added at the end of the three lists below (the CHECK, the seed
--- and control_enabled); another key of this release goes beside them in each
--- of the three. Every later control migration must carry both keys in its
--- CHECK and in control_enabled.
+-- keys, provider_self_service_enabled (P4), staff_invitations_enabled (P4b),
+-- cross_facility_orders_enabled and cross_facility_route_access_enabled
+-- (P4c), are added at the end of the three lists below (the CHECK, the seed
+-- and control_enabled). Every later control migration must carry all four
+-- keys in its CHECK and in control_enabled. Section 6's commands and route
+-- predicates read controls inside clinical transactions (V11): a later
+-- migration that locks platform.control_settings while it holds clinical
+-- locks must take it with a NOWAIT retry, as 6.7 takes the clinical tables.
 do $$
 declare
   live_keys constant text[] := array['break_glass_enabled', 'maintenance_mode', 'outreach_portal_enabled',
@@ -6088,7 +10224,8 @@ $$;
 alter table platform.control_settings add constraint control_settings_control_key_check check (control_key in (
   'patient_portal_enabled', 'provider_portal_enabled', 'outreach_portal_enabled',
   'maintenance_mode', 'uploads_enabled', 'break_glass_enabled',
-  'provider_self_service_enabled', 'staff_invitations_enabled'
+  'provider_self_service_enabled', 'staff_invitations_enabled',
+  'cross_facility_orders_enabled', 'cross_facility_route_access_enabled'
 ));
 
 -- The seed (C2, R8). platform.control_settings has no INSERT policy, so an
@@ -6101,7 +10238,10 @@ alter table platform.control_settings add constraint control_settings_control_ke
 -- without it. Turning FORCE on where it was off would make every accountless
 -- control read raise PLATFORM_CONTROL_UNAVAILABLE under such an owner (every
 -- portal's guard, 503). Off: an administrator opens facility self sign-up
--- with the audited admin command, and staff invitations likewise.
+-- with the audited admin command, and staff invitations and orders between
+-- facilities likewise. Work on accepted orders between facilities is seeded
+-- on (no route can exist while orders are off); switching it off stops all
+-- route-backed work at once.
 do $$
 declare
   was_forced boolean;
@@ -6117,7 +10257,11 @@ begin
     ('provider_self_service_enabled', false,
       'Facility self sign-up ships closed (P4); enable by audited admin command', null),
     ('staff_invitations_enabled', false,
-      'Facility staff invitations ship closed (P4b); enable by audited admin command', null)
+      'Facility staff invitations ship closed (P4b); enable by audited admin command', null),
+    ('cross_facility_orders_enabled', false,
+      'Cross-facility orders ship closed (P4c); enable by audited admin command', null),
+    ('cross_facility_route_access_enabled', true,
+      'Work on accepted cross-facility orders; switch off only to stop it everywhere (P4c)', null)
   on conflict do nothing;
   if was_forced then
     execute 'alter table platform.control_settings force row level security';
@@ -6141,7 +10285,8 @@ begin
   if requested_key not in (
     'patient_portal_enabled','provider_portal_enabled','outreach_portal_enabled',
     'maintenance_mode','uploads_enabled','break_glass_enabled',
-    'provider_self_service_enabled','staff_invitations_enabled'
+    'provider_self_service_enabled','staff_invitations_enabled',
+    'cross_facility_orders_enabled','cross_facility_route_access_enabled'
   ) then
     raise exception using errcode='22023', message='PLATFORM_CONTROL_INVALID';
   end if;

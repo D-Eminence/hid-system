@@ -1,16 +1,19 @@
 \set ON_ERROR_STOP on
--- The facility self sign-up and staff invitation controls (0086, section 7).
--- Rollback-only.
+-- The facility self sign-up, staff invitation and cross-facility order
+-- controls (0086, section 8). Rollback-only.
 --
---   1. platform.control_settings accepts exactly eight keys: the six of 0039,
+--   1. platform.control_settings accepts exactly ten keys: the six of 0039,
 --      provider_self_service_enabled and staff_invitations_enabled (P4b),
---      both seeded off with their reasons and no updater; FORCE row-level
---      security is back on after the seed;
+--      both seeded off with their reasons and no updater, and
+--      cross_facility_orders_enabled (seeded off) and
+--      cross_facility_route_access_enabled (seeded on) (P4c), with their
+--      reasons and no updater; FORCE row-level security is back on after the
+--      seed;
 --   2. platform.control_enabled keeps 0040's shape (SECURITY DEFINER, STABLE,
 --      its search path, EXECUTE for PUBLIC) and answers the six old keys and
---      the two new ones; an unknown key still raises 22023 PLATFORM_CONTROL_INVALID;
+--      the four new ones; an unknown key still raises 22023 PLATFORM_CONTROL_INVALID;
 --   3. the admin console's commands, through the exact Identity API runtime
---      role, list eight controls and open and close the new one, each change
+--      role, list ten controls and open and close the new one, each change
 --      recorded once in platform.control_events; the runtime cannot write the
 --      table directly;
 --   4. require_control_enabled('provider_self_service_enabled') raises 55000
@@ -40,7 +43,7 @@ select set_config('hid.test.control_owner_bypasses_rls',
      join pg_roles role_row on role_row.oid = proc.proowner
     where proc.oid = 'platform.control_enabled(text)'::regprocedure), true);
 
--- 1. The table: eight keys, the seeds, forced row-level security.
+-- 1. The table: ten keys, the seeds, forced row-level security.
 do $$
 declare violated text; seed record;
 begin
@@ -49,10 +52,11 @@ begin
              regexp_matches(pg_get_constraintdef(constraint_row.oid), '''([a-z_]+)''', 'g') match
        where constraint_row.conrelid = 'platform.control_settings'::regclass
          and constraint_row.conname = 'control_settings_control_key_check')
-     is distinct from array['break_glass_enabled', 'maintenance_mode', 'outreach_portal_enabled',
+     is distinct from array['break_glass_enabled', 'cross_facility_orders_enabled',
+       'cross_facility_route_access_enabled', 'maintenance_mode', 'outreach_portal_enabled',
        'patient_portal_enabled', 'provider_portal_enabled', 'provider_self_service_enabled', 'staff_invitations_enabled',
        'uploads_enabled'] then
-    raise exception 'control_settings_control_key_check does not list exactly the eight keys';
+    raise exception 'control_settings_control_key_check does not list exactly the ten keys';
   end if;
   if (select count(*) from pg_constraint constraint_row
        where constraint_row.conrelid = 'platform.control_settings'::regclass and constraint_row.contype = 'c'
@@ -73,8 +77,18 @@ begin
      or seed.reason <> 'Facility staff invitations ship closed (P4b); enable by audited admin command' then
     raise exception 'staff_invitations_enabled was not seeded off with its reason: %', row_to_json(seed);
   end if;
-  if (select count(*) from platform.control_settings) <> 8 then
-    raise exception 'platform.control_settings does not hold exactly eight controls';
+  select * into seed from platform.control_settings where control_key = 'cross_facility_orders_enabled';
+  if not found or seed.enabled or seed.updated_by is not null or seed.row_version <> 1
+     or seed.reason <> 'Cross-facility orders ship closed (P4c); enable by audited admin command' then
+    raise exception 'cross_facility_orders_enabled was not seeded off with its reason: %', row_to_json(seed);
+  end if;
+  select * into seed from platform.control_settings where control_key = 'cross_facility_route_access_enabled';
+  if not found or not seed.enabled or seed.updated_by is not null or seed.row_version <> 1
+     or seed.reason <> 'Work on accepted cross-facility orders; switch off only to stop it everywhere (P4c)' then
+    raise exception 'cross_facility_route_access_enabled was not seeded on with its reason: %', row_to_json(seed);
+  end if;
+  if (select count(*) from platform.control_settings) <> 10 then
+    raise exception 'platform.control_settings does not hold exactly ten controls';
   end if;
   begin
     insert into platform.control_settings (control_key, enabled, reason)
@@ -116,10 +130,11 @@ declare
 begin
   select array_agg(control.control_key order by control.control_key) into listed
     from platform.admin_list_controls() control;
-  if listed is distinct from array['break_glass_enabled', 'maintenance_mode', 'outreach_portal_enabled',
+  if listed is distinct from array['break_glass_enabled', 'cross_facility_orders_enabled',
+      'cross_facility_route_access_enabled', 'maintenance_mode', 'outreach_portal_enabled',
       'patient_portal_enabled', 'provider_portal_enabled', 'provider_self_service_enabled', 'staff_invitations_enabled',
       'uploads_enabled'] then
-    raise exception 'admin_list_controls did not list the eight controls: %', listed;
+    raise exception 'admin_list_controls did not list the ten controls: %', listed;
   end if;
   if (select control.enabled from platform.admin_list_controls() control
        where control.control_key = 'provider_self_service_enabled')
@@ -130,7 +145,7 @@ begin
   -- The old keys answer exactly as their rows say.
   foreach key in array array['patient_portal_enabled', 'provider_portal_enabled', 'outreach_portal_enabled',
       'maintenance_mode', 'uploads_enabled', 'break_glass_enabled', 'provider_self_service_enabled',
-      'staff_invitations_enabled'] loop
+      'staff_invitations_enabled', 'cross_facility_orders_enabled', 'cross_facility_route_access_enabled'] loop
     state := platform.control_enabled(key);
     if state is distinct from (select control.enabled from platform.admin_list_controls() control
                                  where control.control_key = key) then

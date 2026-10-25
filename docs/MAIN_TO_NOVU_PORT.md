@@ -917,6 +917,158 @@ their builds; the items Identity carries are listed here too.
   `provider-self-service-rollback` changed for the restricted role, the new
   review and the eighth control key.
 
+Cross-facility lab requests and prescriptions (P4c, in 0086's section 6,
+after P4b's section 5; the grants became section 7 and the controls section 8,
+still last). `main` has no cross-facility order routing, so every item here is
+new on this branch except the patient-inbox grant, a port of `main`'s grant.
+Owner decisions of 2026-10-25 (the fifth and sixth sets) are marked "owner".
+The ehr-api, lab-api, pharmacy-api, identity-api and website parts are
+recorded by their builds.
+
+- The route (`ehr.order_routes`, with `ehr.order_route_events`,
+  `ehr.order_route_accept_attempts`, `ehr.order_route_attestation_texts`,
+  `lab.order_route_result_reports`, `pharmacy.order_route_dispensing_reports`
+  and `identity.order_route_destination_settings`): uuid keys, forced
+  row-level security with four permissive policies, no runtime privilege,
+  append-only events and reports. A route is `sent` at once with
+  `respond_by = created_at + 7 days`, then `accepted`, `completed`,
+  `declined`, `withdrawn`, `expired` (stored by the next command that touches
+  it) or `cancelled`; at most one live route per order and five per order;
+  never again once a route of the order was accepted. The guard
+  (`ehr.guard_order_route_mutation`) keeps the header, the snapshot and the
+  attestation immutable, sets each transition column once, allows only the
+  state table's transitions and windows, and requires an event of the new
+  version with the same state and windows (P5); a deferred check requires
+  event 1 at commit, run as the owner (the committing role is the EHR
+  runtime, which reads no route table; found by the race harness, which
+  commits as the runtimes).
+- The clinician's attestation (owner Q2): the send carries the current
+  attestation text version of the kind (`ehr.order_route_attestation_text`,
+  two texts seeded), names the receiving facility, and is stored with the
+  sender's name, the facility's name and `patient_agreement
+  'clinician_attested'`; an older version is refused
+  (`ORDER_ROUTE_ATTESTATION_OUTDATED`).
+- Send (`ehr.send_order_route`, the EHR runtime): staff context with
+  `direct-care` (no emergency, no break-glass), `ehr.order-route.send` (new;
+  doctor and clinician) and the kind's write permission, the patient's write
+  consent at the ordering facility, `cross_facility_orders_enabled` on, the
+  order the patient's in that encounter at this facility (a draft is
+  activated, recorded by the EHR's own versioning), an eligible destination,
+  no deny directive, the patient's active account (V12, or the notice could
+  not reach them), the limits (100 sends per member and 200 per facility pair
+  a day, 500 open per destination); the order is snapshotted with the
+  orderer's licence from a facility attestation whose doctor grant is still
+  in force. The receiving facility gets a `system` row without the patient,
+  the patient the inbox item `ORDER_ROUTE_SENT`.
+- Eligibility (`identity.order_route_destination_eligible`, checked in the
+  directory, at send and at acceptance after locking the receiving
+  organization's application): an active, verified facility of an active
+  organization that is reviewed (self-service) or governed; an active
+  laboratory or pharmacy product at that facility from an approved
+  application; listed (support's latest setting, else governed, else a
+  self-service review by CAC contact, officer match, register or in person);
+  a member holding `lab.order-route.receive` or
+  `pharmacy.order-route.receive` (new; lab and pharmacist); not the ordering
+  facility. The directory (`identity.search_order_destinations`, the Identity
+  runtime) answers at most ten, with the registered address and
+  `newOnHealthId`.
+- Receive (`lab.*`/`pharmacy.*_order_route*`, the Lab and Pharmacy
+  runtimes): Incoming shows no patient, clinical information, instructions,
+  licence number or source ids; acceptance matches the Health ID or the date
+  of birth, counts mismatches (five lock that order there with a row at the
+  ordering facility and the patient's notice; 20 a day stop the member),
+  refuses a suspended ordering facility (V10), creates the work item bound to
+  the route and answers the patient card; a same-facility hand-off that took
+  the order first makes the acceptance withdraw the route (`order_in_work`,
+  R10); decline takes a reason code.
+- Route access: the work lists' policies became strict
+  (`lab.work_item_allows`/`pharmacy.work_item_allows`: the session facility
+  and the member's consent or this row's route), and `lab.context_allows`/
+  `pharmacy.context_allows` gained one branch, a live route of that kind for
+  that patient at that facility for a member with the receive permission.
+  Residual (the owner signs it): the chain-table branch is per patient at the
+  facility, not per order (SPEC-FINAL 4.3).
+- Windows: work for 30 days after acceptance; after the first result or
+  dispensing both end at `least(completed + 14 days, accepted + 45 days)`
+  and later reports never move them; a cancellation ends writes now and reads
+  7 days later (entered in error, release and support end both now).
+- Returns, in the receiving facility's transaction: a released result
+  version, an invalidation, a dispensing and a reversal each file a report,
+  the first completes the route, and the ordering facility gets a `system`
+  row with the patient. A release on a cancelled route, or on an accepted one
+  past its window, and a dispensing outside the window are refused
+  (`ORDER_ROUTE_CLOSED`); an invalidation and a reversal never are.
+- The mirror (`ehr.sync_order_routes_on_order_change`, after update of a lab
+  request or prescription): a sent route is withdrawn; an accepted lab
+  request is cancelled when it leaves `active` (an edit while active is an
+  event, the receiver keeps what it accepted); an accepted prescription is
+  cancelled by any change; a completed route records the change, and entered
+  in error ends its access.
+- Release and support: releasing a self-signed-up organization closes its
+  live routes both ways (a trigger on `self_service_released_at`), with a
+  `system` row at each counterpart, the patients' notices and one platform
+  row `admin.self-service-facility.release-order-routes` with the counts;
+  support finds a route by reference or Health ID, reads its summary, closes
+  it (`admin.order-route.close`, needs `platform.facility.manage`) and lists
+  or unlists a destination (`admin.order-route-destination.set`).
+- The patient (owner Q2): the portal lists the orders sent for them with
+  every field that crossed and the attestation, and Stop withdraws a sent
+  route; notices `ORDER_ROUTE_SENT`, `_WITHDRAWN`, `_ACCEPTED`, `_DECLINED`,
+  `_ACCEPT_LOCKED` and `_CANCELLED` carry only the route, kind and facility
+  names.
+- The patient inbox grant, a port of `main`'s
+  (`eb9b1ca:services/ehr-api/database/runtime-grants.sql:1664-1665`):
+  `identity.list_my_notification_inbox(integer)` and
+  `identity.mark_my_notification_read(uuid)` (0037) were revoked from PUBLIC
+  and granted to no role here, so Identity's `GET
+  /api/v1/identity/me/notifications` and its mark-read failed with 42501 in
+  production. 0086 section 7 and `runtime-grants.sql` grant both to
+  `hid_identity_runtime` (`main` also names `hid_schema_test_runtime`; here
+  the suite runs as the API runtime, so it is not needed).
+- Controls: `cross_facility_orders_enabled` (seeded off; sends, the
+  directory and acceptance) and `cross_facility_route_access_enabled`
+  (seeded on; work on accepted routes, switched off only to stop it
+  everywhere). Every later control migration must carry all four keys of
+  0086 in its CHECK and in `platform.control_enabled`. V11's rule: no
+  running service reads `platform.control_settings` inside a clinical
+  transaction today, so 0086's control section after its clinical locks
+  cannot deadlock; P4c's own commands do read controls inside clinical
+  transactions, so a later migration that locks `platform.control_settings`
+  while holding clinical locks must take it with the same NOWAIT retry.
+- Locks: nothing before section 6.7 locks the nine clinical tables
+  (`lab.work_items`, `pharmacy.work_items`, `ehr.lab_requests`,
+  `ehr.encounters`, `ehr.prescriptions`, `lab.result_releases`,
+  `lab.result_invalidations`, `pharmacy.dispensings`,
+  `pharmacy.dispensing_reversals`); 6.7 takes all nine ACCESS EXCLUSIVE at
+  once with NOWAIT, retrying every 100 ms, and stops the release with
+  nothing applied after 50 attempts (55P03, "the clinical order tables
+  stayed busy for 5 seconds; run the release again at a quieter time").
+  Measured on PostgreSQL 16 (build report, `p4c/build/db.md`): about 40 ms
+  from 6.7 to commit on an empty database and about 200 ms with 50,000 work
+  items in each list; under 20 to 300 transactions a second on the nine
+  tables the release applied in 0.5 to 1.0 s with no failed transaction;
+  under saturating traffic it stopped with 55P03 and applied nothing, and ran
+  again cleanly once the traffic stopped.
+- Rollback: switch `cross_facility_orders_enabled` off first (with P4's and
+  P4b's two; the previous console accepts only the six old keys), and
+  `cross_facility_route_access_enabled` too if the reason is route access.
+  The previous services (57a94db) call no new function; their same-facility
+  writes carry no route and pass the unchanged branches; the previous Lab and
+  Pharmacy list route-backed items but authorize each through Identity, so
+  routed work pauses until the images return. The rollback suite runs the
+  previous EHR's lab request create and update, the previous Lab's and
+  Pharmacy's acceptance, list and per-item read, and the previous Identity's
+  control list (ten keys) on the new schema.
+- Tests (`services/ehr-api/test/database/`, rollback-only): new
+  `order-routes-send`, `order-routes-receive`, `order-routes-patient`,
+  `order-routes-lifecycle`, `order-routes-returns`,
+  `order-routes-concurrency` (serial orders; the two-connection races, the
+  final block against a dispensing in flight and their deadlocking mutants
+  run in the build's harness), `order-routes-privileges` and
+  `patient-notification-inbox-runtime`; `provider-self-service-control` and
+  `provider-self-service-rollback` changed for the ten keys and the previous
+  EHR, Lab and Pharmacy SQL.
+
 ## Not ported, and why
 
 - Already on this branch: #26 (0071 grants the list), #58 (0071 seeds `direct-care`).
@@ -986,6 +1138,17 @@ their builds; the items Identity carries are listed here too.
 - Edits a suite in `services/ehr-api/database/tests/`, which production
   refuses: #48 as `main` made it (0080 also restates `main`'s 0077 bodies). A
   port orders its guards so the suite needs no edit.
+- `main`'s `0066_patient_access_safety.sql` beyond the inbox grant (P4c
+  needs none of it): the session-bound access-request wrappers
+  (`list_my_patient_access_requests`, `approve_my_access_request`,
+  `deny_my_access_request`; here Identity calls the 0035 commands, which bind
+  to the signed-in account's patient), the patient's revocation of a grant
+  they gave (`revoke_my_consent_grant`; break-glass grants are never
+  patient-revocable), the access history's `breakGlass` and
+  `patientRevocable` labels, and no new inbox items for a deleted login
+  (here `notification.enqueue_patient_inbox_item` checks only an active
+  patient with an account). Its decision-command repair is already here as
+  0072. Each would be its own change.
 - The other launch features and their infrastructure (#63–#98) are not ported
   yet. Each waits on the owner decision recorded below, where it needs one.
 

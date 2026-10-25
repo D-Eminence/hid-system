@@ -995,6 +995,63 @@ grant execute on function identity.organization_self_service_state(uuid),
 revoke all on identity.staff_attestation_texts, identity.staff_invitations,
   identity.staff_invitation_sends, identity.staff_licence_attestations from public;
 
+-- Cross-facility lab requests and prescriptions (0086 section 6, P4c), as
+-- that migration grants them (its section 7). The EHR's commands (send,
+-- withdraw, the order row's routes and summaries, the patient's list and
+-- Stop, the attestation text) go to the EHR runtime; the Lab's and the
+-- Pharmacy's (lists, read, accept, decline, the resource check, the cards)
+-- and the strict work-item policies' functions, which their queries
+-- evaluate, to theirs; the directory and support's find, summary, close and
+-- destination setting to the Identity runtime. The schema test runtime gets
+-- every command but support's (its rollback-only suites insert work items
+-- under the new policies). The section's helpers, trigger functions and
+-- tables (routes, events, acceptance attempts, attestation texts, result and
+-- dispensing reports, destination settings) are granted to no role.
+grant execute on function ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,char),
+  ehr.withdraw_order_route(uuid,text,uuid,bigint,text),
+  ehr.list_order_routes_for_order(text,uuid,uuid),
+  ehr.order_route_summaries(text,uuid,uuid[]),
+  ehr.patient_list_order_routes(),
+  ehr.patient_stop_order_route(uuid,bigint),
+  ehr.order_route_attestation_text(text)
+  to hid_ehr_runtime, hid_schema_test_runtime;
+grant execute on function lab.list_order_routes(text,text),
+  lab.get_order_route(uuid),
+  lab.accept_order_route(uuid,bigint,text,text,text,char),
+  lab.decline_order_route(uuid,bigint,text),
+  lab.order_route_access_for(text,uuid,text),
+  lab.order_route_cards(uuid[]),
+  lab.work_item_allows(uuid,uuid,uuid,text)
+  to hid_lab_runtime, hid_schema_test_runtime;
+grant execute on function pharmacy.list_order_routes(text,text),
+  pharmacy.get_order_route(uuid),
+  pharmacy.accept_order_route(uuid,bigint,text,text,text,text,char),
+  pharmacy.decline_order_route(uuid,bigint,text),
+  pharmacy.order_route_access_for(text,uuid,text),
+  pharmacy.order_route_cards(uuid[]),
+  pharmacy.work_item_allows(uuid,uuid,uuid,text)
+  to hid_pharmacy_runtime, hid_schema_test_runtime;
+grant execute on function identity.search_order_destinations(text,text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function identity.admin_order_route_summary(uuid),
+  identity.admin_find_order_routes(text,text),
+  identity.admin_close_order_route(uuid,bigint,text),
+  identity.admin_set_order_route_destination(uuid,boolean,text)
+  to hid_identity_runtime;
+revoke all on ehr.order_routes, ehr.order_route_events, ehr.order_route_accept_attempts,
+  ehr.order_route_attestation_texts, lab.order_route_result_reports, pharmacy.order_route_dispensing_reports,
+  identity.order_route_destination_settings from public;
+-- The patient's inbox (0037): revoked from PUBLIC there and, until 0086
+-- section 7, granted to no role on this branch, so Identity's GET
+-- /api/v1/identity/me/notifications and POST .../:notificationId/read failed
+-- with 42501 as its runtime. A port of main's grant
+-- (eb9b1ca:services/ehr-api/database/runtime-grants.sql:1664-1665, which also
+-- names hid_schema_test_runtime; 0086 grants the Identity runtime alone, as
+-- SPEC-FINAL 8.14 says); the order-route notices reach patients only here.
+grant execute on function identity.list_my_notification_inbox(integer),
+  identity.mark_my_notification_read(uuid)
+  to hid_identity_runtime;
+
 -- Public patient enrollment persists only encrypted pending evidence. Its
 -- activation command performs the canonical account/patient writes atomically.
 grant select, insert, update, delete on identity.public_patient_enrollments,

@@ -30,13 +30,24 @@
 --     self-signed-up administrator before review (the restricted role's six
 --     permissions) and after it (org_admin's), resolved as before;
 --   services/identity-api/src/admin/admin.service.ts and auth/security.guard.ts
---     the platform control list, change and reads.
+--     the platform control list, change and reads;
+--   services/ehr-api/src/ehr/lab-requests/lab-requests.service.ts (P4c,
+--     section 8 below): a lab request's create, lock and update under the
+--     new route-mirror triggers;
+--   services/lab-api/src/lab/lab-work-items.service.ts and
+--   services/pharmacy-api/src/pharmacy/pharmacy.service.ts (section 8): the
+--     same-facility acceptance, the work list and the per-item read, as the
+--     exact Lab and Pharmacy API runtimes, on the work lists' new strict
+--     policies and the new order_route_id column.
 --
 -- What it shows: governed applications default to admin_review; governed
 -- approvals and rejections name a reviewer and a reason, so the replaced
 -- review check admits them; the replaced governed submit and prune keep their
--- answers; the control list carries the two new keys (both off) and the six
--- old keys answer as before. The previous Identity calls no 0086 command.
+-- answers; the control list carries the four new keys (P4b's two off, P4c's
+-- orders off and route access on) and the six old keys answer as before. The
+-- previous Identity calls no 0086 command; the previous Lab and Pharmacy
+-- call none either, and keep accepting, listing and reading same-facility
+-- work.
 begin;
 
 do $$
@@ -484,8 +495,9 @@ declare
   result record;
 begin
   execute 'select array_agg(control_key order by control_key) from platform.admin_list_controls()' into listed;
-  if cardinality(listed) <> 8 or not listed @> array['provider_self_service_enabled', 'staff_invitations_enabled'] then
-    raise exception 'The previous admin console does not list the two new controls: %', listed;
+  if cardinality(listed) <> 10 or not listed @> array['provider_self_service_enabled', 'staff_invitations_enabled',
+      'cross_facility_orders_enabled', 'cross_facility_route_access_enabled'] then
+    raise exception 'The previous admin console does not list the four new controls: %', listed;
   end if;
   for outreach in execute 'select * from platform.admin_list_controls()' loop
     if outreach.control_key = 'outreach_portal_enabled' then
@@ -534,6 +546,269 @@ begin
   execute 'select platform.prune_verification_quotas()' into pruned;
   if pruned is null or pruned < 0 then
     raise exception 'The previous Identity''s prune returned %', pruned;
+  end if;
+end $$;
+reset role;
+
+-- 8. The previous Lab and Pharmacy (57a94db) on the new work lists (P4c):
+-- a hospital's own Lab and Pharmacy accept its orders, list their work and
+-- read one item, each with the previous service's SQL text through the exact
+-- API runtime in the context DatabaseService.withTransaction sets. Owner SQL
+-- writes the hospital, its staff, the patient's consents and the orders.
+insert into identity.organizations (id, name, slug)
+values ('c8a10000-0000-4000-8000-000000000001', 'Rollback Clinic Ltd', 'rollback-clinic');
+insert into identity.facilities (id, organization_id, name, code, timezone, active, lifecycle_status)
+values ('c8a20000-0000-4000-8000-000000000001', 'c8a10000-0000-4000-8000-000000000001', 'Rollback Clinic',
+  'ROLLBACK-CLINIC', 'Africa/Lagos', true, 'verified');
+insert into auth.accounts (id, subject, email, display_name, status)
+select ('c8a00000-0000-4000-8000-00000000000' || s.n)::uuid, 'staff:rollback-' || s.code,
+  'rollback-' || s.code || '@example.invalid', s.full_name, 'active'
+  from (values (1, 'doctor', 'Rollback Doctor'), (2, 'lab', 'Rollback Scientist'),
+               (3, 'pharmacist', 'Rollback Pharmacist'), (4, 'patient', 'Rollback Patient')) s(n, code, full_name);
+insert into identity.staff (id, account_id, full_name, email, verification_status, default_role)
+select ('c8a30000-0000-4000-8000-00000000000' || s.n)::uuid, ('c8a00000-0000-4000-8000-00000000000' || s.n)::uuid,
+  s.full_name, 'rollback-' || s.role || '@example.invalid', 'verified', s.role
+  from (values (1, 'doctor', 'Rollback Doctor'), (2, 'lab', 'Rollback Scientist'),
+               (3, 'pharmacist', 'Rollback Pharmacist')) s(n, role, full_name);
+insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+  membership_role, app_role, is_primary, active)
+select ('c8a40000-0000-4000-8000-00000000000' || s.n)::uuid, ('c8a30000-0000-4000-8000-00000000000' || s.n)::uuid,
+  ('c8a00000-0000-4000-8000-00000000000' || s.n)::uuid, 'c8a10000-0000-4000-8000-000000000001',
+  'c8a20000-0000-4000-8000-000000000001', s.role, s.role, true, true
+  from (values (1, 'doctor'), (2, 'lab'), (3, 'pharmacist')) s(n, role);
+insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+select ('c8a50000-0000-4000-8000-00000000000' || s.n)::uuid, ('c8a00000-0000-4000-8000-00000000000' || s.n)::uuid,
+  s.role, 'facility', ('c8a40000-0000-4000-8000-00000000000' || s.n)::uuid, 'c8a20000-0000-4000-8000-000000000001',
+  'Rollback suite role'
+  from (values (1, 'doctor'), (2, 'lab'), (3, 'pharmacist')) s(n, role);
+insert into identity.patients (id, account_id, hid_code, first_name, last_name, full_name, gender, dob, status)
+values ('c8a60000-0000-4000-8000-000000000001', 'c8a00000-0000-4000-8000-000000000004', 'HID-RBACKPAT',
+  'Rollback', 'Patient', 'Rollback Patient', 'female', '1991-02-03', 'active');
+insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id, scope, status,
+  reason, starts_at, expires_at, break_glass, purpose_of_use)
+select gen_random_uuid(), 'c8a60000-0000-4000-8000-000000000001', ('c8a30000-0000-4000-8000-00000000000' || n)::uuid,
+  ('c8a00000-0000-4000-8000-00000000000' || n)::uuid, ('c8a40000-0000-4000-8000-00000000000' || n)::uuid,
+  'c8a20000-0000-4000-8000-000000000001', 'write_records', 'active', 'Rollback suite consent',
+  clock_timestamp() - interval '1 hour', clock_timestamp() + interval '1 day', false, 'direct-care'
+  from generate_series(1, 3) n;
+select set_config('app.actor_subject', 'staff:rollback-doctor', true),
+  set_config('app.membership_id', 'c8a40000-0000-4000-8000-000000000001', true),
+  set_config('app.facility_id', 'c8a20000-0000-4000-8000-000000000001', true),
+  set_config('app.correlation_id', 'rollback-orders-0001', true),
+  set_config('app.purpose_of_use', 'direct-care', true);
+insert into ehr.encounters (id, patient_id, facility_id, created_by, created_by_membership_id, encounter_type, status,
+  started_at)
+values ('c8a70000-0000-4000-8000-000000000001', 'c8a60000-0000-4000-8000-000000000001',
+  'c8a20000-0000-4000-8000-000000000001', 'c8a00000-0000-4000-8000-000000000001',
+  'c8a40000-0000-4000-8000-000000000001', 'ambulatory', 'in_progress', clock_timestamp());
+insert into ehr.lab_requests (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  test_code_system, test_code, test_display, priority, status, specimen_type_code, clinical_information)
+values ('c8a80000-0000-4000-8000-000000000001', 'c8a70000-0000-4000-8000-000000000001',
+  'c8a60000-0000-4000-8000-000000000001', 'c8a20000-0000-4000-8000-000000000001',
+  'c8a00000-0000-4000-8000-000000000001', 'c8a40000-0000-4000-8000-000000000001', 'http://loinc.org', '718-7',
+  'Haemoglobin', 'routine', 'active', 'whole-blood', 'Rollback suite request');
+insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+  medication_code_system, medication_code, medication_display, dose_quantity, dose_unit, route_code, frequency,
+  instructions, starts_on, status)
+values ('c8a90000-0000-4000-8000-000000000001', 'c8a70000-0000-4000-8000-000000000001',
+  'c8a60000-0000-4000-8000-000000000001', 'c8a20000-0000-4000-8000-000000000001',
+  'c8a00000-0000-4000-8000-000000000001', 'c8a40000-0000-4000-8000-000000000001', 'urn:rollback:medication',
+  'paracetamol-500', 'Paracetamol 500 mg', 1, 'tablet', 'oral', 'Every 6 hours', 'Take with water', current_date, 'active');
+
+-- The previous EHR (lab-requests.service.ts create, lock and update): the
+-- order tables' new triggers (the route mirror) leave its writes unchanged.
+set local role hid_ehr_api_runtime;
+select set_config('app.actor_subject', 'staff:rollback-doctor', true),
+  set_config('app.facility_id', 'c8a20000-0000-4000-8000-000000000001', true),
+  set_config('app.correlation_id', 'rollback-ehr-0001', true),
+  set_config('app.membership_id', 'c8a40000-0000-4000-8000-000000000001', true),
+  set_config('app.purpose_of_use', 'direct-care', true);
+do $$
+declare
+  columns text := 'id, encounter_id as "encounterId", patient_id as "patientId", facility_id as "facilityId",
+  created_by as "createdBy", created_by_membership_id as "createdByMembershipId",
+  test_code_system as "testCodeSystem", test_code as "testCode", test_display as "testDisplay",
+  priority, status, specimen_type_code as "specimenTypeCode", clinical_information as "clinicalInformation",
+  external_order_reference as "externalOrderReference", row_version as "rowVersion",
+  created_at as "createdAt", updated_at as "updatedAt"';
+  created record;
+  locked record;
+  updated record;
+begin
+  execute 'insert into ehr.lab_requests (
+               encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
+               test_code_system, test_code, test_display, priority, status,
+               specimen_type_code, clinical_information, external_order_reference
+             ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+             returning ' || columns
+    using 'c8a70000-0000-4000-8000-000000000001'::uuid, 'c8a60000-0000-4000-8000-000000000001'::uuid,
+      'c8a20000-0000-4000-8000-000000000001'::uuid, 'c8a00000-0000-4000-8000-000000000001'::uuid,
+      'c8a40000-0000-4000-8000-000000000001'::uuid, 'http://loinc.org', '2345-7', 'Glucose', 'routine', 'draft',
+      'serum', 'Rollback suite second request', null::text
+    into created;
+  execute 'select ' || columns || ' from ehr.lab_requests
+       where id = $1 and encounter_id = $2 and patient_id = $3 and facility_id = $4 for update'
+    using created.id, created."encounterId", created."patientId", created."facilityId" into locked;
+  perform set_config('app.change_reason', 'Raised after review', true);
+  execute 'update ehr.lab_requests set
+             priority = coalesce($1, priority), status = coalesce($2, status),
+             clinical_information = coalesce($3, clinical_information)
+           where id = $4 and encounter_id = $5 and patient_id = $6 and facility_id = $7 and row_version = $8
+           returning ' || columns
+    using 'urgent'::text, 'active'::text, null::text, created.id, created."encounterId", created."patientId",
+      created."facilityId", locked."rowVersion"
+    into updated;
+  if updated."rowVersion" is distinct from 2 or updated.status <> 'active' or updated.priority <> 'urgent' then
+    raise exception 'The previous EHR could not update its lab request: %', row_to_json(updated);
+  end if;
+end $$;
+reset role;
+create temp table rollback_orders as
+  select lab_request.id, lab_request.patient_id, lab_request.facility_id, lab_request.row_version,
+    lab_request.encounter_id, lab_request.priority, lab_request.test_code_system, lab_request.test_code,
+    lab_request.test_display, lab_request.clinical_information, lab_request.created_by, lab_request.created_at
+    from ehr.lab_requests lab_request where lab_request.id = 'c8a80000-0000-4000-8000-000000000001';
+create temp table rollback_prescriptions as
+  select prescription.* from ehr.prescriptions prescription
+   where prescription.id = 'c8a90000-0000-4000-8000-000000000001';
+grant select on rollback_orders to hid_lab_api_runtime;
+grant select on rollback_prescriptions to hid_pharmacy_api_runtime;
+
+-- The previous Lab (lab-work-items.service.ts acceptEhrOrder, get, list).
+set local role hid_lab_api_runtime;
+select set_config('app.actor_subject', 'staff:rollback-lab', true),
+  set_config('app.facility_id', 'c8a20000-0000-4000-8000-000000000001', true),
+  set_config('app.correlation_id', 'rollback-lab-0001', true),
+  set_config('app.membership_id', 'c8a40000-0000-4000-8000-000000000002', true),
+  set_config('app.purpose_of_use', 'direct-care', true);
+do $$
+declare
+  source_order record;
+  existing record;
+  accepted record;
+  item_id uuid := gen_random_uuid();
+  read_back record;
+  listed integer;
+begin
+  select * into source_order from rollback_orders;
+  execute 'select id::text,patient_id::text,facility_id::text,ordering_facility_id::text,
+        source_ehr_order_id::text,source_ehr_order_version::text,source_encounter_id::text,status,
+        priority,accepted_by::text,accepted_at,row_version::text,created_at,request_sha256
+       from lab.work_items where (facility_id=$1 and accepted_by=$2 and idempotency_key=$3)
+         or source_ehr_order_id=$4'
+    using 'c8a20000-0000-4000-8000-000000000001'::uuid, 'c8a00000-0000-4000-8000-000000000002'::uuid,
+      'ehr-lab-order:' || source_order.id || ':v' || source_order.row_version, source_order.id
+    into existing;
+  if existing.id is not null then
+    raise exception 'The previous Lab found work before accepting';
+  end if;
+  execute 'insert into lab.work_items(id,patient_id,facility_id,ordering_facility_id,source_ehr_order_id,
+        source_ehr_order_version,source_encounter_id,status,priority,test_code_system,test_code,
+        test_name,clinical_indication,requested_by,requested_at,accepted_by,
+        accepted_by_membership_id,idempotency_key,request_sha256,correlation_id)
+       values ($1,$2,$3,$4,$5,$6,$7,''accepted'',$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+       returning *'
+    using item_id, source_order.patient_id, 'c8a20000-0000-4000-8000-000000000001'::uuid,
+      source_order.facility_id, source_order.id, source_order.row_version, source_order.encounter_id,
+      source_order.priority, source_order.test_code_system, source_order.test_code, source_order.test_display,
+      source_order.clinical_information, source_order.created_by, source_order.created_at,
+      'c8a00000-0000-4000-8000-000000000002'::uuid, 'c8a40000-0000-4000-8000-000000000002'::uuid,
+      'ehr-lab-order:' || source_order.id || ':v' || source_order.row_version, repeat('7', 64), 'rollback-lab-0001'
+    into accepted;
+  execute 'insert into lab.work_item_requested_tests(work_item_id,facility_id,patient_id,"ordinal",code_system,code,name)
+       values ($1,$2,$3,1,$4,$5,$6)'
+    using accepted.id, accepted.facility_id, accepted.patient_id, source_order.test_code_system, source_order.test_code,
+      source_order.test_display;
+  execute 'insert into lab.work_item_events(work_item_id,facility_id,patient_id,event_version,event_type,
+        actor_id,actor_membership_id,reason,correlation_id)
+       values ($1,$2,$3,1,''accepted'',$4,$5,''Accepted exact EHR laboratory order version'',$6)'
+    using accepted.id, accepted.facility_id, accepted.patient_id, 'c8a00000-0000-4000-8000-000000000002'::uuid,
+      'c8a40000-0000-4000-8000-000000000002'::uuid, 'rollback-lab-0001';
+  if accepted.order_route_id is not null then
+    raise exception 'The previous Lab''s same-facility work item carries a route';
+  end if;
+  execute 'select id::text,patient_id::text,facility_id::text,ordering_facility_id::text,
+  source_ehr_order_id::text,source_ehr_order_version::text,source_encounter_id::text,status,priority,
+  accepted_by::text,accepted_at,row_version::text,created_at from lab.work_items where id=$1'
+    using item_id into read_back;
+  if read_back.id is distinct from item_id::text then
+    raise exception 'The previous Lab could not read its work item';
+  end if;
+  execute 'select count(*) from (select w.id::text,w.patient_id::text,w.facility_id::text,w.ordering_facility_id::text,
+        w.source_ehr_order_id::text,w.source_ehr_order_version::text,w.source_encounter_id::text,w.status,w.priority,
+        w.accepted_by::text,w.accepted_at,w.row_version::text,w.created_at,w.test_name,a.id::text as accession_id,
+        a.accession_number,array_remove(array_agg(s.status order by s.created_at),null) as specimen_statuses from lab.work_items w
+        left join lab.accessions a on a.work_item_id=w.id left join lab.specimens s on s.accession_id=a.id
+        group by w.id,a.id,a.accession_number order by w.accepted_at asc,w.id asc limit 200) listed'
+    into listed;
+  if listed <> 1 then
+    raise exception 'The previous Lab listed % work items, not its one', listed;
+  end if;
+end $$;
+reset role;
+
+-- The previous Pharmacy (pharmacy.service.ts acceptPrescription, getWorkItem,
+-- listWorkItems).
+set local role hid_pharmacy_api_runtime;
+select set_config('app.actor_subject', 'staff:rollback-pharmacist', true),
+  set_config('app.facility_id', 'c8a20000-0000-4000-8000-000000000001', true),
+  set_config('app.correlation_id', 'rollback-pharmacy-0001', true),
+  set_config('app.membership_id', 'c8a40000-0000-4000-8000-000000000003', true),
+  set_config('app.purpose_of_use', 'direct-care', true);
+do $$
+declare
+  source_prescription record;
+  existing record;
+  accepted record;
+  item_id uuid := gen_random_uuid();
+  read_back record;
+  listed integer;
+  work_item_select text := 'select w.*,d.id::text as dispensing_id,d.status as dispensing_status,
+  r.id::text as reversal_id from pharmacy.work_items w
+  left join pharmacy.dispensings d on d.work_item_id=w.id
+  left join pharmacy.dispensing_reversals r on r.dispensing_id=d.id';
+begin
+  select * into source_prescription from rollback_prescriptions;
+  execute work_item_select || '
+        where (w.facility_id=$1 and w.accepted_by=$2 and w.idempotency_key=$3)
+          or w.source_ehr_prescription_id=$4'
+    using 'c8a20000-0000-4000-8000-000000000001'::uuid, 'c8a00000-0000-4000-8000-000000000003'::uuid,
+      'rollback-pharmacy-accept-0001', source_prescription.id
+    into existing;
+  if existing.id is not null then
+    raise exception 'The previous Pharmacy found work before accepting';
+  end if;
+  execute 'insert into pharmacy.work_items (
+        id,patient_id,facility_id,ordering_facility_id,source_ehr_prescription_id,
+        source_ehr_prescription_version,source_encounter_id,source_status,medication_code_system,
+        medication_code,medication_display,dose_quantity,dose_unit,route_code,frequency,instructions,
+        starts_on,ends_on,prescribed_by,prescribed_at,accepted_by,accepted_by_membership_id,
+        acceptance_reason,idempotency_key,request_sha256,correlation_id
+      ) values ($1,$2,$3,$4,$5,$6,$7,''active'',$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
+      returning *'
+    using item_id, source_prescription.patient_id, 'c8a20000-0000-4000-8000-000000000001'::uuid,
+      source_prescription.facility_id, source_prescription.id, source_prescription.row_version,
+      source_prescription.encounter_id, source_prescription.medication_code_system, source_prescription.medication_code,
+      source_prescription.medication_display, source_prescription.dose_quantity, source_prescription.dose_unit,
+      source_prescription.route_code, source_prescription.frequency, source_prescription.instructions,
+      source_prescription.starts_on, source_prescription.ends_on, source_prescription.created_by,
+      source_prescription.created_at, 'c8a00000-0000-4000-8000-000000000003'::uuid,
+      'c8a40000-0000-4000-8000-000000000003'::uuid, 'Collected at the hospital pharmacy',
+      'rollback-pharmacy-accept-0001', repeat('8', 64), 'rollback-pharmacy-0001'
+    into accepted;
+  execute 'insert into pharmacy.work_item_events (
+        work_item_id,patient_id,facility_id,event_version,event_type,actor_id,actor_membership_id,reason,correlation_id
+      ) values ($1,$2,$3,1,''prescription_accepted'',$4,$5,$6,$7)'
+    using accepted.id, accepted.patient_id, accepted.facility_id, 'c8a00000-0000-4000-8000-000000000003'::uuid,
+      'c8a40000-0000-4000-8000-000000000003'::uuid, 'Collected at the hospital pharmacy', 'rollback-pharmacy-0001';
+  execute work_item_select || ' where w.id=$1' using item_id into read_back;
+  if read_back.id is distinct from item_id or read_back.dispensing_id is not null then
+    raise exception 'The previous Pharmacy could not read its work item';
+  end if;
+  execute 'select count(*) from (' || work_item_select || '
+        order by w.accepted_at asc,w.id asc limit 200) listed' into listed;
+  if listed <> 1 then
+    raise exception 'The previous Pharmacy listed % work items, not its one', listed;
   end if;
 end $$;
 reset role;
