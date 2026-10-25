@@ -21,9 +21,8 @@ export class CloseOrderRouteDto {
 /**
  * Support finds order routes by their reference or by the patient's Health ID
  * (C21): exactly one. The body of POST admin/order-routes/search, so a Health
- * ID goes in no URL, whose request line access logs keep (CODEX §26, as POST
- * principals/search and P4's CAC search); also the GET's query (deprecated
- * for the Health ID).
+ * ID goes in no URL, whose request line access logs and browser history keep
+ * (CODEX §26, as POST principals/search and P4's CAC search).
  */
 export class FindOrderRoutesDto {
   @IsOptional() @Transform(trim) @IsString() @MaxLength(64)
@@ -31,4 +30,14 @@ export class FindOrderRoutesDto {
 
   @IsOptional() @Transform(trim) @IsString() @MaxLength(64)
   healthId?: string;
+}
+
+/**
+ * The query of GET admin/order-routes: the lookup by reference only. A
+ * healthId query parameter is refused 400 HEALTH_ID_NOT_ACCEPTED_IN_URL
+ * before the guard (health-id-in-url.ts); by Health ID is the POST.
+ */
+export class FindOrderRoutesQueryDto {
+  @IsOptional() @Transform(trim) @IsString() @MaxLength(64)
+  reference?: string;
 }
