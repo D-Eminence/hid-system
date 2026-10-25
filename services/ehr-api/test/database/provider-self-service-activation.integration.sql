@@ -7,7 +7,9 @@
 --   1. R6: the account, the staff record and the application take the
 --      administrator name and organization type sent with the request whose
 --      emailed code opened the activating session, not those of the request
---      that opened the application, nor those of a later request;
+--      that opened the application, nor those of a later request; P4b: the
+--      administrator holds only the restricted role, the organization is
+--      pending;
 --   2. R1: identity.prepare_self_service_provider_activation answers
 --      'session_invalid' for no live session and changes nothing, and for a
 --      live session of an application no longer open (ending it); 'ready'
@@ -160,6 +162,22 @@ do $$ begin
                        and application.administrator_name = 'Dr Ada Obi'
                        and application.organization_type = 'hospital') then
     raise exception 'The activated account did not keep the details of the code that proved the mailbox';
+  end if;
+  -- P4b: the activation records the approval before the administrator's role
+  -- row (the review gate would refuse the restricted role at an organization
+  -- that is not yet pending), and the role is the restricted one, granted by
+  -- no one, with the membership still named org_admin.
+  if (select array_agg(assignment.role_code || ':' || coalesce(assignment.granted_by::text, 'none'))
+        from auth.account_roles assignment
+       where assignment.account_id = current_setting('hid.test.ada_account')::uuid and assignment.revoked_at is null)
+     is distinct from array['org_admin_awaiting_review:none']
+     or not exists (select 1 from identity.staff_facility_memberships membership
+                     where membership.account_id = current_setting('hid.test.ada_account')::uuid
+                       and membership.membership_role = 'org_admin' and membership.app_role = 'org_admin')
+     or (select state.review_state from identity.organization_applications application,
+           lateral identity.organization_self_service_state(application.organization_id) state
+          where application.id = current_setting('hid.test.app_n')::uuid) is distinct from 'pending' then
+    raise exception 'The activation did not grant only the restricted role at a pending organization';
   end if;
 end $$;
 -- Another live session of the now activated application is ended as invalid.

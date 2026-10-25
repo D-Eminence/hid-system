@@ -15,14 +15,16 @@
 --      at the expected version, and audits it as the platform administrator;
 --      its refusals: 22023 (note or arguments), P0002 (not an activated
 --      self-service application), 23505 (already reviewed, checked before the
---      version), 40001 (version conflict);
+--      version), 40001 (version conflict); since P4b it also takes the
+--      administrator's access ('none' here; the roles, licences and their
+--      refusals are self-service-review-unlock.integration.sql's);
 --   3. both work for a standalone platform administrator without any facility
 --      membership, as Identity's administrators sign in (and for one with a
 --      facility selected, still audited without it), and refuse an
 --      account without the permission (42501): listing needs
---      platform.identity-review.read, reviewing platform.facility.manage and
---      platform.admin.access, both a correlation ID and the
---      healthcare-operations purpose of use;
+--      platform.identity-review.read, reviewing platform.facility.manage,
+--      platform.facility.unlock (P4b) and platform.admin.access, both a
+--      correlation ID and the healthcare-operations purpose of use;
 --   4. only the Identity runtimes may execute them;
 --   5. the review columns are all set together and only on an approved
 --      self-service application;
@@ -242,7 +244,8 @@ begin
       (10, first_application, current_version - 1, 'A sufficient note', '40001')
     ) as rows(n, target, version, note, expected) order by n loop
     begin
-      perform identity.admin_review_self_service_facility(refused.target, refused.version, refused.note);
+      perform identity.admin_review_self_service_facility(refused.target, refused.version, refused.note,
+        'none', 'cac_registered_contact', null, null);
       raise exception 'Refusal case % was accepted', refused.n;
     exception when others then
       if sqlstate <> refused.expected then
@@ -252,7 +255,7 @@ begin
   end loop;
 
   select * into result from identity.admin_review_self_service_facility(first_application, current_version,
-    '  Checked the email domain against the company  ');
+    '  Checked the email domain against the company  ', 'none', 'cac_registered_contact', null, null);
   if result.application_id is distinct from first_application or result.reviewed_at is null
      or result.row_version <> current_version + 1 then
     raise exception 'The review did not return the new version: %', row_to_json(result);
@@ -261,13 +264,15 @@ begin
 
   -- Already reviewed: 23505 at the current version and at the stale one.
   begin
-    perform identity.admin_review_self_service_facility(first_application, result.row_version, 'A second review note');
+    perform identity.admin_review_self_service_facility(first_application, result.row_version, 'A second review note',
+      'none', 'cac_registered_contact', null, null);
     raise exception 'A reviewed facility was reviewed again';
   exception when unique_violation then
     if sqlerrm <> 'SELF_SERVICE_FACILITY_ALREADY_REVIEWED' then raise; end if;
   end;
   begin
-    perform identity.admin_review_self_service_facility(first_application, current_version, 'A stale second review');
+    perform identity.admin_review_self_service_facility(first_application, current_version, 'A stale second review',
+      'none', 'cac_registered_contact', null, null);
     raise exception 'A reviewed facility was reviewed again at a stale version';
   exception when unique_violation then null;
   end;
@@ -354,7 +359,7 @@ begin
         perform identity.admin_list_self_service_facilities('all');
       else
         perform identity.admin_review_self_service_facility(second_application, second_version,
-          'Unauthorized review attempt');
+          'Unauthorized review attempt', 'none', 'cac_registered_contact', null, null);
       end if;
       raise exception 'Permission case % was accepted', attempt.n;
     exception when insufficient_privilege then
@@ -370,7 +375,7 @@ begin
   end if;
   perform set_config('app.actor_subject', 'synthetic:ssr:facility-reviewer', true);
   select * into result from identity.admin_review_self_service_facility(second_application, second_version,
-    'Facility reviewer checked the pharmacy licence');
+    'Facility reviewer checked the pharmacy licence', 'none', 'regulator_register', null, null);
   if result.row_version <> second_version + 1 then
     raise exception 'A facility reviewer could not review: %', row_to_json(result);
   end if;
@@ -390,7 +395,7 @@ do $$
 declare runtime_role text; signature text;
 begin
   foreach signature in array array['identity.admin_list_self_service_facilities(text)',
-      'identity.admin_review_self_service_facility(uuid,bigint,text)',
+      'identity.admin_review_self_service_facility(uuid,bigint,text,text,text,text,text)',
       'identity.admin_release_self_service_facility(uuid,bigint,text,boolean)',
       'identity.admin_list_open_self_service_applications(text)',
       'identity.admin_reject_self_service_application(uuid,bigint,text,boolean)',
@@ -537,6 +542,33 @@ values ('c8790000-0000-4000-8000-000000000106', 'c8780000-0000-4000-8000-0000000
 insert into auth.account_roles (id, account_id, role_code, scope_type, grant_reason)
 values ('c8710000-0000-4000-8000-000000000006', 'c8700000-0000-4000-8000-000000000006',
   'platform_super_admin', 'platform', 'Review suite member super admin');
+-- A third facility signs up for that review (P4b: the review needs an active
+-- administrator holding the restricted role, which the bulk rows lack).
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject', 'system:auth', true),
+  set_config('app.correlation_id', 'self-service-review-signup-3', true),
+  set_config('app.purpose_of_use', '', true);
+do $$
+declare application_id uuid; current_application record; activated record;
+begin
+  application_id := identity.submit_self_service_organization_application('ehr', 'clinic', 'RC9900064007',
+    'Chika Clinic Admin', 'chika.admin@clinic.invalid');
+  select * into current_application from identity.public_get_organization_application(
+    'RC9900064007', 'chika.admin@clinic.invalid', 'ehr');
+  perform identity.public_record_organization_cac_result(application_id, current_application.row_version,
+    'verified', '990064007', 'RC9900064007', 'Chika Clinic Ltd', 'Private Company Limited by Shares', '2020-03-07',
+    '7 Review Suite Road, Lagos', 'active');
+  perform identity.begin_self_service_provider_enrollment('RC9900064007', 'chika.admin@clinic.invalid', 'ehr',
+    'c8790000-0000-4000-8000-000000000007', encode(sha256('review-suite-otp-7'::bytea), 'hex'), 'Chika Clinic Admin',
+    'clinic');
+  perform identity.verify_organization_profile_completion_challenge('c8790000-0000-4000-8000-000000000007',
+    encode(sha256('review-suite-otp-7'::bytea), 'hex'), encode(sha256('review-suite-session-7'::bytea), 'hex'));
+  select * into activated from identity.activate_self_service_provider_enrollment(
+    encode(sha256('review-suite-session-7'::bytea), 'hex'),
+    '$argon2id$v=19$m=65536,t=3,p=1$' || repeat('a', 22) || '$' || repeat('b', 43));
+  perform set_config('hid.test.ssr_application_3', application_id::text, true);
+end $$;
+reset role;
 set local role hid_identity_api_runtime;
 select set_config('app.actor_subject', 'synthetic:ssr:member-admin', true),
   set_config('app.facility_id', 'c8730000-0000-4000-8000-000000000001', true),
@@ -550,8 +582,11 @@ begin
     raise exception 'An administrator with a facility selected could not list';
   end if;
   select * into result from identity.admin_review_self_service_facility(
-    'c8770000-0000-4000-8000-000000000001', 1, 'Reviewed with a facility selected');
-  if result.row_version <> 2 then
+    current_setting('hid.test.ssr_application_3')::uuid,
+    (select item.row_version from identity.admin_list_self_service_facilities('unreviewed') item
+      where item.application_id = current_setting('hid.test.ssr_application_3')::uuid),
+    'Reviewed with a facility selected', 'none', 'officer_match', null, null);
+  if result.row_version is null or result.granted_role <> 'none' then
     raise exception 'An administrator with a facility selected could not review: %', row_to_json(result);
   end if;
 end $$;

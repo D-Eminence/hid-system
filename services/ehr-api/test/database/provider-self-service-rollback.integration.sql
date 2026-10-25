@@ -19,17 +19,24 @@
 --   services/identity-api/src/identity/qoreid-verification.service.ts
 --     the existing-organization CAC binding match, here for an administrator
 --     who signed up through 0086 before the rollback, and its quota charge
---     (consume_qoreid_quota 'existing_cac'), which 0086 refuses (42501, the
---     previous Identity's 403 PERMISSION_DENIED) until support has reviewed
---     the self-signed-up organization (review fix R7);
+--     (consume_qoreid_quota 'existing_cac'): before support's review the
+--     administrator holds only the restricted role (P4b), which lacks
+--     organization.manage, so both are refused with 42501 (the previous
+--     Identity's 403 PERMISSION_DENIED); after the review both work; R7's
+--     own refusal (QOREID_QUOTA_SELF_SERVICE_REVIEW_REQUIRED) is shown on a
+--     reviewed administrator whose review columns owner SQL clears;
+--   services/identity-api/src/auth/current-staff-context.service.ts
+--     the staff context, for a governed administrator (unchanged) and for the
+--     self-signed-up administrator before review (the restricted role's six
+--     permissions) and after it (org_admin's), resolved as before;
 --   services/identity-api/src/admin/admin.service.ts and auth/security.guard.ts
 --     the platform control list, change and reads.
 --
 -- What it shows: governed applications default to admin_review; governed
 -- approvals and rejections name a reviewer and a reason, so the replaced
 -- review check admits them; the replaced governed submit and prune keep their
--- answers; the control list carries the seventh key and the six old keys
--- answer as before. The previous Identity calls no 0086 command.
+-- answers; the control list carries the two new keys (both off) and the six
+-- old keys answer as before. The previous Identity calls no 0086 command.
 begin;
 
 do $$
@@ -321,9 +328,120 @@ select set_config('app.actor_subject', 'org-onboarding:' || current_setting('hid
   set_config('app.membership_id', current_setting('hid.test.rollback_self_membership'), true),
   set_config('app.correlation_id', 'rollback-binding-0001', true),
   set_config('app.purpose_of_use', 'healthcare-operations', true);
-do $$
-declare matched boolean;
+create function pg_temp.previous_staff_context(target_subject text) returns jsonb language plpgsql as $f$
+declare answer jsonb;
 begin
+  -- The previous Identity's own query text (current-staff-context.service.ts).
+  execute $q$select coalesce(jsonb_agg(to_jsonb(context)), '[]'::jsonb) from (
+     select account.id::text as account_id,
+              account.subject,
+              account.email,
+              account.display_name,
+              membership.facility_id::text,
+              membership.id::text as membership_id,
+              membership.organization_id::text,
+              facility.name as facility_name,
+              facility.code as facility_code,
+              array_remove(array[membership.membership_role, membership.app_role], null) as roles,
+              coalesce(array_agg(distinct permission.code) filter (where permission.code is not null), array[]::text[]) as permissions,
+              membership.is_primary
+         from auth.accounts account
+         join identity.staff_facility_memberships membership
+           on membership.account_id = account.id
+          and membership.active
+          and membership.migration_hold_reason is null
+         join identity.staff staff
+           on staff.id = membership.staff_id
+          and staff.account_id = account.id
+          and staff.active
+          and lower(btrim(staff.verification_status)) = any($2::text[])
+         join identity.organizations organization
+           on organization.id = membership.organization_id
+          and organization.active
+         join identity.facilities facility
+           on facility.id = membership.facility_id
+          and facility.organization_id = membership.organization_id
+          and facility.active
+         left join auth.account_roles account_role
+           on account_role.account_id = account.id
+          and account_role.scope_type = 'facility'
+          and account_role.membership_id = membership.id
+          and account_role.facility_id = membership.facility_id
+          and account_role.revoked_at is null
+         left join auth.roles role
+           on role.code = account_role.role_code
+          and role.active
+         left join auth.role_permissions role_permission on role_permission.role_code = role.code
+         left join auth.permissions permission
+           on permission.code = role_permission.permission_code
+          and permission.active
+        where account.subject = $1
+          and account.status = 'active'
+          and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
+        group by account.id, account.subject, account.email, account.display_name,
+                 membership.id, membership.facility_id, membership.organization_id,
+                 membership.membership_role, membership.app_role, membership.is_primary,
+                 facility.name, facility.code
+        order by membership.is_primary desc, facility.name, membership.facility_id) context$q$
+    using target_subject, array['verified', 'approved', 'active'] into answer;
+  return answer;
+end $f$;
+grant execute on function pg_temp.previous_staff_context(text) to hid_identity_api_runtime;
+do $$
+declare
+  matched boolean;
+  context jsonb;
+begin
+  -- Before support's review: the restricted role.
+  context := pg_temp.previous_staff_context('org-onboarding:' || current_setting('hid.test.rollback_self_account'));
+  if jsonb_array_length(context) <> 1
+     or (select array_agg(value order by value) from jsonb_array_elements_text(context -> 0 -> 'permissions'))
+       is distinct from array['audit.read', 'outreach.campaign.read', 'outreach.campaign.write',
+         'outreach.registration.read', 'outreach.registration.write', 'workforce.manage'] then
+    raise exception 'The previous Identity resolves the pending administrator as %', context;
+  end if;
+  if jsonb_array_length(pg_temp.previous_staff_context('staff:rollback-admin')) <> 1 then
+    raise exception 'The previous Identity does not resolve the governed administrator';
+  end if;
+  begin
+    execute 'select identity.current_organization_cac_binding_matches($1,$2,$3,$4,$5,$6,$7) as matched'
+      using 'hospital'::text, 'RC9900067004'::text, 'Self Signed Hospital Ltd'::text,
+        'Private Company Limited by Shares'::text, '2014-04-04'::text, '4 Rollback Road, Lagos'::text, 'active'::text
+      into matched;
+    raise exception 'The pending administrator matched the CAC binding without organization.manage';
+  exception when insufficient_privilege then null;
+  end;
+  begin
+    execute 'select platform.consume_qoreid_quota($1,$2,$3,$4,$5)'
+      using 'existing_cac'::text, current_setting('hid.test.rollback_self_organization')::uuid,
+        null::uuid, null::char(64), null::char(64);
+    raise exception 'An unreviewed self-signed-up organization charged a CAC lookup through the previous Identity';
+  exception when insufficient_privilege then
+    if sqlerrm <> 'QOREID_QUOTA_PERMISSION_DENIED' then raise; end if;
+  end;
+end $$;
+-- Support reviews the facility (the new Identity's command); the previous
+-- Identity then resolves org_admin and recognises the binding.
+select set_config('app.actor_subject', 'staff:rollback-admin', true),
+  set_config('app.facility_id', '', true), set_config('app.membership_id', '', true),
+  set_config('app.correlation_id', 'rollback-review-self', true);
+select granted_role from identity.admin_review_self_service_facility(
+  (select item.application_id from identity.admin_list_self_service_facilities('unreviewed') item
+    where item.administrator_account_id = current_setting('hid.test.rollback_self_account')::uuid),
+  (select item.row_version from identity.admin_list_self_service_facilities('unreviewed') item
+    where item.administrator_account_id = current_setting('hid.test.rollback_self_account')::uuid),
+  'Checked before the rollback', 'none', 'cac_registered_contact', null, null);
+select set_config('app.actor_subject', 'org-onboarding:' || current_setting('hid.test.rollback_self_account'), true),
+  set_config('app.facility_id', current_setting('hid.test.rollback_self_facility'), true),
+  set_config('app.membership_id', current_setting('hid.test.rollback_self_membership'), true),
+  set_config('app.correlation_id', 'rollback-binding-0002', true);
+do $$
+declare matched boolean; context jsonb;
+begin
+  context := pg_temp.previous_staff_context('org-onboarding:' || current_setting('hid.test.rollback_self_account'));
+  if not (context -> 0 -> 'permissions') ? 'organization.manage' then
+    raise exception 'The previous Identity does not resolve the reviewed administrator as org_admin: %', context;
+  end if;
   execute 'select identity.current_organization_cac_binding_matches($1,$2,$3,$4,$5,$6,$7) as matched'
     using 'hospital'::text, 'RC9900067004'::text, 'Self Signed Hospital Ltd'::text,
       'Private Company Limited by Shares'::text, '2014-04-04'::text, '4 Rollback Road, Lagos'::text, 'active'::text
@@ -331,14 +449,23 @@ begin
   if matched is not true then
     raise exception 'The previous Identity does not recognise a self-signed-up organization''s CAC binding';
   end if;
-  begin
-    execute 'select platform.consume_qoreid_quota($1,$2,$3,$4,$5)'
-      using 'existing_cac'::text, current_setting('hid.test.rollback_self_organization')::uuid,
-        null::uuid, null::char(64), null::char(64);
-    raise exception 'An unreviewed self-signed-up organization charged a CAC lookup through the previous Identity';
-  exception when insufficient_privilege then
-    if sqlerrm <> 'QOREID_QUOTA_SELF_SERVICE_REVIEW_REQUIRED' then raise; end if;
-  end;
+  execute 'select platform.consume_qoreid_quota($1,$2,$3,$4,$5)'
+    using 'existing_cac'::text, current_setting('hid.test.rollback_self_organization')::uuid,
+      null::uuid, null::char(64), null::char(64);
+end $$;
+reset role;
+-- R7: the review columns cleared by owner SQL; the lookup is refused by R7.
+update identity.organization_applications set self_service_reviewed_at = null, self_service_reviewed_by_account_id = null,
+  self_service_review_note = null, self_service_granted_role = null, self_service_verification_method = null
+ where organization_id = current_setting('hid.test.rollback_self_organization')::uuid;
+set local role hid_identity_api_runtime;
+do $$ begin
+  execute 'select platform.consume_qoreid_quota($1,$2,$3,$4,$5)'
+    using 'existing_cac'::text, current_setting('hid.test.rollback_self_organization')::uuid,
+      null::uuid, null::char(64), null::char(64);
+  raise exception 'An organization without a recorded review charged a CAC lookup through the previous Identity';
+exception when insufficient_privilege then
+  if sqlerrm <> 'QOREID_QUOTA_SELF_SERVICE_REVIEW_REQUIRED' then raise; end if;
 end $$;
 reset role;
 
@@ -357,8 +484,8 @@ declare
   result record;
 begin
   execute 'select array_agg(control_key order by control_key) from platform.admin_list_controls()' into listed;
-  if cardinality(listed) <> 7 or not listed @> array['provider_self_service_enabled'] then
-    raise exception 'The previous admin console does not list the seventh control: %', listed;
+  if cardinality(listed) <> 8 or not listed @> array['provider_self_service_enabled', 'staff_invitations_enabled'] then
+    raise exception 'The previous admin console does not list the two new controls: %', listed;
   end if;
   for outreach in execute 'select * from platform.admin_list_controls()' loop
     if outreach.control_key = 'outreach_portal_enabled' then

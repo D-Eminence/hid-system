@@ -943,10 +943,11 @@ grant execute on function identity.submit_self_service_organization_application(
   identity.current_self_service_provider_enrollment(char),
   identity.self_service_provider_code_state(text,text,text),
   identity.activate_self_service_provider_enrollment(char,text),
+  identity.withdraw_self_service_provider_enrollment(char),
   platform.consume_self_service_cac_quota(uuid,char,integer)
   to hid_identity_runtime, hid_schema_test_runtime;
 grant execute on function identity.admin_list_self_service_facilities(text),
-  identity.admin_review_self_service_facility(uuid,bigint,text),
+  identity.admin_review_self_service_facility(uuid,bigint,text,text,text,text,text),
   identity.admin_release_self_service_facility(uuid,bigint,text,boolean),
   identity.admin_list_open_self_service_applications(text),
   identity.admin_reject_self_service_application(uuid,bigint,text,boolean),
@@ -958,6 +959,41 @@ revoke all on function identity.activate_self_service_organization_application(c
   from public;
 revoke all on platform.self_service_cac_quota_counters,
   platform.self_service_cac_platform_quota_counters from public;
+
+-- Full access after support's review and facility staff invitations (0086
+-- section 5, P4b), as that migration grants them. The facility
+-- administrator's and staff's commands, the invitee's commands (accountless
+-- and signed in) and the self-recorded licence go to the Identity runtime and
+-- the schema test runtime; the staff context's review-state read and
+-- support's commands (the facility's staff, the administrator's role,
+-- probation's end, the invitation lookup and the review with its role and
+-- evidence) to the Identity runtime alone. The section's helpers, vocabulary,
+-- trigger functions and tables (attestation texts, invitations, sends,
+-- licence attestations) are granted to no role.
+grant execute on function identity.record_self_service_administrator_licence(text,text),
+  identity.list_facility_staff(),
+  identity.list_facility_staff_invitations(),
+  identity.facility_staff_management_state(),
+  identity.create_staff_invitation(uuid,uuid,text,text,text,text,text,text,text,char,char,char,text),
+  identity.record_staff_invitation_delivery(uuid,text),
+  identity.resend_staff_invitation(uuid,bigint,uuid,char,char,text),
+  identity.revoke_staff_invitation(uuid,bigint),
+  identity.end_facility_staff_membership(uuid,bigint,text),
+  identity.change_facility_staff_role(uuid,bigint,text,text,text,text,text),
+  identity.open_staff_invitation(uuid,char,text,char,char),
+  identity.prepare_staff_invitation_acceptance(char),
+  identity.accept_staff_invitation_with_password(char,text),
+  identity.preview_staff_invitation_for_account(uuid,char,char),
+  identity.accept_staff_invitation_for_account(uuid,char,char)
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function identity.organization_self_service_state(uuid),
+  identity.admin_list_facility_staff(uuid),
+  identity.admin_set_self_service_administrator_role(uuid,bigint,text,text,text,text,text),
+  identity.admin_end_self_service_probation(uuid,bigint,text),
+  identity.admin_find_staff_invitations(text)
+  to hid_identity_runtime;
+revoke all on identity.staff_attestation_texts, identity.staff_invitations,
+  identity.staff_invitation_sends, identity.staff_licence_attestations from public;
 
 -- Public patient enrollment persists only encrypted pending evidence. Its
 -- activation command performs the canonical account/patient writes atomically.

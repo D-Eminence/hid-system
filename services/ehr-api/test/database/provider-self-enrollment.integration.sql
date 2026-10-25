@@ -18,8 +18,9 @@
 --      submit, read, verified CAC evidence, the email code and activation
 --      create the organization, verified facility, CAC binding, product,
 --      active account (email_verified_at and password_changed_at set, A10),
---      verified org_admin staff, membership and role, and the activation
---      returns the login email; a consumed session cannot activate again and
+--      verified org_admin staff and membership with the restricted role
+--      org_admin_awaiting_review (P4b: full access after support's review),
+--      and the activation returns the login email; a consumed session cannot activate again and
 --      the registered CAC cannot be submitted again;
 --   5. main's #81 answers: another email for an open CAC needs manual
 --      resolution, and an administrator email that already has an account is
@@ -170,6 +171,7 @@ begin
       'identity.prepare_self_service_provider_activation(char)',
       'identity.current_self_service_provider_enrollment(char)',
       'identity.self_service_provider_code_state(text,text,text)',
+      'identity.withdraw_self_service_provider_enrollment(char)',
       'identity.activate_self_service_provider_enrollment(char,text)',
       'platform.consume_self_service_cac_quota(uuid,char,integer)'
     ] loop
@@ -201,6 +203,7 @@ begin
       'identity.prepare_self_service_provider_activation(char)',
       'identity.current_self_service_provider_enrollment(char)',
       'identity.self_service_provider_code_state(text,text,text)',
+      'identity.withdraw_self_service_provider_enrollment(char)',
       'identity.activate_self_service_provider_enrollment(char,text)'
     ] loop
       if has_function_privilege(runtime_role, signature, 'EXECUTE') then
@@ -220,6 +223,7 @@ begin
                 'identity.prepare_self_service_provider_activation(char)'::regprocedure,
                 'identity.current_self_service_provider_enrollment(char)'::regprocedure,
                 'identity.self_service_provider_code_state(text,text,text)'::regprocedure,
+                'identity.withdraw_self_service_provider_enrollment(char)'::regprocedure,
                 'identity.activate_self_service_provider_enrollment(char,text)'::regprocedure,
                 'platform.consume_self_service_cac_quota(uuid,char,integer)'::regprocedure)
                 and acl.grantee = 0) then
@@ -433,8 +437,12 @@ begin
                      where s.account_id = provider_account and s.default_role = 'org_admin'
                        and s.verification_status = 'verified'
                        and m.facility_id = provider_facility and m.membership_role = 'org_admin' and m.active)
+     -- P4b: the restricted role until support's review, and no other role.
+     or (select array_agg(r.role_code) from auth.account_roles r where r.account_id = provider_account
+           and r.revoked_at is null) is distinct from array['org_admin_awaiting_review']
      or not exists (select 1 from auth.account_roles r where r.account_id = provider_account
-                      and r.role_code = 'org_admin' and r.facility_id = provider_facility and r.revoked_at is null)
+                      and r.role_code = 'org_admin_awaiting_review' and r.facility_id = provider_facility
+                      and r.revoked_at is null)
      or not exists (select 1 from identity.organization_applications a
                       where a.id = provider_application and a.status = 'approved' and a.approval_mode = 'self_service'
                         and a.first_admin_account_id = provider_account and a.reviewed_by_account_id is null

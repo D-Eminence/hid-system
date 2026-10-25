@@ -6,7 +6,10 @@
 --
 --   1. R7 (CRITIC C13): the administrator of a self-signed-up organization
 --      that support has not reviewed cannot charge an organization CAC lookup
---      (42501 QOREID_QUOTA_SELF_SERVICE_REVIEW_REQUIRED, nothing charged);
+--      (since P4b its restricted role lacks organization.manage, so 42501
+--      QOREID_QUOTA_PERMISSION_DENIED comes first; R7's own 42501
+--      QOREID_QUOTA_SELF_SERVICE_REVIEW_REQUIRED is shown on a reviewed
+--      administrator whose review columns owner SQL clears; nothing charged);
 --      once support has reviewed it, the 0049 quota applies as before;
 --   2. R2: identity.admin_release_self_service_facility refuses, in order,
 --      42501 (no platform.facility.manage), 22023 (reason), P0002 (not an
@@ -110,7 +113,7 @@ do $$ begin
   perform platform.consume_qoreid_quota('existing_cac', current_setting('hid.test.organization')::uuid, null, null, null);
   raise exception 'An unreviewed self-signed-up organization charged a CAC lookup';
 exception when insufficient_privilege then
-  if sqlerrm <> 'QOREID_QUOTA_SELF_SERVICE_REVIEW_REQUIRED' then raise; end if;
+  if sqlerrm <> 'QOREID_QUOTA_PERMISSION_DENIED' then raise; end if;
 end $$;
 reset role;
 do $$ begin
@@ -130,7 +133,31 @@ select set_config('hid.test.version', (select result.row_version::text
   from identity.admin_review_self_service_facility(current_setting('hid.test.application')::uuid,
     (select item.row_version from identity.admin_list_self_service_facilities('all') item
       where item.application_id = current_setting('hid.test.application')::uuid),
-    'Looked plausible at first review') result), true);
+    'Looked plausible at first review', 'none', 'cac_registered_contact', null, null) result), true);
+reset role;
+-- R7 itself: owner SQL clears the review columns of the reviewed (org_admin)
+-- administrator's application; the lookup is then refused by R7.
+update identity.organization_applications set self_service_reviewed_at = null, self_service_reviewed_by_account_id = null,
+  self_service_review_note = null, self_service_granted_role = null, self_service_verification_method = null
+ where id = current_setting('hid.test.application')::uuid;
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject', current_setting('hid.test.subject'), true),
+  set_config('app.correlation_id', 'self-service-release-lookup-r7', true),
+  set_config('app.facility_id', current_setting('hid.test.facility'), true),
+  set_config('app.membership_id', current_setting('hid.test.membership'), true);
+do $$ begin
+  perform platform.consume_qoreid_quota('existing_cac', current_setting('hid.test.organization')::uuid, null, null, null);
+  raise exception 'An organization without a recorded review charged a CAC lookup';
+exception when insufficient_privilege then
+  if sqlerrm <> 'QOREID_QUOTA_SELF_SERVICE_REVIEW_REQUIRED' then raise; end if;
+end $$;
+reset role;
+update identity.organization_applications set self_service_reviewed_at = clock_timestamp(),
+  self_service_reviewed_by_account_id = (select id from auth.accounts where subject = 'synthetic:release:super'),
+  self_service_review_note = 'Looked plausible at first review', self_service_granted_role = 'none',
+  self_service_verification_method = 'cac_registered_contact'
+ where id = current_setting('hid.test.application')::uuid;
+set local role hid_identity_api_runtime;
 select set_config('app.actor_subject', current_setting('hid.test.subject'), true),
   set_config('app.correlation_id', 'self-service-release-lookup-2', true),
   set_config('app.facility_id', current_setting('hid.test.facility'), true),
@@ -242,7 +269,8 @@ begin
     if sqlerrm <> 'SELF_SERVICE_FACILITY_ALREADY_RELEASED' then raise; end if;
   end;
   begin
-    perform identity.admin_review_self_service_facility(application, result.row_version, 'A review after the release');
+    perform identity.admin_review_self_service_facility(application, result.row_version, 'A review after the release',
+      'none', 'other', null, null);
     raise exception 'A released facility was reviewed';
   exception when no_data_found then null;
   end;
