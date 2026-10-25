@@ -65,7 +65,11 @@ export class RevokeSessionsCommandDto {
 
 
 export class PlatformControlCommandDto {
-  @Matches(/^(patient_portal_enabled|provider_portal_enabled|outreach_portal_enabled|maintenance_mode|uploads_enabled|break_glass_enabled)$/)
+  // provider_self_service_enabled: facility self sign-up (P4, migration 0086).
+  // staff_invitations_enabled: facility staff invitations (P4b, migration 0086).
+  // cross_facility_orders_enabled: sending and accepting orders between facilities (P4c, migration 0086).
+  // cross_facility_route_access_enabled: work on accepted orders between facilities (P4c, migration 0086).
+  @Matches(/^(patient_portal_enabled|provider_portal_enabled|outreach_portal_enabled|maintenance_mode|uploads_enabled|break_glass_enabled|provider_self_service_enabled|staff_invitations_enabled|cross_facility_orders_enabled|cross_facility_route_access_enabled)$/)
   controlKey!: string;
   @IsBoolean()
   enabled!: boolean;

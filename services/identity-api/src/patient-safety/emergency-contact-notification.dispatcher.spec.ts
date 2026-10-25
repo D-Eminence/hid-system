@@ -7,7 +7,7 @@ import { NotificationOtpClient } from '../auth/notification-otp.client';
 import { getEnvironment, resetEnvironmentForTests } from '../config/environment';
 import { DatabaseModule } from '../database/database.module';
 import {
-  EMERGENCY_CONTACT_CLAIM_BATCHES, EMERGENCY_CONTACT_CLAIM_LEASE_SECONDS, EMERGENCY_CONTACT_CLAIM_LIMIT,
+  alertClinicianName, EMERGENCY_CONTACT_CLAIM_BATCHES, EMERGENCY_CONTACT_CLAIM_LEASE_SECONDS, EMERGENCY_CONTACT_CLAIM_LIMIT,
   EmergencyContactNotificationDispatcher,
 } from './emergency-contact-notification.dispatcher';
 import { EmergencyContactProtector } from './emergency-contact-protector';
@@ -104,6 +104,25 @@ describe('EmergencyContactNotificationDispatcher', () => {
         if (clinicianName !== null) expect(clinicianName).toMatch(fullNamePattern);
         if (facilityName !== null) expect(facilityName).toMatch(facilityPattern);
       }
+    });
+
+    // P4b (V1): a display name is typed by its holder, so one that still
+    // reads like a domain after cleaning is dropped and the alert says
+    // "a health worker"; every facility is affected.
+    it('drops a clinician name that reads like a domain', async () => {
+      for (const name of ['hid-payroll.com', 'Dr Ada healthid.ng', 'Visit Lagos.Gov now', 'x.co']) {
+        expect(alertClinicianName(name)).toBeNull();
+      }
+      for (const [name, shown] of [['Dr. Ụ́chè (ICU)', 'Dr. Ụ́chè ICU'], ['Dr Bola Adeyemi', 'Dr Bola Adeyemi'],
+        ['A. B. Okafor', 'A. B. Okafor'], ['Nurse Ọlá', 'Nurse Ọlá']] as const) {
+        expect(alertClinicianName(name)).toBe(shown);
+      }
+      const deliverEmergencyContactAlert = jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'brevo' });
+      const { query, protector, dispatcher } = dispatcherWith(deliverEmergencyContactAlert);
+      query.mockResolvedValueOnce({ rows: [claimed(protector, { clinician_name: 'hid-payroll.com' })] })
+        .mockResolvedValue({ rows: [{ next_status: 'delivered' }] });
+      await dispatcher.dispatch('patient-lifecycle-test-domain');
+      expect(deliverEmergencyContactAlert.mock.calls[0]?.[0]).toMatchObject({ clinicianName: null });
     });
 
     it.each([null, 'HID-ABCDEF23', 'ef23', 'EF2', 'EF1O'])(

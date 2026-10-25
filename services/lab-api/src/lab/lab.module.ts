@@ -10,6 +10,10 @@ import { LabExecutionsController } from './lab-executions.controller';
 import { LabExecutionsService } from './lab-executions.service';
 import { PatientResultsController,StaffResultsController } from './patient-results.controller';
 import { PatientResultsService } from './patient-results.service';
+import { LabOrderRoutesController } from './lab-order-routes.controller';
+import { LabOrderRoutesService } from './lab-order-routes.service';
+import { LabOrderRouteAccess } from './order-route-access';
+import { LabOrderRouteCards } from './order-route-cards';
 
 /**
  * Laboratory bounded-context composition point.
@@ -17,7 +21,8 @@ import { PatientResultsService } from './patient-results.service';
  * Imported external evidence is Lab-owned and deliberately separate from
  * native accession/specimen/execution workflows, which remain future work.
  */
-@Module({ imports: [LabIdentityAuthorizationModule], controllers: [StaffResultsController,LabImportsController, LabWorkItemsController, LabAccessionsController, LabExecutionsController, PatientResultsController],
-  providers: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService, PatientResultsService],
+@Module({ imports: [LabIdentityAuthorizationModule], controllers: [StaffResultsController,LabImportsController, LabWorkItemsController, LabAccessionsController, LabExecutionsController, PatientResultsController, LabOrderRoutesController],
+  providers: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService, PatientResultsService,
+    LabOrderRoutesService, LabOrderRouteAccess, LabOrderRouteCards],
   exports: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService] })
 export class LabModule {}

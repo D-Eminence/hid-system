@@ -2,11 +2,26 @@ import { ArgumentsHost, Catch, ExceptionFilter, HttpException, HttpStatus, Logge
 import type { Response } from 'express';
 import type { HidRequest } from './request-context';
 
+/** Problem members an extension can never replace. */
+const STANDARD_MEMBERS = new Set(['type', 'title', 'status', 'detail', 'instance', 'correlationId', 'code', 'errors']);
+
 export class DomainProblem extends HttpException {
+  /** Extension members sent with the problem (RFC 9457), e.g. `attemptsLeft`: numbers, strings, booleans, null. */
+  public readonly extensions?: Readonly<Record<string, string | number | boolean | null>>;
+
   constructor(status: number, public readonly code: string, detail: string,
-    public readonly errors?: readonly { field: string; messages: readonly string[] }[]) {
+    public readonly errors?: readonly { field: string; messages: readonly string[] }[],
+    options?: { extensions?: Readonly<Record<string, string | number | boolean | null>> }) {
     super(detail, status);
+    if (options?.extensions) this.extensions = options.extensions;
   }
+}
+
+/** A domain problem's extension members, never one that would replace a standard member. */
+function extensionMembers(problem: DomainProblem | undefined): Record<string, unknown> {
+  if (!problem?.extensions) return {};
+  return Object.fromEntries(Object.entries(problem.extensions).filter(([name, value]) => !STANDARD_MEMBERS.has(name)
+    && (value === null || ['string', 'number', 'boolean'].includes(typeof value))));
 }
 
 @Catch()
@@ -29,6 +44,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       instance: `urn:hid:request:${request.correlationId ?? 'unavailable'}`,
       correlationId: request.correlationId ?? 'unavailable', code,
       ...(domain?.errors ? { errors: domain.errors } : {}),
+      ...extensionMembers(domain),
     });
   }
 

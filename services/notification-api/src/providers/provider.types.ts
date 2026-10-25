@@ -115,3 +115,65 @@ export function emergencyContactAlertContent(input: {
       + `${input.clinicianName || 'a health worker'}${where} on ${alertTime(input.occurredAt)} (WAT). ${contact}`,
   };
 }
+
+/**
+ * The lower-case role label a staff invitation names (P4b, SPEC 4.2): the
+ * five roles a self-signed-up facility may invite. No other role can be sent.
+ */
+export const STAFF_ROLE_LABELS = {
+  doctor: 'doctor',
+  nurse: 'nurse',
+  lab: 'laboratory scientist',
+  pharmacist: 'pharmacist',
+  receptionist: 'receptionist',
+} as const;
+export type StaffInvitationRole = keyof typeof STAFF_ROLE_LABELS;
+export const STAFF_INVITATION_ROLES = Object.keys(STAFF_ROLE_LABELS) as readonly StaffInvitationRole[];
+
+/**
+ * Where the invitation link opens: the portal host of this deployment, fixed
+ * by HID_DEPLOYMENT_ENV and never taken from a request (SPEC 4.6), so a caller
+ * cannot point the link at another site.
+ */
+export function staffInvitationLinkOrigin(deployment: 'development' | 'staging' | 'production'): string {
+  if (deployment === 'staging') return 'https://staging.healthidentitydirectory.com';
+  if (deployment === 'development') return 'http://localhost:5173';
+  return 'https://app.healthidentitydirectory.com';
+}
+
+/** The invitation's reference for support: the first 8 hex characters of its id, upper case (S10.4). */
+export function staffInvitationReference(invitationId: string): string {
+  return invitationId.replace(/-/g, '').slice(0, 8).toUpperCase();
+}
+
+/**
+ * A facility staff invitation (P4b, SPEC 4.6), plain text like every Health
+ * ID email. It names no person: no invitee, no inviter and no free text (S3).
+ * The facility's name appears only when Identity sent one that the DTO
+ * accepted (no link-like or domain-like text); otherwise "a facility". The
+ * link carries the invitation id and its 256-bit token in the fragment, which
+ * browsers do not send to any server; the 6-digit code is the typed fallback.
+ */
+export function staffInvitationContent(input: {
+  facilityName?: string | null;
+  roleCode: StaffInvitationRole;
+  invitationId: string;
+  token: string;
+  code: string;
+  expiresAt: Date;
+  origin: string;
+  supportEmail: string;
+}): MessageContent {
+  const facility = input.facilityName || 'a facility';
+  const page = `${input.origin}/provider/invitation`;
+  return {
+    subject: `Invitation to join ${facility} on Health ID`,
+    text: 'Hello,\n\n'
+      + `The administrator of ${facility} has invited you to join the facility on Health ID as a ${STAFF_ROLE_LABELS[input.roleCode]}.\n\n`
+      + `To accept, open this link:\n${page}#${input.invitationId}.${input.token}\n\n`
+      + `If the link does not open, go to ${page} and enter this email address and the code ${input.code}.\n\n`
+      + `The invitation expires on ${alertTime(input.expiresAt)} (WAT). If you were not expecting it, you can ignore this email: `
+      + 'nothing happens unless you accept. To report it, write to Health ID support at '
+      + `${input.supportEmail} and quote reference ${staffInvitationReference(input.invitationId)}.`,
+  };
+}

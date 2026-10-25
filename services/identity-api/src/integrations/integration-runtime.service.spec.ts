@@ -63,6 +63,41 @@ describe('provider runtime decisions', () => {
       'a0000000-0000-4000-8000-000000000003', null, null]);
   });
 
+  it('charges an accountless CAC lookup only by application, keyed network digest and the platform daily cap', async () => {
+    const query = jest.fn().mockResolvedValue({ rows: [{ admitted: true }] });
+    const database = { withSystemTransaction: jest.fn(async (_correlation, work) => work({ query })) };
+    const service = new IntegrationRuntimeService(database as unknown as DatabaseService);
+    await service.consumeSelfServiceCacQuota('self-service-correlation',
+      'a0000000-0000-4000-8000-000000000004', 'a'.repeat(64), 200);
+    expect(database.withSystemTransaction).toHaveBeenCalledWith('self-service-correlation', expect.any(Function));
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0]?.[0]).toContain('platform.consume_self_service_cac_quota($1,$2,$3)');
+    expect(query.mock.calls[0]?.[0]).not.toContain('consume_qoreid_quota');
+    expect(query.mock.calls[0]?.[1]).toEqual(['a0000000-0000-4000-8000-000000000004', 'a'.repeat(64), 200]);
+  });
+
+  it('refuses a denied accountless CAC lookup with the generic quota problem', async () => {
+    const outcomes: Array<[unknown, number, string]> = [
+      // A denial of any limit, the platform day included, returns false.
+      [{ rows: [{ admitted: false }] }, 429, 'VERIFICATION_QUOTA_EXCEEDED'],
+      [{ rows: [] }, 503, 'VERIFICATION_QUOTA_UNAVAILABLE'],
+      [{ code: '42501', message: 'private SQL diagnostics' }, 403, 'PERMISSION_DENIED'],
+      // An out-of-range cap is refused by the command (22023).
+      [{ code: '22023', message: 'private SQL diagnostics' }, 503, 'VERIFICATION_QUOTA_UNAVAILABLE'],
+      [new Error('private connection detail'), 503, 'VERIFICATION_QUOTA_UNAVAILABLE'],
+    ];
+    for (const [outcome, status, code] of outcomes) {
+      const query = 'rows' in (outcome as object)
+        ? jest.fn().mockResolvedValue(outcome) : jest.fn().mockRejectedValue(outcome);
+      const database = { withSystemTransaction: jest.fn(async (_correlation, work) => work({ query })) };
+      const service = new IntegrationRuntimeService(database as unknown as DatabaseService);
+      const failure = await service.consumeSelfServiceCacQuota('self-service-correlation',
+        'a0000000-0000-4000-8000-000000000004', 'a'.repeat(64), 200).catch((error) => error);
+      expect(failure).toMatchObject({ status, code });
+      expect(JSON.stringify(failure)).not.toMatch(/private|network|application_day|platform_day|exhausted/i);
+    }
+  });
+
   it('maps a database quota denial to 429 without leaking database diagnostics', async () => {
     const query = jest.fn().mockRejectedValue({ code: 'P4290', message: 'private SQL diagnostics' });
     const database = { withTransaction: jest.fn(async (_context, work) => work({ query })) };

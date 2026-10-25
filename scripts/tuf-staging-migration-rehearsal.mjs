@@ -293,9 +293,23 @@ try {
     [{code:'emergency',display:'Emergency treatment',active:true,source_system:'hid'}],
     'Migration 0085 must add exactly its declared emergency purpose');
   });
+  // Migration 0086 (P4b) adds exactly one role, org_admin_awaiting_review (a
+  // self-signed-up facility's administrator until support reviews it); every
+  // role row that existed before the upgrade is unchanged.
+  const declaredRoles = ['org_admin_awaiting_review'];
+  await withClient('hid_upgrade', async client => {
+    await client.query("set timezone = 'UTC'");
+    const kept = (await client.query(`select to_jsonb(t)::text as value from auth.roles t
+      where code <> all($1::text[]) order by to_jsonb(t)::text collate "C"`, [declaredRoles])).rows;
+    assert.deepEqual({ rows: kept.length, sha256: sha256(kept.map(row => row.value).join('\n')) },
+      upgradeBefore['auth.roles'], 'Upgrade changed a historical auth.roles row');
+    assert.deepEqual((await client.query(`select code, active from auth.roles where code = any($1::text[])
+      order by code`, [declaredRoles])).rows, declaredRoles.map(code => ({ code, active: true })),
+    'Migration 0086 must add exactly its declared role');
+  });
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
-    'auth.permissions', 'auth.role_permissions', 'identity.purpose_of_use_codes',
+    'auth.permissions', 'auth.role_permissions', 'identity.purpose_of_use_codes', 'auth.roles',
   ]);
   for (const [name, value] of Object.entries(upgradeBefore)) {
     if (!expectedChanged.has(name)) assert.deepEqual(upgradeAfter[name], value, `Upgrade changed historical ${name}`);
@@ -304,7 +318,7 @@ try {
   assert.deepEqual(await snapshot('hid_upgrade_restored'), upgradeBefore, 'Pre-schema backup must restore the exact 0028 state');
   evidence.checks.existing_schema_upgrade = {from:'0028',to:latestSchema,dry_run_unchanged:true,
     historical_tables_preserved:true,historical_purposes_preserved:true,direct_care_seed_verified:true,
-    emergency_seed_verified:true,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
+    emergency_seed_verified:true,declared_roles_added:declaredRoles,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
   command('create synthetic database', join(pgBindir, 'createdb'), [database]);
@@ -336,6 +350,11 @@ try {
     [join(repository, 'services/identity-api/scripts/verify-patient-runtime.mjs')], workflowEnvironment));
   evidence.checks.emergency_contacts_runtime = JSON.parse(command('exact-role emergency contacts workflow and alert claim',
     process.execPath, [join(repository, 'services/identity-api/scripts/verify-emergency-contacts-runtime.mjs')], workflowEnvironment));
+  evidence.checks.provider_enrollment_runtime = JSON.parse(command('exact-role facility self sign-up workflow, gate, cap and review',
+    process.execPath, [join(repository, 'services/identity-api/scripts/verify-provider-enrollment-runtime.mjs')], workflowEnvironment));
+  // P4c: Identity, EHR, Lab and Pharmacy booted from their own code, each as its exact runtime role.
+  evidence.checks.order_routes_runtime = JSON.parse(command('exact-role cross-facility lab requests and prescriptions',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-order-routes-runtime.mjs')], workflowEnvironment));
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
   const before = await snapshot(database);

@@ -25,6 +25,10 @@ const prescription = (status: OrderStatus, rowVersion = '3'): PrescriptionRow =>
   updatedAt: new Date('2026-08-10T10:00:00Z'),
 });
 
+// The order-route reader of an EHR with no routes to other facilities (P4c).
+const noRoutes = { summaries: async () => new Map(), summary: async () => null,
+  crossFacilityOrdersEnabled: async () => false };
+
 describe('PrescriptionsService Pharmacy handoff', () => {
   const pharmacyApi = { acceptEhrPrescription: jest.fn() };
   const repository = { run: jest.fn() };
@@ -37,7 +41,7 @@ describe('PrescriptionsService Pharmacy handoff', () => {
   const serviceFor = (row: PrescriptionRow) => {
     repository.run.mockImplementation(async (_context, _patientId, _access, _event, operation) =>
       (await operation({ query: jest.fn().mockResolvedValue({ rows: [row] }) })).value);
-    return new PrescriptionsService(repository as never, pharmacyApi as never);
+    return new PrescriptionsService(repository as never, pharmacyApi as never, noRoutes as never);
   };
 
   it('rejects a stale prescription version before crossing the service boundary', async () => {

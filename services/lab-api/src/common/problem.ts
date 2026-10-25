@@ -18,7 +18,12 @@ export interface ProblemDetails {
   correlationId: string;
   code: string;
   errors?: readonly { field: string; messages: readonly string[] }[];
+  /** A refusal's own facts the client needs (RFC 9457 extension members), e.g. `attemptsLeft`. */
+  [extension: string]: unknown;
 }
+
+/** Problem members an extension can never replace. */
+const STANDARD_MEMBERS = new Set(['type', 'title', 'status', 'detail', 'instance', 'correlationId', 'code', 'errors']);
 
 export class DomainProblem extends HttpException {
   /**
@@ -26,14 +31,18 @@ export class DomainProblem extends HttpException {
    * database refusal a service maps) for logs and tests; it is never sent to
    * the client, and the filter logs only its SQLSTATE.
    */
+  /** Extension members sent with the problem (numbers, strings, booleans and null only). */
+  public readonly extensions?: Readonly<Record<string, string | number | boolean | null>>;
+
   constructor(
     status: number,
     public readonly code: string,
     detail: string,
     public readonly errors?: ProblemDetails['errors'],
-    options?: { cause?: unknown },
+    options?: { cause?: unknown; extensions?: Readonly<Record<string, string | number | boolean | null>> },
   ) {
-    super(detail, status, options);
+    super(detail, status, options?.cause === undefined ? undefined : { cause: options.cause });
+    if (options?.extensions) this.extensions = options.extensions;
   }
 }
 
@@ -99,9 +108,17 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       correlationId: request.correlationId ?? 'unavailable',
       code,
       ...(domainProblem?.errors ? { errors: domainProblem.errors } : {}),
+      ...this.extensions(domainProblem),
     };
 
     response.status(status).type('application/problem+json').json(problem);
+  }
+
+  /** A domain problem's extension members, never one that would replace a standard member. */
+  private extensions(problem: DomainProblem | undefined): Record<string, unknown> {
+    if (!problem?.extensions) return {};
+    return Object.fromEntries(Object.entries(problem.extensions).filter(([name, value]) => !STANDARD_MEMBERS.has(name)
+      && (value === null || ['string', 'number', 'boolean'].includes(typeof value))));
   }
 
   private safeMessage(exception: unknown): string {

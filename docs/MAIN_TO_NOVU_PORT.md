@@ -63,6 +63,7 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | #68 (N2(b), service half) | The enrollment cookie shows the new HID (`GET /current`, an activation replay) for 15 minutes after activation only, then answers 404 as an unknown enrollment. Before, a shared device showed it to the next person for up to 24 hours. A start with the key of an activated enrollment answers 409 `IDEMPOTENCY_KEY_REUSED`, as on `main`, so the page says the registration was completed. Not ported: `main`'s 0085 check of the same in the activation command (the service refuses before it calls the command), and `main`'s expiry of the cookie in the activation response, so a reload within the 15 minutes still shows the HID, which a patient who verified only a phone needs to sign in and to recover the account | — |
 | #16 (emergency contacts, with e1757ba) | A patient keeps up to five emergency contacts, each stored encrypted and verified by a code the contact reads back; when a clinician uses break-glass, each verified contact with alerts on gets one alert. It shipped switched off and is switched on through the code defaults after the owner's approval of 2026-10-24 (D1). Switched off, adding a contact and sending a code answer 409 `EMERGENCY_CONTACT_DELIVERY_UNAVAILABLE` and no message can be sent. It differs from `main` as listed below the table | 0084 (main 0065), runtime-grants.sql |
 | main 0097 section 2 with #18 0c4de59 and 17abba5 (plan waves W14, Identity part, and W30) | Staff can use break-glass in production (owner decision of 2026-10-24, below). 0085 seeds the active `emergency` purpose of use `identity.activate_break_glass` requires, as `main`'s 0097 does (ON CONFLICT DO NOTHING: an operator's row, active or not, is kept as it is). Identity runs `platform.require_control_enabled('break_glass_enabled')` inside the activation transaction, before the command: the control off answers 423 `BREAK_GLASS_DISABLED` and writes nothing, an unreadable control 503 `PLATFORM_CONTROL_UNAVAILABLE`, and a missing or deactivated `emergency` purpose also 423 `BREAK_GLASS_DISABLED` (it was 400 `INVALID_CONSENT_COMMAND`). Every other 55000 stays 409 and every other 22023 stays 400. It differs from `main` as listed below the table | 0085 (main 0097) |
+| #81, main 0061–0063 with db49a0d, 46a173f and 08c906f, and P71's activation (plan wave P4) | Facility self sign-up (owner decision D14): a hospital, laboratory or pharmacy signs itself up through "Setup Your Facility" with a CAC lookup, an email code and a password, without an administrator approving it first, and support reviews every new facility within a business day (owner decision of 2026-10-24). It shipped closed: the platform control `provider_self_service_enabled` is seeded off and is opened with the audited admin command. Administrators finish with a password and get a staff session, as P71 did; staff MFA is not ported (owner decision 2). #81's answers are kept. It differs from `main` as listed below the table | 0086 (main 0061–0063), runtime-grants.sql |
 
 Emergency contacts differ from `main` (#16 and e1757ba) in these ways. Owner
 decisions of 2026-10-23 are marked "owner".
@@ -208,6 +209,1020 @@ these ways, all from the owner's decision to enable it now:
   (`services/ehr-api/test/database/break-glass-launch.integration.sql`);
   production's control reads work (#63 under "Not ported").
 
+Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
+08c906f, #81 and P71's activation) in these ways. Owner decisions of
+2026-10-23 and 2026-10-24 are marked "owner".
+
+- One migration, 0086, holds main's three and this branch's additions; its
+  control section is its last statements, so the ACCESS EXCLUSIVE lock on
+  `platform.control_settings` is held only for the CHECK swap, the seed and the
+  `control_enabled` replace, and a release that cannot take that lock leaves
+  nothing applied (the plan's separate control migration would have left the
+  self-service commands requiring a key `control_enabled` rejects).
+- A1: `provider_self_service_enabled`, seeded off. `identity.submit_self_service_organization_application`
+  and the activation wrapper `identity.activate_self_service_provider_enrollment`
+  require it (55000 `PLATFORM_CONTROL_DISABLED:provider_self_service_enabled`),
+  and Identity checks it before any write. The table has no INSERT policy, so
+  the seed reads the table's FORCE row-level security setting and, only if it
+  is on, lifts it for its own insert and restores it, as `main`'s 0098 does; a
+  table without FORCE is left without it (review fix R8: turning FORCE on
+  where an operator had lifted it would make every accountless control read
+  fail under an owner that does not bypass row-level security, closing every
+  portal). `services/ehr-api/scripts/test-staging-schema-upgrade.mjs` checks
+  that a release changes no existing table's row-level security or FORCE
+  setting, also from a baseline with FORCE lifted on `platform.control_settings`,
+  where the Identity runtime must still read the controls. The control is read
+  from Identity's accountless context
+  exactly as the security guard's portal check reads it, so it needs the same
+  owner that can read the table; under a NOBYPASSRLS owner the gate stays
+  closed (55000 `PLATFORM_CONTROL_UNAVAILABLE`).
+- Every later migration that changes the `control_key` CHECK or
+  `platform.control_enabled` must carry `provider_self_service_enabled` with
+  the six others: 0086 refused to run unless both named exactly the six live
+  keys, and a later copy of `main`'s 0098 or another control wave without it
+  would make the self sign-up gate raise 22023 (closed). Likewise a later
+  replacement of `platform.prune_verification_quotas` must keep 0086's two
+  counter tables (A4 here is "the 0049 body live at merge, plus 0086's
+  tables"; 0086 refused to run if the live body pruned anything else), and a
+  later replacement of `platform.consume_qoreid_quota` must keep 0086's
+  refusal of an unreviewed self-signed-up organization's `existing_cac`
+  lookup (R7; 0086 refused to run unless the live body was 0049's).
+- A4: the prune keeps 0049's body and adds 0086's tables; `main`'s 0085 body
+  is not ported (it deletes from a table this branch does not have).
+- A5: the runtime grants are made in 0086 as well as in `runtime-grants.sql`,
+  since a release never applies that file.
+- A6 (owner, Q2): a platform-wide daily cap on accountless CAC lookups, the
+  third argument of `platform.consume_self_service_cac_quota(uuid,char,integer)`
+  (1–100000, else 22023), with its own counter table, charged last so a network
+  or application denial never spends it, and audited as `platform_day`.
+  Identity reads `PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP` (1–100000, code
+  default 200); an invalid value closes the gate instead of stopping Identity.
+  `main`'s two-argument command does not exist here.
+- A7 with C8, and review fixes R4 and R5: the public application quota is
+  charged once per start, in its own committed transaction before the submit,
+  and not again when the same start sends the email code. So a start the
+  submit refuses (409 `PROVIDER_ENROLLMENT_REQUIRES_REVIEW`) also costs one of
+  the 10 an hour and 30 a day. It is keyed by the client network (an IPv4
+  address or an IPv6 /64, the CAC lookup's key), not the raw address, so
+  rotating IPv6 addresses inside one allocation resets neither quota. Owner
+  re-decision available: #81's 409 `PROVIDER_ENROLLMENT_REQUIRES_REVIEW` tells
+  any caller who passes Turnstile whether a CAC and product already has a
+  governed or self-service application or is registered (the governed public
+  intake answers the same `{accepted}` whatever exists); the quota now bounds
+  such probes, and a uniform answer with no code sent is the alternative.
+- R5: at most 10 emailed codes a day reach one administrator email across
+  every self-service application (`identity.begin_self_service_provider_enrollment`,
+  on top of 0056's 60 seconds, 5 an hour and 15 a day per application). Past
+  any of these limits start sends nothing and says so (R14 below).
+- R17 (second review): 0056's `identity.begin_organization_profile_completion`
+  sent a code for any open, verified application of a CAC number, product and
+  email, whatever its approval mode, and the public self-service lookup now
+  verifies applications whose email the submitter chose, so the governed
+  completion route (`POST /api/v1/identity/organization-applications/completion/start`,
+  on the public site) and a rolled-back Identity could send codes for
+  self-service applications outside R5's 10 a day per email (15 a day per
+  application instead) and without R6's stored details. 0086 moves 0056's body
+  into the owner-only `identity.issue_organization_profile_completion_code`,
+  which sends only for the approval mode its caller names, and replaces the
+  governed command (its signature, owner and grants kept; 0086 refuses to run
+  unless the live body is 0056's) so that it sends only for governed
+  (`admin_review`) applications, answering NULL for a self-service one exactly
+  as for none; the self-service command calls the helper for self-service
+  ones. The governed route's answer stays uniform, so nothing new is
+  disclosed. A later replacement of the governed command must keep this.
+  Not changed: the governed route's public application quota stays keyed by
+  the raw address, as on `main` (it no longer reaches self-service
+  applications).
+- R6: the administrator name and organization type the activated account,
+  staff record and application keep are those sent with the request whose
+  emailed code opened the activating session (stored on its challenge), not
+  those of whichever request opened the application; `main` keeps the
+  first submitter's.
+- A8 with C9 (owner, Q3), and review fix R3: an unactivated self-service
+  application lapses 24 hours after it was submitted. The next submit for its
+  CAC and product by another email, on the self-service or the governed path
+  (the stale application's own email resumes it instead, without renewing
+  it, so a squatter cannot extend its hold), rejects it (reviewed_at,
+  the reason "Self-service application lapsed: not activated within 24 hours of
+  submission", no reviewer, row_version bumped), invalidates its email codes and
+  completion sessions, audits `identity.organization.self-service.lapse` and
+  opens a new application. An activated application and a governed application
+  never lapse. `main` never expires these rows. The governed submit still
+  returns a fresh (under 24 hours) self-service application for the same CAC
+  and product, as before (follow-up below). R3: the application keeps the keyed
+  digest of the network that opened it. R15 (second review) replaced the first
+  review's 7-day refusal after any closure, which locked real applicants out:
+  the submit lapsed the stale application and then refused itself because of
+  that same lapse, so the failed submit rolled the lapse back and an
+  applicant who had mistyped the email could never start again from the
+  office network, and support's rejection only started the 7 days. Now:
+  - a lapse refuses no one. Instead a hold is not renewed: a new application
+    whose email or network already had a self-service application for the
+    CAC and product closed in the last 7 days (lapsed, including the one this
+    submit has just lapsed, closed by the system or by support) is opened
+    without a hold (`self_service_without_hold`): anyone else's submit lapses
+    it at once (reason "Self-service application lapsed: opened without a
+    hold and replaced by another sign-up"), though its own email can still
+    finish it. A squatter that resubmits from its own network with a new email
+    therefore gains nothing, while a mistyped email corrected from the same
+    network after 24 hours is accepted;
+  - only support sets a refusal: a rejection or release refuses the closed
+    application's email and network for 7 days
+    (`self_service_refusal_ends_at`; 409 `PROVIDER_ENROLLMENT_REQUIRES_REVIEW`,
+    as any conflict) unless support lets the applicant retry (`allowRetry`),
+    and support can waive a refusal in force for a CAC number and product
+    (`identity.admin_waive_self_service_refusals`, `POST
+    /api/v1/admin/self-service-applications/waive-refusal`, audited
+    `admin.self-service-application.refusal-waive`);
+  - the activation pre-check's `email_registered` closes the application (no
+    reviewer, the reason "Self-service application closed: its administrator
+    email already belongs to an account", no refusal, its other codes and
+    sessions ended, audited `identity.organization.self-service.close`), so
+    the applicant can start again at once with another email.
+  Residual: a stranger who lapses a real applicant's stale application holds
+  the CAC for 24 hours (the documented squat); after that the applicant's own
+  email and network are accepted, without a hold, so an active stranger can
+  keep lapsing it, each time paying a Turnstile solve and a public
+  application quota unit; support's rejection (refusing the stranger's email
+  and network) is the remedy.
+- A9 with review fix R1: before hashing the password, activation runs
+  `identity.prepare_self_service_provider_activation` in its own committed
+  transaction. It refuses a token that names no live session (401), charges
+  one of the session's 5 attempts (the 6th ends it, 401), and answers an
+  activation that can never succeed (email already registered 409
+  `PROVIDER_EMAIL_ALREADY_REGISTERED`, which also closes the application, R15;
+  CAC bound, legal name used or the application not a ready self-service one,
+  409 `ORGANIZATION_REVIEW_REQUIRED`) at once, ending the session. So a session costs at most 5 argon2id hashes,
+  and an activation certain to fail costs none. It reads the control after
+  locking the session.
+- A10: activation sets the account's `email_verified_at` and
+  `password_changed_at`.
+- A11: submit takes the governed submit's lock key `org-application:` and
+  activation the governed approval's `org-cac:`, so the two paths serialize on
+  one CAC (`main` uses `self-service-org-` keys).
+- A12 with review fix R10: `GET /api/v1/identity/provider-enrollments/availability`
+  answers `{ open: true }`, `{ open: false, reason: 'closed' }` when sign-up is
+  switched off or not configured, and `{ open: false, reason: 'unavailable' }`
+  on any fault, never an error, so the page can say "try again shortly" rather
+  than "not open" during an outage.
+- A13: the gate also requires `provider_portal_enabled` on and
+  `maintenance_mode` off, which the security guard does not enforce on public
+  routes.
+- The gate answers 423 `PROVIDER_ENROLLMENT_UNAVAILABLE` on every route (C1:
+  the gateway turns every 5xx into 503 `UPSTREAM_UNAVAILABLE`), and 55000
+  `PLATFORM_CONTROL_DISABLED:provider_self_service_enabled` and the gate's
+  22023 answer the same 423. Other upstream failures keep `main`'s 5xx codes.
+- Turnstile accepts `provider-enrollment` on production `app.` and staging
+  `staging.` only (`main`: www and staging).
+- Activation is P71's (owner, decision 2): `AuthService.login(..., 'staff')`,
+  the three session cookies and `x-csrf-token`, answering `actor`; no MFA, and
+  `hid_enrollment` is not cleared (this branch's decision under #50).
+- All four products may sign themselves up (owner, Q5); a laboratory or
+  pharmacy administrator gets the provider portal, and since P4b (below) it
+  invites its staff after support's review. A second product for an already registered CAC goes to admin review
+  (owner, Q8), and one email cannot be both a patient account and a facility
+  administrator (409, owner, Q7).
+- Support's review (owner, Q1, "alert + daily review"): three review columns on
+  the application (`self_service_reviewed_at`, `self_service_reviewed_by_account_id`,
+  `self_service_review_note`, all set together, only on an approved
+  self-service application) and two commands,
+  `identity.admin_list_self_service_facilities` (`platform.identity-review.read`)
+  and `identity.admin_review_self_service_facility` (`platform.facility.manage`,
+  and since P4b also `platform.facility.unlock`; the review now records the
+  administrator's role and evidence and unlocks the facility, below),
+  served as `GET /api/v1/admin/self-service-facilities` and
+  `POST /api/v1/admin/self-service-facilities/:applicationId/review`. Unlike
+  the governed application commands they need no facility membership, so a
+  standalone platform administrator can use them, as 0064's commands; the
+  review is audited as the platform administrator
+  (`admin.self-service-facility.review`). Suspending the facility and
+  disabling the account use the existing commands. The unreviewed list is
+  oldest activation first, so none is hidden behind 200 newer ones (R12); the
+  reviewed and all lists are newest first. `main` has no review.
+- R2: support's release of a fraudulent sign-up,
+  `identity.admin_release_self_service_facility` (`platform.facility.manage`),
+  served as `POST /api/v1/admin/self-service-facilities/:applicationId/release`
+  (`If-Match`, `{ reason }`). Suspend and disable stop an impostor but leave
+  the CAC bound, the product registered, the application approved and the
+  organization holding the company's legal name, so the real company could
+  neither sign up nor be approved by review. Once every facility of the
+  organization is inactive and the administrator's account is disabled
+  (otherwise 409 `SELF_SERVICE_FACILITY_RELEASE_REQUIRES_SUSPENSION`), the
+  release closes the application, removes the CAC binding, suspends the
+  products, deactivates the organization and renames it "Released self
+  sign-up <id>" (out of the legal-name checks), revokes the facility roles and
+  memberships, deactivates the staff record and audits
+  `admin.self-service-facility.release`; the list shows it as handled.
+- R3: support's list of open self-service applications,
+  `identity.admin_list_open_self_service_applications` (`GET
+  /api/v1/admin/self-service-applications`) and its rejection,
+  `identity.admin_reject_self_service_application` (`POST
+  /api/v1/admin/self-service-applications/:applicationId/reject`, `{ reason,
+  allowRetry? }`), both without a facility membership. R16 (second review):
+  the list was oldest first, at most 200, with no total, and every start with
+  a made-up CAC number leaves an open row that nothing lapses, so about 200
+  junk rows hid a live squat. It now lists the applications that hold a CAC
+  now first (`holdsCac`), verified ones first within each group, then the
+  newest, with `total` (all matching open rows), and support can search one
+  exact CAC number (`POST /api/v1/admin/self-service-applications/search`,
+  `{ cacRegistrationNumber }`, in the body to keep it out of access logs, as
+  the principal search). Not done: closing never-verified rows outside a
+  submit.
+- R7 (CRITIC C13): an organization that signed itself up makes no
+  organization CAC lookup (`POST /api/v1/identity/organizations/verification/cac/:context`,
+  403 `PERMISSION_DENIED`, nothing charged) until support has reviewed it, so
+  an unreviewed facility cannot spend paid lookups outside the 200-a-day cap.
+  0086 replaces `platform.consume_qoreid_quota` with 0049's body plus that
+  refusal.
+- A mistyped CAC number can register another company. QoreID's lookup proves
+  that the number belongs to a real, active company, not that the applicant
+  works there, and the emailed code proves only the applicant's own mailbox.
+  An applicant who mistypes a digit and lands on another company's number
+  would, at activation, register that company under its verified legal name,
+  with the applicant as its administrator and the CAC number bound to it, so
+  the company itself could then neither sign up nor be approved by review.
+  `main` has the same exposure and shows nothing before the account is made.
+  This branch mitigates it three ways: the confirmation read (R13 below), so
+  the password step says "You're registering <verified legal name>, CAC number
+  <as entered>" and offers "This isn't my organization" before any account
+  exists; support's daily review of every activated self sign-up (owner
+  guard), whose console tells support to treat a legal name that is not the
+  administrator's own organization as a wrong sign-up; and support's release
+  (R2), which frees the CAC number and the legal name once the facility is
+  suspended and the account disabled. The administrator email is not freed
+  (below).
+- R13 (the website's second contract): `GET
+  /api/v1/identity/provider-enrollments/profile` answers, for the enrollment
+  cookie that verify set, `{ organizationName, registrationNumber,
+  productCode, organizationType, administratorName, administratorEmail }`:
+  the verified legal name the activation will register, the CAC number as
+  entered, and the product, organization type and administrator the account
+  will keep (R6: those of the code that opened the session). It is served by
+  a new read-only command, `identity.current_self_service_provider_enrollment(char)`,
+  which needs the control, locks nothing, charges no activation attempt and
+  ends no session. 0056's `identity.current_organization_profile_completion`
+  was not reused: it has no administrator name, email or type, it answers
+  the governed review profile's name rather than the one the activation
+  registers, and it answers a governed application's session too. The route
+  checks the signed-in browser (409) and the gate (423) as the others do; no
+  live session of a ready self-service application answers 401
+  `ORGANIZATION_COMPLETION_SESSION_INVALID`. It takes no Origin header,
+  because browsers send none on a same-origin GET: the cookie is the guard
+  (HttpOnly, SameSite=Strict, host-only and scoped to
+  `/api/v1/identity/provider-enrollments`), CORS lets only HID's own origins
+  read the answer, and a disallowed Origin is refused before any route runs,
+  as 0056's own `GET …/completion/profile` already relies on. `main` has no
+  such read.
+- R14 (the website's second contract): start says when it sent no code.
+  `begin_self_service_provider_enrollment` returns null both when a limit
+  holds the code back and when the application is no longer open, and start
+  used to answer `{ accepted, challengeId, expiresInSeconds: 600,
+  resendAfterSeconds: 60 }` either way, with a challenge that did not exist,
+  so the page said a code was sent when none was and the code that was in
+  force could no longer be entered. Start now runs the new read-only
+  `identity.self_service_provider_code_state(text,text,text)` in the same
+  transaction and answers 200 `{ accepted: true, codeSent, challengeId?,
+  expiresInSeconds?, resendAfterSeconds }`: `codeSent: false` names the code
+  still in force (the newest that can still be entered, as the recovery
+  start's cooldown names its earlier challenge), when there is one, and the
+  seconds until a start can send a new one under 0056's 60 seconds, 5 an hour
+  and 15 a day and R5's 10 a day per email; after a sent code
+  `resendAfterSeconds` is that same wait (60 normally, up to an hour after the
+  5th code of an hour). An application that closed since start read it (it
+  was activated, lapsed or rejected meanwhile) answers 409
+  `PROVIDER_ENROLLMENT_REQUIRES_REVIEW`, as a retry would. The shape is a 200
+  with a field, not a 429, because the start was accepted and charged, the
+  answer carries the code in force, and this branch's problem details carry
+  no extension members or `Retry-After`. It is additive: a page that ignores
+  `codeSent` still verifies the code in force. Telling the caller that no code
+  went out reveals nothing new: start has already confirmed the application to
+  this caller, and R5's wait can only say that the email received 10
+  self-service codes in a day. The governed completion's start keeps its
+  uniform answer. `main` answers as this branch used to.
+- A released wrong sign-up keeps its administrator email (a decision, not
+  built): the disabled account keeps the address and the deactivated staff
+  record keeps it too (`staff_email_ci_uq` covers every staff row), and both
+  activation and governed approval refuse an email held by any account that is
+  not deleted or by any staff record. A command that frees it was evaluated
+  and not built, because it is not both small and safe: (1) it may touch only
+  an account that did nothing beyond activating, and that cannot be
+  established from a few tables: an account and its facility are referenced
+  by 101 foreign keys to `auth.accounts` and 53 to `identity.facilities` across
+  the identity, auth, audit, EHR, lab, pharmacy, OCR, outreach, notification,
+  migration and platform schemas, so a check that misses one would detach an account from
+  records it wrote; (2) freeing needs two changes no command makes today:
+  rewriting the staff record's email (NOT NULL, unique across all staff rows)
+  and removing the account's email or setting it to `deleted`, a status no
+  admin command sets and whose handling by sign-in, recovery and the principal
+  lists is unverified; (3) undoing it means restoring an address someone may
+  have used since. Support's procedure instead: confirm with the organization
+  that the sign-up named the wrong company; suspend the facility
+  (`POST /admin/facilities/:id/status`), disable the account
+  (`POST /admin/principals/:id/status`) and revoke its sessions
+  (`POST /admin/principals/:id/sessions/revoke`); release it
+  (`POST /admin/self-service-facilities/:applicationId/release`), which frees
+  the CAC number and the legal name at once; then the administrator signs up
+  the right organization with the correct CAC number and another email address
+  they control (another mailbox of the organization). The released email's
+  7-day refusal (R3) applies to the released CAC number and product only, not
+  to a correct CAC number; where the release concerns the right company
+  signed up with the wrong email, support releases it with `allowRetry`, so
+  the company's network is not refused (R15), or waives the refusal later.
+  If an organization must use that same email, that is an owner decision and
+  a reviewed one-off database change, not a support action.
+- Round-1 review fixes, each absent on `main` and recorded above: R1 the
+  activation pre-check and its 5-attempt budget (A9); R2 support's release; R3
+  the own-email resume, the submitting network, the 7-day refusal and support's
+  open-application list and rejection (A8 and R3); R4 the public application
+  quota charged before the submit (A7); R5 10 codes a day per email; R6 the
+  proving code's administrator details; R7 no organization CAC lookup before
+  support's review; R8 the seed keeps FORCE as it finds it (A1); R9 the
+  declaration's text (no behaviour); R10 availability's `reason` (A12); R11
+  the verifier drives the database's own gate (verifier bullet below); R12
+  the unreviewed list oldest first (support's review). The integration step's
+  fix is also this branch's only: support's review command answers only its
+  23505 as `SELF_SERVICE_FACILITY_ALREADY_REVIEWED`, and any other integrity
+  refusal (23514) as 503 `SELF_SERVICE_FACILITY_UNAVAILABLE` (`main` has no
+  review command). R13 and R14 above come from the website's second contract.
+  The second review's fixes, also absent on `main`: R15 a lapse refuses no
+  one, a renewal from the same email or network holds nothing, support's
+  rejection or release refuses for 7 days unless it lets the applicant retry,
+  support's waiver, and the registered email closing its application (A8);
+  R16 the open list ranked, counted and searched (R3); R17 the governed code
+  command serving governed applications only (R5).
+- The ported database suites run from `services/ehr-api/test/database/`
+  (`provider-self-enrollment`, `provider-self-service-cac-quota`,
+  `provider-self-service-control`, `provider-self-service-lapse`,
+  `self-service-facility-review` and `provider-self-service-rollback`, which
+  runs the previous Identity's own SQL on the new schema), with the review
+  fixes' `provider-self-service-activation`, `self-service-facility-release`
+  and `self-service-open-applications`, and R13's and R14's
+  `provider-self-service-confirmation`.
+- `services/identity-api/scripts/verify-provider-enrollment-runtime.mjs` (main's
+  verifier rewritten for this branch) runs in the migration rehearsal as
+  `hid_identity_api_runtime`, with local stubs for Siteverify, QoreID and
+  notification delivery, on production's hosts (`app.`, `ehr.`, `admin.`). It
+  proves: the shipped gate answers 423 on all three routes and availability is
+  false; a standalone platform administrator opens the control; the provider
+  portal off or maintenance on closes it again; start, the emailed code, verify
+  and activate, then `GET /auth/session`, `POST /auth/facility` and a fresh
+  password sign-in on `ehr.`; a second sitting resumes without a QoreID lookup;
+  #81's answers; the lapse after 24 hours frees the CAC; the 200-a-day platform
+  cap refuses the 201st lookup; support's list and review as a standalone
+  administrator, with its version conflict; and closing the control refuses a
+  held session. It also proves the review fixes: the database's own gate
+  through Identity (a start parked on the public application quota, and an
+  activation parked on its session's row, while the control is closed, answer
+  423 from the database's refusal with nothing written; R11), the activation
+  pre-check and its 5-attempt budget, the details of the code that proved the
+  mailbox, the charge of a refused start and the IPv6 /64 key, the squatter's
+  own resume and network, support's release followed by the real company's
+  sign-up, the open-application list and rejection, and availability's
+  reason; and R13 and R14: the confirmation read with no Origin (its 401s,
+  409, 423 and the proving code's details, nothing charged), and start's
+  `codeSent: false` within the 60 seconds (naming the code just sent, which
+  then verifies), after the code was used (no code named), at the hour's
+  limit (naming the 5th code, which verifies) and at the email's 10 a day,
+  with nothing delivered, and 409 for an application support rejected while
+  its start waited. For the second review it proves: the registered email's
+  application closed and a new email accepted at once from the same network;
+  the governed completion route (on the public site's origin) answering its
+  uniform 200 with nothing delivered or stored for a self-service
+  application; the squatter's renewal from its own network accepted without a
+  hold and lapsed at once by the real company, which gets the hold; the open
+  list ranked with its total and the CAC number search; the waiver (403, 400,
+  200, then 404) followed by the office's sign-up; and a retry rejection
+  followed by the corrected email from the same network. Unlike `main`'s, it can also run against a disposable copy of a
+  database on a loopback test cluster (`HID_PROVIDER_RUNTIME_LOCAL_CLUSTER=loopback`,
+  `NODE_ENV=test`), which proves the same flow on a database built in
+  production's order.
+- `POST /auth/login` and the activation set the session cookies through one
+  helper, `setSessionCookies` (`AuthController.setCookies` is a pure extraction
+  of it, C18), so the two cannot drift.
+- R15 to R17 are proved by `self-service-open-applications` (the typo
+  corrected from the same network, the squatter's renewal, the stranger's
+  lapse, the retry rejection, the waiver, and 210 stale rows beside one live
+  squat), `self-service-facility-release` (the release's refusal and its
+  `allowRetry`), `provider-self-service-activation` and
+  `provider-self-enrollment` (the registered email's closure),
+  `provider-self-enrollment` and `provider-self-service-rollback` (the
+  governed command, and the previous Identity's completion start, send
+  nothing for a self-service application, with the control on and off), and
+  by the verifier (below).
+- Follow-ups, each its own decision: the governed submit still attaches a
+  governed applicant to a fresh self-service application for the same CAC and
+  product, and the admin application list does not show `approval_mode`; the
+  governed admin commands still need a facility membership (`0046`), so a
+  governed public application can hold a CAC and product until an
+  administrator with a membership rejects it; staff MFA, once ported, must
+  say what it does to these administrators and to the staff they invite;
+  once support has reviewed a self-signed-up organization, its
+  administrator's organization CAC check is charged to that account's 0049
+  quota (5 an hour, 15 a day, 10 a day per organization), outside the
+  200-a-day self sign-up cap; and a released sign-up's account keeps its
+  email (the decision and support's procedure are above). A self-signed-up
+  facility is no longer limited to one user: its administrator invites staff
+  after support's review (P4b, below).
+- The website already has what this branch's backend answers for P4 (health
+  at `8d40891`, P4's website build): the console's release and
+  open-application pages, with the reject and release forms' `allowRetry`,
+  the waiver, the CAC number search and the total; the sign-up page's use of
+  availability's reason and start's `codeSent`; and the copy R15 and R16
+  call for: the `PROVIDER_EMAIL_ALREADY_REGISTERED` panel (the sign-up is
+  closed; start again with another email), the
+  `PROVIDER_ENROLLMENT_REQUIRES_REVIEW` text (a refusal follows only
+  support's rejection or release), the kept details' 24-hour note, and the
+  open-applications panel's `holdsCac` and `lapsesAt` (equal to the
+  submission time for an application opened without a hold). Nothing further
+  is needed on the website for P4's backend.
+
+Full access after support's review, and facility staff invitations (P4b, in
+0086's section 5, which follows P4's sections and precedes the grants and the
+control section, still last). `main` has neither: it reviews every clinician
+independently (its 0087-0098) and its self-signed-up administrator holds
+`org_admin` at once. Owner decisions of 2026-10-25 (P4b's Q1-Q7) are marked
+"owner". The Identity, notification-api and website parts are recorded by
+their builds; the items Identity carries are listed here too.
+
+- R18 (P4 leftover), "This isn't my organization":
+  `identity.withdraw_self_service_provider_enrollment(char)` (Identity's
+  accountless `system:auth` context; `POST
+  /api/v1/identity/provider-enrollments/withdraw` with the enrollment cookie).
+  From a live completion session of an open self-service application it
+  closes the application (rejected, no reviewer, the reason "Self-service
+  application withdrawn by its applicant", no refusal), ends every code and
+  session of it and audits `identity.organization.self-service.withdraw`
+  (system; `{productCode, previousStatus}`), answering `withdrawn`; no live
+  session answers `session_invalid` and changes nothing, and a session whose
+  application is no longer open answers `session_invalid` and is ended. It
+  reads the control after locking the session (55000 with the control off)
+  and sets no 7-day refusal: like any closure, a new application of that
+  email or network for the same CAC number and product within 7 days opens
+  without a hold (R15), so a squatter cannot renew a hold by withdrawing.
+  Suite: `provider-self-service-withdrawal`.
+- The restricted role. Activation grants `org_admin_awaiting_review` (new;
+  `workforce.manage`, `audit.read` and the four outreach registration and
+  campaign permissions, each one `org_admin` already holds) instead of
+  `org_admin`, after recording the approval; the membership stays named
+  `org_admin`. A self-signed-up organization is pending (activated, not yet
+  reviewed), reviewed, or released (`identity.organization_self_service_state`,
+  read by Identity's staff context as `facility.selfService`; governed and
+  legacy organizations have no row and are unaffected).
+- The review gate: a trigger on `auth.account_roles`
+  (`account_roles_review_gate`, before insert or update of the role, scope,
+  facility, membership or revocation) refuses any facility role but the
+  restricted one at a pending organization (P0001 `FACILITY_REVIEW_PENDING`),
+  any facility role at a released one (`FACILITY_RELEASED`), and the
+  restricted role anywhere else (`FACILITY_REVIEW_ROLE_INVALID`). It also
+  refuses the owner and every runtime, so no other path (a governed second
+  product's approval, owner SQL) can hand a pending facility clinical access.
+- Before review the administrator may record its own licence
+  (`identity.record_self_service_administrator_licence`, audited
+  `identity.facility-administrator-licence.record`); the facility sees only a
+  number hint (its last four letters or digits). Every staff write before
+  review answers `FACILITY_REVIEW_PENDING`.
+- Support's review unlocks (`identity.admin_review_self_service_facility`,
+  now seven arguments): it needs `platform.facility.unlock` (new; granted to
+  `platform_admin`, `platform_super_admin` and `facility_review_admin`, so
+  `identity_review_admin` + `facility_review_admin` make a least-privilege
+  reviewer) besides `platform.admin.access`, `platform.facility.manage` and
+  the healthcare-operations purpose; it records the administrator's role
+  (`none`, or the role the organization type and product allow, §3.6 of the
+  P4b spec: doctor at a clinic or hospital, `lab` at a laboratory, pharmacist
+  at a pharmacy, none for `other`), the verification method and, for a
+  clinical role, a licence of the matching body (owner Q2: a licence is
+  required unless support grants none); it revokes the restricted role,
+  grants `org_admin` (and the clinical role, with a `platform_review`
+  attestation), bumps the membership's version, signs the administrator out
+  everywhere (`facility_reviewed`) and audits
+  `admin.self-service-facility.review` (platform; role, method, licence body,
+  membership and sessions revoked) and `identity.facility-access.unlock`
+  (system, the facility). A suspended facility, a disabled account or a
+  missing membership answers 23514 with nothing written.
+- After review support can change the administrator's role
+  (`identity.admin_set_self_service_administrator_role`, the same evidence,
+  sessions revoked `facility_access_changed`, audited
+  `admin.self-service-facility.administrator-role`, whose details keep the
+  change's verification method (the application keeps the review's), and
+  `identity.facility-access.change`) and end the first 30 days early
+  (`identity.admin_end_self_service_probation`,
+  `admin.self-service-facility.probation-end`).
+- The first 30 days after review (owner): at most 5 break-glass grants per
+  facility in a rolling 24 hours (trigger `consent_grants_self_service_probation`
+  on `identity.consent_grants`, created in 0086 section 6.7 under its NOWAIT
+  lock and serialized per facility by an advisory lock, P0001
+  `EMERGENCY_PROBATION_LIMIT`; Identity
+  answers 429 `EMERGENCY_PROBATION_LIMITED`, and a rolled-back Identity its
+  429 `EMERGENCY_RATE_LIMITED`), and invitations limited to 10 a day and 20
+  emails a day (30 and 60 after). A replayed break-glass reuses its grant and
+  is never refused.
+- Staff invitations (`staff_invitations_enabled`, new, seeded off; owner Q1:
+  one release with P4): three tables (`identity.staff_invitations`,
+  `identity.staff_invitation_sends`, `identity.staff_licence_attestations`)
+  and `identity.staff_attestation_texts`, all with forced row-level security,
+  no runtime privilege and no-mutation or guarded-column triggers. A reviewed
+  self-signed-up facility's administrator invites by name, email and role
+  (the roles its type allows, with a licence and the facility's attestation
+  for a clinical role: the facility vouches for its clinicians, where `main`
+  reviews each independently); secrets are stored only as keyed hashes
+  Identity computes (a link token, a typed code bound to the email, an open
+  session); limits per facility (100 pending; 30 invitations and 60 emails a
+  day), per recipient (3 invitations and 8 emails in 30 days from one
+  facility; 5 emails a day across facilities, beyond which the email is
+  silently not sent) and per
+  invitation (5 sends, 60 seconds between them, valid 7 days); 10 sends
+  that failed definitively in 24 hours pause the facility's invitations. Commands: create (idempotent per inviter, facility
+  and key), record the delivery, resend, revoke, list, the page's state; open
+  (link or typed code; 10 wrong tokens lock an invitation, 5 wrong codes stop
+  typed mode until a resend), prepare (5 attempts), accept with a password
+  (`new` creates the account, staff record and membership; `dormant_staff`
+  resets the password, bumps the token version, revokes every session and
+  reuses the ended membership), and the signed-in preview and accept for
+  existing staff on their own host (no facility, no permission; one staff
+  audit row at the inviting facility on success and none on a refusal). A
+  patient account, a platform account, an inactive or unverified staff record
+  and an account that cannot sign in are refused. `identity.staff.license_number`
+  is never written; the licence lives in the attestation, and the facility
+  and the invitee see only its hint. Support reads a facility's staff and
+  finds an invitation by the reference in the email
+  (`identity.admin_list_facility_staff`, `identity.admin_find_staff_invitations`,
+  `platform.principal.read`).
+- Staff management: the administrator lists its own facility's members,
+  ends a membership (roles revoked, pending access requests expired, active
+  consent grants revoked with one `identity.consent-grant.close` row each,
+  not the administrator's own or another administrator's) and changes a
+  member's role (with a new attestation). Each is audited at the facility.
+- Release (R2) now also revokes the organization's pending invitations, ends
+  its memberships before revoking their roles, revokes their active consent
+  grants (one system `identity.consent-grant.close` row each, V2), expires
+  pending access requests and revokes the sessions of accounts left with no
+  active membership; the counts are in the release's audit details.
+- One lock order for every P4b writer and both triggers: the organization's
+  self-service application row first (release FOR UPDATE, support's review
+  and changes FOR NO KEY UPDATE, staff commands and the gate FOR SHARE), then
+  facility and membership rows, then the advisory locks
+  `staff-invitations:<facility>`, `staff-invitation-recipient:<email>` and
+  `account-email:<email>`, then account rows. A two-connection harness
+  (outside the release's suites, which roll back) shows an accept or prepare
+  waiting behind a release answer withdrawn or invalid, a role change and a
+  release in either order leave no role on an ended membership, and a review
+  and an account disable in either order grant nothing to a disabled account,
+  with no deadlock.
+- Identity's P4b items (its build records the detail): the staff context's
+  `facility.selfService` (`{ review: 'pending'|'reviewed', organizationType }`,
+  only at a self-signed-up facility; the previous membership query is
+  wrapped unchanged, with one definer state read per membership row);
+  password re-entry for invite, role change and removal (the sign-in check
+  and lockout, against the session's own account; 403
+  `STAFF_REAUTHENTICATION_FAILED`, counted as a failed sign-in); the
+  recovery hold (403 `STAFF_RECENT_RECOVERY_HOLD`) on invite, resend and role
+  change within 24 hours of an OTP recovery, not on removal or revocation (a
+  future hold on other staff commands takes the same marker); the
+  invitation email through notification-api's fixed template, with no
+  person's name, the facility name dropped when it looks like a domain and
+  the origin from the deployment; Turnstile action `staff-invitation` on
+  `app.` and `staging.` only; 429 `EMERGENCY_PROBATION_LIMITED`;
+  emergency-contact alerts drop a domain-like clinician name everywhere
+  (V1); the withdrawal route. The website treats a 404 from any new route as
+  "not available yet". Routes: support's review now answers `grantedRole`
+  and `sessionsRevoked` and needs `platform.facility.unlock`; new
+  `POST /api/v1/admin/self-service-facilities/:id/administrator-role` and
+  `.../end-probation` (If-Match); the staff routes `GET
+  /api/v1/identity/facility-staff`, `POST .../facility-staff/administrator-licence`,
+  `POST .../staff-invitations` (Idempotency-Key), `.../:id/resend`,
+  `.../:id/revoke`, `POST .../facility-staff/:membershipId/end` and
+  `.../role` (`workforce.manage`, the body's `expectedVersion`); the
+  signed-in `POST .../staff-invitations/signed-in/preview` and `.../accept`
+  (no facility header, no permission, no interceptor row: a refusal writes
+  no facility audit row, only the guard's facility-less denial for a bad
+  Origin or CSRF token, as on every route); the public `POST
+  .../staff-invitations/open` and `.../accept` (the `hid_staff_invitation`
+  cookie; no session is issued); support's `GET /api/v1/admin/facilities/:id/staff`
+  and `GET /api/v1/admin/staff-invitations?reference=` (`platform.principal.read`,
+  audited on success). notification-api gains `POST
+  /api/v1/notifications/staff-invitation` (fixed fields, email only); an
+  older notification-api answers 404, which Identity records as a
+  definitive failure, so invitations are switched on only after the
+  all-13 release. Its typed-code sentence reads "go to {page} and enter this
+  email address and the code", without the spec's 'choose "I have a code"':
+  the page opened without a link shows the code form at once and has no such
+  button (found by the integration build's comparison with the website).
+  Identity's choices the spec left open: a replayed invite answers
+  `deliveryOutcome: 'unknown'` (the command keeps no outcome for a replay); a resend reads the invitee's email from the facility's own list
+  (pending plus 30 days), so an invitation that expired more than 30 days
+  ago answers 404; the attestation version is the constant
+  `facility-staff-attestation-v1` (a new text needs an Identity change); a
+  401 from notification-api is `unknown`, not a definitive failure, so it
+  never counts towards the delivery pause; a receptionist's licence fields
+  may be absent or null; support's staff read answers flat rows with
+  `attestedByAccountId` and `attestedByName`, and 404
+  `ADMIN_FACILITY_NOT_FOUND` for an unknown facility; the new Identity calls
+  `identity.organization_self_service_state` on every staff request, so it
+  needs 0086 (the release applies migrations before services).
+- Deviations from `main` (besides the owner's, below): the licence bodies
+  MLSCN and PCN, whose number formats no repository states (the pattern is
+  the general one); no licence expiry is collected; duplicate licence
+  numbers are not refused (support sees `sameLicenceElsewhere`). "Governed
+  clinician provisioning" stays on the not-ported list.
+- Limitations: one administrator per facility (no invitable role manages
+  staff; support changes the administrator's clinical access); no staff MFA;
+  a laboratory's work comes only from tests ordered at the same facility and
+  a pharmacy sees only prescriptions written there, until cross-facility
+  orders (P4c); a governed second product for a self-signed-up company needs
+  support's review of the sign-up first (the governed approval reuses the
+  organization only through an active `org_admin` row).
+- Locks until commit (measured with `pg_locks` on a copy of the 0085
+  production-order database, four runs): besides P4's, SHARE ROW EXCLUSIVE
+  (writes wait, reads do not) on `auth.account_roles` and
+  `identity.consent_grants` (the triggers), `auth.roles`, `identity.facilities`,
+  `identity.staff` and `identity.staff_facility_memberships` (foreign keys of
+  the new tables); no new ACCESS EXCLUSIVE on an existing table. The whole
+  migration took 138-169 ms on an empty database in eight runs (P4's alone
+  53-80 ms), its control section 3.1-5.4 ms.
+- Preflights before signing (read-only; P4's P1, P2, C2, R8 and R17 still
+  apply): PF1 `select count(*) from auth.roles where code =
+  'org_admin_awaiting_review'` and `select count(*) from auth.permissions where
+  code = 'platform.facility.unlock'` must both be 0 (0086 inserts them without
+  ON CONFLICT, so an existing row stops the release); PF2 `select tgname from
+  pg_trigger where tgrelid in ('auth.account_roles'::regclass,
+  'identity.consent_grants'::regclass) and not tgisinternal` shows neither
+  `account_roles_review_gate` nor `consent_grants_self_service_probation`;
+  PF3 `select a.email, r.role_code from auth.account_roles r join
+  auth.accounts a on a.id = r.account_id where r.scope_type = 'platform' and
+  r.revoked_at is null`: each support reviewer holds `platform_admin`,
+  `platform_super_admin`, or `identity_review_admin` + `facility_review_admin`
+  (remedy: grant the last two, never `platform_admin` for this purpose); PF4
+  capture one governed staff member's `GET /api/v1/auth/session` facility
+  block, to compare after the release; PF5 the migration login owns, or holds
+  TRIGGER and REFERENCES on, `auth.account_roles`, `auth.roles`,
+  `auth.role_permissions`, `auth.permissions`, `auth.accounts`,
+  `identity.staff`, `identity.staff_facility_memberships`,
+  `identity.facilities`, `identity.organizations`,
+  `identity.organization_applications` and `identity.consent_grants`
+  (`select c.oid::regclass, pg_get_userbyid(c.relowner) from pg_class c where
+  c.oid in (...)`); PF6 `select account_id, facility_id, count(*) from
+  identity.staff_facility_memberships where active group by 1, 2 having
+  count(*) > 1`, for the record (`main`'s N5; nothing in P4b depends on it).
+- Rollback: switch `staff_invitations_enabled` and
+  `provider_self_service_enabled` off first (the previous console accepts only
+  the six old keys). The previous Identity (57a94db) works on the new schema:
+  it calls no new command; it resolves restricted, reviewed and invited
+  members' permissions from their role rows as before; it can no longer give
+  an unreviewed self-signed-up administrator an organization CAC lookup (no
+  `organization.manage`, 42501 `QOREID_QUOTA_PERMISSION_DENIED`, its 403);
+  the probation trigger keeps capping break-glass (its 429). The rollback
+  suite runs its own SQL, including its staff-context query and a governed
+  approval.
+- Deviations from `main`, each the owner's: facility vouching instead of an
+  independent clinician review; the administrator's clinical role resting on
+  support's review and a recorded licence (Q2); invited clinicians reach
+  patient records with a password only (staff MFA deferred); Outreach intake
+  before review; `facility_review_admin` gains `platform.facility.unlock`.
+- Follow-ups: NIN enablement needs a re-review of self-service access
+  (`identity.registration.write`, held by `org_admin`, nurses and
+  receptionists, engages the policy that reads every patient row); cross-facility
+  lab orders and prescriptions are the next change (P4c), and a stand-alone
+  laboratory's or pharmacy's workspace has no orders until then; invitation
+  data retention (a purge of invitee names and emails after 90 days, S22e)
+  is a separate change; registry checks of licences are not built.
+- Runtime verifier (`services/identity-api/scripts/verify-provider-enrollment-runtime.mjs`,
+  in the migration rehearsal): P4's flow with the restricted role and the
+  new review, then a P4b section run as the Identity runtime over HTTP: the
+  applicant's withdrawal; the pending administrator's six permissions and
+  refusals (patient lookup, registration, break-glass, consent, invite); the
+  review gate against the runtime role directly (no table privilege), the
+  owner and a definer writer called as the runtime role, at a pending and a
+  released organization; the own licence; review refusals and the unlock
+  with sign-out for a hospital (doctor), laboratory (lab), pharmacy
+  (pharmacist), an `other` sign-up (no clinical access, then a doctor by
+  support's administrator-role change) and a least-privilege reviewer; the
+  first 30 days' emergency cap and its early end; invitations closed and
+  opened, the email checked by a local stub of notification-api's route
+  with that route's own DTO and template; open by link and typed code with
+  their counters, supersession and network limit; accept as a new account
+  and sign-in on the role's host; existing staff signed in (link and typed);
+  a patient's or a platform account's email; an account appearing or
+  changing meanwhile; removal, dormant re-acceptance and role change; expiry
+  and revocation; the recipient, cross-facility, first-30-days and
+  delivery-pause limits and the recovery hold; a governed facility
+  unchanged; release after review; support's reads; an audit scan; and the
+  staff context's cost.
+- Tests (`services/ehr-api/test/database/`, rollback-only): new
+  `self-service-review-unlock`, `staff-invitations`,
+  `staff-invitation-acceptance`, `facility-staff-management`,
+  `staff-invitation-concurrency` (serial orders; the two-connection races are
+  run by the build's harness), `p4b-privileges` (grants, definer and
+  search_path, no table privilege, forced row-level security, triggers
+  enabled, the audit leak scan, support's reads) and
+  `provider-self-service-withdrawal`; P4's `provider-self-enrollment`,
+  `provider-self-service-activation`, `provider-self-service-control`,
+  `self-service-facility-release`, `self-service-facility-review` and
+  `provider-self-service-rollback` changed for the restricted role, the new
+  review and the eighth control key.
+
+Cross-facility lab requests and prescriptions (P4c, in 0086's section 6,
+after P4b's section 5; the grants became section 7 and the controls section 8,
+still last). `main` has no cross-facility order routing, so every item here is
+new on this branch except the patient-inbox grant, a port of `main`'s grant.
+Owner decisions of 2026-10-25 (the fifth and sixth sets) are marked "owner".
+The ehr-api, lab-api, pharmacy-api, identity-api and website parts are
+recorded by their builds.
+
+- The route (`ehr.order_routes`, with `ehr.order_route_events`,
+  `ehr.order_route_accept_attempts`, `ehr.order_route_attestation_texts`,
+  `lab.order_route_result_reports`, `pharmacy.order_route_dispensing_reports`
+  and `identity.order_route_destination_settings`): uuid keys, forced
+  row-level security with four permissive policies, no runtime privilege,
+  append-only events and reports. A route is `sent` at once with
+  `respond_by = created_at + 7 days`, then `accepted`, `completed`,
+  `declined`, `withdrawn`, `expired` (stored by the next command that touches
+  it) or `cancelled`; at most one live route per order and five per order;
+  never again once a route of the order was accepted. The guard
+  (`ehr.guard_order_route_mutation`) keeps the header, the snapshot and the
+  attestation immutable, sets each transition column once, allows only the
+  state table's transitions and windows, and requires an event of the new
+  version with the same state and windows (P5); a deferred check requires
+  event 1 at commit, run as the owner (the committing role is the EHR
+  runtime, which reads no route table; found by the race harness, which
+  commits as the runtimes).
+- The clinician's attestation (owner Q2): the send carries the current
+  attestation text version of the kind (`ehr.order_route_attestation_text`,
+  two texts seeded), names the receiving facility, and is stored with the
+  sender's name, the facility's name and `patient_agreement
+  'clinician_attested'`; an older version is refused
+  (`ORDER_ROUTE_ATTESTATION_OUTDATED`).
+- Send (`ehr.send_order_route`, the EHR runtime): staff context with
+  `direct-care` (no emergency, no break-glass), `ehr.order-route.send` (new;
+  doctor and clinician) and the kind's write permission, the patient's write
+  consent at the ordering facility, `cross_facility_orders_enabled` on, the
+  order the patient's in that encounter at this facility (a draft is
+  activated, recorded by the EHR's own versioning), an eligible destination,
+  no deny directive, the patient's active account (V12, or the notice could
+  not reach them), the limits (100 sends per member and 200 per facility pair
+  a day, 500 open per destination); the order is snapshotted with the
+  orderer's licence from a facility attestation whose doctor grant is still
+  in force. The receiving facility gets a `system` row without the patient,
+  the patient the inbox item `ORDER_ROUTE_SENT`. The orderer's withdrawal
+  (`ehr.withdraw_order_route`) needs no consent grant and answers the
+  route's patient, which the EHR checks against the path before its audit
+  row names a patient (a mismatch answers 404 and rolls the withdrawal back).
+- Eligibility (`identity.order_route_destination_eligible`, checked in the
+  directory, at send and at acceptance after locking the receiving
+  organization's application): an active, verified facility of an active
+  organization that is reviewed (self-service) or governed; an active
+  laboratory or pharmacy product at that facility from an approved
+  application; listed (support's latest setting, else governed, else a
+  self-service review by CAC contact, officer match, register or in person);
+  a member holding `lab.order-route.receive` or
+  `pharmacy.order-route.receive` (new; lab and pharmacist); not the ordering
+  facility. The directory (`identity.search_order_destinations`, the Identity
+  runtime) answers at most ten, with the registered address and
+  `newOnHealthId`.
+- Receive (`lab.*`/`pharmacy.*_order_route*`, the Lab and Pharmacy
+  runtimes): Incoming shows no patient, clinical information, instructions,
+  licence number or source ids; acceptance matches the Health ID or the date
+  of birth, optionally with the order's reference (which the patient sees in
+  the app), and counts mismatches: five that name the order (a Health ID, or
+  a date of birth with its reference) or 20 in all lock that order there
+  with a row at the ordering facility and the patient's notice, and 20 a day
+  stop the member; a date of birth without the reference names no order (the
+  counter may have picked another patient's row of several), so it counts
+  only towards the member's day and the order's 20 and tells no one until a
+  lock; a reference that is not the order's is refused
+  (`ORDER_ROUTE_REFERENCE_MISMATCH`) and counted nowhere; the patient's deny
+  directive is checked again at acceptance;
+  refuses a suspended ordering facility (V10), creates the work item bound to
+  the route and answers the patient card; a same-facility hand-off that took
+  the order first makes the acceptance withdraw the route (`order_in_work`,
+  R10); decline takes a reason code.
+- Route access: the work lists' policies became strict
+  (`lab.work_item_allows`/`pharmacy.work_item_allows`: the session facility
+  and the member's consent or this row's route), and `lab.context_allows`/
+  `pharmacy.context_allows` gained one branch, a live route of that kind for
+  that patient at that facility for a member with the receive permission.
+  Residual (the owner signs it): the chain-table branch is per patient at the
+  facility, not per order (SPEC-FINAL 4.3).
+- Windows: work for 30 days after acceptance; after the first result or
+  dispensing both end at `least(completed + 14 days, accepted + 45 days)`
+  and later reports never move them; a cancellation ends writes now and reads
+  7 days later (entered in error, release and support end both now).
+- Returns, in the receiving facility's transaction: a released result
+  version, an invalidation, a dispensing and a reversal each file a report,
+  the first completes the route, and the ordering facility gets a `system`
+  row with the patient. A release on a cancelled route, or on an accepted one
+  past its window, and a dispensing outside the window are refused
+  (`ORDER_ROUTE_CLOSED`); an invalidation and a reversal never are.
+- The mirror (`ehr.sync_order_routes_on_order_change`, after update of a lab
+  request or prescription): a sent route is withdrawn; an accepted lab
+  request is cancelled when it leaves `active` (an edit while active is an
+  event, the receiver keeps what it accepted); an accepted prescription is
+  cancelled by any change; a completed route records the change, and entered
+  in error ends its access and tells the patient (`ORDER_ROUTE_CANCELLED`).
+- Release and support: releasing a self-signed-up organization closes its
+  live routes both ways (a trigger on `self_service_released_at`), with a
+  `system` row at each counterpart, the patients' notices and one platform
+  row `admin.self-service-facility.release-order-routes` with the counts;
+  support finds a route by reference or Health ID, reads its summary, closes
+  it (`admin.order-route.close`, needs `platform.facility.manage`) and lists
+  or unlists a destination (`admin.order-route-destination.set`).
+- The patient (owner Q2): the portal lists the orders sent for them with
+  every field that crossed and the attestation, and Stop withdraws a sent
+  route; an order marked entered in error (closed so, or its lab request or
+  prescription now `entered_in_error`, which the record view already hides)
+  stays listed as the record of what went where but answers no content beyond
+  its reference, no attestation text and no attesting clinician, with
+  `enteredInError` true (it may be another patient's, written in this chart
+  by mistake); notices `ORDER_ROUTE_SENT`, `_WITHDRAWN`, `_ACCEPTED`, `_DECLINED`,
+  `_ACCEPT_LOCKED` and `_CANCELLED` carry only the route, kind and facility
+  names.
+- The patient inbox grant, a port of `main`'s
+  (`eb9b1ca:services/ehr-api/database/runtime-grants.sql:1664-1665`):
+  `identity.list_my_notification_inbox(integer)` and
+  `identity.mark_my_notification_read(uuid)` (0037) were revoked from PUBLIC
+  and granted to no role here, so Identity's `GET
+  /api/v1/identity/me/notifications` and its mark-read failed with 42501 in
+  production. 0086 section 7 and `runtime-grants.sql` grant both to
+  `hid_identity_runtime` (`main` also names `hid_schema_test_runtime`; here
+  the suite runs as the API runtime, so it is not needed).
+- Controls: `cross_facility_orders_enabled` (seeded off; sends, the
+  directory and acceptance) and `cross_facility_route_access_enabled`
+  (seeded on; work on accepted routes, switched off only to stop it
+  everywhere). Every later control migration must carry all four keys of
+  0086 in its CHECK and in `platform.control_enabled`. V11's rule: of the
+  running services (57a94db) only Identity's emergency activation reads a
+  control inside a transaction (`platform.require_control_enabled`, then an
+  insert into `identity.consent_grants`); the guards and the EHR read with a
+  pool statement. 0086 therefore takes `platform.control_settings` (ACCESS
+  EXCLUSIVE) and `identity.consent_grants` (SHARE ROW EXCLUSIVE, for P4b's
+  probation trigger, now created right after) in 6.7's one NOWAIT attempt
+  with the nine clinical tables, and nothing after 6.7 waits for a lock. The
+  first build created that trigger in section 5 and waited for
+  `platform.control_settings` in the control section while holding the nine
+  and `consent_grants`: an activation started in between deadlocked with the
+  migration (40P01; either side could be the victim, so the clinician's
+  activation could fail or the release stop), and every control read queued
+  behind the waiting lock until the deadlock was detected (about 1 s). The
+  build's race harness reproduced it in 6 of 6 runs and shows none since.
+  P4c's own commands also read controls inside clinical transactions, so a
+  later migration that locks `platform.control_settings` while holding
+  clinical locks or a lock on `identity.consent_grants` must take it in the
+  same NOWAIT attempt.
+- Locks: nothing before section 6.7 locks the nine clinical tables
+  (`lab.work_items`, `pharmacy.work_items`, `ehr.lab_requests`,
+  `ehr.encounters`, `ehr.prescriptions`, `lab.result_releases`,
+  `lab.result_invalidations`, `pharmacy.dispensings`,
+  `pharmacy.dispensing_reversals`), `platform.control_settings` or
+  `identity.consent_grants`; 6.7 takes the nine and
+  `platform.control_settings` ACCESS EXCLUSIVE and `identity.consent_grants`
+  SHARE ROW EXCLUSIVE at once with NOWAIT, retrying every 100 ms, so every
+  authenticated request's control read waits from 6.7 to commit (not behind
+  a waiting lock), and stops the release with
+  nothing applied after 50 attempts (55P03, "the clinical order tables
+  stayed busy for 5 seconds; run the release again at a quieter time").
+  Measured on PostgreSQL 16 (the schema declaration's evidence): about 40 ms
+  from 6.7 to commit on an empty database and about 200 ms with 50,000 work
+  items in each list; under 20 to 300 transactions a second on the nine
+  tables the release applied in 0.5 to 1.0 s with no failed transaction;
+  under saturating traffic it stopped with 55P03 and applied nothing, and ran
+  again cleanly once the traffic stopped.
+- Rollback: switch `cross_facility_orders_enabled` off first (with P4's and
+  P4b's two; the previous console accepts only the six old keys), and
+  `cross_facility_route_access_enabled` too if the reason is route access.
+  The previous services (57a94db) call no new function; their same-facility
+  writes carry no route and pass the unchanged branches; the previous Lab and
+  Pharmacy list route-backed items but authorize each through Identity, so
+  routed work pauses until the images return. The rollback suite runs the
+  previous EHR's lab request create and update, the previous Lab's and
+  Pharmacy's acceptance, list and per-item read, and the previous Identity's
+  control list (ten keys) on the new schema.
+- Tests (`services/ehr-api/test/database/`, rollback-only): new
+  `order-routes-send`, `order-routes-receive`, `order-routes-patient`,
+  `order-routes-lifecycle`, `order-routes-returns`,
+  `order-routes-concurrency` (serial orders; the two-connection races, the
+  final block against a dispensing in flight and their deadlocking mutants
+  run in the build's harness), `order-routes-privileges` and
+  `patient-notification-inbox-runtime`; `provider-self-service-control` and
+  `provider-self-service-rollback` changed for the ten keys and the previous
+  EHR, Lab and Pharmacy SQL.
+
+The services' part of P4c (all new; routes under `/api/v1`, errors
+`application/problem+json` keyed on `code`, every id a v4 UUID):
+
+- ehr-api: `POST`/`GET patients/:patientId/encounters/:encounterId/lab-requests/:requestId/order-routes`
+  and `POST …/order-routes/:routeId/withdraw`, the same three under
+  `prescriptions/:prescriptionId`, `GET order-route-attestation?kind=`,
+  `GET me/order-routes` and `POST me/order-routes/:routeId/withdraw` (the
+  patient's Stop, the only patient write). Send and an order's routes run in
+  the clinical repository (Identity's write or read consent, the staff audit
+  row with the patient; the send's row carries the attestation version and
+  `patientAgreement`); withdraw and the attestation text are plain staff
+  transactions with their own rows; the patient's routes are patient-self
+  transactions. Every staff order-route route answers 403 `PERMISSION_DENIED`
+  unless the purpose is `direct-care`. The lab-request and prescription lists
+  and reads gain `orderRoute` (C4, only under `direct-care`) and
+  `crossFacilityOrders` (a pool read after the transaction, false on any
+  error); the lab request's row lock is `for no key update`; an update of a
+  routed request never hands it to this facility's Lab (`labHandoff
+  {state:'not_sent', code:'ORDER_ROUTED'}`); `sendToLab` and the
+  pharmacist's hand-off answer 409 `LAB_REQUEST_ROUTED` /
+  `PRESCRIPTION_ROUTED`. An order counts as routed while its latest route is
+  live or was ever accepted (one work item per order, ever).
+- lab-api and pharmacy-api: `GET order-routes?view=incoming|recent`
+  (default `incoming`; its `healthId` parameter is deprecated, see below),
+  `POST order-routes/search` (`{ view?, healthId }`, the Health ID in the
+  body), `GET order-routes/:routeId`, `POST …/accept`
+  (`Idempotency-Key`; the Health ID upper-cased and trimmed, or a calendar
+  date, and an optional `reference` (the order's 8 characters); pharmacy adds
+  a reason of 8-500) and `POST …/decline`, for
+  `lab.order-route.receive` / `pharmacy.order-route.receive`, READ COMMITTED.
+  A mismatch, the lock and `order_in_work` commit with their audit row and
+  are answered after the commit (409, with `attemptsLeft` as a problem
+  member). Every per-item route asks the database about the resource it acts
+  on (`lab.order_route_access_for` / `pharmacy.order_route_access_for`):
+  `allowed` goes on with `basis: 'order-route'` in its audit row, `closed` is
+  409 `ORDER_ROUTE_CLOSED`, `paused` 423 `CROSS_FACILITY_ORDERS_UNAVAILABLE`,
+  `none` asks Identity as before. Route-backed work rows carry the route card
+  and, while the route allows a read, the patient's name, sex, date of birth
+  and Health ID's last 4, and never the other facility's order, prescription
+  or encounter id; a work list that shows a patient's identity writes one
+  audit row per patient shown (`lab.work-item.list` /
+  `pharmacy.work-item.list`, naming the patient, with the work item and route
+  ids and `basis: 'order-route'`). A Lab release refused by the return trigger is 409
+  `ORDER_ROUTE_CLOSED`; a refused dispensing on a route-backed item is 409
+  `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE`.
+- identity-api: `GET identity/order-destinations?kind=laboratory|pharmacy&query=`
+  (`ehr.order-route.send`, run under `direct-care`; 60 searches per
+  membership an hour in an `account` bucket keyed by an HMAC of the
+  membership with the OTP key, counted in its own transaction before the
+  search; the audit row names the kind and the count, never the query);
+  support's `GET admin/facilities/:facilityId/order-route-summary`,
+  `POST admin/facilities/:facilityId/order-destination`,
+  `GET admin/order-routes?reference=` (its `healthId` parameter is
+  deprecated), `POST admin/order-routes/search` (`{ reference }` or
+  `{ healthId }`, same permissions and audit action) and
+  `POST admin/order-routes/:routeId/close` (`If-Match`), `@FacilityOptional`,
+  reads audited on success and failure, writes on failure only (their
+  platform rows come from the commands); `POST admin/controls` accepts the
+  two new keys; the sign-up availability's open answer gains
+  `crossFacilityOrders`, read on its own so an unknown key never closes
+  sign-up. The patient inbox routes need no code change.
+- Choices recorded from the services' build (services report D1-D19):
+  validation of the directory, the lookup, the identifiers and the
+  attestation kind answers the spec's own codes rather than
+  `VALIDATION_FAILED`; a send replay answers the receiver's availability as
+  unknown (null); the withdraw answer carries only what the withdrawal
+  returns; the patient's content includes what crossed about the orderer;
+  `date` values are read by their calendar fields so no process time zone
+  moves them; a unique violation or deadlock on a send answers 503
+  `ORDER_ROUTE_UNAVAILABLE` (a retry answers the real state).
+- Found by the review and fixed (P4c's backend fix):
+  - Health IDs in GET query strings (Lab and Pharmacy "Find by Health ID",
+    support's lookup) reached the gateway's access log, whose stock `main`
+    format keeps the request line with its query (CODEX §26). The gateway now
+    logs `$request_method $uri $server_protocol`, never the query string,
+    for every route; and each lookup has a POST that takes the Health ID in
+    its body. The GETs still take `healthId` for the website build that
+    sends it (deprecated): once the website calls the POSTs, the GETs should
+    refuse it.
+  - A change of the self-signed-up administrator's own access
+    (`identity.admin_set_self_service_administrator_role`) also overwrote
+    `self_service_verification_method`, which P4c's default listing reads, so
+    it listed or unlisted the facility for orders without any listing record.
+    The change's method is now kept in its audit row only.
+- Found by the integration's end-to-end run and fixed:
+  - A route-backed work item that the strict policy hides (its route paused
+    by `cross_facility_route_access_enabled`, or closed) answered 404 on
+    `GET work-items/:id`, Lab's accession and Pharmacy's dispensing; these
+    now ask the database about the hidden item and answer 423
+    `CROSS_FACILITY_ORDERS_UNAVAILABLE` or 409 `ORDER_ROUTE_CLOSED`, as the
+    route contract says. A chain row (an accession, specimen, execution,
+    result or dispensing) is found only through rows the session can read, so
+    while route access is off it is refused (403 or 404), not "paused".
+  - A port of `main`'s binding (not P4c, but every cross-facility order
+    needs it): a patient's own decisions on access requests
+    (`GET /api/v1/identity/me/access-requests`, `POST
+    …/access-requests/:requestId/approve` and `…/deny`) took the staff
+    request context, so the patient app (which sends no purpose header)
+    got 400 `PURPOSE_OF_USE_REQUIRED`, and with the header 500 (a patient
+    has no facility): no patient could see, approve or deny a clinician's
+    request, so no write grant could be created through the app. They are
+    now patient-only and bound to the patient session (`main` does the
+    same). `main`'s two checks on approval are ported too (the review found
+    the approval live without them, and a write grant is what lets a
+    clinician send the patient's order to another facility): an approval is
+    refused for 24 hours after an OTP account recovery (403
+    `PATIENT_RECENT_RECOVERY_HOLD`, checked first) and from a session family
+    first issued more than 10 minutes ago (403
+    `PATIENT_RECENT_AUTH_REQUIRED`, "For your security, sign out, sign in
+    again, and approve within 10 minutes."), in the approval's transaction;
+    the denial and the list stay unguarded. As in `main`, setting an Access
+    PIN is held for 24 hours after a recovery as well (revoking it is not).
+- The runtime verifier `services/ehr-api/scripts/verify-order-routes-runtime.mjs`
+  (run by the TUF rehearsal after the provider verifier) boots Identity,
+  EHR, Lab and Pharmacy from their own code, each as its exact runtime role,
+  and drives P4c end to end over HTTP with fixtures from P4's sign-up, P4b's
+  review and invitations and the patient's approval in the app.
+
 ## Not ported, and why
 
 - Already on this branch: #26 (0071 grants the list), #58 (0071 seeds `direct-care`).
@@ -216,7 +1231,7 @@ these ways, all from the owner's decision to enable it now:
 - Needs `main`'s Phase 4 platform administration (0061–0072 on `main`), which
   this branch replaces with its own (0064): the rest of #18 (its control and
   audit repairs are ported above), #24, #32 7A (its OCR guards are ported
-  above), #49, #81, #76 A24 (its search is ported above), #80 A20, and the platform branches of #25, #27 and
+  above), #49, #76 A24 (its search is ported above), #80 A20, and the platform branches of #25, #27 and
   #39 (`admin_revoke_session_family`, `PlatformSecurityService`,
   `platformSessionEnded`). Platform administrator MFA would bring them back as
   its own change.
@@ -277,6 +1292,17 @@ these ways, all from the owner's decision to enable it now:
 - Edits a suite in `services/ehr-api/database/tests/`, which production
   refuses: #48 as `main` made it (0080 also restates `main`'s 0077 bodies). A
   port orders its guards so the suite needs no edit.
+- `main`'s `0066_patient_access_safety.sql` beyond the inbox grant (P4c
+  needs none of it): the session-bound access-request wrappers
+  (`list_my_patient_access_requests`, `approve_my_access_request`,
+  `deny_my_access_request`; here Identity calls the 0035 commands, which bind
+  to the signed-in account's patient), the patient's revocation of a grant
+  they gave (`revoke_my_consent_grant`; break-glass grants are never
+  patient-revocable), the access history's `breakGlass` and
+  `patientRevocable` labels, and no new inbox items for a deleted login
+  (here `notification.enqueue_patient_inbox_item` checks only an active
+  patient with an account). Its decision-command repair is already here as
+  0072. Each would be its own change.
 - The other launch features and their infrastructure (#63–#98) are not ported
   yet. Each waits on the owner decision recorded below, where it needs one.
 
@@ -304,6 +1330,13 @@ Decided by the owner, D-Eminence:
   document routes).
 - Staff password recovery runs on the portal (#41, ported above), and staff
   sign-in on the portal sends staff to ehr.
+- Facility self sign-up (D14, 2026-10-23, and 2026-10-24): hospitals,
+  laboratories and pharmacies sign themselves up, finishing with a password
+  (no authenticator); every new facility appears for support, who review it
+  within a business day and suspend the facility and disable the account if it
+  looks wrong; all four products; 200 CAC lookups a day across all sign-ups;
+  unactivated applications lapse after 24 hours; the control ships off and is
+  switched on right after the deploy and its closed-state checks, with no pilot.
 
 Still open, with what each one holds back:
 
@@ -345,8 +1378,23 @@ Still open, with what each one holds back:
   origin secret.
 - Platform administrator MFA, two-person approval, governed clinician
   provisioning, staff MFA and clinician sign-up.
-- Patient features held behind controls: revoking access, account deletion and
-  hospital self-activation.
+- Patient features held behind controls: revoking access and account
+  deletion. (Hospital self-activation is ported above as facility self sign-up,
+  behind `provider_self_service_enabled`.)
+- Facility self sign-up (ported above, switched off): the owner signs the 0086
+  declaration, after the read-only preflights (no closed organization
+  application without a review reason, reviewer or review time, which 0086
+  refuses; one reviewer check and one control-key check; the owner of
+  `platform.control_settings` and `platform.control_enabled`; and
+  `platform.control_settings`'s row-level security and FORCE settings with its
+  owner's `rolsuper` and `rolbypassrls`: stop and find out why if row-level
+  security and FORCE are both on and the owner has neither, since production's
+  accountless control reads could not then work as they do; and the md5 of the
+  live sources of `platform.consume_qoreid_quota` and
+  `identity.begin_organization_profile_completion`, which 0086 requires to be
+  0049's `dca2fbb737f2c747148eacc7d6e66c5f` and 0056's
+  `6c94f9fca935f41a1bbcc313d9447d04`, else its dry run stops the release with
+  nothing changed), then opens the control with the audited admin command.
 - Emergency contacts (ported above, switched off): storing contacts' names and
   destinations, the alert wording, production delivery and the pilot accounts.
   Alerts also need an active `emergency` purpose of use, which 0085 seeds;

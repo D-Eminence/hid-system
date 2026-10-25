@@ -63,13 +63,16 @@ function identityControllers(): Array<{ name: string; prototype: object }> {
 describe('Patient-only routes (A9)', () => {
   // SecurityGuard refuses any session other than the patient's own on these
   // routes (403 PATIENT_SESSION_REQUIRED) before the handler, and records the
-  // refusal without a facility. On Novu only the emergency-contact routes are
-  // patient-only so far (main's W11 extends it to the other me/* routes). A
-  // route that loses @PatientOnly() fails here.
+  // refusal without a facility. On Novu the emergency-contact routes and the
+  // patient's own access-request list and decisions (P4c) are patient-only so
+  // far (main's W11 extends it to the other me/* routes). A route that loses
+  // @PatientOnly() fails here.
   const PATIENT_ONLY_HANDLERS = [
     'EmergencyContactController.list', 'EmergencyContactController.availability', 'EmergencyContactController.add',
     'EmergencyContactController.update', 'EmergencyContactController.deactivate',
     'EmergencyContactController.sendVerification', 'EmergencyContactController.confirmVerification',
+    'ConsentController.listMyAccessRequests', 'ConsentController.approveAccessRequest',
+    'ConsentController.denyAccessRequest',
   ];
   const declared = identityControllers().flatMap((controller) => routes(controller)
     .map((route) => ({ ...route, handler: `${controller.name}.${route.name}` })));
@@ -79,7 +82,7 @@ describe('Patient-only routes (A9)', () => {
       'PatientSelfController', 'ConsentController', 'EmergencyContactController', 'AdminController', 'HealthController']));
   });
 
-  it('marks exactly the emergency-contact routes patient-only, each also patient-allowed and facility-optional', () => {
+  it('marks exactly the emergency-contact and access-request decision routes patient-only, each also patient-allowed and facility-optional', () => {
     const patientOnly = declared.filter((route) => route.patientOnly === true);
     expect(patientOnly.map((route) => route.handler).sort()).toEqual([...PATIENT_ONLY_HANDLERS].sort());
     for (const route of patientOnly) {

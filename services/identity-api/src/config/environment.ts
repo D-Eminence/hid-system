@@ -17,6 +17,23 @@ const pilotAccountIds = z.preprocess(emptyToUndefined, z.string().optional())
   .pipe(z.array(z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
     'Pilot account IDs must be UUIDs')).max(20).refine(uniqueValues, 'Pilot account IDs must be unique'));
 
+/** The code default of PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP (owner decision Q2, 2026-10-24). */
+export const PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP_DEFAULT = 200;
+/**
+ * The platform-wide daily cap on QoreID CAC lookups made by facility self
+ * sign-up (P4 A6): an integer from 1 to 100000, 200 when unset. Any other value
+ * becomes null, which keeps self sign-up closed (423) instead of refusing to
+ * boot: a boot refusal would stop every Identity route (Novu's register).
+ */
+const selfServiceDailyCap = z.preprocess(emptyToUndefined, z.string().optional())
+  .transform((value): number | null => {
+    if (value === undefined) return PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP_DEFAULT;
+    const text = value.trim();
+    if (!/^[0-9]{1,6}$/.test(text)) return null;
+    const cap = Number(text);
+    return cap >= 1 && cap <= 100_000 ? cap : null;
+  });
+
 function validProxyCidr(value: string): boolean {
   const [address, prefix, extra] = value.split('/');
   if (!address || extra !== undefined) return false;
@@ -129,6 +146,9 @@ const environmentSchema = z.object({
   // QoreID's POST endpoints do not publish an idempotency contract. Keep
   // retries explicitly disabled rather than risking duplicate verification.
   QOREID_MAX_RETRIES: z.coerce.number().int().min(0).max(0).default(0),
+  // Facility self sign-up's platform-wide daily QoreID CAC lookup cap (P4 A6).
+  // Null when the value is invalid: self sign-up then stays closed.
+  PROVIDER_SELF_SERVICE_QOREID_DAILY_CAP: selfServiceDailyCap,
   // One budget of wrong public-enrollment contact codes per recipient, across
   // its challenges and enrollments: the PATIENT_ENROLLMENT_CONTACT_FAILURE_MAX-th
   // wrong code within the window refuses every code for that recipient, a

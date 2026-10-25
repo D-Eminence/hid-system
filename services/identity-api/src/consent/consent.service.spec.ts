@@ -106,6 +106,23 @@ describe('ConsentService', () => {
       expect(query).toHaveBeenCalledTimes(2);
     },
   );
+  // P4b (Q4, V5): a self-signed-up facility's first 30 days allow 5 emergency
+  // activations a day; that refusal has its own code and words, and any other
+  // P0001 keeps the per-account limit's.
+  it('answers the first-30-days cap 429 EMERGENCY_PROBATION_LIMITED, before the generic P0001', async () => {
+    query.mockResolvedValueOnce({ rows: [{}] })
+      .mockRejectedValueOnce(Object.assign(new Error('EMERGENCY_PROBATION_LIMIT'), { code: 'P0001' }));
+    await expect(service.activateBreakGlass({ ...context, purposeOfUse: 'emergency' }, {
+      hid: 'HID-ABCDEFGH', reason: 'Emergency care required', durationMinutes: 30,
+    })).rejects.toMatchObject({ status: 429, code: 'EMERGENCY_PROBATION_LIMITED',
+      message: 'This facility is new to Health ID: emergency access is limited to 5 activations a day in its first '
+        + '30 days. Contact Health ID support to lift the limit.' });
+    query.mockResolvedValueOnce({ rows: [{}] })
+      .mockRejectedValueOnce(Object.assign(new Error('Emergency access rate limit exceeded'), { code: 'P0001' }));
+    await expect(service.activateBreakGlass({ ...context, purposeOfUse: 'emergency' }, {
+      hid: 'HID-ABCDEFGH', reason: 'Emergency care required', durationMinutes: 30,
+    })).rejects.toMatchObject({ status: 429, code: 'EMERGENCY_RATE_LIMITED' });
+  });
   it('propagates audit/outbox failure without returning a grant', async () => {
     const outage = new Error('Synthetic durable audit outage');
     query.mockResolvedValueOnce({ rows: [{}] }).mockRejectedValueOnce(outage);
@@ -247,23 +264,83 @@ describe('ConsentService', () => {
     expect(query).toHaveBeenCalledWith(expect.stringContaining('identity.list_my_access_requests()'));
   });
 
-  it('returns the patient approval result from the governed consent command', async () => {
-    query.mockResolvedValueOnce({
-      rows: [{
-        accessRequestId: '40000000-0000-4000-8000-000000000004',
-        consentGrantId: '60000000-0000-4000-8000-000000000004',
-        patientId: '50000000-0000-4000-8000-000000000004',
-        status: 'approved',
-        expiresAt: new Date('2026-09-29T13:00:00.000Z'),
-        replayed: false,
-      }],
-    });
-    await expect(service.approveAccessRequest(context, '40000000-0000-4000-8000-000000000004'))
+  // The patient's own decision (patientConsentContext): no facility, the patient session.
+  const patientContext: DataAccessContext = {
+    correlationId: 'consent-service-patient-correlation', facilityId: '', membershipId: '', purposeOfUse: 'direct-care',
+    actor: {
+      kind: 'patient', id: '70000000-0000-4000-8000-000000000001', subject: 'patient:test',
+      accountId: '70000000-0000-4000-8000-000000000001', patientId: '50000000-0000-4000-8000-000000000004',
+      sessionId: '80000000-0000-4000-8000-000000000001', roles: [], permissions: [], facilityIds: [], facilities: [],
+      authenticationMethod: 'local',
+    },
+  };
+  const approved = {
+    rows: [{
+      accessRequestId: '40000000-0000-4000-8000-000000000004',
+      consentGrantId: '60000000-0000-4000-8000-000000000004',
+      patientId: '50000000-0000-4000-8000-000000000004',
+      status: 'approved',
+      expiresAt: new Date('2026-09-29T13:00:00.000Z'),
+      replayed: false,
+    }],
+  };
+
+  it('returns the patient approval result from the governed consent command, after the hold and sign-in checks', async () => {
+    query.mockResolvedValueOnce({ rows: [{ held: false }] })
+      .mockResolvedValueOnce({ rows: [{ recent: true }] })
+      .mockResolvedValueOnce(approved);
+    await expect(service.approveAccessRequest(patientContext, '40000000-0000-4000-8000-000000000004'))
       .resolves.toMatchObject({ status: 'approved', replayed: false });
-    expect(query).toHaveBeenCalledWith(
+    // In this order and in the approval's one transaction (main eb9b1ca).
+    expect(withTransaction).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0]?.[0]).toContain('auth.otp_challenges');
+    expect(query.mock.calls[0]?.[1]).toEqual(['70000000-0000-4000-8000-000000000001', 24]);
+    expect(query.mock.calls[1]?.[0]).toContain('min(family.issued_at)');
+    expect(query.mock.calls[1]?.[1]).toEqual(['80000000-0000-4000-8000-000000000001',
+      '70000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000004']);
+    expect(query).toHaveBeenNthCalledWith(3,
       expect.stringContaining('identity.approve_access_request'),
       ['40000000-0000-4000-8000-000000000004'],
     );
+  });
+
+  it('refuses an approval for 24 hours after an OTP recovery, before anything else (REC-NOTIFY)', async () => {
+    query.mockResolvedValueOnce({ rows: [{ held: true }] });
+    await expect(service.approveAccessRequest(patientContext, '40000000-0000-4000-8000-000000000004'))
+      .rejects.toMatchObject({ status: 403, code: 'PATIENT_RECENT_RECOVERY_HOLD' });
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('approve_access_request'))).toBe(false);
+  });
+
+  it('fails closed when the recovery hold cannot be read', async () => {
+    query.mockResolvedValueOnce({ rows: [] });
+    await expect(service.approveAccessRequest(patientContext, '40000000-0000-4000-8000-000000000004'))
+      .rejects.toMatchObject({ status: 403, code: 'PATIENT_RECENT_RECOVERY_HOLD' });
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses an approval from a session family not signed in within 10 minutes, with main\'s detail', async () => {
+    query.mockResolvedValueOnce({ rows: [{ held: false }] }).mockResolvedValueOnce({ rows: [{ recent: false }] });
+    await expect(service.approveAccessRequest(patientContext, '40000000-0000-4000-8000-000000000004'))
+      .rejects.toMatchObject({ status: 403, code: 'PATIENT_RECENT_AUTH_REQUIRED',
+        message: 'For your security, sign out, sign in again, and approve within 10 minutes.' });
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('approve_access_request'))).toBe(false);
+  });
+
+  it('refuses an approval without a patient session before any query', async () => {
+    await expect(service.approveAccessRequest(context, '40000000-0000-4000-8000-000000000004'))
+      .rejects.toMatchObject({ status: 403, code: 'PATIENT_SESSION_REQUIRED' });
+    expect(withTransaction).not.toHaveBeenCalled();
+  });
+
+  it('leaves the denial unguarded: no hold or sign-in check', async () => {
+    query.mockResolvedValueOnce({ rows: [{ accessRequestId: '40000000-0000-4000-8000-000000000004', status: 'denied',
+      patientId: '50000000-0000-4000-8000-000000000004', deniedAt: new Date(), replayed: false }] });
+    await expect(service.denyAccessRequest(patientContext, '40000000-0000-4000-8000-000000000004', 'Not my clinician'))
+      .resolves.toMatchObject({ status: 'denied' });
+    expect(query).toHaveBeenCalledTimes(1);
+    expect(query.mock.calls[0]?.[0]).toContain('identity.deny_access_request');
   });
 
   it('returns the patient denial result and trims the reason', async () => {

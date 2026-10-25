@@ -29,13 +29,36 @@ import { OrganizationProfileCompletionService } from './organization-profile-com
 import { PatientEnrollmentController } from './patient-enrollment.controller';
 import { PatientEnrollmentService } from './patient-enrollment.service';
 import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider } from './patient-enrollment.provider';
+import { ProviderEnrollmentController } from './provider-enrollment.controller';
+import { ProviderEnrollmentService } from './provider-enrollment.service';
+import { AdminSelfServiceApplicationsController,
+  AdminSelfServiceFacilitiesController } from './self-service-facilities.controller';
+import { SelfServiceFacilitiesService } from './self-service-facilities.service';
+import { AdminFacilityStaffController } from './admin-facility-staff.controller';
+import { FacilityStaffController } from './facility-staff.controller';
+import { FacilityStaffService } from './facility-staff.service';
+import { StaffInvitationsPublicController } from './staff-invitations-public.controller';
+import { StaffInvitationsSignedInController } from './staff-invitations-signed-in.controller';
+import { StaffInvitationsService } from './staff-invitations.service';
+import { StaffReauthenticationService } from './staff-reauthentication.service';
+import { OrderDestinationsController } from './order-destinations.controller';
+import { OrderDestinationsService } from './order-destinations.service';
 
 @Module({
   imports: [AuthModule, TurnstileModule, IntegrationModule],
   controllers: [IdentityController, NinRegistrationController, QoreIdVerificationController,
     PublicOrganizationApplicationsController, PublicOrganizationProfileCompletionController,
     AdminOrganizationApplicationsController,
-    PatientEnrollmentController],
+    PatientEnrollmentController,
+    ProviderEnrollmentController,
+    AdminSelfServiceFacilitiesController, AdminSelfServiceApplicationsController,
+    // Facility staff invitations (P4b). The static segments (open, accept,
+    // signed-in/preview, signed-in/accept) never match :invitationId/resend or
+    // :invitationId/revoke.
+    StaffInvitationsSignedInController, StaffInvitationsPublicController, FacilityStaffController,
+    AdminFacilityStaffController,
+    // The directory of laboratories and pharmacies an order can go to (P4c).
+    OrderDestinationsController],
   providers: [
     IdentityService,
     NinRegistrationService,
@@ -58,6 +81,12 @@ import { PUBLIC_PATIENT_IDENTITY_PROVIDER, QoreIdPublicPatientIdentityProvider }
     OrganizationProfileCompletionService,
     NotificationOtpClient,
     PatientEnrollmentService,
+    ProviderEnrollmentService,
+    SelfServiceFacilitiesService,
+    StaffInvitationsService,
+    FacilityStaffService,
+    StaffReauthenticationService,
+    OrderDestinationsService,
     QoreIdPublicPatientIdentityProvider,
     { provide: PUBLIC_PATIENT_IDENTITY_PROVIDER, useExisting: QoreIdPublicPatientIdentityProvider },
     PostgresIdentityProvider,

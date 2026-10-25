@@ -6,8 +6,8 @@ import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
-import { IdentityService } from '../identity/identity.service';
 import type { CompleteExecutionDto,CorrectResultDto,EnterResultDto,GovernResultDto,StartExecutionDto } from './dto/execution.dto';
+import { LabOrderRouteAccess,basisDetails,type LabRouteResource,type RecordAction } from './order-route-access';
 
 interface ExecutionRow extends QueryResultRow {id:string;accession_id:string;specimen_id:string;requested_test_id:string;patient_id:string;
  facility_id:string;status:'in_progress'|'completed';method:string|null;started_at:Date;completed_at:Date|null;row_version:string;
@@ -24,9 +24,22 @@ const REV=`rr.id::text,rr.result_id::text,rr.execution_id::text,rr.patient_id::t
  rr.result_type,rr.numeric_value::text,rr.text_value,rr.unit,rr.reference_range,rr.abnormal_flag,rr.entry_source,
  rr.verification_status,rr.entered_at,rr.correction_reason,rr.request_sha256`;
 
+const executionDenied=()=>new DomainProblem(403,'LAB_EXECUTION_ACCESS_DENIED','Lab execution/result access is not authorized');
+
+/**
+ * The Lab return trigger refuses a release on an order route from another facility that is cancelled, or accepted and
+ * past its work window (P4c, SPEC-FINAL §6, P3): 23514 with the message ORDER_ROUTE_CLOSED, answered 409. Any other
+ * error of the insert is passed on unchanged (a serialization failure reaches DatabaseService's retry).
+ */
+function releaseRefusal(error:unknown):DomainProblem|undefined{
+ const {code,message}=(typeof error==='object'&&error!==null?error:{}) as {code?:unknown;message?:unknown};
+ if(code!=='23514'||message!=='ORDER_ROUTE_CLOSED')return undefined;
+ return new DomainProblem(409,'ORDER_ROUTE_CLOSED','This order from another facility is closed: its result cannot be released',undefined,{cause:error});
+}
+
 @Injectable()
 export class LabExecutionsService {
- constructor(private readonly database:DatabaseService,private readonly identity:IdentityService,private readonly audit:AuditService) {}
+ constructor(private readonly database:DatabaseService,private readonly audit:AuditService,private readonly routeAccess:LabOrderRouteAccess) {}
 
  async start(context:DataAccessContext,specimenId:string,input:StartExecutionDto,key:string) {
   this.permission(context,'lab.execution.start'); const normalized={expectedSpecimenVersion:input.expectedSpecimenVersion,
@@ -37,7 +50,7 @@ export class LabExecutionsService {
     `select s.id::text,s.accession_id::text,s.patient_id::text,s.facility_id::text,s.status,s.row_version::text,a.work_item_id::text
      from lab.specimens s join lab.accessions a on a.id=s.accession_id where s.id=$1 for update of s`,[specimenId]);
    const source=specimen.rows[0]; if(!source) throw new DomainProblem(404,'LAB_SPECIMEN_NOT_FOUND','Lab specimen was not found');
-   await this.authorize(source.patient_id,context,'write_records');
+   const basis=await this.authorize(client,context,'specimen',source.id,source.patient_id,'write_records');
    if(source.status!=='received'||Number(source.row_version)!==input.expectedSpecimenVersion) throw new DomainProblem(412,'SPECIMEN_NOT_EXECUTABLE','Only the expected received specimen version can begin execution');
    const existing=await client.query<ExecutionRow>(`select ${EXEC} from lab.test_executions e join lab.work_item_requested_tests t on t.id=e.requested_test_id
     where e.specimen_id=$1 or (e.facility_id=$2 and e.started_by=$3 and e.idempotency_key=$4)`,[specimenId,context.facilityId,context.actor.accountId,key]);
@@ -54,7 +67,7 @@ export class LabExecutionsService {
    const row=inserted.rows[0]; if(!row) throw new DomainProblem(503,'LAB_EXECUTION_NOT_CREATED','Execution could not be started');
    const full=await this.find(client,row.id); await this.event(client,full,1,'execution_started',normalized.reason,context);
    await this.outbox(client,'LabTestExecutionStarted',full.id,1,full,context,{executionId:full.id,specimenId,requestedTestId:full.requested_test_id,status:'in_progress'});
-   await this.audit.recordWithClient(client,this.auditEvent(context,full,'lab.execution.start',{accessionId:full.accession_id,specimenId,requestedTestId:full.requested_test_id}));
+   await this.audit.recordWithClient(client,this.auditEvent(context,full,'lab.execution.start',{accessionId:full.accession_id,specimenId,requestedTestId:full.requested_test_id,...basisDetails(basis)}));
    return this.aggregate(client,full);
   },{isolationLevel:'SERIALIZABLE'});
  }
@@ -63,7 +76,7 @@ export class LabExecutionsService {
   this.permission(context,'lab.execution.complete'); const payload={expectedVersion:input.expectedVersion,completedAt:input.completedAt,notes:input.notes?.trim()||null};
   const digest=requestDigest('lab.execution.complete',{executionId:id,...payload});
   return this.database.withTransaction(context,async client=>{
-   const current=await this.find(client,id,true); await this.authorize(current.patient_id,context,'write_records');
+   const current=await this.find(client,id,true); const basis=await this.authorize(client,context,'execution',current.id,current.patient_id,'write_records');
    if(current.status==='completed'&&current.completed_idempotency_key===key) {if(current.completed_request_sha256!==digest) throw new DomainProblem(409,'IDEMPOTENCY_CONFLICT','Completion conflicts with existing command');return this.aggregate(client,current);}
    const result=await client.query<ExecutionRow>(`update lab.test_executions set status='completed',completed_at=$2,completed_by=$3,
     completed_by_membership_id=$4,completion_notes=$5,completed_idempotency_key=$6,completed_request_sha256=$7,row_version=row_version+1
@@ -71,7 +84,7 @@ export class LabExecutionsService {
    if(!result.rows[0]) throw new DomainProblem(412,'VERSION_CONFLICT','Execution changed or is not in progress');
    const row=await this.find(client,id); await this.event(client,row,Number(row.row_version),'execution_completed','Analytical execution completed',context);
    await this.outbox(client,'LabTestExecutionCompleted',row.id,Number(row.row_version),row,context,{executionId:row.id,status:'completed'});
-   await this.audit.recordWithClient(client,this.auditEvent(context,row,'lab.execution.complete',{accessionId:row.accession_id,specimenId:row.specimen_id}));
+   await this.audit.recordWithClient(client,this.auditEvent(context,row,'lab.execution.complete',{accessionId:row.accession_id,specimenId:row.specimen_id,...basisDetails(basis)}));
    return this.aggregate(client,row);
   },{isolationLevel:'SERIALIZABLE'});
  }
@@ -85,7 +98,7 @@ export class LabExecutionsService {
    unit:input.unit?.trim()||null,referenceRange:input.referenceRange?.trim()||null,abnormalFlag:input.abnormalFlag??'unknown',correctionReason};
   const digest=requestDigest(resultId?'lab.result.correct':'lab.result.enter',payload);
   return this.database.withTransaction(context,async client=>{
-   const execution=await this.find(client,executionId,true); await this.authorize(execution.patient_id,context,'write_records');
+   const execution=await this.find(client,executionId,true); const basis=await this.authorize(client,context,'execution',execution.id,execution.patient_id,'write_records');
    if(execution.status!=='completed'||Number(execution.row_version)!==input.expectedExecutionVersion) throw new DomainProblem(412,'EXECUTION_NOT_RESULT_ELIGIBLE','Result requires expected completed execution version');
    const replay=await client.query<RevisionRow>(`select ${REV} from lab.result_revisions rr where rr.facility_id=$1 and rr.entered_by=$2 and rr.idempotency_key=$3`,[context.facilityId,context.actor.accountId,key]);
    if(replay.rows[0]) {if(replay.rows[0].request_sha256!==digest) throw new DomainProblem(409,'IDEMPOTENCY_CONFLICT','Result command conflicts with existing revision');return this.resultAggregate(client,replay.rows[0].result_id);}
@@ -109,7 +122,7 @@ export class LabExecutionsService {
    [headId,executionId,execution.patient_id,execution.facility_id,version,eventType,context.actor.accountId,context.membershipId,correctionReason??'Manual unverified result entered',context.correlationId]);
    const outboxType=version===1?'LabResultEntered':'LabResultCorrected'; await this.outbox(client,outboxType,headId,version,execution,context,
     {resultId:headId,executionId,version,status:'entered',verificationStatus:'unverified',entrySource:'manual'});
-   await this.audit.recordWithClient(client,this.auditEvent(context,execution,version===1?'lab.result.enter':'lab.result.correct',{resultId:headId,version,correctionReason}));
+   await this.audit.recordWithClient(client,this.auditEvent(context,execution,version===1?'lab.result.enter':'lab.result.correct',{resultId:headId,version,correctionReason,...basisDetails(basis)}));
    return this.resultAggregate(client,headId);
   },{isolationLevel:'SERIALIZABLE'});
  }
@@ -120,23 +133,23 @@ export class LabExecutionsService {
   const digest=requestDigest(`lab.result.${operation}`,{resultId,...input});
   return this.database.withTransaction(context,async client=>{
    const head=await client.query<{id:string;execution_id:string;patient_id:string;facility_id:string;current_version:string}>(`select id::text,execution_id::text,patient_id::text,facility_id::text,current_version::text from lab.results where id=$1 for update`,[resultId]);
-   const row=head.rows[0];if(!row)throw new DomainProblem(404,'LAB_RESULT_NOT_FOUND','Lab result was not found');await this.authorize(row.patient_id,context,'write_records');
+   const row=head.rows[0];if(!row)throw new DomainProblem(404,'LAB_RESULT_NOT_FOUND','Lab result was not found');const basis=await this.authorize(client,context,'result',row.id,row.patient_id,'write_records');
    if(Number(row.current_version)!==input.expectedResultVersion)throw new DomainProblem(412,'VERSION_CONFLICT','Result version changed since review');
    const table=operation==='verify'?'lab.result_verifications':'lab.result_releases';
    const replay=await client.query<{request_sha256:string}>(`select request_sha256 from ${table} where facility_id=$1 and ${operation==='verify'?'verified_by':'released_by'}=$2 and idempotency_key=$3`,[context.facilityId,context.actor.accountId,key]);
    if(replay.rows[0]){if(replay.rows[0].request_sha256!==digest)throw new DomainProblem(409,'IDEMPOTENCY_CONFLICT','Governance command conflicts with existing request');return this.resultAggregate(client,resultId);}
    if(operation==='verify')await client.query(`insert into lab.result_verifications(result_id,execution_id,patient_id,facility_id,result_version,verified_by,verified_by_membership_id,verified_at,reason,idempotency_key,request_sha256,correlation_id) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,[resultId,row.execution_id,row.patient_id,row.facility_id,input.expectedResultVersion,context.actor.accountId,context.membershipId,input.occurredAt,input.reason.trim(),key,digest,context.correlationId]);
-   else {const verification=await client.query<{id:string}>(`select id::text from lab.result_verifications where result_id=$1 and result_version=$2`,[resultId,input.expectedResultVersion]);if(!verification.rows[0])throw new DomainProblem(409,'RESULT_NOT_VERIFIED','Exact result version is not verified');await client.query(`insert into lab.result_releases(verification_id,result_id,execution_id,patient_id,facility_id,result_version,released_by,released_by_membership_id,released_at,reason,idempotency_key,request_sha256,correlation_id) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,[verification.rows[0].id,resultId,row.execution_id,row.patient_id,row.facility_id,input.expectedResultVersion,context.actor.accountId,context.membershipId,input.occurredAt,input.reason.trim(),key,digest,context.correlationId]);}
-   const execution=await this.find(client,row.execution_id);const event=operation==='verify'?'LabResultVerified':'LabResultReleased';await this.outbox(client,event,resultId,input.expectedResultVersion,execution,context,{resultId,resultVersion:input.expectedResultVersion,status:operation==='verify'?'verified_not_released':'released'});await this.audit.recordWithClient(client,this.auditEvent(context,execution,`lab.result.${operation}`,{resultId,resultVersion:input.expectedResultVersion,reason:input.reason.trim()}));return this.resultAggregate(client,resultId);
+   else {const verification=await client.query<{id:string}>(`select id::text from lab.result_verifications where result_id=$1 and result_version=$2`,[resultId,input.expectedResultVersion]);if(!verification.rows[0])throw new DomainProblem(409,'RESULT_NOT_VERIFIED','Exact result version is not verified');await client.query(`insert into lab.result_releases(verification_id,result_id,execution_id,patient_id,facility_id,result_version,released_by,released_by_membership_id,released_at,reason,idempotency_key,request_sha256,correlation_id) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,[verification.rows[0].id,resultId,row.execution_id,row.patient_id,row.facility_id,input.expectedResultVersion,context.actor.accountId,context.membershipId,input.occurredAt,input.reason.trim(),key,digest,context.correlationId]).catch((error:unknown)=>{throw releaseRefusal(error)??error;});}
+   const execution=await this.find(client,row.execution_id);const event=operation==='verify'?'LabResultVerified':'LabResultReleased';await this.outbox(client,event,resultId,input.expectedResultVersion,execution,context,{resultId,resultVersion:input.expectedResultVersion,status:operation==='verify'?'verified_not_released':'released'});await this.audit.recordWithClient(client,this.auditEvent(context,execution,`lab.result.${operation}`,{resultId,resultVersion:input.expectedResultVersion,reason:input.reason.trim(),...basisDetails(basis)}));return this.resultAggregate(client,resultId);
   },{isolationLevel:'SERIALIZABLE'});
  }
  async getResultHistory(context:DataAccessContext,id:string){this.permission(context,'lab.result.released.read');return this.database.withTransaction(context,async client=>{
   const head=await client.query<{patient_id:string}>(`select patient_id::text from lab.results where id=$1`,[id]);const source=head.rows[0];
-  if(!source)throw new DomainProblem(404,'LAB_RESULT_NOT_FOUND','Lab result was not found');await this.authorize(source.patient_id,context,'read_records');
+  if(!source)throw new DomainProblem(404,'LAB_RESULT_NOT_FOUND','Lab result was not found');const basis=await this.authorize(client,context,'result',id,source.patient_id,'read_records');
   // Lab staff who may read executions (and so unreleased values) keep the full history; every other reader gets the released view.
   const result=await this.resultAggregate(client,id);const full=context.actor.permissions.includes('lab.execution.read');const view=full?result:this.releasedView(result);
   if(!view)throw new DomainProblem(404,'LAB_RESULT_NOT_FOUND','No released Lab result is available');
-  await this.audit.recordWithClient(client,this.readAudit(context,source.patient_id,full?'lab.result.history.read':'lab.result.released.read','lab-result',id,{versionsReturned:view.revisions.map(r=>r.version)}));
+  await this.audit.recordWithClient(client,this.readAudit(context,source.patient_id,full?'lab.result.history.read':'lab.result.released.read','lab-result',id,{versionsReturned:view.revisions.map(r=>r.version),...basisDetails(basis)}));
   return view;});}
 
  /**
@@ -149,22 +162,22 @@ export class LabExecutionsService {
   const found=await client.query<WorkItemOrderRow>(`select id::text,patient_id::text,source_ehr_order_id::text,source_ehr_order_version::text,
    test_code_system,test_code,test_name,accepted_at from lab.work_items where source_ehr_order_id=$1 and facility_id=$2`,[sourceEhrOrderId,context.facilityId]);
   const item=found.rows[0];if(!item)throw new DomainProblem(404,'LAB_WORK_ITEM_NOT_FOUND','Lab work item was not found');
-  await this.authorize(item.patient_id,context,'read_records');
+  const basis=await this.authorize(client,context,'work_item',item.id,item.patient_id,'read_records');
   const heads=await client.query<{id:string}>(`select r.id::text from lab.results r join lab.test_executions e on e.id=r.execution_id
    join lab.work_item_requested_tests t on t.id=e.requested_test_id where t.work_item_id=$1 and r.patient_id=$2 and r.facility_id=$3
    order by e.started_at,r.id`,[item.id,item.patient_id,context.facilityId]);
   const results=[];for(const head of heads.rows){const view=this.releasedView(await this.resultAggregate(client,head.id));if(view)results.push(view);}
   await this.audit.recordWithClient(client,this.readAudit(context,item.patient_id,'lab.result.released.read','lab-work-item',item.id,
-   {sourceEhrOrderId:item.source_ehr_order_id,results:results.map(r=>({resultId:r.id,versionsReturned:r.revisions.map(v=>v.version)}))}));
+   {sourceEhrOrderId:item.source_ehr_order_id,results:results.map(r=>({resultId:r.id,versionsReturned:r.revisions.map(v=>v.version)})),...basisDetails(basis)}));
   return {workItemId:item.id,sourceEhrOrderId:item.source_ehr_order_id,sourceEhrOrderVersion:Number(item.source_ehr_order_version),patientId:item.patient_id,
    acceptedAt:item.accepted_at,test:{codeSystem:item.test_code_system,code:item.test_code,name:item.test_name},results};});}
 
- async get(context:DataAccessContext,id:string) {this.permission(context,'lab.execution.read');return this.database.withTransaction(context,async client=>{const row=await this.find(client,id);await this.authorize(row.patient_id,context,'read_records');return this.aggregate(client,row);});}
+ async get(context:DataAccessContext,id:string) {this.permission(context,'lab.execution.read');return this.database.withTransaction(context,async client=>{const row=await this.find(client,id);await this.authorize(client,context,'execution',row.id,row.patient_id,'read_records');return this.aggregate(client,row);});}
  async listForSpecimen(context:DataAccessContext,specimenId:string) {this.permission(context,'lab.execution.read');return this.database.withTransaction(context,async client=>{
   // Authorize the specimen's patient, as get() does, before any execution or result value is read.
   const specimen=await client.query<{patient_id:string}>(`select patient_id::text from lab.specimens where id=$1`,[specimenId]);
   const source=specimen.rows[0];if(!source)throw new DomainProblem(404,'LAB_SPECIMEN_NOT_FOUND','Lab specimen was not found');
-  await this.authorize(source.patient_id,context,'read_records');
+  await this.authorize(client,context,'specimen',specimenId,source.patient_id,'read_records');
   const rows=await client.query<ExecutionRow>(`select ${EXEC} from lab.test_executions e join lab.work_item_requested_tests t on t.id=e.requested_test_id where e.specimen_id=$1 and e.patient_id=$2 order by e.started_at`,[specimenId,source.patient_id]);
   return {items:await Promise.all(rows.rows.map(row=>this.aggregate(client,row)))};});}
  private async find(client:PoolClient,id:string,lock=false) {const result=await client.query<ExecutionRow>(`select ${EXEC} from lab.test_executions e join lab.work_item_requested_tests t on t.id=e.requested_test_id where e.id=$1${lock?' for update of e':''}`,[id]);const row=result.rows[0];if(!row)throw new DomainProblem(404,'LAB_EXECUTION_NOT_FOUND','Lab execution was not found');return row;}
@@ -185,7 +198,13 @@ export class LabExecutionsService {
  }
  private validateValue(input:EnterResultDto) {if((input.resultType==='numeric'&&(input.numericValue===undefined||input.textValue!==undefined))||(input.resultType==='text'&&(!input.textValue?.trim()||input.numericValue!==undefined)))throw new DomainProblem(400,'INVALID_RESULT_VALUE','Result value must match its declared type');}
  private permission(c:DataAccessContext,p:string){if(!c.actor.permissions.includes(p))throw new DomainProblem(403,'LAB_EXECUTION_ACCESS_DENIED','Required Lab permission is absent');}
- private async authorize(patientId:string,c:DataAccessContext,a:'read_records'|'write_records'){const d=await this.identity.authorize(patientId,a,c.purposeOfUse,c);if(!d.allowed||(a==='write_records'&&d.breakGlass))throw new DomainProblem(403,'LAB_EXECUTION_ACCESS_DENIED','Lab execution/result access is not authorized');}
+ /**
+  * The command's authorization on the resource it acts on (P4c, PRIV P12): an order route that allows it, or the
+  * member's consent through Identity as before, refused with LAB_EXECUTION_ACCESS_DENIED.
+  */
+ private authorize(client:PoolClient,c:DataAccessContext,resource:LabRouteResource,resourceId:string,patientId:string,a:RecordAction){
+  return this.routeAccess.authorize(client,c,resource,resourceId,patientId,a,executionDenied);
+ }
  private event(client:PoolClient,row:ExecutionRow,v:number,t:string,reason:string,c:DataAccessContext){return client.query(`insert into lab.execution_events(execution_id,patient_id,facility_id,event_version,event_type,actor_id,actor_membership_id,reason,correlation_id) values($1,$2,$3,$4,$5,$6,$7,$8,$9)`,[row.id,row.patient_id,row.facility_id,v,t,c.actor.accountId,c.membershipId,reason,c.correlationId]);}
  private outbox(client:PoolClient,type:string,id:string,v:number,row:{patient_id:string;facility_id:string},c:DataAccessContext,payload:Record<string,unknown>){return client.query(`insert into lab.outbox_events(event_type,aggregate_id,aggregate_version,facility_id,patient_id,correlation_id,payload) values($1,$2,$3,$4,$5,$6,$7::jsonb)`,[type,id,v,row.facility_id,row.patient_id,c.correlationId,JSON.stringify(payload)]);}
  private readAudit(c:DataAccessContext,patientId:string,action:string,resourceType:'lab-result'|'lab-work-item',resourceId:string,details:Record<string,unknown>){return {correlationId:c.correlationId,actorType:'staff' as const,actorSubject:c.actor.subject,actorAccountId:c.actor.accountId,actorMembershipId:c.membershipId,organizationId:c.actor.facility?.organizationId,facilityId:c.facilityId,patientId,action,resourceType,resourceId,outcome:'success' as const,purposeOfUse:c.purposeOfUse,details,sourceSystem:'lab-api'};}

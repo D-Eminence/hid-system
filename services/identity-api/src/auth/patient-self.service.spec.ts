@@ -63,20 +63,39 @@ describe('Patient self service', () => {
   it('configures a PIN only through the patient-session-bound database command', async () => {
     const { service, query } = setup({ ignored: true });
     query.mockReset();
+    query.mockResolvedValueOnce({ rows: [{ held: false }] });
     query.mockResolvedValueOnce({ rows: [{ recent: true }] });
     query.mockResolvedValueOnce({ rows: [] });
     query.mockResolvedValueOnce({ rows: [{ patient_id: 'patient-id' }] });
     await expect(service.setAccessPin(request, '1234')).resolves.toEqual({ configured: true });
+    expect(query.mock.calls[0]?.[0]).toContain('auth.otp_challenges');
+    expect(query.mock.calls[0]?.[1]).toEqual(['account-id', 24]);
     expect(query).toHaveBeenNthCalledWith(
-      2,
+      3,
       "select set_config('app.actor_subject',$1,true)",
       ['patient-subject'],
     );
     expect(query).toHaveBeenNthCalledWith(
-      3,
+      4,
       'select identity.set_my_patient_access_pin($1, $2, $3) as patient_id',
       ['patient-subject', 'session-id', '1234'],
     );
+  });
+  it('holds a PIN set for 24 hours after an OTP recovery, before the sign-in check, as main', async () => {
+    const { service, query } = setup({ ignored: true });
+    query.mockReset().mockResolvedValueOnce({ rows: [{ held: true }] });
+    await expect(service.setAccessPin(request, '1234')).rejects.toMatchObject({
+      status: 403, code: 'PATIENT_RECENT_RECOVERY_HOLD' });
+    expect(query).toHaveBeenCalledTimes(1);
+  });
+  it('a PIN revocation is never held by a recovery', async () => {
+    const { service, query } = setup({ ignored: true });
+    query.mockReset();
+    query.mockResolvedValueOnce({ rows: [{ recent: true }] });
+    query.mockResolvedValueOnce({ rows: [] });
+    query.mockResolvedValueOnce({ rows: [{ patient_id: 'patient-id' }] });
+    await expect(service.revokeAccessPin(request)).resolves.toEqual({ revoked: true });
+    expect(query.mock.calls.some(([sql]) => String(sql).includes('auth.otp_challenges'))).toBe(false);
   });
   it('revokes a PIN only through the patient-session-bound database command', async () => {
     const { service, query } = setup({ ignored: true });
@@ -98,9 +117,9 @@ describe('Patient self service', () => {
   });
   it('denies a PIN change when the authentication family is no longer recent', async () => {
     const { service, query } = setup({ ignored: true });
-    query.mockReset().mockResolvedValueOnce({ rows: [{ recent: false }] });
+    query.mockReset().mockResolvedValueOnce({ rows: [{ held: false }] }).mockResolvedValueOnce({ rows: [{ recent: false }] });
     await expect(service.setAccessPin(request, '1234')).rejects.toThrow('Sign in again');
-    expect(query).toHaveBeenCalledTimes(1);
-    expect(query.mock.calls[0]?.[0]).toContain('min(family.issued_at)');
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[1]?.[0]).toContain('min(family.issued_at)');
   });
 });

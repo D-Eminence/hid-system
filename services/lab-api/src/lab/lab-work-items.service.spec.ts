@@ -10,6 +10,8 @@ import type { DataAccessContext } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import type { IdentityService } from '../identity/identity.service';
 import { LabWorkItemsService } from './lab-work-items.service';
+import { LabOrderRouteAccess } from './order-route-access';
+import { LabOrderRouteCards } from './order-route-cards';
 import type { AcceptEhrLabOrderCommand } from './lab-work-items.types';
 
 const facilityId = '10000000-0000-4000-8000-000000000001';
@@ -72,7 +74,8 @@ const harness = (rows: (typeof stored)[], insertError?: Error, later?: { stateme
     operation(client) } as unknown as DatabaseService;
   const identity = { authorize: jest.fn().mockResolvedValue({ allowed: true, breakGlass: false }) } as unknown as IdentityService;
   const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService;
-  return { service: new LabWorkItemsService(database, identity, audit), queries };
+  return { service: new LabWorkItemsService(database, identity, audit, new LabOrderRouteAccess(identity),
+    new LabOrderRouteCards(database)), queries };
 };
 const inserts = (queries: string[]) => queries.filter((sql) => /insert into lab\./.test(sql));
 
@@ -125,6 +128,16 @@ describe('LabWorkItemsService.acceptEhrOrder', () => {
     const refusal = await service.acceptEhrOrder(context, command(1)).catch((error: unknown) => error);
     expect(refusal).toMatchObject({ code: 'LAB_ORDER_NOT_CURRENT', status: 409 });
     expect((refusal as { getResponse?: () => unknown }).getResponse?.()).not.toMatch(/does not match/);
+    expect((refusal as { cause?: unknown }).cause).toBe(guard);
+  });
+
+  // P4c (SPEC-FINAL §7.5): the guard refuses an order with a live route to
+  // another facility's laboratory with the message LAB_REQUEST_ROUTED.
+  it('answers the guard\'s LAB_REQUEST_ROUTED refusal with 409 LAB_REQUEST_ROUTED, as the EHR answers it', async () => {
+    const guard = Object.assign(new Error('LAB_REQUEST_ROUTED'), { code: '23514' });
+    const { service } = harness([], guard);
+    const refusal = await service.acceptEhrOrder(context, command(1)).catch((error: unknown) => error);
+    expect(refusal).toMatchObject({ code: 'LAB_REQUEST_ROUTED', status: 409 });
     expect((refusal as { cause?: unknown }).cause).toBe(guard);
   });
 });

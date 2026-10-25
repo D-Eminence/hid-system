@@ -2,7 +2,8 @@ import { BadRequestException, Inject, Injectable, Optional, ServiceUnavailableEx
 import { getEnvironment, type Environment } from '../config/environment';
 import { BrevoFallbackProvider } from '../providers/brevo.provider';
 import { MetaWhatsAppProvider } from '../providers/meta.provider';
-import { emergencyContactAlertContent, type OtpMessage, type OtpProvider, type ProviderResult } from '../providers/provider.types';
+import { emergencyContactAlertContent, type OtpMessage, type OtpProvider, type ProviderResult, staffInvitationContent,
+  staffInvitationLinkOrigin, type StaffInvitationRole } from '../providers/provider.types';
 import { SesEmailProvider } from '../providers/ses.provider';
 import { TermiiSmsProvider } from '../providers/termii.provider';
 
@@ -71,6 +72,35 @@ export class NotificationService {
         patientFullName: input.patientFullName, patientHidSuffix: input.patientHidSuffix,
         clinicianName: input.clinicianName, facilityName: input.facilityName, facilityPhone: input.facilityPhone,
         occurredAt: input.occurredAt, supportPhone: this.environment.EMERGENCY_CONTACT_SUPPORT_PHONE,
+        supportEmail: this.environment.EMERGENCY_CONTACT_SUPPORT_EMAIL,
+      }),
+    }, rawPlan);
+  }
+
+  /**
+   * Renders a facility staff invitation (P4b) and delivers it by email like an
+   * OTP: the same profile checks, delivery plan and fallback. The content is
+   * set, so no WhatsApp OTP template is ever used. The link's origin is this
+   * deployment's portal (HID_DEPLOYMENT_ENV); Health ID support's address is
+   * the alerts' EMERGENCY_CONTACT_SUPPORT_EMAIL.
+   */
+  deliverStaffInvitation(input: {
+    recipient: string;
+    facilityName: string | null;
+    roleCode: StaffInvitationRole;
+    invitationId: string;
+    token: string;
+    code: string;
+    expiresAt: Date;
+    idempotencyKey: string;
+  }, rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'STAFF_INVITATION',
+      idempotencyKey: input.idempotencyKey,
+      content: staffInvitationContent({
+        facilityName: input.facilityName, roleCode: input.roleCode, invitationId: input.invitationId,
+        token: input.token, code: input.code, expiresAt: input.expiresAt,
+        origin: staffInvitationLinkOrigin(this.environment.HID_DEPLOYMENT_ENV),
         supportEmail: this.environment.EMERGENCY_CONTACT_SUPPORT_EMAIL,
       }),
     }, rawPlan);

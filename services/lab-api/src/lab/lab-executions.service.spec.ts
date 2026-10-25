@@ -6,10 +6,11 @@ import type { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { AuthorizationDecision,AuthorizationRequest,IdentityProvider } from '../identity/identity.types';
 import { LabExecutionsService } from './lab-executions.service';
+import { LabOrderRouteAccess } from './order-route-access';
 
 const context={correlationId:'execution-correlation',facilityId:'10000000-0000-4000-8000-000000000001',membershipId:'40000000-0000-4000-8000-000000000001',purposeOfUse:'direct-care',actor:{id:'actor',subject:'staff:lab',accountId:'20000000-0000-4000-8000-000000000001',roles:['lab'],permissions:['lab.execution.start','lab.execution.complete','lab.execution.read','lab.result.enter','lab.result.correct'],facilityIds:[],facilities:[],authenticationMethod:'local'}} satisfies DataAccessContext;
 const specimenId='50000000-0000-4000-8000-000000000001',patientId='60000000-0000-4000-8000-000000000001',executionId='70000000-0000-4000-8000-000000000001';
-const harness=(query:(sql:string)=>Promise<unknown>,decision={allowed:true,breakGlass:false})=>{const client={query:jest.fn(query)} as unknown as PoolClient;const database={withTransaction:async<T>(_c:DataAccessContext,fn:(c:PoolClient)=>Promise<T>)=>fn(client)} as unknown as DatabaseService;const identity={authorize:jest.fn().mockResolvedValue(decision)} as unknown as IdentityService;const audit={recordWithClient:jest.fn().mockResolvedValue(undefined)} as unknown as AuditService;return {service:new LabExecutionsService(database,identity,audit),client,audit};};
+const harness=(query:(sql:string)=>Promise<unknown>,decision={allowed:true,breakGlass:false})=>{const client={query:jest.fn(query)} as unknown as PoolClient;const database={withTransaction:async<T>(_c:DataAccessContext,fn:(c:PoolClient)=>Promise<T>)=>fn(client)} as unknown as DatabaseService;const identity={authorize:jest.fn().mockResolvedValue(decision)} as unknown as IdentityService;const audit={recordWithClient:jest.fn().mockResolvedValue(undefined)} as unknown as AuditService;return {service:new LabExecutionsService(database,audit,new LabOrderRouteAccess(identity)),client,audit};};
 
 describe('LabExecutionsService',()=>{
  it('starts only from the received specimen and preserves the exact requested test',async()=>{const queries:string[]=[];const row={id:executionId,accession_id:'80000000-0000-4000-8000-000000000001',specimen_id:specimenId,requested_test_id:'90000000-0000-4000-8000-000000000001',patient_id:patientId,facility_id:context.facilityId,status:'in_progress',method:null,started_at:new Date(),completed_at:null,row_version:'1',idempotency_key:'execution-test-key-0001',request_sha256:'a'.repeat(64),completed_idempotency_key:null,completed_request_sha256:null,test_name:'Haemoglobin',test_code:'718-7',test_code_system:'http://loinc.org'};
@@ -44,7 +45,7 @@ describe('LabExecutionsService.listForSpecimen patient authorization',()=>{
   const audit={record:jest.fn().mockResolvedValue(undefined),recordWithClient:jest.fn().mockResolvedValue(undefined)};
   const provider={authorize:jest.fn(authorize),lookupExactHid:jest.fn(),consentStatus:jest.fn()} satisfies IdentityProvider;
   const identity=new IdentityService(provider,audit as unknown as AuditService);
-  const service=new LabExecutionsService(database,identity,audit as unknown as AuditService);
+  const service=new LabExecutionsService(database,audit as unknown as AuditService,new LabOrderRouteAccess(identity));
   const statements=()=>client.query.mock.calls.map(call=>String(call[0]));
   const resultReads=()=>statements().filter(sql=>RESULT_READS.test(sql));
   const authorizationOutcomes=()=>audit.record.mock.calls.map(([event])=>event as {action:string;outcome:string;patientId?:string}).filter(event=>event.action==='identity.authorization.check');

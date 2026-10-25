@@ -13,7 +13,7 @@ import { ApproveOrganizationApplicationDto, CompleteOrganizationProfileDto,
 import { OrganizationApplicationsService } from './organization-applications.service';
 import { OrganizationProfileCompletionService } from './organization-profile-completion.service';
 
-function expectedVersion(value: string | undefined): number {
+export function expectedVersion(value: string | undefined): number {
   const normalized = value?.trim().replace(/^W\//, '').replace(/^"|"$/g, '');
   const version = normalized ? Number(normalized) : Number.NaN;
   if (!Number.isSafeInteger(version) || version < 1) {

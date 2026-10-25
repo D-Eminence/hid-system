@@ -4,6 +4,7 @@ import type { DataAccessContext } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import type { IdentityService } from '../identity/identity.service';
 import { LabAccessionsService } from './lab-accessions.service';
+import { LabOrderRouteAccess } from './order-route-access';
 
 const context={correlationId:'lab-accession-correlation',facilityId:'10000000-0000-4000-8000-000000000001',
   membershipId:'40000000-0000-4000-8000-000000000001',purposeOfUse:'direct-care',actor:{id:'actor',subject:'staff:lab',
@@ -24,7 +25,7 @@ const harness=(query:(sql:string,values?:unknown[])=>Promise<unknown>,decision={
   const database={withTransaction:async <T>(_context:DataAccessContext,fn:(c:PoolClient)=>Promise<T>)=>fn(client)} as unknown as DatabaseService;
   const identity={authorize:jest.fn().mockResolvedValue(decision)} as unknown as IdentityService;
   const audit={recordWithClient:jest.fn().mockResolvedValue(undefined)} as unknown as AuditService;
-  return {service:new LabAccessionsService(database,identity,audit),client,identity,audit};
+  return {service:new LabAccessionsService(database,audit,new LabOrderRouteAccess(identity)),client,identity,audit};
 };
 
 describe('LabAccessionsService',()=>{

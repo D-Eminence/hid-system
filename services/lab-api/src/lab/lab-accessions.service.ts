@@ -6,9 +6,11 @@ import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
-import { IdentityService } from '../identity/identity.service';
 import type { CollectSpecimenDto, CreateAccessionDto, ReceiveSpecimenDto, RejectSpecimenDto } from './dto/accession.dto';
 import type { LabAccessionResult, LabSpecimenResult, SpecimenStatus } from './lab-accessions.types';
+import { LabOrderRouteAccess, basisDetails } from './order-route-access';
+
+const operationDenied = () => new DomainProblem(403,'LAB_OPERATION_ACCESS_DENIED','Lab operation is not authorized');
 
 interface AccessionRow extends QueryResultRow { id:string; accession_number:string; work_item_id:string; patient_id:string;
   facility_id:string; status:'accessioned'; priority:LabAccessionResult['priority']; row_version:string; created_at:Date; request_sha256:string }
@@ -23,8 +25,8 @@ const SPECIMEN_COLUMNS = `id::text,specimen_identifier,requirement_id::text,acce
 
 @Injectable()
 export class LabAccessionsService {
-  constructor(private readonly database:DatabaseService, private readonly identity:IdentityService,
-    private readonly audit:AuditService) {}
+  constructor(private readonly database:DatabaseService, private readonly audit:AuditService,
+    private readonly routeAccess:LabOrderRouteAccess) {}
 
   async create(context:DataAccessContext, workItemId:string, input:CreateAccessionDto, key:string):Promise<LabAccessionResult> {
     this.permission(context,'lab.accession.create');
@@ -35,9 +37,10 @@ export class LabAccessionsService {
       const workResult=await client.query<{id:string;patient_id:string;facility_id:string;priority:LabAccessionResult['priority'];status:string}>(
         `select id::text,patient_id::text,facility_id::text,priority,status from lab.work_items where id=$1`,[workItemId]);
       const work=workResult.rows[0];
-      if(!work) throw new DomainProblem(404,'LAB_WORK_ITEM_NOT_FOUND','Lab work item was not found');
+      if(!work) return this.routeAccess.hiddenWorkItem(client,workItemId,'write_records',
+        ()=>new DomainProblem(404,'LAB_WORK_ITEM_NOT_FOUND','Lab work item was not found'));
       if(work.facility_id!==context.facilityId||work.status!=='accepted') throw new DomainProblem(409,'LAB_WORK_ITEM_NOT_ACCESSIONABLE','Lab work item is not accessionable at this facility');
-      await this.authorize(work.patient_id,context,'write_records');
+      const basis=await this.routeAccess.authorize(client,context,'work_item',work.id,work.patient_id,'write_records',operationDenied);
       // Accessions are insert-only (0019 trigger; no UPDATE for the runtime role, so
       // no row lock). Unique keys allow one accession per work item and idempotency
       // key; DatabaseService reruns the SERIALIZABLE loser of a race (Stage 9).
@@ -71,7 +74,7 @@ export class LabAccessionsService {
       [accession.id,workItemId,work.patient_id,work.facility_id,context.actor.accountId,context.membershipId,normalized.reason,context.correlationId]);
       await this.outbox(client,'LabAccessionCreated',accession.id,1,work.patient_id,work.facility_id,context,
         { accessionId:accession.id,workItemId });
-      await this.audit.recordWithClient(client,this.auditEvent(context,accession,'lab.accession.create',{ workItemId }));
+      await this.audit.recordWithClient(client,this.auditEvent(context,accession,'lab.accession.create',{ workItemId,...basisDetails(basis) }));
       return this.aggregate(client,accession);
     },{ isolationLevel:'SERIALIZABLE' });
   }
@@ -81,8 +84,8 @@ export class LabAccessionsService {
     return this.database.withTransaction(context,async (client) => {
       const result=await client.query<AccessionRow>(`select ${ACCESSION_COLUMNS} from lab.accessions where id=$1`,[accessionId]);
       const row=result.rows[0]; if(!row) throw new DomainProblem(404,'LAB_ACCESSION_NOT_FOUND','Lab accession was not found');
-      await this.authorize(row.patient_id,context,'read_records');
-      await this.audit.recordWithClient(client,this.auditEvent(context,row,'lab.accession.read'));
+      const basis=await this.routeAccess.authorize(client,context,'accession',row.id,row.patient_id,'read_records',operationDenied);
+      await this.audit.recordWithClient(client,this.auditEvent(context,row,'lab.accession.read',basisDetails(basis)));
       return this.aggregate(client,row);
     },{ readOnly:false });
   }
@@ -111,7 +114,7 @@ export class LabAccessionsService {
       const currentResult=await client.query<SpecimenRow>(`select ${SPECIMEN_COLUMNS} from lab.specimens
         where id=$1 and accession_id=$2 for update`,[specimenId,accessionId]);
       const current=currentResult.rows[0]; if(!current) throw new DomainProblem(404,'LAB_SPECIMEN_NOT_FOUND','Lab specimen was not found');
-      await this.authorize(current.patient_id,context,'write_records');
+      const basis=await this.routeAccess.authorize(client,context,'specimen',current.id,current.patient_id,'write_records',operationDenied);
       const replay=await client.query<{request_sha256:string}>(`select request_sha256 from lab.specimen_command_idempotency
         where facility_id=$1 and actor_id=$2 and idempotency_key=$3`,[context.facilityId,context.actor.accountId,key]);
       if(replay.rows[0]) {
@@ -136,7 +139,7 @@ export class LabAccessionsService {
       const eventType=target==='collected'?'LabSpecimenCollected':target==='received'?'LabSpecimenReceived':'LabSpecimenRejected';
       await this.outbox(client,eventType,row.id,Number(row.row_version),row.patient_id,row.facility_id,context,
         { specimenId:row.id,accessionId,rowVersion:Number(row.row_version),status:target });
-      await this.audit.recordWithClient(client,this.auditEvent(context,row,`lab.specimen.${operation}`,{ accessionId,reason }));
+      await this.audit.recordWithClient(client,this.auditEvent(context,row,`lab.specimen.${operation}`,{ accessionId,reason,...basisDetails(basis) }));
       return this.projectSpecimen(row);
     },{ isolationLevel:'SERIALIZABLE' });
   }
@@ -162,10 +165,6 @@ export class LabAccessionsService {
     [eventType,aggregateId,version,facilityId,patientId,context.correlationId,JSON.stringify(payload)]); }
   private permission(context:DataAccessContext,permission:string) { if(!context.actor.permissions.includes(permission))
     throw new DomainProblem(403,'LAB_OPERATION_ACCESS_DENIED','Required Lab operation permission is absent'); }
-  private async authorize(patientId:string,context:DataAccessContext,action:'read_records'|'write_records') {
-    const decision=await this.identity.authorize(patientId,action,context.purposeOfUse,context);
-    if(!decision.allowed||(action==='write_records'&&decision.breakGlass)) throw new DomainProblem(403,'LAB_OPERATION_ACCESS_DENIED','Lab operation is not authorized');
-  }
   private auditEvent(context:DataAccessContext,row:{id:string;patient_id:string;facility_id:string},action:string,details?:Record<string,unknown>) {
     return { correlationId:context.correlationId,actorType:'staff' as const,actorSubject:context.actor.subject,
       actorAccountId:context.actor.accountId,actorMembershipId:context.membershipId,organizationId:context.actor.facility?.organizationId,

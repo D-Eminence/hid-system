@@ -916,6 +916,142 @@ grant execute on function identity.submit_organization_application(text,text,tex
   identity.admin_reject_organization_application(uuid,bigint,text)
   to hid_identity_runtime, hid_schema_test_runtime;
 
+-- Accountless provider self-enrollment (0086, main 0061-0063), as that
+-- migration grants it. The runtime activates only through the wrapper that
+-- returns the login email in the same transaction, after the activation
+-- pre-check that charges the session's attempt budget; the underlying
+-- activation command and the lapse helper stay owner-only. The emailed code
+-- is sent through the self-service command that stores the requested
+-- administrator details and limits codes per recipient, and two read-only
+-- commands answer what the password step shows before the account exists and
+-- whether start's code went out. The CAC lookup is
+-- charged through the network, application and platform-day quota command,
+-- never the account-scoped `application_cac` path, and no runtime holds a
+-- privilege on its counter tables. Support's list, review and release of
+-- activated self-service facilities, and its list and rejection of open
+-- self-service applications and its waiver of a rejection's or release's
+-- 7-day refusal, are platform administration commands for the Identity
+-- runtime only. 0056's code sending (begin_organization_profile_completion,
+-- above) serves governed applications only since 0086; its logic is the
+-- owner-only issue_organization_profile_completion_code, which the
+-- self-service command calls for self-service applications.
+grant execute on function identity.submit_self_service_organization_application(text,text,text,text,text,char),
+  identity.public_get_organization_application(text,text,text),
+  identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text),
+  identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text),
+  identity.prepare_self_service_provider_activation(char),
+  identity.current_self_service_provider_enrollment(char),
+  identity.self_service_provider_code_state(text,text,text),
+  identity.activate_self_service_provider_enrollment(char,text),
+  identity.withdraw_self_service_provider_enrollment(char),
+  platform.consume_self_service_cac_quota(uuid,char,integer)
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function identity.admin_list_self_service_facilities(text),
+  identity.admin_review_self_service_facility(uuid,bigint,text,text,text,text,text),
+  identity.admin_release_self_service_facility(uuid,bigint,text,boolean),
+  identity.admin_list_open_self_service_applications(text),
+  identity.admin_reject_self_service_application(uuid,bigint,text,boolean),
+  identity.admin_waive_self_service_refusals(text,text,text)
+  to hid_identity_runtime;
+revoke all on function identity.activate_self_service_organization_application(char,text),
+  identity.lapse_stale_self_service_organization_application(text,text,text),
+  identity.issue_organization_profile_completion_code(text,text,text,uuid,char,text)
+  from public;
+revoke all on platform.self_service_cac_quota_counters,
+  platform.self_service_cac_platform_quota_counters from public;
+
+-- Full access after support's review and facility staff invitations (0086
+-- section 5, P4b), as that migration grants them. The facility
+-- administrator's and staff's commands, the invitee's commands (accountless
+-- and signed in) and the self-recorded licence go to the Identity runtime and
+-- the schema test runtime; the staff context's review-state read and
+-- support's commands (the facility's staff, the administrator's role,
+-- probation's end, the invitation lookup and the review with its role and
+-- evidence) to the Identity runtime alone. The section's helpers, vocabulary,
+-- trigger functions and tables (attestation texts, invitations, sends,
+-- licence attestations) are granted to no role.
+grant execute on function identity.record_self_service_administrator_licence(text,text),
+  identity.list_facility_staff(),
+  identity.list_facility_staff_invitations(),
+  identity.facility_staff_management_state(),
+  identity.create_staff_invitation(uuid,uuid,text,text,text,text,text,text,text,char,char,char,text),
+  identity.record_staff_invitation_delivery(uuid,text),
+  identity.resend_staff_invitation(uuid,bigint,uuid,char,char,text),
+  identity.revoke_staff_invitation(uuid,bigint),
+  identity.end_facility_staff_membership(uuid,bigint,text),
+  identity.change_facility_staff_role(uuid,bigint,text,text,text,text,text),
+  identity.open_staff_invitation(uuid,char,text,char,char),
+  identity.prepare_staff_invitation_acceptance(char),
+  identity.accept_staff_invitation_with_password(char,text),
+  identity.preview_staff_invitation_for_account(uuid,char,char),
+  identity.accept_staff_invitation_for_account(uuid,char,char)
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function identity.organization_self_service_state(uuid),
+  identity.admin_list_facility_staff(uuid),
+  identity.admin_set_self_service_administrator_role(uuid,bigint,text,text,text,text,text),
+  identity.admin_end_self_service_probation(uuid,bigint,text),
+  identity.admin_find_staff_invitations(text)
+  to hid_identity_runtime;
+revoke all on identity.staff_attestation_texts, identity.staff_invitations,
+  identity.staff_invitation_sends, identity.staff_licence_attestations from public;
+
+-- Cross-facility lab requests and prescriptions (0086 section 6, P4c), as
+-- that migration grants them (its section 7). The EHR's commands (send,
+-- withdraw, the order row's routes and summaries, the patient's list and
+-- Stop, the attestation text) go to the EHR runtime; the Lab's and the
+-- Pharmacy's (lists, read, accept, decline, the resource check, the cards)
+-- and the strict work-item policies' functions, which their queries
+-- evaluate, to theirs; the directory and support's find, summary, close and
+-- destination setting to the Identity runtime. The schema test runtime gets
+-- every command but support's (its rollback-only suites insert work items
+-- under the new policies). The section's helpers, trigger functions and
+-- tables (routes, events, acceptance attempts, attestation texts, result and
+-- dispensing reports, destination settings) are granted to no role.
+grant execute on function ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,char),
+  ehr.withdraw_order_route(uuid,text,uuid,bigint,text),
+  ehr.list_order_routes_for_order(text,uuid,uuid),
+  ehr.order_route_summaries(text,uuid,uuid[]),
+  ehr.patient_list_order_routes(),
+  ehr.patient_stop_order_route(uuid,bigint),
+  ehr.order_route_attestation_text(text)
+  to hid_ehr_runtime, hid_schema_test_runtime;
+grant execute on function lab.list_order_routes(text,text),
+  lab.get_order_route(uuid),
+  lab.accept_order_route(uuid,bigint,text,text,text,char,text),
+  lab.decline_order_route(uuid,bigint,text),
+  lab.order_route_access_for(text,uuid,text),
+  lab.order_route_cards(uuid[]),
+  lab.work_item_allows(uuid,uuid,uuid,text)
+  to hid_lab_runtime, hid_schema_test_runtime;
+grant execute on function pharmacy.list_order_routes(text,text),
+  pharmacy.get_order_route(uuid),
+  pharmacy.accept_order_route(uuid,bigint,text,text,text,text,char,text),
+  pharmacy.decline_order_route(uuid,bigint,text),
+  pharmacy.order_route_access_for(text,uuid,text),
+  pharmacy.order_route_cards(uuid[]),
+  pharmacy.work_item_allows(uuid,uuid,uuid,text)
+  to hid_pharmacy_runtime, hid_schema_test_runtime;
+grant execute on function identity.search_order_destinations(text,text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function identity.admin_order_route_summary(uuid),
+  identity.admin_find_order_routes(text,text),
+  identity.admin_close_order_route(uuid,bigint,text),
+  identity.admin_set_order_route_destination(uuid,boolean,text)
+  to hid_identity_runtime;
+revoke all on ehr.order_routes, ehr.order_route_events, ehr.order_route_accept_attempts,
+  ehr.order_route_attestation_texts, lab.order_route_result_reports, pharmacy.order_route_dispensing_reports,
+  identity.order_route_destination_settings from public;
+-- The patient's inbox (0037): revoked from PUBLIC there and, until 0086
+-- section 7, granted to no role on this branch, so Identity's GET
+-- /api/v1/identity/me/notifications and POST .../:notificationId/read failed
+-- with 42501 as its runtime. A port of main's grant
+-- (eb9b1ca:services/ehr-api/database/runtime-grants.sql:1664-1665, which also
+-- names hid_schema_test_runtime; 0086 grants the Identity runtime alone, as
+-- SPEC-FINAL 8.14 says); the order-route notices reach patients only here.
+grant execute on function identity.list_my_notification_inbox(integer),
+  identity.mark_my_notification_read(uuid)
+  to hid_identity_runtime;
+
 -- Public patient enrollment persists only encrypted pending evidence. Its
 -- activation command performs the canonical account/patient writes atomically.
 grant select, insert, update, delete on identity.public_patient_enrollments,

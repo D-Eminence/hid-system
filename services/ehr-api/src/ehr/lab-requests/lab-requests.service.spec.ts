@@ -24,6 +24,11 @@ const createdAtExact = '2026-10-01T09:00:00.123456Z';
 // The microsecond text of created_at, as lab-session-guards.integration.sql
 // proves Lab's acceptance guard needs it.
 const exactColumn = `${timelineCursorSql('created_at')} as "createdAtExact"`;
+// The order-route reader of an EHR with no routes to other facilities (P4c):
+// these specs are about same-facility Lab; order-routes.spec.ts covers routes.
+const noRoutes = { summaries: async () => new Map(), summary: async () => null,
+  crossFacilityOrdersEnabled: async () => false };
+
 const row = (status: OrderStatus): LabRequestRow => ({
   id: requestId, encounterId, patientId, facilityId, createdBy: accountId, createdByMembershipId: membershipId,
   testCodeSystem: 'loinc', testCode: '718-7', testDisplay: 'Hemoglobin', priority: 'routine', status,
@@ -46,7 +51,7 @@ describe('LabRequestsService handoff to Lab', () => {
       (await operation({ query })).value);
     repository.executeCreate.mockImplementation(async (_client, _context, _patientId, _key, _operation, _digest,
       _type, create) => create());
-    return { query, service: new LabRequestsService(repository as never, labApi as never) };
+    return { query, service: new LabRequestsService(repository as never, labApi as never, noRoutes as never) };
   };
 
   beforeEach(() => {
@@ -118,7 +123,7 @@ const fakeDatabase = (before: LabRequestRow, after: LabRequestRow = before) => {
     exists: jest.fn(async () => true),
   };
   const labApi = { acceptEhrOrder: jest.fn().mockResolvedValue(workItem) };
-  return { query, repository, labApi, service: new LabRequestsService(repository as never, labApi as never) };
+  return { query, repository, labApi, service: new LabRequestsService(repository as never, labApi as never, noRoutes as never) };
 };
 const at = (status: OrderStatus, rowVersion: string) => ({ ...row(status), rowVersion });
 const writes = (query: jest.Mock) => query.mock.calls.map(([sql]) => String(sql))

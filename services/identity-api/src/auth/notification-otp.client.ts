@@ -94,7 +94,37 @@ export class NotificationOtpClient {
     }, this.environment.EMERGENCY_CONTACT_ALERT_TIMEOUT_MS);
   }
 
-  private async post(path: 'otp' | 'emergency-contact-alert', idempotencyKey: string, correlationId: string,
+  /**
+   * A facility staff invitation email (P4b, SPEC 4.6 and 6.2). notification-api
+   * renders it from fixed fields: no person's name and no free text; the
+   * facility's name only when Identity found it safe (otherwise omitted, and
+   * the email says "a facility"). Keyed by the send, so a retry of the same
+   * send is not delivered twice. Without a delivery plan nothing is sent
+   * (definitive_failure); without a workload token the outcome is unknown,
+   * so the invitation stays pending and can be resent.
+   */
+  async deliverStaffInvitation(input: {
+    sendId: string;
+    invitationId: string;
+    recipient: string;
+    facilityName?: string;
+    roleCode: string;
+    token: string;
+    code: string;
+    expiresAt: Date;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'definitive_failure', safeCode: 'delivery_policy_unavailable' };
+    return this.post('staff-invitation', `staff-invitation:${input.sendId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient,
+      ...(input.facilityName ? { facilityName: input.facilityName } : {}),
+      roleCode: input.roleCode, invitationId: input.invitationId, token: input.token, code: input.code,
+      expiresAt: input.expiresAt.toISOString(), plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  private async post(path: 'otp' | 'emergency-contact-alert' | 'staff-invitation', idempotencyKey: string, correlationId: string,
     body: Record<string, unknown>, timeoutMs: number,
   ): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
     const credential = await this.credentials();
@@ -130,7 +160,9 @@ export class NotificationOtpClient {
       // keys. A missing or expired token is never sent (credentials below), so
       // an alert stays retryable and ends as attempts_exhausted if the refusal
       // lasts; a code keeps the definitive mapping.
-      if (path === 'emergency-contact-alert' && response.status === 401) return { outcome: 'unknown', safeCode: 'http_401' };
+      // A staff invitation likewise: a 401 is Notification's own key fetch, not
+      // the address, so it must not count towards the facility's delivery pause.
+      if (path !== 'otp' && response.status === 401) return { outcome: 'unknown', safeCode: 'http_401' };
       return { outcome: response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429
         ? 'definitive_failure' : 'unknown', safeCode: `http_${response.status}` };
     }

@@ -1,6 +1,8 @@
 import { requestDigest } from '../common/idempotency';
 import type { DataAccessContext } from '../common/request-context';
 import { PharmacyService } from './pharmacy.service';
+import { PharmacyOrderRouteAccess } from './order-route-access';
+import { PharmacyOrderRouteCards } from './order-route-cards';
 
 const ids = {
   patient: '123e4567-e89b-42d3-a456-426614174001', facility: '123e4567-e89b-42d3-a456-426614174002',
@@ -46,7 +48,8 @@ describe('PharmacyService', () => {
     identity.authorize.mockResolvedValue({ allowed: true, patientId: ids.patient,
       facilityId: ids.facility, membershipId: ids.membership, scope: 'write_records',
       purpose: 'direct-care', breakGlass: true });
-    const service = new PharmacyService(database as never, identity as never, audit as never);
+    const service = new PharmacyService(database as never, identity as never, audit as never,
+      new PharmacyOrderRouteAccess(identity as never), new PharmacyOrderRouteCards(database as never));
     await expect(service.acceptPrescription(context, command, 'acceptance-key-1234'))
       .rejects.toMatchObject({ status: 403, code: 'PHARMACY_ACCESS_DENIED' });
     expect(database.withTransaction).not.toHaveBeenCalled();
@@ -59,7 +62,8 @@ describe('PharmacyService', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] });
     const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
-    const service = new PharmacyService(database as never, identity as never, audit as never);
+    const service = new PharmacyService(database as never, identity as never, audit as never,
+      new PharmacyOrderRouteAccess(identity as never), new PharmacyOrderRouteCards(database as never));
     const result = await service.acceptPrescription(context, command, 'acceptance-key-1234');
     expect(result).toMatchObject({ id: ids.work, status: 'accepted', dispensing: null,
       sourceEhrPrescriptionVersion: 2 });
@@ -76,7 +80,8 @@ describe('PharmacyService', () => {
       request_sha256: requestDigest('pharmacy.work-item.accept-ehr-prescription', command) };
     const query = jest.fn().mockResolvedValueOnce({ rows: [existing] });
     const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
-    const service = new PharmacyService(database as never, identity as never, audit as never);
+    const service = new PharmacyService(database as never, identity as never, audit as never,
+      new PharmacyOrderRouteAccess(identity as never), new PharmacyOrderRouteCards(database as never));
     await expect(service.acceptPrescription(context, command, 'acceptance-key-1234'))
       .resolves.toMatchObject({ id: ids.work, status: 'accepted', dispensing: null });
     expect(query).toHaveBeenCalledTimes(1);
@@ -89,10 +94,15 @@ describe('PharmacyService', () => {
       medication_code: null, medication_display: command.medicationDisplay, quantity_dispensed: '21',
       quantity_unit: 'tablet', status: 'dispensed', dispensed_by: ids.account, dispensed_at: new Date(),
       row_version: '1', created_at: new Date(), reversal_id: null };
-    const query = jest.fn().mockResolvedValueOnce({ rows: [workRow] }).mockResolvedValueOnce({ rows: [] })
+    // The work item, C17's answer for it (P4c: no route, so Identity's consent decides), the
+    // replay read, the insert and the outbox.
+    const query = jest.fn().mockResolvedValueOnce({ rows: [workRow] })
+      .mockResolvedValueOnce({ rows: [{ outcome: 'none', route_id: null, work_item_id: ids.work }] })
+      .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [dispensingRow] }).mockResolvedValueOnce({ rows: [] });
     const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
-    const service = new PharmacyService(database as never, identity as never, audit as never);
+    const service = new PharmacyService(database as never, identity as never, audit as never,
+      new PharmacyOrderRouteAccess(identity as never), new PharmacyOrderRouteCards(database as never));
     await expect(service.dispense(context, ids.work, { expectedWorkItemVersion: 1,
       quantityDispensed: 21, quantityUnit: 'tablet', reason: 'Medicine handed to patient' },
     'dispensing-key-1234')).resolves.toMatchObject({ id: ids.dispensing, status: 'dispensed',
