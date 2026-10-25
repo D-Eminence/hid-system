@@ -5,7 +5,8 @@ import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
-import type { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto } from './dto/order-route.dto';
+import type { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto, SearchOrderRoutesDto }
+  from './dto/order-route.dto';
 import {
   incomingPrescriptionRoute,
   orderRouteUnavailable,
@@ -21,6 +22,8 @@ import { PharmacyOrderRouteCards } from './order-route-cards';
 /** A Health ID as identity.patients stores it (NMIG 0002:187), after upper(btrim()). */
 const HEALTH_ID = /^HID-[A-HJ-NP-Z2-9]{6,32}$/;
 const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
+/** A route's reference as C15 compares it (8 characters of its id, upper-cased). */
+const REFERENCE = /^[0-9A-F]{8}$/;
 
 /** The refused results C15 commits (V6), with the audit outcome and the route's state after them. */
 const REFUSED: Readonly<Record<string, { outcome: 'denied' | 'failure'; state: string }>> = {
@@ -48,6 +51,22 @@ export function normalizedIdentifier(kind: 'health_id' | 'date_of_birth', value:
   return trimmed;
 }
 
+/** The Health ID a counter finds a patient's orders by, upper-cased and checked, or null for none. */
+function healthIdFilter(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  const healthId = value.trim().toUpperCase();
+  if (!HEALTH_ID.test(healthId)) throw invalid('The Health ID is not in the form HID-XXXXXX');
+  return healthId;
+}
+
+/** The order's reference as the counter typed it, upper-cased, or null when none was given. */
+export function normalizedReference(value: string | undefined): string | null {
+  if (value === undefined) return null;
+  const reference = value.trim().toUpperCase();
+  if (!REFERENCE.test(reference)) throw invalid('The reference is the 8 characters shown with the order');
+  return reference;
+}
+
 /**
  * The pharmacy's side of prescriptions other facilities send (P4c,
  * SPEC-FINAL §4, §9.3, §10.2): Incoming and Recent (C13), one route (C14),
@@ -60,10 +79,17 @@ export class PharmacyOrderRoutesService {
   constructor(private readonly database: DatabaseService, private readonly audit: AuditService,
     private readonly cards: PharmacyOrderRouteCards) {}
 
+  /** GET pharmacy/order-routes: Incoming or Recent; its healthId parameter is deprecated (CODEX §26). */
   async list(context: DataAccessContext, query: ListOrderRoutesQueryDto) {
-    const view = query.view ?? 'incoming';
-    const healthId = query.healthId === undefined ? null : query.healthId.trim().toUpperCase();
-    if (healthId !== null && !HEALTH_ID.test(healthId)) throw invalid('The Health ID is not in the form HID-XXXXXX');
+    return this.listed(context, query.view ?? 'incoming', healthIdFilter(query.healthId));
+  }
+
+  /** POST pharmacy/order-routes/search: the same, found by the patient's Health ID from the body, never a URL. */
+  async search(context: DataAccessContext, input: SearchOrderRoutesDto) {
+    return this.listed(context, input.view ?? 'incoming', healthIdFilter(input.healthId));
+  }
+
+  private async listed(context: DataAccessContext, view: 'incoming' | 'recent', healthId: string | null) {
     const items = await this.run(context, async (client) => {
       const result = await client.query<Row>('select * from pharmacy.list_order_routes($1, $2)', [view, healthId]);
       const items = result.rows.map((row) => (view === 'incoming' ? incomingPrescriptionRoute(row) : recentPrescriptionRoute(row)));
@@ -93,13 +119,14 @@ export class PharmacyOrderRoutesService {
     const identifierKind = input.patientIdentifier.kind;
     const identifier = normalizedIdentifier(identifierKind, input.patientIdentifier.value);
     const reason = input.reason.trim();
+    const reference = normalizedReference(input.reference);
     const digest = requestDigest('pharmacy.order-route.accept', { routeId, expectedVersion: input.expectedVersion,
-      identifierKind, identifier, reason });
+      identifierKind, identifier, reason, ...(reference === null ? {} : { reference }) });
     // A returned refusal commits with its audit row and is answered after the
     // commit (V6); a raised one rolls back.
     const outcome = await this.run(context, async (client) => {
-      const result = await client.query<Row>('select * from pharmacy.accept_order_route($1, $2, $3, $4, $5, $6, $7)',
-        [routeId, input.expectedVersion, identifierKind, identifier, reason, idempotencyKey, digest]);
+      const result = await client.query<Row>('select * from pharmacy.accept_order_route($1, $2, $3, $4, $5, $6, $7, $8)',
+        [routeId, input.expectedVersion, identifierKind, identifier, reason, idempotencyKey, digest, reference]);
       const row = result.rows[0];
       if (!row) throw orderRouteUnavailable();
       const value = typeof row.result === 'string' ? row.result : '';
@@ -111,7 +138,8 @@ export class PharmacyOrderRoutesService {
         const patientId = await this.workItemPatient(client, workItemId);
         await this.audit.recordWithClient(client, context, 'pharmacy.order-route.accept',
           { resourceType: 'order-route', resourceId: routeId, ...(patientId ? { patientId } : {}) },
-          { routeId, kind: 'prescription', state: 'accepted', workItemId, identifierKind, replayed });
+          { routeId, kind: 'prescription', state: 'accepted', workItemId, identifierKind, withReference: reference !== null,
+            replayed });
         const patient = routePatient(row);
         return { answer: {
           route: { id: routeId, version: Number(row.route_row_version),
@@ -130,7 +158,7 @@ export class PharmacyOrderRoutesService {
       await this.audit.recordWithClient(client, context, 'pharmacy.order-route.accept',
         { resourceType: 'order-route', resourceId: routeId },
         { routeId, kind: 'prescription', state: refused.state, result: value, identifierKind,
-          ...(value === 'patient_mismatch' ? { attemptsLeft } : {}) }, refused.outcome);
+          withReference: reference !== null, ...(value === 'patient_mismatch' ? { attemptsLeft } : {}) }, refused.outcome);
       return { refusal };
     });
     if ('refusal' in outcome) throw outcome.refusal;

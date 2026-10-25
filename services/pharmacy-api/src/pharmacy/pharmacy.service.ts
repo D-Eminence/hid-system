@@ -171,9 +171,36 @@ export class PharmacyService {
       }, { returnedCount: result.rows.length });
       const cards = await this.routeCards.cards(client, result.rows.filter((row) => row.order_route_id).map((row) => row.id),
         context.correlationId);
+      await this.auditShownPatients(client, context, result.rows, cards);
       return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id))) };
     });
     return { ...page, ...(await this.routeCards.flags()) };
+  }
+
+  /**
+   * Who saw which patient on the work list (P4c): a route-backed row's card
+   * shows the patient's name, sex, date of birth and Health ID ending, so one
+   * row per patient shown, naming the patient, with the work items and routes
+   * (ids only, §12) and basis 'order-route', in the list's transaction (no
+   * answer without its audit). Rows without a patient on the card name no
+   * one; the collection row above stays as it was.
+   */
+  private async auditShownPatients(client: PoolClient, context: DataAccessContext, rows: readonly WorkItemRow[],
+    cards: ReadonlyMap<string, OrderRouteCard>) {
+    const shown = new Map<string, { first: WorkItemRow; workItemIds: string[]; orderRouteIds: string[] }>();
+    for (const row of rows) {
+      const card = cards.get(row.id);
+      if (!row.order_route_id || !card?.patient) continue;
+      const entry = shown.get(row.patient_id) ?? { first: row, workItemIds: [], orderRouteIds: [] };
+      entry.workItemIds.push(row.id);
+      entry.orderRouteIds.push(card.orderRoute.id);
+      shown.set(row.patient_id, entry);
+    }
+    for (const [patientId, entry] of shown) {
+      await this.audit.recordWithClient(client, context, 'pharmacy.work-item.list', {
+        patientId, resourceType: 'pharmacy-work-item', resourceId: entry.first.id,
+      }, { basis: 'order-route', workItemIds: entry.workItemIds, orderRouteIds: entry.orderRouteIds });
+    }
   }
 
   async getWorkItem(context: DataAccessContext, id: string) {

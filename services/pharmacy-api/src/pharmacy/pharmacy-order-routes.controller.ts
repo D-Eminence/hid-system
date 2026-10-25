@@ -2,7 +2,7 @@ import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Q
 import { RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
-import { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto } from './dto/order-route.dto';
+import { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto, SearchOrderRoutesDto } from './dto/order-route.dto';
 import { PharmacyOrderRoutesService } from './pharmacy-order-routes.service';
 
 const uuid = () => new ParseUUIDPipe({ version: '4' });
@@ -20,6 +20,17 @@ export class PharmacyOrderRoutesController {
   @RequirePermissions('pharmacy.order-route.receive')
   list(@Query() query: ListOrderRoutesQueryDto, @Req() request: HidRequest) {
     return this.routes.list(requireRequestContext(request), query);
+  }
+
+  /**
+   * Find by the patient's Health ID, sent in the body so it is in no request
+   * line a gateway or edge log keeps (CODEX §26); the GET's healthId
+   * parameter is deprecated.
+   */
+  @Post('search') @HttpCode(200)
+  @RequirePermissions('pharmacy.order-route.receive')
+  search(@Body() input: SearchOrderRoutesDto, @Req() request: HidRequest) {
+    return this.routes.search(requireRequestContext(request), input);
   }
 
   @Get(':routeId')

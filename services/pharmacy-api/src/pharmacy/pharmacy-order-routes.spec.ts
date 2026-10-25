@@ -8,9 +8,9 @@ import { INTERNAL_CALLER, PUBLIC_ROUTE, REQUIRED_PERMISSIONS } from '../common/d
 import { requestDigest } from '../common/idempotency';
 import { DomainProblem, ProblemDetailsFilter } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
-import { AcceptOrderRouteDto, DeclineOrderRouteDto } from './dto/order-route.dto';
+import { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto, SearchOrderRoutesDto } from './dto/order-route.dto';
 import { PharmacyOrderRoutesController } from './pharmacy-order-routes.controller';
-import { PharmacyOrderRoutesService, normalizedIdentifier } from './pharmacy-order-routes.service';
+import { PharmacyOrderRoutesService, normalizedIdentifier, normalizedReference } from './pharmacy-order-routes.service';
 import { PharmacyService } from './pharmacy.service';
 import { PharmacyOrderRouteAccess } from './order-route-access';
 import { PharmacyOrderRouteCards } from './order-route-cards';
@@ -30,7 +30,7 @@ const context = { correlationId: 'correlation-123456', facilityId, membershipId:
 const databaseError = (code: string, message: string) => Object.assign(new Error(message), { code });
 
 describe('Pharmacy order-route routes (SPEC-FINAL §10.2)', () => {
-  it('serves four browser routes, all needing pharmacy.order-route.receive, none internal or public', () => {
+  it('serves five browser routes, all needing pharmacy.order-route.receive, none internal or public', () => {
     const base = Reflect.getMetadata(PATH_METADATA, PharmacyOrderRoutesController) as string;
     const routes = Object.getOwnPropertyNames(PharmacyOrderRoutesController.prototype).filter((name) => name !== 'constructor')
       .map((name) => {
@@ -42,6 +42,8 @@ describe('Pharmacy order-route routes (SPEC-FINAL §10.2)', () => {
     const permission = ['pharmacy.order-route.receive'];
     expect(routes).toEqual([
       [RequestMethod.GET, 'pharmacy/order-routes', undefined, permission, undefined, undefined],
+      // Find by Health ID with the Health ID in the body (CODEX §26).
+      [RequestMethod.POST, 'pharmacy/order-routes/search', 200, permission, undefined, undefined],
       [RequestMethod.GET, 'pharmacy/order-routes/:routeId', undefined, permission, undefined, undefined],
       [RequestMethod.POST, 'pharmacy/order-routes/:routeId/accept', 201, permission, undefined, undefined],
       [RequestMethod.POST, 'pharmacy/order-routes/:routeId/decline', 200, permission, undefined, undefined],
@@ -64,6 +66,12 @@ describe('Pharmacy order-route routes (SPEC-FINAL §10.2)', () => {
       .toEqual(['patientIdentifier']);
     expect(await errors(DeclineOrderRouteDto, { expectedVersion: 1, reason: 'medicine_unavailable' })).toEqual([]);
     expect(await errors(DeclineOrderRouteDto, { expectedVersion: 1, reason: 'Out of stock' })).toEqual(['reason']);
+    expect(await errors(AcceptOrderRouteDto, { ...accept, reference: '123e4567' })).toEqual([]);
+    expect(await errors(AcceptOrderRouteDto, { ...accept, reference: 7 })).toEqual(['reference']);
+    // The GET's healthId stays, deprecated, for the website build that still sends it.
+    expect(await errors(ListOrderRoutesQueryDto, { view: 'incoming', healthId: 'HID-ABC234' })).toEqual([]);
+    expect(await errors(SearchOrderRoutesDto, { view: 'recent', healthId: 'HID-ABC234' })).toEqual([]);
+    expect(await errors(SearchOrderRoutesDto, { view: 'incoming' })).toEqual(['healthId']);
   });
 });
 
@@ -114,6 +122,19 @@ describe('PharmacyOrderRoutesService (C13-C16)', () => {
       { view: 'incoming', resultCount: 1, byHealthId: false }, undefined]]);
   });
 
+  it('finds by the Health ID from the body, never the URL, and audits no Health ID', async () => {
+    const h = routesHarness({ 'pharmacy.list_order_routes': [incoming] });
+    await h.service.search(context, { healthId: ' hid-abc234 ' });
+    expect(h.statements[0]?.values).toEqual(['incoming', 'HID-ABC234']);
+    expect(h.audits[0]?.[2]).toEqual({ view: 'incoming', resultCount: 1, byHealthId: true });
+    expect(JSON.stringify(h.audits)).not.toContain('ABC234');
+    await expect(h.service.search(context, { view: 'recent', healthId: 'HID-0O1I' }))
+      .rejects.toMatchObject({ status: 400, code: 'ORDER_ROUTE_INVALID' });
+    expect(h.statements).toHaveLength(1);
+    await h.service.list(context, { view: 'incoming', healthId: 'HID-ABC234' });
+    expect(h.statements[1]?.values).toEqual(['incoming', 'HID-ABC234']);
+  });
+
   it('shows an accepted route\'s instructions and patient only as the database gives them, naming the patient on the row', async () => {
     const h = routesHarness({ 'pharmacy.get_order_route': [{ ...incoming, effective_state: 'accepted', instructions: 'After food',
       work_item_id: workItemId, patient_full_name: 'Ngozi Eze', patient_sex: 'female', patient_date_of_birth: '1990-01-01',
@@ -130,14 +151,28 @@ describe('PharmacyOrderRoutesService (C13-C16)', () => {
     const input = { expectedVersion: 1, patientIdentifier: { kind: 'date_of_birth' as const, value: '1990-01-01' },
       reason: 'Patient at the counter' };
     const answer = await h.service.accept(context, routeId, input, key);
-    expect(h.statements[0]).toEqual({ sql: 'select * from pharmacy.accept_order_route($1, $2, $3, $4, $5, $6, $7)',
+    expect(h.statements[0]).toEqual({ sql: 'select * from pharmacy.accept_order_route($1, $2, $3, $4, $5, $6, $7, $8)',
       values: [routeId, 1, 'date_of_birth', '1990-01-01', 'Patient at the counter', key, requestDigest('pharmacy.order-route.accept',
-        { routeId, expectedVersion: 1, identifierKind: 'date_of_birth', identifier: '1990-01-01', reason: 'Patient at the counter' })] });
+        { routeId, expectedVersion: 1, identifierKind: 'date_of_birth', identifier: '1990-01-01', reason: 'Patient at the counter' }),
+      null] });
     expect(answer).toEqual({ route: { id: routeId, version: 2, effectiveState: 'accepted' }, workItemId,
       patient: { fullName: 'Ngozi Eze', sex: 'female', dateOfBirth: '1990-01-01', healthIdLast4: '2345' }, instructions: 'After food',
       orderer: { licenceBody: 'MDCN', licenceNumber: 'MDCN/1' }, replayed: false });
     expect(h.audits[0]).toEqual(['pharmacy.order-route.accept', { resourceType: 'order-route', resourceId: routeId, patientId },
-      { routeId, kind: 'prescription', state: 'accepted', workItemId, identifierKind: 'date_of_birth', replayed: false }, undefined]);
+      { routeId, kind: 'prescription', state: 'accepted', workItemId, identifierKind: 'date_of_birth', withReference: false,
+        replayed: false }, undefined]);
+    // With the order's reference: passed upper-cased and covered by the digest, never audited itself.
+    const withReference = routesHarness({ 'pharmacy.accept_order_route': [{ result: 'accepted', route_row_version: '2',
+      work_item_id: workItemId, replayed: false }] });
+    await withReference.service.accept(context, routeId, { ...input, reference: ' 123e4567 ' }, key);
+    expect(withReference.statements[0]?.values.slice(-2)).toEqual([requestDigest('pharmacy.order-route.accept',
+      { routeId, expectedVersion: 1, identifierKind: 'date_of_birth', identifier: '1990-01-01', reason: 'Patient at the counter',
+        reference: '123E4567' }), '123E4567']);
+    expect(withReference.audits[0]?.[2]).toMatchObject({ withReference: true });
+    expect(JSON.stringify(withReference.audits)).not.toContain('123E4567');
+    await expect(withReference.service.accept(context, routeId, { ...input, reference: 'REF-1' }, key))
+      .rejects.toMatchObject({ status: 400, code: 'ORDER_ROUTE_INVALID' });
+    expect(normalizedReference(undefined)).toBeNull();
   });
 
   it('commits a mismatch with a denied row and answers 409 with attemptsLeft after the commit', async () => {
@@ -147,13 +182,14 @@ describe('PharmacyOrderRoutesService (C13-C16)', () => {
     expect(refusal).toMatchObject({ status: 409, code: 'ORDER_ROUTE_PATIENT_MISMATCH', extensions: { attemptsLeft: 2 } });
     await expect(h.database.withTransaction.mock.results[0]?.value).resolves.toEqual({ refusal });
     expect(h.audits).toEqual([['pharmacy.order-route.accept', { resourceType: 'order-route', resourceId: routeId },
-      { routeId, kind: 'prescription', state: 'sent', result: 'patient_mismatch', identifierKind: 'health_id', attemptsLeft: 2 },
-      'denied']]);
+      { routeId, kind: 'prescription', state: 'sent', result: 'patient_mismatch', identifierKind: 'health_id',
+        withReference: false, attemptsLeft: 2 }, 'denied']]);
   });
 
   it.each([
     ['P0001', 'ORDER_ROUTE_NOT_PENDING', 409, 'ORDER_ROUTE_NOT_PENDING'],
     ['P0001', 'ORDER_ROUTE_ACCEPT_LIMITED', 429, 'ORDER_ROUTE_ACCEPT_LIMITED'],
+    ['P0001', 'ORDER_ROUTE_REFERENCE_MISMATCH', 409, 'ORDER_ROUTE_REFERENCE_MISMATCH'],
     ['P0001', 'ORDER_ROUTE_VERSION_CONFLICT', 412, 'VERSION_CONFLICT'],
     ['P0002', 'ORDER_ROUTE_NOT_FOUND', 404, 'ORDER_ROUTE_NOT_FOUND'],
     ['55000', 'PLATFORM_CONTROL_DISABLED:cross_facility_orders_enabled', 423, 'CROSS_FACILITY_ORDERS_UNAVAILABLE'],
@@ -313,10 +349,19 @@ describe('Pharmacy per-item routes authorize the resource they act on (P12)', ()
     expect(answer).toMatchObject({ crossFacilityOrders: false, crossFacilityWork: false,
       items: [{ id: workItemId, orderRoute: { id: routeId }, patient: { fullName: 'Ngozi Eze' } }] });
     expect(answer.items[0]).not.toHaveProperty('sourceEhrPrescriptionId');
+    // The collection row as before, and one row naming the patient the card shows (ids only, basis order-route).
+    expect(h.audits).toEqual([
+      expect.objectContaining({ action: 'pharmacy.work-item.list', resourceType: 'pharmacy-work-item-collection',
+        details: { returnedCount: 1 } }),
+      { action: 'pharmacy.work-item.list', patientId, resourceType: 'pharmacy-work-item', resourceId: workItemId,
+        details: { basis: 'order-route', workItemIds: [workItemId], orderRouteIds: [routeId] } }]);
+    expect(JSON.stringify(h.audits)).not.toMatch(/Ngozi|1990-01-01|2345/);
     const own = pharmacyHarness({ outcome: 'none', route_id: null }, undefined, false);
     const ownAnswer = await own.service.listWorkItems(context);
     expect(ownAnswer.items[0]).toMatchObject({ sourceEhrPrescriptionId: prescriptionId, sourceEncounterId: encounterId });
     expect(ownAnswer.items[0]).not.toHaveProperty('orderRoute');
     expect(own.statements.some((s) => s.sql.includes('order_route_cards'))).toBe(false);
+    // A same-facility list names no patient: only the collection row.
+    expect(own.audits).toEqual([expect.objectContaining({ resourceType: 'pharmacy-work-item-collection' })]);
   });
 });
