@@ -10,6 +10,8 @@ import type { DataAccessContext } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import type { IdentityService } from '../identity/identity.service';
 import { LabWorkItemsService } from './lab-work-items.service';
+import { LabOrderRouteAccess } from './order-route-access';
+import { LabOrderRouteCards } from './order-route-cards';
 import type { AcceptEhrLabOrderCommand } from './lab-work-items.types';
 
 const facilityId = '10000000-0000-4000-8000-000000000001';
@@ -72,7 +74,8 @@ const harness = (rows: (typeof stored)[], insertError?: Error, later?: { stateme
     operation(client) } as unknown as DatabaseService;
   const identity = { authorize: jest.fn().mockResolvedValue({ allowed: true, breakGlass: false }) } as unknown as IdentityService;
   const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService;
-  return { service: new LabWorkItemsService(database, identity, audit), queries };
+  return { service: new LabWorkItemsService(database, identity, audit, new LabOrderRouteAccess(identity),
+    new LabOrderRouteCards(database)), queries };
 };
 const inserts = (queries: string[]) => queries.filter((sql) => /insert into lab\./.test(sql));
 

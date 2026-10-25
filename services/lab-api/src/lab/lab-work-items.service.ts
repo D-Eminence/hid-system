@@ -8,22 +8,29 @@ import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { AcceptEhrLabOrderCommand, LabWorkItemResult } from './lab-work-items.types';
+import { LabOrderRouteAccess, basisDetails } from './order-route-access';
+import { LabOrderRouteCards, type OrderRouteCard } from './order-route-cards';
 
 interface WorkItemRow extends QueryResultRow {
   id: string; patient_id: string; facility_id: string; ordering_facility_id: string;
   source_ehr_order_id: string; source_ehr_order_version: string; source_encounter_id: string;
   status: 'accepted'; priority: AcceptEhrLabOrderCommand['priority']; accepted_by: string;
   accepted_at: Date; row_version: string; created_at: Date;
+  /** Set when the work item came from another facility's order route (P4c). */
+  order_route_id?: string | null;
 }
 
 const WORK_ITEM_SELECT = `select id::text,patient_id::text,facility_id::text,ordering_facility_id::text,
   source_ehr_order_id::text,source_ehr_order_version::text,source_encounter_id::text,status,priority,
-  accepted_by::text,accepted_at,row_version::text,created_at from lab.work_items`;
+  accepted_by::text,accepted_at,row_version::text,created_at,order_route_id::text from lab.work_items`;
+
+const workItemDenied = () => new DomainProblem(403, 'LAB_WORK_ITEM_ACCESS_DENIED', 'Lab work-item access is not authorized');
 
 @Injectable()
 export class LabWorkItemsService {
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityService,
-    private readonly audit: AuditService) {}
+    private readonly audit: AuditService, private readonly routeAccess: LabOrderRouteAccess,
+    private readonly routeCards: LabOrderRouteCards) {}
 
   async acceptEhrOrder(context: DataAccessContext, command: AcceptEhrLabOrderCommand): Promise<LabWorkItemResult> {
     if (!context.actor.permissions.includes('lab.work-item.accept')) {
@@ -119,27 +126,40 @@ export class LabWorkItemsService {
       const result = await client.query<WorkItemRow>(`${WORK_ITEM_SELECT} where id=$1`, [workItemId]);
       const row = result.rows[0];
       if (!row) throw new DomainProblem(404, 'LAB_WORK_ITEM_NOT_FOUND', 'Lab work item was not found');
-      await this.authorize(row.patient_id, context, 'read_records');
-      await this.audit.recordWithClient(client, this.auditEvent(context,row,'lab.work-item.read'));
-      return this.project(row);
+      const basis = await this.routeAccess.authorize(client, context, 'work_item', row.id, row.patient_id, 'read_records',
+        workItemDenied);
+      await this.audit.recordWithClient(client, this.auditEvent(context,row,'lab.work-item.read', basisDetails(basis)));
+      const cards = row.order_route_id ? await this.routeCards.cards(client, [row.id], context.correlationId) : undefined;
+      return this.project(row, cards?.get(row.id));
     });
   }
 
+  /**
+   * The work list. Row-level security shows this facility's rows the member
+   * may read: under a consent grant, or bound to an order route that allows
+   * a read now (P4c, strict policy). A route-backed row carries its route
+   * card and, while the route allows a read, its patient (C12). The answer
+   * says whether orders between facilities and work on them are on, read
+   * after the transaction (FEAS R4, V11).
+   */
   async list(context: DataAccessContext) {
     if (!context.actor.permissions.includes('lab.work-item.read')) {
       throw new DomainProblem(403, 'LAB_WORK_ITEM_ACCESS_DENIED', 'Lab work-item read permission is required');
     }
-    return this.database.withTransaction(context, async (client) => {
+    const page = await this.database.withTransaction(context, async (client) => {
       const result = await client.query<WorkItemRow & { test_name:string; accession_id:string|null; accession_number:string|null;
         specimen_statuses:string[]|null }>(`select w.id::text,w.patient_id::text,w.facility_id::text,w.ordering_facility_id::text,
         w.source_ehr_order_id::text,w.source_ehr_order_version::text,w.source_encounter_id::text,w.status,w.priority,
-        w.accepted_by::text,w.accepted_at,w.row_version::text,w.created_at,w.test_name,a.id::text as accession_id,
+        w.accepted_by::text,w.accepted_at,w.row_version::text,w.created_at,w.order_route_id::text,w.test_name,a.id::text as accession_id,
         a.accession_number,array_remove(array_agg(s.status order by s.created_at),null) as specimen_statuses from lab.work_items w
         left join lab.accessions a on a.work_item_id=w.id left join lab.specimens s on s.accession_id=a.id
         group by w.id,a.id,a.accession_number order by w.accepted_at asc,w.id asc limit 200`);
-      return { items: result.rows.map((row) => ({ ...this.project(row),testName:row.test_name,
+      const routed = result.rows.filter((row) => row.order_route_id).map((row) => row.id);
+      const cards = await this.routeCards.cards(client, routed, context.correlationId);
+      return { items: result.rows.map((row) => ({ ...this.project(row, cards.get(row.id)),testName:row.test_name,
         accessionId:row.accession_id,accessionNumber:row.accession_number,specimenStatuses:row.specimen_statuses ?? [] })) };
     });
+    return { ...page, ...(await this.routeCards.flags()) };
   }
 
   private async authorize(patientId: string, context: DataAccessContext, action: 'read_records' | 'write_records') {
@@ -149,10 +169,17 @@ export class LabWorkItemsService {
     }
   }
 
-  private project(row: WorkItemRow): LabWorkItemResult {
-    return { id: row.id,patientId: row.patient_id,facilityId: row.facility_id,
-      sourceEhrOrderId: row.source_ehr_order_id,sourceEhrOrderVersion: Number(row.source_ehr_order_version),
+  /**
+   * A work item as Lab answers it. A route-backed one (P4c) never carries
+   * the other facility's order id (PRIV P4.3); it carries its route card
+   * instead, and its patient only while the route allows a read.
+   */
+  private project(row: WorkItemRow, card?: OrderRouteCard): LabWorkItemResult {
+    const base = { id: row.id,patientId: row.patient_id,facilityId: row.facility_id,
+      sourceEhrOrderVersion: Number(row.source_ehr_order_version),
       status: row.status,priority: row.priority,acceptedAt: row.accepted_at,version: Number(row.row_version) };
+    if (!row.order_route_id) return { ...base, sourceEhrOrderId: row.source_ehr_order_id };
+    return { ...base, ...(card ? { orderRoute: card.orderRoute, ...(card.patient ? { patient: card.patient } : {}) } : {}) };
   }
 
   private auditEvent(context: DataAccessContext,row: WorkItemRow,action: string,details?: Record<string,unknown>) {

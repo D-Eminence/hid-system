@@ -6,6 +6,7 @@ import type { DatabaseService } from '../database/database.service';
 import { IdentityService } from '../identity/identity.service';
 import type { AuthorizationDecision,AuthorizationRequest,IdentityProvider } from '../identity/identity.types';
 import { LabExecutionsService } from './lab-executions.service';
+import { LabOrderRouteAccess } from './order-route-access';
 
 // Released Lab results for readers who hold lab.result.released.read without
 // lab.execution.read (the doctor, clinician and nurse roles, 0021): they get the
@@ -73,7 +74,7 @@ const harness=({results={[resultId]:correctedAfterRelease} as Record<string,Stor
  const database={withTransaction:async<T>(_c:DataAccessContext,fn:(c:PoolClient)=>Promise<T>)=>fn(client as unknown as PoolClient)} as unknown as DatabaseService;
  const audit={record:jest.fn().mockResolvedValue(undefined),recordWithClient:jest.fn().mockResolvedValue(undefined)};
  const provider={authorize:jest.fn(authorize),lookupExactHid:jest.fn(),consentStatus:jest.fn()} satisfies IdentityProvider;
- const service=new LabExecutionsService(database,new IdentityService(provider,audit as unknown as AuditService),audit as unknown as AuditService);
+ const service=new LabExecutionsService(database,audit as unknown as AuditService,new LabOrderRouteAccess(new IdentityService(provider,audit as unknown as AuditService)));
  const statements=()=>client.query.mock.calls.map(call=>String(call[0]));
  const resultReads=()=>statements().filter(sql=>RESULT_READS.test(sql));
  const firstResultRead=()=>{const index=client.query.mock.calls.findIndex(call=>RESULT_READS.test(String(call[0])));return index<0?Infinity:client.query.mock.invocationCallOrder[index]??Infinity;};
