@@ -3,6 +3,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { NotificationOtpClient, type OtpDeliveryOutcome } from '../auth/notification-otp.client';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
+import { DOMAIN_LIKE } from '../identity/staff-names';
 import { EmergencyContactProtector, type EmergencyContactChannel } from './emergency-contact-protector';
 
 /**
@@ -46,8 +47,15 @@ export function alertPatientFullName(value: string | null): string {
   return alertText(value, /[^\p{L}\p{M}' .-]/gu, /^[^\p{L}\p{M}]+/u, 120) ?? 'Someone';
 }
 
+/**
+ * The clinician as the alert names them, or null ("a health worker"). A
+ * display name is typed by its holder (a self-signed-up administrator or an
+ * invitee), so one that still reads like a domain after cleaning
+ * ("hid-payroll.com") is dropped: a mail client could make it a link (P4b, V1).
+ */
 export function alertClinicianName(value: string | null): string | null {
-  return alertText(value, /[^\p{L}\p{M}' .-]/gu, /^[^\p{L}\p{M}]+/u, 120);
+  const name = alertText(value, /[^\p{L}\p{M}' .-]/gu, /^[^\p{L}\p{M}]+/u, 120);
+  return name !== null && DOMAIN_LIKE.test(name) ? null : name;
 }
 
 export function alertFacilityName(value: string | null): string | null {

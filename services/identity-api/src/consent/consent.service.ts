@@ -281,6 +281,14 @@ export class ConsentService {
     if (error.code === '55000' && message === 'PLATFORM_CONTROL_UNAVAILABLE') {
       return new DomainProblem(503, 'PLATFORM_CONTROL_UNAVAILABLE', 'Platform runtime controls are unavailable');
     }
+    // A self-signed-up facility's first 30 days after support's review (P4b,
+    // Q4): the trigger consent_grants_self_service_probation allows 5
+    // emergency activations a day per facility. Mapped before the generic
+    // P0001 so it is not shown as the per-account limit (V5).
+    if (error.code === 'P0001' && message === 'EMERGENCY_PROBATION_LIMIT') {
+      return new DomainProblem(429, 'EMERGENCY_PROBATION_LIMITED', 'This facility is new to Health ID: emergency '
+        + 'access is limited to 5 activations a day in its first 30 days. Contact Health ID support to lift the limit.');
+    }
     switch (error.code) {
       case 'P0001':
         return new DomainProblem(429, 'EMERGENCY_RATE_LIMITED', 'Too many emergency activations. Contact your facility emergency access administrator.');

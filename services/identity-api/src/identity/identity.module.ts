@@ -34,6 +34,13 @@ import { ProviderEnrollmentService } from './provider-enrollment.service';
 import { AdminSelfServiceApplicationsController,
   AdminSelfServiceFacilitiesController } from './self-service-facilities.controller';
 import { SelfServiceFacilitiesService } from './self-service-facilities.service';
+import { AdminFacilityStaffController } from './admin-facility-staff.controller';
+import { FacilityStaffController } from './facility-staff.controller';
+import { FacilityStaffService } from './facility-staff.service';
+import { StaffInvitationsPublicController } from './staff-invitations-public.controller';
+import { StaffInvitationsSignedInController } from './staff-invitations-signed-in.controller';
+import { StaffInvitationsService } from './staff-invitations.service';
+import { StaffReauthenticationService } from './staff-reauthentication.service';
 
 @Module({
   imports: [AuthModule, TurnstileModule, IntegrationModule],
@@ -42,7 +49,12 @@ import { SelfServiceFacilitiesService } from './self-service-facilities.service'
     AdminOrganizationApplicationsController,
     PatientEnrollmentController,
     ProviderEnrollmentController,
-    AdminSelfServiceFacilitiesController, AdminSelfServiceApplicationsController],
+    AdminSelfServiceFacilitiesController, AdminSelfServiceApplicationsController,
+    // Facility staff invitations (P4b). The static segments (open, accept,
+    // signed-in/preview, signed-in/accept) never match :invitationId/resend or
+    // :invitationId/revoke.
+    StaffInvitationsSignedInController, StaffInvitationsPublicController, FacilityStaffController,
+    AdminFacilityStaffController],
   providers: [
     IdentityService,
     NinRegistrationService,
@@ -67,6 +79,9 @@ import { SelfServiceFacilitiesService } from './self-service-facilities.service'
     PatientEnrollmentService,
     ProviderEnrollmentService,
     SelfServiceFacilitiesService,
+    StaffInvitationsService,
+    FacilityStaffService,
+    StaffReauthenticationService,
     QoreIdPublicPatientIdentityProvider,
     { provide: PUBLIC_PATIENT_IDENTITY_PROVIDER, useExisting: QoreIdPublicPatientIdentityProvider },
     PostgresIdentityProvider,

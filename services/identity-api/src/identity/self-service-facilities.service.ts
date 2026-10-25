@@ -4,6 +4,7 @@ import { DomainProblem } from '../common/problem';
 import type { PlatformAdminContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import type { SelfServiceFacilityState } from './dto/self-service-facility.dto';
+import { normalizeLicenceNumber } from './staff-licence';
 
 interface SelfServiceFacilityRow extends QueryResultRow {
   application_id: string;
@@ -27,12 +28,48 @@ interface SelfServiceFacilityRow extends QueryResultRow {
   released_at: Date | string | null;
   released_by_account_id: string | null;
   release_reason: string | null;
+  // P4b (SPEC 3.5): support's choice of the administrator's role, its
+  // evidence, the administrator's own licence, and the facility since review.
+  review_grants_role?: string | null;
+  reviewable_roles?: string[] | null;
+  granted_role?: string | null;
+  verification_method?: string | null;
+  administrator_licence_body?: string | null;
+  administrator_licence_number?: string | null;
+  administrator_licence_recorded_at?: Date | string | null;
+  member_count?: string | number | null;
+  pending_invitation_count?: string | number | null;
+  probation_ends_at?: Date | string | null;
+  break_glass_last_7d?: string | number | null;
+  delivery_failures_last_day?: string | number | null;
 }
 
 interface ReviewRow extends QueryResultRow {
   application_id: string;
   reviewed_at: Date | string;
   row_version: string | number;
+  granted_role: string;
+  sessions_revoked: string | number;
+}
+
+interface AdministratorRoleRow extends QueryResultRow {
+  application_id: string;
+  row_version: string | number;
+  granted_role: string;
+  sessions_revoked: string | number;
+}
+
+interface ProbationEndRow extends QueryResultRow {
+  application_id: string;
+  row_version: string | number;
+  probation_ended_at: Date | string;
+}
+
+/** The administrator's own role, its evidence and licence, as support records them (SPEC 3.5, 3.7). */
+export interface AdministratorAccessInput {
+  grantedRole: string;
+  verificationMethod: string;
+  administratorLicence?: { body: string; number: string };
 }
 
 interface ReleaseRow extends QueryResultRow {
@@ -71,7 +108,29 @@ interface WaiveRow extends QueryResultRow {
   row_version: string | number;
 }
 
-type DatabaseCommand = 'review' | 'release' | 'application' | 'waive';
+type DatabaseCommand = 'review' | 'release' | 'application' | 'waive' | 'administrator-role' | 'probation';
+
+/**
+ * Refusals the P4b admin commands raise with the code as the message (SPEC
+ * 3.5, 3.7, 3.8, 6.2), mapped before the per-command rules.
+ */
+const MESSAGE_REFUSALS: Readonly<Record<string, readonly [string, number, string]>> = Object.freeze({
+  SELF_SERVICE_FACILITY_REVIEW_REQUIRES_ACTIVE: ['23514', 409,
+    'The facility, its organization and its administrator must be active, with one administrator membership'],
+  SELF_SERVICE_ADMINISTRATOR_ROLE_UNCHANGED: ['23505', 409, 'The administrator already has this access'],
+  SELF_SERVICE_PROBATION_ALREADY_ENDED: ['23505', 409, 'The first 30 days have already ended'],
+});
+
+function nullableCount(value: string | number | null | undefined): number | null {
+  if (value === null || value === undefined) return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function licenceArguments(input: AdministratorAccessInput): [string | null, string | null] {
+  const licence = input.administratorLicence;
+  return licence ? [licence.body, normalizeLicenceNumber(licence.number)] : [null, null];
+}
 
 function isoOrNull(value: Date | string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
@@ -122,23 +181,83 @@ export class SelfServiceFacilitiesService {
         releasedAt: isoOrNull(row.released_at),
         releasedByAccountId: row.released_by_account_id,
         releaseReason: row.release_reason,
+        reviewGrantsRole: row.review_grants_role ?? null,
+        reviewableRoles: row.reviewable_roles ?? [],
+        grantedRole: row.granted_role ?? null,
+        verificationMethod: row.verification_method ?? null,
+        administratorLicenceBody: row.administrator_licence_body ?? null,
+        administratorLicenceNumber: row.administrator_licence_number ?? null,
+        administratorLicenceRecordedAt: isoOrNull(row.administrator_licence_recorded_at),
+        memberCount: nullableCount(row.member_count),
+        pendingInvitationCount: nullableCount(row.pending_invitation_count),
+        probationEndsAt: isoOrNull(row.probation_ends_at),
+        breakGlassLast7d: nullableCount(row.break_glass_last_7d),
+        deliveryFailuresLastDay: nullableCount(row.delivery_failures_last_day),
       })) };
     } catch (error) {
       throw this.mapDatabaseError(error);
     }
   }
 
-  async review(context: PlatformAdminContext, applicationId: string, expectedVersion: number, note: string) {
+  /**
+   * Marks a self-signed-up facility reviewed (P4b, SPEC 3.5): in one
+   * transaction the database grants the administrator org_admin and the role
+   * support chose (with its licence), revokes the restricted role, records
+   * the evidence and signs the administrator out, so they sign in again on the
+   * role's host.
+   */
+  async review(context: PlatformAdminContext, applicationId: string, expectedVersion: number, note: string,
+    access: AdministratorAccessInput) {
+    const [licenceBody, licenceNumber] = licenceArguments(access);
     try {
       const result = await this.database.withPlatformTransaction(context, (client) =>
-        client.query<ReviewRow>('select * from identity.admin_review_self_service_facility($1,$2,$3)',
-          [applicationId, expectedVersion, note]));
+        client.query<ReviewRow>('select * from identity.admin_review_self_service_facility($1,$2,$3,$4,$5,$6,$7)',
+          [applicationId, expectedVersion, note, access.grantedRole, access.verificationMethod,
+            licenceBody, licenceNumber]));
       const row = result.rows[0];
       if (!row) throw new DomainProblem(503, 'SELF_SERVICE_FACILITY_REVIEW_UNAVAILABLE', 'Review could not be completed');
       return { applicationId: row.application_id, reviewedAt: isoOrNull(row.reviewed_at),
-        version: Number(row.row_version) };
+        version: Number(row.row_version), grantedRole: row.granted_role, sessionsRevoked: Number(row.sessions_revoked) };
     } catch (error) {
       throw this.mapDatabaseError(error);
+    }
+  }
+
+  /**
+   * Changes a reviewed administrator's own role (P4b, S12, SPEC 3.7): every
+   * other facility role revoked, the new one granted with its licence, and the
+   * administrator signed out when a role is granted.
+   */
+  async setAdministratorRole(context: PlatformAdminContext, applicationId: string, expectedVersion: number,
+    access: AdministratorAccessInput, reason: string) {
+    const [licenceBody, licenceNumber] = licenceArguments(access);
+    try {
+      const result = await this.database.withPlatformTransaction(context, (client) =>
+        client.query<AdministratorRoleRow>(
+          'select * from identity.admin_set_self_service_administrator_role($1,$2,$3,$4,$5,$6,$7)',
+          [applicationId, expectedVersion, access.grantedRole, licenceBody, licenceNumber,
+            access.verificationMethod, reason]));
+      const row = result.rows[0];
+      if (!row) throw new DomainProblem(503, 'SELF_SERVICE_FACILITY_UNAVAILABLE', 'Facility sign-up review is unavailable');
+      return { applicationId: row.application_id, version: Number(row.row_version), grantedRole: row.granted_role,
+        sessionsRevoked: Number(row.sessions_revoked) };
+    } catch (error) {
+      throw this.mapDatabaseError(error, 'administrator-role');
+    }
+  }
+
+  /** Ends a reviewed facility's first 30 days early (P4b, SPEC 3.8). */
+  async endProbation(context: PlatformAdminContext, applicationId: string, expectedVersion: number, reason: string) {
+    try {
+      const result = await this.database.withPlatformTransaction(context, (client) =>
+        client.query<ProbationEndRow>('select * from identity.admin_end_self_service_probation($1,$2,$3)',
+          [applicationId, expectedVersion, reason]));
+      const row = result.rows[0];
+      if (!row) throw new DomainProblem(503, 'SELF_SERVICE_FACILITY_UNAVAILABLE', 'Facility sign-up review is unavailable');
+      return { applicationId: row.application_id, version: Number(row.row_version),
+        probationEndedAt: isoOrNull(row.probation_ended_at) };
+    } catch (error) {
+      throw this.mapDatabaseError(error, 'probation');
     }
   }
 
@@ -240,6 +359,14 @@ export class SelfServiceFacilitiesService {
   private mapDatabaseError(error: unknown, command: DatabaseCommand = 'review'): DomainProblem {
     if (error instanceof DomainProblem) return error;
     const code = typeof error === 'object' && error !== null && 'code' in error ? error.code : undefined;
+    const message = typeof error === 'object' && error !== null && 'message' in error
+      && typeof error.message === 'string' ? error.message : '';
+    // P4b's refusals by message, before the per-command rules (SPEC 6.2).
+    const refusal = MESSAGE_REFUSALS[message];
+    if (refusal && refusal[0] === code) return new DomainProblem(refusal[1], message, refusal[2]);
+    if (code === '22023' && message.startsWith('SELF_SERVICE_REVIEW_') && /^[A-Z_]+$/.test(message)) {
+      return new DomainProblem(400, message, 'The review\'s role, licence or evidence is invalid');
+    }
     if (code === '42501') return new DomainProblem(403, 'PERMISSION_DENIED', 'Facility sign-up review is not permitted');
     if (code === 'P0002') {
       if (command === 'waive') {
@@ -256,7 +383,7 @@ export class SelfServiceFacilitiesService {
     // identity.admin_release_self_service_facility 23505
     // SELF_SERVICE_FACILITY_ALREADY_RELEASED (0086), each before it compares
     // the version. Nothing else in these commands raises 23505.
-    if (code === '23505') {
+    if (code === '23505' && command !== 'administrator-role' && command !== 'probation') {
       return command === 'release'
         ? new DomainProblem(409, 'SELF_SERVICE_FACILITY_ALREADY_RELEASED', 'This facility sign-up was already released')
         : new DomainProblem(409, 'SELF_SERVICE_FACILITY_ALREADY_REVIEWED', 'This facility sign-up was already reviewed');

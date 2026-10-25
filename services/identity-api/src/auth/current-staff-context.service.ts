@@ -1,5 +1,5 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
-import type { ActorContext, FacilityAssignment } from '../common/request-context';
+import type { ActorContext, FacilityAssignment, FacilitySelfService } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import type { CredentialIdentity } from './auth.types';
 import { ACTIVE_STAFF_VERIFICATION_STATUSES } from './auth-policy';
@@ -17,6 +17,9 @@ interface StaffContextRow {
   roles: string[];
   permissions: string[];
   is_primary: boolean;
+  /** identity.organization_self_service_state's review_state: null for governed and legacy organizations. */
+  review_state?: string | null;
+  organization_type?: string | null;
 }
 
 interface PlatformAuthorityRow {
@@ -24,39 +27,12 @@ interface PlatformAuthorityRow {
   permissions: string[];
 }
 
-@Injectable()
-export class CurrentStaffContextService {
-  constructor(private readonly database: DatabaseService) {}
-
-  async resolve(
-    subject: string,
-    authenticationMethod: ActorContext['authenticationMethod'],
-    sessionId?: string,
-    preferredFacilityId?: string,
-  ): Promise<ActorContext> {
-    let identity = await this.resolvePostgres(subject, authenticationMethod);
-    if (!identity) {
-      const account = await this.database.query<{ id: string; email: string | null; display_name: string | null }>(
-        `select id::text, email, display_name from auth.accounts
-          where subject = $1 and status = 'active'
-            and (disabled_until is null or disabled_until <= clock_timestamp())`,
-        [subject],
-      );
-      const row = account.rows[0];
-      if (!row) throw new UnauthorizedException('Staff account or facility membership is inactive');
-      identity = { subject, accountId: row.id, ...(row.email ? { email: row.email } : {}),
-        displayName: row.display_name ?? subject, facilities: [], authenticationMethod };
-    }
-    const platformAuthority = await this.resolvePlatformAuthority(identity.accountId);
-    return this.toActor(identity, platformAuthority, sessionId, preferredFacilityId);
-  }
-
-  private async resolvePostgres(
-    subject: string,
-    authenticationMethod: 'local' | 'oidc',
-  ): Promise<CredentialIdentity | undefined> {
-    const result = await this.database.query<StaffContextRow>(
-      `select account.id::text as account_id,
+/**
+ * The staff context's membership query exactly as it was before P4b, without
+ * its ORDER BY (FEA R4). Kept byte-identical so governed and legacy facilities
+ * resolve exactly as before.
+ */
+export const STAFF_MEMBERSHIPS_SQL = `select account.id::text as account_id,
               account.subject,
               account.email,
               account.display_name,
@@ -104,8 +80,54 @@ export class CurrentStaffContextService {
         group by account.id, account.subject, account.email, account.display_name,
                  membership.id, membership.facility_id, membership.organization_id,
                  membership.membership_role, membership.app_role, membership.is_primary,
-                 facility.name, facility.code
-        order by membership.is_primary desc, facility.name, membership.facility_id`,
+                 facility.name, facility.code`;
+
+/**
+ * P4b wraps that query: after grouping, one call per membership row of
+ * identity.organization_self_service_state (0086 §5, stable, definer) adds the
+ * organization's self sign-up state, which answers no row for governed and
+ * legacy organizations. The order is the old one.
+ */
+export const STAFF_CONTEXT_SQL = `select grouped.*, state.review_state, state.organization_type
+         from (${STAFF_MEMBERSHIPS_SQL}) grouped
+         left join lateral identity.organization_self_service_state(grouped.organization_id::uuid) state on true
+        order by grouped.is_primary desc, grouped.facility_name, grouped.facility_id::uuid`;
+
+const SELF_SERVICE_REVIEW_STATES = new Set(['pending', 'reviewed']);
+
+@Injectable()
+export class CurrentStaffContextService {
+  constructor(private readonly database: DatabaseService) {}
+
+  async resolve(
+    subject: string,
+    authenticationMethod: ActorContext['authenticationMethod'],
+    sessionId?: string,
+    preferredFacilityId?: string,
+  ): Promise<ActorContext> {
+    let identity = await this.resolvePostgres(subject, authenticationMethod);
+    if (!identity) {
+      const account = await this.database.query<{ id: string; email: string | null; display_name: string | null }>(
+        `select id::text, email, display_name from auth.accounts
+          where subject = $1 and status = 'active'
+            and (disabled_until is null or disabled_until <= clock_timestamp())`,
+        [subject],
+      );
+      const row = account.rows[0];
+      if (!row) throw new UnauthorizedException('Staff account or facility membership is inactive');
+      identity = { subject, accountId: row.id, ...(row.email ? { email: row.email } : {}),
+        displayName: row.display_name ?? subject, facilities: [], authenticationMethod };
+    }
+    const platformAuthority = await this.resolvePlatformAuthority(identity.accountId);
+    return this.toActor(identity, platformAuthority, sessionId, preferredFacilityId);
+  }
+
+  private async resolvePostgres(
+    subject: string,
+    authenticationMethod: 'local' | 'oidc',
+  ): Promise<CredentialIdentity | undefined> {
+    const result = await this.database.query<StaffContextRow>(
+      STAFF_CONTEXT_SQL,
       [subject, [...ACTIVE_STAFF_VERIFICATION_STATUSES]],
     );
     const first = result.rows[0];
@@ -192,6 +214,13 @@ export class CurrentStaffContextService {
       roles: [...new Set(row.roles)].sort(),
       permissions: [...new Set(row.permissions)].sort(),
       isPrimary: row.is_primary,
+      // Only a self-signed-up organization that is pending or reviewed; a
+      // released one is inactive and never listed.
+      ...(row.review_state && SELF_SERVICE_REVIEW_STATES.has(row.review_state) && row.organization_type
+        ? { selfService: {
+          review: row.review_state as FacilitySelfService['review'],
+          organizationType: row.organization_type as FacilitySelfService['organizationType'],
+        } } : {}),
     };
   }
 }

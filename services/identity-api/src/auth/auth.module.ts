@@ -23,6 +23,9 @@ import { IntegrationModule } from '../integrations/integration.module';
   controllers: [AuthController, OtpController, PatientSelfController],
   providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, OtpService, NotificationOtpClient, GoogleAuthenticationService],
   // AuthService: facility self sign-up signs the new administrator in (P4).
-  exports: [AuthService, TokenService, SecurityGuard, WorkloadAuthService, TurnstileModule, GoogleAuthenticationService, NotificationOtpClient],
+  // LocalAuthProvider and AuthSessionAuditService: the password re-entry of
+  // facility staff management (P4b).
+  exports: [AuthService, TokenService, SecurityGuard, WorkloadAuthService, TurnstileModule, GoogleAuthenticationService, NotificationOtpClient,
+    LocalAuthProvider, AuthSessionAuditService],
 })
 export class AuthModule {}

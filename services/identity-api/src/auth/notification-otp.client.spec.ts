@@ -297,3 +297,108 @@ describe('NotificationOtpClient workload token in JWT mode', () => {
     }
   });
 });
+
+// Facility staff invitations (P4b, SPEC 4.6 and 6.2).
+describe('NotificationOtpClient staff invitation delivery', () => {
+  const invitation = {
+    sendId: 'e0000000-0000-4000-8000-000000000001', invitationId: '3f2a9c1b-7d4e-4a5b-8c6d-0e1f2a3b4c5d',
+    recipient: 'invitee@example.test', facilityName: 'Synthetic Clinic Ltd', roleCode: 'nurse',
+    token: 'A'.repeat(43), code: '048213', expiresAt: new Date('2026-11-01T13:35:00.000Z'), correlationId: 'request-21',
+  };
+  const plan = { capability: 'email', primary: 'ses', fallback: 'brevo', configuration: {} };
+  let directory: string;
+  let warn: jest.SpyInstance;
+
+  beforeEach(async () => {
+    directory = await mkdtemp(join(tmpdir(), 'hid-notification-token-'));
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+      CORS_ORIGINS: 'https://www.healthidentitydirectory.com', AUTH_MODE: 'local',
+      AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
+      AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
+      NOTIFICATION_API_URL: 'http://127.0.0.1:3007',
+      NOTIFICATION_SERVICE_IDENTITY_MODE: 'local-secret',
+      NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN: 'test-service-token-with-32-characters',
+    });
+    resetEnvironmentForTests();
+    warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+
+  afterEach(async () => {
+    warn.mockRestore();
+    global.fetch = originalFetch;
+    for (const key of Object.keys(process.env)) if (!(key in originalEnvironment)) delete process.env[key];
+    Object.assign(process.env, originalEnvironment);
+    resetEnvironmentForTests();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  const client = (deliveryPlan: jest.Mock = jest.fn().mockResolvedValue(plan)) =>
+    new NotificationOtpClient({ deliveryPlan } as unknown as IntegrationRuntimeService);
+
+  it('posts the fixed fields, keyed by the send, to the staff-invitation route, with the email plan', async () => {
+    const deliveryPlan = jest.fn().mockResolvedValue(plan);
+    global.fetch = jest.fn().mockResolvedValue(new Response(JSON.stringify({ outcome: 'accepted',
+      primary: { provider: 'ses' } }), { status: 202 }));
+    await expect(client(deliveryPlan).deliverStaffInvitation(invitation)).resolves.toEqual({ outcome: 'accepted',
+      provider: 'ses' });
+    expect(deliveryPlan).toHaveBeenCalledWith('email');
+    const [url, init] = (global.fetch as jest.Mock).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('http://127.0.0.1:3007/api/v1/notifications/staff-invitation');
+    expect(init.headers).toEqual(expect.objectContaining({ 'idempotency-key': `staff-invitation:${invitation.sendId}`,
+      'x-correlation-id': 'request-21', 'x-hid-internal-caller': 'identity-api' }));
+    // No person's name, no free text: exactly these keys.
+    expect(JSON.parse(String(init.body))).toEqual({ channel: 'email', recipient: 'invitee@example.test',
+      facilityName: 'Synthetic Clinic Ltd', roleCode: 'nurse', invitationId: invitation.invitationId,
+      token: 'A'.repeat(43), code: '048213', expiresAt: '2026-11-01T13:35:00.000Z', plan });
+    const timeout = jest.spyOn(AbortSignal, 'timeout');
+    await client().deliverStaffInvitation(invitation);
+    expect(timeout).toHaveBeenLastCalledWith(5_000);
+    timeout.mockRestore();
+  });
+
+  it('omits the facility name when Identity left it out', async () => {
+    global.fetch = jest.fn().mockResolvedValue(new Response(JSON.stringify({ outcome: 'accepted' }), { status: 202 }));
+    const { facilityName: _name, ...withoutName } = invitation;
+    await client().deliverStaffInvitation(withoutName);
+    expect(JSON.parse(String((global.fetch as jest.Mock).mock.calls[0][1].body))).not.toHaveProperty('facilityName');
+  });
+
+  it('answers no delivery plan as definitive_failure and sends nothing', async () => {
+    global.fetch = jest.fn();
+    await expect(client(jest.fn().mockRejectedValue(new Error('no plan'))).deliverStaffInvitation(invitation))
+      .resolves.toMatchObject({ outcome: 'definitive_failure' });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [404, 'definitive_failure'], [400, 'definitive_failure'], [403, 'definitive_failure'], [401, 'unknown'],
+    [429, 'unknown'], [500, 'unknown'], [503, 'unknown'],
+  ])('maps an HTTP %i (404: a notification-api without the route) to %s', async (status, outcome) => {
+    global.fetch = jest.fn().mockResolvedValue(new Response('{}', { status }));
+    await expect(client().deliverStaffInvitation(invitation)).resolves.toMatchObject({ outcome,
+      safeCode: `http_${status}` });
+  });
+
+  it('keeps a transport failure unknown', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('socket hang up'));
+    await expect(client().deliverStaffInvitation(invitation)).resolves.toEqual({ outcome: 'unknown',
+      safeCode: 'transport_error' });
+  });
+
+  it('answers a missing workload token unknown (the invitation stays resendable), logging no field', async () => {
+    Object.assign(process.env, { NOTIFICATION_SERVICE_IDENTITY_MODE: 'jwt',
+      NOTIFICATION_IDENTITY_WORKLOAD_TOKEN_FILE: join(directory, 'notification.jwt') });
+    delete process.env.NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN;
+    resetEnvironmentForTests();
+    global.fetch = jest.fn();
+    await expect(client().deliverStaffInvitation(invitation)).resolves.toEqual({ outcome: 'unknown',
+      safeCode: 'workload_token_unavailable' });
+    expect(global.fetch).not.toHaveBeenCalled();
+    const line = String(warn.mock.calls[0]?.[0]);
+    for (const secret of [invitation.recipient, invitation.token, invitation.code, invitation.invitationId,
+      invitation.sendId, 'Synthetic Clinic']) {
+      expect(line).not.toContain(secret);
+    }
+  });
+});

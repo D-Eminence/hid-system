@@ -106,6 +106,23 @@ describe('ConsentService', () => {
       expect(query).toHaveBeenCalledTimes(2);
     },
   );
+  // P4b (Q4, V5): a self-signed-up facility's first 30 days allow 5 emergency
+  // activations a day; that refusal has its own code and words, and any other
+  // P0001 keeps the per-account limit's.
+  it('answers the first-30-days cap 429 EMERGENCY_PROBATION_LIMITED, before the generic P0001', async () => {
+    query.mockResolvedValueOnce({ rows: [{}] })
+      .mockRejectedValueOnce(Object.assign(new Error('EMERGENCY_PROBATION_LIMIT'), { code: 'P0001' }));
+    await expect(service.activateBreakGlass({ ...context, purposeOfUse: 'emergency' }, {
+      hid: 'HID-ABCDEFGH', reason: 'Emergency care required', durationMinutes: 30,
+    })).rejects.toMatchObject({ status: 429, code: 'EMERGENCY_PROBATION_LIMITED',
+      message: 'This facility is new to Health ID: emergency access is limited to 5 activations a day in its first '
+        + '30 days. Contact Health ID support to lift the limit.' });
+    query.mockResolvedValueOnce({ rows: [{}] })
+      .mockRejectedValueOnce(Object.assign(new Error('Emergency access rate limit exceeded'), { code: 'P0001' }));
+    await expect(service.activateBreakGlass({ ...context, purposeOfUse: 'emergency' }, {
+      hid: 'HID-ABCDEFGH', reason: 'Emergency care required', durationMinutes: 30,
+    })).rejects.toMatchObject({ status: 429, code: 'EMERGENCY_RATE_LIMITED' });
+  });
   it('propagates audit/outbox failure without returning a grant', async () => {
     const outage = new Error('Synthetic durable audit outage');
     query.mockResolvedValueOnce({ rows: [{}] }).mockRejectedValueOnce(outage);

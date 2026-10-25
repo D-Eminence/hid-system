@@ -1,6 +1,8 @@
-import { Transform } from 'class-transformer';
-import { IsBoolean, IsIn, IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { Transform, Type } from 'class-transformer';
+import { IsBoolean, IsIn, IsOptional, IsString, Matches, MaxLength, MinLength, ValidateNested } from 'class-validator';
 import { IsOptionalButNotNull } from '../../common/validation';
+import { ADMINISTRATOR_GRANTABLE_ROLES, type AdministratorGrantableRole, LICENCE_BODIES, type LicenceBody,
+  VERIFICATION_METHODS, type VerificationMethod } from '../staff-licence';
 
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value;
 const cacNumber = ({ value }: { value: unknown }) => typeof value === 'string'
@@ -14,10 +16,59 @@ export class ListSelfServiceFacilitiesDto {
   state?: SelfServiceFacilityState;
 }
 
-/** Support's note that a self-signed-up facility was checked: 8-500 characters, trimmed. */
+/**
+ * The administrator's own licence as support records it (P4b, SPEC 3.5): the
+ * regulator and the number, trimmed, 3-100 characters (Identity normalizes it;
+ * the database checks that the body fits the role and the number's pattern).
+ */
+export class AdministratorLicenceInputDto {
+  @IsIn(LICENCE_BODIES)
+  body!: LicenceBody;
+
+  @Transform(trim) @IsString() @MinLength(3) @MaxLength(100)
+  number!: string;
+}
+
+/**
+ * Support's review of a self-signed-up facility (P4 owner guard, extended by
+ * P4b, SPEC 3.5): the note (8-500 characters, trimmed); the administrator's
+ * own role, 'none' or a clinical role, which needs the licence (the database
+ * answers 400 SELF_SERVICE_REVIEW_LICENCE_REQUIRED without it, so the DTO
+ * does not require it); and how support checked.
+ */
 export class ReviewSelfServiceFacilityDto {
   @Transform(trim) @IsString() @MinLength(8) @MaxLength(500)
   note!: string;
+
+  @IsIn(ADMINISTRATOR_GRANTABLE_ROLES)
+  grantedRole!: AdministratorGrantableRole;
+
+  @IsIn(VERIFICATION_METHODS)
+  verificationMethod!: VerificationMethod;
+
+  @IsOptionalButNotNull() @ValidateNested() @Type(() => AdministratorLicenceInputDto)
+  administratorLicence?: AdministratorLicenceInputDto;
+}
+
+/** Support changes a reviewed administrator's own access (P4b, SPEC 3.7): as review, with a reason. */
+export class SelfServiceAdministratorRoleDto {
+  @IsIn(ADMINISTRATOR_GRANTABLE_ROLES)
+  grantedRole!: AdministratorGrantableRole;
+
+  @IsIn(VERIFICATION_METHODS)
+  verificationMethod!: VerificationMethod;
+
+  @IsOptionalButNotNull() @ValidateNested() @Type(() => AdministratorLicenceInputDto)
+  administratorLicence?: AdministratorLicenceInputDto;
+
+  @Transform(trim) @IsString() @MinLength(8) @MaxLength(500)
+  reason!: string;
+}
+
+/** Support ends a reviewed facility's first 30 days early (P4b, SPEC 3.8): a reason of 8-500 characters. */
+export class EndSelfServiceProbationDto {
+  @Transform(trim) @IsString() @MinLength(8) @MaxLength(500)
+  reason!: string;
 }
 
 /**

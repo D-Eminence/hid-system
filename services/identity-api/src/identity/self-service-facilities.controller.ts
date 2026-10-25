@@ -2,9 +2,9 @@ import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Q
 import { requireAdminContext } from '../admin/admin-context';
 import { AuditAction, AuditFailuresOnly, FacilityOptional, RequirePermissions } from '../common/decorators';
 import type { HidRequest } from '../common/request-context';
-import { ListSelfServiceFacilitiesDto, RejectSelfServiceApplicationDto, ReleaseSelfServiceFacilityDto,
-  ReviewSelfServiceFacilityDto, SearchSelfServiceApplicationsDto,
-  WaiveSelfServiceRefusalDto } from './dto/self-service-facility.dto';
+import { EndSelfServiceProbationDto, ListSelfServiceFacilitiesDto, RejectSelfServiceApplicationDto,
+  ReleaseSelfServiceFacilityDto, ReviewSelfServiceFacilityDto, SearchSelfServiceApplicationsDto,
+  SelfServiceAdministratorRoleDto, WaiveSelfServiceRefusalDto } from './dto/self-service-facility.dto';
 import { expectedVersion } from './organization-applications.controller';
 import { SelfServiceFacilitiesService } from './self-service-facilities.service';
 
@@ -28,14 +28,44 @@ export class AdminSelfServiceFacilitiesController {
     return this.facilities.list(requireAdminContext(request), filters.state ?? 'unreviewed');
   }
 
+  /**
+   * Support's review (P4b, SPEC 3.5): it gives the facility full access at
+   * once, grants the administrator org_admin and the role chosen (with its
+   * licence) and signs them out. Needs platform.facility.unlock as well (S13).
+   */
   @Post(':applicationId/review')
   @HttpCode(200)
-  @RequirePermissions('platform.facility.manage')
+  @RequirePermissions('platform.facility.manage', 'platform.facility.unlock')
   @AuditAction('admin.self-service-facility.review')
   review(@Param('applicationId', new ParseUUIDPipe({ version: '4' })) applicationId: string,
     @Headers('if-match') ifMatch: string | undefined,
     @Body() input: ReviewSelfServiceFacilityDto, @Req() request: HidRequest) {
-    return this.facilities.review(requireAdminContext(request), applicationId, expectedVersion(ifMatch), input.note);
+    return this.facilities.review(requireAdminContext(request), applicationId, expectedVersion(ifMatch), input.note,
+      input);
+  }
+
+  /** Support changes a reviewed administrator's own access (P4b, S12, SPEC 3.7). */
+  @Post(':applicationId/administrator-role')
+  @HttpCode(200)
+  @RequirePermissions('platform.facility.manage', 'platform.facility.unlock')
+  @AuditAction('admin.self-service-facility.administrator-role')
+  administratorRole(@Param('applicationId', new ParseUUIDPipe({ version: '4' })) applicationId: string,
+    @Headers('if-match') ifMatch: string | undefined,
+    @Body() input: SelfServiceAdministratorRoleDto, @Req() request: HidRequest) {
+    return this.facilities.setAdministratorRole(requireAdminContext(request), applicationId, expectedVersion(ifMatch),
+      input, input.reason);
+  }
+
+  /** Support ends a reviewed facility's first 30 days early (P4b, SPEC 3.8). */
+  @Post(':applicationId/end-probation')
+  @HttpCode(200)
+  @RequirePermissions('platform.facility.manage', 'platform.facility.unlock')
+  @AuditAction('admin.self-service-facility.probation-end')
+  endProbation(@Param('applicationId', new ParseUUIDPipe({ version: '4' })) applicationId: string,
+    @Headers('if-match') ifMatch: string | undefined,
+    @Body() input: EndSelfServiceProbationDto, @Req() request: HidRequest) {
+    return this.facilities.endProbation(requireAdminContext(request), applicationId, expectedVersion(ifMatch),
+      input.reason);
   }
 
   /**

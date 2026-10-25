@@ -10,6 +10,17 @@ export interface FacilityAssignment {
   roles: readonly string[];
   permissions: readonly string[];
   isPrimary: boolean;
+  /**
+   * Present only at a facility that signed itself up (P4b): 'pending' until
+   * Health ID support reviews it, then 'reviewed'. Governed and legacy
+   * facilities never carry it, so their session answers are unchanged.
+   */
+  selfService?: FacilitySelfService;
+}
+
+export interface FacilitySelfService {
+  review: 'pending' | 'reviewed';
+  organizationType: 'clinic' | 'hospital' | 'laboratory' | 'pharmacy' | 'other';
 }
 
 export interface ActorContext {
