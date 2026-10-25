@@ -1128,7 +1128,8 @@ The services' part of P4c (all new; routes under `/api/v1`, errors
   `PRESCRIPTION_ROUTED`. An order counts as routed while its latest route is
   live or was ever accepted (one work item per order, ever).
 - lab-api and pharmacy-api: `GET order-routes?view=incoming|recent`
-  (default `incoming`; its `healthId` parameter is deprecated, see below),
+  (default `incoming`; a `healthId` query parameter is refused 400
+  `HEALTH_ID_NOT_ACCEPTED_IN_URL`, see below),
   `POST order-routes/search` (`{ view?, healthId }`, the Health ID in the
   body), `GET order-routes/:routeId`, `POST …/accept`
   (`Idempotency-Key`; the Health ID upper-cased and trimmed, or a calendar
@@ -1157,8 +1158,9 @@ The services' part of P4c (all new; routes under `/api/v1`, errors
   search; the audit row names the kind and the count, never the query);
   support's `GET admin/facilities/:facilityId/order-route-summary`,
   `POST admin/facilities/:facilityId/order-destination`,
-  `GET admin/order-routes?reference=` (its `healthId` parameter is
-  deprecated), `POST admin/order-routes/search` (`{ reference }` or
+  `GET admin/order-routes?reference=` (by reference only; a `healthId`
+  query parameter is refused 400 `HEALTH_ID_NOT_ACCEPTED_IN_URL`, see
+  below), `POST admin/order-routes/search` (`{ reference }` or
   `{ healthId }`, same permissions and audit action) and
   `POST admin/order-routes/:routeId/close` (`If-Match`), `@FacilityOptional`,
   reads audited on success and failure, writes on failure only (their
@@ -1181,9 +1183,20 @@ The services' part of P4c (all new; routes under `/api/v1`, errors
     format keeps the request line with its query (CODEX §26). The gateway now
     logs `$request_method $uri $server_protocol`, never the query string,
     for every route; and each lookup has a POST that takes the Health ID in
-    its body. The GETs still take `healthId` for the website build that
-    sends it (deprecated): once the website calls the POSTs, the GETs should
-    refuse it.
+    its body. The website and the admin console now call the POSTs, so the
+    three GETs (`lab/order-routes`, `pharmacy/order-routes`,
+    `admin/order-routes`) refuse a `healthId` query parameter, in any form
+    and with any value (empty included): 400 problem+json, code
+    `HEALTH_ID_NOT_ACCEPTED_IN_URL`, a fixed detail naming the matching
+    `POST …/search` and never the value. Each service refuses it in a
+    route-scoped middleware (`health-id-in-url.ts`, imported by the route's
+    module), so the refusal comes before the guard (no Identity call, no
+    session or control read), the audit interceptor and validation: no
+    database query, no audit row, no log line. The GETs' query DTOs no
+    longer have the field, so every other unknown key is still refused
+    `VALIDATION_FAILED`; the lists and support's lookup by reference answer
+    as before, and the POSTs are unchanged. The order-routes runtime
+    verifier asserts the three refusals end to end.
   - A change of the self-signed-up administrator's own access
     (`identity.admin_set_self_service_administrator_role`) also overwrote
     `self_service_verification_method`, which P4c's default listing reads, so
