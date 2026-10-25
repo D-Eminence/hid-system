@@ -503,18 +503,18 @@ describe('facility self sign-up activation and its quota (P4)', () => {
   // P4b (P4 leftover 1): "This isn't my organization".
   describe('facility self sign-up\'s withdrawal', () => {
     it('closes the session\'s application through one command keyed by the same session hash', async () => {
-      const query = jest.fn().mockResolvedValueOnce({ rows: [{ withdrawn: true }] });
+      const query = jest.fn().mockResolvedValueOnce({ rows: [{ result: 'withdrawn' }] });
       const { service: completion, database } = service(query);
       await expect(completion.withdrawSelfService(token, correlationId)).resolves.toBeUndefined();
       expect(database.withSystemTransaction).toHaveBeenCalledTimes(1);
-      expect(query.mock.calls[0]?.[0]).toBe('select identity.withdraw_self_service_provider_enrollment($1) as withdrawn');
+      expect(query.mock.calls[0]?.[0]).toBe('select identity.withdraw_self_service_provider_enrollment($1) as result');
       const readQuery = jest.fn().mockResolvedValueOnce({ rows: [] });
       await service(readQuery).service.selfServiceProfile(token, correlationId).catch(() => undefined);
       expect(query.mock.calls[0]?.[1]).toEqual(readQuery.mock.calls[0]?.[1]);
     });
 
     it('answers nothing withdrawn 401, and a missing or malformed cookie 401 before any database call', async () => {
-      for (const rows of [[{ withdrawn: false }], [{ withdrawn: null }], []]) {
+      for (const rows of [[{ result: 'session_invalid' }], [{ result: null }], [{ result: true }], []]) {
         await expect(service(jest.fn().mockResolvedValueOnce({ rows })).service.withdrawSelfService(token, correlationId))
           .rejects.toMatchObject({ status: 401, code: 'ORGANIZATION_COMPLETION_SESSION_INVALID' });
       }
