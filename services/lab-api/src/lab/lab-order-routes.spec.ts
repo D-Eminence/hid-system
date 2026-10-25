@@ -11,10 +11,10 @@ import { requestDigest } from '../common/idempotency';
 import type { DataAccessContext } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import type { IdentityService } from '../identity/identity.service';
-import { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto } from './dto/order-route.dto';
+import { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto, SearchOrderRoutesDto } from './dto/order-route.dto';
 import { labOrderRouteProblem } from './lab-order-route.mapping';
 import { LabOrderRoutesController } from './lab-order-routes.controller';
-import { LabOrderRoutesService, normalizedIdentifier } from './lab-order-routes.service';
+import { LabOrderRoutesService, normalizedIdentifier, normalizedReference } from './lab-order-routes.service';
 import { LabWorkItemsService } from './lab-work-items.service';
 import { LabOrderRouteAccess } from './order-route-access';
 import { LabOrderRouteCards, orderRouteCard } from './order-route-cards';
@@ -67,7 +67,7 @@ const incoming = { route_id: routeId, reference: 'B0000000', row_version: '1', e
   patient_id: patientId, source_lab_request_id: sourceOrderId, orderer_account_id: 'x', clinical_information: null };
 
 describe('Lab order-route routes (SPEC-FINAL §10.2)', () => {
-  it('serves four browser routes, all needing lab.order-route.receive, none internal or public', () => {
+  it('serves five browser routes, all needing lab.order-route.receive, none internal or public', () => {
     const base = Reflect.getMetadata(PATH_METADATA, LabOrderRoutesController) as string;
     const routes = Object.getOwnPropertyNames(LabOrderRoutesController.prototype).filter((name) => name !== 'constructor')
       .map((name) => {
@@ -79,6 +79,9 @@ describe('Lab order-route routes (SPEC-FINAL §10.2)', () => {
       });
     expect(routes).toEqual([
       [RequestMethod.GET, 'lab/order-routes', undefined, ['lab.order-route.receive'], 'lab.order-route.list.request', undefined, undefined],
+      // Find by Health ID with the Health ID in the body (CODEX §26).
+      [RequestMethod.POST, 'lab/order-routes/search', 200, ['lab.order-route.receive'], 'lab.order-route.list.request',
+        undefined, undefined],
       [RequestMethod.GET, 'lab/order-routes/:routeId', undefined, ['lab.order-route.receive'], 'lab.order-route.read.request',
         undefined, undefined],
       [RequestMethod.POST, 'lab/order-routes/:routeId/accept', 201, ['lab.order-route.receive'], 'lab.order-route.accept.request',
@@ -112,13 +115,23 @@ describe('Lab order-route routes (SPEC-FINAL §10.2)', () => {
     expect(await errors(ListOrderRoutesQueryDto, { view: 'recent' })).toEqual([]);
     expect(await errors(ListOrderRoutesQueryDto, { view: 'all' })).toEqual(['view']);
     expect(await errors(ListOrderRoutesQueryDto, { view: 'incoming', dateOfBirth: '1990-01-01' })).toEqual(['dateOfBirth']);
+    // The GET's healthId stays, deprecated, for the website build that still sends it.
+    expect(await errors(ListOrderRoutesQueryDto, { view: 'incoming', healthId: 'HID-ABC234' })).toEqual([]);
+    expect(await errors(SearchOrderRoutesDto, { view: 'incoming', healthId: 'HID-ABC234' })).toEqual([]);
+    expect(await errors(SearchOrderRoutesDto, { healthId: 'HID-ABC234' })).toEqual([]);
+    expect(await errors(SearchOrderRoutesDto, { view: 'incoming' })).toEqual(['healthId']);
+    expect(await errors(SearchOrderRoutesDto, { healthId: 'HID-ABC234', dateOfBirth: '1990-01-01' })).toEqual(['dateOfBirth']);
+    expect(await errors(AcceptOrderRouteDto, { expectedVersion: 1, patientIdentifier: { kind: 'date_of_birth', value: '1990-01-01' },
+      reference: 'b0000000' })).toEqual([]);
+    expect(await errors(AcceptOrderRouteDto, { expectedVersion: 1, patientIdentifier: { kind: 'date_of_birth', value: '1990-01-01' },
+      reference: 7 })).toEqual(['reference']);
   });
 });
 
 describe('LabOrderRoutesService list and get (C7, C8)', () => {
   it('lists Incoming as previews, never the patient, clinical information, licence number or source ids', async () => {
     const h = harness({ 'lab.list_order_routes': [incoming] }, { orders: true, work: false });
-    const answer = await h.service.list(context, { view: 'incoming', healthId: ' hid-abc234 ' });
+    const answer = await h.service.search(context, { view: 'incoming', healthId: ' hid-abc234 ' });
     expect(h.statements[0]).toEqual({ sql: 'select * from lab.list_order_routes($1, $2)', values: ['incoming', 'HID-ABC234'] });
     expect(h.options).toEqual([{ isolationLevel: 'READ COMMITTED' }]);
     expect(answer).toEqual({ crossFacilityOrders: true, crossFacilityWork: false, items: [{ id: routeId, reference: 'B0000000',
@@ -137,7 +150,15 @@ describe('LabOrderRoutesService list and get (C7, C8)', () => {
     const h = harness({ 'lab.list_order_routes': [] });
     await h.service.list(context, {});
     expect(h.statements[0]?.values).toEqual(['incoming', null]);
+    await h.service.search(context, { healthId: 'HID-ABC234' });
+    expect(h.statements[1]?.values).toEqual(['incoming', 'HID-ABC234']);
+    await expect(h.service.search(context, { healthId: 'HID-0O1I' })).rejects.toMatchObject({ status: 400, code: 'ORDER_ROUTE_INVALID' });
+    expect(h.statements).toHaveLength(2);
+    // The deprecated GET filter answers the same as the POST, and refuses the same malformed Health ID.
+    await h.service.list(context, { view: 'incoming', healthId: ' hid-abc234 ' });
+    expect(h.statements[2]?.values).toEqual(['incoming', 'HID-ABC234']);
     await expect(h.service.list(context, { healthId: 'HID-0O1I' })).rejects.toMatchObject({ status: 400, code: 'ORDER_ROUTE_INVALID' });
+    expect(h.statements).toHaveLength(3);
   });
 
   it('lists Recent as metadata, with the work item and test name once accepted', async () => {
@@ -195,16 +216,31 @@ describe('LabOrderRoutesService accept (C9) and decline (C10)', () => {
   it('accepts with the normalized identifier and a digest of it, naming the patient on the row and answering the card', async () => {
     const h = harness({ 'lab.accept_order_route': [accepted] });
     const answer = await h.service.accept(context, routeId, input('health_id', ' hid-abc234'), key);
-    expect(h.statements[0]).toEqual({ sql: 'select * from lab.accept_order_route($1, $2, $3, $4, $5, $6)',
+    expect(h.statements[0]).toEqual({ sql: 'select * from lab.accept_order_route($1, $2, $3, $4, $5, $6, $7)',
       values: [routeId, 1, 'health_id', 'HID-ABC234', key, requestDigest('lab.order-route.accept',
-        { routeId, expectedVersion: 1, identifierKind: 'health_id', identifier: 'HID-ABC234' })] });
+        { routeId, expectedVersion: 1, identifierKind: 'health_id', identifier: 'HID-ABC234' }), null] });
     expect(h.options).toEqual([{ isolationLevel: 'READ COMMITTED' }]);
     expect(answer).toEqual({ route: { id: routeId, version: 2, effectiveState: 'accepted' }, workItemId,
       patient: { fullName: 'Ngozi Eze', sex: 'female', dateOfBirth: '1990-01-01', healthIdLast4: '2345' },
       clinicalInformation: 'Fatigue', orderer: { licenceBody: 'MDCN', licenceNumber: 'MDCN/12345' }, replayed: false });
     expect(h.audits).toEqual([expect.objectContaining({ action: 'lab.order-route.accept', outcome: 'success', patientId,
-      details: { routeId, kind: 'lab_request', state: 'accepted', workItemId, identifierKind: 'health_id', replayed: false } })]);
+      details: { routeId, kind: 'lab_request', state: 'accepted', workItemId, identifierKind: 'health_id', withReference: false,
+        replayed: false } })]);
     expect(JSON.stringify(h.audits)).not.toMatch(/ABC234|Ngozi|MDCN\/12345|Fatigue/);
+  });
+
+  it('passes the order\'s reference with a date of birth, upper-cased, and digests it', async () => {
+    const h = harness({ 'lab.accept_order_route': [accepted] });
+    await h.service.accept(context, routeId, { ...input('date_of_birth', '1990-01-01'), reference: ' b0000000 ' }, key);
+    expect(h.statements[0]?.values).toEqual([routeId, 1, 'date_of_birth', '1990-01-01', key, requestDigest('lab.order-route.accept',
+      { routeId, expectedVersion: 1, identifierKind: 'date_of_birth', identifier: '1990-01-01', reference: 'B0000000' }),
+    'B0000000']);
+    expect(h.audits[0]).toMatchObject({ details: expect.objectContaining({ withReference: true }) });
+    expect(JSON.stringify(h.audits)).not.toContain('B0000000');
+    await expect(h.service.accept(context, routeId, { ...input('date_of_birth', '1990-01-01'), reference: 'REF-1' }, key))
+      .rejects.toMatchObject({ status: 400, code: 'ORDER_ROUTE_INVALID' });
+    expect(h.statements).toHaveLength(2);
+    expect(normalizedReference(undefined)).toBeNull();
   });
 
   it('commits a mismatch (V6) and answers it after the commit: 409 with attemptsLeft, no patient on the row', async () => {
@@ -215,7 +251,7 @@ describe('LabOrderRoutesService accept (C9) and decline (C10)', () => {
     await expect(h.database.withTransaction.mock.results[0]?.value).resolves.toEqual({ refusal });
     expect(h.audits).toEqual([expect.objectContaining({ action: 'lab.order-route.accept', outcome: 'denied',
       details: { routeId, kind: 'lab_request', state: 'sent', result: 'patient_mismatch', identifierKind: 'date_of_birth',
-        attemptsLeft: 4 } })]);
+        withReference: false, attemptsLeft: 4 } })]);
     expect(h.audits[0]).not.toHaveProperty('patientId');
     expect(JSON.stringify(h.audits)).not.toContain('1990');
   });
@@ -239,6 +275,7 @@ describe('LabOrderRoutesService accept (C9) and decline (C10)', () => {
     ['P0001', 'ORDER_ROUTE_NOT_PENDING', 409], ['P0001', 'ORDER_ROUTE_EXPIRED', 409], ['P0001', 'ORDER_ROUTE_ACCEPT_LOCKED', 409],
     ['P0001', 'ORDER_ROUTE_DESTINATION_INELIGIBLE', 409], ['P0001', 'ORDER_ROUTE_ORDERING_FACILITY_UNAVAILABLE', 409],
     ['P0001', 'ORDER_ROUTE_PATIENT_DENIED', 409], ['P0001', 'ORDER_ROUTE_HEALTH_ID_REQUIRED', 409],
+    ['P0001', 'ORDER_ROUTE_REFERENCE_MISMATCH', 409],
     ['P0001', 'IDEMPOTENCY_KEY_REUSED', 409], ['P0001', 'ORDER_ROUTE_ACCEPT_LIMITED', 429],
   ])('answers a raised %s %s as %i with that code', async (state, message, status) => {
     const h = harness({ 'lab.accept_order_route': databaseError(state, message) });
@@ -314,21 +351,49 @@ describe('Lab work list with route-backed rows (C12)', () => {
     accession_number: null, specimen_statuses: [] });
   const local = 'd0000000-0000-4000-8000-000000000001';
 
-  const build = (cards: unknown[] | Error) => {
+  const build = (cards: unknown[] | Error, rows = [row(workItemId, true), row(local, false)]) => {
     const statements: string[] = [];
     const client = { query: jest.fn(async (sql: string) => {
       statements.push(sql);
       if (sql.includes('lab.order_route_cards')) { if (cards instanceof Error) throw cards; return { rows: cards }; }
-      if (sql.includes('from lab.work_items w')) return { rows: [row(workItemId, true), row(local, false)] };
+      if (sql.includes('from lab.work_items w')) return { rows };
       return { rows: [] };
     }) };
     const database = { withTransaction: async <T>(_c: DataAccessContext, fn: (c: PoolClient) => Promise<T>) =>
       fn(client as unknown as PoolClient), query: jest.fn(async () => ({ rows: [{ orders: false, work: true }] })) } as unknown as DatabaseService;
     const identity = { authorize: jest.fn() } as unknown as IdentityService;
-    const service = new LabWorkItemsService(database, identity, { recordWithClient: jest.fn() } as unknown as AuditService,
+    const audits: Array<Record<string, unknown>> = [];
+    const audit = { recordWithClient: jest.fn(async (_c: unknown, event: Record<string, unknown>) => { audits.push(event); }) };
+    const service = new LabWorkItemsService(database, identity, audit as unknown as AuditService,
       new LabOrderRouteAccess(identity), new LabOrderRouteCards(database));
-    return { service, statements };
+    return { service, statements, audits, audit };
   };
+
+  it('names each patient the list shows on a route card in one row per patient, ids only, basis order-route', async () => {
+    const second = '60000000-0000-4000-8000-000000000002';
+    const secondRoute = 'b0000000-0000-4000-8000-000000000002';
+    const otherPatient = '50000000-0000-4000-8000-000000000009';
+    const third = '60000000-0000-4000-8000-000000000003';
+    const { service, audits } = build([card, { ...card, work_item_id: second, route_id: secondRoute },
+      { ...card, work_item_id: third, route_id: 'b0000000-0000-4000-8000-000000000003', access: 'none' }],
+    [row(workItemId, true), row(second, true), { ...row(third, true), patient_id: otherPatient }, row(local, false)]);
+    await service.list(context);
+    expect(audits).toEqual([expect.objectContaining({ action: 'lab.work-item.list', patientId, facilityId,
+      resourceType: 'lab-work-item', resourceId: workItemId, actorType: 'staff',
+      details: { basis: 'order-route', workItemIds: [workItemId, second], orderRouteIds: [routeId, secondRoute] } })]);
+    // The card without a patient (access none) and the same-facility row name no one.
+    expect(JSON.stringify(audits)).not.toContain(otherPatient);
+    expect(JSON.stringify(audits)).not.toMatch(/Ngozi|1990-01-01|2345|MDCN/);
+  });
+
+  it('writes no list row when no card shows a patient, and fails the list when its audit fails', async () => {
+    const quiet = build(Object.assign(new Error('x'), { code: '42501' }));
+    await quiet.service.list(context);
+    expect(quiet.audits).toEqual([]);
+    const failing = build([card]);
+    failing.audit.recordWithClient.mockRejectedValueOnce(new Error('audit unavailable'));
+    await expect(failing.service.list(context)).rejects.toThrow('audit unavailable');
+  });
 
   it('adds the route card and patient to route-backed rows only, without the other facility\'s order id, and the two flags', async () => {
     const { service, statements } = build([card]);

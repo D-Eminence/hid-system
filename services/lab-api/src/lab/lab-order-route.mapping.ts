@@ -127,6 +127,9 @@ const P0001_REFUSALS: Readonly<Record<string, readonly [number, string]>> = Obje
   ORDER_ROUTE_ORDERING_FACILITY_UNAVAILABLE: [409, 'The ordering facility is not available on Health ID now'],
   ORDER_ROUTE_PATIENT_DENIED: [409, 'The patient does not allow this facility to receive their records'],
   ORDER_ROUTE_HEALTH_ID_REQUIRED: [409, 'Confirm the patient\'s Health ID: no date of birth is on record'],
+  // A reference given with the date of birth that is not this order's: the
+  // counter picked another row. Nothing is counted (C9).
+  ORDER_ROUTE_REFERENCE_MISMATCH: [409, 'That reference is not this order\'s: ask the patient for the reference in their app'],
   IDEMPOTENCY_KEY_REUSED: [409, 'Idempotency-Key was already used with a different request'],
   ORDER_ROUTE_ACCEPT_LIMITED: [429, 'Too many wrong tries today; try again tomorrow'],
 });
