@@ -47,7 +47,7 @@
 --       applicant's own stale application resumed rather than lapsed, the
 --       submitting network kept on the application, and a 7-day refusal to
 --       reopen a closed self-service application's CAC and product for its
---       email or network;
+--       email or network (narrowed by R15);
 --   R5  at most 10 emailed codes a day to one administrator email across
 --       every self-service application;
 --   R6  the administrator name and organization type the activated account
@@ -68,6 +68,28 @@
 --       still in force and the wait before a new one, so start can say that
 --       no code was sent (R5's and 0056's limits) instead of answering as if
 --       one had been.
+-- The second review of this port changed (each recorded in
+-- docs/MAIN_TO_NOVU_PORT.md):
+--   R15 R3's 7-day refusal locked real applicants out: a lapse the same
+--       submit had just made counted against it and was rolled back with
+--       it, so a mistyped email kept its network out indefinitely, and
+--       support's rejection only started the 7 days. Now a lapse refuses no
+--       one; instead an email or network that already had an application for
+--       the CAC and product closed in the last 7 days opens a new one without
+--       a hold (anyone else's submit lapses it at once), so a squatter
+--       renewing from its own network gains nothing; only support's
+--       rejection or release sets a 7-day refusal, unless support lets the
+--       applicant retry, and support can waive one in force; and the
+--       activation pre-check's 'email_registered' closes the application, so
+--       the applicant can start again at once with another email;
+--   R16 support's open-applications list shows the applications that hold a
+--       CAC now first (verified ones first, then the newest), with the total
+--       and an exact CAC number search, so stale or made-up ones cannot hide
+--       a live squat;
+--   R17 0056's governed code command sends codes for governed applications
+--       only: its logic is an owner-only helper that the self-service command
+--       calls for self-service ones, so the governed route (or a previous
+--       Identity) cannot bypass R5's limit per email or R6's stored details.
 -- main's 0061 interim review check and its re-add of the status check (same
 -- values as 0046) are not ported, nor main's later migrations or staff MFA.
 --
@@ -79,7 +101,8 @@
 -- and release foreign keys), all from the first statements; ACCESS EXCLUSIVE
 -- on platform.control_settings, the hot-path table every authenticated request
 -- reads, only in the control section, which is the last statements of this
--- file. Replacing platform.consume_qoreid_quota takes no table lock. The new
+-- file. Replacing platform.consume_qoreid_quota and
+-- identity.begin_organization_profile_completion takes no table lock. The new
 -- tables and functions lock nothing that already exists.
 --
 -- Applied migrations 0001 through 0085 are immutable.
@@ -131,7 +154,16 @@ alter table identity.organization_applications
   -- that opened a self-service application; never the address itself.
   add column submitter_network_digest char(64)
     constraint organization_applications_submitter_network_digest_check
-    check (submitter_network_digest is null or submitter_network_digest ~ '^[a-f0-9]{64}$');
+    check (submitter_network_digest is null or submitter_network_digest ~ '^[a-f0-9]{64}$'),
+  -- R3: opened by an email or network that already had a self-service
+  -- application for this CAC and product closed in the last 7 days, so it
+  -- holds nothing: anyone else's submit lapses it at once.
+  add column self_service_without_hold boolean not null default false,
+  -- R3: until then, the email and network of this application, which support
+  -- closed, may not open a new self-service application for its CAC and
+  -- product; NULL when nothing is refused (a lapse, a system closure, a
+  -- closure that lets the applicant retry, or a refusal support waived).
+  add column self_service_refusal_ends_at timestamptz;
 
 -- R1 and R6: the completion challenge carries the activation attempts made
 -- with its session and the administrator name and organization type sent
@@ -215,6 +247,15 @@ alter table identity.organization_applications
       and approval_mode = 'self_service'
       and status = 'rejected'
       and organization_id is not null)
+  ),
+  -- R3: a hold and a refusal concern self-service applications only, and a
+  -- refusal only a closed one.
+  add constraint organization_applications_self_service_hold_ck check (
+    approval_mode = 'self_service'
+    or (not self_service_without_hold and self_service_refusal_ends_at is null)
+  ),
+  add constraint organization_applications_self_service_refusal_ck check (
+    self_service_refusal_ends_at is null or status = 'rejected'
   );
 
 create index organization_applications_self_service_idx
@@ -228,8 +269,9 @@ create index organization_applications_self_service_activation_idx
   on identity.organization_applications (reviewed_at, id)
   where approval_mode = 'self_service' and organization_id is not null;
 
--- R3: support's list of open self-service applications, oldest first; and
--- the closed ones a submit checks before it reopens their CAC and product.
+-- R3: support's list of open self-service applications (R16 ranks it); and
+-- the closed ones a submit checks before it reopens their CAC and product
+-- (R15: a refusal support set, and whether a new application gets a hold).
 create index organization_applications_self_service_open_idx
   on identity.organization_applications (created_at, id)
   where approval_mode = 'self_service' and status in ('pending_verification', 'ready_for_review');
@@ -635,7 +677,9 @@ $$;
 -- email (requested_email) resumes it instead: its created_at is not renewed,
 -- so its holder cannot extend its hold by submitting again, and anyone
 -- else's submit still lapses it. The governed submit passes no email and
--- always lapses it.
+-- always lapses it. An application opened without a hold
+-- (self_service_without_hold) is stale from the start: anyone else's submit
+-- lapses it at once, with its own reason.
 --
 -- Lock order: the completion sessions first, then the application row, then
 -- the challenges without a session. Activation locks its session and then the
@@ -660,7 +704,8 @@ begin
      and application.product_code = requested_product
      and application.approval_mode = 'self_service'
      and application.status in ('pending_verification', 'ready_for_review')
-     and application.created_at < clock_timestamp() - interval '24 hours';
+     and (application.created_at < clock_timestamp() - interval '24 hours'
+       or application.self_service_without_hold);
   if candidate is null or candidate_email = requested_email then return null; end if;
 
   perform 1 from identity.organization_profile_completion_challenges challenge
@@ -675,14 +720,19 @@ begin
    where application.id = candidate
      and application.approval_mode = 'self_service'
      and application.status in ('pending_verification', 'ready_for_review')
-     and application.created_at < clock_timestamp() - interval '24 hours'
+     and (application.created_at < clock_timestamp() - interval '24 hours'
+       or application.self_service_without_hold)
    for update;
   if not found then return null; end if;
 
   update identity.organization_applications application
      set status = 'rejected',
          reviewed_at = clock_timestamp(),
-         review_reason = 'Self-service application lapsed: not activated within 24 hours of submission',
+         review_reason = case
+           when stale.created_at < clock_timestamp() - interval '24 hours'
+             then 'Self-service application lapsed: not activated within 24 hours of submission'
+           else 'Self-service application lapsed: opened without a hold and replaced by another sign-up'
+         end,
          updated_at = clock_timestamp(),
          row_version = application.row_version + 1
    where application.id = stale.id;
@@ -701,7 +751,7 @@ begin
     'organization-application', stale.id::text,
     'application', 'identity-api',
     jsonb_build_object('productCode', stale.product_code, 'previousStatus', stale.status,
-      'lapseAfterHours', 24)
+      'lapseAfterHours', 24, 'withoutHold', stale.self_service_without_hold)
   );
 
   return stale.id;
@@ -712,13 +762,23 @@ $$;
 -- lapse, under the lock), A11 (the governed submit's lock key) and explicit
 -- NULL product and organization type refusals (22023, as 0052's governed
 -- submit). Both 23514 messages are main's. R3: Identity passes the keyed
--- digest of the client network (stored on a new application); the stale
--- application's own email resumes it rather than lapsing it; and a new
--- application is refused for 7 days after a self-service application for the
--- same CAC and product was closed (lapsed, rejected by support or released by
--- support), when it had the same administrator email or was opened from the
--- same network, so its holder cannot reopen it at once. The refusal has the
--- same message as any other open-application conflict.
+-- digest of the client network (stored on a new application), and the stale
+-- application's own email resumes it rather than lapsing it. Then:
+--   * a hold is not renewed: a new application whose administrator email or
+--     network already had a self-service application for this CAC and
+--     product closed in the last 7 days (lapsed, including the one this
+--     submit has just lapsed, closed by the system, or closed by support) is
+--     opened without a hold (self_service_without_hold), so anyone else's
+--     submit lapses it at once. It can still be finished. A squatter that
+--     resubmits from its own network with a new email therefore gains
+--     nothing, while an applicant who mistyped the email, or whose email
+--     already has an account, can start again from the same network;
+--   * a refusal binds only where support set one: while a self-service
+--     application for this CAC and product that support rejected or
+--     released has self_service_refusal_ends_at in the future (7 days, unless
+--     support let the applicant retry or later waived it), its email and its
+--     network may not open a new one (23514, the same message as any other
+--     open-application conflict). A lapse never refuses anyone.
 create function identity.submit_self_service_organization_application(
   requested_product text,
   requested_organization_type text,
@@ -734,6 +794,7 @@ declare
   normalized_cac text := upper(regexp_replace(coalesce(requested_cac_number, ''), '[[:space:]]+', '', 'g'));
   normalized_email text := lower(btrim(coalesce(requested_administrator_email, '')));
   application identity.organization_applications%rowtype;
+  without_hold boolean;
 begin
   if platform.current_actor_subject() is distinct from 'system:auth'
      or platform.current_correlation_id() is null then
@@ -789,7 +850,7 @@ begin
        and closed.product_code = requested_product
        and closed.approval_mode = 'self_service'
        and closed.status = 'rejected'
-       and coalesce(closed.self_service_released_at, closed.reviewed_at) > clock_timestamp() - interval '7 days'
+       and closed.self_service_refusal_ends_at > clock_timestamp()
        and (closed.administrator_email = normalized_email
          or closed.submitter_network_digest = requested_network_digest)
   ) then
@@ -797,13 +858,25 @@ begin
       message = 'This organization application requires manual resolution';
   end if;
 
+  select exists (
+    select 1 from identity.organization_applications closed
+     where closed.cac_registration_number = normalized_cac
+       and closed.product_code = requested_product
+       and closed.approval_mode = 'self_service'
+       and closed.status = 'rejected'
+       and coalesce(closed.self_service_released_at, closed.reviewed_at) > clock_timestamp() - interval '7 days'
+       and (closed.administrator_email = normalized_email
+         or closed.submitter_network_digest = requested_network_digest)
+  ) into without_hold;
+
   insert into identity.organization_applications (
     product_code, organization_name, organization_type, cac_registration_number,
-    administrator_name, administrator_email, approval_mode, submitter_network_digest
+    administrator_name, administrator_email, approval_mode, submitter_network_digest,
+    self_service_without_hold
   ) values (
     requested_product, 'Pending CAC verification', requested_organization_type,
     normalized_cac, btrim(requested_administrator_name), normalized_email, 'self_service',
-    requested_network_digest
+    requested_network_digest, without_hold
   ) returning * into application;
 
   insert into audit.events (
@@ -816,7 +889,8 @@ begin
     'application', 'identity-api',
     jsonb_build_object(
       'productCode', requested_product,
-      'organizationType', requested_organization_type
+      'organizationType', requested_organization_type,
+      'withoutHold', without_hold
     )
   );
 
@@ -866,10 +940,110 @@ begin
 end;
 $$;
 
--- R5 and R6: the emailed code of facility self sign-up. It sends the code as
--- 0056's begin_organization_profile_completion does (and returns what it
--- returns: the stored administrator email when a code is to be sent, else
--- null), for an open self-service application only, with two additions:
+-- R5: 0056's begin_organization_profile_completion sends a code for any
+-- open, verified application of the CAC number, product and email, whatever
+-- its approval_mode. Before this migration only an administrator's CAC lookup
+-- could verify an application; the public self-service lookup now verifies
+-- applications whose email the submitter chose, so the governed completion
+-- route (and a previous Identity's) could send their codes outside R5's 10 a
+-- day per email and without R6's stored details. 0056's body becomes this
+-- owner-only helper, which sends only for the approval mode its caller names;
+-- the governed command keeps its signature, owner and grants and sends only
+-- for governed (admin_review) applications, answering NULL for a self-service
+-- one exactly as for no application; the self-service command calls the
+-- helper for self-service applications. Refuse to run if the live body is
+-- not 0056's, rather than overwrite a change this migration does not know
+-- about.
+do $$
+begin
+  if (select md5(proc.prosrc) from pg_proc proc
+       where proc.oid = 'identity.begin_organization_profile_completion(text,text,text,uuid,char)'::regprocedure)
+     is distinct from '6c94f9fca935f41a1bbcc313d9447d04' then
+    raise exception '0086 expected identity.begin_organization_profile_completion to be 0056''s body';
+  end if;
+end
+$$;
+
+create function identity.issue_organization_profile_completion_code(
+  requested_cac_number text, requested_email text, requested_product text,
+  requested_challenge_id uuid, requested_code_hmac char(64), requested_approval_mode text
+) returns text
+language plpgsql
+set search_path = pg_catalog, identity, audit, platform, pg_temp
+as $$
+declare
+  application identity.organization_applications%rowtype;
+begin
+  if platform.current_actor_subject() is distinct from 'system:auth'
+     or platform.current_correlation_id() is null
+     or requested_challenge_id is null
+     or requested_code_hmac is null or requested_code_hmac !~ '^[a-f0-9]{64}$'
+     or requested_cac_number !~ '^(RC|BN|IT)[0-9]{4,20}$'
+     or requested_email is null or requested_product not in
+       ('ehr', 'migrate', 'laboratory', 'pharmacy')
+     or requested_approval_mode is null
+     or requested_approval_mode not in ('admin_review', 'self_service') then
+    raise exception using errcode = '22023', message = 'Invalid completion request';
+  end if;
+  select * into application from identity.organization_applications row
+    where row.cac_registration_number = requested_cac_number
+      and row.product_code = requested_product
+      and row.administrator_email = lower(btrim(requested_email))
+      and row.approval_mode = requested_approval_mode
+      and row.status in ('pending_verification', 'ready_for_review')
+      and row.verification_result = 'verified'
+      and row.provider_verified_registration_number = row.cac_registration_number
+      and row.provider_reference ~ '^[0-9]+$'
+    for update;
+  if not found then return null; end if;
+  delete from identity.organization_profile_completion_challenges old
+   where old.id in (
+     select stale.id from identity.organization_profile_completion_challenges stale
+      where stale.expires_at < clock_timestamp() - interval '48 hours'
+        and (stale.session_expires_at is null
+          or stale.session_expires_at < clock_timestamp() - interval '48 hours')
+      order by stale.expires_at limit 100
+   );
+  if exists (select 1 from identity.organization_profile_completion_challenges prior
+      where prior.application_id = application.id
+        and prior.created_at > clock_timestamp() - interval '60 seconds')
+     or (select count(*) from identity.organization_profile_completion_challenges prior
+       where prior.application_id = application.id
+         and prior.created_at > clock_timestamp() - interval '1 hour') >= 5
+     or (select count(*) from identity.organization_profile_completion_challenges prior
+       where prior.application_id = application.id
+         and prior.created_at > clock_timestamp() - interval '1 day') >= 15 then
+    return null;
+  end if;
+  update identity.organization_profile_completion_challenges challenge
+     set invalidated_at = clock_timestamp()
+   where challenge.application_id = application.id and challenge.invalidated_at is null
+     and challenge.session_hmac is null;
+  insert into identity.organization_profile_completion_challenges
+    (id, application_id, code_hmac, expires_at)
+  values (requested_challenge_id, application.id, requested_code_hmac,
+    clock_timestamp() + interval '10 minutes');
+  return application.administrator_email;
+end;
+$$;
+
+create or replace function identity.begin_organization_profile_completion(
+  requested_cac_number text, requested_email text, requested_product text,
+  requested_challenge_id uuid, requested_code_hmac char(64)
+) returns text
+language plpgsql security definer
+set search_path = pg_catalog, identity, audit, platform, pg_temp
+as $$
+begin
+  return identity.issue_organization_profile_completion_code(requested_cac_number, requested_email,
+    requested_product, requested_challenge_id, requested_code_hmac, 'admin_review');
+end;
+$$;
+
+-- R5 and R6: the emailed code of facility self sign-up. It sends the code
+-- through 0056's sending logic (identity.issue_organization_profile_completion_code
+-- above, returning the stored administrator email when a code is to be sent,
+-- else null), for an open self-service application only, with two additions:
 --   * the administrator name and organization type sent with this request
 --     are stored on the new challenge, and the activation takes them from the
 --     challenge whose code opened its session (R6);
@@ -925,8 +1099,8 @@ begin
      and challenge.created_at > clock_timestamp() - interval '1 day';
   if recent_codes >= 10 then return null; end if;
 
-  recipient := identity.begin_organization_profile_completion(requested_cac_number, requested_email,
-    requested_product, requested_challenge_id, requested_code_hmac);
+  recipient := identity.issue_organization_profile_completion_code(requested_cac_number, requested_email,
+    requested_product, requested_challenge_id, requested_code_hmac, 'self_service');
   if recipient is not null then
     update identity.organization_profile_completion_challenges challenge
        set requested_administrator_name = btrim(begin_self_service_provider_enrollment.requested_administrator_name),
@@ -958,6 +1132,15 @@ $$;
 -- command repeats every check under its locks. The control is read after the
 -- session's row lock (A1), so a control closed while a request waits for
 -- that lock refuses it.
+-- R3: 'email_registered' also closes the application (rejected, with no
+-- reviewer, an explanatory reason and no refusal; its other codes and
+-- sessions are ended; audited identity.organization.self-service.close), since
+-- that email can never activate it: the applicant can start again at once
+-- with another email, from the same network, rather than wait for the
+-- application to lapse. Other sessions of the application are ended only if
+-- no other transaction holds them (SKIP LOCKED): a pre-check or activation
+-- holding one finds the application closed and refuses, so this never waits
+-- on a session out of the lapse's lock order.
 create function identity.prepare_self_service_provider_activation(
   requested_session_hmac char(64)
 ) returns text
@@ -1040,6 +1223,38 @@ begin
   update identity.organization_profile_completion_challenges row
      set invalidated_at = clock_timestamp()
    where row.id = challenge.id;
+  if refusal = 'email_registered' then
+    update identity.organization_applications row
+       set status = 'rejected',
+           reviewed_at = clock_timestamp(),
+           review_reason = 'Self-service application closed: its administrator email already belongs to an account',
+           updated_at = clock_timestamp(),
+           row_version = row.row_version + 1
+     where row.id = application.id
+       and row.approval_mode = 'self_service'
+       and row.status in ('pending_verification', 'ready_for_review')
+    returning row.* into application;
+    if found then
+      update identity.organization_profile_completion_challenges row
+         set invalidated_at = clock_timestamp()
+       where row.id in (
+         select other.id from identity.organization_profile_completion_challenges other
+          where other.application_id = application.id
+            and other.invalidated_at is null
+          for update skip locked);
+      insert into audit.events (
+        correlation_id, actor_type, action, outcome, resource_type, resource_id,
+        provenance, source_system, details
+      ) values (
+        platform.current_correlation_id(), 'system',
+        'identity.organization.self-service.close', 'success',
+        'organization-application', application.id::text,
+        'application', 'identity-api',
+        jsonb_build_object('productCode', application.product_code,
+          'closeReason', 'administrator_email_registered')
+      );
+    end if;
+  end if;
   if refusal = 'application_closed' then return 'session_invalid'; end if;
   return refusal;
 end;
@@ -1277,6 +1492,7 @@ revoke all on function identity.public_get_organization_application(text,text,te
   identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text),
   identity.activate_self_service_organization_application(char,text),
   identity.lapse_stale_self_service_organization_application(text,text,text),
+  identity.issue_organization_profile_completion_code(text,text,text,uuid,char,text),
   identity.submit_self_service_organization_application(text,text,text,text,text,char),
   identity.activate_self_service_provider_enrollment(char,text),
   identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text),
@@ -1845,13 +2061,17 @@ $$;
 -- characters); P0002 SELF_SERVICE_FACILITY_NOT_FOUND (not an activated
 -- self-service application); 23505 SELF_SERVICE_FACILITY_ALREADY_RELEASED;
 -- 40001 version conflict; 23514 SELF_SERVICE_FACILITY_RELEASE_REQUIRES_SUSPENSION.
--- The released application's email and network may not reopen its CAC and
--- product for 7 days (R3). Lock order: the application, then the CAC's
--- 'org-cac:' lock, then the binding, as activation and governed approval.
+-- Unless support lets the applicant retry (allow_retry, for a sign-up that
+-- named the right company with the wrong email), the released application's
+-- email and network may not open a new application for its CAC and product
+-- for 7 days (R3, self_service_refusal_ends_at; the waive command lifts it).
+-- Lock order: the application, then the CAC's 'org-cac:' lock, then the
+-- binding, as activation and governed approval.
 create function identity.admin_release_self_service_facility(
   target_application_id uuid,
   expected_version bigint,
-  release_reason text
+  release_reason text,
+  allow_retry boolean default false
 ) returns table (
   application_id uuid,
   released_at timestamptz,
@@ -1864,6 +2084,7 @@ declare
   actor_account uuid := platform.current_account_id();
   reason text := btrim(coalesce(release_reason, ''));
   current_row identity.organization_applications%rowtype;
+  released timestamptz;
 begin
   if actor_account is null
      or platform.current_correlation_id() is null
@@ -1872,7 +2093,7 @@ begin
      or not auth.account_has_platform_permission(actor_account, 'platform.facility.manage') then
     raise exception using errcode = '42501', message = 'ADMIN_PERMISSION_DENIED';
   end if;
-  if target_application_id is null or expected_version is null
+  if target_application_id is null or expected_version is null or allow_retry is null
      or length(reason) not between 8 and 500 then
     raise exception using errcode = '22023', message = 'SELF_SERVICE_RELEASE_INVALID';
   end if;
@@ -1934,13 +2155,15 @@ begin
    where staff.account_id = current_row.first_admin_account_id
      and staff.active;
 
+  released := clock_timestamp();
   update identity.organization_applications app
      set status = 'rejected',
          review_reason = 'Self-service sign-up released by platform support',
-         self_service_released_at = clock_timestamp(),
+         self_service_released_at = released,
          self_service_released_by_account_id = actor_account,
          self_service_release_reason = reason,
-         updated_at = clock_timestamp(),
+         self_service_refusal_ends_at = case when allow_retry then null else released + interval '7 days' end,
+         updated_at = released,
          row_version = app.row_version + 1
    where app.id = current_row.id
    returning app.* into current_row;
@@ -1956,7 +2179,7 @@ begin
     jsonb_build_object('productCode', current_row.product_code,
       'organizationId', current_row.organization_id, 'facilityId', current_row.facility_id,
       'administratorAccountId', current_row.first_admin_account_id,
-      'version', current_row.row_version)
+      'allowRetry', allow_retry, 'version', current_row.row_version)
   );
 
   return query select current_row.id, current_row.self_service_released_at, current_row.row_version;
@@ -1964,12 +2187,20 @@ end;
 $$;
 
 -- R3: support's view of open self-service applications (submitted, not yet
--- activated or lapsed), oldest first, at most 200: an application holds its
--- CAC and product for 24 hours, and one opened by a stranger blocks the real
--- company until then, so support can see who holds which CAC and close it.
--- email_verified says whether a code sent to the administrator email was
--- ever confirmed for it.
-create function identity.admin_list_open_self_service_applications()
+-- activated or lapsed), at most 200. An application holds its CAC and product
+-- for 24 hours (none when it was opened without a hold), and one opened by a
+-- stranger blocks the real company until then, so support can see who holds
+-- which CAC and close it. The rows that block someone now come first: those
+-- still holding their CAC (holds_cac), then, within each group, verified ones
+-- (a made-up CAC number never verifies), then the newest. A stale row holds
+-- nothing (anyone else's submit lapses it) but may still be activated by its
+-- holder, so it is listed after them. total_count is the number of open rows
+-- that match, beyond the 200 shown. requested_cac_number (optional, spaces
+-- removed, upper case; a malformed one raises 22023) lists only that CAC
+-- number's open applications, for a company that says its sign-up is blocked.
+-- email_verified says whether a code sent to the administrator email was ever
+-- confirmed for it.
+create function identity.admin_list_open_self_service_applications(requested_cac_number text default null)
 returns table (
   application_id uuid,
   row_version bigint,
@@ -1983,13 +2214,18 @@ returns table (
   verification_result text,
   email_verified boolean,
   submitted_at timestamptz,
-  lapses_at timestamptz
+  lapses_at timestamptz,
+  holds_cac boolean,
+  total_count bigint
 )
 language plpgsql stable security definer
 set search_path = pg_catalog, identity, auth, platform, pg_temp
 as $$
 declare
   actor_account uuid := platform.current_account_id();
+  observed_at timestamptz := clock_timestamp();
+  cac_filter text := case when requested_cac_number is null then null
+    else upper(regexp_replace(requested_cac_number, '[[:space:]]+', '', 'g')) end;
 begin
   if actor_account is null
      or platform.current_correlation_id() is null
@@ -1997,20 +2233,30 @@ begin
      or not auth.account_has_platform_permission(actor_account, 'platform.identity-review.read') then
     raise exception using errcode = '42501', message = 'ADMIN_PERMISSION_DENIED';
   end if;
+  if cac_filter is not null and cac_filter !~ '^(RC|BN|IT)[0-9]{4,20}$' then
+    raise exception using errcode = '22023', message = 'SELF_SERVICE_APPLICATION_FILTER_INVALID';
+  end if;
   return query
-    select app.id, app.row_version, app.product_code, app.organization_type,
-      left(app.cac_registration_number, 2)
-        || repeat('*', length(app.cac_registration_number) - 4)
-        || right(app.cac_registration_number, 2),
-      app.verified_organization_name, app.administrator_name, app.administrator_email,
-      app.status, app.verification_result,
+    select listed.id, listed.row_version, listed.product_code, listed.organization_type,
+      left(listed.cac_registration_number, 2)
+        || repeat('*', length(listed.cac_registration_number) - 4)
+        || right(listed.cac_registration_number, 2),
+      listed.verified_organization_name, listed.administrator_name, listed.administrator_email,
+      listed.status, listed.verification_result,
       exists (select 1 from identity.organization_profile_completion_challenges challenge
-               where challenge.application_id = app.id and challenge.consumed_at is not null),
-      app.created_at, app.created_at + interval '24 hours'
-    from identity.organization_applications app
-    where app.approval_mode = 'self_service'
-      and app.status in ('pending_verification', 'ready_for_review')
-    order by app.created_at, app.id
+               where challenge.application_id = listed.id and challenge.consumed_at is not null),
+      listed.created_at, listed.lapses_at, listed.lapses_at > observed_at,
+      count(*) over ()
+    from (
+      select app.*, case when app.self_service_without_hold then app.created_at
+          else app.created_at + interval '24 hours' end as lapses_at
+        from identity.organization_applications app
+       where app.approval_mode = 'self_service'
+         and app.status in ('pending_verification', 'ready_for_review')
+         and (cac_filter is null or app.cac_registration_number = cac_filter)
+    ) listed
+    order by listed.lapses_at > observed_at desc, listed.status = 'ready_for_review' desc,
+      listed.created_at desc, listed.id desc
     limit 200;
 end;
 $$;
@@ -2018,15 +2264,21 @@ $$;
 -- R3: support closes an open self-service application (rejected, with the
 -- time, the reviewing administrator and the reason), ends its codes and
 -- sessions and audits admin.self-service-application.reject as the platform
--- administrator. Its email and network may then not reopen the CAC and
--- product for 7 days. Refusals, in this order: 42501 ADMIN_PERMISSION_DENIED;
--- 22023 SELF_SERVICE_REJECT_INVALID; P0002 SELF_SERVICE_APPLICATION_NOT_FOUND
--- (no such open self-service application); 40001 version conflict. Lock order
--- as the lapse: the sessions, then the application, then the other challenges.
+-- administrator. Unless support lets the applicant retry (allow_retry, for
+-- the applicant's own mistake such as a mistyped email), its email and
+-- network may then not open a new application for the CAC and product for 7
+-- days (self_service_refusal_ends_at); identity.admin_waive_self_service_refusals
+-- lifts that refusal later. Either way a new application from that email or
+-- network within 7 days is opened without a hold. Refusals, in this order:
+-- 42501 ADMIN_PERMISSION_DENIED; 22023 SELF_SERVICE_REJECT_INVALID; P0002
+-- SELF_SERVICE_APPLICATION_NOT_FOUND (no such open self-service application);
+-- 40001 version conflict. Lock order as the lapse: the sessions, then the
+-- application, then the other challenges.
 create function identity.admin_reject_self_service_application(
   target_application_id uuid,
   expected_version bigint,
-  reject_reason text
+  reject_reason text,
+  allow_retry boolean default false
 ) returns table (
   application_id uuid,
   rejected_at timestamptz,
@@ -2040,6 +2292,7 @@ declare
   reason text := btrim(coalesce(reject_reason, ''));
   current_row identity.organization_applications%rowtype;
   previous_status text;
+  closed_at timestamptz;
 begin
   if actor_account is null
      or platform.current_correlation_id() is null
@@ -2048,7 +2301,7 @@ begin
      or not auth.account_has_platform_permission(actor_account, 'platform.facility.manage') then
     raise exception using errcode = '42501', message = 'ADMIN_PERMISSION_DENIED';
   end if;
-  if target_application_id is null or expected_version is null
+  if target_application_id is null or expected_version is null or allow_retry is null
      or length(reason) not between 8 and 500 then
     raise exception using errcode = '22023', message = 'SELF_SERVICE_REJECT_INVALID';
   end if;
@@ -2072,13 +2325,15 @@ begin
     raise exception using errcode = '40001', message = 'Organization application version conflict';
   end if;
   previous_status := current_row.status;
+  closed_at := clock_timestamp();
 
   update identity.organization_applications app
      set status = 'rejected',
-         reviewed_at = clock_timestamp(),
+         reviewed_at = closed_at,
          reviewed_by_account_id = actor_account,
          review_reason = reason,
-         updated_at = clock_timestamp(),
+         self_service_refusal_ends_at = case when allow_retry then null else closed_at + interval '7 days' end,
+         updated_at = closed_at,
          row_version = app.row_version + 1
    where app.id = current_row.id
    returning app.* into current_row;
@@ -2096,18 +2351,103 @@ begin
     'organization-application', current_row.id::text, 'healthcare-operations', reason,
     'application', 'identity-api',
     jsonb_build_object('productCode', current_row.product_code, 'previousStatus', previous_status,
-      'version', current_row.row_version)
+      'allowRetry', allow_retry, 'version', current_row.row_version)
   );
 
   return query select current_row.id, current_row.reviewed_at, current_row.row_version;
 end;
 $$;
 
+-- R3: support lifts the 7-day refusal for a CAC number and product, for a
+-- company whose own email or network a rejection or release refused (an
+-- employee's sign-up, a mistake support rejected as abuse). Every closed
+-- self-service application of that CAC number and product whose refusal is
+-- still in force has it lifted (self_service_refusal_ends_at set to NULL, the
+-- version bumped), each audited admin.self-service-application.refusal-waive
+-- as the platform administrator with the reason. A new application from
+-- their email or network within 7 days is still opened without a hold.
+-- Permission and context as the rejection. Refusals, in this order: 42501
+-- ADMIN_PERMISSION_DENIED; 22023 SELF_SERVICE_WAIVE_INVALID (a malformed CAC
+-- number, an unknown product, a reason not 8-500 characters); P0002
+-- SELF_SERVICE_REFUSAL_NOT_FOUND (no refusal in force for them). It takes the
+-- CAC number and product's 'org-application:' lock, as the submits do.
+create function identity.admin_waive_self_service_refusals(
+  requested_cac_number text,
+  requested_product text,
+  waive_reason text
+) returns table (
+  application_id uuid,
+  waived_at timestamptz,
+  row_version bigint
+)
+language plpgsql security definer
+set search_path = pg_catalog, identity, auth, audit, platform, pg_temp
+as $$
+declare
+  actor_account uuid := platform.current_account_id();
+  normalized_cac text := upper(regexp_replace(coalesce(requested_cac_number, ''), '[[:space:]]+', '', 'g'));
+  reason text := btrim(coalesce(waive_reason, ''));
+  waived identity.organization_applications%rowtype;
+  waived_count integer := 0;
+begin
+  if actor_account is null
+     or platform.current_correlation_id() is null
+     or platform.current_purpose_of_use() is distinct from 'healthcare-operations'
+     or not auth.account_has_platform_permission(actor_account, 'platform.admin.access')
+     or not auth.account_has_platform_permission(actor_account, 'platform.facility.manage') then
+    raise exception using errcode = '42501', message = 'ADMIN_PERMISSION_DENIED';
+  end if;
+  if normalized_cac !~ '^(RC|BN|IT)[0-9]{4,20}$'
+     or requested_product is null
+     or requested_product not in ('ehr', 'migrate', 'laboratory', 'pharmacy')
+     or length(reason) not between 8 and 500 then
+    raise exception using errcode = '22023', message = 'SELF_SERVICE_WAIVE_INVALID';
+  end if;
+
+  perform pg_advisory_xact_lock(
+    hashtextextended('org-application:' || normalized_cac || ':' || requested_product, 0)
+  );
+
+  for waived in
+    update identity.organization_applications app
+       set self_service_refusal_ends_at = null,
+           updated_at = clock_timestamp(),
+           row_version = app.row_version + 1
+     where app.cac_registration_number = normalized_cac
+       and app.product_code = requested_product
+       and app.approval_mode = 'self_service'
+       and app.status = 'rejected'
+       and app.self_service_refusal_ends_at > clock_timestamp()
+    returning app.*
+  loop
+    waived_count := waived_count + 1;
+    insert into audit.events (
+      correlation_id, actor_type, actor_subject, actor_account_id, action, outcome,
+      resource_type, resource_id, purpose_of_use, reason, provenance, source_system, details
+    ) values (
+      platform.current_correlation_id(), 'platform', platform.current_actor_subject(), actor_account,
+      'admin.self-service-application.refusal-waive', 'success',
+      'organization-application', waived.id::text, 'healthcare-operations', reason,
+      'application', 'identity-api',
+      jsonb_build_object('productCode', waived.product_code, 'version', waived.row_version)
+    );
+    application_id := waived.id;
+    waived_at := waived.updated_at;
+    row_version := waived.row_version;
+    return next;
+  end loop;
+  if waived_count = 0 then
+    raise exception using errcode = 'P0002', message = 'SELF_SERVICE_REFUSAL_NOT_FOUND';
+  end if;
+end;
+$$;
+
 revoke all on function identity.admin_list_self_service_facilities(text),
   identity.admin_review_self_service_facility(uuid,bigint,text),
-  identity.admin_release_self_service_facility(uuid,bigint,text),
-  identity.admin_list_open_self_service_applications(),
-  identity.admin_reject_self_service_application(uuid,bigint,text)
+  identity.admin_release_self_service_facility(uuid,bigint,text,boolean),
+  identity.admin_list_open_self_service_applications(text),
+  identity.admin_reject_self_service_application(uuid,bigint,text,boolean),
+  identity.admin_waive_self_service_refusals(text,text,text)
   from public;
 
 -- 5. Runtime grants (A5). runtime-grants.sql carries the same grants for a
@@ -2130,9 +2470,10 @@ begin
       platform.consume_self_service_cac_quota(uuid,char,integer),
       identity.admin_list_self_service_facilities(text),
       identity.admin_review_self_service_facility(uuid,bigint,text),
-      identity.admin_release_self_service_facility(uuid,bigint,text),
-      identity.admin_list_open_self_service_applications(),
-      identity.admin_reject_self_service_application(uuid,bigint,text)
+      identity.admin_release_self_service_facility(uuid,bigint,text,boolean),
+      identity.admin_list_open_self_service_applications(text),
+      identity.admin_reject_self_service_application(uuid,bigint,text,boolean),
+      identity.admin_waive_self_service_refusals(text,text,text)
       to hid_identity_runtime;
   end if;
   if exists (select 1 from pg_roles where rolname = 'hid_schema_test_runtime') then

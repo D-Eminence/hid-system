@@ -3,7 +3,8 @@ import { requireAdminContext } from '../admin/admin-context';
 import { AuditAction, AuditFailuresOnly, FacilityOptional, RequirePermissions } from '../common/decorators';
 import type { HidRequest } from '../common/request-context';
 import { ListSelfServiceFacilitiesDto, RejectSelfServiceApplicationDto, ReleaseSelfServiceFacilityDto,
-  ReviewSelfServiceFacilityDto } from './dto/self-service-facility.dto';
+  ReviewSelfServiceFacilityDto, SearchSelfServiceApplicationsDto,
+  WaiveSelfServiceRefusalDto } from './dto/self-service-facility.dto';
 import { expectedVersion } from './organization-applications.controller';
 import { SelfServiceFacilitiesService } from './self-service-facilities.service';
 
@@ -42,7 +43,8 @@ export class AdminSelfServiceFacilitiesController {
    * suspended its facility and disabled its administrator with the existing
    * commands: the application is closed, the CAC binding removed, the product
    * suspended and the organization deactivated and renamed, so the real
-   * company can sign up. Version from If-Match, as review.
+   * company can sign up. Version from If-Match, as review. allowRetry (R15)
+   * spares its email and network the 7-day refusal.
    */
   @Post(':applicationId/release')
   @HttpCode(200)
@@ -52,15 +54,18 @@ export class AdminSelfServiceFacilitiesController {
     @Headers('if-match') ifMatch: string | undefined,
     @Body() input: ReleaseSelfServiceFacilityDto, @Req() request: HidRequest) {
     return this.facilities.release(requireAdminContext(request), applicationId, expectedVersion(ifMatch),
-      input.reason);
+      input.reason, input.allowRetry ?? false);
   }
 }
 
 /**
  * Open self-service applications (P4 review fix R3): submitted and not yet
- * activated or lapsed. Each holds its CAC and product for 24 hours, so
- * support can see who holds which and close one that is not the company's.
- * The same guards as the facility list and review.
+ * activated or lapsed. Each holds its CAC and product for 24 hours (none when
+ * opened without a hold), so support can see who holds which and close one
+ * that is not the company's; those holding a CAC now come first, with the
+ * total and a search by CAC number (R16). Support can let the applicant retry
+ * or waive a 7-day refusal (R15). The same guards as the facility list and
+ * review.
  */
 @Controller('admin/self-service-applications')
 @FacilityOptional()
@@ -75,6 +80,33 @@ export class AdminSelfServiceApplicationsController {
     return this.facilities.listOpenApplications(requireAdminContext(request));
   }
 
+  /**
+   * The same list for one CAC number (R16), with the number in the body, out
+   * of the request lines that access logs keep, as principals/search does.
+   */
+  @Post('search')
+  @HttpCode(200)
+  @RequirePermissions('platform.identity-review.read')
+  @AuditAction('admin.self-service-applications.list')
+  search(@Body() input: SearchSelfServiceApplicationsDto, @Req() request: HidRequest) {
+    return this.facilities.listOpenApplications(requireAdminContext(request), input.cacRegistrationNumber);
+  }
+
+  /**
+   * Lifts the 7-day refusals a rejection or release set for a CAC number and
+   * product (R15), for a company whose own email or network they refused.
+   * No version: it lifts whatever refusal is in force, and lifting is idempotent
+   * in effect (a second call answers 404 SELF_SERVICE_REFUSAL_NOT_FOUND).
+   */
+  @Post('waive-refusal')
+  @HttpCode(200)
+  @RequirePermissions('platform.facility.manage')
+  @AuditAction('admin.self-service-application.refusal-waive')
+  waiveRefusal(@Body() input: WaiveSelfServiceRefusalDto, @Req() request: HidRequest) {
+    return this.facilities.waiveRefusals(requireAdminContext(request), input.cacRegistrationNumber,
+      input.productCode, input.reason);
+  }
+
   @Post(':applicationId/reject')
   @HttpCode(200)
   @RequirePermissions('platform.facility.manage')
@@ -83,6 +115,6 @@ export class AdminSelfServiceApplicationsController {
     @Headers('if-match') ifMatch: string | undefined,
     @Body() input: RejectSelfServiceApplicationDto, @Req() request: HidRequest) {
     return this.facilities.rejectOpenApplication(requireAdminContext(request), applicationId,
-      expectedVersion(ifMatch), input.reason);
+      expectedVersion(ifMatch), input.reason, input.allowRetry ?? false);
   }
 }

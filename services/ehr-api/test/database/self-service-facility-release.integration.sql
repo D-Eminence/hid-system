@@ -21,8 +21,13 @@
 --      administrator; a second release answers 23505; the support list shows
 --      it as handled ('reviewed' and 'all', not 'unreviewed');
 --   4. the released email and network cannot reopen the CAC and product for
---      7 days; the real company, with its own email and network, signs up
---      for the same CAC and product and is activated with the legal name.
+--      7 days (self_service_refusal_ends_at, R15); the real company, with its
+--      own email and network, signs up for the same CAC and product, with a
+--      hold, and is activated with the legal name;
+--   5. R15: a release that lets the applicant retry (allow_retry, for a
+--      sign-up of the right company with the wrong email) sets no refusal:
+--      the company's network signs up again at once with another email,
+--      without a hold; a NULL allow_retry raises 22023.
 -- See provider-self-enrollment.integration.sql for why FORCE is lifted on
 -- the control table when its owner cannot bypass row-level security.
 begin;
@@ -185,6 +190,13 @@ begin
       if refused.n = 6 and sqlerrm <> 'SELF_SERVICE_FACILITY_RELEASE_REQUIRES_SUSPENSION' then raise; end if;
     end;
   end loop;
+  begin
+    perform identity.admin_release_self_service_facility(application, version, 'Impostor confirmed by support',
+      null);
+    raise exception 'A release with a NULL allow_retry was accepted';
+  exception when invalid_parameter_value then
+    if sqlerrm <> 'SELF_SERVICE_RELEASE_INVALID' then raise; end if;
+  end;
   -- Support suspends the facility; the account is still enabled.
   perform identity.admin_transition_facility(current_setting('hid.test.facility')::uuid, 1, 'suspended',
     'Impostor confirmed by support', 'release-suite-suspend', repeat('a', 64));
@@ -267,7 +279,9 @@ begin
      or application.self_service_released_by_account_id <> 'c8b00000-0000-4000-8000-000000000001'
      or application.self_service_release_reason <> 'Impostor confirmed: the email is not the company''s'
      or application.organization_id <> current_setting('hid.test.organization')::uuid
-     or application.verified_organization_name <> 'Release Company Ltd' then
+     or application.verified_organization_name <> 'Release Company Ltd'
+     or application.self_service_refusal_ends_at
+          is distinct from application.self_service_released_at + interval '7 days' then
     raise exception 'The application was not closed exactly: %', row_to_json(application);
   end if;
   if exists (select 1 from identity.organization_cac_registrations where cac_registration_number = 'RC9900069001')
@@ -295,6 +309,7 @@ begin
      or event.details ->> 'organizationId' <> application.organization_id::text
      or event.details ->> 'facilityId' <> application.facility_id::text
      or (event.details ->> 'version')::bigint <> application.row_version
+     or event.details -> 'allowRetry' <> 'false'::jsonb
      or event.details::text ~ 'RC9900069001|release\.invalid' then
     raise exception 'The release audit row is wrong: %', row_to_json(event);
   end if;
@@ -345,6 +360,9 @@ begin
     encode(sha256('release-session-2'::bytea), 'hex'),
     '$argon2id$v=19$m=65536,t=3,p=1$' || repeat('a', 22) || '$' || repeat('b', 43));
   perform set_config('hid.test.real_organization', activated.organization_id::text, true);
+  perform set_config('hid.test.real_application', application_id::text, true);
+  perform set_config('hid.test.real_facility', activated.facility_id::text, true);
+  perform set_config('hid.test.real_account', activated.account_id::text, true);
 end $$;
 reset role;
 do $$ begin
@@ -353,8 +371,51 @@ do $$ begin
                     and organization.name = 'Release Company Ltd' and organization.active)
      or (select binding.organization_id from identity.organization_cac_registrations binding
           where binding.cac_registration_number = 'RC9900069001')
-        is distinct from current_setting('hid.test.real_organization')::uuid then
-    raise exception 'The real company was not registered with its CAC and legal name';
+        is distinct from current_setting('hid.test.real_organization')::uuid
+     or (select self_service_without_hold from identity.organization_applications
+          where id = current_setting('hid.test.real_application')::uuid) then
+    raise exception 'The real company was not registered with its CAC and legal name, with a hold';
+  end if;
+end $$;
+
+-- 5. R15: say the real company's administrator signed up with a personal
+-- email. Support releases the sign-up letting the applicant retry: the
+-- company's network signs up again at once with the work email, without a
+-- hold.
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject', 'synthetic:release:super', true),
+  set_config('app.correlation_id', 'self-service-release-0004', true),
+  set_config('app.purpose_of_use', 'healthcare-operations', true);
+do $$
+declare result record; version bigint;
+begin
+  perform identity.admin_transition_facility(current_setting('hid.test.real_facility')::uuid, 1, 'suspended',
+    'Signed up with a personal email', 'release-suite-suspend-2', repeat('c', 64));
+  perform auth.admin_transition_account(current_setting('hid.test.real_account')::uuid, 1,
+    'disabled', 'Signed up with a personal email', 'release-suite-disable-2', repeat('d', 64));
+  select item.row_version into version from identity.admin_list_self_service_facilities('all') item
+   where item.application_id = current_setting('hid.test.real_application')::uuid;
+  select * into result from identity.admin_release_self_service_facility(
+    current_setting('hid.test.real_application')::uuid, version,
+    'Right company, personal email: let the work email sign up', true);
+  if result.row_version <> version + 1 then
+    raise exception 'The retry release did not return the new version: %', row_to_json(result);
+  end if;
+  perform set_config('app.actor_subject', 'system:auth', true);
+  perform set_config('app.purpose_of_use', '', true);
+  perform set_config('hid.test.retry_application', identity.submit_self_service_organization_application(
+    'ehr', 'hospital', 'RC9900069001', 'Real Administrator', 'work.admin@releasecompany.invalid',
+    encode(sha256('company-network'::bytea), 'hex'))::text, true);
+end $$;
+reset role;
+do $$ begin
+  if (select self_service_refusal_ends_at from identity.organization_applications
+       where id = current_setting('hid.test.real_application')::uuid) is not null
+     or (select details -> 'allowRetry' from audit.events where action = 'admin.self-service-facility.release'
+          and resource_uuid = current_setting('hid.test.real_application')::uuid) <> 'true'::jsonb
+     or not (select self_service_without_hold from identity.organization_applications
+              where id = current_setting('hid.test.retry_application')::uuid) then
+    raise exception 'The retry release set a refusal, or the company''s new sign-up holds the CAC';
   end if;
 end $$;
 

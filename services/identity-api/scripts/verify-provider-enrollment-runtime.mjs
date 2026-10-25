@@ -19,7 +19,13 @@
 // rejection of open applications, and availability's reason. And the
 // website's second contract: the confirmation read before the password
 // (GET profile, R13) and start's answer when no code is sent (codeSent
-// false, the code in force and the wait, R14).
+// false, the code in force and the wait, R14). And the second review: a lapse
+// refuses no one and a renewal from the same email or network holds nothing,
+// support's rejection or release refuses for 7 days unless it lets the
+// applicant retry, support's waiver, the registered email closing its
+// application (R15); the open list ranked, counted and searched (R16); and
+// the governed completion route sending no code for a self-service
+// application (R17).
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { createHmac, randomUUID } from 'node:crypto';
@@ -44,9 +50,11 @@ const isolated = `${rehearsal ? 'hid_rehearsal' : process.env.PGDATABASE}_provid
 const origin = 'https://app.healthidentitydirectory.com';
 const ehrOrigin = 'https://ehr.healthidentitydirectory.com';
 const adminOrigin = 'https://admin.healthidentitydirectory.com';
+// The public site, where the governed completion (organization-completion) runs.
+const publicOrigin = 'https://healthidentitydirectory.com';
 const runtimeOptions = `options=${encodeURIComponent('-c role=hid_identity_api_runtime')}`;
 Object.assign(process.env, { AUTH_COOKIE_SECURE: 'true', HID_DEPLOYMENT_ENV: 'production',
-  NIN_PROVIDER_MODE: 'unavailable', CORS_ORIGINS: [origin, ehrOrigin, adminOrigin].join(','),
+  NIN_PROVIDER_MODE: 'unavailable', CORS_ORIGINS: [origin, ehrOrigin, adminOrigin, publicOrigin].join(','),
   IDENTITY_SERVICE_IDENTITY_MODE: 'local-secret',
   IDENTITY_EHR_INTERNAL_SERVICE_TOKEN: 'public-synthetic-ehr-workload-token',
   TURNSTILE_MODE: 'required', TURNSTILE_SECRET_KEY: 'example-turnstile-secret',
@@ -91,7 +99,8 @@ const { IntegrationRuntimeService } = load('integrations/integration-runtime.ser
 const { ProviderEnrollmentController } = load('identity/provider-enrollment.controller.ts');
 const { ProviderEnrollmentService } = load('identity/provider-enrollment.service.ts');
 const { OrganizationProfileCompletionService } = load('identity/organization-profile-completion.service.ts');
-const { AdminOrganizationApplicationsController } = load('identity/organization-applications.controller.ts');
+const { AdminOrganizationApplicationsController, PublicOrganizationProfileCompletionController } =
+  load('identity/organization-applications.controller.ts');
 const { OrganizationApplicationsService } = load('identity/organization-applications.service.ts');
 const { AdminSelfServiceFacilitiesController, AdminSelfServiceApplicationsController } =
   load('identity/self-service-facilities.controller.ts');
@@ -214,6 +223,7 @@ try {
   await owner.query("update platform.integration_providers set enabled=true, row_version=row_version+1 where provider='qoreid'");
   const module = await Test.createTestingModule({
     controllers: [AuthController, ProviderEnrollmentController, AdminOrganizationApplicationsController,
+      PublicOrganizationProfileCompletionController,
       AdminSelfServiceFacilitiesController, AdminSelfServiceApplicationsController, AdminController],
     providers: [DatabaseService, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
@@ -734,15 +744,60 @@ try {
   assert.equal(refusedTaken.body.detail, 'The administrator email is already associated with an HID account');
   assert(!cookies(refusedTaken).some(value => value.startsWith(cookieName)), 'A refused activation set a session cookie');
   assert.deepEqual(await footprint(), footprintBefore, 'A refused activation created or changed something');
-  assert.deepEqual({ ...(await application(cacTaken)), id: undefined }, { id: undefined,
-    status: 'ready_for_review', verification_result: 'verified', approval_mode: 'self_service' });
+  // R15: that email can never activate it, so the application is closed
+  // (no reviewer, no refusal), audited.
+  const takenApplication = await application(cacTaken);
+  assert.deepEqual({ ...takenApplication, id: undefined }, { id: undefined,
+    status: 'rejected', verification_result: 'verified', approval_mode: 'self_service' });
+  assert.deepEqual((await owner.query(`select reviewed_by_account_id, review_reason, self_service_refusal_ends_at
+      from identity.organization_applications where id=$1`, [takenApplication.id])).rows,
+  [{ reviewed_by_account_id: null, self_service_refusal_ends_at: null,
+    review_reason: 'Self-service application closed: its administrator email already belongs to an account' }]);
+  assert.deepEqual((await owner.query(`select actor_type, details from audit.events
+    where action='identity.organization.self-service.close' and resource_id=$1`, [takenApplication.id])).rows,
+  [{ actor_type: 'system', details: { productCode: 'ehr', closeReason: 'administrator_email_registered' } }]);
   // R1: the pre-check answered it before any hash (no attempt charged) and
   // ended the session, so retrying costs nothing either.
   assert.deepEqual(await sessionState(startedTaken.body.challengeId), { activation_attempts: 0, ended: true });
   expectProblem(await activate(takenCookie, 'Synthetic-Provider-Password-2027'), 401,
     'ORGANIZATION_COMPLETION_SESSION_INVALID');
+  // The applicant starts again at once, from the same network, with another
+  // email: a new application, without a hold (that network just had one).
+  const emailTakenWork = email('taken-work');
+  const restartedTaken = await start(enrollment({ cacRegistrationNumber: cacTaken, administratorEmail: emailTakenWork }),
+    TAKEN_NETWORK);
+  assert.equal(restartedTaken.status, 200, `restart after the registered email failed: ${JSON.stringify(restartedTaken.body)}`);
+  assert.equal(restartedTaken.body.codeSent, true);
+  assert.equal(qoreidCacLookups.at(-1), cacTaken, 'The new application was not verified with QoreID');
+  const restartedApplication = await application(cacTaken, emailTakenWork);
+  assert.notEqual(restartedApplication.id, takenApplication.id);
+  assert.deepEqual((await owner.query(`select status, self_service_without_hold from identity.organization_applications
+    where id=$1`, [restartedApplication.id])).rows, [{ status: 'ready_for_review', self_service_without_hold: true }]);
   security.activation_email_registered = 'PROVIDER_EMAIL_ALREADY_REGISTERED';
-  session.precheck_email_registered = { attempts: 0, sessionEnded: true, retry: 401 };
+  session.precheck_email_registered = { attempts: 0, sessionEnded: true, retry: 401, applicationClosed: true,
+    restartSameNetworkOtherEmail: 200, restartHold: false };
+
+  // R17: the governed completion route (the public site's) sends no code for
+  // a self-service application: its answer stays uniform, nothing is
+  // delivered and no challenge is stored. The restart's code is past its 60
+  // seconds, so only the approval mode stops it.
+  await owner.query(`update identity.organization_profile_completion_challenges
+    set created_at = created_at - interval '2 minutes' where application_id=$1`, [restartedApplication.id]);
+  await completion.settleDeliveries();
+  const deliveriesBeforeGoverned = recipients.length;
+  const governedStart = await http.post('/api/v1/identity/organization-applications/completion/start')
+    .set('Origin', publicOrigin).set('X-Forwarded-For', '198.51.100.70')
+    .send({ productCode: 'ehr', cacRegistrationNumber: cacTaken, administratorEmail: emailTakenWork,
+      turnstileAction: 'organization-completion',
+      turnstileToken: turnstile('organization-completion', new URL(publicOrigin).hostname) });
+  assert.equal(governedStart.status, 200, `governed completion start: ${JSON.stringify(governedStart.body)}`);
+  assert.deepEqual(Object.keys(governedStart.body).sort(),
+    ['accepted', 'challengeId', 'expiresInSeconds', 'resendAfterSeconds']);
+  await completion.settleDeliveries();
+  assert.equal(recipients.length, deliveriesBeforeGoverned, 'The governed route delivered a self-service code');
+  assert.equal(await count('select count(*)::int n from identity.organization_profile_completion_challenges where id=$1',
+    [governedStart.body.challengeId]), 0, 'The governed route stored a challenge for a self-service application');
+  security.governed_completion_self_service = { status: 200, delivered: 0, stored: 0 };
 
   // Owner Q8: a second product for an already registered CAC goes to review.
   // The pharmacy sign-up for cacA is a new application (its own product), is
@@ -1080,35 +1135,49 @@ try {
     where cac_registration_number=$1 and administrator_email=$2 returning id, row_version`,
   [cacLapse, emailSquatter])).rows[0];
   // R3: the squatter's own email resumes its stale application without
-  // renewing it, and its network cannot take the CAC over with another email
-  // (that attempt changes nothing); only someone else's submit lapses it.
+  // renewing it. R15: its network taking the CAC over with another email
+  // lapses it, but the new application holds nothing, so the real company's
+  // next submit lapses that one at once and gets the hold.
   const lookupsBeforeSquatterResume = qoreidCacLookups.length;
   const squatterResumed = await start(enrollment({ cacRegistrationNumber: cacLapse, administratorEmail: emailSquatter }),
     '198.51.100.30');
   assert.equal(squatterResumed.status, 200, `squatter resume failed: ${JSON.stringify(squatterResumed.body)}`);
-  expectProblem(await start(enrollment({ cacRegistrationNumber: cacLapse, administratorEmail: email('squatter-two') }),
-    '198.51.100.30'), 409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
   assert.equal(qoreidCacLookups.length, lookupsBeforeSquatterResume, 'A squatter resume reached QoreID');
   assert.deepEqual((await owner.query(`select status, row_version, created_at < clock_timestamp() - interval '24 hours' stale
       from identity.organization_applications where id=$1`, [stale.id])).rows[0],
-  { status: 'ready_for_review', row_version: stale.row_version, stale: true },
-  'The squatter renewed its hold, or its network lapsed it');
+  { status: 'ready_for_review', row_version: stale.row_version, stale: true }, 'The squatter renewed its hold');
+  const emailSquatterTwo = email('squatter-two');
+  const renewed = await start(enrollment({ cacRegistrationNumber: cacLapse, administratorEmail: emailSquatterTwo }),
+    '198.51.100.30');
+  assert.equal(renewed.status, 200, `the squatter's renewal failed: ${JSON.stringify(renewed.body)}`);
+  const renewal = await application(cacLapse, emailSquatterTwo);
+  assert.deepEqual((await owner.query('select self_service_without_hold from identity.organization_applications where id=$1',
+    [renewal.id])).rows, [{ self_service_without_hold: true }], 'The squatter\'s renewal holds the CAC');
   lapse.own_email_resumes_without_renewal = true;
-  lapse.own_network_new_email = 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW';
+  lapse.own_network_new_email = { status: 200, hold: false };
   const freed = await start(enrollment({ cacRegistrationNumber: cacLapse, administratorEmail: emailOwner }), '198.51.100.31');
   assert.equal(freed.status, 200, `start after the lapse failed: ${JSON.stringify(freed.body)}`);
   assert.equal(qoreidCacLookups.at(-1), cacLapse, 'The new application was not verified with QoreID');
+  assert.deepEqual((await owner.query(`select status, self_service_without_hold from identity.organization_applications
+    where cac_registration_number=$1 and administrator_email=$2`, [cacLapse, emailOwner])).rows,
+  [{ status: 'ready_for_review', self_service_without_hold: false }], 'The real company was not given the hold');
   const lapsed = (await owner.query(`select status, reviewed_at is not null reviewed, review_reason, reviewed_by_account_id,
-      row_version from identity.organization_applications where id=$1`, [stale.id])).rows[0];
+      row_version, self_service_refusal_ends_at from identity.organization_applications where id=$1`, [stale.id])).rows[0];
   assert.deepEqual(lapsed, { status: 'rejected', reviewed: true,
     review_reason: 'Self-service application lapsed: not activated within 24 hours of submission',
-    reviewed_by_account_id: null, row_version: String(Number(stale.row_version) + 1) });
+    reviewed_by_account_id: null, row_version: String(Number(stale.row_version) + 1), self_service_refusal_ends_at: null });
+  assert.deepEqual((await owner.query(`select status, review_reason from identity.organization_applications where id=$1`,
+    [renewal.id])).rows, [{ status: 'rejected',
+    review_reason: 'Self-service application lapsed: opened without a hold and replaced by another sign-up' }]);
   assert.equal(await count(`select count(*)::int n from identity.organization_profile_completion_challenges
     where application_id=$1 and invalidated_at is null`, [stale.id]), 0, 'The lapse left a code or session usable');
   const lapseAudit = (await owner.query(`select actor_type, outcome, details from audit.events
-    where action='identity.organization.self-service.lapse' and resource_id=$1`, [stale.id])).rows;
+    where action='identity.organization.self-service.lapse' and resource_id = any($1::text[]) order by sequence_id`,
+  [[stale.id, renewal.id]])).rows;
   assert.deepEqual(lapseAudit, [{ actor_type: 'system', outcome: 'success',
-    details: { productCode: 'ehr', previousStatus: 'ready_for_review', lapseAfterHours: 24 } }]);
+    details: { productCode: 'ehr', previousStatus: 'ready_for_review', lapseAfterHours: 24, withoutHold: false } },
+  { actor_type: 'system', outcome: 'success',
+    details: { productCode: 'ehr', previousStatus: 'ready_for_review', lapseAfterHours: 24, withoutHold: true } }]);
   expectProblem(await activate(squatterCookie, password), 401, 'ORGANIZATION_COMPLETION_SESSION_INVALID');
   const ownerVerified = await verify({ challengeId: freed.body.challengeId, code: await codeFor(freed.body.challengeId) });
   assert.equal(ownerVerified.status, 200);
@@ -1120,7 +1189,7 @@ try {
   lapse.window_hours = 24;
   lapse.within_window_other_email = 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW';
   lapse.after_window = { previous: 'rejected', challengesInvalidated: true, audited: true,
-    previousSession: 401, newApplication: 'activated' };
+    previousSession: 401, renewalWithoutHold: 'lapsed at once', newApplication: 'activated', refusal: 'none' };
 
   // R2: support releases a fraudulent self sign-up. Say the owner's sign-up
   // above was an impostor's: support suspends the facility and disables the
@@ -1197,9 +1266,11 @@ try {
   review.release = { requiresSuspension: 409, identityReviewer: 403, staleVersion: 409, status: 200, again: 409,
     bindingRemoved: true, organizationRenamed: true, releasedEmailOrNetwork: 409, realCompanyActivated: 200 };
 
-  // R3: support sees the open self-service applications, oldest first, and
-  // closes one that holds a company's CAC; its email and network then cannot
-  // reopen it for 7 days, while the real company can.
+  // R3: support sees the open self-service applications and closes one that
+  // holds a company's CAC; its email and network then cannot reopen it for 7
+  // days, while the real company can. R16: those holding a CAC now come
+  // first, with the total, and support finds one by CAC number. R15: support
+  // waives a refusal, or rejects letting the applicant retry.
   const openPath = '/admin/self-service-applications';
   const cacSquat = 'RC9900063602'; const emailSquat = email('squat'); const SQUAT_NETWORK = '198.51.100.35';
   const squatStarted = await start(enrollment({ cacRegistrationNumber: cacSquat, administratorEmail: emailSquat }),
@@ -1209,14 +1280,28 @@ try {
     where cac_registration_number=$1`, [cacSquat])).rows[0];
   const openListed = await adminGet(identityReviewer, openPath);
   assert.equal(openListed.status, 200, `open list failed: ${JSON.stringify(openListed.body)}`);
-  const submittedTimes = openListed.body.items.map(item => Date.parse(item.submittedAt));
-  assert.deepEqual(submittedTimes, [...submittedTimes].sort((left, right) => left - right), 'The open list is not oldest first');
+  assert.deepEqual(Object.keys(openListed.body).sort(), ['items', 'total']);
+  assert.equal(openListed.body.total, await count(`select count(*)::int n from identity.organization_applications
+    where approval_mode='self_service' and status in ('pending_verification', 'ready_for_review')`));
+  const rank = item => [item.holdsCac ? 0 : 1, item.status === 'ready_for_review' ? 0 : 1, -Date.parse(item.submittedAt)];
+  const ranked = [...openListed.body.items].sort((left, right) => {
+    const [a, b] = [rank(left), rank(right)];
+    return a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+  });
+  assert.deepEqual(openListed.body.items.map(item => item.applicationId), ranked.map(item => item.applicationId),
+    'The open list is not holding first, verified first, newest first');
   assert.deepEqual(openListed.body.items.find(item => item.applicationId === squatApplication.id), {
     applicationId: squatApplication.id, version: Number(squatApplication.row_version), productCode: 'ehr',
     organizationType: 'clinic', cacHint: 'RC********02', organizationName: `Runtime Clinic ${cacSquat} Ltd`,
     administratorName: 'Synthetic Provider Admin', administratorEmail: emailSquat, status: 'ready_for_review',
     verificationResult: 'verified', emailVerified: false, submittedAt: squatApplication.created_at.toISOString(),
-    lapsesAt: new Date(squatApplication.created_at.getTime() + 24 * 3600 * 1000).toISOString() });
+    lapsesAt: new Date(squatApplication.created_at.getTime() + 24 * 3600 * 1000).toISOString(), holdsCac: true });
+  const searched = await adminPost(identityReviewer, `${openPath}/search`,
+    { cacRegistrationNumber: ` ${cacSquat.toLowerCase()} ` });
+  assert.equal(searched.status, 200, `open search failed: ${JSON.stringify(searched.body)}`);
+  assert.deepEqual([searched.body.total, searched.body.items.map(item => item.applicationId)], [1, [squatApplication.id]]);
+  expectProblem(await adminPost(identityReviewer, `${openPath}/search`, { cacRegistrationNumber: 'RC12' }),
+    400, 'VALIDATION_FAILED');
   assert(!openListed.body.items.some(item => item.applicationId === impostor.id), 'A released application is listed as open');
   const rejectPath = `${openPath}/${squatApplication.id}/reject`;
   const rejectReason = 'Holds a company CAC with an unrelated email';
@@ -1237,15 +1322,62 @@ try {
   assert.deepEqual((await owner.query(`select actor_type, actor_account_id, reason from audit.events
     where action='admin.self-service-application.reject' and resource_id=$1`, [squatApplication.id])).rows,
   [{ actor_type: 'platform', actor_account_id: superAdmin.accountId, reason: rejectReason }]);
+  assert.deepEqual((await owner.query(`select self_service_refusal_ends_at = reviewed_at + interval '7 days' refusal
+    from identity.organization_applications where id=$1`, [squatApplication.id])).rows, [{ refusal: true }],
+  'The rejection did not refuse its email and network for 7 days');
   expectProblem(await start(enrollment({ cacRegistrationNumber: cacSquat, administratorEmail: emailSquat }),
     '198.51.100.36'), 409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
-  expectProblem(await start(enrollment({ cacRegistrationNumber: cacSquat, administratorEmail: email('squat-two') }),
+  const emailSquatTwo = email('squat-two');
+  expectProblem(await start(enrollment({ cacRegistrationNumber: cacSquat, administratorEmail: emailSquatTwo }),
     SQUAT_NETWORK), 409, 'PROVIDER_ENROLLMENT_REQUIRES_REVIEW');
+  // Say the rejected sign-up was an employee's, from the company's office:
+  // support waives the refusal for the CAC number and product, and the
+  // office signs up at once (without a hold, as its network just had one).
+  const waivePath = `${openPath}/waive-refusal`;
+  const waiveBody = { cacRegistrationNumber: cacSquat.toLowerCase(), productCode: 'ehr',
+    reason: 'The company confirmed its office network' };
+  expectProblem(await adminPost(identityReviewer, waivePath, waiveBody), 403, 'PERMISSION_DENIED');
+  expectProblem(await adminPost(superAdmin, waivePath, { ...waiveBody, productCode: 'dental' }), 400, 'VALIDATION_FAILED');
+  const waived = await adminPost(superAdmin, waivePath, waiveBody);
+  assert.equal(waived.status, 200, `waiver failed: ${JSON.stringify(waived.body)}`);
+  assert.deepEqual(waived.body.waived.map(item => [item.applicationId, item.version]),
+    [[squatApplication.id, rejected.body.version + 1]]);
+  expectProblem(await adminPost(superAdmin, waivePath, waiveBody), 404, 'SELF_SERVICE_REFUSAL_NOT_FOUND');
+  assert.deepEqual((await owner.query(`select actor_type, actor_account_id, reason from audit.events
+    where action='admin.self-service-application.refusal-waive' and resource_id=$1`, [squatApplication.id])).rows,
+  [{ actor_type: 'platform', actor_account_id: superAdmin.accountId, reason: 'The company confirmed its office network' }]);
+  const officeAfterWaiver = await start(enrollment({ cacRegistrationNumber: cacSquat, administratorEmail: emailSquatTwo }),
+    SQUAT_NETWORK);
+  assert.equal(officeAfterWaiver.status, 200, `start after the waiver failed: ${JSON.stringify(officeAfterWaiver.body)}`);
+  assert.deepEqual((await owner.query(`select self_service_without_hold from identity.organization_applications
+    where cac_registration_number=$1 and administrator_email=$2`, [cacSquat, emailSquatTwo])).rows,
+  [{ self_service_without_hold: true }]);
   const squatFreed = await start(enrollment({ cacRegistrationNumber: cacSquat, administratorEmail: email('squat-real') }),
     '198.51.100.37');
   assert.equal(squatFreed.status, 200, `the real company could not start: ${JSON.stringify(squatFreed.body)}`);
-  review.open_applications = { list: 'oldest first', identityReviewer: 'list only', reject: 200, missingIfMatch: 428,
-    staleVersion: 409, again: 404, rejectedEmailOrNetwork: 409, realCompany: 200 };
+  // A rejection that lets the applicant retry (a mistyped email) refuses no
+  // one: the same network starts again at once with the right email.
+  const cacRetry = 'RC9900063603'; const RETRY_NETWORK = '198.51.100.71';
+  const typoStarted = await start(enrollment({ cacRegistrationNumber: cacRetry, administratorEmail: email('typo') }),
+    RETRY_NETWORK);
+  assert.equal(typoStarted.status, 200);
+  const typoApplication = (await owner.query(`select id, row_version from identity.organization_applications
+    where cac_registration_number=$1`, [cacRetry])).rows[0];
+  expectProblem(await adminPost(superAdmin, `${openPath}/${typoApplication.id}/reject`,
+    { reason: 'The applicant mistyped the email', allowRetry: 'yes' },
+    { 'If-Match': `"${typoApplication.row_version}"` }), 400, 'VALIDATION_FAILED');
+  const retried = await adminPost(superAdmin, `${openPath}/${typoApplication.id}/reject`,
+    { reason: 'The applicant mistyped the email', allowRetry: true }, { 'If-Match': `"${typoApplication.row_version}"` });
+  assert.equal(retried.status, 200, `retry rejection failed: ${JSON.stringify(retried.body)}`);
+  assert.deepEqual((await owner.query(`select self_service_refusal_ends_at from identity.organization_applications
+    where id=$1`, [typoApplication.id])).rows, [{ self_service_refusal_ends_at: null }]);
+  const corrected = await start(enrollment({ cacRegistrationNumber: cacRetry, administratorEmail: email('corrected') }),
+    RETRY_NETWORK);
+  assert.equal(corrected.status, 200, `the corrected start failed: ${JSON.stringify(corrected.body)}`);
+  review.open_applications = { list: 'holding first, verified first, newest first', total: openListed.body.total,
+    search: 200, identityReviewer: 'list only', reject: 200, missingIfMatch: 428, staleVersion: 409, again: 404,
+    rejectedEmailOrNetwork: 409, waiver: 200, waivedAgain: 404, afterWaiver: 200, realCompany: 200,
+    retryRejection: 200, correctedFromSameNetwork: 200 };
 
   // The database's own gate, driven through Identity (R11). A request passes
   // Identity's gate, then waits behind a lock the verifier holds; the control
@@ -1474,8 +1606,9 @@ try {
   expectProblem(heldStart, 429, 'VERIFICATION_QUOTA_EXCEEDED');
   await owner.query(`update identity.organization_profile_completion_challenges
     set created_at = created_at - interval '2 minutes'
-    where application_id = (select id from identity.organization_applications where cac_registration_number=$1)`, [cacTaken]);
-  const heldResume = await start(enrollment({ cacRegistrationNumber: cacTaken, administratorEmail: emailA }), TAKEN_NETWORK);
+    where application_id in (select id from identity.organization_applications where cac_registration_number=$1)`, [cacTaken]);
+  const heldResume = await start(enrollment({ cacRegistrationNumber: cacTaken, administratorEmail: emailTakenWork }),
+    TAKEN_NETWORK);
   assert.equal(heldResume.status, 200, `held resume failed: ${JSON.stringify(heldResume.body)}`);
   const heldVerified = await verify({ challengeId: heldResume.body.challengeId,
     code: await codeFor(heldResume.body.challengeId) });
@@ -1501,7 +1634,9 @@ try {
       'org_admin_membership', 'account', 'ehr_product', 'staff_session', 'session_read', 'facility_selection',
       'password_sign_in', 'resume_without_lookup', 'details_from_proving_code', 'activation_precheck', 'lapse',
       'support_release', 'real_company_after_release', 'open_applications', 'database_gate', 'activation_budget',
-      'platform_cap', 'support_review', 'control_closed', 'confirmation_read', 'no_code_answer'],
+      'platform_cap', 'support_review', 'control_closed', 'confirmation_read', 'no_code_answer',
+      'registered_email_closes', 'governed_route_sends_no_self_service_code', 'renewal_without_hold',
+      'open_list_ranked_searched', 'refusal_waiver', 'retry_rejection'],
     gate, security, quota, session, lapse, review, confirmation, noCode, qoreidCacLookups: qoreidCacLookups.length,
     siteverifyCalls: siteverifyRequests.length }) + '\n');
 } finally {

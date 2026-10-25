@@ -274,6 +274,25 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   every self-service application (`identity.begin_self_service_provider_enrollment`,
   on top of 0056's 60 seconds, 5 an hour and 15 a day per application). Past
   any of these limits start sends nothing and says so (R14 below).
+- R17 (second review): 0056's `identity.begin_organization_profile_completion`
+  sent a code for any open, verified application of a CAC number, product and
+  email, whatever its approval mode, and the public self-service lookup now
+  verifies applications whose email the submitter chose, so the governed
+  completion route (`POST /api/v1/identity/organization-applications/completion/start`,
+  on the public site) and a rolled-back Identity could send codes for
+  self-service applications outside R5's 10 a day per email (15 a day per
+  application instead) and without R6's stored details. 0086 moves 0056's body
+  into the owner-only `identity.issue_organization_profile_completion_code`,
+  which sends only for the approval mode its caller names, and replaces the
+  governed command (its signature, owner and grants kept; 0086 refuses to run
+  unless the live body is 0056's) so that it sends only for governed
+  (`admin_review`) applications, answering NULL for a self-service one exactly
+  as for none; the self-service command calls the helper for self-service
+  ones. The governed route's answer stays uniform, so nothing new is
+  disclosed. A later replacement of the governed command must keep this.
+  Not changed: the governed route's public application quota stays keyed by
+  the raw address, as on `main` (it no longer reaches self-service
+  applications).
 - R6: the administrator name and organization type the activated account,
   staff record and application keep are those sent with the request whose
   emailed code opened the activating session (stored on its challenge), not
@@ -291,18 +310,49 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   never lapse. `main` never expires these rows. The governed submit still
   returns a fresh (under 24 hours) self-service application for the same CAC
   and product, as before (follow-up below). R3: the application keeps the keyed
-  digest of the network that opened it, and for 7 days after a self-service
-  application is closed (lapsed, rejected by support or released by support)
-  a new application for its CAC and product is refused (409, as any conflict)
-  to its email and to its network.
+  digest of the network that opened it. R15 (second review) replaced the first
+  review's 7-day refusal after any closure, which locked real applicants out:
+  the submit lapsed the stale application and then refused itself because of
+  that same lapse, so the failed submit rolled the lapse back and an
+  applicant who had mistyped the email could never start again from the
+  office network, and support's rejection only started the 7 days. Now:
+  - a lapse refuses no one. Instead a hold is not renewed: a new application
+    whose email or network already had a self-service application for the
+    CAC and product closed in the last 7 days (lapsed, including the one this
+    submit has just lapsed, closed by the system or by support) is opened
+    without a hold (`self_service_without_hold`): anyone else's submit lapses
+    it at once (reason "Self-service application lapsed: opened without a
+    hold and replaced by another sign-up"), though its own email can still
+    finish it. A squatter that resubmits from its own network with a new email
+    therefore gains nothing, while a mistyped email corrected from the same
+    network after 24 hours is accepted;
+  - only support sets a refusal: a rejection or release refuses the closed
+    application's email and network for 7 days
+    (`self_service_refusal_ends_at`; 409 `PROVIDER_ENROLLMENT_REQUIRES_REVIEW`,
+    as any conflict) unless support lets the applicant retry (`allowRetry`),
+    and support can waive a refusal in force for a CAC number and product
+    (`identity.admin_waive_self_service_refusals`, `POST
+    /api/v1/admin/self-service-applications/waive-refusal`, audited
+    `admin.self-service-application.refusal-waive`);
+  - the activation pre-check's `email_registered` closes the application (no
+    reviewer, the reason "Self-service application closed: its administrator
+    email already belongs to an account", no refusal, its other codes and
+    sessions ended, audited `identity.organization.self-service.close`), so
+    the applicant can start again at once with another email.
+  Residual: a stranger who lapses a real applicant's stale application holds
+  the CAC for 24 hours (the documented squat); after that the applicant's own
+  email and network are accepted, without a hold, so an active stranger can
+  keep lapsing it, each time paying a Turnstile solve and a public
+  application quota unit; support's rejection (refusing the stranger's email
+  and network) is the remedy.
 - A9 with review fix R1: before hashing the password, activation runs
   `identity.prepare_self_service_provider_activation` in its own committed
   transaction. It refuses a token that names no live session (401), charges
   one of the session's 5 attempts (the 6th ends it, 401), and answers an
   activation that can never succeed (email already registered 409
-  `PROVIDER_EMAIL_ALREADY_REGISTERED`; CAC bound, legal name used or the
-  application not a ready self-service one, 409 `ORGANIZATION_REVIEW_REQUIRED`)
-  at once, ending the session. So a session costs at most 5 argon2id hashes,
+  `PROVIDER_EMAIL_ALREADY_REGISTERED`, which also closes the application, R15;
+  CAC bound, legal name used or the application not a ready self-service one,
+  409 `ORGANIZATION_REVIEW_REQUIRED`) at once, ending the session. So a session costs at most 5 argon2id hashes,
   and an activation certain to fail costs none. It reads the control after
   locking the session.
 - A10: activation sets the account's `email_verified_at` and
@@ -363,10 +413,19 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   `admin.self-service-facility.release`; the list shows it as handled.
 - R3: support's list of open self-service applications,
   `identity.admin_list_open_self_service_applications` (`GET
-  /api/v1/admin/self-service-applications`, oldest first) and its rejection,
+  /api/v1/admin/self-service-applications`) and its rejection,
   `identity.admin_reject_self_service_application` (`POST
-  /api/v1/admin/self-service-applications/:applicationId/reject`), both
-  without a facility membership.
+  /api/v1/admin/self-service-applications/:applicationId/reject`, `{ reason,
+  allowRetry? }`), both without a facility membership. R16 (second review):
+  the list was oldest first, at most 200, with no total, and every start with
+  a made-up CAC number leaves an open row that nothing lapses, so about 200
+  junk rows hid a live squat. It now lists the applications that hold a CAC
+  now first (`holdsCac`), verified ones first within each group, then the
+  newest, with `total` (all matching open rows), and support can search one
+  exact CAC number (`POST /api/v1/admin/self-service-applications/search`,
+  `{ cacRegistrationNumber }`, in the body to keep it out of access logs, as
+  the principal search). Not done: closing never-verified rows outside a
+  submit.
 - R7 (CRITIC C13): an organization that signed itself up makes no
   organization CAC lookup (`POST /api/v1/identity/organizations/verification/cac/:context`,
   403 `PERMISSION_DENIED`, nothing charged) until support has reviewed it, so
@@ -464,9 +523,11 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   the right organization with the correct CAC number and another email address
   they control (another mailbox of the organization). The released email's
   7-day refusal (R3) applies to the released CAC number and product only, not
-  to a correct CAC number. If an organization must use that same email, that
-  is an owner decision and a reviewed one-off database change, not a support
-  action.
+  to a correct CAC number; where the release concerns the right company
+  signed up with the wrong email, support releases it with `allowRetry`, so
+  the company's network is not refused (R15), or waives the refusal later.
+  If an organization must use that same email, that is an owner decision and
+  a reviewed one-off database change, not a support action.
 - Round-1 review fixes, each absent on `main` and recorded above: R1 the
   activation pre-check and its 5-attempt budget (A9); R2 support's release; R3
   the own-email resume, the submitting network, the 7-day refusal and support's
@@ -481,6 +542,12 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   23505 as `SELF_SERVICE_FACILITY_ALREADY_REVIEWED`, and any other integrity
   refusal (23514) as 503 `SELF_SERVICE_FACILITY_UNAVAILABLE` (`main` has no
   review command). R13 and R14 above come from the website's second contract.
+  The second review's fixes, also absent on `main`: R15 a lapse refuses no
+  one, a renewal from the same email or network holds nothing, support's
+  rejection or release refuses for 7 days unless it lets the applicant retry,
+  support's waiver, and the registered email closing its application (A8);
+  R16 the open list ranked, counted and searched (R3); R17 the governed code
+  command serving governed applications only (R5).
 - The ported database suites run from `services/ehr-api/test/database/`
   (`provider-self-enrollment`, `provider-self-service-cac-quota`,
   `provider-self-service-control`, `provider-self-service-lapse`,
@@ -515,13 +582,31 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   then verifies), after the code was used (no code named), at the hour's
   limit (naming the 5th code, which verifies) and at the email's 10 a day,
   with nothing delivered, and 409 for an application support rejected while
-  its start waited. Unlike `main`'s, it can also run against a disposable copy of a
+  its start waited. For the second review it proves: the registered email's
+  application closed and a new email accepted at once from the same network;
+  the governed completion route (on the public site's origin) answering its
+  uniform 200 with nothing delivered or stored for a self-service
+  application; the squatter's renewal from its own network accepted without a
+  hold and lapsed at once by the real company, which gets the hold; the open
+  list ranked with its total and the CAC number search; the waiver (403, 400,
+  200, then 404) followed by the office's sign-up; and a retry rejection
+  followed by the corrected email from the same network. Unlike `main`'s, it can also run against a disposable copy of a
   database on a loopback test cluster (`HID_PROVIDER_RUNTIME_LOCAL_CLUSTER=loopback`,
   `NODE_ENV=test`), which proves the same flow on a database built in
   production's order.
 - `POST /auth/login` and the activation set the session cookies through one
   helper, `setSessionCookies` (`AuthController.setCookies` is a pure extraction
   of it, C18), so the two cannot drift.
+- R15 to R17 are proved by `self-service-open-applications` (the typo
+  corrected from the same network, the squatter's renewal, the stranger's
+  lapse, the retry rejection, the waiver, and 210 stale rows beside one live
+  squat), `self-service-facility-release` (the release's refusal and its
+  `allowRetry`), `provider-self-service-activation` and
+  `provider-self-enrollment` (the registered email's closure),
+  `provider-self-enrollment` and `provider-self-service-rollback` (the
+  governed command, and the previous Identity's completion start, send
+  nothing for a self-service application, with the control on and off), and
+  by the verifier (below).
 - Follow-ups, each its own decision: the governed submit still attaches a
   governed applicant to a fresh self-service application for the same CAC and
   product, and the admin application list does not show `approval_mode`; the
@@ -535,7 +620,16 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   200-a-day self sign-up cap; a released sign-up's account keeps its email
   (the decision and support's procedure are above); and the website's console
   needs the release and open-application pages, and the sign-up page needs
-  availability's reason and start's `codeSent`.
+  availability's reason and start's `codeSent`. After the second review the
+  website and console copy must also follow R15 and R16: the
+  `PROVIDER_EMAIL_ALREADY_REGISTERED` panel (the sign-up is closed; start
+  again with another email), the `PROVIDER_ENROLLMENT_REQUIRES_REVIEW` text
+  (a refusal now follows only support's rejection or release), the kept
+  details' 24-hour note, the console's open-applications panel ("holds its
+  CAC number and product for 24 hours", "Holds the CAC number until", now
+  `holdsCac` and `lapsesAt`, which equals the submission time for an
+  application opened without a hold), the reject and release forms
+  (`allowRetry`), the waiver, the search and the total.
 
 ## Not ported, and why
 

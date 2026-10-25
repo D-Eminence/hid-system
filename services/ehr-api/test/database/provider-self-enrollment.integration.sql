@@ -8,9 +8,9 @@
 --      approval without a reviewer is admitted and a governed (admin_review)
 --      approval without one is refused by that check;
 --   2. both Identity runtimes may execute the six public commands and the
---      quota command; nobody may execute the owner-only activation or the
---      lapse helper; the self-service commands take the governed path's
---      advisory-lock keys (A11);
+--      quota command; nobody may execute the owner-only activation, the
+--      lapse helper or the code-sending helper (R17); the self-service
+--      commands take the governed path's advisory-lock keys (A11);
 --   3. with provider_self_service_enabled off, as 0086 seeds it, submit and
 --      activation raise 55000 PLATFORM_CONTROL_DISABLED:provider_self_service_enabled
 --      and write nothing;
@@ -23,7 +23,13 @@
 --      the registered CAC cannot be submitted again;
 --   5. main's #81 answers: another email for an open CAC needs manual
 --      resolution, and an administrator email that already has an account is
---      refused with the exact message Identity maps;
+--      refused with the exact message Identity maps; the pre-check's
+--      'email_registered' closes the application (R15: no reviewer, its
+--      reason, every code and session ended, audited, no refusal), so another
+--      email can start again at once;
+--   R17: 0056's governed code command sends nothing for a self-service
+--      application (NULL, no challenge stored); 0056's own
+--      organization-onboarding suite still proves it sends for a governed one;
 --   6. closing the control again refuses a verified session's activation and
 --      writes nothing.
 --
@@ -177,7 +183,8 @@ begin
       'hid_pharmacy_api_runtime', 'hid_outreach_api_runtime', 'hid_ocr_api_runtime'] loop
     foreach signature in array array[
       'identity.activate_self_service_organization_application(char,text)',
-      'identity.lapse_stale_self_service_organization_application(text,text,text)'
+      'identity.lapse_stale_self_service_organization_application(text,text,text)',
+      'identity.issue_organization_profile_completion_code(text,text,text,uuid,char,text)'
     ] loop
       if has_function_privilege(runtime_role, signature, 'EXECUTE') then
         raise exception 'The owner-only command % is executable by %', signature, runtime_role;
@@ -208,6 +215,7 @@ begin
                 'identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text)'::regprocedure,
                 'identity.activate_self_service_organization_application(char,text)'::regprocedure,
                 'identity.lapse_stale_self_service_organization_application(text,text,text)'::regprocedure,
+                'identity.issue_organization_profile_completion_code(text,text,text,uuid,char,text)'::regprocedure,
                 'identity.begin_self_service_provider_enrollment(text,text,text,uuid,char,text,text)'::regprocedure,
                 'identity.prepare_self_service_provider_activation(char)'::regprocedure,
                 'identity.current_self_service_provider_enrollment(char)'::regprocedure,
@@ -308,8 +316,15 @@ begin
     raise exception 'Verified CAC evidence was not recorded: %', recorded;
   end if;
 
-  recipient := identity.begin_organization_profile_completion('RC9900062101',
-    'runtime.provider@example.invalid', 'ehr', challenge_id, code_hmac);
+  -- R17: 0056's governed command sends no code for a self-service application.
+  -- (No challenge is stored either: checked as the owner below.)
+  if identity.begin_organization_profile_completion('RC9900062101',
+       'runtime.provider@example.invalid', 'ehr', 'c4690000-0000-4000-8000-0000000000f1',
+       encode(sha256('governed-route-otp'::bytea), 'hex')) is not null then
+    raise exception 'The governed code command sent a code for a self-service application';
+  end if;
+  recipient := identity.begin_self_service_provider_enrollment('RC9900062101',
+    'runtime.provider@example.invalid', 'ehr', challenge_id, code_hmac, 'Runtime Provider Admin', 'clinic');
   if recipient is distinct from 'runtime.provider@example.invalid' then
     raise exception 'Email challenge was not issued to the stored administrator';
   end if;
@@ -385,6 +400,12 @@ begin
   end;
 end $$;
 reset role;
+do $$ begin
+  if exists (select 1 from identity.organization_profile_completion_challenges challenge
+              where challenge.id = 'c4690000-0000-4000-8000-0000000000f1') then
+    raise exception 'The governed code command stored a challenge for a self-service application';
+  end if;
+end $$;
 
 do $$
 declare
@@ -467,8 +488,9 @@ begin
   perform identity.public_record_organization_cac_result(application_id, current_application.row_version,
     'verified', '9900062102', 'RC9900062102', 'Existing Account Laboratory Ltd',
     'Private Company Limited by Shares', '2018-02-01', '2 Synthetic Registry Road, Lagos', 'active');
-  perform identity.begin_organization_profile_completion('RC9900062102',
-    'onboarding-admin@example.invalid', 'laboratory', challenge_id, code_hmac);
+  perform identity.begin_self_service_provider_enrollment('RC9900062102',
+    'onboarding-admin@example.invalid', 'laboratory', challenge_id, code_hmac, 'Existing Account Admin',
+    'laboratory');
   if not identity.verify_organization_profile_completion_challenge(challenge_id, code_hmac, session_hmac) then
     raise exception 'The second application email was not verified';
   end if;
@@ -485,7 +507,36 @@ begin
      or identity.prepare_self_service_provider_activation(session_hmac) <> 'session_invalid' then
     raise exception 'The activation pre-check did not refuse the registered email once and end the session';
   end if;
+  -- R15: that email can never activate it, so the application is closed and
+  -- the applicant starts again at once with another email.
+  perform set_config('hid.test.registered_application', application_id::text, true);
+  if identity.submit_self_service_organization_application('laboratory', 'laboratory',
+       'RC9900062102', 'Existing Account Admin', 'work.admin@example.invalid') = application_id then
+    raise exception 'Another email did not start again after the registered email closed the application';
+  end if;
 end $$;
+reset role;
+do $$
+declare closed identity.organization_applications%rowtype; event record;
+begin
+  select * into closed from identity.organization_applications
+   where id = current_setting('hid.test.registered_application')::uuid;
+  if closed.status <> 'rejected' or closed.reviewed_at is null or closed.reviewed_by_account_id is not null
+     or closed.review_reason <> 'Self-service application closed: its administrator email already belongs to an account'
+     or closed.self_service_refusal_ends_at is not null
+     or exists (select 1 from identity.organization_profile_completion_challenges challenge
+                 where challenge.application_id = closed.id and challenge.invalidated_at is null) then
+    raise exception 'The registered email did not close its application exactly: %', row_to_json(closed);
+  end if;
+  select * into event from audit.events where action = 'identity.organization.self-service.close';
+  if (select count(*) from audit.events where action = 'identity.organization.self-service.close') <> 1
+     or event.actor_type <> 'system' or event.resource_uuid <> closed.id
+     or event.details <> jsonb_build_object('productCode', 'laboratory',
+       'closeReason', 'administrator_email_registered') then
+    raise exception 'The closure audit row is wrong: %', row_to_json(event);
+  end if;
+end $$;
+set local role hid_identity_api_runtime;
 
 -- 6. Closing the control again refuses activation of a verified session and
 -- writes nothing.

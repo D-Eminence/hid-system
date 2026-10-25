@@ -98,7 +98,7 @@ const acceptedMigrations = new Map([
   ['0083_bind_patient_self_context_to_live_session.sql', '1591165d3ede78a2b4c52a221dccb08e52304ec70548245522edc5c97c9a4270'],
   ['0084_patient_emergency_contacts.sql', '4cd331440a1f15f36b109dd3b9f9fee60de43fbfd188395ae9a32f58c51b0e40'],
   ['0085_emergency_purpose_of_use.sql', '618e56311d3f74210a95accebea770d0337653563ae5c84c45d29172c1bc0969'],
-  ['0086_provider_self_service_onboarding.sql', 'd3febfb09fd6dc4865cb0dccb9a206925f6366a4d38eb6a45b3aa6f884575e09'],
+  ['0086_provider_self_service_onboarding.sql', 'e52b03d0a0d897d0ddb060ff3151d755774ee0cce30371320d4331b1db9e95ea'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

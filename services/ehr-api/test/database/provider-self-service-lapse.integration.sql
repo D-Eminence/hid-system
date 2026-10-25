@@ -61,8 +61,8 @@ begin
   perform identity.public_record_organization_cac_result(squatted, current_application.row_version,
     'verified', '9900066001', 'RC9900066001', 'Lapse Hospital Ltd',
     'Private Company Limited by Shares', '2017-05-01', '1 Lapse Road, Lagos', 'active');
-  perform identity.begin_organization_profile_completion('RC9900066001', 'squatter@lapse.invalid', 'ehr',
-    'c8890000-0000-4000-8000-000000000001', encode(sha256('lapse-otp-1'::bytea), 'hex'));
+  perform identity.begin_self_service_provider_enrollment('RC9900066001', 'squatter@lapse.invalid', 'ehr',
+    'c8890000-0000-4000-8000-000000000001', encode(sha256('lapse-otp-1'::bytea), 'hex'), 'Squatter', 'hospital');
   if not identity.verify_organization_profile_completion_challenge('c8890000-0000-4000-8000-000000000001',
       encode(sha256('lapse-otp-1'::bytea), 'hex'), encode(sha256('lapse-session-1'::bytea), 'hex')) then
     raise exception 'The squatter''s email was not verified';
@@ -77,8 +77,9 @@ begin
   perform identity.public_record_organization_cac_result(activated_application, current_application.row_version,
     'verified', '9900066003', 'RC9900066003', 'Lapse Pharmacy Ltd',
     'Private Company Limited by Shares', '2017-05-03', '3 Lapse Road, Lagos', 'active');
-  perform identity.begin_organization_profile_completion('RC9900066003', 'activated@lapse.invalid', 'pharmacy',
-    'c8890000-0000-4000-8000-000000000003', encode(sha256('lapse-otp-3'::bytea), 'hex'));
+  perform identity.begin_self_service_provider_enrollment('RC9900066003', 'activated@lapse.invalid', 'pharmacy',
+    'c8890000-0000-4000-8000-000000000003', encode(sha256('lapse-otp-3'::bytea), 'hex'), 'Activated Admin',
+    'pharmacy');
   perform identity.verify_organization_profile_completion_challenge('c8890000-0000-4000-8000-000000000003',
     encode(sha256('lapse-otp-3'::bytea), 'hex'), encode(sha256('lapse-session-3'::bytea), 'hex'));
   perform identity.activate_self_service_provider_enrollment(encode(sha256('lapse-session-3'::bytea), 'hex'),

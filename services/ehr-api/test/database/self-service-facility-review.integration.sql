@@ -105,8 +105,8 @@ begin
     challenge_id := ('c8790000-0000-4000-8000-00000000000' || signup.n)::uuid;
     code_hmac := encode(sha256(('review-suite-otp-' || signup.n)::bytea), 'hex');
     session_hmac := encode(sha256(('review-suite-session-' || signup.n)::bytea), 'hex');
-    perform identity.begin_organization_profile_completion(signup.cac, signup.admin_email,
-      signup.product, challenge_id, code_hmac);
+    perform identity.begin_self_service_provider_enrollment(signup.cac, signup.admin_email,
+      signup.product, challenge_id, code_hmac, signup.admin_name, signup.kind);
     if not identity.verify_organization_profile_completion_challenge(challenge_id, code_hmac, session_hmac) then
       raise exception 'Review suite sign-up % was not verified', signup.n;
     end if;
@@ -391,9 +391,10 @@ declare runtime_role text; signature text;
 begin
   foreach signature in array array['identity.admin_list_self_service_facilities(text)',
       'identity.admin_review_self_service_facility(uuid,bigint,text)',
-      'identity.admin_release_self_service_facility(uuid,bigint,text)',
-      'identity.admin_list_open_self_service_applications()',
-      'identity.admin_reject_self_service_application(uuid,bigint,text)'] loop
+      'identity.admin_release_self_service_facility(uuid,bigint,text,boolean)',
+      'identity.admin_list_open_self_service_applications(text)',
+      'identity.admin_reject_self_service_application(uuid,bigint,text,boolean)',
+      'identity.admin_waive_self_service_refusals(text,text,text)'] loop
     foreach runtime_role in array array['hid_identity_runtime', 'hid_identity_api_runtime'] loop
       if not has_function_privilege(runtime_role, signature, 'EXECUTE') then
         raise exception '% cannot execute %', runtime_role, signature;

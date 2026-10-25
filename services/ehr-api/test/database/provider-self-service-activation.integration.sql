@@ -14,9 +14,11 @@
 --      charges one of the session's 5 attempts; the 6th answers
 --      'attempts_exceeded' and ends the session; an activation that can never
 --      succeed ('email_registered', 'cac_bound', 'name_exists', 'not_ready')
---      is answered at once and ends the session without charging it; a
---      closed control raises 55000 even for a live session; a wrong context
---      raises 42501;
+--      is answered at once and ends the session without charging it;
+--      'email_registered' also closes the application (R15: rejected, no
+--      reviewer, its reason, no refusal, its other session and code ended,
+--      audited), the others leave it open; a closed control raises 55000 even
+--      for a live session; a wrong context raises 42501;
 --   3. R5: at most 10 emailed codes a day reach one administrator email
 --      across every self-service application; past that no code is sent
 --      (null, no challenge), another email is not affected, and a day later
@@ -216,6 +218,15 @@ reset role;
 -- Case g stands for a governed application's completion session.
 update identity.organization_applications set approval_mode = 'admin_review'
  where id = current_setting('hid.test.app_g')::uuid;
+-- Case e also has a second live session and an unused code.
+insert into identity.organization_profile_completion_challenges
+  (id, application_id, code_hmac, expires_at, consumed_at, session_hmac, session_expires_at) values
+  ('c8a90101-0000-4000-8000-000000000011', current_setting('hid.test.app_e')::uuid,
+   encode(sha256('act-otp-e2'::bytea), 'hex'), clock_timestamp() + interval '10 minutes', clock_timestamp(),
+   encode(sha256('act-session-e2'::bytea), 'hex'), clock_timestamp() + interval '1 hour');
+insert into identity.organization_profile_completion_challenges (id, application_id, code_hmac, expires_at) values
+  ('c8a90101-0000-4000-8000-000000000012', current_setting('hid.test.app_e')::uuid,
+   encode(sha256('act-otp-e3'::bytea), 'hex'), clock_timestamp() + interval '10 minutes');
 
 set local role hid_identity_api_runtime;
 select set_config('app.actor_subject', 'system:auth', true),
@@ -283,12 +294,43 @@ do $$ begin
   end if;
   if (select count(*) from identity.organizations) <> 2
      or exists (select 1 from identity.organization_applications
-                 where id in (current_setting('hid.test.app_b')::uuid, current_setting('hid.test.app_e')::uuid,
+                 where id in (current_setting('hid.test.app_b')::uuid,
                    current_setting('hid.test.app_c')::uuid, current_setting('hid.test.app_x')::uuid,
                    current_setting('hid.test.app_g')::uuid) and status <> 'ready_for_review') then
     raise exception 'A refused pre-check created or closed something';
   end if;
+  -- R15: the registered email's application is closed, so another email can
+  -- start again at once; nothing refuses its email or network.
+  if not exists (select 1 from identity.organization_applications
+                  where id = current_setting('hid.test.app_e')::uuid and status = 'rejected'
+                    and reviewed_at is not null and reviewed_by_account_id is null
+                    and review_reason = 'Self-service application closed: its administrator email already belongs to an account'
+                    and self_service_refusal_ends_at is null)
+     or exists (select 1 from identity.organization_profile_completion_challenges
+                 where application_id = current_setting('hid.test.app_e')::uuid and invalidated_at is null)
+     or (select count(*) from audit.events where action = 'identity.organization.self-service.close'
+           and resource_uuid = current_setting('hid.test.app_e')::uuid
+           and correlation_id = 'self-service-activation-0005'
+           and details = '{"productCode": "laboratory", "closeReason": "administrator_email_registered"}'::jsonb) <> 1
+     or exists (select 1 from audit.events where action = 'identity.organization.self-service.close'
+                 and resource_uuid <> current_setting('hid.test.app_e')::uuid) then
+    raise exception 'The registered email''s application was not closed exactly';
+  end if;
 end $$;
+set local role hid_identity_api_runtime;
+select set_config('app.actor_subject', 'system:auth', true),
+  set_config('app.correlation_id', 'self-service-activation-0006', true);
+do $$ begin
+  if identity.prepare_self_service_provider_activation(encode(sha256('act-session-e2'::bytea), 'hex'))
+       <> 'session_invalid' then
+    raise exception 'The closed application''s other session is still live';
+  end if;
+  if identity.submit_self_service_organization_application('laboratory', 'laboratory', 'RC9900068003',
+       'Taken Admin', 'work.taken@activation.invalid') = current_setting('hid.test.app_e')::uuid then
+    raise exception 'Another email did not open a new application after the closure';
+  end if;
+end $$;
+reset role;
 
 -- A closed control refuses a live session, after the session's lock, and
 -- charges nothing.

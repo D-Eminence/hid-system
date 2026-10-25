@@ -929,8 +929,12 @@ grant execute on function identity.submit_organization_application(text,text,tex
 -- never the account-scoped `application_cac` path, and no runtime holds a
 -- privilege on its counter tables. Support's list, review and release of
 -- activated self-service facilities, and its list and rejection of open
--- self-service applications, are platform administration commands for the
--- Identity runtime only.
+-- self-service applications and its waiver of a rejection's or release's
+-- 7-day refusal, are platform administration commands for the Identity
+-- runtime only. 0056's code sending (begin_organization_profile_completion,
+-- above) serves governed applications only since 0086; its logic is the
+-- owner-only issue_organization_profile_completion_code, which the
+-- self-service command calls for self-service applications.
 grant execute on function identity.submit_self_service_organization_application(text,text,text,text,text,char),
   identity.public_get_organization_application(text,text,text),
   identity.public_record_organization_cac_result(uuid,bigint,text,text,text,text,text,text,text,text),
@@ -943,12 +947,14 @@ grant execute on function identity.submit_self_service_organization_application(
   to hid_identity_runtime, hid_schema_test_runtime;
 grant execute on function identity.admin_list_self_service_facilities(text),
   identity.admin_review_self_service_facility(uuid,bigint,text),
-  identity.admin_release_self_service_facility(uuid,bigint,text),
-  identity.admin_list_open_self_service_applications(),
-  identity.admin_reject_self_service_application(uuid,bigint,text)
+  identity.admin_release_self_service_facility(uuid,bigint,text,boolean),
+  identity.admin_list_open_self_service_applications(text),
+  identity.admin_reject_self_service_application(uuid,bigint,text,boolean),
+  identity.admin_waive_self_service_refusals(text,text,text)
   to hid_identity_runtime;
 revoke all on function identity.activate_self_service_organization_application(char,text),
-  identity.lapse_stale_self_service_organization_application(text,text,text)
+  identity.lapse_stale_self_service_organization_application(text,text,text),
+  identity.issue_organization_profile_completion_code(text,text,text,uuid,char,text)
   from public;
 revoke all on platform.self_service_cac_quota_counters,
   platform.self_service_cac_platform_quota_counters from public;

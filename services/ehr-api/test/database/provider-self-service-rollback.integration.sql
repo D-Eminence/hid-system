@@ -12,7 +12,10 @@
 --   services/identity-api/src/integrations/integration-runtime.service.ts
 --     consume_qoreid_quota ('application_cac') and prune_verification_quotas;
 --   services/identity-api/src/identity/organization-profile-completion.service.ts
---     completion start, invalidate, verify, current and complete;
+--     completion start, invalidate, verify, current and complete; its
+--     completion start sends no code for a self-service application, with the
+--     control on or off (review fix R17), so a rolled-back Identity cannot
+--     bypass R5 or R6 either;
 --   services/identity-api/src/identity/qoreid-verification.service.ts
 --     the existing-organization CAC binding match, here for an administrator
 --     who signed up through 0086 before the rollback, and its quota charge
@@ -250,8 +253,9 @@ begin
   perform identity.public_record_organization_cac_result(application_id, current_application.row_version,
     'verified', '7004', 'RC9900067004', 'Self Signed Hospital Ltd',
     'Private Company Limited by Shares', '2014-04-04', '4 Rollback Road, Lagos', 'active');
-  perform identity.begin_organization_profile_completion('RC9900067004', 'self.signed@rollback.invalid', 'ehr',
-    'c8990000-0000-4000-8000-000000000004', encode(sha256('rollback-otp-4'::bytea), 'hex'));
+  perform identity.begin_self_service_provider_enrollment('RC9900067004', 'self.signed@rollback.invalid', 'ehr',
+    'c8990000-0000-4000-8000-000000000004', encode(sha256('rollback-otp-4'::bytea), 'hex'), 'Self Signed Admin',
+    'hospital');
   perform identity.verify_organization_profile_completion_challenge('c8990000-0000-4000-8000-000000000004',
     encode(sha256('rollback-otp-4'::bytea), 'hex'), encode(sha256('rollback-session-4'::bytea), 'hex'));
   select * into activated from identity.activate_self_service_provider_enrollment(
@@ -260,8 +264,54 @@ begin
   perform set_config('hid.test.rollback_self_account', activated.account_id::text, true);
   perform set_config('hid.test.rollback_self_facility', activated.facility_id::text, true);
   perform set_config('hid.test.rollback_self_organization', activated.organization_id::text, true);
+  -- An open, verified self-service application that the previous Identity's
+  -- completion start must not send a code for (R17).
+  application_id := identity.submit_self_service_organization_application('laboratory', 'laboratory',
+    'RC9900067005', 'Open Self Signed Admin', 'open.self.signed@rollback.invalid');
+  select * into current_application from identity.public_get_organization_application(
+    'RC9900067005', 'open.self.signed@rollback.invalid', 'laboratory');
+  perform identity.public_record_organization_cac_result(application_id, current_application.row_version,
+    'verified', '7005', 'RC9900067005', 'Open Self Signed Laboratory Ltd',
+    'Private Company Limited by Shares', '2014-05-05', '5 Rollback Road, Lagos', 'active');
+end $$;
+create function pg_temp.previous_completion_start(challenge uuid) returns text language plpgsql as $f$
+declare recipient text;
+begin
+  execute 'select platform.consume_public_application_quota($1)' using repeat('8', 64);
+  execute 'select identity.begin_organization_profile_completion($1,$2,$3,$4,$5) as recipient_email'
+    using 'RC9900067005'::text, 'open.self.signed@rollback.invalid'::text, 'laboratory'::text,
+      challenge, encode(sha256('rollback-otp-5'::bytea), 'hex')
+    into recipient;
+  return recipient;
+end $f$;
+grant execute on function pg_temp.previous_completion_start(uuid) to hid_identity_api_runtime;
+do $$ begin
+  if pg_temp.previous_completion_start('c8990000-0000-4000-8000-000000000005') is not null then
+    raise exception 'The previous Identity''s completion start sent a code for a self-service application';
+  end if;
+end $$;
+select set_config('app.actor_subject', 'staff:rollback-admin', true),
+  set_config('app.correlation_id', 'rollback-signup-0002', true),
+  set_config('app.purpose_of_use', 'healthcare-operations', true);
+select platform.admin_set_control('provider_self_service_enabled', false,
+  (select control.row_version from platform.admin_list_controls() control
+    where control.control_key = 'provider_self_service_enabled'),
+  'Rollback suite closes facility sign-up');
+select set_config('app.actor_subject', 'system:auth', true),
+  set_config('app.purpose_of_use', '', true);
+do $$ begin
+  if pg_temp.previous_completion_start('c8990000-0000-4000-8000-000000000006') is not null then
+    raise exception 'With the control off, the previous Identity''s completion start sent a code for a self-service application';
+  end if;
 end $$;
 reset role;
+do $$ begin
+  if exists (select 1 from identity.organization_profile_completion_challenges challenge
+              join identity.organization_applications application on application.id = challenge.application_id
+             where application.cac_registration_number = 'RC9900067005') then
+    raise exception 'The previous Identity''s completion start stored a challenge for a self-service application';
+  end if;
+end $$;
 select set_config('hid.test.rollback_self_membership',
   (select membership.id::text from identity.staff_facility_memberships membership
     where membership.account_id = current_setting('hid.test.rollback_self_account')::uuid), true);

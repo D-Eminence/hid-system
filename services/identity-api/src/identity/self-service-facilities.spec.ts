@@ -45,12 +45,13 @@ const openRow = {
   administrator_email: 'squatter@example.invalid', application_status: 'ready_for_review',
   verification_result: 'verified', email_verified: true,
   submitted_at: new Date('2026-10-24T08:00:00.000Z'), lapses_at: new Date('2026-10-25T08:00:00.000Z'),
+  holds_cac: true, total_count: '1',
 };
 const openItem = {
   applicationId, version: 3, productCode: 'ehr', organizationType: 'hospital', cacHint: 'RC…4567',
   organizationName: 'Synthetic Clinic Ltd', administratorName: 'Squatter', administratorEmail: 'squatter@example.invalid',
   status: 'ready_for_review', verificationResult: 'verified', emailVerified: true,
-  submittedAt: '2026-10-24T08:00:00.000Z', lapsesAt: '2026-10-25T08:00:00.000Z',
+  submittedAt: '2026-10-24T08:00:00.000Z', lapsesAt: '2026-10-25T08:00:00.000Z', holdsCac: true,
 };
 
 // A standalone platform administrator: platform authority, no facility membership.
@@ -97,8 +98,11 @@ describe('self-signed-up facility review: service', () => {
     await expect(service.release(context, applicationId, 6, 'Impostor confirmed by support'))
       .resolves.toEqual({ applicationId, releasedAt: '2026-10-25T10:00:00.000Z', version: 7 });
     expect(database.withPlatformTransaction).toHaveBeenCalledWith(context, expect.any(Function));
-    expect(query).toHaveBeenCalledWith('select * from identity.admin_release_self_service_facility($1,$2,$3)',
-      [applicationId, 6, 'Impostor confirmed by support']);
+    expect(query).toHaveBeenCalledWith('select * from identity.admin_release_self_service_facility($1,$2,$3,$4)',
+      [applicationId, 6, 'Impostor confirmed by support', false]);
+    await service.release(context, applicationId, 6, 'Right company, wrong email', true);
+    expect(query).toHaveBeenLastCalledWith('select * from identity.admin_release_self_service_facility($1,$2,$3,$4)',
+      [applicationId, 6, 'Right company, wrong email', true]);
   });
 
   it.each([
@@ -119,13 +123,64 @@ describe('self-signed-up facility review: service', () => {
     const query = jest.fn().mockResolvedValueOnce({ rows: [openRow] }).mockResolvedValueOnce({ rows: [{
       application_id: applicationId, rejected_at: new Date('2026-10-24T09:00:00.000Z'), row_version: '4' }] });
     const { service, database } = serviceWith(query);
-    await expect(service.listOpenApplications(context)).resolves.toEqual({ items: [openItem] });
+    await expect(service.listOpenApplications(context)).resolves.toEqual({ total: 1, items: [openItem] });
     expect(database.withPlatformTransaction).toHaveBeenNthCalledWith(1, context, expect.any(Function), { readOnly: true });
-    expect(query).toHaveBeenNthCalledWith(1, 'select * from identity.admin_list_open_self_service_applications()');
+    expect(query).toHaveBeenNthCalledWith(1, 'select * from identity.admin_list_open_self_service_applications($1)',
+      [null]);
     await expect(service.rejectOpenApplication(context, applicationId, 3, 'Squat on a real company'))
       .resolves.toEqual({ applicationId, rejectedAt: '2026-10-24T09:00:00.000Z', version: 4 });
-    expect(query).toHaveBeenNthCalledWith(2, 'select * from identity.admin_reject_self_service_application($1,$2,$3)',
-      [applicationId, 3, 'Squat on a real company']);
+    expect(query).toHaveBeenNthCalledWith(2, 'select * from identity.admin_reject_self_service_application($1,$2,$3,$4)',
+      [applicationId, 3, 'Squat on a real company', false]);
+  });
+
+  it('searches one CAC number, counts beyond the 200 shown, and answers an empty list with total 0 (R16)', async () => {
+    const query = jest.fn().mockResolvedValueOnce({ rows: [{ ...openRow, holds_cac: false, total_count: 340 }] })
+      .mockResolvedValueOnce({ rows: [] });
+    const { service } = serviceWith(query);
+    await expect(service.listOpenApplications(context, 'RC1234567')).resolves.toEqual({ total: 340,
+      items: [{ ...openItem, holdsCac: false }] });
+    expect(query).toHaveBeenNthCalledWith(1, 'select * from identity.admin_list_open_self_service_applications($1)',
+      ['RC1234567']);
+    await expect(service.listOpenApplications(context)).resolves.toEqual({ total: 0, items: [] });
+  });
+
+  it('rejects letting the applicant retry (R15)', async () => {
+    const query = jest.fn().mockResolvedValue({ rows: [{ application_id: applicationId,
+      rejected_at: new Date('2026-10-24T09:00:00.000Z'), row_version: '4' }] });
+    await serviceWith(query).service.rejectOpenApplication(context, applicationId, 3, 'Mistyped the email', true);
+    expect(query).toHaveBeenCalledWith('select * from identity.admin_reject_self_service_application($1,$2,$3,$4)',
+      [applicationId, 3, 'Mistyped the email', true]);
+  });
+
+  it('waives the refusals of a CAC number and product and answers each one (R15)', async () => {
+    const query = jest.fn().mockResolvedValue({ rows: [
+      { application_id: applicationId, waived_at: new Date('2026-10-25T11:00:00.000Z'), row_version: '8' },
+      { application_id: 'other', waived_at: '2026-10-25T11:00:00Z', row_version: 3 }] });
+    const { service, database } = serviceWith(query);
+    await expect(service.waiveRefusals(context, 'RC1234567', 'ehr', 'The company confirmed its office'))
+      .resolves.toEqual({ waived: [
+        { applicationId, waivedAt: '2026-10-25T11:00:00.000Z', version: 8 },
+        { applicationId: 'other', waivedAt: '2026-10-25T11:00:00.000Z', version: 3 }] });
+    expect(database.withPlatformTransaction).toHaveBeenCalledWith(context, expect.any(Function));
+    expect(query).toHaveBeenCalledWith('select * from identity.admin_waive_self_service_refusals($1,$2,$3)',
+      ['RC1234567', 'ehr', 'The company confirmed its office']);
+  });
+
+  it.each([
+    ['P0002', 404, 'SELF_SERVICE_REFUSAL_NOT_FOUND'],
+    ['22023', 400, 'SELF_SERVICE_FACILITY_REQUEST_INVALID'],
+    ['42501', 403, 'PERMISSION_DENIED'],
+    ['23514', 503, 'SELF_SERVICE_FACILITY_UNAVAILABLE'],
+  ])('maps the waiver\'s %s to %i %s (R15)', async (code, status, answer) => {
+    const { service } = serviceWith(jest.fn().mockRejectedValue(Object.assign(new Error('private'), { code })));
+    await expect(service.waiveRefusals(context, 'RC1234567', 'ehr', 'The company confirmed its office'))
+      .rejects.toMatchObject({ status, code: answer });
+  });
+
+  it('answers a waiver that returns no row 503', async () => {
+    await expect(serviceWith(jest.fn().mockResolvedValue({ rows: [] })).service
+      .waiveRefusals(context, 'RC1234567', 'ehr', 'The company confirmed its office'))
+      .rejects.toMatchObject({ status: 503, code: 'SELF_SERVICE_FACILITY_UNAVAILABLE' });
   });
 
   it.each([
@@ -212,6 +267,14 @@ describe('self-signed-up facility review: route metadata', () => {
     expect(meta(AUDIT_ACTION, review.release)).toBe('admin.self-service-facility.release');
     expect(meta(AUDIT_ACTION, open.list)).toBe('admin.self-service-applications.list');
     expect(meta(AUDIT_ACTION, open.reject)).toBe('admin.self-service-application.reject');
+  });
+
+  it('guards the search like the list and the waiver like the rejection (R15, R16)', () => {
+    const open = AdminSelfServiceApplicationsController.prototype;
+    expect(meta(REQUIRED_PERMISSIONS, open.search)).toEqual(meta(REQUIRED_PERMISSIONS, open.list));
+    expect(meta(AUDIT_ACTION, open.search)).toBe(meta(AUDIT_ACTION, open.list));
+    expect(meta(REQUIRED_PERMISSIONS, open.waiveRefusal)).toEqual(['platform.facility.manage']);
+    expect(meta(AUDIT_ACTION, open.waiveRefusal)).toBe('admin.self-service-application.refusal-waive');
   });
 });
 
@@ -335,8 +398,19 @@ describe('self-signed-up facility review over HTTP, as a standalone platform adm
       .send({ reason: '  Impostor confirmed by support  ' });
     expect(answer.status).toBe(200);
     expect(answer.body).toEqual({ applicationId, releasedAt: '2026-10-25T10:00:00.000Z', version: 7 });
-    expect(query).toHaveBeenCalledWith(expect.stringContaining('admin_release_self_service_facility($1,$2,$3)'),
-      [applicationId, 6, 'Impostor confirmed by support']);
+    expect(query).toHaveBeenCalledWith(expect.stringContaining('admin_release_self_service_facility($1,$2,$3,$4)'),
+      [applicationId, 6, 'Impostor confirmed by support', false]);
+    const retry = await request(app.getHttpServer()).post(`${base}/${applicationId}/release`)
+      .set('Authorization', 'Bearer synthetic').set('If-Match', '"6"')
+      .send({ reason: 'Right company, wrong email', allowRetry: true });
+    expect(retry.status).toBe(200);
+    expect(query).toHaveBeenLastCalledWith(expect.any(String), [applicationId, 6, 'Right company, wrong email', true]);
+    for (const allowRetry of [null, 'yes', 1]) {
+      const invalid = await request(app.getHttpServer()).post(`${base}/${applicationId}/release`)
+        .set('Authorization', 'Bearer synthetic').set('If-Match', '"6"')
+        .send({ reason: 'Impostor confirmed by support', allowRetry });
+      expect([invalid.status, invalid.body.code]).toEqual([400, 'VALIDATION_FAILED']);
+    }
     const noVersion = await request(app.getHttpServer()).post(`${base}/${applicationId}/release`)
       .set('Authorization', 'Bearer synthetic').send({ reason: 'Impostor confirmed by support' });
     expect([noVersion.status, noVersion.body.code]).toEqual([428, 'IF_MATCH_REQUIRED']);
@@ -354,15 +428,28 @@ describe('self-signed-up facility review over HTTP, as a standalone platform adm
     const applications = '/api/v1/admin/self-service-applications';
     query.mockResolvedValueOnce({ rows: [openRow] });
     const listed = await request(app.getHttpServer()).get(applications).set('Authorization', 'Bearer synthetic');
-    expect([listed.status, listed.body]).toEqual([200, { items: [openItem] }]);
+    expect([listed.status, listed.body]).toEqual([200, { total: 1, items: [openItem] }]);
+    expect(query).toHaveBeenLastCalledWith(expect.stringContaining('admin_list_open_self_service_applications($1)'),
+      [null]);
     query.mockResolvedValueOnce({ rows: [{ application_id: applicationId,
       rejected_at: new Date('2026-10-24T09:00:00.000Z'), row_version: '4' }] });
     const rejected = await request(app.getHttpServer()).post(`${applications}/${applicationId}/reject`)
       .set('Authorization', 'Bearer synthetic').set('If-Match', '"3"').send({ reason: ' Squat on a real company ' });
     expect([rejected.status, rejected.body]).toEqual([200,
       { applicationId, rejectedAt: '2026-10-24T09:00:00.000Z', version: 4 }]);
-    expect(query).toHaveBeenLastCalledWith(expect.stringContaining('admin_reject_self_service_application($1,$2,$3)'),
-      [applicationId, 3, 'Squat on a real company']);
+    expect(query).toHaveBeenLastCalledWith(expect.stringContaining('admin_reject_self_service_application($1,$2,$3,$4)'),
+      [applicationId, 3, 'Squat on a real company', false]);
+    query.mockResolvedValueOnce({ rows: [{ application_id: applicationId,
+      rejected_at: new Date('2026-10-24T09:00:00.000Z'), row_version: '4' }] });
+    const retry = await request(app.getHttpServer()).post(`${applications}/${applicationId}/reject`)
+      .set('Authorization', 'Bearer synthetic').set('If-Match', '"3"')
+      .send({ reason: 'Mistyped the email', allowRetry: true });
+    expect(retry.status).toBe(200);
+    expect(query).toHaveBeenLastCalledWith(expect.any(String), [applicationId, 3, 'Mistyped the email', true]);
+    const nullRetry = await request(app.getHttpServer()).post(`${applications}/${applicationId}/reject`)
+      .set('Authorization', 'Bearer synthetic').set('If-Match', '"3"')
+      .send({ reason: 'Mistyped the email', allowRetry: null });
+    expect([nullRetry.status, nullRetry.body.code]).toEqual([400, 'VALIDATION_FAILED']);
     query.mockRejectedValueOnce(Object.assign(new Error('private'), { code: 'P0002' }));
     const gone = await request(app.getHttpServer()).post(`${applications}/${applicationId}/reject`)
       .set('Authorization', 'Bearer synthetic').set('If-Match', '"3"').send({ reason: 'Squat on a real company' });
@@ -371,6 +458,57 @@ describe('self-signed-up facility review over HTTP, as a standalone platform adm
       claims: {} });
     const withoutManage = await request(app.getHttpServer()).post(`${applications}/${applicationId}/reject`)
       .set('Authorization', 'Bearer synthetic').set('If-Match', '"3"').send({ reason: 'Squat on a real company' });
+    expect([withoutManage.status, withoutManage.body.code]).toEqual([403, 'PERMISSION_DENIED']);
+  });
+
+  it('searches open applications by CAC number in the body (R16)', async () => {
+    const applications = '/api/v1/admin/self-service-applications';
+    query.mockResolvedValueOnce({ rows: [openRow] });
+    const found = await request(app.getHttpServer()).post(`${applications}/search`)
+      .set('Authorization', 'Bearer synthetic').send({ cacRegistrationNumber: ' rc 1234 567 ' });
+    expect([found.status, found.body]).toEqual([200, { total: 1, items: [openItem] }]);
+    expect(query).toHaveBeenLastCalledWith(expect.stringContaining('admin_list_open_self_service_applications($1)'),
+      ['RC1234567']);
+    for (const body of [{}, { cacRegistrationNumber: 'RC12' }, { cacRegistrationNumber: 1234567 },
+      { cacRegistrationNumber: 'RC1234567', status: 'open' }]) {
+      const invalid = await request(app.getHttpServer()).post(`${applications}/search`)
+        .set('Authorization', 'Bearer synthetic').send(body);
+      expect([invalid.status, invalid.body.code]).toEqual([400, 'VALIDATION_FAILED']);
+    }
+    expect(query).toHaveBeenCalledTimes(1);
+    tokens.verify.mockResolvedValue({ actor: standaloneAdmin(['platform.admin.access', 'platform.facility.manage']),
+      claims: {} });
+    const withoutRead = await request(app.getHttpServer()).post(`${applications}/search`)
+      .set('Authorization', 'Bearer synthetic').send({ cacRegistrationNumber: 'RC1234567' });
+    expect([withoutRead.status, withoutRead.body.code]).toEqual([403, 'PERMISSION_DENIED']);
+  });
+
+  it('waives the refusals of a CAC number and product (R15)', async () => {
+    const waive = '/api/v1/admin/self-service-applications/waive-refusal';
+    query.mockResolvedValueOnce({ rows: [{ application_id: applicationId,
+      waived_at: new Date('2026-10-25T11:00:00.000Z'), row_version: '8' }] });
+    const waived = await request(app.getHttpServer()).post(waive).set('Authorization', 'Bearer synthetic')
+      .send({ cacRegistrationNumber: 'rc1234567', productCode: 'ehr', reason: '  The company confirmed its office  ' });
+    expect([waived.status, waived.body]).toEqual([200,
+      { waived: [{ applicationId, waivedAt: '2026-10-25T11:00:00.000Z', version: 8 }] }]);
+    expect(query).toHaveBeenLastCalledWith(expect.stringContaining('admin_waive_self_service_refusals($1,$2,$3)'),
+      ['RC1234567', 'ehr', 'The company confirmed its office']);
+    query.mockRejectedValueOnce(Object.assign(new Error('private'), { code: 'P0002' }));
+    const none = await request(app.getHttpServer()).post(waive).set('Authorization', 'Bearer synthetic')
+      .send({ cacRegistrationNumber: 'RC1234567', productCode: 'ehr', reason: 'The company confirmed its office' });
+    expect([none.status, none.body.code]).toEqual([404, 'SELF_SERVICE_REFUSAL_NOT_FOUND']);
+    for (const body of [{ cacRegistrationNumber: 'RC1234567', productCode: 'dental', reason: 'The company confirmed' },
+      { cacRegistrationNumber: 'RC12', productCode: 'ehr', reason: 'The company confirmed' },
+      { cacRegistrationNumber: 'RC1234567', productCode: 'ehr', reason: 'short' },
+      { cacRegistrationNumber: 'RC1234567', productCode: 'ehr', reason: 'The company confirmed', extra: true }]) {
+      const invalid = await request(app.getHttpServer()).post(waive).set('Authorization', 'Bearer synthetic').send(body);
+      expect([invalid.status, invalid.body.code]).toEqual([400, 'VALIDATION_FAILED']);
+    }
+    expect(query).toHaveBeenCalledTimes(2);
+    tokens.verify.mockResolvedValue({ actor: standaloneAdmin(['platform.admin.access', 'platform.identity-review.read']),
+      claims: {} });
+    const withoutManage = await request(app.getHttpServer()).post(waive).set('Authorization', 'Bearer synthetic')
+      .send({ cacRegistrationNumber: 'RC1234567', productCode: 'ehr', reason: 'The company confirmed its office' });
     expect([withoutManage.status, withoutManage.body.code]).toEqual([403, 'PERMISSION_DENIED']);
   });
 
