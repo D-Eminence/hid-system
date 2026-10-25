@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import type { QueryResultRow } from 'pg';
+import { requireNoRecentRecoveryHold, requireRecentPatientAuthentication, type PatientSessionActor }
+  from '../auth/recent-authentication';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
@@ -53,6 +55,9 @@ export interface VerifiedPatientPinAccess {
   expiresAt: Date;
   existingGrant: boolean;
 }
+
+/** main's answer to an approval from a session not freshly signed in (eb9b1ca consent.service.ts). */
+export const RECENT_APPROVAL_AUTH_DETAIL = 'For your security, sign out, sign in again, and approve within 10 minutes.';
 
 @Injectable()
 export class ConsentService {
@@ -122,9 +127,25 @@ export class ConsentService {
     }, { readOnly: true });
   }
 
+  /**
+   * Approval grants a clinician access (a write grant is what lets a clinician
+   * send the patient's order to another facility, P4c), so, as main does, it
+   * is refused for 24 hours after an OTP account recovery (403
+   * PATIENT_RECENT_RECOVERY_HOLD, checked first) and needs a recent sign-in:
+   * the session family first issued within 10 minutes (403
+   * PATIENT_RECENT_AUTH_REQUIRED). Both run in the approval's transaction.
+   * Denial and the list stay available.
+   */
   async approveAccessRequest(context: DataAccessContext, requestId: string) {
+    const actor = context.actor;
+    if (actor.kind !== 'patient' || !actor.patientId || !actor.sessionId) {
+      throw new DomainProblem(403, 'PATIENT_SESSION_REQUIRED', 'An active patient session is required');
+    }
+    const patient = actor as PatientSessionActor;
     try {
       return await this.database.withTransaction(context, async (client) => {
+        await requireNoRecentRecoveryHold(client, patient.accountId, 'new access approvals');
+        await requireRecentPatientAuthentication(client, patient, RECENT_APPROVAL_AUTH_DETAIL);
         const result = await client.query<Record<string, unknown> & QueryResultRow>(
           `select access_request_id as "accessRequestId", consent_grant_id as "consentGrantId",
              patient_id as "patientId", status, expires_at as "expiresAt", replayed
