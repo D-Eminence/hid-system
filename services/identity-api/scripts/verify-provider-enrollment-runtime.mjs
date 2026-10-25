@@ -2384,7 +2384,9 @@ try {
   assert.equal(chidi.sent.subject, `Invitation to join ${hospital.facilityName} on Health ID`);
   assert(chidi.sent.text.includes(`as a doctor.`));
   assert(chidi.sent.text.includes(`https://app.healthidentitydirectory.com/provider/invitation#${chidi.invitationId}.${chidi.sent.body.token}`));
-  assert(chidi.sent.text.includes(`and the code ${chidi.sent.body.code}.`));
+  // The typed fallback: the page opened without a link shows the code form at once.
+  assert(chidi.sent.text.includes('If the link does not open, go to https://app.healthidentitydirectory.com/provider/invitation'
+    + ` and enter this email address and the code ${chidi.sent.body.code}.`));
   assert(chidi.sent.text.includes(`quote reference ${reference}.`));
   // Replay (same key, same request): 200 with the stored values, no second email.
   const replayKey = `verifier-invite-replay-${randomUUID()}`;

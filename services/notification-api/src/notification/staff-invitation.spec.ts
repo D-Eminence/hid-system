@@ -29,7 +29,7 @@ function expectedText(facility: string, label: string, origin = 'https://app.hea
   return 'Hello,\n\n'
     + `The administrator of ${facility} has invited you to join the facility on Health ID as a ${label}.\n\n`
     + `To accept, open this link:\n${origin}/provider/invitation#${invitationId}.${token}\n\n`
-    + `If the link does not open, go to ${origin}/provider/invitation, choose "I have a code", and enter this email address and the code 482913.\n\n`
+    + `If the link does not open, go to ${origin}/provider/invitation and enter this email address and the code 482913.\n\n`
     + 'The invitation expires on 1 Nov 2026, 14:35 (WAT). If you were not expecting it, you can ignore this email: '
     + `nothing happens unless you accept. To report it, write to Health ID support at ${support} and quote reference 3F2A9C1B.`;
 }

@@ -171,7 +171,7 @@ export function staffInvitationContent(input: {
     text: 'Hello,\n\n'
       + `The administrator of ${facility} has invited you to join the facility on Health ID as a ${STAFF_ROLE_LABELS[input.roleCode]}.\n\n`
       + `To accept, open this link:\n${page}#${input.invitationId}.${input.token}\n\n`
-      + `If the link does not open, go to ${page}, choose "I have a code", and enter this email address and the code ${input.code}.\n\n`
+      + `If the link does not open, go to ${page} and enter this email address and the code ${input.code}.\n\n`
       + `The invitation expires on ${alertTime(input.expiresAt)} (WAT). If you were not expecting it, you can ignore this email: `
       + 'nothing happens unless you accept. To report it, write to Health ID support at '
       + `${input.supportEmail} and quote reference ${staffInvitationReference(input.invitationId)}.`,

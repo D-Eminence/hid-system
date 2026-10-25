@@ -800,9 +800,12 @@ their builds; the items Identity carries are listed here too.
   /api/v1/notifications/staff-invitation` (fixed fields, email only); an
   older notification-api answers 404, which Identity records as a
   definitive failure, so invitations are switched on only after the
-  all-13 release. Identity's choices the spec left open: a replayed invite
-  answers `deliveryOutcome: 'unknown'` (the command keeps no outcome for a
-  replay); a resend reads the invitee's email from the facility's own list
+  all-13 release. Its typed-code sentence reads "go to {page} and enter this
+  email address and the code", without the spec's 'choose "I have a code"':
+  the page opened without a link shows the code form at once and has no such
+  button (found by the integration build's comparison with the website).
+  Identity's choices the spec left open: a replayed invite answers
+  `deliveryOutcome: 'unknown'` (the command keeps no outcome for a replay); a resend reads the invitee's email from the facility's own list
   (pending plus 30 days), so an invitation that expired more than 30 days
   ago answers 404; the attestation version is the constant
   `facility-staff-attestation-v1` (a new text needs an Identity change); a
