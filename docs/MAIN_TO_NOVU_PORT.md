@@ -378,8 +378,8 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   the three session cookies and `x-csrf-token`, answering `actor`; no MFA, and
   `hid_enrollment` is not cleared (this branch's decision under #50).
 - All four products may sign themselves up (owner, Q5); a laboratory or
-  pharmacy administrator gets the provider portal only until staff management
-  exists. A second product for an already registered CAC goes to admin review
+  pharmacy administrator gets the provider portal, and since P4b (below) it
+  invites its staff after support's review. A second product for an already registered CAC goes to admin review
   (owner, Q8), and one email cannot be both a patient account and a facility
   administrator (409, owner, Q7).
 - Support's review (owner, Q1, "alert + daily review"): three review columns on
@@ -387,7 +387,9 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   `self_service_review_note`, all set together, only on an approved
   self-service application) and two commands,
   `identity.admin_list_self_service_facilities` (`platform.identity-review.read`)
-  and `identity.admin_review_self_service_facility` (`platform.facility.manage`),
+  and `identity.admin_review_self_service_facility` (`platform.facility.manage`,
+  and since P4b also `platform.facility.unlock`; the review now records the
+  administrator's role and evidence and unlocks the facility, below),
   served as `GET /api/v1/admin/self-service-facilities` and
   `POST /api/v1/admin/self-service-facilities/:applicationId/review`. Unlike
   the governed application commands they need no facility membership, so a
@@ -612,24 +614,231 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   product, and the admin application list does not show `approval_mode`; the
   governed admin commands still need a facility membership (`0046`), so a
   governed public application can hold a CAC and product until an
-  administrator with a membership rejects it; a self-signed-up facility has
-  one user; staff MFA, once ported, must say what it does to these
-  administrators; once support has reviewed a self-signed-up organization,
-  its administrator's organization CAC check is charged to that account's
-  0049 quota (5 an hour, 15 a day, 10 a day per organization), outside the
-  200-a-day self sign-up cap; a released sign-up's account keeps its email
-  (the decision and support's procedure are above); and the website's console
-  needs the release and open-application pages, and the sign-up page needs
-  availability's reason and start's `codeSent`. After the second review the
-  website and console copy must also follow R15 and R16: the
-  `PROVIDER_EMAIL_ALREADY_REGISTERED` panel (the sign-up is closed; start
-  again with another email), the `PROVIDER_ENROLLMENT_REQUIRES_REVIEW` text
-  (a refusal now follows only support's rejection or release), the kept
-  details' 24-hour note, the console's open-applications panel ("holds its
-  CAC number and product for 24 hours", "Holds the CAC number until", now
-  `holdsCac` and `lapsesAt`, which equals the submission time for an
-  application opened without a hold), the reject and release forms
-  (`allowRetry`), the waiver, the search and the total.
+  administrator with a membership rejects it; staff MFA, once ported, must
+  say what it does to these administrators and to the staff they invite;
+  once support has reviewed a self-signed-up organization, its
+  administrator's organization CAC check is charged to that account's 0049
+  quota (5 an hour, 15 a day, 10 a day per organization), outside the
+  200-a-day self sign-up cap; and a released sign-up's account keeps its
+  email (the decision and support's procedure are above). A self-signed-up
+  facility is no longer limited to one user: its administrator invites staff
+  after support's review (P4b, below).
+- The website already has what this branch's backend answers for P4 (health
+  at `8d40891`, P4's website build): the console's release and
+  open-application pages, with the reject and release forms' `allowRetry`,
+  the waiver, the CAC number search and the total; the sign-up page's use of
+  availability's reason and start's `codeSent`; and the copy R15 and R16
+  call for: the `PROVIDER_EMAIL_ALREADY_REGISTERED` panel (the sign-up is
+  closed; start again with another email), the
+  `PROVIDER_ENROLLMENT_REQUIRES_REVIEW` text (a refusal follows only
+  support's rejection or release), the kept details' 24-hour note, and the
+  open-applications panel's `holdsCac` and `lapsesAt` (equal to the
+  submission time for an application opened without a hold). Nothing further
+  is needed on the website for P4's backend.
+
+Full access after support's review, and facility staff invitations (P4b, in
+0086's section 5, which follows P4's sections and precedes the grants and the
+control section, still last). `main` has neither: it reviews every clinician
+independently (its 0087-0098) and its self-signed-up administrator holds
+`org_admin` at once. Owner decisions of 2026-10-25 (P4b's Q1-Q7) are marked
+"owner". The Identity, notification-api and website parts are recorded by
+their builds; the items Identity carries are listed here too.
+
+- R18 (P4 leftover), "This isn't my organization":
+  `identity.withdraw_self_service_provider_enrollment(char)` (Identity's
+  accountless `system:auth` context; `POST
+  /api/v1/identity/provider-enrollments/withdraw` with the enrollment cookie).
+  From a live completion session of an open self-service application it
+  closes the application (rejected, no reviewer, the reason "Self-service
+  application withdrawn by its applicant", no refusal), ends every code and
+  session of it and audits `identity.organization.self-service.withdraw`
+  (system; `{productCode, previousStatus}`), answering `withdrawn`; no live
+  session answers `session_invalid` and changes nothing, and a session whose
+  application is no longer open answers `session_invalid` and is ended. It
+  reads the control after locking the session (55000 with the control off)
+  and sets no 7-day refusal: like any closure, a new application of that
+  email or network for the same CAC number and product within 7 days opens
+  without a hold (R15), so a squatter cannot renew a hold by withdrawing.
+  Suite: `provider-self-service-withdrawal`.
+- The restricted role. Activation grants `org_admin_awaiting_review` (new;
+  `workforce.manage`, `audit.read` and the four outreach registration and
+  campaign permissions, each one `org_admin` already holds) instead of
+  `org_admin`, after recording the approval; the membership stays named
+  `org_admin`. A self-signed-up organization is pending (activated, not yet
+  reviewed), reviewed, or released (`identity.organization_self_service_state`,
+  read by Identity's staff context as `facility.selfService`; governed and
+  legacy organizations have no row and are unaffected).
+- The review gate: a trigger on `auth.account_roles`
+  (`account_roles_review_gate`, before insert or update of the role, scope,
+  facility, membership or revocation) refuses any facility role but the
+  restricted one at a pending organization (P0001 `FACILITY_REVIEW_PENDING`),
+  any facility role at a released one (`FACILITY_RELEASED`), and the
+  restricted role anywhere else (`FACILITY_REVIEW_ROLE_INVALID`). It also
+  refuses the owner and every runtime, so no other path (a governed second
+  product's approval, owner SQL) can hand a pending facility clinical access.
+- Before review the administrator may record its own licence
+  (`identity.record_self_service_administrator_licence`, audited
+  `identity.facility-administrator-licence.record`); the facility sees only a
+  number hint (its last four letters or digits). Every staff write before
+  review answers `FACILITY_REVIEW_PENDING`.
+- Support's review unlocks (`identity.admin_review_self_service_facility`,
+  now seven arguments): it needs `platform.facility.unlock` (new; granted to
+  `platform_admin`, `platform_super_admin` and `facility_review_admin`, so
+  `identity_review_admin` + `facility_review_admin` make a least-privilege
+  reviewer) besides `platform.admin.access`, `platform.facility.manage` and
+  the healthcare-operations purpose; it records the administrator's role
+  (`none`, or the role the organization type and product allow, §3.6 of the
+  P4b spec: doctor at a clinic or hospital, `lab` at a laboratory, pharmacist
+  at a pharmacy, none for `other`), the verification method and, for a
+  clinical role, a licence of the matching body (owner Q2: a licence is
+  required unless support grants none); it revokes the restricted role,
+  grants `org_admin` (and the clinical role, with a `platform_review`
+  attestation), bumps the membership's version, signs the administrator out
+  everywhere (`facility_reviewed`) and audits
+  `admin.self-service-facility.review` (platform; role, method, licence body,
+  membership and sessions revoked) and `identity.facility-access.unlock`
+  (system, the facility). A suspended facility, a disabled account or a
+  missing membership answers 23514 with nothing written.
+- After review support can change the administrator's role
+  (`identity.admin_set_self_service_administrator_role`, the same evidence,
+  sessions revoked `facility_access_changed`, audited
+  `admin.self-service-facility.administrator-role` and
+  `identity.facility-access.change`) and end the first 30 days early
+  (`identity.admin_end_self_service_probation`,
+  `admin.self-service-facility.probation-end`).
+- The first 30 days after review (owner): at most 5 break-glass grants per
+  facility in a rolling 24 hours (trigger `consent_grants_self_service_probation`
+  on `identity.consent_grants`, P0001 `EMERGENCY_PROBATION_LIMIT`; Identity
+  answers 429 `EMERGENCY_PROBATION_LIMITED`, and a rolled-back Identity its
+  429 `EMERGENCY_RATE_LIMITED`), and invitations limited to 10 a day and 20
+  emails a day (30 and 60 after). A replayed break-glass reuses its grant and
+  is never refused.
+- Staff invitations (`staff_invitations_enabled`, new, seeded off; owner Q1:
+  one release with P4): three tables (`identity.staff_invitations`,
+  `identity.staff_invitation_sends`, `identity.staff_licence_attestations`)
+  and `identity.staff_attestation_texts`, all with forced row-level security,
+  no runtime privilege and no-mutation or guarded-column triggers. A reviewed
+  self-signed-up facility's administrator invites by name, email and role
+  (the roles its type allows, with a licence and the facility's attestation
+  for a clinical role: the facility vouches for its clinicians, where `main`
+  reviews each independently); secrets are stored only as keyed hashes
+  Identity computes (a link token, a typed code bound to the email, an open
+  session); limits per facility (100 pending; 30 invitations and 60 emails a
+  day), per recipient (3 invitations and 8 emails in 30 days from one
+  facility; 5 emails a day across facilities, beyond which the email is
+  silently not sent) and per
+  invitation (5 sends, 60 seconds between them, valid 7 days); 10 sends
+  that failed definitively in 24 hours pause the facility's invitations. Commands: create (idempotent per inviter, facility
+  and key), record the delivery, resend, revoke, list, the page's state; open
+  (link or typed code; 10 wrong tokens lock an invitation, 5 wrong codes stop
+  typed mode until a resend), prepare (5 attempts), accept with a password
+  (`new` creates the account, staff record and membership; `dormant_staff`
+  resets the password, bumps the token version, revokes every session and
+  reuses the ended membership), and the signed-in preview and accept for
+  existing staff on their own host (no facility, no permission; one staff
+  audit row at the inviting facility on success and none on a refusal). A
+  patient account, a platform account, an inactive or unverified staff record
+  and an account that cannot sign in are refused. `identity.staff.license_number`
+  is never written; the licence lives in the attestation, and the facility
+  and the invitee see only its hint. Support reads a facility's staff and
+  finds an invitation by the reference in the email
+  (`identity.admin_list_facility_staff`, `identity.admin_find_staff_invitations`,
+  `platform.principal.read`).
+- Staff management: the administrator lists its own facility's members,
+  ends a membership (roles revoked, pending access requests expired, active
+  consent grants revoked with one `identity.consent-grant.close` row each,
+  not the administrator's own or another administrator's) and changes a
+  member's role (with a new attestation). Each is audited at the facility.
+- Release (R2) now also revokes the organization's pending invitations, ends
+  its memberships before revoking their roles, revokes their active consent
+  grants (one system `identity.consent-grant.close` row each, V2), expires
+  pending access requests and revokes the sessions of accounts left with no
+  active membership; the counts are in the release's audit details.
+- One lock order for every P4b writer and both triggers: the organization's
+  self-service application row first (release FOR UPDATE, support's review
+  and changes FOR NO KEY UPDATE, staff commands and the gate FOR SHARE), then
+  facility and membership rows, then the advisory locks
+  `staff-invitations:<facility>`, `staff-invitation-recipient:<email>` and
+  `account-email:<email>`, then account rows. A two-connection harness
+  (outside the release's suites, which roll back) shows an accept or prepare
+  waiting behind a release answer withdrawn or invalid, a role change and a
+  release in either order leave no role on an ended membership, and a review
+  and an account disable in either order grant nothing to a disabled account,
+  with no deadlock.
+- Identity's P4b items (its build records the detail): the staff context's
+  `facility.selfService`; password re-entry for invite, role change and
+  removal (the sign-in check and lockout); the invitation email through
+  notification-api's fixed template, with no person's name, the facility
+  name dropped when it looks like a domain and the origin from the
+  deployment; Turnstile action `staff-invitation` on `app.` and `staging.`
+  only; 429 `EMERGENCY_PROBATION_LIMITED`; emergency-contact alerts drop a
+  domain-like clinician name everywhere (V1); the withdrawal route. The
+  website treats a 404 from any new route as "not available yet".
+- Locks until commit (measured with `pg_locks` on a copy of the 0085
+  production-order database, four runs): besides P4's, SHARE ROW EXCLUSIVE
+  (writes wait, reads do not) on `auth.account_roles` and
+  `identity.consent_grants` (the triggers), `auth.roles`, `identity.facilities`,
+  `identity.staff` and `identity.staff_facility_memberships` (foreign keys of
+  the new tables); no new ACCESS EXCLUSIVE on an existing table. The whole
+  migration took 138-169 ms on an empty database in eight runs (P4's alone
+  53-80 ms), its control section 3.1-5.4 ms.
+- Preflights before signing (read-only; P4's P1, P2, C2, R8 and R17 still
+  apply): PF1 `select count(*) from auth.roles where code =
+  'org_admin_awaiting_review'` and `select count(*) from auth.permissions where
+  code = 'platform.facility.unlock'` must both be 0 (0086 inserts them without
+  ON CONFLICT, so an existing row stops the release); PF2 `select tgname from
+  pg_trigger where tgrelid in ('auth.account_roles'::regclass,
+  'identity.consent_grants'::regclass) and not tgisinternal` shows neither
+  `account_roles_review_gate` nor `consent_grants_self_service_probation`;
+  PF3 `select a.email, r.role_code from auth.account_roles r join
+  auth.accounts a on a.id = r.account_id where r.scope_type = 'platform' and
+  r.revoked_at is null`: each support reviewer holds `platform_admin`,
+  `platform_super_admin`, or `identity_review_admin` + `facility_review_admin`
+  (remedy: grant the last two, never `platform_admin` for this purpose); PF4
+  capture one governed staff member's `GET /api/v1/auth/session` facility
+  block, to compare after the release; PF5 the migration login owns, or holds
+  TRIGGER and REFERENCES on, `auth.account_roles`, `auth.roles`,
+  `auth.role_permissions`, `auth.permissions`, `auth.accounts`,
+  `identity.staff`, `identity.staff_facility_memberships`,
+  `identity.facilities`, `identity.organizations`,
+  `identity.organization_applications` and `identity.consent_grants`
+  (`select c.oid::regclass, pg_get_userbyid(c.relowner) from pg_class c where
+  c.oid in (...)`); PF6 `select account_id, facility_id, count(*) from
+  identity.staff_facility_memberships where active group by 1, 2 having
+  count(*) > 1`, for the record (`main`'s N5; nothing in P4b depends on it).
+- Rollback: switch `staff_invitations_enabled` and
+  `provider_self_service_enabled` off first (the previous console accepts only
+  the six old keys). The previous Identity (57a94db) works on the new schema:
+  it calls no new command; it resolves restricted, reviewed and invited
+  members' permissions from their role rows as before; it can no longer give
+  an unreviewed self-signed-up administrator an organization CAC lookup (no
+  `organization.manage`, 42501 `QOREID_QUOTA_PERMISSION_DENIED`, its 403);
+  the probation trigger keeps capping break-glass (its 429). The rollback
+  suite runs its own SQL, including its staff-context query and a governed
+  approval.
+- Deviations from `main`, each the owner's: facility vouching instead of an
+  independent clinician review; the administrator's clinical role resting on
+  support's review and a recorded licence (Q2); invited clinicians reach
+  patient records with a password only (staff MFA deferred); Outreach intake
+  before review; `facility_review_admin` gains `platform.facility.unlock`.
+- Follow-ups: NIN enablement needs a re-review of self-service access
+  (`identity.registration.write`, held by `org_admin`, nurses and
+  receptionists, engages the policy that reads every patient row); cross-facility
+  lab orders and prescriptions are the next change (P4c), and a stand-alone
+  laboratory's or pharmacy's workspace has no orders until then; the runtime
+  verifier's P4b extension is the integration build's.
+- Tests (`services/ehr-api/test/database/`, rollback-only): new
+  `self-service-review-unlock`, `staff-invitations`,
+  `staff-invitation-acceptance`, `facility-staff-management`,
+  `staff-invitation-concurrency` (serial orders; the two-connection races are
+  run by the build's harness), `p4b-privileges` (grants, definer and
+  search_path, no table privilege, forced row-level security, triggers
+  enabled, the audit leak scan, support's reads) and
+  `provider-self-service-withdrawal`; P4's `provider-self-enrollment`,
+  `provider-self-service-activation`, `provider-self-service-control`,
+  `self-service-facility-release`, `self-service-facility-review` and
+  `provider-self-service-rollback` changed for the restricted role, the new
+  review and the eighth control key.
 
 ## Not ported, and why
 
