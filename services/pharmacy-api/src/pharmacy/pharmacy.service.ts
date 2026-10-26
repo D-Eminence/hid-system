@@ -159,8 +159,12 @@ export class PharmacyService {
    * The work list. Row-level security shows this facility's rows the member
    * may read: under consent, or bound to an order route that allows a read
    * now (P4c, strict policy). A route-backed row carries its route card and,
-   * while the route allows a read, its patient (C18). The answer says whether
-   * orders between facilities and work on them are on (FEAS R4, V11).
+   * while the route allows a read, its patient (C18). To a member who may
+   * receive prescriptions from other facilities, the answer says whether this
+   * facility receives them now and whether any wait or are held here (item 4,
+   * 0089; read in the transaction after the audit rows, left out when it
+   * cannot be read). The answer also says whether orders between facilities
+   * and work on them are on (FEAS R4, V11).
    */
   async listWorkItems(context: DataAccessContext) {
     const page = await this.database.withTransaction(context, async (client) => {
@@ -172,7 +176,8 @@ export class PharmacyService {
       const cards = await this.routeCards.cards(client, result.rows.filter((row) => row.order_route_id).map((row) => row.id),
         context.correlationId);
       await this.auditShownPatients(client, context, result.rows, cards);
-      return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id))) };
+      const receiving = await this.routeCards.receiving(client, context);
+      return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id))), ...receiving };
     });
     return { ...page, ...(await this.routeCards.flags()) };
   }

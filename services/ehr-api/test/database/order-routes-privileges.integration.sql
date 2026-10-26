@@ -5,7 +5,10 @@
 --      runtime, support's to Identity only, the helpers and trigger functions
 --      to no role; PUBLIC on none; and 0088's (item 3: the wrong-patient
 --      report's wrappers and recreated cards, support's list and review, the
---      ordering facility's Overview read) exactly as its section 5 grants them;
+--      ordering facility's Overview read) exactly as its section 5 grants them,
+--      and 0089's (item 4: the Lab and Pharmacy wrappers of whether this
+--      facility receives and whether orders wait or are held here; support's
+--      recreated find) exactly as its section 5 grants them;
 --   2. no runtime privilege on any new table and no sequence; row-level
 --      security enabled and forced with its four policies; the work lists'
 --      strict policies; every new trigger enabled 'O';
@@ -612,9 +615,16 @@ select signature::regprocedure, grantees from (values
   ('pharmacy.report_wrong_patient_order_route(uuid,bigint,text,text,text,character)', array['hid_pharmacy_runtime', 'hid_schema_test_runtime']),
   ('identity.admin_list_wrong_patient_reports(text,uuid)', array['hid_identity_runtime']),
   ('identity.admin_review_wrong_patient_report(uuid,bigint,text[],text,boolean)', array['hid_identity_runtime']),
-  ('ehr.list_sent_wrong_patient_order_routes()', array['hid_ehr_runtime', 'hid_schema_test_runtime'])) v(signature, grantees);
--- Every other function section 6 or 0088 creates or replaces: owner only
--- (0088's shared command and its report table's guard among them).
+  ('ehr.list_sent_wrong_patient_order_routes()', array['hid_ehr_runtime', 'hid_schema_test_runtime']),
+  -- 0089 (item 4): whether this facility receives, and whether orders wait
+  -- or are held here; support's find (C21) recreated, still Identity's alone.
+  ('lab.order_route_receives_here()', array['hid_lab_runtime', 'hid_schema_test_runtime']),
+  ('lab.order_routes_here()', array['hid_lab_runtime', 'hid_schema_test_runtime']),
+  ('pharmacy.order_route_receives_here()', array['hid_pharmacy_runtime', 'hid_schema_test_runtime']),
+  ('pharmacy.order_routes_here()', array['hid_pharmacy_runtime', 'hid_schema_test_runtime'])) v(signature, grantees);
+-- Every other function section 6, 0088 or 0089 creates or replaces: owner
+-- only (0088's shared command and its report table's guard, and 0089's two
+-- shared helpers, among them).
 insert into expected_execute
 select p.oid::regprocedure, array[]::text[]
   from pg_proc p join pg_namespace n on n.oid = p.pronamespace
@@ -628,8 +638,8 @@ select expected.signature, coalesce((select array_agg(acl.grantee::regrole::text
    where p.oid = expected.signature and acl.privilege_type = 'EXECUTE' and acl.grantee <> p.proowner),
     array[]::text[]) as grantees
   from expected_execute expected;
-select pg_temp.assert('section 6 has its 69 functions, with the two inbox functions 71, and 0088 adds 7: 78',
-  (select count(*) from expected_execute) = 78, (select count(*) from expected_execute)::text);
+select pg_temp.assert('section 6 has its 69 functions, with the two inbox functions 71, 0088 adds 7 and 0089 6: 84',
+  (select count(*) from expected_execute) = 84, (select count(*) from expected_execute)::text);
 select pg_temp.assert('EXECUTE exactly as section 7 grants it', not exists (select 1 from expected_execute expected
     join actual_execute actual using (signature) where actual.grantees <> expected.grantees),
   (select string_agg(expected.signature::text || ' ' || actual.grantees::text, '; ') from expected_execute expected
@@ -638,7 +648,10 @@ select pg_temp.assert('PUBLIC executes none', not exists (select 1 from expected
     aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
    where p.oid = expected.signature and acl.grantee = 0));
 select pg_temp.assert('every helper, view function and trigger function is the owner''s alone',
-  (select count(*) from expected_execute where cardinality(grantees) = 0) = 45
+  (select count(*) from expected_execute where cardinality(grantees) = 0) = 47
+  and (select count(*) from expected_execute where cardinality(grantees) = 0
+         and signature in ('ehr.order_route_receives_here(text)'::regprocedure, 'ehr.order_routes_here(text)'::regprocedure))
+    = 2
   and not exists (select 1 from expected_execute expected, pg_roles runtime
     where cardinality(expected.grantees) = 0 and runtime.rolname ~ '^hid_.*runtime$'
       and has_function_privilege(runtime.oid, expected.signature, 'EXECUTE')));
@@ -651,7 +664,23 @@ select pg_temp.assert('the API runtimes reach the commands through their parents
   and not has_function_privilege('hid_lab_api_runtime', 'ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', 'EXECUTE')
   and not has_function_privilege('hid_identity_api_runtime', 'ehr.close_order_route(uuid,text,text,boolean)', 'EXECUTE')
   and not has_function_privilege('hid_ehr_api_runtime', 'identity.admin_close_order_route(uuid,bigint,text)', 'EXECUTE')
-  and not has_function_privilege('hid_notification_worker', 'identity.list_my_notification_inbox(integer)', 'EXECUTE'));
+  and not has_function_privilege('hid_notification_worker', 'identity.list_my_notification_inbox(integer)', 'EXECUTE')
+  -- 0089: each receiving runtime reaches its own wrappers only, and support's
+  -- find stays Identity's.
+  and has_function_privilege('hid_lab_api_runtime', 'lab.order_route_receives_here()', 'EXECUTE')
+  and has_function_privilege('hid_lab_api_runtime', 'lab.order_routes_here()', 'EXECUTE')
+  and not has_function_privilege('hid_lab_api_runtime', 'pharmacy.order_route_receives_here()', 'EXECUTE')
+  and not has_function_privilege('hid_lab_api_runtime', 'pharmacy.order_routes_here()', 'EXECUTE')
+  and not has_function_privilege('hid_lab_api_runtime', 'ehr.order_route_receives_here(text)', 'EXECUTE')
+  and not has_function_privilege('hid_lab_api_runtime', 'ehr.order_routes_here(text)', 'EXECUTE')
+  and has_function_privilege('hid_pharmacy_api_runtime', 'pharmacy.order_route_receives_here()', 'EXECUTE')
+  and has_function_privilege('hid_pharmacy_api_runtime', 'pharmacy.order_routes_here()', 'EXECUTE')
+  and not has_function_privilege('hid_pharmacy_api_runtime', 'lab.order_route_receives_here()', 'EXECUTE')
+  and not has_function_privilege('hid_pharmacy_api_runtime', 'lab.order_routes_here()', 'EXECUTE')
+  and has_function_privilege('hid_identity_api_runtime', 'identity.admin_find_order_routes(text,text)', 'EXECUTE')
+  and not has_function_privilege('hid_schema_test_runtime', 'identity.admin_find_order_routes(text,text)', 'EXECUTE')
+  and not has_function_privilege('hid_identity_api_runtime', 'lab.order_route_receives_here()', 'EXECUTE')
+  and not has_function_privilege('hid_ehr_api_runtime', 'lab.order_route_receives_here()', 'EXECUTE'));
 
 -- 2. Tables, sequences, row-level security, triggers.
 create temp table new_tables (relation regclass primary key) on commit drop;

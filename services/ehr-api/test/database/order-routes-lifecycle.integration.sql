@@ -26,7 +26,10 @@
 --      the event on the receiving side with reason wrong_patient, both
 --      windows now; refused on a sent route; support's close then finds the
 --      route closed and the order change mirror leaves the cancelled one
---      alone; wrong_patient appears on no other state.
+--      alone; wrong_patient appears on no other state;
+--   9. support's find (0089, item 4) for every route of the suite: closable is
+--      exactly whether support's Close acts now, access_ends_at the stored
+--      column; the lapsed routes of 7 are not closable.
 -- Shared fixture of the P4c suites (each suite carries its own copy, so it
 -- runs alone). Synthetic values only; uuid prefix e4c.
 --   Platform: SA (platform_super_admin), SU (support_admin), FR
@@ -1202,6 +1205,13 @@ select pg_temp.assert('C21 reads the lapsed routes as expired', (select array_ag
     from unnest(string_to_array(current_setting('hid.test.lapsed_references'), ',')) wanted(reference)
     cross join lateral identity.admin_find_order_routes(wanted.reference, null) found)
   = array['expired', 'expired', 'expired']);
+select pg_temp.assert('C21 (0089) answers the lapsed routes not closable, with access_ends_at only once accepted',
+  (select array_agg(found.closable::text || ':' || (found.access_ends_at is not null)::text
+       || ':' || coalesce((found.access_ends_at < clock_timestamp())::text, '-')
+       order by found.kind, found.accepted_at nulls first)
+    from unnest(string_to_array(current_setting('hid.test.lapsed_references'), ',')) wanted(reference)
+    cross join lateral identity.admin_find_order_routes(wanted.reference, null) found)
+  = array['false:false:-', 'false:true:true', 'false:true:true']);
 select pg_temp.as_platform(3);
 select pg_temp.check('support''s close of an accepted route past its window', format($s$select * from
   identity.admin_close_order_route(%L, %s, 'The patient asked support to stop it')$s$, current_setting('hid.test.lroute_18'),
@@ -1301,6 +1311,55 @@ select pg_temp.assert('ended_kind by state: wrong_patient only on cancelled and 
                and route.state not in ('cancelled', 'completed'))
   and (select array_agg(route.state order by route.state) from ehr.order_routes route
         where route.ended_kind = 'wrong_patient') = array['cancelled', 'completed']);
+
+-- 9. Support's find (C21, 0089) against support's Close (C22) for every
+-- route of this suite: closable is exactly "Close acts now" (tried at the
+-- version found, then undone), access_ends_at is the stored column, and a
+-- live route that is not closable is completed.
+create function pg_temp.close_acts(route uuid, current_version bigint)
+returns text language plpgsql as $f$
+begin
+  begin
+    perform identity.admin_close_order_route(route, current_version, 'Support checks whether Close acts');
+    raise exception using errcode = 'P0001', message = 'P4C_CLOSE_ACTED';
+  exception when others then
+    if sqlerrm = 'P4C_CLOSE_ACTED' then
+      return 'acts';
+    end if;
+    return sqlstate || ' ' || sqlerrm;
+  end;
+end
+$f$;
+grant execute on function pg_temp.close_acts(uuid,bigint) to hid_identity_api_runtime;
+create temp table every_route on commit drop as
+  select route.id, route.reference::text as reference, route.state, route.access_ends_at from ehr.order_routes route;
+create temp table every_found (route_id uuid primary key, effective_state text, access_ends_at timestamptz,
+  closable boolean, close_outcome text) on commit drop;
+grant select on every_route to hid_identity_api_runtime;
+grant select, insert on every_found to hid_identity_api_runtime;
+set local role hid_identity_api_runtime;
+select pg_temp.as_platform(1);
+insert into every_found (route_id, effective_state, access_ends_at, closable, close_outcome)
+select found.route_id, found.effective_state, found.access_ends_at, found.closable,
+  pg_temp.close_acts(found.route_id, found.row_version)
+  from every_route listed
+  cross join lateral identity.admin_find_order_routes(listed.reference, null) found
+ where found.route_id = listed.id;
+reset role;
+select pg_temp.assert('C21 against C22 for every route of the suite',
+  (select count(*) from every_found) = (select count(*) from every_route)
+  and (select count(*) from every_route) = 31
+  and not exists (select 1 from every_found found join every_route listed on listed.id = found.route_id
+                   where found.closable is distinct from (found.close_outcome = 'acts')
+                      or found.close_outcome not in ('acts', '23505 ORDER_ROUTE_ALREADY_CLOSED')
+                      or found.access_ends_at is distinct from listed.access_ends_at
+                      or (not found.closable and found.effective_state in ('sent', 'accepted', 'completed')
+                          and listed.state <> 'completed'))
+  and exists (select 1 from every_found found where found.closable)
+  and exists (select 1 from every_found found where not found.closable and found.effective_state = 'completed'),
+  (select count(*) || ' routes; ' || coalesce(string_agg(found.route_id || ' ' || found.effective_state || ' '
+     || found.closable || ' ' || found.close_outcome, '; ') filter (where found.closable is distinct from
+     (found.close_outcome = 'acts')), 'no mismatch') from every_found found));
 
 select pg_temp.report();
 rollback;

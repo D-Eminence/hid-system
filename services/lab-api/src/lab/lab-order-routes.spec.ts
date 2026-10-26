@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { RequestMethod } from '@nestjs/common';
+import { Logger, RequestMethod } from '@nestjs/common';
 import { HTTP_CODE_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
@@ -17,7 +17,7 @@ import { LabOrderRoutesController } from './lab-order-routes.controller';
 import { LabOrderRoutesService, normalizedIdentifier, normalizedReference } from './lab-order-routes.service';
 import { LabWorkItemsService } from './lab-work-items.service';
 import { LabOrderRouteAccess } from './order-route-access';
-import { LabOrderRouteCards, orderRouteCard } from './order-route-cards';
+import { LabOrderRouteCards, orderRouteCard, receivingFacts } from './order-route-cards';
 
 const facilityId = '10000000-0000-4000-8000-000000000001';
 const patientId = '50000000-0000-4000-8000-000000000001';
@@ -32,11 +32,21 @@ const context = { correlationId: 'lab-route-correlation', facilityId, membership
 
 const databaseError = (code: string, message: string) => Object.assign(new Error(message), { code });
 
-/** The service over a fake client: `answers` maps a function name to its rows or error. */
-function harness(answers: Record<string, unknown[] | Error> = {}, flags = { orders: true, work: true }) {
+/** Item 4 (0089): the one statement that reads whether this facility receives, and its savepoint. */
+const RECEIVES = 'select lab.order_route_receives_here() as receives, lab.order_routes_here() as routes_here';
+const RECEIVES_STATEMENTS = [{ sql: 'savepoint lab_order_route_receives', values: [] }, { sql: RECEIVES, values: [] },
+  { sql: 'release savepoint lab_order_route_receives', values: [] }];
+
+/**
+ * The service over a fake client: `answers` maps a function name to its rows or error; `receiving` is the
+ * answer to the statement that reads whether this facility receives (item 4): the database's NULLs by default.
+ */
+function harness(answers: Record<string, unknown[] | Error> = {}, flags = { orders: true, work: true },
+  receiving: unknown[] | Error = [{ receives: null, routes_here: null }]) {
   const statements: Array<{ sql: string; values: readonly unknown[] }> = [];
   const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
     statements.push({ sql, values });
+    if (sql === RECEIVES) { if (receiving instanceof Error) throw receiving; return { rows: receiving }; }
     if (sql.includes('from lab.work_items where id = $1')) return { rows: [{ patient_id: patientId }] };
     const name = /from\s+([a-z_]+\.[a-z_]+)\(/i.exec(sql)?.[1] ?? '';
     const answer = answers[name];
@@ -55,8 +65,12 @@ function harness(answers: Record<string, unknown[] | Error> = {}, flags = { orde
   const audit = { recordWithClient: jest.fn(async (_c: unknown, event: Record<string, unknown>) => { audits.push(event); }) } as
     unknown as AuditService;
   const service = new LabOrderRoutesService(database, audit, new LabOrderRouteCards(database));
-  return { service, statements, audits, database, options };
+  return { service, statements, audits, database, options, client, audit: audit as unknown as { recordWithClient: jest.Mock } };
 }
+
+/** The list statements alone (each list also reads whether this facility receives, item 4). */
+const listStatements = (statements: ReadonlyArray<{ sql: string; values: readonly unknown[] }>) =>
+  statements.filter((statement) => statement.sql.includes('lab.list_order_routes'));
 
 const incoming = { route_id: routeId, reference: 'B0000000', row_version: '1', effective_state: 'sent',
   ordering_facility_name: 'Ordering Hospital', orderer_name: 'Dr Ada Obi', orderer_licence_body: 'MDCN',
@@ -136,7 +150,8 @@ describe('LabOrderRoutesService list and get (C7, C8)', () => {
   it('lists Incoming as previews, never the patient, clinical information, licence number or source ids', async () => {
     const h = harness({ 'lab.list_order_routes': [incoming] }, { orders: true, work: false });
     const answer = await h.service.search(context, { view: 'incoming', healthId: ' hid-abc234 ' });
-    expect(h.statements[0]).toEqual({ sql: 'select * from lab.list_order_routes($1, $2)', values: ['incoming', 'HID-ABC234'] });
+    expect(h.statements).toEqual([{ sql: 'select * from lab.list_order_routes($1, $2)', values: ['incoming', 'HID-ABC234'] },
+      ...RECEIVES_STATEMENTS]);
     expect(h.options).toEqual([{ isolationLevel: 'READ COMMITTED' }]);
     expect(answer).toEqual({ crossFacilityOrders: true, crossFacilityWork: false, items: [{ id: routeId, reference: 'B0000000',
       version: 1, effectiveState: 'sent', orderingFacilityName: 'Ordering Hospital', orderer: { name: 'Dr Ada Obi', licenceBody: 'MDCN' },
@@ -153,15 +168,16 @@ describe('LabOrderRoutesService list and get (C7, C8)', () => {
   it('defaults to Incoming and refuses a malformed Health ID with 400 before the database', async () => {
     const h = harness({ 'lab.list_order_routes': [] });
     await h.service.list(context, {});
-    expect(h.statements[0]?.values).toEqual(['incoming', null]);
+    expect(listStatements(h.statements)[0]?.values).toEqual(['incoming', null]);
     await h.service.search(context, { healthId: 'HID-ABC234' });
-    expect(h.statements[1]?.values).toEqual(['incoming', 'HID-ABC234']);
+    expect(listStatements(h.statements)[1]?.values).toEqual(['incoming', 'HID-ABC234']);
+    const before = h.statements.length;
     await expect(h.service.search(context, { healthId: 'HID-0O1I' })).rejects.toMatchObject({ status: 400, code: 'ORDER_ROUTE_INVALID' });
-    expect(h.statements).toHaveLength(2);
+    expect(h.statements).toHaveLength(before);
     // The GET's list never filters by a Health ID, whatever reaches it.
     await h.service.list(context, { view: 'recent', healthId: 'HID-ABC234' } as never);
-    expect(h.statements[2]?.values).toEqual(['recent', null]);
-    expect(h.statements).toHaveLength(3);
+    expect(listStatements(h.statements)[2]?.values).toEqual(['recent', null]);
+    expect(listStatements(h.statements)).toHaveLength(3);
   });
 
   it('lists Recent as metadata, with the work item and test name once accepted', async () => {
@@ -207,6 +223,92 @@ describe('LabOrderRoutesService list and get (C7, C8)', () => {
     const h = harness({ 'lab.get_order_route': databaseError('P0002', 'ORDER_ROUTE_NOT_FOUND') });
     await expect(h.service.get(context, routeId)).rejects.toMatchObject({ status: 404, code: 'ORDER_ROUTE_NOT_FOUND' });
     expect(h.audits).toEqual([]);
+  });
+});
+
+describe('LabOrderRoutesService: whether this facility receives, and orders waiting or held here (item 4, 0089)', () => {
+  it.each([
+    ['Incoming', (h: ReturnType<typeof harness>) => h.service.list(context, {})],
+    ['Recent', (h: ReturnType<typeof harness>) => h.service.list(context, { view: 'recent' })],
+    ['the search', (h: ReturnType<typeof harness>) => h.service.search(context, { healthId: 'HID-ABC234' })],
+  ])('answers them beside %s, read after the audit row in the list\'s one READ COMMITTED transaction', async (_name, run) => {
+    for (const [receives, routesHere] of [[true, { waiting: true, held: false }], [false, { waiting: false, held: true }]] as const) {
+      const h = harness({ 'lab.list_order_routes': [] }, { orders: true, work: false },
+        [{ receives, routes_here: { held: routesHere.held, waiting: routesHere.waiting } }]);
+      const answer = await run(h);
+      expect(answer).toEqual({ items: [], receives, routesHere, crossFacilityOrders: true, crossFacilityWork: false });
+      expect(Object.keys(answer)).toEqual(['items', 'receives', 'routesHere', 'crossFacilityOrders', 'crossFacilityWork']);
+      expect(h.statements.slice(1)).toEqual(RECEIVES_STATEMENTS);
+      expect(h.options).toEqual([{ isolationLevel: 'READ COMMITTED' }]);
+      expect(h.database.withTransaction).toHaveBeenCalledTimes(1);
+      expect(h.audit.recordWithClient.mock.invocationCallOrder[0])
+        .toBeLessThan(h.client.query.mock.invocationCallOrder[1]!);
+      // The list's row is as before: nothing of the facts reaches it.
+      expect(h.audits).toEqual([expect.objectContaining({ action: 'lab.order-route.list' })]);
+      expect(JSON.stringify(h.audits)).not.toMatch(/receives|routesHere/);
+    }
+  });
+
+  it('leaves both out when the database answers NULL or another type, never a made-up false', async () => {
+    for (const row of [{ receives: null, routes_here: null }, { receives: 'true', routes_here: { waiting: 'yes', held: true } },
+      { receives: 1, routes_here: { waiting: true } }, { receives: undefined, routes_here: [true, false] }]) {
+      const answer = await harness({ 'lab.list_order_routes': [] }, undefined, [row]).service.list(context, {});
+      expect(answer).not.toHaveProperty('receives');
+      expect(answer).not.toHaveProperty('routesHere');
+    }
+    const none = await harness({ 'lab.list_order_routes': [] }, undefined, []).service.list(context, {});
+    expect(Object.keys(none)).toEqual(['items', 'crossFacilityOrders', 'crossFacilityWork']);
+  });
+
+  it('answers only the two booleans of routesHere, also from jsonb text, and each fact on its own', () => {
+    expect(receivingFacts({ receives: false, routes_here: { held: true, waiting: false, count: 3, patientId } }))
+      .toEqual({ receives: false, routesHere: { waiting: false, held: true } });
+    expect(receivingFacts({ receives: true, routes_here: '{"held": false, "waiting": true}' }))
+      .toEqual({ receives: true, routesHere: { waiting: true, held: false } });
+    expect(receivingFacts({ receives: true, routes_here: 'not json' })).toEqual({ receives: true });
+    expect(receivingFacts({ receives: null, routes_here: { held: false, waiting: false } }))
+      .toEqual({ routesHere: { waiting: false, held: false } });
+    expect(receivingFacts(undefined)).toEqual({});
+  });
+
+  it('rolls back to its savepoint on a failure, logs the SQLSTATE alone, and still answers the list', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const h = harness({ 'lab.list_order_routes': [incoming] }, undefined,
+        databaseError('42501', 'Order route staff context is required'));
+      const answer = await h.service.list(context, {});
+      expect(answer.items).toHaveLength(1);
+      expect(Object.keys(answer)).toEqual(['items', 'crossFacilityOrders', 'crossFacilityWork']);
+      expect(h.statements.map((statement) => statement.sql)).toEqual(['select * from lab.list_order_routes($1, $2)',
+        'savepoint lab_order_route_receives', RECEIVES, 'rollback to savepoint lab_order_route_receives']);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith({ message: 'Whether this facility receives orders could not be read', sqlState: '42501',
+        correlationId: context.correlationId });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('staff context');
+      // The list's audit row stays, in the same transaction.
+      expect(h.audits).toEqual([expect.objectContaining({ action: 'lab.order-route.list', details: expect.objectContaining({
+        resultCount: 1 }) })]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('reads nothing for a member without lab.order-route.receive', async () => {
+    const h = harness({ 'lab.list_order_routes': [] }, undefined, [{ receives: true, routes_here: { held: true, waiting: true } }]);
+    const answer = await h.service.list({ ...context, actor: { ...context.actor, permissions: ['lab.work-item.read'] } }, {});
+    expect(answer).toEqual({ items: [], crossFacilityOrders: true, crossFacilityWork: true });
+    expect(h.statements.map((statement) => statement.sql)).toEqual(['select * from lab.list_order_routes($1, $2)']);
+  });
+
+  it('reads nothing while route access is off: the list answers 423 as before', async () => {
+    const h = harness({ 'lab.list_order_routes':
+      databaseError('55000', 'PLATFORM_CONTROL_DISABLED:cross_facility_route_access_enabled') });
+    const refusal = await h.service.list(context, {}).catch((error: unknown) => error);
+    expect(refusal).toMatchObject({ status: 423, code: 'CROSS_FACILITY_ORDERS_UNAVAILABLE' });
+    expect(refusal).not.toHaveProperty('receives');
+    expect(h.statements.map((statement) => statement.sql)).toEqual(['select * from lab.list_order_routes($1, $2)']);
+    expect(h.audits).toEqual([]);
+    expect(h.database.query).not.toHaveBeenCalled();
   });
 });
 
@@ -354,10 +456,12 @@ describe('Lab work list with route-backed rows (C12)', () => {
     accession_number: null, specimen_statuses: [] });
   const local = 'd0000000-0000-4000-8000-000000000001';
 
-  const build = (cards: unknown[] | Error, rows = [row(workItemId, true), row(local, false)]) => {
+  const build = (cards: unknown[] | Error, rows = [row(workItemId, true), row(local, false)],
+    receiving: unknown[] | Error = [{ receives: null, routes_here: null }]) => {
     const statements: string[] = [];
     const client = { query: jest.fn(async (sql: string) => {
       statements.push(sql);
+      if (sql === RECEIVES) { if (receiving instanceof Error) throw receiving; return { rows: receiving }; }
       if (sql.includes('lab.order_route_cards')) { if (cards instanceof Error) throw cards; return { rows: cards }; }
       if (sql.includes('from lab.work_items w')) return { rows };
       return { rows: [] };
@@ -369,7 +473,7 @@ describe('Lab work list with route-backed rows (C12)', () => {
     const audit = { recordWithClient: jest.fn(async (_c: unknown, event: Record<string, unknown>) => { audits.push(event); }) };
     const service = new LabWorkItemsService(database, identity, audit as unknown as AuditService,
       new LabOrderRouteAccess(identity), new LabOrderRouteCards(database));
-    return { service, statements, audits, audit };
+    return { service, statements, audits, audit, client };
   };
 
   it('names each patient the list shows on a route card in one row per patient, ids only, basis order-route', async () => {
@@ -423,6 +527,54 @@ describe('Lab work list with route-backed rows (C12)', () => {
     expect(answer.items[0]).not.toHaveProperty('sourceEhrOrderId');
     expect(statements).toContain('rollback to savepoint lab_order_route_cards');
   });
+
+  it('says whether this facility receives and holds orders, after the cards and the audit rows, adding no audit row (item 4)',
+    async () => {
+      const facts = build([card], undefined, [{ receives: true, routes_here: { held: true, waiting: false } }]);
+      const answer = await facts.service.list(context);
+      expect(answer).toMatchObject({ receives: true, routesHere: { waiting: false, held: true }, crossFacilityOrders: false,
+        crossFacilityWork: true });
+      expect(Object.keys(answer)).toEqual(['items', 'receives', 'routesHere', 'crossFacilityOrders', 'crossFacilityWork']);
+      // One read per list, in its savepoint, after the cards; the audit rows are the same as without it.
+      expect(facts.statements.filter((sql) => sql === RECEIVES)).toHaveLength(1);
+      const cardsAt = facts.statements.findIndex((sql) => sql.includes('lab.order_route_cards'));
+      expect(facts.statements.slice(cardsAt + 2)).toEqual(['savepoint lab_order_route_receives', RECEIVES,
+        'release savepoint lab_order_route_receives']);
+      const order = (mock: jest.Mock) => mock.mock.invocationCallOrder;
+      const receivesCall = facts.client.query.mock.calls.findIndex(([sql]) => sql === 'savepoint lab_order_route_receives');
+      expect(Math.max(...order(facts.audit.recordWithClient))).toBeLessThan(order(facts.client.query)[receivesCall]!);
+      const without = build([card]);
+      await without.service.list(context);
+      expect(facts.audits).toEqual(without.audits);
+      expect(JSON.stringify(facts.audits)).not.toMatch(/receives|routesHere|held|waiting/);
+    });
+
+  it('leaves both out when the database answers NULL, when the read fails, and asks nothing of a member who cannot receive',
+    async () => {
+      const nulls = await build([card]).service.list(context);
+      expect(nulls).not.toHaveProperty('receives');
+      expect(nulls).not.toHaveProperty('routesHere');
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      try {
+        const failing = build([card], undefined, databaseError('42883', 'function lab.order_route_receives_here() does not exist'));
+        const answer = await failing.service.list(context);
+        expect(answer.items).toHaveLength(2);
+        expect(answer).not.toHaveProperty('receives');
+        expect(answer).not.toHaveProperty('routesHere');
+        expect(failing.statements).toContain('rollback to savepoint lab_order_route_receives');
+        expect(failing.statements).not.toContain('release savepoint lab_order_route_receives');
+        expect(warn).toHaveBeenCalledWith({ message: 'Whether this facility receives orders could not be read', sqlState: '42883',
+          correlationId: context.correlationId });
+        expect(JSON.stringify(warn.mock.calls)).not.toContain('does not exist');
+      } finally {
+        warn.mockRestore();
+      }
+      const reader = build([card]);
+      const readerAnswer = await reader.service.list({ ...context, actor: { ...context.actor, permissions: ['lab.work-item.read'] } });
+      expect(readerAnswer).not.toHaveProperty('receives');
+      expect(reader.statements.some((sql) => sql.includes('order_route_receives_here') || sql.includes('lab_order_route_receives')))
+        .toBe(false);
+    });
 
   it('shows no patient on a card whose route allows no read now', () => {
     expect(orderRouteCard({ ...card, access: 'none', patient_full_name: 'Ngozi Eze' })).not.toHaveProperty('patient');

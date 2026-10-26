@@ -359,6 +359,68 @@ describe('order-route routes in Identity over HTTP', () => {
       expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'api.admin.order-routes.find', outcome: 'success' }));
     });
 
+    it('passes the summary\'s destination through unchanged (item 4, 0089), and answers without it on an earlier schema',
+      async () => {
+        admin(all);
+        const summary = { listed: { value: false, byDefault: true, reason: null, setAt: null },
+          destination: { receivingTypes: ['laboratory', 'pharmacy'], review: 'reviewed' },
+          receivedAcceptedLifetime: 0, receivedPatientsLifetime: 0, counterparts: [] };
+        handlers['identity.admin_order_route_summary'] = () => ({ rows: [{ summary }] });
+        const answer = await request(server()).get(`/api/v1/admin/facilities/${laboratoryId}/order-route-summary`)
+          .set('Authorization', 'Bearer synthetic');
+        expect([answer.status, answer.body]).toEqual([200, { facilityId: laboratoryId, ...summary }]);
+        expect(Object.keys(answer.body)).toEqual(['facilityId', 'listed', 'destination', 'receivedAcceptedLifetime',
+          'receivedPatientsLifetime', 'counterparts']);
+        const governedHospital = { ...summary, destination: { receivingTypes: [], review: 'governed' } };
+        handlers['identity.admin_order_route_summary'] = () => ({ rows: [{ summary: JSON.stringify(governedHospital) }] });
+        const hospital = await request(server()).get(`/api/v1/admin/facilities/${facilityId}/order-route-summary`)
+          .set('Authorization', 'Bearer synthetic');
+        expect([hospital.status, hospital.body.destination]).toEqual([200, { receivingTypes: [], review: 'governed' }]);
+        const { destination: _destination, ...earlier } = summary;
+        handlers['identity.admin_order_route_summary'] = () => ({ rows: [{ summary: earlier }] });
+        const before = await request(server()).get(`/api/v1/admin/facilities/${laboratoryId}/order-route-summary`)
+          .set('Authorization', 'Bearer synthetic');
+        expect([before.status, before.body]).toEqual([200, { facilityId: laboratoryId, ...earlier }]);
+        expect(before.body).not.toHaveProperty('destination');
+      });
+
+    it('answers when access ends and whether Close acts now (item 4, 0089), from every column, on either schema', async () => {
+      admin(all);
+      const base = { route_id: routeId, reference: '70000000', kind: 'lab_request', row_version: '4', effective_state: 'completed',
+        ordering_facility_id: facilityId, ordering_facility_name: 'Synthetic Hospital Ltd', receiving_facility_id: laboratoryId,
+        receiving_facility_name: 'Synthetic Laboratory', created_at: new Date('2026-10-01T08:00:00Z'),
+        accepted_at: new Date('2026-10-01T09:00:00Z'), ended_at: null, ended_kind: null };
+      const sent = { ...base, route_id: '70000000-0000-4000-8000-000000000002', reference: '70000002', row_version: '1',
+        effective_state: 'sent', accepted_at: null, access_ends_at: null, closable: true };
+      handlers['identity.admin_find_order_routes'] = () => ({ rows: [
+        { ...base, access_ends_at: new Date('2026-10-19T11:12:00.123Z'), closable: false }, sent] });
+      const found = await request(server()).get('/api/v1/admin/order-routes?reference=70000000').set('Authorization', 'Bearer synthetic');
+      expect(found.status).toBe(200);
+      expect(found.body).toEqual({ items: [{ routeId, reference: '70000000', kind: 'lab_request', version: 4,
+        effectiveState: 'completed', orderingFacilityId: facilityId, orderingFacilityName: 'Synthetic Hospital Ltd',
+        receivingFacilityId: laboratoryId, receivingFacilityName: 'Synthetic Laboratory', createdAt: '2026-10-01T08:00:00.000Z',
+        acceptedAt: '2026-10-01T09:00:00.000Z', endedAt: null, endedKind: null, accessEndsAt: '2026-10-19T11:12:00.123Z',
+        closable: false }, expect.objectContaining({ reference: '70000002', effectiveState: 'sent', accessEndsAt: null,
+        closable: true })], wrongPatientReports: true });
+      expect(Object.keys(found.body.items[0]).slice(-2)).toEqual(['accessEndsAt', 'closable']);
+      expect(sqlCalls('identity.admin_find_order_routes').map((call) => call.sql))
+        .toEqual(['select * from identity.admin_find_order_routes($1, $2)']);
+      // A schema without 0089 (13 columns): neither key, never a made-up closable: false; the lookup still answers.
+      handlers['identity.admin_find_order_routes'] = () => ({ rows: [base] });
+      const earlier = await request(server()).post('/api/v1/admin/order-routes/search')
+        .set('Authorization', 'Bearer synthetic').send({ healthId: 'HID-ABC234' });
+      expect(earlier.status).toBe(200);
+      expect(earlier.body.items[0]).not.toHaveProperty('accessEndsAt');
+      expect(earlier.body.items[0]).not.toHaveProperty('closable');
+      expect(Object.keys(earlier.body.items[0])).toHaveLength(13);
+      // A closable the database did not answer as a boolean is left out; an unreadable time is null.
+      handlers['identity.admin_find_order_routes'] = () => ({ rows: [{ ...base, access_ends_at: 'not a time', closable: null },
+        { ...base, access_ends_at: '2026-10-19T11:12:00+00:00', closable: 'false' }] });
+      const odd = await request(server()).get('/api/v1/admin/order-routes?reference=70000000').set('Authorization', 'Bearer synthetic');
+      expect(odd.body.items.map((item: Record<string, unknown>) => [item.accessEndsAt, 'closable' in item]))
+        .toEqual([[null, false], ['2026-10-19T11:12:00.000Z', false]]);
+    });
+
     it('lists or unlists a facility for orders, with a reason; failures audited only', async () => {
       admin(all);
       handlers['identity.admin_set_order_route_destination'] = () => ({ rows: [{ facility_id: laboratoryId, listed: false,
