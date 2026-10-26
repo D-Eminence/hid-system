@@ -49,4 +49,21 @@ describe('HID event envelope v1', () => {
       .toThrow(/outside its producer contract/);
   });
 
+
+  it('accepts the two rows the late correction writes (D17, 0090), the same shapes as the wrong-patient report\'s', () => {
+    // C29 writes item 3's rows: the Lab invalidation's event per current result version, and the Pharmacy reversal's.
+    const voided = { ...event, producer: 'lab' as const, eventType: 'LabResultEnteredInError', aggregateType: 'lab-result',
+      aggregateVersion: 2, payload: { resultId: event.aggregateId, resultVersion: 2, status: 'entered_in_error' } };
+    expect(eventEnvelope(voided)).toMatchObject({ type: 'LabResultEnteredInError', producer: 'lab', payload: voided.payload });
+    const reversed = { ...event, producer: 'pharmacy' as const, eventType: 'MedicationDispensingReversed',
+      aggregateType: 'medication-dispensing-reversal', aggregateVersion: 1, payload: { reversalId: event.aggregateId,
+        dispensingId: '60000000-0000-4000-8000-000000000001', workItemId: '70000000-0000-4000-8000-000000000001',
+        status: 'reversed' } };
+    expect(eventEnvelope(reversed)).toMatchObject({ type: 'MedicationDispensingReversed', producer: 'pharmacy',
+      payload: reversed.payload });
+    // Never the reason, the note or the value.
+    expect(() => eventEnvelope({ ...voided, payload: { ...voided.payload, reason: 'not this patient' } }))
+      .toThrow(/outside its producer contract/);
+    expect(() => eventEnvelope({ ...voided, payload: { ...voided.payload, numericValue: 6.8 } })).toThrow();
+  });
 });
