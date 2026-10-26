@@ -1637,19 +1637,21 @@ Still open, with what each one holds back:
   without it break-glass is refused.
 - Duplicate active memberships for one account and facility: the read-only
   query decides whether one-membership enforcement can ship.
-- The wrong-patient report (item 3, 0088): the owner signs 0088's declaration
-  (`config/production-schema-compatibility.json` is unsigned until then)
-  after the website release that carries its screens (D15) and after the
-  container database acceptance (`scripts/run-container-database-acceptance.sh`),
-  which, with the staging schema upgrade, is a manual gate before signing.
-  The release diffs from item 2's released commit (0087 must be live first:
-  the declaration names only 0088 and `runtime-grants.sql`). With the
-  default `changed` selection it rebuilds all 13 components, because
-  `scripts/verify-migration-ledger.mjs` changes, as 0087's release does. The
-  website's backend pins must name the commits item 2's release deployed
-  before its item 3 release can deploy, and be re-pinned after this one.
-  Late correction (D17), the patient email (D9) and "can't complete" (D18)
-  are not in this build.
+- The wrong-patient report (item 3, 0088): signed by the owner, D-Eminence,
+  in chat on 2026-10-26, after the container database acceptance (a fresh
+  install applying all 89 migrations and every `test/database` suite, then
+  no pending migration) and the staging schema upgrade passed. The owner
+  confirmed that the sending clinician keeps seeing the patient's name on
+  the Overview card after their grant ends (D10 as written; every such
+  view is audited). Release order: the website release carrying the
+  dormant screens, pinned to item 2's release, then this backend release,
+  diffed from item 2's released commit (0087 must be live first: the
+  declaration names only 0088 and `runtime-grants.sql`); with the default
+  `changed` selection it rebuilds all 13 components, because
+  `scripts/verify-migration-ledger.mjs` changes, as 0087's release does.
+  The website's pins are re-pinned after this release. Late correction
+  (D17), the patient email (D9) and "can't complete" (D18) are not in this
+  build.
 
 A default-off switch is turned on through `dev`'s Terraform for a tunable, or
 by a later commit for a one-way enforcement flip; a database control through
