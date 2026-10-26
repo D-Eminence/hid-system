@@ -1740,9 +1740,13 @@ Still open, with what each one holds back:
   adversarial review. 0088 must be live first (the declaration names only
   0089 and `runtime-grants.sql`). Release order: 0089 with
   `runtime-grants.sql`, then lab-api, pharmacy-api and identity-api built
-  from the same commit (ehr-api only if the release tooling counts its
-  `scripts/`), then the website with health's re-pin; either order is safe,
-  since every field is optional. A follow-up for the owner: an index on
+  from the same commit, then the website with health's re-pin; either order
+  is safe, since every field is optional. The release tooling
+  (`scripts/production-backend-build.mjs`) counts the verifier under
+  `services/ehr-api/scripts/` toward both the ehr-api and the migration
+  images; with the default `changed` selection, the diff from item 3's
+  released commit rebuilds all 13 components anyway, because
+  `scripts/verify-migration-ledger.mjs` changes, as for 0087 and 0088. A follow-up for the owner: an index on
   `identity.staff_facility_memberships (facility_id)` for active memberships,
   if `receives` is slow in production (3-4 ms a call, p95 up to 6.5 ms, with
   10,000 memberships); not in 0089, because it would lock the table.
