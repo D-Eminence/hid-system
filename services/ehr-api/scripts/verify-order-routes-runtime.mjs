@@ -22,9 +22,12 @@
 // accounts (as the other runtime verifiers seed them), QoreID switched on, a
 // newer attestation text (the DPO's next wording, to prove the current one is
 // required), reading what the database holds, ageing routes past their
-// windows (the services' clock cannot be moved), and one row the laboratory
+// windows (the services' clock cannot be moved), one row the laboratory
 // could not write itself (its own same-facility work item for the same
-// patient, to prove a route never opens another row of that patient).
+// patient, to prove a route never opens another row of that patient), and,
+// for the wrong-patient report (item 3), a laboratory role that may receive
+// lab requests but not mark results entered in error (no standard role is
+// one: the lab role holds both permissions).
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -788,9 +791,12 @@ try {
   const routedItem = workList.items.find(item => item.id === accepted.workItemId);
   assert(routedItem, `work list: ${JSON.stringify(workList)}`);
   assert.equal('sourceEhrOrderId' in routedItem, false, 'a routed row must not carry the other facility\'s order id');
+  // Item 3: the card carries the route's version as a number (the wrong-patient report's expectedVersion) and
+  // endedKind, null while the route is live.
   assert.deepEqual(routedItem.orderRoute, { id: route1.id, reference: route1.reference, effectiveState: 'accepted',
-    access: 'work', orderingFacilityName: hospital.name, ordererName: hospital.administratorName,
-    ordererLicence: { body: 'MDCN', number: 'MDCN/70011' } });
+    access: 'work', version: accepted.route.version, endedKind: null, orderingFacilityName: hospital.name,
+    ordererName: hospital.administratorName, ordererLicence: { body: 'MDCN', number: 'MDCN/70011' } });
+  assert.equal(typeof routedItem.orderRoute.version, 'number');
   assert.deepEqual(routedItem.patient, { fullName: patient.fullName, sex: patient.sex, dateOfBirth: patient.dob,
     healthIdLast4: patient.hid.slice(-4) });
   assertNone(routedItem, [patient.hid, lr1.id, encounter.id], 'routed work row');
@@ -1335,6 +1341,354 @@ try {
       queryInAudit: 0 } };
   step('support finds and closes a route; the directory allows 60 searches an hour per member');
 
+  // ── 12b. Wrong patient (item 3): a receiver ends an order it accepted for someone who was not the patient ──
+  // A laboratory signed up for this block (so the first laboratory's counts stay as asserted below), its
+  // administrator, a scientist invited through P4b, and an invited member whose role (owner SQL: no standard
+  // role is one) may receive lab requests but not mark results entered in error. The pharmacy is the one above.
+  const wpLab = await signUp({ label: 'Wrong-patient Laboratory', organizationType: 'laboratory', productCode: 'laboratory',
+    administratorName: 'Ifeoma Nwosu' });
+  await review(wpLab, 'lab', { body: 'MLSCN', number: 'MLSCN/70066' });
+  const wpLabAdmin = await signInStaff(wpLab.email, HOSTS.lab, wpLab.facilityId, { name: wpLab.administratorName });
+  const wpLabMember = await invited(wpLabAdmin, HOSTS.lab, wpLab.facilityId, { name: 'Jide Wrongpatient',
+    email: synthetic('wp-lab-member'), role: 'lab', licenceBody: 'MLSCN', licenceNumber: 'MLSCN/80066' });
+  const wpReceiver = await invited(wpLabAdmin, HOSTS.lab, wpLab.facilityId, { name: 'Kunle Receiveronly',
+    email: synthetic('wp-lab-receiver'), role: 'lab', licenceBody: 'MLSCN', licenceNumber: 'MLSCN/80077' });
+  await owner.query(`insert into auth.roles (code, description) values ('verifier_lab_receiver_only',
+    'Order-route verifier: receives lab requests, cannot mark results entered in error') on conflict do nothing`);
+  await owner.query(`insert into auth.role_permissions (role_code, permission_code)
+    values ('verifier_lab_receiver_only', 'lab.order-route.receive') on conflict do nothing`);
+  await age(`with old as (update auth.account_roles set revoked_at = clock_timestamp(), revoked_by = $2,
+        revocation_reason = 'Order-route verifier: a receive-only member'
+      where account_id = $1 and role_code = 'lab' and scope_type = 'facility' and revoked_at is null
+      returning membership_id, facility_id)
+    insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+    select gen_random_uuid(), $1, 'verifier_lab_receiver_only', 'facility', membership_id, facility_id,
+      'Order-route verifier: a receive-only member' from old`, [wpReceiver.accountId, wpLabAdmin.accountId]);
+  const wpNotes = {
+    lab: 'He gave his cousin\'s Health ID at the counter; noticed when he asked for his own result',
+    labAccepted: 'Wrong row picked at the counter; the person left before any sample',
+    pharmacy: 'She collected it with another woman\'s date of birth; we think she was pretending',
+  };
+  const wpPath = (base, routeId) => `/${base === lab ? 'lab' : 'pharmacy'}/order-routes/${routeId}/wrong-patient`;
+  const reportWrong = (who, base, routeId, body, key = freshKey('wrong-patient')) => call(base, who, 'POST', wpPath(base, routeId),
+    body, key === null ? {} : { key });
+  const routeVersion = async (who, base, routeId) => expectStatus(await call(base, who, 'GET',
+    `/${base === lab ? 'lab' : 'pharmacy'}/order-routes/${routeId}`), 200, 'route').version;
+  const myLabResults = async () => expectStatus(await http(lab, 'GET', '/lab/internal/me/released-results', {
+    cookie: patientSession.cookie, headers: { 'x-hid-internal-caller': 'ehr-api', 'x-hid-service-token': tokens.lab } }), 200,
+  'the patient\'s released results').records.map(record => record.id);
+  const wpCounts = async routeId => one(`select
+      (select count(*)::int from ehr.order_route_wrong_patient_reports where route_id = $1) as reports,
+      (select state from ehr.order_routes where id = $1) as state,
+      (select ended_kind from ehr.order_routes where id = $1) as ended_kind`, [routeId]);
+  const wp = {};
+
+  // Lab, completed: sent, refused while not accepted, accepted, worked and released, then reported.
+  const lrW1 = await newLabRequest();
+  const routeW1 = expectStatus(await send(doctor, 'lab_request', lrW1, wpLab.facilityId, labVersion), 201, 'send lrW1').route;
+  wp.notAccepted = expectProblem(await reportWrong(wpLabAdmin, lab, routeW1.id, { expectedVersion: 1, reason: 'other',
+    note: wpNotes.lab }), 409, 'ORDER_ROUTE_NOT_ACCEPTED').code;
+  const acceptedW1 = expectStatus(await accept(wpLabAdmin, lab, routeW1.id, 1, { kind: 'date_of_birth', value: patient.dob },
+    { body: { reference: routeW1.reference } }), 201, 'accept lrW1');
+  const wpItem = expectStatus(await labCall(wpLabMember, 'GET', '/work-items'), 200, 'work list').items
+    .find(item => item.id === acceptedW1.workItemId);
+  assert(wpItem && typeof wpItem.orderRoute.version === 'number' && wpItem.orderRoute.endedKind === null,
+    `card: ${JSON.stringify(wpItem?.orderRoute)}`);
+  const wpAccession = expectStatus(await labCall(wpLabMember, 'POST', `/work-items/${acceptedW1.workItemId}/accession`,
+    { requirements: [{ specimenType: 'blood' }], reason: 'Synthetic accession of an order from another facility' },
+  { key: freshKey('accession') }), 201, 'accession W1');
+  let wpSpecimen = wpAccession.specimens[0];
+  wpSpecimen = expectStatus(await labCall(wpLabMember, 'POST', `/accessions/${wpAccession.id}/specimens/${wpSpecimen.id}/collect`,
+    { expectedVersion: wpSpecimen.version, collectedAt: now() }, { key: freshKey('collect') }), 201, 'collect W1');
+  wpSpecimen = expectStatus(await labCall(wpLabMember, 'POST', `/accessions/${wpAccession.id}/specimens/${wpSpecimen.id}/receive`,
+    { expectedVersion: wpSpecimen.version, receivedAt: now() }, { key: freshKey('receive') }), 201, 'receive W1');
+  let wpRun = expectStatus(await labCall(wpLabMember, 'POST', `/specimens/${wpSpecimen.id}/executions`,
+    { expectedSpecimenVersion: wpSpecimen.version, startedAt: now(), reason: 'Synthetic run of a routed order' },
+  { key: freshKey('execution') }), 201, 'execution W1');
+  wpRun = expectStatus(await labCall(wpLabMember, 'POST', `/executions/${wpRun.id}/complete`,
+    { expectedVersion: wpRun.version, completedAt: now() }, { key: freshKey('complete') }), 201, 'complete W1');
+  const wpResult = expectStatus(await labCall(wpLabMember, 'POST', `/executions/${wpRun.id}/results`,
+    { expectedExecutionVersion: wpRun.version, resultType: 'numeric', numericValue: 9.4, unit: '%', referenceRange: '4.0-5.6',
+      abnormalFlag: 'high' }, { key: freshKey('result') }), 201, 'result W1');
+  const wpResultId = wpResult.id ?? wpResult.result?.id;
+  expectStatus(await labCall(wpLabAdmin, 'POST', `/results/${wpResultId}/verify`, { expectedResultVersion: 1, occurredAt: now(),
+    reason: 'Verified by a second laboratory member' }, { key: freshKey('verify') }), 201, 'verify W1');
+  expectStatus(await labCall(wpLabAdmin, 'POST', `/results/${wpResultId}/release`, { expectedResultVersion: 1, occurredAt: now(),
+    reason: 'Released to the ordering facility' }, { key: freshKey('release') }), 201, 'release W1');
+  assert(await myLabResults().then(ids => ids.includes(wpResultId)), 'the released result is not in the patient\'s record');
+  // Refusals, each writing nothing: a stale version (the release moved it), the receive-only member with a
+  // result to withdraw, no Idempotency-Key, a note too short once trimmed, another laboratory.
+  const releasedVersion = await routeVersion(wpLabMember, lab, routeW1.id);
+  assert(releasedVersion > acceptedW1.route.version, 'the release did not move the route version');
+  wp.staleVersion = expectProblem(await reportWrong(wpLabMember, lab, routeW1.id, { expectedVersion: acceptedW1.route.version,
+    reason: 'someone_elses_details', note: wpNotes.lab }), 412, 'VERSION_CONFLICT').code;
+  const withoutPermission = expectProblem(await reportWrong(wpReceiver, lab, routeW1.id, { expectedVersion: releasedVersion,
+    reason: 'someone_elses_details', note: wpNotes.lab }), 403, 'ORDER_ROUTE_CORRECTION_PERMISSION_REQUIRED');
+  assert.equal(withoutPermission.permission, 'lab.result.entered-in-error');
+  wp.correctionPermissionRequired = `403 ${withoutPermission.code} (${withoutPermission.permission})`;
+  wp.withoutKey = expectProblem(await reportWrong(wpLabMember, lab, routeW1.id, { expectedVersion: releasedVersion,
+    reason: 'someone_elses_details', note: wpNotes.lab }, null), 400, 'IDEMPOTENCY_KEY_REQUIRED').code;
+  wp.shortNote = expectProblem(await reportWrong(wpLabMember, lab, routeW1.id, { expectedVersion: releasedVersion,
+    reason: 'other', note: '   Not him    ' }), 400, 'ORDER_ROUTE_INVALID').code;
+  wp.badReason = expectProblem(await reportWrong(wpLabMember, lab, routeW1.id, { expectedVersion: releasedVersion,
+    reason: 'cannot_complete', note: wpNotes.lab }), 400, 'VALIDATION_FAILED').code;
+  wp.otherLaboratory = expectProblem(await reportWrong(labAdmin, lab, routeW1.id, { expectedVersion: releasedVersion,
+    reason: 'other', note: wpNotes.lab }), 404, 'ORDER_ROUTE_NOT_FOUND').code;
+  assert.deepEqual(await wpCounts(routeW1.id), { reports: 0, state: 'completed', ended_kind: null }, 'a refusal wrote');
+  // The scientist (not the acceptor) reports it: the result is withdrawn, access ends, the patient is told.
+  const wpKey = freshKey('wrong-patient-w1');
+  const wpBody = { expectedVersion: releasedVersion, reason: 'someone_elses_details', note: `  ${wpNotes.lab}  ` };
+  const endedW1 = expectStatus(await reportWrong(wpLabMember, lab, routeW1.id, wpBody, wpKey), 200, 'wrong patient (lab)');
+  assert.deepEqual(endedW1, { route: { id: routeW1.id, version: endedW1.route.version, effectiveState: 'completed',
+    endedKind: 'wrong_patient' }, resultsVoided: 1, resultReportsMarked: 1, dispensingReversed: false, replayed: false });
+  assert(endedW1.route.version > releasedVersion);
+  const replayW1 = expectStatus(await reportWrong(wpLabMember, lab, routeW1.id, wpBody, wpKey), 200, 'replay');
+  assert.deepEqual(replayW1, { ...endedW1, replayed: true });
+  wp.anotherKey = expectProblem(await reportWrong(wpLabMember, lab, routeW1.id, { ...wpBody,
+    expectedVersion: endedW1.route.version }), 409, 'ORDER_ROUTE_ALREADY_ENDED').code;
+  // State before version: the old version is refused as already ended, not as a version conflict.
+  wp.oldVersionAfterEnd = expectProblem(await reportWrong(wpLabAdmin, lab, routeW1.id, { ...wpBody,
+    expectedVersion: releasedVersion }), 409, 'ORDER_ROUTE_ALREADY_ENDED').code;
+  // B: the route is metadata, the item leaves the work list, and nothing more can be recorded on it.
+  const routeAtB = expectStatus(await call(lab, wpLabMember, 'GET', `/lab/order-routes/${routeW1.id}`), 200, 'route at B');
+  assert.deepEqual([routeAtB.patient, routeAtB.clinicalInformation, routeAtB.effectiveState], [undefined, undefined, 'completed']);
+  assert(!expectStatus(await labCall(wpLabMember, 'GET', '/work-items'), 200, 'work list').items
+    .some(item => item.id === acceptedW1.workItemId), 'the reported item is still on the work list');
+  const itemAfter = await labCall(wpLabMember, 'GET', `/work-items/${acceptedW1.workItemId}`);
+  const writeAfter = await labCall(wpLabAdmin, 'POST', `/executions/${wpRun.id}/results`, { expectedExecutionVersion: wpRun.version,
+    resultType: 'numeric', numericValue: 9.5, unit: '%' }, { key: freshKey('result') });
+  assert([403, 404].includes(itemAfter.status), `item after the report: ${answerOf(itemAfter)}`);
+  assert([403, 404, 409].includes(writeAfter.status), `a result after the report: ${answerOf(writeAfter)}`);
+  if (writeAfter.status === 409) assert.equal(writeAfter.body.code, 'ORDER_ROUTE_CLOSED');
+  // A member holding the patient's own consent at B still reads the item on that basis: the card says how the
+  // route ended, with no patient, and any write answers 409 ORDER_ROUTE_CLOSED, consent or not.
+  await approvedAccess(wpLabAdmin, 'write_records');
+  const consentCard = expectStatus(await labCall(wpLabAdmin, 'GET', '/work-items'), 200, 'consent holder\'s list').items
+    .find(item => item.id === acceptedW1.workItemId);
+  assert.deepEqual([consentCard?.orderRoute.access, consentCard?.orderRoute.endedKind, typeof consentCard?.orderRoute.version,
+    consentCard?.patient], ['none', 'wrong_patient', 'number', undefined], JSON.stringify(consentCard));
+  const closedWrite = expectProblem(await labCall(wpLabAdmin, 'POST', `/executions/${wpRun.id}/results`,
+    { expectedExecutionVersion: wpRun.version, resultType: 'numeric', numericValue: 9.5, unit: '%' }, { key: freshKey('result') }),
+  409, 'ORDER_ROUTE_CLOSED').code;
+  // A: the status, the released row beside its entered-in-error row (no value), the receiving side's events.
+  const viewW1 = expectStatus(await ehrCall(doctor, 'GET', routesPath('lab_request', lrW1.id)), 200, 'A\'s view').items[0];
+  assert.deepEqual([viewW1.effectiveState, viewW1.endedKind, viewW1.resendAllowed, Boolean(viewW1.endedAt)],
+    ['completed', 'wrong_patient', false, true]);
+  assert.deepEqual(viewW1.results.map(item => [item.kind, item.resultId, item.numericValue === null ? null : Number(item.numericValue)]),
+    [['released', wpResultId, 9.4], ['entered_in_error', wpResultId, null]]);
+  const endedEvent = viewW1.events.find(event => event.type === 'access_ended');
+  assert.deepEqual([endedEvent?.side, endedEvent?.reasonCode], ['receiving', 'wrong_patient']);
+  assert(viewW1.events.some(event => event.type === 'result_marked_in_error'));
+  assertNone(viewW1, [wpNotes.lab, wpLabMember.name, wpLabMember.accountId], 'A\'s view');
+  // P: the order in full, no Stop, the new inbox notice; the result has left the record.
+  const myW1 = expectStatus(await patientCall(ehr, 'GET', '/ehr/me/order-routes'), 200, 'my routes').items
+    .find(item => item.id === routeW1.id);
+  assert.deepEqual([myW1.effectiveState, myW1.endedKind, myW1.actions, myW1.enteredInError, myW1.content.testDisplay,
+    myW1.content.clinicalInformation], ['completed', 'wrong_patient', [], false, labTest.testDisplay, clinicalNote]);
+  const wpInbox = expectStatus(await patientCall(identity, 'GET', '/identity/me/notifications?limit=100'), 200, 'inbox')
+    .filter(item => item.notificationCode === 'ORDER_ROUTE_WRONG_PATIENT');
+  const noticeW1 = wpInbox.find(item => item.resourceId === routeW1.id);
+  assert.deepEqual([noticeW1?.resourceType, noticeW1?.metadata], ['order-route', { routeId: routeW1.id, kind: 'lab_request',
+    orderingFacilityName: hospital.name, receivingFacilityName: wpLab.name }], JSON.stringify(wpInbox));
+  const resultsAfter = await myLabResults();
+  assert(!resultsAfter.includes(wpResultId), 'the withdrawn result is still in the patient\'s record');
+  assert(resultsAfter.includes(resultId), 'another result left the patient\'s record');
+  // What the database holds: one report, the invalidation's event for delivery, B's own audit row (no note).
+  assert.deepEqual(await one(`select (select count(*)::int from lab.result_invalidations where result_id = $1) as invalidations,
+      (select count(*)::int from lab.outbox_events where event_type = 'LabResultEnteredInError' and aggregate_id = $1
+        and patient_id = $2 and facility_id = $3) as outbox`, [wpResultId, patient.id, wpLab.facilityId]),
+  { invalidations: 1, outbox: 1 });
+  const bRows = await all(`select patient_id, details from audit.events where action = 'lab.order-route.wrong-patient'
+    and resource_id = $1 order by sequence_id`, [routeW1.id]);
+  assert.deepEqual(bRows.map(row => [row.patient_id, row.details.replayed, row.details.reasonCode, row.details.resultsVoided]),
+    [[patient.id, false, 'someone_elses_details', 1], [patient.id, true, 'someone_elses_details', 1]]);
+  assert.deepEqual(await all(`select facility_id from audit.events where action = 'ehr.order-route.wrong-patient'
+    and resource_id = $1 order by facility_id`, [routeW1.id]), [hospital.facilityId, wpLab.facilityId].sort()
+    .map(facility_id => ({ facility_id })));
+  wp.labCompleted = { answer: { effectiveState: 'completed', endedKind: 'wrong_patient', resultsVoided: 1,
+    resultReportsMarked: 1 }, replay: 'replayed true', reportedBy: 'a scientist, not the acceptor',
+  receiver: { routeRead: 'no patient', workList: 'item gone', itemRead: itemAfter.status, resultWrite: answerOf(writeAfter),
+    consentHolder: { card: 'access none, endedKind wrong_patient, no patient', resultWrite: closedWrite } },
+  ordering: { results: ['released', 'entered_in_error (no value)'], event: 'access_ended (receiving, wrong_patient)',
+    resendAllowed: false }, patient: { route: 'full content, no Stop', inbox: 'ORDER_ROUTE_WRONG_PATIENT',
+    labRecord: 'result gone, the earlier result kept' }, audit: 'B with the patient (and the replay), A and B system rows' };
+
+  // Lab, accepted, nothing returned: the receive-only member may end it (nothing to withdraw); no resend (D5).
+  const lrW2 = await newLabRequest();
+  const routeW2 = expectStatus(await send(doctor, 'lab_request', lrW2, wpLab.facilityId, labVersion), 201, 'send lrW2').route;
+  const acceptedW2 = expectStatus(await accept(wpLabAdmin, lab, routeW2.id, 1, { kind: 'health_id', value: patient.hid }), 201,
+    'accept lrW2');
+  const endedW2 = expectStatus(await reportWrong(wpReceiver, lab, routeW2.id, { expectedVersion: acceptedW2.route.version,
+    reason: 'other', note: wpNotes.labAccepted }), 200, 'wrong patient, nothing returned');
+  assert.deepEqual(endedW2, { route: { id: routeW2.id, version: endedW2.route.version, effectiveState: 'cancelled',
+    endedKind: 'wrong_patient' }, resultsVoided: 0, resultReportsMarked: 0, dispensingReversed: false, replayed: false });
+  const viewW2 = expectStatus(await ehrCall(doctor, 'GET', routesPath('lab_request', lrW2.id)), 200, 'A\'s view W2').items[0];
+  assert.deepEqual([viewW2.effectiveState, viewW2.endedKind, viewW2.results, viewW2.resendAllowed],
+    ['cancelled', 'wrong_patient', [], false]);
+  const lrW2Now = expectStatus(await ehrCall(doctor, 'GET', `${enc}/lab-requests/${lrW2.id}`), 200, 'lrW2');
+  wp.resend = expectProblem(await send(doctor, 'lab_request', lrW2Now, wpLab.facilityId, labVersion), 409,
+    'ORDER_ROUTE_ORDER_IN_WORK').code;
+  wp.labAccepted = { reportedBy: 'a member who may receive but not mark results in error', answer: 'cancelled, nothing withdrawn',
+    ordering: 'cancelled (wrong_patient), no results', resend: wp.resend };
+
+  // Lab, accepted and past B's window: already ended (the window is aged by owner SQL).
+  const lrW3 = await newLabRequest();
+  const routeW3 = expectStatus(await send(doctor, 'lab_request', lrW3, wpLab.facilityId, labVersion), 201, 'send lrW3').route;
+  const acceptedW3 = expectStatus(await accept(wpLabAdmin, lab, routeW3.id, 1, { kind: 'health_id', value: patient.hid }), 201,
+    'accept lrW3');
+  await age(`update ehr.order_routes set writes_end_at = clock_timestamp() - interval '1 minute',
+      access_ends_at = clock_timestamp() - interval '1 minute' where id = $1`, [routeW3.id]);
+  wp.outsideWindow = expectProblem(await reportWrong(wpLabAdmin, lab, routeW3.id, { expectedVersion: acceptedW3.route.version,
+    reason: 'other', note: wpNotes.labAccepted }), 409, 'ORDER_ROUTE_ALREADY_ENDED').code;
+  assert.deepEqual(await wpCounts(routeW3.id), { reports: 0, state: 'accepted', ended_kind: null });
+
+  // Pharmacy, dispensed: the dispensing is reversed and the prescription ends.
+  const rxW1 = await newPrescription('active');
+  const rxRouteW1 = await sendPrescription(rxW1);
+  const rxAcceptedW1 = expectStatus(await acceptPrescription(rxRouteW1.id, 1, { kind: 'health_id', value: patient.hid }), 201,
+    'accept rxW1');
+  const rxItemW1 = expectStatus(await pharmacyCall(pharmacist, 'GET', `/work-items/${rxAcceptedW1.workItemId}`), 200, 'rxW1 item');
+  assert(typeof rxItemW1.orderRoute.version === 'number' && rxItemW1.orderRoute.endedKind === null);
+  expectStatus(await pharmacyCall(pharmacist, 'POST', `/work-items/${rxAcceptedW1.workItemId}/dispensings`,
+    { expectedWorkItemVersion: Number(rxItemW1.version), quantityDispensed: 60, quantityUnit: 'tablet',
+      reason: 'Synthetic dispensing at the counter' }, { key: freshKey('dispense') }), 201, 'dispense rxW1');
+  const rxVersion = await routeVersion(pharmacist, pharmacy, rxRouteW1.id);
+  const endedRx = expectStatus(await reportWrong(pharmacist, pharmacy, rxRouteW1.id, { expectedVersion: rxVersion,
+    reason: 'suspected_misuse', note: wpNotes.pharmacy }), 200, 'wrong patient (pharmacy)');
+  assert.deepEqual(endedRx, { route: { id: rxRouteW1.id, version: endedRx.route.version, effectiveState: 'completed',
+    endedKind: 'wrong_patient' }, resultsVoided: 0, resultReportsMarked: 0, dispensingReversed: true, replayed: false });
+  wp.pharmacyAgain = expectProblem(await reportWrong(pharmacist, pharmacy, rxRouteW1.id, { expectedVersion: endedRx.route.version,
+    reason: 'suspected_misuse', note: wpNotes.pharmacy }), 409, 'ORDER_ROUTE_ALREADY_ENDED').code;
+  const rxViewW1 = expectStatus(await ehrCall(doctor, 'GET', routesPath('prescription', rxW1.id)), 200, 'A\'s rx view').items[0];
+  assert.deepEqual([rxViewW1.effectiveState, rxViewW1.endedKind, rxViewW1.dispensings.map(item => item.kind)],
+    ['completed', 'wrong_patient', ['dispensed', 'reversed']]);
+  assert.equal((await one(`select count(*)::int as n from pharmacy.outbox_events where event_type = 'MedicationDispensingReversed'
+    and aggregate_type = 'medication-dispensing-reversal' and patient_id = $1 and facility_id = $2
+    and payload->>'workItemId' = $3`, [patient.id, pharmacyFacility.facilityId, rxAcceptedW1.workItemId])).n, 1);
+  const rxNotice = expectStatus(await patientCall(identity, 'GET', '/identity/me/notifications?limit=100'), 200, 'inbox')
+    .find(item => item.notificationCode === 'ORDER_ROUTE_WRONG_PATIENT' && item.resourceId === rxRouteW1.id);
+  assert.deepEqual(rxNotice?.metadata, { routeId: rxRouteW1.id, kind: 'prescription', orderingFacilityName: hospital.name,
+    receivingFacilityName: pharmacyFacility.name });
+  wp.pharmacyDispensed = { answer: 'completed, dispensing reversed', again: wp.pharmacyAgain,
+    ordering: ['dispensed', 'reversed'], outbox: 'MedicationDispensingReversed', patientNotice: 'ORDER_ROUTE_WRONG_PATIENT' };
+
+  // The ordering facility's Overview card (D10's alternative (a)): the sender sees their own orders in full; a
+  // colleague a count and the references; another facility nothing; a member without ehr.order-route.send 403.
+  const overview = who => call(ehr, who, 'GET', '/ehr/order-routes/wrong-patient');
+  const wpReferences = [routeW1.reference, routeW2.reference, rxRouteW1.reference];
+  const own = expectStatus(await overview(doctor), 200, 'Overview (sender)');
+  assert.equal(own.windowDays, 30);
+  assert.deepEqual(own.others, { count: 0, references: [] });
+  assert.deepEqual(own.items.map(item => item.routeId).sort(), [routeW1.id, routeW2.id, rxRouteW1.id].sort());
+  const ownW1 = own.items.find(item => item.routeId === routeW1.id);
+  assert.deepEqual({ ...ownW1, endedAt: undefined }, { routeId: routeW1.id, reference: routeW1.reference, kind: 'lab_request',
+    receivingFacility: { id: wpLab.facilityId, name: wpLab.name }, patient: { name: patient.fullName }, endedAt: undefined,
+    resultsWithdrawn: 1, dispensingReversed: false,
+    link: { patientId: patient.id, encounterId: encounter.id, kind: 'lab_request', orderId: lrW1.id } });
+  assert(Number.isFinite(Date.parse(ownW1.endedAt)));
+  assert.deepEqual(own.items.filter(item => item.routeId !== routeW1.id).map(item => [item.kind, item.resultsWithdrawn,
+    item.dispensingReversed]).sort(), [['lab_request', 0, false], ['prescription', 0, true]]);
+  const overviewRows = await all(`select action, patient_id, details from audit.events
+    where action like 'ehr.order-route.wrong-patient-overview%' and actor_account_id = $1 order by sequence_id`, [doctor.accountId]);
+  assert.deepEqual(overviewRows.map(row => [row.action, row.patient_id]), [['ehr.order-route.wrong-patient-overview', null],
+    ...own.items.map(() => ['ehr.order-route.wrong-patient-overview.item', patient.id])]);
+  assert.deepEqual(overviewRows[0].details, { itemCount: 3, otherCount: 0 });
+  assertNone(overviewRows, [patient.fullName, ...wpReferences], 'the Overview audit rows');
+  const colleague = expectStatus(await overview(secondDoctor), 200, 'Overview (colleague)');
+  assert.deepEqual([colleague.items, colleague.others.count, [...colleague.others.references].sort()], [[], 3, [...wpReferences].sort()]);
+  assertNone(colleague, [patient.fullName, patient.id, lrW1.id, encounter.id], 'the colleague\'s Overview');
+  assert.deepEqual(expectStatus(await overview(thirdDoctor), 200, 'Overview (other facility)'),
+    { windowDays: 30, items: [], others: { count: 0, references: [] } });
+  // A hospital laboratory member holds no ehr.order-route.send: refused before the database is read.
+  const noSendResponse = await overview(hospitalLab1);
+  expectProblem(noSendResponse, 403);
+  const noSend = answerOf(noSendResponse);
+  const emergencyOverview = expectProblem(await call(ehr, doctor, 'GET', '/ehr/order-routes/wrong-patient', undefined,
+    { purpose: 'emergency' }), 403, 'PERMISSION_DENIED').code;
+  wp.overview = { sender: { items: 3, others: 0, patientName: true, link: 'patient, encounter, kind, order',
+    audit: 'one read row (no patient) and one row per item naming the patient' },
+  colleague: { items: 0, count: 3, references: 'the three, no patient' }, otherFacility: 'empty',
+  withoutSendPermission: noSend, emergency: emergencyOverview };
+
+  // Support: the reports (unreviewed, flagged first), the facility filter, the review (once, If-Match), the tile.
+  const unreviewed = expectStatus(await adminCall('GET', '/admin/wrong-patient-reports?status=unreviewed'), 200,
+    'support\'s reports').items;
+  const reportOf = routeId => unreviewed.find(item => item.routeId === routeId);
+  assert.deepEqual(unreviewed.map(item => item.routeId).sort(), [routeW1.id, routeW2.id, rxRouteW1.id].sort());
+  const reportW1 = reportOf(routeW1.id);
+  assert.deepEqual({ reference: reportW1.reference, kind: reportW1.kind, receiving: reportW1.receivingFacility,
+    ordering: reportW1.orderingFacility, reportedBy: reportW1.reportedBy.accountId, acceptedBy: reportW1.acceptedBy.accountId,
+    sameMember: reportW1.sameMember, acceptedWith: reportW1.acceptedWith, reason: reportW1.reason, note: reportW1.note,
+    stateBefore: reportW1.stateBefore, resultsVoided: reportW1.resultsVoided, resultReportsMarked: reportW1.resultReportsMarked,
+    specimensCollected: reportW1.specimensCollected, reporterRecordedWork: reportW1.reporterRecordedWork, flags: reportW1.flags,
+    facility30: reportW1.facilityReportsLast30Days, review: reportW1.review },
+  { reference: routeW1.reference, kind: 'lab_request', receiving: { id: wpLab.facilityId, name: wpLab.name },
+    ordering: { id: hospital.facilityId, name: hospital.name }, reportedBy: wpLabMember.accountId,
+    acceptedBy: wpLabAdmin.accountId, sameMember: false, acceptedWith: 'date_of_birth_with_reference',
+    reason: 'someone_elses_details', note: wpNotes.lab, stateBefore: 'completed', resultsVoided: 1, resultReportsMarked: 1,
+    specimensCollected: 1, reporterRecordedWork: true, flags: ['something_came_back', 'reporter_recorded_work'], facility30: 2,
+    review: null });
+  assert.deepEqual(reportW1.recordedBy.map(entry => entry.accountId).sort(), [wpLabAdmin.accountId, wpLabMember.accountId].sort());
+  assert.deepEqual([reportOf(routeW2.id).flags, reportOf(routeW2.id).acceptedWith, reportOf(routeW2.id).reporterRecordedWork],
+    [['other_reason_nothing_recorded'], 'health_id', false]);
+  assert.deepEqual(reportOf(rxRouteW1.id).flags, ['something_came_back', 'reporter_recorded_work', 'suspected_misuse']);
+  assertNone(unreviewed, [patient.fullName, patient.hid, patient.id, labTest.testDisplay, medicine.medicationDisplay, clinicalNote],
+    'support\'s reports');
+  const tileBefore = unreviewed.length;
+  const ofLab = expectStatus(await adminCall('GET', `/admin/wrong-patient-reports?status=recent&facilityId=${wpLab.facilityId}`), 200,
+    'reports of one facility').items;
+  assert.deepEqual(ofLab.map(item => item.routeId).sort(), [routeW1.id, routeW2.id].sort());
+  wp.unknownFacility = expectProblem(await adminCall('GET', `/admin/wrong-patient-reports?status=recent&facilityId=${randomUUID()}`),
+    404, 'ADMIN_FACILITY_NOT_FOUND').code;
+  const reviewPath = `/admin/wrong-patient-reports/${reportW1.reportId}/review`;
+  const reviewBody = { actions: ['ordering_facility_told', 'referred_to_dpo'],
+    note: 'Phoned the hospital the same day and referred it to the DPO', removeNote: true };
+  wp.reviewWithoutIfMatch = expectProblem(await adminCall('POST', reviewPath, reviewBody), 428, 'IF_MATCH_REQUIRED').code;
+  wp.reviewStale = expectProblem(await adminCall('POST', reviewPath, reviewBody, { ifMatch: reportW1.version + 6 }), 409,
+    'VERSION_CONFLICT').code;
+  wp.reviewMixed = expectProblem(await adminCall('POST', `/admin/wrong-patient-reports/${reportOf(routeW2.id).reportId}/review`,
+    { actions: ['no_further_action', 'facility_contacted'], note: 'Phoned the laboratory manager' },
+    { ifMatch: reportOf(routeW2.id).version }), 400, 'WRONG_PATIENT_REVIEW_INVALID').code;
+  const reviewedW1 = expectStatus(await adminCall('POST', reviewPath, reviewBody, { ifMatch: reportW1.version }), 200, 'review');
+  assert.deepEqual({ ...reviewedW1, reviewedAt: undefined }, { reportId: reportW1.reportId, version: reportW1.version + 1,
+    reviewedAt: undefined, actions: ['ordering_facility_told', 'referred_to_dpo'], noteRemoved: true });
+  wp.reviewAgain = expectProblem(await adminCall('POST', reviewPath, reviewBody, { ifMatch: reviewedW1.version }), 409,
+    'WRONG_PATIENT_REPORT_ALREADY_REVIEWED').code;
+  const afterReview = expectStatus(await adminCall('GET', '/admin/wrong-patient-reports?status=unreviewed'), 200, 'unreviewed').items;
+  assert.deepEqual(afterReview.map(item => item.routeId).sort(), [routeW2.id, rxRouteW1.id].sort());
+  const recentW1 = expectStatus(await adminCall('GET', '/admin/wrong-patient-reports?status=recent'), 200, 'recent').items
+    .find(item => item.routeId === routeW1.id);
+  assert.deepEqual([recentW1.note, recentW1.noteRemoved, recentW1.review?.actions, recentW1.review?.note,
+    recentW1.review?.reviewedBy?.accountId], ['Removed by Health ID support at review.', true,
+    ['ordering_facility_told', 'referred_to_dpo'], reviewBody.note, support.accountId]);
+  assert.deepEqual(await all(`select actor_type, reason, details from audit.events where action = 'admin.wrong-patient-report.review'
+    and resource_id = $1`, [reportW1.reportId]), [{ actor_type: 'platform', reason: reviewBody.note,
+    details: { reportId: reportW1.reportId, routeId: routeW1.id, actions: reviewBody.actions, noteRemoved: true,
+      version: reviewedW1.version } }]);
+  assert(await one(`select count(*)::int as n from audit.events where action = 'api.admin.wrong-patient-reports.list'
+    and outcome = 'success'`).then(row => row.n) >= 4, 'support\'s list reads are audited');
+  wp.support = { unreviewed: tileBefore, tile: `${tileBefore} to review, then ${afterReview.length}`,
+    flags: { labCompleted: reportW1.flags, labAccepted: reportOf(routeW2.id).flags, pharmacy: reportOf(rxRouteW1.id).flags },
+    facilityFilter: 'the laboratory\'s two', unknownFacility: wp.unknownFacility,
+    review: { withoutIfMatch: wp.reviewWithoutIfMatch, stale: wp.reviewStale, mixedActions: wp.reviewMixed, reviewed: 200,
+      noteRemoved: 'fixed text', again: wp.reviewAgain, platformRow: 'admin.wrong-patient-report.review, the review note as reason' } };
+
+  // The reporters' notes reach support's list only: no audit row, inbox item or service log carries one.
+  const noteValues = Object.values(wpNotes);
+  const noteRows = await all(`select action from audit.events where ${noteValues.map((_, index) =>
+    `strpos(coalesce(details::text, '') || coalesce(reason, ''), $${index + 1}) > 0`).join(' or ')}`, noteValues);
+  assert.deepEqual(noteRows, [], `a note reached an audit row: ${JSON.stringify(noteRows)}`);
+  const noteNotices = await all(`select notification_code from notification.inbox_items
+    where ${noteValues.map((_, index) => `strpos(metadata::text, $${index + 1}) > 0`).join(' or ')}`, noteValues);
+  assert.deepEqual(noteNotices, []);
+  for (const [name, log] of childLogs) {
+    const text = log.join('');
+    for (const note of noteValues) assert(!text.includes(note) && !text.includes(note.slice(0, 24)), `${name} logged a note`);
+  }
+  wp.notes = { auditRows: 0, inbox: 0, serviceLogs: 0, onlyIn: 'support\'s list' };
+  evidence.wrongPatient = wp;
+  step('wrong patient: lab (result withdrawn), nothing returned, outside the window, pharmacy (reversed); Overview card; support\'s list and review');
+
   // ── Timing (p95 of 25 calls each, with this run's routes and work) ──
   const p95 = async request => {
     const samples = [];
@@ -1430,8 +1784,8 @@ try {
     and actor_type='system'`);
   for (const row of crossRows) for (const id of staffIds) assert(!row.details.includes(id), 'a system row names a member');
   const sensitive = [...identityValues, otherPatient.hid, clinicalNote, medicine.instructions, medicine.medicationDisplay,
-    labTest.testDisplay, 'Synthetic own glucose test', '6.8', 'MDCN/70011', 'MDCN/80022', 'MLSCN/70022', 'MLSCN/80011', 'PCN/70033',
-    patientEmail];
+    labTest.testDisplay, 'Synthetic own glucose test', '6.8', '9.4', 'MDCN/70011', 'MDCN/80022', 'MLSCN/70022', 'MLSCN/80011',
+    'MLSCN/80066', 'PCN/70033', patientEmail, ...Object.values(wpNotes)];
   const scanned = await all(`select action, details::text as details from audit.events
     where action like '%order-route%' or action like '%order-destination%' or details ? 'orderRouteId'`);
   const leaks = scanned.filter(row => sensitive.some(value => row.details.includes(value)))
