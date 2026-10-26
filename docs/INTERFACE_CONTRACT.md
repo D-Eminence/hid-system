@@ -803,3 +803,104 @@ Frontend telemetry accepts only enumerated product event names and primitive
 allowlisted properties. Safe correlation IDs may accompany sanitized technical
 errors; request/response bodies, URLs, headers, identity/clinical content, and
 OCR extraction text are never part of the browser telemetry contract.
+
+## 21. Orders between facilities: an order accepted for the wrong person
+
+A laboratory or pharmacy that accepted an order from another facility can
+report that the person it accepted it for was not the order's patient
+(migration 0088; owner decisions of 2026-10-26, recorded in
+`MAIN_TO_NOVU_PORT.md`). In one transaction its access ends, every result it
+released on the order is marked entered in error, a dispensing it recorded is
+reversed, support gets a report, and the patient gets an inbox notice
+(`ORDER_ROUTE_WRONG_PATIENT`, metadata `{routeId, kind, orderingFacilityName,
+receivingFacilityName}`; no email). The order cannot be received again: the
+clinician writes a new one.
+
+```text
+POST /api/v1/lab/order-routes/:routeId/wrong-patient        # lab.order-route.receive
+POST /api/v1/pharmacy/order-routes/:routeId/wrong-patient   # pharmacy.order-route.receive
+```
+
+Facility context, `X-Purpose-Of-Use: direct-care` and `Idempotency-Key` are
+required. The body is `{ expectedVersion, reason, note }`: `reason` is one of
+`wrong_order_chosen`, `someone_elses_details`, `suspected_misuse`, `other`;
+`note` is 8-500 characters once trimmed and reaches Health ID support only
+(never an audit row, a log line, the ordering facility or the patient). Any
+member who may receive that kind of order may report; when something must be
+withdrawn the member also needs `lab.result.entered-in-error` or
+`pharmacy.dispensing.reverse`. It is allowed while the receiver may still work
+on the order (30 days after acceptance, or 14 days after the first return, 45
+at most) and not once anyone else ended it. `200` answers
+`{ route: { id, version, effectiveState, endedKind: 'wrong_patient' },
+resultsVoided, resultReportsMarked, dispensingReversed, replayed }`; the same
+member, key and request answer the stored report with `replayed: true`.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `VALIDATION_FAILED` | the body (an unknown reason, a note outside 8-500, an unknown field) |
+| 400 | `ORDER_ROUTE_INVALID` | a note shorter than 8 once trimmed, or the command's own input check |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | no or malformed key |
+| 403 | `PERMISSION_DENIED` | not a receiving member under direct care |
+| 403 | `ORDER_ROUTE_CORRECTION_PERMISSION_REQUIRED` | something must be withdrawn; problem member `permission` names the missing one |
+| 404 | `ORDER_ROUTE_NOT_FOUND` | not addressed to this facility, or another kind |
+| 409 | `ORDER_ROUTE_NOT_ACCEPTED` | not accepted (decline it instead) |
+| 409 | `ORDER_ROUTE_ALREADY_ENDED` | ended by anyone, or past the window; checked before the version |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | the key with another request |
+| 409 | `ORDER_ROUTE_CHANGED_CONCURRENTLY` | a concurrent route write or a deadlock (this command only) |
+| 412 | `VERSION_CONFLICT` | something was returned or changed since the version was read |
+| 423 | `CROSS_FACILITY_ORDERS_UNAVAILABLE` | `cross_facility_route_access_enabled` off |
+| 503 | `ORDER_ROUTE_UNAVAILABLE` | anything else |
+
+The Lab and Pharmacy work lists' `orderRoute` card gains `version` (a number)
+and `endedKind` (null while the route is live). After a report the work item
+leaves the list for members without the patient's consent; any write on it
+answers 409 `ORDER_ROUTE_CLOSED`, and a Lab release under consent is refused.
+
+Support (Identity, `@FacilityOptional`, platform transactions):
+
+```text
+GET  /api/v1/admin/wrong-patient-reports?status=unreviewed|recent&facilityId=   # platform.facility.read
+POST /api/v1/admin/wrong-patient-reports/:reportId/review                       # platform.facility.manage, If-Match
+```
+
+The list answers `{ items }` (at most 200): `unreviewed` flagged first, then
+oldest first; `recent` the last 90 days, newest first; `facilityId` the
+reporting (receiving) facility, 404 `ADMIN_FACILITY_NOT_FOUND` when unknown.
+Each item carries the report, both facilities, who reported and who accepted
+(names, `sameMember`, `acceptedWith`), the reason and note, what was
+withdrawn, who recorded the work, `flags` (`something_came_back`,
+`reporter_recorded_work`, `suspected_misuse`, `other_reason_nothing_recorded`),
+the 30-day counts per facility and per accepting member, and `review`. It
+carries no patient and no order content. The admin Overview tile counts the
+`unreviewed` list. The review takes `{ actions, note, removeNote? }`: one or
+more of `ordering_facility_told`, `facility_contacted`,
+`staff_access_changed`, `facility_suspended`, `referred_to_dpo`, or exactly
+`["no_further_action"]`, and a note of 8-500; `removeNote` replaces the
+reporter's note with "Removed by Health ID support at review." It answers
+`{ reportId, version, reviewedAt, actions, noteRemoved }`; refusals are 400
+`WRONG_PATIENT_REVIEW_INVALID`, 404 `WRONG_PATIENT_REPORT_NOT_FOUND`, 409
+`WRONG_PATIENT_REPORT_ALREADY_REVIEWED` (once only, checked before the
+version), 409 `VERSION_CONFLICT`, 428 `IF_MATCH_REQUIRED`. The command writes
+the platform audit row `admin.wrong-patient-report.review`.
+
+The ordering facility (EHR):
+
+```text
+GET /api/v1/ehr/order-routes/wrong-patient   # ehr.order-route.send, facility, direct-care only
+```
+
+The Overview card lists the orders sent from the session's facility that
+ended this way in the last 30 days: `{ windowDays: 30, items, others: { count,
+references } }`. A member sees an order in full (`routeId`, `reference`,
+`kind`, `receivingFacility { id, name }`, `patient { name }`, `endedAt`,
+`resultsWithdrawn`, `dispensingReversed`, `link { patientId, encounterId,
+kind, orderId }`) only if they sent it and may still read that patient's
+record; every other such order of the facility counts in `others` with its
+reference only. The read is audited in its transaction: one
+`ehr.order-route.wrong-patient-overview` row (no patient, details `{ itemCount,
+otherCount }`) and one `ehr.order-route.wrong-patient-overview.item` row per
+order shown in full, naming its patient. The order's route views (`GET
+…/order-routes`), the order lists' `orderRoute`, the patient's
+`GET /api/v1/ehr/me/order-routes` and support's lookup answer `endedKind:
+'wrong_patient'` unchanged in shape; the views list each withdrawn result as
+an `entered_in_error` report, without a value, beside its `released` row.

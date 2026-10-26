@@ -65,6 +65,7 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | main 0097 section 2 with #18 0c4de59 and 17abba5 (plan waves W14, Identity part, and W30) | Staff can use break-glass in production (owner decision of 2026-10-24, below). 0085 seeds the active `emergency` purpose of use `identity.activate_break_glass` requires, as `main`'s 0097 does (ON CONFLICT DO NOTHING: an operator's row, active or not, is kept as it is). Identity runs `platform.require_control_enabled('break_glass_enabled')` inside the activation transaction, before the command: the control off answers 423 `BREAK_GLASS_DISABLED` and writes nothing, an unreadable control 503 `PLATFORM_CONTROL_UNAVAILABLE`, and a missing or deactivated `emergency` purpose also 423 `BREAK_GLASS_DISABLED` (it was 400 `INVALID_CONSENT_COMMAND`). Every other 55000 stays 409 and every other 22023 stays 400. It differs from `main` as listed below the table | 0085 (main 0097) |
 | #81, main 0061–0063 with db49a0d, 46a173f and 08c906f, and P71's activation (plan wave P4) | Facility self sign-up (owner decision D14): a hospital, laboratory or pharmacy signs itself up through "Setup Your Facility" with a CAC lookup, an email code and a password, without an administrator approving it first, and support reviews every new facility within a business day (owner decision of 2026-10-24). It shipped closed: the platform control `provider_self_service_enabled` is seeded off and is opened with the audited admin command. Administrators finish with a password and get a staff session, as P71 did; staff MFA is not ported (owner decision 2). #81's answers are kept. It differs from `main` as listed below the table | 0086 (main 0061–0063), runtime-grants.sql |
 | main 0066 items 2-4 (3490809 / eb9b1ca) | A patient can revoke access they gave (an approved request or Access PIN use) from the Access page; emergency (break-glass) and workforce access cannot be revoked there. The access history labels emergency access and which grants the patient can revoke, and a deleted login gets no new inbox items. It differs from `main` as listed below the table | 0087, runtime-grants.sql |
+| — | This branch only (item 3, owner decisions of 2026-10-26): a laboratory or pharmacy that accepted an order from another facility for someone who was not its patient ends it from its work list. Its access ends and every result it sent back is marked entered in error, or its dispensing reversed, in one transaction; the patient gets an inbox notice; support reviews every report; the ordering facility sees such orders on its Overview for 30 days. Described below the table | 0088, runtime-grants.sql |
 
 Emergency contacts differ from `main` (#16 and e1757ba) in these ways. Owner
 decisions of 2026-10-23 are marked "owner".
@@ -1328,6 +1329,108 @@ signing 0087's declaration; those that keep `main`'s behaviour say so.
   advisory key and the inbox rule are therefore manual gates before signing
   (Still open, below).
 
+The wrong-patient report (item 3, this branch only; SPEC-FINAL in the
+item's build notes). The owner approved it on 2026-10-26 with these
+decisions, all built as decided:
+
+- D1: the receiver has its own remedy. D3: one transaction ends the route's
+  access and withdraws everything that went back (each result version marked
+  entered in error at A, a dispensing reversed); it cannot half-happen.
+- D2: usable while the receiver may still work on the order: up to 30 days
+  after acceptance, or 14 days after the first return (45 at most), and not
+  once anyone else ended it (the clinician's change, support's close, its
+  time). Otherwise 409 `ORDER_ROUTE_ALREADY_ENDED`; before acceptance 409
+  `ORDER_ROUTE_NOT_ACCEPTED` (decline instead).
+- D4: any member at B who may receive that kind of order
+  (`lab.order-route.receive` / `pharmacy.order-route.receive`); withdrawing a
+  result needs `lab.result.entered-in-error`, reversing a dispensing
+  `pharmacy.dispensing.reverse` (403
+  `ORDER_ROUTE_CORRECTION_PERMISSION_REQUIRED`, problem member `permission`).
+  D4b: no second confirmer.
+- D5: the order cannot be received again; the clinician writes a new one
+  (a resend answers 409 `ORDER_ROUTE_ORDER_IN_WORK`).
+- D6: one of four reasons (`wrong_order_chosen`, `someone_elses_details`,
+  `suspected_misuse`, `other`) and a note for support of 8-500 characters.
+  D7: the note reaches support's list only (no audit row, log line, ordering
+  facility or patient); support may replace it once, at review, with
+  "Removed by Health ID support at review."
+- D8: the patient gets a new inbox notice, `ORDER_ROUTE_WRONG_PATIENT`, with
+  its own title on the website. D9: in-app only, no email (no
+  notification-worker, AWS rule or Novu change). D13: the patient's sent order
+  is kept in full.
+- D10, the alternative (a): the order screen, the two phone calls (B's success
+  message tells B to phone; support phones when something had gone back) and
+  a card on the ordering facility's Overview listing such orders for 30 days.
+  The card's read (`GET /api/v1/ehr/order-routes/wrong-patient`, designed in
+  this build, privacy first): bound to the live staff session, the facility
+  and `direct-care` like the other order-route reads (the guard re-checks the
+  session with Identity; the database binds subject, membership and facility,
+  42501 otherwise); a member sees an order in full (reference, kind, receiving
+  facility, patient's name, when it ended, what was withdrawn, the link to the
+  order) only if they sent it and may still read that patient's record; every
+  other such order of the facility counts, with its reference and no patient;
+  a member without `ehr.order-route.send` is refused 403 by the guard (the
+  database answers the empty card). Read-only, no acknowledgement. Audited in
+  the read's transaction: one `ehr.order-route.wrong-patient-overview` row
+  (no patient, `{ itemCount, otherCount }`) and one
+  `ehr.order-route.wrong-patient-overview.item` row per order shown in full,
+  naming its patient; never a name in details.
+- D11: support's "Wrong-patient reports" list (`GET
+  admin/wrong-patient-reports?status=unreviewed|recent&facilityId=`,
+  `platform.facility.read`), flagged first; "Mark reviewed" (`POST
+  admin/wrong-patient-reports/:reportId/review`, `platform.facility.manage`,
+  `If-Match`, once; one or more actions or "no further action" alone, and a
+  note); the admin Overview tile counts the unreviewed list. D12: no
+  automatic limits; the list shows 30-day counts per facility and per
+  accepting member. D14: support refers to the DPO, the same day, every
+  suspected-misuse report and every report where something had gone back
+  (the flags `suspected_misuse` and `something_came_back`).
+- D15: the website ships first (dormant: its buttons need a numeric
+  `orderRoute.version`, and the new routes answer 404 on the old backend),
+  then the backend with the owner's signature on 0088. D16: the wording is
+  the spec's §9 drafts. D17: late correction is not in this build (the next
+  item); support and clinicians follow §9.5's guidance meanwhile. D18: no
+  "can't complete" action; the form says not to use this for that, "other"
+  reads "The person was not the patient for another reason", and support's
+  list flags `other_reason_nothing_recorded`. D19: the clinician sees
+  "another person's result, withdrawn by {lab} on {date}" with the value
+  hidden behind "Show the withdrawn value" (the website hides it; the order's
+  route view still carries the released row's value beside the
+  `entered_in_error` row, which has none).
+
+The services' part (routes under `/api/v1`; INTERFACE_CONTRACT §21):
+
+- lab-api and pharmacy-api: `POST order-routes/:routeId/wrong-patient`
+  (`Idempotency-Key`; body `{ expectedVersion, reason, note }`; the note is
+  trimmed and digested with the route, version and reason), one READ
+  COMMITTED transaction run once; the service writes its own row
+  (`lab.order-route.wrong-patient` / `pharmacy.order-route.wrong-patient`,
+  the patient from the command, details without the note) and Lab's
+  interceptor writes `api.lab.order-route.wrong-patient.request` without a
+  body (pharmacy-api has no audit interceptor, as for accept and decline).
+  A concurrent route write or deadlock (40001, 40P01) answers 409
+  `ORDER_ROUTE_CHANGED_CONCURRENTLY` for this command only. The work lists'
+  `orderRoute` card gains `version` (a number) and `endedKind`.
+- identity-api: support's list and review above; the list is audited by the
+  interceptor (`admin.wrong-patient-reports.list`), the review by the
+  command's platform row (`admin.wrong-patient-report.review`, the review note
+  as its reason; the interceptor writes failures only).
+- ehr-api: the Overview read above; `endedKind: 'wrong_patient'` passes
+  through the order's route views, the order lists' `orderRoute` and the
+  patient's routes with no code change.
+- Tests: the database suites `order-routes-wrong-patient` and
+  `order-routes-wrong-patient-overview` (and the extended order-route
+  suites); jest and HTTP specs in the four services
+  (`lab-order-route-wrong-patient.spec.ts`,
+  `pharmacy-order-route-wrong-patient.spec.ts`, Identity's
+  `order-routes.http.spec.ts`, EHR's `order-route-wrong-patient.spec.ts`);
+  and the order-routes runtime verifier's wrong-patient block (a lab order
+  with a released result withdrawn, one with nothing returned, one past its
+  window, a dispensed prescription reversed; the refusals; the patient's
+  notice and record; the ordering facility's view and Overview card for the
+  sender, a colleague and another facility; support's list and review; no
+  note in any audit row, inbox item or service log).
+
 ## Not ported, and why
 
 - Already on this branch: #26 (0071 grants the list), #58 (0071 seeds `direct-care`).
@@ -1446,6 +1549,11 @@ Decided by the owner, D-Eminence:
   differs from `main`" in Ported above) and signed 0087's declaration, with the website copy release
   (the corrected emergency-access sentence and the revoke form's PIN note)
   going first.
+- The wrong-patient report (item 3) is built at the owner's request
+  (2026-10-26) with the decisions D1-D19 described under "The wrong-patient
+  report" in Ported above, D10 taking the alternative (a): the order screen,
+  the two phone calls and a card on the ordering facility's Overview for 30
+  days, read-only, showing a member full rows only for orders they sent.
 
 Still open, with what each one holds back:
 
@@ -1513,6 +1621,13 @@ Still open, with what each one holds back:
   without it break-glass is refused.
 - Duplicate active memberships for one account and facility: the read-only
   query decides whether one-membership enforcement can ship.
+- The wrong-patient report (item 3, 0088): the owner signs 0088's declaration
+  (`config/production-schema-compatibility.json` is unsigned until then)
+  after the website release that carries its screens (D15) and after the
+  container database acceptance (`scripts/run-container-database-acceptance.sh`),
+  which, with the staging schema upgrade, is a manual gate before signing.
+  Late correction (D17), the patient email (D9) and "can't complete" (D18)
+  are not in this build.
 
 A default-off switch is turned on through `dev`'s Terraform for a tunable, or
 by a later commit for a one-way enforcement flip; a database control through
