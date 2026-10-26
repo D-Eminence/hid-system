@@ -135,6 +135,10 @@ const P0001_REFUSALS: Readonly<Record<string, readonly [number, string]>> = Obje
   // The wrong-patient report (C25, item 3 §5.1): the state is checked before the version.
   ORDER_ROUTE_NOT_ACCEPTED: [409, 'This order has not been accepted, so there is nothing to end: decline it instead'],
   ORDER_ROUTE_ALREADY_ENDED: [409, 'This order has already ended, so it cannot be ended here'],
+  // The late correction (C29, D17 §5.1): the state is checked before the version.
+  ORDER_ROUTE_STILL_OPEN: [409, 'This order is still open: report it with "This isn\'t the order\'s patient" instead'],
+  ORDER_ROUTE_ALREADY_REPORTED: [409, 'This order has already been reported as accepted for the wrong person'],
+  ORDER_ROUTE_CORRECTION_TOO_LATE: [409, 'The time to correct this order has passed: phone Health ID support'],
 });
 
 /** The permission C25 names when something must be withdrawn and the member may not (D4). */
@@ -150,6 +154,25 @@ function correctionPermissionRequired(error: unknown): DomainProblem {
   return new DomainProblem(403, 'ORDER_ROUTE_CORRECTION_PERMISSION_REQUIRED',
     'Results were recorded on this order, and this role cannot mark results entered in error', undefined,
     { cause: error, extensions: { permission: detail === LAB_CORRECTION_PERMISSION ? detail : LAB_CORRECTION_PERMISSION } });
+}
+
+/** An ISO-8601 UTC instant with milliseconds, as C29's limit refusal gives it (e.g. 2026-10-27T09:14:03.218Z). */
+const RETRY_AFTER = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+
+/**
+ * C29's limit (D17-9): 5 late corrections per member and 20 per facility in
+ * any 24 hours, exact. 429 with the earliest time another is possible as the
+ * problem member `retryAfter` (the database's DETAIL, kept only when it is
+ * such a time); support cannot lift it.
+ */
+function correctionLimit(error: unknown): DomainProblem {
+  const detail = (error as { detail?: unknown }).detail;
+  const parsed = typeof detail === 'string' && RETRY_AFTER.test(detail) ? new Date(detail) : undefined;
+  const retryAfter = parsed && Number.isFinite(parsed.getTime()) && parsed.toISOString() === detail ? detail : undefined;
+  return new DomainProblem(429, 'ORDER_ROUTE_CORRECTION_LIMIT', retryAfter
+    ? `This laboratory may make no more late corrections until ${retryAfter}; if many orders are affected, phone Health ID support now`
+    : 'This laboratory may make no more late corrections for now; if many orders are affected, phone Health ID support now',
+  undefined, { cause: error, ...(retryAfter ? { extensions: { retryAfter } } : {}) });
 }
 
 export const crossFacilityOrdersUnavailable = () => new DomainProblem(423, 'CROSS_FACILITY_ORDERS_UNAVAILABLE',
@@ -206,6 +229,7 @@ export function labOrderRouteProblem(error: unknown): unknown {
         return new DomainProblem(412, 'VERSION_CONFLICT', 'The order route changed; reload it', undefined, { cause: error });
       }
       if (message === 'ORDER_ROUTE_CORRECTION_PERMISSION_REQUIRED') return correctionPermissionRequired(error);
+      if (message === 'ORDER_ROUTE_CORRECTION_LIMIT') return correctionLimit(error);
       const refusal = P0001_REFUSALS[message];
       return refusal ? new DomainProblem(refusal[0], message, refusal[1], undefined, { cause: error })
         : orderRouteUnavailable(error);
@@ -251,5 +275,105 @@ export function wrongPatientAnswer(routeId: string, row: Row): WrongPatientAnswe
     resultReportsMarked: count(field(row, 'result_reports_marked')) ?? 0,
     dispensingReversed: field(row, 'dispensing_reversed') === true,
     replayed: result === 'replayed',
+  };
+}
+
+/**
+ * The late correction's problems (C29, D17 §5.1): as the wrong-patient
+ * report's, a concurrent release, reversal or order change (40001) or a
+ * deadlock (40P01) is 409 ORDER_ROUTE_CHANGED_CONCURRENTLY for this command
+ * only; everything else as the other route commands, the limit 429 with
+ * `retryAfter`, the capability's own failure (XX000) 503.
+ */
+export function lateCorrectionProblem(error: unknown): unknown {
+  return wrongPatientProblem(error);
+}
+
+/**
+ * The answer of C29 (D17 §5.1): the route as the correction left it, the
+ * ending it had before (null when it had only lapsed), what was withdrawn and
+ * until when the order could be corrected; never the patient or the report id.
+ */
+export interface LateCorrectionAnswer {
+  route: { id: string; version: number; effectiveState: string; endedKind: string };
+  late: true;
+  endedKindBefore: string | null;
+  resultsVoided: number;
+  resultReportsMarked: number;
+  dispensingReversed: boolean;
+  correctableUntil: string | null;
+  replayed: boolean;
+}
+
+export function correctionAnswer(routeId: string, row: Row): LateCorrectionAnswer | undefined {
+  const result = field(row, 'result');
+  const version = count(field(row, 'route_row_version'));
+  const effectiveState = text(field(row, 'effective_state'));
+  const endedKind = text(field(row, 'ended_kind'));
+  if ((result !== 'corrected' && result !== 'replayed') || version === null || !effectiveState || !endedKind) return undefined;
+  return {
+    route: { id: routeId, version, effectiveState, endedKind },
+    late: true,
+    endedKindBefore: text(field(row, 'ended_kind_before')),
+    resultsVoided: count(field(row, 'results_voided')) ?? 0,
+    resultReportsMarked: count(field(row, 'result_reports_marked')) ?? 0,
+    dispensingReversed: field(row, 'dispensing_reversed') === true,
+    correctableUntil: iso(field(row, 'correctable_until')),
+    replayed: result === 'replayed',
+  };
+}
+
+/** The correction states C30 answers (`not_accepted` never: it lists accepted routes only). */
+const DETAILED = new Set(['open', 'correctable']);
+
+/** What went back to the ordering facility and when (C30's `returned_items`), oldest first, at most 20. */
+function returnedItems(value: unknown): { at: string | null; withdrawn: boolean }[] {
+  let parsed = value;
+  if (typeof value === 'string') {
+    try { parsed = JSON.parse(value) as unknown; } catch { return []; }
+  }
+  if (!Array.isArray(parsed)) return [];
+  return parsed.slice(0, 20).flatMap((item: unknown) => {
+    if (typeof item !== 'object' || item === null || Array.isArray(item)) return [];
+    const entry = item as Record<string, unknown>;
+    return [{ at: iso(entry.at), withdrawn: entry.withdrawn === true }];
+  });
+}
+
+/**
+ * One row of C30 (D17-8, §5.1): an order this laboratory accepted, found by
+ * its reference, with its correction state and deadline, the laboratory's own
+ * report if any, and, only while it is open or correctable, the laboratory's
+ * own facts about it (the test, who here accepted it and how identity was
+ * checked, what went back and when). Built field by field: no patient, no
+ * orderer, no work item, no value. Undefined for a row without a route id.
+ */
+export function correctableLabRoute(row: Row) {
+  const id = text(field(row, 'route_id', 'id'));
+  if (!id) return undefined;
+  const correction = text(field(row, 'correction_state', 'correction'));
+  const what = text(field(row, 'what_name'));
+  const reportedAt = iso(field(row, 'reported_at'));
+  return {
+    id,
+    reference: text(field(row, 'reference')),
+    kind: text(field(row, 'kind')),
+    version: count(field(row, 'row_version', 'version')),
+    effectiveState: text(field(row, 'effective_state')),
+    orderingFacilityName: text(field(row, 'ordering_facility_name')),
+    acceptedAt: iso(field(row, 'accepted_at')),
+    completedAt: iso(field(row, 'completed_at')),
+    endedAt: iso(field(row, 'ended_at')),
+    endedKind: text(field(row, 'ended_kind')),
+    returned: field(row, 'returned') === true,
+    correction,
+    correctableUntil: iso(field(row, 'correctable_until')),
+    wrongPatient: reportedAt ? { reportedAt, late: field(row, 'report_late') === true } : null,
+    details: correction !== null && DETAILED.has(correction) && what !== null ? {
+      what,
+      acceptedBy: text(field(row, 'accepted_by_name')),
+      acceptedWith: text(field(row, 'accepted_with')),
+      returned: returnedItems(field(row, 'returned_items')),
+    } : null,
   };
 }

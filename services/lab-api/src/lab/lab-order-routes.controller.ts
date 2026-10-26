@@ -2,8 +2,8 @@ import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Q
 import { AuditAction, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
-import { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto, ReportWrongPatientDto, SearchOrderRoutesDto }
-  from './dto/order-route.dto';
+import { AcceptOrderRouteDto, CorrectWrongPatientDto, DeclineOrderRouteDto, FindCorrectableDto, ListOrderRoutesQueryDto,
+  ReportWrongPatientDto, SearchOrderRoutesDto } from './dto/order-route.dto';
 import { LabOrderRoutesService } from './lab-order-routes.service';
 
 const uuid = () => new ParseUUIDPipe({ version: '4' });
@@ -32,6 +32,18 @@ export class LabOrderRoutesController {
   @RequirePermissions('lab.order-route.receive') @AuditAction('lab.order-route.list.request')
   search(@Body() input: SearchOrderRoutesDto, @Req() request: HidRequest) {
     return this.routes.search(requireRequestContext(request), input);
+  }
+
+  /**
+   * Find an order this laboratory accepted by its exact reference (C30, D17
+   * §5.1), to correct it after it ended. A POST, so the reference (with a
+   * date of birth an acceptance factor) is in no request line. Declared before
+   * the `:routeId` routes; a route id is a version-4 UUID, never this word.
+   */
+  @Post('correctable') @HttpCode(200)
+  @RequirePermissions('lab.order-route.receive') @AuditAction('lab.order-route.correctable.request')
+  findCorrectable(@Body() input: FindCorrectableDto, @Req() request: HidRequest) {
+    return this.routes.findCorrectable(requireRequestContext(request), input);
   }
 
   @Get(':routeId')
@@ -68,5 +80,22 @@ export class LabOrderRoutesController {
     @Headers('idempotency-key') key: string | undefined, @Req() request: HidRequest) {
     const idempotencyKey = requireIdempotencyKey(key);
     return this.routes.reportWrongPatient(requireRequestContext(request), routeId, input, idempotencyKey);
+  }
+
+  /**
+   * The laboratory accepted this order for someone who was not its patient
+   * and finds out after the order ended or its window lapsed (C29, D17 §5.1):
+   * every result it recorded on the order is withdrawn, until 180 days after
+   * acceptance, at most 5 per member and 20 per laboratory in any 24 hours.
+   * Any member who may receive lab requests; withdrawing a result also needs
+   * lab.result.entered-in-error, which the command checks. The interceptor's
+   * row carries no body (the support note is never audited).
+   */
+  @Post(':routeId/wrong-patient-correction') @HttpCode(200)
+  @RequirePermissions('lab.order-route.receive') @AuditAction('lab.order-route.wrong-patient-correction.request')
+  correctWrongPatient(@Param('routeId', uuid()) routeId: string, @Body() input: CorrectWrongPatientDto,
+    @Headers('idempotency-key') key: string | undefined, @Req() request: HidRequest) {
+    const idempotencyKey = requireIdempotencyKey(key);
+    return this.routes.correctWrongPatient(requireRequestContext(request), routeId, input, idempotencyKey);
   }
 }

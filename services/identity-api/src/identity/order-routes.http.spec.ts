@@ -354,7 +354,8 @@ describe('order-route routes in Identity over HTTP', () => {
       handlers['identity.admin_find_order_routes'] = () => ({ rows: [] });
       const byReference = await request(server()).get('/api/v1/admin/order-routes?reference=7000000a')
         .set('Authorization', 'Bearer synthetic');
-      expect([byReference.status, byReference.body]).toEqual([200, { items: [], wrongPatientReports: true }]);
+      expect([byReference.status, byReference.body]).toEqual([200, { items: [], wrongPatientReports: true,
+        lateCorrection: true }]);
       expect(sqlCalls('identity.admin_find_order_routes').map((call) => call.values)).toEqual([['7000000A', null]]);
       expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'api.admin.order-routes.find', outcome: 'success' }));
     });
@@ -401,7 +402,7 @@ describe('order-route routes in Identity over HTTP', () => {
         receivingFacilityId: laboratoryId, receivingFacilityName: 'Synthetic Laboratory', createdAt: '2026-10-01T08:00:00.000Z',
         acceptedAt: '2026-10-01T09:00:00.000Z', endedAt: null, endedKind: null, accessEndsAt: '2026-10-19T11:12:00.123Z',
         closable: false }, expect.objectContaining({ reference: '70000002', effectiveState: 'sent', accessEndsAt: null,
-        closable: true })], wrongPatientReports: true });
+        closable: true })], wrongPatientReports: true, lateCorrection: true });
       expect(Object.keys(found.body.items[0]).slice(-2)).toEqual(['accessEndsAt', 'closable']);
       expect(sqlCalls('identity.admin_find_order_routes').map((call) => call.sql))
         .toEqual(['select * from identity.admin_find_order_routes($1, $2)']);
@@ -511,7 +512,7 @@ describe('order-route routes in Identity over HTTP', () => {
         noteRemoved: false, stateBefore: 'completed', resultsVoided: 1, resultReportsMarked: 1, dispensingReversed: false,
         specimensCollected: 1, recordedBy: [{ accountId: '20000000-0000-4000-8000-000000000031', name: 'Remi Lab' }],
         reporterRecordedWork: true, flags: ['something_came_back', 'reporter_recorded_work'], facilityReportsLast30Days: 2,
-        memberReportsLast30Days: 1, review: null }] }]);
+        memberReportsLast30Days: 1, review: null }], lateCorrection: true }]);
       expect(sqlCalls('identity.admin_list_wrong_patient_reports')[0]?.values).toEqual(['unreviewed', null]);
       expect(database.withPlatformTransaction).toHaveBeenCalledWith(expect.objectContaining({
         purposeOfUse: 'healthcare-operations' }), expect.any(Function), { readOnly: true });
@@ -614,5 +615,121 @@ describe('order-route routes in Identity over HTTP', () => {
       const denied = await review({ actions: ['facility_contacted'], note: 'Phoned the laboratory manager' }, '1');
       expect([denied.status, denied.body.code]).toEqual([403, 'PERMISSION_DENIED']);
     });
+  });
+
+  describe('support and the late correction (D17: C21, C26, C27)', () => {
+    const admin = (permissions: string[]) => tokens.verify.mockResolvedValue({ actor: standaloneAdmin(permissions), claims: {} });
+    const all = ['platform.admin.access', 'platform.facility.read', 'platform.facility.manage', 'platform.principal.read'];
+    const reportId = '80000000-0000-4000-8000-000000000002';
+    const found = { route_id: routeId, reference: '70000000', kind: 'lab_request', row_version: '6', effective_state: 'completed',
+      ordering_facility_id: facilityId, ordering_facility_name: 'Synthetic Hospital Ltd', receiving_facility_id: laboratoryId,
+      receiving_facility_name: 'Synthetic Laboratory', created_at: new Date('2026-10-01T08:00:00Z'),
+      accepted_at: new Date('2026-10-01T09:00:00Z'), ended_at: new Date('2026-10-05T09:00:00Z'), ended_kind: 'support',
+      access_ends_at: new Date('2026-10-05T09:00:00Z'), closable: false };
+    const report = { report_id: reportId, row_version: '1', route_id: routeId, reference: '70000000', kind: 'lab_request',
+      receiving_facility_id: laboratoryId, receiving_facility_name: 'Synthetic Laboratory', ordering_facility_id: facilityId,
+      ordering_facility_name: 'Synthetic Hospital Ltd', reported_at: new Date('2026-10-26T08:00:00Z'),
+      reported_by_account_id: '20000000-0000-4000-8000-000000000031', reported_by_name: 'Remi Lab',
+      accepted_by_account_id: '20000000-0000-4000-8000-000000000032', accepted_by_name: 'Tola Lab', same_member: false,
+      accepted_with: 'health_id', accepted_at: new Date('2026-10-01T09:00:00Z'), reason_code: 'someone_elses_details',
+      note: 'The patient phoned: she never gave a sample there', note_removed: false, state_before: 'completed',
+      results_voided: 1, result_reports_marked: 1, dispensing_reversed: false, specimens_collected: 1, recorded_by: [],
+      reporter_recorded_work: false, flags: ['something_came_back', 'late_correction', 'patient_prompted'],
+      facility_reports_last_30_days: 1, member_reports_last_30_days: 0, reviewed_at: null, reviewed_by_account_id: null,
+      reviewed_by_name: null, review_actions: null, review_note: null };
+    const late = { late: true, ended_kind_before: 'support', discovered_by: 'patient',
+      // node-postgres makes a date column a Date at local midnight.
+      discovered_on: new Date(2026, 9, 25), reporter_late_reports_last_30_days: 2, ordering_sender_active: false,
+      required_actions: ['ordering_facility_told', 'referred_to_dpo'] };
+
+    it('finds a route with whether it may still be corrected, until when, and the report; lateCorrection: true', async () => {
+      admin(all);
+      handlers['identity.admin_find_order_routes'] = () => ({ rows: [
+        { ...found, correction: 'correctable', correctable_until: new Date('2027-03-30T09:00:00Z'), wrong_patient_reported_at: null,
+          wrong_patient_late: null },
+        { ...found, route_id: '70000000-0000-4000-8000-000000000003', correction: 'reported', correctable_until: null,
+          wrong_patient_reported_at: new Date('2026-10-26T08:00:00.5Z'), wrong_patient_late: true },
+        { ...found, route_id: '70000000-0000-4000-8000-000000000004', correction: 'too_late',
+          correctable_until: new Date('2026-04-01T09:00:00Z'), wrong_patient_reported_at: null, wrong_patient_late: null },
+        { ...found, route_id: '70000000-0000-4000-8000-000000000005', effective_state: 'sent', accepted_at: null,
+          correction: 'not_accepted', correctable_until: null, wrong_patient_reported_at: null, wrong_patient_late: null }] });
+      const answer = await request(server()).get('/api/v1/admin/order-routes?reference=70000000').set('Authorization', 'Bearer synthetic');
+      expect(answer.status).toBe(200);
+      expect(answer.body.lateCorrection).toBe(true);
+      expect(answer.body.wrongPatientReports).toBe(true);
+      expect(answer.body.items.map((item: Record<string, unknown>) => [item.correction, item.correctableUntil, item.wrongPatient]))
+        .toEqual([['correctable', '2027-03-30T09:00:00.000Z', null],
+          ['reported', null, { reportedAt: '2026-10-26T08:00:00.500Z', late: true }],
+          ['too_late', '2026-04-01T09:00:00.000Z', null], ['not_accepted', null, null]]);
+      expect(Object.keys(answer.body.items[0]).slice(-5)).toEqual(['accessEndsAt', 'closable', 'correction', 'correctableUntil',
+        'wrongPatient']);
+      // An earlier schema (0089's 15 columns): none of the three, and the lookup still answers.
+      handlers['identity.admin_find_order_routes'] = () => ({ rows: [found] });
+      const earlier = await request(server()).post('/api/v1/admin/order-routes/search')
+        .set('Authorization', 'Bearer synthetic').send({ healthId: 'HID-ABC234' });
+      expect(earlier.status).toBe(200);
+      for (const key of ['correction', 'correctableUntil', 'wrongPatient']) expect(earlier.body.items[0]).not.toHaveProperty(key);
+      expect(Object.keys(earlier.body.items[0])).toHaveLength(15);
+    });
+
+    it('lists a late report with its facts and what the review requires; an in-window one late false; an earlier schema none',
+      async () => {
+        admin(all);
+        handlers['identity.admin_list_wrong_patient_reports'] = () => ({ rows: [
+          { ...report, ...late, required_actions: ['ordering_facility_told', 'referred_to_dpo', 'something_unknown'] },
+          { ...report, report_id: '80000000-0000-4000-8000-000000000003', flags: ['something_came_back'], late: false,
+            ended_kind_before: null, discovered_by: null, discovered_on: null, reporter_late_reports_last_30_days: 0,
+            ordering_sender_active: true, required_actions: [] },
+          { ...report, report_id: '80000000-0000-4000-8000-000000000004' }] });
+        const answer = await request(server()).get('/api/v1/admin/wrong-patient-reports?status=unreviewed')
+          .set('Authorization', 'Bearer synthetic');
+        expect(answer.status).toBe(200);
+        expect(answer.body.lateCorrection).toBe(true);
+        const [lateReport, inWindow, earlier] = answer.body.items as Record<string, unknown>[];
+        expect(lateReport).toMatchObject({ late: true, endedKindBefore: 'support', discoveredBy: 'patient', discoveredOn: '2026-10-25',
+          reporterLateReportsLast30Days: 2, orderingSenderActive: false, requiredActions: ['referred_to_dpo', 'ordering_facility_told'],
+          flags: ['something_came_back', 'late_correction', 'patient_prompted'], review: null });
+        expect(inWindow).toMatchObject({ late: false, endedKindBefore: null, discoveredBy: null, discoveredOn: null,
+          reporterLateReportsLast30Days: 0, orderingSenderActive: true, requiredActions: [] });
+        for (const key of ['late', 'endedKindBefore', 'discoveredBy', 'discoveredOn', 'reporterLateReportsLast30Days',
+          'orderingSenderActive', 'requiredActions']) expect(earlier).not.toHaveProperty(key);
+        expect(JSON.stringify(answer.body)).not.toContain('50000000-0000-4000-8000-000000000001');
+      });
+
+    it('refuses to mark a late report reviewed without the referral 400 WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED with required',
+      async () => {
+        admin(['platform.admin.access', 'platform.facility.read', 'platform.facility.manage']);
+        const review = (body: unknown) => request(server()).post(`/api/v1/admin/wrong-patient-reports/${reportId}/review`)
+          .set('Authorization', 'Bearer synthetic').set('If-Match', '1').send(body as object);
+        const both = 'referred_to_dpo,ordering_facility_told';
+        for (const [detail, required] of [[both, both], ['ordering_facility_told', 'ordering_facility_told'],
+          ['ordering_facility_told,referred_to_dpo,x', both]]) {
+          handlers['identity.admin_review_wrong_patient_report'] = () => {
+            throw Object.assign(databaseError('22023', 'WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED'), { detail });
+          };
+          const refused = await review({ actions: ['no_further_action'], note: 'Checked with the laboratory by phone' });
+          expect([refused.status, refused.body.code, refused.body.required]).toEqual([400, 'WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED',
+            required]);
+          expect(refused.body).not.toHaveProperty('extensions');
+          expect(refused.headers['content-type']).toMatch(/^application\/problem\+json/);
+        }
+        // A DETAIL naming no known action: the refusal still, without the member.
+        handlers['identity.admin_review_wrong_patient_report'] = () => {
+          throw Object.assign(databaseError('22023', 'WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED'), { detail: 'unknown' });
+        };
+        const bare = await review({ actions: ['facility_contacted'], note: 'Checked with the laboratory by phone' });
+        expect([bare.status, bare.body.code, 'required' in bare.body]).toEqual([400, 'WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED', false]);
+        // Any other 22023 of the review is still the generic refusal.
+        handlers['identity.admin_review_wrong_patient_report'] = () => { throw databaseError('22023', 'WRONG_PATIENT_REVIEW_INVALID'); };
+        const generic = await review({ actions: ['facility_contacted'], note: 'Checked with the laboratory by phone' });
+        expect([generic.status, generic.body.code, 'required' in generic.body]).toEqual([400, 'WRONG_PATIENT_REVIEW_INVALID', false]);
+        // With the required actions the review goes through as before.
+        handlers['identity.admin_review_wrong_patient_report'] = () => ({ rows: [{ report_id: reportId, row_version: '2',
+          reviewed_at: new Date('2026-10-26T09:00:00Z'), review_actions: ['ordering_facility_told', 'referred_to_dpo'],
+          note_removed: false }] });
+        const reviewed = await review({ actions: ['ordering_facility_told', 'referred_to_dpo'],
+          note: 'Phoned the hospital and referred it to the DPO' });
+        expect([reviewed.status, reviewed.body.version]).toEqual([200, 2]);
+      });
   });
 });

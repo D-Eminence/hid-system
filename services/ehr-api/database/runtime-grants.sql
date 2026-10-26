@@ -1114,6 +1114,39 @@ revoke all on function ehr.order_route_receives_here(text),
   identity.admin_find_order_routes(text,text)
   from public;
 
+-- The late correction of an order accepted for the wrong person (0090, D17),
+-- as that migration grants it (its section 9): the Lab and Pharmacy late
+-- command and lookup to their runtimes and the schema test runtime; the
+-- patient's list (0090 drops and creates it with three more columns, so the
+-- grant above is given again) to the EHR runtime and the schema test
+-- runtime; support's reports list and find (both dropped and created with
+-- more columns) to the Identity runtime alone. The capability table, the two
+-- helpers and the shared command and lookup are granted to no role.
+grant execute on function lab.correct_wrong_patient_order_route(uuid,bigint,text,text,date,text,text,char),
+  lab.find_correctable_order_routes(text)
+  to hid_lab_runtime, hid_schema_test_runtime;
+grant execute on function pharmacy.correct_wrong_patient_order_route(uuid,bigint,text,text,date,text,text,char),
+  pharmacy.find_correctable_order_routes(text)
+  to hid_pharmacy_runtime, hid_schema_test_runtime;
+grant execute on function ehr.patient_list_order_routes()
+  to hid_ehr_runtime, hid_schema_test_runtime;
+grant execute on function identity.admin_list_wrong_patient_reports(text,uuid),
+  identity.admin_find_order_routes(text,text)
+  to hid_identity_runtime;
+revoke all on function ehr.order_route_correctable_until(ehr.order_routes),
+  ehr.order_route_correction_state(ehr.order_routes),
+  ehr.correct_wrong_patient_order_route(text,uuid,bigint,text,text,date,text,text,char),
+  ehr.find_correctable_order_routes(text,text),
+  lab.correct_wrong_patient_order_route(uuid,bigint,text,text,date,text,text,char),
+  lab.find_correctable_order_routes(text),
+  pharmacy.correct_wrong_patient_order_route(uuid,bigint,text,text,date,text,text,char),
+  pharmacy.find_correctable_order_routes(text),
+  ehr.patient_list_order_routes(),
+  identity.admin_list_wrong_patient_reports(text,uuid),
+  identity.admin_find_order_routes(text,text)
+  from public;
+revoke all on ehr.order_route_correction_capabilities from public;
+
 -- Public patient enrollment persists only encrypted pending evidence. Its
 -- activation command performs the canonical account/patient writes atomically.
 grant select, insert, update, delete on identity.public_patient_enrollments,

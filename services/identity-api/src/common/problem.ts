@@ -20,15 +20,34 @@ export interface ProblemDetails {
   errors?: readonly { field: string; messages: readonly string[] }[];
 }
 
+/** Problem members an extension can never replace. */
+const STANDARD_MEMBERS = new Set(['type', 'title', 'status', 'detail', 'instance', 'correlationId', 'code', 'errors']);
+
 export class DomainProblem extends HttpException {
+  /**
+   * Extension members sent with the problem (RFC 9457), as Lab's and
+   * Pharmacy's: e.g. `required` on support's review refusal (D17).
+   * Strings, numbers, booleans and null; never a standard member.
+   */
+  public readonly extensions?: Readonly<Record<string, string | number | boolean | null>>;
+
   constructor(
     status: number,
     public readonly code: string,
     detail: string,
     public readonly errors?: ProblemDetails['errors'],
+    options?: { extensions?: Readonly<Record<string, string | number | boolean | null>> },
   ) {
     super(detail, status);
+    if (options?.extensions) this.extensions = options.extensions;
   }
+}
+
+/** A domain problem's extension members, never one that would replace a standard member. */
+function extensionMembers(problem: DomainProblem | undefined): Record<string, unknown> {
+  if (!problem?.extensions) return {};
+  return Object.fromEntries(Object.entries(problem.extensions).filter(([name, value]) => !STANDARD_MEMBERS.has(name)
+    && (value === null || ['string', 'number', 'boolean'].includes(typeof value))));
 }
 
 @Catch()
@@ -70,6 +89,7 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       correlationId: request.correlationId ?? 'unavailable',
       code,
       ...(domainProblem?.errors ? { errors: domainProblem.errors } : {}),
+      ...extensionMembers(domainProblem),
     };
 
     response.status(status).type('application/problem+json').json(problem);

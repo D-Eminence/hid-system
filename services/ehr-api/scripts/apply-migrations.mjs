@@ -10,6 +10,7 @@ import {
   loadLocalEnvironment,
 } from '../../../scripts/local-environment.mjs';
 import { databaseOptions, managedDatabaseUrl } from './database-options.mjs';
+import { forwardMigrationNotices } from './migration-notices.mjs';
 import { orderMigrations } from './migration-order.mjs';
 
 const { Client } = pg;
@@ -86,6 +87,7 @@ async function appliedMigrations(client) {
 async function main() {
   const migrations = await loadMigrations();
   const client = new Client(databaseOptions(databaseUrl, 'hid-schema-migrator'));
+  const notices = forwardMigrationNotices(client, (line) => process.stdout.write(line));
   await client.connect();
 
   try {
@@ -130,7 +132,7 @@ async function main() {
       await client.query("set local statement_timeout = '120s'");
       for (const migration of pending) {
         try {
-          await client.query(migration.effectiveSql);
+          await notices.during(migration.version, () => client.query(migration.effectiveSql));
         } catch (error) {
           throw new Error(`Migration ${migration.version}: ${error.message}`);
         }
@@ -146,7 +148,7 @@ async function main() {
         await client.query('begin');
         await client.query("set local lock_timeout = '5s'");
         await client.query("set local statement_timeout = '120s'");
-        await client.query(migration.effectiveSql);
+        await notices.during(migration.version, () => client.query(migration.effectiveSql));
         await client.query(
           `insert into migration.schema_migrations
              (version, checksum_sha256, effective_checksum_sha256, execution_ms)

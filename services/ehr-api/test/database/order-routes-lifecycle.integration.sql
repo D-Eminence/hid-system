@@ -30,6 +30,13 @@
 --   9. support's find (0089, item 4) for every route of the suite: closable is
 --      exactly whether support's Close acts now, access_ends_at the stored
 --      column; the lapsed routes of 7 are not closable.
+--  10. the late correction (0090, D17) for every route of the suite received
+--      at L1 or PH1: what support's find (C21) answers as the route's
+--      correction state is exactly what the late command decides (tried as
+--      LB1 or PB1 at the version found, and undone): correctable acts, open,
+--      reported, not accepted and too late refuse with their codes; the
+--      deadline C21 gives is ehr.order_route_correctable_until's while the
+--      route is open, correctable or too late.
 -- Shared fixture of the P4c suites (each suite carries its own copy, so it
 -- runs alone). Synthetic values only; uuid prefix e4c.
 --   Platform: SA (platform_super_admin), SU (support_admin), FR
@@ -1360,6 +1367,79 @@ select pg_temp.assert('C21 against C22 for every route of the suite',
   (select count(*) || ' routes; ' || coalesce(string_agg(found.route_id || ' ' || found.effective_state || ' '
      || found.closable || ' ' || found.close_outcome, '; ') filter (where found.closable is distinct from
      (found.close_outcome = 'acts')), 'no mismatch') from every_found found));
+
+-- 10. The late correction (0090) against C21 for every route received at L1
+-- or PH1: the command tried at the version C21 found, as LB1 or PB1 (who
+-- may withdraw what must be withdrawn), and undone.
+create function pg_temp.late_acts(kind text, route uuid, version bigint) returns text language plpgsql as $f$
+begin
+  begin
+    if kind = 'lab_request' then
+      perform * from lab.correct_wrong_patient_order_route(route, version, 'other', 'own_check',
+        (clock_timestamp() at time zone 'Africa/Lagos')::date, 'Checked by the lifecycle suite',
+        'p4c-lifecycle-late-' || substr(md5(route::text), 1, 12), repeat('a', 64));
+    else
+      perform * from pharmacy.correct_wrong_patient_order_route(route, version, 'other', 'own_check',
+        (clock_timestamp() at time zone 'Africa/Lagos')::date, 'Checked by the lifecycle suite',
+        'p4c-lifecycle-late-' || substr(md5(route::text), 1, 12), repeat('a', 64));
+    end if;
+    raise exception 'P4C_LATE_ACTED';
+  exception when others then
+    if sqlerrm = 'P4C_LATE_ACTED' then
+      return 'acts';
+    end if;
+    return sqlstate || ' ' || sqlerrm;
+  end;
+end
+$f$;
+grant execute on function pg_temp.late_acts(text,uuid,bigint) to hid_lab_api_runtime, hid_pharmacy_api_runtime;
+create temp table late_route on commit drop as
+  select route.id, route.reference::text as reference, route.kind, route.receiving_facility_id,
+    route.accepted_at + interval '4320 hours' as deadline
+    from ehr.order_routes route
+   where route.receiving_facility_id in (current_setting('hid.test.facility_1')::uuid,
+     current_setting('hid.test.facility_2')::uuid);
+create temp table late_found (route_id uuid primary key, kind text, row_version bigint, correction text,
+  correctable_until timestamptz, outcome text) on commit drop;
+grant select on late_route to hid_identity_api_runtime, hid_lab_api_runtime, hid_pharmacy_api_runtime;
+grant select, insert, update on late_found to hid_identity_api_runtime, hid_lab_api_runtime, hid_pharmacy_api_runtime;
+set local role hid_identity_api_runtime;
+select pg_temp.as_platform(1);
+insert into late_found (route_id, kind, row_version, correction, correctable_until)
+select found.route_id, found.kind, found.row_version, found.correction, found.correctable_until
+  from late_route listed
+  cross join lateral identity.admin_find_order_routes(listed.reference, null) found
+ where found.route_id = listed.id;
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+update late_found set outcome = pg_temp.late_acts(kind, route_id, row_version) where kind = 'lab_request';
+reset role;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_signup_admin(2);
+update late_found set outcome = pg_temp.late_acts(kind, route_id, row_version) where kind = 'prescription';
+reset role;
+select pg_temp.assert('C21''s correction state is what the late command decides, for every route received here',
+  (select count(*) from late_found) = (select count(*) from late_route)
+  and not exists (select 1 from late_found found
+                   where found.outcome is distinct from case found.correction
+                     when 'correctable' then 'acts' when 'open' then 'P0001 ORDER_ROUTE_STILL_OPEN'
+                     when 'reported' then 'P0001 ORDER_ROUTE_ALREADY_REPORTED'
+                     when 'not_accepted' then 'P0001 ORDER_ROUTE_NOT_ACCEPTED'
+                     when 'too_late' then 'P0001 ORDER_ROUTE_CORRECTION_TOO_LATE' end)
+  and exists (select 1 from late_found found where found.correction = 'correctable')
+  and exists (select 1 from late_found found where found.correction = 'open')
+  and exists (select 1 from late_found found where found.correction = 'not_accepted'),
+  (select count(*) || ' routes: ' || string_agg(found.correction || '/' || coalesce(found.outcome, '-'), ', ')
+     from late_found found));
+select pg_temp.assert('C21''s deadline: ehr.order_route_correctable_until''s while open, correctable or too late, '
+    || 'else none; the late commands were undone',
+  not exists (select 1 from late_found found join late_route listed on listed.id = found.route_id
+               where found.correctable_until is distinct from
+                 case when found.correction in ('open', 'correctable', 'too_late') then listed.deadline end)
+  and not exists (select 1 from ehr.order_route_wrong_patient_reports report
+                   where report.idempotency_key like 'p4c-lifecycle-late-%')
+  and not exists (select 1 from ehr.order_route_correction_capabilities));
 
 select pg_temp.report();
 rollback;

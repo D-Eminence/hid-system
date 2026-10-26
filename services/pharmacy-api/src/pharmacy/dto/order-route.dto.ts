@@ -1,5 +1,6 @@
 import { Transform, Type } from 'class-transformer';
-import { IsDefined, IsIn, IsInt, IsOptional, IsString, Length, MaxLength, Min, MinLength, ValidateNested } from 'class-validator';
+import { IsDefined, IsIn, IsInt, IsOptional, IsString, Length, Matches, MaxLength, Min, MinLength, ValidateNested }
+  from 'class-validator';
 
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value;
 
@@ -87,4 +88,46 @@ export class ReportWrongPatientDto {
 
   @IsString() @MinLength(8) @MaxLength(500)
   note!: string;
+}
+
+/** How the pharmacy found out that the prescription's patient was not the person it accepted it for (D17, CL11). */
+export const DISCOVERED_BY = ['patient', 'ordering_facility', 'own_check', 'support', 'other'] as const;
+
+/**
+ * POST pharmacy/order-routes/:routeId/wrong-patient-correction (C29, D17
+ * SPEC-FINAL §5.1): the late correction of a prescription the pharmacy
+ * accepted for the wrong person, after it ended or its window lapsed, until
+ * 180 days after acceptance. Every field is required. `discoveredOn` is the
+ * Lagos day the pharmacy found out, a calendar date not after today nor
+ * before the acceptance day (the service checks the calendar, the command
+ * the bounds: 400 ORDER_ROUTE_INVALID). The note is for Health ID support
+ * only: 8 to 500 characters once trimmed, never in an audit row.
+ */
+export class CorrectWrongPatientDto {
+  @IsInt() @Min(1)
+  expectedVersion!: number;
+
+  @IsIn(WRONG_PATIENT_REASONS)
+  reason!: (typeof WRONG_PATIENT_REASONS)[number];
+
+  @IsIn(DISCOVERED_BY)
+  discoveredBy!: (typeof DISCOVERED_BY)[number];
+
+  @IsString() @Matches(/^\d{4}-\d{2}-\d{2}$/)
+  discoveredOn!: string;
+
+  @IsString() @MinLength(8) @MaxLength(500)
+  note!: string;
+}
+
+/**
+ * POST pharmacy/order-routes/correctable (C30, D17-8): a prescription this
+ * pharmacy accepted, found by its exact 8-character reference, sent in the
+ * body so it is in no request line. 1 to 16 characters as
+ * `AcceptOrderRouteDto.reference`; the service trims, upper-cases and checks
+ * it (400 ORDER_ROUTE_INVALID).
+ */
+export class FindCorrectableDto {
+  @IsString() @MinLength(1) @MaxLength(16)
+  reference!: string;
 }

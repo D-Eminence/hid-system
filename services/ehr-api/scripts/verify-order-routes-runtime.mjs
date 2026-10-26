@@ -31,7 +31,15 @@
 // are checked on the answers the run already reads: receives and routesHere
 // on the Lab and Pharmacy work lists and Incoming, support's Find's
 // accessEndsAt and closable, the facility summary's destination, and a
-// laboratory unlisted after orders were sent to it.
+// laboratory unlisted after orders were sent to it. The late correction (D17,
+// 0090) is run at the wrong-patient laboratory and the pharmacy: an order
+// support closed, item 3's lapsed order and a lapsed completed one, an order
+// past its 180 days, a closed prescription; the lookup by reference, the
+// refusals, the limits (5 a member, 20 a facility in 24 hours), the readers'
+// new fields, support's required review actions, and the capability, which
+// no committed correction leaves behind and no runtime can read, write or use.
+// Owner SQL there only ages routes, adds a role that reads the Lab work list
+// without receiving lab requests, and reads what the database holds.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -693,6 +701,8 @@ try {
   // Item 3: this backend serves the wrong-patient report, so the website may ask the clinician to have an order ended
   // at the receiver before changing it (an earlier backend sends no such field).
   assert.equal(listed.wrongPatientReports, true);
+  // D17: and the late correction (0090).
+  assert.equal(listed.lateCorrection, true);
   assert.equal(listed.items.find(item => item.id === lr1.id).orderRoute.effectiveState, 'sent');
   evidence.send = { attestation: { read: 200, audited: 'no patient', outdated: 'ORDER_ROUTE_ATTESTATION_OUTDATED' },
     refusals: sendProblems, sent: { status: 201, state: 'sent', respondByDays: 7, draftActivated: true, replay: 'same route' },
@@ -1380,6 +1390,7 @@ try {
     200, 'find by reference');
   // Item 3: support's Close form may send support to the receiver first (an earlier Identity sends no such field).
   assert.equal(foundByReference.wrongPatientReports, true);
+  assert.equal(foundByReference.lateCorrection, true);
   const byReference = foundByReference.items;
   assert.deepEqual(byReference.map(item => [item.routeId, item.effectiveState, item.receivingFacilityName]),
     [[rxRoute3.id, 'sent', pharmacyFacility.name]]);
@@ -1685,11 +1696,19 @@ try {
   assert.deepEqual(own.others, { count: 0, references: [] });
   assert.deepEqual(own.items.map(item => item.routeId).sort(), [routeW1.id, routeW2.id, rxRouteW1.id].sort());
   const ownW1 = own.items.find(item => item.routeId === routeW1.id);
-  assert.deepEqual({ ...ownW1, endedAt: undefined }, { routeId: routeW1.id, reference: routeW1.reference, kind: 'lab_request',
-    receivingFacility: { id: wpLab.facilityId, name: wpLab.name }, patient: { name: patient.fullName }, endedAt: undefined,
-    resultsWithdrawn: 1, dispensingReversed: false,
+  // D17 (0090): each item also says when it was reported, whether late, and how the order had ended before a late
+  // report; for these in-window reports late is false, there is no earlier ending, and the report is the ending's
+  // transaction, milliseconds apart.
+  assert.deepEqual({ ...ownW1, endedAt: undefined, reportedAt: undefined }, { routeId: routeW1.id, reference: routeW1.reference,
+    kind: 'lab_request', receivingFacility: { id: wpLab.facilityId, name: wpLab.name }, patient: { name: patient.fullName },
+    endedAt: undefined, reportedAt: undefined, late: false, endedKindBefore: null, resultsWithdrawn: 1, dispensingReversed: false,
     link: { patientId: patient.id, encounterId: encounter.id, kind: 'lab_request', orderId: lrW1.id } });
   assert(Number.isFinite(Date.parse(ownW1.endedAt)));
+  for (const item of own.items) {
+    assert.deepEqual([item.late, item.endedKindBefore], [false, null], JSON.stringify(item));
+    assert(Math.abs(Date.parse(item.reportedAt) - Date.parse(item.endedAt)) < 1000, JSON.stringify(item));
+  }
+  assert.equal(own.lateCorrection, true);
   assert.deepEqual(own.items.filter(item => item.routeId !== routeW1.id).map(item => [item.kind, item.resultsWithdrawn,
     item.dispensingReversed]).sort(), [['lab_request', 0, false], ['prescription', 0, true]]);
   const overviewRows = await all(`select action, patient_id, details from audit.events
@@ -1735,7 +1754,7 @@ try {
   assert.deepEqual([colleague.items, colleague.others.count, [...colleague.others.references].sort()], [[], 3, [...wpReferences].sort()]);
   assertNone(colleague, [patient.fullName, patient.id, lrW1.id, encounter.id], 'the colleague\'s Overview');
   assert.deepEqual(expectStatus(await overview(thirdDoctor), 200, 'Overview (other facility)'),
-    { windowDays: 30, items: [], others: { count: 0, references: [] } });
+    { windowDays: 30, items: [], others: { count: 0, references: [] }, lateCorrection: true });
   // A hospital laboratory member holds no ehr.order-route.send: refused before the database is read.
   const noSendResponse = await overview(hospitalLab1);
   expectProblem(noSendResponse, 403);
@@ -1767,9 +1786,17 @@ try {
     specimensCollected: 1, reporterRecordedWork: true, flags: ['something_came_back', 'reporter_recorded_work'], facility30: 2,
     review: null });
   assert.deepEqual(reportW1.recordedBy.map(entry => entry.accountId).sort(), [wpLabAdmin.accountId, wpLabMember.accountId].sort());
+  // D17 (0090): a report on a route of a patient reported before in the last 90 days is flagged patient_reported_before
+  // (routeW1's came first); in-window reports carry no late fact and require nothing new at review.
   assert.deepEqual([reportOf(routeW2.id).flags, reportOf(routeW2.id).acceptedWith, reportOf(routeW2.id).reporterRecordedWork],
-    [['other_reason_nothing_recorded'], 'health_id', false]);
-  assert.deepEqual(reportOf(rxRouteW1.id).flags, ['something_came_back', 'reporter_recorded_work', 'suspected_misuse']);
+    [['other_reason_nothing_recorded', 'patient_reported_before'], 'health_id', false]);
+  assert.deepEqual(reportOf(rxRouteW1.id).flags, ['something_came_back', 'reporter_recorded_work', 'suspected_misuse',
+    'patient_reported_before']);
+  for (const item of unreviewed) {
+    assert.deepEqual([item.late, item.endedKindBefore, item.discoveredBy, item.discoveredOn, item.requiredActions],
+      [false, null, null, null, []], JSON.stringify(item));
+  }
+  assert.equal(reportW1.orderingSenderActive, true);
   assertNone(unreviewed, [patient.fullName, patient.hid, patient.id, labTest.testDisplay, medicine.medicationDisplay, clinicalNote],
     'support\'s reports');
   const tileBefore = unreviewed.length;
@@ -1860,6 +1887,470 @@ try {
     accept: unlistedAccept, decline: 200, afterDecline: afterDecline.routesHere };
   step('contract fields (item 4): receives and routesHere on every list, Find\'s accessEndsAt and closable, the summary\'s destination');
 
+  // ── 12d. Late correction (D17, 0090): after an order ended, the laboratory or pharmacy withdraws what it recorded
+  // for someone who was not the patient ──
+  // At the wrong-patient laboratory above: a completed order support closed (group 2), item 3's routeW3 (accepted,
+  // lapsed) and a completed order whose window lapsed (group 1), an order past the 180 days, a prescription the
+  // pharmacy dispensed and support closed, then the limits (5 a member, 20 a facility in 24 hours). Owner SQL only
+  // ages routes, adds a role that reads the work list without receiving lab requests, and reads what the database
+  // holds (the capability table, its statistics, the reports).
+  const late = {};
+  const lagosDay = offsetHours => new Date(Date.now() + (1 + offsetHours) * 3600_000).toISOString().slice(0, 10);
+  const lateNotes = {
+    labSupport: 'The patient phoned: she never gave a sample at this laboratory that week',
+    labLapsed: 'Picked the wrong row at the counter; found in our own weekly audit',
+    labCompleted: 'His brother came in with his Health ID; the result was the brother\'s',
+    pharmacy: 'The dispensing went to a woman giving another woman\'s date of birth',
+    batch: 'A batch mix-up at the counter, found in our own weekly check',
+  };
+  const kindPath = base => (base === lab ? 'lab' : 'pharmacy');
+  const lookupLate = (who, base, reference) => call(base, who, 'POST', `/${kindPath(base)}/order-routes/correctable`,
+    { reference });
+  const correctLate = (who, base, routeId, body, key = freshKey('late')) => call(base, who, 'POST',
+    `/${kindPath(base)}/order-routes/${routeId}/wrong-patient-correction`, body, key === null ? {} : { key });
+  const lateBody = (expectedVersion, note, extra = {}) => ({ expectedVersion, reason: 'someone_elses_details',
+    discoveredBy: 'patient', discoveredOn: lagosDay(0), note, ...extra });
+  const capabilityRows = async () => (await one('select count(*)::int as n from ehr.order_route_correction_capabilities')).n;
+  let lateCommitted = 0;
+  // Refusals that come after the command wrote its capability (the version, the withdrawal permission): the row
+  // rolls back with them, so the table's statistics count an insert without a delete.
+  let capabilityRollbacks = 0;
+  const lookupOne = async (who, base, route) => {
+    const answer = expectStatus(await lookupLate(who, base, route.reference.toLowerCase()), 200, `lookup ${route.reference}`);
+    assert.equal(answer.lateCorrection, true);
+    const items = answer.items.filter(item => item.id === route.id);
+    assert.equal(items.length, 1, JSON.stringify(answer));
+    assert.deepEqual(Object.keys(items[0]), ['id', 'reference', 'kind', 'version', 'effectiveState', 'orderingFacilityName',
+      'acceptedAt', 'completedAt', 'endedAt', 'endedKind', 'returned', 'correction', 'correctableUntil', 'wrongPatient', 'details']);
+    assertNone(answer, [...identityValues, clinicalNote, medicine.instructions], 'the lookup');
+    return items[0];
+  };
+  const deadlineOf = async routeId => (await one(`select to_char((accepted_at + interval '4320 hours') at time zone 'UTC',
+    'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as until from ehr.order_routes where id = $1`, [routeId])).until;
+  const ordersPath = kind => (kind === 'lab_request' ? 'lab-requests' : 'prescriptions');
+  // What A, the patient and support read of one route: C4 (the order's own read), C3, C5 and C21.
+  const readsOf = async (kind, order, route) => ({
+    c4: expectStatus(await ehrCall(doctor, 'GET', `${enc}/${ordersPath(kind)}/${order.id}`), 200, 'C4').orderRoute,
+    c3: expectStatus(await ehrCall(doctor, 'GET', routesPath(kind, order.id)), 200, 'C3').items.find(item => item.id === route.id),
+    c5: expectStatus(await patientCall(ehr, 'GET', '/ehr/me/order-routes'), 200, 'C5').items.find(item => item.id === route.id),
+    c21: await findRoute(route),
+  });
+  const untilOnAll = reads => [reads.c4.correctableUntil, reads.c3.correctableUntil, reads.c5.correctableUntil,
+    reads.c21.correctableUntil];
+  const inboxNotice = async (code, routeId) => expectStatus(await patientCall(identity, 'GET',
+    '/identity/me/notifications?limit=100'), 200, 'inbox').find(item => item.notificationCode === code && item.resourceId === routeId);
+  const releaseResult = async (workItemId, value) => {
+    const accessioned = expectStatus(await labCall(wpLabMember, 'POST', `/work-items/${workItemId}/accession`,
+      { requirements: [{ specimenType: 'blood' }], reason: 'Synthetic accession of an order from another facility' },
+    { key: freshKey('accession') }), 201, 'accession');
+    let sample = accessioned.specimens[0];
+    sample = expectStatus(await labCall(wpLabMember, 'POST', `/accessions/${accessioned.id}/specimens/${sample.id}/collect`,
+      { expectedVersion: sample.version, collectedAt: now() }, { key: freshKey('collect') }), 201, 'collect');
+    sample = expectStatus(await labCall(wpLabMember, 'POST', `/accessions/${accessioned.id}/specimens/${sample.id}/receive`,
+      { expectedVersion: sample.version, receivedAt: now() }, { key: freshKey('receive') }), 201, 'receive');
+    let run = expectStatus(await labCall(wpLabMember, 'POST', `/specimens/${sample.id}/executions`,
+      { expectedSpecimenVersion: sample.version, startedAt: now(), reason: 'Synthetic run of a routed order' },
+    { key: freshKey('execution') }), 201, 'execution');
+    run = expectStatus(await labCall(wpLabMember, 'POST', `/executions/${run.id}/complete`,
+      { expectedVersion: run.version, completedAt: now() }, { key: freshKey('complete') }), 201, 'complete');
+    const entered = expectStatus(await labCall(wpLabMember, 'POST', `/executions/${run.id}/results`,
+      { expectedExecutionVersion: run.version, resultType: 'numeric', numericValue: value, unit: '%', referenceRange: '4.0-5.6',
+        abnormalFlag: 'high' }, { key: freshKey('result') }), 201, 'result');
+    const enteredId = entered.id ?? entered.result?.id;
+    expectStatus(await labCall(wpLabAdmin, 'POST', `/results/${enteredId}/verify`, { expectedResultVersion: 1, occurredAt: now(),
+      reason: 'Verified by a second laboratory member' }, { key: freshKey('verify') }), 201, 'verify');
+    expectStatus(await labCall(wpLabAdmin, 'POST', `/results/${enteredId}/release`, { expectedResultVersion: 1, occurredAt: now(),
+      reason: 'Released to the ordering facility' }, { key: freshKey('release') }), 201, 'release');
+    return enteredId;
+  };
+
+  // Lab, group 2: completed, then closed by support inside its window; corrected late.
+  const lrL1 = await newLabRequest();
+  const routeL1 = expectStatus(await send(doctor, 'lab_request', lrL1, wpLab.facilityId, labVersion), 201, 'send lrL1').route;
+  const acceptedL1 = expectStatus(await accept(wpLabAdmin, lab, routeL1.id, 1, { kind: 'health_id', value: patient.hid }), 201,
+    'accept lrL1');
+  const resultL1 = await releaseResult(acceptedL1.workItemId, 7.9);
+  assert(await myLabResults().then(ids => ids.includes(resultL1)), 'the released result is not in the patient\'s record');
+  // While it is open: the lookup shows it with the laboratory's own facts; the late command sends it to item 3's report.
+  const openL1 = await lookupOne(wpLabMember, lab, routeL1);
+  assert.deepEqual([openL1.correction, openL1.returned, openL1.endedKind, openL1.wrongPatient, openL1.details?.what,
+    openL1.details?.acceptedWith, openL1.details?.returned.map(item => item.withdrawn)],
+  ['open', true, null, null, labTest.testDisplay, 'health_id', [false]]);
+  assert.equal(typeof openL1.details.acceptedBy, 'string');
+  const deadlineL1 = await deadlineOf(routeL1.id);
+  assert.equal(openL1.correctableUntil, deadlineL1);
+  late.stillOpen = expectProblem(await correctLate(wpLabMember, lab, routeL1.id, lateBody(openL1.version, lateNotes.labSupport)),
+    409, 'ORDER_ROUTE_STILL_OPEN').code;
+  const openReads = await readsOf('lab_request', lrL1, routeL1);
+  assert.deepEqual(untilOnAll(openReads), [deadlineL1, deadlineL1, deadlineL1, deadlineL1]);
+  assert.deepEqual([openReads.c21.correction, openReads.c21.closable, openReads.c4.wrongPatient], ['open', true, null]);
+  // Support closes it (C22): access ends now; the order is still correctable until its deadline.
+  expectStatus(await adminCall('POST', `/admin/order-routes/${routeL1.id}/close`,
+    { reason: 'The patient asked support to stop this order' }, { ifMatch: openReads.c21.version }), 200, 'support closes routeL1');
+  const correctableL1 = await lookupOne(wpLabMember, lab, routeL1);
+  assert.deepEqual([correctableL1.correction, correctableL1.endedKind, correctableL1.returned, correctableL1.correctableUntil,
+    correctableL1.details?.returned.length], ['correctable', 'support', true, deadlineL1, 1]);
+  const supportClosedReads = await readsOf('lab_request', lrL1, routeL1);
+  assert.deepEqual(untilOnAll(supportClosedReads), [deadlineL1, deadlineL1, deadlineL1, deadlineL1],
+    'C4, C3, C5 and C21 carry the same deadline');
+  assert.deepEqual([supportClosedReads.c21.correction, supportClosedReads.c3.endedKind], ['correctable', 'support']);
+  // Refusals, each writing nothing.
+  const { discoveredBy: _withoutDiscoveredBy, ...noDiscoveredBy } = lateBody(correctableL1.version, lateNotes.labSupport);
+  late.refusals = {
+    withoutDiscoveredBy: expectProblem(await correctLate(wpLabMember, lab, routeL1.id, noDiscoveredBy), 400,
+      'VALIDATION_FAILED').code,
+    unknownField: expectProblem(await correctLate(wpLabMember, lab, routeL1.id, { ...lateBody(correctableL1.version,
+      lateNotes.labSupport), patientId: patient.id }), 400, 'VALIDATION_FAILED').code,
+    shortNote: expectProblem(await correctLate(wpLabMember, lab, routeL1.id, lateBody(correctableL1.version, '   Not her    ')),
+      400, 'ORDER_ROUTE_INVALID').code,
+    foundOutTomorrow: expectProblem(await correctLate(wpLabMember, lab, routeL1.id, lateBody(correctableL1.version,
+      lateNotes.labSupport, { discoveredOn: lagosDay(24) })), 400, 'ORDER_ROUTE_INVALID').code,
+    foundOutBeforeAcceptance: expectProblem(await correctLate(wpLabMember, lab, routeL1.id, lateBody(correctableL1.version,
+      lateNotes.labSupport, { discoveredOn: lagosDay(-48) })), 400, 'ORDER_ROUTE_INVALID').code,
+    withoutKey: expectProblem(await correctLate(wpLabMember, lab, routeL1.id, lateBody(correctableL1.version,
+      lateNotes.labSupport), null), 400, 'IDEMPOTENCY_KEY_REQUIRED').code,
+    otherLaboratory: expectProblem(await correctLate(labAdmin, lab, routeL1.id, lateBody(correctableL1.version,
+      lateNotes.labSupport)), 404, 'ORDER_ROUTE_NOT_FOUND').code,
+    emergency: answerOf(await call(lab, wpLabMember, 'POST', `/lab/order-routes/${routeL1.id}/wrong-patient-correction`,
+      lateBody(correctableL1.version, lateNotes.labSupport), { key: freshKey('late'), purpose: 'emergency' })),
+  };
+  assert(late.refusals.emergency.startsWith('403'), late.refusals.emergency);
+  const withoutWithdrawal = expectProblem(await correctLate(wpReceiver, lab, routeL1.id, lateBody(correctableL1.version,
+    lateNotes.labSupport)), 403, 'ORDER_ROUTE_CORRECTION_PERMISSION_REQUIRED');
+  assert.equal(withoutWithdrawal.permission, 'lab.result.entered-in-error');
+  late.refusals.receiveOnlyMember = `403 ${withoutWithdrawal.code} (${withoutWithdrawal.permission})`;
+  capabilityRollbacks += 1;
+  late.refusals.staleVersion = expectProblem(await correctLate(wpLabMember, lab, routeL1.id, lateBody(acceptedL1.route.version,
+    lateNotes.labSupport)), 412, 'VERSION_CONFLICT').code;
+  capabilityRollbacks += 1;
+  assert.deepEqual(await wpCounts(routeL1.id), { reports: 0, state: 'completed', ended_kind: 'support' }, 'a refusal wrote');
+  assert.equal(await capabilityRows(), 0, 'a refusal left a capability');
+  // The scientist corrects it: the result is withdrawn, the ending (support's) kept, the patient told.
+  const keyL1 = freshKey('late-l1');
+  const bodyL1 = lateBody(correctableL1.version, `  ${lateNotes.labSupport}  `);
+  const correctedL1 = expectStatus(await correctLate(wpLabMember, lab, routeL1.id, bodyL1, keyL1), 200,
+    'late correction (lab, group 2)');
+  lateCommitted += 1;
+  assert.deepEqual(correctedL1, { route: { id: routeL1.id, version: correctedL1.route.version,
+    effectiveState: correctableL1.effectiveState, endedKind: 'support' }, late: true, endedKindBefore: 'support', resultsVoided: 1,
+  resultReportsMarked: 1, dispensingReversed: false, correctableUntil: deadlineL1, replayed: false });
+  assert.equal(typeof correctedL1.route.version, 'number');
+  assert.equal(await capabilityRows(), 0, 'the capability outlived its command');
+  const afterL1 = await readsOf('lab_request', lrL1, routeL1);
+  assert.deepEqual(untilOnAll(afterL1), [null, null, null, null], 'a deadline after the correction');
+  for (const read of [afterL1.c4, afterL1.c3, afterL1.c5, afterL1.c21]) {
+    assert.equal(read.wrongPatient?.late, true, JSON.stringify(read));
+  }
+  assert.equal(afterL1.c21.correction, 'reported');
+  assert.deepEqual([afterL1.c3.endedKind, afterL1.c3.endedAt, afterL1.c3.results.map(item => [item.kind, item.resultId])],
+    ['support', supportClosedReads.c3.endedAt, [['released', resultL1], ['entered_in_error', resultL1]]]);
+  assert(afterL1.c3.results.find(item => item.kind === 'entered_in_error').numericValue === null);
+  const reportedL1 = await lookupOne(wpLabMember, lab, routeL1);
+  assert.deepEqual([reportedL1.correction, reportedL1.details, reportedL1.wrongPatient?.late], ['reported', null, true]);
+  assert.equal(reportedL1.wrongPatient.reportedAt, afterL1.c3.wrongPatient.reportedAt);
+  // The sender's Overview: the late item, its ending support's close, reported after it.
+  const lateOverview = expectStatus(await call(ehr, doctor, 'GET', '/ehr/order-routes/wrong-patient'), 200, 'Overview');
+  assert.equal(lateOverview.lateCorrection, true);
+  const overviewL1 = lateOverview.items.find(item => item.routeId === routeL1.id);
+  assert.deepEqual([overviewL1?.late, overviewL1?.endedKindBefore, overviewL1?.endedAt, overviewL1?.resultsWithdrawn],
+    [true, 'support', supportClosedReads.c3.endedAt, 1], JSON.stringify(overviewL1));
+  assert(Date.parse(overviewL1.reportedAt) > Date.parse(overviewL1.endedAt));
+  // The patient: told in the inbox, the result gone from the record.
+  const noticeL1 = await inboxNotice('ORDER_ROUTE_WRONG_PATIENT_CORRECTED', routeL1.id);
+  assert.deepEqual(noticeL1?.metadata, { routeId: routeL1.id, kind: 'lab_request', orderingFacilityName: hospital.name,
+    receivingFacilityName: wpLab.name });
+  assert(!(await myLabResults()).includes(resultL1), 'the withdrawn result is still in the patient\'s record');
+  // B: no read of the patient's records came with the correction.
+  const itemAfterL1 = await labCall(wpLabMember, 'GET', `/work-items/${acceptedL1.workItemId}`);
+  assert([403, 404].includes(itemAfterL1.status), `B read the item after the correction: ${answerOf(itemAfterL1)}`);
+  // Replay, another key, item 3's report.
+  const replayL1 = expectStatus(await correctLate(wpLabMember, lab, routeL1.id, bodyL1, keyL1), 200, 'late replay');
+  assert.deepEqual(replayL1, { ...correctedL1, route: { ...correctedL1.route, version: replayL1.route.version }, replayed: true });
+  late.anotherKey = expectProblem(await correctLate(wpLabMember, lab, routeL1.id, lateBody(replayL1.route.version,
+    lateNotes.labSupport)), 409, 'ORDER_ROUTE_ALREADY_REPORTED').code;
+  late.itemThreesReport = expectProblem(await reportWrong(wpLabMember, lab, routeL1.id, { expectedVersion: replayL1.route.version,
+    reason: 'other', note: lateNotes.labSupport }), 409, 'ORDER_ROUTE_ALREADY_ENDED').code;
+  // Support: the late report, flagged, with what its review requires (D17-6); the console cannot close it without them.
+  const lateReports = expectStatus(await adminCall('GET', '/admin/wrong-patient-reports?status=unreviewed'), 200, 'reports');
+  assert.equal(lateReports.lateCorrection, true);
+  const reportL1 = lateReports.items.find(item => item.routeId === routeL1.id);
+  assert.deepEqual([reportL1.late, reportL1.endedKindBefore, reportL1.discoveredBy, reportL1.discoveredOn,
+    reportL1.orderingSenderActive, reportL1.requiredActions, reportL1.reporterLateReportsLast30Days, reportL1.stateBefore,
+    reportL1.note], [true, 'support', 'patient', lagosDay(0), true, ['referred_to_dpo', 'ordering_facility_told'], 1, 'completed',
+    lateNotes.labSupport]);
+  assert(reportL1.flags.includes('late_correction'), JSON.stringify(reportL1.flags));
+  const lateReview = (actions, version) => adminCall('POST', `/admin/wrong-patient-reports/${reportL1.reportId}/review`,
+    { actions, note: 'Phoned the hospital the same day and referred it to the DPO' }, { ifMatch: version });
+  const noFurther = expectProblem(await lateReview(['no_further_action'], reportL1.version), 400,
+    'WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED');
+  assert.equal(noFurther.required, 'referred_to_dpo,ordering_facility_told');
+  const dpoOnly = expectProblem(await lateReview(['referred_to_dpo'], reportL1.version), 400,
+    'WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED');
+  assert.equal(dpoOnly.required, 'ordering_facility_told');
+  const reviewedL1 = expectStatus(await lateReview(['ordering_facility_told', 'referred_to_dpo'], reportL1.version), 200,
+    'late review');
+  assert.deepEqual(reviewedL1.actions, ['ordering_facility_told', 'referred_to_dpo']);
+  late.labSupportClosed = { open: { lookup: 'open, with details', command: late.stillOpen, deadline: 'the same on C4, C3, C5, C21' },
+    afterSupportClose: { lookup: 'correctable, details with one return', deadline: 'unchanged on all four' },
+    corrected: { endedKind: 'support (kept)', endedKindBefore: 'support', resultsVoided: 1, resultReportsMarked: 1 },
+    after: { deadline: 'null on all four', c21: 'reported', ordering: ['released', 'entered_in_error (no value)'],
+      overview: 'late, endedAt support\'s close', patient: 'ORDER_ROUTE_WRONG_PATIENT_CORRECTED, result gone',
+      receiverItemRead: itemAfterL1.status },
+    replay: 'replayed true', anotherKey: late.anotherKey, itemThreesReport: late.itemThreesReport,
+    support: { flags: reportL1.flags, requiredActions: reportL1.requiredActions,
+      review: { noFurtherAction: `400 ${noFurther.code} (${noFurther.required})`, dpoOnly: `400 (${dpoOnly.required})`,
+        both: 200 } } };
+
+  // The served signal: the lists, Find, the reports list and the Overview carry lateCorrection; the work list only
+  // for a member who may receive (a role that reads the work list without receiving, owner SQL).
+  const lateLists = { labRequests: expectStatus(await ehrCall(doctor, 'GET', `${enc}/lab-requests`), 200, 'lab requests'),
+    prescriptions: expectStatus(await ehrCall(doctor, 'GET', `${enc}/prescriptions`), 200, 'prescriptions'),
+    find: expectStatus(await adminCall('GET', `/admin/order-routes?reference=${routeL1.reference}`), 200, 'find'),
+    workList: expectStatus(await labCall(wpLabMember, 'GET', '/work-items'), 200, 'work list'),
+    pharmacyWorkList: expectStatus(await pharmacyCall(pharmacist, 'GET', '/work-items'), 200, 'pharmacy work list') };
+  for (const [name, answer] of Object.entries(lateLists)) assert.equal(answer.lateCorrection, true, name);
+  const wpReader = await invited(wpLabAdmin, HOSTS.lab, wpLab.facilityId, { name: 'Lola Workreader',
+    email: synthetic('wp-lab-reader'), role: 'lab', licenceBody: 'MLSCN', licenceNumber: 'MLSCN/80088' });
+  await owner.query(`insert into auth.roles (code, description) values ('verifier_lab_work_reader',
+    'Order-route verifier: reads the lab work list, does not receive lab requests') on conflict do nothing`);
+  await owner.query(`insert into auth.role_permissions (role_code, permission_code)
+    values ('verifier_lab_work_reader', 'lab.work-item.read') on conflict do nothing`);
+  await age(`with old as (update auth.account_roles set revoked_at = clock_timestamp(), revoked_by = $2,
+        revocation_reason = 'Order-route verifier: a work-list reader'
+      where account_id = $1 and role_code = 'lab' and scope_type = 'facility' and revoked_at is null
+      returning membership_id, facility_id)
+    insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+    select gen_random_uuid(), $1, 'verifier_lab_work_reader', 'facility', membership_id, facility_id,
+      'Order-route verifier: a work-list reader' from old`, [wpReader.accountId, wpLabAdmin.accountId]);
+  const readerList = expectStatus(await labCall(wpReader, 'GET', '/work-items'), 200, 'reader work list');
+  assert(!('lateCorrection' in readerList) && !('receives' in readerList), JSON.stringify(Object.keys(readerList)));
+  const readerLookup = expectProblem(await lookupLate(wpReader, lab, routeL1.reference), 403, 'PERMISSION_DENIED').code;
+  late.servedSignal = { labRequests: true, prescriptions: true, find: true, reports: true, overview: true, workList: true,
+    pharmacyWorkList: true, memberWithoutReceive: { workList: 'no lateCorrection', lookup: `403 ${readerLookup}` } };
+
+  // Lab, group 1 (accepted, lapsed): item 3's routeW3, refused as already ended there, is corrected late by the
+  // member who may receive but not mark results entered in error (nothing to withdraw); it ends wrong_patient now.
+  const lapsedW3 = await lookupOne(wpReceiver, lab, routeW3);
+  assert.deepEqual([lapsedW3.correction, lapsedW3.returned, lapsedW3.endedKind, lapsedW3.details?.returned],
+    ['correctable', false, null, []]);
+  const correctedW3 = expectStatus(await correctLate(wpReceiver, lab, routeW3.id, lateBody(lapsedW3.version, lateNotes.labLapsed,
+    { reason: 'wrong_order_chosen', discoveredBy: 'own_check' })), 200, 'late correction (lab, group 1, accepted)');
+  lateCommitted += 1;
+  assert.deepEqual({ ...correctedW3, route: { ...correctedW3.route, version: 0 } }, { route: { id: routeW3.id, version: 0,
+    effectiveState: 'cancelled', endedKind: 'wrong_patient' }, late: true, endedKindBefore: null, resultsVoided: 0,
+  resultReportsMarked: 0, dispensingReversed: false, correctableUntil: await deadlineOf(routeW3.id), replayed: false });
+  assert.deepEqual(await wpCounts(routeW3.id), { reports: 1, state: 'cancelled', ended_kind: 'wrong_patient' });
+  assert((await inboxNotice('ORDER_ROUTE_WRONG_PATIENT', routeW3.id)), 'no ORDER_ROUTE_WRONG_PATIENT notice for routeW3');
+  const overviewW3 = expectStatus(await call(ehr, doctor, 'GET', '/ehr/order-routes/wrong-patient'), 200, 'Overview').items
+    .find(item => item.routeId === routeW3.id);
+  assert.deepEqual([overviewW3?.late, overviewW3?.endedKindBefore, overviewW3?.resultsWithdrawn], [true, null, 0]);
+  // Lab, group 1 (completed, lapsed): a completed order aged past its window.
+  const lrL2 = await newLabRequest();
+  const routeL2 = expectStatus(await send(doctor, 'lab_request', lrL2, wpLab.facilityId, labVersion), 201, 'send lrL2').route;
+  const acceptedL2 = expectStatus(await accept(wpLabAdmin, lab, routeL2.id, 1, { kind: 'health_id', value: patient.hid }), 201,
+    'accept lrL2');
+  const resultL2 = await releaseResult(acceptedL2.workItemId, 8.3);
+  await age(`update ehr.order_routes set writes_end_at = clock_timestamp() - interval '1 minute',
+      access_ends_at = clock_timestamp() - interval '1 minute' where id = $1`, [routeL2.id]);
+  const lapsedL2 = await lookupOne(wpLabMember, lab, routeL2);
+  assert.deepEqual([lapsedL2.correction, lapsedL2.returned, lapsedL2.endedKind], ['correctable', true, null]);
+  const correctedL2 = expectStatus(await correctLate(wpLabMember, lab, routeL2.id, lateBody(lapsedL2.version,
+    lateNotes.labCompleted, { discoveredBy: 'ordering_facility' })), 200, 'late correction (lab, group 1, completed)');
+  lateCommitted += 1;
+  assert.deepEqual([correctedL2.route.effectiveState, correctedL2.route.endedKind, correctedL2.endedKindBefore,
+    correctedL2.resultsVoided, correctedL2.resultReportsMarked], ['completed', 'wrong_patient', null, 1, 1]);
+  const viewL2 = expectStatus(await ehrCall(doctor, 'GET', routesPath('lab_request', lrL2.id)), 200, 'C3 L2').items[0];
+  assert.deepEqual([viewL2.endedKind, viewL2.wrongPatient?.late, viewL2.correctableUntil,
+    viewL2.results.map(item => [item.kind, item.resultId])], ['wrong_patient', true, null,
+    [['released', resultL2], ['entered_in_error', resultL2]]]);
+  assert(await inboxNotice('ORDER_ROUTE_WRONG_PATIENT', routeL2.id), 'no ORDER_ROUTE_WRONG_PATIENT notice for routeL2');
+  assert(!(await myLabResults()).includes(resultL2));
+  late.labLapsed = { accepted: { route: 'cancelled (wrong_patient)', endedKindBefore: null, by: 'a receive-only member',
+    notice: 'ORDER_ROUTE_WRONG_PATIENT', overview: 'late, nothing withdrawn' },
+  completed: { route: 'completed (wrong_patient)', ordering: ['released', 'entered_in_error'], notice: 'ORDER_ROUTE_WRONG_PATIENT' } };
+
+  // Too late: an order accepted 181 days ago (every time of the route aged, keeping 0086's CHECKs).
+  const lrL3 = await newLabRequest();
+  const routeL3 = expectStatus(await send(doctor, 'lab_request', lrL3, wpLab.facilityId, labVersion), 201, 'send lrL3').route;
+  expectStatus(await accept(wpLabAdmin, lab, routeL3.id, 1, { kind: 'health_id', value: patient.hid }), 201, 'accept lrL3');
+  await age(`update ehr.order_routes set created_at = created_at - interval '181 days',
+      respond_by = respond_by - interval '181 days', accepted_at = accepted_at - interval '181 days',
+      writes_end_at = writes_end_at - interval '181 days', access_ends_at = access_ends_at - interval '181 days'
+    where id = $1`, [routeL3.id]);
+  const tooLate = await lookupOne(wpLabMember, lab, routeL3);
+  assert.deepEqual([tooLate.correction, tooLate.details, tooLate.correctableUntil], ['too_late', null, await deadlineOf(routeL3.id)]);
+  assert(Date.parse(tooLate.correctableUntil) < Date.now());
+  late.tooLate = { lookup: 'too_late, no details', command: expectProblem(await correctLate(wpLabMember, lab, routeL3.id,
+    lateBody(tooLate.version, lateNotes.labLapsed, { discoveredOn: lagosDay(0) })), 409, 'ORDER_ROUTE_CORRECTION_TOO_LATE').code };
+  const foundTooLate = await findRoute(routeL3);
+  assert.deepEqual([foundTooLate.correction, foundTooLate.correctableUntil], ['too_late', tooLate.correctableUntil]);
+  late.tooLate.find = 'too_late, the deadline past';
+  assert.deepEqual(await wpCounts(routeL3.id), { reports: 0, state: 'accepted', ended_kind: null });
+
+  // Pharmacy, group 2: dispensed, closed by support, then the dispensing reversed late.
+  const rxL = await newPrescription('active');
+  const rxRouteL = await sendPrescription(rxL);
+  const rxAcceptedL = expectStatus(await acceptPrescription(rxRouteL.id, 1, { kind: 'health_id', value: patient.hid }), 201,
+    'accept rxL');
+  const rxItemL = expectStatus(await pharmacyCall(pharmacist, 'GET', `/work-items/${rxAcceptedL.workItemId}`), 200, 'rxL item');
+  expectStatus(await pharmacyCall(pharmacist, 'POST', `/work-items/${rxAcceptedL.workItemId}/dispensings`,
+    { expectedWorkItemVersion: Number(rxItemL.version), quantityDispensed: 60, quantityUnit: 'tablet',
+      reason: 'Synthetic dispensing at the counter' }, { key: freshKey('dispense') }), 201, 'dispense rxL');
+  const foundRxL = await findRoute(rxRouteL);
+  expectStatus(await adminCall('POST', `/admin/order-routes/${rxRouteL.id}/close`,
+    { reason: 'The pharmacy asked support to close it' }, { ifMatch: foundRxL.version }), 200, 'support closes rxRouteL');
+  const rxCorrectable = await lookupOne(pharmacist, pharmacy, rxRouteL);
+  assert.deepEqual([rxCorrectable.correction, rxCorrectable.kind, rxCorrectable.details?.what,
+    rxCorrectable.details?.returned.map(item => item.withdrawn)], ['correctable', 'prescription', medicine.medicationDisplay, [false]]);
+  const rxDeadline = await deadlineOf(rxRouteL.id);
+  assert.deepEqual(untilOnAll(await readsOf('prescription', rxL, rxRouteL)), [rxDeadline, rxDeadline, rxDeadline, rxDeadline]);
+  const rxCorrected = expectStatus(await correctLate(pharmacist, pharmacy, rxRouteL.id, lateBody(rxCorrectable.version,
+    lateNotes.pharmacy, { reason: 'suspected_misuse', discoveredBy: 'ordering_facility' })), 200, 'late correction (pharmacy)');
+  lateCommitted += 1;
+  assert.deepEqual([rxCorrected.route.endedKind, rxCorrected.endedKindBefore, rxCorrected.dispensingReversed,
+    rxCorrected.resultsVoided], ['support', 'support', true, 0]);
+  const rxAfter = await readsOf('prescription', rxL, rxRouteL);
+  assert.deepEqual(untilOnAll(rxAfter), [null, null, null, null]);
+  assert.deepEqual([rxAfter.c3.dispensings.map(item => item.kind), rxAfter.c3.wrongPatient?.late, rxAfter.c21.correction],
+    [['dispensed', 'reversed'], true, 'reported']);
+  assert(await inboxNotice('ORDER_ROUTE_WRONG_PATIENT_CORRECTED', rxRouteL.id), 'no notice for the prescription');
+  assert.equal((await one(`select count(*)::int as n from pharmacy.outbox_events where event_type = 'MedicationDispensingReversed'
+    and patient_id = $1 and facility_id = $2 and payload->>'workItemId' = $3`,
+  [patient.id, pharmacyFacility.facilityId, rxAcceptedL.workItemId])).n, 1);
+  late.pharmacy = { lookup: 'correctable, the medicine, the dispensing', deadline: 'the same on C4, C3, C5, C21',
+    corrected: 'dispensing reversed, support\'s ending kept', ordering: ['dispensed', 'reversed'],
+    notice: 'ORDER_ROUTE_WRONG_PATIENT_CORRECTED', outbox: 'MedicationDispensingReversed' };
+
+  // The limits (D17-9): 5 late corrections per member and 20 per facility in any 24 hours, exact; the refusal says
+  // from when another is possible (the oldest counted report + 24 hours, rounded up to the millisecond).
+  const lapsedRoute = async () => {
+    const order = await newLabRequest();
+    const route = expectStatus(await send(doctor, 'lab_request', order, wpLab.facilityId, labVersion), 201, 'send').route;
+    const accepted = expectStatus(await accept(wpLabAdmin, lab, route.id, 1, { kind: 'health_id', value: patient.hid }), 201,
+      'accept');
+    await age(`update ehr.order_routes set writes_end_at = clock_timestamp() - interval '1 minute',
+        access_ends_at = clock_timestamp() - interval '1 minute' where id = $1`, [route.id]);
+    return { route, version: accepted.route.version };
+  };
+  const correctLapsed = async (who, label) => {
+    const { route, version } = await lapsedRoute();
+    const answer = await correctLate(who, lab, route.id, lateBody(version, lateNotes.batch,
+      { reason: 'other', discoveredBy: 'own_check' }));
+    if (answer.status === 200) lateCommitted += 1;
+    return { route, answer, label };
+  };
+  const freeAt = async (column, value, limit) => (await one(`select to_char(date_trunc('milliseconds',
+      reported_at + interval '24 hours' + interval '999 microseconds') at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as at
+    from ehr.order_route_wrong_patient_reports
+    where late and ${column} = $1 and reported_at > clock_timestamp() - interval '24 hours'
+    order by reported_at, id offset (select count(*) - $2 from ehr.order_route_wrong_patient_reports
+      where late and ${column} = $1 and reported_at > clock_timestamp() - interval '24 hours') limit 1`, [value, limit])).at;
+  // The receive-only member: routeW3 and four more, then the sixth is refused.
+  for (let index = 0; index < 4; index += 1) expectStatus((await correctLapsed(wpReceiver, 'receiver')).answer, 200, 'receiver');
+  const memberLimited = await correctLapsed(wpReceiver, 'receiver sixth');
+  const memberRefusal = expectProblem(memberLimited.answer, 429, 'ORDER_ROUTE_CORRECTION_LIMIT');
+  const memberFree = await freeAt('reported_by_account_id', wpReceiver.accountId, 5);
+  assert.equal(memberRefusal.retryAfter, memberFree);
+  assert.deepEqual(await wpCounts(memberLimited.route.id), { reports: 0, state: 'accepted', ended_kind: null });
+  // Up to 20 at the laboratory: the administrator 5, the scientist 3 more (5), a fourth member 5; a fifth member's
+  // first is refused for the facility, from the laboratory's oldest counted report + 24 hours.
+  for (let index = 0; index < 5; index += 1) expectStatus((await correctLapsed(wpLabAdmin, 'administrator')).answer, 200, 'admin');
+  for (let index = 0; index < 3; index += 1) expectStatus((await correctLapsed(wpLabMember, 'scientist')).answer, 200, 'member');
+  const wpExtra = await invited(wpLabAdmin, HOSTS.lab, wpLab.facilityId, { name: 'Musa Fourthmember',
+    email: synthetic('wp-lab-extra'), role: 'lab', licenceBody: 'MLSCN', licenceNumber: 'MLSCN/80099' });
+  const wpFifth = await invited(wpLabAdmin, HOSTS.lab, wpLab.facilityId, { name: 'Ngozi Fifthmember',
+    email: synthetic('wp-lab-fifth'), role: 'lab', licenceBody: 'MLSCN', licenceNumber: 'MLSCN/80100' });
+  for (let index = 0; index < 5; index += 1) expectStatus((await correctLapsed(wpExtra, 'fourth')).answer, 200, 'fourth');
+  const lateAtLab = (await one(`select count(*)::int as n from ehr.order_route_wrong_patient_reports where late
+    and receiving_facility_id = $1 and reported_at > clock_timestamp() - interval '24 hours'`, [wpLab.facilityId])).n;
+  assert.equal(lateAtLab, 20);
+  const facilityLimited = await correctLapsed(wpFifth, 'fifth');
+  const facilityRefusal = expectProblem(facilityLimited.answer, 429, 'ORDER_ROUTE_CORRECTION_LIMIT');
+  const facilityFree = await freeAt('receiving_facility_id', wpLab.facilityId, 20);
+  assert.equal(facilityRefusal.retryAfter, facilityFree);
+  assert.notEqual(facilityFree, memberFree);
+  assert.deepEqual(await wpCounts(facilityLimited.route.id), { reports: 0, state: 'accepted', ended_kind: null });
+  // The pharmacy is another facility: its count is its own.
+  late.limits = { member: { corrected: 5, sixth: `429 ${memberRefusal.code}`, retryAfter: 'the member\'s oldest + 24 h, exact' },
+    facility: { corrected: lateAtLab, twentyFirst: `429 ${facilityRefusal.code} (a member with none)`,
+      retryAfter: 'the laboratory\'s oldest + 24 h, exact' }, refusedRoutes: 'unchanged, no report' };
+
+  // The capability never outlives its command, and the runtimes can neither read nor write it, nor call the command.
+  assert.equal(await capabilityRows(), 0, 'a capability row is left');
+  const labRuntime = new Client({ connectionString: databaseUrl('hid_lab_api_runtime') });
+  await labRuntime.connect();
+  const runtimeCodes = {};
+  try {
+    for (const [name, sql] of [['read', 'select count(*) from ehr.order_route_correction_capabilities'],
+      ['insert', `insert into ehr.order_route_correction_capabilities (transaction_id, route_id, kind, receiving_facility_id,
+        patient_id, membership_id) values (pg_current_xact_id(), '${routeL3.id}', 'lab_request', '${wpLab.facilityId}',
+        '${patient.id}', '${randomUUID()}')`],
+      ['command', `select * from ehr.correct_wrong_patient_order_route('lab_request', '${routeL3.id}', 1, 'other', 'own_check',
+        current_date, 'Synthetic attempt by the runtime itself', 'verifier-runtime-attempt-0001', repeat('a', 64)::char(64))`]]) {
+      runtimeCodes[name] = await labRuntime.query(sql).then(() => 'allowed', error => error.code);
+    }
+  } finally {
+    await labRuntime.end();
+  }
+  assert.deepEqual(runtimeCodes, { read: '42501', insert: '42501', command: '42501' });
+  // Inserts = deletes + the refusals that came after the capability was written; read from fresh owner sessions until
+  // every service process has flushed its statistics.
+  const statsDeadline = Date.now() + 30_000;
+  let capabilityStats;
+  for (;;) {
+    const fresh = new Client({ host: socket, port, user: pgUser, database: isolated });
+    await fresh.connect();
+    try {
+      capabilityStats = (await fresh.query(`select n_tup_ins::int as inserted, n_tup_del::int as deleted, n_tup_upd::int as updated
+        from pg_stat_user_tables where schemaname = 'ehr' and relname = 'order_route_correction_capabilities'`)).rows[0];
+    } finally {
+      await fresh.end();
+    }
+    if (capabilityStats.inserted === lateCommitted + capabilityRollbacks && capabilityStats.deleted === lateCommitted) break;
+    assert(Date.now() < statsDeadline, `capability statistics ${JSON.stringify(capabilityStats)}, expected ${lateCommitted} committed`
+      + ` and ${capabilityRollbacks} rolled back`);
+    await new Promise(done => setTimeout(done, 500));
+  }
+  assert.equal(capabilityStats.updated, 0);
+  late.capability = { rowsLeft: 0, runtime: runtimeCodes, statistics: { ...capabilityStats, committed: lateCommitted,
+    rolledBackAfterWriting: capabilityRollbacks } };
+
+  // Audit: B's own rows (with the patient, never the note), the lookups' rows (no patient, the route ids), the
+  // system rows at A and B (late), and no note anywhere.
+  const bLateRows = await all(`select patient_id, details from audit.events where action = 'lab.order-route.wrong-patient-correction'
+    and resource_id = $1 order by sequence_id`, [routeL1.id]);
+  assert.deepEqual(bLateRows.map(row => [row.patient_id, row.details.replayed, row.details.late, row.details.endedKindBefore,
+    row.details.discoveredBy, row.details.discoveredOn]), [[patient.id, false, true, 'support', 'patient', lagosDay(0)],
+    [patient.id, true, true, 'support', 'patient', lagosDay(0)]]);
+  const lookupRows = await all(`select action, patient_id, details from audit.events
+    where action in ('lab.order-route.correctable', 'pharmacy.order-route.correctable') order by sequence_id`);
+  assert(lookupRows.length >= 7 && lookupRows.every(row => row.patient_id === null && Array.isArray(row.details.routeIds)
+    && Array.isArray(row.details.states) && row.details.found === row.details.routeIds.length), JSON.stringify(lookupRows.slice(0, 3)));
+  const lookupRowsWithoutIds = lookupRows.map(row => JSON.stringify(row.details.routeIds.reduce((text, id) => text.split(id)
+    .join('<route id>'), JSON.stringify(row.details))));
+  assertNone(lookupRowsWithoutIds, [routeL1.reference, rxRouteL.reference, patient.fullName, patient.hid, labTest.testDisplay],
+    'the lookups\' rows');
+  const requestRows = await all(`select patient_id from audit.events where action in
+    ('api.lab.order-route.correctable.request', 'api.lab.order-route.wrong-patient-correction.request')`);
+  assert(requestRows.length > 0 && requestRows.every(row => row.patient_id === null), 'an interceptor row names a patient');
+  const systemLateRows = await all(`select facility_id, details from audit.events where action = 'ehr.order-route.wrong-patient'
+    and resource_id = $1 order by facility_id`, [routeL1.id]);
+  assert.deepEqual(systemLateRows.map(row => [row.facility_id, row.details.late, row.details.endedKindBefore,
+    row.details.discoveredBy]), [hospital.facilityId, wpLab.facilityId].sort().map(facility => [facility, true, 'support', 'patient']));
+  const lateNoteValues = Object.values(lateNotes);
+  const lateNoteRows = await all(`select action from audit.events where ${lateNoteValues.map((_, index) =>
+    `strpos(coalesce(details::text, '') || coalesce(reason, ''), $${index + 1}) > 0`).join(' or ')}`, lateNoteValues);
+  assert.deepEqual(lateNoteRows, [], `a late note reached an audit row: ${JSON.stringify(lateNoteRows)}`);
+  for (const [name, log] of childLogs) {
+    const text = log.join('');
+    for (const note of lateNoteValues) assert(!text.includes(note.slice(0, 24)), `${name} logged a late note`);
+  }
+  late.audit = { receiver: 'with the patient, how and when found out, never the note', lookups: `${lookupRows.length} rows, no patient,`
+    + ' route ids and states only', interceptor: 'no patient', system: 'A and B, late, endedKindBefore', notes: 'in no row or log' };
+  evidence.lateCorrection = late;
+  step('late correction (D17): lab group 2 after support\'s close, lab group 1 accepted and completed, too late, pharmacy, '
+    + 'refusals, the lookup, the limits, the capability');
+
   // ── Timing (p95 of 25 calls each, with this run's routes and work) ──
   const p95 = async request => {
     const samples = [];
@@ -1922,6 +2413,12 @@ try {
     from ehr.order_routes where id = any($1::uuid[]) order by created_at`, [[route1.id, route2b.id, route6.id]]);
   assert.deepEqual(released.map(row => [row.state, row.ended_kind]), [['completed', 'receiving_released'],
     ['withdrawn', 'receiving_released'], ['withdrawn', 'receiving_released']]);
+  // D17-3: the released laboratory can no longer act on its orders. Its completed order is receiver_released with no
+  // deadline for the clinician (C4, C3), the patient (C5) and support (C21), so no screen sends anyone to it.
+  const releasedReads = await readsOf('lab_request', lr1, route1);
+  assert.deepEqual(untilOnAll(releasedReads), [null, null, null, null], 'a released laboratory still has a deadline');
+  assert.equal(releasedReads.c21.correction, 'receiver_released');
+  evidence.receiverReleased = { correction: releasedReads.c21.correction, correctableUntil: untilOnAll(releasedReads) };
   const releaseRow = await one(`select actor_type, facility_id, patient_id, details from audit.events
     where action='admin.self-service-facility.release-order-routes' and resource_id=$1`, [laboratory.applicationId])
     ?? await one(`select actor_type, facility_id, patient_id, details from audit.events
@@ -1960,7 +2457,7 @@ try {
   for (const row of crossRows) for (const id of staffIds) assert(!row.details.includes(id), 'a system row names a member');
   const sensitive = [...identityValues, otherPatient.hid, clinicalNote, medicine.instructions, medicine.medicationDisplay,
     labTest.testDisplay, 'Synthetic own glucose test', '6.8', '9.4', 'MDCN/70011', 'MDCN/80022', 'MLSCN/70022', 'MLSCN/80011',
-    'MLSCN/80066', 'PCN/70033', patientEmail, ...Object.values(wpNotes)];
+    'MLSCN/80066', 'PCN/70033', patientEmail, ...Object.values(wpNotes), ...Object.values(lateNotes)];
   const scanned = await all(`select action, details::text as details from audit.events
     where action like '%order-route%' or action like '%order-destination%' or details ? 'orderRouteId'`);
   const leaks = scanned.filter(row => sensitive.some(value => row.details.includes(value)))
@@ -1968,7 +2465,7 @@ try {
   assert.deepEqual(leaks, []);
   // Item 4: nothing new is audited; no row carries the new fields.
   const contractFieldRows = await all(`select action from audit.events
-    where coalesce(details::text, '') ~ '"(receives|routesHere|closable|accessEndsAt|receivingTypes)"'`);
+    where coalesce(details::text, '') ~ '"(receives|routesHere|closable|accessEndsAt|receivingTypes|lateCorrection|correctableUntil)"'`);
   assert.deepEqual(contractFieldRows, [], `a row carries a contract field: ${JSON.stringify(contractFieldRows)}`);
   evidence.audit = { routes: routes.length, neverAccepted: neverAccepted.length, rowsScanned: scanned.length,
     sensitiveValues: sensitive.length, leaks: 0, patientOnBRowsBeforeAcceptance: 0, actorsOnSystemRows: 0,

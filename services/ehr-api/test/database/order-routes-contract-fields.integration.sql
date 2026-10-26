@@ -1685,6 +1685,19 @@ select pg_temp.assert('section 2''s bounds: ehr.order_routes'' respond-by and ac
                      (select pg_get_constraintdef(built.oid) from pg_constraint built
                        where built.conrelid = 'pg_temp.item4_bounds_0086'::regclass
                          and built.conname = expected.conname and built.contype = 'c')));
+-- held restates H6's read predicate; 0090 replaces H6 but keeps that
+-- predicate word for word (its capability branch only follows a route test
+-- that has failed).
+select pg_temp.assert('H6 still has the read predicate held restates (0090 kept it word for word)',
+  position($p$       and route.state in ('accepted', 'completed', 'cancelled')
+       and ((requested_action = 'write_records' and route.state in ('accepted', 'completed')
+             and clock_timestamp() < route.writes_end_at)
+         or (requested_action = 'read_records' and clock_timestamp() < route.access_ends_at))) then$p$
+    in (select proc.prosrc from pg_proc proc
+         where proc.oid = 'ehr.order_route_access_allows(text,uuid,uuid,text)'::regprocedure)) > 0
+  and (select proc.prosrc ~ 'route\.state in \(''accepted'', ''completed'', ''cancelled''\)'
+         and proc.prosrc ~ 'route\.access_ends_at > checked_at'
+       from pg_proc proc where proc.oid = 'ehr.order_routes_here(text)'::regprocedure));
 -- Every case once more, against the unbounded predicates evaluated as owner
 -- (Incoming's list and H6's read): the bounds change nothing.
 select pg_temp.run_matrix('after-routes');
@@ -1830,10 +1843,11 @@ select found.route_id, found.effective_state, found.access_ends_at, found.closab
   cross join lateral identity.admin_find_order_routes(listed.reference, null) found
  where found.route_id = listed.id;
 reset role;
-select pg_temp.assert('C21 finds every route of the suite, with 15 columns',
+select pg_temp.assert('C21 finds every route of the suite, with 19 columns (0090 adds the correction state, its '
+    || 'deadline and the wrong-patient report''s time and lateness)',
   (select count(*) from item4_found) = (select count(*) from item4_routes)
   and (select count(*) from item4_routes) = 20
-  and not exists (select 1 from item4_found found where found.columns <> 15));
+  and not exists (select 1 from item4_found found where found.columns <> 19));
 select pg_temp.assert('closable is exactly "support''s Close acts now", for every route',
   not exists (select 1 from item4_found found
                where found.closable is distinct from (found.close_outcome = 'acts')

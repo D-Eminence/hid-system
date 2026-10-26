@@ -15,7 +15,9 @@
 --   4. orders that ended over 30 days ago, ended another way, or are still
 --      live are not listed;
 --   5. the read is bound to the live staff session, its facility and the
---      direct-care purpose (42501 otherwise), and writes nothing.
+--      direct-care purpose (42501 otherwise), and writes nothing;
+--   6. (0090) each item also says when it was reported and whether late,
+--      and its ending before the report; the list is keyed on the report.
 -- Shared fixture of the P4c suites (each suite carries its own copy, so it
 -- runs alone). Synthetic values only; uuid prefix e4c.
 --   Platform: SA (platform_super_admin), SU (support_admin), FR
@@ -982,11 +984,21 @@ select pg_temp.assert('a full row: exactly the agreed fields',
         'name', 'P4c Sign-up Laboratory Ltd'),
       'patient', jsonb_build_object('name', 'Patience Okafor'),
       'endedAt', (pg_temp.route(current_setting('hid.test.lroute_1')::uuid)).ended_at,
+      -- 0090: the report's time and lateness, and the ending before it.
+      'reportedAt', (select report.reported_at from ehr.order_route_wrong_patient_reports report
+                      where report.route_id = current_setting('hid.test.lroute_1')::uuid),
+      'late', false, 'endedKindBefore', null,
       'resultsWithdrawn', 0, 'dispensingReversed', false,
       'link', jsonb_build_object('patientId', 'e4c30000-0000-4000-8000-000000000001',
         'encounterId', 'e4c50000-0000-4000-8000-000000000001', 'kind', 'lab_request',
         'orderId', current_setting('hid.test.lr_1')::uuid)),
   (select (answer -> 'items' -> 1)::text from ov_answers where reader = 'da'));
+select pg_temp.assert('0090: every in-window item is reported milliseconds after it ended, not late, with no '
+    || 'ending before',
+  (select bool_and((item ->> 'reportedAt')::timestamptz >= (item ->> 'endedAt')::timestamptz
+       and (item ->> 'reportedAt')::timestamptz < (item ->> 'endedAt')::timestamptz + interval '1 second'
+       and item ->> 'late' = 'false' and item -> 'endedKindBefore' = 'null'::jsonb)
+     from ov_answers, jsonb_array_elements(answer -> 'items') item where reader = 'da'));
 select pg_temp.assert('the prescription''s row says the dispensing was reversed',
   (select answer -> 'items' -> 0 ->> 'kind' = 'prescription' and answer -> 'items' -> 0 -> 'dispensingReversed' = 'true'::jsonb
      and answer -> 'items' -> 0 -> 'link' ->> 'orderId' = current_setting('hid.test.rx_1')

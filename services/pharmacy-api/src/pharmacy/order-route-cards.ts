@@ -203,6 +203,16 @@ export class PharmacyOrderRouteCards {
   }
 
   /**
+   * D17 (0090): to a member holding `pharmacy.order-route.receive`, the work
+   * list says this backend serves the late correction (`lateCorrection:
+   * true`), so the website shows "Correct an order that has ended" without an
+   * audited read; nothing to anyone else. Reads nothing.
+   */
+  lateCorrection(context: DataAccessContext): { lateCorrection?: true } {
+    return context.actor.permissions.includes(RECEIVE_PERMISSION) ? { lateCorrection: true } : {};
+  }
+
+  /**
    * The two P4c controls, read with a pool statement after (never inside)
    * the clinical transaction (V11). Off when they cannot be read.
    */

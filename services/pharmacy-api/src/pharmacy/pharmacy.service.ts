@@ -163,8 +163,9 @@ export class PharmacyService {
    * receive prescriptions from other facilities, the answer says whether this
    * facility receives them now and whether any wait or are held here (item 4,
    * 0089; read in the transaction after the audit rows, left out when it
-   * cannot be read). The answer also says whether orders between facilities
-   * and work on them are on (FEAS R4, V11).
+   * cannot be read), and that this backend serves the late correction
+   * (`lateCorrection: true`, D17). The answer also says whether orders
+   * between facilities and work on them are on (FEAS R4, V11).
    */
   async listWorkItems(context: DataAccessContext) {
     const page = await this.database.withTransaction(context, async (client) => {
@@ -177,7 +178,8 @@ export class PharmacyService {
         context.correlationId);
       await this.auditShownPatients(client, context, result.rows, cards);
       const receiving = await this.routeCards.receiving(client, context);
-      return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id))), ...receiving };
+      return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id))), ...receiving,
+        ...this.routeCards.lateCorrection(context) };
     });
     return { ...page, ...(await this.routeCards.flags()) };
   }

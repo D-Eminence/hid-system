@@ -17,6 +17,9 @@ export const ORDER_ROUTE_KINDS: readonly OrderRouteKind[] = ['lab_request', 'pre
 /** Stored states with a route in force (SPEC-FINAL §3.2). */
 export const LIVE_STATES: ReadonlySet<string> = new Set(['sent', 'accepted', 'completed']);
 
+/** B's report on a route (D17, 0090): when, and whether after the order had ended. */
+export interface OrderRouteWrongPatient { reportedAt: string; late: boolean }
+
 export interface OrderRouteSummary {
   id: string;
   reference: string | null;
@@ -33,6 +36,20 @@ export interface OrderRouteSummary {
   declineReason: string | null;
   acceptLocked: boolean;
   resendAllowed: boolean;
+  /**
+   * D17 (0090): the receiver's report that it accepted the order for the
+   * wrong person, whether in its window (`late: false`) or after the order
+   * ended (`late: true`); null when there is none. Present only when the
+   * database answers it (an earlier schema does not, and the field is left
+   * out).
+   */
+  wrongPatient?: OrderRouteWrongPatient | null;
+  /**
+   * D17 (0090): until when the receiver may still withdraw what it sent back
+   * (180 days after acceptance), set while the order is open or correctable,
+   * else null. Present only when the database answers it.
+   */
+  correctableUntil?: string | null;
 }
 
 export interface OrderRouteAttestation {
@@ -166,6 +183,28 @@ function kindOf(value: unknown, fallback?: OrderRouteKind): OrderRouteKind {
   throw new Error('An order route without a known kind');
 }
 
+/**
+ * D17's two fields of a summary (0090), each only when the source carries it:
+ * the jsonb summary's `wrongPatient` and `correctableUntil` (C3, C4), or C5's
+ * `wrong_patient_reported_at`, `wrong_patient_late` and `correctable_until`
+ * columns. A source without them (an earlier schema, C1's and C2's rows)
+ * gives neither, so the answer is as before 0090.
+ */
+function lateCorrectionFields(source: Source): Pick<OrderRouteSummary, 'wrongPatient' | 'correctableUntil'> {
+  const fields: Pick<OrderRouteSummary, 'wrongPatient' | 'correctableUntil'> = {};
+  if (source.wrongPatient !== undefined) {
+    const report = parseJson(source.wrongPatient);
+    const reportedAt = isRecord(report) ? iso(field(report, 'reportedAt', 'reported_at')) : null;
+    fields.wrongPatient = isRecord(report) && reportedAt ? { reportedAt, late: field(report, 'late') === true } : null;
+  } else if (source.wrong_patient_reported_at !== undefined) {
+    const reportedAt = iso(source.wrong_patient_reported_at);
+    fields.wrongPatient = reportedAt ? { reportedAt, late: source.wrong_patient_late === true } : null;
+  }
+  const until = field(source, 'correctableUntil', 'correctable_until');
+  if (until !== undefined) fields.correctableUntil = iso(until);
+  return fields;
+}
+
 /** OrderRouteSummary from a command row or a jsonb summary (C1, C3, C4, C5). */
 export function orderRouteSummary(source: Source, fallbackKind?: OrderRouteKind): OrderRouteSummary {
   const nested = field(source, 'receivingFacility');
@@ -196,6 +235,7 @@ export function orderRouteSummary(source: Source, fallbackKind?: OrderRouteKind)
     acceptLocked: flag(field(source, 'acceptLocked', 'accept_locked')) === true
       || (lockedAt !== undefined && lockedAt !== null),
     resendAllowed: flag(field(source, 'resendAllowed', 'resend_allowed')) === true,
+    ...lateCorrectionFields(source),
   };
 }
 
@@ -402,6 +442,15 @@ export interface WrongPatientOverviewItem {
   receivingFacility: { id: string | null; name: string | null };
   patient: { name: string | null };
   endedAt: string | null;
+  /**
+   * D17 (0090): when the receiver reported it (the card lists reports of the
+   * last 30 days, whatever the order's ending), whether it did so after the
+   * order had ended (`late`), and how the order had ended before a late
+   * report (null otherwise). Present only when the database answers them.
+   */
+  reportedAt?: string | null;
+  late?: boolean;
+  endedKindBefore?: string | null;
   /** Result versions that had come back here and are now reported entered in error (0 for a prescription). */
   resultsWithdrawn: number;
   dispensingReversed: boolean;
@@ -437,6 +486,9 @@ function overviewItem(source: Source): WrongPatientOverviewItem | undefined {
       name: isRecord(receiving) ? text(field(receiving, 'name')) : null },
     patient: { name: isRecord(patient) ? text(field(patient, 'name')) : null },
     endedAt: iso(field(source, 'endedAt')),
+    ...(source.reportedAt !== undefined ? { reportedAt: iso(source.reportedAt) } : {}),
+    ...(source.late !== undefined ? { late: source.late === true } : {}),
+    ...(source.endedKindBefore !== undefined ? { endedKindBefore: text(source.endedKindBefore) } : {}),
     resultsWithdrawn: count(field(source, 'resultsWithdrawn')) ?? 0,
     dispensingReversed: flag(field(source, 'dispensingReversed')) === true,
     link: { patientId, encounterId: text(field(link, 'encounterId')), kind, orderId: text(field(link, 'orderId')) },

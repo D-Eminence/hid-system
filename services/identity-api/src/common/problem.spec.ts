@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 import type { ArgumentsHost } from '@nestjs/common';
 import type { Response } from 'express';
 import type { HidRequest } from './request-context';
-import { ProblemDetailsFilter } from './problem';
+import { DomainProblem, ProblemDetailsFilter } from './problem';
 
 describe('ProblemDetailsFilter PHI safety', () => {
   it('does not log or echo a raw exception, stack, concrete patient path, or query string', () => {
@@ -67,5 +67,22 @@ describe('ProblemDetailsFilter PHI safety', () => {
     const problem = (response.json as jest.Mock).mock.calls[0]?.[0] as { status: number; code: string; detail: string };
     expect(problem).toMatchObject({ status: 413, code: 'PAYLOAD_TOO_LARGE' });
     expect(JSON.stringify(problem)).not.toContain('raw oversized clinical note content');
+  });
+
+  it('sends a domain problem\'s extension members at the top level, never one that replaces a standard member (D17)', () => {
+    const request = { correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPQ', method: 'POST',
+      route: { path: '/admin/wrong-patient-reports/:reportId/review' } } as unknown as HidRequest;
+    const response = { status: jest.fn().mockReturnThis(), type: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() } as
+      unknown as Response;
+    const host = { switchToHttp: () => ({ getRequest: () => request, getResponse: () => response }) } as unknown as ArgumentsHost;
+    new ProblemDetailsFilter().catch(new DomainProblem(400, 'WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED', 'Refer it first', undefined,
+      { extensions: { required: 'referred_to_dpo', code: 'OTHER', status: 200, detail: 'x', correlationId: 'x' } }), host);
+    const problem = (response.json as jest.Mock).mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(problem).toMatchObject({ status: 400, code: 'WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED', detail: 'Refer it first',
+      correlationId: '01J5A2C3D4E5F6G7H8J9K0MNPQ', required: 'referred_to_dpo' });
+    expect(problem).not.toHaveProperty('extensions');
+    new ProblemDetailsFilter().catch(new DomainProblem(400, 'BAD', 'No extensions'), host);
+    expect(Object.keys((response.json as jest.Mock).mock.calls[1]?.[0] as object)).toEqual(['type', 'title', 'status', 'detail',
+      'instance', 'correlationId', 'code']);
   });
 });

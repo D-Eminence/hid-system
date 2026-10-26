@@ -112,6 +112,10 @@ export class LabRequestsService {
    * the patient (item 3, 0088): only then does the website ask a clinician to
    * have it ended there before changing the order. An earlier backend sends
    * no such field, and the website keeps its earlier warning (D15).
+   * `lateCorrection: true` says it also lets the receiver withdraw, after the
+   * order ended, what it sent back for the wrong person (D17, 0090): only then
+   * does the website say until when it can, from each route's
+   * `correctableUntil`.
    */
   async list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
     const scope = { list: 'ehr.lab-requests', patientId, encounterId };
@@ -135,7 +139,8 @@ export class LabRequestsService {
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
-    return { ...page, crossFacilityOrders: await this.orderRoutes.crossFacilityOrdersEnabled(), wrongPatientReports: true };
+    return { ...page, crossFacilityOrders: await this.orderRoutes.crossFacilityOrdersEnabled(), wrongPatientReports: true,
+      lateCorrection: true };
   }
 
   get(context: DataAccessContext, patientId: string, encounterId: string, requestId: string) {

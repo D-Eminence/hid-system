@@ -1749,17 +1749,25 @@ select pg_temp.assert('the flags', (select array_agg(listed.reference || ':' || 
       order by listed.reference)
     from wp_listed listed)
   = (select array_agg(pair order by pair) from (values
-      ((pg_temp.route(current_setting('hid.test.lroute_1')::uuid)).reference || ':'),
-      ((pg_temp.route(current_setting('hid.test.lroute_2')::uuid)).reference || ':reporter_recorded_work'),
+      -- 0090 (CL13) adds patient_reported_before: every report but route
+      -- 15's, the first of the suite, follows another on a route of P.
+      ((pg_temp.route(current_setting('hid.test.lroute_1')::uuid)).reference || ':patient_reported_before'),
+      ((pg_temp.route(current_setting('hid.test.lroute_2')::uuid)).reference
+        || ':reporter_recorded_work+patient_reported_before'),
       ((pg_temp.route(current_setting('hid.test.lroute_3')::uuid)).reference
-        || ':something_came_back+reporter_recorded_work+suspected_misuse'),
-      ((pg_temp.route(current_setting('hid.test.lroute_4')::uuid)).reference || ':something_came_back+reporter_recorded_work'),
-      ((pg_temp.route(current_setting('hid.test.lroute_5')::uuid)).reference || ':something_came_back+reporter_recorded_work'),
-      ((pg_temp.route(current_setting('hid.test.lroute_13')::uuid)).reference || ':'),
+        || ':something_came_back+reporter_recorded_work+suspected_misuse+patient_reported_before'),
+      ((pg_temp.route(current_setting('hid.test.lroute_4')::uuid)).reference
+        || ':something_came_back+reporter_recorded_work+patient_reported_before'),
+      ((pg_temp.route(current_setting('hid.test.lroute_5')::uuid)).reference
+        || ':something_came_back+reporter_recorded_work+patient_reported_before'),
+      ((pg_temp.route(current_setting('hid.test.lroute_13')::uuid)).reference || ':patient_reported_before'),
       ((pg_temp.route(current_setting('hid.test.lroute_15')::uuid)).reference || ':other_reason_nothing_recorded'),
-      ((pg_temp.route(current_setting('hid.test.rroute_1')::uuid)).reference || ':something_came_back+reporter_recorded_work'),
-      ((pg_temp.route(current_setting('hid.test.rroute_2')::uuid)).reference || ':something_came_back'),
-      ((pg_temp.route(current_setting('hid.test.rroute_3')::uuid)).reference || ':other_reason_nothing_recorded')) v(pair)),
+      ((pg_temp.route(current_setting('hid.test.rroute_1')::uuid)).reference
+        || ':something_came_back+reporter_recorded_work+patient_reported_before'),
+      ((pg_temp.route(current_setting('hid.test.rroute_2')::uuid)).reference
+        || ':something_came_back+patient_reported_before'),
+      ((pg_temp.route(current_setting('hid.test.rroute_3')::uuid)).reference
+        || ':other_reason_nothing_recorded+patient_reported_before')) v(pair)),
   (select string_agg(listed.reference || ':' || array_to_string(listed.flags, '+'), ', ') from wp_listed listed));
 select pg_temp.assert('the names, the members and the 30-day counts',
   (select listed.reported_by_name = 'Musa Second Lab' and listed.accepted_by_name = 'Kemi Lab Admin'
@@ -1775,6 +1783,12 @@ select pg_temp.assert('the names, the members and the 30-day counts',
          and listed.facility_reports_last_30_days = 3 and listed.same_member is false
        from wp_listed listed where listed.route_id = current_setting('hid.test.rroute_1')::uuid),
   (select row_to_json(listed)::text from wp_listed listed where listed.route_id = current_setting('hid.test.lroute_1')::uuid));
+select pg_temp.assert('0090''s columns of in-window reports: not late, no late facts, no late reports by the '
+    || 'reporter, the sender still active, nothing the review requires',
+  (select bool_and(not listed.late and listed.ended_kind_before is null and listed.discovered_by is null
+     and listed.discovered_on is null and listed.reporter_late_reports_last_30_days = 0 and listed.ordering_sender_active
+     and listed.required_actions = array[]::text[])
+     from wp_listed listed));
 select pg_temp.assert('no patient and no order content in the list', not exists (select 1 from wp_listed listed
   where row_to_json(listed)::text ~* '(Patience|Okafor|P4CPATP|Haemoglobin|Amoxicillin|1990-04-12)'));
 set local role hid_identity_api_runtime;

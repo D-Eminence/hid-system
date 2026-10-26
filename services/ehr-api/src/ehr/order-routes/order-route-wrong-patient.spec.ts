@@ -152,8 +152,9 @@ describe('OrderRoutesService.wrongPatientOverview (C28)', () => {
 
   it('answers a colleague the count and references only, and audits the read without a patient', async () => {
     const h = serviceHarness({ windowDays: 30, items: [], others: { count: 3, references: ['70000000', 'AB12CD34', '9F00E1A2'] } });
+    // D17: the answer also says this backend serves the late correction.
     await expect(h.service.wrongPatientOverview(context())).resolves.toEqual({ windowDays: 30, items: [],
-      others: { count: 3, references: ['70000000', 'AB12CD34', '9F00E1A2'] } });
+      others: { count: 3, references: ['70000000', 'AB12CD34', '9F00E1A2'] }, lateCorrection: true });
     expect(h.audits).toEqual([expect.objectContaining({ action: 'ehr.order-route.wrong-patient-overview',
       details: { itemCount: 0, otherCount: 3 } })]);
     expect(h.audits[0]).not.toHaveProperty('patientId');
@@ -161,7 +162,7 @@ describe('OrderRoutesService.wrongPatientOverview (C28)', () => {
 
   it('answers the empty card for a facility with no such order, or a member without ehr.order-route.send', async () => {
     const h = serviceHarness(empty);
-    await expect(h.service.wrongPatientOverview(context())).resolves.toEqual(empty);
+    await expect(h.service.wrongPatientOverview(context())).resolves.toEqual({ ...empty, lateCorrection: true });
     expect(h.audits).toEqual([expect.objectContaining({ details: { itemCount: 0, otherCount: 0 } })]);
   });
 
