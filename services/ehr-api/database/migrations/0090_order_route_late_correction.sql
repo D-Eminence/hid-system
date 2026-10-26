@@ -1008,8 +1008,15 @@ $$;
 -- Lab and Pharmacy wrappers below call it with their kind. In this order, in
 -- the service's READ COMMITTED transaction; any refusal raises, so nothing
 -- is stored (the capability included):
---   1. the actor: a direct-care staff session holding the kind's receive
---      permission at the session facility (42501);
+--   1. the caller's transaction READ COMMITTED, else 25000
+--      ORDER_ROUTE_CORRECTION_READ_COMMITTED_REQUIRED before anything is
+--      read: the limits of step 6 are exact only because each statement
+--      after the facility lock reads a new snapshot, which sees what an
+--      earlier holder committed while this one waited (under REPEATABLE READ
+--      the counts would miss it, and SERIALIZABLE does not catch it beside
+--      the services' READ COMMITTED calls); then the actor: a direct-care
+--      staff session holding the kind's receive permission at the session
+--      facility (42501);
 --   2. the input (22023 ORDER_ROUTE_INVALID): the reason one of item 3's
 --      four, how B found out one of five, the day it found out not after
 --      today in Africa/Lagos, the note 8 to 500 characters once trimmed, the
@@ -1125,7 +1132,10 @@ declare
   violated_constraint text;
   removed integer;
 begin
-  -- 1. The actor.
+  -- 1. The caller's transaction, before anything is read, then the actor.
+  if current_setting('transaction_isolation') is distinct from 'read committed' then
+    raise exception using errcode = '25000', message = 'ORDER_ROUTE_CORRECTION_READ_COMMITTED_REQUIRED';
+  end if;
   select * into actor from ehr.order_route_receiver(requested_kind);
   -- 2. The input.
   if requested_route_id is null or expected_version is null or expected_version < 1

@@ -95,6 +95,47 @@ select ehr.order_route_access_allows('lab_request', gen_random_uuid(), gen_rando
     as d17_readonly_answer,
   pg_current_xact_id_if_assigned() is null as d17_readonly_no_xid \gset
 rollback;
+-- D17 (before the fixture): the late command runs only in a READ COMMITTED
+-- transaction, where each statement after its facility lock reads a new
+-- snapshot, so that its limits are exact; under REPEATABLE READ and
+-- SERIALIZABLE it refuses before it reads anything (under READ COMMITTED
+-- the same call reaches the actor). Recorded in section 1 below.
+begin isolation level repeatable read;
+create function pg_temp.d17_isolation_outcome() returns text language plpgsql as $f$
+begin
+  perform ehr.correct_wrong_patient_order_route('lab_request', gen_random_uuid(), 1, 'other', 'own_check',
+    current_date, 'Isolation probe note', 'd17-isolation-probe-0001', repeat('a', 64));
+  return 'ok';
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+select pg_temp.d17_isolation_outcome() as d17_repeatable_read_outcome \gset
+rollback;
+begin isolation level serializable;
+create function pg_temp.d17_isolation_outcome() returns text language plpgsql as $f$
+begin
+  perform ehr.correct_wrong_patient_order_route('lab_request', gen_random_uuid(), 1, 'other', 'own_check',
+    current_date, 'Isolation probe note', 'd17-isolation-probe-0001', repeat('a', 64));
+  return 'ok';
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+select pg_temp.d17_isolation_outcome() as d17_serializable_outcome \gset
+rollback;
+begin isolation level read committed;
+create function pg_temp.d17_isolation_outcome() returns text language plpgsql as $f$
+begin
+  perform ehr.correct_wrong_patient_order_route('lab_request', gen_random_uuid(), 1, 'other', 'own_check',
+    current_date, 'Isolation probe note', 'd17-isolation-probe-0001', repeat('a', 64));
+  return 'ok';
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end
+$f$;
+select pg_temp.d17_isolation_outcome() as d17_read_committed_outcome \gset
+rollback;
 begin;
 
 do $$
@@ -1239,6 +1280,15 @@ end $$;
 -- 1. Properties, grants and pins.
 select pg_temp.assert('d17: a route-access check in a read-only transaction answers no and leaves no transaction id',
   :'d17_readonly_no_xid'::boolean and not :'d17_readonly_answer'::boolean);
+select pg_temp.assert('d17: the late command refuses a REPEATABLE READ or SERIALIZABLE caller before it reads '
+    || 'anything (its limits are exact only under READ COMMITTED); under READ COMMITTED the same call reaches the actor',
+  :'d17_repeatable_read_outcome' = '25000 ORDER_ROUTE_CORRECTION_READ_COMMITTED_REQUIRED'
+  and :'d17_serializable_outcome' = '25000 ORDER_ROUTE_CORRECTION_READ_COMMITTED_REQUIRED'
+  and :'d17_read_committed_outcome' like '42501 %'
+  and (select position('transaction_isolation' in p.prosrc) between 1 and position('order_route_receiver' in p.prosrc)
+        from pg_proc p
+       where p.oid = 'ehr.correct_wrong_patient_order_route(text,uuid,bigint,text,text,date,text,text,character)'::regprocedure),
+  concat_ws(' | ', :'d17_repeatable_read_outcome', :'d17_serializable_outcome', :'d17_read_committed_outcome'));
 select pg_temp.assert('d17: every new, replaced and recreated function: language, security, volatility, parallel, '
     || 'strictness, leakproof, cost, search path',
   (select array_agg(format('%s|%s|%s|%s|%s|%s|%s|%s|%s', p.oid::regprocedure, l.lanname, p.prosecdef, p.provolatile,
