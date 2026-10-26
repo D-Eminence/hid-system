@@ -1697,10 +1697,11 @@ try {
   assert.deepEqual(overviewRows.map(row => [row.action, row.patient_id]), [['ehr.order-route.wrong-patient-overview', null],
     ...own.items.map(() => ['ehr.order-route.wrong-patient-overview.item', patient.id])]);
   assert.deepEqual(overviewRows[0].details, { itemCount: 3, otherCount: 0 });
-  // An item row names its route by id (ids only), and a reference is the first 8 characters of that id upper-cased,
-  // so an all-digit reference would match its own row's id: look for the references with the route ids left out.
-  assertNone(overviewRows.map(row => ({ ...row, details: { ...row.details, routeId: undefined } })),
-    [patient.fullName, ...wpReferences], 'the Overview audit rows');
+  // A reference is its route id's first 8 hex digits, upper-cased, and each item row names its route by id
+  // (details.routeId): a reference of digits alone is then inside that id. Look for references with the ids taken out.
+  const overviewRowsWithoutRouteIds = JSON.parse([routeW1.id, routeW2.id, rxRouteW1.id]
+    .reduce((text, routeId) => text.split(routeId).join('<route id>'), JSON.stringify(overviewRows)));
+  assertNone(overviewRowsWithoutRouteIds, [patient.fullName, ...wpReferences], 'the Overview audit rows');
   // The report usually comes days after the order, once the grant it was sent under has expired: the sender still
   // sees their orders in full (D10's rule as the owner gave it). Owner SQL expires the sender's grants for the patient
   // (triggers off), then puts them back as they were.
