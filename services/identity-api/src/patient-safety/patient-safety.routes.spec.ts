@@ -72,7 +72,7 @@ describe('Patient-only routes (A9)', () => {
     'EmergencyContactController.update', 'EmergencyContactController.deactivate',
     'EmergencyContactController.sendVerification', 'EmergencyContactController.confirmVerification',
     'ConsentController.listMyAccessRequests', 'ConsentController.approveAccessRequest',
-    'ConsentController.denyAccessRequest',
+    'ConsentController.denyAccessRequest', 'ConsentController.revokeMyConsentGrant',
   ];
   const declared = identityControllers().flatMap((controller) => routes(controller)
     .map((route) => ({ ...route, handler: `${controller.name}.${route.name}` })));
@@ -82,12 +82,24 @@ describe('Patient-only routes (A9)', () => {
       'PatientSelfController', 'ConsentController', 'EmergencyContactController', 'AdminController', 'HealthController']));
   });
 
-  it('marks exactly the emergency-contact and access-request decision routes patient-only, each also patient-allowed and facility-optional', () => {
+  it('marks exactly the emergency-contact, access-request decision and grant revocation routes patient-only, each also patient-allowed and facility-optional', () => {
     const patientOnly = declared.filter((route) => route.patientOnly === true);
     expect(patientOnly.map((route) => route.handler).sort()).toEqual([...PATIENT_ONLY_HANDLERS].sort());
     for (const route of patientOnly) {
       expect(route).toMatchObject({ patientAllowed: true, facilityOptional: true, isPublic: undefined, permissions: undefined });
     }
+  });
+
+  it('exposes patient grant revocation on a patient route and keeps the staff close route permissioned (main, 0087)', () => {
+    const consent = declared.filter((route) => route.handler.startsWith('ConsentController.'));
+    expect(consent.find((route) => route.name === 'revokeMyConsentGrant')).toMatchObject({
+      base: 'identity', path: 'me/consent-grants/:grantId/revoke', method: RequestMethod.POST, patientOnly: true,
+      patientAllowed: true, facilityOptional: true, failuresOnly: undefined, permissions: undefined,
+    });
+    expect(consent.find((route) => route.name === 'closeOwnGrant'))
+      .toMatchObject({ patientAllowed: undefined, permissions: ['identity.consent.write'] });
+    expect(consent.find((route) => route.name === 'activateBreakGlass'))
+      .toMatchObject({ patientAllowed: undefined, permissions: ['identity.consent.write', 'identity.break-glass.write'] });
   });
 
   it('serves support opt-out and the facility alert phone only to platform permissions', () => {

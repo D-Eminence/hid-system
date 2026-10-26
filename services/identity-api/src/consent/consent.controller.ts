@@ -9,6 +9,7 @@ import { ListStaffAccessRequestsDto } from './dto/list-staff-access-requests.dto
 import { CreateAccessRequestDto } from './dto/create-access-request.dto';
 import { CreateBreakGlassDto } from './dto/create-break-glass.dto';
 import { VerifyPatientAccessPinDto } from './dto/verify-patient-access-pin.dto';
+import { RevokeConsentGrantDto } from './dto/revoke-consent-grant.dto';
 
 @Controller('identity')
 export class ConsentController {
@@ -63,6 +64,26 @@ export class ConsentController {
     @Body() input: DenyAccessRequestDto,
   ) {
     return this.consent.denyAccessRequest(patientConsentContext(request), requestId, input.reason);
+  }
+
+  /**
+   * The patient revokes a grant they gave (main 0066 item 2, migration 0087):
+   * a patient-approved or PIN-derived grant; break-glass and workforce grants
+   * answer 409. The database command binds it to the live patient session.
+   * As in main, no recent sign-in and no recovery hold: revoking only removes
+   * access. No purpose-of-use, facility or idempotency header; a repeat
+   * answers 200 with replayed: true.
+   */
+  @Post('me/consent-grants/:grantId/revoke')
+  @HttpCode(200)
+  @PatientOnly()
+  @AuditAction('identity.consent-grant.patient-revoke.command')
+  revokeMyConsentGrant(
+    @Req() request: HidRequest,
+    @Param('grantId', new ParseUUIDPipe()) grantId: string,
+    @Body() input: RevokeConsentGrantDto,
+  ) {
+    return this.consent.revokeMyConsentGrant(request, grantId, input.reason);
   }
 
   @Post('break-glass')

@@ -3,7 +3,7 @@ import type { QueryResultRow } from 'pg';
 import { requireNoRecentRecoveryHold, requireRecentPatientAuthentication, type PatientSessionActor }
   from '../auth/recent-authentication';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
+import type { DataAccessContext, HidRequest } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import type { CreateAccessRequestDto } from './dto/create-access-request.dto';
 import type { CreateBreakGlassDto } from './dto/create-break-glass.dto';
@@ -28,6 +28,27 @@ export interface BreakGlassRow extends QueryResultRow {
   expiresAt: Date;
   existingGrant: boolean;
 }
+
+export interface RevokedGrantRow extends QueryResultRow {
+  consentGrantId: string;
+  status: 'revoked';
+  revokedAt: Date;
+  replayed: boolean;
+}
+
+/**
+ * The patient's revocation (0087) answers with main's codes; the website shows
+ * `detail` to the patient as it is, so these are written for the patient.
+ * (A 5xx detail is replaced by ProblemDetailsFilter in any case.)
+ */
+export const REVOCATION_DETAIL = {
+  notRevocable: 'This access cannot be revoked here. Emergency access, and access you did not give, end on their own.',
+  notActive: 'This access has already ended. Reload the page to see its current status.',
+  notFound: 'This access record is not available. Reload the page to see your current access.',
+  sessionNotLive: 'Your session could not be confirmed. Sign in again, then revoke access.',
+  invalidReason: 'Enter a reason of at least 3 characters.',
+  unavailable: 'Revoking access is not available right now. Try again later.',
+} as const;
 
 export interface ClosedGrantRow extends QueryResultRow {
   consentGrantId: string;
@@ -172,6 +193,35 @@ export class ConsentService {
       });
     } catch (error) {
       throw this.translate(error);
+    }
+  }
+
+  /**
+   * The patient revokes a grant they gave (main 0066 item 2, migration 0087).
+   * Bound to the live patient session the way the patient-self commands are
+   * (W03): a system transaction, the verified subject bound, then the command
+   * checks the subject/session pair through identity.patient_self_session.
+   * Unlike approval, no recovery hold and no recent sign-in (main: "Denial
+   * and revocation stay available").
+   */
+  async revokeMyConsentGrant(request: HidRequest, grantId: string, reason: string) {
+    const actor = request.actor;
+    if (actor?.kind !== 'patient' || !actor.patientId || !actor.sessionId) {
+      throw new DomainProblem(403, 'PATIENT_SESSION_REQUIRED', 'An active patient session is required');
+    }
+    try {
+      return await this.database.withSystemTransaction(request.correlationId, async (client) => {
+        await client.query("select set_config('app.actor_subject', $1, true)", [actor.subject]);
+        const result = await client.query<RevokedGrantRow>(
+          `select consent_grant_id as "consentGrantId", grant_status as status,
+             revoked_at as "revokedAt", replayed
+           from identity.revoke_my_consent_grant($1, $2, $3, $4)`,
+          [actor.subject, actor.sessionId, grantId, reason.trim()],
+        );
+        return this.requireRow(result.rows[0]);
+      });
+    } catch (error) {
+      throw this.translateRevocation(error);
     }
   }
 
@@ -327,6 +377,28 @@ export class ConsentService {
         return new DomainProblem(400, 'INVALID_CONSENT_COMMAND', 'The consent command failed integrity validation');
       default:
         return error;
+    }
+  }
+
+  /** main's codes for the revocation, with REVOCATION_DETAIL for the patient. */
+  private translateRevocation(error: unknown): unknown {
+    if (error instanceof DomainProblem || !isDatabaseError(error)) return error;
+    const raw = (error as unknown as { message?: unknown }).message;
+    switch (error.code) {
+      case '55000':
+        return new DomainProblem(409, 'CONSENT_COMMAND_CONFLICT', raw === 'CONSENT_GRANT_NOT_PATIENT_REVOCABLE'
+          ? REVOCATION_DETAIL.notRevocable : REVOCATION_DETAIL.notActive);
+      case 'P0002':
+        return new DomainProblem(404, 'CONSENT_RESOURCE_NOT_FOUND', REVOCATION_DETAIL.notFound);
+      case '42501':
+        return new DomainProblem(403, 'CONSENT_COMMAND_DENIED', REVOCATION_DETAIL.sessionNotLive);
+      case '22023':
+        return new DomainProblem(400, 'INVALID_CONSENT_COMMAND', REVOCATION_DETAIL.invalidReason);
+      case '42883':
+        // An Identity build ahead of migration 0087 (a rehearsal order only).
+        return new DomainProblem(503, 'CONSENT_COMMAND_UNAVAILABLE', REVOCATION_DETAIL.unavailable);
+      default:
+        return this.translate(error);
     }
   }
 

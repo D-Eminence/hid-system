@@ -12,6 +12,26 @@ export function requirePatient(actor: ActorContext | undefined): ActorContext & 
   return actor as ActorContext & { patientId: string; sessionId: string };
 }
 
+/**
+ * Migration 0087 labels each access-history item with revocableByPatient.
+ * This build, which serves POST me/consent-grants/:grantId/revoke, publishes
+ * it as the website's patientRevocable (always a boolean, never true for a
+ * break-glass item). An Identity build without that route passes the
+ * database JSON through, and the website ignores revocableByPatient, so its
+ * Revoke button never appears where the route is not served (during a
+ * release, or after identity-api alone is rolled back).
+ */
+export function publishAccessHistory(value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || !Array.isArray((value as { items?: unknown }).items)) return value;
+  const history = value as { items: Array<Record<string, unknown>> };
+  return {
+    ...history,
+    items: history.items.map(({ revocableByPatient, ...item }) => ({
+      ...item, patientRevocable: revocableByPatient === true && item.breakGlass !== true,
+    })),
+  };
+}
+
 @Injectable()
 export class PatientSelfService {
   constructor(private readonly database: DatabaseService, private readonly audit: AuditService) {}
@@ -146,7 +166,7 @@ export class PatientSelfService {
       return allowed ? operation === 'authorize'
         ? { allowed: true, patientId: actor.patientId, accountId: actor.accountId, subject: actor.subject,
           sessionId: actor.sessionId, expiresAt: new Date(Date.now() + 30_000).toISOString() }
-        : value : null;
+        : operation === 'access-history' ? publishAccessHistory(value) : value : null;
     }).then((value) => {
       if (value === null) throw new DomainProblem(403, 'PATIENT_ACCESS_DENIED', 'Patient access is unavailable');
       return value;
