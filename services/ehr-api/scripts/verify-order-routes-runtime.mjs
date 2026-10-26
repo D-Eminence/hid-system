@@ -27,7 +27,11 @@
 // patient, to prove a route never opens another row of that patient), and,
 // for the wrong-patient report (item 3), a laboratory role that may receive
 // lab requests but not mark results entered in error (no standard role is
-// one: the lab role holds both permissions).
+// one: the lab role holds both permissions). Item 4 (0089)'s contract fields
+// are checked on the answers the run already reads: receives and routesHere
+// on the Lab and Pharmacy work lists and Incoming, support's Find's
+// accessEndsAt and closable, the facility summary's destination, and a
+// laboratory unlisted after orders were sent to it.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -493,8 +497,13 @@ try {
     { expectedVersion: 1, patientIdentifier: { kind: 'health_id', value: patient.hid } }, { key: freshKey('accept') }),
   423, 'CROSS_FACILITY_ORDERS_UNAVAILABLE').code;
   const closedIncoming = expectStatus(await call(lab, labAdmin, 'GET', '/lab/order-routes?view=incoming'), 200, 'closed incoming');
-  assert.deepEqual(closedIncoming, { items: [], crossFacilityOrders: false, crossFacilityWork: true });
+  // Item 4 (0089): the reviewed, listed laboratory receives whatever the switch says; nothing waits or is held there yet.
+  assert.deepEqual(closedIncoming, { items: [], receives: true, routesHere: { waiting: false, held: false },
+    crossFacilityOrders: false, crossFacilityWork: true });
   closed.incoming = closedIncoming;
+  const closedWorkList = expectStatus(await call(lab, labAdmin, 'GET', '/lab/work-items'), 200, 'closed work list');
+  assert.deepEqual([closedWorkList.receives, closedWorkList.routesHere, closedWorkList.crossFacilityOrders],
+    [true, { waiting: false, held: false }, false]);
   const closedList = expectStatus(await ehrCall(doctor, 'GET', `${enc}/lab-requests`), 200, 'closed list');
   assert.equal(closedList.crossFacilityOrders, false);
   closed.labRequestList = { crossFacilityOrders: false, orderRoute: closedList.items[0].orderRoute };
@@ -532,11 +541,51 @@ try {
   const summaryOther = expectStatus(await adminCall('GET', `/admin/facilities/${otherLab.facilityId}/order-route-summary`), 200,
     'summary');
   assert.deepEqual(summaryOther.listed, { value: false, byDefault: true, reason: null, setAt: null });
+  // Item 4 (0089): what the facility is as a destination, beside the listing (D6), with no verification method (D7).
+  assert.deepEqual(summaryOther.destination, { receivingTypes: ['laboratory'], review: 'reviewed' });
+  assert.deepEqual(Object.keys(summaryOther).sort(), ['counterparts', 'destination', 'facilityId', 'listed',
+    'receivedAcceptedLifetime', 'receivedPatientsLifetime']);
+  const destinationOf = async target => expectStatus(await adminCall('GET',
+    `/admin/facilities/${target.facilityId}/order-route-summary`), 200, `summary ${target.label}`).destination;
+  const destinations = { laboratory: await destinationOf(laboratory), pharmacy: await destinationOf(pharmacyFacility),
+    hospital: await destinationOf(hospital), pendingLaboratory: await destinationOf(pendingLab), checkedAsOther: summaryOther.destination };
+  assert.deepEqual(destinations, { laboratory: { receivingTypes: ['laboratory'], review: 'reviewed' },
+    pharmacy: { receivingTypes: ['pharmacy'], review: 'reviewed' }, hospital: { receivingTypes: [], review: 'reviewed' },
+    pendingLaboratory: { receivingTypes: ['laboratory'], review: 'pending' },
+    checkedAsOther: { receivingTypes: ['laboratory'], review: 'reviewed' } });
+  // Whether the laboratory checked as Other receives (B1): not until support lists it, and not after it unlists it,
+  // on its work list and Incoming alike, whatever the switches say; nothing waits or is held there.
+  const receivingAtOther = async label => {
+    const workList = expectStatus(await call(lab, otherLabAdmin, 'GET', '/lab/work-items'), 200, `other work list ${label}`);
+    const incomingList = expectStatus(await call(lab, otherLabAdmin, 'GET', '/lab/order-routes?view=incoming'), 200,
+      `other incoming ${label}`);
+    assert.deepEqual(workList.routesHere, { waiting: false, held: false }, label);
+    assert.deepEqual(incomingList.routesHere, { waiting: false, held: false }, label);
+    assert.equal(workList.receives, incomingList.receives, label);
+    return workList.receives;
+  };
+  const otherReceives = { unlistedByDefault: await receivingAtOther('before listing') };
+  // The pending laboratory's administrator may not read the work list or Incoming yet (the guard refuses the
+  // missing permission), so neither says anything.
+  const pendingWorkList = expectProblem(await call(lab, pendingLabAdmin, 'GET', '/lab/work-items'), 403, 'PERMISSION_DENIED',
+    'pending laboratory work list');
+  const pendingIncoming = expectProblem(await call(lab, pendingLabAdmin, 'GET', '/lab/order-routes?view=incoming'), 403,
+    'PERMISSION_DENIED');
+  for (const refusal of [pendingWorkList, pendingIncoming]) {
+    assert(!('receives' in refusal) && !('routesHere' in refusal), JSON.stringify(refusal));
+  }
   assert.equal(expectStatus(await listOther(true), 200, 'list other').listed, true);
+  otherReceives.listedBySupport = await receivingAtOther('listed');
   assert.deepEqual(expectStatus(await search(doctor, 'laboratory', 'Verifier Laboratory'), 200, 'directory').items
     .map(item => item.facilityId).sort(), [laboratory.facilityId, otherLab.facilityId].sort());
   expectProblem(await listOther(true), 409, 'ORDER_ROUTE_DESTINATION_UNCHANGED');
   assert.equal(expectStatus(await listOther(false), 200, 'unlist other').listed, false);
+  otherReceives.unlistedBySupport = await receivingAtOther('unlisted');
+  assert.deepEqual(otherReceives, { unlistedByDefault: false, listedBySupport: true, unlistedBySupport: false });
+  const summaryOtherAfter = expectStatus(await adminCall('GET', `/admin/facilities/${otherLab.facilityId}/order-route-summary`),
+    200, 'summary after');
+  assert.deepEqual([summaryOtherAfter.listed.value, summaryOtherAfter.listed.byDefault, summaryOtherAfter.destination],
+    [false, false, { receivingTypes: ['laboratory'], review: 'reviewed' }]);
   assert.deepEqual(expectStatus(await search(doctor, 'laboratory', 'Verifier Laboratory'), 200, 'directory').items
     .map(item => item.facilityId), [laboratory.facilityId]);
   expectProblem(await adminCall('POST', `/admin/facilities/${hospital.facilityId}/order-destination`,
@@ -544,6 +593,9 @@ try {
   evidence.directory = { found: 'reviewed listed laboratory only', notFound: ['pending laboratory', 'laboratory checked as Other',
     'hospital'], registeredAddress: true, newOnHealthId: true, supportListed: 'found', supportUnlisted: 'gone',
     unchanged: 409, hospital: 404, queryTooShort: 400, labMember: 403 };
+  evidence.contractFields = { destinations, receivesAtLaboratoryCheckedAsOther: otherReceives,
+    pendingLaboratory: { workList: `403 ${pendingWorkList.code}`, incoming: `403 ${pendingIncoming.code}`, fields: 'none' },
+    closedIncoming: { receives: true, routesHere: { waiting: false, held: false }, crossFacilityOrders: false } };
   step('directory: only reviewed, listed laboratories and pharmacies; support lists and unlists');
 
   // Synthetic values that must never reach a receiver before acceptance, a third facility or an audit row.
@@ -651,6 +703,8 @@ try {
   // What B sees at once: a preview, without the patient or the clinical information.
   const incoming = expectStatus(await call(lab, labAdmin, 'GET', '/lab/order-routes?view=incoming'), 200, 'incoming');
   assert.deepEqual([incoming.crossFacilityOrders, incoming.crossFacilityWork, incoming.items.length], [true, true, 1]);
+  // Item 4: the laboratory receives, and an order waits there.
+  assert.deepEqual([incoming.receives, incoming.routesHere], [true, { waiting: true, held: false }]);
   const preview = incoming.items[0];
   assert.deepEqual(Object.keys(preview).sort(), ['acceptLocked', 'attemptsLeft', 'effectiveState', 'id', 'orderer',
     'orderingFacilityName', 'priority', 'reference', 'respondBy', 'sentAt', 'specimenTypeCode', 'test', 'version']);
@@ -791,6 +845,9 @@ try {
   const now = () => new Date().toISOString();
   const workList = expectStatus(await labCall(labMember, 'GET', '/work-items'), 200, 'work list');
   assert.deepEqual([workList.crossFacilityOrders, workList.crossFacilityWork], [true, true]);
+  // Item 4: the accepted order is held here; none waits.
+  assert.deepEqual([workList.receives, workList.routesHere], [true, { waiting: false, held: true }]);
+  evidence.contractFields.atTheLaboratory = { incomingAfterSend: incoming.routesHere, workListAfterAcceptance: workList.routesHere };
   const routedItem = workList.items.find(item => item.id === accepted.workItemId);
   assert(routedItem, `work list: ${JSON.stringify(workList)}`);
   assert.equal('sourceEhrOrderId' in routedItem, false, 'a routed row must not carry the other facility\'s order id');
@@ -938,6 +995,7 @@ try {
   const pharmacyUrlRefusal = await refusedInUrl(extra => pharmacyCall(pharmacist, 'GET',
     `/order-routes?view=incoming&healthId=${patient.hid}`, undefined, extra), 'pharmacy/order-routes/search',
   'Pharmacy GET with a Health ID');
+  assert.deepEqual([rxIncoming.receives, rxIncoming.routesHere], [true, { waiting: true, held: false }]);
   const rxPreview = rxIncoming.items.find(item => item.id === rxRoute1.id);
   assert.deepEqual(rxPreview.medication, { codeSystem: medicine.medicationCodeSystem, code: medicine.medicationCode,
     display: medicine.medicationDisplay });
@@ -947,6 +1005,9 @@ try {
   const rxAccepted = expectStatus(await acceptPrescription(rxRoute1.id, 1, { kind: 'date_of_birth', value: patient.dob }), 201,
     'pharmacy accept');
   assert.deepEqual([rxAccepted.instructions, rxAccepted.patient.healthIdLast4], [medicine.instructions, patient.hid.slice(-4)]);
+  const rxWorkList = expectStatus(await pharmacyCall(pharmacist, 'GET', '/work-items'), 200, 'pharmacy work list');
+  assert.deepEqual([rxWorkList.receives, rxWorkList.routesHere], [true, { waiting: false, held: true }]);
+  evidence.contractFields.atThePharmacy = { incomingAfterSend: rxIncoming.routesHere, workListAfterAcceptance: rxWorkList.routesHere };
   const rxItem = expectStatus(await pharmacyCall(pharmacist, 'GET', `/work-items/${rxAccepted.workItemId}`), 200, 'rx item');
   assert.equal(rxItem.orderRoute.access, 'work');
   assert.equal('sourceEhrPrescriptionId' in rxItem || 'sourceEncounterId' in rxItem, false);
@@ -1181,6 +1242,8 @@ try {
   const lr7 = await newLabRequest('active');
   const handedOff = { labWorkItem: Boolean(lr7.labWorkItem), labHandoff: lr7.labHandoff };
   const ownLabList = expectStatus(await labCall(hospitalLab1, 'GET', '/work-items'), 200, 'hospital lab list');
+  // Item 4: a hospital's own laboratory staff are told the hospital receives no lab requests from other facilities.
+  assert.deepEqual([ownLabList.receives, ownLabList.routesHere], [false, { waiting: false, held: false }]);
   const ownLabItem = ownLabList.items.find(item => item.sourceEhrOrderId === lr7.id);
   assert(ownLabItem, `hand-off: ${JSON.stringify({ handedOff, items: ownLabList.items })}`);
   assert.equal(ownLabItem.orderRoute, undefined);
@@ -1222,6 +1285,8 @@ try {
   'same-facility pull');
   const pulledItemId = pulled.workItem?.id ?? pulled.pharmacyWorkItem?.id ?? pulled.id;
   const ownRxList = expectStatus(await pharmacyCall(hospitalPharmacist, 'GET', '/work-items'), 200, 'hospital pharmacy list');
+  assert.deepEqual([ownRxList.receives, ownRxList.routesHere], [false, { waiting: false, held: false }]);
+  evidence.contractFields.hospitalsOwnStaff = { lab: { receives: false }, pharmacy: { receives: false } };
   const ownRxItem = ownRxList.items.find(item => item.sourceEhrPrescriptionId === rx7.id);
   assert(ownRxItem, `pull: ${JSON.stringify(pulled)}`);
   assert.equal(ownRxItem.orderRoute, undefined);
@@ -1284,11 +1349,20 @@ try {
     'CROSS_FACILITY_ORDERS_UNAVAILABLE').code,
     // A chain row (a dispensing) is found only through rows the session can read, so it is refused, not "paused".
     chainRead: answerOf(await pharmacyCall(pharmacist, 'GET', `/dispensings/${dispensed.id}`)),
-    incoming: answerOf(await pharmacyCall(pharmacist, 'GET', '/order-routes?view=incoming')),
+    incoming: await pharmacyCall(pharmacist, 'GET', '/order-routes?view=incoming'),
   };
+  // Item 4: Incoming answers 423 as before and says nothing more; the work list, which that switch never refuses, says
+  // the pharmacy receives and holds accepted work (the paused notice), and that one order still waits.
+  expectProblem(accessOff.incoming, 423, 'CROSS_FACILITY_ORDERS_UNAVAILABLE', 'incoming while route access is off');
+  assert(!('receives' in accessOff.incoming.body) && !('routesHere' in accessOff.incoming.body), JSON.stringify(accessOff.incoming.body));
+  accessOff.incoming = answerOf(accessOff.incoming);
   assert([403, 404].includes(Number(accessOff.chainRead.split(' ')[0])), `chain read while off: ${accessOff.chainRead}`);
   const pausedList = expectStatus(await pharmacyCall(pharmacist, 'GET', '/work-items'), 200, 'paused list');
   assert.equal(pausedList.crossFacilityWork, false);
+  assert.deepEqual([pausedList.receives, pausedList.routesHere, pausedList.crossFacilityOrders],
+    [true, { waiting: true, held: true }, false]);
+  evidence.contractFields.routeAccessOff = { incoming: '423, no fields', workList: { receives: true,
+    routesHere: pausedList.routesHere, crossFacilityWork: false } };
   assert(!pausedList.items.some(item => item.id === rx4Accepted.workItemId), 'a routed item is listed while route access is off');
   accessOff.list = 'routed rows hidden, crossFacilityWork false';
   accessOff.orderingView = expectStatus(await ehrCall(doctor, 'GET', routesPath('prescription', rx4.id)), 200, 'ordering view')
@@ -1310,6 +1384,8 @@ try {
   assert.deepEqual(byReference.map(item => [item.routeId, item.effectiveState, item.receivingFacilityName]),
     [[rxRoute3.id, 'sent', pharmacyFacility.name]]);
   assertNone(byReference, [...identityValues, ...clinicalOnly, medicine.medicationDisplay], 'support\'s lookup');
+  // Item 4 (0089): when the receiving facility's access ends (none before acceptance) and whether Close acts now.
+  assert.deepEqual([byReference[0].accessEndsAt, byReference[0].closable], [null, true]);
   // The Health ID in the body (CODEX §26); one in the GET's URL is refused, with or without a reference.
   const byHealthIdSupport = expectStatus(await adminCall('POST', '/admin/order-routes/search', { healthId: patient.hid }), 200,
     'find by HID').items;
@@ -1330,6 +1406,28 @@ try {
   expectProblem(await adminCall('POST', closePath, closeReason, { ifMatch: 2 }), 409, 'ORDER_ROUTE_ALREADY_CLOSED');
   assert.equal(expectStatus(await ehrCall(doctor, 'GET', routesPath('prescription', rx3.id)), 200, 'closed').items[0].endedKind,
     'support');
+  // Item 4 (0089): Find answers what Close would do now, at the database clock. Closed by support: no longer closable.
+  const findRoute = async route => expectStatus(await adminCall('GET', `/admin/order-routes?reference=${route.reference}`), 200,
+    `find ${route.reference}`).items.find(item => item.routeId === route.id);
+  const afterClose = await findRoute(rxRoute3);
+  assert.deepEqual([afterClose.effectiveState, afterClose.accessEndsAt, afterClose.closable], ['withdrawn', null, false]);
+  // A completed prescription inside its window: Close acts; access ends exactly when the database says.
+  const completedOpen = await findRoute(rxRoute2);
+  const storedEnd = (await one('select access_ends_at from ehr.order_routes where id=$1', [rxRoute2.id])).access_ends_at;
+  assert.deepEqual([completedOpen.effectiveState, completedOpen.closable, completedOpen.accessEndsAt],
+    ['completed', true, storedEnd.toISOString()]);
+  assert(Date.parse(completedOpen.accessEndsAt) > Date.now(), completedOpen.accessEndsAt);
+  // The first lab request, completed and moved past its access (9b): Find says Close would not act, and Close refuses.
+  const completedEnded = await findRoute(route1);
+  assert.deepEqual([completedEnded.effectiveState, completedEnded.endedAt, completedEnded.closable], ['completed', null, false]);
+  assert(Date.parse(completedEnded.accessEndsAt) < Date.now(), completedEnded.accessEndsAt);
+  expectProblem(await adminCall('POST', `/admin/order-routes/${route1.id}/close`, closeReason,
+    { ifMatch: completedEnded.version }), 409, 'ORDER_ROUTE_ALREADY_CLOSED');
+  assert.deepEqual(await one('select state, ended_at from ehr.order_routes where id=$1', [route1.id]),
+    { state: 'completed', ended_at: null });
+  evidence.contractFields.support = { sent: { accessEndsAt: null, closable: true }, closedBySupport: { closable: false },
+    completedInWindow: { closable: true, accessEndsAt: 'the stored access_ends_at' },
+    completedPastAccess: { closable: false, close: 'ORDER_ROUTE_ALREADY_CLOSED' } };
   assert.deepEqual(await all(`select actor_type, facility_id, patient_id from audit.events where action='admin.order-route.close'
     and resource_id=$1`, [rxRoute3.id]), [{ actor_type: 'platform', facility_id: null, patient_id: null }]);
   // The directory: 60 searches an hour per member; the 61st is refused.
@@ -1725,6 +1823,39 @@ try {
   evidence.wrongPatient = wp;
   step('wrong patient: lab (result withdrawn), nothing returned, outside the window, pharmacy (reversed); Overview card; support\'s list and review');
 
+  // ── 12c. Item 4 (0089, D4): a laboratory unlisted after orders were sent to it still sees them ──
+  // Support lists the laboratory checked as Other; the doctor sends it two lab requests and it accepts one; support
+  // unlists it again. Its work list and Incoming then say it does not receive, and that one order is held there and
+  // one waits: the website keeps the paused notice for the accepted work and shows the waiting one for Decline.
+  assert.equal(expectStatus(await listOther(true), 200, 'list other again').listed, true);
+  const lrHeld = await newLabRequest();
+  const routeHeld = expectStatus(await send(doctor, 'lab_request', lrHeld, otherLab.facilityId, labVersion), 201,
+    'send to the laboratory checked as Other').route;
+  const lrWaiting = await newLabRequest();
+  const routeWaiting = expectStatus(await send(doctor, 'lab_request', lrWaiting, otherLab.facilityId, labVersion), 201,
+    'send to the laboratory checked as Other (2)').route;
+  const heldAccepted = expectStatus(await accept(otherLabAdmin, lab, routeHeld.id, 1, { kind: 'health_id', value: patient.hid }),
+    201, 'accept at the laboratory checked as Other');
+  assert.equal(expectStatus(await listOther(false), 200, 'unlist other again').listed, false);
+  const unlistedIncoming = expectStatus(await call(lab, otherLabAdmin, 'GET', '/lab/order-routes?view=incoming'), 200,
+    'Incoming once unlisted');
+  assert.deepEqual([unlistedIncoming.receives, unlistedIncoming.routesHere, unlistedIncoming.items.map(item => item.id)],
+    [false, { waiting: true, held: true }, [routeWaiting.id]]);
+  const unlistedWork = expectStatus(await call(lab, otherLabAdmin, 'GET', '/lab/work-items'), 200, 'work list once unlisted');
+  assert.deepEqual([unlistedWork.receives, unlistedWork.routesHere], [false, { waiting: true, held: true }]);
+  assert(unlistedWork.items.some(item => item.id === heldAccepted.workItemId), 'the accepted order left the work list');
+  const unlistedAccept = expectProblem(await accept(otherLabAdmin, lab, routeWaiting.id, 1,
+    { kind: 'health_id', value: patient.hid }), 409, 'ORDER_ROUTE_DESTINATION_INELIGIBLE').code;
+  expectStatus(await call(lab, otherLabAdmin, 'POST', `/lab/order-routes/${routeWaiting.id}/decline`,
+    { expectedVersion: 1, reason: 'test_not_offered' }), 200, 'decline once unlisted');
+  const afterDecline = expectStatus(await call(lab, otherLabAdmin, 'GET', '/lab/order-routes?view=incoming'), 200,
+    'Incoming after the decline');
+  assert.deepEqual([afterDecline.receives, afterDecline.routesHere, afterDecline.items], [false, { waiting: false, held: true }, []]);
+  evidence.contractFields.unlistedAfterOrders = { incoming: { receives: false, routesHere: unlistedIncoming.routesHere,
+    listed: 'the waiting order' }, workList: { receives: false, routesHere: unlistedWork.routesHere, accepted: 'listed' },
+    accept: unlistedAccept, decline: 200, afterDecline: afterDecline.routesHere };
+  step('contract fields (item 4): receives and routesHere on every list, Find\'s accessEndsAt and closable, the summary\'s destination');
+
   // ── Timing (p95 of 25 calls each, with this run's routes and work) ──
   const p95 = async request => {
     const samples = [];
@@ -1779,6 +1910,10 @@ try {
       { reason: 'Order-route verifier releases this sign-up' }, { ifMatch: applicationVersion }), 200, `release ${target.label}`);
   };
   await releaseFacility(laboratory, laboratory.accountId);
+  // Item 4: a released sign-up is no destination (the release suspends its products).
+  const releasedDestination = await destinationOf(laboratory);
+  assert.deepEqual(releasedDestination, { receivingTypes: [], review: 'released' });
+  evidence.contractFields.releasedDestination = releasedDestination;
   const released = await all(`select id, state, ended_kind, access_ends_at <= clock_timestamp() as access_ended
     from ehr.order_routes where id = any($1::uuid[]) order by created_at`, [[route1.id, route2b.id, route6.id]]);
   assert.deepEqual(released.map(row => [row.state, row.ended_kind]), [['completed', 'receiving_released'],
@@ -1827,8 +1962,13 @@ try {
   const leaks = scanned.filter(row => sensitive.some(value => row.details.includes(value)))
     .map(row => `${row.action}: ${sensitive.find(value => row.details.includes(value))}`);
   assert.deepEqual(leaks, []);
+  // Item 4: nothing new is audited; no row carries the new fields.
+  const contractFieldRows = await all(`select action from audit.events
+    where coalesce(details::text, '') ~ '"(receives|routesHere|closable|accessEndsAt|receivingTypes)"'`);
+  assert.deepEqual(contractFieldRows, [], `a row carries a contract field: ${JSON.stringify(contractFieldRows)}`);
   evidence.audit = { routes: routes.length, neverAccepted: neverAccepted.length, rowsScanned: scanned.length,
-    sensitiveValues: sensitive.length, leaks: 0, patientOnBRowsBeforeAcceptance: 0, actorsOnSystemRows: 0 };
+    sensitiveValues: sensitive.length, leaks: 0, patientOnBRowsBeforeAcceptance: 0, actorsOnSystemRows: 0,
+    contractFieldRows: 0 };
   step('audit: no patient at B before acceptance, no actor on cross-facility rows, no content or identifier in any row');
   evidence.elapsedSeconds = Math.round((Date.now() - startedAt) / 1000);
   evidence.status = 'passed';
