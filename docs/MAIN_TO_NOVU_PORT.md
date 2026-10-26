@@ -1385,9 +1385,14 @@ decisions, all built as decided:
   accepting member. D14: support refers to the DPO, the same day, every
   suspected-misuse report and every report where something had gone back
   (the flags `suspected_misuse` and `something_came_back`).
-- D15: the website ships first (dormant: its buttons need a numeric
-  `orderRoute.version`, and the new routes answer 404 on the old backend),
-  then the backend with the owner's signature on 0088. D16: the wording is
+- D15: the website ships first, then the backend with the owner's signature
+  on 0088. Until then the website is dormant: the work-row button needs a
+  numeric `orderRoute.version`, which only 0088's cards carry, and every new
+  route answers 404 `NOT_FOUND` on 595c044's and 7246d0e's services (checked
+  at integration), which the website says as "not available yet" or shows
+  as nothing. Two parts show before the backend: the Accepted panel's
+  button, which answers "isn't available yet" on 404 (SPEC-FINAL §11), and
+  the guidance sentences (§9.2, §9.4, §9.5). D16: the wording is
   the spec's §9 drafts. D17: late correction is not in this build (the next
   item); support and clinicians follow §9.5's guidance meanwhile. D18: no
   "can't complete" action; the form says not to use this for that, "other"
@@ -1626,6 +1631,12 @@ Still open, with what each one holds back:
   after the website release that carries its screens (D15) and after the
   container database acceptance (`scripts/run-container-database-acceptance.sh`),
   which, with the staging schema upgrade, is a manual gate before signing.
+  The release diffs from item 2's released commit (0087 must be live first:
+  the declaration names only 0088 and `runtime-grants.sql`). With the
+  default `changed` selection it rebuilds all 13 components, because
+  `scripts/verify-migration-ledger.mjs` changes, as 0087's release does. The
+  website's backend pins must name the commits item 2's release deployed
+  before its item 3 release can deploy, and be re-pinned after this one.
   Late correction (D17), the patient email (D9) and "can't complete" (D18)
   are not in this build.
 
