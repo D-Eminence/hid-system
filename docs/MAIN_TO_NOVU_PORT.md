@@ -1483,8 +1483,8 @@ decisions, built as decided:
 - D6: `destination` sits beside `listed`, not inside it. D7: no verification
   method and no "listable" flag. D8: support's listing command is unchanged.
   D9: no "found now" on the summary.
-- D10: 0089's declaration stays unsigned in this build (`reviewed_by` empty);
-  the owner signs it later.
+- D10: 0089's declaration was left unsigned in the build; the owner,
+  D-Eminence, signed it in chat on 2026-10-26 (see Still open).
 
 What mirrors what (a later migration that changes one changes the other with
 it; 0089 pins each body by md5, and the suite's consistency checks catch
@@ -1655,8 +1655,8 @@ Decided by the owner, D-Eminence:
   days, read-only, showing a member full rows only for orders they sent.
 - The contract fields (item 4) are built at the owner's request (2026-10-26)
   with the decisions D1-D10 described under "The contract fields" in Ported
-  above, D4 taking the alternative (`routesHere`) and D10 leaving 0089's
-  declaration unsigned for now.
+  above, D4 taking the alternative (`routesHere`); the owner signed 0089's
+  declaration in chat on 2026-10-26.
 
 Still open, with what each one holds back:
 
@@ -1739,13 +1739,17 @@ Still open, with what each one holds back:
   The website's pins are re-pinned after this release. Late correction
   (D17), the patient email (D9) and "can't complete" (D18) are not in this
   build.
-- The contract fields (item 4, 0089): unsigned (D10). The owner signs after
-  the container database acceptance, the staging schema upgrade and an
-  adversarial review. 0088 must be live first (the declaration names only
-  0089 and `runtime-grants.sql`). Release order: 0089 with
-  `runtime-grants.sql`, then lab-api, pharmacy-api and identity-api built
-  from the same commit, then the website with health's re-pin; either order
-  is safe, since every field is optional. The release tooling
+- The contract fields (item 4, 0089): signed by the owner, D-Eminence, in
+  chat on 2026-10-26, after the container database acceptance (a fresh
+  install applying all 90 migrations and every `test/database` suite, then
+  no pending migration), the staging schema upgrade and an adversarial
+  review passed. 0088 is live (item 3's release, bd8676e; the declaration
+  names only 0089 and `runtime-grants.sql`). Release order, as the owner
+  chose: this backend first (0089 with `runtime-grants.sql`, then lab-api,
+  pharmacy-api and identity-api built from the same commit), then the
+  website with health's re-pin to this release, which the owner approved
+  in the same message; either order is safe, since every field is
+  optional. The release tooling
   (`scripts/production-backend-build.mjs`) counts the verifier under
   `services/ehr-api/scripts/` toward both the ehr-api and the migration
   images; with the default `changed` selection, the diff from item 3's
