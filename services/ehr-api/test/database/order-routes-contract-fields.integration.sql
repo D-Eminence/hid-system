@@ -27,7 +27,9 @@
 --      and another kind's routes never count; nothing without the receive
 --      permission; the same at a governed and a self-signed-up facility, at
 --      an unlisted one and at one whose product is suspended, with either
---      switch off; a route sent 51 days ago is still held (the read's bound),
+--      switch off; an order waiting at the unlisted facility, or while
+--      orders between facilities are off, is refused by Accept and can still
+--      be declined; a route sent 51 days ago is still held (the read's bound),
 --      and the two CHECKs that bound rests on are still 0086's, validated;
 --      every case equals Incoming's and route access's own predicates,
 --      unbounded, evaluated as owner; booleans only;
@@ -1423,11 +1425,42 @@ reset role;
 set local role hid_lab_api_runtime;
 select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
 select pg_temp.expect_facts('L1 unlisted with a lab request waiting', 'lab', 'false {"held": false, "waiting": true}');
+-- Waiting is not acceptable here (INTERFACE_CONTRACT section 22): Accept is
+-- refused while receives is false, and Decline still acts (undone here).
+select pg_temp.check('L1 unlisted: the waiting lab request cannot be accepted',
+  format($s$select * from lab.accept_order_route(%L, 1, 'health_id', 'HID-P4CPATP', 'p4c-item4-accept-w1-unlisted', %L)$s$,
+    current_setting('hid.test.route_w1'), repeat('a', 64)), 'P0001 ORDER_ROUTE_DESTINATION_INELIGIBLE');
+select pg_temp.check('L1 unlisted: the waiting lab request can still be declined',
+  format($s$do $d$ begin perform * from lab.decline_order_route(%L, 1, 'test_not_offered');
+    raise exception 'P4C_DECLINED'; end $d$$s$, current_setting('hid.test.route_w1')), 'P0001 P4C_DECLINED');
+select pg_temp.expect_facts('L1 unlisted: the lab request still waits', 'lab', 'false {"held": false, "waiting": true}');
 reset role;
 set local role hid_identity_api_runtime;
 select pg_temp.as_platform(3);
 select pg_temp.check('support relists L1', format($s$select * from identity.admin_set_order_route_destination(%L, true,
   'Complaint closed, listed again')$s$, current_setting('hid.test.facility_1')), 'ok');
+-- Nor while orders between facilities are off, though L1 receives and the
+-- order still waits; Decline still acts (undone here).
+select pg_temp.as_platform(1);
+select platform.admin_set_control('cross_facility_orders_enabled', false,
+  (select control.row_version from platform.admin_list_controls() control
+    where control.control_key = 'cross_facility_orders_enabled'), 'P4c item 4 suite closes orders');
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select pg_temp.expect_facts('L1 listed, orders off, a lab request waiting', 'lab', 'true {"held": false, "waiting": true}');
+select pg_temp.check('orders off: the waiting lab request cannot be accepted',
+  format($s$select * from lab.accept_order_route(%L, 1, 'health_id', 'HID-P4CPATP', 'p4c-item4-accept-w1-orders-off', %L)$s$,
+    current_setting('hid.test.route_w1'), repeat('a', 64)), '55000 PLATFORM_CONTROL_DISABLED:cross_facility_orders_enabled');
+select pg_temp.check('orders off: the waiting lab request can still be declined',
+  format($s$do $d$ begin perform * from lab.decline_order_route(%L, 1, 'test_not_offered');
+    raise exception 'P4C_DECLINED'; end $d$$s$, current_setting('hid.test.route_w1')), 'P0001 P4C_DECLINED');
+reset role;
+set local role hid_identity_api_runtime;
+select pg_temp.as_platform(1);
+select platform.admin_set_control('cross_facility_orders_enabled', true,
+  (select control.row_version from platform.admin_list_controls() control
+    where control.control_key = 'cross_facility_orders_enabled'), 'P4c item 4 suite opens orders again');
 reset role;
 select pg_temp.age_route(current_setting('hid.test.route_w1')::uuid, interval '7 days', interval '0');
 set local role hid_lab_api_runtime;

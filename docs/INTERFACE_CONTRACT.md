@@ -944,8 +944,10 @@ answer two more fields beside `items`, `crossFacilityOrders` and
   receive them. It reads no switch, so it stays true while orders between
   facilities are off.
 - `routesHere` (`{ waiting: boolean, held: boolean }`): `waiting` says an
-  order of that kind sent to this facility can still be accepted (what
-  Incoming lists); `held` says one it accepted (accepted, completed, or
+  order of that kind was sent to this facility and is not yet past its
+  respond-by (what Incoming lists). It can be accepted only while `receives`
+  is true and orders between facilities are on; it can be declined until its
+  respond-by either way. `held` says one it accepted (accepted, completed, or
   cancelled with its reads kept) may still be read here. Both stay true at a
   facility that support unlisted, or whose product is suspended, so it still
   sees and can decline what was sent and is told when its accepted work is
