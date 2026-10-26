@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0088",
-    "count": 89,
+    "last": "0089",
+    "count": 90,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -453,6 +453,10 @@
       {
         "name": "0088_order_route_wrong_patient.sql",
         "sha256": "614e21d83c8bb8d059e8eeac876c7fc1dadf89e1d0031fef12779aff0e3dd193"
+      },
+      {
+        "name": "0089_order_route_contract_fields.sql",
+        "sha256": "b0dcd05375f62a5bfd1491c415e3e6ee3417f769092559eb35912e702584efb7"
       }
     ]
   },

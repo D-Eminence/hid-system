@@ -1091,6 +1091,29 @@ revoke all on function ehr.report_wrong_patient_order_route(text,uuid,bigint,tex
   from public;
 revoke all on ehr.order_route_wrong_patient_reports from public;
 
+-- Whether this facility receives, whether orders wait or are held here, and
+-- support's find with when access ends (0089, item 4), as that migration
+-- grants them (its section 5): the Lab and Pharmacy wrappers to their
+-- runtimes and the schema test runtime; support's find (0089 drops and
+-- creates it with two more columns, so the grant above is given again) to
+-- the Identity runtime alone. The two shared helpers are granted to no role.
+grant execute on function lab.order_route_receives_here(),
+  lab.order_routes_here()
+  to hid_lab_runtime, hid_schema_test_runtime;
+grant execute on function pharmacy.order_route_receives_here(),
+  pharmacy.order_routes_here()
+  to hid_pharmacy_runtime, hid_schema_test_runtime;
+grant execute on function identity.admin_find_order_routes(text,text)
+  to hid_identity_runtime;
+revoke all on function ehr.order_route_receives_here(text),
+  ehr.order_routes_here(text),
+  lab.order_route_receives_here(),
+  lab.order_routes_here(),
+  pharmacy.order_route_receives_here(),
+  pharmacy.order_routes_here(),
+  identity.admin_find_order_routes(text,text)
+  from public;
+
 -- Public patient enrollment persists only encrypted pending evidence. Its
 -- activation command performs the canonical account/patient writes atomically.
 grant select, insert, update, delete on identity.public_patient_enrollments,
