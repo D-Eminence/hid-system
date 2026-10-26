@@ -166,7 +166,14 @@ export class AdminOrderRoutesService {
     }
   }
 
-  /** C21: by reference (at most 5 routes) or by Health ID (at most 20), exactly one of them. */
+  /**
+   * C21: by reference (at most 5 routes) or by Health ID (at most 20), exactly
+   * one of them. `wrongPatientReports: true` says this backend lets the
+   * receiving laboratory or pharmacy end an order it accepted for the wrong
+   * person (item 3, 0088): only then does support's Close form ask support to
+   * have such an order ended there first. An earlier Identity sends no such
+   * field, and the form keeps its earlier wording (D15).
+   */
   async find(context: PlatformAdminContext, reference: string | undefined, healthId: string | undefined) {
     const byReference = reference ? reference.toUpperCase() : null;
     const byHealthId = healthId ? healthId.toUpperCase() : null;
@@ -187,7 +194,7 @@ export class AdminOrderRoutesService {
           orderingFacilityName: row.ordering_facility_name, receivingFacilityId: row.receiving_facility_id,
           receivingFacilityName: row.receiving_facility_name, createdAt: iso(row.created_at),
           acceptedAt: iso(row.accepted_at), endedAt: iso(row.ended_at), endedKind: row.ended_kind,
-        })) };
+        })), wrongPatientReports: true };
       }, { readOnly: true });
     } catch (error) {
       throw adminOrderRouteProblem(error, 'lookup');

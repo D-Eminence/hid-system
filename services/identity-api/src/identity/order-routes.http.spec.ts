@@ -278,6 +278,8 @@ describe('order-route routes in Identity over HTTP', () => {
         receivingFacilityId: laboratoryId, receivingFacilityName: 'Synthetic Laboratory', createdAt: '2026-10-25T09:00:00.000Z',
         acceptedAt: '2026-10-25T10:00:00.000Z', endedAt: null, endedKind: null }]);
       expect(sqlCalls('identity.admin_find_order_routes')[0]?.values).toEqual(['7000000A', null]);
+      // This Identity serves the wrong-patient report (item 3): the Close form may send support to the receiver first.
+      expect(found.body.wrongPatientReports).toBe(true);
       // The Health ID goes in a POST body (CODEX §26); the GET refuses one in its URL (next test).
       const byHealthId = await request(server()).post('/api/v1/admin/order-routes/search')
         .set('Authorization', 'Bearer synthetic').send({ healthId: ' hid-abc234 ' });
@@ -352,7 +354,7 @@ describe('order-route routes in Identity over HTTP', () => {
       handlers['identity.admin_find_order_routes'] = () => ({ rows: [] });
       const byReference = await request(server()).get('/api/v1/admin/order-routes?reference=7000000a')
         .set('Authorization', 'Bearer synthetic');
-      expect([byReference.status, byReference.body]).toEqual([200, { items: [] }]);
+      expect([byReference.status, byReference.body]).toEqual([200, { items: [], wrongPatientReports: true }]);
       expect(sqlCalls('identity.admin_find_order_routes').map((call) => call.values)).toEqual([['7000000A', null]]);
       expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'api.admin.order-routes.find', outcome: 'success' }));
     });

@@ -61,7 +61,10 @@ export class PrescriptionsService {
   /**
    * One page of the encounter's prescriptions, each with its latest route to
    * another facility (`orderRoute`), and whether orders between facilities
-   * are on (`crossFacilityOrders`, a pool read after the transaction).
+   * are on (`crossFacilityOrders`, a pool read after the transaction), and
+   * `wrongPatientReports: true`: the receiving pharmacy can end an order it
+   * accepted for someone who was not the patient (item 3, 0088), so the
+   * website may ask a clinician to have it ended there first (D15).
    */
   async list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
     const scope = { list: 'ehr.prescriptions', patientId, encounterId };
@@ -85,7 +88,7 @@ export class PrescriptionsService {
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
-    return { ...page, crossFacilityOrders: await this.orderRoutes.crossFacilityOrdersEnabled() };
+    return { ...page, crossFacilityOrders: await this.orderRoutes.crossFacilityOrdersEnabled(), wrongPatientReports: true };
   }
 
   get(context: DataAccessContext, patientId: string, encounterId: string, prescriptionId: string) {

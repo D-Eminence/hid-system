@@ -638,6 +638,9 @@ try {
   assert.deepEqual(receivedAudit, [{ actor_type: 'system', facility_id: laboratory.facilityId, patient_id: null }]);
   const listed = expectStatus(await ehrCall(doctor, 'GET', `${enc}/lab-requests`), 200, 'lab requests');
   assert.equal(listed.crossFacilityOrders, true);
+  // Item 3: this backend serves the wrong-patient report, so the website may ask the clinician to have an order ended
+  // at the receiver before changing it (an earlier backend sends no such field).
+  assert.equal(listed.wrongPatientReports, true);
   assert.equal(listed.items.find(item => item.id === lr1.id).orderRoute.effectiveState, 'sent');
   evidence.send = { attestation: { read: 200, audited: 'no patient', outdated: 'ORDER_ROUTE_ATTESTATION_OUTDATED' },
     refusals: sendProblems, sent: { status: 201, state: 'sent', respondByDays: 7, draftActivated: true, replay: 'same route' },
@@ -1299,8 +1302,11 @@ try {
   // ── 12. Support: find and close; the directory's hourly budget ──
   const rx3 = await newPrescription('active');
   const rxRoute3 = await sendPrescription(rx3);
-  const byReference = expectStatus(await adminCall('GET', `/admin/order-routes?reference=${rxRoute3.reference.toLowerCase()}`), 200,
-    'find by reference').items;
+  const foundByReference = expectStatus(await adminCall('GET', `/admin/order-routes?reference=${rxRoute3.reference.toLowerCase()}`),
+    200, 'find by reference');
+  // Item 3: support's Close form may send support to the receiver first (an earlier Identity sends no such field).
+  assert.equal(foundByReference.wrongPatientReports, true);
+  const byReference = foundByReference.items;
   assert.deepEqual(byReference.map(item => [item.routeId, item.effectiveState, item.receivingFacilityName]),
     [[rxRoute3.id, 'sent', pharmacyFacility.name]]);
   assertNone(byReference, [...identityValues, ...clinicalOnly, medicine.medicationDisplay], 'support\'s lookup');

@@ -906,3 +906,14 @@ order shown in full, naming its patient. The order's route views (`GET
 `GET /api/v1/ehr/me/order-routes` and support's lookup answer `endedKind:
 'wrong_patient'` unchanged in shape; the views list each withdrawn result as
 an `entered_in_error` report, without a value, beside its `released` row.
+
+This backend also says that it serves the report, so the website's guidance
+can wait for it (D15: the website ships first and stays dormant). The EHR's
+lab-request and prescription lists (`GET …/encounters/:encounterId/lab-requests`
+and `…/prescriptions`) and support's lookup (`GET /api/v1/admin/order-routes`
+and `POST /api/v1/admin/order-routes/search`) answer `wrongPatientReports:
+true` beside their items; an earlier backend sends no such field. Only then
+does the website ask the ordering clinician, in its change warning, and
+support, in its Close form, to have the laboratory or pharmacy end an order it
+accepted for the wrong person first. The Lab and Pharmacy work lists say the
+same through `orderRoute.version`, which only this backend sends.

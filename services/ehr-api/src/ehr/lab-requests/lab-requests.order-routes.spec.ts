@@ -144,7 +144,8 @@ describe('LabRequestsService with routes to other facilities (P4c)', () => {
   it('lists each request with its latest route, and the page with crossFacilityOrders read by a pool query after the transaction', async () => {
     const { service, log } = fake(row(OrderStatus.Active), row(OrderStatus.Active), [route('sent')]);
     const page = await service.list(context, patientId, encounterId, { limit: 10 } as never);
-    expect(page).toMatchObject({ crossFacilityOrders: true, items: [{ id: requestId, orderRoute: { id: routeId } }] });
+    expect(page).toMatchObject({ crossFacilityOrders: true, wrongPatientReports: true,
+      items: [{ id: requestId, orderRoute: { id: routeId } }] });
     expect(log).toEqual(['tx: select id, encounter_id', 'tx: C4', 'pool: control']);
   });
 
@@ -199,7 +200,8 @@ describe('PrescriptionsService with routes to other facilities (P4c)', () => {
   it('lists prescriptions with their latest route and the crossFacilityOrders flag', async () => {
     const { service, reader } = build({ ...route('declined'), kind: 'prescription' });
     const page = await service.list(context, patientId, encounterId, { limit: 10 } as never);
-    expect(page).toMatchObject({ crossFacilityOrders: false, items: [{ id: requestId, orderRoute: { effectiveState: 'declined' } }] });
+    expect(page).toMatchObject({ crossFacilityOrders: false, wrongPatientReports: true,
+      items: [{ id: requestId, orderRoute: { effectiveState: 'declined' } }] });
     expect(reader.summaries).toHaveBeenCalledWith(expect.anything(), context, 'prescription', patientId, [requestId]);
   });
 });
