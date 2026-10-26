@@ -3,8 +3,8 @@ import { AuditAction, AuditFailuresOnly, FacilityOptional, RequirePermissions } 
 import type { HidRequest } from '../common/request-context';
 import { expectedVersion } from '../identity/organization-applications.controller';
 import { requireAdminContext } from './admin-context';
-import { CloseOrderRouteDto, FindOrderRoutesDto, FindOrderRoutesQueryDto, SetOrderRouteDestinationDto }
-  from './dto/order-route-admin.dto';
+import { CloseOrderRouteDto, FindOrderRoutesDto, FindOrderRoutesQueryDto, ListWrongPatientReportsQueryDto,
+  ReviewWrongPatientReportDto, SetOrderRouteDestinationDto } from './dto/order-route-admin.dto';
 import { AdminOrderRoutesService } from './order-routes.service';
 
 const uuid = () => new ParseUUIDPipe({ version: '4' });
@@ -51,6 +51,19 @@ export class AdminOrderRouteReadsController {
   search(@Body() input: FindOrderRoutesDto, @Req() request: HidRequest) {
     return this.routes.find(requireAdminContext(request), input.reference || undefined, input.healthId || undefined);
   }
+
+  /**
+   * Support's "Wrong-patient reports" (C26, item 3 §5.2, D11): the unreviewed
+   * ones, flagged first, or the last 90 days'; optionally of one receiving
+   * facility. No patient and no order content; the reporter's note is shown
+   * to support only (D7). The Overview tile counts the unreviewed list.
+   */
+  @Get('wrong-patient-reports')
+  @RequirePermissions('platform.admin.access', 'platform.facility.read')
+  @AuditAction('admin.wrong-patient-reports.list')
+  wrongPatientReports(@Query() query: ListWrongPatientReportsQueryDto, @Req() request: HidRequest) {
+    return this.routes.listWrongPatientReports(requireAdminContext(request), query.status, query.facilityId);
+  }
 }
 
 /**
@@ -80,5 +93,21 @@ export class AdminOrderRouteCommandsController {
   close(@Param('routeId', uuid()) routeId: string, @Headers('if-match') ifMatch: string | undefined,
     @Body() input: CloseOrderRouteDto, @Req() request: HidRequest) {
     return this.routes.close(requireAdminContext(request), routeId, expectedVersion(ifMatch), input.reason);
+  }
+
+  /**
+   * Mark a wrong-patient report reviewed, once (C27, item 3 §5.2): what
+   * support did, a note, and optionally the reporter's note replaced by fixed
+   * text. If-Match carries the report's version. The command writes the
+   * platform row (admin.wrong-patient-report.review, the review note as its
+   * reason), so the interceptor audits failures only.
+   */
+  @Post('wrong-patient-reports/:reportId/review')
+  @HttpCode(200)
+  @RequirePermissions('platform.admin.access', 'platform.facility.manage')
+  @AuditAction('admin.wrong-patient-report.review')
+  reviewWrongPatientReport(@Param('reportId', uuid()) reportId: string, @Headers('if-match') ifMatch: string | undefined,
+    @Body() input: ReviewWrongPatientReportDto, @Req() request: HidRequest) {
+    return this.routes.reviewWrongPatientReport(requireAdminContext(request), reportId, expectedVersion(ifMatch), input);
   }
 }

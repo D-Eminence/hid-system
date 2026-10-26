@@ -74,6 +74,11 @@ describe('order-route routes in Identity: metadata', () => {
       .toEqual([['platform.admin.access', 'platform.facility.manage', 'platform.facility.unlock'], 'admin.order-route-destination.set']);
     expect([meta(REQUIRED_PERMISSIONS, writes.close), meta(AUDIT_ACTION, writes.close)])
       .toEqual([['platform.admin.access', 'platform.facility.manage'], 'admin.order-route.close']);
+    // Item 3 (C26, C27): the wrong-patient reports and their review.
+    expect([meta(REQUIRED_PERMISSIONS, reads.wrongPatientReports), meta(AUDIT_ACTION, reads.wrongPatientReports)])
+      .toEqual([['platform.admin.access', 'platform.facility.read'], 'admin.wrong-patient-reports.list']);
+    expect([meta(REQUIRED_PERMISSIONS, writes.reviewWrongPatientReport), meta(AUDIT_ACTION, writes.reviewWrongPatientReport)])
+      .toEqual([['platform.admin.access', 'platform.facility.manage'], 'admin.wrong-patient-report.review']);
   });
 });
 
@@ -398,6 +403,151 @@ describe('order-route routes in Identity over HTTP', () => {
       }
       admin(['platform.admin.access', 'platform.principal.read']);
       const denied = await close('3');
+      expect([denied.status, denied.body.code]).toEqual([403, 'PERMISSION_DENIED']);
+    });
+  });
+
+  describe('support\'s wrong-patient reports (item 3, C26 and C27)', () => {
+    const admin = (permissions: string[]) => tokens.verify.mockResolvedValue({ actor: standaloneAdmin(permissions), claims: {} });
+    const reader = ['platform.admin.access', 'platform.facility.read'];
+    const manager = ['platform.admin.access', 'platform.facility.read', 'platform.facility.manage'];
+    const reportId = '80000000-0000-4000-8000-000000000001';
+    const note = 'The person at the counter gave his brother\'s Health ID';
+    const row = { report_id: reportId, row_version: '1', route_id: routeId, reference: '70000000', kind: 'lab_request',
+      receiving_facility_id: laboratoryId, receiving_facility_name: 'Synthetic Laboratory', ordering_facility_id: facilityId,
+      ordering_facility_name: 'Synthetic Hospital Ltd', reported_at: new Date('2026-10-26T08:00:00Z'),
+      reported_by_account_id: '20000000-0000-4000-8000-000000000031', reported_by_name: 'Remi Lab',
+      accepted_by_account_id: '20000000-0000-4000-8000-000000000031', accepted_by_name: 'Remi Lab', same_member: true,
+      accepted_with: 'date_of_birth', accepted_at: new Date('2026-10-25T10:00:00Z'), reason_code: 'someone_elses_details', note,
+      note_removed: false, state_before: 'completed', results_voided: 1, result_reports_marked: 1, dispensing_reversed: false,
+      specimens_collected: 1, recorded_by: [{ accountId: '20000000-0000-4000-8000-000000000031', name: 'Remi Lab', extra: 'x' }],
+      reporter_recorded_work: true, flags: ['something_came_back', 'reporter_recorded_work'], facility_reports_last_30_days: 2,
+      member_reports_last_30_days: 1, reviewed_at: null, reviewed_by_account_id: null, reviewed_by_name: null,
+      review_actions: null, review_note: null,
+      // Never answered, whatever the database returns.
+      patient_id: '50000000-0000-4000-8000-000000000001' };
+    const list = (query: string) => request(server()).get(`/api/v1/admin/wrong-patient-reports?${query}`)
+      .set('Authorization', 'Bearer synthetic');
+    const review = (body: unknown, ifMatch?: string) => {
+      const call = request(server()).post(`/api/v1/admin/wrong-patient-reports/${reportId}/review`)
+        .set('Authorization', 'Bearer synthetic');
+      return (ifMatch ? call.set('If-Match', ifMatch) : call).send(body as object);
+    };
+
+    it('lists the unreviewed reports field by field, read-only, as a standalone administrator, audited on success', async () => {
+      admin(reader);
+      handlers['identity.admin_list_wrong_patient_reports'] = () => ({ rows: [row] });
+      const answer = await list('status=unreviewed');
+      expect([answer.status, answer.body]).toEqual([200, { items: [{ reportId, version: 1, routeId, reference: '70000000',
+        kind: 'lab_request', receivingFacility: { id: laboratoryId, name: 'Synthetic Laboratory' },
+        orderingFacility: { id: facilityId, name: 'Synthetic Hospital Ltd' }, reportedAt: '2026-10-26T08:00:00.000Z',
+        reportedBy: { accountId: '20000000-0000-4000-8000-000000000031', name: 'Remi Lab' },
+        acceptedBy: { accountId: '20000000-0000-4000-8000-000000000031', name: 'Remi Lab' }, sameMember: true,
+        acceptedWith: 'date_of_birth', acceptedAt: '2026-10-25T10:00:00.000Z', reason: 'someone_elses_details', note,
+        noteRemoved: false, stateBefore: 'completed', resultsVoided: 1, resultReportsMarked: 1, dispensingReversed: false,
+        specimensCollected: 1, recordedBy: [{ accountId: '20000000-0000-4000-8000-000000000031', name: 'Remi Lab' }],
+        reporterRecordedWork: true, flags: ['something_came_back', 'reporter_recorded_work'], facilityReportsLast30Days: 2,
+        memberReportsLast30Days: 1, review: null }] }]);
+      expect(sqlCalls('identity.admin_list_wrong_patient_reports')[0]?.values).toEqual(['unreviewed', null]);
+      expect(database.withPlatformTransaction).toHaveBeenCalledWith(expect.objectContaining({
+        purposeOfUse: 'healthcare-operations' }), expect.any(Function), { readOnly: true });
+      expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'api.admin.wrong-patient-reports.list',
+        outcome: 'success', actorType: 'platform' }));
+      // The note reaches support's answer only: no audit row carries it.
+      expect(JSON.stringify([audit.record.mock.calls, audit.recordWithClient.mock.calls])).not.toContain('brother');
+    });
+
+    it('lists the last 90 days of one receiving facility, with a review when there is one', async () => {
+      admin(reader);
+      handlers['identity.admin_list_wrong_patient_reports'] = () => ({ rows: [{ ...row, row_version: 2,
+        note: 'Removed by Health ID support at review.', note_removed: true, reviewed_at: '2026-10-26T09:00:00Z',
+        reviewed_by_account_id: 'e0000000-0000-4000-8000-000000000086', reviewed_by_name: 'Synthetic Support',
+        review_actions: ['ordering_facility_told', 'referred_to_dpo'], review_note: 'Phoned the hospital and referred it' }] });
+      const answer = await list(`status=recent&facilityId=${laboratoryId}`);
+      expect(answer.status).toBe(200);
+      expect(answer.body.items[0]).toMatchObject({ version: 2, note: 'Removed by Health ID support at review.', noteRemoved: true,
+        review: { reviewedAt: '2026-10-26T09:00:00.000Z', reviewedBy: { accountId: 'e0000000-0000-4000-8000-000000000086',
+          name: 'Synthetic Support' }, actions: ['ordering_facility_told', 'referred_to_dpo'],
+        note: 'Phoned the hospital and referred it' } });
+      expect(JSON.stringify(answer.body)).not.toContain('50000000-0000-4000-8000-000000000001');
+      expect(sqlCalls('identity.admin_list_wrong_patient_reports')[0]?.values).toEqual(['recent', laboratoryId]);
+    });
+
+    it('refuses a bad query 400 before the database, and answers each refusal by code', async () => {
+      admin(reader);
+      for (const query of ['', 'status=all', 'status=unreviewed&facilityId=not-a-uuid', 'status=recent&patientId=x']) {
+        const invalid = await list(query);
+        expect([invalid.status, invalid.body.code]).toEqual([400, 'VALIDATION_FAILED']);
+      }
+      expect(sqlCalls('identity.admin_list_wrong_patient_reports')).toHaveLength(0);
+      for (const [state, message, status, code] of [['P0002', 'ADMIN_FACILITY_NOT_FOUND', 404, 'ADMIN_FACILITY_NOT_FOUND'],
+        ['22023', 'WRONG_PATIENT_REPORTS_QUERY_INVALID', 400, 'WRONG_PATIENT_REPORTS_QUERY_INVALID'],
+        ['42501', 'ADMIN_PERMISSION_DENIED', 403, 'PERMISSION_DENIED'], ['XX000', 'internal', 503, 'ORDER_ROUTES_ADMIN_UNAVAILABLE'],
+      ] as const) {
+        handlers['identity.admin_list_wrong_patient_reports'] = () => { throw databaseError(state, message); };
+        const refused = await list(`status=recent&facilityId=${laboratoryId}`);
+        expect([refused.status, refused.body.code]).toEqual([status, code]);
+      }
+      admin(['platform.admin.access', 'platform.principal.read']);
+      const denied = await list('status=unreviewed');
+      expect([denied.status, denied.body.code]).toEqual([403, 'PERMISSION_DENIED']);
+      // A staff member at a facility, without platform authority, is refused too.
+      tokens.verify.mockResolvedValue({ actor: doctorAt(), claims: {} });
+      const staff = await list('status=unreviewed');
+      expect(staff.status).toBe(403);
+    });
+
+    it('marks a report reviewed with If-Match, the actions, the trimmed note and the note removal', async () => {
+      admin(manager);
+      handlers['identity.admin_review_wrong_patient_report'] = () => ({ rows: [{ report_id: reportId, row_version: '2',
+        reviewed_at: new Date('2026-10-26T09:00:00Z'), review_actions: ['ordering_facility_told', 'referred_to_dpo'],
+        note_removed: true }] });
+      const reviewed = await review({ actions: ['ordering_facility_told', 'referred_to_dpo'],
+        note: '  Phoned the hospital and referred it  ', removeNote: true }, '"1"');
+      expect([reviewed.status, reviewed.body]).toEqual([200, { reportId, version: 2, reviewedAt: '2026-10-26T09:00:00.000Z',
+        actions: ['ordering_facility_told', 'referred_to_dpo'], noteRemoved: true }]);
+      expect(sqlCalls('identity.admin_review_wrong_patient_report')[0]?.values).toEqual([reportId, 1,
+        ['ordering_facility_told', 'referred_to_dpo'], 'Phoned the hospital and referred it', true]);
+      await review({ actions: ['no_further_action'], note: 'Checked: an honest slip at the counter' }, '2');
+      expect(sqlCalls('identity.admin_review_wrong_patient_report')[1]?.values).toEqual([reportId, 2, ['no_further_action'],
+        'Checked: an honest slip at the counter', false]);
+      // The command writes the platform row; the interceptor writes failures only.
+      expect(audit.record).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'api.admin.wrong-patient-report.review',
+        outcome: 'success' }));
+    });
+
+    it('requires If-Match and a valid body before the database, and answers each refusal by code', async () => {
+      admin(manager);
+      const noVersion = await review({ actions: ['facility_contacted'], note: 'Phoned the laboratory manager' });
+      expect([noVersion.status, noVersion.body.code]).toEqual([428, 'IF_MATCH_REQUIRED']);
+      for (const body of [{ actions: [], note: 'Phoned the laboratory manager' },
+        { actions: ['facility_contacted', 'facility_contacted'], note: 'Phoned the laboratory manager' },
+        { actions: ['phoned'], note: 'Phoned the laboratory manager' }, { actions: 'facility_contacted', note: 'Phoned the manager' },
+        { actions: ['facility_contacted'], note: '  short  ' }, { actions: ['facility_contacted'], note: 'x'.repeat(501) },
+        { actions: ['facility_contacted'], note: 'Phoned the laboratory manager', removeNote: 'yes' },
+        { actions: ['facility_contacted'], note: 'Phoned the laboratory manager', reportId }]) {
+        const invalid = await review(body, '1');
+        expect([invalid.status, invalid.body.code]).toEqual([400, 'VALIDATION_FAILED']);
+      }
+      expect(sqlCalls('identity.admin_review_wrong_patient_report')).toHaveLength(0);
+      for (const [state, message, status, code] of [
+        ['22023', 'WRONG_PATIENT_REVIEW_INVALID', 400, 'WRONG_PATIENT_REVIEW_INVALID'],
+        ['P0002', 'WRONG_PATIENT_REPORT_NOT_FOUND', 404, 'WRONG_PATIENT_REPORT_NOT_FOUND'],
+        ['23505', 'WRONG_PATIENT_REPORT_ALREADY_REVIEWED', 409, 'WRONG_PATIENT_REPORT_ALREADY_REVIEWED'],
+        ['40001', 'Wrong-patient report version conflict', 409, 'VERSION_CONFLICT'],
+        ['42501', 'ADMIN_PERMISSION_DENIED', 403, 'PERMISSION_DENIED'],
+        ['23505', 'something_else', 503, 'ORDER_ROUTES_ADMIN_UNAVAILABLE'],
+        ['XX000', 'internal', 503, 'ORDER_ROUTES_ADMIN_UNAVAILABLE'],
+      ] as const) {
+        handlers['identity.admin_review_wrong_patient_report'] = () => { throw databaseError(state, message); };
+        const refused = await review({ actions: ['facility_contacted', 'no_further_action'],
+          note: 'Phoned the laboratory manager' }, '1');
+        expect([refused.status, refused.body.code]).toEqual([status, code]);
+      }
+      expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'api.admin.wrong-patient-report.review',
+        outcome: 'failure' }));
+      admin(reader);
+      const denied = await review({ actions: ['facility_contacted'], note: 'Phoned the laboratory manager' }, '1');
       expect([denied.status, denied.body.code]).toEqual([403, 'PERMISSION_DENIED']);
     });
   });
