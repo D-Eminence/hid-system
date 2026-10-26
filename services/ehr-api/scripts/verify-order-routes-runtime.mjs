@@ -550,6 +550,22 @@ try {
     const text = JSON.stringify(value);
     for (const item of forbidden) assert(!text.includes(item), `${label} carries ${item}`);
   };
+  // A Health ID in the URL of a lookup GET (CODEX §26) is refused before the service does anything: 400
+  // HEALTH_ID_NOT_ACCEPTED_IN_URL naming the POST, the value never repeated, nothing listed, and no service (nor
+  // Identity, which the guard would ask) wrote a row for the request.
+  const refusedInUrl = async (send, searchPath, label) => {
+    const correlationId = `verifier-hid-in-url-${randomUUID()}`;
+    const response = await send({ headers: { 'x-correlation-id': correlationId } });
+    const problem = expectProblem(response, 400, 'HEALTH_ID_NOT_ACCEPTED_IN_URL', label);
+    assert.equal(problem.correlationId, correlationId, label);
+    assert(problem.detail.includes(`POST /api/v1/${searchPath}`), `${label}: ${problem.detail}`);
+    assert(!('items' in problem), `${label} listed`);
+    assertNone([problem, [...response.headers]], [patient.hid, patient.hid.toLowerCase(), patient.hid.slice(4)], label);
+    assert.deepEqual(await one(`select (select count(*)::int from audit.events where correlation_id = $1) as audit,
+      (select count(*)::int from auth.session_events where correlation_id = $1) as sessions`, [correlationId]),
+    { audit: 0, sessions: 0 }, `${label} wrote rows`);
+    return 'HEALTH_ID_NOT_ACCEPTED_IN_URL';
+  };
 
   // ── 4. Send, with the clinician's attestation ──
   const attestation = expectStatus(await call(ehr, doctor, 'GET', '/ehr/order-route-attestation?kind=lab_request'), 200,
@@ -692,16 +708,18 @@ try {
   assert.deepEqual(await all(`select outcome, identifies_route from ehr.order_route_accept_attempts where route_id = $1
     order by attempted_at`, [route1.id]), [{ outcome: 'mismatch', identifies_route: false },
     { outcome: 'mismatch', identifies_route: true }]);
-  // Find by Health ID with the Health ID in the body (CODEX §26); the GET's healthId still answers (deprecated).
+  // Find by Health ID with the Health ID in the body (CODEX §26); a healthId in the GET's URL is refused.
   const byHealthId = expectStatus(await call(lab, labAdmin, 'POST', '/lab/order-routes/search',
     { view: 'incoming', healthId: patient.hid.toLowerCase() }), 200, 'by Health ID');
   assert.deepEqual(byHealthId.items.map(item => [item.id, item.attemptsLeft]), [[route1.id, 4]]);
   assert.deepEqual(expectStatus(await call(lab, labAdmin, 'POST', '/lab/order-routes/search',
     { view: 'incoming', healthId: healthIdOf() }), 200, 'other Health ID').items, []);
   expectProblem(await call(lab, labAdmin, 'POST', '/lab/order-routes/search', { view: 'incoming' }), 400, 'VALIDATION_FAILED');
-  assert.deepEqual(expectStatus(await call(lab, labAdmin, 'GET',
-    `/lab/order-routes?view=incoming&healthId=${patient.hid.toLowerCase()}`), 200, 'deprecated GET').items.map(item => item.id),
-  [route1.id]);
+  const labUrlRefusal = await refusedInUrl(extra => call(lab, labAdmin, 'GET',
+    `/lab/order-routes?view=incoming&healthId=${patient.hid.toLowerCase()}`, undefined, extra), 'lab/order-routes/search',
+  'Lab GET with a Health ID');
+  await refusedInUrl(extra => call(lab, labAdmin, 'GET', '/lab/order-routes?healthId=', undefined, extra),
+    'lab/order-routes/search', 'Lab GET with an empty healthId');
   expectProblem(await accept(labAdmin, lab, route1.id, 1, { kind: 'date_of_birth', value: '1987-02-30' }), 400,
     'ORDER_ROUTE_INVALID');
   const acceptKey = freshKey('accept-lr1');
@@ -728,7 +746,7 @@ try {
     { outcome: 'success', patient_id: patient.id }, { outcome: 'success', patient_id: patient.id }]);
   evidence.receive = { wrongDateOfBirthAlone: { status: 409, attemptsLeft: 5 },
     wrongDateOfBirthWithReference: { status: 409, attemptsLeft: 4 }, otherReference: 'ORDER_ROUTE_REFERENCE_MISMATCH',
-    findByHealthId: 'POST search (body); deprecated GET still answers',
+    findByHealthId: 'POST search (body)', healthIdInGetUrl: labUrlRefusal,
     invalidDate: 400, accepted: { status: 201, patient: 'name, sex, date of birth, Health ID last 4',
       clinicalInformation: 'after acceptance', licenceNumber: 'after acceptance' }, replay: 'same work item',
     acceptedAgain: 'ORDER_ROUTE_NOT_PENDING', audit: { mismatch: 'denied, no patient', accepted: 'with the patient' } };
@@ -908,6 +926,9 @@ try {
   const rx1 = await newPrescription('active');
   const rxRoute1 = await sendPrescription(rx1);
   const rxIncoming = expectStatus(await pharmacyCall(pharmacist, 'GET', '/order-routes?view=incoming'), 200, 'pharmacy incoming');
+  const pharmacyUrlRefusal = await refusedInUrl(extra => pharmacyCall(pharmacist, 'GET',
+    `/order-routes?view=incoming&healthId=${patient.hid}`, undefined, extra), 'pharmacy/order-routes/search',
+  'Pharmacy GET with a Health ID');
   const rxPreview = rxIncoming.items.find(item => item.id === rxRoute1.id);
   assert.deepEqual(rxPreview.medication, { codeSystem: medicine.medicationCodeSystem, code: medicine.medicationCode,
     display: medicine.medicationDisplay });
@@ -958,7 +979,8 @@ try {
     item.medication.display]), [['dispensed', 60, 'tablet', medicine.medicationDisplay],
     ['reversed', 60, 'tablet', medicine.medicationDisplay]]);
   // Same-facility pull of a routed prescription is refused (the pharmacist role holds the permission).
-  evidence.prescriptions = { preview: 'medicine, no patient or instructions', acceptNeedsReason: 400,
+  evidence.prescriptions = { preview: 'medicine, no patient or instructions', healthIdInGetUrl: pharmacyUrlRefusal,
+    acceptNeedsReason: 400,
     accepted: 'date of birth; instructions after acceptance', changedAfterAcceptance: 'cancelled (order_changed)',
     dispensingAfterCancel: `409 ${rxRefused.body.code}`, readsKept: '7 days, access read', dispensedAndReversed: 'both reports',
     completed: true };
@@ -1276,17 +1298,17 @@ try {
   assert.deepEqual(byReference.map(item => [item.routeId, item.effectiveState, item.receivingFacilityName]),
     [[rxRoute3.id, 'sent', pharmacyFacility.name]]);
   assertNone(byReference, [...identityValues, ...clinicalOnly, medicine.medicationDisplay], 'support\'s lookup');
-  // The Health ID in the body (CODEX §26); the GET's healthId still answers (deprecated) until the console moves.
+  // The Health ID in the body (CODEX §26); one in the GET's URL is refused, with or without a reference.
   const byHealthIdSupport = expectStatus(await adminCall('POST', '/admin/order-routes/search', { healthId: patient.hid }), 200,
     'find by HID').items;
   assert(byHealthIdSupport.some(item => item.routeId === rxRoute3.id) && byHealthIdSupport.length <= 20);
-  assert.deepEqual(expectStatus(await adminCall('GET', `/admin/order-routes?healthId=${patient.hid}`), 200, 'deprecated GET')
-    .items.map(item => item.routeId), byHealthIdSupport.map(item => item.routeId));
+  const supportUrlRefusal = await refusedInUrl(extra => adminCall('GET', `/admin/order-routes?healthId=${patient.hid}`,
+    undefined, extra), 'admin/order-routes/search', 'support GET with a Health ID');
+  await refusedInUrl(extra => adminCall('GET', `/admin/order-routes?reference=${rxRoute3.reference}&healthId=${patient.hid}`,
+    undefined, extra), 'admin/order-routes/search', 'support GET with a reference and a Health ID');
   expectProblem(await adminCall('POST', '/admin/order-routes/search', { reference: rxRoute3.reference, healthId: patient.hid }),
     400, 'ORDER_ROUTE_LOOKUP_INVALID');
   expectProblem(await adminCall('GET', '/admin/order-routes'), 400, 'ORDER_ROUTE_LOOKUP_INVALID');
-  expectProblem(await adminCall('GET', `/admin/order-routes?reference=${rxRoute3.reference}&healthId=${patient.hid}`), 400,
-    'ORDER_ROUTE_LOOKUP_INVALID');
   const closePath = `/admin/order-routes/${rxRoute3.id}/close`;
   const closeReason = { reason: 'Patient reported the pharmacy is the wrong one' };
   expectProblem(await adminCall('POST', closePath, closeReason), 428);
@@ -1306,7 +1328,8 @@ try {
   assert.equal(expectStatus(await search(doctor, 'laboratory', 'Verifier Laboratory'), 200, 'another member').items.length, 1);
   assert.equal((await one(`select count(*)::int n from audit.events where action='identity.order-destinations.search'
     and (details::text like '%Verifier%' or details ? 'query')`)).n, 0, 'a search row names the query');
-  evidence.support = { findByReference: 'one, no patient or content', findByHealthId: true, lookupInvalid: 400,
+  evidence.support = { findByReference: 'one, no patient or content', findByHealthId: true,
+    healthIdInGetUrl: supportUrlRefusal, lookupInvalid: 400,
     close: { withoutIfMatch: 428, stale: 'VERSION_CONFLICT', closed: 'withdrawn (support)', again: 'ORDER_ROUTE_ALREADY_CLOSED',
       platformRow: 'admin.order-route.close' }, directoryBudget: { first60: 200, sixtyFirst: 429, otherMember: 200,
       queryInAudit: 0 } };

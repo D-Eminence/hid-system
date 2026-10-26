@@ -115,8 +115,9 @@ describe('Lab order-route routes (SPEC-FINAL §10.2)', () => {
     expect(await errors(ListOrderRoutesQueryDto, { view: 'recent' })).toEqual([]);
     expect(await errors(ListOrderRoutesQueryDto, { view: 'all' })).toEqual(['view']);
     expect(await errors(ListOrderRoutesQueryDto, { view: 'incoming', dateOfBirth: '1990-01-01' })).toEqual(['dateOfBirth']);
-    // The GET's healthId stays, deprecated, for the website build that still sends it.
-    expect(await errors(ListOrderRoutesQueryDto, { view: 'incoming', healthId: 'HID-ABC234' })).toEqual([]);
+    // The GET takes no Health ID (CODEX §26): the middleware refuses it first (health-id-in-url.spec.ts), and
+    // validation would still refuse it as an unknown key.
+    expect(await errors(ListOrderRoutesQueryDto, { view: 'incoming', healthId: 'HID-ABC234' })).toEqual(['healthId']);
     expect(await errors(SearchOrderRoutesDto, { view: 'incoming', healthId: 'HID-ABC234' })).toEqual([]);
     expect(await errors(SearchOrderRoutesDto, { healthId: 'HID-ABC234' })).toEqual([]);
     expect(await errors(SearchOrderRoutesDto, { view: 'incoming' })).toEqual(['healthId']);
@@ -154,10 +155,9 @@ describe('LabOrderRoutesService list and get (C7, C8)', () => {
     expect(h.statements[1]?.values).toEqual(['incoming', 'HID-ABC234']);
     await expect(h.service.search(context, { healthId: 'HID-0O1I' })).rejects.toMatchObject({ status: 400, code: 'ORDER_ROUTE_INVALID' });
     expect(h.statements).toHaveLength(2);
-    // The deprecated GET filter answers the same as the POST, and refuses the same malformed Health ID.
-    await h.service.list(context, { view: 'incoming', healthId: ' hid-abc234 ' });
-    expect(h.statements[2]?.values).toEqual(['incoming', 'HID-ABC234']);
-    await expect(h.service.list(context, { healthId: 'HID-0O1I' })).rejects.toMatchObject({ status: 400, code: 'ORDER_ROUTE_INVALID' });
+    // The GET's list never filters by a Health ID, whatever reaches it.
+    await h.service.list(context, { view: 'recent', healthId: 'HID-ABC234' } as never);
+    expect(h.statements[2]?.values).toEqual(['recent', null]);
     expect(h.statements).toHaveLength(3);
   });
 

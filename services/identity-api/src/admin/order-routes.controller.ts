@@ -3,7 +3,8 @@ import { AuditAction, AuditFailuresOnly, FacilityOptional, RequirePermissions } 
 import type { HidRequest } from '../common/request-context';
 import { expectedVersion } from '../identity/organization-applications.controller';
 import { requireAdminContext } from './admin-context';
-import { CloseOrderRouteDto, FindOrderRoutesDto, SetOrderRouteDestinationDto } from './dto/order-route-admin.dto';
+import { CloseOrderRouteDto, FindOrderRoutesDto, FindOrderRoutesQueryDto, SetOrderRouteDestinationDto }
+  from './dto/order-route-admin.dto';
 import { AdminOrderRoutesService } from './order-routes.service';
 
 const uuid = () => new ParseUUIDPipe({ version: '4' });
@@ -26,19 +27,22 @@ export class AdminOrderRouteReadsController {
     return this.routes.summary(requireAdminContext(request), facilityId);
   }
 
-  /** By reference, or (deprecated, CODEX §26) by a Health ID in the query: the console moves to the POST. */
+  /**
+   * By reference only. A healthId in the URL is refused 400 before this
+   * route runs (health-id-in-url.ts, CODEX §26): by Health ID is the POST.
+   */
   @Get('order-routes')
   @RequirePermissions('platform.admin.access', 'platform.principal.read')
   @AuditAction('admin.order-routes.find')
-  find(@Query() query: FindOrderRoutesDto, @Req() request: HidRequest) {
-    return this.routes.find(requireAdminContext(request), query.reference || undefined, query.healthId || undefined);
+  find(@Query() query: FindOrderRoutesQueryDto, @Req() request: HidRequest) {
+    return this.routes.find(requireAdminContext(request), query.reference || undefined, undefined);
   }
 
   /**
    * The lookup with the reference or the Health ID in the body, so the
-   * patient's Health ID is in no request line the gateway or an edge logs
-   * (CODEX §26, as POST principals/search). Same permissions, audit action
-   * and answer as the GET.
+   * patient's Health ID is in no request line the gateway, an edge or a
+   * browser's history keeps (CODEX §26, as POST principals/search). Same
+   * permissions, audit action and answer as the GET.
    */
   @Post('order-routes/search')
   @HttpCode(200)

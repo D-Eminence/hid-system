@@ -1,13 +1,17 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }));
 
 import { createHmac, randomUUID } from 'node:crypto';
-import { type INestApplication, ValidationPipe } from '@nestjs/common';
+import { type INestApplication, Logger, ValidationPipe } from '@nestjs/common';
 import { APP_GUARD, APP_INTERCEPTOR, Reflector } from '@nestjs/core';
 import { Test } from '@nestjs/testing';
 import type { NextFunction, Response } from 'express';
 import request from 'supertest';
 import { AdminOrderRouteCommandsController, AdminOrderRouteReadsController } from '../admin/order-routes.controller';
+import { AdminModule } from '../admin/admin.module';
 import { AdminOrderRoutesService } from '../admin/order-routes.service';
+import {
+  HEALTH_ID_NOT_ACCEPTED_IN_URL, HEALTH_ID_NOT_ACCEPTED_IN_URL_DETAIL, HealthIdInUrlRefusalModule,
+} from '../admin/health-id-in-url';
 import { AuditInterceptor } from '../audit/audit.interceptor';
 import { AuditService } from '../audit/audit.service';
 import { SecurityGuard } from '../auth/security.guard';
@@ -47,6 +51,10 @@ describe('order-route routes in Identity: metadata', () => {
     expect(meta(FACILITY_OPTIONAL, OrderDestinationsController)).toBeUndefined();
     expect(meta(REQUIRED_PERMISSIONS, OrderDestinationsController.prototype.search)).toEqual(['ehr.order-route.send']);
     expect(meta(AUDIT_ACTION, OrderDestinationsController.prototype.search)).toBe('identity.order-destinations.search');
+  });
+
+  it('support\'s lookup refuses a Health ID in its URL: AdminModule wires the refusal', () => {
+    expect(Reflect.getMetadata('imports', AdminModule)).toContain(HealthIdInUrlRefusalModule);
   });
 
   it('support\'s reads are audited on success and failure, its writes on failure only, all facility optional', () => {
@@ -112,6 +120,8 @@ describe('order-route routes in Identity over HTTP', () => {
     audit.record.mockResolvedValue(undefined);
     audit.recordWithClient.mockResolvedValue(undefined);
     const moduleRef = await Test.createTestingModule({
+      // AdminModule's refusal of a Health ID in the lookup's URL (CODEX §26).
+      imports: [HealthIdInUrlRefusalModule],
       controllers: [OrderDestinationsController, AdminOrderRouteReadsController, AdminOrderRouteCommandsController],
       providers: [
         OrderDestinationsService, AdminOrderRoutesService,
@@ -263,20 +273,22 @@ describe('order-route routes in Identity over HTTP', () => {
         receivingFacilityId: laboratoryId, receivingFacilityName: 'Synthetic Laboratory', createdAt: '2026-10-25T09:00:00.000Z',
         acceptedAt: '2026-10-25T10:00:00.000Z', endedAt: null, endedKind: null }]);
       expect(sqlCalls('identity.admin_find_order_routes')[0]?.values).toEqual(['7000000A', null]);
-      // The Health ID goes in a POST body (CODEX §26); the GET's healthId is deprecated but still answered.
+      // The Health ID goes in a POST body (CODEX §26); the GET refuses one in its URL (next test).
       const byHealthId = await request(server()).post('/api/v1/admin/order-routes/search')
         .set('Authorization', 'Bearer synthetic').send({ healthId: ' hid-abc234 ' });
       expect([byHealthId.status, byHealthId.body.items[0]?.routeId]).toEqual([200, routeId]);
-      await request(server()).get('/api/v1/admin/order-routes?healthId=hid-abc234').set('Authorization', 'Bearer synthetic');
-      expect(sqlCalls('identity.admin_find_order_routes').slice(1).map((call) => call.values))
-        .toEqual([[null, 'HID-ABC234'], [null, 'HID-ABC234']]);
+      expect(sqlCalls('identity.admin_find_order_routes')[1]?.values).toEqual([null, 'HID-ABC234']);
       const byReference = await request(server()).post('/api/v1/admin/order-routes/search')
         .set('Authorization', 'Bearer synthetic').send({ reference: '7000000a' });
-      expect([byReference.status, sqlCalls('identity.admin_find_order_routes')[3]?.values]).toEqual([200, ['7000000A', null]]);
-      for (const query of ['', 'reference=7000000A&healthId=HID-ABC234', 'reference=7000000', 'reference=GGGGGGGG',
-        'healthId=ABC234']) {
+      expect([byReference.status, sqlCalls('identity.admin_find_order_routes')[2]?.values]).toEqual([200, ['7000000A', null]]);
+      for (const query of ['', 'reference=', 'reference=7000000', 'reference=GGGGGGGG']) {
         const invalid = await request(server()).get(`/api/v1/admin/order-routes?${query}`).set('Authorization', 'Bearer synthetic');
         expect([invalid.status, invalid.body.code]).toEqual([400, 'ORDER_ROUTE_LOOKUP_INVALID']);
+      }
+      // Every other unknown key in the GET's query is still refused by validation.
+      for (const query of ['reference=7000000A&dateOfBirth=1990-01-01', 'HealthId=HID-ABC234']) {
+        const unknown = await request(server()).get(`/api/v1/admin/order-routes?${query}`).set('Authorization', 'Bearer synthetic');
+        expect([unknown.status, unknown.body.code]).toEqual([400, 'VALIDATION_FAILED']);
       }
       for (const body of [{}, { reference: '7000000A', healthId: 'HID-ABC234' }, { healthId: 'ABC234' }]) {
         const invalid = await request(server()).post('/api/v1/admin/order-routes/search')
@@ -286,13 +298,58 @@ describe('order-route routes in Identity over HTTP', () => {
       const unknownField = await request(server()).post('/api/v1/admin/order-routes/search')
         .set('Authorization', 'Bearer synthetic').send({ healthId: 'HID-ABC234', dateOfBirth: '1990-01-01' });
       expect([unknownField.status, unknownField.body.code]).toEqual([400, 'VALIDATION_FAILED']);
-      expect(sqlCalls('identity.admin_find_order_routes')).toHaveLength(4);
+      expect(sqlCalls('identity.admin_find_order_routes')).toHaveLength(3);
       expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'api.admin.order-routes.find', outcome: 'failure' }));
       expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'api.admin.order-routes.find', outcome: 'success' }));
       admin(['platform.admin.access']);
       const denied = await request(server()).post('/api/v1/admin/order-routes/search')
         .set('Authorization', 'Bearer synthetic').send({ healthId: 'HID-ABC234' });
       expect([denied.status, denied.body.code]).toEqual([403, 'PERMISSION_DENIED']);
+    });
+
+    it.each([
+      'healthId=HID-ABC234', 'healthId=hid-abc234', 'healthId=', 'healthId', 'reference=7000000A&healthId=HID-ABC234',
+      'healthId=ABC234', 'healthId=HID-ABC234&healthId=HID-XYZ789', 'healthId%5B%5D=HID-ABC234', '%68ealthId=HID-ABC234',
+      'healthId=HID-ABC234&dateOfBirth=1990-01-01',
+    ])('refuses GET admin/order-routes?%s 400 HEALTH_ID_NOT_ACCEPTED_IN_URL before the guard, audit and database', async (query) => {
+      admin(all);
+      const logged = (['log', 'error', 'warn', 'debug', 'verbose', 'fatal'] as const)
+        .map((level) => jest.spyOn(Logger.prototype, level));
+      try {
+        const refused = await request(server()).get(`/api/v1/admin/order-routes?${query}`).set('Authorization', 'Bearer synthetic');
+        expect(refused.status).toBe(400);
+        expect(refused.headers['content-type']).toMatch(/^application\/problem\+json/);
+        expect(refused.body).toEqual({ type: 'https://healthidentitydirectory.com/problems/health-id-not-accepted-in-url',
+          title: 'BAD_REQUEST', status: 400, detail: HEALTH_ID_NOT_ACCEPTED_IN_URL_DETAIL,
+          instance: `urn:hid:request:${refused.body.correlationId as string}`, correlationId: expect.any(String),
+          code: HEALTH_ID_NOT_ACCEPTED_IN_URL });
+        expect(HEALTH_ID_NOT_ACCEPTED_IN_URL_DETAIL).toContain('POST /api/v1/admin/order-routes/search');
+        // Never the value, in the body or a header; no session read, no control read, no query, no audit row, no log.
+        expect(`${refused.text}${JSON.stringify(refused.headers)}`).not.toMatch(/ABC234|XYZ789/i);
+        expect(tokens.verify).not.toHaveBeenCalled();
+        expect(calls).toEqual([]);
+        expect(contexts).toEqual([]);
+        expect(audit.record).not.toHaveBeenCalled();
+        expect(audit.recordWithClient).not.toHaveBeenCalled();
+        for (const spy of logged) expect(spy).not.toHaveBeenCalled();
+      } finally {
+        for (const spy of logged) spy.mockRestore();
+      }
+    });
+
+    it('refuses a Health ID in the lookup\'s URL on HEAD and without credentials alike, and keeps the lookup by reference', async () => {
+      const head = await request(server()).head('/api/v1/admin/order-routes?healthId=HID-ABC234').set('Authorization', 'Bearer synthetic');
+      expect(head.status).toBe(400);
+      const anonymous = await request(server()).get('/api/v1/admin/order-routes?healthId=HID-ABC234');
+      expect([anonymous.status, anonymous.body.code]).toEqual([400, HEALTH_ID_NOT_ACCEPTED_IN_URL]);
+      expect([tokens.verify.mock.calls.length, calls.length, audit.record.mock.calls.length]).toEqual([0, 0, 0]);
+      admin(all);
+      handlers['identity.admin_find_order_routes'] = () => ({ rows: [] });
+      const byReference = await request(server()).get('/api/v1/admin/order-routes?reference=7000000a')
+        .set('Authorization', 'Bearer synthetic');
+      expect([byReference.status, byReference.body]).toEqual([200, { items: [] }]);
+      expect(sqlCalls('identity.admin_find_order_routes').map((call) => call.values)).toEqual([['7000000A', null]]);
+      expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'api.admin.order-routes.find', outcome: 'success' }));
     });
 
     it('lists or unlists a facility for orders, with a reason; failures audited only', async () => {

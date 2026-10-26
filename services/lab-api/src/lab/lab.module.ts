@@ -14,6 +14,7 @@ import { LabOrderRoutesController } from './lab-order-routes.controller';
 import { LabOrderRoutesService } from './lab-order-routes.service';
 import { LabOrderRouteAccess } from './order-route-access';
 import { LabOrderRouteCards } from './order-route-cards';
+import { HealthIdInUrlRefusalModule } from './health-id-in-url';
 
 /**
  * Laboratory bounded-context composition point.
@@ -21,7 +22,7 @@ import { LabOrderRouteCards } from './order-route-cards';
  * Imported external evidence is Lab-owned and deliberately separate from
  * native accession/specimen/execution workflows, which remain future work.
  */
-@Module({ imports: [LabIdentityAuthorizationModule], controllers: [StaffResultsController,LabImportsController, LabWorkItemsController, LabAccessionsController, LabExecutionsController, PatientResultsController, LabOrderRoutesController],
+@Module({ imports: [LabIdentityAuthorizationModule, HealthIdInUrlRefusalModule], controllers: [StaffResultsController,LabImportsController, LabWorkItemsController, LabAccessionsController, LabExecutionsController, PatientResultsController, LabOrderRoutesController],
   providers: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService, PatientResultsService,
     LabOrderRoutesService, LabOrderRouteAccess, LabOrderRouteCards],
   exports: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService] })

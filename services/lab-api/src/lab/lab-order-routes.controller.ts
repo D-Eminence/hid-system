@@ -16,6 +16,7 @@ const uuid = () => new ParseUUIDPipe({ version: '4' });
 export class LabOrderRoutesController {
   constructor(private readonly routes: LabOrderRoutesService) {}
 
+  /** Incoming or Recent. A healthId in the URL is refused 400 before this route runs (health-id-in-url.ts). */
   @Get()
   @RequirePermissions('lab.order-route.receive') @AuditAction('lab.order-route.list.request')
   list(@Query() query: ListOrderRoutesQueryDto, @Req() request: HidRequest) {
@@ -24,8 +25,7 @@ export class LabOrderRoutesController {
 
   /**
    * Find by the patient's Health ID, sent in the body so it is in no request
-   * line a gateway or edge log keeps (CODEX §26); the GET's healthId
-   * parameter is deprecated.
+   * line a gateway, edge log or browser history keeps (CODEX §26).
    */
   @Post('search') @HttpCode(200)
   @RequirePermissions('lab.order-route.receive') @AuditAction('lab.order-route.list.request')

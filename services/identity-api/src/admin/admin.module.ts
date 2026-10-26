@@ -12,9 +12,10 @@ import { PricingService } from './pricing.service';
 import { PublicPricingController } from './public-pricing.controller';
 import { AdminOrderRouteCommandsController, AdminOrderRouteReadsController } from './order-routes.controller';
 import { AdminOrderRoutesService } from './order-routes.service';
+import { HealthIdInUrlRefusalModule } from './health-id-in-url';
 
 @Module({
-  imports: [DatabaseModule, AuditModule, IdentityModule, PatientSafetyModule],
+  imports: [DatabaseModule, AuditModule, IdentityModule, PatientSafetyModule, HealthIdInUrlRefusalModule],
   controllers: [AdminController, PublicPricingController, IntegrationAdminController,
     // Orders between facilities (P4c): support's summary, listing, lookup and close.
     AdminOrderRouteReadsController, AdminOrderRouteCommandsController],
