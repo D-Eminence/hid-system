@@ -11,13 +11,14 @@
 --    exists; the two bodies this migration replaces or drops (support's
 --    summary C20 and find C21) and the thirteen it relies on are byte for byte
 --    0086's (md5 of pg_proc.prosrc, measured on 0001-0088; 0087 and 0088
---    replace none of them); ehr.order_routes_receiving_idx and the
---    respond-by and acceptance CHECKs of ehr.order_routes are 0086's; C20
---    and C21 have 0086's security, volatility and search path and share one
---    owner, which may create in ehr, lab, pharmacy and identity, run every
---    function the new and changed bodies call, read the tables they read,
---    and which the applying role may become. C20's and C21's owner,
---    attributes and ACL are recorded.
+--    replace none of them); ehr.order_routes_receiving_idx is 0086's, and
+--    the respond-by and acceptance CHECKs of ehr.order_routes are 0086's and
+--    validated (their definitions compared with the same CHECKs built in the
+--    session); C20 and C21 have 0086's security, volatility and search path
+--    and share one owner, which may create in ehr, lab, pharmacy and
+--    identity, run every function the new and changed bodies call, read the
+--    tables they read, and which the applying role may become. C20's and
+--    C21's owner, attributes and ACL are recorded.
 -- 1. B1, whether this facility receives: ehr.order_route_receives_here(text),
 --    owner-only, through lab.order_route_receives_here() and
 --    pharmacy.order_route_receives_here() (SECURITY DEFINER SQL wrappers, as
@@ -65,20 +66,22 @@
 --    (grantee, privilege), as before the DROP, or the release stops.
 --
 -- Locks. 0089 itself holds no table lock at any section boundary (measured
--- with pg_locks). Its only table lock is a momentary ACCESS SHARE on
+-- with pg_locks). Its only table locks are two momentary ACCESS SHARE locks,
+-- each released at once: on ehr.order_routes, taken by pg_get_constraintdef
+-- in the CHECK precondition (section 0 d), and on
 -- identity.order_route_destination_settings, taken by the PL/pgSQL validator
--- when it resolves C20's %rowtype and released at once (measured: while
--- another session holds ACCESS EXCLUSIVE on that table, the runner's
--- lock_timeout stops the dry run or the apply after 5 seconds with nothing
--- applied; with it held on ehr.order_routes, ehr.order_route_events,
--- identity.facilities, identity.organizations,
+-- when it resolves C20's %rowtype (measured: while another session holds
+-- ACCESS EXCLUSIVE on either table, the runner's lock_timeout stops the dry
+-- run or the apply after 5 seconds with nothing applied; with it held on
+-- ehr.order_route_events, identity.facilities, identity.organizations,
 -- identity.organization_applications, identity.organization_products,
 -- identity.staff_facility_memberships, identity.patients, auth.accounts,
 -- auth.account_roles, platform.control_settings or identity.consent_grants,
 -- 0089 applies without waiting). The SQL wrappers name only functions, the
--- PL/pgSQL bodies are not planned at CREATE, the preconditions read the
--- catalog only, and dropping and creating functions locks no table. ACCESS
--- SHARE conflicts only with ACCESS EXCLUSIVE, so no request waits for 0089.
+-- PL/pgSQL bodies are not planned at CREATE, the other preconditions read
+-- the catalog only, and dropping and creating functions locks no table.
+-- ACCESS SHARE conflicts only with ACCESS EXCLUSIVE, so no request waits for
+-- 0089.
 -- When 0088 is pending too, the dry run applies both in one transaction, and
 -- 0088's ACCESS EXCLUSIVE on ehr.order_routes is then held through 0089 as
 -- well.
@@ -91,7 +94,8 @@
 
 -- 0. Preconditions. The release dry-runs every pending migration in one
 -- transaction before applying any, so a refusal here stops the release with
--- nothing changed. Catalog reads only.
+-- nothing changed. Catalog reads; only pg_get_constraintdef takes a table
+-- lock, a momentary ACCESS SHARE on ehr.order_routes (see Locks).
 do $$
 declare
   mismatch text;
@@ -149,9 +153,10 @@ begin
     raise exception '0089: a function the new fields rely on has another body than 0086 gave it: %', mismatch;
   end if;
   -- d. Section 2's index and bounds: 0086's ehr.order_routes_receiving_idx
-  -- on (receiving_facility_id, state, created_at), not partial, and the two
-  -- validated CHECKs the bounds derive from (pg_index and pg_constraint
-  -- only).
+  -- on (receiving_facility_id, state, created_at), not partial (pg_index);
+  -- and the two CHECKs the bounds derive from, validated and exactly 0086's
+  -- (0086:6376 and 6394-6406), compared with the same CHECKs built on a
+  -- temporary table in this session, as 0088 compares its CHECKs.
   if to_regclass('ehr.order_routes_receiving_idx') is null
      or (select index_row.indrelid <> 'ehr.order_routes'::regclass or index_row.indpred is not null
                 or index_row.indexprs is not null
@@ -163,11 +168,46 @@ begin
            from pg_index index_row where index_row.indexrelid = to_regclass('ehr.order_routes_receiving_idx')) then
     raise exception '0089: ehr.order_routes_receiving_idx is not 0086''s (receiving_facility_id, state, created_at)';
   end if;
-  if (select count(*) from pg_constraint constraint_row
-       where constraint_row.conrelid = 'ehr.order_routes'::regclass and constraint_row.contype = 'c'
-         and constraint_row.convalidated
-         and constraint_row.conname in ('order_routes_respond_by_ck', 'order_routes_acceptance_ck')) <> 2 then
-    raise exception '0089: ehr.order_routes must have 0086''s validated respond-by and acceptance CHECKs';
+  create temporary table order_route_bounds_0089 (
+    kind text,
+    state text,
+    created_at timestamptz,
+    respond_by timestamptz,
+    accepted_at timestamptz,
+    accepted_by_account_id uuid,
+    accepted_by_membership_id uuid,
+    accept_idempotency_key text,
+    accept_request_sha256 char(64),
+    lab_work_item_id uuid,
+    pharmacy_work_item_id uuid,
+    writes_end_at timestamptz,
+    access_ends_at timestamptz,
+    constraint order_routes_respond_by_ck check (respond_by = created_at + interval '168 hours'),
+    constraint order_routes_acceptance_ck check (
+      (accepted_at is null and accepted_by_account_id is null and accepted_by_membership_id is null
+        and accept_idempotency_key is null and accept_request_sha256 is null
+        and lab_work_item_id is null and pharmacy_work_item_id is null
+        and writes_end_at is null and access_ends_at is null
+        and state in ('sent', 'declined', 'withdrawn', 'expired'))
+      or (accepted_at is not null and accepted_by_account_id is not null and accepted_by_membership_id is not null
+        and accept_idempotency_key is not null and accept_request_sha256 is not null
+        and ((kind = 'lab_request' and lab_work_item_id is not null)
+          or (kind = 'prescription' and pharmacy_work_item_id is not null))
+        and writes_end_at is not null and access_ends_at is not null
+        and writes_end_at <= access_ends_at and access_ends_at <= accepted_at + interval '1080 hours'
+        and state in ('accepted', 'completed', 'cancelled')))
+  ) on commit drop;
+  select string_agg(expected.conname, ', ' order by expected.conname) into mismatch
+    from (values ('order_routes_respond_by_ck'), ('order_routes_acceptance_ck')) expected(conname)
+   where (select pg_get_constraintdef(live.oid) from pg_constraint live
+           where live.conrelid = 'ehr.order_routes'::regclass and live.conname = expected.conname
+             and live.contype = 'c' and live.convalidated)
+         is distinct from
+         (select pg_get_constraintdef(built.oid) from pg_constraint built
+           where built.conrelid = 'pg_temp.order_route_bounds_0089'::regclass and built.conname = expected.conname
+             and built.contype = 'c');
+  if mismatch is not null then
+    raise exception '0089: a CHECK section 2''s bounds derive from is not 0086''s validated CHECK: %', mismatch;
   end if;
   -- e. C20's and C21's attributes and ACL before the change.
   create temporary table order_route_contract_0089 on commit drop as
@@ -264,7 +304,8 @@ $$;
 -- receive permission). Two booleans: no patient, no count, no reference.
 -- The clock is read once. Each read is a range of
 -- ehr.order_routes_receiving_idx (facility, state, created_at), so it does
--- not grow with the facility's history:
+-- not grow with the facility's history (both CHECKs named below are
+-- compared with 0086's in section 0):
 --   - waiting: respond_by = created_at + 168 hours (0086's
 --     order_routes_respond_by_ck), so the created_at bound is the same
 --     condition;

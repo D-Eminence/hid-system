@@ -1494,7 +1494,10 @@ steps 2 and 3 of `identity.order_route_destination_eligible` (md5
 `6b274d9b…`); `held`'s 1272-hour bound relies on
 `ehr.accept_receiving_order_route` (md5 `1d4a77de…`) refusing at the
 respond-by, and on `order_routes_respond_by_ck` and
-`order_routes_acceptance_ck`.
+`order_routes_acceptance_ck`, which 0089 compares with 0086's definitions
+before it applies (a CHECK of either name with another definition, or not
+validated, stops the release; the contract-fields suite checks them again
+after it).
 
 The services' part (routes under `/api/v1`; INTERFACE_CONTRACT §22):
 

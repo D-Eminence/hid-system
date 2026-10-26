@@ -27,7 +27,8 @@
 --      and another kind's routes never count; nothing without the receive
 --      permission; the same at a governed and a self-signed-up facility, at
 --      an unlisted one and at one whose product is suspended, with either
---      switch off; a route sent 51 days ago is still held (the read's bound);
+--      switch off; a route sent 51 days ago is still held (the read's bound),
+--      and the two CHECKs that bound rests on are still 0086's, validated;
 --      every case equals Incoming's and route access's own predicates,
 --      unbounded, evaluated as owner; booleans only;
 --   4. B2, support's find (C21): for every route of the suite (sent, sent past
@@ -1609,6 +1610,48 @@ set local role hid_lab_api_runtime;
 select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
 select pg_temp.expect_facts('L1 once that route''s access has ended', 'lab', 'true {"held": false, "waiting": false}');
 reset role;
+-- The two CHECKs section 2's bounds rest on are still 0086's, validated
+-- (0086:6376 and 6394-6406; 0089 compares them before it applies), compared
+-- with the same CHECKs built here: o1 above is then as long as any route can
+-- be held after it was sent.
+create temp table item4_bounds_0086 (
+  kind text,
+  state text,
+  created_at timestamptz,
+  respond_by timestamptz,
+  accepted_at timestamptz,
+  accepted_by_account_id uuid,
+  accepted_by_membership_id uuid,
+  accept_idempotency_key text,
+  accept_request_sha256 char(64),
+  lab_work_item_id uuid,
+  pharmacy_work_item_id uuid,
+  writes_end_at timestamptz,
+  access_ends_at timestamptz,
+  constraint order_routes_respond_by_ck check (respond_by = created_at + interval '168 hours'),
+  constraint order_routes_acceptance_ck check (
+    (accepted_at is null and accepted_by_account_id is null and accepted_by_membership_id is null
+      and accept_idempotency_key is null and accept_request_sha256 is null
+      and lab_work_item_id is null and pharmacy_work_item_id is null
+      and writes_end_at is null and access_ends_at is null
+      and state in ('sent', 'declined', 'withdrawn', 'expired'))
+    or (accepted_at is not null and accepted_by_account_id is not null and accepted_by_membership_id is not null
+      and accept_idempotency_key is not null and accept_request_sha256 is not null
+      and ((kind = 'lab_request' and lab_work_item_id is not null)
+        or (kind = 'prescription' and pharmacy_work_item_id is not null))
+      and writes_end_at is not null and access_ends_at is not null
+      and writes_end_at <= access_ends_at and access_ends_at <= accepted_at + interval '1080 hours'
+      and state in ('accepted', 'completed', 'cancelled')))
+) on commit drop;
+select pg_temp.assert('section 2''s bounds: ehr.order_routes'' respond-by and acceptance CHECKs are 0086''s, validated',
+  not exists (select 1 from (values ('order_routes_respond_by_ck'), ('order_routes_acceptance_ck')) expected(conname)
+               where (select pg_get_constraintdef(live.oid) from pg_constraint live
+                       where live.conrelid = 'ehr.order_routes'::regclass and live.conname = expected.conname
+                         and live.contype = 'c' and live.convalidated)
+                     is distinct from
+                     (select pg_get_constraintdef(built.oid) from pg_constraint built
+                       where built.conrelid = 'pg_temp.item4_bounds_0086'::regclass
+                         and built.conname = expected.conname and built.contype = 'c')));
 -- Every case once more, against the unbounded predicates evaluated as owner
 -- (Incoming's list and H6's read): the bounds change nothing.
 select pg_temp.run_matrix('after-routes');
