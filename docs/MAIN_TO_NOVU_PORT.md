@@ -67,6 +67,7 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | main 0066 items 2-4 (3490809 / eb9b1ca) | A patient can revoke access they gave (an approved request or Access PIN use) from the Access page; emergency (break-glass) and workforce access cannot be revoked there. The access history labels emergency access and which grants the patient can revoke, and a deleted login gets no new inbox items. It differs from `main` as listed below the table | 0087, runtime-grants.sql |
 | — | This branch only (item 3, owner decisions of 2026-10-26): a laboratory or pharmacy that accepted an order from another facility for someone who was not its patient ends it from its work list. Its access ends and every result it sent back is marked entered in error, or its dispensing reversed, in one transaction; the patient gets an inbox notice; support reviews every report; the ordering facility sees such orders on its Overview for 30 days. Described below the table | 0088, runtime-grants.sql |
 | — | This branch only (item 4, owner decisions of 2026-10-26): the Lab and Pharmacy work lists and Incoming say whether the facility receives orders from other facilities now and whether any wait or are held there; support's order lookup says when the receiving facility's access ends and whether Close would act now; support's facility summary says what the facility is as a destination. Read-only: nothing is written and no audit row is added. Described below the table | 0089, runtime-grants.sql |
+| — | This branch only (D17, owner decisions of 2026-10-26): a laboratory or pharmacy that finds out after an order ended, or its window lapsed, that it accepted the order for someone who was not its patient finds it by its reference and withdraws what it recorded on it, until 180 days after acceptance, at most 5 a member and 20 a facility in 24 hours. Every result it recorded is marked entered in error (or its dispensing reversed) as item 3 does; its access to the patient's records is never reopened; the patient, the ordering facility and support are told; support cannot mark such a report reviewed without the DPO referral (and the call to the ordering facility) where something had come back. Described below the table | 0090, runtime-grants.sql |
 
 Emergency contacts differ from `main` (#16 and e1757ba) in these ways. Owner
 decisions of 2026-10-23 are marked "owner".
@@ -1530,6 +1531,133 @@ The services' part (routes under `/api/v1`; INTERFACE_CONTRACT §22):
   declines, the waiting one and holds the accepted one); a released
   sign-up's destination; and no audit row carrying the fields.
 
+The late correction (D17, this branch only; SPEC-FINAL in the item's build
+notes): when a laboratory or pharmacy (B) finds out late that it accepted an
+order for the wrong person, item 3's report no longer works once its window
+has closed or the order ended another way. D17 adds "Correct an order that
+has ended". The owner approved it on 2026-10-26, taking every recommended
+default, built as decided:
+
+- D17-1: one member of B who may receive that kind of order
+  (`lab.order-route.receive` / `pharmacy.order-route.receive`), and may mark
+  results entered in error (`lab.result.entered-in-error`) or reverse
+  dispensings (`pharmacy.dispensing.reverse`) when something must be
+  withdrawn, withdraws at once; support reviews every such report within one
+  business day. No second member.
+- D17-2: until 180 days after B accepted the order, set in one database
+  function (`ehr.order_route_correctable_until`; the order summary inlines the
+  same expression and a suite check keeps them equal). Past it: 409
+  `ORDER_ROUTE_CORRECTION_TOO_LATE`.
+- D17-3: when B cannot act (it left Health ID, does not respond, or the
+  deadline passed), support's stop-gap, reworded: the clinician notes in the
+  record, without repeating the value, that the result was not the patient's;
+  support refers it to the DPO the same day. No support withdrawal.
+- D17-4: the ordering facility (A) sees item 3's red warning with the other
+  person's values hidden, plus the sentence that anything it recorded from
+  the value (a note, a diagnosis, a prescription) still shows until it
+  amends it or marks it entered in error (the website's words; the backend
+  answers `wrongPatient: { reportedAt, late }`).
+- D17-5: guidance only for A: phone B with the reference, with evidence; an
+  unexpected result is not a reason (the website's words).
+- D17-6: support refers to the DPO the same day every late report where
+  something had gone back and every "suspected misuse" one. The console, and
+  the database behind it, refuse to mark such a report reviewed without
+  "Referred to the DPO", and, where something had gone back and the
+  ordering facility is still on Health ID, without "Ordering facility told":
+  400 `WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED`, problem member `required`
+  (C27, and a CHECK on the report table as the backstop).
+- D17-7: the patient is told in the app's inbox only:
+  `ORDER_ROUTE_WRONG_PATIENT` when the order ended now,
+  `ORDER_ROUTE_WRONG_PATIENT_CORRECTED` when it had ended before. No email.
+- D17-8: B finds the order by its exact 8-character reference only
+  (`POST …/order-routes/correctable`, the reference in the body); for an
+  order it may still correct it also sees the test or medicine, who at B
+  accepted it and how identity was checked, and what went back and when.
+  Never the patient. A reference no order accepted there carries answers 200
+  with no items, never 404.
+- D17-9: at most 5 late corrections per member and 20 per facility in any 24
+  hours, exact (a transaction advisory lock per receiving facility); the
+  refusal (429 `ORDER_ROUTE_CORRECTION_LIMIT`) says from when another is
+  possible (problem member `retryAfter`); support cannot lift it.
+- D17-10: an order whose time simply ran out is ended "accepted for the wrong
+  person" now (`wrong_patient`), so every item 3 screen works unchanged; an
+  order that had ended another way keeps that ending.
+- D17-11: the website ships first and stays dormant until this backend says
+  it serves D17 (`lateCorrection: true` on the Lab and Pharmacy work lists,
+  the EHR's lab-request and prescription lists, the ordering facility's
+  Overview, support's lookup and reports list; a `correctableUntil` key on a
+  route; any answer from the lookup); then this backend.
+- D17-12: 0090's declaration stays unsigned in this build (`reviewed_by`
+  empty); the owner signs after the gates of SPEC-FINAL §11.2.
+- D17-13: the ordering facility's Overview is unchanged: only the clinician
+  who sent the order sees the full item; colleagues see the reference.
+
+How it is made safe (0090): the command (`ehr.correct_wrong_patient_order_route`,
+owner-only, through `lab.`/`pharmacy.correct_wrong_patient_order_route`)
+writes one row of `ehr.order_route_correction_capabilities` (forced
+row-level security, no grant to any role), keyed by its own transaction id,
+for the route's facility, patient, kind and the member; the receiving access
+rule (H6) honours it only inside that transaction
+(`pg_current_xact_id_if_assigned()`), behind the control and the receive
+permission; the command deletes it before it returns. H7 and item 3's
+command are unchanged byte for byte.
+
+The services' part (routes under `/api/v1`; INTERFACE_CONTRACT §23):
+
+- lab-api and pharmacy-api: `POST order-routes/correctable` (body
+  `{ reference }`, 1-16 characters; trimmed, upper-cased and checked, 400
+  `ORDER_ROUTE_INVALID`) reads `lab.find_correctable_order_routes` (the
+  Pharmacy twin) in a READ COMMITTED transaction, answers each order field by
+  field (`details` only while open or correctable, never the patient) with
+  `lateCorrection: true`, and writes one row per lookup
+  (`lab.order-route.correctable` / `pharmacy.order-route.correctable`, no
+  patient, `{ found, states, routeIds }`, never the reference).
+  `POST order-routes/:routeId/wrong-patient-correction` (`Idempotency-Key`;
+  body `{ expectedVersion, reason, discoveredBy, discoveredOn, note }`, all
+  required; `discoveredOn` a calendar date, the note trimmed and digested with
+  the rest) runs the command once in a READ COMMITTED transaction and writes
+  B's own row (`lab.order-route.wrong-patient-correction` /
+  `pharmacy.…`, the patient from the command, how and when B found out, the
+  counts, `late: true`, never the note); Lab's interceptor writes the
+  `….request` rows without a body (pharmacy-api has no interceptor, as for
+  item 3). The new refusals: 409 `ORDER_ROUTE_STILL_OPEN` (use item 3's
+  report), `ORDER_ROUTE_ALREADY_REPORTED`, `ORDER_ROUTE_CORRECTION_TOO_LATE`;
+  429 `ORDER_ROUTE_CORRECTION_LIMIT` with `retryAfter`; a concurrent route
+  write or deadlock 409 `ORDER_ROUTE_CHANGED_CONCURRENTLY` (this command
+  only). The work lists add `lateCorrection: true` for a member holding the
+  receive permission. Item 3's report, the cards and the work lists' rows
+  are unchanged.
+- ehr-api: the order summary (`orderRoute` on the lists and reads, the
+  order's route views) and the patient's routes pass `wrongPatient` and
+  `correctableUntil` on when the database answers them; the Overview's items
+  pass `reportedAt`, `late` and `endedKindBefore` on, and its answer and the
+  two lists add `lateCorrection: true`.
+- identity-api: support's lookup passes `correction`, `correctableUntil` and
+  `wrongPatient` on, and the reports list the seven late facts
+  (`late`, `endedKindBefore`, `discoveredBy`, `discoveredOn`,
+  `reporterLateReportsLast30Days`, `orderingSenderActive`,
+  `requiredActions`), each when the schema answers it; both answers add
+  `lateCorrection: true`. The review answers the new refusal with problem
+  member `required`; Identity's problem details gain extension members for
+  it (as Lab's and Pharmacy's already have).
+- notification-worker, event-dispatcher (only a test added: the two outbox
+  rows are item 3's shapes), the gateway, AWS and the Novu set-up are
+  unchanged.
+- Tests: the database suite `order-routes-late-correction` and the extended
+  order-route suites; jest and HTTP specs (`lab-order-route-late-correction.spec.ts`,
+  `pharmacy-order-route-late-correction.spec.ts`, EHR's
+  `order-route-late-correction.spec.ts`, Identity's `order-routes.http.spec.ts`
+  and `problem.spec.ts`, the event-dispatcher's contract spec, and the exact
+  shapes that gained a field); and the order-routes runtime verifier's late
+  correction block (an order support closed, item 3's lapsed order and a
+  lapsed completed one, an order past its 180 days, a closed prescription;
+  the lookup before and after; the refusals; the deadline on the four
+  readers; the patient's notice and record; the Overview; support's flags,
+  required actions and refused review; the member and facility limits with
+  their exact `retryAfter`; the capability table empty, its statistics,
+  and no runtime able to read, write or use it; no note in any audit row or
+  log).
+
 ## Not ported, and why
 
 - Already on this branch: #26 (0071 grants the list), #58 (0071 seeds `direct-care`).
@@ -1657,6 +1785,17 @@ Decided by the owner, D-Eminence:
   with the decisions D1-D10 described under "The contract fields" in Ported
   above, D4 taking the alternative (`routesHere`); the owner signed 0089's
   declaration in chat on 2026-10-26.
+- The late correction (D17) is built at the owner's request (2026-10-26) with
+  every recommended default, D17-1 to D17-13, described under "The late
+  correction" in Ported above: one member of the laboratory or pharmacy
+  withdraws at once and support reviews; 180 days after acceptance; support's
+  stop-gap reworded, no support withdrawal; item 3's red warning plus the
+  sentence about what the clinic recorded; guidance only for the clinic;
+  the DPO referral enforced by the console; inbox only; lookup by exact
+  reference with the laboratory's own facts, never the patient; 5 a member
+  and 20 a facility in 24 hours, exact; a lapsed order ended
+  `wrong_patient`; website first; 0090's declaration unsigned in this build;
+  the Overview unchanged.
 
 Still open, with what each one holds back:
 
@@ -1758,6 +1897,26 @@ Still open, with what each one holds back:
   `identity.staff_facility_memberships (facility_id)` for active memberships,
   if `receives` is slow in production (3-4 ms a call, p95 up to 6.5 ms, with
   10,000 memberships); not in 0089, because it would lock the table.
+- The late correction (D17, 0090): unsigned (D17-12; `reviewed_by` empty).
+  The owner signs after the gates of SPEC-FINAL §11.2: the container database
+  acceptance, the staging schema upgrade, the suites, the race harness and
+  the performance gates, the copies, the old images' verifiers and the
+  migration checks, and the owners named in the production dry run's notice
+  read and recorded. Release order (D17-11): item 4 is live (the declaration
+  names only 0090 and `runtime-grants.sql`); the website first (dormant until
+  this backend says it serves D17), then this backend: `database-migration`
+  (0090 with `runtime-grants.sql`, dry run then apply), then lab-api,
+  pharmacy-api, ehr-api and identity-api from the same commit; the default
+  `changed` selection rebuilds all 13 components, because
+  `scripts/verify-migration-ledger.mjs` changes, as for 0087-0089. D17 is
+  switched off only by rolling those four services back together. Support's
+  runbook: a laboratory or pharmacy that reports a batch mix-up larger than
+  the limits is told when more are possible; support phones each ordering
+  facility on the list it gives and asks the engineering on-call for a
+  hotfix only if the limits must be raised. Follow-ups, not in this build:
+  a support-granted permit past the deadline, a two-person support
+  withdrawal, a second member at the laboratory, the patient email, the
+  Overview for a sender who has left, and a support allowance for the limits.
   Rollback and mixed images were run end to end (integration): 22cd47f's
   and aba7c16's services pass their own order-routes runtime verifier on
   0089 (their lists carry no new field and support's lookup keeps its 13

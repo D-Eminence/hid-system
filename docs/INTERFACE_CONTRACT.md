@@ -1008,3 +1008,186 @@ Identity image too; a schema before 0089 answers without it.
   "destination": { "receivingTypes": ["laboratory"], "review": "governed" },
   "receivedAcceptedLifetime": 0, "receivedPatientsLifetime": 0, "counterparts": [] }
 ```
+
+## 23. Orders between facilities: correcting an order accepted for the wrong person after it ended
+
+A laboratory or pharmacy that finds out, after an order ended or its window
+lapsed, that it accepted the order for someone who was not its patient can
+still withdraw what it recorded on it, until 180 days after it accepted the
+order (migration 0090, D17; owner decisions of 2026-10-26, recorded in
+`MAIN_TO_NOVU_PORT.md`). In one transaction every result it recorded on the
+order is marked entered in error (or its dispensing reversed) exactly as §21
+does; an order whose time had only run out ends `wrong_patient` now, and an
+order that had ended another way keeps that ending; support gets a report
+flagged `late_correction`; the patient gets an inbox notice
+(`ORDER_ROUTE_WRONG_PATIENT` when the order ended now,
+`ORDER_ROUTE_WRONG_PATIENT_CORRECTED` when it had ended before; metadata
+`{routeId, kind, orderingFacilityName, receivingFacilityName}`; no email).
+The receiver's access to the patient's records is never reopened. What the
+ordering facility recorded from the value (a note, a diagnosis, a
+prescription) stays until it amends it.
+
+```text
+POST /api/v1/lab/order-routes/correctable                               # lab.order-route.receive
+POST /api/v1/pharmacy/order-routes/correctable                          # pharmacy.order-route.receive
+POST /api/v1/lab/order-routes/:routeId/wrong-patient-correction        # lab.order-route.receive
+POST /api/v1/pharmacy/order-routes/:routeId/wrong-patient-correction   # pharmacy.order-route.receive
+```
+
+Facility context and `X-Purpose-Of-Use: direct-care` are required on all four.
+
+**Find an order by its reference.** The body is `{ reference }` (a string of
+1-16 characters; a POST, so the reference, which with a date of birth names an
+order at acceptance, is in no request line). The service trims and
+upper-cases it; it must then be 8 hex characters (400 `ORDER_ROUTE_INVALID`).
+`200` answers at most 5 orders this facility accepted with that reference,
+newest acceptance first, and `lateCorrection: true`:
+
+```json
+{ "items": [ { "id": "…", "reference": "3F2A9C1B", "kind": "lab_request", "version": 9,
+    "effectiveState": "completed", "orderingFacilityName": "…", "acceptedAt": "…", "completedAt": "… | null",
+    "endedAt": "… | null", "endedKind": "support | … | null", "returned": true,
+    "correction": "open | correctable | reported | too_late", "correctableUntil": "…",
+    "wrongPatient": { "reportedAt": "…", "late": true } | null,
+    "details": { "what": "Full blood count", "acceptedBy": "…",
+                 "acceptedWith": "health_id | date_of_birth_with_reference | date_of_birth",
+                 "returned": [ { "at": "…", "withdrawn": false } ] } | null } ],
+  "lateCorrection": true }
+```
+
+`correction` is `open` while item 3's report (§21) still applies (the
+website then offers that form with this `id` and `version`), `correctable`
+when only this correction applies, `reported` once the order has a report (in
+or after its window), `too_late` from `correctableUntil` (180 days after
+acceptance; for `too_late` already past). `details`, the facility's own facts
+about the order (the test or medicine, who here accepted it and how identity
+was checked, what went back and when, at most 20), is present only while the
+order is `open` or `correctable`. No patient, orderer, work item or value is
+ever answered. A reference no order accepted here carries answers `200
+{ "items": [], "lateCorrection": true }`, never 404. Each lookup writes one
+audit row (`lab.order-route.correctable` / `pharmacy.order-route.correctable`,
+no patient, details `{ found, states, routeIds }`, never the reference);
+Lab's interceptor writes `api.lab.order-route.correctable.request`.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `VALIDATION_FAILED` | the body (no reference, not a string, longer than 16, an unknown field) |
+| 400 | `ORDER_ROUTE_INVALID` | not 8 hex characters once trimmed and upper-cased |
+| 403 | `PERMISSION_DENIED` | not a receiving member under direct care |
+| 423 | `CROSS_FACILITY_ORDERS_UNAVAILABLE` | `cross_facility_route_access_enabled` off |
+| 503 | `ORDER_ROUTE_UNAVAILABLE` | anything else |
+
+Lab and Pharmacy never answer `ORDER_ROUTE_LOOKUP_INVALID` (the code of support's lookup).
+
+**Correct it.** `Idempotency-Key` is required. The body, every field
+required, unknown fields refused:
+
+```json
+{ "expectedVersion": 9,
+  "reason": "wrong_order_chosen | someone_elses_details | suspected_misuse | other",
+  "discoveredBy": "patient | ordering_facility | own_check | support | other",
+  "discoveredOn": "2026-10-20",
+  "note": "8 to 500 characters once trimmed, for Health ID support" }
+```
+
+`discoveredOn` is the day the facility found out: a calendar date, not after
+today and not before the day it accepted the order (Africa/Lagos). The note
+reaches support's list only (never an audit row, a log line, the ordering
+facility or the patient). The request digest is
+`requestDigest('lab.order-route.wrong-patient-correction', { routeId,
+expectedVersion, reason, discoveredBy, discoveredOn, note: note.trim() })`
+(`pharmacy.…` for the pharmacy). Any member who may receive that kind of order
+may correct; when something must be withdrawn the member also needs
+`lab.result.entered-in-error` or `pharmacy.dispensing.reverse`. At most 5
+late corrections per member and 20 per facility in any 24 hours, exact;
+support cannot lift the limit. `200` answers:
+
+```json
+{ "route": { "id": "…", "version": 11, "effectiveState": "completed | cancelled", "endedKind": "wrong_patient | support | …" },
+  "late": true, "endedKindBefore": "support | null", "resultsVoided": 1, "resultReportsMarked": 1,
+  "dispensingReversed": false, "correctableUntil": "…", "replayed": false }
+```
+
+`endedKindBefore` is how the order had ended before the correction (null when
+its time had only run out; it then ends `wrong_patient` now). The same member,
+key and request answer the stored report with `replayed: true`. The service
+writes its own row (`lab.order-route.wrong-patient-correction` /
+`pharmacy.order-route.wrong-patient-correction`, with the patient from the
+command, details `{routeId, kind, reportId, stateBefore, endedKindBefore,
+state, reasonCode, discoveredBy, discoveredOn, resultsVoided,
+dispensingReversed, replayed, late: true}`, never the note); Lab's interceptor
+writes `api.lab.order-route.wrong-patient-correction.request` without a body.
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `VALIDATION_FAILED` | the body: an unknown reason or `discoveredBy`, a date not in the form `YYYY-MM-DD`, a note outside 8-500 as sent, a missing or unknown field |
+| 400 | `ORDER_ROUTE_INVALID` | a note under 8 once trimmed; `discoveredOn` not a calendar date, in the future, or before the order was accepted; the command's own input check |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | no or malformed key |
+| 403 | `PERMISSION_DENIED` | not a receiving member under direct care |
+| 403 | `ORDER_ROUTE_CORRECTION_PERMISSION_REQUIRED` | something must be withdrawn; problem member `permission` names the missing one |
+| 404 | `ORDER_ROUTE_NOT_FOUND` | not addressed to this facility, or another kind |
+| 409 | `ORDER_ROUTE_NOT_ACCEPTED` | never accepted here |
+| 409 | `ORDER_ROUTE_STILL_OPEN` | still open: use §21's report |
+| 409 | `ORDER_ROUTE_ALREADY_REPORTED` | reported already, in or after the window (also when a concurrent report won) |
+| 409 | `ORDER_ROUTE_CORRECTION_TOO_LATE` | past `correctableUntil` |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | the key with another request, or a key first used for §21's report |
+| 409 | `ORDER_ROUTE_CHANGED_CONCURRENTLY` | a concurrent release, reversal or order change, or a deadlock (this command only) |
+| 412 | `VERSION_CONFLICT` | correctable, but the order's version moved since it was read; checked after the state |
+| 423 | `CROSS_FACILITY_ORDERS_UNAVAILABLE` | `cross_facility_route_access_enabled` off |
+| 429 | `ORDER_ROUTE_CORRECTION_LIMIT` | 5 by this member or 20 at this facility in the last 24 hours; problem member `retryAfter` (ISO-8601 UTC, milliseconds) is the earliest time another is possible |
+| 503 | `ORDER_ROUTE_UNAVAILABLE` | anything else |
+
+After a correction (in or after the window), nothing more can be written or
+released on the order's work item, even under the patient's consent (409
+`ORDER_ROUTE_CLOSED`; a Lab release is refused).
+
+**What the other services answer (fields only; no new route).** Each new
+field is sent only by a backend with 0090; a client reads it only when it is
+present and of the right type.
+
+- EHR: the order's route views (`GET …/order-routes`), the lab-request and
+  prescription lists' and reads' `orderRoute`, and the patient's
+  `GET /api/v1/ehr/me/order-routes` items gain `wrongPatient: { reportedAt,
+  late } | null` (the receiver's report, in or after the window) and
+  `correctableUntil: string | null` (set while the order is `open` or
+  `correctable`). The lab-request and prescription lists add
+  `lateCorrection: true` beside `wrongPatientReports: true`. The Overview card
+  (`GET /api/v1/ehr/order-routes/wrong-patient`) lists the reports of the last
+  30 days whatever the order's ending; its items gain `reportedAt`, `late` and
+  `endedKindBefore` (a late report on an order that had ended another way
+  keeps that ending in `endedAt`), and the answer adds `lateCorrection: true`.
+- Lab and Pharmacy: the work lists add `lateCorrection: true` for a member
+  holding the kind's receive permission (nothing to anyone else).
+- Identity, support's lookup (`GET /api/v1/admin/order-routes`, `POST
+  /api/v1/admin/order-routes/search`): each item gains `correction`
+  (`not_accepted | open | correctable | reported | too_late`),
+  `correctableUntil` (null for `not_accepted` and `reported`; already past for
+  `too_late`) and `wrongPatient: { reportedAt, late } | null`; the answer adds
+  `lateCorrection: true`.
+- Identity, support's reports list (`GET /api/v1/admin/wrong-patient-reports`):
+  each item gains `late`, `endedKindBefore`, `discoveredBy`, `discoveredOn`
+  (`YYYY-MM-DD`), `reporterLateReportsLast30Days`, `orderingSenderActive` and
+  `requiredActions` (what the review requires: `referred_to_dpo`, then
+  `ordering_facility_told`); `flags` may also hold `late_correction`,
+  `patient_prompted` and `patient_reported_before`; the answer adds
+  `lateCorrection: true`.
+- Identity, the review (`POST /api/v1/admin/wrong-patient-reports/:reportId/review`):
+  a late report where something had gone back, or a "suspected misuse" one,
+  cannot be marked reviewed without `referred_to_dpo`; where something had
+  gone back and the ordering facility is still on Health ID, also without
+  `ordering_facility_told`. Refused 400
+  `WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED`, problem member `required` (the
+  missing actions, comma-separated, `referred_to_dpo` first). Every other
+  refusal is unchanged.
+
+```json
+{ "type": "https://healthidentitydirectory.com/problems/wrong-patient-review-referral-required",
+  "title": "BAD_REQUEST", "status": 400, "detail": "…", "instance": "urn:hid:request:…", "correlationId": "…",
+  "code": "WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED", "required": "referred_to_dpo,ordering_facility_told" }
+```
+
+`lateCorrection: true` on any of these answers, a `correctableUntil` key on
+any route, or any answer from the lookup tells the website that this backend
+serves the correction (D17-11: the website ships first and stays dormant). An
+earlier backend sends none of them, and its Lab and Pharmacy answer the two
+new routes 404.
