@@ -1,12 +1,14 @@
 -- The ordering facility's Overview read of orders ended as accepted for the
 -- wrong person (0088 C28, item 3's D10 alternative (a)). Rollback-only; fails
 -- without 0088. Read as the exact EHR runtime.
---   1. a sender sees full rows only for orders they sent whose patient's
---      record they may still read: reference, kind, receiving facility, the
---      patient's name, when it ended, what was withdrawn, the link; newest
---      first;
---   2. of every other such order of the facility (a colleague's, or their
---      own without read access now) only the count and the references;
+--   1. a sender sees full rows for the orders they sent, and only for
+--      those: reference, kind, receiving facility, the patient's name, when
+--      it ended, what was withdrawn, the link; newest first; whether their
+--      grant for the patient is live, has expired (the usual case: the report
+--      comes days after the order) or was revoked (D10's rule as the owner
+--      gave it);
+--   2. of every colleague's such order of the facility only the count and
+--      the references; a sender's own order is never among them;
 --   3. a member without ehr.order-route.send (a nurse, a laboratory
 --      scientist, an administrator) sees nothing, as does a member of another
 --      facility;
@@ -908,8 +910,10 @@ select pg_temp.as_platform(3);
 select * from identity.admin_close_order_route(current_setting('hid.test.lroute_4')::uuid, 2,
   'The hospital asked support to close it');
 reset role;
--- Lab route 3 ended 31 days ago (owner SQL, triggers off); DA no longer
--- holds a consent for Q at GH (CA still does).
+-- Lab route 3 ended 31 days ago (owner SQL, triggers off). DA's grant for P
+-- expired two days ago, as a grant does once the report comes days after the
+-- order; P's own revocation (0087) withdrew DA's grant for Q. CA's grant for
+-- Q is live.
 do $$
 begin
   set local session_replication_role = replica;
@@ -920,6 +924,9 @@ begin
   update ehr.order_route_wrong_patient_reports set reported_at = reported_at - interval '31 days',
     accepted_at = accepted_at - interval '31 days'
    where route_id = current_setting('hid.test.lroute_3')::uuid;
+  update identity.consent_grants set starts_at = clock_timestamp() - interval '3 days',
+    expires_at = clock_timestamp() - interval '2 days'
+   where patient_id = 'e4c30000-0000-4000-8000-000000000001' and account_id = 'e4c10000-0000-4000-8000-000000000011';
   update identity.consent_grants set status = 'revoked', revoked_at = clock_timestamp(),
     revoked_by = 'e4c10000-0000-4000-8000-000000000011', revoked_reason = 'P4c suite: consent withdrawn'
    where patient_id = 'e4c30000-0000-4000-8000-000000000002' and account_id = 'e4c10000-0000-4000-8000-000000000011';
@@ -931,13 +938,21 @@ select pg_temp.assert('the fixture: the routes'' endings',
   = array['1:cancelled:wrong_patient', '2:cancelled:wrong_patient', '3:cancelled:wrong_patient', '4:cancelled:support',
     '5:accepted:-', '6:cancelled:wrong_patient']
   and (pg_temp.route(current_setting('hid.test.rroute_1')::uuid)).ended_kind = 'wrong_patient');
+select pg_temp.assert('the fixture: DA may read neither P''s nor Q''s record at GH now; CA may read Q''s',
+  not identity.has_active_consent_grant('e4c30000-0000-4000-8000-000000000001', 'synthetic:p4c:da',
+        'e4c13000-0000-4000-8000-000000000011', 'e4c21000-0000-4000-8000-000000000001', 'read_records', 'direct-care')
+  and not identity.has_active_consent_grant('e4c30000-0000-4000-8000-000000000002', 'synthetic:p4c:da',
+        'e4c13000-0000-4000-8000-000000000011', 'e4c21000-0000-4000-8000-000000000001', 'read_records', 'direct-care')
+  and identity.has_active_consent_grant('e4c30000-0000-4000-8000-000000000002', 'synthetic:p4c:ca',
+        'e4c13000-0000-4000-8000-000000000012', 'e4c21000-0000-4000-8000-000000000001', 'read_records', 'direct-care'));
 select set_config('hid.test.footprint_before', pg_temp.footprint(), true);
 select set_config('hid.test.ref_' || n, (pg_temp.route(current_setting('hid.test.lroute_' || n)::uuid)).reference, true)
   from generate_series(1, 6) n;
 select set_config('hid.test.ref_rx', (pg_temp.route(current_setting('hid.test.rroute_1')::uuid)).reference, true);
 
--- 1 and 2. DA: P's two orders in full (newest first); CA's order for Q and
--- DA's own order for Q (no consent now) as references only.
+-- 1 and 2. DA: their three orders in full, newest first, though their grant
+-- for P has expired and the one for Q was revoked; CA's order for Q as a
+-- reference only.
 create temp table ov_answers (reader text primary key, answer jsonb not null);
 grant select, insert on ov_answers to hid_ehr_api_runtime;
 set local role hid_ehr_api_runtime;
@@ -946,16 +961,18 @@ insert into ov_answers select 'da', ehr.list_sent_wrong_patient_order_routes();
 select pg_temp.as_staff(12, 'e4c21000-0000-4000-8000-000000000001');
 insert into ov_answers select 'ca', ehr.list_sent_wrong_patient_order_routes();
 reset role;
-select pg_temp.assert('DA''s answer: two full rows, newest first, and two references',
+select pg_temp.assert('DA''s answer: their three orders in full, newest first, and one reference',
   (select answer -> 'windowDays' = '30'::jsonb
      and (select array_agg(item ->> 'reference') from jsonb_array_elements(answer -> 'items') item)
-       = array[current_setting('hid.test.ref_rx'), current_setting('hid.test.ref_1')]
-     and answer -> 'others' -> 'count' = '2'::jsonb
-     and (select array_agg(reference order by reference) from jsonb_array_elements_text(answer -> 'others' -> 'references')
-           reference)
-       = (select array_agg(reference order by reference) from (values (current_setting('hid.test.ref_6')),
-           (current_setting('hid.test.ref_2'))) v(reference))
+       = array[current_setting('hid.test.ref_rx'), current_setting('hid.test.ref_1'), current_setting('hid.test.ref_2')]
+     and answer -> 'others' = jsonb_build_object('count', 1, 'references', jsonb_build_array(current_setting('hid.test.ref_6')))
    from ov_answers where reader = 'da'),
+  (select answer::text from ov_answers where reader = 'da'));
+select pg_temp.assert('an expired grant (P) and a revoked one (Q): the sender still sees whose order it was',
+  (select array_agg(item -> 'patient' ->> 'name' order by item ->> 'reference') = (select array_agg(name order by reference)
+      from (values (current_setting('hid.test.ref_rx'), 'Patience Okafor'), (current_setting('hid.test.ref_1'), 'Patience Okafor'),
+                   (current_setting('hid.test.ref_2'), 'Quadri Bello')) v(reference, name))
+     from ov_answers, jsonb_array_elements(answer -> 'items') item where reader = 'da'),
   (select answer::text from ov_answers where reader = 'da'));
 select pg_temp.assert('a full row: exactly the agreed fields',
   (select answer -> 'items' -> 1 from ov_answers where reader = 'da')
@@ -986,10 +1003,17 @@ select pg_temp.assert('CA''s answer: Q''s order in full, the other three as refe
            (current_setting('hid.test.ref_2')), (current_setting('hid.test.ref_rx'))) v(reference))
    from ov_answers where reader = 'ca'),
   (select answer::text from ov_answers where reader = 'ca'));
-select pg_temp.assert('no reference-only part carries a name; the colleague''s patient never appears in full',
+select pg_temp.assert('no reference-only part carries a name; a colleague''s order never appears in full',
   not exists (select 1 from ov_answers where (answer -> 'others')::text ~* '(Patience|Quadri|Nkem|Okafor|Bello|Eze)')
-  and not exists (select 1 from ov_answers where reader = 'da' and answer::text ~* '(Quadri|Bello)')
+  and not exists (select 1 from ov_answers, jsonb_array_elements(answer -> 'items') item
+                   where reader = 'da' and item ->> 'routeId' = current_setting('hid.test.lroute_6'))
   and not exists (select 1 from ov_answers where reader = 'ca' and answer::text ~* '(Patience|Okafor)'));
+select pg_temp.assert('a sender''s own order is never among the references',
+  not exists (select 1 from ov_answers, jsonb_array_elements_text(answer -> 'others' -> 'references') reference
+               where reader = 'da' and reference in (current_setting('hid.test.ref_1'), current_setting('hid.test.ref_2'),
+                 current_setting('hid.test.ref_rx')))
+  and not exists (select 1 from ov_answers, jsonb_array_elements_text(answer -> 'others' -> 'references') reference
+               where reader = 'ca' and reference = current_setting('hid.test.ref_6')));
 select pg_temp.assert('4. not listed: the order that ended 31 days ago, the one support closed, the live one',
   not exists (select 1 from ov_answers where answer::text like '%' || current_setting('hid.test.ref_3') || '%'
                  or answer::text like '%' || current_setting('hid.test.ref_4') || '%'

@@ -1367,8 +1367,12 @@ decisions, all built as decided:
   session with Identity; the database binds subject, membership and facility,
   42501 otherwise); a member sees an order in full (reference, kind, receiving
   facility, patient's name, when it ended, what was withdrawn, the link to the
-  order) only if they sent it and may still read that patient's record; every
-  other such order of the facility counts, with its reference and no patient;
+  order) only if they sent it, as D10 says, whether or not they may still
+  open the patient's record (the report usually comes days after the order,
+  when the grant it was sent under has expired, and the sender must know
+  whose care to review; the record itself still opens only through the
+  governed lookup); every colleague's such order of the facility counts, with
+  its reference and no patient;
   a member without `ehr.order-route.send` is refused 403 by the guard (the
   database answers the empty card). Read-only, no acknowledgement. Audited in
   the read's transaction: one `ehr.order-route.wrong-patient-overview` row

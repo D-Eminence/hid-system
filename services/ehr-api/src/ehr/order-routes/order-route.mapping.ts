@@ -393,8 +393,7 @@ export function withOrderRoute<Row extends { id: string }>(row: Row,
 /**
  * One order on the ordering facility's Overview card (C28, item 3 D10): an
  * order this member sent that the receiving laboratory or pharmacy reported
- * it accepted for someone who was not the patient, while the member may still
- * read that patient's record (the database decides).
+ * it accepted for someone who was not the patient (the database decides).
  */
 export interface WrongPatientOverviewItem {
   routeId: string;
@@ -412,8 +411,8 @@ export interface WrongPatientOverviewItem {
 
 /**
  * The Overview card's answer (C28): the member's own such orders in full, and
- * of every other such order of the facility (a colleague's, or the member's
- * own whose patient they may no longer read) only the count and references.
+ * of every colleague's such order of the facility only the count and
+ * references.
  */
 export interface WrongPatientOverview {
   windowDays: number;

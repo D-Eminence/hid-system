@@ -83,8 +83,8 @@ export class OrderRoutesController {
    * The Overview card (C28, item 3 D10): orders sent from this facility that
    * the receiving laboratory or pharmacy reported it accepted for someone who
    * was not the patient, in the last 30 days. ehr.order-route.send at the
-   * X-Facility-ID facility, direct care only; the member's own orders in full
-   * (while they may read the patient), the rest as a count and references.
+   * X-Facility-ID facility, direct care only; the member's own orders in full,
+   * a colleague's as a count and references.
    */
   @Get('order-routes/wrong-patient')
   @RequirePermissions('ehr.order-route.send')

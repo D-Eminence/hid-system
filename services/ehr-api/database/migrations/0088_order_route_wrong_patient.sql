@@ -56,12 +56,14 @@
 --    - ehr.list_sent_wrong_patient_order_routes() (C28), the ordering
 --      facility's Overview card: the orders sent from the session's facility
 --      that ended 'wrong_patient' in the last 30 days; a member sees full
---      rows (with the patient's name) only for orders they sent and whose
---      patient's record they may still read, and of every other such order
---      only a count and its reference; a member without
---      ehr.order-route.send sees nothing. Bound to the live staff session,
---      facility and direct-care purpose as C3 and C4 are; the EHR service
---      audits each read.
+--      rows (with the patient's name) only for orders they sent, whether or
+--      not they may still open the patient's record (the report usually
+--      comes days after the order, when the grant it was sent under has
+--      expired), and of every colleague's such order only a count and its
+--      reference; a member without ehr.order-route.send sees nothing. Bound
+--      to the live staff session, facility and direct-care purpose as C3 and
+--      C4 are; the EHR service audits each read, and each full row with its
+--      patient.
 -- 5. Grants, here and in runtime-grants.sql: the Lab and Pharmacy commands
 --    and cards to their runtimes, C26 and C27 to the Identity runtime, C28 to
 --    the EHR runtime, all but support's also to the schema test runtime.
@@ -141,9 +143,9 @@ begin
   end if;
   -- c. The bodies the command, the reads and the replaced functions rely on
   -- (0086 section 6, 0077's two governance validators, 0086's chain
-  -- policies' context functions; and 0026's Lab outbox reference check, 0086's
-  -- staff and platform actors and 0005's ehr.context_allows, which the
-  -- command's step order and the new reads depend on).
+  -- policies' context functions; and 0026's Lab outbox reference check and
+  -- 0086's staff and platform actors, which the command's step order and the
+  -- new reads depend on).
   select string_agg(format('%s md5 %s', expected.proc, md5(proc.prosrc)), '; ') into mismatch
     from (values
       ('ehr.close_order_route(uuid,text,text,boolean)'::regprocedure, 'd0c8c11573bc3fd5cc764553d55b1820'),
@@ -169,8 +171,7 @@ begin
       ('pharmacy.context_allows(uuid,uuid,text)'::regprocedure, '958a6e5cd2a534d158c82fe399b8f381'),
       ('lab.validate_outbox_aggregate_reference()'::regprocedure, 'b86458c9a75df2fec44f6ddf7a8acbef'),
       ('ehr.order_route_staff_actor(boolean)'::regprocedure, 'b1873dca92164652cc1977a90acb6184'),
-      ('identity.order_route_platform_actor(text[])'::regprocedure, '599cccfdba5e9b4c46cde4dd2814a541'),
-      ('ehr.context_allows(uuid,uuid,text)'::regprocedure, '75016690184a80bd246c365b4d108082'))
+      ('identity.order_route_platform_actor(text[])'::regprocedure, '599cccfdba5e9b4c46cde4dd2814a541'))
          expected(proc, digest)
     join pg_proc proc on proc.oid = expected.proc
    where md5(proc.prosrc) <> expected.digest;
@@ -1204,11 +1205,15 @@ $$;
 --     (the same empty answer as a facility with no such order);
 --   - full rows (reference, kind, receiving facility, the patient's name,
 --     when it ended, what was withdrawn, and the order's link) only for
---     orders the member sent and whose patient's record they may still read
---     (ehr.context_allows, C3's check), at most 50;
---   - of every other such order (a colleague's, or the member's own without
---     read access now) only the count and the references, at most 100.
--- The EHR service audits each read (SPEC-FINAL item 3 contract, C28).
+--     orders the member sent (D10's rule as the owner gave it), at most 50.
+--     No consent check: the sender wrote the order, the report usually comes
+--     days later, after every grant (5 minutes to 24 hours) has expired, and
+--     the sender must know whose care to review; the record itself still
+--     opens only through the governed lookup;
+--   - of every other such order (a colleague's) only the count and the
+--     references, at most 100; a member's own order is never among them.
+-- The EHR service audits each read, and each full row with its patient
+-- (SPEC-FINAL item 3 contract, C28).
 create function ehr.list_sent_wrong_patient_order_routes()
 returns jsonb
 language plpgsql stable security definer
@@ -1229,8 +1234,7 @@ begin
       route.receiving_facility_id, route.source_encounter_id,
       coalesce(route.source_lab_request_id, route.source_prescription_id) as order_id,
       report.result_reports_marked, report.dispensing_reversed,
-      (route.sent_by_account_id = actor.actor_account_id
-        and ehr.context_allows(route.patient_id, actor.actor_facility_id, 'read_records')) as full_row
+      (route.sent_by_account_id = actor.actor_account_id) as full_row
       from ehr.order_route_wrong_patient_reports report
       join ehr.order_routes route on route.id = report.route_id
      where report.ordering_facility_id = actor.actor_facility_id

@@ -894,9 +894,11 @@ ended this way in the last 30 days: `{ windowDays: 30, items, others: { count,
 references } }`. A member sees an order in full (`routeId`, `reference`,
 `kind`, `receivingFacility { id, name }`, `patient { name }`, `endedAt`,
 `resultsWithdrawn`, `dispensingReversed`, `link { patientId, encounterId,
-kind, orderId }`) only if they sent it and may still read that patient's
-record; every other such order of the facility counts in `others` with its
-reference only. The read is audited in its transaction: one
+kind, orderId }`) only if they sent it, whether or not they may still open
+the patient's record (at most 50, newest first); every colleague's such order
+of the facility counts in `others` with its reference only (at most 100
+references; the count is complete). A member's own order is never in
+`others`. The read is audited in its transaction: one
 `ehr.order-route.wrong-patient-overview` row (no patient, details `{ itemCount,
 otherCount }`) and one `ehr.order-route.wrong-patient-overview.item` row per
 order shown in full, naming its patient. The order's route views (`GET

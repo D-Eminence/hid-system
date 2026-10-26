@@ -1594,6 +1594,35 @@ try {
     ...own.items.map(() => ['ehr.order-route.wrong-patient-overview.item', patient.id])]);
   assert.deepEqual(overviewRows[0].details, { itemCount: 3, otherCount: 0 });
   assertNone(overviewRows, [patient.fullName, ...wpReferences], 'the Overview audit rows');
+  // The report usually comes days after the order, once the grant it was sent under has expired: the sender still
+  // sees their orders in full (D10's rule as the owner gave it). Owner SQL expires the sender's grants for the patient
+  // (triggers off), then puts them back as they were.
+  const grants = await all(`select id, starts_at, expires_at from identity.consent_grants
+    where account_id = $1 and patient_id = $2 and status = 'active' and expires_at > now()`, [doctor.accountId, patient.id]);
+  assert(grants.length > 0, 'the sender holds a live grant for the patient before it is expired');
+  const grantsOwner = async (sql, values) => {
+    const client = await owner.connect();
+    try {
+      await client.query('begin');
+      await client.query('set local session_replication_role = replica');
+      await client.query(sql, values);
+      await client.query('commit');
+    } catch (error) { await client.query('rollback'); throw error; } finally { client.release(); }
+  };
+  await grantsOwner(`update identity.consent_grants set starts_at = now() - interval '3 days',
+    expires_at = now() - interval '2 days' where id = any($1::uuid[])`, [grants.map(grant => grant.id)]);
+  let expiredOverview;
+  try {
+    expiredOverview = expectStatus(await overview(doctor), 200, 'Overview (sender, grant expired)');
+  } finally {
+    await grantsOwner(`update identity.consent_grants grant_row set starts_at = kept.starts_at, expires_at = kept.expires_at
+      from unnest($1::uuid[], $2::timestamptz[], $3::timestamptz[]) kept(id, starts_at, expires_at) where grant_row.id = kept.id`,
+    [grants.map(grant => grant.id), grants.map(grant => grant.starts_at), grants.map(grant => grant.expires_at)]);
+  }
+  assert.deepEqual(expiredOverview.items.map(item => [item.routeId, item.patient.name]).sort(),
+    own.items.map(item => [item.routeId, item.patient.name]).sort());
+  assert(expiredOverview.items.every(item => item.patient.name === patient.fullName));
+  assert.deepEqual(expiredOverview.others, { count: 0, references: [] });
   const colleague = expectStatus(await overview(secondDoctor), 200, 'Overview (colleague)');
   assert.deepEqual([colleague.items, colleague.others.count, [...colleague.others.references].sort()], [[], 3, [...wpReferences].sort()]);
   assertNone(colleague, [patient.fullName, patient.id, lrW1.id, encounter.id], 'the colleague\'s Overview');
@@ -1606,7 +1635,8 @@ try {
   const emergencyOverview = expectProblem(await call(ehr, doctor, 'GET', '/ehr/order-routes/wrong-patient', undefined,
     { purpose: 'emergency' }), 403, 'PERMISSION_DENIED').code;
   wp.overview = { sender: { items: 3, others: 0, patientName: true, link: 'patient, encounter, kind, order',
-    audit: 'one read row (no patient) and one row per item naming the patient' },
+    audit: 'one read row (no patient) and one row per item naming the patient',
+    afterGrantExpired: 'the same three in full, with the patient\'s name' },
   colleague: { items: 0, count: 3, references: 'the three, no patient' }, otherFacility: 'empty',
   withoutSendPermission: noSend, emergency: emergencyOverview };
 

@@ -251,8 +251,8 @@ export class OrderRoutesService {
    * guard re-checks the live staff session at this facility with Identity and
    * the permission; the database binds the session's subject, membership and
    * facility under direct care (42501 otherwise). The privacy rule is the
-   * database's: full rows only for the member's own orders whose patient they
-   * may still read; every other such order as a count and its reference; a
+   * database's (D10 as the owner gave it): full rows only for the orders the
+   * member sent; a colleague's such order as a count and its reference; a
    * member without ehr.order-route.send nothing. Audited in the same
    * transaction: one row for the read (no patient), and one per order shown in
    * full, naming its patient, as the order's own route views are.
