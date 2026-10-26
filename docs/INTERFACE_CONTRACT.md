@@ -845,7 +845,7 @@ member, key and request answer the stored report with `replayed: true`.
 | 404 | `ORDER_ROUTE_NOT_FOUND` | not addressed to this facility, or another kind |
 | 409 | `ORDER_ROUTE_NOT_ACCEPTED` | not accepted (decline it instead) |
 | 409 | `ORDER_ROUTE_ALREADY_ENDED` | ended by anyone, or past the window; checked before the version |
-| 409 | `IDEMPOTENCY_KEY_REUSED` | the key with another request |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | the key with another request, also when that request is on another route at the same moment |
 | 409 | `ORDER_ROUTE_CHANGED_CONCURRENTLY` | a concurrent route write or a deadlock (this command only) |
 | 412 | `VERSION_CONFLICT` | something was returned or changed since the version was read |
 | 423 | `CROSS_FACILITY_ORDERS_UNAVAILABLE` | `cross_facility_route_access_enabled` off |

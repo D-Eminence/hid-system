@@ -629,7 +629,9 @@ revoke all on function ehr.guard_order_route_wrong_patient_report() from public;
 --      pharmacy.outbox_events comes before it: their row-level security and
 --      the Lab outbox's reference check need the window this step closes;
 --  15. the report row (T8), copying how the route was accepted (its T3
---      match);
+--      match); the key's unique index answers IDEMPOTENCY_KEY_REUSED for a
+--      report with the same key on another route that committed after both
+--      lookups (the routes are locked one by one), as the lookups would;
 --  16. a system row at A and at B, with the patient (ids and codes; never
 --      the note);
 --  17. the patient's inbox notice ORDER_ROUTE_WRONG_PATIENT;
@@ -681,6 +683,7 @@ declare
   candidate record;
   reversal uuid;
   inserted_report uuid;
+  violated_constraint text;
 begin
   -- 1. The actor.
   select * into actor from ehr.order_route_receiver(requested_kind);
@@ -921,27 +924,38 @@ begin
                                                                else 'access_ended' end) then
     raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_ALREADY_ENDED';
   end if;
-  -- 15. The report row.
+  -- 15. The report row. The key's unique index is the last word on a reused
+  -- key: a report with the same key on another route that committed after
+  -- both lookups (the routes are locked one by one) meets it here, and is
+  -- answered IDEMPOTENCY_KEY_REUSED as the lookups answer it, not 23505.
   select attempt.identifier_kind, attempt.identifies_route into accepted_attempt
     from ehr.order_route_accept_attempts attempt
    where attempt.route_id = current_route.id and attempt.outcome = 'match'
    order by attempt.attempted_at desc, attempt.id desc
    limit 1;
-  insert into ehr.order_route_wrong_patient_reports as report (id, route_id, kind, receiving_facility_id,
-    receiving_organization_id, ordering_facility_id, state_before, reason_code, note, reported_by_account_id,
-    reported_by_membership_id, accepted_by_account_id, accepted_by_membership_id, accepted_at, accepted_with,
-    recorded_by_membership_ids, reporter_recorded_work, specimens_collected, results_voided, result_reports_marked,
-    dispensing_reversed, idempotency_key, request_sha256, correlation_id)
-  values (gen_random_uuid(), current_route.id, current_route.kind, current_route.receiving_facility_id,
-    current_route.receiving_organization_id, current_route.ordering_facility_id, current_route.state,
-    requested_reason, note_text, actor.actor_account_id, actor.actor_membership_id,
-    current_route.accepted_by_account_id, current_route.accepted_by_membership_id, current_route.accepted_at,
-    case when accepted_attempt.identifier_kind = 'health_id' then 'health_id'
-         when accepted_attempt.identifies_route then 'date_of_birth_with_reference'
-         else 'date_of_birth' end,
-    recorded, actor.actor_membership_id = any(recorded), specimen_count, voided, reports_after - reports_before,
-    reversed, requested_idempotency_key, requested_request_sha256, platform.current_correlation_id())
-  returning report.id into inserted_report;
+  begin
+    insert into ehr.order_route_wrong_patient_reports as report (id, route_id, kind, receiving_facility_id,
+      receiving_organization_id, ordering_facility_id, state_before, reason_code, note, reported_by_account_id,
+      reported_by_membership_id, accepted_by_account_id, accepted_by_membership_id, accepted_at, accepted_with,
+      recorded_by_membership_ids, reporter_recorded_work, specimens_collected, results_voided, result_reports_marked,
+      dispensing_reversed, idempotency_key, request_sha256, correlation_id)
+    values (gen_random_uuid(), current_route.id, current_route.kind, current_route.receiving_facility_id,
+      current_route.receiving_organization_id, current_route.ordering_facility_id, current_route.state,
+      requested_reason, note_text, actor.actor_account_id, actor.actor_membership_id,
+      current_route.accepted_by_account_id, current_route.accepted_by_membership_id, current_route.accepted_at,
+      case when accepted_attempt.identifier_kind = 'health_id' then 'health_id'
+           when accepted_attempt.identifies_route then 'date_of_birth_with_reference'
+           else 'date_of_birth' end,
+      recorded, actor.actor_membership_id = any(recorded), specimen_count, voided, reports_after - reports_before,
+      reversed, requested_idempotency_key, requested_request_sha256, platform.current_correlation_id())
+    returning report.id into inserted_report;
+  exception when unique_violation then
+    get stacked diagnostics violated_constraint = constraint_name;
+    if violated_constraint = 'order_route_wrong_patient_reports_idempotency_uq' then
+      raise exception using errcode = 'P0001', message = 'IDEMPOTENCY_KEY_REUSED';
+    end if;
+    raise;
+  end;
   -- 16. The system rows at A and at B, with the patient.
   perform ehr.order_route_system_audit(closed.closed, 'ordering', 'ehr.order-route.wrong-patient', true,
     jsonb_build_object('reason', requested_reason, 'stateBefore', current_route.state, 'resultsVoided', voided,

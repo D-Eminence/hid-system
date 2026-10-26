@@ -37,8 +37,10 @@
 --      the emergency purpose, a member who may not withdraw what must be
 --      withdrawn (and that member where nothing must be), the control off,
 --      invalid input;
---  12. idempotency: a replay, a key reused with another digest, another key
---      after the end (with the answered and the old version);
+--  12. idempotency: a replay, a key reused with another digest or on
+--      another route (also by a report that committed after both lookups:
+--      IDEMPOTENCY_KEY_REUSED, not 23505), another key after the end (with
+--      the answered and the old version);
 --  13. after the report: a release under P's consent at B is refused (the
 --      replaced release trigger), support's close finds it closed, the order
 --      change mirror still runs, C5 keeps the content and offers no Stop, the
@@ -1587,6 +1589,51 @@ select pg_temp.assert('the replay answers the report with the route as it is, an
 select pg_temp.assert('route 13''s report: accepted with a date of birth and the reference',
   (select report.accepted_with from ehr.order_route_wrong_patient_reports report
     where report.route_id = current_setting('hid.test.lroute_13')::uuid) = 'date_of_birth_with_reference');
+-- The same key on another route, by a report that committed after both of
+-- this report's lookups (the two routes are locked one by one, so neither
+-- waits for the other there). One session plays both: a trigger on the
+-- route's events plants that report's row the moment this report ends route
+-- 12, after its lookups and before its own row. The key's unique index then
+-- answers it as the lookups would, IDEMPOTENCY_KEY_REUSED (409), not 23505
+-- (which the services answer 503), and nothing is written.
+create function pg_temp.plant_same_key_report() returns trigger language plpgsql security definer as $f$
+begin
+  if not exists (select 1 from ehr.order_route_wrong_patient_reports report
+                  where report.idempotency_key = 'p4c-wp-report-0012-race') then
+    insert into ehr.order_route_wrong_patient_reports (id, route_id, kind, receiving_facility_id,
+      receiving_organization_id, ordering_facility_id, state_before, reason_code, note, reported_by_account_id,
+      reported_by_membership_id, accepted_by_account_id, accepted_by_membership_id, accepted_at, accepted_with,
+      recorded_by_membership_ids, reporter_recorded_work, specimens_collected, results_voided, result_reports_marked,
+      dispensing_reversed, idempotency_key, request_sha256, correlation_id)
+    select gen_random_uuid(), current_setting('hid.test.lroute_20')::uuid, report.kind, report.receiving_facility_id,
+      report.receiving_organization_id, report.ordering_facility_id, report.state_before, report.reason_code,
+      report.note, report.reported_by_account_id, report.reported_by_membership_id, report.accepted_by_account_id,
+      report.accepted_by_membership_id, report.accepted_at, report.accepted_with, report.recorded_by_membership_ids,
+      report.reporter_recorded_work, report.specimens_collected, report.results_voided, report.result_reports_marked,
+      report.dispensing_reversed, 'p4c-wp-report-0012-race', report.request_sha256, report.correlation_id
+      from ehr.order_route_wrong_patient_reports report
+     where report.route_id = current_setting('hid.test.lroute_13')::uuid;
+  end if;
+  return null;
+end
+$f$;
+create trigger p4c_plant_same_key_report after insert on ehr.order_route_events for each row
+  when (new.route_id::text = current_setting('hid.test.lroute_12', true))
+  execute function pg_temp.plant_same_key_report();
+set local role hid_lab_api_runtime;
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select pg_temp.check('the same key on another route, committed after both lookups', format($s$select * from
+  pg_temp.wrong_patient('lab_request', %L, 2, 'wrong_order_chosen', 'Picked the wrong row at the counter',
+  'p4c-wp-report-0012-race')$s$, current_setting('hid.test.lroute_12')), 'P0001 IDEMPOTENCY_KEY_REUSED');
+reset role;
+drop trigger p4c_plant_same_key_report on ehr.order_route_events;
+select pg_temp.assert('the same key at the same moment wrote nothing, and route 12 is still accepted',
+  pg_temp.footprint() = current_setting('hid.test.footprint_13')
+  and (pg_temp.route(current_setting('hid.test.lroute_12')::uuid)).state = 'accepted'
+  and (pg_temp.route(current_setting('hid.test.lroute_12')::uuid)).ended_kind is null
+  and not exists (select 1 from ehr.order_route_wrong_patient_reports report
+                   where report.idempotency_key = 'p4c-wp-report-0012-race'),
+  pg_temp.footprint() || ' vs ' || current_setting('hid.test.footprint_13'));
 
 -- 13. After the reports.
 -- A release under P's consent at L1, of route 5's new correction v3
