@@ -37,7 +37,20 @@ patient mapping on use.
 
 `GET /api/v1/identity/me` returns the authenticated patient's profile and HID.
 `GET /api/v1/identity/me/access-history` returns at most 50 safe grant summaries;
-grant status does not assert notification delivery. `GET /api/v1/ehr/me/records`
+grant status does not assert notification delivery. Access-history items
+include `breakGlass` and `patientRevocable`, both booleans and never both true;
+the limit of 50 keeps the grants the patient can revoke before any others, and
+the items are listed newest first.
+`POST /api/v1/identity/me/consent-grants/:grantId/revoke` (`{ "reason" }`, 3 to
+500 characters) revokes a grant the patient gave (patient-approved or
+PIN-derived) and answers `200 { consentGrantId, status: "revoked", revokedAt,
+replayed }`; a repeat, or a grant already revoked otherwise, answers
+`replayed: true`. Break-glass and workforce grants, and an expired grant,
+answer `409 CONSENT_COMMAND_CONFLICT`; another patient's or an unknown grant
+`404 CONSENT_RESOURCE_NOT_FOUND`; a session that is no longer live `403
+CONSENT_COMMAND_DENIED`; a short reason `400`; a staff session `403
+PATIENT_SESSION_REQUIRED`. Revoking needs no recent sign-in and is never held
+after an account recovery. `GET /api/v1/ehr/me/records`
 returns at most 50 completed encounters and 50 current signed/amended note
 revisions, after fresh Identity authorization through the EHR workload caller.
 These routes accept no browser-selected patient identity. Patient record access
