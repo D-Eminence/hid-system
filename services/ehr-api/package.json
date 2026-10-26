@@ -18,6 +18,7 @@
     "db:test-staging-upgrade": "node scripts/test-staging-schema-upgrade.mjs",
     "db:dry-run": "node scripts/apply-migrations.mjs --dry-run",
     "db:migrate": "node scripts/apply-migrations.mjs",
+    "db:test-runner": "node --test scripts/migration-notices.test.mjs",
     "db:bootstrap": "node scripts/bootstrap-database-roles.mjs",
     "db:bootstrap:local": "node scripts/bootstrap-database-roles.mjs --local-development-admin",
     "db:verify-roles": "node scripts/bootstrap-database-roles.mjs --verify-only",
