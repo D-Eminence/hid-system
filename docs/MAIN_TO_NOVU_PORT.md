@@ -1907,9 +1907,9 @@ Still open, with what each one holds back:
   10,000 memberships); not in 0089, because it would lock the table.
 - The late correction (D17, 0090): unsigned (D17-12; `reviewed_by` empty).
   The owner signs after the gates of SPEC-FINAL §11.2: the container database
-  acceptance, the staging schema upgrade, the suites, the race harness and
-  the performance gates, the copies, the old images' verifiers and the
-  migration checks; then one owner step before signing:
+  acceptance, the staging schema upgrade, the suites, the race harness, the
+  copies, the old images' verifiers and the migration checks; then two
+  owner steps before signing:
   - Production's owners, read with the read-only query in 0090's header
     ("Owners, before signing") and recorded. The release dry-runs 0090 only
     once the declaration is signed, so its output cannot be read first.
@@ -1918,6 +1918,21 @@ Still open, with what each one holds back:
     the owners recorded. Whatever the query shows, section 0 stops the
     release with nothing applied if a role it names lacks a privilege it
     needs.
+  - The measured costs, accepted as they are (SPEC-FINAL §7's budgets in
+    brackets). Measured on an owner copy with 20,000 lapsed lab routes,
+    40,000 denied results and 100,000 bulk routes, 0089's bodies against
+    0090's, interleaved, on the local PostgreSQL 16 cluster:
+    - the order summary: +4.9 to +10.3 µs per route while the receiving
+      facility is a destination, +11.9 µs once it is not (+5 µs);
+    - C4, the summaries of one list of 200 orders: +2.9 to +3.5 ms, from
+      about 15 ms (+2 ms);
+    - H6 through the policy path, with a transaction id: +10.2 to +11.8 µs
+      per denied row as T9's state varies (median of 18 rounds +10.5 µs, 4
+      rounds above +12), and +12.9 µs with T9 never analyzed, as 0090
+      creates it (the review's measurement); the whole denied-row query
+      +0.3 % to +2.4 % (+12 µs, 2 %);
+    - the patient's list (C5): +1.1 to +1.8 µs per row; support's find
+      (C21): +7 to +9 µs per row.
   Release order (D17-11): item 4 is live (the declaration
   names only 0090 and `runtime-grants.sql`); the website first (dormant until
   this backend says it serves D17), then this backend: `database-migration`
