@@ -1503,10 +1503,14 @@ Still open, with what each one holds back:
   re-pin of those four (below, Frontend pin). The owner signs the 0087
   declaration after the read-only preflights (the md5 and owners of the six
   bodies 0087 pins, no `revoke_my_consent_grant` yet, the CHECKs and the one
-  user trigger on `identity.consent_grants`, the migration login's
-  membership in the owner of the two replaced functions, and two counts:
-  active legacy grants naming the patient as grantor, and active patients
-  with a deleted login), and after the website copy release.
+  user trigger on `identity.consent_grants`; that the migration login has
+  the privileges of, that is inherits, the owners of the two replaced
+  functions, of `identity.patient_self_session` and of the three tables the
+  new SECURITY DEFINER revoke reads and writes, `pg_has_role(..., 'USAGE')`,
+  since a membership granted WITH INHERIT FALSE passes a MEMBER test yet
+  cannot replace the functions; and two counts: active legacy grants naming
+  the patient as grantor, and active patients with a deleted login), and
+  after the website copy release.
 - Facility self sign-up (ported above, switched off): the owner signs the 0086
   declaration, after the read-only preflights (no closed organization
   application without a review reason, reviewer or review time, which 0086
