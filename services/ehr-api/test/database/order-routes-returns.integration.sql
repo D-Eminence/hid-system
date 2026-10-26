@@ -18,7 +18,11 @@
 --   6. the release trigger 0088 replaced: a release under the patient's
 --      consent at B still crosses on a completed route support closed, and is
 --      refused (23514 ORDER_ROUTE_CLOSED) on one its laboratory ended as
---      fulfilled for the wrong person.
+--      fulfilled for the wrong person;
+--   7. the release trigger 0090 replaced: after the laboratory reports the
+--      support-closed route late (D17), what A holds is withdrawn and a later
+--      release under the patient's consent is refused too, though the route
+--      keeps support's ending.
 -- Shared fixture of the P4c suites (each suite carries its own copy, so it
 -- runs alone). Synthetic values only; uuid prefix e4c.
 --   Platform: SA (platform_super_admin), SU (support_admin), FR
@@ -830,6 +834,57 @@ select pg_temp.assert('the support-closed route still files it; the wrong-patien
   and not exists (select 1 from lab.result_releases release_row
                    where release_row.result_id = current_setting('hid.test.result_4')::uuid
                      and release_row.result_version = 2));
+
+-- 7. The replaced release trigger (0090). LB1 reports route 3 (support
+-- closed, v1 and v2 back at A) late: both are withdrawn at A, the ending
+-- (support) stays. A version 3 (owner SQL, verified) released under P's
+-- consent by LB2 is then refused.
+select set_config('hid.test.version_3', (select route.row_version::text from ehr.order_routes route
+  where route.id = current_setting('hid.test.route_3')::uuid), true);
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select pg_temp.check('LB1 reports route 3 late', format($s$select * from lab.correct_wrong_patient_order_route(%L, %s,
+  'someone_elses_details', 'patient', (clock_timestamp() at time zone 'Africa/Lagos')::date,
+  'The patient says it was not them', 'p4c-returns-late-0003', repeat('a', 64))$s$, current_setting('hid.test.route_3'),
+  current_setting('hid.test.version_3')), 'ok');
+reset role;
+do $$
+declare
+  head lab.results%rowtype;
+  verification_id uuid := gen_random_uuid();
+begin
+  select * into head from lab.results where id = current_setting('hid.test.result_3')::uuid;
+  set local session_replication_role = replica;
+  insert into lab.result_revisions (result_id, execution_id, patient_id, facility_id, version, result_type,
+    numeric_value, unit, reference_range, abnormal_flag, entered_by, entered_by_membership_id, correction_reason,
+    idempotency_key, request_sha256, correlation_id, revision_kind, supersedes_version)
+  values (head.id, head.execution_id, head.patient_id, head.facility_id, 3, 'numeric', 12.1, 'g/dL', '12.0-15.5',
+    'normal', 'e4c10000-0000-4000-8000-000000000031', 'e4c13000-0000-4000-8000-000000000031', 'Repeated the run',
+    'p4c-returns-rev-chain3-003', repeat('a', 64), 'p4c-chain', 'correction', 2);
+  update lab.results set current_version = 3 where id = head.id;
+  insert into lab.result_verifications (id, result_id, execution_id, patient_id, facility_id, result_version,
+    verified_by, verified_by_membership_id, verified_at, reason, idempotency_key, request_sha256, correlation_id)
+  values (verification_id, head.id, head.execution_id, head.patient_id, head.facility_id, 3,
+    current_setting('hid.test.account_1')::uuid, current_setting('hid.test.membership_1')::uuid, clock_timestamp(),
+    'Verified the repeat', 'p4c-returns-ver-chain3-003', repeat('a', 64), 'p4c-chain');
+  set local session_replication_role = origin;
+  perform set_config('hid.test.chain3_verification_3', verification_id::text, true);
+end $$;
+set local role hid_lab_api_runtime;
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select pg_temp.check('a consent release on the route reported late', format($s$select pg_temp.release(%L, 3, %L,
+  'p4c-returns-release-33')$s$, current_setting('hid.test.result_3'), current_setting('hid.test.chain3_verification_3')),
+  '23514 ORDER_ROUTE_CLOSED');
+reset role;
+select pg_temp.assert('the late-reported route: both releases withdrawn at A, nothing more filed, support''s ending kept',
+  (select array_agg(report.kind || ':' || report.result_version order by report.kind, report.result_version)
+     from lab.order_route_result_reports report where report.route_id = current_setting('hid.test.route_3')::uuid)
+    = array['entered_in_error:1', 'entered_in_error:2', 'released:1', 'released:2']
+  and (select route.ended_kind = 'support' and route.state = 'completed' from ehr.order_routes route
+        where route.id = current_setting('hid.test.route_3')::uuid)
+  and not exists (select 1 from lab.result_releases release_row
+                   where release_row.result_id = current_setting('hid.test.result_3')::uuid
+                     and release_row.result_version = 3));
 
 select pg_temp.report();
 rollback;

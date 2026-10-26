@@ -14,7 +14,12 @@
 --      full content, ended_kind wrong_patient and no Stop; the inbox notice
 --      ORDER_ROUTE_WRONG_PATIENT with the four metadata keys; when the order
 --      is then marked entered in error, C5 redacts it as for any such
---      order and keeps ended_kind wrong_patient.
+--      order and keeps ended_kind wrong_patient;
+--   6. the late correction (0090, D17): C5's three trailing columns, when the
+--      laboratory reported and whether late, and the deadline while it may
+--      still act; on a completed order marked entered in error (redacted),
+--      on item 3's in-window reports, on an open and a sent route; the
+--      notice ORDER_ROUTE_WRONG_PATIENT_CORRECTED.
 -- Shared fixture of the P4c suites (each suite carries its own copy, so it
 -- runs alone). Synthetic values only; uuid prefix e4c.
 --   Platform: SA (platform_super_admin), SU (support_admin), FR
@@ -801,6 +806,56 @@ select pg_temp.assert('an order then marked entered in error: redacted, ended_ki
     and listed.actions = array[]::text[]
   from ehr.patient_list_order_routes() listed where listed.route_id = current_setting('hid.test.route_8')::uuid));
 reset role;
+
+-- 6. The late correction (0090). LB1 reports route 2 (completed, ended
+-- entered_in_error when its order was marked so in section 4) late; lab route
+-- 9 is accepted and open.
+set local role hid_ehr_api_runtime;
+select set_config('hid.test.lr_9', pg_temp.lab_request(1, 'active')::text, true);
+select set_config('hid.test.route_9', pg_temp.send(11, 'lab_request', current_setting('hid.test.lr_9')::uuid,
+  current_setting('hid.test.facility_1')::uuid, 'p4c-patient-send-late-0009')::text, true);
+reset role;
+select set_config('hid.test.version_2', (select route.row_version::text from ehr.order_routes route
+  where route.id = current_setting('hid.test.route_2')::uuid), true);
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select accepted.result from lab.accept_order_route(current_setting('hid.test.route_9')::uuid, 1, 'health_id',
+  'HID-P4CPATP', 'p4c-patient-accept-late-9', repeat('a', 64)) accepted;
+select pg_temp.check('LB1 reports route 2 late', format($s$select * from lab.correct_wrong_patient_order_route(%L, %s,
+  'someone_elses_details', 'patient', (clock_timestamp() at time zone 'Africa/Lagos')::date,
+  'The patient says it was not them', 'p4c-patient-late-0002', repeat('a', 64))$s$, current_setting('hid.test.route_2'),
+  current_setting('hid.test.version_2')), 'ok');
+reset role;
+select set_config('hid.test.deadline_9', (select (route.accepted_at + interval '4320 hours')::text from ehr.order_routes route
+  where route.id = current_setting('hid.test.route_9')::uuid), true),
+  set_config('hid.test.reported_2', (select report.reported_at::text from ehr.order_route_wrong_patient_reports report
+  where report.route_id = current_setting('hid.test.route_2')::uuid), true);
+set local role hid_ehr_api_runtime;
+select pg_temp.as_patient(1);
+select pg_temp.assert('C5 answers 25 columns', (select count(*) from json_object_keys((select row_to_json(listed)
+  from ehr.patient_list_order_routes() listed limit 1))) = 25);
+select pg_temp.assert('C5: the order marked entered in error and reported late: redacted, the report''s time and late, '
+    || 'no deadline', (select listed.entered_in_error and listed.content = jsonb_build_object('reference', listed.reference)
+    and listed.wrong_patient_late and listed.wrong_patient_reported_at = current_setting('hid.test.reported_2')::timestamptz
+    and listed.correctable_until is null and listed.ended_kind = 'entered_in_error'
+  from ehr.patient_list_order_routes() listed where listed.route_id = current_setting('hid.test.route_2')::uuid));
+select pg_temp.assert('C5: item 3''s in-window reports are not late and have no deadline',
+  (select bool_and(not listed.wrong_patient_late and listed.wrong_patient_reported_at is not null
+     and listed.correctable_until is null)
+   from ehr.patient_list_order_routes() listed
+  where listed.route_id in (current_setting('hid.test.route_7')::uuid, current_setting('hid.test.route_8')::uuid)));
+select pg_temp.assert('C5: an open route has the deadline and no report; a sent one neither',
+  (select listed.correctable_until = current_setting('hid.test.deadline_9')::timestamptz
+     and listed.wrong_patient_reported_at is null and listed.wrong_patient_late is null
+   from ehr.patient_list_order_routes() listed where listed.route_id = current_setting('hid.test.route_9')::uuid)
+  and (select listed.correctable_until is null and listed.wrong_patient_late is null
+       from ehr.patient_list_order_routes() listed where listed.route_id = current_setting('hid.test.route_1')::uuid));
+reset role;
+select pg_temp.assert('the notice ORDER_ROUTE_WRONG_PATIENT_CORRECTED with the four metadata keys (the order had ended)',
+  (select count(*) = 1 and bool_and(item.metadata ?& array['routeId', 'kind', 'orderingFacilityName',
+      'receivingFacilityName'] and (select count(*) from jsonb_object_keys(item.metadata)) = 4)
+   from notification.inbox_items item where item.notification_code = 'ORDER_ROUTE_WRONG_PATIENT_CORRECTED'
+     and item.resource_id = current_setting('hid.test.route_2')::uuid));
 
 select pg_temp.report();
 rollback;

@@ -389,8 +389,9 @@ create function pg_temp.release_insert(member text) returns text language sql as
       'lab-guard-suite-release',repeat('b',64),'lab-guard-suite')$i$, actor.account, actor.membership)
   from pg_temp.lab_member(member) actor
 $$;
--- Only the wrong-patient report (0088's ehr.report_wrong_patient_order_route, as the table's owner) writes
--- lab.result_invalidations; this insert follows its columns (0021) for result R1 version 1.
+-- Only the wrong-patient reports, in and after the window (0088's ehr.report_wrong_patient_order_route and 0090's
+-- ehr.correct_wrong_patient_order_route, as the table's owner), write lab.result_invalidations; this insert follows
+-- their columns (0021) for result R1 version 1.
 create function pg_temp.invalidation_insert(member text) returns text language sql as $$
   select format($i$insert into lab.result_invalidations(result_id,execution_id,patient_id,facility_id,
     result_version,disposition,actor_id,actor_membership_id,reason,idempotency_key,request_sha256,correlation_id)

@@ -16,7 +16,17 @@
 --      it withdraws the release); the report then a release (refused,
 --      23514); a dispensing then the report (412, then reversed); the report
 --      then a dispensing (refused, 23514). The two-session interleavings run
---      in the build's race harness.
+--      in the build's race harness;
+--   7. the late correction (0090, D17) against a release, a reversal and the
+--      order-change mirror, in both serial orders: a release under P's
+--      consent on a route support closed, then the correction (412 with the
+--      version read before, then it withdraws that release too); the
+--      correction, then such a release (refused, 23514); A's order change on
+--      a lapsed accepted route, then the correction (412, then corrected as
+--      ended before); the correction, then the order change (the route
+--      stays ended wrong_patient); a reversal under P's consent, then the
+--      correction (412, then reported without a second reversal); the
+--      correction, then such a reversal (refused).
 -- Shared fixture of the P4c suites (each suite carries its own copy, so it
 -- runs alone). Synthetic values only; uuid prefix e4c.
 --   Platform: SA (platform_super_admin), SU (support_admin), FR
@@ -825,6 +835,211 @@ select pg_temp.assert('the dispensing reversed; nothing dispensed after the repo
     where report.route_id = current_setting('hid.test.rxroute_1')::uuid) = array['dispensed', 'reversed']
   and not exists (select 1 from pharmacy.dispensings dispensing
                    where dispensing.work_item_id = current_setting('hid.test.rxitem_2')::uuid));
+
+-- 7. The late correction (0090) against a release, a reversal and the
+-- order-change mirror. Lab routes 8-11 and prescription routes 3-4, accepted
+-- by LB1 and PB1; a verified, released result on routes 8 and 9, a
+-- dispensing by PB2 on prescription routes 3 and 4; support (FR) closes 8,
+-- 9 and the two prescription routes; 10 and 11 lapse with nothing recorded.
+-- LB2 at L1 and PB2 at PH1 hold P's direct-care consent.
+insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id, scope, status,
+  reason, starts_at, expires_at, break_glass, purpose_of_use)
+select gen_random_uuid(), 'e4c30000-0000-4000-8000-000000000001', ('e4c12000-0000-4000-8000-0000000000' || m.n)::uuid,
+  ('e4c10000-0000-4000-8000-0000000000' || m.n)::uuid, ('e4c13000-0000-4000-8000-0000000000' || m.n)::uuid,
+  current_setting('hid.test.facility_' || m.site)::uuid, 'write_records', 'active', 'P4c suite consent at the receiver',
+  clock_timestamp() - interval '1 hour', clock_timestamp() + interval '30 days', false, 'direct-care'
+  from (values (31, 1), (33, 2)) m(n, site);
+create function pg_temp.late(kind text, route uuid, version bigint, key text)
+returns table (result text, route_state text, ended_kind text, ended_kind_before text, results_voided integer,
+  result_reports_marked integer, dispensing_reversed boolean, state_before text)
+language plpgsql as $f$
+begin
+  if kind = 'lab_request' then
+    return query select corrected.result, corrected.route_state, corrected.ended_kind, corrected.ended_kind_before,
+      corrected.results_voided, corrected.result_reports_marked, corrected.dispensing_reversed, corrected.state_before
+      from lab.correct_wrong_patient_order_route(route, version, 'someone_elses_details', 'patient',
+        (clock_timestamp() at time zone 'Africa/Lagos')::date, 'The patient says it was not them', key,
+        repeat('a', 64)) corrected;
+  else
+    return query select corrected.result, corrected.route_state, corrected.ended_kind, corrected.ended_kind_before,
+      corrected.results_voided, corrected.result_reports_marked, corrected.dispensing_reversed, corrected.state_before
+      from pharmacy.correct_wrong_patient_order_route(route, version, 'someone_elses_details', 'patient',
+        (clock_timestamp() at time zone 'Africa/Lagos')::date, 'The patient says it was not them', key,
+        repeat('a', 64)) corrected;
+  end if;
+end
+$f$;
+-- The route's version, read as the owner (the runtimes may not read routes).
+create function pg_temp.version_of(route uuid) returns bigint language sql stable security definer
+set search_path = pg_catalog, pg_temp as $f$
+  select candidate.row_version from ehr.order_routes candidate where candidate.id = route
+$f$;
+grant execute on function pg_temp.late(text,uuid,bigint,text), pg_temp.version_of(uuid) to hid_lab_api_runtime,
+  hid_pharmacy_api_runtime;
+set local role hid_ehr_api_runtime;
+select set_config('hid.test.lr_' || n, pg_temp.lab_request(1, 'active')::text, true) from generate_series(8, 11) n;
+select set_config('hid.test.rx_' || n, pg_temp.prescription(1, 'active')::text, true) from generate_series(3, 4) n;
+select set_config('hid.test.route_' || n, pg_temp.send(11, 'lab_request', current_setting('hid.test.lr_' || n)::uuid,
+  current_setting('hid.test.facility_1')::uuid, 'p4c-race-send-' || lpad(n::text, 6, '0'))::text, true)
+  from generate_series(8, 11) n;
+select set_config('hid.test.rxroute_' || n, pg_temp.send(11, 'prescription', current_setting('hid.test.rx_' || n)::uuid,
+  current_setting('hid.test.facility_2')::uuid, 'p4c-race-send-rx' || lpad(n::text, 4, '0'))::text, true)
+  from generate_series(3, 4) n;
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select set_config('hid.test.item_' || n, (select accepted.work_item_id::text
+  from pg_temp.accept_lab(current_setting('hid.test.route_' || n)::uuid, 1, 'p4c-race-accept-0000' || lpad(n::text, 2, '0'))
+    accepted), true)
+  from generate_series(8, 11) n;
+reset role;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_signup_admin(2);
+select set_config('hid.test.rxitem_' || n, (select accepted.work_item_id::text from pharmacy.accept_order_route(
+  current_setting('hid.test.rxroute_' || n)::uuid, 1, 'health_id', 'HID-P4CPATP', 'Patient collected the prescription',
+  'p4c-race-rx-accept-0' || n, repeat('a', 64)) accepted), true) from generate_series(3, 4) n;
+select pg_temp.as_staff(33, current_setting('hid.test.facility_2')::uuid);
+select set_config('hid.test.dispensing_' || n, pg_temp.dispense(current_setting('hid.test.rxitem_' || n)::uuid,
+  'p4c-race-dispense-000' || n)::text, true) from generate_series(3, 4) n;
+reset role;
+select set_config('hid.test.result_' || n, pg_temp.lab_chain(current_setting('hid.test.item_' || n)::uuid, 'race' || n,
+  10.4)::text, true) from generate_series(8, 9) n;
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select pg_temp.release(current_setting('hid.test.result_' || n)::uuid, 1,
+  current_setting('hid.test.race' || n || '_verification_1')::uuid, 'p4c-race-release-000' || n) from generate_series(8, 9) n;
+reset role;
+create temp table race_to_close on commit drop as
+  select route.id, route.row_version from ehr.order_routes route
+   where route.id in (current_setting('hid.test.route_8')::uuid, current_setting('hid.test.route_9')::uuid,
+     current_setting('hid.test.rxroute_3')::uuid, current_setting('hid.test.rxroute_4')::uuid);
+grant select on race_to_close to hid_identity_api_runtime;
+set local role hid_identity_api_runtime;
+select pg_temp.as_platform(3);
+select closed.state from race_to_close listed
+  cross join lateral identity.admin_close_order_route(listed.id, listed.row_version,
+    'The hospital asked support to close it') closed;
+reset role;
+set local session_replication_role = replica;
+update ehr.order_routes set created_at = created_at - interval '46 days', respond_by = respond_by - interval '46 days',
+  accepted_at = accepted_at - interval '46 days', writes_end_at = writes_end_at - interval '46 days',
+  access_ends_at = access_ends_at - interval '46 days'
+ where id in (current_setting('hid.test.route_10')::uuid, current_setting('hid.test.route_11')::uuid);
+set local session_replication_role = origin;
+select set_config('hid.test.version_' || n, pg_temp.version_of(current_setting('hid.test.route_' || n)::uuid)::text, true)
+  from generate_series(8, 11) n;
+select set_config('hid.test.rxversion_' || n, pg_temp.version_of(current_setting('hid.test.rxroute_' || n)::uuid)::text,
+  true) from generate_series(3, 4) n;
+-- A release under P's consent on the closed route 8 (LB2 releases v2), then
+-- the correction: with the version read before, 412; with the new one it
+-- withdraws that release too (v2 by the invalidation, v1 directly).
+select set_config('hid.test.race8_verification_2', pg_temp.lab_correction(current_setting('hid.test.result_8')::uuid,
+  'race8', 11.2, current_setting('hid.test.account_1')::uuid, current_setting('hid.test.membership_1')::uuid)::text, true);
+set local role hid_lab_api_runtime;
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select pg_temp.check('release under consent, then the late correction: the release', format($s$select pg_temp.release(%L, 2,
+  %L, 'p4c-race-release-0082')$s$, current_setting('hid.test.result_8'), current_setting('hid.test.race8_verification_2')),
+  'ok');
+select pg_temp.as_signup_admin(1);
+select pg_temp.check('release under consent, then the late correction, with the version read before', format($s$select *
+  from pg_temp.late('lab_request', %L, %s, 'p4c-race-late-000008')$s$, current_setting('hid.test.route_8'),
+  current_setting('hid.test.version_8')), 'P0001 ORDER_ROUTE_VERSION_CONFLICT');
+select pg_temp.assert('release under consent, then the late correction, with the new version',
+  (select late.result = 'corrected' and late.results_voided = 1 and late.result_reports_marked = 2
+     and late.ended_kind = 'support' and late.ended_kind_before = 'support'
+   from pg_temp.late('lab_request', current_setting('hid.test.route_8')::uuid,
+     pg_temp.version_of(current_setting('hid.test.route_8')::uuid), 'p4c-race-late-000008') late));
+-- The correction of route 9, then a release under P's consent: refused.
+select pg_temp.assert('the late correction, then a release under consent: the correction',
+  (select late.result = 'corrected' from pg_temp.late('lab_request', current_setting('hid.test.route_9')::uuid,
+     current_setting('hid.test.version_9')::bigint, 'p4c-race-late-000009') late));
+reset role;
+select set_config('hid.test.race9_verification_2', pg_temp.lab_correction(current_setting('hid.test.result_9')::uuid,
+  'race9', 11.2, current_setting('hid.test.account_1')::uuid, current_setting('hid.test.membership_1')::uuid)::text, true);
+set local role hid_lab_api_runtime;
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select pg_temp.check('the late correction, then a release under consent: the release', format($s$select pg_temp.release(%L,
+  2, %L, 'p4c-race-release-0092')$s$, current_setting('hid.test.result_9'), current_setting('hid.test.race9_verification_2')),
+  '23514 ORDER_ROUTE_CLOSED');
+reset role;
+select pg_temp.assert('A holds route 8''s two releases withdrawn, route 9''s one, nothing more',
+  (select array_agg(report.kind || ':' || report.result_version order by report.kind, report.result_version)
+     from lab.order_route_result_reports report where report.route_id = current_setting('hid.test.route_8')::uuid)
+    = array['entered_in_error:1', 'entered_in_error:2', 'released:1', 'released:2']
+  and (select array_agg(report.kind || ':' || report.result_version order by report.kind, report.result_version)
+     from lab.order_route_result_reports report where report.route_id = current_setting('hid.test.route_9')::uuid)
+    = array['entered_in_error:1', 'released:1']);
+-- A's order change on the lapsed accepted route 10, then the correction:
+-- 412, then corrected as ended before (cancelled, order_changed kept).
+set local role hid_ehr_api_runtime;
+select pg_temp.as_staff(11, 'e4c21000-0000-4000-8000-000000000001');
+select set_config('app.change_reason', 'No longer needed', true);
+update ehr.lab_requests set status = 'cancelled' where id = current_setting('hid.test.lr_10')::uuid;
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select pg_temp.check('the order change, then the late correction, with the version read before', format($s$select * from
+  pg_temp.late('lab_request', %L, %s, 'p4c-race-late-000010')$s$, current_setting('hid.test.route_10'),
+  current_setting('hid.test.version_10')), 'P0001 ORDER_ROUTE_VERSION_CONFLICT');
+select pg_temp.assert('the order change, then the late correction, with the new version',
+  (select late.result = 'corrected' and late.route_state = 'cancelled' and late.ended_kind = 'order_changed'
+     and late.state_before = 'cancelled' and late.ended_kind_before = 'order_changed'
+   from pg_temp.late('lab_request', current_setting('hid.test.route_10')::uuid,
+     pg_temp.version_of(current_setting('hid.test.route_10')::uuid), 'p4c-race-late-000010') late));
+-- The correction of the lapsed route 11, then A's order change: the route
+-- stays ended wrong_patient; the change is the order's own.
+select pg_temp.assert('the late correction, then the order change: the correction',
+  (select late.result = 'corrected' and late.route_state = 'cancelled' and late.ended_kind = 'wrong_patient'
+   from pg_temp.late('lab_request', current_setting('hid.test.route_11')::uuid,
+     current_setting('hid.test.version_11')::bigint, 'p4c-race-late-000011') late));
+reset role;
+select set_config('hid.test.version_11_after', pg_temp.version_of(current_setting('hid.test.route_11')::uuid)::text, true);
+set local role hid_ehr_api_runtime;
+select pg_temp.as_staff(11, 'e4c21000-0000-4000-8000-000000000001');
+select set_config('app.change_reason', 'No longer needed', true);
+update ehr.lab_requests set status = 'cancelled' where id = current_setting('hid.test.lr_11')::uuid;
+reset role;
+select pg_temp.assert('the late correction, then the order change: the route unchanged, ended wrong_patient',
+  (select route.state = 'cancelled' and route.ended_kind = 'wrong_patient'
+     and route.row_version = current_setting('hid.test.version_11_after')::bigint
+   from ehr.order_routes route where route.id = current_setting('hid.test.route_11')::uuid));
+-- A reversal under P's consent on prescription route 3 (closed), then the
+-- correction: 412, then reported without a second reversal. The correction
+-- of route 4, then such a reversal: refused.
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_staff(33, current_setting('hid.test.facility_2')::uuid);
+insert into pharmacy.dispensing_reversals (dispensing_id, dispensing_version, work_item_id, patient_id, facility_id,
+  reversed_by, reversed_by_membership_id, reason, idempotency_key, request_sha256, correlation_id)
+values (current_setting('hid.test.dispensing_3')::uuid, 1, current_setting('hid.test.rxitem_3')::uuid,
+  'e4c30000-0000-4000-8000-000000000001', current_setting('hid.test.facility_2')::uuid,
+  'e4c10000-0000-4000-8000-000000000033', 'e4c13000-0000-4000-8000-000000000033', 'Handed out the wrong strength',
+  'p4c-race-reverse-consent-3', repeat('e', 64), current_setting('app.correlation_id'));
+select pg_temp.as_signup_admin(2);
+select pg_temp.check('a reversal under consent, then the late correction, with the version read before', format($s$select *
+  from pg_temp.late('prescription', %L, %s, 'p4c-race-late-rx0003')$s$, current_setting('hid.test.rxroute_3'),
+  current_setting('hid.test.rxversion_3')), 'P0001 ORDER_ROUTE_VERSION_CONFLICT');
+select pg_temp.assert('a reversal under consent, then the late correction, with the new version: no second reversal',
+  (select late.result = 'corrected' and not late.dispensing_reversed and late.state_before = 'completed'
+   from pg_temp.late('prescription', current_setting('hid.test.rxroute_3')::uuid,
+     pg_temp.version_of(current_setting('hid.test.rxroute_3')::uuid), 'p4c-race-late-rx0003') late));
+select pg_temp.assert('the late correction, then a reversal under consent: the correction reverses',
+  (select late.result = 'corrected' and late.dispensing_reversed
+   from pg_temp.late('prescription', current_setting('hid.test.rxroute_4')::uuid,
+     current_setting('hid.test.rxversion_4')::bigint, 'p4c-race-late-rx0004') late));
+select pg_temp.as_staff(33, current_setting('hid.test.facility_2')::uuid);
+select pg_temp.assert('the late correction, then a reversal under consent: the reversal is refused',
+  left(pg_temp.outcome(format($s$insert into pharmacy.dispensing_reversals (dispensing_id, dispensing_version,
+    work_item_id, patient_id, facility_id, reversed_by, reversed_by_membership_id, reason, idempotency_key,
+    request_sha256, correlation_id) values (%L, 1, %L, 'e4c30000-0000-4000-8000-000000000001', %L,
+    'e4c10000-0000-4000-8000-000000000033', 'e4c13000-0000-4000-8000-000000000033', 'Handed out the wrong strength',
+    'p4c-race-reverse-consent-4', repeat('e', 64), 'p4c-race-correlation')$s$, current_setting('hid.test.dispensing_4'),
+    current_setting('hid.test.rxitem_4'), current_setting('hid.test.facility_2'))), 2) = '23');
+reset role;
+select pg_temp.assert('exactly one reversal of each dispensing; T9 empty',
+  (select count(*) from pharmacy.dispensing_reversals reversal
+    where reversal.dispensing_id in (current_setting('hid.test.dispensing_3')::uuid,
+      current_setting('hid.test.dispensing_4')::uuid)) = 2
+  and not exists (select 1 from ehr.order_route_correction_capabilities));
 
 select pg_temp.report();
 rollback;
