@@ -27,7 +27,10 @@
 --    will own every new object; o may create in ehr, lab and pharmacy, read
 --    and write what the new command and lookup read and write (T8 included)
 --    and run what they call; every role that runs a body reading T8 after
---    0090 may read it; the owners of C5 and C21 may run o's helpers; the
+--    0090 may read it; the owners of C5 and C21 may run o's helpers; every
+--    role that asks the helper whether the receiving organization was
+--    released (o, the summary's callers C3 and C4, and the owners of C5 and
+--    C21) may read identity.organizations and run o's helpers; the
 --    applying role may become each owner. A privilege counts only when held
 --    by ownership, membership or grant, never through a superuser's bypass:
 --    production's migrator has none. A NOTICE names every owner checked.
@@ -51,7 +54,9 @@
 --    one place the 180-day bound is set (the summary inlines the same
 --    expression; the suite checks they agree), and
 --    ehr.order_route_correction_state(route), PL/pgSQL: not_accepted,
---    reported, open (exactly item 3's window), correctable or too_late.
+--    reported, receiver_released (B's organization was released: no member
+--    of B can act, so support's stop-gap applies, D17-3), open (exactly item
+--    3's window), correctable or too_late.
 -- 4. H6, ehr.order_route_access_allows, replaced: 0086's body word for word,
 --    plus, inside its existing "no route allows it" test, a capability
 --    branch: pg_current_xact_id_if_assigned() (never txid_current(), which
@@ -636,6 +641,36 @@ begin
     raise exception '0090: C5, C21 or C26 has an owner that may not run o''s helpers, what it calls, or create the recreated function in its schema: %',
       mismatch;
   end if;
+  -- Every role that asks the helper whether the receiving organization was
+  -- released (the helper reads identity.organizations as its caller) may
+  -- read that table and run o's helpers: o (C29, C30), the summary's callers
+  -- (C3 and C4; the summary asks only when B is not available), and the
+  -- recorded owners of C5 and C21.
+  select string_agg(format('%s (%s) %s', needer.what, pg_get_userbyid(needer.role_id), needer.privilege), ', ')
+    into mismatch
+    from (
+      select caller.what, caller.role_id, wanted.privilege
+        from (select proc.oid::regprocedure::text as what, proc.proowner as role_id from pg_proc proc
+               where proc.oid in ('ehr.list_order_routes_for_order(text,uuid,uuid)'::regprocedure,
+                                  'ehr.order_route_summaries(text,uuid,uuid[])'::regprocedure)
+              union all
+              select recorded.signature, recorded.proowner from pg_temp.order_route_late_0090 recorded
+               where recorded.signature::regprocedure in ('ehr.patient_list_order_routes()'::regprocedure,
+                       'identity.admin_find_order_routes(text,text)'::regprocedure)
+              union all
+              select 'o (H6)', o) caller
+        cross join (values ('SELECT on identity.organizations'), ('EXECUTE on o''s helpers')) wanted(privilege)
+    ) needer
+   where (needer.privilege = 'SELECT on identity.organizations'
+          and not pg_temp.order_route_0090_holds(needer.role_id,
+            (select relation.relowner from pg_class relation where relation.oid = 'identity.organizations'::regclass),
+            (select relation.relacl from pg_class relation where relation.oid = 'identity.organizations'::regclass),
+            'r', 'SELECT'))
+      or (needer.privilege = 'EXECUTE on o''s helpers'
+          and not pg_temp.order_route_0090_holds(needer.role_id, o, '{}'::aclitem[], 'f', 'EXECUTE'));
+  if mismatch is not null then
+    raise exception '0090: a role that asks whether the receiving organization was released may not: %', mismatch;
+  end if;
   -- The applying role inherits every owner it acts for (replacing, dropping,
   -- altering T8) and may become each one it gives an object to (ALTER OWNER
   -- needs SET on PostgreSQL 16).
@@ -811,15 +846,24 @@ as $$
 $$;
 
 -- What the late correction may do with a route, at the database clock:
---   not_accepted  never accepted;
---   reported      ended 'wrong_patient', or reported (in or after its window);
---   open          item 3's own window (0088 C25 step 9): accepted, or
---                 completed and not ended, before writes_end_at;
---   too_late      at or past ehr.order_route_correctable_until;
---   correctable   anything else accepted.
+--   not_accepted       never accepted;
+--   reported           ended 'wrong_patient', or reported (in or after its
+--                      window);
+--   receiver_released  the receiving organization was released from Health
+--                      ID: the route ended 'receiving_released', or the
+--                      organization is no longer active (only its release
+--                      makes it so, for good, also for a route that had
+--                      ended another way before). Its memberships ended, so
+--                      no member of B can act: support's stop-gap applies
+--                      (D17-3), and no deadline is given;
+--   open               item 3's own window (0088 C25 step 9): accepted, or
+--                      completed and not ended, before writes_end_at;
+--   too_late           at or past ehr.order_route_correctable_until;
+--   correctable        anything else accepted.
 -- An open window always ends before the deadline (writes_end_at <=
 -- accepted_at + 1080 hours), so "open or correctable" is exactly "accepted,
--- not reported, before the deadline". PL/pgSQL, so its plans are cached.
+-- not reported, B not released, before the deadline". PL/pgSQL, so its plans
+-- are cached.
 create function ehr.order_route_correction_state(route ehr.order_routes)
 returns text
 language plpgsql stable
@@ -833,6 +877,10 @@ begin
     when route.ended_kind = 'wrong_patient'
       or exists (select 1 from ehr.order_route_wrong_patient_reports report where report.route_id = route.id)
       then 'reported'
+    when route.ended_kind = 'receiving_released'
+      or not exists (select 1 from identity.organizations organization
+                      where organization.id = route.receiving_organization_id and organization.active)
+      then 'receiver_released'
     when (route.state = 'accepted' and checked_at < route.writes_end_at)
       or (route.state = 'completed' and route.ended_at is null and checked_at < route.writes_end_at) then 'open'
     when checked_at >= ehr.order_route_correctable_until(route) then 'too_late'
@@ -1029,8 +1077,10 @@ $$;
 --   5. the route, unlocked: addressed here and of this kind (P0002); its
 --      correction state (not_accepted, reported, open and too_late refuse:
 --      ORDER_ROUTE_NOT_ACCEPTED, ORDER_ROUTE_ALREADY_REPORTED,
---      ORDER_ROUTE_STILL_OPEN, ORDER_ROUTE_CORRECTION_TOO_LATE); then the
---      day B found out not before the Lagos day of the acceptance (22023);
+--      ORDER_ROUTE_STILL_OPEN, ORDER_ROUTE_CORRECTION_TOO_LATE;
+--      receiver_released 42501 ORDER_ROUTE_RECEIVER_RELEASED, as the actor
+--      refuses a member of a released organization); then the day B found
+--      out not before the Lagos day of the acceptance (22023);
 --   6. the limits, exact (D17-9): a transaction advisory lock per receiving
 --      facility, held to commit; under it the replay and the state again (so
 --      a concurrent retry answers replayed, and a concurrent report of the
@@ -1182,8 +1232,10 @@ begin
   end if;
   correction := ehr.order_route_correction_state(peeked);
   if correction <> 'correctable' then
-    raise exception using errcode = 'P0001', message = case correction
+    raise exception using errcode = case correction when 'receiver_released' then '42501' else 'P0001' end,
+      message = case correction
       when 'not_accepted' then 'ORDER_ROUTE_NOT_ACCEPTED' when 'reported' then 'ORDER_ROUTE_ALREADY_REPORTED'
+      when 'receiver_released' then 'ORDER_ROUTE_RECEIVER_RELEASED'
       when 'open' then 'ORDER_ROUTE_STILL_OPEN' else 'ORDER_ROUTE_CORRECTION_TOO_LATE' end;
   end if;
   if requested_discovered_on < (peeked.accepted_at at time zone 'Africa/Lagos')::date then
@@ -1215,8 +1267,10 @@ begin
   select route.* into peeked from ehr.order_routes route where route.id = peeked.id;
   correction := ehr.order_route_correction_state(peeked);
   if correction <> 'correctable' then
-    raise exception using errcode = 'P0001', message = case correction
+    raise exception using errcode = case correction when 'receiver_released' then '42501' else 'P0001' end,
+      message = case correction
       when 'not_accepted' then 'ORDER_ROUTE_NOT_ACCEPTED' when 'reported' then 'ORDER_ROUTE_ALREADY_REPORTED'
+      when 'receiver_released' then 'ORDER_ROUTE_RECEIVER_RELEASED'
       when 'open' then 'ORDER_ROUTE_STILL_OPEN' else 'ORDER_ROUTE_CORRECTION_TOO_LATE' end;
   end if;
   checked_at := clock_timestamp();
@@ -1295,8 +1349,10 @@ begin
   -- 11. The state first, then the version.
   correction := ehr.order_route_correction_state(current_route);
   if correction <> 'correctable' then
-    raise exception using errcode = 'P0001', message = case correction
+    raise exception using errcode = case correction when 'receiver_released' then '42501' else 'P0001' end,
+      message = case correction
       when 'not_accepted' then 'ORDER_ROUTE_NOT_ACCEPTED' when 'reported' then 'ORDER_ROUTE_ALREADY_REPORTED'
+      when 'receiver_released' then 'ORDER_ROUTE_RECEIVER_RELEASED'
       when 'open' then 'ORDER_ROUTE_STILL_OPEN' else 'ORDER_ROUTE_CORRECTION_TOO_LATE' end;
   end if;
   if current_route.row_version <> expected_version then
@@ -1707,11 +1763,14 @@ $$;
 -- The ordering facility's summary of one route (0086:7179-7193), replaced
 -- with two keys: wrongPatient, B's report ({reportedAt, late}) or null; and
 -- correctableUntil, the deadline while B may still correct the route (open
--- or correctable: accepted, not reported, before the deadline), else null.
+-- or correctable: accepted, not reported, B not released, before the
+-- deadline), else null. Whether B was released is asked of the helper only
+-- when B is not available as a destination (an available B's organization
+-- is active), so an ordinary list pays nothing for it.
 -- Both are computed inline from one read of T8, without calling the helpers:
 -- a LANGUAGE sql function with SET is never inlined and is planned on each
 -- call, which would cost every order list several times the summary itself.
--- OFFSET 0 keeps the report's subquery from being pulled up into each
+-- OFFSET 0 keeps the facts' subquery from being pulled up into each
 -- reference to it (two reads of T8), and a route never accepted, which has
 -- no report, does not read it. The deadline is
 -- ehr.order_route_correctable_until's expression; the suite checks they
@@ -1726,20 +1785,24 @@ as $$
     'version', route.row_version, 'effectiveState', ehr.order_route_effective_state(route),
     'receivingFacility', jsonb_build_object('id', route.receiving_facility_id,
       'name', (select facility.name from identity.facilities facility where facility.id = route.receiving_facility_id),
-      'available', identity.order_route_destination_eligible(route.receiving_facility_id, route.kind)),
+      'available', facts.available),
     'createdAt', route.created_at, 'respondBy', route.respond_by, 'acceptedAt', route.accepted_at,
     'completedAt', route.completed_at, 'endedAt', route.ended_at, 'endedKind', route.ended_kind,
     'declineReason', route.decline_reason, 'acceptLocked', route.accept_locked_at is not null,
     'resendAllowed', resend_allowed,
-    'wrongPatient', report.answer,
-    'correctableUntil', case when route.accepted_at is not null and route.ended_kind is distinct from 'wrong_patient'
-                               and report.answer is null
+    'wrongPatient', facts.answer,
+    'correctableUntil', case when route.accepted_at is not null
+                               and coalesce(route.ended_kind not in ('wrong_patient', 'receiving_released'), true)
+                               and facts.answer is null
                                and clock_timestamp() < route.accepted_at + interval '4320 hours'
+                               and (facts.available
+                                 or ehr.order_route_correction_state(route) <> 'receiver_released')
                              then route.accepted_at + interval '4320 hours' end)
-    from (select (select jsonb_build_object('reportedAt', wrong_patient.reported_at, 'late', wrong_patient.late)
+    from (select identity.order_route_destination_eligible(route.receiving_facility_id, route.kind) as available,
+                 (select jsonb_build_object('reportedAt', wrong_patient.reported_at, 'late', wrong_patient.late)
                     from ehr.order_route_wrong_patient_reports wrong_patient
                    where route.accepted_at is not null and wrong_patient.route_id = route.id) as answer
-           offset 0) report
+           offset 0) facts
 $$;
 
 -- C28. The ordering facility's Overview card (0088 section 4), replaced:
@@ -1811,7 +1874,7 @@ $$;
 -- three trailing columns: when B reported that it accepted the order for
 -- someone else and whether that report came after the order had ended
 -- (null when there is none), and the deadline while B may still correct
--- it (open or correctable), else null. The OUT columns change, so it is
+-- it (open or correctable; never once B was released), else null. The OUT columns change, so it is
 -- dropped and created with 0086's body (its redaction of an order marked
 -- entered in error unchanged) and attributes, given back to its recorded
 -- owner and checked in section 8, and granted again in section 9.
@@ -2160,8 +2223,8 @@ $$;
 -- C21. Support's find (0089 section 3), with four trailing columns: the
 -- route's correction state (the helper), the deadline while B may still act
 -- or once it has passed (open, correctable, too_late; null when never
--- accepted or already reported), and B's report (when, and whether late) if
--- any. The reference is compared as char(8), so a lookup by reference uses
+-- accepted, already reported or B released), and B's report (when, and
+-- whether late) if any. The reference is compared as char(8), so a lookup by reference uses
 -- order_routes_reference_idx. The 5 or 20 routes are chosen first, then the
 -- effective state and the correction state are evaluated once for each
 -- (OFFSET 0 keeps the lateral subquery from being pulled up, which would

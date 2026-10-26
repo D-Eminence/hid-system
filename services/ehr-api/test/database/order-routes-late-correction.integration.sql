@@ -1686,7 +1686,9 @@ select route_closed.state from unnest(array['g2s', 'v12', 'v2u', 'lima', 'limb',
 reset role;
 -- g2o and g2orc end as the ordering organization's release ends routes,
 -- g2r and g2rrc as the receiving one's (the release trigger's own call of
--- the closer; the organizations stay active, so B may still act).
+-- the closer; the organizations stay active, but an order ended so is
+-- receiver_released all the same: no member of a released organization can
+-- act, and section 12 releases one for real).
 select pg_temp.assert('d17 fixture: the releases'' endings',
   pg_temp.close_as(pg_temp.r('g2o'), 'ordering_released') = 'access_ended'
   and pg_temp.close_as(pg_temp.r('g2r'), 'receiving_released') = 'access_ended'
@@ -1731,12 +1733,12 @@ select pg_temp.assert('d17 fixture: each route''s state, ending and correction s
      join ehr.order_routes route on route.id = pg_temp.r(listed.name))
   = array['g2s:completed:support:correctable', 'g1c:completed:-:correctable', 'g1a:accepted:-:correctable',
     'g2e:completed:entered_in_error:correctable', 'g2o:completed:ordering_released:correctable',
-    'g2r:completed:receiving_released:correctable', 'v12:completed:support:correctable',
+    'g2r:completed:receiving_released:receiver_released', 'v12:completed:support:correctable',
     'v2u:completed:support:correctable', 'old:completed:-:too_late', 'rep:cancelled:wrong_patient:reported',
     'lima:completed:support:correctable', 'gl:sent:-:not_accepted', 'q:completed:-:correctable',
     'g2oc:cancelled:order_changed:correctable', 'g2ec:cancelled:entered_in_error:correctable',
     'g2sc:cancelled:support:correctable', 'g2orc:cancelled:ordering_released:correctable',
-    'g2rrc:cancelled:receiving_released:correctable', 'opa:accepted:-:open', 'opc:completed:-:open',
+    'g2rrc:cancelled:receiving_released:receiver_released', 'opa:accepted:-:open', 'opc:completed:-:open',
     'snt:sent:-:not_accepted', 'dec:declined:-:not_accepted', 'wdn:withdrawn:orderer:not_accepted',
     'exp:sent:-:not_accepted', 'rx2s:completed:support:correctable', 'rx1a:accepted:-:correctable',
     'rxrev:completed:-:correctable', 'rx1c:completed:-:correctable', 'rxpr:completed:support:correctable'],
@@ -1792,6 +1794,38 @@ select pg_temp.assert('d17 state: open, correctable and too late by definition',
     pg_temp.state_with('completed', interval '4320 hours' - interval '1 minute', '1 hour', '-2 hours'),
     pg_temp.state_with('completed', interval '4320 hours' + interval '1 second', '1 hour', '-2 hours'),
     pg_temp.state_with('accepted', interval '4320 hours' + interval '1 second', null, '-1 hour')));
+-- B released (D17-3): an order ended 'receiving_released', or whose
+-- receiving organization is no longer active (only its release makes it
+-- so), is receiver_released whatever its other facts, unless reported;
+-- an active organization changes nothing.
+create function pg_temp.state_released(name text, new_ended_kind text, organization_active boolean)
+returns text language plpgsql as $f$
+declare
+  changed ehr.order_routes;
+begin
+  select route.* into changed from ehr.order_routes route where route.id = pg_temp.r(name);
+  if new_ended_kind is not null then
+    changed.ended_kind := new_ended_kind;
+    changed.ended_at := coalesce(changed.ended_at, clock_timestamp());
+  end if;
+  if not organization_active then
+    changed.receiving_organization_id := gen_random_uuid();
+  end if;
+  return ehr.order_route_correction_state(changed);
+end
+$f$;
+select pg_temp.assert('d17 state: receiver_released when the order ended so or its receiving organization is not active',
+  pg_temp.state_released('g2s', null, false) = 'receiver_released'
+  and pg_temp.state_released('g2s', null, true) = 'correctable'
+  and pg_temp.state_released('g1c', 'receiving_released', true) = 'receiver_released'
+  and pg_temp.state_released('opc', null, false) = 'receiver_released'
+  and pg_temp.state_released('old', null, false) = 'receiver_released'
+  and pg_temp.state_released('rep', null, false) = 'reported'
+  and pg_temp.state_released('snt', null, false) = 'not_accepted',
+  concat_ws(',', pg_temp.state_released('g2s', null, false), pg_temp.state_released('g2s', null, true),
+    pg_temp.state_released('g1c', 'receiving_released', true), pg_temp.state_released('opc', null, false),
+    pg_temp.state_released('old', null, false), pg_temp.state_released('rep', null, false),
+    pg_temp.state_released('snt', null, false)));
 
 -- 2. The capability. Without one, LB1 at L1 (no consent for P or Q) reads
 -- none of their results, and cannot void one by hand; the Lab runtime can
@@ -2031,6 +2065,16 @@ select pg_temp.check('d17 refusal: opa is still open, with a stale version (the 
 select pg_temp.check('d17 refusal: old is too late', format($s$select * from pg_temp.late('lab_request', %L, %s, 'other',
     'patient', pg_temp.lagos_today(), 'The patient says it was not them', 'd17-refuse-old-00001')$s$,
     pg_temp.r('old'), pg_temp.v(pg_temp.r('old'))), 'P0001 ORDER_ROUTE_CORRECTION_TOO_LATE');
+select pg_temp.check('d17 refusal: ' || name || ' ended by its receiving organization''s release (B cannot act)',
+  format($s$select * from pg_temp.late('lab_request', %L, %s, 'other', 'patient', pg_temp.lagos_today(),
+    'The patient says it was not them', %L)$s$, pg_temp.r(name), pg_temp.v(pg_temp.r(name)),
+    'd17-refuse-' || name || '-00001'), '42501 ORDER_ROUTE_RECEIVER_RELEASED')
+  from unnest(array['g2r', 'g2rrc']) name;
+select pg_temp.assert('d17 refusal: the lookup answers g2r receiver_released, without B''s details',
+  pg_temp.look('g2r-released', 'lab_request', pg_temp.ref('g2r')) = 1
+  and pg_temp.found('g2r-released') ->> 'correction_state' = 'receiver_released'
+  and pg_temp.found('g2r-released') -> 'what_name' = 'null'::jsonb
+  and pg_temp.found('g2r-released') -> 'returned_items' = 'null'::jsonb);
 select pg_temp.check('d17 refusal: rep was reported in its window', format($s$select * from pg_temp.late('lab_request',
     %L, %s, 'other', 'patient', pg_temp.lagos_today(), 'The patient says it was not them', 'd17-refuse-rep-00001')$s$,
     pg_temp.r('rep'), pg_temp.v(pg_temp.r('rep'))), 'P0001 ORDER_ROUTE_ALREADY_REPORTED');
@@ -2215,9 +2259,10 @@ begin
                  (select facility.name from identity.facilities facility where facility.id = r.receiving_facility_id))));
 end $$;
 
--- Every other route of the table, by the member named: LB1 g1c, g2e, g2o;
--- LB2 g1a, g2r, v12, v2u; LB3 (P's consent) g2oc; LR (receive only;
--- nothing to withdraw) g2ec, g2sc, g2orc, g2rrc; PB2 rx2s, rxrev; PR (nothing
+-- Every other route of the table, by the member named (g2r and g2rrc, ended
+-- by the receiving release, were refused in section 4): LB1 g1c, g2e, g2o;
+-- LB2 g1a, v12, v2u; LB3 (P's consent) g2oc; LR (receive only;
+-- nothing to withdraw) g2ec, g2sc, g2orc; PB2 rx2s, rxrev; PR (nothing
 -- to reverse) rx1a; PB1 rx1c.
 set local role hid_lab_api_runtime;
 select pg_temp.as_signup_admin(1);
@@ -2234,8 +2279,7 @@ select pg_temp.check('d17 ' || late.name || ': corrected late', format($s$select
     pg_temp.v(pg_temp.r(late.name)), late.reason, late.found_by, late.found_on, 'd17-late-' || late.name || '-000001'),
   'ok')
   from (values ('g1a', 'wrong_order_chosen', 'own_check', pg_temp.lagos_today()),
-               ('g2r', 'someone_elses_details', 'other', pg_temp.lagos_today()),
-               ('v12', 'someone_elses_details', 'patient', pg_temp.lagos_today()),
+               ('v12', 'someone_elses_details', 'other', pg_temp.lagos_today()),
                ('v2u', 'other', 'ordering_facility', pg_temp.lagos_today())) late(name, reason, found_by, found_on);
 select pg_temp.as_extra(34, current_setting('hid.test.facility_1')::uuid);
 select pg_temp.check('d17 g2oc: corrected late by LB3', format($s$select pg_temp.keep_late('g2oc', 'lab_request', %L, %s,
@@ -2247,7 +2291,7 @@ select pg_temp.check('d17 ' || late.name || ': corrected late by LR', format($s$
     pg_temp.r(late.name), pg_temp.v(pg_temp.r(late.name)), late.reason, late.found_by,
     'd17-late-' || late.name || '-000001'), 'ok')
   from (values ('g2ec', 'suspected_misuse', 'ordering_facility'), ('g2sc', 'other', 'support'),
-               ('g2orc', 'wrong_order_chosen', 'own_check'), ('g2rrc', 'someone_elses_details', 'patient'))
+               ('g2orc', 'wrong_order_chosen', 'own_check'))
        late(name, reason, found_by);
 reset role;
 set local role hid_pharmacy_api_runtime;
@@ -2271,7 +2315,7 @@ select pg_temp.assert('d17: every route of the table afterwards (state, ending) 
   (select array_agg(format('%s:%s:%s|%s:%s|%s:%s:%s|%s', name, route.state, route.ended_kind, report.state_before,
        coalesce(report.ended_kind_before, '-'), report.results_voided, report.result_reports_marked,
        report.dispensing_reversed, report.late) order by position)
-     from unnest(array['g2s', 'g1c', 'g1a', 'g2e', 'g2o', 'g2r', 'v12', 'v2u', 'g2oc', 'g2ec', 'g2sc', 'g2orc', 'g2rrc',
+     from unnest(array['g2s', 'g1c', 'g1a', 'g2e', 'g2o', 'v12', 'v2u', 'g2oc', 'g2ec', 'g2sc', 'g2orc',
        'rx2s', 'rx1a', 'rxrev', 'rx1c']) with ordinality listed(name, position)
      join ehr.order_routes route on route.id = pg_temp.r(listed.name)
      join ehr.order_route_wrong_patient_reports report on report.route_id = route.id)
@@ -2280,14 +2324,12 @@ select pg_temp.assert('d17: every route of the table afterwards (state, ending) 
     'g1a:cancelled:wrong_patient|accepted:-|1:0:f|t',
     'g2e:completed:entered_in_error|completed:entered_in_error|1:1:f|t',
     'g2o:completed:ordering_released|completed:ordering_released|1:1:f|t',
-    'g2r:completed:receiving_released|completed:receiving_released|1:1:f|t',
     'v12:completed:support|completed:support|1:2:f|t',
     'v2u:completed:support|completed:support|1:1:f|t',
     'g2oc:cancelled:order_changed|cancelled:order_changed|1:0:f|t',
     'g2ec:cancelled:entered_in_error|cancelled:entered_in_error|0:0:f|t',
     'g2sc:cancelled:support|cancelled:support|0:0:f|t',
     'g2orc:cancelled:ordering_released|cancelled:ordering_released|0:0:f|t',
-    'g2rrc:cancelled:receiving_released|cancelled:receiving_released|0:0:f|t',
     'rx2s:completed:support|completed:support|0:0:t|t',
     'rx1a:cancelled:wrong_patient|accepted:-|0:0:f|t',
     'rxrev:completed:wrong_patient|completed:-|0:0:f|t',
@@ -2295,7 +2337,7 @@ select pg_temp.assert('d17: every route of the table afterwards (state, ending) 
   (select string_agg(format('%s:%s:%s|%s:%s|%s:%s:%s|%s', name, route.state, route.ended_kind, report.state_before,
        coalesce(report.ended_kind_before, '-'), report.results_voided, report.result_reports_marked,
        report.dispensing_reversed, report.late), ', ' order by position)
-     from unnest(array['g2s', 'g1c', 'g1a', 'g2e', 'g2o', 'g2r', 'v12', 'v2u', 'g2oc', 'g2ec', 'g2sc', 'g2orc', 'g2rrc',
+     from unnest(array['g2s', 'g1c', 'g1a', 'g2e', 'g2o', 'v12', 'v2u', 'g2oc', 'g2ec', 'g2sc', 'g2orc',
        'rx2s', 'rx1a', 'rxrev', 'rx1c']) with ordinality listed(name, position)
      join ehr.order_routes route on route.id = pg_temp.r(listed.name)
      left join ehr.order_route_wrong_patient_reports report on report.route_id = route.id));
@@ -2304,7 +2346,7 @@ select pg_temp.assert('d17: each answer matches its route and report',
     select 1 from p4c_answers answer
       join ehr.order_routes route on route.id = pg_temp.r(answer.label)
       join ehr.order_route_wrong_patient_reports report on report.route_id = route.id
-     where answer.label in ('g1c', 'g1a', 'g2e', 'g2o', 'g2r', 'v12', 'v2u', 'g2oc', 'g2ec', 'g2sc', 'g2orc', 'g2rrc',
+     where answer.label in ('g1c', 'g1a', 'g2e', 'g2o', 'v12', 'v2u', 'g2oc', 'g2ec', 'g2sc', 'g2orc',
              'rx2s', 'rx1a', 'rxrev', 'rx1c')
        and answer.answer is distinct from jsonb_build_object('result', 'corrected', 'report_id', report.id,
          'route_row_version', route.row_version, 'route_state', route.state,
@@ -2370,7 +2412,7 @@ select pg_temp.assert('d17 pharmacy: rx2s and rx1c reversed once (A''s report), 
 select pg_temp.assert('d17: P''s notices: CORRECTED for the routes that had ended, WRONG_PATIENT for those that end now '
     || '(and item 3''s); R''s routes had ended',
   (select count(*) from notification.inbox_items item where item.patient_id = current_setting('hid.test.p')::uuid
-    and item.notification_code = 'ORDER_ROUTE_WRONG_PATIENT_CORRECTED') = 7
+    and item.notification_code = 'ORDER_ROUTE_WRONG_PATIENT_CORRECTED') = 6
   and (select array_agg(item.resource_id order by item.resource_id) from notification.inbox_items item
         where item.patient_id = current_setting('hid.test.p')::uuid
           and item.notification_code = 'ORDER_ROUTE_WRONG_PATIENT')
@@ -2380,14 +2422,16 @@ select pg_temp.assert('d17: P''s notices: CORRECTED for the routes that had ende
          from notification.inbox_items item where item.patient_id = current_setting('hid.test.n')::uuid
           and item.notification_code like 'ORDER_ROUTE_WRONG_PATIENT%')
       = (select array_agg('ORDER_ROUTE_WRONG_PATIENT_CORRECTED:' || id order by id) from unnest(array[pg_temp.r('g2oc'),
-          pg_temp.r('g2ec'), pg_temp.r('g2sc'), pg_temp.r('g2orc'), pg_temp.r('g2rrc')]) id));
+          pg_temp.r('g2ec'), pg_temp.r('g2sc'), pg_temp.r('g2orc')]) id));
 select pg_temp.assert('d17: two system rows (A and B) per late report, with late', (select count(*) from audit.events event
-  where event.action = 'ehr.order-route.wrong-patient' and event.details ->> 'late' = 'true') = 34);
+  where event.action = 'ehr.order-route.wrong-patient' and event.details ->> 'late' = 'true') = 30);
 select pg_temp.assert('d17: T9 is empty after every correction', pg_temp.capabilities() = 0);
-select pg_temp.assert('d17: P''s record shows none of the corrected results, still old''s (too late)',
+select pg_temp.assert('d17: P''s record shows none of the corrected results, still old''s (too late) and g2r''s (B '
+    || 'released: support''s stop-gap)',
   not (pg_temp.patient_results() && array[pg_temp.res('g2s'), pg_temp.res('g1c'), pg_temp.res('g2e'), pg_temp.res('g2o'),
-    pg_temp.res('g2r'), pg_temp.res('v12'), pg_temp.res('v2u')])
-  and pg_temp.res('old') = any(pg_temp.patient_results()));
+    pg_temp.res('v12'), pg_temp.res('v2u')])
+  and pg_temp.res('old') = any(pg_temp.patient_results())
+  and pg_temp.res('g2r') = any(pg_temp.patient_results()));
 
 -- 6. After a late report. A release under P's consent at L1 (LB3) of g2s's
 -- next version is refused; a write on its items is closed, a read none.
@@ -2475,7 +2519,7 @@ select pg_temp.assert('d17 readers: on every route the summary''s correctableUnt
            <> (select jsonb_build_object('reportedAt', report.reported_at, 'late', report.late)
                  from ehr.order_route_wrong_patient_reports report where report.route_id = route.id)))
   and (select count(*) from ehr.order_routes) = 33
-  and (select count(distinct ehr.order_route_correction_state(route)) from ehr.order_routes route) = 5);
+  and (select count(distinct ehr.order_route_correction_state(route)) from ehr.order_routes route) = 6);
 -- The summary reads the report table once for an accepted route (the
 -- report, from which it answers both keys) and not at all for a route never
 -- accepted, which has no report (table statistics, this transaction).
@@ -2521,7 +2565,7 @@ set local role hid_identity_api_runtime;
 select pg_temp.as_platform(2);
 insert into d17_out (label, answer)
 select 'c21-' || name, to_jsonb(found)
-  from unnest(array['g2s', 'lima', 'old', 'snt', 'opc']) name
+  from unnest(array['g2s', 'lima', 'old', 'snt', 'opc', 'g2r']) name
   cross join lateral identity.admin_find_order_routes(case name when 'old' then lower(pg_temp.ref(name))
     else pg_temp.ref(name) end, null) found;
 reset role;
@@ -2595,7 +2639,7 @@ select pg_temp.assert('d17 readers: C3 gives A g2s with wrongPatient (late), no 
   (select string_agg(label || ' ' || answer::text, E'\n') from d17_out where label in ('c3-g2s', 'c3-lima', 'c4')));
 select pg_temp.assert('d17 readers: C28 lists every report sent from GH in 30 days to DA, the sender, newest report '
     || 'first, with reportedAt, late and endedKindBefore; a group-2 item keeps its earlier endedAt',
-  (select jsonb_array_length(answer -> 'items') = 19 and (answer -> 'others' ->> 'count')::integer = 0
+  (select jsonb_array_length(answer -> 'items') = 17 and (answer -> 'others' ->> 'count')::integer = 0
      from d17_out where label = 'c28')
   and (select array_agg((item ->> 'routeId')::uuid order by ordinal)
          from d17_out, jsonb_array_elements(answer -> 'items') with ordinality listed(item, ordinal) where label = 'c28')
@@ -2648,7 +2692,18 @@ select pg_temp.assert('d17 readers: C21 by reference: the correction state, the 
                    where label = 'c21-p'
                      and answer ->> 'correction'
                        is distinct from ehr.order_route_correction_state(pg_temp.route((answer ->> 'route_id')::uuid)))
-  and (select count(*) from d17_out where label in ('c21-g2s', 'c21-lima', 'c21-old', 'c21-snt', 'c21-opc')) = 5);
+  and (select count(*) from d17_out where label in ('c21-g2s', 'c21-lima', 'c21-old', 'c21-snt', 'c21-opc', 'c21-g2r')) = 6);
+select pg_temp.assert('d17 readers: g2r, ended by its receiving organization''s release, is receiver_released with no '
+    || 'deadline in C21, C5 and the summary (support''s stop-gap applies), and its result still shows to P',
+  (select answer ->> 'correction' = 'receiver_released' and answer -> 'correctable_until' = 'null'::jsonb
+     and answer -> 'wrong_patient_late' = 'null'::jsonb
+   from d17_out where label = 'c21-g2r')
+  and (select answer -> 'correctable_until' = 'null'::jsonb and answer -> 'wrong_patient_late' = 'null'::jsonb
+       from d17_out where label = 'c5' and (answer ->> 'route_id')::uuid = pg_temp.r('g2r'))
+  and ehr.order_route_summary(pg_temp.route(pg_temp.r('g2r')), false) -> 'correctableUntil' = 'null'::jsonb
+  and ehr.order_route_summary(pg_temp.route(pg_temp.r('g2rrc')), false) -> 'correctableUntil' = 'null'::jsonb,
+  (select string_agg(label || ' ' || answer::text, E'\n') from d17_out
+    where label = 'c21-g2r' or (label = 'c5' and (answer ->> 'route_id')::uuid = pg_temp.r('g2r'))));
 select pg_temp.assert('d17 readers: C21 still evaluates the effective state once per row',
   (select (length(p.prosrc) - length(replace(p.prosrc, 'order_route_effective_state', '')))
           / length('order_route_effective_state') from pg_proc p
@@ -2673,7 +2728,7 @@ select pg_temp.assert('d17 readers: C26''s late columns, the reporter''s late re
    from d17_listed listed where listed.route_id = pg_temp.r('g2s'))
   and (select listed.required_actions = array['referred_to_dpo'] and listed.reporter_late_reports_last_30_days = 4
        from d17_listed listed where listed.route_id = pg_temp.r('g2o'))
-  and (select listed.required_actions = array['referred_to_dpo'] and listed.reporter_late_reports_last_30_days = 4
+  and (select listed.required_actions = array['referred_to_dpo'] and listed.reporter_late_reports_last_30_days = 3
        from d17_listed listed where listed.route_id = pg_temp.r('g2ec'))
   and (select listed.required_actions = array[]::text[] from d17_listed listed where listed.route_id = pg_temp.r('g2sc'))
   and (select listed.required_actions = array[]::text[] and listed.ended_kind_before is null
@@ -2687,20 +2742,19 @@ select pg_temp.assert('d17 readers: C26''s late columns, the reporter''s late re
 select pg_temp.assert('d17 readers: C26''s flags: late_correction on every late report, patient_prompted when found out '
     || 'from the patient or another way and something had come back, patient_reported_before after the patient''s first',
   (select array_agg(name || ':' || array_to_string(listed.flags, '+') order by name)
-     from unnest(array['g2s', 'g1c', 'g1a', 'g2r', 'g2oc', 'g2rrc', 'rep', 'rx2s', 'rx1a']) name
+     from unnest(array['g2s', 'g1c', 'g1a', 'v12', 'g2oc', 'rep', 'rx2s', 'rx1a']) name
      join d17_listed listed on listed.route_id = pg_temp.r(name))
   = array[
     'g1a:reporter_recorded_work+late_correction+patient_reported_before',
     'g1c:something_came_back+reporter_recorded_work+suspected_misuse+late_correction+patient_reported_before',
     'g2oc:late_correction',
-    'g2r:something_came_back+reporter_recorded_work+late_correction+patient_prompted+patient_reported_before',
-    'g2rrc:late_correction+patient_reported_before',
     'g2s:something_came_back+reporter_recorded_work+late_correction+patient_prompted+patient_reported_before',
     'rep:',
     'rx1a:late_correction+patient_reported_before',
-    'rx2s:something_came_back+reporter_recorded_work+late_correction+patient_prompted+patient_reported_before'],
+    'rx2s:something_came_back+reporter_recorded_work+late_correction+patient_prompted+patient_reported_before',
+    'v12:something_came_back+reporter_recorded_work+late_correction+patient_prompted+patient_reported_before'],
   (select string_agg(name || ':' || array_to_string(listed.flags, '+'), ', ' order by name)
-     from unnest(array['g2s', 'g1c', 'g1a', 'g2r', 'g2oc', 'g2rrc', 'rep', 'rx2s', 'rx1a']) name
+     from unnest(array['g2s', 'g1c', 'g1a', 'v12', 'g2oc', 'rep', 'rx2s', 'rx1a']) name
      join d17_listed listed on listed.route_id = pg_temp.r(name)));
 select pg_temp.assert('d17 readers: C26 names no patient', not exists (select 1 from d17_listed listed
   where row_to_json(listed)::text ~* '(Patience|Okafor|Rukayat|Danjuma|Nkem|P4CPAT|1990-04-12)'));
@@ -2918,6 +2972,75 @@ select pg_temp.assert('d17 bound: ... the lookup says too late, without details'
   pg_temp.look('bnd-after', 'lab_request', pg_temp.ref('bnd')) = 1
   and pg_temp.found('bnd-after') ->> 'correction_state' = 'too_late' and pg_temp.found('bnd-after') -> 'what_name' = 'null'::jsonb);
 reset role;
+
+-- 12. A real release of B (D17-3). Support suspends L1, disables its
+-- administrator LB1 and releases it: the release ends L1's live orders
+-- 'receiving_released' and deactivates its organization and memberships, so
+-- no member of L1 can act again. limb (P's, closed by support before the
+-- release, never reported) keeps its ending but is receiver_released
+-- everywhere, with no deadline: support's stop-gap applies, and LB2's late
+-- correction is refused by the actor. opc (R's, open) ends
+-- 'receiving_released'.
+select pg_temp.assert('d17 released: before the release, limb is correctable and opc open',
+  ehr.order_route_correction_state(pg_temp.route(pg_temp.r('limb'))) = 'correctable'
+  and ehr.order_route_correction_state(pg_temp.route(pg_temp.r('opc'))) = 'open');
+-- dup2, a copy written with triggers off, is removed first (its order is not
+-- real, so the release could not end it).
+set local session_replication_role = replica;
+delete from ehr.order_routes route where route.id = current_setting('hid.test.route_dup2')::uuid;
+set local session_replication_role = origin;
+set local role hid_identity_api_runtime;
+select pg_temp.as_platform(1);
+select identity.admin_transition_facility(current_setting('hid.test.facility_1')::uuid,
+  (select facility.row_version from identity.facilities facility where facility.id = current_setting('hid.test.facility_1')::uuid),
+  'suspended', 'Suspended for the D17 suite', 'd17-release-suspend-l1-01', repeat('c', 64));
+select auth.admin_transition_account(current_setting('hid.test.account_1')::uuid,
+  (select account.row_version from auth.accounts account where account.id = current_setting('hid.test.account_1')::uuid),
+  'disabled', 'Disabled for the D17 release', 'd17-release-disable-lb1-01', repeat('d', 64));
+select identity.admin_release_self_service_facility(current_setting('hid.test.app_1')::uuid,
+  (select application.row_version from identity.admin_list_self_service_facilities('all') application
+    where application.application_id = current_setting('hid.test.app_1')::uuid),
+  'Released for the D17 suite', false);
+insert into d17_out (label, answer)
+select 'c21-released-' || name, to_jsonb(found)
+  from unnest(array['limb', 'opc']) name
+  cross join lateral identity.admin_find_order_routes(pg_temp.ref(name), null) found;
+reset role;
+set local role hid_ehr_api_runtime;
+select pg_temp.as_patient(1);
+insert into d17_out (label, answer) select 'c5-released', to_jsonb(listed) from ehr.patient_list_order_routes() listed;
+reset role;
+select pg_temp.assert('d17 released: L1''s organization is no longer active; limb keeps its ending, opc ends '
+    || 'receiving_released, and both are receiver_released with no deadline in the summary, C5 and C21',
+  not (select organization.active from identity.organizations organization
+        join identity.facilities facility on facility.organization_id = organization.id
+       where facility.id = current_setting('hid.test.facility_1')::uuid)
+  and (pg_temp.route(pg_temp.r('limb'))).ended_kind = 'support'
+  and (pg_temp.route(pg_temp.r('opc'))).ended_kind = 'receiving_released'
+  and ehr.order_route_correction_state(pg_temp.route(pg_temp.r('limb'))) = 'receiver_released'
+  and ehr.order_route_correction_state(pg_temp.route(pg_temp.r('opc'))) = 'receiver_released'
+  and ehr.order_route_summary(pg_temp.route(pg_temp.r('limb')), false) -> 'correctableUntil' = 'null'::jsonb
+  and ehr.order_route_summary(pg_temp.route(pg_temp.r('opc')), false) -> 'correctableUntil' = 'null'::jsonb
+  and (select bool_and(answer ->> 'correction' = 'receiver_released' and answer -> 'correctable_until' = 'null'::jsonb)
+         and count(*) = 2
+       from d17_out where label like 'c21-released-%')
+  and (select bool_and(answer -> 'correctable_until' = 'null'::jsonb) and count(*) = 1
+       from d17_out where label = 'c5-released' and (answer ->> 'route_id')::uuid = pg_temp.r('limb')),
+  concat_ws(' | ', ehr.order_route_correction_state(pg_temp.route(pg_temp.r('limb'))),
+    ehr.order_route_correction_state(pg_temp.route(pg_temp.r('opc'))),
+    ehr.order_route_summary(pg_temp.route(pg_temp.r('limb')), false) ->> 'correctableUntil',
+    (select string_agg(answer::text, ' ') from d17_out where label like 'c21-released-%')));
+select pg_temp.snap();
+set local role hid_lab_api_runtime;
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select set_config('hid.test.released_limb', pg_temp.outcome(format($s$select * from pg_temp.late('lab_request', %L, %s,
+    'other', 'own_check', pg_temp.lagos_today(), 'Found on our own audit of the run', 'd17-released-limb-0001')$s$,
+    pg_temp.r('limb'), pg_temp.v(pg_temp.r('limb')))), true);
+reset role;
+select pg_temp.assert('d17 released: LB2''s late correction of limb is refused by the actor, writing nothing',
+  current_setting('hid.test.released_limb') = '42501 Order route staff context is required'
+  and (select count(*) from ehr.order_route_wrong_patient_reports report where report.route_id = pg_temp.r('limb')) = 0
+  and pg_temp.capabilities() = 0, current_setting('hid.test.released_limb'));
 select pg_temp.assert('d17: T9 is empty at the end', pg_temp.capabilities() = 0);
 
 select pg_temp.report();
