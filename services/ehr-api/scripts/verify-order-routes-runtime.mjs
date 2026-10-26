@@ -2413,6 +2413,12 @@ try {
     from ehr.order_routes where id = any($1::uuid[]) order by created_at`, [[route1.id, route2b.id, route6.id]]);
   assert.deepEqual(released.map(row => [row.state, row.ended_kind]), [['completed', 'receiving_released'],
     ['withdrawn', 'receiving_released'], ['withdrawn', 'receiving_released']]);
+  // D17-3: the released laboratory can no longer act on its orders. Its completed order is receiver_released with no
+  // deadline for the clinician (C4, C3), the patient (C5) and support (C21), so no screen sends anyone to it.
+  const releasedReads = await readsOf('lab_request', lr1, route1);
+  assert.deepEqual(untilOnAll(releasedReads), [null, null, null, null], 'a released laboratory still has a deadline');
+  assert.equal(releasedReads.c21.correction, 'receiver_released');
+  evidence.receiverReleased = { correction: releasedReads.c21.correction, correctableUntil: untilOnAll(releasedReads) };
   const releaseRow = await one(`select actor_type, facility_id, patient_id, details from audit.events
     where action='admin.self-service-facility.release-order-routes' and resource_id=$1`, [laboratory.applicationId])
     ?? await one(`select actor_type, facility_id, patient_id, details from audit.events
