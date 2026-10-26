@@ -1593,8 +1593,8 @@ default, built as decided:
   the EHR's lab-request and prescription lists, the ordering facility's
   Overview, support's lookup and reports list; a `correctableUntil` key on a
   route; any answer from the lookup); then this backend.
-- D17-12: 0090's declaration stays unsigned in this build (`reviewed_by`
-  empty); the owner signs after the gates of SPEC-FINAL §11.2.
+- D17-12: 0090's declaration was left unsigned in the build; the owner,
+  D-Eminence, signed it in chat on 2026-10-26 (see Still open).
 - D17-13: the ordering facility's Overview is unchanged: only the clinician
   who sent the order sees the full item; colleagues see the reference.
 
@@ -1802,8 +1802,8 @@ Decided by the owner, D-Eminence:
   the DPO referral enforced by the console; inbox only; lookup by exact
   reference with the laboratory's own facts, never the patient; 5 a member
   and 20 a facility in 24 hours, exact; a lapsed order ended
-  `wrong_patient`; website first; 0090's declaration unsigned in this build;
-  the Overview unchanged.
+  `wrong_patient`; website first; 0090's declaration signed by the owner in
+  chat on 2026-10-26; the Overview unchanged.
 
 Still open, with what each one holds back:
 
@@ -1905,21 +1905,18 @@ Still open, with what each one holds back:
   `identity.staff_facility_memberships (facility_id)` for active memberships,
   if `receives` is slow in production (3-4 ms a call, p95 up to 6.5 ms, with
   10,000 memberships); not in 0089, because it would lock the table.
-- The late correction (D17, 0090): unsigned (D17-12; `reviewed_by` empty).
-  The owner signs after the gates of SPEC-FINAL §11.2: the container database
-  acceptance, the staging schema upgrade, the suites, the race harness, the
-  copies, the old images' verifiers and the migration checks; then two
-  owner steps before signing:
-  - Production's owners, read with the read-only query in 0090's header
-    ("Owners, before signing") and recorded. The release dry-runs 0090 only
-    once the declaration is signed, so its output cannot be read first.
-    Once signed, the runner prints 0090's NOTICE ("0090: owners checked:
-    …") in the release's log, in the dry run and in the apply; it must name
-    the owners recorded. Whatever the query shows, section 0 stops the
-    release with nothing applied if a role it names lacks a privilege it
-    needs.
-  - The measured costs, accepted as they are (SPEC-FINAL §7's budgets in
-    brackets). Measured on an owner copy with 20,000 lapsed lab routes,
+- The late correction (D17, 0090): signed by the owner, D-Eminence, in chat
+  on 2026-10-26 (D17-12), after the gates of SPEC-FINAL §11.2 passed: the
+  container database acceptance (its database stages), the staging schema
+  upgrade, the suites, the race harness, the copies, the old images'
+  verifiers and the migration checks. Of the two owner steps:
+  - Production's owners were not read beforehand: the owner chose to rely
+    on section 0, which stops the release with nothing applied if a role it
+    names lacks a privilege it needs. The runner prints 0090's NOTICE
+    ("0090: owners checked: …") in the release's log, in the dry run and in
+    the apply; it is read after the release and recorded here.
+  - The measured costs were accepted by the owner as they are (SPEC-FINAL
+    §7's budgets in brackets). Measured on an owner copy with 20,000 lapsed lab routes,
     40,000 denied results and 100,000 bulk routes, 0089's bodies against
     0090's, interleaved, on the local PostgreSQL 16 cluster:
     - the order summary: +4.9 to +10.3 µs per route while the receiving
