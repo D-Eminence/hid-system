@@ -1909,8 +1909,16 @@ Still open, with what each one holds back:
   The owner signs after the gates of SPEC-FINAL §11.2: the container database
   acceptance, the staging schema upgrade, the suites, the race harness and
   the performance gates, the copies, the old images' verifiers and the
-  migration checks, and the owners named in the production dry run's notice
-  read and recorded. Release order (D17-11): item 4 is live (the declaration
+  migration checks; then one owner step before signing:
+  - Production's owners, read with the read-only query in 0090's header
+    ("Owners, before signing") and recorded. The release dry-runs 0090 only
+    once the declaration is signed, so its output cannot be read first.
+    Once signed, the runner prints 0090's NOTICE ("0090: owners checked:
+    …") in the release's log, in the dry run and in the apply; it must name
+    the owners recorded. Whatever the query shows, section 0 stops the
+    release with nothing applied if a role it names lacks a privilege it
+    needs.
+  Release order (D17-11): item 4 is live (the declaration
   names only 0090 and `runtime-grants.sql`); the website first (dormant until
   this backend says it serves D17), then this backend: `database-migration`
   (0090 with `runtime-grants.sql`, dry run then apply), then lab-api,

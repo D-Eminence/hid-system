@@ -32,7 +32,8 @@
 --    the summary's callers C3 and C4, and the owners of C5 and C21) may read
 --    identity.organizations; the applying role may become each owner. A privilege counts only when held
 --    by ownership, membership or grant, never through a superuser's bypass:
---    production's migrator has none. A NOTICE names every owner checked.
+--    production's migrator has none. A NOTICE names every owner checked;
+--    the runner forwards it to the release's log (see Owners, below).
 --    Every attribute but the body of each replaced or dropped function is
 --    recorded.
 -- 1. T8 first, under one ACCESS EXCLUSIVE lock on T8 alone, taken NOWAIT:
@@ -116,6 +117,44 @@
 -- identity.organizations or lab.result_revisions, the runner's lock_timeout
 -- stops the dry run and the apply after 5 seconds with nothing applied; held
 -- on any other table the new bodies read, 0090 applies without waiting.
+--
+-- Owners, before signing (D17-12). The release dry-runs this file only
+-- once its declaration is signed, so production's owners are read before
+-- signing with this read-only query (catalog reads only) and recorded:
+--   select owned.what, pg_get_userbyid(owned.owner_id) as owner
+--     from (select proc.oid::regprocedure::text as what, proc.proowner as owner_id
+--             from pg_proc proc
+--            where proc.oid in (
+--              'ehr.order_route_access_allows(text,uuid,uuid,text)'::regprocedure,
+--              'ehr.order_route_item_access(text,uuid,text)'::regprocedure,
+--              'lab.return_order_route_result()'::regprocedure,
+--              'ehr.guard_order_route_wrong_patient_report()'::regprocedure,
+--              'ehr.list_sent_wrong_patient_order_routes()'::regprocedure,
+--              'identity.admin_list_wrong_patient_reports(text,uuid)'::regprocedure,
+--              'identity.admin_review_wrong_patient_report(uuid,bigint,text[],text,boolean)'::regprocedure,
+--              'ehr.order_route_summary(ehr.order_routes,boolean)'::regprocedure,
+--              'ehr.patient_list_order_routes()'::regprocedure,
+--              'identity.admin_find_order_routes(text,text)'::regprocedure,
+--              'ehr.list_order_routes_for_order(text,uuid,uuid)'::regprocedure,
+--              'ehr.order_route_summaries(text,uuid,uuid[])'::regprocedure,
+--              'lab.order_route_access_for(text,uuid,text)'::regprocedure,
+--              'pharmacy.order_route_access_for(text,uuid,text)'::regprocedure)
+--           union all
+--           select relation.oid::regclass::text, relation.relowner
+--             from pg_class relation
+--            where relation.oid in ('ehr.order_route_wrong_patient_reports'::regclass,
+--                                   'identity.organizations'::regclass)) owned
+--    order by owned.what;
+-- It returns 16 rows: the 14 functions and T8 that section 0 names, and
+-- identity.organizations, which the readers now read. One owner on every
+-- row is expected. A second owner does not stop the release by itself:
+-- section 0 then checks, by ownership, membership or grant, that each role
+-- it names may do what it must, and stops the release with nothing applied
+-- if one may not. Once signed, scripts/apply-migrations.mjs prints this
+-- file's NOTICE in the release's log, in the dry run and in the apply
+-- ("NOTICE 0090_order_route_late_correction.sql: 0090: owners checked:
+-- ..."): the same 14 functions and T8, H6's owner also as "o (H6)". It must
+-- name the owners recorded before signing.
 --
 -- Old services on this schema: the previous Lab and Pharmacy images call
 -- none of the new functions; item access and the release trigger change
