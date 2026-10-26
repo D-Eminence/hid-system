@@ -1551,7 +1551,11 @@ default, built as decided:
 - D17-3: when B cannot act (it left Health ID, does not respond, or the
   deadline passed), support's stop-gap, reworded: the clinician notes in the
   record, without repeating the value, that the result was not the patient's;
-  support refers it to the DPO the same day. No support withdrawal.
+  support refers it to the DPO the same day. No support withdrawal. Once B's
+  organization was released (its memberships ended, for good), every reader
+  answers the order `receiver_released` with no deadline (also an order that
+  had ended another way before the release), so no screen promises a
+  withdrawal B can no longer make, and the command refuses it.
 - D17-4: the ordering facility (A) sees item 3's red warning with the other
   person's values hidden, plus the sentence that anything it recorded from
   the value (a note, a diagnosis, a prescription) still shows until it
@@ -1576,7 +1580,9 @@ default, built as decided:
   Never the patient. A reference no order accepted there carries answers 200
   with no items, never 404.
 - D17-9: at most 5 late corrections per member and 20 per facility in any 24
-  hours, exact (a transaction advisory lock per receiving facility); the
+  hours, exact (a transaction advisory lock per receiving facility, and the
+  command refuses any caller whose transaction is not READ COMMITTED, where
+  the count after the lock could miss what an earlier holder committed); the
   refusal (429 `ORDER_ROUTE_CORRECTION_LIMIT`) says from when another is
   possible (problem member `retryAfter`); support cannot lift it.
 - D17-10: an order whose time simply ran out is ended "accepted for the wrong
@@ -1600,7 +1606,9 @@ for the route's facility, patient, kind and the member; the receiving access
 rule (H6) honours it only inside that transaction
 (`pg_current_xact_id_if_assigned()`), behind the control and the receive
 permission; the command deletes it before it returns. H7 and item 3's
-command are unchanged byte for byte.
+command are unchanged byte for byte. The command runs only in a READ
+COMMITTED transaction (25000 `ORDER_ROUTE_CORRECTION_READ_COMMITTED_REQUIRED`
+otherwise, before it reads anything), as both services call it.
 
 The services' part (routes under `/api/v1`; INTERFACE_CONTRACT §23):
 

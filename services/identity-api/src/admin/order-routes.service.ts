@@ -28,9 +28,10 @@ interface FoundRouteRow extends QueryResultRow {
   closable?: boolean | null;
   /**
    * D17 (0090): whether the receiver may still withdraw what it sent back
-   * (`not_accepted | open | correctable | reported | too_late`), the deadline
-   * (also past, for too_late; null for not_accepted and reported), and the
-   * receiver's report, if any. Absent on an earlier schema.
+   * (`not_accepted | open | correctable | reported | receiver_released |
+   * too_late`), the deadline (also past, for too_late; null for not_accepted,
+   * reported and receiver_released), and the receiver's report, if any.
+   * Absent on an earlier schema.
    */
   correction?: string | null;
   correctable_until?: Date | string | null;
@@ -251,8 +252,9 @@ export class AdminOrderRoutesService {
    *
    * D17 (0090): each route also answers `correction` (whether the receiver
    * may still withdraw what it sent back: not_accepted, open, correctable,
-   * reported or too_late), `correctableUntil` (the deadline; already past for
-   * too_late) and `wrongPatient` (`{ reportedAt, late }` or null), each only
+   * reported, receiver_released (its organization was released, so no
+   * member can act) or too_late), `correctableUntil` (the deadline; already
+   * past for too_late) and `wrongPatient` (`{ reportedAt, late }` or null), each only
    * when the schema answers it, and the answer adds `lateCorrection: true`,
    * so support's console learns this backend serves the late correction.
    */
