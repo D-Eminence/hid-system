@@ -47,6 +47,9 @@ const { NotificationOtpClient } = load('auth/notification-otp.client.ts');
 const { ConsentController } = load('consent/consent.controller.ts');
 const { ConsentService } = load('consent/consent.service.ts');
 const { EmergencyContactController } = load('patient-safety/emergency-contact.controller.ts');
+// 0087: the access history (PatientSelfController) serves the revocation's labels.
+const { PatientSelfController } = load('auth/patient-self.controller.ts');
+const { PatientSelfService } = load('auth/patient-self.service.ts');
 const { EmergencyContactService } = load('patient-safety/emergency-contact.service.ts');
 const { EmergencyContactProtector } = load('patient-safety/emergency-contact-protector.ts');
 const { EmergencyContactNotificationDispatcher } = load('patient-safety/emergency-contact-notification.dispatcher.ts');
@@ -91,10 +94,10 @@ const notification = {
 let app;
 try {
   const module = await Test.createTestingModule({
-    controllers: [AuthController, ConsentController, EmergencyContactController],
+    controllers: [AuthController, ConsentController, EmergencyContactController, PatientSelfController],
     providers: [{ provide: DatabaseService, useValue: database }, TokenService, LocalAuthProvider,
       CurrentStaffContextService, CurrentPatientContextService, AuthService, AuthSessionAuditService,
-      AuditService, WorkloadAuthService, TurnstileService, ConsentService,
+      AuditService, WorkloadAuthService, TurnstileService, ConsentService, PatientSelfService,
       EmergencyContactService, EmergencyContactProtector, EmergencyContactNotificationDispatcher,
       { provide: NotificationOtpClient, useValue: notification },
       { provide: GoogleAuthenticationService, useValue: {
@@ -217,6 +220,42 @@ try {
     [activated.body.consentGrantId])).rows;
   assert.deepEqual(intents, [{ status: 'pending' }], 'break-glass creates one intent for the verified contact');
 
+  // 0087 (main 0066 items 2-3): the access history's labels and the patient's
+  // revocation, as the website calls them. sa signed in moments ago, so the
+  // approval below has its recent sign-in, and no recovery hold exists yet.
+  const historyItem = async (who, grantId) => (await get(who, '/identity/me/access-history').expect(200)).body.items
+    .find((item) => item.consentGrantId === grantId);
+  const revokeGrant = (who, grantId, reason = 'No longer needed') =>
+    post(who, `/identity/me/consent-grants/${grantId}/revoke`, { reason });
+  const emergencyItem = await historyItem(sa, activated.body.consentGrantId);
+  assert.deepEqual([emergencyItem.breakGlass, emergencyItem.patientRevocable, 'revocableByPatient' in emergencyItem],
+    [true, false, false], 'break-glass is labelled and never revocable; the database key is not published');
+  problem(await revokeGrant(sa, activated.body.consentGrantId), 409, 'CONSENT_COMMAND_CONFLICT', 'revoking break-glass');
+  problem(await revokeGrant(clinician, activated.body.consentGrantId), 403, 'PATIENT_SESSION_REQUIRED', 'a staff session revoking');
+  const asked = await http.post('/api/v1/identity/access-requests').set('Cookie', clinician.cookie).set('Origin', origin)
+    .set('x-csrf-token', clinician.csrf).set('X-Facility-ID', ids.facility).set('X-Purpose-Of-Use', 'direct-care')
+    .send({ hid: 'HID-CNTCTAAA', scope: 'read_records', reason: 'Follow-up review visit', durationMinutes: 60 });
+  assert.equal(asked.status, 201, `access request failed: ${JSON.stringify(asked.body)}`);
+  const approval = await post(sa, `/identity/access-requests/${asked.body.accessRequestId}/approve`);
+  assert.equal(approval.status, 200, `approval failed: ${JSON.stringify(approval.body)}`);
+  const approvedGrantId = approval.body.consentGrantId;
+  const approvedItem = await historyItem(sa, approvedGrantId);
+  assert.deepEqual([approvedItem.breakGlass, approvedItem.patientRevocable], [false, true]);
+  problem(await revokeGrant(sb, approvedGrantId), 404, 'CONSENT_RESOURCE_NOT_FOUND', "another patient's grant");
+  const revoked = await revokeGrant(sa, approvedGrantId, '  No longer needed  ');
+  assert.equal(revoked.status, 200, `revocation failed: ${JSON.stringify(revoked.body)}`);
+  assert.deepEqual([revoked.body.consentGrantId, revoked.body.status, revoked.body.replayed], [approvedGrantId, 'revoked', false]);
+  const again = await revokeGrant(sa, approvedGrantId);
+  assert.deepEqual([again.status, again.body.replayed], [200, true]);
+  const revokedItem = await historyItem(sa, approvedGrantId);
+  assert.deepEqual([revokedItem.status, revokedItem.patientRevocable], ['revoked', false]);
+  // The facility's audit sees that the patient revoked, never the patient's words (kept on the grant).
+  assert.deepEqual((await pool.query(`select actor_type, facility_id, reason from audit.events
+    where action = 'identity.consent-grant.patient-revoke' and resource_id = $1`, [approvedGrantId])).rows,
+    [{ actor_type: 'patient', facility_id: ids.facility, reason: 'Revoked by the patient' }]);
+  assert.equal((await pool.query('select revoked_reason from identity.consent_grants where id = $1', [approvedGrantId]))
+    .rows[0].revoked_reason, 'No longer needed');
+
   // The leased dispatcher sends the owner's field set, masked, and never the typed reason.
   const dispatcher = module.get(EmergencyContactNotificationDispatcher);
   const summary = await dispatcher.dispatch(`emergency-contacts-${randomUUID()}`);
@@ -326,6 +365,7 @@ try {
   process.stdout.write(JSON.stringify({ status: 'passed', scope: 'local-synthetic-only', role: 'hid_identity_api_runtime',
     delivery: 'local-stub-only', availability: 'delivery-on-email-only', sms_contact_refused: true,
     emergency_contacts: 'encrypted-owned-verified-renamed-deactivated', staff_session_refused: true,
+    patient_grant_revocation: 'labels-break-glass-409-staff-403-other-patient-404-revoked-replayed-audited-without-patient-words',
     break_glass_contact_alert: 'intent-created-stub-delivered-once', alert_fields: 'full-name-hid-suffix-clinician-facility-phone',
     alert_has_no_full_hid_or_reason: true, alert_audit_without_facility_or_contact_details: true,
     removed_contact_erased: true, recovery_hold: 'add-refused-lifted-after-24h', identity_audit_rows: sources,
