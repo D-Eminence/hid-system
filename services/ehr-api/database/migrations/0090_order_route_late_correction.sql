@@ -1711,8 +1711,12 @@ $$;
 -- Both are computed inline from one read of T8, without calling the helpers:
 -- a LANGUAGE sql function with SET is never inlined and is planned on each
 -- call, which would cost every order list several times the summary itself.
--- The deadline is ehr.order_route_correctable_until's expression; the suite
--- checks they agree on every route. 0086's keys and attributes otherwise.
+-- OFFSET 0 keeps the report's subquery from being pulled up into each
+-- reference to it (two reads of T8), and a route never accepted, which has
+-- no report, does not read it. The deadline is
+-- ehr.order_route_correctable_until's expression; the suite checks they
+-- agree on every route, and counts the reads. 0086's keys and attributes
+-- otherwise.
 create or replace function ehr.order_route_summary(route ehr.order_routes, resend_allowed boolean)
 returns jsonb
 language sql stable
@@ -1734,7 +1738,8 @@ as $$
                              then route.accepted_at + interval '4320 hours' end)
     from (select (select jsonb_build_object('reportedAt', wrong_patient.reported_at, 'late', wrong_patient.late)
                     from ehr.order_route_wrong_patient_reports wrong_patient
-                   where wrong_patient.route_id = route.id) as answer) report
+                   where route.accepted_at is not null and wrong_patient.route_id = route.id) as answer
+           offset 0) report
 $$;
 
 -- C28. The ordering facility's Overview card (0088 section 4), replaced:

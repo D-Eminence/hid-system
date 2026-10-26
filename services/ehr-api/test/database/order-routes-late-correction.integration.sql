@@ -2476,6 +2476,29 @@ select pg_temp.assert('d17 readers: on every route the summary''s correctableUnt
                  from ehr.order_route_wrong_patient_reports report where report.route_id = route.id)))
   and (select count(*) from ehr.order_routes) = 33
   and (select count(distinct ehr.order_route_correction_state(route)) from ehr.order_routes route) = 5);
+-- The summary reads the report table once for an accepted route (the
+-- report, from which it answers both keys) and not at all for a route never
+-- accepted, which has no report (table statistics, this transaction).
+create function pg_temp.t8_scans() returns bigint language sql volatile as $f$
+  select coalesce(pg_stat_get_xact_numscans('ehr.order_route_wrong_patient_reports'::regclass), 0)
+    + coalesce((select sum(pg_stat_get_xact_numscans(index_row.indexrelid)) from pg_index index_row
+                 where index_row.indrelid = 'ehr.order_route_wrong_patient_reports'::regclass), 0)::bigint
+$f$;
+create function pg_temp.t8_scans_of_summary(name text) returns bigint language plpgsql volatile as $f$
+declare
+  before bigint := pg_temp.t8_scans();
+begin
+  perform ehr.order_route_summary(pg_temp.route(pg_temp.r(name)), false);
+  return pg_temp.t8_scans() - before;
+end
+$f$;
+select pg_temp.assert('d17 readers: one summary reads the report table once for an accepted route (reported or not), '
+    || 'never for one not accepted',
+  pg_temp.t8_scans_of_summary('lima') = 1 and pg_temp.t8_scans_of_summary('g2s') = 1
+  and pg_temp.t8_scans_of_summary('opc') = 1 and pg_temp.t8_scans_of_summary('snt') = 0
+  and pg_temp.t8_scans_of_summary('dec') = 0,
+  concat_ws(' ', pg_temp.t8_scans_of_summary('lima'), pg_temp.t8_scans_of_summary('g2s'),
+    pg_temp.t8_scans_of_summary('opc'), pg_temp.t8_scans_of_summary('snt'), pg_temp.t8_scans_of_summary('dec')));
 -- The answers as the runtimes give them, kept for the owner's checks.
 create temp table d17_out (n serial primary key, label text not null, answer jsonb not null);
 grant select, insert on d17_out to hid_ehr_api_runtime, hid_identity_api_runtime;
