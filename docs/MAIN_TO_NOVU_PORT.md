@@ -1512,7 +1512,8 @@ The services' part (routes under `/api/v1`; INTERFACE_CONTRACT §22):
   `identity.admin_find_order_routes` and maps `accessEndsAt` and `closable`
   only when the schema answers them, so it works with or without 0089 (or
   with a later migration that restores 0086's lookup). The summary passes
-  `destination` through unchanged.
+  `destination` through unchanged, as earlier Identity images do, so it is
+  answered as soon as 0089 is applied.
 - ehr-api: no runtime change; the order-routes runtime verifier checks the
   fields (scripts only).
 - Tests: the database suite `order-routes-contract-fields` and the extended
@@ -1750,6 +1751,14 @@ Still open, with what each one holds back:
   `identity.staff_facility_memberships (facility_id)` for active memberships,
   if `receives` is slow in production (3-4 ms a call, p95 up to 6.5 ms, with
   10,000 memberships); not in 0089, because it would lock the table.
+  Rollback and mixed images were run end to end (integration): 22cd47f's
+  and aba7c16's services pass their own order-routes runtime verifier on
+  0089 (their lists carry no new field and support's lookup keeps its 13
+  columns; the summary already carries `destination`), and item 4's
+  services pass 22cd47f's on 0088 (no field, no 503). The website was fed
+  the answers of each (aba7c16 on 0087, 22cd47f on 0088 and 0089, item 4 on
+  0088 and 0089): it keeps today's pages wherever a field is absent and
+  uses each one wherever it is answered.
 
 A default-off switch is turned on through `dev`'s Terraform for a tunable, or
 by a later commit for a one-way enforcement flip; a database control through

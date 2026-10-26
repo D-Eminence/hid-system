@@ -997,7 +997,9 @@ four keys:
 No verification method is answered. Listing can change whether clinicians
 find the facility only when `receivingTypes` is not empty and `review` is
 `pending`, `reviewed` or `governed`; the console offers the listing form only
-then.
+then. The summary is the database's own, which Identity passes through as it
+is, so `destination` is answered as soon as 0089 is applied, by an earlier
+Identity image too; a schema before 0089 answers without it.
 
 ```json
 { "facilityId": "…", "listed": { "value": true, "byDefault": true, "reason": null, "setAt": null },
