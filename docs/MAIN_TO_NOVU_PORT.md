@@ -1239,8 +1239,8 @@ The services' part of P4c (all new; routes under `/api/v1`, errors
 
 Patient grant revocation differs from `main` (0066 items 2-4, 3490809 and
 eb9b1ca) in these ways. The choices are the recommended defaults of the
-item's spec (D1-D14), which the owner confirms by signing 0087's
-declaration; those that keep `main`'s behaviour say so.
+item's spec (D1-D14), which the owner confirmed in chat on 2026-10-26 when
+signing 0087's declaration; those that keep `main`'s behaviour say so.
 
 - One migration, 0087, holds the three items (this branch's 0066 is
   `0066_patient_chat_history.sql`): `identity.revoke_my_consent_grant`, the
@@ -1441,8 +1441,11 @@ Decided by the owner, D-Eminence:
   unactivated applications lapse after 24 hours; the control ships off and is
   switched on right after the deploy and its closed-state checks, with no pilot.
 - Patient grant revocation (main 0066 items 2-4) is ported, as 0087, at the
-  owner's request. Its choices D1-D14 are not decided yet: they are the
-  spec's recommended defaults, listed under Still open below.
+  owner's request. On 2026-10-26 the owner confirmed the spec's recommended
+  defaults D1-D14 (each is described under "Patient grant revocation
+  differs from `main`" in Ported above) and signed 0087's declaration, with the website copy release
+  (the corrected emergency-access sentence and the revoke form's PIN note)
+  going first.
 
 Still open, with what each one holds back:
 
@@ -1490,44 +1493,6 @@ Still open, with what each one holds back:
   When account deletion is ported: support's emergency-contact opt-out counts
   a patient as told even when the inbox skips a deleted login (0084's
   `patients_told`).
-- Patient grant revocation (ported above, 0087, unsigned): 0087 is built on
-  the spec's recommended defaults D1-D14, which the owner has not confirmed.
-  They stand only if the owner signs 0087's declaration without changing
-  one; a change is made, and re-tested, before signing. D1: the database
-  labels `revocableByPatient` and Identity publishes `patientRevocable`. D2:
-  no recent sign-in to revoke. D3: `main`'s rule (patient-approved or
-  PIN-derived; never break-glass or workforce). D4: order routes are left
-  alone. D5: details written for the patient. D6: the website drops "and
-  reviewed" from the emergency-access sentence first. D7: only a deleted
-  login gets no new inbox items. D8 and D9: no notice to the clinician and
-  no inbox receipt. D10: the owner signs `reviewed_by` and re-pins health
-  after the release. D11: 0087 is released on its own. D12: the Access PIN
-  stays valid after a PIN-based grant is revoked, and the revoke form says
-  so. D13: the audit row's reason is the fixed 'Revoked by the patient'. D14:
-  the history's limit keeps revocable grants. Sequencing: the website copy
-  release (the corrected emergency-access sentence, and the PIN sentence on
-  the revoke form) ships before 0087, while health's pins match the live
-  backend; since item 1's release (595c044: identity-api, ehr-api, lab-api
-  and pharmacy-api) they do not, so that release carries the owner-signed
-  re-pin of those four (below, Frontend pin). The owner signs the 0087
-  declaration after the read-only preflights (the md5 and owners of the six
-  bodies 0087 pins, no `revoke_my_consent_grant` yet, the CHECKs and the one
-  user trigger on `identity.consent_grants`; that the migration login has
-  the privileges of, that is inherits, the owners of the two replaced
-  functions, of `identity.patient_self_session` and of the three tables the
-  new SECURITY DEFINER revoke reads and writes, `pg_has_role(..., 'USAGE')`,
-  since a membership granted WITH INHERIT FALSE passes a MEMBER test yet
-  cannot replace the functions; and two counts: active legacy grants naming
-  the patient as grantor, and active patients with a deleted login), and
-  after the website copy release. Before signing, at the release commit, two
-  gates that CI does not run are run by hand and their outputs kept with the
-  review: the container database acceptance (`npm run
-  acceptance:container:database`: a fresh install, every suite in
-  `services/ehr-api/test/database/`, the new one included, then no pending
-  migration) and the staging schema upgrade (`npm --prefix services/ehr-api
-  run db:test-staging-upgrade` with `HID_REHEARSAL_ADMIN_URL` set: 0087 as
-  the only declared migration, the runtime grants unchanged, a clean
-  install).
 - Facility self sign-up (ported above, switched off): the owner signs the 0086
   declaration, after the read-only preflights (no closed organization
   application without a review reason, reviewer or review time, which 0086
