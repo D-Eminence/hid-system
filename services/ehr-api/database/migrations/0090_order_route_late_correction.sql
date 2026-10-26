@@ -30,8 +30,7 @@
 --    0090 may read it; the owners of C5 and C21 may run o's helpers; every
 --    role that decides whether the receiving organization was released (o,
 --    the summary's callers C3 and C4, and the owners of C5 and C21) may read
---    identity.organizations and run o's helpers; the applying role may
---    become each owner. A privilege counts only when held
+--    identity.organizations; the applying role may become each owner. A privilege counts only when held
 --    by ownership, membership or grant, never through a superuser's bypass:
 --    production's migrator has none. A NOTICE names every owner checked.
 --    Every attribute but the body of each replaced or dropped function is
@@ -107,16 +106,16 @@
 -- sessions only at commit. Section 5's PL/pgSQL validator takes a momentary
 -- ACCESS SHARE on lab.result_revisions (the release trigger's %ROWTYPE).
 -- Held to commit besides T8: ACCESS EXCLUSIVE on the new T9, its primary
--- key and its TOAST table, and ACCESS SHARE on identity.facilities, which
--- the summary's LANGUAGE sql body names when it is created. Nothing else is
--- locked: nothing on ehr.order_routes beyond that momentary read, nothing
--- else on any Lab or Pharmacy chain table, nothing on
--- platform.control_settings or identity.consent_grants. ACCESS SHARE
--- conflicts only with ACCESS EXCLUSIVE: with ACCESS EXCLUSIVE held on
--- ehr.order_routes, ehr.order_route_events, T8, identity.facilities or
--- lab.result_revisions, the runner's lock_timeout stops the dry run and the
--- apply after 5 seconds with nothing applied; held on any other table the
--- new bodies read, 0090 applies without waiting.
+-- key and its TOAST table, and ACCESS SHARE on identity.facilities and
+-- identity.organizations, which the summary's LANGUAGE sql body names when
+-- it is created. Nothing else is locked: nothing on ehr.order_routes beyond
+-- that momentary read, nothing else on any Lab or Pharmacy chain table,
+-- nothing on platform.control_settings or identity.consent_grants. ACCESS
+-- SHARE conflicts only with ACCESS EXCLUSIVE: with ACCESS EXCLUSIVE held on
+-- ehr.order_routes, ehr.order_route_events, T8, identity.facilities,
+-- identity.organizations or lab.result_revisions, the runner's lock_timeout
+-- stops the dry run and the apply after 5 seconds with nothing applied; held
+-- on any other table the new bodies read, 0090 applies without waiting.
 --
 -- Old services on this schema: the previous Lab and Pharmacy images call
 -- none of the new functions; item access and the release trigger change
@@ -642,34 +641,27 @@ begin
       mismatch;
   end if;
   -- Every role that decides whether the receiving organization was
-  -- released (the helper reads identity.organizations as its caller, and
-  -- C5 reads it itself) may read that table and run o's helpers: o (C29,
-  -- C30), the summary's callers (C3 and C4; the summary asks the helper only
-  -- when B is not available), and the recorded owners of C5 and C21.
-  select string_agg(format('%s (%s) %s', needer.what, pg_get_userbyid(needer.role_id), needer.privilege), ', ')
+  -- released may read identity.organizations: o (C29 and C30, through the
+  -- helper), the summary's callers (C3 and C4; the summary reads it only
+  -- when B is not available), and the recorded owners of C5 (which reads it
+  -- itself) and C21 (through the helper, which they may run, checked above).
+  select string_agg(format('%s (%s)', caller.what, pg_get_userbyid(caller.role_id)), ', ')
     into mismatch
-    from (
-      select caller.what, caller.role_id, wanted.privilege
-        from (select proc.oid::regprocedure::text as what, proc.proowner as role_id from pg_proc proc
-               where proc.oid in ('ehr.list_order_routes_for_order(text,uuid,uuid)'::regprocedure,
-                                  'ehr.order_route_summaries(text,uuid,uuid[])'::regprocedure)
-              union all
-              select recorded.signature, recorded.proowner from pg_temp.order_route_late_0090 recorded
-               where recorded.signature::regprocedure in ('ehr.patient_list_order_routes()'::regprocedure,
-                       'identity.admin_find_order_routes(text,text)'::regprocedure)
-              union all
-              select 'o (H6)', o) caller
-        cross join (values ('SELECT on identity.organizations'), ('EXECUTE on o''s helpers')) wanted(privilege)
-    ) needer
-   where (needer.privilege = 'SELECT on identity.organizations'
-          and not pg_temp.order_route_0090_holds(needer.role_id,
-            (select relation.relowner from pg_class relation where relation.oid = 'identity.organizations'::regclass),
-            (select relation.relacl from pg_class relation where relation.oid = 'identity.organizations'::regclass),
-            'r', 'SELECT'))
-      or (needer.privilege = 'EXECUTE on o''s helpers'
-          and not pg_temp.order_route_0090_holds(needer.role_id, o, '{}'::aclitem[], 'f', 'EXECUTE'));
+    from (select proc.oid::regprocedure::text as what, proc.proowner as role_id from pg_proc proc
+           where proc.oid in ('ehr.list_order_routes_for_order(text,uuid,uuid)'::regprocedure,
+                              'ehr.order_route_summaries(text,uuid,uuid[])'::regprocedure)
+          union all
+          select recorded.signature, recorded.proowner from pg_temp.order_route_late_0090 recorded
+           where recorded.signature::regprocedure in ('ehr.patient_list_order_routes()'::regprocedure,
+                   'identity.admin_find_order_routes(text,text)'::regprocedure)
+          union all
+          select 'o (H6)', o) caller
+    cross join pg_class relation
+   where relation.oid = 'identity.organizations'::regclass
+     and not pg_temp.order_route_0090_holds(caller.role_id, relation.relowner, relation.relacl, 'r', 'SELECT');
   if mismatch is not null then
-    raise exception '0090: a role that asks whether the receiving organization was released may not: %', mismatch;
+    raise exception '0090: a role that decides whether the receiving organization was released may not read identity.organizations: %',
+      mismatch;
   end if;
   -- The applying role inherits every owner it acts for (replacing, dropping,
   -- altering T8) and may become each one it gives an object to (ALTER OWNER
@@ -1764,9 +1756,10 @@ $$;
 -- with two keys: wrongPatient, B's report ({reportedAt, late}) or null; and
 -- correctableUntil, the deadline while B may still correct the route (open
 -- or correctable: accepted, not reported, B not released, before the
--- deadline), else null. Whether B was released is asked of the helper only
--- when B is not available as a destination (an available B's organization
--- is active), so an ordinary list pays nothing for it.
+-- deadline), else null. Whether B's organization is still active (no
+-- release) is read only when B is not available as a destination (an
+-- available B's organization is active), so an ordinary list pays nothing
+-- for it, and never through the helper.
 -- Both are computed inline from one read of T8, without calling the helpers:
 -- a LANGUAGE sql function with SET is never inlined and is planned on each
 -- call, which would cost every order list several times the summary itself.
@@ -1796,7 +1789,9 @@ as $$
                                and facts.answer is null
                                and clock_timestamp() < route.accepted_at + interval '4320 hours'
                                and (facts.available
-                                 or ehr.order_route_correction_state(route) <> 'receiver_released')
+                                 or exists (select 1 from identity.organizations organization
+                                             where organization.id = route.receiving_organization_id
+                                               and organization.active))
                              then route.accepted_at + interval '4320 hours' end)
     from (select identity.order_route_destination_eligible(route.receiving_facility_id, route.kind) as available,
                  (select jsonb_build_object('reportedAt', wrong_patient.reported_at, 'late', wrong_patient.late)

@@ -3055,6 +3055,17 @@ select pg_temp.assert('d17 released: L1''s organization is no longer active; lim
     ehr.order_route_correction_state(pg_temp.route(pg_temp.r('opc'))),
     ehr.order_route_summary(pg_temp.route(pg_temp.r('limb')), false) ->> 'correctableUntil',
     (select string_agg(answer::text, ' ') from d17_out where label like 'c21-released-%')));
+-- The summary asks whether the receiving organization is active itself, and only when the receiving facility is not
+-- available as a destination: no call of the correction-state helper per route (function statistics).
+select set_config('hid.test.state_calls_before_summary', coalesce(pg_stat_get_xact_function_calls(
+  'ehr.order_route_correction_state(ehr.order_routes)'::regprocedure), 0)::text, true);
+select count(ehr.order_route_summary(pg_temp.route(pg_temp.r(name)), false))
+  from unnest(array['limb', 'opc', 'lima', 'g2s', 'snt']) name;
+select pg_temp.assert('d17 released: the summary of an order whose receiving facility is not available calls no helper',
+  coalesce(pg_stat_get_xact_function_calls('ehr.order_route_correction_state(ehr.order_routes)'::regprocedure), 0)
+    = current_setting('hid.test.state_calls_before_summary')::bigint,
+  current_setting('hid.test.state_calls_before_summary') || ' -> ' || coalesce(pg_stat_get_xact_function_calls(
+    'ehr.order_route_correction_state(ehr.order_routes)'::regprocedure), 0));
 select pg_temp.snap();
 set local role hid_lab_api_runtime;
 select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
