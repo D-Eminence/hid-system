@@ -790,6 +790,13 @@ revoke all on function identity.current_patient_account(text),
   identity.authorize_patient_self(text,uuid), identity.patient_self_access_history(text,uuid),
   ehr.patient_self_context(uuid) from public;
 
+-- The patient's revocation of a grant they gave (0087, main 0066's
+-- revoke_my_consent_grant): bound to the live patient session inside the
+-- command; break-glass and workforce grants are refused there. As 0087 grants it.
+grant execute on function identity.revoke_my_consent_grant(text,uuid,uuid,text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.revoke_my_consent_grant(text,uuid,uuid,text) from public;
+
 -- Patient emergency contacts (0084), as that migration grants them. Every
 -- patient command resolves the patient through identity.patient_self_session,
 -- delivery requires the Identity system context, and the two support commands

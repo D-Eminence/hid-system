@@ -2,10 +2,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadConfiguration, verifyMachineConfiguration } from '../scripts/verify-release-contract.mjs';
 
-test('release accepts 87 retained filenames through 0086, including duplicate prefixes and the unused 0065 slot', async () => {
+test('release accepts 88 retained filenames through 0087, including duplicate prefixes and the unused 0065 slot', async () => {
   const configuration = await loadConfiguration();
-  assert.equal(configuration.components.migration.count, 87);
-  assert.equal(configuration.components.migration.last, '0086');
+  assert.equal(configuration.components.migration.count, 88);
+  assert.equal(configuration.components.migration.last, '0087');
   assert.ok(!configuration.components.migration.files.some(file => file.name.startsWith('0065_')));
   await verifyMachineConfiguration(configuration);
 });
