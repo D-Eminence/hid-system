@@ -3,7 +3,9 @@
 --   1. EXECUTE on every section 6 function exactly as section 7 grants it
 --      (SPEC-FINAL 8.10): the commands to their runtime and the schema test
 --      runtime, support's to Identity only, the helpers and trigger functions
---      to no role; PUBLIC on none;
+--      to no role; PUBLIC on none; and 0088's (item 3: the wrong-patient
+--      report's wrappers and recreated cards, support's list and review, the
+--      ordering facility's Overview read) exactly as its section 5 grants them;
 --   2. no runtime privilege on any new table and no sequence; row-level
 --      security enabled and forced with its four policies; the work lists'
 --      strict policies; every new trigger enabled 'O';
@@ -13,7 +15,8 @@
 --      event; a set-once column changed;
 --   4. after a run through every command (send, mismatch and accept, release,
 --      correction, invalidation, dispensing, reversal, decline, withdrawal,
---      Stop, support's close, the destination setting): each route's event
+--      Stop, support's close, the destination setting, 0088's wrong-patient
+--      report): each route's event
 --      history replays to its head; no row at the receiving facility carries
 --      the patient before acceptance (P4.1); no row written for the other
 --      facility carries an account or membership (P4.2); no details carry a
@@ -603,8 +606,15 @@ select signature::regprocedure, grantees from (values
   ('identity.admin_close_order_route(uuid,bigint,text)', array['hid_identity_runtime']),
   ('identity.admin_set_order_route_destination(uuid,boolean,text)', array['hid_identity_runtime']),
   ('identity.list_my_notification_inbox(integer)', array['hid_identity_runtime']),
-  ('identity.mark_my_notification_read(uuid)', array['hid_identity_runtime'])) v(signature, grantees);
--- Every other function section 6 creates or replaces: owner only.
+  ('identity.mark_my_notification_read(uuid)', array['hid_identity_runtime']),
+  -- 0088 (item 3).
+  ('lab.report_wrong_patient_order_route(uuid,bigint,text,text,text,character)', array['hid_lab_runtime', 'hid_schema_test_runtime']),
+  ('pharmacy.report_wrong_patient_order_route(uuid,bigint,text,text,text,character)', array['hid_pharmacy_runtime', 'hid_schema_test_runtime']),
+  ('identity.admin_list_wrong_patient_reports(text,uuid)', array['hid_identity_runtime']),
+  ('identity.admin_review_wrong_patient_report(uuid,bigint,text[],text,boolean)', array['hid_identity_runtime']),
+  ('ehr.list_sent_wrong_patient_order_routes()', array['hid_ehr_runtime', 'hid_schema_test_runtime'])) v(signature, grantees);
+-- Every other function section 6 or 0088 creates or replaces: owner only
+-- (0088's shared command and its report table's guard among them).
 insert into expected_execute
 select p.oid::regprocedure, array[]::text[]
   from pg_proc p join pg_namespace n on n.oid = p.pronamespace
@@ -618,8 +628,8 @@ select expected.signature, coalesce((select array_agg(acl.grantee::regrole::text
    where p.oid = expected.signature and acl.privilege_type = 'EXECUTE' and acl.grantee <> p.proowner),
     array[]::text[]) as grantees
   from expected_execute expected;
-select pg_temp.assert('section 6 has its 69 functions, with the two inbox functions 71',
-  (select count(*) from expected_execute) = 71, (select count(*) from expected_execute)::text);
+select pg_temp.assert('section 6 has its 69 functions, with the two inbox functions 71, and 0088 adds 7: 78',
+  (select count(*) from expected_execute) = 78, (select count(*) from expected_execute)::text);
 select pg_temp.assert('EXECUTE exactly as section 7 grants it', not exists (select 1 from expected_execute expected
     join actual_execute actual using (signature) where actual.grantees <> expected.grantees),
   (select string_agg(expected.signature::text || ' ' || actual.grantees::text, '; ') from expected_execute expected
@@ -628,7 +638,7 @@ select pg_temp.assert('PUBLIC executes none', not exists (select 1 from expected
     aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
    where p.oid = expected.signature and acl.grantee = 0));
 select pg_temp.assert('every helper, view function and trigger function is the owner''s alone',
-  (select count(*) from expected_execute where cardinality(grantees) = 0) = 43
+  (select count(*) from expected_execute where cardinality(grantees) = 0) = 45
   and not exists (select 1 from expected_execute expected, pg_roles runtime
     where cardinality(expected.grantees) = 0 and runtime.rolname ~ '^hid_.*runtime$'
       and has_function_privilege(runtime.oid, expected.signature, 'EXECUTE')));
@@ -647,7 +657,7 @@ select pg_temp.assert('the API runtimes reach the commands through their parents
 create temp table new_tables (relation regclass primary key) on commit drop;
 insert into new_tables values ('ehr.order_routes'), ('ehr.order_route_events'), ('ehr.order_route_accept_attempts'),
   ('ehr.order_route_attestation_texts'), ('lab.order_route_result_reports'), ('pharmacy.order_route_dispensing_reports'),
-  ('identity.order_route_destination_settings');
+  ('identity.order_route_destination_settings'), ('ehr.order_route_wrong_patient_reports');
 select pg_temp.assert('no role but the owner holds a privilege on a new table', not exists (select 1
     from new_tables t join pg_class c on c.oid = t.relation, aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
    where acl.grantee <> c.relowner)
@@ -685,7 +695,8 @@ select pg_temp.assert('every new trigger is enabled ''O''', (select count(*) fil
       'order_route_dispensing_reports_no_mutation', 'order_route_destination_settings_no_mutation',
       'lab_requests_order_routes_sync', 'prescriptions_order_routes_sync', 'result_releases_order_route_return',
       'result_invalidations_order_route_return', 'dispensings_order_route_return',
-      'dispensing_reversals_order_route_return', 'organization_applications_order_routes_release')) = 15);
+      'dispensing_reversals_order_route_return', 'organization_applications_order_routes_release',
+      'order_route_wrong_patient_reports_guard')) = 16);
 
 -- 4 (run). Every command once.
 create function pg_temp.accept(route uuid, n integer, identifier text, key text)
@@ -694,11 +705,11 @@ returns text language sql as $f$
 $f$;
 grant execute on function pg_temp.accept(uuid,integer,text,text) to hid_lab_api_runtime;
 set local role hid_ehr_api_runtime;
-select set_config('hid.test.lr_' || n, pg_temp.lab_request(1, 'active')::text, true) from generate_series(1, 7) n;
+select set_config('hid.test.lr_' || n, pg_temp.lab_request(1, 'active')::text, true) from generate_series(1, 8) n;
 select set_config('hid.test.rx_1', pg_temp.prescription(1, 'active')::text, true);
 select set_config('hid.test.route_' || n, pg_temp.send(11, 'lab_request', current_setting('hid.test.lr_' || n)::uuid,
   current_setting('hid.test.facility_1')::uuid, 'p4c-priv-send-' || lpad(n::text, 6, '0'))::text, true)
-  from generate_series(1, 6) n;
+  from (values (1), (2), (3), (4), (5), (6), (8)) v(n);
 select set_config('hid.test.rxroute_1', pg_temp.send(11, 'prescription', current_setting('hid.test.rx_1')::uuid,
   current_setting('hid.test.facility_2')::uuid, 'p4c-priv-send-rx0001')::text, true);
 reset role;
@@ -715,6 +726,9 @@ select set_config('hid.test.item_2', (select accepted.work_item_id::text from la
   current_setting('hid.test.route_2')::uuid, 1, 'health_id', 'HID-P4CPATP', 'p4c-priv-accept-000002', repeat('a', 64))
   accepted), true);
 select state from lab.decline_order_route(current_setting('hid.test.route_3')::uuid, 1, 'test_not_offered');
+select set_config('hid.test.item_8', (select accepted.work_item_id::text from lab.accept_order_route(
+  current_setting('hid.test.route_8')::uuid, 1, 'health_id', 'HID-P4CPATP', 'p4c-priv-accept-000008', repeat('a', 64))
+  accepted), true);
 reset role;
 set local role hid_pharmacy_api_runtime;
 select pg_temp.as_signup_admin(2);
@@ -723,10 +737,16 @@ select set_config('hid.test.rxitem_1', (select accepted.work_item_id::text from 
   'p4c-priv-rx-accept-01', repeat('a', 64)) accepted), true);
 reset role;
 select set_config('hid.test.result_1', pg_temp.lab_chain(current_setting('hid.test.item_1')::uuid, 'priv1', 10.4)::text, true);
+select set_config('hid.test.result_8', pg_temp.lab_chain(current_setting('hid.test.item_8')::uuid, 'priv8', 10.4)::text, true);
 set local role hid_lab_api_runtime;
 select pg_temp.as_signup_admin(1);
 select pg_temp.release(current_setting('hid.test.result_1')::uuid, 1, current_setting('hid.test.priv1_verification_1')::uuid,
   'p4c-priv-release-0001');
+select pg_temp.release(current_setting('hid.test.result_8')::uuid, 1, current_setting('hid.test.priv8_verification_1')::uuid,
+  'p4c-priv-release-0008');
+-- 0088: LB1 reports route 8 (released) as accepted for the wrong person.
+select result from lab.report_wrong_patient_order_route(current_setting('hid.test.route_8')::uuid, 3, 'suspected_misuse',
+  'Counter mix-up with a twin sister', 'p4c-priv-wrong-patient-0008', repeat('f', 64));
 reset role;
 select set_config('hid.test.priv1_verification_2', pg_temp.lab_correction(current_setting('hid.test.result_1')::uuid,
   'priv1', 11.2, current_setting('hid.test.account_1')::uuid, current_setting('hid.test.membership_1')::uuid)::text, true);
@@ -845,11 +865,12 @@ set constraints all deferred;
 -- 4 (checks).
 create temp table suite_routes on commit drop as
   select route.* from ehr.order_routes route where route.correlation_id like 'p4c-suite-%'
-    and route.id in (select current_setting('hid.test.route_' || n)::uuid from generate_series(1, 6) n
+    and route.id in (select current_setting('hid.test.route_' || n)::uuid from (values (1), (2), (3), (4), (5), (6), (8)) v(n)
                      union all select current_setting('hid.test.rxroute_1')::uuid);
 select pg_temp.assert('the run left every outcome', (select array_agg(route.state || coalesce(':' || route.ended_kind, '')
     order by route.id = current_setting('hid.test.rxroute_1')::uuid, route.created_at, route.id) from suite_routes route)
-  = array['completed', 'cancelled:support', 'declined', 'withdrawn:orderer', 'withdrawn:patient', 'sent', 'completed']);
+  = array['completed', 'cancelled:support', 'declined', 'withdrawn:orderer', 'withdrawn:patient', 'sent',
+    'completed:wrong_patient', 'completed']);
 select pg_temp.assert('each event history replays to its head', not exists (select 1 from suite_routes route
   where (select array_agg(event.event_version order by event.event_version) from ehr.order_route_events event
           where event.route_id = route.id)
@@ -883,7 +904,8 @@ $f$;
 select pg_temp.assert('no details carry a name, text, value, licence or identifier', not exists (select 1
   from audit.events event, unnest(array['Ada', 'Patience', 'Okafor', 'Kemi', 'Haemoglobin', '718-7', 'Amoxicillin',
       'amoxicillin', 'whole-blood', 'Fever', 'Take after food', '10.4', '11.2', 'g/dL', 'MDCN', 'MLS/', 'PCN/', 'HID-',
-      'P4CPAT', '1990-04-12', 'Sign-up', 'Hospital', 'Laboratory', 'Pharmacy', 'specimen', 'Wrong strength']) word
+      'P4CPAT', '1990-04-12', 'Sign-up', 'Hospital', 'Laboratory', 'Pharmacy', 'specimen', 'Wrong strength',
+      'twin', 'Counter mix-up']) word
   where (event.resource_type = 'order-route' or event.action like '%order-route%')
     and pg_temp.without_uuids(event.details) ilike '%' || word || '%'),
   (select string_agg(distinct event.action || ' ' || event.details::text, '; ') from audit.events event
@@ -898,13 +920,14 @@ select pg_temp.assert('the rows the run wrote', (select array_agg(distinct event
   @> array['admin.order-route-destination.set', 'admin.order-route.close', 'ehr.order-route.accepted', 'ehr.order-route.closed', 'ehr.order-route.declined', 'ehr.order-route.dispensing-returned',
     'ehr.order-route.dispensing-reversed', 'ehr.order-route.received', 'ehr.order-route.result-marked-in-error',
     'ehr.order-route.patient-withdrawn', 'ehr.order-route.result-returned', 'ehr.order-route.withdrawn',
-    'identity.order-route-destination.set'],
+    'ehr.order-route.wrong-patient', 'identity.order-route-destination.set'],
   (select array_agg(distinct event.action order by event.action)::text
     from audit.events event where event.resource_type = 'order-route' or event.action like '%order-route%'));
 select pg_temp.assert('the inbox items carry the four metadata keys only', (select bool_and(item.metadata ?& array['routeId',
     'kind', 'orderingFacilityName', 'receivingFacilityName'] and (select count(*) from jsonb_object_keys(item.metadata)) = 4)
   from notification.inbox_items item where item.resource_type = 'order-route')
-  and (select count(*) from notification.inbox_items item where item.resource_type = 'order-route') >= 7);
+  and (select count(*) from notification.inbox_items item where item.resource_type = 'order-route') >= 7
+  and exists (select 1 from notification.inbox_items item where item.notification_code = 'ORDER_ROUTE_WRONG_PATIENT'));
 
 select pg_temp.report();
 rollback;

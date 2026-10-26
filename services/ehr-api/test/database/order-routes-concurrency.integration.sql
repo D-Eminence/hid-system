@@ -9,7 +9,14 @@
 --   4. two sends of one order: the second refused while the first is live, a
 --      replay answers the first; after a decline the order may go again;
 --   5. a same-facility hand-off that won the order (R10): the accept
---      withdraws the route (order_in_work) and creates nothing.
+--      withdraws the route (order_in_work) and creates nothing;
+--   6. the wrong-patient report (0088, item 3) against a return, in both
+--      serial orders: a release then the report (the report with the
+--      version it read answers ORDER_ROUTE_VERSION_CONFLICT; with the new one
+--      it withdraws the release); the report then a release (refused,
+--      23514); a dispensing then the report (412, then reversed); the report
+--      then a dispensing (refused, 23514). The two-session interleavings run
+--      in the build's race harness.
 -- Shared fixture of the P4c suites (each suite carries its own copy, so it
 -- runs alone). Synthetic values only; uuid prefix e4c.
 --   Platform: SA (platform_super_admin), SU (support_admin), FR
@@ -735,6 +742,89 @@ select pg_temp.assert('R10: the route withdrawn (order_in_work), nothing at L1, 
     and event.facility_id = 'e4c21000-0000-4000-8000-000000000001')
   and exists (select 1 from notification.inbox_items item where item.resource_id = current_setting('hid.test.route_5')::uuid
     and item.notification_code = 'ORDER_ROUTE_WITHDRAWN'));
+
+-- 6. The wrong-patient report against a return (0088). Lab routes 6-7 and
+-- prescription routes 1-2, accepted by LB1 and PB1; a verified result
+-- (lab_chain) on routes 6 and 7.
+set local role hid_ehr_api_runtime;
+select set_config('hid.test.lr_' || n, pg_temp.lab_request(1, 'active')::text, true) from generate_series(6, 7) n;
+select set_config('hid.test.rx_' || n, pg_temp.prescription(1, 'active')::text, true) from generate_series(1, 2) n;
+select set_config('hid.test.route_' || n, pg_temp.send(11, 'lab_request', current_setting('hid.test.lr_' || n)::uuid,
+  current_setting('hid.test.facility_1')::uuid, 'p4c-race-send-' || lpad(n::text, 6, '0'))::text, true)
+  from generate_series(6, 7) n;
+select set_config('hid.test.rxroute_' || n, pg_temp.send(11, 'prescription', current_setting('hid.test.rx_' || n)::uuid,
+  current_setting('hid.test.facility_2')::uuid, 'p4c-race-send-rx' || lpad(n::text, 4, '0'))::text, true)
+  from generate_series(1, 2) n;
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select set_config('hid.test.item_' || n, (select accepted.work_item_id::text
+  from pg_temp.accept_lab(current_setting('hid.test.route_' || n)::uuid, 1, 'p4c-race-accept-00000' || n) accepted), true)
+  from generate_series(6, 7) n;
+reset role;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_signup_admin(2);
+select set_config('hid.test.rxitem_' || n, (select accepted.work_item_id::text from pharmacy.accept_order_route(
+  current_setting('hid.test.rxroute_' || n)::uuid, 1, 'health_id', 'HID-P4CPATP', 'Patient collected the prescription',
+  'p4c-race-rx-accept-0' || n, repeat('a', 64)) accepted), true) from generate_series(1, 2) n;
+reset role;
+select set_config('hid.test.result_' || n, pg_temp.lab_chain(current_setting('hid.test.item_' || n)::uuid, 'race' || n,
+  10.4)::text, true) from generate_series(6, 7) n;
+-- A release, then the report: the report with the version it read answers
+-- 412; with the new version it withdraws the release.
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select pg_temp.release(current_setting('hid.test.result_6')::uuid, 1, current_setting('hid.test.race6_verification_1')::uuid,
+  'p4c-race-release-0006');
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select pg_temp.check('release then report, with the version read before the release', format($s$select * from
+  lab.report_wrong_patient_order_route(%L, 2, 'wrong_order_chosen', 'Picked the wrong row at the counter',
+  'p4c-race-wrong-0006', repeat('a', 64))$s$, current_setting('hid.test.route_6')), 'P0001 ORDER_ROUTE_VERSION_CONFLICT');
+select pg_temp.check('release then report, with the new version', format($s$select * from
+  lab.report_wrong_patient_order_route(%L, 3, 'wrong_order_chosen', 'Picked the wrong row at the counter',
+  'p4c-race-wrong-0006', repeat('a', 64))$s$, current_setting('hid.test.route_6')), 'ok');
+-- The report, then a release: refused.
+select pg_temp.check('report then release: the report', format($s$select * from
+  lab.report_wrong_patient_order_route(%L, 2, 'wrong_order_chosen', 'Picked the wrong row at the counter',
+  'p4c-race-wrong-0007', repeat('a', 64))$s$, current_setting('hid.test.route_7')), 'ok');
+select pg_temp.as_signup_admin(1);
+select pg_temp.assert('report then release: the release is refused (23514)', left(pg_temp.outcome(format($s$select
+  pg_temp.release(%L, 1, %L, 'p4c-race-release-0007')$s$, current_setting('hid.test.result_7'),
+  current_setting('hid.test.race7_verification_1'))), 5) = '23514');
+reset role;
+select pg_temp.assert('release then report: A holds the release withdrawn; report then release: nothing reached A',
+  (select array_agg(report.kind || ':' || report.result_version order by report.recorded_at, report.id)
+     from lab.order_route_result_reports report where report.route_id = current_setting('hid.test.route_6')::uuid)
+    = array['released:1', 'entered_in_error:1']
+  and not exists (select 1 from lab.order_route_result_reports report
+                   where report.route_id = current_setting('hid.test.route_7')::uuid)
+  and not exists (select 1 from lab.result_releases release_row
+                   where release_row.result_id = current_setting('hid.test.result_7')::uuid)
+  and (select array_agg(route.state || ':' || route.ended_kind order by route.created_at) from ehr.order_routes route
+        where route.id in (current_setting('hid.test.route_6')::uuid, current_setting('hid.test.route_7')::uuid))
+    = array['completed:wrong_patient', 'cancelled:wrong_patient']);
+-- A dispensing, then the report (412, then reversed); the report, then a
+-- dispensing (refused).
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_staff(33, current_setting('hid.test.facility_2')::uuid);
+select pg_temp.dispense(current_setting('hid.test.rxitem_1')::uuid, 'p4c-race-dispense-0001');
+select pg_temp.check('dispensing then report, with the version read before it', format($s$select * from
+  pharmacy.report_wrong_patient_order_route(%L, 2, 'wrong_order_chosen', 'Handed to the wrong person',
+  'p4c-race-wrong-rx01', repeat('a', 64))$s$, current_setting('hid.test.rxroute_1')), 'P0001 ORDER_ROUTE_VERSION_CONFLICT');
+select pg_temp.check('dispensing then report, with the new version', format($s$select * from
+  pharmacy.report_wrong_patient_order_route(%L, 3, 'wrong_order_chosen', 'Handed to the wrong person',
+  'p4c-race-wrong-rx01', repeat('a', 64))$s$, current_setting('hid.test.rxroute_1')), 'ok');
+select pg_temp.check('report then dispensing: the report', format($s$select * from
+  pharmacy.report_wrong_patient_order_route(%L, 2, 'wrong_order_chosen', 'Handed to the wrong person',
+  'p4c-race-wrong-rx02', repeat('a', 64))$s$, current_setting('hid.test.rxroute_2')), 'ok');
+select pg_temp.assert('report then dispensing: the dispensing is refused (23514)', left(pg_temp.outcome(format($s$select
+  pg_temp.dispense(%L, 'p4c-race-dispense-0002')$s$, current_setting('hid.test.rxitem_2'))), 5) = '23514');
+reset role;
+select pg_temp.assert('the dispensing reversed; nothing dispensed after the report',
+  (select array_agg(report.kind order by report.recorded_at) from pharmacy.order_route_dispensing_reports report
+    where report.route_id = current_setting('hid.test.rxroute_1')::uuid) = array['dispensed', 'reversed']
+  and not exists (select 1 from pharmacy.dispensings dispensing
+                   where dispensing.work_item_id = current_setting('hid.test.rxitem_2')::uuid));
 
 select pg_temp.report();
 rollback;
