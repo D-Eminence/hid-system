@@ -2619,6 +2619,31 @@ select pg_temp.assert('d17 readers: C21 by Health ID runs each helper once per r
   concat_ws(' ', current_setting('hid.test.calls_before_c21'), current_setting('hid.test.calls_after_c21'),
     current_setting('hid.test.calls_before_limit'), current_setting('hid.test.calls_after_limit'),
     pg_temp.helper_calls()::text, current_setting('hid.test.c21_limit_rows'), current_setting('hid.test.c30_rows')));
+-- C5 computes its deadline inline from the report it already joins, as the
+-- summary does: one call answers P's list without calling either helper,
+-- and agrees with them on every route it returns.
+create function pg_temp.c5_helper_calls() returns integer[] language sql volatile as $f$
+  select array[coalesce(pg_stat_get_xact_function_calls('ehr.order_route_correction_state(ehr.order_routes)'::regprocedure), 0),
+    coalesce(pg_stat_get_xact_function_calls('ehr.order_route_correctable_until(ehr.order_routes)'::regprocedure), 0)]::integer[]
+$f$;
+select set_config('hid.test.calls_before_c5', pg_temp.c5_helper_calls()::text, true);
+set local role hid_ehr_api_runtime;
+select pg_temp.as_patient(1);
+insert into d17_out (label, answer) select 'c5-calls', to_jsonb(listed) from ehr.patient_list_order_routes() listed;
+reset role;
+select set_config('hid.test.calls_after_c5', pg_temp.c5_helper_calls()::text, true);
+select pg_temp.assert('d17 readers: C5 calls neither helper, and its deadline agrees with them on every route it returns',
+  current_setting('hid.test.calls_after_c5') = current_setting('hid.test.calls_before_c5')
+  and (select count(*) from d17_out where label = 'c5-calls') >= 15
+  and (select count(*) from d17_out where label = 'c5-calls' and answer ->> 'correctable_until' is not null) >= 2
+  and not exists (
+    select 1 from d17_out out_row
+      join ehr.order_routes route on route.id = (out_row.answer ->> 'route_id')::uuid
+     where out_row.label = 'c5-calls'
+       and (out_row.answer ->> 'correctable_until')::timestamptz is distinct from
+           case when ehr.order_route_correction_state(route) in ('open', 'correctable')
+                then ehr.order_route_correctable_until(route) end),
+  current_setting('hid.test.calls_before_c5') || ' ' || current_setting('hid.test.calls_after_c5'));
 create function pg_temp.out(wanted text, route_key text, route uuid) returns jsonb language sql stable as $f$
   select out_row.answer from d17_out out_row where out_row.label = wanted and (out_row.answer ->> route_key)::uuid = route
 $f$;

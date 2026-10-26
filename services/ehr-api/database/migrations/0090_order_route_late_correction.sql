@@ -28,10 +28,10 @@
 --    and write what the new command and lookup read and write (T8 included)
 --    and run what they call; every role that runs a body reading T8 after
 --    0090 may read it; the owners of C5 and C21 may run o's helpers; every
---    role that asks the helper whether the receiving organization was
---    released (o, the summary's callers C3 and C4, and the owners of C5 and
---    C21) may read identity.organizations and run o's helpers; the
---    applying role may become each owner. A privilege counts only when held
+--    role that decides whether the receiving organization was released (o,
+--    the summary's callers C3 and C4, and the owners of C5 and C21) may read
+--    identity.organizations and run o's helpers; the applying role may
+--    become each owner. A privilege counts only when held
 --    by ownership, membership or grant, never through a superuser's bypass:
 --    production's migrator has none. A NOTICE names every owner checked.
 --    Every attribute but the body of each replaced or dropped function is
@@ -641,11 +641,11 @@ begin
     raise exception '0090: C5, C21 or C26 has an owner that may not run o''s helpers, what it calls, or create the recreated function in its schema: %',
       mismatch;
   end if;
-  -- Every role that asks the helper whether the receiving organization was
-  -- released (the helper reads identity.organizations as its caller) may
-  -- read that table and run o's helpers: o (C29, C30), the summary's callers
-  -- (C3 and C4; the summary asks only when B is not available), and the
-  -- recorded owners of C5 and C21.
+  -- Every role that decides whether the receiving organization was
+  -- released (the helper reads identity.organizations as its caller, and
+  -- C5 reads it itself) may read that table and run o's helpers: o (C29,
+  -- C30), the summary's callers (C3 and C4; the summary asks the helper only
+  -- when B is not available), and the recorded owners of C5 and C21.
   select string_agg(format('%s (%s) %s', needer.what, pg_get_userbyid(needer.role_id), needer.privilege), ', ')
     into mismatch
     from (
@@ -1874,10 +1874,14 @@ $$;
 -- three trailing columns: when B reported that it accepted the order for
 -- someone else and whether that report came after the order had ended
 -- (null when there is none), and the deadline while B may still correct
--- it (open or correctable; never once B was released), else null. The OUT columns change, so it is
--- dropped and created with 0086's body (its redaction of an order marked
--- entered in error unchanged) and attributes, given back to its recorded
--- owner and checked in section 8, and granted again in section 9.
+-- it (open or correctable: accepted, not reported, B not released, before
+-- the deadline), else null. The deadline is computed inline from the report
+-- the query already joins, as the summary does, without calling the
+-- helpers (each a function call per row); the suite checks that it agrees
+-- with them on every route and calls neither. The OUT columns change, so
+-- it is dropped and created with 0086's body (its redaction of an order
+-- marked entered in error unchanged) and attributes, given back to its
+-- recorded owner and checked in section 8, and granted again in section 9.
 drop function ehr.patient_list_order_routes();
 
 create function ehr.patient_list_order_routes()
@@ -1963,8 +1967,13 @@ begin
       listed.in_error,
       report.reported_at,
       report.late,
-      case when ehr.order_route_correction_state(route) in ('open', 'correctable')
-           then ehr.order_route_correctable_until(route) end
+      case when route.accepted_at is not null
+             and coalesce(route.ended_kind not in ('wrong_patient', 'receiving_released'), true)
+             and report.route_id is null
+             and clock_timestamp() < route.accepted_at + interval '4320 hours'
+             and exists (select 1 from identity.organizations organization
+                          where organization.id = route.receiving_organization_id and organization.active)
+           then route.accepted_at + interval '4320 hours' end
       from ehr.order_routes route
       join listed on listed.listed_id = route.id
       left join ehr.order_route_wrong_patient_reports report on report.route_id = route.id
