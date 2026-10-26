@@ -100,6 +100,7 @@ const acceptedMigrations = new Map([
   ['0085_emergency_purpose_of_use.sql', '618e56311d3f74210a95accebea770d0337653563ae5c84c45d29172c1bc0969'],
   ['0086_provider_self_service_onboarding.sql', 'f810d4396b094604dab543f1eec5389a3d5ac5cc73fe561dd9a74495195b79a9'],
   ['0087_patient_grant_revocation.sql', 'f6784a554c729c1ff44a09c9085da1d0cf807b9ce0e9b1d2e7383f8a2a250320'],
+  ['0088_order_route_wrong_patient.sql', '614e21d83c8bb8d059e8eeac876c7fc1dadf89e1d0031fef12779aff0e3dd193'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

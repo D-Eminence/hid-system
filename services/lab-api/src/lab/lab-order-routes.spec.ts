@@ -67,7 +67,7 @@ const incoming = { route_id: routeId, reference: 'B0000000', row_version: '1', e
   patient_id: patientId, source_lab_request_id: sourceOrderId, orderer_account_id: 'x', clinical_information: null };
 
 describe('Lab order-route routes (SPEC-FINAL §10.2)', () => {
-  it('serves five browser routes, all needing lab.order-route.receive, none internal or public', () => {
+  it('serves six browser routes, all needing lab.order-route.receive, none internal or public', () => {
     const base = Reflect.getMetadata(PATH_METADATA, LabOrderRoutesController) as string;
     const routes = Object.getOwnPropertyNames(LabOrderRoutesController.prototype).filter((name) => name !== 'constructor')
       .map((name) => {
@@ -88,6 +88,9 @@ describe('Lab order-route routes (SPEC-FINAL §10.2)', () => {
         undefined, undefined],
       [RequestMethod.POST, 'lab/order-routes/:routeId/decline', 200, ['lab.order-route.receive'], 'lab.order-route.decline.request',
         undefined, undefined],
+      // Item 3 (C25): accepted for someone who was not the order's patient.
+      [RequestMethod.POST, 'lab/order-routes/:routeId/wrong-patient', 200, ['lab.order-route.receive'],
+        'lab.order-route.wrong-patient.request', undefined, undefined],
     ]);
   });
 
@@ -343,7 +346,7 @@ describe('Lab work list with route-backed rows (C12)', () => {
   const card = { work_item_id: workItemId, route_id: routeId, reference: 'B0000000', effective_state: 'accepted', access: 'work',
     ordering_facility_name: 'Ordering Hospital', orderer_name: 'Dr Ada Obi', orderer_licence_body: 'MDCN',
     orderer_licence_number: 'MDCN/12345', patient_full_name: 'Ngozi Eze', patient_sex: 'female', patient_date_of_birth: '1990-01-01',
-    patient_health_id_last4: '2345' };
+    patient_health_id_last4: '2345', row_version: '4', ended_kind: null };
   const row = (id: string, routed: boolean) => ({ id, patient_id: patientId, facility_id: facilityId,
     ordering_facility_id: routed ? sourceOrderId : facilityId, source_ehr_order_id: sourceOrderId, source_ehr_order_version: '1',
     source_encounter_id: sourceOrderId, status: 'accepted', priority: 'stat', accepted_by: 'a', accepted_at: new Date(),
@@ -402,8 +405,8 @@ describe('Lab work list with route-backed rows (C12)', () => {
     expect(answer.crossFacilityWork).toBe(true);
     const [routed, own] = answer.items;
     expect(routed).toMatchObject({ id: workItemId, priority: 'stat', orderRoute: { id: routeId, reference: 'B0000000',
-      effectiveState: 'accepted', access: 'work', orderingFacilityName: 'Ordering Hospital', ordererName: 'Dr Ada Obi',
-      ordererLicence: { body: 'MDCN', number: 'MDCN/12345' } },
+      effectiveState: 'accepted', access: 'work', version: 4, endedKind: null, orderingFacilityName: 'Ordering Hospital',
+      ordererName: 'Dr Ada Obi', ordererLicence: { body: 'MDCN', number: 'MDCN/12345' } },
       patient: { fullName: 'Ngozi Eze', sex: 'female', dateOfBirth: '1990-01-01', healthIdLast4: '2345' } });
     expect(routed).not.toHaveProperty('sourceEhrOrderId');
     expect(own).toMatchObject({ id: local, sourceEhrOrderId: sourceOrderId });

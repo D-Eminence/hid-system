@@ -107,6 +107,11 @@ export class LabRequestsService {
    * route to another facility (`orderRoute`, null when none; left out when it
    * cannot be read) and the page whether orders between facilities are on
    * (`crossFacilityOrders`, a pool read after the clinical transaction).
+   * `wrongPatientReports: true` says this backend lets the receiving
+   * laboratory or pharmacy end an order it accepted for someone who was not
+   * the patient (item 3, 0088): only then does the website ask a clinician to
+   * have it ended there before changing the order. An earlier backend sends
+   * no such field, and the website keeps its earlier warning (D15).
    */
   async list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
     const scope = { list: 'ehr.lab-requests', patientId, encounterId };
@@ -130,7 +135,7 @@ export class LabRequestsService {
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
-    return { ...page, crossFacilityOrders: await this.orderRoutes.crossFacilityOrdersEnabled() };
+    return { ...page, crossFacilityOrders: await this.orderRoutes.crossFacilityOrdersEnabled(), wrongPatientReports: true };
   }
 
   get(context: DataAccessContext, patientId: string, encounterId: string, requestId: string) {

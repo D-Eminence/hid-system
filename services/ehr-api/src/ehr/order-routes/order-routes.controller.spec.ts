@@ -48,8 +48,11 @@ describe('Order-route controllers (SPEC-FINAL §10.1)', () => {
         patientAllowed: undefined, facilityOptional: undefined, isPublic: undefined },
       { path: 'ehr/order-route-attestation', method: RequestMethod.GET, code: undefined,
         permissions: ['ehr.order-route.send'], patientAllowed: undefined, facilityOptional: undefined, isPublic: undefined },
+      // Item 3 (C28): the Overview card of orders reported accepted for the wrong person.
+      { path: 'ehr/order-routes/wrong-patient', method: RequestMethod.GET, code: undefined,
+        permissions: ['ehr.order-route.send'], patientAllowed: undefined, facilityOptional: undefined, isPublic: undefined },
     ]));
-    expect(routes(OrderRoutesController)).toHaveLength(7);
+    expect(routes(OrderRoutesController)).toHaveLength(8);
   });
 
   it('serves the patient only GET me/order-routes and POST me/order-routes/:routeId/withdraw (Stop), without a facility', () => {

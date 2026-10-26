@@ -14,7 +14,11 @@
 --   5. C3 gives them to A under its read consent only (the summary, the
 --      attestation, the events without actors, the reports); refuses the
 --      emergency purpose, a member without consent, the receiving facility
---      and a third facility; C4's summaries.
+--      and a third facility; C4's summaries;
+--   6. the release trigger 0088 replaced: a release under the patient's
+--      consent at B still crosses on a completed route support closed, and is
+--      refused (23514 ORDER_ROUTE_CLOSED) on one its laboratory ended as
+--      fulfilled for the wrong person.
 -- Shared fixture of the P4c suites (each suite carries its own copy, so it
 -- runs alone). Synthetic values only; uuid prefix e4c.
 --   Platform: SA (platform_super_admin), SU (support_admin), FR
@@ -765,6 +769,67 @@ select pg_temp.assert('no runtime reads the reports', not has_table_privilege('h
     'lab.order_route_result_reports', 'SELECT')
   and not has_table_privilege('hid_ehr_api_runtime', 'lab.order_route_result_reports', 'SELECT')
   and not has_table_privilege('hid_pharmacy_api_runtime', 'pharmacy.order_route_dispensing_reports', 'SELECT'));
+
+-- 6. The replaced release trigger (0088). Lab routes 3 and 4, accepted by
+-- LB1, v1 released by LB1; support (FR) closes route 3; LB2 reports route 4
+-- as accepted for the wrong person. Each result then gets a verified
+-- correction v2 (owner SQL), which LB2, holding P's consent at L1, releases.
+set local role hid_ehr_api_runtime;
+select set_config('hid.test.lr_' || n, pg_temp.lab_request(1, 'active')::text, true) from generate_series(3, 4) n;
+select set_config('hid.test.route_' || n, pg_temp.send(11, 'lab_request', current_setting('hid.test.lr_' || n)::uuid,
+  current_setting('hid.test.facility_1')::uuid, 'p4c-returns-send-000' || n)::text, true) from generate_series(3, 4) n;
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select set_config('hid.test.item_' || n, (select accepted.work_item_id::text from lab.accept_order_route(
+  current_setting('hid.test.route_' || n)::uuid, 1, 'health_id', 'HID-P4CPATP', 'p4c-returns-accept-' || n || '0',
+  repeat('a', 64)) accepted), true) from generate_series(3, 4) n;
+reset role;
+select set_config('hid.test.result_' || n, pg_temp.lab_chain(current_setting('hid.test.item_' || n)::uuid, 'chain' || n,
+  10.4)::text, true) from generate_series(3, 4) n;
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select pg_temp.release(current_setting('hid.test.result_' || n)::uuid, 1,
+  current_setting('hid.test.chain' || n || '_verification_1')::uuid, 'p4c-returns-release-' || n || '1')
+  from generate_series(3, 4) n;
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select reported.result from lab.report_wrong_patient_order_route(current_setting('hid.test.route_4')::uuid, 3,
+  'someone_elses_details', 'The person gave another patient''s details', 'p4c-returns-wrong-0004', repeat('a', 64))
+  reported;
+reset role;
+set local role hid_identity_api_runtime;
+select pg_temp.as_platform(3);
+select closed.state from identity.admin_close_order_route(current_setting('hid.test.route_3')::uuid, 3,
+  'The hospital asked support to close it') closed;
+reset role;
+select set_config('hid.test.chain' || n || '_verification_2', pg_temp.lab_correction(
+  current_setting('hid.test.result_' || n)::uuid, 'chain' || n, 11.2, current_setting('hid.test.account_1')::uuid,
+  current_setting('hid.test.membership_1')::uuid)::text, true) from generate_series(3, 4) n;
+insert into identity.consent_grants (id, patient_id, staff_id, account_id, membership_id, facility_id, scope, status,
+  reason, starts_at, expires_at, break_glass, purpose_of_use)
+values (gen_random_uuid(), 'e4c30000-0000-4000-8000-000000000001', 'e4c12000-0000-4000-8000-000000000031',
+  'e4c10000-0000-4000-8000-000000000031', 'e4c13000-0000-4000-8000-000000000031', current_setting('hid.test.facility_1')::uuid,
+  'write_records', 'active', 'P4c suite consent at the laboratory', clock_timestamp() - interval '1 hour',
+  clock_timestamp() + interval '30 days', false, 'direct-care');
+set local role hid_lab_api_runtime;
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select pg_temp.check('a consent release on the route support closed', format($s$select pg_temp.release(%L, 2, %L,
+  'p4c-returns-release-32')$s$, current_setting('hid.test.result_3'), current_setting('hid.test.chain3_verification_2')),
+  'ok');
+select pg_temp.check('a consent release on the route ended as fulfilled for the wrong person', format($s$select
+  pg_temp.release(%L, 2, %L, 'p4c-returns-release-42')$s$, current_setting('hid.test.result_4'),
+  current_setting('hid.test.chain4_verification_2')), '23514 ORDER_ROUTE_CLOSED');
+reset role;
+select pg_temp.assert('the support-closed route still files it; the wrong-patient route files nothing more',
+  (select array_agg(report.kind || ':' || report.result_version order by report.recorded_at, report.id)
+     from lab.order_route_result_reports report where report.route_id = current_setting('hid.test.route_3')::uuid)
+    = array['released:1', 'released:2']
+  and (select array_agg(report.kind || ':' || report.result_version order by report.recorded_at, report.id)
+     from lab.order_route_result_reports report where report.route_id = current_setting('hid.test.route_4')::uuid)
+    = array['released:1', 'entered_in_error:1']
+  and not exists (select 1 from lab.result_releases release_row
+                   where release_row.result_id = current_setting('hid.test.result_4')::uuid
+                     and release_row.result_version = 2));
 
 select pg_temp.report();
 rollback;

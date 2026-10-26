@@ -80,6 +80,19 @@ export class OrderRoutesController {
   }
 
   /**
+   * The Overview card (C28, item 3 D10): orders sent from this facility that
+   * the receiving laboratory or pharmacy reported it accepted for someone who
+   * was not the patient, in the last 30 days. ehr.order-route.send at the
+   * X-Facility-ID facility, direct care only; the member's own orders in full,
+   * a colleague's as a count and references.
+   */
+  @Get('order-routes/wrong-patient')
+  @RequirePermissions('ehr.order-route.send')
+  wrongPatientOverview(@Req() request: HidRequest) {
+    return this.routes.wrongPatientOverview(requireRequestContext(request));
+  }
+
+  /**
    * The current attestation text of a kind (C24), shown as the send screen's
    * checkbox. ehr.order-route.send and the kind's write permission; the kind
    * comes from the query, so its permission is checked here.

@@ -2,7 +2,8 @@ import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Q
 import { RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
-import { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto, SearchOrderRoutesDto } from './dto/order-route.dto';
+import { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto, ReportWrongPatientDto, SearchOrderRoutesDto }
+  from './dto/order-route.dto';
 import { PharmacyOrderRoutesService } from './pharmacy-order-routes.service';
 
 const uuid = () => new ParseUUIDPipe({ version: '4' });
@@ -51,5 +52,20 @@ export class PharmacyOrderRoutesController {
   @RequirePermissions('pharmacy.order-route.receive')
   decline(@Param('routeId', uuid()) routeId: string, @Body() input: DeclineOrderRouteDto, @Req() request: HidRequest) {
     return this.routes.decline(requireRequestContext(request), routeId, input);
+  }
+
+  /**
+   * The pharmacy accepted this prescription for someone who was not its
+   * patient (C25, SPEC-FINAL item 3 §5.1): its access ends and a dispensing
+   * it recorded is reversed, in one transaction. Any member who may receive
+   * prescriptions; reversing a dispensing also needs
+   * pharmacy.dispensing.reverse, which the command checks.
+   */
+  @Post(':routeId/wrong-patient') @HttpCode(200)
+  @RequirePermissions('pharmacy.order-route.receive')
+  reportWrongPatient(@Param('routeId', uuid()) routeId: string, @Body() input: ReportWrongPatientDto,
+    @Headers('idempotency-key') key: string | undefined, @Req() request: HidRequest) {
+    const idempotencyKey = requireIdempotencyKey(key);
+    return this.routes.reportWrongPatient(requireRequestContext(request), routeId, input, idempotencyKey);
   }
 }

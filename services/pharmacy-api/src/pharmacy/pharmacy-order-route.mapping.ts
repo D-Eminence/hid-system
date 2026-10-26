@@ -141,7 +141,25 @@ const P0001_REFUSALS: Readonly<Record<string, readonly [number, string]>> = Obje
   ORDER_ROUTE_REFERENCE_MISMATCH: [409, 'That reference is not this order\'s: ask the patient for the reference in their app'],
   IDEMPOTENCY_KEY_REUSED: [409, 'Idempotency-Key was already used with a different request'],
   ORDER_ROUTE_ACCEPT_LIMITED: [429, 'Too many wrong tries today; try again tomorrow'],
+  // The wrong-patient report (C25, item 3 §5.1): the state is checked before the version.
+  ORDER_ROUTE_NOT_ACCEPTED: [409, 'This prescription has not been accepted, so there is nothing to end: decline it instead'],
+  ORDER_ROUTE_ALREADY_ENDED: [409, 'This prescription has already ended, so it cannot be ended here'],
 });
+
+/** The permission C25 names when a dispensing must be reversed and the member may not (D4). */
+export const PHARMACY_CORRECTION_PERMISSION = 'pharmacy.dispensing.reverse';
+
+/**
+ * C25's refusal when a dispensing must be reversed and the member may not
+ * reverse dispensings: 403 with the missing permission as an extension (the
+ * database's DETAIL, kept only when it is that permission).
+ */
+function correctionPermissionRequired(error: unknown): DomainProblem {
+  const detail = (error as { detail?: unknown }).detail;
+  return new DomainProblem(403, 'ORDER_ROUTE_CORRECTION_PERMISSION_REQUIRED',
+    'A dispensing was recorded on this prescription, and this role cannot reverse dispensings', undefined,
+    { extensions: { permission: detail === PHARMACY_CORRECTION_PERMISSION ? detail : PHARMACY_CORRECTION_PERMISSION } });
+}
 
 export const crossFacilityOrdersUnavailable = () => new DomainProblem(423, 'CROSS_FACILITY_ORDERS_UNAVAILABLE',
   'Orders between facilities are paused on Health ID');
@@ -195,6 +213,7 @@ export function pharmacyOrderRouteProblem(error: unknown): unknown {
       if (message === 'ORDER_ROUTE_VERSION_CONFLICT') {
         return new DomainProblem(412, 'VERSION_CONFLICT', 'The order route changed; reload it');
       }
+      if (message === 'ORDER_ROUTE_CORRECTION_PERMISSION_REQUIRED') return correctionPermissionRequired(error);
       const refusal = P0001_REFUSALS[message];
       return refusal ? new DomainProblem(refusal[0], message, refusal[1])
         : orderRouteUnavailable();
@@ -202,4 +221,42 @@ export function pharmacyOrderRouteProblem(error: unknown): unknown {
     default:
       return orderRouteUnavailable();
   }
+}
+
+/**
+ * The wrong-patient report's problems (C25): a concurrent route write (40001)
+ * or a deadlock with a manual reversal (40P01) is 409
+ * ORDER_ROUTE_CHANGED_CONCURRENTLY for this command only (the website asks the
+ * member to try again); everything else as the other route commands.
+ */
+export function wrongPatientProblem(error: unknown): unknown {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  if (code === '40001' || code === '40P01') {
+    return new DomainProblem(409, 'ORDER_ROUTE_CHANGED_CONCURRENTLY', 'Someone changed this prescription at the same moment; try again');
+  }
+  return pharmacyOrderRouteProblem(error);
+}
+
+/** The answer of C25 (item 3 §5.1): the route as the report left it and what was withdrawn; never the patient or the report id. */
+export interface WrongPatientAnswer {
+  route: { id: string; version: number; effectiveState: string; endedKind: string };
+  resultsVoided: number;
+  resultReportsMarked: number;
+  dispensingReversed: boolean;
+  replayed: boolean;
+}
+
+export function wrongPatientAnswer(routeId: string, row: Row): WrongPatientAnswer | undefined {
+  const result = field(row, 'result');
+  const version = count(field(row, 'route_row_version'));
+  const effectiveState = text(field(row, 'effective_state'));
+  const endedKind = text(field(row, 'ended_kind'));
+  if ((result !== 'ended' && result !== 'replayed') || version === null || !effectiveState || !endedKind) return undefined;
+  return {
+    route: { id: routeId, version, effectiveState, endedKind },
+    resultsVoided: count(field(row, 'results_voided')) ?? 0,
+    resultReportsMarked: count(field(row, 'result_reports_marked')) ?? 0,
+    dispensingReversed: field(row, 'dispensing_reversed') === true,
+    replayed: result === 'replayed',
+  };
 }

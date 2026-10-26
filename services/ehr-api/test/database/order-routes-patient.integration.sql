@@ -9,7 +9,12 @@
 --   2. C6 stops a sent route (both facilities' rows, the notice), and refuses
 --      after acceptance, after respond_by, a second time, a stale version
 --      and another patient's route; no patient session is refused;
---   3. any change of the order withdraws a sent route and tells the patient.
+--   3. any change of the order withdraws a sent route and tells the patient;
+--   5. the wrong-patient ending (0088, item 3): C5 keeps the route with its
+--      full content, ended_kind wrong_patient and no Stop; the inbox notice
+--      ORDER_ROUTE_WRONG_PATIENT with the four metadata keys; when the order
+--      is then marked entered in error, C5 redacts it as for any such
+--      order and keeps ended_kind wrong_patient.
 -- Shared fixture of the P4c suites (each suite carries its own copy, so it
 -- runs alone). Synthetic values only; uuid prefix e4c.
 --   Platform: SA (platform_super_admin), SU (support_admin), FR
@@ -754,6 +759,47 @@ select pg_temp.assert('C5 still shows the other routes in full', (select count(*
   from ehr.patient_list_order_routes() listed
  where listed.route_id in (current_setting('hid.test.route_1')::uuid, current_setting('hid.test.route_3')::uuid,
    current_setting('hid.test.rxroute_1')::uuid)));
+reset role;
+
+-- 5. The wrong-patient ending (0088): lab routes 7 and 8, accepted by LB1
+-- and reported by LB2; then route 8's order is marked entered in error.
+set local role hid_ehr_api_runtime;
+select set_config('hid.test.lr_' || n, pg_temp.lab_request(1, 'active')::text, true) from generate_series(7, 8) n;
+select set_config('hid.test.route_' || n, pg_temp.send(11, 'lab_request', current_setting('hid.test.lr_' || n)::uuid,
+  current_setting('hid.test.facility_1')::uuid, 'p4c-patient-send-wp-' || lpad(n::text, 4, '0'))::text, true)
+  from generate_series(7, 8) n;
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select accepted.result from generate_series(7, 8) n, lab.accept_order_route(current_setting('hid.test.route_' || n)::uuid, 1,
+  'health_id', 'HID-P4CPATP', 'p4c-patient-accept-wp-' || n, repeat('a', 64)) accepted;
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select reported.result from generate_series(7, 8) n, lab.report_wrong_patient_order_route(
+  current_setting('hid.test.route_' || n)::uuid, 2, 'someone_elses_details', 'The person gave another patient''s details',
+  'p4c-patient-wrong-' || lpad(n::text, 4, '0'), repeat('a', 64)) reported;
+reset role;
+select pg_temp.assert('the notice: ORDER_ROUTE_WRONG_PATIENT with the four metadata keys', (select count(*) = 2
+    and bool_and(item.resource_type = 'order-route' and item.metadata ?& array['routeId', 'kind', 'orderingFacilityName',
+      'receivingFacilityName'] and (select count(*) from jsonb_object_keys(item.metadata)) = 4)
+  from notification.inbox_items item where item.notification_code = 'ORDER_ROUTE_WRONG_PATIENT'
+    and item.resource_id in (current_setting('hid.test.route_7')::uuid, current_setting('hid.test.route_8')::uuid)));
+set local role hid_ehr_api_runtime;
+select pg_temp.as_patient(1);
+select pg_temp.assert('C5 keeps the reported route in full, ended wrong_patient, without Stop', (select
+    listed.ended_kind = 'wrong_patient' and listed.effective_state = 'cancelled' and listed.accepted_at is not null
+    and listed.ended_at is not null and not listed.entered_in_error and listed.content ->> 'testDisplay' = 'Haemoglobin'
+    and listed.content ? 'ordererName' and listed.attestation_text is not null and listed.attested_by_name = 'Ada Doctor'
+    and listed.actions = array[]::text[]
+  from ehr.patient_list_order_routes() listed where listed.route_id = current_setting('hid.test.route_7')::uuid));
+select pg_temp.as_staff(11, 'e4c21000-0000-4000-8000-000000000001');
+select set_config('app.change_reason', 'Ordered for the wrong patient', true);
+update ehr.lab_requests set status = 'entered_in_error' where id = current_setting('hid.test.lr_8')::uuid;
+select pg_temp.as_patient(1);
+select pg_temp.assert('an order then marked entered in error: redacted, ended_kind still wrong_patient', (select
+    listed.ended_kind = 'wrong_patient' and listed.effective_state = 'cancelled' and listed.entered_in_error
+    and listed.content = jsonb_build_object('reference', listed.reference) and listed.attestation_text is null
+    and listed.actions = array[]::text[]
+  from ehr.patient_list_order_routes() listed where listed.route_id = current_setting('hid.test.route_8')::uuid));
 reset role;
 
 select pg_temp.report();

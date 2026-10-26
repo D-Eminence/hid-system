@@ -20,7 +20,13 @@
 --      access ended on the completed route, rows at each counterpart and the
 --      patients' notices;
 --   6. the same-facility hand-off and the pharmacist's pull of a routed order
---      refused (23514).
+--      refused (23514);
+--   8. the wrong-patient ending (0088, item 3) by state: accepted ->
+--      cancelled and completed -> access ended, ended_kind wrong_patient,
+--      the event on the receiving side with reason wrong_patient, both
+--      windows now; refused on a sent route; support's close then finds the
+--      route closed and the order change mirror leaves the cancelled one
+--      alone; wrong_patient appears on no other state.
 -- Shared fixture of the P4c suites (each suite carries its own copy, so it
 -- runs alone). Synthetic values only; uuid prefix e4c.
 --   Platform: SA (platform_super_admin), SU (support_admin), FR
@@ -1221,6 +1227,80 @@ select pg_temp.check('a dispensing past the work window', format($s$select pg_te
 reset role;
 select pg_temp.assert('nothing dispensed on route 7', not exists (select 1 from pharmacy.dispensings dispensing
   where dispensing.work_item_id = current_setting('hid.test.ritem_7')::uuid));
+
+-- 8. The wrong-patient ending (0088) by state. Lab routes 21 (accepted by
+-- LB1, reported by LB2) and 22 (sent); prescription route 8 (accepted by
+-- PB1, dispensed and reported by PB2).
+set local role hid_ehr_api_runtime;
+select set_config('hid.test.lr_' || n, pg_temp.lab_request(1, 'active')::text, true) from generate_series(21, 22) n;
+select set_config('hid.test.rx_8', pg_temp.prescription(1, 'active')::text, true);
+select set_config('hid.test.lroute_' || n, pg_temp.send(11, 'lab_request', current_setting('hid.test.lr_' || n)::uuid,
+  current_setting('hid.test.facility_1')::uuid, 'p4c-life-send-lab-' || lpad(n::text, 4, '0'))::text, true)
+  from generate_series(21, 22) n;
+select set_config('hid.test.rroute_8', pg_temp.send(11, 'prescription', current_setting('hid.test.rx_8')::uuid,
+  current_setting('hid.test.facility_2')::uuid, 'p4c-life-send-rx-0008')::text, true);
+reset role;
+set local role hid_lab_api_runtime;
+select set_config('hid.test.litem_21', pg_temp.accept_lab(current_setting('hid.test.lroute_21')::uuid, 1)::text, true);
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select pg_temp.check('a wrong-patient report of a sent route', format($s$select * from
+  lab.report_wrong_patient_order_route(%L, 1, 'wrong_order_chosen', 'Picked the wrong row at the counter',
+  'p4c-life-wrong-0022', repeat('a', 64))$s$, current_setting('hid.test.lroute_22')), 'P0001 ORDER_ROUTE_NOT_ACCEPTED');
+select pg_temp.check('the wrong-patient report of accepted lab route 21', format($s$select * from
+  lab.report_wrong_patient_order_route(%L, 2, 'wrong_order_chosen', 'Picked the wrong row at the counter',
+  'p4c-life-wrong-0021', repeat('a', 64))$s$, current_setting('hid.test.lroute_21')), 'ok');
+reset role;
+set local role hid_pharmacy_api_runtime;
+select set_config('hid.test.ritem_8', pg_temp.accept_rx(current_setting('hid.test.rroute_8')::uuid)::text, true);
+select pg_temp.as_staff(33, current_setting('hid.test.facility_2')::uuid);
+select pg_temp.dispense(current_setting('hid.test.ritem_8')::uuid, 'p4c-life-dispense-0008');
+select pg_temp.check('the wrong-patient report of completed prescription route 8', format($s$select * from
+  pharmacy.report_wrong_patient_order_route(%L, 3, 'someone_elses_details', 'Collected with another patient''s details',
+  'p4c-life-wrong-rx08', repeat('a', 64))$s$, current_setting('hid.test.rroute_8')), 'ok');
+reset role;
+do $$
+declare r ehr.order_routes%rowtype;
+begin
+  r := pg_temp.route(current_setting('hid.test.lroute_21')::uuid);
+  perform pg_temp.assert('accepted -> cancelled, wrong_patient, both windows end now', r.state = 'cancelled'
+    and r.ended_kind = 'wrong_patient' and r.writes_end_at = r.ended_at and r.access_ends_at = r.ended_at
+    and pg_temp.last_event(r.id) = 'cancelled'
+    and (select event.side || ':' || event.reason_code || ':' || event.state_after from ehr.order_route_events event
+          where event.route_id = r.id order by event.event_version desc limit 1) = 'receiving:wrong_patient:cancelled',
+    row_to_json(r)::text);
+  r := pg_temp.route(current_setting('hid.test.rroute_8')::uuid);
+  perform pg_temp.assert('completed -> completed, access ended, wrong_patient', r.state = 'completed'
+    and r.ended_kind = 'wrong_patient' and r.completed_at is not null and r.writes_end_at = r.ended_at
+    and r.access_ends_at = r.ended_at and pg_temp.last_event(r.id) = 'access_ended'
+    and (select event.side || ':' || event.reason_code || ':' || event.state_after from ehr.order_route_events event
+          where event.route_id = r.id order by event.event_version desc limit 1) = 'receiving:wrong_patient:completed',
+    row_to_json(r)::text);
+end $$;
+select set_config('hid.test.version_21', (pg_temp.route(current_setting('hid.test.lroute_21')::uuid)).row_version::text,
+  true), set_config('hid.test.version_rx8', (pg_temp.route(current_setting('hid.test.rroute_8')::uuid)).row_version::text,
+  true);
+set local role hid_identity_api_runtime;
+select pg_temp.as_platform(3);
+select pg_temp.check('support''s close of the cancelled wrong-patient route', format($s$select * from
+  identity.admin_close_order_route(%L, %s, 'The patient asked support to stop it')$s$, current_setting('hid.test.lroute_21'),
+  current_setting('hid.test.version_21')), '23505 ORDER_ROUTE_ALREADY_CLOSED');
+select pg_temp.check('support''s close of the ended completed wrong-patient route', format($s$select * from
+  identity.admin_close_order_route(%L, %s, 'The patient asked support to stop it')$s$, current_setting('hid.test.rroute_8'),
+  current_setting('hid.test.version_rx8')), '23505 ORDER_ROUTE_ALREADY_CLOSED');
+reset role;
+set local role hid_ehr_api_runtime;
+select pg_temp.edit_lab(current_setting('hid.test.lr_21')::uuid, 'cancelled', 'No longer needed');
+select pg_temp.edit_rx(current_setting('hid.test.rx_8')::uuid, 'frequency', 'Dose interval changed');
+reset role;
+select pg_temp.assert('the mirror leaves the cancelled route alone, and only adds an event to the ended completed one',
+  (pg_temp.route(current_setting('hid.test.lroute_21')::uuid)).row_version::text = current_setting('hid.test.version_21')
+  and pg_temp.last_event(current_setting('hid.test.rroute_8')::uuid) = 'order_changed_after_completion'
+  and (pg_temp.route(current_setting('hid.test.rroute_8')::uuid)).ended_kind = 'wrong_patient');
+select pg_temp.assert('ended_kind by state: wrong_patient only on cancelled and completed routes',
+  not exists (select 1 from ehr.order_routes route where route.ended_kind = 'wrong_patient'
+               and route.state not in ('cancelled', 'completed'))
+  and (select array_agg(route.state order by route.state) from ehr.order_routes route
+        where route.ended_kind = 'wrong_patient') = array['cancelled', 'completed']);
 
 select pg_temp.report();
 rollback;

@@ -1059,6 +1059,38 @@ grant execute on function identity.list_my_notification_inbox(integer),
   identity.mark_my_notification_read(uuid)
   to hid_identity_runtime;
 
+-- The receiving facility's wrong-patient report (0088, item 3), as that
+-- migration grants it (its section 5): the Lab and Pharmacy commands and
+-- their recreated route cards (0088 drops and creates the cards with two more
+-- columns, so the grants above are given again) to their runtimes; support's
+-- list and review to the Identity runtime alone; the ordering facility's
+-- Overview read (C28) to the EHR runtime; all but support's also to the
+-- schema test runtime. The shared command, the report table's guard and the
+-- report table are granted to no role.
+grant execute on function lab.report_wrong_patient_order_route(uuid,bigint,text,text,text,char),
+  lab.order_route_cards(uuid[])
+  to hid_lab_runtime, hid_schema_test_runtime;
+grant execute on function pharmacy.report_wrong_patient_order_route(uuid,bigint,text,text,text,char),
+  pharmacy.order_route_cards(uuid[])
+  to hid_pharmacy_runtime, hid_schema_test_runtime;
+grant execute on function identity.admin_list_wrong_patient_reports(text,uuid),
+  identity.admin_review_wrong_patient_report(uuid,bigint,text[],text,boolean)
+  to hid_identity_runtime;
+grant execute on function ehr.list_sent_wrong_patient_order_routes()
+  to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function ehr.report_wrong_patient_order_route(text,uuid,bigint,text,text,text,char),
+  ehr.guard_order_route_wrong_patient_report(),
+  ehr.receiving_order_route_cards(text,uuid[]),
+  lab.report_wrong_patient_order_route(uuid,bigint,text,text,text,char),
+  lab.order_route_cards(uuid[]),
+  pharmacy.report_wrong_patient_order_route(uuid,bigint,text,text,text,char),
+  pharmacy.order_route_cards(uuid[]),
+  identity.admin_list_wrong_patient_reports(text,uuid),
+  identity.admin_review_wrong_patient_report(uuid,bigint,text[],text,boolean),
+  ehr.list_sent_wrong_patient_order_routes()
+  from public;
+revoke all on ehr.order_route_wrong_patient_reports from public;
+
 -- Public patient enrollment persists only encrypted pending evidence. Its
 -- activation command performs the canonical account/patient writes atomically.
 grant select, insert, update, delete on identity.public_patient_enrollments,
