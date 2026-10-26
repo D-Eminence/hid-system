@@ -26,6 +26,16 @@ interface FoundRouteRow extends QueryResultRow {
   access_ends_at?: Date | string | null;
   /** Item 4 (0089): whether support's Close would act now, at the database clock. Absent on an earlier schema. */
   closable?: boolean | null;
+  /**
+   * D17 (0090): whether the receiver may still withdraw what it sent back
+   * (`not_accepted | open | correctable | reported | too_late`), the deadline
+   * (also past, for too_late; null for not_accepted and reported), and the
+   * receiver's report, if any. Absent on an earlier schema.
+   */
+  correction?: string | null;
+  correctable_until?: Date | string | null;
+  wrong_patient_reported_at?: Date | string | null;
+  wrong_patient_late?: boolean | null;
 }
 
 /** A row of C26 (`identity.admin_list_wrong_patient_reports`, item 3 §5.2). */
@@ -65,6 +75,14 @@ interface WrongPatientReportRow extends QueryResultRow {
   reviewed_by_name: string | null;
   review_actions: string[] | null;
   review_note: string | null;
+  /** D17 (0090): the seven trailing columns of a late report's facts. Absent on an earlier schema. */
+  late?: boolean;
+  ended_kind_before?: string | null;
+  discovered_by?: string | null;
+  discovered_on?: Date | string | null;
+  reporter_late_reports_last_30_days?: number | string | null;
+  ordering_sender_active?: boolean | null;
+  required_actions?: string[] | null;
 }
 
 /** Who recorded the work (C6): `[{ accountId, name }]` from C26's jsonb, nothing else of each entry. */
@@ -76,6 +94,44 @@ function recordedBy(value: unknown): { accountId: string; name: string | null }[
     const { accountId, name } = entry as { accountId?: unknown; name?: unknown };
     return typeof accountId === 'string' ? [{ accountId, name: typeof name === 'string' ? name : null }] : [];
   });
+}
+
+/**
+ * A `date` as yyyy-mm-dd. node-postgres parses a `date` column into a Date at
+ * local midnight, so the local calendar fields are the stored date whatever
+ * the process's time zone (toISOString would shift it east of UTC).
+ */
+function day(value: Date | string | null | undefined): string | null {
+  if (value instanceof Date) {
+    if (!Number.isFinite(value.getTime())) return null;
+    const pad = (part: number) => String(part).padStart(2, '0');
+    return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
+  }
+  return typeof value === 'string' ? value : null;
+}
+
+/** What C27 requires before a report is marked reviewed (D17-6), in C26's order. */
+const REQUIRED_ACTIONS = ['referred_to_dpo', 'ordering_facility_told'] as const;
+
+/**
+ * D17 (0090): a late report's facts, each only when the schema answers it:
+ * whether it came after the order had ended, how the order had ended before,
+ * how and when the receiver found out, the reporter's own late reports in 30
+ * days, whether the sender is still at the ordering facility, and what the
+ * review requires (`referred_to_dpo`, `ordering_facility_told`).
+ */
+function lateReportFacts(row: WrongPatientReportRow) {
+  if (!('late' in row)) return {};
+  return {
+    late: row.late === true,
+    endedKindBefore: row.ended_kind_before ?? null,
+    discoveredBy: row.discovered_by ?? null,
+    discoveredOn: day(row.discovered_on),
+    reporterLateReportsLast30Days: Number(row.reporter_late_reports_last_30_days ?? 0),
+    orderingSenderActive: row.ordering_sender_active === true,
+    requiredActions: Array.isArray(row.required_actions)
+      ? REQUIRED_ACTIONS.filter((action) => row.required_actions!.includes(action)) : [],
+  };
 }
 
 /** A C26 row as support's list shows it (item 3 §5.2), built field by field: no patient, no order content. */
@@ -107,6 +163,7 @@ function wrongPatientReport(row: WrongPatientReportRow) {
     flags: Array.isArray(row.flags) ? row.flags : [],
     facilityReportsLast30Days: Number(row.facility_reports_last_30_days),
     memberReportsLast30Days: Number(row.member_reports_last_30_days),
+    ...lateReportFacts(row),
     review: row.reviewed_at === null || row.reviewed_at === undefined ? null : {
       reviewedAt: iso(row.reviewed_at),
       reviewedBy: { accountId: row.reviewed_by_account_id, name: row.reviewed_by_name },
@@ -191,6 +248,13 @@ export class AdminOrderRoutesService {
    * clock). The query selects every column, so on a schema without 0089 (or
    * a later one that restores 0086's lookup) both are left out, never a
    * made-up `closable: false`, and the lookup still answers.
+   *
+   * D17 (0090): each route also answers `correction` (whether the receiver
+   * may still withdraw what it sent back: not_accepted, open, correctable,
+   * reported or too_late), `correctableUntil` (the deadline; already past for
+   * too_late) and `wrongPatient` (`{ reportedAt, late }` or null), each only
+   * when the schema answers it, and the answer adds `lateCorrection: true`,
+   * so support's console learns this backend serves the late correction.
    */
   async find(context: PlatformAdminContext, reference: string | undefined, healthId: string | undefined) {
     const byReference = reference ? reference.toUpperCase() : null;
@@ -211,7 +275,10 @@ export class AdminOrderRoutesService {
           acceptedAt: iso(row.accepted_at), endedAt: iso(row.ended_at), endedKind: row.ended_kind,
           ...('access_ends_at' in row ? { accessEndsAt: iso(row.access_ends_at ?? null) } : {}),
           ...(typeof row.closable === 'boolean' ? { closable: row.closable } : {}),
-        })), wrongPatientReports: true };
+          ...('correction' in row ? { correction: row.correction ?? null } : {}),
+          ...('correctable_until' in row ? { correctableUntil: iso(row.correctable_until ?? null) } : {}),
+          ...('wrong_patient_reported_at' in row ? { wrongPatient: wrongPatientOf(row) } : {}),
+        })), wrongPatientReports: true, lateCorrection: true };
       }, { readOnly: true });
     } catch (error) {
       throw adminOrderRouteProblem(error, 'lookup');
@@ -222,14 +289,16 @@ export class AdminOrderRoutesService {
    * C26 (item 3 §5.2): support's wrong-patient reports, `unreviewed` (flagged
    * first, then oldest first) or `recent` (90 days, newest first), at most
    * 200, optionally of one receiving facility. Read-only; the interceptor
-   * audits it (admin.wrong-patient-reports.list), never naming a note.
+   * audits it (admin.wrong-patient-reports.list), never naming a note. D17
+   * (0090): late reports carry their facts (`lateReportFacts`), and the
+   * answer adds `lateCorrection: true`.
    */
   async listWrongPatientReports(context: PlatformAdminContext, status: 'unreviewed' | 'recent', facilityId?: string) {
     try {
       return await this.database.withPlatformTransaction(context, async (client) => {
         const result = await client.query<WrongPatientReportRow>(
           'select * from identity.admin_list_wrong_patient_reports($1, $2)', [status, facilityId ?? null]);
-        return { items: result.rows.map(wrongPatientReport) };
+        return { items: result.rows.map(wrongPatientReport), lateCorrection: true };
       }, { readOnly: true });
     } catch (error) {
       throw adminOrderRouteProblem(error, 'facility');
@@ -277,6 +346,27 @@ export class AdminOrderRoutesService {
   }
 }
 
+/** The receiver's report on a found route (D17): `{ reportedAt, late }`, or null when it has none. */
+function wrongPatientOf(row: FoundRouteRow): { reportedAt: string; late: boolean } | null {
+  const reportedAt = iso(row.wrong_patient_reported_at ?? null);
+  return reportedAt ? { reportedAt, late: row.wrong_patient_late === true } : null;
+}
+
+/**
+ * C27's refusal when a late report's required actions are missing (D17-6):
+ * 400 with the missing ones as the problem member `required` (the DETAIL,
+ * comma-separated, `referred_to_dpo` first), kept to the known actions.
+ */
+function referralRequired(error: unknown): DomainProblem {
+  const detail = (error as { detail?: unknown }).detail;
+  const named = typeof detail === 'string' ? detail.split(',').map((action) => action.trim()) : [];
+  const required = REQUIRED_ACTIONS.filter((action) => named.includes(action)).join(',');
+  return new DomainProblem(400, 'WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED',
+    'This report came after the order had ended: record "Referred to the DPO" and, where the order had come back, '
+      + '"Ordering facility told" before marking it reviewed', undefined,
+    required ? { extensions: { required } } : undefined);
+}
+
 function parse(value: unknown): Record<string, unknown> | undefined {
   const parsed = typeof value === 'string' ? JSON.parse(value) as unknown : value;
   return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
@@ -288,7 +378,8 @@ function parse(value: unknown): Record<string, unknown> | undefined {
  * version conflict 409 VERSION_CONFLICT (P4b's admin convention, 40001).
  * Item 3: support's wrong-patient list (C26) uses the `facility` scope (an
  * unknown facility is 404 ADMIN_FACILITY_NOT_FOUND, B8); the review (C27) the
- * `report` scope.
+ * `report` scope, where D17's 22023 WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED is
+ * 400 with the problem member `required`.
  */
 export function adminOrderRouteProblem(error: unknown, scope: 'facility' | 'lookup' | 'route' | 'report'): unknown {
   if (error instanceof DomainProblem) return error;
@@ -307,6 +398,8 @@ export function adminOrderRouteProblem(error: unknown, scope: 'facility' | 'look
     case '22023':
       if (scope === 'lookup') return lookupInvalid();
       if (scope === 'report') {
+        // D17-6: recognised before the generic refusal (an older Identity answers it WRONG_PATIENT_REVIEW_INVALID).
+        if (message === 'WRONG_PATIENT_REVIEW_REFERRAL_REQUIRED') return referralRequired(error);
         return new DomainProblem(400, 'WRONG_PATIENT_REVIEW_INVALID',
           'Choose one or more actions, or "No further action" alone, and write a note of 8 to 500 characters');
       }
