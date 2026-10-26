@@ -143,9 +143,10 @@ export class LabWorkItemsService {
    * who may receive lab requests from other facilities, the answer says
    * whether this facility receives them now and whether any wait or are held
    * here (item 4, 0089; read in the transaction after the audit rows, left
-   * out when it cannot be read). The answer also says whether orders between
-   * facilities and work on them are on, read after the transaction (FEAS R4,
-   * V11).
+   * out when it cannot be read), and that this backend serves the late
+   * correction (`lateCorrection: true`, D17). The answer also says whether
+   * orders between facilities and work on them are on, read after the
+   * transaction (FEAS R4, V11).
    */
   async list(context: DataAccessContext) {
     if (!context.actor.permissions.includes('lab.work-item.read')) {
@@ -165,7 +166,7 @@ export class LabWorkItemsService {
       const receiving = await this.routeCards.receiving(client, context);
       return { items: result.rows.map((row) => ({ ...this.project(row, cards.get(row.id)),testName:row.test_name,
         accessionId:row.accession_id,accessionNumber:row.accession_number,specimenStatuses:row.specimen_statuses ?? [] })),
-      ...receiving };
+      ...receiving, ...this.routeCards.lateCorrection(context) };
     });
     return { ...page, ...(await this.routeCards.flags()) };
   }

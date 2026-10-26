@@ -5,10 +5,13 @@ import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
-import type { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto, ReportWrongPatientDto,
-  SearchOrderRoutesDto } from './dto/order-route.dto';
+import type { AcceptOrderRouteDto, CorrectWrongPatientDto, DeclineOrderRouteDto, FindCorrectableDto, ListOrderRoutesQueryDto,
+  ReportWrongPatientDto, SearchOrderRoutesDto } from './dto/order-route.dto';
 import {
+  correctablePrescriptionRoute,
+  correctionAnswer,
   incomingPrescriptionRoute,
+  lateCorrectionProblem,
   orderRouteUnavailable,
   pharmacyOrderRouteProblem,
   prescriptionRouteDetail,
@@ -58,6 +61,20 @@ function healthIdFilter(value: string): string {
   const healthId = value.trim().toUpperCase();
   if (!HEALTH_ID.test(healthId)) throw invalid('The Health ID is not in the form HID-XXXXXX');
   return healthId;
+}
+
+/**
+ * The day the pharmacy found out (C29), as a calendar date. The command
+ * checks its bounds (not after today in Lagos, not before the acceptance
+ * day); a date that is no calendar date never reaches it.
+ */
+export function discoveryDay(value: string): string {
+  const date = ISO_DATE.exec(value);
+  const parsed = date ? new Date(Date.UTC(Number(date[1]), Number(date[2]) - 1, Number(date[3]))) : undefined;
+  if (!date || !parsed || parsed.toISOString().slice(0, 10) !== value) {
+    throw invalid('The day you found out must be a calendar date, YYYY-MM-DD');
+  }
+  return value;
 }
 
 /** The order's reference as the counter typed it, upper-cased, or null when none was given. */
@@ -222,6 +239,73 @@ export class PharmacyOrderRoutesService {
       }, { isolationLevel: 'READ COMMITTED' });
     } catch (error) {
       throw wrongPatientProblem(error);
+    }
+  }
+
+  /**
+   * Find a prescription this pharmacy accepted by its exact reference (C30,
+   * D17-8, §5.1): at most 5, newest acceptance first, each with its
+   * correction state and deadline and, only while it is open or correctable,
+   * the pharmacy's own facts about it; never the patient. A reference no
+   * accepted prescription here carries answers `items: []`, never 404. One
+   * READ COMMITTED transaction: the lookup's own row (no patient, the route
+   * ids and states, never the reference) is written with it.
+   * `lateCorrection: true` says this backend serves the late correction.
+   */
+  async findCorrectable(context: DataAccessContext, input: FindCorrectableDto) {
+    const reference = normalizedReference(input.reference);
+    if (reference === null) throw invalid('The reference is the 8 characters shown with the order');
+    return this.run(context, async (client) => {
+      const result = await client.query<Row>('select * from pharmacy.find_correctable_order_routes($1)', [reference]);
+      const found = result.rows.map(correctablePrescriptionRoute);
+      if (found.some((item) => item === undefined)) throw orderRouteUnavailable();
+      const items = found as NonNullable<(typeof found)[number]>[];
+      await this.audit.recordWithClient(client, context, 'pharmacy.order-route.correctable',
+        { resourceType: 'order-route-collection', resourceId: context.facilityId },
+        { found: items.length, states: items.map((item) => item.correction), routeIds: items.map((item) => item.id) });
+      return { items, lateCorrection: true as const };
+    });
+  }
+
+  /**
+   * The pharmacy reverses, after the prescription has ended or its window
+   * lapsed, a dispensing it recorded for someone who was not its patient
+   * (C29, D17 §4.5, §5.1). One READ COMMITTED transaction, run once: the
+   * command reverses the dispensing (A sees it reversed), ends a prescription
+   * that had only lapsed as wrong_patient or keeps another ending, records the
+   * late report for support and tells the patient; this writes the pharmacy's
+   * own audit row with the patient (from the command), how and when it found
+   * out and the counts, never the note. A replay (same member, key and
+   * request) answers the route as it is now and the counts of the first.
+   */
+  async correctWrongPatient(context: DataAccessContext, routeId: string, input: CorrectWrongPatientDto,
+    idempotencyKey: string) {
+    const note = input.note.trim();
+    if (note.length < 8 || note.length > 500) throw invalid('The note for Health ID support must be 8 to 500 characters');
+    const discoveredOn = discoveryDay(input.discoveredOn);
+    const digest = requestDigest('pharmacy.order-route.wrong-patient-correction', { routeId,
+      expectedVersion: input.expectedVersion, reason: input.reason, discoveredBy: input.discoveredBy, discoveredOn, note });
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const result = await client.query<Row>(
+          'select * from pharmacy.correct_wrong_patient_order_route($1, $2, $3, $4, $5::date, $6, $7, $8)',
+          [routeId, input.expectedVersion, input.reason, input.discoveredBy, discoveredOn, note, idempotencyKey, digest]);
+        const row = result.rows[0];
+        const answer = row ? correctionAnswer(routeId, row) : undefined;
+        const patientId = typeof row?.patient_id === 'string' ? row.patient_id : undefined;
+        if (!row || !answer || !patientId) throw orderRouteUnavailable();
+        await this.audit.recordWithClient(client, context, 'pharmacy.order-route.wrong-patient-correction',
+          { resourceType: 'order-route', resourceId: routeId, patientId },
+          { routeId, kind: 'prescription', reportId: typeof row.report_id === 'string' ? row.report_id : null,
+            stateBefore: typeof row.state_before === 'string' ? row.state_before : null,
+            endedKindBefore: answer.endedKindBefore,
+            state: typeof row.route_state === 'string' ? row.route_state : null, reasonCode: input.reason,
+            discoveredBy: input.discoveredBy, discoveredOn, resultsVoided: answer.resultsVoided,
+            dispensingReversed: answer.dispensingReversed, replayed: answer.replayed, late: true });
+        return answer;
+      }, { isolationLevel: 'READ COMMITTED' });
+    } catch (error) {
+      throw lateCorrectionProblem(error);
     }
   }
 

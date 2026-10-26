@@ -81,7 +81,7 @@ const incoming = { route_id: routeId, reference: 'B0000000', row_version: '1', e
   patient_id: patientId, source_lab_request_id: sourceOrderId, orderer_account_id: 'x', clinical_information: null };
 
 describe('Lab order-route routes (SPEC-FINAL §10.2)', () => {
-  it('serves six browser routes, all needing lab.order-route.receive, none internal or public', () => {
+  it('serves eight browser routes, all needing lab.order-route.receive, none internal or public', () => {
     const base = Reflect.getMetadata(PATH_METADATA, LabOrderRoutesController) as string;
     const routes = Object.getOwnPropertyNames(LabOrderRoutesController.prototype).filter((name) => name !== 'constructor')
       .map((name) => {
@@ -96,6 +96,9 @@ describe('Lab order-route routes (SPEC-FINAL §10.2)', () => {
       // Find by Health ID with the Health ID in the body (CODEX §26).
       [RequestMethod.POST, 'lab/order-routes/search', 200, ['lab.order-route.receive'], 'lab.order-route.list.request',
         undefined, undefined],
+      // D17 (C30): an accepted order by its reference, declared before the :routeId routes.
+      [RequestMethod.POST, 'lab/order-routes/correctable', 200, ['lab.order-route.receive'],
+        'lab.order-route.correctable.request', undefined, undefined],
       [RequestMethod.GET, 'lab/order-routes/:routeId', undefined, ['lab.order-route.receive'], 'lab.order-route.read.request',
         undefined, undefined],
       [RequestMethod.POST, 'lab/order-routes/:routeId/accept', 201, ['lab.order-route.receive'], 'lab.order-route.accept.request',
@@ -105,6 +108,9 @@ describe('Lab order-route routes (SPEC-FINAL §10.2)', () => {
       // Item 3 (C25): accepted for someone who was not the order's patient.
       [RequestMethod.POST, 'lab/order-routes/:routeId/wrong-patient', 200, ['lab.order-route.receive'],
         'lab.order-route.wrong-patient.request', undefined, undefined],
+      // D17 (C29): the late correction, after the order ended.
+      [RequestMethod.POST, 'lab/order-routes/:routeId/wrong-patient-correction', 200, ['lab.order-route.receive'],
+        'lab.order-route.wrong-patient-correction.request', undefined, undefined],
     ]);
   });
 
@@ -534,7 +540,10 @@ describe('Lab work list with route-backed rows (C12)', () => {
       const answer = await facts.service.list(context);
       expect(answer).toMatchObject({ receives: true, routesHere: { waiting: false, held: true }, crossFacilityOrders: false,
         crossFacilityWork: true });
-      expect(Object.keys(answer)).toEqual(['items', 'receives', 'routesHere', 'crossFacilityOrders', 'crossFacilityWork']);
+      // D17: to a member who may receive lab requests the work list also says the late correction is served.
+      expect(Object.keys(answer)).toEqual(['items', 'receives', 'routesHere', 'lateCorrection', 'crossFacilityOrders',
+        'crossFacilityWork']);
+      expect(answer.lateCorrection).toBe(true);
       // One read per list, in its savepoint, after the cards; the audit rows are the same as without it.
       expect(facts.statements.filter((sql) => sql === RECEIVES)).toHaveLength(1);
       const cardsAt = facts.statements.findIndex((sql) => sql.includes('lab.order_route_cards'));
@@ -546,7 +555,7 @@ describe('Lab work list with route-backed rows (C12)', () => {
       const without = build([card]);
       await without.service.list(context);
       expect(facts.audits).toEqual(without.audits);
-      expect(JSON.stringify(facts.audits)).not.toMatch(/receives|routesHere|held|waiting/);
+      expect(JSON.stringify(facts.audits)).not.toMatch(/receives|routesHere|held|waiting|lateCorrection/);
     });
 
   it('leaves both out when the database answers NULL, when the read fails, and asks nothing of a member who cannot receive',
@@ -572,6 +581,8 @@ describe('Lab work list with route-backed rows (C12)', () => {
       const reader = build([card]);
       const readerAnswer = await reader.service.list({ ...context, actor: { ...context.actor, permissions: ['lab.work-item.read'] } });
       expect(readerAnswer).not.toHaveProperty('receives');
+      // D17: nor does a member who cannot receive lab requests learn that the late correction is served.
+      expect(readerAnswer).not.toHaveProperty('lateCorrection');
       expect(reader.statements.some((sql) => sql.includes('order_route_receives_here') || sql.includes('lab_order_route_receives')))
         .toBe(false);
     });

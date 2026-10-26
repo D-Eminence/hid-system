@@ -2,8 +2,8 @@ import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Q
 import { RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
-import { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto, ReportWrongPatientDto, SearchOrderRoutesDto }
-  from './dto/order-route.dto';
+import { AcceptOrderRouteDto, CorrectWrongPatientDto, DeclineOrderRouteDto, FindCorrectableDto, ListOrderRoutesQueryDto,
+  ReportWrongPatientDto, SearchOrderRoutesDto } from './dto/order-route.dto';
 import { PharmacyOrderRoutesService } from './pharmacy-order-routes.service';
 
 const uuid = () => new ParseUUIDPipe({ version: '4' });
@@ -32,6 +32,18 @@ export class PharmacyOrderRoutesController {
   @RequirePermissions('pharmacy.order-route.receive')
   search(@Body() input: SearchOrderRoutesDto, @Req() request: HidRequest) {
     return this.routes.search(requireRequestContext(request), input);
+  }
+
+  /**
+   * Find a prescription this pharmacy accepted by its exact reference (C30,
+   * D17 §5.1), to correct it after it ended. A POST, so the reference (with a
+   * date of birth an acceptance factor) is in no request line. Declared before
+   * the `:routeId` routes; a route id is a version-4 UUID, never this word.
+   */
+  @Post('correctable') @HttpCode(200)
+  @RequirePermissions('pharmacy.order-route.receive')
+  findCorrectable(@Body() input: FindCorrectableDto, @Req() request: HidRequest) {
+    return this.routes.findCorrectable(requireRequestContext(request), input);
   }
 
   @Get(':routeId')
@@ -67,5 +79,21 @@ export class PharmacyOrderRoutesController {
     @Headers('idempotency-key') key: string | undefined, @Req() request: HidRequest) {
     const idempotencyKey = requireIdempotencyKey(key);
     return this.routes.reportWrongPatient(requireRequestContext(request), routeId, input, idempotencyKey);
+  }
+
+  /**
+   * The pharmacy accepted this prescription for someone who was not its
+   * patient and finds out after it ended or its window lapsed (C29, D17
+   * §5.1): a dispensing it recorded is reversed, until 180 days after
+   * acceptance, at most 5 per member and 20 per pharmacy in any 24 hours. Any
+   * member who may receive prescriptions; reversing a dispensing also needs
+   * pharmacy.dispensing.reverse, which the command checks.
+   */
+  @Post(':routeId/wrong-patient-correction') @HttpCode(200)
+  @RequirePermissions('pharmacy.order-route.receive')
+  correctWrongPatient(@Param('routeId', uuid()) routeId: string, @Body() input: CorrectWrongPatientDto,
+    @Headers('idempotency-key') key: string | undefined, @Req() request: HidRequest) {
+    const idempotencyKey = requireIdempotencyKey(key);
+    return this.routes.correctWrongPatient(requireRequestContext(request), routeId, input, idempotencyKey);
   }
 }
