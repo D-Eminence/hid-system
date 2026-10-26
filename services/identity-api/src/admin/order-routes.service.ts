@@ -22,6 +22,10 @@ interface FoundRouteRow extends QueryResultRow {
   accepted_at: Date | string | null;
   ended_at: Date | string | null;
   ended_kind: string | null;
+  /** Item 4 (0089): when the receiving facility's access ends; null before acceptance. Absent on an earlier schema. */
+  access_ends_at?: Date | string | null;
+  /** Item 4 (0089): whether support's Close would act now, at the database clock. Absent on an earlier schema. */
+  closable?: boolean | null;
 }
 
 /** A row of C26 (`identity.admin_list_wrong_patient_reports`, item 3 §5.2). */
@@ -135,7 +139,14 @@ const unavailable = () => new DomainProblem(503, 'ORDER_ROUTES_ADMIN_UNAVAILABLE
 export class AdminOrderRoutesService {
   constructor(private readonly database: DatabaseService) {}
 
-  /** C20: listing, lifetime counts and 30 days per counterpart; no patient, no order content. */
+  /**
+   * C20: listing, what the facility is as a destination (`destination
+   * { receivingTypes, review }`, item 4, 0089: its active laboratory or
+   * pharmacy products and its sign-up's review, no verification method),
+   * lifetime counts and 30 days per counterpart; no patient, no order
+   * content. The database's object is answered as it is, so an earlier
+   * schema answers without `destination`.
+   */
   async summary(context: PlatformAdminContext, facilityId: string) {
     try {
       return await this.database.withPlatformTransaction(context, async (client) => {
@@ -173,6 +184,13 @@ export class AdminOrderRoutesService {
    * person (item 3, 0088): only then does support's Close form ask support to
    * have such an order ended there first. An earlier Identity sends no such
    * field, and the form keeps its earlier wording (D15).
+   *
+   * Item 4 (0089): each route also answers `accessEndsAt` (when the
+   * receiving facility's access ends, null before acceptance) and `closable`
+   * (whether Close would act now: C22's own refusal, negated, at the database
+   * clock). The query selects every column, so on a schema without 0089 (or
+   * a later one that restores 0086's lookup) both are left out, never a
+   * made-up `closable: false`, and the lookup still answers.
    */
   async find(context: PlatformAdminContext, reference: string | undefined, healthId: string | undefined) {
     const byReference = reference ? reference.toUpperCase() : null;
@@ -182,18 +200,17 @@ export class AdminOrderRoutesService {
     if (byHealthId !== null && !HEALTH_ID.test(byHealthId)) throw lookupInvalid();
     try {
       return await this.database.withPlatformTransaction(context, async (client) => {
+        // node-postgres answers uuid and bigint as text, as the earlier casts did.
         const result = await client.query<FoundRouteRow>(
-          `select route_id::text as route_id, reference, kind, row_version, effective_state,
-                  ordering_facility_id::text as ordering_facility_id, ordering_facility_name,
-                  receiving_facility_id::text as receiving_facility_id, receiving_facility_name,
-                  created_at, accepted_at, ended_at, ended_kind
-             from identity.admin_find_order_routes($1, $2)`, [byReference, byHealthId]);
+          'select * from identity.admin_find_order_routes($1, $2)', [byReference, byHealthId]);
         return { items: result.rows.map((row) => ({
           routeId: row.route_id, reference: row.reference, kind: row.kind, version: Number(row.row_version),
           effectiveState: row.effective_state, orderingFacilityId: row.ordering_facility_id,
           orderingFacilityName: row.ordering_facility_name, receivingFacilityId: row.receiving_facility_id,
           receivingFacilityName: row.receiving_facility_name, createdAt: iso(row.created_at),
           acceptedAt: iso(row.accepted_at), endedAt: iso(row.ended_at), endedKind: row.ended_kind,
+          ...('access_ends_at' in row ? { accessEndsAt: iso(row.access_ends_at ?? null) } : {}),
+          ...(typeof row.closable === 'boolean' ? { closable: row.closable } : {}),
         })), wrongPatientReports: true };
       }, { readOnly: true });
     } catch (error) {
