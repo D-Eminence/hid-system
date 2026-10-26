@@ -48,21 +48,28 @@
 -- identity.approve_access_request, identity.deny_access_request and
 -- identity.list_my_access_requests and their grants are unchanged.
 --
--- Locks: none on any table. The three functions are PL/pgSQL, whose bodies
--- are not analysed against tables when created; the preconditions read only
--- the system catalogs; the grants change only the function ACLs. So 0086's
--- rule for platform.control_settings and identity.consent_grants (one NOWAIT
--- attempt) does not apply, and no request waits for this migration. At run
--- time the revoke takes the PIN advisory key, then FOR UPDATE on one grant
--- row, the order PIN removal and PIN change use; it never inserts a grant, so
--- P4b's BEFORE INSERT probation trigger never fires for it, and it refuses a
--- break-glass grant before writing.
+-- Locks: one table lock, a momentary ACCESS SHARE on identity.consent_grants,
+-- taken twice and each time released at once: by pg_get_constraintdef in the
+-- CHECK precondition, and by the PL/pgSQL validator when it resolves the
+-- revoke's identity.consent_grants%rowtype. ACCESS SHARE conflicts only with
+-- ACCESS EXCLUSIVE (most DDL, VACUUM FULL, a vacuum truncating the table), so
+-- no request waits for this migration; while another session holds ACCESS
+-- EXCLUSIVE on the table, the runner's lock_timeout stops the dry run or the
+-- apply with nothing applied. No other table is locked: the other catalog
+-- reads take no table lock, the bodies are not otherwise checked against
+-- tables when created, and the grants change only the function ACLs. 0087
+-- never locks platform.control_settings, so 0086's rule for it (one NOWAIT
+-- attempt) does not apply. At run time the revoke takes the PIN advisory key,
+-- then FOR UPDATE on one grant row, the order PIN removal and PIN change use;
+-- it never inserts a grant, so P4b's BEFORE INSERT probation trigger never
+-- fires for it, and it refuses a break-glass grant before writing.
 --
 -- Applied migrations 0001 through 0086 are immutable.
 
 -- 0. Preconditions. The release dry-runs every pending migration in one
 -- transaction before applying any, so a refusal here stops the release with
--- nothing changed. Reading the catalog takes no lock on any table.
+-- nothing changed. These are catalog reads; only pg_get_constraintdef locks a
+-- table, a momentary ACCESS SHARE on identity.consent_grants (see Locks).
 do $$
 declare
   mismatch text;

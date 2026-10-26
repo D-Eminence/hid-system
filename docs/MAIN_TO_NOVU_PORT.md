@@ -1277,8 +1277,16 @@ declaration; those that keep `main`'s behaviour say so.
   (`identity.patient_self_session`, 0033's PIN set and removal and 0075's
   `identity.access_patient_with_pin`) differ; if `identity.consent_grants`
   lacks one of the four CHECKs the rule reads; or if that table has any user
-  trigger other than 0086's BEFORE INSERT probation trigger. It takes no
-  table lock.
+  trigger other than 0086's BEFORE INSERT probation trigger.
+- Locks: 0087's only table lock is a momentary ACCESS SHARE on
+  `identity.consent_grants`, taken by `pg_get_constraintdef` in the CHECK
+  precondition and by the PL/pgSQL validator resolving the revoke's
+  `%rowtype`, each released at once. It conflicts only with ACCESS EXCLUSIVE
+  (most DDL, VACUUM FULL, a vacuum truncating the table), so no request waits
+  for it; if another session holds ACCESS EXCLUSIVE there, the runner's 5 s
+  `lock_timeout` stops the dry run or the apply with nothing applied. 0087
+  never locks `platform.control_settings`, so 0086's NOWAIT rule does not
+  apply.
 - D2, as on `main`: revoking needs no recent sign-in and is never held after
   an account recovery, because it only removes access. So someone holding a
   live patient session can also end the patient's grants, and after the real
