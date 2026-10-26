@@ -1431,23 +1431,9 @@ Decided by the owner, D-Eminence:
   looks wrong; all four products; 200 CAC lookups a day across all sign-ups;
   unactivated applications lapse after 24 hours; the control ships off and is
   switched on right after the deploy and its closed-state checks, with no pilot.
-- Patient grant revocation (main 0066 items 2-4, the owner's request): 0087
-  is built on the recommended defaults D1-D14, which stand unless the owner
-  changes one before signing its declaration. D1: the database labels
-  `revocableByPatient` and Identity publishes `patientRevocable`. D2: no
-  recent sign-in to revoke. D3: `main`'s rule (patient-approved or
-  PIN-derived; never break-glass or workforce). D4: order routes are left
-  alone. D5: details written for the patient. D6: the website drops "and
-  reviewed" from the emergency-access sentence first. D7: only a deleted
-  login gets no new inbox items. D8 and D9: no notice to the clinician and
-  no inbox receipt. D10: the owner signs `reviewed_by` and re-pins health
-  after the release. D11: 0087 is released on its own. D12: the Access PIN
-  stays valid after a PIN-based grant is revoked, and the revoke form says
-  so. D13: the audit row's reason is the fixed 'Revoked by the patient'. D14:
-  the history's limit keeps revocable grants. Sequencing: the website copy
-  release (the corrected emergency-access sentence, and the PIN sentence on
-  the revoke form) ships before 0087, while health's pins match the live
-  backend.
+- Patient grant revocation (main 0066 items 2-4) is ported, as 0087, at the
+  owner's request. Its choices D1-D14 are not decided yet: they are the
+  spec's recommended defaults, listed under Still open below.
 
 Still open, with what each one holds back:
 
@@ -1495,7 +1481,26 @@ Still open, with what each one holds back:
   When account deletion is ported: support's emergency-contact opt-out counts
   a patient as told even when the inbox skips a deleted login (0084's
   `patients_told`).
-- Patient grant revocation (ported above, 0087): the owner signs the 0087
+- Patient grant revocation (ported above, 0087, unsigned): 0087 is built on
+  the spec's recommended defaults D1-D14, which the owner has not confirmed.
+  They stand only if the owner signs 0087's declaration without changing
+  one; a change is made, and re-tested, before signing. D1: the database
+  labels `revocableByPatient` and Identity publishes `patientRevocable`. D2:
+  no recent sign-in to revoke. D3: `main`'s rule (patient-approved or
+  PIN-derived; never break-glass or workforce). D4: order routes are left
+  alone. D5: details written for the patient. D6: the website drops "and
+  reviewed" from the emergency-access sentence first. D7: only a deleted
+  login gets no new inbox items. D8 and D9: no notice to the clinician and
+  no inbox receipt. D10: the owner signs `reviewed_by` and re-pins health
+  after the release. D11: 0087 is released on its own. D12: the Access PIN
+  stays valid after a PIN-based grant is revoked, and the revoke form says
+  so. D13: the audit row's reason is the fixed 'Revoked by the patient'. D14:
+  the history's limit keeps revocable grants. Sequencing: the website copy
+  release (the corrected emergency-access sentence, and the PIN sentence on
+  the revoke form) ships before 0087, while health's pins match the live
+  backend; since item 1's release (595c044: identity-api, ehr-api, lab-api
+  and pharmacy-api) they do not, so that release carries the owner-signed
+  re-pin of those four (below, Frontend pin). The owner signs the 0087
   declaration after the read-only preflights (the md5 and owners of the six
   bodies 0087 pins, no `revoke_my_consent_grant` yet, the CHECKs and the one
   user trigger on `identity.consent_grants`, the migration login's
