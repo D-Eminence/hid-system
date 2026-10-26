@@ -1390,14 +1390,21 @@ decisions, all built as decided:
   suspected-misuse report and every report where something had gone back
   (the flags `suspected_misuse` and `something_came_back`).
 - D15: the website ships first, then the backend with the owner's signature
-  on 0088. Until then the website is dormant: the work-row button needs a
-  numeric `orderRoute.version`, which only 0088's cards carry, and every new
-  route answers 404 `NOT_FOUND` on 595c044's and 7246d0e's services (checked
-  at integration), which the website says as "not available yet" or shows
-  as nothing. Two parts show before the backend: the Accepted panel's
-  button, which answers "isn't available yet" on 404 (SPEC-FINAL §11), and
-  the guidance sentences (§9.2, §9.4, §9.5). D16: the wording is
-  the spec's §9 drafts. D17: late correction is not in this build (the next
+  on 0088. Until then the website is dormant: it shows the new action and the
+  new guidance only once this backend has said it serves the report. The
+  Lab and Pharmacy work lists' cards carry a numeric `orderRoute.version`
+  (only 0088's cards do); the EHR's lab-request and prescription lists and
+  support's order-route lookup answer `wrongPatientReports: true`; and every
+  new route answers 404 `NOT_FOUND` on 595c044's and 7246d0e's services
+  (checked at integration). Before that the Accepted panel asks only for the
+  check that the person is the patient, with no button; the clinician's
+  change warning and support's Close form keep their earlier words, so nobody
+  is sent to a facility that cannot end the order, nor away from the
+  clinician's change and support's Close, the only remedies on today's
+  backend; and support's console stops listing the reports page once a read
+  answers 404. The patient's new card line (tell the facility or Health ID
+  support) shows on both, since support can close the order on either.
+  D16: the wording is the spec's §9 drafts. D17: late correction is not in this build (the next
   item); support and clinicians follow §9.5's guidance meanwhile. D18: no
   "can't complete" action; the form says not to use this for that, "other"
   reads "The person was not the patient for another reason", and support's
