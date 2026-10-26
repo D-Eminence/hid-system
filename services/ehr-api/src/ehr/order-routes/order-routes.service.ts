@@ -13,6 +13,7 @@ import {
   orderRouteSummary,
   orderRouteView,
   patientOrderRoute,
+  wrongPatientOverview,
   type OrderRouteKind,
   type PatientOrderRoute,
 } from './order-route.mapping';
@@ -236,6 +237,53 @@ export class OrderRoutesService {
           details: { kind, version: row.version },
         });
         return { kind, version: row.version, text: row.text };
+      });
+    } catch (error) {
+      throw orderRouteProblem(error, 'staff');
+    }
+  }
+
+  /**
+   * The ordering facility's Overview card (C28, item 3 D10's alternative
+   * (a)): the orders sent from this facility that the receiving laboratory or
+   * pharmacy reported it accepted for someone who was not the patient, in the
+   * last 30 days. Read-only, bound like the other order-route reads: the
+   * guard re-checks the live staff session at this facility with Identity and
+   * the permission; the database binds the session's subject, membership and
+   * facility under direct care (42501 otherwise). The privacy rule is the
+   * database's: full rows only for the member's own orders whose patient they
+   * may still read; every other such order as a count and its reference; a
+   * member without ehr.order-route.send nothing. Audited in the same
+   * transaction: one row for the read (no patient), and one per order shown in
+   * full, naming its patient, as the order's own route views are.
+   */
+  async wrongPatientOverview(context: DataAccessContext) {
+    requireDirectCare(context);
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const result = await client.query<{ answer: unknown }>('select ehr.list_sent_wrong_patient_order_routes() as answer');
+        const overview = wrongPatientOverview(result.rows[0]?.answer);
+        if (!overview) throw orderRouteUnavailable();
+        const staff = {
+          correlationId: context.correlationId,
+          actorType: 'staff' as const,
+          actorSubject: context.actor.subject,
+          actorAccountId: context.actor.accountId,
+          actorMembershipId: context.membershipId,
+          organizationId: context.actor.facility?.organizationId,
+          facilityId: context.facilityId,
+          outcome: 'success' as const,
+          purposeOfUse: context.purposeOfUse,
+        };
+        await this.audit.recordWithClient(client, { ...staff, action: 'ehr.order-route.wrong-patient-overview',
+          resourceType: 'order-route-collection', resourceId: context.facilityId,
+          details: { itemCount: overview.items.length, otherCount: overview.others.count } });
+        for (const item of overview.items) {
+          await this.audit.recordWithClient(client, { ...staff, patientId: item.link.patientId,
+            action: 'ehr.order-route.wrong-patient-overview.item', resourceType: 'order-route', resourceId: item.routeId,
+            details: { routeId: item.routeId, kind: item.kind } });
+        }
+        return overview;
       });
     } catch (error) {
       throw orderRouteProblem(error, 'staff');

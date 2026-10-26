@@ -389,3 +389,83 @@ export function withOrderRoute<Row extends { id: string }>(row: Row,
   routes: ReadonlyMap<string, OrderRouteSummary> | undefined): Row & { orderRoute?: OrderRouteSummary | null } {
   return routes === undefined ? row : { ...row, orderRoute: routes.get(row.id) ?? null };
 }
+
+/**
+ * One order on the ordering facility's Overview card (C28, item 3 D10): an
+ * order this member sent that the receiving laboratory or pharmacy reported
+ * it accepted for someone who was not the patient, while the member may still
+ * read that patient's record (the database decides).
+ */
+export interface WrongPatientOverviewItem {
+  routeId: string;
+  reference: string | null;
+  kind: OrderRouteKind;
+  receivingFacility: { id: string | null; name: string | null };
+  patient: { name: string | null };
+  endedAt: string | null;
+  /** Result versions that had come back here and are now reported entered in error (0 for a prescription). */
+  resultsWithdrawn: number;
+  dispensingReversed: boolean;
+  /** The order's place in the clinical record (patients/:patientId/encounters/:encounterId/lab-requests|prescriptions/:orderId). */
+  link: { patientId: string; encounterId: string | null; kind: OrderRouteKind; orderId: string | null };
+}
+
+/**
+ * The Overview card's answer (C28): the member's own such orders in full, and
+ * of every other such order of the facility (a colleague's, or the member's
+ * own whose patient they may no longer read) only the count and references.
+ */
+export interface WrongPatientOverview {
+  windowDays: number;
+  items: WrongPatientOverviewItem[];
+  others: { count: number; references: string[] };
+}
+
+function overviewItem(source: Source): WrongPatientOverviewItem | undefined {
+  const receiving = field(source, 'receivingFacility');
+  const patient = field(source, 'patient');
+  const link = field(source, 'link');
+  const routeId = text(field(source, 'routeId'));
+  const kind = field(source, 'kind');
+  if (!routeId || (kind !== 'lab_request' && kind !== 'prescription') || !isRecord(link)) return undefined;
+  const patientId = text(field(link, 'patientId'));
+  if (!patientId) return undefined;
+  return {
+    routeId,
+    reference: text(field(source, 'reference')),
+    kind,
+    receivingFacility: { id: isRecord(receiving) ? text(field(receiving, 'id')) : null,
+      name: isRecord(receiving) ? text(field(receiving, 'name')) : null },
+    patient: { name: isRecord(patient) ? text(field(patient, 'name')) : null },
+    endedAt: iso(field(source, 'endedAt')),
+    resultsWithdrawn: count(field(source, 'resultsWithdrawn')) ?? 0,
+    dispensingReversed: flag(field(source, 'dispensingReversed')) === true,
+    link: { patientId, encounterId: text(field(link, 'encounterId')), kind, orderId: text(field(link, 'orderId')) },
+  };
+}
+
+/**
+ * C28's jsonb as the EHR answers it, built field by field from a fixed list
+ * (nothing else the read returns reaches the browser). Undefined when the
+ * answer, or any order in it, is not one C28 gives: the read then fails
+ * closed (503) rather than show an order it could not audit.
+ */
+export function wrongPatientOverview(value: unknown): WrongPatientOverview | undefined {
+  const answer = parseJson(value);
+  if (!isRecord(answer)) return undefined;
+  const rawItems = parseJson(field(answer, 'items'));
+  const others = parseJson(field(answer, 'others'));
+  if (!Array.isArray(rawItems) || !isRecord(others)) return undefined;
+  const items = rawItems.map((item) => (isRecord(item) ? overviewItem(item) : undefined));
+  if (items.some((item) => item === undefined)) return undefined;
+  const references = parseJson(field(others, 'references'));
+  return {
+    windowDays: count(field(answer, 'windowDays')) ?? 30,
+    items: items as WrongPatientOverviewItem[],
+    others: {
+      count: count(field(others, 'count')) ?? 0,
+      references: Array.isArray(references) ? references.filter((reference): reference is string => typeof reference === 'string')
+        : [],
+    },
+  };
+}
