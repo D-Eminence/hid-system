@@ -2,7 +2,8 @@ import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Q
 import { AuditAction, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
-import { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto, SearchOrderRoutesDto } from './dto/order-route.dto';
+import { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto, ReportWrongPatientDto, SearchOrderRoutesDto }
+  from './dto/order-route.dto';
 import { LabOrderRoutesService } from './lab-order-routes.service';
 
 const uuid = () => new ParseUUIDPipe({ version: '4' });
@@ -51,5 +52,21 @@ export class LabOrderRoutesController {
   @RequirePermissions('lab.order-route.receive') @AuditAction('lab.order-route.decline.request')
   decline(@Param('routeId', uuid()) routeId: string, @Body() input: DeclineOrderRouteDto, @Req() request: HidRequest) {
     return this.routes.decline(requireRequestContext(request), routeId, input);
+  }
+
+  /**
+   * The laboratory accepted this order for someone who was not its patient
+   * (C25, SPEC-FINAL item 3 §5.1): its access ends and every result it sent
+   * back is withdrawn, in one transaction. Any member who may receive lab
+   * requests; withdrawing a result also needs lab.result.entered-in-error,
+   * which the command checks. The interceptor's row carries no body (the
+   * support note is never audited).
+   */
+  @Post(':routeId/wrong-patient') @HttpCode(200)
+  @RequirePermissions('lab.order-route.receive') @AuditAction('lab.order-route.wrong-patient.request')
+  reportWrongPatient(@Param('routeId', uuid()) routeId: string, @Body() input: ReportWrongPatientDto,
+    @Headers('idempotency-key') key: string | undefined, @Req() request: HidRequest) {
+    const idempotencyKey = requireIdempotencyKey(key);
+    return this.routes.reportWrongPatient(requireRequestContext(request), routeId, input, idempotencyKey);
   }
 }

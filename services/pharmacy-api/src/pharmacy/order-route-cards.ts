@@ -19,14 +19,20 @@ export interface OrderRouteCardRow {
   patient_sex: string | null;
   patient_date_of_birth: string | Date | null;
   patient_health_id_last4: string | null;
+  /** The route's version (item 3, 0088): the wrong-patient report's expectedVersion. node-postgres answers bigint as text. */
+  row_version: string | number;
+  /** How the route ended: null while it is live; 'wrong_patient', 'support', 'order_changed', ... (0088). */
+  ended_kind: string | null;
 }
 
-/** What a route-backed work row shows of its route (SPEC-FINAL §10.2). */
+/** What a route-backed work row shows of its route (SPEC-FINAL §10.2; item 3 adds version and endedKind). */
 export interface WorkItemOrderRoute {
   id: string;
   reference: string | null;
   effectiveState: string;
   access: 'work' | 'read' | 'none';
+  version: number;
+  endedKind: string | null;
   orderingFacilityName: string | null;
   ordererName: string | null;
   ordererLicence?: { body: string; number: string | null };
@@ -65,6 +71,9 @@ export function orderRouteCard(row: OrderRouteCardRow): OrderRouteCard {
     reference: row.reference,
     effectiveState: row.effective_state,
     access,
+    // A number, as the website checks it (B9), whatever node-postgres made of the bigint.
+    version: Number(row.row_version),
+    endedKind: row.ended_kind ?? null,
     orderingFacilityName: row.ordering_facility_name,
     ordererName: row.orderer_name,
     ...(row.orderer_licence_body
@@ -103,7 +112,7 @@ export class PharmacyOrderRouteCards {
           `select work_item_id::text as work_item_id, route_id::text as route_id, reference, effective_state, access,
                   ordering_facility_name, orderer_name, orderer_licence_body, orderer_licence_number,
                   patient_full_name, patient_sex, patient_date_of_birth::text as patient_date_of_birth,
-                  patient_health_id_last4
+                  patient_health_id_last4, row_version, ended_kind
              from pharmacy.order_route_cards($1::uuid[])`,
           [workItemIds.slice(start, start + CARD_BATCH)],
         );

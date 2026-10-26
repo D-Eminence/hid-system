@@ -30,7 +30,7 @@ const context = { correlationId: 'correlation-123456', facilityId, membershipId:
 const databaseError = (code: string, message: string) => Object.assign(new Error(message), { code });
 
 describe('Pharmacy order-route routes (SPEC-FINAL §10.2)', () => {
-  it('serves five browser routes, all needing pharmacy.order-route.receive, none internal or public', () => {
+  it('serves six browser routes, all needing pharmacy.order-route.receive, none internal or public', () => {
     const base = Reflect.getMetadata(PATH_METADATA, PharmacyOrderRoutesController) as string;
     const routes = Object.getOwnPropertyNames(PharmacyOrderRoutesController.prototype).filter((name) => name !== 'constructor')
       .map((name) => {
@@ -47,6 +47,8 @@ describe('Pharmacy order-route routes (SPEC-FINAL §10.2)', () => {
       [RequestMethod.GET, 'pharmacy/order-routes/:routeId', undefined, permission, undefined, undefined],
       [RequestMethod.POST, 'pharmacy/order-routes/:routeId/accept', 201, permission, undefined, undefined],
       [RequestMethod.POST, 'pharmacy/order-routes/:routeId/decline', 200, permission, undefined, undefined],
+      // Item 3 (C25): accepted for someone who was not the prescription's patient.
+      [RequestMethod.POST, 'pharmacy/order-routes/:routeId/wrong-patient', 200, permission, undefined, undefined],
     ]);
   });
 
@@ -247,7 +249,7 @@ function pharmacyHarness(access: { outcome: string; route_id: string | null }, d
     if (sql.includes('pharmacy.order_route_cards')) return { rows: [{ work_item_id: workItemId, route_id: routeId, reference: 'R',
       effective_state: 'accepted', access: 'work', ordering_facility_name: 'Ordering Hospital', orderer_name: 'Dr Ada Obi',
       orderer_licence_body: null, orderer_licence_number: null, patient_full_name: 'Ngozi Eze', patient_sex: 'female',
-      patient_date_of_birth: '1990-01-01', patient_health_id_last4: '2345' }] };
+      patient_date_of_birth: '1990-01-01', patient_health_id_last4: '2345', row_version: '5', ended_kind: null }] };
     if (sql.includes('insert into pharmacy.dispensings')) { if (dispensingInsert) throw dispensingInsert; return { rows: [] }; }
     if (sql.includes('from pharmacy.work_items w')) return { rows: [workRow] };
     if (sql.includes('from pharmacy.dispensings d') && sql.includes('d.id=$1')) return { rows: [{ id: dispensingId, work_item_id: workItemId, patient_id: patientId,
@@ -299,7 +301,7 @@ describe('Pharmacy per-item routes authorize the resource they act on (P12)', ()
     const h = pharmacyHarness({ outcome: 'allowed', route_id: routeId });
     const item = await h.service.getWorkItem(context, workItemId);
     expect(h.identity.authorize).not.toHaveBeenCalled();
-    expect(item).toMatchObject({ id: workItemId, orderRoute: { id: routeId, access: 'work' },
+    expect(item).toMatchObject({ id: workItemId, orderRoute: { id: routeId, access: 'work', version: 5, endedKind: null },
       patient: { fullName: 'Ngozi Eze', healthIdLast4: '2345' } });
     expect(item).not.toHaveProperty('sourceEhrPrescriptionId');
     expect(item).not.toHaveProperty('sourceEncounterId');

@@ -62,3 +62,23 @@ export class DeclineOrderRouteDto {
   @IsIn(DECLINE_REASONS)
   reason!: (typeof DECLINE_REASONS)[number];
 }
+
+/** What happened at the counter (SPEC-FINAL item 3 §4.3, D6, D18: "other" is "not the patient for another reason"). */
+export const WRONG_PATIENT_REASONS = ['wrong_order_chosen', 'someone_elses_details', 'suspected_misuse', 'other'] as const;
+
+/**
+ * POST lab/order-routes/:routeId/wrong-patient (C25): the laboratory accepted
+ * this order for someone who was not its patient. The note is for Health ID
+ * support only (D7): 8 to 500 characters once trimmed (the service refuses a
+ * shorter one after the trim, 400 ORDER_ROUTE_INVALID), never in an audit row.
+ */
+export class ReportWrongPatientDto {
+  @IsInt() @Min(1)
+  expectedVersion!: number;
+
+  @IsIn(WRONG_PATIENT_REASONS)
+  reason!: (typeof WRONG_PATIENT_REASONS)[number];
+
+  @IsString() @MinLength(8) @MaxLength(500)
+  note!: string;
+}

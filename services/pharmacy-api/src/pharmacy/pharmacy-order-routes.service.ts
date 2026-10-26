@@ -5,8 +5,8 @@ import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
-import type { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto, SearchOrderRoutesDto }
-  from './dto/order-route.dto';
+import type { AcceptOrderRouteDto, DeclineOrderRouteDto, ListOrderRoutesQueryDto, ReportWrongPatientDto,
+  SearchOrderRoutesDto } from './dto/order-route.dto';
 import {
   incomingPrescriptionRoute,
   orderRouteUnavailable,
@@ -15,6 +15,8 @@ import {
   recentPrescriptionRoute,
   resultRefusal,
   routePatient,
+  wrongPatientAnswer,
+  wrongPatientProblem,
   type Row,
 } from './pharmacy-order-route.mapping';
 import { PharmacyOrderRouteCards } from './order-route-cards';
@@ -175,6 +177,43 @@ export class PharmacyOrderRoutesService {
         { routeId, kind: 'prescription', state: row.state, reason: input.reason });
       return { route: { id: routeId, version: Number(row.row_version), effectiveState: row.state } };
     });
+  }
+
+  /**
+   * The pharmacy accepted this prescription for someone who was not its
+   * patient (C25, SPEC-FINAL item 3 §4.3, §7.2). One READ COMMITTED
+   * transaction, run once: the command ends the route's access, reverses a
+   * dispensing that went back, records the report for support and tells the
+   * patient; this writes the pharmacy's own audit row with the patient (from
+   * the command) and the counts, never the note (D7). A replay (same member,
+   * key and request) answers the route as it is now and the first's counts.
+   */
+  async reportWrongPatient(context: DataAccessContext, routeId: string, input: ReportWrongPatientDto,
+    idempotencyKey: string) {
+    const note = input.note.trim();
+    if (note.length < 8 || note.length > 500) throw invalid('The note for Health ID support must be 8 to 500 characters');
+    const digest = requestDigest('pharmacy.order-route.wrong-patient',
+      { routeId, expectedVersion: input.expectedVersion, reason: input.reason, note });
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const result = await client.query<Row>(
+          'select * from pharmacy.report_wrong_patient_order_route($1, $2, $3, $4, $5, $6)',
+          [routeId, input.expectedVersion, input.reason, note, idempotencyKey, digest]);
+        const row = result.rows[0];
+        const answer = row ? wrongPatientAnswer(routeId, row) : undefined;
+        const patientId = typeof row?.patient_id === 'string' ? row.patient_id : undefined;
+        if (!row || !answer || !patientId) throw orderRouteUnavailable();
+        await this.audit.recordWithClient(client, context, 'pharmacy.order-route.wrong-patient',
+          { resourceType: 'order-route', resourceId: routeId, patientId },
+          { routeId, kind: 'prescription', reportId: typeof row.report_id === 'string' ? row.report_id : null,
+            stateBefore: typeof row.state_before === 'string' ? row.state_before : null,
+            state: typeof row.route_state === 'string' ? row.route_state : null, reasonCode: input.reason,
+            resultsVoided: answer.resultsVoided, dispensingReversed: answer.dispensingReversed, replayed: answer.replayed });
+        return answer;
+      }, { isolationLevel: 'READ COMMITTED' });
+    } catch (error) {
+      throw wrongPatientProblem(error);
+    }
   }
 
   private async run<Result>(context: DataAccessContext, operation: (client: PoolClient) => Promise<Result>) {
