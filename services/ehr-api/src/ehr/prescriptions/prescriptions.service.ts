@@ -64,7 +64,9 @@ export class PrescriptionsService {
    * are on (`crossFacilityOrders`, a pool read after the transaction), and
    * `wrongPatientReports: true`: the receiving pharmacy can end an order it
    * accepted for someone who was not the patient (item 3, 0088), so the
-   * website may ask a clinician to have it ended there first (D15).
+   * website may ask a clinician to have it ended there first (D15); and
+   * `lateCorrection: true`: it can also reverse, after the prescription
+   * ended, a dispensing it recorded for the wrong person (D17, 0090).
    */
   async list(context: DataAccessContext, patientId: string, encounterId: string, query: TimelineQueryDto) {
     const scope = { list: 'ehr.prescriptions', patientId, encounterId };
@@ -88,7 +90,8 @@ export class PrescriptionsService {
       },
       (client) => this.repository.encounterExists(client, encounterId, patientId, context.facilityId),
     );
-    return { ...page, crossFacilityOrders: await this.orderRoutes.crossFacilityOrdersEnabled(), wrongPatientReports: true };
+    return { ...page, crossFacilityOrders: await this.orderRoutes.crossFacilityOrdersEnabled(), wrongPatientReports: true,
+      lateCorrection: true };
   }
 
   get(context: DataAccessContext, patientId: string, encounterId: string, prescriptionId: string) {

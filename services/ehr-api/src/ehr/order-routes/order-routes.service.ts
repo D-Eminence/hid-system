@@ -255,7 +255,11 @@ export class OrderRoutesService {
    * member sent; a colleague's such order as a count and its reference; a
    * member without ehr.order-route.send nothing. Audited in the same
    * transaction: one row for the read (no patient), and one per order shown in
-   * full, naming its patient, as the order's own route views are.
+   * full, naming its patient, as the order's own route views are. D17
+   * (0090): the card lists reports of the last 30 days whatever the order's
+   * ending, late ones too (each item says when and whether late), and the
+   * answer says `lateCorrection: true`, so the card learns this backend
+   * serves the late correction.
    */
   async wrongPatientOverview(context: DataAccessContext) {
     requireDirectCare(context);
@@ -283,7 +287,7 @@ export class OrderRoutesService {
             action: 'ehr.order-route.wrong-patient-overview.item', resourceType: 'order-route', resourceId: item.routeId,
             details: { routeId: item.routeId, kind: item.kind } });
         }
-        return overview;
+        return { ...overview, lateCorrection: true as const };
       });
     } catch (error) {
       throw orderRouteProblem(error, 'staff');
