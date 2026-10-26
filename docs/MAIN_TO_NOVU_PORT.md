@@ -64,6 +64,7 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | #16 (emergency contacts, with e1757ba) | A patient keeps up to five emergency contacts, each stored encrypted and verified by a code the contact reads back; when a clinician uses break-glass, each verified contact with alerts on gets one alert. It shipped switched off and is switched on through the code defaults after the owner's approval of 2026-10-24 (D1). Switched off, adding a contact and sending a code answer 409 `EMERGENCY_CONTACT_DELIVERY_UNAVAILABLE` and no message can be sent. It differs from `main` as listed below the table | 0084 (main 0065), runtime-grants.sql |
 | main 0097 section 2 with #18 0c4de59 and 17abba5 (plan waves W14, Identity part, and W30) | Staff can use break-glass in production (owner decision of 2026-10-24, below). 0085 seeds the active `emergency` purpose of use `identity.activate_break_glass` requires, as `main`'s 0097 does (ON CONFLICT DO NOTHING: an operator's row, active or not, is kept as it is). Identity runs `platform.require_control_enabled('break_glass_enabled')` inside the activation transaction, before the command: the control off answers 423 `BREAK_GLASS_DISABLED` and writes nothing, an unreadable control 503 `PLATFORM_CONTROL_UNAVAILABLE`, and a missing or deactivated `emergency` purpose also 423 `BREAK_GLASS_DISABLED` (it was 400 `INVALID_CONSENT_COMMAND`). Every other 55000 stays 409 and every other 22023 stays 400. It differs from `main` as listed below the table | 0085 (main 0097) |
 | #81, main 0061–0063 with db49a0d, 46a173f and 08c906f, and P71's activation (plan wave P4) | Facility self sign-up (owner decision D14): a hospital, laboratory or pharmacy signs itself up through "Setup Your Facility" with a CAC lookup, an email code and a password, without an administrator approving it first, and support reviews every new facility within a business day (owner decision of 2026-10-24). It shipped closed: the platform control `provider_self_service_enabled` is seeded off and is opened with the audited admin command. Administrators finish with a password and get a staff session, as P71 did; staff MFA is not ported (owner decision 2). #81's answers are kept. It differs from `main` as listed below the table | 0086 (main 0061–0063), runtime-grants.sql |
+| main 0066 items 2-4 (3490809 / eb9b1ca) | A patient can revoke access they gave (an approved request or Access PIN use) from the Access page; emergency (break-glass) and workforce access cannot be revoked there. The access history labels emergency access and which grants the patient can revoke, and a deleted login gets no new inbox items. It differs from `main` as listed below the table | 0087, runtime-grants.sql |
 
 Emergency contacts differ from `main` (#16 and e1757ba) in these ways. Owner
 decisions of 2026-10-23 are marked "owner".
@@ -1236,6 +1237,97 @@ The services' part of P4c (all new; routes under `/api/v1`, errors
   and drives P4c end to end over HTTP with fixtures from P4's sign-up, P4b's
   review and invitations and the patient's approval in the app.
 
+Patient grant revocation differs from `main` (0066 items 2-4, 3490809 and
+eb9b1ca) in these ways. The choices are the recommended defaults of the
+item's spec (D1-D14), which the owner confirmed in chat on 2026-10-26 when
+signing 0087's declaration; those that keep `main`'s behaviour say so.
+
+- One migration, 0087, holds the three items (this branch's 0066 is
+  `0066_patient_chat_history.sql`): `identity.revoke_my_consent_grant`, the
+  access history's labels and the deleted-login inbox rule. Item 1 is not
+  ported (below).
+- D1: the database labels each history item `revocableByPatient`, not
+  `main`'s `patientRevocable`, and Identity's history route publishes it as
+  `patientRevocable` (a boolean, never true for break-glass) without the
+  database key. A release migrates, then rolls identity-api, so with
+  `main`'s key in SQL the website would show Revoke from the migration's
+  commit until Identity rolled, and for good after a backend rollback, and a
+  click would show "Cannot POST …". Here the button shows only where the
+  route is served, except during the minutes of an identity-api rollout or
+  rollback, when ECS runs old and new tasks side by side; a retry after the
+  rollout succeeds, because a repeat replays.
+- Break-glass is also recognised by scope (`scope = 'break_glass'`), as
+  `identity.has_active_consent_grant` (0012) does, in the command and in both
+  labels. It matters only for legacy-imported rows, whose flag and scope need
+  not agree.
+- D13: the audit row's reason is the fixed 'Revoked by the patient'
+  (`main`: the patient's own words). The facility's audit readers
+  (`audit.list_facility_events`) and support's platform audit see that the
+  patient revoked, not why. The patient's trimmed words stay on the grant
+  row (`consent_grants.revoked_reason`), which no service reads.
+- D14: the history's limit of 50 picks the grants the patient can revoke
+  first, then the newest, and lists the chosen items newest first (`main`:
+  the newest 50), so newer rows, such as a burst of break-glass use, cannot
+  push a revocable grant out of reach. With 50 grants or fewer the list is
+  0030's, in 0030's order.
+- Preconditions: 0087 refuses to run if `revoke_my_consent_grant` already
+  exists; if the two bodies it replaces (0030's history, md5
+  `ca6c848749f55e08a5f7a0a60c838293`, and 0037's enqueue,
+  `662353fa2a411879e4e8d869d54827d5`) or the four it relies on
+  (`identity.patient_self_session`, 0033's PIN set and removal and 0075's
+  `identity.access_patient_with_pin`) differ; if `identity.consent_grants`
+  lacks one of the four CHECKs the rule reads; or if that table has any user
+  trigger other than 0086's BEFORE INSERT probation trigger.
+- Locks: 0087's only table lock is a momentary ACCESS SHARE on
+  `identity.consent_grants`, taken by `pg_get_constraintdef` in the CHECK
+  precondition and by the PL/pgSQL validator resolving the revoke's
+  `%rowtype`, each released at once. It conflicts only with ACCESS EXCLUSIVE
+  (most DDL, VACUUM FULL, a vacuum truncating the table), so no request waits
+  for it; if another session holds ACCESS EXCLUSIVE there, the runner's 5 s
+  `lock_timeout` stops the dry run or the apply with nothing applied. 0087
+  never locks `platform.control_settings`, so 0086's NOWAIT rule does not
+  apply.
+- D2, as on `main`: revoking needs no recent sign-in and is never held after
+  an account recovery, because it only removes access. So someone holding a
+  live patient session can also end the patient's grants, and after the real
+  patient recovers the account they cannot approve a new request for 24
+  hours (the approval's recovery hold).
+- D5: the refusals use `main`'s codes with a `detail` written for the
+  patient, which the website shows as it is (`main`'s details are
+  technical): 409 `CONSENT_COMMAND_CONFLICT` for break-glass, workforce or an
+  ended grant, 404 `CONSENT_RESOURCE_NOT_FOUND`, 403 `CONSENT_COMMAND_DENIED`
+  for a session that is no longer live, and 400 for a short reason.
+- D12, as on `main`: revoking a PIN-based grant leaves the Access PIN valid,
+  so a facility that still knows it can use it again and gets a new grant at
+  once. The website's revoke form is to say so. A lasting fix (refusing that
+  facility until the PIN changes) would replace 0075's body and is a later
+  change.
+- D3, D4, D7, D8 and D9, as on `main`: a patient may revoke a
+  patient-approved or PIN-derived grant (a legacy-imported grant naming the
+  patient as grantor included), never a break-glass or workforce grant;
+  order routes sent under a grant the patient revokes are left alone (the
+  patient can Stop each until it is accepted, and an order sent at the same
+  moment as the revocation may still go out); only a `deleted` login gets no
+  new inbox items; and neither the clinician nor the patient's inbox is told
+  of a revocation.
+- D6: the website's emergency-access sentence loses "and reviewed" ("It is
+  time-limited and audited; it cannot be revoked here.") in a website
+  release before 0087, because no break-glass review exists here and 0087 is
+  what makes the sentence show.
+- Tests: `services/ehr-api/test/database/patient-grant-revocation.integration.sql`
+  (rollback-only), Identity's HTTP, service and route specs, and a block in
+  `services/identity-api/scripts/verify-emergency-contacts-runtime.mjs`,
+  which now serves the access history. Only the container database
+  acceptance runs the new suite (its loop over `services/ehr-api/test/database/`),
+  and no CI job runs that script or the staging schema upgrade
+  (`services/ehr-api/scripts/test-staging-schema-upgrade.mjs`). CI covers 0087
+  by applying it (the TUF rehearsal's fresh install and upgrade, and the
+  image build's migration job), by the ledger and release gates, by
+  Identity's jest suites and by the verifier block, which the rehearsal
+  runs. The SQL-level checks of the refusals, the limit, the audit row, the
+  advisory key and the inbox rule are therefore manual gates before signing
+  (Still open, below).
+
 ## Not ported, and why
 
 - Already on this branch: #26 (0071 grants the list), #58 (0071 seeds `direct-care`).
@@ -1305,17 +1397,15 @@ The services' part of P4c (all new; routes under `/api/v1`, errors
 - Edits a suite in `services/ehr-api/database/tests/`, which production
   refuses: #48 as `main` made it (0080 also restates `main`'s 0077 bodies). A
   port orders its guards so the suite needs no edit.
-- `main`'s `0066_patient_access_safety.sql` beyond the inbox grant (P4c
-  needs none of it): the session-bound access-request wrappers
+- `main`'s `0066_patient_access_safety.sql` item 1 and its restatement of
+  0035: the session-bound access-request wrappers
   (`list_my_patient_access_requests`, `approve_my_access_request`,
-  `deny_my_access_request`; here Identity calls the 0035 commands, which bind
-  to the signed-in account's patient), the patient's revocation of a grant
-  they gave (`revoke_my_consent_grant`; break-glass grants are never
-  patient-revocable), the access history's `breakGlass` and
-  `patientRevocable` labels, and no new inbox items for a deleted login
-  (here `notification.enqueue_patient_inbox_item` checks only an active
-  patient with an account). Its decision-command repair is already here as
-  0072. Each would be its own change.
+  `deny_my_access_request`, with their grants; here Identity calls the 0035
+  commands, which bind to the signed-in account's patient), and its repeat of
+  the 0035 decision commands, whose repair is already here as 0072. Item 1
+  would be its own change. Items 2-4 (the patient's revocation of a grant
+  they gave, the access history's labels and no new inbox items for a
+  deleted login) are ported above as 0087, and P4c took its inbox grant.
 - The other launch features and their infrastructure (#63–#98) are not ported
   yet. Each waits on the owner decision recorded below, where it needs one.
 
@@ -1350,6 +1440,12 @@ Decided by the owner, D-Eminence:
   looks wrong; all four products; 200 CAC lookups a day across all sign-ups;
   unactivated applications lapse after 24 hours; the control ships off and is
   switched on right after the deploy and its closed-state checks, with no pilot.
+- Patient grant revocation (main 0066 items 2-4) is ported, as 0087, at the
+  owner's request. On 2026-10-26 the owner confirmed the spec's recommended
+  defaults D1-D14 (each is described under "Patient grant revocation
+  differs from `main`" in Ported above) and signed 0087's declaration, with the website copy release
+  (the corrected emergency-access sentence and the revoke form's PIN note)
+  going first.
 
 Still open, with what each one holds back:
 
@@ -1391,9 +1487,12 @@ Still open, with what each one holds back:
   origin secret.
 - Platform administrator MFA, two-person approval, governed clinician
   provisioning, staff MFA and clinician sign-up.
-- Patient features held behind controls: revoking access and account
-  deletion. (Hospital self-activation is ported above as facility self sign-up,
-  behind `provider_self_service_enabled`.)
+- Patient features held behind controls: account deletion. (Hospital
+  self-activation is ported above as facility self sign-up, behind
+  `provider_self_service_enabled`; revoking access is ported above as 0087.)
+  When account deletion is ported: support's emergency-contact opt-out counts
+  a patient as told even when the inbox skips a deleted login (0084's
+  `patients_told`).
 - Facility self sign-up (ported above, switched off): the owner signs the 0086
   declaration, after the read-only preflights (no closed organization
   application without a review reason, reviewer or review time, which 0086

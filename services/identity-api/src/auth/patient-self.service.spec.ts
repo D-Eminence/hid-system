@@ -2,7 +2,7 @@ import type { PoolClient } from 'pg';
 import type { AuditService } from '../audit/audit.service';
 import type { HidRequest } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
-import { PatientSelfService } from './patient-self.service';
+import { PatientSelfService, publishAccessHistory } from './patient-self.service';
 
 const request = { actor: { kind: 'patient', patientId: 'patient-id', accountId: 'account-id',
   subject: 'patient-subject', sessionId: 'session-id' }, correlationId: 'self-test-request',
@@ -121,5 +121,34 @@ describe('Patient self service', () => {
     await expect(service.setAccessPin(request, '1234')).rejects.toThrow('Sign in again');
     expect(query).toHaveBeenCalledTimes(2);
     expect(query.mock.calls[1]?.[0]).toContain('min(family.issued_at)');
+  });
+});
+
+describe('Access history labels (0087)', () => {
+  const item = (fields: Record<string, unknown>) => ({ consentGrantId: 'grant-id', scope: 'read_records', purpose: 'direct-care',
+    status: 'active', startsAt: '2026-10-25T00:00:00Z', expiresAt: '2026-10-26T00:00:00Z', reason: 'Visit',
+    facilityName: 'Synthetic Facility', ...fields });
+
+  it('publishes revocableByPatient as the website\'s patientRevocable and drops the database key', async () => {
+    const { service, query } = setup({ items: [item({ breakGlass: false, revocableByPatient: true }),
+      item({ consentGrantId: 'emergency-id', scope: 'break_glass', breakGlass: true, revocableByPatient: false })] });
+    const history = await service.history(request) as { items: Array<Record<string, unknown>> };
+    expect(history.items).toEqual([item({ breakGlass: false, patientRevocable: true }),
+      item({ consentGrantId: 'emergency-id', scope: 'break_glass', breakGlass: true, patientRevocable: false })]);
+    expect(query.mock.calls[1]?.[0]).toContain('identity.patient_self_access_history($1,$2)');
+    expect(query.mock.calls[1]?.[1]).toEqual(['patient-subject', 'session-id']);
+  });
+
+  it('answers patientRevocable false when the database sends no label, and never true for break-glass', () => {
+    expect(publishAccessHistory({ items: [item({})] })).toEqual({ items: [item({ patientRevocable: false })] });
+    expect(publishAccessHistory({ items: [item({ breakGlass: true, revocableByPatient: true })] }))
+      .toEqual({ items: [item({ breakGlass: true, patientRevocable: false })] });
+    expect(publishAccessHistory({ items: [] })).toEqual({ items: [] });
+  });
+
+  it('leaves the profile and a denied history unchanged', async () => {
+    await expect(setup({ patientId: 'patient-id', revocableByPatient: true }).service.profile(request))
+      .resolves.toEqual({ patientId: 'patient-id', revocableByPatient: true });
+    await expect(setup(null).service.history(request)).rejects.toThrow('Patient access is unavailable');
   });
 });

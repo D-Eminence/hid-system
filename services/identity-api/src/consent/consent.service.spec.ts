@@ -1,8 +1,8 @@
 import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
-import type { DataAccessContext } from '../common/request-context';
+import type { DataAccessContext, HidRequest } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
-import { ConsentService } from './consent.service';
+import { ConsentService, REVOCATION_DETAIL } from './consent.service';
 
 const context: DataAccessContext = {
   correlationId: 'consent-service-test-correlation',
@@ -420,5 +420,73 @@ describe('ConsentService', () => {
         durationMinutes: 15,
       })).rejects.toMatchObject({ code: 'PATIENT_PIN_ACCESS_DENIED' });
     }
+  });
+});
+
+describe('ConsentService patient revocation (0087)', () => {
+  const query = jest.fn();
+  const client = { query } as unknown as PoolClient;
+  const withSystemTransaction = jest.fn(
+    async (_correlationId: string, operation: (transactionClient: PoolClient) => Promise<unknown>) => operation(client),
+  );
+  const withTransaction = jest.fn();
+  const service = new ConsentService({ withSystemTransaction, withTransaction } as unknown as DatabaseService);
+  const grantId = '60000000-0000-4000-8000-000000000009';
+  const patientRequest = {
+    correlationId: 'consent-revocation-correlation',
+    actor: { kind: 'patient', id: 'synthetic:patient', subject: 'synthetic:patient',
+      accountId: '70000000-0000-4000-8000-000000000001', patientId: '50000000-0000-4000-8000-000000000004',
+      sessionId: '80000000-0000-4000-8000-000000000001', roles: [], permissions: [], facilityIds: [], facilities: [],
+      authenticationMethod: 'local' },
+  } as unknown as HidRequest;
+
+  beforeEach(() => { query.mockReset(); withSystemTransaction.mockClear(); withTransaction.mockClear(); });
+
+  it('revokes through the session-bound command: subject bound first, reason trimmed, no hold or sign-in check', async () => {
+    const revokedAt = new Date('2026-10-25T00:00:00.000Z');
+    query.mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ consentGrantId: grantId, status: 'revoked', revokedAt, replayed: false }] });
+    await expect(service.revokeMyConsentGrant(patientRequest, grantId, '  No longer needed '))
+      .resolves.toEqual({ consentGrantId: grantId, status: 'revoked', revokedAt, replayed: false });
+    expect(withSystemTransaction).toHaveBeenCalledWith('consent-revocation-correlation', expect.any(Function));
+    expect(withTransaction).not.toHaveBeenCalled();
+    expect(query).toHaveBeenCalledTimes(2);
+    expect(query.mock.calls[0]).toEqual(["select set_config('app.actor_subject', $1, true)", ['synthetic:patient']]);
+    expect(query.mock.calls[1]?.[0]).toContain('identity.revoke_my_consent_grant($1, $2, $3, $4)');
+    expect(query.mock.calls[1]?.[1]).toEqual(['synthetic:patient', '80000000-0000-4000-8000-000000000001', grantId,
+      'No longer needed']);
+    expect(query.mock.calls.some(([sql]) => /otp_challenges|issued_at/.test(String(sql)))).toBe(false);
+  });
+
+  it('answers a replay as a success', async () => {
+    query.mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ consentGrantId: grantId, status: 'revoked', revokedAt: new Date(), replayed: true }] });
+    await expect(service.revokeMyConsentGrant(patientRequest, grantId, 'Again')).resolves.toMatchObject({ replayed: true });
+  });
+
+  it('refuses without a patient session before any transaction', async () => {
+    await expect(service.revokeMyConsentGrant({ ...patientRequest, actor: { ...patientRequest.actor!, kind: 'staff' } } as HidRequest,
+      grantId, 'Revoke')).rejects.toMatchObject({ status: 403, code: 'PATIENT_SESSION_REQUIRED' });
+    expect(withSystemTransaction).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ code: '55000', message: 'CONSENT_GRANT_NOT_PATIENT_REVOCABLE' }, 409, 'CONSENT_COMMAND_CONFLICT', REVOCATION_DETAIL.notRevocable],
+    [{ code: '55000', message: 'The access grant is no longer active' }, 409, 'CONSENT_COMMAND_CONFLICT', REVOCATION_DETAIL.notActive],
+    [{ code: 'P0002', message: 'The access grant is unavailable' }, 404, 'CONSENT_RESOURCE_NOT_FOUND', REVOCATION_DETAIL.notFound],
+    [{ code: '42501', message: 'Patient self session is required' }, 403, 'CONSENT_COMMAND_DENIED', REVOCATION_DETAIL.sessionNotLive],
+    [{ code: '22023', message: 'A revocation reason is required' }, 400, 'INVALID_CONSENT_COMMAND', REVOCATION_DETAIL.invalidReason],
+    [{ code: '42883', message: 'function identity.revoke_my_consent_grant does not exist' }, 503, 'CONSENT_COMMAND_UNAVAILABLE',
+      REVOCATION_DETAIL.unavailable],
+  ])('maps %o to %i %s with a patient-readable detail', async (failure, status, code, detail) => {
+    query.mockResolvedValueOnce({ rows: [] }).mockRejectedValueOnce(failure);
+    await expect(service.revokeMyConsentGrant(patientRequest, grantId, 'Revoke'))
+      .rejects.toMatchObject({ status, code, message: detail });
+  });
+
+  it('answers 503 CONSENT_COMMAND_UNAVAILABLE when the command returns no row', async () => {
+    query.mockResolvedValueOnce({ rows: [] }).mockResolvedValueOnce({ rows: [] });
+    await expect(service.revokeMyConsentGrant(patientRequest, grantId, 'Revoke'))
+      .rejects.toMatchObject({ status: 503, code: 'CONSENT_COMMAND_UNAVAILABLE' });
   });
 });
