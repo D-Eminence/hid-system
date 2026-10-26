@@ -66,6 +66,7 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | #81, main 0061–0063 with db49a0d, 46a173f and 08c906f, and P71's activation (plan wave P4) | Facility self sign-up (owner decision D14): a hospital, laboratory or pharmacy signs itself up through "Setup Your Facility" with a CAC lookup, an email code and a password, without an administrator approving it first, and support reviews every new facility within a business day (owner decision of 2026-10-24). It shipped closed: the platform control `provider_self_service_enabled` is seeded off and is opened with the audited admin command. Administrators finish with a password and get a staff session, as P71 did; staff MFA is not ported (owner decision 2). #81's answers are kept. It differs from `main` as listed below the table | 0086 (main 0061–0063), runtime-grants.sql |
 | main 0066 items 2-4 (3490809 / eb9b1ca) | A patient can revoke access they gave (an approved request or Access PIN use) from the Access page; emergency (break-glass) and workforce access cannot be revoked there. The access history labels emergency access and which grants the patient can revoke, and a deleted login gets no new inbox items. It differs from `main` as listed below the table | 0087, runtime-grants.sql |
 | — | This branch only (item 3, owner decisions of 2026-10-26): a laboratory or pharmacy that accepted an order from another facility for someone who was not its patient ends it from its work list. Its access ends and every result it sent back is marked entered in error, or its dispensing reversed, in one transaction; the patient gets an inbox notice; support reviews every report; the ordering facility sees such orders on its Overview for 30 days. Described below the table | 0088, runtime-grants.sql |
+| — | This branch only (item 4, owner decisions of 2026-10-26): the Lab and Pharmacy work lists and Incoming say whether the facility receives orders from other facilities now and whether any wait or are held there; support's order lookup says when the receiving facility's access ends and whether Close would act now; support's facility summary says what the facility is as a destination. Read-only: nothing is written and no audit row is added. Described below the table | 0089, runtime-grants.sql |
 
 Emergency contacts differ from `main` (#16 and e1757ba) in these ways. Owner
 decisions of 2026-10-23 are marked "owner".
@@ -1447,6 +1448,84 @@ The services' part (routes under `/api/v1`; INTERFACE_CONTRACT §21):
   sender, a colleague and another facility; support's list and review; no
   note in any audit row, inbox item or service log).
 
+The contract fields (item 4, this branch only; SPEC-FINAL in the item's
+build notes): the three facts B1-B3 that the P4c website fix was owed, so the
+website stops guessing them. The owner approved it on 2026-10-26 with these
+decisions, built as decided:
+
+- D1: `receives` (and `routesHere`, below) only to a member holding the
+  kind's receive permission (`lab.order-route.receive` /
+  `pharmacy.order-route.receive`); left out for everyone else (the database
+  answers them NULL, and the service does not ask).
+- D2: a stand-alone laboratory or pharmacy that does not receive is told so
+  without a reason: "Health ID clinicians at other facilities can't send
+  {facility} lab requests at the moment. If you expect them, ask Health ID
+  support." (and "prescriptions" for a pharmacy). The website's words; the
+  backend answers only the boolean, never why.
+- D3: the website remembers the flag for 10 minutes per membership, facility
+  and service, so the Overview skips its Incoming read at a governed facility
+  that does not receive. No Identity change.
+- D4, the alternative: 0089 also answers `routesHere: { waiting, held }` on
+  the same answers. `waiting`: an order of the kind was sent to this facility
+  and is before its respond-by (what Incoming lists). `held`: one is
+  accepted, completed or cancelled with `access_ends_at` still ahead (what
+  route access may read). Booleans only, with no patient, count or reference;
+  bound to the session like `receives`; read through
+  `ehr.order_routes_receiving_idx`, `held` among the routes sent in the last
+  1272 hours (no route can be held longer) and planned per call for its own
+  facility. Both stay true at a facility that support unlisted or whose
+  product is suspended, so the website shows and lets it decline orders
+  already sent to it, and shows the paused notice for its accepted work, at
+  every facility.
+- D5: support's lookup answers both `accessEndsAt` (the exact stored time,
+  as `acceptedAt` and `endedAt` are; for a completed lab request it tells
+  support when the first result came back, plus 14 days) and `closable`.
+- D6: `destination` sits beside `listed`, not inside it. D7: no verification
+  method and no "listable" flag. D8: support's listing command is unchanged.
+  D9: no "found now" on the summary.
+- D10: 0089's declaration stays unsigned in this build (`reviewed_by` empty);
+  the owner signs it later.
+
+What mirrors what (a later migration that changes one changes the other with
+it; 0089 pins each body by md5, and the suite's consistency checks catch
+drift after it): `closable` mirrors support's Close
+(`identity.admin_close_order_route`, md5 `e0ea834d…`); `destination` mirrors
+steps 2 and 3 of `identity.order_route_destination_eligible` (md5
+`6b274d9b…`); `held`'s 1272-hour bound relies on
+`ehr.accept_receiving_order_route` (md5 `1d4a77de…`) refusing at the
+respond-by, and on `order_routes_respond_by_ck` and
+`order_routes_acceptance_ck`.
+
+The services' part (routes under `/api/v1`; INTERFACE_CONTRACT §22):
+
+- lab-api and pharmacy-api: the work lists and Incoming (GET and the search
+  POST) read `select lab.order_route_receives_here() as receives,
+  lab.order_routes_here() as routes_here` (the Pharmacy twins) once, in the
+  list's own READ COMMITTED transaction, after its audit rows, in a savepoint,
+  and only for a member holding the receive permission. A failure (a schema
+  without 0089, a facility no longer active) rolls back to the savepoint,
+  logs the SQLSTATE and the correlation id only, and leaves both fields out;
+  the list still answers. Each field is answered only when the database gave
+  it as a boolean, never a made-up `false`. No audit row changes. Incoming's
+  423 while route access is off reads nothing; the work list says it then.
+- identity-api: support's lookup reads every column of
+  `identity.admin_find_order_routes` and maps `accessEndsAt` and `closable`
+  only when the schema answers them, so it works with or without 0089 (or
+  with a later migration that restores 0086's lookup). The summary passes
+  `destination` through unchanged.
+- ehr-api: no runtime change; the order-routes runtime verifier checks the
+  fields (scripts only).
+- Tests: the database suite `order-routes-contract-fields` and the extended
+  privileges and lifecycle suites; the Lab and Pharmacy list specs and HTTP
+  specs; Identity's `order-routes.http.spec.ts`; and the order-routes
+  runtime verifier: the laboratory, the pharmacy and the hospital's own
+  staff; the laboratory checked as Other, listed and unlisted; the pending
+  laboratory (no field); route access off; support's lookup before
+  acceptance, after Close, and inside and past a completed order's access;
+  a laboratory unlisted after orders were sent to it (it still sees, and
+  declines, the waiting one and holds the accepted one); a released
+  sign-up's destination; and no audit row carrying the fields.
+
 ## Not ported, and why
 
 - Already on this branch: #26 (0071 grants the list), #58 (0071 seeds `direct-care`).
@@ -1570,6 +1649,10 @@ Decided by the owner, D-Eminence:
   report" in Ported above, D10 taking the alternative (a): the order screen,
   the two phone calls and a card on the ordering facility's Overview for 30
   days, read-only, showing a member full rows only for orders they sent.
+- The contract fields (item 4) are built at the owner's request (2026-10-26)
+  with the decisions D1-D10 described under "The contract fields" in Ported
+  above, D4 taking the alternative (`routesHere`) and D10 leaving 0089's
+  declaration unsigned for now.
 
 Still open, with what each one holds back:
 
@@ -1652,6 +1735,17 @@ Still open, with what each one holds back:
   The website's pins are re-pinned after this release. Late correction
   (D17), the patient email (D9) and "can't complete" (D18) are not in this
   build.
+- The contract fields (item 4, 0089): unsigned (D10). The owner signs after
+  the container database acceptance, the staging schema upgrade and an
+  adversarial review. 0088 must be live first (the declaration names only
+  0089 and `runtime-grants.sql`). Release order: 0089 with
+  `runtime-grants.sql`, then lab-api, pharmacy-api and identity-api built
+  from the same commit (ehr-api only if the release tooling counts its
+  `scripts/`), then the website with health's re-pin; either order is safe,
+  since every field is optional. A follow-up for the owner: an index on
+  `identity.staff_facility_memberships (facility_id)` for active memberships,
+  if `receives` is slow in production (3-4 ms a call, p95 up to 6.5 ms, with
+  10,000 memberships); not in 0089, because it would lock the table.
 
 A default-off switch is turned on through `dev`'s Terraform for a tunable, or
 by a later commit for a one-way enforcement flip; a database control through

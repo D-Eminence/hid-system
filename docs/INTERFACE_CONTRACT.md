@@ -917,3 +917,90 @@ does the website ask the ordering clinician, in its change warning, and
 support, in its Close form, to have the laboratory or pharmacy end an order it
 accepted for the wrong person first. The Lab and Pharmacy work lists say the
 same through `orderRoute.version`, which only this backend sends.
+
+## 22. Orders between facilities: whether a facility receives, when support's Close acts, and what a facility is as a destination
+
+Migration 0089 (item 4; owner decisions of 2026-10-26, recorded in
+`MAIN_TO_NOVU_PORT.md`) adds three read-only facts to answers that already
+exist. No route, status code or audit row is added. An earlier backend sends
+none of the new fields, so a client reads each only when it is present and of
+the right type.
+
+The Lab and Pharmacy work lists and Incoming:
+
+```text
+GET  /api/v1/lab/work-items                GET  /api/v1/pharmacy/work-items
+GET  /api/v1/lab/order-routes              GET  /api/v1/pharmacy/order-routes
+POST /api/v1/lab/order-routes/search       POST /api/v1/pharmacy/order-routes/search
+```
+
+answer two more fields beside `items`, `crossFacilityOrders` and
+`crossFacilityWork`:
+
+- `receives` (boolean): whether clinicians at other facilities can send this
+  facility lab requests (prescriptions) now. That is: an active, verified
+  facility whose sign-up support reviewed or approved, with an active
+  laboratory (pharmacy) product, listed for orders, with a member who may
+  receive them. It reads no switch, so it stays true while orders between
+  facilities are off.
+- `routesHere` (`{ waiting: boolean, held: boolean }`): `waiting` says an
+  order of that kind sent to this facility can still be accepted (what
+  Incoming lists); `held` says one it accepted (accepted, completed, or
+  cancelled with its reads kept) may still be read here. Both stay true at a
+  facility that support unlisted, or whose product is suspended, so it still
+  sees and can decline what was sent and is told when its accepted work is
+  paused.
+
+Both are about the session's own facility (the request names none), carry no
+patient, count or reference, and are answered only to a member holding
+`lab.order-route.receive` (`pharmacy.order-route.receive`). A member without
+it, and an earlier backend, get neither field; a failure to read them leaves
+them out and the list still answers. While
+`cross_facility_route_access_enabled` is off, Incoming answers 423 as before,
+without them; the work list still carries them.
+
+```json
+{ "items": [], "receives": true, "routesHere": { "waiting": true, "held": false },
+  "crossFacilityOrders": true, "crossFacilityWork": true }
+```
+
+Support's lookup (`GET /api/v1/admin/order-routes?reference=` and
+`POST /api/v1/admin/order-routes/search`, `platform.principal.read`): each
+item gains `accessEndsAt` (ISO-8601, when the receiving facility's read
+access ends; `null` before acceptance) and `closable` (whether
+`POST /api/v1/admin/order-routes/:routeId/close` would act now, by the
+database's clock). A live order that is not closable is a completed one
+whose access has ended, or that someone ended. Clients trust `closable` as
+answered and use no clock of their own. Close may still answer 409
+`ORDER_ROUTE_ALREADY_CLOSED` when access ends between the lookup and the
+close. An earlier backend, or a schema without 0089, sends neither field.
+
+```json
+{ "items": [{ "routeId": "…", "reference": "3F2A9C1B", "kind": "lab_request", "version": 4,
+  "effectiveState": "completed", "…": "…", "acceptedAt": "2026-10-01T09:00:00.000Z", "endedAt": null,
+  "endedKind": null, "accessEndsAt": "2026-10-19T11:12:00.000Z", "closable": false }],
+  "wrongPatientReports": true }
+```
+
+Support's facility summary
+(`GET /api/v1/admin/facilities/:facilityId/order-route-summary`,
+`platform.facility.read`) gains `destination` after `listed`, which keeps its
+four keys:
+
+- `receivingTypes`: the sorted subset of `laboratory` and `pharmacy` of the
+  facility's active products whose source application is approved. It is
+  `[]` for a hospital, clinic or other facility, a suspended product and a
+  released sign-up.
+- `review`: `pending`, `reviewed` or `released` (the self sign-up's review),
+  `governed` (approved by support without a self sign-up) or `legacy`.
+
+No verification method is answered. Listing can change whether clinicians
+find the facility only when `receivingTypes` is not empty and `review` is
+`pending`, `reviewed` or `governed`; the console offers the listing form only
+then.
+
+```json
+{ "facilityId": "…", "listed": { "value": true, "byDefault": true, "reason": null, "setAt": null },
+  "destination": { "receivingTypes": ["laboratory"], "review": "governed" },
+  "receivedAcceptedLifetime": 0, "receivedPatientsLifetime": 0, "counterparts": [] }
+```
