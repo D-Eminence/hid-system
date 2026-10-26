@@ -139,9 +139,13 @@ export class LabWorkItemsService {
    * The work list. Row-level security shows this facility's rows the member
    * may read: under a consent grant, or bound to an order route that allows
    * a read now (P4c, strict policy). A route-backed row carries its route
-   * card and, while the route allows a read, its patient (C12). The answer
-   * says whether orders between facilities and work on them are on, read
-   * after the transaction (FEAS R4, V11).
+   * card and, while the route allows a read, its patient (C12). To a member
+   * who may receive lab requests from other facilities, the answer says
+   * whether this facility receives them now and whether any wait or are held
+   * here (item 4, 0089; read in the transaction after the audit rows, left
+   * out when it cannot be read). The answer also says whether orders between
+   * facilities and work on them are on, read after the transaction (FEAS R4,
+   * V11).
    */
   async list(context: DataAccessContext) {
     if (!context.actor.permissions.includes('lab.work-item.read')) {
@@ -158,8 +162,10 @@ export class LabWorkItemsService {
       const routed = result.rows.filter((row) => row.order_route_id).map((row) => row.id);
       const cards = await this.routeCards.cards(client, routed, context.correlationId);
       await this.auditShownPatients(client, context, result.rows, cards);
+      const receiving = await this.routeCards.receiving(client, context);
       return { items: result.rows.map((row) => ({ ...this.project(row, cards.get(row.id)),testName:row.test_name,
-        accessionId:row.accession_id,accessionNumber:row.accession_number,specimenStatuses:row.specimen_statuses ?? [] })) };
+        accessionId:row.accession_id,accessionNumber:row.accession_number,specimenStatuses:row.specimen_statuses ?? [] })),
+      ...receiving };
     });
     return { ...page, ...(await this.routeCards.flags()) };
   }

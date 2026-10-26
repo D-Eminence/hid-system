@@ -90,16 +90,25 @@ export class PharmacyOrderRoutesService {
     return this.listed(context, input.view ?? 'incoming', healthIdFilter(input.healthId));
   }
 
+  /**
+   * Incoming or Recent, audited in its transaction. To a member holding
+   * pharmacy.order-route.receive (every caller: the routes require it) the
+   * answer also says whether this facility receives prescriptions from other
+   * facilities now and whether any wait or are held here (item 4, 0089), read
+   * after the audit row and left out when it cannot be read. While route
+   * access is off the list refuses (423) and nothing more is read: the work
+   * list, which that switch never refuses, says it then.
+   */
   private async listed(context: DataAccessContext, view: 'incoming' | 'recent', healthId: string | null) {
-    const items = await this.run(context, async (client) => {
+    const { items, receiving } = await this.run(context, async (client) => {
       const result = await client.query<Row>('select * from pharmacy.list_order_routes($1, $2)', [view, healthId]);
       const items = result.rows.map((row) => (view === 'incoming' ? incomingPrescriptionRoute(row) : recentPrescriptionRoute(row)));
       await this.audit.recordWithClient(client, context, 'pharmacy.order-route.list',
         { resourceType: 'order-route-collection', resourceId: context.facilityId },
         { view, resultCount: items.length, byHealthId: healthId !== null });
-      return items;
+      return { items, receiving: await this.cards.receiving(client, context) };
     });
-    return { items, ...(await this.cards.flags()) };
+    return { items, ...receiving, ...(await this.cards.flags()) };
   }
 
   async get(context: DataAccessContext, routeId: string) {

@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import type { PoolClient } from 'pg';
+import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 
 /** C12 takes at most 200 work items (SPEC-FINAL §8.7). */
@@ -25,7 +26,12 @@ export interface OrderRouteCardRow {
   ended_kind: string | null;
 }
 
-/** What a route-backed work row shows of its route (SPEC-FINAL §10.2; item 3 adds version and endedKind). */
+/**
+ * What a route-backed work row shows of its route (SPEC-FINAL §10.2; item 3
+ * adds version and endedKind). The list around the rows may also say whether
+ * this facility receives lab requests from other facilities and whether any
+ * wait or are held here (item 4, `ReceivingFacts`).
+ */
 export interface WorkItemOrderRoute {
   id: string;
   reference: string | null;
@@ -50,6 +56,24 @@ export interface OrderRouteCard { orderRoute: WorkItemOrderRoute; patient?: Work
 
 /** Whether the two P4c controls are on, for the page's banners (FEAS R4). */
 export interface CrossFacilityFlags { crossFacilityOrders: boolean; crossFacilityWork: boolean }
+
+/**
+ * Whether lab requests from other facilities wait here (sent, before their
+ * respond-by) or are held here (accepted, completed or cancelled, while this
+ * facility may still read them): item 4, D4. Booleans only.
+ */
+export interface RoutesHere { waiting: boolean; held: boolean }
+
+/**
+ * What the work list and Incoming say about this facility as a receiver
+ * (item 4, 0089): `receives` is whether clinicians at other facilities can
+ * send it lab requests now (H4, whatever the switches say), `routesHere`
+ * whether any wait or are held here. Each is left out when it was not read.
+ */
+export interface ReceivingFacts { receives?: boolean; routesHere?: RoutesHere }
+
+/** The permission the database answers `receiving` to (NULL to anyone else). */
+const RECEIVE_PERMISSION = 'lab.order-route.receive';
 
 const ACCESS = new Set(['work', 'read', 'none']);
 
@@ -89,8 +113,32 @@ export function orderRouteCard(row: OrderRouteCardRow): OrderRouteCard {
 }
 
 /**
- * The route cards of route-backed work items (C12, `lab.order_route_cards`)
- * and the two control flags (SPEC-FINAL §9.2).
+ * The receiving facts as the answer carries them: each only when the
+ * database gave it with the right type (an older schema, or a member the
+ * database answers NULL to, gives nothing); never a made-up false.
+ */
+export function receivingFacts(row: { receives?: unknown; routes_here?: unknown } | undefined): ReceivingFacts {
+  const routes = jsonObject(row?.routes_here);
+  return {
+    ...(typeof row?.receives === 'boolean' ? { receives: row.receives } : {}),
+    ...(routes && typeof routes.waiting === 'boolean' && typeof routes.held === 'boolean'
+      ? { routesHere: { waiting: routes.waiting, held: routes.held } } : {}),
+  };
+}
+
+/** A jsonb value as an object (node-postgres parses jsonb; text is parsed here). */
+function jsonObject(value: unknown): Record<string, unknown> | undefined {
+  let parsed = value;
+  if (typeof value === 'string') {
+    try { parsed = JSON.parse(value) as unknown; } catch { return undefined; }
+  }
+  return typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed) ? parsed as Record<string, unknown> : undefined;
+}
+
+/**
+ * The route cards of route-backed work items (C12, `lab.order_route_cards`),
+ * the two control flags (SPEC-FINAL §9.2), and whether this facility receives
+ * lab requests from other facilities and holds any (item 4, 0089).
  */
 @Injectable()
 export class LabOrderRouteCards {
@@ -125,6 +173,33 @@ export class LabOrderRouteCards {
       return new Map();
     }
     return found;
+  }
+
+  /**
+   * Item 4 (0089): whether this facility receives lab requests from other
+   * facilities now, and whether any wait or are held here, for a member
+   * holding `lab.order-route.receive`; nothing for anyone else (no statement:
+   * the database would answer NULL). Both functions are bound to the session
+   * (no facility argument) as the cards are. One statement in the caller's
+   * transaction, after its audit row, in a savepoint: a failure (a schema
+   * without 0089, a facility no longer active) leaves both out and never
+   * fails the list. Booleans only: no patient, count or reference, so the
+   * list's audit rows stay as they are.
+   */
+  async receiving(client: PoolClient, context: DataAccessContext): Promise<ReceivingFacts> {
+    if (!context.actor.permissions.includes(RECEIVE_PERMISSION)) return {};
+    await client.query('savepoint lab_order_route_receives');
+    try {
+      const result = await client.query<{ receives: unknown; routes_here: unknown }>(
+        'select lab.order_route_receives_here() as receives, lab.order_routes_here() as routes_here');
+      await client.query('release savepoint lab_order_route_receives');
+      return receivingFacts(result.rows[0]);
+    } catch (error) {
+      await client.query('rollback to savepoint lab_order_route_receives');
+      this.logger.warn({ message: 'Whether this facility receives orders could not be read', sqlState: sqlState(error),
+        correlationId: context.correlationId });
+      return {};
+    }
   }
 
   /**

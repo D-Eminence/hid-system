@@ -31,10 +31,18 @@ const actor: ActorContext = { id: 'staff:pharmacist', subject: 'staff:pharmacist
   facilityIds: [facilityId], facilities: [assignment], facility: assignment, authenticationMethod: 'local' };
 
 const statements: Array<{ sql: string; values: readonly unknown[] }> = [];
+/** Item 4 (0089): what the database answers to whether this facility receives (no row by default). */
+let receivingRows: unknown[] = [];
+const RECEIVES = 'select pharmacy.order_route_receives_here() as receives, pharmacy.order_routes_here() as routes_here';
 const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
   statements.push({ sql, values });
-  return { rows: [] };
+  return { rows: sql === RECEIVES ? receivingRows : [] };
 }) };
+/** A list's statements: the list, then the read of whether this facility receives in its savepoint (item 4). */
+const listed = (values: readonly unknown[]) => [{ sql: 'select * from pharmacy.list_order_routes($1, $2)', values },
+  { sql: 'savepoint pharmacy_order_route_receives', values: [] }, { sql: RECEIVES, values: [] },
+  { sql: 'release savepoint pharmacy_order_route_receives', values: [] }];
+const lists = () => statements.filter((statement) => statement.sql.includes('pharmacy.list_order_routes'));
 const database = {
   withTransaction: jest.fn(async (_context: unknown, work: (c: typeof client) => Promise<unknown>) => work(client)),
   query: jest.fn(async () => ({ rows: [{ orders: true, work: true }] })),
@@ -71,6 +79,7 @@ describe('a Health ID in the URL of GET pharmacy/order-routes (CODEX §26)', () 
   beforeEach(async () => {
     jest.clearAllMocks();
     statements.length = 0;
+    receivingRows = [];
     const moduleRef = await Test.createTestingModule({ imports: [PharmacyOrderRoutesHttpModule] }).compile();
     app = moduleRef.createNestApplication({ logger: false });
     app.setGlobalPrefix('api/v1');
@@ -150,27 +159,41 @@ describe('a Health ID in the URL of GET pharmacy/order-routes (CODEX §26)', () 
   it('leaves the GET without healthId as it was: Incoming or Recent, audited, other unknown keys refused by validation', async () => {
     const recent = await send('GET', '/api/v1/pharmacy/order-routes?view=recent');
     expect([recent.status, recent.body]).toEqual([200, { items: [], crossFacilityOrders: true, crossFacilityWork: true }]);
-    expect(statements).toEqual([{ sql: 'select * from pharmacy.list_order_routes($1, $2)', values: ['recent', null] }]);
+    expect(statements).toEqual(listed(['recent', null]));
     expect(guard.canActivate).toHaveBeenCalledTimes(1);
     expect(audit.recordWithClient).toHaveBeenCalledWith(client, expect.objectContaining({ facilityId }),
       'pharmacy.order-route.list', { resourceType: 'order-route-collection', resourceId: facilityId },
       { view: 'recent', resultCount: 0, byHealthId: false });
     const incoming = await send('GET', '/api/v1/pharmacy/order-routes');
     expect(incoming.status).toBe(200);
-    expect(statements[1]?.values).toEqual(['incoming', null]);
+    expect(lists()[1]?.values).toEqual(['incoming', null]);
     for (const query of ['view=incoming&dateOfBirth=1990-01-01', `HealthId=${healthId}`, 'view=all']) {
       const invalid = await send('GET', `/api/v1/pharmacy/order-routes?${query}`);
       expect([invalid.status, invalid.body?.code]).toEqual([400, 'VALIDATION_FAILED']);
     }
-    expect(statements).toHaveLength(2);
+    expect(lists()).toHaveLength(2);
+    expect(statements).toHaveLength(8);
   });
 
   it('keeps POST pharmacy/order-routes/search, the Health ID in the body', async () => {
     const found = await send('POST', '/api/v1/pharmacy/order-routes/search',
       { body: { view: 'incoming', healthId: ` ${healthId.toLowerCase()} ` } });
     expect([found.status, found.body?.items]).toEqual([200, []]);
-    expect(statements).toEqual([{ sql: 'select * from pharmacy.list_order_routes($1, $2)', values: ['incoming', healthId] }]);
+    expect(statements).toEqual(listed(['incoming', healthId]));
     expect(audit.recordWithClient).toHaveBeenCalledWith(client, expect.anything(), 'pharmacy.order-route.list',
       expect.anything(), { view: 'incoming', resultCount: 0, byHealthId: true });
+  });
+
+  it('answers whether this facility receives and holds orders beside the list (item 4, 0089), the URL rule unchanged', async () => {
+    receivingRows = [{ receives: false, routes_here: { held: false, waiting: true } }];
+    const incoming = await send('GET', '/api/v1/pharmacy/order-routes');
+    expect([incoming.status, incoming.body]).toEqual([200, { items: [], receives: false,
+      routesHere: { waiting: true, held: false }, crossFacilityOrders: true, crossFacilityWork: true }]);
+    const found = await send('POST', '/api/v1/pharmacy/order-routes/search', { body: { healthId } });
+    expect([found.status, found.body?.receives, found.body?.routesHere]).toEqual([200, false, { waiting: true, held: false }]);
+    expect(statements).toEqual([...listed(['incoming', null]), ...listed(['incoming', healthId])]);
+    const refused = await send('GET', `/api/v1/pharmacy/order-routes?healthId=${healthId}`);
+    expect([refused.status, refused.body?.code, refused.body?.receives]).toEqual([400, HEALTH_ID_NOT_ACCEPTED_IN_URL, undefined]);
+    expect(statements).toHaveLength(8);
   });
 });

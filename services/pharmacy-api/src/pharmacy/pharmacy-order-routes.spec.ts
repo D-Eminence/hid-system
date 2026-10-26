@@ -1,5 +1,5 @@
 import 'reflect-metadata';
-import { RequestMethod } from '@nestjs/common';
+import { Logger, RequestMethod } from '@nestjs/common';
 import { HTTP_CODE_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
@@ -13,7 +13,7 @@ import { PharmacyOrderRoutesController } from './pharmacy-order-routes.controlle
 import { PharmacyOrderRoutesService, normalizedIdentifier, normalizedReference } from './pharmacy-order-routes.service';
 import { PharmacyService } from './pharmacy.service';
 import { PharmacyOrderRouteAccess } from './order-route-access';
-import { PharmacyOrderRouteCards } from './order-route-cards';
+import { PharmacyOrderRouteCards, receivingFacts } from './order-route-cards';
 
 const facilityId = '123e4567-e89b-42d3-a456-426614174002';
 const patientId = '123e4567-e89b-42d3-a456-426614174001';
@@ -78,10 +78,18 @@ describe('Pharmacy order-route routes (SPEC-FINAL §10.2)', () => {
   });
 });
 
-function routesHarness(answers: Record<string, unknown[] | Error> = {}) {
+/** Item 4 (0089): the one statement that reads whether this facility receives, and its savepoint. */
+const RECEIVES = 'select pharmacy.order_route_receives_here() as receives, pharmacy.order_routes_here() as routes_here';
+const RECEIVES_STATEMENTS = [{ sql: 'savepoint pharmacy_order_route_receives', values: [] }, { sql: RECEIVES, values: [] },
+  { sql: 'release savepoint pharmacy_order_route_receives', values: [] }];
+
+/** `receiving` answers the read of whether this facility receives (item 4): the database's NULLs by default. */
+function routesHarness(answers: Record<string, unknown[] | Error> = {},
+  receiving: unknown[] | Error = [{ receives: null, routes_here: null }]) {
   const statements: Array<{ sql: string; values: readonly unknown[] }> = [];
   const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
     statements.push({ sql, values });
+    if (sql === RECEIVES) { if (receiving instanceof Error) throw receiving; return { rows: receiving }; }
     if (sql.includes('from pharmacy.work_items where id = $1')) return { rows: [{ patient_id: patientId }] };
     const name = /from\s+([a-z_]+\.[a-z_]+)\(/i.exec(sql)?.[1] ?? '';
     const answer = answers[name];
@@ -99,8 +107,12 @@ function routesHarness(answers: Record<string, unknown[] | Error> = {}) {
   const audit = { recordWithClient: jest.fn(async (_c: unknown, _ctx: unknown, action: string, resource: Record<string, unknown>,
     details: Record<string, unknown> = {}, outcome?: string) => { audits.push([action, resource, details, outcome]); }) };
   const service = new PharmacyOrderRoutesService(database as never, audit as never, new PharmacyOrderRouteCards(database as never));
-  return { service, statements, audits, options, database };
+  return { service, statements, audits, options, database, client, audit };
 }
+
+/** The list statements alone (each list also reads whether this facility receives, item 4). */
+const listStatements = (statements: ReadonlyArray<{ sql: string; values: readonly unknown[] }>) =>
+  statements.filter((statement) => statement.sql.includes('pharmacy.list_order_routes'));
 
 const incoming = { route_id: routeId, reference: '123E4567', row_version: 1, effective_state: 'sent',
   ordering_facility_name: 'Ordering Hospital', orderer_name: 'Dr Ada Obi', orderer_licence_body: null,
@@ -113,7 +125,8 @@ describe('PharmacyOrderRoutesService (C13-C16)', () => {
   it('lists Incoming previews without the patient, the instructions or source ids, with the flags', async () => {
     const h = routesHarness({ 'pharmacy.list_order_routes': [incoming] });
     const answer = await h.service.list(context, { view: 'incoming' });
-    expect(h.statements[0]).toEqual({ sql: 'select * from pharmacy.list_order_routes($1, $2)', values: ['incoming', null] });
+    expect(h.statements).toEqual([{ sql: 'select * from pharmacy.list_order_routes($1, $2)', values: ['incoming', null] },
+      ...RECEIVES_STATEMENTS]);
     expect(h.options).toEqual([{ isolationLevel: 'READ COMMITTED' }]);
     expect(answer).toEqual({ crossFacilityOrders: true, crossFacilityWork: true, items: [{ id: routeId, reference: '123E4567',
       version: 1, effectiveState: 'sent', orderingFacilityName: 'Ordering Hospital', orderer: { name: 'Dr Ada Obi', licenceBody: null },
@@ -128,15 +141,17 @@ describe('PharmacyOrderRoutesService (C13-C16)', () => {
   it('finds by the Health ID from the body, never the URL, and audits no Health ID', async () => {
     const h = routesHarness({ 'pharmacy.list_order_routes': [incoming] });
     await h.service.search(context, { healthId: ' hid-abc234 ' });
-    expect(h.statements[0]?.values).toEqual(['incoming', 'HID-ABC234']);
+    expect(listStatements(h.statements)[0]?.values).toEqual(['incoming', 'HID-ABC234']);
     expect(h.audits[0]?.[2]).toEqual({ view: 'incoming', resultCount: 1, byHealthId: true });
     expect(JSON.stringify(h.audits)).not.toContain('ABC234');
+    const before = h.statements.length;
     await expect(h.service.search(context, { view: 'recent', healthId: 'HID-0O1I' }))
       .rejects.toMatchObject({ status: 400, code: 'ORDER_ROUTE_INVALID' });
-    expect(h.statements).toHaveLength(1);
+    expect(h.statements).toHaveLength(before);
+    expect(listStatements(h.statements)).toHaveLength(1);
     // The GET's list never filters by a Health ID, whatever reaches it.
     await h.service.list(context, { view: 'incoming', healthId: 'HID-ABC234' } as never);
-    expect(h.statements[1]?.values).toEqual(['incoming', null]);
+    expect(listStatements(h.statements)[1]?.values).toEqual(['incoming', null]);
   });
 
   it('shows an accepted route\'s instructions and patient only as the database gives them, naming the patient on the row', async () => {
@@ -235,7 +250,7 @@ describe('PharmacyOrderRoutesService (C13-C16)', () => {
 
 // The per-item Pharmacy routes authorize the resource they act on (C17, PRIV P12).
 function pharmacyHarness(access: { outcome: string; route_id: string | null }, decision = { allowed: false, breakGlass: false },
-  routed = true, dispensingInsert?: Error) {
+  routed = true, dispensingInsert?: Error, receiving: unknown[] | Error = [{ receives: null, routes_here: null }]) {
   const statements: Array<{ sql: string; values: readonly unknown[] }> = [];
   const workRow = { id: workItemId, patient_id: patientId, facility_id: facilityId, ordering_facility_id: encounterId,
     source_ehr_prescription_id: prescriptionId, source_ehr_prescription_version: '2', source_encounter_id: encounterId,
@@ -245,6 +260,7 @@ function pharmacyHarness(access: { outcome: string; route_id: string | null }, d
     dispensing_id: null, reversal_id: null, order_route_id: routed ? routeId : null };
   const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
     statements.push({ sql, values });
+    if (sql === RECEIVES) { if (receiving instanceof Error) throw receiving; return { rows: receiving }; }
     if (sql.includes('pharmacy.order_route_access_for')) return { rows: [{ work_item_id: workItemId, ...access }] };
     if (sql.includes('pharmacy.order_route_cards')) return { rows: [{ work_item_id: workItemId, route_id: routeId, reference: 'R',
       effective_state: 'accepted', access: 'work', ordering_facility_name: 'Ordering Hospital', orderer_name: 'Dr Ada Obi',
@@ -265,7 +281,7 @@ function pharmacyHarness(access: { outcome: string; route_id: string | null }, d
   }) };
   const service = new PharmacyService(database as never, identity as never, audit as never,
     new PharmacyOrderRouteAccess(identity as never), new PharmacyOrderRouteCards(database as never));
-  return { service, statements, identity, audits };
+  return { service, statements, identity, audits, audit, client };
 }
 
 const ITEM_ROUTES: Array<[string, string, string, 'read_records' | 'write_records',
@@ -367,5 +383,119 @@ describe('Pharmacy per-item routes authorize the resource they act on (P12)', ()
     expect(own.statements.some((s) => s.sql.includes('order_route_cards'))).toBe(false);
     // A same-facility list names no patient: only the collection row.
     expect(own.audits).toEqual([expect.objectContaining({ resourceType: 'pharmacy-work-item-collection' })]);
+  });
+
+  it('says whether this facility receives and holds prescriptions, after the cards and the audit rows, adding no audit row (item 4)',
+    async () => {
+      const facts = pharmacyHarness({ outcome: 'none', route_id: null }, undefined, true, undefined,
+        [{ receives: true, routes_here: { held: true, waiting: true } }]);
+      const answer = await facts.service.listWorkItems(context);
+      expect(answer).toMatchObject({ receives: true, routesHere: { waiting: true, held: true }, crossFacilityOrders: false,
+        crossFacilityWork: false });
+      expect(Object.keys(answer)).toEqual(['items', 'receives', 'routesHere', 'crossFacilityOrders', 'crossFacilityWork']);
+      const sql = facts.statements.map((statement) => statement.sql);
+      expect(sql.filter((text) => text === RECEIVES)).toHaveLength(1);
+      expect(sql.slice(-3)).toEqual(['savepoint pharmacy_order_route_receives', RECEIVES,
+        'release savepoint pharmacy_order_route_receives']);
+      expect(sql.findIndex((text) => text.includes('pharmacy.order_route_cards'))).toBeLessThan(sql.indexOf(RECEIVES));
+      const savepointCall = facts.client.query.mock.calls.findIndex(([text]) => text === 'savepoint pharmacy_order_route_receives');
+      expect(Math.max(...facts.audit.recordWithClient.mock.invocationCallOrder))
+        .toBeLessThan(facts.client.query.mock.invocationCallOrder[savepointCall]!);
+      const without = pharmacyHarness({ outcome: 'none', route_id: null });
+      await without.service.listWorkItems(context);
+      expect(facts.audits).toEqual(without.audits);
+      expect(JSON.stringify(facts.audits)).not.toMatch(/receives|routesHere|held|waiting/);
+    });
+
+  it('leaves both out of the work list when NULL or unreadable, and asks nothing of a member who cannot receive', async () => {
+    const nulls = await pharmacyHarness({ outcome: 'none', route_id: null }).service.listWorkItems(context);
+    expect(Object.keys(nulls)).toEqual(['items', 'crossFacilityOrders', 'crossFacilityWork']);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const failing = pharmacyHarness({ outcome: 'none', route_id: null }, undefined, true, undefined,
+        databaseError('42883', 'function pharmacy.order_routes_here() does not exist'));
+      const answer = await failing.service.listWorkItems(context);
+      expect(answer.items).toHaveLength(1);
+      expect(Object.keys(answer)).toEqual(['items', 'crossFacilityOrders', 'crossFacilityWork']);
+      expect(failing.statements.map((statement) => statement.sql).slice(-3)).toEqual(['savepoint pharmacy_order_route_receives',
+        RECEIVES, 'rollback to savepoint pharmacy_order_route_receives']);
+      expect(warn).toHaveBeenCalledWith({ message: 'Whether this facility receives orders could not be read', sqlState: '42883',
+        correlationId: context.correlationId });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('does not exist');
+    } finally {
+      warn.mockRestore();
+    }
+    const reader = pharmacyHarness({ outcome: 'none', route_id: null }, undefined, true, undefined,
+      [{ receives: true, routes_here: { held: true, waiting: true } }]);
+    const readerAnswer = await reader.service.listWorkItems({ ...context, actor: { ...context.actor,
+      permissions: ['pharmacy.work-item.read'] } });
+    expect(readerAnswer).not.toHaveProperty('receives');
+    expect(readerAnswer).not.toHaveProperty('routesHere');
+    expect(reader.statements.some((statement) => statement.sql.includes('order_route_receives'))).toBe(false);
+  });
+});
+
+describe('PharmacyOrderRoutesService: whether this facility receives, and orders waiting or held here (item 4, 0089)', () => {
+  it.each([
+    ['Incoming', (h: ReturnType<typeof routesHarness>) => h.service.list(context, { view: 'incoming' })],
+    ['Recent', (h: ReturnType<typeof routesHarness>) => h.service.list(context, { view: 'recent' })],
+    ['the search', (h: ReturnType<typeof routesHarness>) => h.service.search(context, { healthId: 'HID-ABC234' })],
+  ])('answers them beside %s, read after the audit row in the list\'s one READ COMMITTED transaction', async (_name, run) => {
+    for (const [receives, routesHere] of [[true, { waiting: false, held: false }], [false, { waiting: true, held: true }]] as const) {
+      const h = routesHarness({ 'pharmacy.list_order_routes': [] }, [{ receives, routes_here: { ...routesHere } }]);
+      const answer = await run(h);
+      expect(answer).toEqual({ items: [], receives, routesHere, crossFacilityOrders: true, crossFacilityWork: true });
+      expect(Object.keys(answer)).toEqual(['items', 'receives', 'routesHere', 'crossFacilityOrders', 'crossFacilityWork']);
+      expect(h.statements.slice(1)).toEqual(RECEIVES_STATEMENTS);
+      expect(h.options).toEqual([{ isolationLevel: 'READ COMMITTED' }]);
+      expect(h.database.withTransaction).toHaveBeenCalledTimes(1);
+      expect(h.audit.recordWithClient.mock.invocationCallOrder[0]).toBeLessThan(h.client.query.mock.invocationCallOrder[1]!);
+      expect(h.audits).toEqual([['pharmacy.order-route.list', expect.anything(), expect.anything(), undefined]]);
+      expect(JSON.stringify(h.audits)).not.toMatch(/receives|routesHere/);
+    }
+  });
+
+  it('leaves both out when the database answers NULL or another type, never a made-up false', async () => {
+    for (const row of [{ receives: null, routes_here: null }, { receives: 'false', routes_here: { waiting: true, held: 'no' } },
+      { receives: 0, routes_here: { held: true } }]) {
+      const answer = await routesHarness({ 'pharmacy.list_order_routes': [] }, [row]).service.list(context, {});
+      expect(Object.keys(answer)).toEqual(['items', 'crossFacilityOrders', 'crossFacilityWork']);
+    }
+    expect(receivingFacts({ receives: true, routes_here: { held: false, waiting: true, routeId } }))
+      .toEqual({ receives: true, routesHere: { waiting: true, held: false } });
+    expect(receivingFacts({ receives: false, routes_here: '{"held": true, "waiting": false}' }))
+      .toEqual({ receives: false, routesHere: { waiting: false, held: true } });
+    expect(receivingFacts(undefined)).toEqual({});
+  });
+
+  it('rolls back to its savepoint on a failure, logs the SQLSTATE alone, and still answers the list', async () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      const h = routesHarness({ 'pharmacy.list_order_routes': [incoming] }, databaseError('42501', 'Order route staff context is required'));
+      const answer = await h.service.list(context, {});
+      expect(answer.items).toHaveLength(1);
+      expect(Object.keys(answer)).toEqual(['items', 'crossFacilityOrders', 'crossFacilityWork']);
+      expect(h.statements.map((statement) => statement.sql)).toEqual(['select * from pharmacy.list_order_routes($1, $2)',
+        'savepoint pharmacy_order_route_receives', RECEIVES, 'rollback to savepoint pharmacy_order_route_receives']);
+      expect(warn).toHaveBeenCalledWith({ message: 'Whether this facility receives orders could not be read', sqlState: '42501',
+        correlationId: context.correlationId });
+      expect(JSON.stringify(warn.mock.calls)).not.toContain('staff context');
+      expect(h.audits).toHaveLength(1);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('reads nothing for a member without pharmacy.order-route.receive, nor while route access is off (423 as before)', async () => {
+    const reader = routesHarness({ 'pharmacy.list_order_routes': [] }, [{ receives: true, routes_here: { held: true, waiting: true } }]);
+    const answer = await reader.service.list({ ...context, actor: { ...context.actor, permissions: ['pharmacy.work-item.read'] } }, {});
+    expect(answer).toEqual({ items: [], crossFacilityOrders: true, crossFacilityWork: true });
+    expect(reader.statements.map((statement) => statement.sql)).toEqual(['select * from pharmacy.list_order_routes($1, $2)']);
+    const paused = routesHarness({ 'pharmacy.list_order_routes':
+      databaseError('55000', 'PLATFORM_CONTROL_DISABLED:cross_facility_route_access_enabled') });
+    const refusal = await paused.service.list(context, {}).catch((error: unknown) => error);
+    expect(refusal).toMatchObject({ status: 423, code: 'CROSS_FACILITY_ORDERS_UNAVAILABLE' });
+    expect(paused.statements.map((statement) => statement.sql)).toEqual(['select * from pharmacy.list_order_routes($1, $2)']);
+    expect(paused.audits).toEqual([]);
   });
 });
