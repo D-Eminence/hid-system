@@ -1317,7 +1317,16 @@ declaration; those that keep `main`'s behaviour say so.
 - Tests: `services/ehr-api/test/database/patient-grant-revocation.integration.sql`
   (rollback-only), Identity's HTTP, service and route specs, and a block in
   `services/identity-api/scripts/verify-emergency-contacts-runtime.mjs`,
-  which now serves the access history.
+  which now serves the access history. Only the container database
+  acceptance runs the new suite (its loop over `services/ehr-api/test/database/`),
+  and no CI job runs that script or the staging schema upgrade
+  (`services/ehr-api/scripts/test-staging-schema-upgrade.mjs`). CI covers 0087
+  by applying it (the TUF rehearsal's fresh install and upgrade, and the
+  image build's migration job), by the ledger and release gates, by
+  Identity's jest suites and by the verifier block, which the rehearsal
+  runs. The SQL-level checks of the refusals, the limit, the audit row, the
+  advisory key and the inbox rule are therefore manual gates before signing
+  (Still open, below).
 
 ## Not ported, and why
 
@@ -1510,7 +1519,15 @@ Still open, with what each one holds back:
   since a membership granted WITH INHERIT FALSE passes a MEMBER test yet
   cannot replace the functions; and two counts: active legacy grants naming
   the patient as grantor, and active patients with a deleted login), and
-  after the website copy release.
+  after the website copy release. Before signing, at the release commit, two
+  gates that CI does not run are run by hand and their outputs kept with the
+  review: the container database acceptance (`npm run
+  acceptance:container:database`: a fresh install, every suite in
+  `services/ehr-api/test/database/`, the new one included, then no pending
+  migration) and the staging schema upgrade (`npm --prefix services/ehr-api
+  run db:test-staging-upgrade` with `HID_REHEARSAL_ADMIN_URL` set: 0087 as
+  the only declared migration, the runtime grants unchanged, a clean
+  install).
 - Facility self sign-up (ported above, switched off): the owner signs the 0086
   declaration, after the read-only preflights (no closed organization
   application without a review reason, reviewer or review time, which 0086
