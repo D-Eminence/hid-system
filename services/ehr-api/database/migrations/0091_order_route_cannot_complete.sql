@@ -861,8 +861,9 @@ revoke all on function ehr.guard_order_route_unable_ending() from public;
 --  9b. then, on a lab request, a checked result (D18-15): a result of the
 --      work item whose current version has a verification and no
 --      invalidation waits to be released: RESULT_READY (B releases it, or
---      corrects it or marks it entered in error first); also with a stale
---      version;
+--      first corrects it if it is wrong: a correction is a new, unverified
+--      version; no Lab route marks one result entered in error); also with a
+--      stale version;
 --  9c. then the version (P0001 ORDER_ROUTE_VERSION_CONFLICT): only a
 --      concurrent write that keeps the route open answers 412;
 --  10. B's facts, read while the route still allows it (before the

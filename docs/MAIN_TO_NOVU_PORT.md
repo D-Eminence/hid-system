@@ -1740,8 +1740,9 @@ it on 2026-10-27, taking every recommended default, built as decided:
   order count is read, with the migration choosing its CHECK-change form by
   table size (validated up to about 200,000 routes, NOT VALID above).
 - D18-15: refused while a checked (verified) result waits to be released
-  (409 `ORDER_ROUTE_RESULT_READY`: B releases it, or corrects it or marks it
-  entered in error first); a possibly critical value needs "We have phoned
+  (409 `ORDER_ROUTE_RESULT_READY`: B releases it, or first corrects it if it
+  is wrong; no Lab route marks one result entered in error, so B's words say
+  release or correct); a possibly critical value needs "We have phoned
   {clinic} about the possibly critical value" (`criticalValueTold: true`,
   else 409 `ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD`, asked before the limits of
   D18-7); A is told "A result was

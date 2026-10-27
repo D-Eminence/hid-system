@@ -1225,8 +1225,9 @@ required. Any member who may receive that kind of order may use it (D18-10).
 It applies only to an order this facility accepted, inside its 30-day work
 window, not ended, not reported as accepted for the wrong person, with nothing
 returned yet (D18-1); a lab request with a checked (verified, not invalidated)
-result waiting to be released is refused until that result is released,
-corrected or marked entered in error (D18-15). The body, unknown fields
+result waiting to be released is refused until that result is released, or
+corrected if it is wrong (a correction makes a new, unverified version; no Lab
+route marks a single result entered in error) (D18-15). The body, unknown fields
 refused, no free text (D18-6):
 
 ```json
