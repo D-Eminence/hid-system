@@ -5,9 +5,11 @@ import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
-import type { AcceptOrderRouteDto, CorrectWrongPatientDto, DeclineOrderRouteDto, FindCorrectableDto, ListOrderRoutesQueryDto,
-  ReportWrongPatientDto, SearchOrderRoutesDto } from './dto/order-route.dto';
+import type { AcceptOrderRouteDto, CannotCompleteOrderRouteDto, CorrectWrongPatientDto, DeclineOrderRouteDto, FindCorrectableDto,
+  ListOrderRoutesQueryDto, ReportWrongPatientDto, SearchOrderRoutesDto } from './dto/order-route.dto';
 import {
+  cannotCompleteAnswer,
+  cannotCompleteProblem,
   correctableLabRoute,
   correctionAnswer,
   incomingLabRoute,
@@ -315,6 +317,46 @@ export class LabOrderRoutesService {
       }, { isolationLevel: 'READ COMMITTED' });
     } catch (error) {
       throw lateCorrectionProblem(error);
+    }
+  }
+
+  /**
+   * The laboratory accepted this order and can't complete it (C31, D18
+   * SPEC-FINAL §4.4, §5.1, §8.1). One READ COMMITTED transaction, run once:
+   * the command ends the order (`cancelled`, `receiving_unable`), closes the
+   * laboratory's writes at once and its reads at once or, when it had opened
+   * an accession, 7 days later, records the reason and what it had recorded,
+   * writes the system rows at both facilities and tells the patient; this
+   * writes the laboratory's own audit row with the patient (from the command),
+   * the reason, the counts and the member's statements, in the same
+   * transaction. `criticalValueTold` is sent as `true` only when the member
+   * ticked it (D18-15). A replay (same member, key and request) answers the
+   * route as it is now and the first ending's reason and counts.
+   */
+  async cannotComplete(context: DataAccessContext, routeId: string, input: CannotCompleteOrderRouteDto,
+    idempotencyKey: string) {
+    const criticalValueTold = input.criticalValueTold === true;
+    const digest = requestDigest('lab.order-route.cannot-complete',
+      { routeId, expectedVersion: input.expectedVersion, reason: input.reason, criticalValueTold });
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const result = await client.query<Row>('select * from lab.cannot_complete_order_route($1, $2, $3, $4, $5, $6)',
+          [routeId, input.expectedVersion, input.reason, criticalValueTold, idempotencyKey, digest]);
+        const row = result.rows[0];
+        const answer = row ? cannotCompleteAnswer(routeId, row) : undefined;
+        const patientId = typeof row?.patient_id === 'string' ? row.patient_id : undefined;
+        if (!row || !answer || !patientId) throw orderRouteUnavailable();
+        await this.audit.recordWithClient(client, this.event(context, 'lab.order-route.cannot-complete', 'success',
+          { resourceType: 'order-route', resourceId: routeId, patientId },
+          { routeId, kind: 'lab_request', endingId: typeof row.ending_id === 'string' ? row.ending_id : null,
+            state: typeof row.route_state === 'string' ? row.route_state : null, reasonCode: answer.reason,
+            specimensCollected: answer.specimensCollected, resultsRecorded: answer.resultsRecorded,
+            criticalCandidates: answer.criticalCandidates, criticalValueTold, confirmedPatient: true,
+            replayed: answer.replayed }));
+        return answer;
+      }, { isolationLevel: 'READ COMMITTED' });
+    } catch (error) {
+      throw cannotCompleteProblem(error);
     }
   }
 

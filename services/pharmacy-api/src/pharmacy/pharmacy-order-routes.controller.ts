@@ -2,8 +2,8 @@ import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Q
 import { RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
-import { AcceptOrderRouteDto, CorrectWrongPatientDto, DeclineOrderRouteDto, FindCorrectableDto, ListOrderRoutesQueryDto,
-  ReportWrongPatientDto, SearchOrderRoutesDto } from './dto/order-route.dto';
+import { AcceptOrderRouteDto, CannotCompleteOrderRouteDto, CorrectWrongPatientDto, DeclineOrderRouteDto, FindCorrectableDto,
+  ListOrderRoutesQueryDto, ReportWrongPatientDto, SearchOrderRoutesDto } from './dto/order-route.dto';
 import { PharmacyOrderRoutesService } from './pharmacy-order-routes.service';
 
 const uuid = () => new ParseUUIDPipe({ version: '4' });
@@ -95,5 +95,22 @@ export class PharmacyOrderRoutesController {
     @Headers('idempotency-key') key: string | undefined, @Req() request: HidRequest) {
     const idempotencyKey = requireIdempotencyKey(key);
     return this.routes.correctWrongPatient(requireRequestContext(request), routeId, input, idempotencyKey);
+  }
+
+  /**
+   * The pharmacy accepted this prescription and can't complete it (C31, D18
+   * SPEC-FINAL §5.1): one fixed reason and the statement that the person it
+   * accepted it for was its patient (or collecting for them). The
+   * prescription ends (`cancelled`, `receiving_unable`), the pharmacy stops
+   * seeing it at once and the patient is told; nothing is withdrawn (nothing
+   * was dispensed). Any member who may receive prescriptions (D18-10); at
+   * most 20 per member and 50 per pharmacy in any 24 hours (D18-7).
+   */
+  @Post(':routeId/cannot-complete') @HttpCode(200)
+  @RequirePermissions('pharmacy.order-route.receive')
+  cannotComplete(@Param('routeId', uuid()) routeId: string, @Body() input: CannotCompleteOrderRouteDto,
+    @Headers('idempotency-key') key: string | undefined, @Req() request: HidRequest) {
+    const idempotencyKey = requireIdempotencyKey(key);
+    return this.routes.cannotComplete(requireRequestContext(request), routeId, input, idempotencyKey);
   }
 }

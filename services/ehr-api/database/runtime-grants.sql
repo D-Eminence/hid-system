@@ -1147,6 +1147,25 @@ revoke all on function ehr.order_route_correctable_until(ehr.order_routes),
   from public;
 revoke all on ehr.order_route_correction_capabilities from public;
 
+-- "We can't complete this order" (0091, D18), as that migration grants it
+-- (its section 6): the Lab and Pharmacy wrappers to their runtimes and the
+-- schema test runtime; support's counts of a facility's endings to the
+-- Identity runtime alone. The endings table, its guard and the shared
+-- command are granted to no role; the order summary keeps its ACL.
+grant execute on function lab.cannot_complete_order_route(uuid,bigint,text,boolean,text,char)
+  to hid_lab_runtime, hid_schema_test_runtime;
+grant execute on function pharmacy.cannot_complete_order_route(uuid,bigint,text,text,char)
+  to hid_pharmacy_runtime, hid_schema_test_runtime;
+grant execute on function identity.admin_order_route_not_completed(uuid)
+  to hid_identity_runtime;
+revoke all on function ehr.cannot_complete_order_route(text,uuid,bigint,text,boolean,text,char),
+  ehr.guard_order_route_unable_ending(),
+  lab.cannot_complete_order_route(uuid,bigint,text,boolean,text,char),
+  pharmacy.cannot_complete_order_route(uuid,bigint,text,text,char),
+  identity.admin_order_route_not_completed(uuid)
+  from public;
+revoke all on ehr.order_route_unable_endings from public;
+
 -- Public patient enrollment persists only encrypted pending evidence. Its
 -- activation command performs the canonical account/patient writes atomically.
 grant select, insert, update, delete on identity.public_patient_enrollments,

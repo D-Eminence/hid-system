@@ -1876,9 +1876,11 @@ select pg_temp.check('wrong_patient on an expired route', format($s$do $d$ begin
 select pg_temp.check('wrong_patient on a declined route', format($s$do $d$ begin set local session_replication_role = replica;
   update ehr.order_routes set ended_at = clock_timestamp(), ended_kind = 'wrong_patient' where id = %L; end $d$$s$,
   current_setting('hid.test.lroute_7')), '23514 new row for relation "order_routes" violates check constraint "order_routes_end_ck"');
+-- (0091 made receiving_unable a known kind, on cancelled routes only, so
+-- the unknown kind is one no migration names.)
 select pg_temp.check('an unknown ended kind (the CHECKs run in name order, the end CHECK first)',
   format($s$do $d$ begin set local session_replication_role = replica;
-  update ehr.order_routes set ended_kind = 'receiving_unable' where id = %L; end $d$$s$, current_setting('hid.test.lroute_1')),
+  update ehr.order_routes set ended_kind = 'not_a_kind' where id = %L; end $d$$s$, current_setting('hid.test.lroute_1')),
   '23514 new row for relation "order_routes" violates check constraint "order_routes_end_ck"');
 
 select pg_temp.report();

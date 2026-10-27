@@ -61,7 +61,10 @@
 --      the 21st at one facility in 24 hours are refused with the time from
 --      which another is possible, a report older than 24 hours is not
 --      counted, and both limits at once give the later time;
---  11. the 180-day bound (D17-2), a minute before and after it.
+--  11. the 180-day bound (D17-2), a minute before and after it;
+--  12. a real release of B (D17-3);
+--  13. after 0091 (D18): an order ended "can't complete" (reads ended at
+--      once) is corrected late, ended_kind_before receiving_unable.
 -- The two-session cases (replays before and after the lock under a
 -- concurrent report, exact limits under concurrency, races with releases,
 -- reversals and the order-change mirror) are in the race harness.
@@ -1449,9 +1452,13 @@ select pg_temp.assert('d17: T8''s four new columns, its widened state CHECK, the
         where k.conrelid = 'ehr.order_route_wrong_patient_reports'::regclass
           and k.conname = 'order_route_wrong_patient_reports_state_before_check')
     = 'CHECK ((state_before = ANY (ARRAY[''accepted''::text, ''completed''::text, ''cancelled''::text])))'
+  -- 0091 adds late_ck again with receiving_unable, NOT VALID above the
+  -- route table's size limit (its section 7; the cannot-complete suite
+  -- checks its form).
   and (select count(*) from pg_constraint k where k.conrelid = 'ehr.order_route_wrong_patient_reports'::regclass
         and k.conname in ('order_route_wrong_patient_reports_late_ck', 'order_route_wrong_patient_reports_late_review_ck')
-        and k.convalidated) = 2
+        and (k.convalidated or (k.conname = 'order_route_wrong_patient_reports_late_ck'
+          and pg_relation_size('ehr.order_routes'::regclass, 'main') > 117145600))) = 2
   and (select pg_get_indexdef(i.indexrelid) from pg_index i
         where i.indexrelid = 'ehr.order_route_wrong_patient_reports_late_member_idx'::regclass)
     = 'CREATE INDEX order_route_wrong_patient_reports_late_member_idx ON ehr.order_route_wrong_patient_reports '
@@ -3078,6 +3085,41 @@ select pg_temp.assert('d17 released: LB2''s late correction of limb is refused b
   and (select count(*) from ehr.order_route_wrong_patient_reports report where report.route_id = pg_temp.r('limb')) = 0
   and pg_temp.capabilities() = 0, current_setting('hid.test.released_limb'));
 select pg_temp.assert('d17: T9 is empty at the end', pg_temp.capabilities() = 0);
+
+-- 13. After 0091 (D18): an order the pharmacy ended "can't complete" (its
+-- reads end at once) is corrected late through the capability, the ending
+-- kept, ended_kind_before receiving_unable, which T8's late CHECK now
+-- admits; the summary then drops notCompleted.
+set local role hid_ehr_api_runtime;
+select pg_temp.order_to('d18x', 'prescription', 1, current_setting('hid.test.facility_2')::uuid);
+reset role;
+set local role hid_pharmacy_api_runtime;
+select set_config('hid.test.item_d18x', pg_temp.accept_rx(pg_temp.r('d18x'))::text, true);
+select pg_temp.as_signup_admin(2);
+select pg_temp.check('d18: PB1 ends d18x, it can''t complete it', format($s$select result from
+  pharmacy.cannot_complete_order_route(%L, 2, 'out_of_stock', 'd17-d18x-unable-0001', repeat('a', 64))$s$,
+  pg_temp.r('d18x')), 'ok');
+reset role;
+select pg_temp.snap();
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_signup_admin(2);
+select pg_temp.check('d18: PB1 corrects d18x late', format($s$select pg_temp.keep_late('d18x', 'prescription', %L, %s,
+  'someone_elses_details', 'own_check', pg_temp.lagos_today(), 'The person served was not the patient',
+  'd17-d18x-late-00001')$s$, pg_temp.r('d18x'), pg_temp.v(pg_temp.r('d18x'))), 'ok');
+reset role;
+select pg_temp.assert('d18: the late correction of an order ended receiving_unable: corrected, the ending kept, '
+    || 'T8 late with ended_kind_before receiving_unable, the notice, T9 empty, notCompleted null',
+  pg_temp.answer('d18x') ->> 'result' = 'corrected'
+  and pg_temp.answer('d18x') ->> 'ended_kind' = 'receiving_unable'
+  and pg_temp.answer('d18x') ->> 'ended_kind_before' = 'receiving_unable'
+  and pg_temp.answer('d18x') ->> 'state_before' = 'cancelled'
+  and (select report.late and report.state_before = 'cancelled' and report.ended_kind_before = 'receiving_unable'
+         from ehr.order_route_wrong_patient_reports report where report.route_id = pg_temp.r('d18x'))
+  and (select count(*) from notification.inbox_items item where item.resource_id = pg_temp.r('d18x')
+        and item.notification_code = 'ORDER_ROUTE_WRONG_PATIENT_CORRECTED') = 1
+  and pg_temp.capabilities() = 0
+  and ehr.order_route_summary(pg_temp.route(pg_temp.r('d18x')), false) -> 'notCompleted' = 'null'::jsonb,
+  pg_temp.answer('d18x')::text);
 
 select pg_temp.report();
 rollback;

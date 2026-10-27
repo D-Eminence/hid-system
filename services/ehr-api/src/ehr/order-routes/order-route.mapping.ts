@@ -20,6 +20,14 @@ export const LIVE_STATES: ReadonlySet<string> = new Set(['sent', 'accepted', 'co
 /** B's report on a route (D17, 0090): when, and whether after the order had ended. */
 export interface OrderRouteWrongPatient { reportedAt: string; late: boolean }
 
+/**
+ * Why the receiving laboratory or pharmacy ended an order it accepted and
+ * couldn't complete (D18, 0091): its reason code, and for a lab request
+ * whether a sample was taken there and whether a result was recorded there
+ * but not released (null for a prescription).
+ */
+export interface OrderRouteNotCompleted { reason: string; sampleTaken: boolean | null; resultRecorded: boolean | null }
+
 export interface OrderRouteSummary {
   id: string;
   reference: string | null;
@@ -50,6 +58,13 @@ export interface OrderRouteSummary {
    * else null. Present only when the database answers it.
    */
   correctableUntil?: string | null;
+  /**
+   * D18 (0091): set for an order the receiver ended because it couldn't
+   * complete it (`endedKind` `receiving_unable`) while no wrong-patient report
+   * exists, else null (once a report exists the earlier reason is not about
+   * the patient). Present only when the database answers it.
+   */
+  notCompleted?: OrderRouteNotCompleted | null;
 }
 
 export interface OrderRouteAttestation {
@@ -205,6 +220,24 @@ function lateCorrectionFields(source: Source): Pick<OrderRouteSummary, 'wrongPat
   return fields;
 }
 
+/**
+ * D18's field of a summary (0091), only when the source carries it: C3's and
+ * C4's jsonb `notCompleted`, `{ reason, sampleTaken, resultRecorded }` or
+ * null. A source without the key (an earlier schema, C1's, C2's and C5's
+ * rows) gives no field, so the answer is as before 0091; an unreadable value
+ * is null, never a made-up reason.
+ */
+function notCompletedField(source: Source): Pick<OrderRouteSummary, 'notCompleted'> {
+  if (source.notCompleted === undefined) return {};
+  const value = parseJson(source.notCompleted);
+  const reason = isRecord(value) ? field(value, 'reason') : undefined;
+  if (!isRecord(value) || typeof reason !== 'string' || !reason) return { notCompleted: null };
+  const sampleTaken = field(value, 'sampleTaken');
+  const resultRecorded = field(value, 'resultRecorded');
+  return { notCompleted: { reason, sampleTaken: typeof sampleTaken === 'boolean' ? sampleTaken : null,
+    resultRecorded: typeof resultRecorded === 'boolean' ? resultRecorded : null } };
+}
+
 /** OrderRouteSummary from a command row or a jsonb summary (C1, C3, C4, C5). */
 export function orderRouteSummary(source: Source, fallbackKind?: OrderRouteKind): OrderRouteSummary {
   const nested = field(source, 'receivingFacility');
@@ -236,6 +269,7 @@ export function orderRouteSummary(source: Source, fallbackKind?: OrderRouteKind)
       || (lockedAt !== undefined && lockedAt !== null),
     resendAllowed: flag(field(source, 'resendAllowed', 'resend_allowed')) === true,
     ...lateCorrectionFields(source),
+    ...notCompletedField(source),
   };
 }
 

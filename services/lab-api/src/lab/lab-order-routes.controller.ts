@@ -2,8 +2,8 @@ import { Body, Controller, Get, Headers, HttpCode, Param, ParseUUIDPipe, Post, Q
 import { AuditAction, RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { requireRequestContext, type HidRequest } from '../common/request-context';
-import { AcceptOrderRouteDto, CorrectWrongPatientDto, DeclineOrderRouteDto, FindCorrectableDto, ListOrderRoutesQueryDto,
-  ReportWrongPatientDto, SearchOrderRoutesDto } from './dto/order-route.dto';
+import { AcceptOrderRouteDto, CannotCompleteOrderRouteDto, CorrectWrongPatientDto, DeclineOrderRouteDto, FindCorrectableDto,
+  ListOrderRoutesQueryDto, ReportWrongPatientDto, SearchOrderRoutesDto } from './dto/order-route.dto';
 import { LabOrderRoutesService } from './lab-order-routes.service';
 
 const uuid = () => new ParseUUIDPipe({ version: '4' });
@@ -97,5 +97,24 @@ export class LabOrderRoutesController {
     @Headers('idempotency-key') key: string | undefined, @Req() request: HidRequest) {
     const idempotencyKey = requireIdempotencyKey(key);
     return this.routes.correctWrongPatient(requireRequestContext(request), routeId, input, idempotencyKey);
+  }
+
+  /**
+   * The laboratory accepted this order and can't complete it (C31, D18
+   * SPEC-FINAL §5.1): one fixed reason, the statement that the person it
+   * accepted the order for was the order's patient, and, when a possibly
+   * critical value is recorded, that the ordering facility was told. The
+   * order ends (`cancelled`, `receiving_unable`), nothing more can be
+   * recorded on it, and the patient is told; nothing is withdrawn (nothing
+   * came back). Any member who may receive lab requests (D18-10); at most 20
+   * per member and 50 per laboratory in any 24 hours (D18-7). The
+   * interceptor's row carries no body.
+   */
+  @Post(':routeId/cannot-complete') @HttpCode(200)
+  @RequirePermissions('lab.order-route.receive') @AuditAction('lab.order-route.cannot-complete.request')
+  cannotComplete(@Param('routeId', uuid()) routeId: string, @Body() input: CannotCompleteOrderRouteDto,
+    @Headers('idempotency-key') key: string | undefined, @Req() request: HidRequest) {
+    const idempotencyKey = requireIdempotencyKey(key);
+    return this.routes.cannotComplete(requireRequestContext(request), routeId, input, idempotencyKey);
   }
 }

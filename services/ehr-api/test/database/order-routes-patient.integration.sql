@@ -19,7 +19,11 @@
 --      laboratory reported and whether late, and the deadline while it may
 --      still act; on a completed order marked entered in error (redacted),
 --      on item 3's in-window reports, on an open and a sent route; the
---      notice ORDER_ROUTE_WRONG_PATIENT_CORRECTED.
+--      notice ORDER_ROUTE_WRONG_PATIENT_CORRECTED;
+--   7. "We can't complete this order" (0091, D18): C5 keeps the ended route
+--      in full, ended receiving_unable, without Stop, with the late
+--      deadline and no report, in its 25 columns (no reason for the
+--      patient); the notice ORDER_ROUTE_NOT_COMPLETED.
 -- Shared fixture of the P4c suites (each suite carries its own copy, so it
 -- runs alone). Synthetic values only; uuid prefix e4c.
 --   Platform: SA (platform_super_admin), SU (support_admin), FR
@@ -856,6 +860,37 @@ select pg_temp.assert('the notice ORDER_ROUTE_WRONG_PATIENT_CORRECTED with the f
       'receivingFacilityName'] and (select count(*) from jsonb_object_keys(item.metadata)) = 4)
    from notification.inbox_items item where item.notification_code = 'ORDER_ROUTE_WRONG_PATIENT_CORRECTED'
      and item.resource_id = current_setting('hid.test.route_2')::uuid));
+
+-- 7. "We can't complete this order" (0091, D18): LB1 ends route 9 (open). C5
+-- keeps it in full, cancelled, ended receiving_unable, without Stop, still
+-- with the late-correction deadline and no report; P's notice is
+-- ORDER_ROUTE_NOT_COMPLETED with the four metadata keys; C5 still answers
+-- 25 columns (the reason is not the patient's to read, D18-4).
+select set_config('hid.test.version_9', (select route.row_version::text from ehr.order_routes route
+  where route.id = current_setting('hid.test.route_9')::uuid), true);
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select pg_temp.check('LB1 ends route 9: it can''t complete it', format($s$select result from
+  lab.cannot_complete_order_route(%L, %s, 'patient_did_not_return', false, 'p4c-patient-unable-0009', repeat('a', 64))$s$,
+  current_setting('hid.test.route_9'), current_setting('hid.test.version_9')), 'ok');
+reset role;
+set local role hid_ehr_api_runtime;
+select pg_temp.as_patient(1);
+select pg_temp.assert('C5 keeps route 9 in full, ended receiving_unable, without Stop, with its deadline and no report',
+  (select listed.ended_kind = 'receiving_unable' and listed.effective_state = 'cancelled' and listed.accepted_at is not null
+     and listed.ended_at is not null and not listed.entered_in_error and listed.content ->> 'testDisplay' = 'Haemoglobin'
+     and listed.attestation_text is not null and listed.actions = array[]::text[]
+     and listed.correctable_until = current_setting('hid.test.deadline_9')::timestamptz
+     and listed.wrong_patient_reported_at is null and listed.wrong_patient_late is null
+   from ehr.patient_list_order_routes() listed where listed.route_id = current_setting('hid.test.route_9')::uuid)
+  and (select count(*) from json_object_keys((select row_to_json(listed)
+        from ehr.patient_list_order_routes() listed limit 1))) = 25);
+reset role;
+select pg_temp.assert('the notice ORDER_ROUTE_NOT_COMPLETED with the four metadata keys',
+  (select count(*) = 1 and bool_and(item.resource_type = 'order-route' and item.metadata ?& array['routeId', 'kind',
+      'orderingFacilityName', 'receivingFacilityName'] and (select count(*) from jsonb_object_keys(item.metadata)) = 4)
+   from notification.inbox_items item where item.notification_code = 'ORDER_ROUTE_NOT_COMPLETED'
+     and item.resource_id = current_setting('hid.test.route_9')::uuid));
 
 select pg_temp.report();
 rollback;

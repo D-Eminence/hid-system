@@ -148,6 +148,8 @@ const P0001_REFUSALS: Readonly<Record<string, readonly [number, string]>> = Obje
   ORDER_ROUTE_STILL_OPEN: [409, 'This prescription is still open: report it with "This isn\'t the order\'s patient" instead'],
   ORDER_ROUTE_ALREADY_REPORTED: [409, 'This prescription has already been reported as accepted for the wrong person'],
   ORDER_ROUTE_CORRECTION_TOO_LATE: [409, 'The time to correct this prescription has passed: phone Health ID support'],
+  // "We can't complete this order" (C31, D18 §5.1): the state is checked before the version.
+  ORDER_ROUTE_ALREADY_RETURNED: [409, 'A dispensing has already gone back on this prescription, so it cannot be ended here'],
 });
 
 /** The permission C25 names when a dispensing must be reversed and the member may not (D4). */
@@ -175,13 +177,34 @@ const RETRY_AFTER = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
  * such a time); support cannot lift it.
  */
 function correctionLimit(error: unknown): DomainProblem {
-  const detail = (error as { detail?: unknown }).detail;
-  const parsed = typeof detail === 'string' && RETRY_AFTER.test(detail) ? new Date(detail) : undefined;
-  const retryAfter = parsed && Number.isFinite(parsed.getTime()) && parsed.toISOString() === detail ? detail : undefined;
+  const retryAfter = retryAfterOf(error);
   return new DomainProblem(429, 'ORDER_ROUTE_CORRECTION_LIMIT', retryAfter
     ? `This pharmacy may make no more late corrections until ${retryAfter}; if many prescriptions are affected, phone Health ID support now`
     : 'This pharmacy may make no more late corrections for now; if many prescriptions are affected, phone Health ID support now',
   undefined, retryAfter ? { extensions: { retryAfter } } : undefined);
+}
+
+/**
+ * C31's limit (D18-7): 20 endings per member and 50 per pharmacy in any 24
+ * hours, exact, never lifted. 429 with the earliest time another is possible
+ * as the problem member `retryAfter` (the database's DETAIL, kept only when it
+ * is an exact UTC time); past it the ordering facility cancels the
+ * prescription or Health ID support closes it.
+ */
+function cannotCompleteLimit(error: unknown): DomainProblem {
+  const retryAfter = retryAfterOf(error);
+  return new DomainProblem(429, 'ORDER_ROUTE_CANNOT_COMPLETE_LIMIT',
+    `The most prescriptions that can be ended here in 24 hours have been ended; more can be ended ${retryAfter
+      ? `from ${retryAfter}` : 'later'}: ask the ordering facility to cancel this prescription, or Health ID support to `
+      + 'close it; if many prescriptions are affected, phone Health ID support now',
+    undefined, retryAfter ? { extensions: { retryAfter } } : undefined);
+}
+
+/** A limit refusal's DETAIL when it is an exact ISO UTC time with milliseconds, else undefined. */
+function retryAfterOf(error: unknown): string | undefined {
+  const detail = (error as { detail?: unknown }).detail;
+  const parsed = typeof detail === 'string' && RETRY_AFTER.test(detail) ? new Date(detail) : undefined;
+  return parsed && Number.isFinite(parsed.getTime()) && parsed.toISOString() === detail ? detail : undefined;
 }
 
 export const crossFacilityOrdersUnavailable = () => new DomainProblem(423, 'CROSS_FACILITY_ORDERS_UNAVAILABLE',
@@ -238,6 +261,7 @@ export function pharmacyOrderRouteProblem(error: unknown): unknown {
       }
       if (message === 'ORDER_ROUTE_CORRECTION_PERMISSION_REQUIRED') return correctionPermissionRequired(error);
       if (message === 'ORDER_ROUTE_CORRECTION_LIMIT') return correctionLimit(error);
+      if (message === 'ORDER_ROUTE_CANNOT_COMPLETE_LIMIT') return cannotCompleteLimit(error);
       const refusal = P0001_REFUSALS[message];
       return refusal ? new DomainProblem(refusal[0], message, refusal[1])
         : orderRouteUnavailable();
@@ -385,5 +409,54 @@ export function correctablePrescriptionRoute(row: Row) {
       acceptedWith: text(field(row, 'accepted_with')),
       returned: returnedItems(field(row, 'returned_items')),
     } : null,
+  };
+}
+
+/**
+ * "We can't complete this order"'s problems (C31, D18 §5.1): as the
+ * wrong-patient report's, a concurrent route write (40001) or a deadlock
+ * (40P01) is 409 ORDER_ROUTE_CHANGED_CONCURRENTLY for this command only;
+ * everything else as the other route commands: the limit 429 with
+ * `retryAfter`, a caller transaction that is not READ COMMITTED (25000), a
+ * CHECK (23514) or a schema without 0091 (42883) 503.
+ */
+export function cannotCompleteProblem(error: unknown): unknown {
+  return wrongPatientProblem(error);
+}
+
+/**
+ * The answer of C31 (D18 §5.1), the Lab's shape: the route as the ending left
+ * it, the reason given (a replay: the first ending's), until when the
+ * pharmacy may still read it (the ending's moment: a pharmacy's reads end at
+ * once) and what it had recorded (always 0 for a prescription); never the
+ * patient, the ending id or anything clinical.
+ */
+export interface CannotCompleteAnswer {
+  route: { id: string; version: number; effectiveState: string; endedKind: string };
+  reason: string;
+  readUntil: string | null;
+  specimensCollected: number;
+  resultsRecorded: number;
+  criticalCandidates: number;
+  replayed: boolean;
+}
+
+export function cannotCompleteAnswer(routeId: string, row: Row): CannotCompleteAnswer | undefined {
+  const result = field(row, 'result');
+  const version = count(field(row, 'route_row_version'));
+  const effectiveState = text(field(row, 'effective_state'));
+  const endedKind = text(field(row, 'ended_kind'));
+  const reason = text(field(row, 'reason_code'));
+  if ((result !== 'ended' && result !== 'replayed') || version === null || !effectiveState || !endedKind || !reason) {
+    return undefined;
+  }
+  return {
+    route: { id: routeId, version, effectiveState, endedKind },
+    reason,
+    readUntil: iso(field(row, 'access_ends_at')),
+    specimensCollected: count(field(row, 'specimens_collected')) ?? 0,
+    resultsRecorded: count(field(row, 'results_recorded')) ?? 0,
+    criticalCandidates: count(field(row, 'critical_candidates')) ?? 0,
+    replayed: result === 'replayed',
   };
 }
