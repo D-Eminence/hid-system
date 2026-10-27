@@ -40,6 +40,17 @@
 // no committed correction leaves behind and no runtime can read, write or use.
 // Owner SQL there only ages routes, adds a role that reads the Lab work list
 // without receiving lab requests, and reads what the database holds.
+// "We can't complete this order" (D18, 0091) is run at a laboratory signed up
+// for it and at the pharmacy: an order ended with nothing recorded (the
+// laboratory stops reading it at once), with a sample and an unverified
+// result (7 more days of reading), refused while a checked result waits and
+// until a possibly critical value is said to be told, a prescription; every
+// refusal over HTTP; what the clinic, the patient, the laboratory and support
+// read afterwards; support's per-facility counts; D17's late correction after
+// the ending, while the laboratory still reads it and after its reads ended;
+// the limits (20 a member, 50 a facility in 24 hours). Owner SQL there only
+// ages routes, writes and then removes synthetic endings for the limits, and
+// reads what the database holds.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
@@ -551,8 +562,11 @@ try {
   assert.deepEqual(summaryOther.listed, { value: false, byDefault: true, reason: null, setAt: null });
   // Item 4 (0089): what the facility is as a destination, beside the listing (D6), with no verification method (D7).
   assert.deepEqual(summaryOther.destination, { receivingTypes: ['laboratory'], review: 'reviewed' });
-  assert.deepEqual(Object.keys(summaryOther).sort(), ['counterparts', 'destination', 'facilityId', 'listed',
-    'receivedAcceptedLifetime', 'receivedPatientsLifetime']);
+  // D18 (0091): support's counts of the orders it couldn't complete, merged in after C20's keys, and the served signal.
+  assert.deepEqual(Object.keys(summaryOther).sort(), ['cannotComplete', 'counterparts', 'destination', 'facilityId', 'listed',
+    'notCompleted', 'receivedAcceptedLifetime', 'receivedPatientsLifetime']);
+  assert.deepEqual([summaryOther.notCompleted, summaryOther.cannotComplete], [{ last30Days: 0, soonAfterAcceptance: 0,
+    afterSevenDays: 0, laterReportedWrongPatient: 0, byReason: {} }, true]);
   const destinationOf = async target => expectStatus(await adminCall('GET',
     `/admin/facilities/${target.facilityId}/order-route-summary`), 200, `summary ${target.label}`).destination;
   const destinations = { laboratory: await destinationOf(laboratory), pharmacy: await destinationOf(pharmacyFacility),
@@ -2351,6 +2365,496 @@ try {
   step('late correction (D17): lab group 2 after support\'s close, lab group 1 accepted and completed, too late, pharmacy, '
     + 'refusals, the lookup, the limits, the capability');
 
+  // ── 12e. "We can't complete this order" (D18, 0091): a laboratory or pharmacy ends an order it accepted and cannot
+  // complete ──
+  // At a laboratory signed up for this block (its administrator and a scientist invited through P4b, so a result can
+  // be entered by one and checked by the other, and the other laboratories' counts stay as asserted below) and at the
+  // pharmacy above. Owner SQL only ages routes, writes synthetic endings for the limits (their key and guard off, and
+  // removed again), and reads what the database holds.
+  const unable = {};
+  const ulLab = await signUp({ label: 'Unable Laboratory', organizationType: 'laboratory', productCode: 'laboratory',
+    administratorName: 'Obinna Eke' });
+  await review(ulLab, 'lab', { body: 'MLSCN', number: 'MLSCN/70088' });
+  const ulLabAdmin = await signInStaff(ulLab.email, HOSTS.lab, ulLab.facilityId, { name: ulLab.administratorName });
+  const ulLabMember = await invited(ulLabAdmin, HOSTS.lab, ulLab.facilityId, { name: 'Pelumi Unablemember',
+    email: synthetic('ul-lab-member'), role: 'lab', licenceBody: 'MLSCN', licenceNumber: 'MLSCN/80122' });
+  const cannotComplete = (who, base, routeId, body, key = freshKey('unable'), extra = {}) => call(base, who, 'POST',
+    `/${kindPath(base)}/order-routes/${routeId}/cannot-complete`, body, { ...(key === null ? {} : { key }), ...extra });
+  const unableCounts = async routeId => one(`select
+      (select count(*)::int from ehr.order_route_unable_endings where route_id = $1) as endings,
+      (select state from ehr.order_routes where id = $1) as state,
+      (select ended_kind from ehr.order_routes where id = $1) as ended_kind`, [routeId]);
+  const storedRoute = async routeId => one(`select row_version, state, ended_kind, ended_at, writes_end_at, access_ends_at,
+      ended_by_account_id from ehr.order_routes where id = $1`, [routeId]);
+  const endingOf = async routeId => one(`select reason_code, accession_made, specimens_collected, results_recorded,
+      critical_candidates, critical_value_told, ended_by_acceptor, minutes_after_acceptance
+    from ehr.order_route_unable_endings where route_id = $1`, [routeId]);
+  const sendU = async () => {
+    const order = await newLabRequest();
+    const route = expectStatus(await send(doctor, 'lab_request', order, ulLab.facilityId, labVersion), 201, 'send to ulLab').route;
+    return { order, route };
+  };
+  const acceptU = async route => expectStatus(await accept(ulLabAdmin, lab, route.id, 1,
+    { kind: 'health_id', value: patient.hid }), 201, `accept ${route.reference}`);
+  // The laboratory's work on an order: the scientist accessions, collects, receives, runs and enters a result; the
+  // administrator (a second member) verifies and releases it when asked.
+  const ulWork = async (workItemId, { value = 7.1, flag = 'high', verify = false, release = false } = {}) => {
+    const accessioned = expectStatus(await labCall(ulLabMember, 'POST', `/work-items/${workItemId}/accession`,
+      { requirements: [{ specimenType: 'blood' }], reason: 'Synthetic accession of an order from another facility' },
+    { key: freshKey('accession') }), 201, 'accession');
+    let sample = accessioned.specimens[0];
+    sample = expectStatus(await labCall(ulLabMember, 'POST', `/accessions/${accessioned.id}/specimens/${sample.id}/collect`,
+      { expectedVersion: sample.version, collectedAt: now() }, { key: freshKey('collect') }), 201, 'collect');
+    sample = expectStatus(await labCall(ulLabMember, 'POST', `/accessions/${accessioned.id}/specimens/${sample.id}/receive`,
+      { expectedVersion: sample.version, receivedAt: now() }, { key: freshKey('receive') }), 201, 'receive');
+    let run = expectStatus(await labCall(ulLabMember, 'POST', `/specimens/${sample.id}/executions`,
+      { expectedSpecimenVersion: sample.version, startedAt: now(), reason: 'Synthetic run of a routed order' },
+    { key: freshKey('execution') }), 201, 'execution');
+    run = expectStatus(await labCall(ulLabMember, 'POST', `/executions/${run.id}/complete`,
+      { expectedVersion: run.version, completedAt: now() }, { key: freshKey('complete') }), 201, 'complete');
+    const entered = expectStatus(await labCall(ulLabMember, 'POST', `/executions/${run.id}/results`,
+      { expectedExecutionVersion: run.version, resultType: 'numeric', numericValue: value, unit: '%', referenceRange: '4.0-5.6',
+        abnormalFlag: flag }, { key: freshKey('result') }), 201, 'result');
+    const resultId = entered.id ?? entered.result?.id;
+    if (verify || release) {
+      expectStatus(await labCall(ulLabAdmin, 'POST', `/results/${resultId}/verify`, { expectedResultVersion: 1, occurredAt: now(),
+        reason: 'Verified by a second laboratory member' }, { key: freshKey('verify') }), 201, 'verify');
+    }
+    if (release) {
+      expectStatus(await labCall(ulLabAdmin, 'POST', `/results/${resultId}/release`, { expectedResultVersion: 1, occurredAt: now(),
+        reason: 'Released to the ordering facility' }, { key: freshKey('release') }), 201, 'release');
+    }
+    return { accessionId: accessioned.id, specimen: sample, run, resultId };
+  };
+  // What the ordering facility reads of one order: C4 on the list and on the order's own read, and C3's view.
+  const orderingReads = async (kind, order, route) => ({
+    list: expectStatus(await ehrCall(doctor, 'GET', `${enc}/${ordersPath(kind)}`), 200, 'list').items
+      .find(item => item.id === order.id)?.orderRoute,
+    c4: expectStatus(await ehrCall(doctor, 'GET', `${enc}/${ordersPath(kind)}/${order.id}`), 200, 'C4').orderRoute,
+    c3: expectStatus(await ehrCall(doctor, 'GET', routesPath(kind, order.id)), 200, 'C3').items.find(item => item.id === route.id),
+  });
+  const notCompletedOnAll = reads => [reads.list?.notCompleted, reads.c4?.notCompleted, reads.c3?.notCompleted];
+  const myRouteU = async route => expectStatus(await patientCall(ehr, 'GET', '/ehr/me/order-routes'), 200, 'C5').items
+    .find(item => item.id === route.id);
+  const ulWorkList = async who => expectStatus(await labCall(who, 'GET', '/work-items'), 200, 'work list');
+  const unableNotes = { withSample: 'The person who gave the sample was not the patient; found when the patient phoned',
+    nothingRecorded: 'We accepted it for her sister at the counter; found in our own weekly check',
+    refused: 'The analyser is down until Friday' };
+
+  // 1. Nothing recorded (D18-1, D18-2): the scientist ends it; the laboratory stops reading it at once.
+  const { order: lrU1, route: routeU1 } = await sendU();
+  unable.beforeAcceptance = expectProblem(await cannotComplete(ulLabMember, lab, routeU1.id, { expectedVersion: 1,
+    reason: 'test_not_offered', confirmedPatient: true }), 409, 'ORDER_ROUTE_NOT_ACCEPTED').code;
+  const acceptedU1 = await acceptU(routeU1);
+  const versionU1 = acceptedU1.route.version;
+  // The served signal (D18-13): the work list says so to a member who may receive lab requests, and to no one else.
+  const listU1 = await ulWorkList(ulLabMember);
+  assert.equal(listU1.cannotComplete, true);
+  assert.deepEqual(Object.keys(listU1).slice(-4), ['lateCorrection', 'cannotComplete', 'crossFacilityOrders',
+    'crossFacilityWork']);
+  const cardU1 = listU1.items.find(item => item.id === acceptedU1.workItemId);
+  assert.deepEqual([cardU1?.orderRoute.effectiveState, cardU1?.orderRoute.access, cardU1?.orderRoute.endedKind,
+    cardU1?.orderRoute.version], ['accepted', 'work', null, versionU1]);
+  const readerU = await ulWorkList(wpReader);
+  assert(!('cannotComplete' in readerU) && !('lateCorrection' in readerU), JSON.stringify(Object.keys(readerU)));
+  // Refusals, each writing nothing.
+  const bodyU1 = { expectedVersion: versionU1, reason: 'test_not_offered', confirmedPatient: true };
+  const { confirmedPatient: _confirmed, ...unconfirmedU1 } = bodyU1;
+  unable.refusals = {
+    withoutKey: expectProblem(await cannotComplete(ulLabMember, lab, routeU1.id, bodyU1, null), 400,
+      'IDEMPOTENCY_KEY_REQUIRED').code,
+    pharmacyReason: expectProblem(await cannotComplete(ulLabMember, lab, routeU1.id, { ...bodyU1, reason: 'out_of_stock' }), 400,
+      'VALIDATION_FAILED').code,
+    withoutConfirmedPatient: expectProblem(await cannotComplete(ulLabMember, lab, routeU1.id, unconfirmedU1), 400,
+      'VALIDATION_FAILED').code,
+    confirmedPatientFalse: expectProblem(await cannotComplete(ulLabMember, lab, routeU1.id, { ...bodyU1,
+      confirmedPatient: false }), 400, 'VALIDATION_FAILED').code,
+    freeText: expectProblem(await cannotComplete(ulLabMember, lab, routeU1.id, { ...bodyU1,
+      note: unableNotes.refused }), 400, 'VALIDATION_FAILED').code,
+    staleVersion: expectProblem(await cannotComplete(ulLabMember, lab, routeU1.id, { ...bodyU1, expectedVersion: versionU1 - 1 }),
+      412, 'VERSION_CONFLICT').code,
+    otherLaboratory: expectProblem(await cannotComplete(labAdmin, lab, routeU1.id, bodyU1), 404, 'ORDER_ROUTE_NOT_FOUND').code,
+    emergency: answerOf(await cannotComplete(ulLabMember, lab, routeU1.id, bodyU1, freshKey('unable'), { purpose: 'emergency' })),
+    withoutReceivePermission: expectProblem(await cannotComplete(wpReader, lab, routeU1.id, bodyU1), 403,
+      'PERMISSION_DENIED').code,
+  };
+  assert(unable.refusals.emergency.startsWith('403'), unable.refusals.emergency);
+  assert.deepEqual(await unableCounts(routeU1.id), { endings: 0, state: 'accepted', ended_kind: null }, 'a refusal wrote');
+  // The ending: cancelled / receiving_unable, writes and reads closed at once, the reason and B's facts kept.
+  const keyU1 = freshKey('unable-u1');
+  const endedU1 = expectStatus(await cannotComplete(ulLabMember, lab, routeU1.id, bodyU1, keyU1), 200,
+    'cannot complete (lab, nothing recorded)');
+  const storedU1 = await storedRoute(routeU1.id);
+  assert.deepEqual(endedU1, { route: { id: routeU1.id, version: versionU1 + 1, effectiveState: 'cancelled',
+    endedKind: 'receiving_unable' }, reason: 'test_not_offered', readUntil: storedU1.access_ends_at.toISOString(),
+  specimensCollected: 0, resultsRecorded: 0, criticalCandidates: 0, replayed: false });
+  assert.deepEqual([Number(storedU1.row_version), storedU1.state, storedU1.ended_kind, storedU1.ended_by_account_id],
+    [versionU1 + 1, 'cancelled', 'receiving_unable', ulLabMember.accountId]);
+  assert(Math.abs(storedU1.access_ends_at - storedU1.ended_at) < 1000 && storedU1.access_ends_at <= Date.now()
+    && storedU1.writes_end_at <= Date.now(), `reads end at once: ${JSON.stringify(storedU1)}`);
+  assert.deepEqual(await endingOf(routeU1.id), { reason_code: 'test_not_offered', accession_made: false, specimens_collected: 0,
+    results_recorded: 0, critical_candidates: 0, critical_value_told: false, ended_by_acceptor: false,
+    minutes_after_acceptance: 0 });
+  // Replay, the key with another request, another key, item 3's report, support's Close, the same order again.
+  const replayU1 = expectStatus(await cannotComplete(ulLabMember, lab, routeU1.id, bodyU1, keyU1), 200, 'replay');
+  assert.deepEqual(replayU1, { ...endedU1, replayed: true });
+  unable.keyReused = expectProblem(await cannotComplete(ulLabMember, lab, routeU1.id, { ...bodyU1, reason: 'other' }, keyU1), 409,
+    'IDEMPOTENCY_KEY_REUSED').code;
+  unable.anotherKey = expectProblem(await cannotComplete(ulLabAdmin, lab, routeU1.id, { ...bodyU1,
+    expectedVersion: endedU1.route.version }), 409, 'ORDER_ROUTE_ALREADY_ENDED').code;
+  unable.itemThreesReport = expectProblem(await reportWrong(ulLabMember, lab, routeU1.id, { expectedVersion: endedU1.route.version,
+    reason: 'other', note: 'Synthetic attempt after the ending' }), 409, 'ORDER_ROUTE_ALREADY_ENDED').code;
+  unable.supportClose = expectProblem(await adminCall('POST', `/admin/order-routes/${routeU1.id}/close`,
+    { reason: 'The laboratory asked support to close it' }, { ifMatch: endedU1.route.version }), 409,
+  'ORDER_ROUTE_ALREADY_CLOSED').code;
+  const lrU1Now = expectStatus(await ehrCall(doctor, 'GET', `${enc}/lab-requests/${lrU1.id}`), 200, 'lrU1');
+  unable.resend = expectProblem(await send(doctor, 'lab_request', lrU1Now, ulLab.facilityId, labVersion), 409,
+    'ORDER_ROUTE_ORDER_IN_WORK').code;
+  assert.equal(await one('select count(*)::int as n from ehr.order_route_unable_endings where route_id = $1', [routeU1.id])
+    .then(row => row.n), 1);
+  // A: why, and that nothing was recorded; the ending as a receiving-side event; no re-send.
+  const readsU1 = await orderingReads('lab_request', lrU1, routeU1);
+  assert.deepEqual(notCompletedOnAll(readsU1), Array(3).fill({ reason: 'test_not_offered', sampleTaken: false,
+    resultRecorded: false }));
+  assert.deepEqual([readsU1.c3.effectiveState, readsU1.c3.endedKind, readsU1.c3.resendAllowed, readsU1.c3.wrongPatient,
+    readsU1.c3.correctableUntil, readsU1.c3.results], ['cancelled', 'receiving_unable', false, null, await deadlineOf(routeU1.id), []]);
+  const endingEvent = readsU1.c3.events.find(event => event.type === 'cancelled');
+  assert.deepEqual([endingEvent?.side, endingEvent?.reasonCode, endingEvent?.stateAfter], ['receiving', 'receiving_unable',
+    'cancelled'], JSON.stringify(readsU1.c3.events));
+  assertNone(readsU1, [ulLabMember.name, ulLabMember.accountId, keyU1], 'A\'s reads');
+  // P: the order as cancelled at B, correctable as D17 says, no reason; the new inbox notice.
+  const myU1 = await myRouteU(routeU1);
+  assert.deepEqual([myU1?.effectiveState, myU1?.endedKind, myU1?.correctableUntil, 'notCompleted' in (myU1 ?? {})],
+    ['cancelled', 'receiving_unable', await deadlineOf(routeU1.id), false]);
+  const noticeU1 = await inboxNotice('ORDER_ROUTE_NOT_COMPLETED', routeU1.id);
+  assert.deepEqual(noticeU1?.metadata, { routeId: routeU1.id, kind: 'lab_request', orderingFacilityName: hospital.name,
+    receivingFacilityName: ulLab.name });
+  assertNone(noticeU1, ['test_not_offered'], 'the patient\'s notice');
+  // B: the order leaves its work list at once; its own item read is refused; the lookup says it may still be corrected.
+  assert(!(await ulWorkList(ulLabMember)).items.some(item => item.id === acceptedU1.workItemId), 'still on the work list');
+  const itemU1 = await labCall(ulLabMember, 'GET', `/work-items/${acceptedU1.workItemId}`);
+  assert([403, 404].includes(itemU1.status), `B read the item after its reads ended: ${answerOf(itemU1)}`);
+  const lookupU1 = await lookupOne(ulLabMember, lab, routeU1);
+  assert.deepEqual([lookupU1.correction, lookupU1.effectiveState, lookupU1.endedKind, lookupU1.returned, lookupU1.wrongPatient],
+    ['correctable', 'cancelled', 'receiving_unable', false, null]);
+  // Support: Find shows the ending and the served signal.
+  const foundU1 = await findRoute(routeU1);
+  assert.deepEqual([foundU1.effectiveState, foundU1.endedKind, foundU1.closable, foundU1.correction], ['cancelled',
+    'receiving_unable', false, 'correctable']);
+  assert.equal(expectStatus(await adminCall('GET', `/admin/order-routes?reference=${routeU1.reference}`), 200, 'find')
+    .cannotComplete, true);
+  unable.nothingRecorded = { answer: 'cancelled, receiving_unable, readUntil = the ending', replay: 'replayed true',
+    keyReused: unable.keyReused, anotherKey: unable.anotherKey, itemThreesReport: unable.itemThreesReport,
+    supportClose: unable.supportClose, resend: unable.resend, ordering: 'notCompleted on the list, C4 and C3; cancelled event',
+    patient: 'ORDER_ROUTE_NOT_COMPLETED; C5 correctable, no reason', receiver: `off the work list, item read ${itemU1.status}`,
+    lookup: 'correctable', find: 'cancelled, receiving_unable, closable false' };
+
+  // 2. The pharmacy (D18-2: its reads end at once): out of stock; nothing can be dispensed afterwards.
+  const rxU = await newPrescription('active');
+  const rxRouteU = await sendPrescription(rxU);
+  const rxAcceptedU = expectStatus(await acceptPrescription(rxRouteU.id, 1, { kind: 'health_id', value: patient.hid }), 201,
+    'accept rxU');
+  const rxItemU = expectStatus(await pharmacyCall(pharmacist, 'GET', `/work-items/${rxAcceptedU.workItemId}`), 200, 'rxU item');
+  const rxList = expectStatus(await pharmacyCall(pharmacist, 'GET', '/work-items'), 200, 'pharmacy work list');
+  assert.equal(rxList.cannotComplete, true);
+  const rxBody = { expectedVersion: rxAcceptedU.route.version, reason: 'out_of_stock', confirmedPatient: true };
+  unable.pharmacyRefusals = {
+    criticalValueTold: expectProblem(await cannotComplete(pharmacist, pharmacy, rxRouteU.id, { ...rxBody, criticalValueTold: true }),
+      400, 'VALIDATION_FAILED').code,
+    labReason: expectProblem(await cannotComplete(pharmacist, pharmacy, rxRouteU.id, { ...rxBody, reason: 'test_not_offered' }), 400,
+      'VALIDATION_FAILED').code,
+  };
+  const rxEnded = expectStatus(await cannotComplete(pharmacist, pharmacy, rxRouteU.id, rxBody), 200, 'cannot complete (pharmacy)');
+  const rxStored = await storedRoute(rxRouteU.id);
+  assert.deepEqual(rxEnded, { route: { id: rxRouteU.id, version: rxAcceptedU.route.version + 1, effectiveState: 'cancelled',
+    endedKind: 'receiving_unable' }, reason: 'out_of_stock', readUntil: rxStored.access_ends_at.toISOString(),
+  specimensCollected: 0, resultsRecorded: 0, criticalCandidates: 0, replayed: false });
+  assert(Math.abs(rxStored.access_ends_at - rxStored.ended_at) < 1000, 'a pharmacy keeps no reading days');
+  const rxDispense = await pharmacyCall(pharmacist, 'POST', `/work-items/${rxAcceptedU.workItemId}/dispensings`,
+    { expectedWorkItemVersion: Number(rxItemU.version), quantityDispensed: 60, quantityUnit: 'tablet',
+      reason: 'Synthetic dispensing after the ending' }, { key: freshKey('dispense') });
+  unable.pharmacyDispensingAfter = answerOf(rxDispense);
+  assert.equal(rxDispense.status, 409, `a dispensing after the ending: ${unable.pharmacyDispensingAfter}`);
+  assert.equal(rxDispense.body.code, 'ORDER_ROUTE_CLOSED');
+  assert.equal((await one('select count(*)::int as n from pharmacy.dispensings where work_item_id = $1',
+    [rxAcceptedU.workItemId])).n, 0);
+  const rxReads = await orderingReads('prescription', rxU, rxRouteU);
+  assert.deepEqual(notCompletedOnAll(rxReads), Array(3).fill({ reason: 'out_of_stock', sampleTaken: null, resultRecorded: null }));
+  const rxUNotice = await inboxNotice('ORDER_ROUTE_NOT_COMPLETED', rxRouteU.id);
+  assert.deepEqual(rxUNotice?.metadata, { routeId: rxRouteU.id, kind: 'prescription', orderingFacilityName: hospital.name,
+    receivingFacilityName: pharmacyFacility.name });
+  assert.deepEqual(await endingOf(rxRouteU.id), { reason_code: 'out_of_stock', accession_made: false, specimens_collected: 0,
+    results_recorded: 0, critical_candidates: 0, critical_value_told: false, ended_by_acceptor: true,
+    minutes_after_acceptance: 0 });
+  unable.pharmacy = { refusals: unable.pharmacyRefusals, answer: 'cancelled, receiving_unable, reads end at once',
+    dispensingAfter: unable.pharmacyDispensingAfter, ordering: 'notCompleted { out_of_stock, null, null }',
+    patient: 'ORDER_ROUTE_NOT_COMPLETED (prescription)' };
+
+  // 3. With a sample and an unverified result (D18-2, D18-15): reads kept 7 days, nothing more recorded; then D17's
+  // late correction withdraws the result, after the ending.
+  const { order: lrU2, route: routeU2 } = await sendU();
+  const acceptedU2 = await acceptU(routeU2);
+  const workU2 = await ulWork(acceptedU2.workItemId, { value: 6.9, flag: 'high' });
+  const endedU2 = expectStatus(await cannotComplete(ulLabMember, lab, routeU2.id, { expectedVersion: acceptedU2.route.version,
+    reason: 'supplies_unavailable', confirmedPatient: true }), 200, 'cannot complete (lab, with a sample)');
+  const storedU2 = await storedRoute(routeU2.id);
+  assert.deepEqual([endedU2.readUntil, endedU2.specimensCollected, endedU2.resultsRecorded, endedU2.criticalCandidates],
+    [storedU2.access_ends_at.toISOString(), 1, 1, 0]);
+  assert(Math.abs(storedU2.access_ends_at - storedU2.ended_at - 168 * 3600_000) < 1000, 'reads kept 7 days');
+  const readsU2 = await orderingReads('lab_request', lrU2, routeU2);
+  assert.deepEqual(notCompletedOnAll(readsU2), Array(3).fill({ reason: 'supplies_unavailable', sampleTaken: true,
+    resultRecorded: true }));
+  assert.deepEqual(readsU2.c3.results, [], 'an unreleased result reached the ordering facility');
+  const cardU2 = (await ulWorkList(ulLabMember)).items.find(item => item.id === acceptedU2.workItemId);
+  assert.deepEqual([cardU2?.orderRoute.access, cardU2?.orderRoute.endedKind, cardU2?.orderRoute.effectiveState],
+    ['read', 'receiving_unable', 'cancelled'], JSON.stringify(cardU2?.orderRoute));
+  expectStatus(await labCall(ulLabMember, 'GET', `/work-items/${acceptedU2.workItemId}`), 200, 'B reads it for 7 days');
+  // Nothing more can be recorded: a write the route alone allowed is refused (the route now allows reading only, so a
+  // row the write would lock is not found: 404, as for item 3's ending; with the patient's consent it would be 409
+  // ORDER_ROUTE_CLOSED), and nothing is written.
+  const revisionsU2 = async () => (await one(`select (select count(*)::int from lab.result_revisions where result_id = $1) as revisions,
+      (select count(*)::int from lab.result_verifications where result_id = $1) as verifications`, [workU2.resultId]));
+  const beforeWritesU2 = await revisionsU2();
+  const writeAfterU2 = await labCall(ulLabMember, 'POST', `/executions/${workU2.run.id}/results`,
+    { expectedExecutionVersion: workU2.run.version, resultType: 'numeric', numericValue: 7.0, unit: '%' },
+  { key: freshKey('result') });
+  const verifyAfterU2 = await labCall(ulLabAdmin, 'POST', `/results/${workU2.resultId}/verify`,
+    { expectedResultVersion: 1, occurredAt: now(), reason: 'Verified after the ending' }, { key: freshKey('verify') });
+  for (const refused of [writeAfterU2, verifyAfterU2]) {
+    assert([403, 404, 409].includes(refused.status), `a write after the ending: ${answerOf(refused)}`);
+    if (refused.status === 409) assert.equal(refused.body.code, 'ORDER_ROUTE_CLOSED');
+  }
+  assert.deepEqual(await revisionsU2(), beforeWritesU2, 'a write after the ending landed');
+  unable.writeAfter = answerOf(writeAfterU2);
+  unable.verifyAfter = answerOf(verifyAfterU2);
+  // D17's late correction on the ended order (C29): the result withdrawn, the ending kept.
+  const lookupU2 = await lookupOne(ulLabMember, lab, routeU2);
+  assert.deepEqual([lookupU2.correction, lookupU2.endedKind], ['correctable', 'receiving_unable']);
+  const correctedU2 = expectStatus(await correctLate(ulLabMember, lab, routeU2.id, lateBody(lookupU2.version,
+    unableNotes.withSample, { discoveredBy: 'patient' })), 200,
+  'late correction after "can\'t complete" (reads kept)');
+  assert.deepEqual([correctedU2.late, correctedU2.endedKindBefore, correctedU2.route.effectiveState, correctedU2.route.endedKind,
+    correctedU2.resultsVoided, correctedU2.dispensingReversed], [true, 'receiving_unable', 'cancelled', 'receiving_unable', 1, false]);
+  const readsU2After = await orderingReads('lab_request', lrU2, routeU2);
+  assert.deepEqual(notCompletedOnAll(readsU2After), [null, null, null], 'notCompleted after a wrong-patient report');
+  assert.deepEqual([readsU2After.c4.wrongPatient?.late, readsU2After.c4.correctableUntil], [true, null]);
+  assert(await inboxNotice('ORDER_ROUTE_WRONG_PATIENT_CORRECTED', routeU2.id), 'no ORDER_ROUTE_WRONG_PATIENT_CORRECTED notice');
+  // D17's late correction once B's reads have ended (the capability path): the order with nothing recorded.
+  const lookupU1Late = await lookupOne(ulLabMember, lab, routeU1);
+  const correctedU1 = expectStatus(await correctLate(ulLabMember, lab, routeU1.id, lateBody(lookupU1Late.version,
+    unableNotes.nothingRecorded, { reason: 'wrong_order_chosen', discoveredBy: 'own_check' })), 200, 'late correction after "can\'t complete" (reads ended)');
+  assert.deepEqual([correctedU1.endedKindBefore, correctedU1.route.endedKind, correctedU1.resultsVoided], ['receiving_unable',
+    'receiving_unable', 0]);
+  assert.deepEqual(notCompletedOnAll(await orderingReads('lab_request', lrU1, routeU1)), [null, null, null]);
+  // Support (D18-12): both late reports flagged late_correction, listed first, naming the earlier ending; reviewed
+  // as any late report where nothing came back (no DPO referral required).
+  const reportsU = expectStatus(await adminCall('GET', '/admin/wrong-patient-reports?status=unreviewed'), 200, 'reports');
+  const reportU2 = reportsU.items.find(item => item.routeId === routeU2.id);
+  const reportU1 = reportsU.items.find(item => item.routeId === routeU1.id);
+  for (const report of [reportU2, reportU1]) {
+    assert.deepEqual([report?.late, report?.endedKindBefore, report?.stateBefore, report?.requiredActions,
+      report?.flags.includes('late_correction')], [true, 'receiving_unable', 'cancelled', [], true], JSON.stringify(report));
+  }
+  const firstUnflagged = reportsU.items.findIndex(item => item.flags.length === 0);
+  assert(firstUnflagged === -1 || [reportU1, reportU2].every(report => reportsU.items.indexOf(report) < firstUnflagged),
+    'a later report after "can\'t complete" is not listed among the flagged reports first');
+  const reviewedU2 = expectStatus(await adminCall('POST', `/admin/wrong-patient-reports/${reportU2.reportId}/review`,
+    { actions: ['facility_contacted'], note: 'Phoned the laboratory: it had ended the order, then found the mix-up' },
+  { ifMatch: reportU2.version }), 200, 'review without the DPO');
+  assert.deepEqual(reviewedU2.actions, ['facility_contacted']);
+  unable.withSample = { answer: 'readUntil 7 days on, 1 specimen, 1 result', ordering: 'notCompleted { true, true }, no result',
+    receiver: 'read, receiving_unable', writeAfter: unable.writeAfter, verifyAfter: unable.verifyAfter,
+    lateCorrection: { readsKept: 'late, endedKindBefore receiving_unable, 1 voided', readsEnded: 'late, 0 voided',
+      ordering: 'notCompleted null', patient: 'ORDER_ROUTE_WRONG_PATIENT_CORRECTED' },
+    support: { flags: reportU2.flags, requiredActions: [], listed: 'among the flagged, first', review: 'facility_contacted: 200' } };
+
+  // 4. A checked result and a possibly critical value (D18-15).
+  const { order: lrU3, route: routeU3 } = await sendU();
+  const acceptedU3 = await acceptU(routeU3);
+  const workU3 = await ulWork(acceptedU3.workItemId, { value: 7.4, flag: 'high', verify: true });
+  const bodyU3 = { expectedVersion: acceptedU3.route.version, reason: 'equipment_unavailable', confirmedPatient: true };
+  unable.resultReady = expectProblem(await cannotComplete(ulLabMember, lab, routeU3.id, bodyU3), 409,
+    'ORDER_ROUTE_RESULT_READY').code;
+  unable.resultReadyStale = expectProblem(await cannotComplete(ulLabMember, lab, routeU3.id, { ...bodyU3,
+    expectedVersion: bodyU3.expectedVersion - 1, criticalValueTold: true }), 409, 'ORDER_ROUTE_RESULT_READY').code;
+  // The scientist corrects it (a new, unverified version) and flags it possibly critical.
+  expectStatus(await labCall(ulLabMember, 'POST', `/executions/${workU3.run.id}/results/${workU3.resultId}/corrections`,
+    { expectedExecutionVersion: workU3.run.version, resultType: 'numeric', numericValue: 15.2, unit: '%',
+      referenceRange: '4.0-5.6', abnormalFlag: 'critical_candidate', expectedResultVersion: 1,
+      reason: 'Synthetic correction: the re-run gave a much higher value' }, { key: freshKey('correct') }), 201, 'correction');
+  unable.criticalNotTold = expectProblem(await cannotComplete(ulLabMember, lab, routeU3.id, bodyU3), 409,
+    'ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD').code;
+  unable.criticalToldFalse = expectProblem(await cannotComplete(ulLabMember, lab, routeU3.id, { ...bodyU3,
+    criticalValueTold: false }), 409, 'ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD').code;
+  assert.deepEqual(await unableCounts(routeU3.id), { endings: 0, state: 'accepted', ended_kind: null }, 'a refusal wrote');
+  const endedU3 = expectStatus(await cannotComplete(ulLabMember, lab, routeU3.id, { ...bodyU3, criticalValueTold: true },
+    freshKey('unable-u3-told')), 200, 'cannot complete (lab, critical value told)');
+  assert.deepEqual([endedU3.specimensCollected, endedU3.resultsRecorded, endedU3.criticalCandidates, endedU3.replayed],
+    [1, 1, 1, false]);
+  assert.deepEqual(await endingOf(routeU3.id), { reason_code: 'equipment_unavailable', accession_made: true,
+    specimens_collected: 1, results_recorded: 1, critical_candidates: 1, critical_value_told: true, ended_by_acceptor: false,
+    minutes_after_acceptance: 0 });
+  assert.deepEqual(notCompletedOnAll(await orderingReads('lab_request', lrU3, routeU3)), Array(3).fill({
+    reason: 'equipment_unavailable', sampleTaken: true, resultRecorded: true }));
+  const systemU3 = await all(`select facility_id, patient_id, details from audit.events
+    where action = 'ehr.order-route.not-completed' and resource_id = $1 order by facility_id`, [routeU3.id]);
+  assert.deepEqual(systemU3.map(row => [row.facility_id, row.patient_id, row.details]),
+    [hospital.facilityId, ulLab.facilityId].sort().map(facility => [facility, patient.id, { routeId: routeU3.id,
+      kind: 'lab_request', state: 'cancelled', reason: 'equipment_unavailable', specimensCollected: 1, resultsRecorded: 1,
+      criticalCandidates: 1, criticalValueTold: true }]));
+  unable.checkedAndCritical = { verified: unable.resultReady, verifiedStaleVersion: unable.resultReadyStale,
+    corrected: { notTold: unable.criticalNotTold, toldFalse: unable.criticalToldFalse, told: '200, criticalCandidates 1' },
+    systemRows: 'A and B, criticalCandidates 1, criticalValueTold true' };
+
+  // 5. The other refusals over HTTP: a completed order, an order past its window, one never accepted.
+  const { route: routeU4 } = await sendU();
+  const acceptedU4 = await acceptU(routeU4);
+  await ulWork(acceptedU4.workItemId, { value: 5.2, flag: 'normal', release: true });
+  const versionU4 = Number((await storedRoute(routeU4.id)).row_version);
+  unable.completed = expectProblem(await cannotComplete(ulLabMember, lab, routeU4.id, { expectedVersion: versionU4,
+    reason: 'other', confirmedPatient: true }), 409, 'ORDER_ROUTE_ALREADY_RETURNED').code;
+  const { route: routeU5 } = await sendU();
+  const acceptedU5 = await acceptU(routeU5);
+  await age(`update ehr.order_routes set writes_end_at = clock_timestamp() - interval '1 minute',
+      access_ends_at = clock_timestamp() - interval '1 minute' where id = $1`, [routeU5.id]);
+  unable.lapsed = expectProblem(await cannotComplete(ulLabMember, lab, routeU5.id, { expectedVersion: acceptedU5.route.version,
+    reason: 'other', confirmedPatient: true }), 409, 'ORDER_ROUTE_ALREADY_ENDED').code;
+  const { route: routeU6 } = await sendU();
+  unable.sent = expectProblem(await cannotComplete(ulLabMember, lab, routeU6.id, { expectedVersion: 1, reason: 'other',
+    confirmedPatient: true }), 409, 'ORDER_ROUTE_NOT_ACCEPTED').code;
+  for (const route of [routeU4, routeU5, routeU6]) {
+    assert.equal((await unableCounts(route.id)).endings, 0, `a refusal wrote an ending for ${route.reference}`);
+  }
+  // An order ended more than 7 days after acceptance (every time of the route aged 8 days, keeping 0086's CHECKs).
+  const { order: lrU7, route: routeU7 } = await sendU();
+  const acceptedU7 = await acceptU(routeU7);
+  await age(`update ehr.order_routes set created_at = created_at - interval '8 days', respond_by = respond_by - interval '8 days',
+      accepted_at = accepted_at - interval '8 days', writes_end_at = writes_end_at - interval '8 days',
+      access_ends_at = access_ends_at - interval '8 days' where id = $1`, [routeU7.id]);
+  expectStatus(await cannotComplete(ulLabAdmin, lab, routeU7.id, { expectedVersion: acceptedU7.route.version,
+    reason: 'patient_did_not_return', confirmedPatient: true }), 200, 'cannot complete (8 days after acceptance)');
+  assert.deepEqual(await endingOf(routeU7.id).then(row => [row.ended_by_acceptor, row.minutes_after_acceptance >= 11520]),
+    [true, true]);
+  assert.deepEqual(notCompletedOnAll(await orderingReads('lab_request', lrU7, routeU7)), Array(3).fill({
+    reason: 'patient_did_not_return', sampleTaken: false, resultRecorded: false }));
+
+  // 6. Support's counts (D18-11) on the facility panel, merged into the summary, with the served signal.
+  const summaryOf = async target => expectStatus(await adminCall('GET', `/admin/facilities/${target.facilityId}/order-route-summary`),
+    200, `summary ${target.label}`);
+  // At the laboratory: four endings (U1 nothing recorded, so soon after acceptance; U2 and U3 with an accession; U7 eight
+  // days after acceptance), two of them later reported as accepted for the wrong person (D18-12).
+  const ulSummary = await summaryOf(ulLab);
+  assert.deepEqual(Object.keys(ulSummary).slice(-2), ['notCompleted', 'cannotComplete']);
+  assert.equal(ulSummary.cannotComplete, true);
+  const { byReason: ulByReason, ...ulCounts } = ulSummary.notCompleted;
+  assert.deepEqual(ulCounts, { last30Days: 4, soonAfterAcceptance: 1, afterSevenDays: 1, laterReportedWrongPatient: 2 });
+  assert.deepEqual(Object.entries(ulByReason).sort(), [['equipment_unavailable', 1], ['patient_did_not_return', 1],
+    ['supplies_unavailable', 1], ['test_not_offered', 1]]);
+  const rxSummary = await summaryOf(pharmacyFacility);
+  assert.deepEqual(rxSummary.notCompleted, { last30Days: 1, soonAfterAcceptance: 1, afterSevenDays: 0,
+    laterReportedWrongPatient: 0, byReason: { out_of_stock: 1 } });
+  assert.deepEqual((await summaryOf(otherLab)).notCompleted, { last30Days: 0, soonAfterAcceptance: 0, afterSevenDays: 0,
+    laterReportedWrongPatient: 0, byReason: {} });
+  assertNone([ulSummary, rxSummary], [...identityValues, ...clinicalOnly, ulLabMember.name, routeU1.reference], 'support\'s counts');
+  unable.supportCounts = { laboratory: ulSummary.notCompleted, pharmacy: rxSummary.notCompleted, none: 'zeros, byReason {}' };
+
+  // 7. The limits (D18-7): 20 a member and 50 a facility in any 24 hours, exact; the refusal says from when another is
+  // possible. Synthetic endings by owner SQL, in transactions with triggers off (session_replication_role replica), so
+  // neither their key to the route nor the endings' guard fires: 20 by the scientist and 30 more at the laboratory,
+  // older; removed afterwards the same way, so the counts below and later are the real ones again.
+  const { route: routeU8 } = await sendU();
+  const acceptedU8 = await acceptU(routeU8);
+  const ulMembership = async who => (await one(`select id from identity.staff_facility_memberships
+    where account_id = $1 and facility_id = $2`, [who.accountId, ulLab.facilityId])).id;
+  const [memberMembership, adminMembership] = [await ulMembership(ulLabMember), await ulMembership(ulLabAdmin)];
+  const syntheticOther = randomUUID();
+  await grantsOwner(`insert into ehr.order_route_unable_endings (route_id, kind, receiving_facility_id, receiving_organization_id,
+      ordering_facility_id, reason_code, ended_by_account_id, ended_by_membership_id, accepted_by_membership_id, accepted_at,
+      ended_by_acceptor, minutes_after_acceptance, accession_made, specimens_collected, results_recorded, idempotency_key,
+      request_sha256, correlation_id, recorded_at)
+    select gen_random_uuid(), 'lab_request', $1::uuid, $2::uuid, $3::uuid, 'other',
+      case when n <= 20 then $4::uuid else gen_random_uuid() end, case when n <= 20 then $5::uuid else $6::uuid end,
+      $7::uuid, clock_timestamp() - interval '2 days', false, 2880, false, 0, 0, 'verifier-synthetic-ending-' || n,
+      repeat('a', 64), 'verifier-synthetic-limit', clock_timestamp() - make_interval(mins => 10 * n)
+    from generate_series(1, 50) n`, [ulLab.facilityId, ulLab.organizationId, hospital.facilityId, ulLabMember.accountId,
+    memberMembership, syntheticOther, adminMembership]);
+  const freeAtUnable = async (column, value, limit) => (await one(`select to_char(date_trunc('milliseconds',
+      recorded_at + interval '24 hours' + interval '999 microseconds') at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') as at
+    from ehr.order_route_unable_endings
+    where ${column} = $1 and recorded_at > clock_timestamp() - interval '24 hours'
+    order by recorded_at, id offset (select count(*) - $2 from ehr.order_route_unable_endings
+      where ${column} = $1 and recorded_at > clock_timestamp() - interval '24 hours') limit 1`, [value, limit])).at;
+  const bodyU8 = { expectedVersion: acceptedU8.route.version, reason: 'other', confirmedPatient: true };
+  let limitCounts;
+  try {
+    limitCounts = (await summaryOf(ulLab)).notCompleted;
+    // The scientist: 20 of their own and 54 at the laboratory: the later of the two times.
+    const memberLimitedU = expectProblem(await cannotComplete(ulLabMember, lab, routeU8.id, bodyU8), 429,
+      'ORDER_ROUTE_CANNOT_COMPLETE_LIMIT');
+    const memberFreeU = await freeAtUnable('ended_by_membership_id', memberMembership, 20);
+    const facilityFreeU = await freeAtUnable('receiving_facility_id', ulLab.facilityId, 50);
+    assert.equal(memberLimitedU.retryAfter, memberFreeU > facilityFreeU ? memberFreeU : facilityFreeU);
+    // The administrator, with one ending of their own (U7): the laboratory's limit alone.
+    const facilityLimitedU = expectProblem(await cannotComplete(ulLabAdmin, lab, routeU8.id, bodyU8), 429,
+      'ORDER_ROUTE_CANNOT_COMPLETE_LIMIT');
+    assert.equal(facilityLimitedU.retryAfter, facilityFreeU);
+    assert.notEqual(memberFreeU, facilityFreeU);
+    assert.deepEqual(await unableCounts(routeU8.id), { endings: 0, state: 'accepted', ended_kind: null }, 'a limited ending wrote');
+    unable.limits = { member: `429 ${memberLimitedU.code}, retryAfter the later of the member's and the laboratory's`,
+      facility: `429 ${facilityLimitedU.code}, retryAfter the laboratory's oldest counted + 24 h, exact`,
+      countsWithSynthetic: limitCounts };
+  } finally {
+    await grantsOwner(`delete from ehr.order_route_unable_endings where correlation_id = 'verifier-synthetic-limit'`);
+  }
+  assert.equal(limitCounts.last30Days, 54);
+  assert.equal(limitCounts.byReason.other, 50);
+  assert.deepEqual((await summaryOf(ulLab)).notCompleted, ulSummary.notCompleted, 'the synthetic endings are gone');
+
+  // 8. Audit: B's own rows (with the patient, the reason and the statements), the system rows at A and B, the
+  // interceptor's rows (no patient, no body), and no free text anywhere.
+  const unableRows = await all(`select action, facility_id, patient_id, details from audit.events
+    where action in ('lab.order-route.cannot-complete', 'pharmacy.order-route.cannot-complete') order by sequence_id`);
+  assert.deepEqual(unableRows.map(row => [row.action, row.details.routeId, row.details.reasonCode, row.details.replayed]), [
+    ['lab.order-route.cannot-complete', routeU1.id, 'test_not_offered', false],
+    ['lab.order-route.cannot-complete', routeU1.id, 'test_not_offered', true],
+    ['pharmacy.order-route.cannot-complete', rxRouteU.id, 'out_of_stock', false],
+    ['lab.order-route.cannot-complete', routeU2.id, 'supplies_unavailable', false],
+    ['lab.order-route.cannot-complete', routeU3.id, 'equipment_unavailable', false],
+    ['lab.order-route.cannot-complete', routeU7.id, 'patient_did_not_return', false]]);
+  for (const row of unableRows) {
+    assert.equal(row.patient_id, patient.id);
+    assert.deepEqual(Object.keys(row.details).sort(), ['confirmedPatient', 'criticalCandidates', 'criticalValueTold', 'endingId',
+      'kind', 'reasonCode', 'replayed', 'resultsRecorded', 'routeId', 'specimensCollected', 'state']);
+    assert.deepEqual([row.details.confirmedPatient, row.details.state], [true, 'cancelled']);
+  }
+  assert.deepEqual(unableRows.find(row => row.details.routeId === routeU3.id).details.criticalValueTold, true);
+  const systemRows = await all(`select resource_id, count(*)::int as n, count(distinct facility_id)::int as facilities,
+      bool_and(patient_id = $1) as with_patient from audit.events where action = 'ehr.order-route.not-completed'
+    group by resource_id order by resource_id collate "C"`, [patient.id]);
+  assert.deepEqual(systemRows, [routeU1.id, rxRouteU.id, routeU2.id, routeU3.id, routeU7.id].sort()
+    .map(resource_id => ({ resource_id, n: 2, facilities: 2, with_patient: true })));
+  const requestRowsU = await all(`select patient_id, details from audit.events
+    where action = 'api.lab.order-route.cannot-complete.request'`);
+  assert(requestRowsU.length >= 10 && requestRowsU.every(row => row.patient_id === null), 'an interceptor row names a patient');
+  assertNone(requestRowsU, [unableNotes.refused, 'confirmedPatient'], 'the interceptor\'s rows');
+  const unableNoteValues = Object.values(unableNotes);
+  const freeTextRows = await all(`select action from audit.events where ${unableNoteValues.map((_, index) =>
+    `strpos(coalesce(details::text, '') || coalesce(reason, ''), $${index + 1}) > 0`).join(' or ')}`, unableNoteValues);
+  assert.deepEqual(freeTextRows, [], `a note reached an audit row: ${JSON.stringify(freeTextRows)}`);
+  for (const [name, log] of childLogs) {
+    const text = log.join('');
+    for (const note of unableNoteValues) assert(!text.includes(note.slice(0, 24)), `${name} logged a note`);
+  }
+  unable.audit = { receiver: `${unableRows.length} rows with the patient, the reason, confirmedPatient`, system: 'A and B for each ending',
+    interceptor: `${requestRowsU.length} rows, no patient, no body`, freeText: 'in no row' };
+  evidence.cannotComplete = { beforeAcceptance: unable.beforeAcceptance, refusals: unable.refusals,
+    nothingRecorded: unable.nothingRecorded, pharmacy: unable.pharmacy, withSample: unable.withSample,
+    checkedAndCritical: unable.checkedAndCritical,
+    otherRefusals: { completed: unable.completed, lapsed: unable.lapsed, neverAccepted: unable.sent },
+    supportCounts: unable.supportCounts, limits: unable.limits, audit: unable.audit };
+  step('cannot complete (D18): lab with nothing recorded, with a sample, a checked result and a critical value, pharmacy; '
+    + 'refusals, the readers, the patient\'s notice, support\'s counts, the limits, D17\'s late correction after the ending');
+
   // ── Timing (p95 of 25 calls each, with this run's routes and work) ──
   const p95 = async request => {
     const samples = [];
@@ -2457,7 +2961,8 @@ try {
   for (const row of crossRows) for (const id of staffIds) assert(!row.details.includes(id), 'a system row names a member');
   const sensitive = [...identityValues, otherPatient.hid, clinicalNote, medicine.instructions, medicine.medicationDisplay,
     labTest.testDisplay, 'Synthetic own glucose test', '6.8', '9.4', 'MDCN/70011', 'MDCN/80022', 'MLSCN/70022', 'MLSCN/80011',
-    'MLSCN/80066', 'PCN/70033', patientEmail, ...Object.values(wpNotes), ...Object.values(lateNotes)];
+    'MLSCN/80066', 'PCN/70033', patientEmail, ...Object.values(wpNotes), ...Object.values(lateNotes),
+    ...Object.values(unableNotes)];
   const scanned = await all(`select action, details::text as details from audit.events
     where action like '%order-route%' or action like '%order-destination%' or details ? 'orderRouteId'`);
   const leaks = scanned.filter(row => sensitive.some(value => row.details.includes(value)))
@@ -2465,7 +2970,7 @@ try {
   assert.deepEqual(leaks, []);
   // Item 4: nothing new is audited; no row carries the new fields.
   const contractFieldRows = await all(`select action from audit.events
-    where coalesce(details::text, '') ~ '"(receives|routesHere|closable|accessEndsAt|receivingTypes|lateCorrection|correctableUntil)"'`);
+    where coalesce(details::text, '') ~ '"(receives|routesHere|closable|accessEndsAt|receivingTypes|lateCorrection|correctableUntil|cannotComplete|notCompleted)"'`);
   assert.deepEqual(contractFieldRows, [], `a row carries a contract field: ${JSON.stringify(contractFieldRows)}`);
   evidence.audit = { routes: routes.length, neverAccepted: neverAccepted.length, rowsScanned: scanned.length,
     sensitiveValues: sensitive.length, leaks: 0, patientOnBRowsBeforeAcceptance: 0, actorsOnSystemRows: 0,
