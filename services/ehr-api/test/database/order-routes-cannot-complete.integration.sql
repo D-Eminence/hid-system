@@ -30,10 +30,12 @@
 --      the critical value was told); a possibly critical value without the
 --      statement;
 --   3. success, Lab and Pharmacy: nothing recorded; an accession with a
---      received and a rejected specimen and an unverified result; a checked
---      result corrected (a new, unverified version) and one marked entered
---      in error, both then allowed; a possibly critical value with the
---      statement; an order accepted 25 days earlier (reads never longer than
+--      received, a rejected and an uncollected specimen (not counted) and an
+--      unverified result; a checked result corrected (a new, unverified
+--      version) and one marked entered in error, both then allowed, without
+--      the statement although the version no longer current, and the one
+--      invalidated, is flagged possibly critical; a possibly critical value
+--      with the statement; an order accepted 25 days earlier (reads never longer than
 --      before); a patient whose account was deleted (no notice);
 --      each with the route, both windows, the event, the T10 row, the two
 --      audit rows with the patient and the critical facts, the notice and
@@ -60,13 +62,14 @@
 --      ended route ALREADY_ENDED; the critical-value retry under a new key;
 --   7. the limits, exact (D18-7): the 21st ending by one member and the
 --      51st at one facility in 24 hours are refused with the time from
---      which another is possible, the 20th and 50th are not, an ending older
---      than 24 hours is not counted, and both limits at once give the later
---      time;
+--      which another is possible, the 20th and 50th are not, an ending a
+--      minute older than 24 hours is not counted while those between 23 and
+--      24 hours old are, and both limits at once give the later time;
 --   8. the readers and their cost: the summary reads T10's rows only for
 --      routes ended this way with no report (none for every other route);
 --      C3 and C4 run as the EHR runtime; C32's five counts against the
---      endings, its P0002 and its actor refusal;
+--      endings, at their boundaries (59 and 60 minutes, 10,079 and 10,080
+--      minutes after acceptance), its P0002 and its actor refusal;
 --   9. the CHECKs: the new kind is refused on withdrawn, expired and
 --      completed routes and without ended_at; T8's late CHECK admits it
 --      only as the earlier ending of a late report; T10's reason, kind,
@@ -1381,6 +1384,24 @@ begin
   set local session_replication_role = origin;
 end
 $f$;
+-- Owner SQL: a third specimen of a work item's accession, still required
+-- (not collected; triggers off).
+create function pg_temp.required_specimen(work_item uuid) returns void language plpgsql as $f$
+declare
+  accession lab.accessions%rowtype;
+  requirement_id uuid := gen_random_uuid();
+begin
+  select * into accession from lab.accessions where work_item_id = work_item;
+  set local session_replication_role = replica;
+  insert into lab.specimen_requirements (id, accession_id, patient_id, facility_id, ordinal, specimen_type)
+  values (requirement_id, accession.id, accession.patient_id, accession.facility_id, 3, 'plasma');
+  insert into lab.specimens (id, requirement_id, accession_id, patient_id, facility_id, specimen_type, status,
+    row_version)
+  values (gen_random_uuid(), requirement_id, accession.id, accession.patient_id, accession.facility_id, 'plasma',
+    'required', 1);
+  set local session_replication_role = origin;
+end
+$f$;
 -- Owner SQL: a result's current version flagged critical_candidate (the
 -- Lab's own flag; triggers off).
 create function pg_temp.flag_critical(target_result uuid) returns void language plpgsql as $f$
@@ -1819,9 +1840,11 @@ select pg_temp.dispense(pg_temp.i('xrxc'), 'd18-dispense-xrxc');
 reset role;
 -- The work: checked (verified) results LB2 entered and LB1 verified on uopc,
 -- ucpl, ucpe, uchk, ueie and ucv; unverified results LB2 entered on ub,
--- uw7, ucrit, uaged, ulate and up; ub's second specimen rejected; ueie's
--- checked version marked entered in error; ucrit's and ucv's current
--- versions flagged critical_candidate.
+-- uw7, ucrit, uaged, ulate and up; ub's second specimen rejected and a
+-- third still required (not collected); ueie's checked version marked
+-- entered in error; ucrit's, ucv's, uchk's (later corrected, so no longer
+-- current) and ueie's (invalidated) current versions flagged
+-- critical_candidate.
 select set_config('hid.test.result_' || name, pg_temp.lab_chain(pg_temp.i(name), 'd18' || name, 13.1)::text, true)
   from unnest(array['uopc', 'ucpl', 'ucpe', 'uchk', 'ueie', 'ucv']) name;
 select pg_temp.assert('d18 fixture: one unverified result each on ub, uw7, ucrit, uaged, ulate and up',
@@ -1830,8 +1853,9 @@ select pg_temp.assert('d18 fixture: one unverified result each on ub, uw7, ucrit
 select set_config('hid.test.result_' || name, current_setting('hid.test.d18' || name || '_result_1'), true)
   from unnest(array['ub', 'uw7', 'ucrit', 'uaged', 'ulate', 'up']) name;
 select pg_temp.reject_specimen(pg_temp.i('ub'));
+select pg_temp.required_specimen(pg_temp.i('ub'));
 select pg_temp.void_current(pg_temp.res('ueie'));
-select pg_temp.flag_critical(pg_temp.res(name)) from unnest(array['ucrit', 'ucv']) name;
+select pg_temp.flag_critical(pg_temp.res(name)) from unnest(array['ucrit', 'ucv', 'uchk', 'ueie']) name;
 -- Releases on uopc, ucpl and ucpe by LB1 under route access: completed.
 set local role hid_lab_api_runtime;
 select pg_temp.as_signup_admin(1);
@@ -2613,13 +2637,13 @@ select pg_temp.assert('d18 key: a replay answers the first ending''s facts with 
 -- receive permission: at most 20 endings by one member and 50 at one
 -- facility in any 24 hours.
 select set_config('hid.test.lr_membership', 'e4c13000-0000-4000-8000-000000000035', true);
--- 19 endings by LR in the last 24 hours and one older (synthetic, owner
--- SQL): LR's 20th is allowed, and the older one is not counted.
+-- 19 endings by LR in the last 24 hours and one a minute older (synthetic,
+-- owner SQL): LR's 20th is allowed, and the older one is not counted.
 select set_config('hid.test.lr_first', pg_temp.synthetic_endings(current_setting('hid.test.lr_membership')::uuid,
   current_setting('hid.test.facility_1')::uuid, (select array_agg(clock_timestamp() - interval '23 hours'
     + make_interval(mins => step) order by step) from generate_series(0, 18) step))::text, true);
 select pg_temp.synthetic_endings(current_setting('hid.test.lr_membership')::uuid,
-  current_setting('hid.test.facility_1')::uuid, array[clock_timestamp() - interval '25 hours']);
+  current_setting('hid.test.facility_1')::uuid, array[clock_timestamp() - interval '24 hours 1 minute']);
 select pg_temp.snap();
 set local role hid_lab_api_runtime;
 select pg_temp.as_extra(35, current_setting('hid.test.facility_1')::uuid);
@@ -2644,12 +2668,12 @@ select pg_temp.assert('d18 limits: the member refusal''s DETAIL is when the olde
   pg_temp.outcome_detail(format($s$select pg_temp.cannot('lab_request', %L, %s, 'supplies_unavailable',
     'd18-limit-ulim2-0003')$s$, pg_temp.r('ulim2'), pg_temp.v(pg_temp.r('ulim2')))) || ' / '
     || pg_temp.limit_detail(current_setting('hid.test.lr_first')::timestamptz + interval '24 hours'));
--- The facility: LR's synthetic endings removed; 39 by another member in
--- the last 24 hours, with L1's real ones, make 49: LR's next (the 50th) is
--- allowed, the 51st refused.
+-- The facility: LR's synthetic endings removed; others by another member
+-- between 23 and 24 hours ago, with L1's real ones, make 49: LR's next (the
+-- 50th) is allowed, the 51st refused.
 select pg_temp.forget_endings();
 select set_config('hid.test.facility_first', pg_temp.synthetic_endings(gen_random_uuid(),
-  current_setting('hid.test.facility_1')::uuid, (select array_agg(clock_timestamp() - interval '22 hours'
+  current_setting('hid.test.facility_1')::uuid, (select array_agg(clock_timestamp() - interval '23 hours 59 minutes'
     + make_interval(mins => step) order by step)
     from generate_series(1, 49 - (select count(*)::integer from ehr.order_route_unable_endings ending_row
       where ending_row.receiving_facility_id = current_setting('hid.test.facility_1')::uuid
@@ -2737,9 +2761,36 @@ select pg_temp.assert('d18 cost: C3 and C4 ran as the EHR runtime for orders not
       'ehr.order_route_unable_endings', 'SELECT'));
 -- C32, support's counts: as support (FR) through the Identity runtime,
 -- against the same counts taken from T10 and T8 here; one PH1 ending 31 days
--- old (synthetic) is outside the 30 days.
+-- old (synthetic) is outside the 30 days; at GL four synthetic endings 59,
+-- 60, 10,079 and 10,080 minutes after their acceptance, nothing recorded
+-- (one within the hour, one after seven days).
 select pg_temp.synthetic_endings(gen_random_uuid(), current_setting('hid.test.facility_2')::uuid,
   array[clock_timestamp() - interval '31 days']);
+create function pg_temp.synthetic_minutes(facility uuid, minutes integer[]) returns void language plpgsql as $f$
+declare
+  after integer;
+  copy_id uuid;
+  template ehr.order_routes%rowtype;
+begin
+  select * into template from ehr.order_routes where id = pg_temp.r('usnt');
+  foreach after in array minutes loop
+    copy_id := pg_temp.copy_route(template.id, jsonb_build_object('id', gen_random_uuid(),
+      'idempotency_key', 'd18-synthetic-' || gen_random_uuid(), 'source_lab_request_id', gen_random_uuid(),
+      'patient_id', gen_random_uuid()));
+    set local session_replication_role = replica;
+    insert into ehr.order_route_unable_endings (route_id, kind, receiving_facility_id, receiving_organization_id,
+      ordering_facility_id, reason_code, ended_by_account_id, ended_by_membership_id, accepted_by_membership_id,
+      accepted_at, ended_by_acceptor, minutes_after_acceptance, accession_made, specimens_collected, results_recorded,
+      idempotency_key, request_sha256, correlation_id)
+    values (copy_id, 'lab_request', facility, template.receiving_organization_id, template.ordering_facility_id,
+      'other', gen_random_uuid(), gen_random_uuid(), gen_random_uuid(), clock_timestamp() - make_interval(mins => after),
+      false, after, false, 0, 0, 'd18-synthetic-' || substr(md5(copy_id::text), 1, 16), repeat('f', 64),
+      'd18-synthetic-correlation');
+    set local session_replication_role = origin;
+  end loop;
+end
+$f$;
+select pg_temp.synthetic_minutes('e4c21000-0000-4000-8000-000000000002', array[59, 60, 10079, 10080]);
 create function pg_temp.counted(facility uuid) returns jsonb language sql stable as $f$
   select jsonb_build_object(
     'last30Days', (select count(*) from ehr.order_route_unable_endings e
@@ -2766,7 +2817,8 @@ select pg_temp.as_platform(3);
 insert into d18_out (label, answer)
 values ('c32-l1', identity.admin_order_route_not_completed(current_setting('hid.test.facility_1')::uuid)),
        ('c32-ph1', identity.admin_order_route_not_completed(current_setting('hid.test.facility_2')::uuid)),
-       ('c32-gh', identity.admin_order_route_not_completed('e4c21000-0000-4000-8000-000000000001'));
+       ('c32-gh', identity.admin_order_route_not_completed('e4c21000-0000-4000-8000-000000000001')),
+       ('c32-gl', identity.admin_order_route_not_completed('e4c21000-0000-4000-8000-000000000002'));
 select pg_temp.check('d18 C32: an unknown facility', $s$select identity.admin_order_route_not_completed(
   gen_random_uuid())$s$, 'P0002 ADMIN_FACILITY_NOT_FOUND');
 select pg_temp.check('d18 C32: no facility', $s$select identity.admin_order_route_not_completed(null)$s$,
@@ -2775,11 +2827,14 @@ select pg_temp.as_signup_admin(1);
 select pg_temp.check('d18 C32: a staff session, not support', format($s$select identity.admin_order_route_not_completed(
   %L)$s$, current_setting('hid.test.facility_1')), '42501 ADMIN_PERMISSION_DENIED');
 reset role;
-select pg_temp.assert('d18 C32: L1''s and PH1''s counts equal those taken from T10 and T8; a facility with none',
+select pg_temp.assert('d18 C32: L1''s and PH1''s counts equal those taken from T10 and T8; a facility with none; '
+    || 'GL''s boundaries (59 minutes counted soon, 60 not; 10,080 after seven days, 10,079 not)',
   (select answer from d18_out where label = 'c32-l1') = current_setting('hid.test.counted_l1')::jsonb
   and (select answer from d18_out where label = 'c32-ph1') = current_setting('hid.test.counted_ph1')::jsonb
   and (select answer from d18_out where label = 'c32-gh') = '{"byReason": {}, "last30Days": 0, "afterSevenDays": 0, '
-    '"soonAfterAcceptance": 0, "laterReportedWrongPatient": 0}'::jsonb,
+    '"soonAfterAcceptance": 0, "laterReportedWrongPatient": 0}'::jsonb
+  and (select answer from d18_out where label = 'c32-gl') = '{"byReason": {"other": 4}, "last30Days": 4, '
+    '"afterSevenDays": 1, "soonAfterAcceptance": 1, "laterReportedWrongPatient": 0}'::jsonb,
   (select string_agg(label || ' ' || answer::text, ' ; ' order by label) from d18_out where label like 'c32-%')
     || ' / ' || current_setting('hid.test.counted_l1') || ' / ' || current_setting('hid.test.counted_ph1'));
 select pg_temp.assert('d18 C32: PH1''s counts exactly (two endings within an hour, nothing recorded, one later '

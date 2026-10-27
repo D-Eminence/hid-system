@@ -1452,9 +1452,13 @@ select pg_temp.assert('d17: T8''s four new columns, its widened state CHECK, the
         where k.conrelid = 'ehr.order_route_wrong_patient_reports'::regclass
           and k.conname = 'order_route_wrong_patient_reports_state_before_check')
     = 'CHECK ((state_before = ANY (ARRAY[''accepted''::text, ''completed''::text, ''cancelled''::text])))'
+  -- 0091 adds late_ck again with receiving_unable, NOT VALID above the
+  -- route table's size limit (its section 7; the cannot-complete suite
+  -- checks its form).
   and (select count(*) from pg_constraint k where k.conrelid = 'ehr.order_route_wrong_patient_reports'::regclass
         and k.conname in ('order_route_wrong_patient_reports_late_ck', 'order_route_wrong_patient_reports_late_review_ck')
-        and k.convalidated) = 2
+        and (k.convalidated or (k.conname = 'order_route_wrong_patient_reports_late_ck'
+          and pg_relation_size('ehr.order_routes'::regclass, 'main') > 117145600))) = 2
   and (select pg_get_indexdef(i.indexrelid) from pg_index i
         where i.indexrelid = 'ehr.order_route_wrong_patient_reports_late_member_idx'::regclass)
     = 'CREATE INDEX order_route_wrong_patient_reports_late_member_idx ON ehr.order_route_wrong_patient_reports '
