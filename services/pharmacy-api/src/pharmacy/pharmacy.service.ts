@@ -164,7 +164,8 @@ export class PharmacyService {
    * facility receives them now and whether any wait or are held here (item 4,
    * 0089; read in the transaction after the audit rows, left out when it
    * cannot be read), and that this backend serves the late correction
-   * (`lateCorrection: true`, D17). The answer also says whether orders
+   * (`lateCorrection: true`, D17) and "We can't complete this order"
+   * (`cannotComplete: true`, D18). The answer also says whether orders
    * between facilities and work on them are on (FEAS R4, V11).
    */
   async listWorkItems(context: DataAccessContext) {
@@ -179,7 +180,7 @@ export class PharmacyService {
       await this.auditShownPatients(client, context, result.rows, cards);
       const receiving = await this.routeCards.receiving(client, context);
       return { items: result.rows.map((row) => this.projectWorkItem(row, cards.get(row.id))), ...receiving,
-        ...this.routeCards.lateCorrection(context) };
+        ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context) };
     });
     return { ...page, ...(await this.routeCards.flags()) };
   }

@@ -1,6 +1,6 @@
 import { Type } from 'class-transformer';
-import { IsDefined, IsIn, IsInt, IsOptional, IsString, Matches, MaxLength, Min, MinLength, ValidateNested }
-  from 'class-validator';
+import { Equals, IsBoolean, IsDefined, IsIn, IsInt, IsOptional, IsString, Matches, MaxLength, Min, MinLength,
+  ValidateNested } from 'class-validator';
 
 export const ORDER_ROUTE_VIEWS = ['incoming', 'recent'] as const;
 
@@ -112,6 +112,43 @@ export class CorrectWrongPatientDto {
 
   @IsString() @MinLength(8) @MaxLength(500)
   note!: string;
+}
+
+/**
+ * Why a laboratory that accepted a lab request can't complete it (D18-5,
+ * SPEC-FINAL D18 §4.3): fixed codes, no free text (D18-6), none about
+ * identity or money. 0091's command and its endings table hold the same
+ * list, and so does the shared fixture
+ * services/ehr-api/test/fixtures/order-route-cannot-complete-reasons.sql
+ * (tested equal).
+ */
+export const LAB_CANNOT_COMPLETE_REASONS = ['test_not_offered', 'supplies_unavailable', 'equipment_unavailable',
+  'sample_unusable', 'sample_not_obtained', 'cannot_meet_priority', 'patient_declined', 'patient_did_not_return',
+  'other'] as const;
+
+/**
+ * POST lab/order-routes/:routeId/cannot-complete (C31, D18 SPEC-FINAL §5.1):
+ * the laboratory accepted this order and can't complete it. One reason of the
+ * laboratory's list; `confirmedPatient` must be `true`: the member states
+ * that the person it accepted the order for was the order's patient (one who
+ * was not uses "This isn't the order's patient"). `criticalValueTold: true`
+ * states that the ordering facility was phoned about a possibly critical
+ * value recorded on the order; the command requires it only when there is
+ * one (D18-15), and anything but `true` is read as not told. Unknown fields
+ * are refused.
+ */
+export class CannotCompleteOrderRouteDto {
+  @IsInt() @Min(1)
+  expectedVersion!: number;
+
+  @IsIn(LAB_CANNOT_COMPLETE_REASONS)
+  reason!: (typeof LAB_CANNOT_COMPLETE_REASONS)[number];
+
+  @Equals(true)
+  confirmedPatient!: true;
+
+  @IsOptional() @IsBoolean()
+  criticalValueTold?: boolean;
 }
 
 /**

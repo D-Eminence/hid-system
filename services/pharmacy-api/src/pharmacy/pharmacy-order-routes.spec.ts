@@ -30,7 +30,7 @@ const context = { correlationId: 'correlation-123456', facilityId, membershipId:
 const databaseError = (code: string, message: string) => Object.assign(new Error(message), { code });
 
 describe('Pharmacy order-route routes (SPEC-FINAL §10.2)', () => {
-  it('serves eight browser routes, all needing pharmacy.order-route.receive, none internal or public', () => {
+  it('serves nine browser routes, all needing pharmacy.order-route.receive, none internal or public', () => {
     const base = Reflect.getMetadata(PATH_METADATA, PharmacyOrderRoutesController) as string;
     const routes = Object.getOwnPropertyNames(PharmacyOrderRoutesController.prototype).filter((name) => name !== 'constructor')
       .map((name) => {
@@ -53,6 +53,8 @@ describe('Pharmacy order-route routes (SPEC-FINAL §10.2)', () => {
       [RequestMethod.POST, 'pharmacy/order-routes/:routeId/wrong-patient', 200, permission, undefined, undefined],
       // D17 (C29): the late correction, after the prescription ended.
       [RequestMethod.POST, 'pharmacy/order-routes/:routeId/wrong-patient-correction', 200, permission, undefined, undefined],
+      // D18 (C31): accepted, and the pharmacy can't complete it.
+      [RequestMethod.POST, 'pharmacy/order-routes/:routeId/cannot-complete', 200, permission, undefined, undefined],
     ]);
   });
 
@@ -396,10 +398,12 @@ describe('Pharmacy per-item routes authorize the resource they act on (P12)', ()
       const answer = await facts.service.listWorkItems(context);
       expect(answer).toMatchObject({ receives: true, routesHere: { waiting: true, held: true }, crossFacilityOrders: false,
         crossFacilityWork: false });
-      // D17: to a member who may receive prescriptions the work list also says the late correction is served.
-      expect(Object.keys(answer)).toEqual(['items', 'receives', 'routesHere', 'lateCorrection', 'crossFacilityOrders',
-        'crossFacilityWork']);
+      // D17: to a member who may receive prescriptions the work list also says the late correction is served,
+      // and D18 that "We can't complete this order" is.
+      expect(Object.keys(answer)).toEqual(['items', 'receives', 'routesHere', 'lateCorrection', 'cannotComplete',
+        'crossFacilityOrders', 'crossFacilityWork']);
       expect(answer.lateCorrection).toBe(true);
+      expect(answer.cannotComplete).toBe(true);
       const sql = facts.statements.map((statement) => statement.sql);
       expect(sql.filter((text) => text === RECEIVES)).toHaveLength(1);
       expect(sql.slice(-3)).toEqual(['savepoint pharmacy_order_route_receives', RECEIVES,
@@ -411,20 +415,23 @@ describe('Pharmacy per-item routes authorize the resource they act on (P12)', ()
       const without = pharmacyHarness({ outcome: 'none', route_id: null });
       await without.service.listWorkItems(context);
       expect(facts.audits).toEqual(without.audits);
-      expect(JSON.stringify(facts.audits)).not.toMatch(/receives|routesHere|held|waiting|lateCorrection/);
+      expect(JSON.stringify(facts.audits)).not.toMatch(/receives|routesHere|held|waiting|lateCorrection|cannotComplete/);
     });
 
   it('leaves both out of the work list when NULL or unreadable, and asks nothing of a member who cannot receive', async () => {
     const nulls = await pharmacyHarness({ outcome: 'none', route_id: null }).service.listWorkItems(context);
-    // D17's lateCorrection reads nothing: a member who may receive prescriptions gets it whatever the facts say.
-    expect(Object.keys(nulls)).toEqual(['items', 'lateCorrection', 'crossFacilityOrders', 'crossFacilityWork']);
+    // D17's lateCorrection and D18's cannotComplete read nothing: a member who may receive prescriptions gets them
+    // whatever the facts say.
+    expect(Object.keys(nulls)).toEqual(['items', 'lateCorrection', 'cannotComplete', 'crossFacilityOrders',
+      'crossFacilityWork']);
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     try {
       const failing = pharmacyHarness({ outcome: 'none', route_id: null }, undefined, true, undefined,
         databaseError('42883', 'function pharmacy.order_routes_here() does not exist'));
       const answer = await failing.service.listWorkItems(context);
       expect(answer.items).toHaveLength(1);
-      expect(Object.keys(answer)).toEqual(['items', 'lateCorrection', 'crossFacilityOrders', 'crossFacilityWork']);
+      expect(Object.keys(answer)).toEqual(['items', 'lateCorrection', 'cannotComplete', 'crossFacilityOrders',
+        'crossFacilityWork']);
       expect(failing.statements.map((statement) => statement.sql).slice(-3)).toEqual(['savepoint pharmacy_order_route_receives',
         RECEIVES, 'rollback to savepoint pharmacy_order_route_receives']);
       expect(warn).toHaveBeenCalledWith({ message: 'Whether this facility receives orders could not be read', sqlState: '42883',
@@ -441,6 +448,8 @@ describe('Pharmacy per-item routes authorize the resource they act on (P12)', ()
     expect(readerAnswer).not.toHaveProperty('routesHere');
     // D17: nor does a member who cannot receive prescriptions learn that the late correction is served.
     expect(readerAnswer).not.toHaveProperty('lateCorrection');
+    // D18: nor that "We can't complete this order" is.
+    expect(readerAnswer).not.toHaveProperty('cannotComplete');
     expect(reader.statements.some((statement) => statement.sql.includes('order_route_receives'))).toBe(false);
   });
 });

@@ -213,6 +213,16 @@ export class LabOrderRouteCards {
   }
 
   /**
+   * D18 (0091): to a member holding `lab.order-route.receive`, the work list
+   * says this backend serves "We can't complete this order"
+   * (`cannotComplete: true`), so the website offers it on an open accepted
+   * order's row; nothing to anyone else. Reads nothing.
+   */
+  cannotComplete(context: DataAccessContext): { cannotComplete?: true } {
+    return context.actor.permissions.includes(RECEIVE_PERMISSION) ? { cannotComplete: true } : {};
+  }
+
+  /**
    * The two P4c controls, read with a pool statement after (never inside)
    * the clinical transaction (V11). Off when they cannot be read.
    */

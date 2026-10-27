@@ -5,9 +5,11 @@ import { requestDigest } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
-import type { AcceptOrderRouteDto, CorrectWrongPatientDto, DeclineOrderRouteDto, FindCorrectableDto, ListOrderRoutesQueryDto,
-  ReportWrongPatientDto, SearchOrderRoutesDto } from './dto/order-route.dto';
+import type { AcceptOrderRouteDto, CannotCompleteOrderRouteDto, CorrectWrongPatientDto, DeclineOrderRouteDto, FindCorrectableDto,
+  ListOrderRoutesQueryDto, ReportWrongPatientDto, SearchOrderRoutesDto } from './dto/order-route.dto';
 import {
+  cannotCompleteAnswer,
+  cannotCompleteProblem,
   correctablePrescriptionRoute,
   correctionAnswer,
   incomingPrescriptionRoute,
@@ -306,6 +308,44 @@ export class PharmacyOrderRoutesService {
       }, { isolationLevel: 'READ COMMITTED' });
     } catch (error) {
       throw lateCorrectionProblem(error);
+    }
+  }
+
+  /**
+   * The pharmacy accepted this prescription and can't complete it (C31, D18
+   * SPEC-FINAL §4.4, §5.1, §8.2). One READ COMMITTED transaction, run once:
+   * the command ends the prescription (`cancelled`, `receiving_unable`),
+   * closes the pharmacy's writes and reads at once, records the reason,
+   * writes the system rows at both facilities and tells the patient; this
+   * writes the pharmacy's own audit row with the patient (from the command),
+   * the reason and the member's statement, in the same transaction. Five
+   * arguments: a pharmacy has no critical value to tell. A replay (same
+   * member, key and request) answers the route as it is now and the first
+   * ending's reason.
+   */
+  async cannotComplete(context: DataAccessContext, routeId: string, input: CannotCompleteOrderRouteDto,
+    idempotencyKey: string) {
+    const digest = requestDigest('pharmacy.order-route.cannot-complete',
+      { routeId, expectedVersion: input.expectedVersion, reason: input.reason });
+    try {
+      return await this.database.withTransaction(context, async (client) => {
+        const result = await client.query<Row>('select * from pharmacy.cannot_complete_order_route($1, $2, $3, $4, $5)',
+          [routeId, input.expectedVersion, input.reason, idempotencyKey, digest]);
+        const row = result.rows[0];
+        const answer = row ? cannotCompleteAnswer(routeId, row) : undefined;
+        const patientId = typeof row?.patient_id === 'string' ? row.patient_id : undefined;
+        if (!row || !answer || !patientId) throw orderRouteUnavailable();
+        await this.audit.recordWithClient(client, context, 'pharmacy.order-route.cannot-complete',
+          { resourceType: 'order-route', resourceId: routeId, patientId },
+          { routeId, kind: 'prescription', endingId: typeof row.ending_id === 'string' ? row.ending_id : null,
+            state: typeof row.route_state === 'string' ? row.route_state : null, reasonCode: answer.reason,
+            specimensCollected: answer.specimensCollected, resultsRecorded: answer.resultsRecorded,
+            criticalCandidates: answer.criticalCandidates, criticalValueTold: false, confirmedPatient: true,
+            replayed: answer.replayed });
+        return answer;
+      }, { isolationLevel: 'READ COMMITTED' });
+    } catch (error) {
+      throw cannotCompleteProblem(error);
     }
   }
 

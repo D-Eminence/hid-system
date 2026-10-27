@@ -1,6 +1,6 @@
 import { Transform, Type } from 'class-transformer';
-import { IsDefined, IsIn, IsInt, IsOptional, IsString, Length, Matches, MaxLength, Min, MinLength, ValidateNested }
-  from 'class-validator';
+import { Equals, IsDefined, IsIn, IsInt, IsOptional, IsString, Length, Matches, MaxLength, Min, MinLength,
+  ValidateNested } from 'class-validator';
 
 const trim = ({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value;
 
@@ -118,6 +118,37 @@ export class CorrectWrongPatientDto {
 
   @IsString() @MinLength(8) @MaxLength(500)
   note!: string;
+}
+
+/**
+ * Why a pharmacy that accepted a prescription can't complete it (D18-5,
+ * SPEC-FINAL D18 §4.3): fixed codes, no free text (D18-6), none about
+ * identity or money. 0091's command and its endings table hold the same
+ * list, and so does the shared fixture
+ * services/ehr-api/test/fixtures/order-route-cannot-complete-reasons.sql
+ * (tested equal).
+ */
+export const PHARMACY_CANNOT_COMPLETE_REASONS = ['out_of_stock', 'medicine_unavailable', 'needs_prescriber_review',
+  'controlled_requirements', 'cannot_meet_priority', 'patient_declined', 'patient_did_not_return', 'other'] as const;
+
+/**
+ * POST pharmacy/order-routes/:routeId/cannot-complete (C31, D18 SPEC-FINAL
+ * §5.1): the pharmacy accepted this prescription and can't complete it. One
+ * reason of the pharmacy's list; `confirmedPatient` must be `true`: the
+ * member states that the person it accepted the prescription for was its
+ * patient, or was collecting it for them (one who was not uses "This isn't
+ * the order's patient"). A pharmacy records no result, so there is no
+ * `criticalValueTold`: it is refused as an unknown field, as is anything else.
+ */
+export class CannotCompleteOrderRouteDto {
+  @IsInt() @Min(1)
+  expectedVersion!: number;
+
+  @IsIn(PHARMACY_CANNOT_COMPLETE_REASONS)
+  reason!: (typeof PHARMACY_CANNOT_COMPLETE_REASONS)[number];
+
+  @Equals(true)
+  confirmedPatient!: true;
 }
 
 /**
