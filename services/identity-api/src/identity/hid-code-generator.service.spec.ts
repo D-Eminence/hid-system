@@ -3,8 +3,10 @@ import { HidCodeGenerator } from './hid-code-generator.service';
 describe('HidCodeGenerator', () => {
   const generator = new HidCodeGenerator();
 
-  it('generates a production HID without ambiguous characters', () => {
-    expect(generator.generate()).toMatch(/^HID-[A-HJ-NP-Z2-9]{16}$/);
+  it('generates a production HID of six characters without ambiguous ones', () => {
+    for (let index = 0; index < 200; index += 1) {
+      expect(generator.generate()).toMatch(/^HID-[A-HJ-NP-Z2-9]{6}$/);
+    }
   });
 
   it('retries a collision and returns only a reserved code', async () => {
