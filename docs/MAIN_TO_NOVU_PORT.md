@@ -1735,10 +1735,10 @@ it on 2026-10-27, taking every recommended default, built as decided:
 - D18-13: website first (dormant until this backend says it serves D18:
   `cannotComplete: true` on the Lab and Pharmacy work lists, support's
   lookup and facility summary), then this backend.
-- D18-14: 0091's declaration stays unsigned (`reviewed_by` empty) in the
-  build; the owner signs after SPEC-FINAL §11.2's checks, once production's
-  order count is read, with the migration choosing its CHECK-change form by
-  table size (validated up to about 200,000 routes, NOT VALID above).
+- D18-14: 0091's declaration was left unsigned in the build; the owner,
+  D-Eminence, signed it in chat on 2026-10-27 (see Still open), with the
+  migration choosing its CHECK-change form by table size (validated up to
+  about 200,000 routes, NOT VALID above).
 - D18-15: refused while a checked (verified) result waits to be released
   (409 `ORDER_ROUTE_RESULT_READY`: B releases it, or first corrects it if it
   is wrong; no Lab route marks one result entered in error, so B's words say
@@ -1963,8 +1963,8 @@ Decided by the owner, D-Eminence:
   plus a required "we will phone" tick in the urgent and safety cases, no
   Overview card; no re-send, a new order; anyone with the receive
   permission; per-facility counts for support; a later wrong-patient report
-  flagged and sorted first; website first, dormant; 0091's declaration left
-  unsigned in the build; refused while a checked result waits for release, a
+  flagged and sorted first; website first, dormant; 0091's declaration
+  signed by the owner in chat on 2026-10-27; refused while a checked result waits for release, a
   critical-value tick, the clinician told a result was recorded.
 
 Still open, with what each one holds back:
@@ -2115,19 +2115,20 @@ Still open, with what each one holds back:
   the answers of each (aba7c16 on 0087, 22cd47f on 0088 and 0089, item 4 on
   0088 and 0089): it keeps today's pages wherever a field is absent and
   uses each one wherever it is answered.
-- "We can't complete this order" (D18, 0091): **not signed**. 0091's
-  declaration in `config/production-schema-compatibility.json` names 0091
-  and `runtime-grants.sql` with `reviewed_by` empty (D18-14), so the release
-  core refuses it (`REVIEWED_BACKWARD_COMPATIBILITY_REQUIRED`) until the
-  owner signs. Before signing (SPEC-FINAL §11.2): the gates of §10 (suites on
-  fresh copies, mutants, race harness, performance, lock and load gates warm
-  and cold, old images, negative copies, refusing preconditions, staging
-  rehearsal, container acceptance); on production, the header's read-only
-  query (the owners, and `reltuples, relpages` of `ehr.order_routes`, a
-  catalog read), then the expected pause at that size, twice, and the CHECK
-  form 0091 will choose (validated up to about 200,000 routes, NOT VALID
-  above), written into the declaration. The measured costs are put before
-  the owner as they are: the order summary about +6 to +9 µs per ordinary
+- "We can't complete this order" (D18, 0091): signed by the owner,
+  D-Eminence, in chat on 2026-10-27 (D18-14), after the gates of
+  SPEC-FINAL §10 passed (suites on fresh copies, mutants, race harness,
+  performance, lock and load gates warm and cold, old images, negative
+  copies, refusing preconditions, staging rehearsal, the container
+  acceptance's database stages). The owner chose not to read production's
+  owners and order-table size beforehand: 0091's section 0 stops the release
+  with nothing applied if a role lacks a privilege, section 7 chooses the
+  CHECK form from the heap size itself (validated up to about 200,000
+  routes, NOT VALID above), and its NOTICEs record the owners and the form
+  in the release's migration log. Cross-facility orders went live in
+  production on 2026-10-26, so the table is expected to be small and the
+  pause about 6-13 ms, twice. The owner accepted the measured costs as they
+  are: the order summary about +6 to +9 µs per ordinary
   route against a +4 µs budget and +13 to +15 µs per route ended this way
   against +8 µs, on a machine about 1.7 times slower than the design's.
   Release order (D18-13): the website first (dormant until this backend says
