@@ -1,7 +1,7 @@
 import type { AccessLog } from '../types/database'
 
 /**
- * Generates a candidate HID code with an 80-bit random suffix.
+ * Generates a candidate HID code with a 6-symbol (30-bit) random suffix, as hid-1.0 issued.
  * Persistence must still reserve it through a unique database constraint.
  */
 const CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // no 0,O,1,I
@@ -12,7 +12,7 @@ function randomSegment(len: number): string {
 }
 
 export function generateHID(): string {
-  return `HID-${randomSegment(16)}`
+  return `HID-${randomSegment(6)}`
 }
 
 function pad(value: number): string {

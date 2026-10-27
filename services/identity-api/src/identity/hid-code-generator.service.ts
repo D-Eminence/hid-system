@@ -15,8 +15,9 @@ export type HidReservation<Result> = (candidate: string) => Promise<
  */
 @Injectable()
 export class HidCodeGenerator {
+  /** HID- and six characters, as hid-1.0 issued them (owner decision, 2026-10-27). */
   generate(): string {
-    const entropy = randomBytes(16);
+    const entropy = randomBytes(6);
     let value = 'HID-';
     for (const byte of entropy) value += HID_ALPHABET[byte & 31];
     return value;

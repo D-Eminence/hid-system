@@ -30,7 +30,7 @@ const failures = []
 
 for (const required of [
   "const HID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'",
-  'randomBytes(16)',
+  'randomBytes(6)',
   'byte & 31',
   'maxAttempts = 8',
   'if (outcome.reserved) return outcome.result',
@@ -53,8 +53,8 @@ for (const required of [
 if (!utilities.includes('crypto.getRandomValues(new Uint8Array(len))')) {
   failures.push('client-side HID helper must use Web Crypto')
 }
-if (!utilities.includes('return `HID-${randomSegment(16)}`')) {
-  failures.push('client-side HID helper must emit a 16-symbol suffix')
+if (!utilities.includes('return `HID-${randomSegment(6)}`')) {
+  failures.push('client-side HID helper must emit a 6-symbol suffix')
 }
 if (/localStorage|sessionStorage/.test(portalAuth)) {
   failures.push('portal session profiles must remain memory-only and be rehydrated from the server')
