@@ -1,5 +1,5 @@
-import { Injectable } from '@nestjs/common';
-import type { QueryResultRow } from 'pg';
+import { Injectable, Logger } from '@nestjs/common';
+import type { PoolClient, QueryResultRow } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { PlatformAdminContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
@@ -180,6 +180,53 @@ function iso(value: Date | string | null | undefined): string | null {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
+/**
+ * Support's counts of the orders a facility accepted and then ended because
+ * it couldn't complete them (C32, D18-11), over the last 30 days at that
+ * facility: all of them, within an hour of acceptance with nothing recorded,
+ * 7 days or more after acceptance, later reported as accepted for the wrong
+ * person (D18-12), and by reason. Counts only: no patient, order or member.
+ */
+export interface FacilityNotCompleted {
+  last30Days: number;
+  soonAfterAcceptance: number;
+  afterSevenDays: number;
+  laterReportedWrongPatient: number;
+  byReason: Record<string, number>;
+}
+
+const COUNT_KEYS = ['last30Days', 'soonAfterAcceptance', 'afterSevenDays', 'laterReportedWrongPatient'] as const;
+/** A reason code as 0091's endings table holds it. */
+const REASON_CODE = /^[a-z][a-z_]{0,63}$/;
+const isCount = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+
+/**
+ * C32's jsonb as support's facility panel shows it, built key by key: the
+ * four counts and `byReason`, each a non-negative integer, or undefined when
+ * any of it is missing or of another type (never a made-up zero).
+ */
+export function facilityNotCompleted(value: unknown): FacilityNotCompleted | undefined {
+  let answer: Record<string, unknown> | undefined;
+  try {
+    answer = parse(value);
+  } catch {
+    return undefined;
+  }
+  if (!answer || !COUNT_KEYS.every((key) => isCount(answer![key]))) return undefined;
+  const reasons = answer.byReason;
+  if (typeof reasons !== 'object' || reasons === null || Array.isArray(reasons)) return undefined;
+  const byReason = Object.entries(reasons as Record<string, unknown>);
+  if (!byReason.every(([code, count]) => REASON_CODE.test(code) && isCount(count))) return undefined;
+  return { last30Days: answer.last30Days as number, soonAfterAcceptance: answer.soonAfterAcceptance as number,
+    afterSevenDays: answer.afterSevenDays as number, laterReportedWrongPatient: answer.laterReportedWrongPatient as number,
+    byReason: Object.fromEntries(byReason) as Record<string, number> };
+}
+
+function sqlState(error: unknown): string {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  return typeof code === 'string' && /^[0-9A-Z]{5}$/.test(code) ? code : 'unknown';
+}
+
 const lookupInvalid = () => new DomainProblem(400, 'ORDER_ROUTE_LOOKUP_INVALID',
   'Enter an order reference (8 characters) or a patient Health ID, not both');
 
@@ -195,6 +242,8 @@ const unavailable = () => new DomainProblem(503, 'ORDER_ROUTES_ADMIN_UNAVAILABLE
  */
 @Injectable()
 export class AdminOrderRoutesService {
+  private readonly logger = new Logger(AdminOrderRoutesService.name);
+
   constructor(private readonly database: DatabaseService) {}
 
   /**
@@ -204,6 +253,15 @@ export class AdminOrderRoutesService {
    * lifetime counts and 30 days per counterpart; no patient, no order
    * content. The database's object is answered as it is, so an earlier
    * schema answers without `destination`.
+   *
+   * D18 (0091): then, in the same read-only transaction, support's counts of
+   * the orders the facility couldn't complete (C32, `notCompleted`) and
+   * `cannotComplete: true`, which says this backend serves "We can't complete
+   * this order". C20 itself is unchanged (a3b1822's verifier asserts its
+   * exact keys), so the counts come from their own function, read in a
+   * savepoint: on any failure (a schema without 0091, an unreadable answer)
+   * both are left out, the SQLSTATE alone is logged, and the summary still
+   * answers.
    */
   async summary(context: PlatformAdminContext, facilityId: string) {
     try {
@@ -212,11 +270,34 @@ export class AdminOrderRoutesService {
           'select identity.admin_order_route_summary($1) as summary', [facilityId]);
         const summary = parse(result.rows[0]?.summary);
         if (!summary) throw new DomainProblem(404, 'ADMIN_FACILITY_NOT_FOUND', 'Facility was not found');
-        return { facilityId, ...summary };
+        const notCompleted = await this.notCompleted(client, facilityId, context.correlationId);
+        return { facilityId, ...summary, ...(notCompleted ? { notCompleted, cannotComplete: true as const } : {}) };
       }, { readOnly: true });
     } catch (error) {
       throw adminOrderRouteProblem(error, 'facility');
     }
+  }
+
+  /** C32 in the summary's transaction, in a savepoint; undefined (and a logged SQLSTATE) on any failure. */
+  private async notCompleted(client: PoolClient, facilityId: string, correlationId: string) {
+    await client.query('savepoint admin_order_route_not_completed');
+    let value: unknown;
+    try {
+      const result = await client.query<{ not_completed: unknown }>(
+        'select identity.admin_order_route_not_completed($1) as not_completed', [facilityId]);
+      await client.query('release savepoint admin_order_route_not_completed');
+      value = result.rows[0]?.not_completed;
+    } catch (error) {
+      await client.query('rollback to savepoint admin_order_route_not_completed');
+      this.logger.warn({ message: 'The counts of orders a facility could not complete could not be read',
+        sqlState: sqlState(error), correlationId });
+      return undefined;
+    }
+    const counts = facilityNotCompleted(value);
+    if (!counts) {
+      this.logger.warn({ message: 'The counts of orders a facility could not complete were unreadable', correlationId });
+    }
+    return counts;
   }
 
   /** C23: list or unlist the facility for orders from other facilities; accepted work is unaffected. */
@@ -257,6 +338,10 @@ export class AdminOrderRoutesService {
    * past for too_late) and `wrongPatient` (`{ reportedAt, late }` or null), each only
    * when the schema answers it, and the answer adds `lateCorrection: true`,
    * so support's console learns this backend serves the late correction.
+   *
+   * D18 (0091): the answer adds `cannotComplete: true`, so support's console
+   * learns this backend serves "We can't complete this order" (an order ended
+   * that way is found as any other: `cancelled`, `receiving_unable`).
    */
   async find(context: PlatformAdminContext, reference: string | undefined, healthId: string | undefined) {
     const byReference = reference ? reference.toUpperCase() : null;
@@ -280,7 +365,7 @@ export class AdminOrderRoutesService {
           ...('correction' in row ? { correction: row.correction ?? null } : {}),
           ...('correctable_until' in row ? { correctableUntil: iso(row.correctable_until ?? null) } : {}),
           ...('wrong_patient_reported_at' in row ? { wrongPatient: wrongPatientOf(row) } : {}),
-        })), wrongPatientReports: true, lateCorrection: true };
+        })), wrongPatientReports: true, lateCorrection: true, cannotComplete: true };
       }, { readOnly: true });
     } catch (error) {
       throw adminOrderRouteProblem(error, 'lookup');
@@ -294,6 +379,12 @@ export class AdminOrderRoutesService {
    * audits it (admin.wrong-patient-reports.list), never naming a note. D17
    * (0090): late reports carry their facts (`lateReportFacts`), and the
    * answer adds `lateCorrection: true`.
+   *
+   * D18-12 (0091, C26 unchanged): a report made after the receiver ended the
+   * order because it couldn't complete it is a late report like any other:
+   * it carries the `late_correction` flag, so it is listed among the flagged
+   * reports, first; `endedKindBefore: 'receiving_unable'` names the earlier
+   * ending. The rows are answered in C26's order, never re-sorted here.
    */
   async listWrongPatientReports(context: PlatformAdminContext, status: 'unreviewed' | 'recent', facilityId?: string) {
     try {

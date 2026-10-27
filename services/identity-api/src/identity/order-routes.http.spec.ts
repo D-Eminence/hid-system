@@ -355,7 +355,7 @@ describe('order-route routes in Identity over HTTP', () => {
       const byReference = await request(server()).get('/api/v1/admin/order-routes?reference=7000000a')
         .set('Authorization', 'Bearer synthetic');
       expect([byReference.status, byReference.body]).toEqual([200, { items: [], wrongPatientReports: true,
-        lateCorrection: true }]);
+        lateCorrection: true, cannotComplete: true }]);
       expect(sqlCalls('identity.admin_find_order_routes').map((call) => call.values)).toEqual([['7000000A', null]]);
       expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'api.admin.order-routes.find', outcome: 'success' }));
     });
@@ -402,7 +402,7 @@ describe('order-route routes in Identity over HTTP', () => {
         receivingFacilityId: laboratoryId, receivingFacilityName: 'Synthetic Laboratory', createdAt: '2026-10-01T08:00:00.000Z',
         acceptedAt: '2026-10-01T09:00:00.000Z', endedAt: null, endedKind: null, accessEndsAt: '2026-10-19T11:12:00.123Z',
         closable: false }, expect.objectContaining({ reference: '70000002', effectiveState: 'sent', accessEndsAt: null,
-        closable: true })], wrongPatientReports: true, lateCorrection: true });
+        closable: true })], wrongPatientReports: true, lateCorrection: true, cannotComplete: true });
       expect(Object.keys(found.body.items[0]).slice(-2)).toEqual(['accessEndsAt', 'closable']);
       expect(sqlCalls('identity.admin_find_order_routes').map((call) => call.sql))
         .toEqual(['select * from identity.admin_find_order_routes($1, $2)']);
@@ -730,6 +730,145 @@ describe('order-route routes in Identity over HTTP', () => {
         const reviewed = await review({ actions: ['ordering_facility_told', 'referred_to_dpo'],
           note: 'Phoned the hospital and referred it to the DPO' });
         expect([reviewed.status, reviewed.body.version]).toEqual([200, 2]);
+      });
+  });
+
+  describe('support and "We can\'t complete this order" (D18: C20 with C32, C21, C26)', () => {
+    const admin = (permissions: string[]) => tokens.verify.mockResolvedValue({ actor: standaloneAdmin(permissions), claims: {} });
+    const all = ['platform.admin.access', 'platform.facility.read', 'platform.facility.manage', 'platform.principal.read'];
+    const summary = { listed: { value: true, byDefault: true, reason: null, setAt: null },
+      destination: { receivingTypes: ['laboratory'], review: 'reviewed' }, receivedAcceptedLifetime: 9,
+      receivedPatientsLifetime: 7, counterparts: [] };
+    const counts = { last30Days: 4, soonAfterAcceptance: 1, afterSevenDays: 1, laterReportedWrongPatient: 1,
+      byReason: { other: 1, out_of_stock: 1, supplies_unavailable: 2 } };
+    const read = (id = laboratoryId) => request(server()).get(`/api/v1/admin/facilities/${id}/order-route-summary`)
+      .set('Authorization', 'Bearer synthetic');
+    const statements = () => calls.map((call) => call.sql).filter((sql) => !sql.includes('platform.control_enabled'));
+
+    it('merges C32\'s five counts into the facility summary, read in a savepoint of the same read-only transaction', async () => {
+      admin(all);
+      handlers['identity.admin_order_route_summary'] = () => ({ rows: [{ summary }] });
+      handlers['identity.admin_order_route_not_completed'] = () => ({ rows: [{ not_completed: counts }] });
+      const answer = await read();
+      expect([answer.status, answer.body]).toEqual([200, { facilityId: laboratoryId, ...summary, notCompleted: counts,
+        cannotComplete: true }]);
+      expect(Object.keys(answer.body)).toEqual(['facilityId', 'listed', 'destination', 'receivedAcceptedLifetime',
+        'receivedPatientsLifetime', 'counterparts', 'notCompleted', 'cannotComplete']);
+      expect(Object.keys(answer.body.notCompleted)).toEqual(['last30Days', 'soonAfterAcceptance', 'afterSevenDays',
+        'laterReportedWrongPatient', 'byReason']);
+      expect(statements()).toEqual(['select identity.admin_order_route_summary($1) as summary',
+        'savepoint admin_order_route_not_completed', 'select identity.admin_order_route_not_completed($1) as not_completed',
+        'release savepoint admin_order_route_not_completed']);
+      expect(sqlCalls('identity.admin_order_route_not_completed')[0]?.values).toEqual([laboratoryId]);
+      expect(database.withPlatformTransaction).toHaveBeenCalledTimes(1);
+      expect(database.withPlatformTransaction).toHaveBeenCalledWith(expect.objectContaining({
+        purposeOfUse: 'healthcare-operations' }), expect.any(Function), { readOnly: true });
+      // No reason in any audit row: the read is audited as before.
+      expect(JSON.stringify(audit.record.mock.calls)).not.toMatch(/supplies_unavailable|notCompleted/);
+      // A facility with no such endings: zeros and an empty byReason, still served.
+      const none = { last30Days: 0, soonAfterAcceptance: 0, afterSevenDays: 0, laterReportedWrongPatient: 0, byReason: {} };
+      handlers['identity.admin_order_route_not_completed'] = () => ({ rows: [{ not_completed: JSON.stringify(none) }] });
+      const empty = await read();
+      expect([empty.status, empty.body.notCompleted, empty.body.cannotComplete]).toEqual([200, none, true]);
+    });
+
+    it('leaves both out when C32 fails (a schema without 0091), rolling back to its savepoint; the summary still answers',
+      async () => {
+        admin(all);
+        const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+        try {
+          handlers['identity.admin_order_route_summary'] = () => ({ rows: [{ summary }] });
+          handlers['identity.admin_order_route_not_completed'] = () => {
+            throw databaseError('42883', 'function identity.admin_order_route_not_completed(unknown) does not exist');
+          };
+          const answer = await read();
+          expect([answer.status, answer.body]).toEqual([200, { facilityId: laboratoryId, ...summary }]);
+          expect(statements().slice(-3)).toEqual(['savepoint admin_order_route_not_completed',
+            'select identity.admin_order_route_not_completed($1) as not_completed',
+            'rollback to savepoint admin_order_route_not_completed']);
+          expect(warn).toHaveBeenCalledWith(expect.objectContaining({ sqlState: '42883' }));
+          expect(JSON.stringify(warn.mock.calls)).not.toContain('does not exist');
+          // A refusal of the actor (42501) after C20 answered: the same.
+          handlers['identity.admin_order_route_not_completed'] = () => { throw databaseError('42501', 'denied'); };
+          const refused = await read();
+          expect([refused.status, refused.body]).toEqual([200, { facilityId: laboratoryId, ...summary }]);
+          // An unreadable answer (no row, a missing or negative count, counts as text, a bad byReason): left out.
+          for (const notCompleted of [undefined, null, 'not json', { ...counts, afterSevenDays: undefined },
+            { ...counts, last30Days: -1 }, { ...counts, soonAfterAcceptance: '1' }, { ...counts, byReason: [] },
+            { ...counts, byReason: { other: 1.5 } }, { ...counts, byReason: { 'Not A Code': 1 } }]) {
+            handlers['identity.admin_order_route_not_completed'] = () => ({ rows: notCompleted === undefined ? []
+              : [{ not_completed: notCompleted }] });
+            const odd = await read();
+            expect([odd.status, 'notCompleted' in odd.body, 'cannotComplete' in odd.body]).toEqual([200, false, false]);
+          }
+        } finally {
+          warn.mockRestore();
+        }
+      });
+
+    it('reads no counts when C20 refuses: 404 for an unknown facility, 403 without platform.facility.read', async () => {
+      admin(all);
+      handlers['identity.admin_order_route_summary'] = () => { throw databaseError('P0002', 'ADMIN_FACILITY_NOT_FOUND'); };
+      handlers['identity.admin_order_route_not_completed'] = () => ({ rows: [{ not_completed: counts }] });
+      const missing = await read();
+      expect([missing.status, missing.body.code]).toEqual([404, 'ADMIN_FACILITY_NOT_FOUND']);
+      admin(['platform.admin.access']);
+      const denied = await read();
+      expect([denied.status, denied.body.code]).toEqual([403, 'PERMISSION_DENIED']);
+      expect(sqlCalls('identity.admin_order_route_not_completed')).toEqual([]);
+    });
+
+    it('Find answers cannotComplete: true, and an order ended that way as cancelled, receiving_unable, still correctable',
+      async () => {
+        admin(all);
+        handlers['identity.admin_find_order_routes'] = () => ({ rows: [{ route_id: routeId, reference: '70000000',
+          kind: 'lab_request', row_version: '3', effective_state: 'cancelled', ordering_facility_id: facilityId,
+          ordering_facility_name: 'Synthetic Hospital Ltd', receiving_facility_id: laboratoryId,
+          receiving_facility_name: 'Synthetic Laboratory', created_at: new Date('2026-10-20T08:00:00Z'),
+          accepted_at: new Date('2026-10-20T09:00:00Z'), ended_at: new Date('2026-10-21T09:00:00Z'),
+          ended_kind: 'receiving_unable', access_ends_at: new Date('2026-10-28T09:00:00Z'), closable: false,
+          correction: 'correctable', correctable_until: new Date('2027-04-18T09:00:00Z'), wrong_patient_reported_at: null,
+          wrong_patient_late: null }] });
+        const answer = await request(server()).get('/api/v1/admin/order-routes?reference=70000000')
+          .set('Authorization', 'Bearer synthetic');
+        expect(answer.status).toBe(200);
+        expect(answer.body).toMatchObject({ items: [{ effectiveState: 'cancelled', endedKind: 'receiving_unable', closable: false,
+          correction: 'correctable', correctableUntil: '2027-04-18T09:00:00.000Z', wrongPatient: null }],
+        wrongPatientReports: true, lateCorrection: true, cannotComplete: true });
+        expect(Object.keys(answer.body)).toEqual(['items', 'wrongPatientReports', 'lateCorrection', 'cannotComplete']);
+      });
+
+    it('D18-12: a later report on an order ended that way is listed flagged, first, in C26\'s order, naming the ending',
+      async () => {
+        admin(all);
+        const base = { row_version: '1', route_id: routeId, reference: '70000000', kind: 'lab_request',
+          receiving_facility_id: laboratoryId, receiving_facility_name: 'Synthetic Laboratory', ordering_facility_id: facilityId,
+          ordering_facility_name: 'Synthetic Hospital Ltd', reported_by_account_id: '20000000-0000-4000-8000-000000000031',
+          reported_by_name: 'Remi Lab', accepted_by_account_id: '20000000-0000-4000-8000-000000000031',
+          accepted_by_name: 'Remi Lab', same_member: true, accepted_with: 'health_id',
+          accepted_at: new Date('2026-10-01T09:00:00Z'), reason_code: 'someone_elses_details',
+          note: 'The person was her sister, who used her card', note_removed: false, results_voided: 1, result_reports_marked: 0,
+          dispensing_reversed: false, specimens_collected: 1, recorded_by: [], reporter_recorded_work: true,
+          facility_reports_last_30_days: 2, member_reports_last_30_days: 2, reviewed_at: null, reviewed_by_account_id: null,
+          reviewed_by_name: null, review_actions: null, review_note: null, discovered_by: 'own_check',
+          discovered_on: new Date(2026, 9, 25), reporter_late_reports_last_30_days: 1, ordering_sender_active: true };
+        // C26's unreviewed order: flagged first (late_correction is a flag), then oldest first.
+        handlers['identity.admin_list_wrong_patient_reports'] = () => ({ rows: [
+          { ...base, report_id: '80000000-0000-4000-8000-000000000011', reported_at: new Date('2026-10-26T08:00:00Z'),
+            state_before: 'cancelled', flags: ['reporter_recorded_work', 'late_correction'], late: true,
+            ended_kind_before: 'receiving_unable', required_actions: [] },
+          { ...base, report_id: '80000000-0000-4000-8000-000000000012', reported_at: new Date('2026-10-20T08:00:00Z'),
+            state_before: 'accepted', flags: [], reporter_recorded_work: false, late: false, ended_kind_before: null,
+            discovered_by: null, discovered_on: null, required_actions: [] }] });
+        const answer = await request(server()).get('/api/v1/admin/wrong-patient-reports?status=unreviewed')
+          .set('Authorization', 'Bearer synthetic');
+        expect(answer.status).toBe(200);
+        const [after, other] = answer.body.items as Record<string, unknown>[];
+        expect(after).toMatchObject({ reportId: '80000000-0000-4000-8000-000000000011', late: true,
+          endedKindBefore: 'receiving_unable', stateBefore: 'cancelled', flags: ['reporter_recorded_work', 'late_correction'],
+          requiredActions: [], discoveredBy: 'own_check', discoveredOn: '2026-10-25' });
+        expect(other).toMatchObject({ reportId: '80000000-0000-4000-8000-000000000012', late: false, flags: [] });
+        expect(sqlCalls('identity.admin_list_wrong_patient_reports')[0]?.values).toEqual(['unreviewed', null]);
       });
   });
 });
