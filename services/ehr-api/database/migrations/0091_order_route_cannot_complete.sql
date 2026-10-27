@@ -54,10 +54,12 @@
 -- 2. The command C31, ehr.cannot_complete_order_route(...) (owner-only),
 --    through lab.cannot_complete_order_route(...) and
 --    pharmacy.cannot_complete_order_route(...) (SECURITY DEFINER SQL
---    wrappers, as item 3's). At most 20 endings per staff member (counted
---    by their account, at every facility it belongs to) and 50 per facility
---    in any 24 hours, exact under advisory locks per account and per
---    facility (D18-7).
+--    wrappers, as item 3's). A possibly critical value is asked about
+--    before the limits, so that a member or facility at its limit is still
+--    told to phone A about it (D18-15). At most 20 endings per staff member
+--    (counted by their account, at every facility it belongs to) and 50 per
+--    facility in any 24 hours, exact under advisory locks per account and
+--    per facility (D18-7).
 -- 3. The ordering facility's summary of one route, replaced: 0090's body
 --    byte for byte plus one key, notCompleted, in its outer select list.
 -- 4. Support's counts C32, identity.admin_order_route_not_completed(uuid):
@@ -829,7 +831,7 @@ revoke all on function ehr.guard_order_route_unable_ending() from public;
 -- nothing is stored:
 --   1. the caller's transaction READ COMMITTED, else 25000
 --      ORDER_ROUTE_CANNOT_COMPLETE_READ_COMMITTED_REQUIRED before anything is
---      read: the limits of step 10 are exact only because each statement
+--      read: the limits of step 11 are exact only because each statement
 --      after the account's and the facility's locks reads a new snapshot,
 --      which sees what an earlier holder committed while this one waited (as
 --      C29); then the
@@ -862,22 +864,25 @@ revoke all on function ehr.guard_order_route_unable_ending() from public;
 --      version;
 --  9c. then the version (P0001 ORDER_ROUTE_VERSION_CONFLICT): only a
 --      concurrent write that keeps the route open answers 412;
---  10. at most 20 endings by this staff member's account (at any facility:
---      one account may hold memberships at several laboratories or
---      pharmacies, and a stolen one must not end 20 at each) and 50 at this
---      facility in the last 24 hours, else P0001
---      ORDER_ROUTE_CANNOT_COMPLETE_LIMIT whose DETAIL is the ISO time (UTC,
---      milliseconds, rounded up) from which another is possible (the later
---      of the two when both are reached);
---  11. B's facts, read while the route still allows it (before the
+--  10. B's facts, read while the route still allows it (before the
 --      ending; the Lab tables' row-level security decides, as for B's own
 --      reads): on a lab request whether an accession exists, how many
 --      specimens were collected, how many results exist on the work item,
 --      how many current, not invalidated versions are flagged
 --      critical_candidate (the Lab's own flag; Health ID makes no critical
 --      result claim);
---  11b. one or more possibly critical values and requested_critical_value_told
---      not true: P0001 ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD (D18-15);
+--  10b. one or more possibly critical values and
+--      requested_critical_value_told not true: P0001
+--      ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD (D18-15), before the limits:
+--      over its limit B cannot end the order itself, so it must still be
+--      told to phone A about the value before anyone else ends it;
+--  11. at most 20 endings by this staff member's account (at any facility:
+--      one account may hold memberships at several laboratories or
+--      pharmacies, and a stolen one must not end 20 at each) and 50 at this
+--      facility in the last 24 hours, else P0001
+--      ORDER_ROUTE_CANNOT_COMPLETE_LIMIT whose DETAIL is the ISO time (UTC,
+--      milliseconds, rounded up) from which another is possible (the later
+--      of the two when both are reached);
 --  12. the ending, through 0086's closer: accepted -> cancelled, ended_kind
 --      'receiving_unable', side receiving, writes end now; reads end now as
 --      well, unless B opened an accession on a lab request, when they end 7
@@ -1044,7 +1049,36 @@ begin
   if current_route.row_version <> expected_version then
     raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_VERSION_CONFLICT';
   end if;
-  -- 10. The limits, counted under the account's and the facility's locks:
+  -- 10. B's facts, read while the route still allows it.
+  work_item := coalesce(current_route.lab_work_item_id, current_route.pharmacy_work_item_id);
+  if requested_kind = 'lab_request' then
+    select exists (select 1 from lab.accessions accession where accession.work_item_id = work_item)
+      into accession_seen;
+    select count(*)::integer into specimen_count
+      from lab.specimens specimen join lab.accessions accession on accession.id = specimen.accession_id
+     where accession.work_item_id = work_item and specimen.collected_at is not null;
+    select count(*)::integer into result_count
+      from lab.results result_row
+      join lab.test_executions execution on execution.id = result_row.execution_id
+      join lab.work_item_requested_tests test on test.id = execution.requested_test_id
+     where test.work_item_id = work_item;
+    select count(*)::integer into critical_count
+      from lab.results result_row
+      join lab.result_revisions revision on revision.result_id = result_row.id
+                                        and revision.version = result_row.current_version
+      join lab.test_executions execution on execution.id = result_row.execution_id
+      join lab.work_item_requested_tests test on test.id = execution.requested_test_id
+     where test.work_item_id = work_item and revision.abnormal_flag = 'critical_candidate'
+       and not exists (select 1 from lab.result_invalidations invalidation
+                        where invalidation.result_id = result_row.id
+                          and invalidation.result_version = result_row.current_version);
+    -- 10b. A possibly critical value B has not said it told A about, asked
+    -- before the limits.
+    if critical_count > 0 and requested_critical_value_told is not true then
+      raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD';
+    end if;
+  end if;
+  -- 11. The limits, counted under the account's and the facility's locks:
   -- the member's by their account, across every facility.
   checked_at := clock_timestamp();
   select count(*)::integer into member_count from ehr.order_route_unable_endings ending
@@ -1073,34 +1107,6 @@ begin
     raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_CANNOT_COMPLETE_LIMIT',
       detail = to_char(date_trunc('milliseconds', greatest(member_free, facility_free) + interval '999 microseconds')
                          at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"');
-  end if;
-  -- 11. B's facts, read while the route still allows it.
-  work_item := coalesce(current_route.lab_work_item_id, current_route.pharmacy_work_item_id);
-  if requested_kind = 'lab_request' then
-    select exists (select 1 from lab.accessions accession where accession.work_item_id = work_item)
-      into accession_seen;
-    select count(*)::integer into specimen_count
-      from lab.specimens specimen join lab.accessions accession on accession.id = specimen.accession_id
-     where accession.work_item_id = work_item and specimen.collected_at is not null;
-    select count(*)::integer into result_count
-      from lab.results result_row
-      join lab.test_executions execution on execution.id = result_row.execution_id
-      join lab.work_item_requested_tests test on test.id = execution.requested_test_id
-     where test.work_item_id = work_item;
-    select count(*)::integer into critical_count
-      from lab.results result_row
-      join lab.result_revisions revision on revision.result_id = result_row.id
-                                        and revision.version = result_row.current_version
-      join lab.test_executions execution on execution.id = result_row.execution_id
-      join lab.work_item_requested_tests test on test.id = execution.requested_test_id
-     where test.work_item_id = work_item and revision.abnormal_flag = 'critical_candidate'
-       and not exists (select 1 from lab.result_invalidations invalidation
-                        where invalidation.result_id = result_row.id
-                          and invalidation.result_version = result_row.current_version);
-    -- 11b. A possibly critical value B has not said it told A about.
-    if critical_count > 0 and requested_critical_value_told is not true then
-      raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD';
-    end if;
   end if;
   -- 12. The ending through 0086's closer.
   select * into closed from ehr.close_order_route(current_route.id, 'receiving_unable', 'receiving',

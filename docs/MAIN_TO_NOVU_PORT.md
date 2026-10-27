@@ -1706,7 +1706,11 @@ it on 2026-10-27, taking every recommended default, built as decided:
   20 a day wherever it belongs: 429
   `ORDER_ROUTE_CANNOT_COMPLETE_LIMIT` with `retryAfter`. Past the limit B
   phones A to cancel the order, or support closes it (C22) after checking
-  who is calling.
+  who is calling. Either ending ends B's reading at once and tells A nothing
+  of a result, so a possibly critical value is asked about before the limit
+  (409 `ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD` comes first), and B's limit
+  words and support's Close words say to phone A about any result recorded
+  on the order first.
 - D18-8: A is told on the order's screen (the reason, the next step, whether
   a sample was taken and whether a result was recorded but not released);
   for urgent, as-soon-as-possible or stat lab requests, any "can't do it in
@@ -1738,7 +1742,8 @@ it on 2026-10-27, taking every recommended default, built as decided:
   (409 `ORDER_ROUTE_RESULT_READY`: B releases it, or corrects it or marks it
   entered in error first); a possibly critical value needs "We have phoned
   {clinic} about the possibly critical value" (`criticalValueTold: true`,
-  else 409 `ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD`); A is told "A result was
+  else 409 `ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD`, asked before the limits of
+  D18-7); A is told "A result was
   recorded there but not released" (`resultRecorded`).
 
 Never a way round a wrong-patient report: B must state that the person was
@@ -2134,9 +2139,15 @@ Still open, with what each one holds back:
   already ended this way keep reading correctly, and D17's correction still
   corrects them. Support's runbook: a laboratory or pharmacy that reaches the
   daily limit in a real batch failure phones support; support confirms who
-  is calling, closes each overflow order it names with Close and the reason
-  "Receiving facility couldn't complete it: over the daily limit", and phones
-  the ordering facilities if B cannot; the limits are not lifted.
+  is calling and, for a laboratory, asks about results on each order it
+  names: a checked result waiting to be released is released by the
+  laboratory instead (that completes the order and sends it), and for any
+  other result recorded there the laboratory phones the ordering facility
+  first (Close ends its reading at once, and the ordering facility then sees
+  no word of a result); support then closes each overflow order with Close
+  and the reason "Receiving facility couldn't complete it: over the daily
+  limit", and phones the ordering facilities if B cannot; the limits are not
+  lifted.
   Follow-ups, not in this build: "Copy into a new order" at the clinic, an
   Overview card for declines, lapses and "can't complete", a support view
   across facilities, re-collection and part supply on one order, B's work

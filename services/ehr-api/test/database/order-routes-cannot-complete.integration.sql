@@ -66,7 +66,8 @@
 --      minute older than 24 hours is not counted while those between 23 and
 --      24 hours old are, and both limits at once give the later time; the
 --      member's limit counts their account at every facility it belongs to
---      (endings at one laboratory count at another);
+--      (endings at one laboratory count at another); and at the limit a
+--      possibly critical value is still asked about first (D18-15);
 --   8. the readers and their cost: the summary reads T10's rows only for
 --      routes ended this way with no report (none for every other route);
 --      C3 and C4 run as the EHR runtime; C32's five counts against the
@@ -2834,6 +2835,35 @@ select pg_temp.assert('d18 limits: at L1, LR is refused once its account has 20 
           and ending_row.recorded_at > clock_timestamp() - interval '24 hours') < 50
   and pg_temp.footprint18() = current_setting('hid.test.footprint_before_limit'),
   current_setting('hid.test.account_refusal'));
+select pg_temp.forget_endings();
+-- At the limit, a possibly critical value is still asked about first
+-- (D18-15 before D18-7): over its limit B cannot end the order itself, and
+-- whoever ends it for B (the clinic, or support's Close) ends B's reading
+-- with no word to A about a result. ulim3 gets an unverified result
+-- flagged critical_candidate (owner SQL); LR at L1 is at 20 endings in 24
+-- hours (18 synthetic under its L1 membership and ulim1, ulim2).
+select pg_temp.assert('d18 limits: one unverified result on ulim3',
+  pg_temp.lab_entry(pg_temp.i('ulim3'), 'd18ulim3', 9.9) = 1);
+select pg_temp.flag_critical(current_setting('hid.test.d18ulim3_result_1')::uuid);
+select pg_temp.synthetic_endings(current_setting('hid.test.lr_membership')::uuid,
+  current_setting('hid.test.facility_1')::uuid, (select array_agg(clock_timestamp() - interval '20 hours'
+    + make_interval(mins => step) order by step) from generate_series(0, 17) step));
+select set_config('hid.test.footprint_before_limit', pg_temp.footprint18(), true);
+set local role hid_lab_api_runtime;
+select pg_temp.as_extra(35, current_setting('hid.test.facility_1')::uuid);
+select set_config('hid.test.critical_at_limit', pg_temp.tried_detail(format($s$select * from pg_temp.cannot('lab_request',
+  %L, %s, 'equipment_unavailable', 'd18-limit-ulim3-0004')$s$, pg_temp.r('ulim3'), pg_temp.v(pg_temp.r('ulim3')))), true),
+  set_config('hid.test.told_at_limit', pg_temp.tried_detail(format($s$select * from pg_temp.cannot('lab_request', %L, %s,
+  'equipment_unavailable', 'd18-limit-ulim3-0005', true)$s$, pg_temp.r('ulim3'), pg_temp.v(pg_temp.r('ulim3')))), true);
+reset role;
+select pg_temp.assert('d18 limits: at the member limit, a possibly critical value without the statement is asked about '
+    || 'first', current_setting('hid.test.critical_at_limit') = 'P0001 ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD / ',
+  current_setting('hid.test.critical_at_limit'));
+select pg_temp.assert('d18 limits: at the member limit, with the statement, the limit refuses',
+  current_setting('hid.test.told_at_limit') like 'P0001 ORDER_ROUTE_CANNOT_COMPLETE_LIMIT / 20%',
+  current_setting('hid.test.told_at_limit'));
+select pg_temp.assert('d18 limits: neither refusal at the limit wrote anything',
+  pg_temp.footprint18() = current_setting('hid.test.footprint_before_limit'));
 select pg_temp.forget_endings();
 
 -- 8. The readers and their cost. The summary reads T10's rows only for a
