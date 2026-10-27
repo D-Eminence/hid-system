@@ -1179,6 +1179,16 @@ grant execute on function identity.public_patient_nin_already_bound(char),
   identity.activate_public_patient_enrollment(uuid,char,text,text,text,text,char)
   to hid_identity_runtime, hid_schema_test_runtime;
 
+-- Sign-up without a NIN (0092): its start and activation commands, and the
+-- date of birth QoreID matched, recorded in the NIN binding's transaction.
+grant execute on function identity.start_public_patient_signup(uuid,char,char,text,char,char,bytea,bytea,char,text),
+  identity.activate_public_patient_signup(uuid,char,text,text,text,text,char),
+  identity.record_my_verified_nin_date_of_birth(text,uuid,uuid,date)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.start_public_patient_signup(uuid,char,char,text,char,char,bytea,bytea,char,text),
+  identity.activate_public_patient_signup(uuid,char,text,text,text,text,char),
+  identity.record_my_verified_nin_date_of_birth(text,uuid,uuid,date) from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),
