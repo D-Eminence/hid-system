@@ -1195,3 +1195,173 @@ any route, or any answer from the lookup tells the website that this backend
 serves the correction (D17-11: the website ships first and stays dormant). An
 earlier backend sends none of them, and its Lab and Pharmacy answer the two
 new routes 404.
+
+## 24. Orders between facilities: an order the laboratory or pharmacy accepted but can't complete
+
+A laboratory or pharmacy that accepted an order from another facility and then
+cannot do it (the test is not offered after all, something has run out or is
+out of service, the sample can't be used, the patient chose not to go ahead or
+left) ends it itself with one fixed reason (migration 0091, hid-system 0091 on
+`staging-novu-ci-20261005`, D18; owner decisions of 2026-10-27, recorded in
+`MAIN_TO_NOVU_PORT.md`). In one transaction the order ends (`cancelled`, ended
+kind `receiving_unable`); the facility can record nothing more on it; it keeps
+reading it for 7 days only if it had opened an accession on a lab request,
+otherwise not at all from that moment (no one, support included, can shorten
+the 7 days); the reason and what it had recorded are kept for the ordering
+facility and support; both facilities get a system audit row
+(`ehr.order-route.not-completed`); and the patient gets an inbox notice
+`ORDER_ROUTE_NOT_COMPLETED` (metadata `{routeId, kind, orderingFacilityName,
+receivingFacilityName}`; no reason; no email; nothing for a patient without an
+active account). Nothing is withdrawn: on an accepted order nothing has gone
+back to the ordering facility or the patient.
+
+```text
+POST /api/v1/lab/order-routes/:routeId/cannot-complete        # lab.order-route.receive
+POST /api/v1/pharmacy/order-routes/:routeId/cannot-complete   # pharmacy.order-route.receive
+```
+
+Facility context, `X-Purpose-Of-Use: direct-care` and `Idempotency-Key` are
+required. Any member who may receive that kind of order may use it (D18-10).
+It applies only to an order this facility accepted, inside its 30-day work
+window, not ended, not reported as accepted for the wrong person, with nothing
+returned yet (D18-1); a lab request with a checked (verified, not invalidated)
+result waiting to be released is refused until that result is released,
+corrected or marked entered in error (D18-15). The body, unknown fields
+refused, no free text (D18-6):
+
+```json
+{ "expectedVersion": 2, "reason": "supplies_unavailable", "confirmedPatient": true, "criticalValueTold": true }
+```
+
+- `reason`, by kind (D18-5; the database's command and its endings table hold
+  the same lists, as does `services/ehr-api/test/fixtures/order-route-cannot-complete-reasons.sql`):
+  - Lab: `test_not_offered`, `supplies_unavailable`, `equipment_unavailable`,
+    `sample_unusable`, `sample_not_obtained`, `cannot_meet_priority`,
+    `patient_declined`, `patient_did_not_return`, `other`;
+  - Pharmacy: `out_of_stock`, `medicine_unavailable`, `needs_prescriber_review`,
+    `controlled_requirements`, `cannot_meet_priority`, `patient_declined`,
+    `patient_did_not_return`, `other`.
+- `confirmedPatient` must be `true`: the member states that the person it
+  accepted the order for was the order's patient (for a prescription, or was
+  collecting it for them). Someone who was not uses §21's report or §23's
+  correction instead.
+- `criticalValueTold` (Lab only; the Pharmacy refuses it as an unknown field):
+  `true` states that the ordering facility was phoned about a possibly
+  critical value recorded on the order (a current, not invalidated result
+  version the laboratory flagged `critical_candidate`); required only when
+  there is one; absent, `false` or `null` reads as not told.
+- The request digest is `requestDigest('lab.order-route.cannot-complete',
+  { routeId, expectedVersion, reason, criticalValueTold })` with
+  `criticalValueTold` as `true` or `false` (Pharmacy
+  `requestDigest('pharmacy.order-route.cannot-complete', { routeId,
+  expectedVersion, reason })`). The same member, facility, key and request
+  answer `replayed: true` with the order as it is now and the first ending's
+  reason and counts; a resubmission with `criticalValueTold: true` after
+  `ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD` is a new request with a new key.
+
+`200` answers:
+
+```json
+{ "route": { "id": "…", "version": 3, "effectiveState": "cancelled", "endedKind": "receiving_unable" },
+  "reason": "supplies_unavailable", "readUntil": "2026-11-03T10:15:00.000Z",
+  "specimensCollected": 1, "resultsRecorded": 1, "criticalCandidates": 1, "replayed": false }
+```
+
+`version` is a number. `readUntil` is when the facility's reading ends: 7 days
+after the ending when it had opened an accession, else the ending's moment
+(always for a prescription). The counts are what the laboratory had recorded
+(specimens collected, results in any state, possibly critical current values;
+0 for a pharmacy). Never the patient, the ending's id or anything clinical.
+The service writes its own row in the same transaction
+(`lab.order-route.cannot-complete` / `pharmacy.order-route.cannot-complete`,
+with the patient from the command, details `{routeId, kind, endingId, state,
+reasonCode, specimensCollected, resultsRecorded, criticalCandidates,
+criticalValueTold, confirmedPatient, replayed}`); Lab's interceptor writes
+`api.lab.order-route.cannot-complete.request` without a body (pharmacy-api has
+no interceptor).
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `VALIDATION_FAILED` | the body: a reason not of this service's list (the other kind's included), a version not an integer of at least 1, `confirmedPatient` not `true`, `criticalValueTold` not a boolean (Lab) or present at all (Pharmacy), an unknown field |
+| 400 | `ORDER_ROUTE_INVALID` | the command's own input check (a key or digest that reached it malformed) |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | no or malformed key |
+| 403 | `PERMISSION_DENIED` | not a receiving member under direct care; a released receiving organization |
+| 404 | `ORDER_ROUTE_NOT_FOUND` | not addressed to this facility, or another kind |
+| 409 | `ORDER_ROUTE_NOT_ACCEPTED` | never accepted (sent, declined, withdrawn, expired): decline it instead |
+| 409 | `ORDER_ROUTE_ALREADY_ENDED` | ended any way (also a concurrent ending that won, or another key on an order this command ended), reported as accepted for the wrong person, or its work window lapsed |
+| 409 | `ORDER_ROUTE_ALREADY_RETURNED` | completed: a result or the dispensing went back |
+| 409 | `ORDER_ROUTE_RESULT_READY` | Lab: a checked result waits to be released (answered before a stale version, whatever `criticalValueTold` says) |
+| 409 | `ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD` | Lab: a possibly critical value is recorded and `criticalValueTold` is not `true` (checked after the limits) |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | the key with another request, another order or the other kind |
+| 409 | `ORDER_ROUTE_CHANGED_CONCURRENTLY` | a serialization failure or deadlock (this command only) |
+| 412 | `VERSION_CONFLICT` | still open, but the order's version moved since it was read; checked after the state |
+| 423 | `CROSS_FACILITY_ORDERS_UNAVAILABLE` | `cross_facility_route_access_enabled` off |
+| 429 | `ORDER_ROUTE_CANNOT_COMPLETE_LIMIT` | 20 endings by this member or 50 at this facility in the last 24 hours (D18-7, exact, never lifted); problem member `retryAfter` (ISO-8601 UTC, milliseconds, the later of the two when both are reached) is the earliest time another is possible. Past the limit the facility asks the ordering facility to cancel the order or Health ID support to close it |
+| 503 | `ORDER_ROUTE_UNAVAILABLE` | anything else, including the command's refusal of a caller whose transaction is not READ COMMITTED (`25000 ORDER_ROUTE_CANNOT_COMPLETE_READ_COMMITTED_REQUIRED`; the services always call it so) and a schema without 0091 |
+
+After the ending nothing more can be written, verified, released or
+dispensed on the order's work item, even under the patient's consent: a
+dispensing answers 409 `ORDER_ROUTE_CLOSED`; a Lab write answers 409
+`ORDER_ROUTE_CLOSED` under the patient's consent and 404 (the execution or
+result is not found for writing) while only the order lets the laboratory read
+it, as after §21's report. Results the laboratory recorded and never released
+stay in its own records only. §21's report then answers
+`ORDER_ROUTE_ALREADY_ENDED`; §23's lookup lists the order `correctable` and
+§23's correction corrects it (also after the facility's reading ended), so an
+ending of this kind never closes the way to a wrong-patient report. Support's
+Close answers `ORDER_ROUTE_ALREADY_CLOSED`. The same order can never be sent
+again (`ORDER_ROUTE_ORDER_IN_WORK`, D18-9); the clinician writes a new order.
+
+**What the other services answer (fields only; no new route).** Each is sent
+only by a backend with 0091; a client reads it only when it is present and of
+the right type.
+
+- Lab and Pharmacy: the work lists (`GET /api/v1/{lab,pharmacy}/work-items`)
+  add `cannotComplete: true` (after `lateCorrection`) for a member holding the
+  kind's receive permission, nothing to anyone else. A row ended this way
+  shows `endedKind: 'receiving_unable'` with `access: 'read'` while the
+  facility's reading lasts; after it only the patient's consent shows it.
+- EHR: the order summary (`orderRoute` on the lab-request and prescription
+  lists and reads, the order's route views) gains `notCompleted: { reason,
+  sampleTaken, resultRecorded } | null`: an object only for an order ended
+  `receiving_unable` that has no wrong-patient report (once one exists the
+  earlier reason is not about the patient, and `wrongPatient` and
+  `correctableUntil` follow §23); `sampleTaken` (a specimen was collected) and
+  `resultRecorded` (a result was recorded there and not released) are
+  booleans for a lab request and `null` for a prescription. The patient's
+  `GET /api/v1/ehr/me/order-routes` is unchanged (the order reads `cancelled`,
+  `receiving_unable`, with §23's `correctableUntil`); the Overview is unchanged
+  (D18-8: no card).
+- Identity, support's facility summary
+  (`GET /api/v1/admin/facilities/:facilityId/order-route-summary`): the answer
+  adds, after its earlier keys, `notCompleted` and `cannotComplete: true`,
+  read in the same read-only transaction in a savepoint and both left out on
+  any failure (D18-11; counted at the receiving facility over the last 30
+  days):
+
+  ```json
+  { "notCompleted": { "last30Days": 4, "soonAfterAcceptance": 1, "afterSevenDays": 1, "laterReportedWrongPatient": 1,
+      "byReason": { "supplies_unavailable": 2, "other": 1, "out_of_stock": 1 } },
+    "cannotComplete": true }
+  ```
+
+  `soonAfterAcceptance` counts endings within 60 minutes of acceptance with no
+  accession, `afterSevenDays` those 7 days or more after acceptance,
+  `laterReportedWrongPatient` those whose order then got a wrong-patient
+  report; `byReason` holds only the reasons that occur. Counts only. There is
+  no list across facilities.
+- Identity, support's lookup (`GET /api/v1/admin/order-routes`,
+  `POST /api/v1/admin/order-routes/search`): the answer adds
+  `cannotComplete: true`; an order ended this way is found as any other
+  (`cancelled`, `receiving_unable`, `closable: false`, §23's `correction`).
+- Identity, support's reports list (`GET /api/v1/admin/wrong-patient-reports`):
+  unchanged. A report made after such an ending is a late report (D18-12):
+  `late: true`, `endedKindBefore: 'receiving_unable'`, the flag
+  `late_correction`, so it is listed among the flagged reports, first; it is
+  reviewed like any late report where nothing came back (no DPO referral is
+  required unless it is a "suspected misuse" one).
+
+`cannotComplete: true` on any of these answers tells the website that this
+backend serves the ending (D18-13: the website ships first and stays
+dormant). An earlier backend sends none of these fields, and its Lab and
+Pharmacy answer the new route 404.

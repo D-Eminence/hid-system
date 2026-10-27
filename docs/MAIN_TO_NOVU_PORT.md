@@ -68,6 +68,7 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | — | This branch only (item 3, owner decisions of 2026-10-26): a laboratory or pharmacy that accepted an order from another facility for someone who was not its patient ends it from its work list. Its access ends and every result it sent back is marked entered in error, or its dispensing reversed, in one transaction; the patient gets an inbox notice; support reviews every report; the ordering facility sees such orders on its Overview for 30 days. Described below the table | 0088, runtime-grants.sql |
 | — | This branch only (item 4, owner decisions of 2026-10-26): the Lab and Pharmacy work lists and Incoming say whether the facility receives orders from other facilities now and whether any wait or are held there; support's order lookup says when the receiving facility's access ends and whether Close would act now; support's facility summary says what the facility is as a destination. Read-only: nothing is written and no audit row is added. Described below the table | 0089, runtime-grants.sql |
 | — | This branch only (D17, owner decisions of 2026-10-26): a laboratory or pharmacy that finds out after an order ended, or its window lapsed, that it accepted the order for someone who was not its patient finds it by its reference and withdraws what it recorded on it, until 180 days after acceptance, at most 5 a member and 20 a facility in 24 hours. Every result it recorded is marked entered in error (or its dispensing reversed) as item 3 does; its access to the patient's records is never reopened; the patient, the ordering facility and support are told; support cannot mark such a report reviewed without the DPO referral (and the call to the ordering facility) where something had come back. Described below the table | 0090, runtime-grants.sql |
+| — | This branch only (D18, owner decisions D18-1 to D18-15 of 2026-10-27): a laboratory or pharmacy that accepted an order from another facility and cannot complete it ends it itself with one fixed reason ("We can't complete this order"), stating that the person was the order's patient. The order ends `cancelled` / `receiving_unable`; nothing more can be recorded on it; the facility keeps reading it for 7 days only if it had opened an accession; the clinic sees why, the patient gets a "couldn't complete" notice, support sees per-facility counts; at most 20 a member and 50 a facility in 24 hours. A checked result must be released first and a possibly critical value phoned first. Described below the table | 0091, runtime-grants.sql |
 
 Emergency contacts differ from `main` (#16 and e1757ba) in these ways. Owner
 decisions of 2026-10-23 are marked "owner".
@@ -1666,6 +1667,144 @@ The services' part (routes under `/api/v1`; INTERFACE_CONTRACT §23):
   and no runtime able to read, write or use it; no note in any audit row or
   log).
 
+"We can't complete this order" (D18, this branch only; SPEC-FINAL in the
+item's build notes; hid-system 0091 on `staging-novu-ci-20261005`, not
+`main`'s 0091): a laboratory or pharmacy (B) that accepted an order from a
+clinic (A) for a patient (P) and then cannot do it had no way to say so: the
+order sat "accepted" for 30 days and lapsed, or B misused the wrong-patient
+report. D18 adds a third action on the order's work row. The owner approved
+it on 2026-10-27, taking every recommended default, built as decided:
+
+- D18-1: only on an order B accepted, inside its 30-day work window, not
+  ended (nor reported as accepted for the wrong person), with nothing
+  returned yet. Otherwise 409 `ORDER_ROUTE_NOT_ACCEPTED`,
+  `ORDER_ROUTE_ALREADY_ENDED` or `ORDER_ROUTE_ALREADY_RETURNED`.
+- D18-2: B keeps reading the order for 7 more days only if it had recorded
+  something on it (a laboratory that had opened an accession); otherwise not
+  at all from the ending (always so for a pharmacy). No one, support
+  included, can shorten the 7 days. B can record nothing more.
+- D18-3: a new patient inbox notice, `ORDER_ROUTE_NOT_COMPLETED`
+  ("{B} couldn't complete your {test request | prescription}: see it in
+  Access and consent"; the website holds the words and ships first). A
+  patient without an active account gets nothing, as for every order notice.
+- D18-4: the patient does not see the reason; the card says B couldn't
+  complete it and to contact the clinic.
+- D18-5: 9 laboratory reasons (`test_not_offered`, `supplies_unavailable`,
+  `equipment_unavailable`, `sample_unusable`, `sample_not_obtained`,
+  `cannot_meet_priority`, `patient_declined`, `patient_did_not_return`,
+  `other`) and 8 pharmacy reasons (`out_of_stock`, `medicine_unavailable`,
+  `needs_prescriber_review`, `controlled_requirements`,
+  `cannot_meet_priority`, `patient_declined`, `patient_did_not_return`,
+  `other`); none about identity or money. The command, its endings table, the
+  two DTOs and a shared fixture hold the same lists (tested equal).
+- D18-6: no free text.
+- D18-7: at most 20 endings per staff member and 50 per facility in any 24
+  hours, exact (a transaction advisory lock per receiving facility; the
+  command runs only READ COMMITTED), never lifted: 429
+  `ORDER_ROUTE_CANNOT_COMPLETE_LIMIT` with `retryAfter`. Past the limit B
+  phones A to cancel the order, or support closes it (C22) after checking
+  who is calling.
+- D18-8: A is told on the order's screen (the reason, the next step, whether
+  a sample was taken and whether a result was recorded but not released);
+  for urgent, as-soon-as-possible or stat lab requests, any "can't do it in
+  time", a pharmacy's "needs the prescriber's review" or "controlled medicine
+  paperwork", B's staff must tick "We will phone {clinic} about this now"
+  (the website's form). No Overview card.
+- D18-9: no re-send of the same order (`ORDER_ROUTE_ORDER_IN_WORK`); the
+  clinician writes a new order, and the screen says so.
+- D18-10: anyone at B with the kind's receive permission
+  (`lab.order-route.receive` / `pharmacy.order-route.receive`).
+- D18-11: support sees, on each facility's order panel, how many orders it
+  ended this way in the last 30 days, how many within an hour of accepting
+  with nothing recorded, how many 7 days or more after accepting, how many
+  were later reported as accepted for the wrong person, and the reasons. No
+  view across facilities.
+- D18-12: a wrong-patient report made after such an ending is reviewed like
+  any late report where nothing came back: it is flagged
+  (`late_correction`) and so listed first among support's unreviewed
+  reports, with `endedKindBefore: 'receiving_unable'` naming the earlier
+  ending.
+- D18-13: website first (dormant until this backend says it serves D18:
+  `cannotComplete: true` on the Lab and Pharmacy work lists, support's
+  lookup and facility summary), then this backend.
+- D18-14: 0091's declaration stays unsigned (`reviewed_by` empty) in the
+  build; the owner signs after SPEC-FINAL §11.2's checks, once production's
+  order count is read, with the migration choosing its CHECK-change form by
+  table size (validated up to about 200,000 routes, NOT VALID above).
+- D18-15: refused while a checked (verified) result waits to be released
+  (409 `ORDER_ROUTE_RESULT_READY`: B releases it, or corrects it or marks it
+  entered in error first); a possibly critical value needs "We have phoned
+  {clinic} about the possibly critical value" (`criticalValueTold: true`,
+  else 409 `ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD`); A is told "A result was
+  recorded there but not released" (`resultRecorded`).
+
+Never a way round a wrong-patient report: B must state that the person was
+the order's patient (`confirmedPatient: true` is required by the API), no
+reason is about identity, nothing that came back can be filed away (a
+completed order is refused, a checked result must be released first), and
+afterwards D17's late correction (C29) still corrects such an order, also
+after B's reading ended: 0091 widens the report table's `late_ck` to admit
+`receiving_unable`, which would otherwise make that correction fail. Once a
+report exists, A's summary drops `notCompleted`, so B's earlier reason is no
+longer shown as a fact about P.
+
+How it is built (0091): `ehr.cannot_complete_order_route` (owner-only,
+through `lab.`/`pharmacy.cannot_complete_order_route`, the Pharmacy's passing
+no critical value) ends the route through 0086's closer (H14) with the new
+kind `receiving_unable` (the two route CHECKs widened), writes one row of
+`ehr.order_route_unable_endings` (forced row-level security, no grant to any
+role, immutable), the two system rows `ehr.order-route.not-completed` and the
+notice; the order summary gains `notCompleted`; support's counts come from
+`identity.admin_order_route_not_completed`, which Identity merges into the
+facility summary (C20 itself is unchanged, since `a3b1822`'s verifier asserts
+its exact keys). Item 3's command, D17's correction and lookup, H6 and H7 are
+unchanged byte for byte.
+
+The services' part (routes under `/api/v1`; INTERFACE_CONTRACT §24):
+
+- lab-api and pharmacy-api: `POST order-routes/:routeId/cannot-complete`
+  (`Idempotency-Key`; body `{ expectedVersion, reason, confirmedPatient:
+  true, criticalValueTold? }`, the reason from the kind's list,
+  `criticalValueTold` Lab only, unknown fields refused) runs the wrapper once
+  in a READ COMMITTED transaction (six arguments at the Lab, five at the
+  Pharmacy; the digest of `{ routeId, expectedVersion, reason,
+  criticalValueTold }`, the Pharmacy's without `criticalValueTold`) and
+  writes B's own row (`lab.order-route.cannot-complete` / `pharmacy.…`, the
+  patient from the command, the reason, the counts, `criticalValueTold`,
+  `confirmedPatient: true`, `replayed`) in the same transaction; Lab's
+  interceptor writes the `….request` row without a body (pharmacy-api has no
+  interceptor). It answers `{ route, reason, readUntil, specimensCollected,
+  resultsRecorded, criticalCandidates, replayed }`, never the patient or the
+  ending's id. The new refusals: 409 `ORDER_ROUTE_ALREADY_RETURNED`,
+  `ORDER_ROUTE_RESULT_READY` and `ORDER_ROUTE_CRITICAL_VALUE_NOT_TOLD` (Lab);
+  429 `ORDER_ROUTE_CANNOT_COMPLETE_LIMIT` with `retryAfter`; a serialization
+  failure or deadlock 409 `ORDER_ROUTE_CHANGED_CONCURRENTLY` (this command
+  only); 25000 and anything unexpected 503. The work lists add
+  `cannotComplete: true` for a member holding the receive permission.
+- ehr-api: the order summary passes `notCompleted` (`{ reason, sampleTaken,
+  resultRecorded }` or null) on when the database answers it. The patient's
+  routes (C5) and the Overview (C28) are unchanged.
+- identity-api: the facility summary adds `notCompleted` (the five counts,
+  each checked a non-negative integer) and `cannotComplete: true`, read with
+  C32 in C20's read-only transaction in a savepoint, both left out (and the
+  SQLSTATE alone logged) on any failure; support's lookup adds
+  `cannotComplete: true`; the reports list passes C26's rows, flags and
+  order through unchanged (D18-12).
+- The patient's notice goes through the existing path: the command enqueues
+  the inbox item (`notification.enqueue_patient_inbox_item`, H12), as for
+  every order notice; no outbox row, no email.
+- notification-worker, event-dispatcher, the gateway, AWS and the Novu
+  set-up are unchanged.
+- Tests: the database suite `order-routes-cannot-complete` and the extended
+  order-route suites; jest and HTTP specs (`lab-order-route-cannot-complete.spec.ts`,
+  `pharmacy-order-route-cannot-complete.spec.ts`, EHR's
+  `order-route-not-completed.spec.ts`, Identity's `order-routes.http.spec.ts`,
+  and the exact shapes that gained a field); and the order-routes runtime
+  verifier's "can't complete" block (an ending at a laboratory and at a
+  pharmacy, every refusal over HTTP, the reads afterwards, the patient's
+  notice, the clinician's view, support's counts, and D17's late correction
+  after the ending).
+
 ## Not ported, and why
 
 - Already on this branch: #26 (0071 grants the list), #58 (0071 seeds `direct-care`).
@@ -1804,6 +1943,19 @@ Decided by the owner, D-Eminence:
   and 20 a facility in 24 hours, exact; a lapsed order ended
   `wrong_patient`; website first; 0090's declaration signed by the owner in
   chat on 2026-10-26; the Overview unchanged.
+- "We can't complete this order" (D18) is built at the owner's request
+  (2026-10-27) with every recommended default, D18-1 to D18-15, described
+  under "We can't complete this order" in Ported above: accepted orders only,
+  inside the 30-day window, nothing returned; B keeps reading 7 days only if
+  it recorded something; a new "couldn't complete" patient notice; no reason
+  to the patient; 9 laboratory and 8 pharmacy reasons; no free text; 20 per
+  member and 50 per facility per 24 hours, never lifted; the order screen
+  plus a required "we will phone" tick in the urgent and safety cases, no
+  Overview card; no re-send, a new order; anyone with the receive
+  permission; per-facility counts for support; a later wrong-patient report
+  flagged and sorted first; website first, dormant; 0091's declaration left
+  unsigned in the build; refused while a checked result waits for release, a
+  critical-value tick, the clinician told a result was recorded.
 
 Still open, with what each one holds back:
 
@@ -1953,6 +2105,40 @@ Still open, with what each one holds back:
   the answers of each (aba7c16 on 0087, 22cd47f on 0088 and 0089, item 4 on
   0088 and 0089): it keeps today's pages wherever a field is absent and
   uses each one wherever it is answered.
+- "We can't complete this order" (D18, 0091): **not signed**. 0091's
+  declaration in `config/production-schema-compatibility.json` names 0091
+  and `runtime-grants.sql` with `reviewed_by` empty (D18-14), so the release
+  core refuses it (`REVIEWED_BACKWARD_COMPATIBILITY_REQUIRED`) until the
+  owner signs. Before signing (SPEC-FINAL §11.2): the gates of §10 (suites on
+  fresh copies, mutants, race harness, performance, lock and load gates warm
+  and cold, old images, negative copies, refusing preconditions, staging
+  rehearsal, container acceptance); on production, the header's read-only
+  query (the owners, and `reltuples, relpages` of `ehr.order_routes`, a
+  catalog read), then the expected pause at that size, twice, and the CHECK
+  form 0091 will choose (validated up to about 200,000 routes, NOT VALID
+  above), written into the declaration. The measured costs are put before
+  the owner as they are: the order summary about +6 to +9 µs per ordinary
+  route against a +4 µs budget and +13 to +15 µs per route ended this way
+  against +8 µs, on a machine about 1.7 times slower than the design's.
+  Release order (D18-13): the website first (dormant until this backend says
+  it serves D18), then this backend at a quiet hour: `database-migration`
+  (0091 with `runtime-grants.sql`, dry run then apply; a 55P03 "stayed busy
+  for 5 seconds" stops it with nothing applied: run it again later), then
+  lab-api, pharmacy-api, ehr-api and identity-api from the same commit; the
+  default `changed` selection rebuilds all 13 components, because
+  `scripts/verify-migration-ledger.mjs` changes, as for 0087-0090. D18 is
+  switched off only by rolling those four services back together; orders
+  already ended this way keep reading correctly, and D17's correction still
+  corrects them. Support's runbook: a laboratory or pharmacy that reaches the
+  daily limit in a real batch failure phones support; support confirms who
+  is calling, closes each overflow order it names with Close and the reason
+  "Receiving facility couldn't complete it: over the daily limit", and phones
+  the ordering facilities if B cannot; the limits are not lifted.
+  Follow-ups, not in this build: "Copy into a new order" at the clinic, an
+  Overview card for declines, lapses and "can't complete", a support view
+  across facilities, re-collection and part supply on one order, B's work
+  cards carrying the wrong-patient report, and a test and medicine catalogue
+  per destination.
 
 A default-off switch is turned on through `dev`'s Terraform for a tunable, or
 by a later commit for a one-way enforcement flip; a database control through
