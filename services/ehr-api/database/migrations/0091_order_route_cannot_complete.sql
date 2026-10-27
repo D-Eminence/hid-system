@@ -734,13 +734,14 @@ $$;
 -- ended as "can't complete" (D18). The reason (by kind, D18-5; never free
 -- text, D18-6), who ended it and whether that member had accepted it, how
 -- many minutes after acceptance, what B had recorded at that moment
--- (whether an accession was opened, specimens collected, results recorded,
--- current versions flagged critical_candidate) and whether B said it had
--- told A of a possibly critical value; never the patient. The idempotency
--- key and digest as T8's. It counts for the limits (20 per member's
--- account, 50 per facility in 24 hours) and support's counts (C32). Its key
--- to the route is added in section 7 (a key to ehr.order_routes takes SHARE
--- ROW EXCLUSIVE on it, which would then be held from here to commit).
+-- (whether an accession was opened, specimens collected and still held,
+-- results recorded, current versions flagged critical_candidate) and
+-- whether B said it had told A of a possibly critical value; never the
+-- patient. The idempotency key and digest as T8's. It counts for the limits
+-- (20 per member's account, 50 per facility in 24 hours) and support's
+-- counts (C32). Its key to the route is added in section 7 (a key to
+-- ehr.order_routes takes SHARE ROW EXCLUSIVE on it, which would then be held
+-- from here to commit).
 create table ehr.order_route_unable_endings (
   id uuid primary key default gen_random_uuid(),
   route_id uuid not null,
@@ -867,7 +868,9 @@ revoke all on function ehr.guard_order_route_unable_ending() from public;
 --  10. B's facts, read while the route still allows it (before the
 --      ending; the Lab tables' row-level security decides, as for B's own
 --      reads): on a lab request whether an accession exists, how many
---      specimens were collected, how many results exist on the work item,
+--      specimens were collected and are still held (collected or received;
+--      a rejected one is no sample B could keep or send on, so neither A
+--      nor B is told about it), how many results exist on the work item,
 --      how many current, not invalidated versions are flagged
 --      critical_candidate (the Lab's own flag; Health ID makes no critical
 --      result claim);
@@ -1056,7 +1059,7 @@ begin
       into accession_seen;
     select count(*)::integer into specimen_count
       from lab.specimens specimen join lab.accessions accession on accession.id = specimen.accession_id
-     where accession.work_item_id = work_item and specimen.collected_at is not null;
+     where accession.work_item_id = work_item and specimen.status in ('collected', 'received');
     select count(*)::integer into result_count
       from lab.results result_row
       join lab.test_executions execution on execution.id = result_row.execution_id

@@ -30,7 +30,9 @@
 --      the critical value was told); a possibly critical value without the
 --      statement;
 --   3. success, Lab and Pharmacy: nothing recorded; an accession with a
---      received, a rejected and an uncollected specimen (not counted) and an
+--      received, a rejected and an uncollected specimen (only the received
+--      one counted: a rejected sample is none B could keep or send on, so
+--      neither the ordering facility nor B is told of it) and an
 --      unverified result; a checked result corrected (a new, unverified
 --      version) and one marked entered in error, both then allowed, without
 --      the statement although the version no longer current, and the one
@@ -2261,12 +2263,12 @@ select pg_temp.assert('d18 ended: uopa (nothing recorded; reads end now; by its 
     current_setting('hid.test.membership_1')::uuid, true, false, 0, 0, 0, 'now', 'd18-end-uopa-0000001', true) = 'ok',
   pg_temp.ending_record('uopa', 'uopa', 'test_not_offered', current_setting('hid.test.account_1')::uuid,
     current_setting('hid.test.membership_1')::uuid, true, false, 0, 0, 0, 'now', 'd18-end-uopa-0000001', true));
-select pg_temp.assert('d18 ended: ub (an accession, two specimens collected, one rejected, one result; reads 7 days; '
-    || 'by LB2, not its acceptor)',
+select pg_temp.assert('d18 ended: ub (an accession, two specimens collected, one received and counted, one rejected '
+    || 'and not counted, one still required; one result; reads 7 days; by LB2, not its acceptor)',
   pg_temp.ending_record('ub', 'ub', 'supplies_unavailable', 'e4c10000-0000-4000-8000-000000000031',
-    'e4c13000-0000-4000-8000-000000000031', false, true, 2, 1, 0, '7 days', 'd18-end-ub-00000001', true) = 'ok',
+    'e4c13000-0000-4000-8000-000000000031', false, true, 1, 1, 0, '7 days', 'd18-end-ub-00000001', true) = 'ok',
   pg_temp.ending_record('ub', 'ub', 'supplies_unavailable', 'e4c10000-0000-4000-8000-000000000031',
-    'e4c13000-0000-4000-8000-000000000031', false, true, 2, 1, 0, '7 days', 'd18-end-ub-00000001', true));
+    'e4c13000-0000-4000-8000-000000000031', false, true, 1, 1, 0, '7 days', 'd18-end-ub-00000001', true));
 select pg_temp.assert('d18 ended: uw7 (an accession; reads 7 days)',
   pg_temp.ending_record('uw7', 'uw7', 'equipment_unavailable', current_setting('hid.test.account_1')::uuid,
     current_setting('hid.test.membership_1')::uuid, true, true, 1, 1, 0, '7 days', 'd18-end-uw7-0000001', true) = 'ok',
@@ -2632,7 +2634,7 @@ select pg_temp.assert('d18 key: a replay answers the first ending''s facts with 
       and answer ->> 'specimens_collected' = '0' and answer ->> 'patient_id' = pg_temp.ended('uopa') ->> 'patient_id'
      from d18_answers where label = 'replay-uopa')
   and (select answer ->> 'result' = 'replayed' and answer ->> 'ending_id' = pg_temp.ended('ub') ->> 'ending_id'
-      and answer ->> 'specimens_collected' = '2' and answer ->> 'results_recorded' = '1'
+      and answer ->> 'specimens_collected' = '1' and answer ->> 'results_recorded' = '1'
       and (answer ->> 'route_row_version')::bigint = (pg_temp.route(pg_temp.r('ub'))).row_version
      from d18_answers where label = 'replay-ub')
   and (select count(*) from ehr.order_route_unable_endings ending_row

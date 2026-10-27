@@ -1712,7 +1712,8 @@ it on 2026-10-27, taking every recommended default, built as decided:
   words and support's Close words say to phone A about any result recorded
   on the order first.
 - D18-8: A is told on the order's screen (the reason, the next step, whether
-  a sample was taken and whether a result was recorded but not released);
+  a sample was taken and is still held, not rejected, and whether a result
+  was recorded but not released);
   for urgent, as-soon-as-possible or stat lab requests, any "can't do it in
   time", a pharmacy's "needs the prescriber's review" or "controlled medicine
   paperwork", B's staff must tick "We will phone {clinic} about this now"

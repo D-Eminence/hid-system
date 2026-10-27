@@ -1270,8 +1270,9 @@ refused, no free text (D18-6):
 `version` is a number. `readUntil` is when the facility's reading ends: 7 days
 after the ending when it had opened an accession, else the ending's moment
 (always for a prescription). The counts are what the laboratory had recorded
-(specimens collected, results in any state, possibly critical current values;
-0 for a pharmacy). Never the patient, the ending's id or anything clinical.
+(specimens collected and still held, that is collected or received, never a
+rejected one; results in any state; possibly critical current values; 0 for a
+pharmacy). Never the patient, the ending's id or anything clinical.
 The service writes its own row in the same transaction
 (`lab.order-route.cannot-complete` / `pharmacy.order-route.cannot-complete`,
 with the patient from the command, details `{routeId, kind, endingId, state,
@@ -1326,7 +1327,7 @@ the right type.
   sampleTaken, resultRecorded } | null`: an object only for an order ended
   `receiving_unable` that has no wrong-patient report (once one exists the
   earlier reason is not about the patient, and `wrongPatient` and
-  `correctableUntil` follow §23); `sampleTaken` (a specimen was collected) and
+  `correctableUntil` follow §23); `sampleTaken` (a specimen was collected and not rejected) and
   `resultRecorded` (a result was recorded there and not released) are
   booleans for a lab request and `null` for a prescription. The patient's
   `GET /api/v1/ehr/me/order-routes` is unchanged (the order reads `cancelled`,
