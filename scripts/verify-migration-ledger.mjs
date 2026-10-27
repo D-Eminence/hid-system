@@ -104,6 +104,7 @@ const acceptedMigrations = new Map([
   ['0089_order_route_contract_fields.sql', '191e49fd87a783caa0e1a6dddd784806a50443b20856c0c8ce55b48d7f9efe71'],
   ['0090_order_route_late_correction.sql', '78d87c950ca52fd4e91a11b08add89366565acd8a90dfbc67cbf6e076ae2eace'],
   ['0091_order_route_cannot_complete.sql', '578e6cad489d2beb544f24f1863cda1bff5b5599758af1276141047207f856a6'],
+  ['0092_public_patient_signup_without_nin.sql', '01089c7a6cfbaa73f4257c8e0df53ec2aeac4d5d704b578dbc3b42e05a624174'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

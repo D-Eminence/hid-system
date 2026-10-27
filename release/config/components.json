@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0091",
-    "count": 92,
+    "last": "0092",
+    "count": 93,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -465,6 +465,10 @@
       {
         "name": "0091_order_route_cannot_complete.sql",
         "sha256": "578e6cad489d2beb544f24f1863cda1bff5b5599758af1276141047207f856a6"
+      },
+      {
+        "name": "0092_public_patient_signup_without_nin.sql",
+        "sha256": "01089c7a6cfbaa73f4257c8e0df53ec2aeac4d5d704b578dbc3b42e05a624174"
       }
     ]
   },
