@@ -1296,7 +1296,7 @@ no interceptor).
 | 409 | `ORDER_ROUTE_CHANGED_CONCURRENTLY` | a serialization failure or deadlock (this command only) |
 | 412 | `VERSION_CONFLICT` | still open, but the order's version moved since it was read; checked after the state |
 | 423 | `CROSS_FACILITY_ORDERS_UNAVAILABLE` | `cross_facility_route_access_enabled` off |
-| 429 | `ORDER_ROUTE_CANNOT_COMPLETE_LIMIT` | 20 endings by this member or 50 at this facility in the last 24 hours (D18-7, exact, never lifted); problem member `retryAfter` (ISO-8601 UTC, milliseconds, the later of the two when both are reached) is the earliest time another is possible. Past the limit the facility asks the ordering facility to cancel the order or Health ID support to close it |
+| 429 | `ORDER_ROUTE_CANNOT_COMPLETE_LIMIT` | 20 endings by this staff member's account (at every facility it belongs to, not only this one) or 50 at this facility in the last 24 hours (D18-7, exact, never lifted); problem member `retryAfter` (ISO-8601 UTC, milliseconds, the later of the two when both are reached) is the earliest time another is possible. Past the limit the facility asks the ordering facility to cancel the order or Health ID support to close it |
 | 503 | `ORDER_ROUTE_UNAVAILABLE` | anything else, including the command's refusal of a caller whose transaction is not READ COMMITTED (`25000 ORDER_ROUTE_CANNOT_COMPLETE_READ_COMMITTED_REQUIRED`; the services always call it so) and a schema without 0091 |
 
 After the ending nothing more can be written, verified, released or

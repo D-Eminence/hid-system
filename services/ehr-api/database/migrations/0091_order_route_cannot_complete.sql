@@ -54,9 +54,10 @@
 -- 2. The command C31, ehr.cannot_complete_order_route(...) (owner-only),
 --    through lab.cannot_complete_order_route(...) and
 --    pharmacy.cannot_complete_order_route(...) (SECURITY DEFINER SQL
---    wrappers, as item 3's). At most 20 endings per member and 50 per
---    facility in any 24 hours, exact under a per-facility advisory lock
---    (D18-7).
+--    wrappers, as item 3's). At most 20 endings per staff member (counted
+--    by their account, at every facility it belongs to) and 50 per facility
+--    in any 24 hours, exact under advisory locks per account and per
+--    facility (D18-7).
 -- 3. The ordering facility's summary of one route, replaced: 0090's body
 --    byte for byte plus one key, notCompleted, in its outer select list.
 -- 4. Support's counts C32, identity.admin_order_route_not_completed(uuid):
@@ -734,10 +735,10 @@ $$;
 -- (whether an accession was opened, specimens collected, results recorded,
 -- current versions flagged critical_candidate) and whether B said it had
 -- told A of a possibly critical value; never the patient. The idempotency
--- key and digest as T8's. It counts for the limits (20 per member, 50 per
--- facility in 24 hours) and support's counts (C32). Its key to the route is
--- added in section 7 (a key to ehr.order_routes takes SHARE ROW EXCLUSIVE
--- on it, which would then be held from here to commit).
+-- key and digest as T8's. It counts for the limits (20 per member's
+-- account, 50 per facility in 24 hours) and support's counts (C32). Its key
+-- to the route is added in section 7 (a key to ehr.order_routes takes SHARE
+-- ROW EXCLUSIVE on it, which would then be held from here to commit).
 create table ehr.order_route_unable_endings (
   id uuid primary key default gen_random_uuid(),
   route_id uuid not null,
@@ -781,9 +782,10 @@ create table ehr.order_route_unable_endings (
   -- had told A about.
   constraint order_route_unable_endings_critical_ck check (critical_candidates = 0 or critical_value_told)
 );
--- The member limit, and the facility limit with support's counts.
-create index order_route_unable_endings_member_idx
-  on ehr.order_route_unable_endings (ended_by_membership_id, recorded_at);
+-- The member limit (by the ender's account, across facilities), and the
+-- facility limit with support's counts.
+create index order_route_unable_endings_account_idx
+  on ehr.order_route_unable_endings (ended_by_account_id, recorded_at);
 create index order_route_unable_endings_facility_idx
   on ehr.order_route_unable_endings (receiving_facility_id, recorded_at);
 -- Row-level security enabled and forced; four policies, as T8's (0088), so
@@ -828,8 +830,9 @@ revoke all on function ehr.guard_order_route_unable_ending() from public;
 --   1. the caller's transaction READ COMMITTED, else 25000
 --      ORDER_ROUTE_CANNOT_COMPLETE_READ_COMMITTED_REQUIRED before anything is
 --      read: the limits of step 10 are exact only because each statement
---      after the facility lock reads a new snapshot, which sees what an
---      earlier holder committed while this one waited (as C29); then the
+--      after the account's and the facility's locks reads a new snapshot,
+--      which sees what an earlier holder committed while this one waited (as
+--      C29); then the
 --      actor: a direct-care staff session holding the kind's receive
 --      permission at the session facility (42501);
 --   2. the input (22023 ORDER_ROUTE_INVALID): the route and a version of at
@@ -840,9 +843,10 @@ revoke all on function ehr.guard_order_route_unable_ending() from public;
 --      and digest answer replayed with the route as it is now and the first
 --      ending's facts; anything else with that key IDEMPOTENCY_KEY_REUSED;
 --   5. the route, unlocked: addressed here and of this kind (P0002);
---   6. the limits, exact (D18-7): a transaction advisory lock per receiving
---      facility, held to commit; only this command takes it, and before any
---      row lock, so it adds no deadlock;
+--   6. the limits, exact (D18-7): a transaction advisory lock per ending
+--      account, then one per receiving facility, both held to commit; only
+--      this command takes them, always in that order and before any row
+--      lock, so they add no deadlock;
 --   7. the route: the application lock FOR SHARE, then FOR UPDATE;
 --   8. the replay again, under the locks;
 --   9. the state first: never accepted NOT_ACCEPTED; ended any way, or with
@@ -858,10 +862,13 @@ revoke all on function ehr.guard_order_route_unable_ending() from public;
 --      version;
 --  9c. then the version (P0001 ORDER_ROUTE_VERSION_CONFLICT): only a
 --      concurrent write that keeps the route open answers 412;
---  10. at most 20 endings by this membership and 50 at this facility in the
---      last 24 hours, else P0001 ORDER_ROUTE_CANNOT_COMPLETE_LIMIT whose
---      DETAIL is the ISO time (UTC, milliseconds, rounded up) from which
---      another is possible (the later of the two when both are reached);
+--  10. at most 20 endings by this staff member's account (at any facility:
+--      one account may hold memberships at several laboratories or
+--      pharmacies, and a stolen one must not end 20 at each) and 50 at this
+--      facility in the last 24 hours, else P0001
+--      ORDER_ROUTE_CANNOT_COMPLETE_LIMIT whose DETAIL is the ISO time (UTC,
+--      milliseconds, rounded up) from which another is possible (the later
+--      of the two when both are reached);
 --  11. B's facts, read while the route still allows it (before the
 --      ending; the Lab tables' row-level security decides, as for B's own
 --      reads): on a lab request whether an accession exists, how many
@@ -975,8 +982,10 @@ begin
   if peeked.id is null then
     raise exception using errcode = 'P0002', message = 'ORDER_ROUTE_NOT_FOUND';
   end if;
-  -- 6. The limits, exact: one ending at a time per receiving facility, from
-  -- here to commit.
+  -- 6. The limits, exact: one ending at a time per ending account, then per
+  -- receiving facility, from here to commit (always in this order).
+  perform pg_advisory_xact_lock(hashtextextended('order-route-cannot-complete-account:'
+    || actor.actor_account_id::text, 0));
   perform pg_advisory_xact_lock(hashtextextended('order-route-cannot-complete:' || actor.actor_facility_id::text, 0));
   -- 7. The route, locked (the application lock FOR SHARE, the route FOR
   -- UPDATE).
@@ -1035,10 +1044,11 @@ begin
   if current_route.row_version <> expected_version then
     raise exception using errcode = 'P0001', message = 'ORDER_ROUTE_VERSION_CONFLICT';
   end if;
-  -- 10. The limits, counted under the facility lock.
+  -- 10. The limits, counted under the account's and the facility's locks:
+  -- the member's by their account, across every facility.
   checked_at := clock_timestamp();
   select count(*)::integer into member_count from ehr.order_route_unable_endings ending
-   where ending.ended_by_membership_id = actor.actor_membership_id
+   where ending.ended_by_account_id = actor.actor_account_id
      and ending.recorded_at > checked_at - interval '24 hours';
   select count(*)::integer into facility_count from ehr.order_route_unable_endings ending
    where ending.receiving_facility_id = actor.actor_facility_id
@@ -1047,7 +1057,7 @@ begin
     -- Another is possible once all but 19 of the counted endings are more
     -- than 24 hours old.
     select ending.recorded_at + interval '24 hours' into member_free from ehr.order_route_unable_endings ending
-     where ending.ended_by_membership_id = actor.actor_membership_id
+     where ending.ended_by_account_id = actor.actor_account_id
        and ending.recorded_at > checked_at - interval '24 hours'
      order by ending.recorded_at, ending.id
      offset member_count - 20 limit 1;

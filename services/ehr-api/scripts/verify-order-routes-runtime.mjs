@@ -2791,7 +2791,8 @@ try {
     // The scientist: 20 of their own and 54 at the laboratory: the later of the two times.
     const memberLimitedU = expectProblem(await cannotComplete(ulLabMember, lab, routeU8.id, bodyU8), 429,
       'ORDER_ROUTE_CANNOT_COMPLETE_LIMIT');
-    const memberFreeU = await freeAtUnable('ended_by_membership_id', memberMembership, 20);
+    // The member's limit counts their account, at every facility it belongs to.
+    const memberFreeU = await freeAtUnable('ended_by_account_id', ulLabMember.accountId, 20);
     const facilityFreeU = await freeAtUnable('receiving_facility_id', ulLab.facilityId, 50);
     assert.equal(memberLimitedU.retryAfter, memberFreeU > facilityFreeU ? memberFreeU : facilityFreeU);
     // The administrator, with one ending of their own (U7): the laboratory's limit alone.

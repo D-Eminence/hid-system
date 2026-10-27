@@ -68,7 +68,7 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | — | This branch only (item 3, owner decisions of 2026-10-26): a laboratory or pharmacy that accepted an order from another facility for someone who was not its patient ends it from its work list. Its access ends and every result it sent back is marked entered in error, or its dispensing reversed, in one transaction; the patient gets an inbox notice; support reviews every report; the ordering facility sees such orders on its Overview for 30 days. Described below the table | 0088, runtime-grants.sql |
 | — | This branch only (item 4, owner decisions of 2026-10-26): the Lab and Pharmacy work lists and Incoming say whether the facility receives orders from other facilities now and whether any wait or are held there; support's order lookup says when the receiving facility's access ends and whether Close would act now; support's facility summary says what the facility is as a destination. Read-only: nothing is written and no audit row is added. Described below the table | 0089, runtime-grants.sql |
 | — | This branch only (D17, owner decisions of 2026-10-26): a laboratory or pharmacy that finds out after an order ended, or its window lapsed, that it accepted the order for someone who was not its patient finds it by its reference and withdraws what it recorded on it, until 180 days after acceptance, at most 5 a member and 20 a facility in 24 hours. Every result it recorded is marked entered in error (or its dispensing reversed) as item 3 does; its access to the patient's records is never reopened; the patient, the ordering facility and support are told; support cannot mark such a report reviewed without the DPO referral (and the call to the ordering facility) where something had come back. Described below the table | 0090, runtime-grants.sql |
-| — | This branch only (D18, owner decisions D18-1 to D18-15 of 2026-10-27): a laboratory or pharmacy that accepted an order from another facility and cannot complete it ends it itself with one fixed reason ("We can't complete this order"), stating that the person was the order's patient. The order ends `cancelled` / `receiving_unable`; nothing more can be recorded on it; the facility keeps reading it for 7 days only if it had opened an accession; the clinic sees why, the patient gets a "couldn't complete" notice, support sees per-facility counts; at most 20 a member and 50 a facility in 24 hours. A checked result must be released first and a possibly critical value phoned first. Described below the table | 0091, runtime-grants.sql |
+| — | This branch only (D18, owner decisions D18-1 to D18-15 of 2026-10-27): a laboratory or pharmacy that accepted an order from another facility and cannot complete it ends it itself with one fixed reason ("We can't complete this order"), stating that the person was the order's patient. The order ends `cancelled` / `receiving_unable`; nothing more can be recorded on it; the facility keeps reading it for 7 days only if it had opened an accession; the clinic sees why, the patient gets a "couldn't complete" notice, support sees per-facility counts; at most 20 a staff member (counted by account, at every facility) and 50 a facility in 24 hours. A checked result must be released first and a possibly critical value phoned first. Described below the table | 0091, runtime-grants.sql |
 
 Emergency contacts differ from `main` (#16 and e1757ba) in these ways. Owner
 decisions of 2026-10-23 are marked "owner".
@@ -1699,8 +1699,11 @@ it on 2026-10-27, taking every recommended default, built as decided:
   two DTOs and a shared fixture hold the same lists (tested equal).
 - D18-6: no free text.
 - D18-7: at most 20 endings per staff member and 50 per facility in any 24
-  hours, exact (a transaction advisory lock per receiving facility; the
-  command runs only READ COMMITTED), never lifted: 429
+  hours, exact (transaction advisory locks per ending account and per
+  receiving facility, in that order; the command runs only READ COMMITTED),
+  never lifted. The member's limit counts their account, at every facility
+  where it holds the receive permission, so a stolen account ends at most
+  20 a day wherever it belongs: 429
   `ORDER_ROUTE_CANNOT_COMPLETE_LIMIT` with `retryAfter`. Past the limit B
   phones A to cancel the order, or support closes it (C22) after checking
   who is calling.

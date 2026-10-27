@@ -64,7 +64,9 @@
 --      51st at one facility in 24 hours are refused with the time from
 --      which another is possible, the 20th and 50th are not, an ending a
 --      minute older than 24 hours is not counted while those between 23 and
---      24 hours old are, and both limits at once give the later time;
+--      24 hours old are, and both limits at once give the later time; the
+--      member's limit counts their account at every facility it belongs to
+--      (endings at one laboratory count at another);
 --   8. the readers and their cost: the summary reads T10's rows only for
 --      routes ended this way with no report (none for every other route);
 --      C3 and C4 run as the EHR runtime; C32's five counts against the
@@ -1449,7 +1451,8 @@ end
 $f$;
 -- Owner SQL: synthetic endings in T10 by a membership at a facility, at the
 -- given times, each on a synthetic copy of route usnt (triggers off: T10's
--- guard and key too). Answers the earliest time.
+-- guard and key too), recorded under the membership's account (a random one
+-- for a made-up membership). Answers the earliest time.
 create function pg_temp.synthetic_endings(membership uuid, facility uuid, times timestamptz[]) returns timestamptz
 language plpgsql as $f$
 declare
@@ -1468,7 +1471,9 @@ begin
       accepted_at, ended_by_acceptor, minutes_after_acceptance, accession_made, specimens_collected, results_recorded,
       idempotency_key, request_sha256, correlation_id, recorded_at)
     values (copy_id, 'lab_request', facility, template.receiving_organization_id, template.ordering_facility_id,
-      'other', gen_random_uuid(), membership, gen_random_uuid(), at_time - interval '2 hours', false, 120, false, 0, 0,
+      'other', coalesce((select member_row.account_id from identity.staff_facility_memberships member_row
+                          where member_row.id = membership), gen_random_uuid()),
+      membership, gen_random_uuid(), at_time - interval '2 hours', false, 120, false, 0, 0,
       'd18-synthetic-' || substr(md5(copy_id::text), 1, 16), repeat('f', 64), 'd18-synthetic-correlation', at_time);
     set local session_replication_role = origin;
   end loop;
@@ -1637,8 +1642,8 @@ select pg_temp.assert('d18: T10''s columns, keys, CHECKs, indexes, guard trigger
         where constraint_row.conrelid = 'ehr.order_route_unable_endings'::regclass) = 15
   and (select array_agg(pg_get_indexdef(index_row.indexrelid) order by pg_get_indexdef(index_row.indexrelid))
          from pg_index index_row where index_row.indrelid = 'ehr.order_route_unable_endings'::regclass)
-    = array['CREATE INDEX order_route_unable_endings_facility_idx ON ehr.order_route_unable_endings USING btree (receiving_facility_id, recorded_at)',
-      'CREATE INDEX order_route_unable_endings_member_idx ON ehr.order_route_unable_endings USING btree (ended_by_membership_id, recorded_at)',
+    = array['CREATE INDEX order_route_unable_endings_account_idx ON ehr.order_route_unable_endings USING btree (ended_by_account_id, recorded_at)',
+      'CREATE INDEX order_route_unable_endings_facility_idx ON ehr.order_route_unable_endings USING btree (receiving_facility_id, recorded_at)',
       'CREATE UNIQUE INDEX order_route_unable_endings_idempotency_uq ON ehr.order_route_unable_endings USING btree (ended_by_account_id, receiving_facility_id, idempotency_key)',
       'CREATE UNIQUE INDEX order_route_unable_endings_pkey ON ehr.order_route_unable_endings USING btree (id)',
       'CREATE UNIQUE INDEX order_route_unable_endings_route_uq ON ehr.order_route_unable_endings USING btree (route_id)']
@@ -2715,6 +2720,120 @@ select pg_temp.assert('d18 limits: both limits at once give the later time',
   current_setting('hid.test.both_refusal') = 'P0001 ORDER_ROUTE_CANNOT_COMPLETE_LIMIT / '
     || pg_temp.limit_detail(current_setting('hid.test.lr_second')::timestamptz + interval '24 hours'),
   current_setting('hid.test.both_refusal'));
+select pg_temp.forget_endings();
+-- One staff member at every facility (D18-7: a stolen account ends at most 20
+-- orders a day, wherever it holds the receive permission): LR's account also
+-- holds a lab receiver membership at GL, another organization's laboratory
+-- (as an accepted invitation of an existing staff member gives it; owner
+-- SQL), and LR accepts two of R's lab requests there, uacc1 and uacc2. LR's
+-- two real endings above (ulim1, ulim2) count for the account.
+insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+  membership_role, app_role, is_primary, active)
+values ('e4c13000-0000-4000-8000-0000000003a5', 'e4c12000-0000-4000-8000-000000000035',
+  'e4c10000-0000-4000-8000-000000000035', 'e4c20000-0000-4000-8000-000000000002',
+  'e4c21000-0000-4000-8000-000000000002', 'lab', 'lab', false, true);
+insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+values (gen_random_uuid(), 'e4c10000-0000-4000-8000-000000000035', 'p4c_lab_receiver_only', 'facility',
+  'e4c13000-0000-4000-8000-0000000003a5', 'e4c21000-0000-4000-8000-000000000002', 'D18 suite: LR also at GL');
+select set_config('hid.test.lr_gl_membership', 'e4c13000-0000-4000-8000-0000000003a5', true),
+  set_config('hid.test.lr_account', 'e4c10000-0000-4000-8000-000000000035', true);
+create function pg_temp.as_lr_at_gl() returns void language sql as $f$
+  select set_config('app.actor_subject', 'synthetic:p4c:lr', true),
+    set_config('app.membership_id', 'e4c13000-0000-4000-8000-0000000003a5', true),
+    set_config('hid.test.actor_account', 'e4c10000-0000-4000-8000-000000000035', true),
+    set_config('app.facility_id', 'e4c21000-0000-4000-8000-000000000002', true),
+    set_config('app.correlation_id', 'd18-suite-lr-gl-' || substr(md5(random()::text), 1, 8), true),
+    set_config('app.purpose_of_use', 'direct-care', true),
+    set_config('app.patient_id', '', true);
+$f$;
+grant execute on function pg_temp.as_lr_at_gl() to hid_lab_api_runtime;
+-- A statement's SQLSTATE, message and DETAIL ('ok' when it succeeded), its
+-- effects always rolled back.
+create function pg_temp.tried_detail(statement text) returns text language plpgsql as $f$
+declare detail_text text;
+begin
+  execute statement;
+  raise exception using errcode = 'P0001', message = 'D18_TRIED_OK';
+exception when others then
+  if sqlerrm = 'D18_TRIED_OK' then
+    return 'ok';
+  end if;
+  get stacked diagnostics detail_text = pg_exception_detail;
+  return sqlstate || ' ' || sqlerrm || ' / ' || coalesce(detail_text, '');
+end
+$f$;
+grant execute on function pg_temp.tried_detail(text) to hid_lab_api_runtime;
+set local role hid_ehr_api_runtime;
+select pg_temp.order_to(name, 'lab_request', 4, 'e4c21000-0000-4000-8000-000000000002')
+  from unnest(array['uacc1', 'uacc2']) name;
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.as_lr_at_gl();
+select pg_temp.assert('d18 limits: LR accepts uacc1 and uacc2 at GL',
+  (select bool_and((select accepted.result from lab.accept_order_route(pg_temp.r(name), 1, 'health_id', 'HID-P4CPATR',
+       'd18-accept-gl-' || name || '-0001', repeat('a', 64), null) accepted) = 'accepted')
+     from unnest(array['uacc1', 'uacc2']) name));
+reset role;
+select pg_temp.snap();
+-- 17 synthetic endings by LR's L1 membership: 19 by the account. At GL the
+-- account's 20th is allowed (tried and rolled back), its 21st is not.
+select set_config('hid.test.lr_account_first', pg_temp.synthetic_endings(current_setting('hid.test.lr_membership')::uuid,
+  current_setting('hid.test.facility_1')::uuid, (select array_agg(clock_timestamp() - interval '23 hours'
+    + make_interval(mins => step) order by step) from generate_series(0, 16) step))::text, true);
+select pg_temp.assert('d18 limits: LR''s account has 19 endings in 24 hours, all at L1',
+  (select count(*) from ehr.order_route_unable_endings ending_row
+    where ending_row.ended_by_account_id = current_setting('hid.test.lr_account')::uuid
+      and ending_row.receiving_facility_id = current_setting('hid.test.facility_1')::uuid
+      and ending_row.recorded_at > clock_timestamp() - interval '24 hours') = 19
+  and not exists (select 1 from ehr.order_route_unable_endings ending_row
+    where ending_row.ended_by_account_id = current_setting('hid.test.lr_account')::uuid
+      and ending_row.receiving_facility_id <> current_setting('hid.test.facility_1')::uuid));
+set local role hid_lab_api_runtime;
+select pg_temp.as_lr_at_gl();
+select set_config('hid.test.account_twentieth', pg_temp.tried(format($s$select * from pg_temp.cannot('lab_request', %L,
+  %s, 'supplies_unavailable', 'd18-limit-uacc1-0001')$s$, pg_temp.r('uacc1'), pg_temp.v(pg_temp.r('uacc1')))), true);
+reset role;
+select pg_temp.assert('d18 limits: the account''s 20th ending in 24 hours, its first at GL, is allowed',
+  current_setting('hid.test.account_twentieth') = 'ok', current_setting('hid.test.account_twentieth'));
+select pg_temp.synthetic_endings(current_setting('hid.test.lr_membership')::uuid,
+  current_setting('hid.test.facility_1')::uuid, array[clock_timestamp() - interval '1 hour']);
+select set_config('hid.test.footprint_before_limit', pg_temp.footprint18(), true);
+set local role hid_lab_api_runtime;
+select pg_temp.as_lr_at_gl();
+select set_config('hid.test.account_refusal', pg_temp.tried_detail(format($s$select pg_temp.cannot('lab_request',
+  %L, %s, 'supplies_unavailable', 'd18-limit-uacc1-0002')$s$, pg_temp.r('uacc1'), pg_temp.v(pg_temp.r('uacc1')))), true);
+reset role;
+select pg_temp.assert('d18 limits: at GL, the account''s 21st ending in 24 hours (20 at L1) is refused, DETAIL when the '
+    || 'account''s oldest counted ending turns 24 hours old, nothing written',
+  current_setting('hid.test.account_refusal') = 'P0001 ORDER_ROUTE_CANNOT_COMPLETE_LIMIT / '
+    || pg_temp.limit_detail(current_setting('hid.test.lr_account_first')::timestamptz + interval '24 hours')
+  and pg_temp.footprint18() = current_setting('hid.test.footprint_before_limit'),
+  current_setting('hid.test.account_refusal'));
+-- The other way: 18 synthetic endings by LR's GL membership at GL (20 by the
+-- account with ulim1 and ulim2): LR at L1, with few endings under its L1
+-- membership and L1 far from 50, is refused.
+select pg_temp.forget_endings();
+select set_config('hid.test.lr_gl_first', pg_temp.synthetic_endings(current_setting('hid.test.lr_gl_membership')::uuid,
+  'e4c21000-0000-4000-8000-000000000002', (select array_agg(clock_timestamp() - interval '22 hours'
+    + make_interval(mins => step) order by step) from generate_series(0, 17) step))::text, true);
+select set_config('hid.test.footprint_before_limit', pg_temp.footprint18(), true);
+set local role hid_lab_api_runtime;
+select pg_temp.as_extra(35, current_setting('hid.test.facility_1')::uuid);
+select set_config('hid.test.account_refusal', pg_temp.tried_detail(format($s$select pg_temp.cannot('lab_request',
+  %L, %s, 'supplies_unavailable', 'd18-limit-ulim3-0003')$s$, pg_temp.r('ulim3'), pg_temp.v(pg_temp.r('ulim3')))), true);
+reset role;
+select pg_temp.assert('d18 limits: at L1, LR is refused once its account has 20 endings in 24 hours, 18 of them at GL '
+    || '(2 under its L1 membership; L1 under 50), nothing written',
+  current_setting('hid.test.account_refusal') = 'P0001 ORDER_ROUTE_CANNOT_COMPLETE_LIMIT / '
+    || pg_temp.limit_detail(current_setting('hid.test.lr_gl_first')::timestamptz + interval '24 hours')
+  and (select count(*) from ehr.order_route_unable_endings ending_row
+        where ending_row.ended_by_membership_id = current_setting('hid.test.lr_membership')::uuid
+          and ending_row.recorded_at > clock_timestamp() - interval '24 hours') = 2
+  and (select count(*) from ehr.order_route_unable_endings ending_row
+        where ending_row.receiving_facility_id = current_setting('hid.test.facility_1')::uuid
+          and ending_row.recorded_at > clock_timestamp() - interval '24 hours') < 50
+  and pg_temp.footprint18() = current_setting('hid.test.footprint_before_limit'),
+  current_setting('hid.test.account_refusal'));
 select pg_temp.forget_endings();
 
 -- 8. The readers and their cost. The summary reads T10's rows only for a
