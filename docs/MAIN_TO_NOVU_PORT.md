@@ -1679,8 +1679,8 @@ it on 2026-10-27, taking every recommended default, built as decided:
   ended (nor reported as accepted for the wrong person), with nothing
   returned yet. Otherwise 409 `ORDER_ROUTE_NOT_ACCEPTED`,
   `ORDER_ROUTE_ALREADY_ENDED` or `ORDER_ROUTE_ALREADY_RETURNED`.
-- D18-2: B keeps reading the order for 7 more days only if it had recorded
-  something on it (a laboratory that had opened an accession); otherwise not
+- D18-2: B keeps reading the order for up to 7 more days (never past its
+  30-day window) only if it had recorded something on it (a laboratory that had opened an accession); otherwise not
   at all from the ending (always so for a pharmacy). No one, support
   included, can shorten the 7 days. B can record nothing more.
 - D18-3: a new patient inbox notice, `ORDER_ROUTE_NOT_COMPLETED`

@@ -7,11 +7,12 @@
 -- the order with one fixed reason. In one transaction the route ends through
 -- 0086's shared closer (accepted -> cancelled, ended_kind
 -- 'receiving_unable'): B's writes end at once; B's reads end at once too,
--- unless B had opened an accession on a lab request, when they last 7 more
--- days (D18-2); the reason and what B had recorded go into a new
--- append-only table (T10); a system row is written at A and at B; P gets an
--- inbox notice (D18-3). Only an order B accepted, inside its work window,
--- not ended, with nothing returned and no report (D18-1); never while a
+-- unless B had opened an accession on a lab request, when they last up to 7
+-- more days, never past the order's work window (D18-2); the reason and
+-- what B had recorded go into a new append-only table (T10); a system row
+-- is written at A and at B; P gets an inbox notice (D18-3). Only an order B
+-- accepted, inside its work window, not ended, with nothing returned and no
+-- report (D18-1); never while a
 -- checked (verified, not invalidated) result waits to be released, and with
 -- a possibly critical value only once B says it has told A (D18-15). Nothing
 -- is withdrawn: on an accepted order nothing has ever gone to A or P. Item

@@ -1205,7 +1205,8 @@ left) ends it itself with one fixed reason (migration 0091, hid-system 0091 on
 `staging-novu-ci-20261005`, D18; owner decisions of 2026-10-27, recorded in
 `MAIN_TO_NOVU_PORT.md`). In one transaction the order ends (`cancelled`, ended
 kind `receiving_unable`); the facility can record nothing more on it; it keeps
-reading it for 7 days only if it had opened an accession on a lab request,
+reading it for up to 7 days (never past the order's 30-day work window) only
+if it had opened an accession on a lab request,
 otherwise not at all from that moment (no one, support included, can shorten
 the 7 days); the reason and what it had recorded are kept for the ordering
 facility and support; both facilities get a system audit row
@@ -1269,8 +1270,9 @@ refused, no free text (D18-6):
 ```
 
 `version` is a number. `readUntil` is when the facility's reading ends: 7 days
-after the ending when it had opened an accession, else the ending's moment
-(always for a prescription). The counts are what the laboratory had recorded
+after the ending, or the end of the order's 30-day window if that comes first,
+when it had opened an accession; else the ending's moment (always for a
+prescription). The counts are what the laboratory had recorded
 (specimens collected and still held, that is collected or received, never a
 rejected one; results in any state; possibly critical current values; 0 for a
 pharmacy). Never the patient, the ending's id or anything clinical.
