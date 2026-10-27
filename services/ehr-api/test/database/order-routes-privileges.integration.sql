@@ -11,7 +11,8 @@
 --      recreated find) exactly as its section 5 grants them, and 0090's (D17:
 --      the Lab and Pharmacy late correction and lookup; the patient's list,
 --      support's reports list and find, recreated) exactly as its section 9
---      grants them;
+--      grants them, and 0091's (D18: the Lab and Pharmacy "can't complete";
+--      support's counts) exactly as its section 6 grants them;
 --   2. no runtime privilege on any new table and no sequence; row-level
 --      security enabled and forced with its four policies; the work lists'
 --      strict policies; every new trigger enabled 'O';
@@ -629,11 +630,16 @@ select signature::regprocedure, grantees from (values
   ('lab.correct_wrong_patient_order_route(uuid,bigint,text,text,date,text,text,character)', array['hid_lab_runtime', 'hid_schema_test_runtime']),
   ('lab.find_correctable_order_routes(text)', array['hid_lab_runtime', 'hid_schema_test_runtime']),
   ('pharmacy.correct_wrong_patient_order_route(uuid,bigint,text,text,date,text,text,character)', array['hid_pharmacy_runtime', 'hid_schema_test_runtime']),
-  ('pharmacy.find_correctable_order_routes(text)', array['hid_pharmacy_runtime', 'hid_schema_test_runtime'])) v(signature, grantees);
--- Every other function section 6, 0088, 0089 or 0090 creates or replaces:
--- owner only (0088's shared command and its report table's guard, 0089's two
--- shared helpers, and 0090's shared command, lookup and two helpers, among
--- them).
+  ('pharmacy.find_correctable_order_routes(text)', array['hid_pharmacy_runtime', 'hid_schema_test_runtime']),
+  -- 0091 (D18): "We can't complete this order", Lab's and Pharmacy's;
+  -- support's counts, Identity's alone.
+  ('lab.cannot_complete_order_route(uuid,bigint,text,boolean,text,character)', array['hid_lab_runtime', 'hid_schema_test_runtime']),
+  ('pharmacy.cannot_complete_order_route(uuid,bigint,text,text,character)', array['hid_pharmacy_runtime', 'hid_schema_test_runtime']),
+  ('identity.admin_order_route_not_completed(uuid)', array['hid_identity_runtime'])) v(signature, grantees);
+-- Every other function section 6, 0088, 0089, 0090 or 0091 creates or
+-- replaces: owner only (0088's shared command and its report table's guard,
+-- 0089's two shared helpers, 0090's shared command, lookup and two helpers,
+-- and 0091's shared command and its endings table's guard, among them).
 insert into expected_execute
 select p.oid::regprocedure, array[]::text[]
   from pg_proc p join pg_namespace n on n.oid = p.pronamespace
@@ -647,8 +653,8 @@ select expected.signature, coalesce((select array_agg(acl.grantee::regrole::text
    where p.oid = expected.signature and acl.privilege_type = 'EXECUTE' and acl.grantee <> p.proowner),
     array[]::text[]) as grantees
   from expected_execute expected;
-select pg_temp.assert('section 6 has its 69 functions, with the two inbox functions 71, 0088 adds 7, 0089 6 and 0090 8: 92',
-  (select count(*) from expected_execute) = 92, (select count(*) from expected_execute)::text);
+select pg_temp.assert('section 6 has its 69 functions, with the two inbox functions 71, 0088 adds 7, 0089 6, 0090 8 and 0091 5: 97',
+  (select count(*) from expected_execute) = 97, (select count(*) from expected_execute)::text);
 select pg_temp.assert('EXECUTE exactly as section 7 grants it', not exists (select 1 from expected_execute expected
     join actual_execute actual using (signature) where actual.grantees <> expected.grantees),
   (select string_agg(expected.signature::text || ' ' || actual.grantees::text, '; ') from expected_execute expected
@@ -657,14 +663,16 @@ select pg_temp.assert('PUBLIC executes none', not exists (select 1 from expected
     aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) acl
    where p.oid = expected.signature and acl.grantee = 0));
 select pg_temp.assert('every helper, view function and trigger function is the owner''s alone',
-  (select count(*) from expected_execute where cardinality(grantees) = 0) = 51
+  (select count(*) from expected_execute where cardinality(grantees) = 0) = 53
   and (select count(*) from expected_execute where cardinality(grantees) = 0
          and signature in ('ehr.order_route_receives_here(text)'::regprocedure, 'ehr.order_routes_here(text)'::regprocedure,
            'ehr.correct_wrong_patient_order_route(text,uuid,bigint,text,text,date,text,text,character)'::regprocedure,
            'ehr.find_correctable_order_routes(text,text)'::regprocedure,
            'ehr.order_route_correctable_until(ehr.order_routes)'::regprocedure,
-           'ehr.order_route_correction_state(ehr.order_routes)'::regprocedure))
-    = 6
+           'ehr.order_route_correction_state(ehr.order_routes)'::regprocedure,
+           'ehr.cannot_complete_order_route(text,uuid,bigint,text,boolean,text,character)'::regprocedure,
+           'ehr.guard_order_route_unable_ending()'::regprocedure))
+    = 8
   and not exists (select 1 from expected_execute expected, pg_roles runtime
     where cardinality(expected.grantees) = 0 and runtime.rolname ~ '^hid_.*runtime$'
       and has_function_privilege(runtime.oid, expected.signature, 'EXECUTE')));
@@ -708,13 +716,25 @@ select pg_temp.assert('the API runtimes reach the commands through their parents
   and not has_function_privilege('hid_identity_api_runtime', 'pharmacy.find_correctable_order_routes(text)', 'EXECUTE')
   and not has_function_privilege('hid_identity_api_runtime', 'ehr.order_route_correction_state(ehr.order_routes)', 'EXECUTE')
   and has_function_privilege('hid_ehr_api_runtime', 'ehr.patient_list_order_routes()', 'EXECUTE')
-  and has_function_privilege('hid_identity_api_runtime', 'identity.admin_list_wrong_patient_reports(text,uuid)', 'EXECUTE'));
+  and has_function_privilege('hid_identity_api_runtime', 'identity.admin_list_wrong_patient_reports(text,uuid)', 'EXECUTE')
+  -- 0091: each receiving runtime reaches its own "can't complete" only;
+  -- support's counts Identity's; the shared command no runtime.
+  and has_function_privilege('hid_lab_api_runtime', 'lab.cannot_complete_order_route(uuid,bigint,text,boolean,text,character)', 'EXECUTE')
+  and not has_function_privilege('hid_lab_api_runtime', 'pharmacy.cannot_complete_order_route(uuid,bigint,text,text,character)', 'EXECUTE')
+  and not has_function_privilege('hid_lab_api_runtime', 'ehr.cannot_complete_order_route(text,uuid,bigint,text,boolean,text,character)', 'EXECUTE')
+  and has_function_privilege('hid_pharmacy_api_runtime', 'pharmacy.cannot_complete_order_route(uuid,bigint,text,text,character)', 'EXECUTE')
+  and not has_function_privilege('hid_pharmacy_api_runtime', 'lab.cannot_complete_order_route(uuid,bigint,text,boolean,text,character)', 'EXECUTE')
+  and has_function_privilege('hid_identity_api_runtime', 'identity.admin_order_route_not_completed(uuid)', 'EXECUTE')
+  and not has_function_privilege('hid_ehr_api_runtime', 'identity.admin_order_route_not_completed(uuid)', 'EXECUTE')
+  and not has_function_privilege('hid_schema_test_runtime', 'identity.admin_order_route_not_completed(uuid)', 'EXECUTE')
+  and not has_function_privilege('hid_ehr_api_runtime', 'lab.cannot_complete_order_route(uuid,bigint,text,boolean,text,character)', 'EXECUTE'));
 
 -- 2. Tables, sequences, row-level security, triggers.
 create temp table new_tables (relation regclass primary key) on commit drop;
 insert into new_tables values ('ehr.order_routes'), ('ehr.order_route_events'), ('ehr.order_route_accept_attempts'),
   ('ehr.order_route_attestation_texts'), ('lab.order_route_result_reports'), ('pharmacy.order_route_dispensing_reports'),
-  ('identity.order_route_destination_settings'), ('ehr.order_route_wrong_patient_reports');
+  ('identity.order_route_destination_settings'), ('ehr.order_route_wrong_patient_reports'),
+  ('ehr.order_route_unable_endings');
 select pg_temp.assert('no role but the owner holds a privilege on a new table', not exists (select 1
     from new_tables t join pg_class c on c.oid = t.relation, aclexplode(coalesce(c.relacl, acldefault('r', c.relowner))) acl
    where acl.grantee <> c.relowner)
@@ -771,7 +791,7 @@ select pg_temp.assert('every new trigger is enabled ''O''', (select count(*) fil
       'lab_requests_order_routes_sync', 'prescriptions_order_routes_sync', 'result_releases_order_route_return',
       'result_invalidations_order_route_return', 'dispensings_order_route_return',
       'dispensing_reversals_order_route_return', 'organization_applications_order_routes_release',
-      'order_route_wrong_patient_reports_guard')) = 16);
+      'order_route_wrong_patient_reports_guard', 'order_route_unable_endings_guard')) = 17);
 
 -- 4 (run). Every command once.
 create function pg_temp.accept(route uuid, n integer, identifier text, key text)

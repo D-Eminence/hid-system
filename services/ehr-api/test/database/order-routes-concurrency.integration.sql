@@ -26,7 +26,13 @@
 --      ended before); the correction, then the order change (the route
 --      stays ended wrong_patient); a reversal under P's consent, then the
 --      correction (412, then reported without a second reversal); the
---      correction, then such a reversal (refused).
+--      correction, then such a reversal (refused);
+--   8. "We can't complete this order" (0091, D18) against a release, a
+--      verification, a dispensing, item 3's report, the order-change mirror
+--      and support's Close, in both serial orders: whichever comes first
+--      decides, the second answering by the route's state; nothing crosses
+--      after the ending (a release or dispensing under P's consent refused,
+--      23514); a replay and another key on an ended route.
 -- Shared fixture of the P4c suites (each suite carries its own copy, so it
 -- runs alone). Synthetic values only; uuid prefix e4c.
 --   Platform: SA (platform_super_admin), SU (support_admin), FR
@@ -1040,6 +1046,171 @@ select pg_temp.assert('exactly one reversal of each dispensing; T9 empty',
     where reversal.dispensing_id in (current_setting('hid.test.dispensing_3')::uuid,
       current_setting('hid.test.dispensing_4')::uuid)) = 2
   and not exists (select 1 from ehr.order_route_correction_capabilities));
+
+-- 8. "We can't complete this order" (0091, D18) against a release, a
+-- verification, a dispensing, item 3's report, the order-change mirror and
+-- support's Close, in both serial orders. Lab routes 12-21 and prescription
+-- routes 5-6, accepted by LB1 and PB1; LB2 and PB2 hold P's consent
+-- (section 7), so a release or dispensing after the ending reaches the
+-- trigger and the validator.
+create function pg_temp.unable(kind text, route uuid, version bigint, key text)
+returns table (result text, route_state text, ended_kind text)
+language plpgsql as $f$
+begin
+  if kind = 'lab_request' then
+    return query select ended.result, ended.route_state, ended.ended_kind
+      from lab.cannot_complete_order_route(route, version, 'supplies_unavailable', false, key, repeat('a', 64)) ended;
+  else
+    return query select ended.result, ended.route_state, ended.ended_kind
+      from pharmacy.cannot_complete_order_route(route, version, 'out_of_stock', key, repeat('a', 64)) ended;
+  end if;
+end
+$f$;
+grant execute on function pg_temp.unable(text,uuid,bigint,text) to hid_lab_api_runtime, hid_pharmacy_api_runtime;
+set local role hid_ehr_api_runtime;
+select set_config('hid.test.lr_' || n, pg_temp.lab_request(1, 'active')::text, true) from generate_series(12, 21) n;
+select set_config('hid.test.route_' || n, pg_temp.send(11, 'lab_request', current_setting('hid.test.lr_' || n)::uuid,
+  current_setting('hid.test.facility_1')::uuid, 'p4c-race-send-' || lpad(n::text, 6, '0'))::text, true)
+  from generate_series(12, 21) n;
+select set_config('hid.test.rx_' || n, pg_temp.prescription(1, 'active')::text, true) from generate_series(5, 6) n;
+select set_config('hid.test.rxroute_' || n, pg_temp.send(11, 'prescription', current_setting('hid.test.rx_' || n)::uuid,
+  current_setting('hid.test.facility_2')::uuid, 'p4c-race-send-rx' || lpad(n::text, 4, '0'))::text, true)
+  from generate_series(5, 6) n;
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select set_config('hid.test.item_' || n, (select accepted.work_item_id::text
+  from pg_temp.accept_lab(current_setting('hid.test.route_' || n)::uuid, 1, 'p4c-race-accept-0000' || n) accepted), true)
+  from generate_series(12, 21) n;
+reset role;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_signup_admin(2);
+select set_config('hid.test.rxitem_' || n, (select accepted.work_item_id::text from pharmacy.accept_order_route(
+  current_setting('hid.test.rxroute_' || n)::uuid, 1, 'health_id', 'HID-P4CPATP', 'Patient collected the prescription',
+  'p4c-race-rx-accept-0' || n, repeat('a', 64)) accepted), true) from generate_series(5, 6) n;
+reset role;
+-- A release (route 12), then the ending: ALREADY_RETURNED. A verification
+-- (route 13), then the ending: RESULT_READY. The ending (route 14), then a
+-- verification and a release under P's consent (owner SQL writes the
+-- verified result, as one whose access check passed before): refused.
+select set_config('hid.test.result_' || n, pg_temp.lab_chain(current_setting('hid.test.item_' || n)::uuid, 'race' || n,
+  10.4)::text, true) from generate_series(12, 13) n;
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select pg_temp.release(current_setting('hid.test.result_12')::uuid, 1,
+  current_setting('hid.test.race12_verification_1')::uuid, 'p4c-race-release-0012');
+select pg_temp.check('release then "can''t complete"', format($s$select * from pg_temp.unable('lab_request', %L, %s,
+  'p4c-race-unable-0012')$s$, current_setting('hid.test.route_12'),
+  pg_temp.version_of(current_setting('hid.test.route_12')::uuid)), 'P0001 ORDER_ROUTE_ALREADY_RETURNED');
+select pg_temp.check('verification then "can''t complete"', format($s$select * from pg_temp.unable('lab_request', %L, 2,
+  'p4c-race-unable-0013')$s$, current_setting('hid.test.route_13')), 'P0001 ORDER_ROUTE_RESULT_READY');
+select pg_temp.check('"can''t complete" then a verification and a release: the ending', format($s$select result from
+  pg_temp.unable('lab_request', %L, 2, 'p4c-race-unable-0014')$s$, current_setting('hid.test.route_14')), 'ok');
+reset role;
+select set_config('hid.test.result_14', pg_temp.lab_chain(current_setting('hid.test.item_14')::uuid, 'race14',
+  10.4)::text, true);
+set local role hid_lab_api_runtime;
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select pg_temp.check('"can''t complete" then a release under P''s consent: refused', format($s$select pg_temp.release(%L,
+  1, %L, 'p4c-race-release-0014')$s$, current_setting('hid.test.result_14'),
+  current_setting('hid.test.race14_verification_1')), '23514 ORDER_ROUTE_CLOSED');
+reset role;
+-- A dispensing (prescription 5), then the ending: ALREADY_RETURNED; the
+-- ending (prescription 6), then a dispensing under P's consent: refused.
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_staff(33, current_setting('hid.test.facility_2')::uuid);
+select pg_temp.dispense(current_setting('hid.test.rxitem_5')::uuid, 'p4c-race-dispense-0005');
+select pg_temp.as_signup_admin(2);
+select pg_temp.check('dispensing then "can''t complete"', format($s$select * from pg_temp.unable('prescription', %L, %s,
+  'p4c-race-unable-rx05')$s$, current_setting('hid.test.rxroute_5'),
+  pg_temp.version_of(current_setting('hid.test.rxroute_5')::uuid)), 'P0001 ORDER_ROUTE_ALREADY_RETURNED');
+select pg_temp.check('"can''t complete" then a dispensing: the ending', format($s$select result from
+  pg_temp.unable('prescription', %L, 2, 'p4c-race-unable-rx06')$s$, current_setting('hid.test.rxroute_6')), 'ok');
+select pg_temp.as_staff(33, current_setting('hid.test.facility_2')::uuid);
+select pg_temp.check('"can''t complete" then a dispensing under P''s consent: refused', format($s$select pg_temp.dispense(%L,
+  'p4c-race-dispense-0006')$s$, current_setting('hid.test.rxitem_6')), '23514 ORDER_ROUTE_CLOSED');
+reset role;
+-- Item 3's report (route 15) then the ending, and the ending (route 16)
+-- then the report: the second answers ALREADY_ENDED.
+set local role hid_lab_api_runtime;
+select pg_temp.as_staff(31, current_setting('hid.test.facility_1')::uuid);
+select pg_temp.check('report then "can''t complete": the report', format($s$select result from
+  lab.report_wrong_patient_order_route(%L, 2, 'wrong_order_chosen', 'Picked the wrong row at the counter',
+  'p4c-race-wrong-0015', repeat('a', 64))$s$, current_setting('hid.test.route_15')), 'ok');
+select pg_temp.check('report then "can''t complete"', format($s$select * from pg_temp.unable('lab_request', %L, 2,
+  'p4c-race-unable-0015')$s$, current_setting('hid.test.route_15')), 'P0001 ORDER_ROUTE_ALREADY_ENDED');
+select pg_temp.check('"can''t complete" then report: the ending', format($s$select result from pg_temp.unable(
+  'lab_request', %L, 2, 'p4c-race-unable-0016')$s$, current_setting('hid.test.route_16')), 'ok');
+select pg_temp.check('"can''t complete" then report', format($s$select * from lab.report_wrong_patient_order_route(%L, 3,
+  'wrong_order_chosen', 'Picked the wrong row at the counter', 'p4c-race-wrong-0016', repeat('a', 64))$s$,
+  current_setting('hid.test.route_16')), 'P0001 ORDER_ROUTE_ALREADY_ENDED');
+reset role;
+-- A's order change (route 17: cancelled) then the ending: ALREADY_ENDED;
+-- the ending (route 18) then the change: the route keeps its ending.
+set local role hid_ehr_api_runtime;
+select pg_temp.as_staff(11, 'e4c21000-0000-4000-8000-000000000001');
+select set_config('app.change_reason', 'No longer needed', true);
+update ehr.lab_requests set status = 'cancelled' where id = current_setting('hid.test.lr_17')::uuid;
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select pg_temp.check('order change then "can''t complete"', format($s$select * from pg_temp.unable('lab_request', %L, %s,
+  'p4c-race-unable-0017')$s$, current_setting('hid.test.route_17'),
+  pg_temp.version_of(current_setting('hid.test.route_17')::uuid)), 'P0001 ORDER_ROUTE_ALREADY_ENDED');
+select pg_temp.check('"can''t complete" then order change: the ending', format($s$select result from pg_temp.unable(
+  'lab_request', %L, 2, 'p4c-race-unable-0018')$s$, current_setting('hid.test.route_18')), 'ok');
+reset role;
+set local role hid_ehr_api_runtime;
+select pg_temp.as_staff(11, 'e4c21000-0000-4000-8000-000000000001');
+select set_config('app.change_reason', 'No longer needed', true);
+update ehr.lab_requests set status = 'cancelled' where id = current_setting('hid.test.lr_18')::uuid;
+reset role;
+-- Support's Close (route 19) then the ending: ALREADY_ENDED; the ending
+-- (route 20) then the Close: ALREADY_CLOSED.
+set local role hid_identity_api_runtime;
+select pg_temp.as_platform(3);
+select closed.state from identity.admin_close_order_route(current_setting('hid.test.route_19')::uuid, 2,
+  'The hospital asked support to close it') closed;
+reset role;
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select pg_temp.check('Close then "can''t complete"', format($s$select * from pg_temp.unable('lab_request', %L, %s,
+  'p4c-race-unable-0019')$s$, current_setting('hid.test.route_19'),
+  pg_temp.version_of(current_setting('hid.test.route_19')::uuid)), 'P0001 ORDER_ROUTE_ALREADY_ENDED');
+select pg_temp.check('"can''t complete" then Close: the ending', format($s$select result from pg_temp.unable(
+  'lab_request', %L, 2, 'p4c-race-unable-0020')$s$, current_setting('hid.test.route_20')), 'ok');
+reset role;
+set local role hid_identity_api_runtime;
+select pg_temp.as_platform(3);
+select pg_temp.check('"can''t complete" then Close', format($s$select * from identity.admin_close_order_route(%L, 3,
+  'The hospital asked support to close it')$s$, current_setting('hid.test.route_20')), '23505 ORDER_ROUTE_ALREADY_CLOSED');
+reset role;
+-- Two endings of route 21: the same member, key and request replay; another
+-- key answers ALREADY_ENDED.
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+select pg_temp.check('the ending of route 21', format($s$select result from pg_temp.unable('lab_request', %L, 2,
+  'p4c-race-unable-0021')$s$, current_setting('hid.test.route_21')), 'ok');
+select pg_temp.assert('the same request again: replayed', (select ended.result = 'replayed'
+  from pg_temp.unable('lab_request', current_setting('hid.test.route_21')::uuid, 2, 'p4c-race-unable-0021') ended));
+select pg_temp.check('another key on route 21', format($s$select * from pg_temp.unable('lab_request', %L, 3,
+  'p4c-race-unable-0021b')$s$, current_setting('hid.test.route_21')), 'P0001 ORDER_ROUTE_ALREADY_ENDED');
+reset role;
+select pg_temp.assert('each route''s ending after the serial pairs; nothing crossed after an ending',
+  (select array_agg(n || ':' || route.state || ':' || coalesce(route.ended_kind, '-') order by n)
+     from generate_series(12, 21) n join ehr.order_routes route on route.id = current_setting('hid.test.route_' || n)::uuid)
+    = array['12:completed:-', '13:accepted:-', '14:cancelled:receiving_unable', '15:cancelled:wrong_patient',
+      '16:cancelled:receiving_unable', '17:cancelled:order_changed', '18:cancelled:receiving_unable',
+      '19:cancelled:support', '20:cancelled:receiving_unable', '21:cancelled:receiving_unable']
+  and (select array_agg(n || ':' || route.state || ':' || coalesce(route.ended_kind, '-') order by n)
+     from generate_series(5, 6) n join ehr.order_routes route on route.id = current_setting('hid.test.rxroute_' || n)::uuid)
+    = array['5:completed:-', '6:cancelled:receiving_unable']
+  and not exists (select 1 from lab.order_route_result_reports report
+                   where report.route_id = current_setting('hid.test.route_14')::uuid)
+  and not exists (select 1 from pharmacy.dispensings dispensing
+                   where dispensing.work_item_id = current_setting('hid.test.rxitem_6')::uuid)
+  and (select count(*) from ehr.order_route_unable_endings ending_row
+        where ending_row.idempotency_key like 'p4c-race-unable-%') = 6);
 
 select pg_temp.report();
 rollback;

@@ -37,6 +37,12 @@
 --      reported, not accepted and too late refuse with their codes; the
 --      deadline C21 gives is ehr.order_route_correctable_until's while the
 --      route is open, correctable or too late.
+--  11. "We can't complete this order" (0091, D18) for every route of the
+--      suite received at L1 or PH1: the command (tried as LB1 or PB1 at the
+--      route's version, and undone) ends exactly the open accepted routes
+--      and answers every other by its state; the closer with the new kind
+--      ends an accepted route cancelled, and the end CHECK refuses it on a
+--      sent route (withdrawn) and a completed one (access ended).
 -- Shared fixture of the P4c suites (each suite carries its own copy, so it
 -- runs alone). Synthetic values only; uuid prefix e4c.
 --   Platform: SA (platform_super_admin), SU (support_admin), FR
@@ -1440,6 +1446,105 @@ select pg_temp.assert('C21''s deadline: ehr.order_route_correctable_until''s whi
   and not exists (select 1 from ehr.order_route_wrong_patient_reports report
                    where report.idempotency_key like 'p4c-lifecycle-late-%')
   and not exists (select 1 from ehr.order_route_correction_capabilities));
+
+-- 11. "We can't complete this order" (0091, D18) by state, for every route
+-- received at L1 or PH1: the command tried at the route's version as LB1 or
+-- PB1 and undone ends exactly the routes item 3's report could still
+-- report (accepted, inside the work window, not ended, no report, no checked
+-- result) and answers every other by its state; and 0086's closer with the
+-- new kind passes the end CHECK only from accepted (cancelled): a sent
+-- route would end withdrawn and a completed one access-ended, both refused.
+create function pg_temp.unable_acts(kind text, route uuid, version bigint) returns text language plpgsql as $f$
+begin
+  begin
+    if kind = 'lab_request' then
+      perform * from lab.cannot_complete_order_route(route, version, 'other', false,
+        'p4c-lifecycle-unable-' || substr(md5(route::text), 1, 12), repeat('a', 64));
+    else
+      perform * from pharmacy.cannot_complete_order_route(route, version, 'other',
+        'p4c-lifecycle-unable-' || substr(md5(route::text), 1, 12), repeat('a', 64));
+    end if;
+    raise exception 'P4C_UNABLE_ACTED';
+  exception when others then
+    if sqlerrm = 'P4C_UNABLE_ACTED' then
+      return 'acts';
+    end if;
+    return sqlstate || ' ' || sqlerrm;
+  end;
+end
+$f$;
+grant execute on function pg_temp.unable_acts(text,uuid,bigint) to hid_lab_api_runtime, hid_pharmacy_api_runtime;
+create temp table unable_route on commit drop as
+  select route.id, route.kind, route.row_version,
+    case when route.accepted_at is null then 'P0001 ORDER_ROUTE_NOT_ACCEPTED'
+         when route.ended_at is not null
+           or exists (select 1 from ehr.order_route_wrong_patient_reports report where report.route_id = route.id)
+           then 'P0001 ORDER_ROUTE_ALREADY_ENDED'
+         when route.state = 'completed' then 'P0001 ORDER_ROUTE_ALREADY_RETURNED'
+         when route.state <> 'accepted' or clock_timestamp() >= route.writes_end_at then 'P0001 ORDER_ROUTE_ALREADY_ENDED'
+         when route.kind = 'lab_request' and exists (select 1 from lab.results result_row
+                join lab.test_executions execution on execution.id = result_row.execution_id
+                join lab.work_item_requested_tests test on test.id = execution.requested_test_id
+               where test.work_item_id = route.lab_work_item_id
+                 and exists (select 1 from lab.result_verifications verification
+                              where verification.result_id = result_row.id
+                                and verification.result_version = result_row.current_version)
+                 and not exists (select 1 from lab.result_invalidations invalidation
+                                  where invalidation.result_id = result_row.id
+                                    and invalidation.result_version = result_row.current_version))
+           then 'P0001 ORDER_ROUTE_RESULT_READY'
+         else 'acts' end as expected,
+    null::text as outcome
+    from ehr.order_routes route
+   where route.receiving_facility_id in (current_setting('hid.test.facility_1')::uuid,
+     current_setting('hid.test.facility_2')::uuid);
+grant select, update on unable_route to hid_lab_api_runtime, hid_pharmacy_api_runtime;
+set local role hid_lab_api_runtime;
+select pg_temp.as_signup_admin(1);
+update unable_route set outcome = pg_temp.unable_acts(kind, id, row_version) where kind = 'lab_request';
+reset role;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_signup_admin(2);
+update unable_route set outcome = pg_temp.unable_acts(kind, id, row_version) where kind = 'prescription';
+reset role;
+select pg_temp.assert('"can''t complete" ends exactly the open accepted routes and answers every other by its state',
+  not exists (select 1 from unable_route listed where listed.outcome is distinct from listed.expected)
+  and exists (select 1 from unable_route listed where listed.expected = 'acts')
+  and exists (select 1 from unable_route listed where listed.expected = 'P0001 ORDER_ROUTE_ALREADY_ENDED')
+  and exists (select 1 from unable_route listed where listed.expected = 'P0001 ORDER_ROUTE_NOT_ACCEPTED')
+  and not exists (select 1 from ehr.order_route_unable_endings ending_row
+                   where ending_row.idempotency_key like 'p4c-lifecycle-unable-%'),
+  (select count(*) || ' routes: ' || string_agg(listed.expected || '/' || coalesce(listed.outcome, '-'), ', ')
+     from unable_route listed where listed.outcome is distinct from listed.expected));
+create function pg_temp.closer_unable(route uuid) returns text language plpgsql as $f$
+declare closed record;
+begin
+  begin
+    select * into closed from ehr.close_order_route(route, 'receiving_unable', 'receiving', true);
+    raise exception 'P4C_CLOSER:%', closed.outcome;
+  exception when others then
+    if sqlerrm like 'P4C_CLOSER:%' then
+      return substr(sqlerrm, 12);
+    end if;
+    return sqlstate || ' ' || sqlerrm;
+  end;
+end
+$f$;
+select pg_temp.as_signup_admin(1);
+select pg_temp.assert('the closer with receiving_unable: accepted -> cancelled passes; a sent route (withdrawn) and '
+    || 'a completed one (access ended) are refused by the end CHECK',
+  (select bool_and(pg_temp.closer_unable(listed.id) = 'cancelled') from unable_route listed
+    where listed.expected = 'acts')
+  and (select bool_and(pg_temp.closer_unable(route.id)
+          = '23514 new row for relation "order_routes" violates check constraint "order_routes_end_ck"')
+         and count(*) > 0
+         from ehr.order_routes route where route.state = 'sent' and clock_timestamp() < route.respond_by)
+  and (select bool_and(pg_temp.closer_unable(route.id)
+          = '23514 new row for relation "order_routes" violates check constraint "order_routes_end_ck"')
+         and count(*) > 0
+         from ehr.order_routes route where route.state = 'completed' and route.ended_at is null),
+  (select string_agg(route.state || ':' || pg_temp.closer_unable(route.id), ', ') from ehr.order_routes route
+    where route.state in ('sent', 'accepted', 'completed') and route.ended_at is null));
 
 select pg_temp.report();
 rollback;
