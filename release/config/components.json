@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0090",
-    "count": 91,
+    "last": "0091",
+    "count": 92,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -461,6 +461,10 @@
       {
         "name": "0090_order_route_late_correction.sql",
         "sha256": "78d87c950ca52fd4e91a11b08add89366565acd8a90dfbc67cbf6e076ae2eace"
+      },
+      {
+        "name": "0091_order_route_cannot_complete.sql",
+        "sha256": "4614b2b08e21e384a10ad916c47db393854f949e2d57a5751876d8a9644367a9"
       }
     ]
   },
