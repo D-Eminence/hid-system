@@ -1,7 +1,29 @@
-import { IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
+import { Equals, IsEmail, IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
 
 export class StartPatientEnrollmentDto {
   @IsString() @Matches(/^\d{11}$/) nin!: string;
+  @IsIn(['patient-enrollment']) turnstileAction!: 'patient-enrollment';
+  // Optional here so a missing token answers 400 TURNSTILE_REQUIRED (TS-8).
+  @IsOptional() @IsString() @MaxLength(2048) turnstileToken?: string;
+}
+
+/** The genders the enrollment profile accepts (identity.patients.gender has no CHECK). */
+export const SIGNUP_GENDERS = ['male', 'female', 'intersex', 'other', 'unknown'] as const;
+export type SignupGender = typeof SIGNUP_GENDERS[number];
+
+/** Sign-up without a NIN (0092): the declared profile; the email is verified next. */
+export class SignupPatientEnrollmentDto {
+  @IsString() @MinLength(1) @MaxLength(80) @Matches(/^[^\x00-\x1f\x7f]*\S[^\x00-\x1f\x7f]*$/)
+  firstName!: string;
+  @IsString() @MinLength(1) @MaxLength(80) @Matches(/^[^\x00-\x1f\x7f]*\S[^\x00-\x1f\x7f]*$/)
+  lastName!: string;
+  @IsString() @MaxLength(254) @IsEmail() email!: string;
+  // 0XXXXXXXXXX or +234XXXXXXXXXX; spaces, dashes and brackets are ignored.
+  @IsString() @MaxLength(32) @Matches(/^\s*(?:0|\+234)[\d\s()-]{10,24}$/) phone!: string;
+  @IsIn(SIGNUP_GENDERS) gender!: SignupGender;
+  @IsOptional() @IsString() @MaxLength(120) @Matches(/^[^\x00-\x1f\x7f]*$/)
+  hospitalCurrentlyUsing?: string;
+  @Equals(true) termsAccepted!: true;
   @IsIn(['patient-enrollment']) turnstileAction!: 'patient-enrollment';
   // Optional here so a missing token answers 400 TURNSTILE_REQUIRED (TS-8).
   @IsOptional() @IsString() @MaxLength(2048) turnstileToken?: string;

@@ -136,9 +136,10 @@ const environmentSchema = z.object({
   QOREID_NIN_ONLY_ENROLLMENT_ENABLED: booleanString,
   // The signed-in "Verify NIN" (POST /identity/me/verification/nin) binds a NIN
   // on a name and date-of-birth match, without proof that the patient holds
-  // it. False answers 503 before any lookup, quota charge or evidence write;
-  // only the owner turns it on.
-  QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: booleanString,
+  // it. On when unset (owner decision of 2026-10-27: sign-up has no NIN, and
+  // this is how a patient adds one later); an explicit 'false' answers 503
+  // before any lookup, quota charge or evidence write.
+  QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
   QOREID_BASE_URL: z.string().url().default('https://api.qoreid.com'),
   QOREID_CLIENT_ID: optionalString,
   QOREID_CLIENT_SECRET: optionalString,

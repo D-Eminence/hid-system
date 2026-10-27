@@ -6,7 +6,7 @@ import { AuditAction, Public } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
-import { ActivatePatientEnrollmentDto, PatientEnrollmentContactDto,
+import { ActivatePatientEnrollmentDto, PatientEnrollmentContactDto, SignupPatientEnrollmentDto,
   StartPatientEnrollmentDto, VerifyPatientEnrollmentContactDto } from './dto/patient-enrollment.dto';
 import { ENROLLMENT_COOKIE_NAME, enrollmentCookieOptions } from './enrollment-cookie';
 import { PatientEnrollmentService } from './patient-enrollment.service';
@@ -43,6 +43,30 @@ export class PatientEnrollmentController {
       request.correlationId, googleCookie);
     response.cookie(ENROLLMENT_COOKIE_NAME, result.cookie,
       enrollmentCookieOptions(this.environment.AUTH_COOKIE_SECURE));
+    return result.progress;
+  }
+
+  /**
+   * Sign-up without a NIN (owner decision of 2026-10-27, as hid-1.0): the
+   * declared profile, then a code to the email at once. Same origin,
+   * Turnstile, accountless and Idempotency-Key handling as the NIN start.
+   */
+  @Post('signup')
+  @HttpCode(200)
+  @AuditAction('identity.patient-enrollment.signup')
+  async signup(@Body() input: SignupPatientEnrollmentDto,
+    @Headers('idempotency-key') idempotencyKey: string | undefined,
+    @Req() request: HidRequest, @Res({ passthrough: true }) response: Response) {
+    this.assertOrigin(request);
+    await this.turnstile.verify({ token: input.turnstileToken,
+      action: input.turnstileAction, origin: request.header('origin'), remoteIp: request.ip });
+    this.assertAccountlessEnrollment(request,
+      this.namedCookie(request, this.google.onboardingCookieName));
+    const result = await this.enrollments.signup({
+      firstName: input.firstName, lastName: input.lastName, email: input.email, phone: input.phone,
+      gender: input.gender, hospitalCurrentlyUsing: input.hospitalCurrentlyUsing,
+    }, idempotencyKey ?? '', request.ip, request.correlationId, (cookie) => response.cookie(
+      ENROLLMENT_COOKIE_NAME, cookie, enrollmentCookieOptions(this.environment.AUTH_COOKIE_SECURE)));
     return result.progress;
   }
 

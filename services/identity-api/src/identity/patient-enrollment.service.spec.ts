@@ -43,12 +43,35 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
   let bound = false;
   let contactBound = false;
   let ready = true;
+  let contactReady = true;
+  let signupOutcome = 'started';
   let rateCount = 0;
   const queries: RecordedQuery[] = [];
   const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
     queries.push({ sql, values });
     if (sql.includes('public_patient_nin_already_bound')) return { rows: [{ bound }] };
     if (sql.includes('public_patient_enrollment_ready')) return { rows: [{ ready }] };
+    if (sql.includes('patient_contact_lookup_ready')) return { rows: [{ ready: contactReady }] };
+    if (sql.includes('identity.start_public_patient_signup')) {
+      if (signupOutcome !== 'started') return { rows: [{ outcome: signupOutcome }] };
+      if (enrollment) throw Object.assign(new Error('duplicate enrollment'), { code: '23505' });
+      enrollment = {
+        id: values[0], nin_lookup_hmac: null, nin_last4: null, nin_ciphertext: null,
+        request_hmac: values[1], token_hmac: values[2], signup_email_lookup_hmac: values[4],
+        signup_phone_lookup_hmac: values[5], signup_phone_ciphertext: values[6],
+        profile_ciphertext: values[7], profile_sha256: values[8], key_version: values[9],
+        provider_reference: null, state: 'verify_contact', expires_at: new Date(Date.now() + 86_400_000),
+        created_at: new Date(), contact_channel: null, contact_hmac: null, contact_lookup_hmac: null,
+        contact_ciphertext: null, contact_verified_at: null,
+      };
+      return { rows: [{ outcome: 'started' }] };
+    }
+    if (sql.includes('identity.activate_public_patient_signup')) {
+      if (enrollment?.state === 'active') return { rows: [{ patient_id: 'patient-8',
+        account_id: 'account-8', hid_code: 'HID-TEST-00000001', replayed: true }] };
+      Object.assign(enrollment!, { activated_at: new Date(), state: 'active', patient_id: 'patient-8' });
+      return { rows: [{ patient_id: 'patient-8', account_id: 'account-8', hid_code: values[4], replayed: false }] };
+    }
     if (sql.includes('public_patient_contact_already_bound')) return { rows: [{ bound: contactBound }] };
     if (sql.includes('from identity.public_patient_enrollment_rates')) return { rows: rateCount
       ? [{ request_count: rateCount, window_started_at: new Date() }] : [] };
@@ -174,6 +197,8 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
     set bound(value: boolean) { bound = value; },
     set contactBound(value: boolean) { contactBound = value; },
     set ready(value: boolean) { ready = value; },
+    set contactReady(value: boolean) { contactReady = value; },
+    set signupOutcome(value: string) { signupOutcome = value; },
     set rateCount(value: number) { rateCount = value; } };
 }
 
@@ -221,28 +246,33 @@ describe('PatientEnrollmentService', () => {
 
   it.each([true, false])('reports only reconciliation readiness (%s), without consuming a NIN or contacting a provider', async ready => {
     const f = fixture(); f.ready = ready;
-    await expect(f.service.availability(correlationId)).resolves.toEqual({ open: ready });
+    // open is the sign-up's: the NIN start's readiness is ninStart only.
+    await expect(f.service.availability(correlationId)).resolves.toEqual({ open: true, signup: true, ninStart: ready });
     expect(f.provider.isAvailable).toHaveBeenCalledTimes(1);
-    expect(f.queries).toEqual([{ sql: 'select identity.public_patient_enrollment_ready() as ready', values: [] }]);
+    expect(f.queries).toEqual([
+      { sql: 'select identity.patient_contact_lookup_ready() as ready', values: [] },
+      { sql: 'select identity.public_patient_enrollment_ready() as ready', values: [] }]);
     expect(f.provider.verifyNin).not.toHaveBeenCalled();
     expect(f.notification.deliver).not.toHaveBeenCalled();
   });
 
-  it('reports closed while the QoreID gate is closed, without reading readiness', async () => {
+  it('reports the NIN start closed while the QoreID gate is closed, without reading its readiness; sign-up stays open', async () => {
     const f = fixture();
     f.provider.isAvailable.mockResolvedValue(false);
-    await expect(f.service.availability(correlationId)).resolves.toEqual({ open: false });
-    expect(f.queries).toEqual([]);
+    await expect(f.service.availability(correlationId)).resolves.toEqual({ open: true, signup: true, ninStart: false });
+    expect(f.queries).toEqual([{ sql: 'select identity.patient_contact_lookup_ready() as ready', values: [] }]);
     expect(f.provider.verifyNin).not.toHaveBeenCalled();
   });
 
-  it('reports closed when enrollment configuration is missing, as start refuses', async () => {
+  it('reports the NIN start closed when enrollment configuration is missing, as start refuses; sign-up does not need the NIN keys', async () => {
     delete process.env.NIN_ENCRYPTION_KEY_B64;
+    delete process.env.NIN_LOOKUP_HMAC_KEY_B64;
     resetEnvironmentForTests();
     const f = fixture();
-    await expect(f.service.availability(correlationId)).resolves.toEqual({ open: false });
+    await expect(f.service.availability(correlationId)).resolves.toEqual({ open: true, signup: true, ninStart: false });
     expect(f.provider.isAvailable).not.toHaveBeenCalled();
-    expect(f.queries).toEqual([]);
+    expect(f.queries).toEqual([{ sql: 'select identity.patient_contact_lookup_ready() as ready', values: [] }]);
+    f.queries.length = 0;
     await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
       .rejects.toMatchObject({ status: 503, code: 'ENROLLMENT_CONFIGURATION_UNAVAILABLE' });
     expect(f.provider.assertAvailable).not.toHaveBeenCalled();
@@ -984,12 +1014,13 @@ describe('PatientEnrollmentService', () => {
       async (_label, closed, pause, status, code) => {
         Object.assign(process.env, open); resetEnvironmentForTests();
         const { f, adapter, pause: pauseQoreId } = gated();
-        await expect(f.service.availability(correlationId)).resolves.toEqual({ open: true });
+        await expect(f.service.availability(correlationId)).resolves.toEqual({ open: true, signup: true, ninStart: true });
         f.queries.length = 0;
         Object.assign(process.env, closed); resetEnvironmentForTests();
         if (pause) pauseQoreId();
-        await expect(f.service.availability(correlationId)).resolves.toEqual({ open: false });
-        expect(f.queries).toEqual([]);
+        await expect(f.service.availability(correlationId)).resolves.toEqual({ open: true, signup: true, ninStart: false });
+        expect(f.queries).toEqual([{ sql: 'select identity.patient_contact_lookup_ready() as ready', values: [] }]);
+        f.queries.length = 0;
         await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
           .rejects.toMatchObject({ status, code });
         expect(f.queries).toEqual([]);
@@ -1000,7 +1031,8 @@ describe('PatientEnrollmentService', () => {
       Object.assign(process.env, open);
       delete process.env.NIN_ENCRYPTION_KEY_B64; resetEnvironmentForTests();
       const { f, integrations } = gated();
-      await expect(f.service.availability(correlationId)).resolves.toEqual({ open: false });
+      await expect(f.service.availability(correlationId)).resolves.toEqual({ open: true, signup: true, ninStart: false });
+      f.queries.length = 0;
       await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
         .rejects.toMatchObject({ status: 503, code: 'ENROLLMENT_CONFIGURATION_UNAVAILABLE' });
       expect(integrations.assertAvailable).not.toHaveBeenCalled();
@@ -1177,6 +1209,117 @@ describe('PatientEnrollmentService', () => {
       await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
         .resolves.toMatchObject({ progress: { recordName: 'Amina Fixture Okafor' } });
       expect(await f.service.current(started.cookie, correlationId)).not.toHaveProperty('recordName');
+    });
+  });
+
+  describe('sign-up without a NIN (0092)', () => {
+    const declared = { firstName: ' Ada ', lastName: 'Obi', email: 'Ada@Example.test',
+      phone: '0803 123 4567', gender: 'female' as const, hospitalCurrentlyUsing: 'LUTH' };
+    const challengeOf = (progress: unknown) => String((progress as { challengeId?: string }).challengeId);
+    const signupCalls = (f: ReturnType<typeof fixture>) => f.queries
+      .filter(({ sql }) => sql.includes('identity.start_public_patient_signup'));
+
+    it('stores the declared profile without a NIN, sets the cookie and sends a code to the email at once', async () => {
+      const f = fixture();
+      const cookies: string[] = [];
+      const result = await f.service.signup(declared, requestKey, '203.0.113.10', correlationId,
+        (cookie) => cookies.push(cookie));
+      expect(cookies).toEqual([result.cookie]);
+      expect(result.progress).toMatchObject({ stage: 'verify_contact', contactChannel: 'email',
+        maskedContact: 'a•••@example.test', challengeId: f.challenge?.id,
+        expiresInSeconds: expect.any(Number), resendAfterSeconds: expect.any(Number),
+        expiresAt: expect.any(String), googleOnboardingRequired: false });
+      expect(result.progress).not.toHaveProperty('recordName');
+      const [call] = signupCalls(f);
+      expect(call?.values[3]).toBe('ada@example.test');
+      expect(call?.values[4]).toBe(createContactLookupHmac('email', 'ada@example.test'));
+      expect(call?.values[5]).toBe(createContactLookupHmac('phone', '+2348031234567'));
+      expect(f.enrollment).toMatchObject({ nin_lookup_hmac: null, state: 'verify_contact', contact_channel: 'email' });
+      expect(f.notification.deliver).toHaveBeenCalledWith(expect.objectContaining({
+        recipient: 'ada@example.test', purpose: 'SIGNUP_VERIFY', channel: 'email' }));
+      // Neither QoreID nor the NIN registry is involved.
+      expect(f.provider.assertAvailable).not.toHaveBeenCalled();
+      expect(f.provider.verifyNin).not.toHaveBeenCalled();
+      expect(f.protector.lookup).not.toHaveBeenCalled();
+      expect(f.queries.some(({ sql }) => sql.includes('public_patient_enrollment_ready'))).toBe(false);
+    });
+
+    it('verifies the declared email, then activates from the declared profile with its own command', async () => {
+      const f = fixture();
+      const started = await f.service.signup(declared, requestKey, '203.0.113.10', correlationId, () => undefined);
+      const code = f.notification.deliver.mock.calls[0]?.[0].code as string;
+      await expect(f.service.verifyContact(started.cookie, challengeOf(started.progress), code, correlationId))
+        .resolves.toEqual({ stage: 'set_password' });
+      await expect(f.service.activate(started.cookie, 'correct horse battery', correlationId))
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      const activation = f.queries.find(({ sql }) => sql.includes('identity.activate_public_patient_signup'));
+      expect(JSON.parse(String(activation?.values[2]))).toEqual({ kind: 'signup', firstName: 'Ada', lastName: 'Obi',
+        email: 'ada@example.test', phone: '+2348031234567', gender: 'female', hospitalCurrentlyUsing: 'LUTH',
+        termsAccepted: true });
+      expect(activation?.values[3]).toBe('ada@example.test');
+      expect(f.queries.some(({ sql }) => sql.includes('identity.activate_public_patient_enrollment'))).toBe(false);
+      expect(f.google.consumePendingInTransaction).not.toHaveBeenCalled();
+    });
+
+    it('works without the NIN keys, encrypting with the OTP-derived key', async () => {
+      delete process.env.NIN_ENCRYPTION_KEY_B64; delete process.env.NIN_LOOKUP_HMAC_KEY_B64;
+      resetEnvironmentForTests();
+      const f = fixture();
+      const started = await f.service.signup(declared, requestKey, '203.0.113.10', correlationId, () => undefined);
+      expect(f.enrollment?.key_version).toBe('otp-hkdf:local-v1');
+      const code = f.notification.deliver.mock.calls[0]?.[0].code as string;
+      await f.service.verifyContact(started.cookie, challengeOf(started.progress), code, correlationId);
+      await expect(f.service.activate(started.cookie, 'correct horse battery', correlationId))
+        .resolves.toMatchObject({ stage: 'active' });
+    });
+
+    it('refuses another email or a phone for the code', async () => {
+      const f = fixture();
+      const started = await f.service.signup(declared, requestKey, '203.0.113.10', correlationId, () => undefined);
+      await expect(f.service.startContact(started.cookie, 'email', 'eve@example.test', '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 400, code: 'ENROLLMENT_CONTACT_MISMATCH' });
+      await expect(f.service.startContact(started.cookie, 'phone', '08031234567', '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 400, code: 'ENROLLMENT_CONTACT_MISMATCH' });
+    });
+
+    it.each([['email_registered', 'PATIENT_EMAIL_ALREADY_REGISTERED', 'This email address already has a Health ID account. Sign in instead.'],
+      ['phone_registered', 'PATIENT_PHONE_ALREADY_REGISTERED', 'This phone number already has a Health ID account. Sign in instead.']])(
+      'answers %s with 409 and sets no cookie', async (outcome, code, detail) => {
+        const f = fixture(); f.signupOutcome = outcome;
+        const cookies: string[] = [];
+        await expect(f.service.signup(declared, requestKey, '203.0.113.10', correlationId, (cookie) => cookies.push(cookie)))
+          .rejects.toMatchObject({ status: 409, code, message: detail });
+        expect(cookies).toEqual([]);
+        expect(f.notification.deliver).not.toHaveBeenCalled();
+      });
+
+    it('resumes a retry with the same key and declaration, and refuses the key for another declaration', async () => {
+      const f = fixture();
+      const first = await f.service.signup(declared, requestKey, '203.0.113.10', correlationId, () => undefined);
+      const again = await f.service.signup(declared, requestKey, '203.0.113.10', correlationId, () => undefined);
+      expect(again.cookie).toBe(first.cookie);
+      expect(again.progress).toMatchObject({ stage: 'verify_contact', challengeId: challengeOf(first.progress) });
+      expect(signupCalls(f)).toHaveLength(1);
+      expect(f.notification.deliver).toHaveBeenCalledTimes(1);
+      await expect(f.service.signup({ ...declared, lastName: 'Other' }, requestKey, '203.0.113.10', correlationId,
+        () => undefined)).rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_KEY_REUSED' });
+    });
+
+    it.each([['phone', { phone: '0803123456' }], ['phone', { phone: '+447700900123' }],
+      ['firstName', { firstName: '   ' }], ['email', { email: 'not-an-email' }]] as const)(
+      'refuses an invalid %s before anything is written', async (field, change) => {
+        const f = fixture();
+        await expect(f.service.signup({ ...declared, ...change }, requestKey, '203.0.113.10', correlationId,
+          () => undefined)).rejects.toMatchObject({ status: 400, code: 'VALIDATION_FAILED',
+          errors: [expect.objectContaining({ field })] });
+        expect(f.queries).toEqual([]);
+      });
+
+    it('the NIN start refuses a sign-up\'s key as reused', async () => {
+      const f = fixture();
+      await f.service.signup(declared, requestKey, '203.0.113.10', correlationId, () => undefined);
+      await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
+        .rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_KEY_REUSED' });
     });
   });
 });

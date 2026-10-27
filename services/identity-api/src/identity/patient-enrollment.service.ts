@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomInt,
+import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes, randomInt,
   randomUUID, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import * as argon2 from 'argon2';
@@ -12,13 +12,18 @@ import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
-import { createContactLookupHmac } from './contact-lookup';
+import { createContactLookupHmac, normalizeContactForLookup } from './contact-lookup';
+import type { SignupGender } from './dto/patient-enrollment.dto';
 import { enrollmentKeysConfigured } from './enrollment-keys';
 import { PUBLIC_PATIENT_IDENTITY_PROVIDER, type PublicPatientIdentityProvider,
   type VerifiedPublicPatientIdentity } from './patient-enrollment.provider';
 
 interface EnrollmentRow extends QueryResultRow {
-  id: string; nin_lookup_hmac: string; request_hmac: string; token_hmac: string;
+  /** Null for a sign-up without a NIN (0092). */
+  id: string; nin_lookup_hmac: string | null; request_hmac: string; token_hmac: string;
+  /** Set only for a sign-up without a NIN (0092): the declared email's contact lookup HMAC. */
+  signup_email_lookup_hmac?: string | null;
+  key_version: string; profile_sha256: string;
   patient_id: string | null;
   state: 'verify_contact' | 'set_password' | 'active'; expires_at: Date;
   profile_ciphertext: Buffer; contact_ciphertext: Buffer | null;
@@ -34,6 +39,17 @@ interface ChallengeRow extends QueryResultRow {
   recipient_hmac: string; delivery_outcome: string;
 }
 type ContactChannel = 'phone' | 'email';
+/** What a sign-up without a NIN declares (POST /identity/patient-enrollments/signup). */
+export interface PatientSignupInput {
+  firstName: string; lastName: string; email: string; phone: string;
+  gender: SignupGender; hospitalCurrentlyUsing?: string;
+}
+/**
+ * Key versions of sign-up rows encrypted with a key derived from the OTP key
+ * (HKDF-SHA256), used when NIN_ENCRYPTION_KEY_B64 is not configured: a
+ * sign-up never depends on the NIN keys.
+ */
+const SIGNUP_DERIVED_KEY_PREFIX = 'otp-hkdf:';
 const localOtpKey = randomBytes(32);
 const ENROLLMENT_TTL_MS = 24 * 60 * 60 * 1000;
 /**
@@ -70,19 +86,105 @@ export class PatientEnrollmentService {
     private readonly google: GoogleAuthenticationService) {}
 
   /**
-   * Whether a start would now pass the checks it makes before it reads a NIN:
-   * the enrollment keys, the QoreID gate (a runtime pause included) and the
-   * database's readiness. It reads no NIN, cookie or rate bucket and writes
-   * nothing; per-request refusals (rate limits, a registered NIN) are not
-   * predicted.
+   * `open`: whether a sign-up without a NIN (POST signup) would now pass the
+   * checks it makes before it reads anything: its keys and the contact lookup
+   * readiness; it never depends on QoreID or the NIN keys. `signup: true` says
+   * this build serves POST signup. `ninStart`: whether the NIN-first start
+   * would pass its checks (the enrollment keys, the QoreID gate, a runtime
+   * pause included, and the database's readiness). It reads no NIN, cookie or
+   * rate bucket and writes nothing; per-request refusals (rate limits, a
+   * registered email, phone or NIN) are not predicted.
    */
-  async availability(correlationId: string): Promise<{ open: boolean }> {
-    if (!this.configured() || !await this.provider.isAvailable()) return { open: false };
+  async availability(correlationId: string): Promise<{ open: boolean; signup: true; ninStart: boolean }> {
+    const signupConfigured = this.signupConfigured();
+    const ninConfigured = this.configured() && await this.provider.isAvailable();
+    if (!signupConfigured && !ninConfigured) return { open: false, signup: true, ninStart: false };
     return this.database.withSystemTransaction(correlationId, async (client) => {
-      const readiness = await client.query<{ ready: boolean }>(
-        'select identity.public_patient_enrollment_ready() as ready');
-      return { open: readiness.rows[0]?.ready === true };
+      const contactReady = signupConfigured ? (await client.query<{ ready: boolean }>(
+        'select identity.patient_contact_lookup_ready() as ready')).rows[0]?.ready === true : false;
+      const ninReady = ninConfigured ? (await client.query<{ ready: boolean }>(
+        'select identity.public_patient_enrollment_ready() as ready')).rows[0]?.ready === true : false;
+      return { open: contactReady, signup: true as const, ninStart: ninReady };
     });
+  }
+
+  /**
+   * Sign-up without a NIN (owner decision of 2026-10-27, as hid-1.0): stores
+   * the declared profile in a pending enrollment (0092), sets the enrollment
+   * cookie through `setCookie` as soon as the enrollment exists, and sends a
+   * code to the declared email at once (SIGNUP_VERIFY). A retry with the same
+   * Idempotency-Key and the same declaration resumes the same enrollment.
+   */
+  async signup(input: PatientSignupInput, idempotencyKey: string, remoteIp: string | undefined,
+    correlationId: string, setCookie: (cookie: string) => void) {
+    this.assertSignupConfigured();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(idempotencyKey)) {
+      throw new DomainProblem(400, 'IDEMPOTENCY_KEY_INVALID', 'A valid idempotency key is required');
+    }
+    const declared = this.declaredProfile(input);
+    const emailLookup = createContactLookupHmac('email', declared.email);
+    const phoneLookup = createContactLookupHmac('phone', declared.phone);
+    const requestHmac = this.hmac('patient-enrollment-request', idempotencyKey);
+    const token = this.hmacBuffer('patient-enrollment-cookie', idempotencyKey).toString('base64url');
+    const tokenHmac = this.hmac('patient-enrollment-token', token);
+    const ipHmac = this.networkHmac(remoteIp);
+    const profileJson = JSON.stringify(declared);
+    const profileHash = createHash('sha256').update(profileJson).digest('hex');
+
+    const preflight = await this.database.withSystemTransaction(correlationId, async (client) => {
+      await client.query('select identity.prune_expired_public_patient_enrollments()');
+      const limited = await this.consumeRate(client, 'ip', ipHmac, this.env.OTP_RATE_MAX_REQUESTS);
+      const keyed = await client.query<EnrollmentRow>(
+        'select * from identity.public_patient_enrollments where request_hmac = $1', [requestHmac]);
+      return { limited, keyed: keyed.rows[0] };
+    });
+    if (preflight.limited) throw this.rateLimited();
+    let id: string;
+    if (preflight.keyed) {
+      const keyed = preflight.keyed;
+      // The same page retrying its own sign-up resumes it; anything else
+      // holding this key (a NIN start, another declaration, an activated
+      // enrollment) is refused.
+      if (keyed.nin_lookup_hmac !== null || keyed.state === 'active'
+        || !keyed.signup_email_lookup_hmac || !this.equalHex(keyed.signup_email_lookup_hmac, emailLookup)
+        || !this.equalHex(keyed.profile_sha256, profileHash)
+        || !this.equalHex(keyed.token_hmac, tokenHmac)) {
+        throw new DomainProblem(409, 'IDEMPOTENCY_KEY_REUSED',
+          'This enrollment retry key belongs to a different request');
+      }
+      id = keyed.id;
+    } else {
+      id = randomUUID();
+      const encryption = this.signupEncryption();
+      let outcome: string | undefined;
+      try {
+        outcome = await this.database.withSystemTransaction(correlationId, async (client) =>
+          (await client.query<{ outcome: string }>(
+            `select identity.start_public_patient_signup($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) as outcome`,
+            [id, requestHmac, tokenHmac, declared.email, emailLookup, phoneLookup,
+              this.encryptWith(encryption.key, id, 'phone', declared.phone),
+              this.encryptWith(encryption.key, id, 'profile', profileJson), profileHash,
+              encryption.version])).rows[0]?.outcome);
+      } catch (error) {
+        if (this.databaseErrorCode(error) === '23505') throw new DomainProblem(409, 'IDEMPOTENCY_KEY_REUSED',
+          'This enrollment retry key belongs to a different request');
+        throw this.mapDatabaseError(error);
+      }
+      if (outcome === 'email_registered') throw this.emailAlreadyRegistered();
+      if (outcome === 'phone_registered') throw this.phoneAlreadyRegistered();
+      if (outcome !== 'started') throw new DomainProblem(503, 'ENROLLMENT_UNAVAILABLE',
+        'Enrollment is temporarily unavailable');
+    }
+    const cookie = `${id}.${token}`;
+    setCookie(cookie);
+    let row = await this.requireEnrollment(cookie, correlationId);
+    if (row.state === 'verify_contact') {
+      const progress = await this.progress(row, correlationId);
+      if ('challengeId' in progress && progress.challengeId) return { cookie, progress };
+      await this.startContact(cookie, 'email', declared.email, remoteIp, correlationId);
+      row = await this.requireEnrollment(cookie, correlationId);
+    }
+    return { cookie, progress: await this.progress(row, correlationId) };
   }
 
   async start(nin: string, idempotencyKey: string, remoteIp: string | undefined,
@@ -123,7 +225,8 @@ export class PatientEnrollmentService {
     // The key of an enrollment already activated is refused as reused, before
     // the duplicate checks: only the page that holds it can send it, and the
     // client says that registration was completed.
-    if (preflight.keyed && (!this.equalHex(preflight.keyed.nin_lookup_hmac, lookupHmac)
+    if (preflight.keyed && (preflight.keyed.nin_lookup_hmac === null
+      || !this.equalHex(preflight.keyed.nin_lookup_hmac, lookupHmac)
       || preflight.keyed.state === 'active')) {
       throw new DomainProblem(409, 'IDEMPOTENCY_KEY_REUSED',
         'This enrollment retry key belongs to a different request');
@@ -212,12 +315,19 @@ export class PatientEnrollmentService {
 
   async startContact(cookie: string | undefined, channel: ContactChannel, rawContact: string,
     remoteIp: string | undefined, correlationId: string) {
-    this.assertConfigured();
     const enrollment = await this.requireEnrollment(cookie, correlationId);
+    const signup = this.isSignup(enrollment);
+    if (signup) this.assertSignupConfigured(); else this.assertConfigured();
     if (enrollment.state !== 'verify_contact') throw new DomainProblem(409, 'ENROLLMENT_STAGE_INVALID',
       'This enrollment is not waiting for contact verification');
     const contact = this.normalizeContact(channel, rawContact);
     const lookupHmac = createContactLookupHmac(channel, contact);
+    // A sign-up verifies the email it declared, and only that one.
+    if (signup && (channel !== 'email'
+      || !this.equalHex(enrollment.signup_email_lookup_hmac ?? '', lookupHmac))) {
+      throw new DomainProblem(400, 'ENROLLMENT_CONTACT_MISMATCH',
+        'Use the email address you signed up with');
+    }
     const recipientHmac = this.hmac('patient-enrollment-recipient', channel, contact);
     const code = randomInt(0, 1_000_000).toString().padStart(6, '0');
     const challengeId = randomUUID();
@@ -233,8 +343,9 @@ export class PatientEnrollmentService {
       // could be verified before the block ends. A read; it takes no lock.
       const failureBlocked = await rateLimitBlocked(client, 'recipient',
         this.contactFailureBucket(recipientHmac));
-      const readiness = await client.query<{ ready: boolean }>(
-        'select identity.public_patient_enrollment_ready() as ready');
+      const readiness = await client.query<{ ready: boolean }>(signup
+        ? 'select identity.patient_contact_lookup_ready() as ready'
+        : 'select identity.public_patient_enrollment_ready() as ready');
       const contactBound = await client.query<{ bound: boolean }>(
         'select identity.public_patient_contact_already_bound($1,$2) as bound',
         [channel, lookupHmac]);
@@ -243,7 +354,7 @@ export class PatientEnrollmentService {
     });
     if (preflight.limited) throw this.rateLimited();
     if (!preflight.ready) throw this.reconciliationRequired();
-    if (preflight.contactBound) throw this.contactAlreadyRegistered();
+    if (preflight.contactBound) throw signup ? this.emailAlreadyRegistered() : this.contactAlreadyRegistered();
     const result = await this.withEnrollmentLock(cookie, correlationId, async (client, row) => {
       if (row.state !== 'verify_contact') throw new DomainProblem(409, 'ENROLLMENT_STAGE_INVALID',
         'This enrollment is not waiting for contact verification');
@@ -262,7 +373,7 @@ export class PatientEnrollmentService {
         `update identity.public_patient_enrollments set contact_channel=$2, contact_hmac=$3,
           contact_lookup_hmac=$4, contact_ciphertext=$5,
           updated_at=clock_timestamp(), row_version=row_version+1 where id=$1`,
-        [row.id, channel, recipientHmac, lookupHmac, this.encrypt(row.id, 'contact', contact)]);
+        [row.id, channel, recipientHmac, lookupHmac, this.encrypt(row.id, 'contact', contact, row.key_version)]);
       await client.query(
         `insert into identity.public_patient_enrollment_otps
          (id,enrollment_id,recipient_hmac,channel,verifier_hmac,verifier_key_version,
@@ -357,8 +468,9 @@ export class PatientEnrollmentService {
       this.consumeRate(client, 'enrollment', this.hmac('patient-enrollment-activate', row.id),
         this.env.OTP_RATE_MAX_REQUESTS * 3));
     if (limited) throw this.rateLimited();
-    const profileJson = this.decrypt(row.id, 'profile', row.profile_ciphertext);
-    const contact = this.decrypt(row.id, 'contact', row.contact_ciphertext);
+    const signup = this.isSignup(row);
+    const profileJson = this.decrypt(row.id, 'profile', row.profile_ciphertext, row.key_version);
+    const contact = this.decrypt(row.id, 'contact', row.contact_ciphertext, row.key_version);
     const contactLookupHmac = createContactLookupHmac(row.contact_channel!, contact);
     // Two first activations that race still hash twice; the command lets one
     // activate and replays the other.
@@ -369,13 +481,16 @@ export class PatientEnrollmentService {
       try {
         const hid = this.hidCodes.generate();
         const result = await this.database.withSystemTransaction(correlationId, async (client) => {
+          // A sign-up without a NIN (0092) has its own activation and no
+          // Google onboarding; the NIN activation refuses its row.
           const activated = await client.query<{ patient_id: string; hid_code: string;
-            account_id: string; replayed: boolean }>(
-            'select * from identity.activate_public_patient_enrollment($1,$2,$3,$4,$5,$6,$7)',
+            account_id: string; replayed: boolean }>(signup
+            ? 'select * from identity.activate_public_patient_signup($1,$2,$3,$4,$5,$6,$7)'
+            : 'select * from identity.activate_public_patient_enrollment($1,$2,$3,$4,$5,$6,$7)',
             [row.id, tokenHmac, profileJson, contact, hid, hash, contactLookupHmac]);
           if (!activated.rows[0]) throw new DomainProblem(503, 'ENROLLMENT_ACTIVATION_UNAVAILABLE',
             'Health ID activation is unavailable');
-          await this.google.consumePendingInTransaction(client, googleCookie, row.id,
+          if (!signup) await this.google.consumePendingInTransaction(client, googleCookie, row.id,
             activated.rows[0].account_id);
           return activated;
         });
@@ -414,7 +529,7 @@ export class PatientEnrollmentService {
         'Enrollment evidence is unavailable');
       return { stage: 'active' as const, hidCode: result.rows[0].hid_code, ...googleProgress };
     }
-    const recordName = withRecordName ? this.storedRecordName(row) : undefined;
+    const recordName = withRecordName && !this.isSignup(row) ? this.storedRecordName(row) : undefined;
     const base = { stage: row.state, expiresAt: row.expires_at.toISOString(),
       ...(row.contact_channel ? { contactChannel: row.contact_channel } : {}),
       ...(recordName ? { recordName } : {}), ...googleProgress };
@@ -427,7 +542,8 @@ export class PatientEnrollmentService {
     const challenge = active.rows[0];
     if (!challenge || challenge.expires_at.getTime() <= Date.now()) return base;
     const maskedContact = row.contact_ciphertext
-      ? this.mask(row.contact_channel, this.decrypt(row.id, 'contact', row.contact_ciphertext)) : undefined;
+      ? this.mask(row.contact_channel, this.decrypt(row.id, 'contact', row.contact_ciphertext, row.key_version))
+      : undefined;
     return { ...base, ...(maskedContact ? { maskedContact } : {}), challengeId: challenge.id,
       expiresInSeconds: Math.max(0, Math.floor((challenge.expires_at.getTime() - Date.now()) / 1000)),
       resendAfterSeconds: Math.max(0, Math.floor((challenge.created_at.getTime()
@@ -451,7 +567,8 @@ export class PatientEnrollmentService {
   /** The stored enrollment's record name; left out, never a failure, if the profile cannot be read. */
   private storedRecordName(row: EnrollmentRow) {
     try {
-      return this.recordName(JSON.parse(this.decrypt(row.id, 'profile', row.profile_ciphertext)) as Record<string, unknown>);
+      return this.recordName(JSON.parse(this.decrypt(row.id, 'profile', row.profile_ciphertext,
+        row.key_version)) as Record<string, unknown>);
     } catch {
       return undefined;
     }
@@ -627,9 +744,12 @@ export class PatientEnrollmentService {
     }
   }
 
-  private encrypt(id: string, purpose: 'nin' | 'profile' | 'contact', value: string) {
-    this.assertConfigured();
-    const key = Buffer.from(this.env.NIN_ENCRYPTION_KEY_B64!, 'base64');
+  /** A NIN enrollment's (or `keyVersion`'s) encryption; a sign-up row's may be the derived key. */
+  private encrypt(id: string, purpose: 'nin' | 'profile' | 'contact', value: string, keyVersion?: string) {
+    return this.encryptWith(this.encryptionKey(keyVersion), id, purpose, value);
+  }
+
+  private encryptWith(key: Buffer, id: string, purpose: 'nin' | 'profile' | 'contact' | 'phone', value: string) {
     const nonce = randomBytes(12);
     const cipher = createCipheriv('aes-256-gcm', key, nonce);
     cipher.setAAD(Buffer.from(`identity:public-patient-enrollment:${id}:${purpose}`));
@@ -637,12 +757,11 @@ export class PatientEnrollmentService {
       cipher.update(value, 'utf8'), cipher.final(), cipher.getAuthTag()]);
   }
 
-  private decrypt(id: string, purpose: 'profile' | 'contact', value: Buffer) {
-    this.assertConfigured();
+  private decrypt(id: string, purpose: 'profile' | 'contact', value: Buffer, keyVersion?: string) {
+    const key = this.encryptionKey(keyVersion);
     if (value.length < 30 || value[0] !== 1) throw new DomainProblem(503,
       'ENROLLMENT_EVIDENCE_UNAVAILABLE', 'Enrollment evidence is unavailable');
     try {
-      const key = Buffer.from(this.env.NIN_ENCRYPTION_KEY_B64!, 'base64');
       const nonce = value.subarray(1, 13);
       const tag = value.subarray(value.length - 16);
       const ciphertext = value.subarray(13, value.length - 16);
@@ -653,6 +772,78 @@ export class PatientEnrollmentService {
     } catch {
       throw new DomainProblem(503, 'ENROLLMENT_EVIDENCE_UNAVAILABLE', 'Enrollment evidence is unavailable');
     }
+  }
+
+  /**
+   * The key of a row's `key_version`: the OTP-derived key for a sign-up row
+   * written without the NIN encryption key, else the NIN encryption key (a NIN
+   * enrollment needs every enrollment key, as before).
+   */
+  private encryptionKey(keyVersion?: string): Buffer {
+    if (keyVersion?.startsWith(SIGNUP_DERIVED_KEY_PREFIX)) {
+      if (keyVersion !== this.derivedKeyVersion()) throw new DomainProblem(503,
+        'ENROLLMENT_EVIDENCE_UNAVAILABLE', 'Enrollment evidence is unavailable');
+      return this.derivedEncryptionKey();
+    }
+    if (keyVersion === undefined) this.assertConfigured();
+    else if (!this.env.NIN_ENCRYPTION_KEY_B64) this.assertConfigured();
+    return Buffer.from(this.env.NIN_ENCRYPTION_KEY_B64!, 'base64');
+  }
+
+  private derivedKeyVersion() { return `${SIGNUP_DERIVED_KEY_PREFIX}${this.env.OTP_HMAC_KEY_VERSION}`; }
+
+  private derivedEncryptionKey(): Buffer {
+    return Buffer.from(hkdfSync('sha256', this.otpKey, Buffer.alloc(0),
+      Buffer.from('hid:public-patient-signup:encryption:v1'), 32));
+  }
+
+  /** A sign-up row's key: the NIN encryption key when configured, else the OTP-derived key. */
+  private signupEncryption(): { key: Buffer; version: string } {
+    if (this.env.NIN_ENCRYPTION_KEY_B64) {
+      return { key: Buffer.from(this.env.NIN_ENCRYPTION_KEY_B64, 'base64'), version: this.env.NIN_KEY_VERSION };
+    }
+    return { key: this.derivedEncryptionKey(), version: this.derivedKeyVersion() };
+  }
+
+  /** A sign-up needs the contact lookup key, and in production the OTP key; never QoreID or the NIN keys. */
+  private signupConfigured(): boolean {
+    return Boolean(this.env.CONTACT_LOOKUP_HMAC_KEY_B64
+      && (this.env.NODE_ENV !== 'production' || this.env.OTP_HMAC_KEY_B64)
+      && (this.env.NIN_ENCRYPTION_KEY_B64 || this.derivedKeyVersion().length <= 64));
+  }
+
+  private assertSignupConfigured() {
+    if (!this.signupConfigured()) {
+      throw new DomainProblem(503, 'ENROLLMENT_CONFIGURATION_UNAVAILABLE',
+        'Patient sign-up is temporarily unavailable');
+    }
+  }
+
+  private isSignup(row: EnrollmentRow) {
+    return row.nin_lookup_hmac === null && typeof row.signup_email_lookup_hmac === 'string';
+  }
+
+  /** The declared profile a sign-up stores and activation reads (0092 checks the same rules). */
+  private declaredProfile(input: PatientSignupInput) {
+    const name = (value: unknown) => typeof value === 'string' ? value.trim().replace(/\s+/g, ' ') : '';
+    const firstName = name(input.firstName);
+    const lastName = name(input.lastName);
+    const hospital = name(input.hospitalCurrentlyUsing);
+    const invalid = (field: string, message: string) => new DomainProblem(400, 'VALIDATION_FAILED',
+      'One or more request fields are invalid.', [{ field, messages: [message] }]);
+    const control = /[\x00-\x1f\x7f]/;
+    if (!firstName || firstName.length > 80 || control.test(firstName)) throw invalid('firstName', 'Enter your first name (1-80 characters)');
+    if (!lastName || lastName.length > 80 || control.test(lastName)) throw invalid('lastName', 'Enter your last name (1-80 characters)');
+    if (hospital.length > 120 || control.test(hospital)) throw invalid('hospitalCurrentlyUsing', 'Enter at most 120 characters');
+    const email = typeof input.email === 'string' ? input.email.trim().toLowerCase() : '';
+    if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw invalid('email', 'Enter a valid email address');
+    const rawPhone = typeof input.phone === 'string' ? input.phone.replace(/[\s()-]/g, '') : '';
+    let phone = '';
+    try { phone = normalizeContactForLookup('phone', rawPhone); } catch { phone = ''; }
+    if (!/^\+234\d{10}$/.test(phone)) throw invalid('phone', 'Enter a Nigerian phone number: 0XXXXXXXXXX or +234XXXXXXXXXX');
+    if (!['male', 'female', 'intersex', 'other', 'unknown'].includes(input.gender)) throw invalid('gender', 'Choose a gender');
+    return { kind: 'signup' as const, firstName, lastName, email, phone, gender: input.gender,
+      ...(hospital ? { hospitalCurrentlyUsing: hospital } : {}), termsAccepted: true as const };
   }
 
   private hmac(...parts: string[]) { return this.hmacBuffer(...parts).toString('hex'); }
@@ -671,6 +862,10 @@ export class PatientEnrollmentService {
     'This identity already has a Health ID or a pending enrollment'); }
   private contactAlreadyRegistered() { return new DomainProblem(409, 'CONTACT_ALREADY_REGISTERED',
     'This contact is already associated with a Health ID'); }
+  private emailAlreadyRegistered() { return new DomainProblem(409, 'PATIENT_EMAIL_ALREADY_REGISTERED',
+    'This email address already has a Health ID account. Sign in instead.'); }
+  private phoneAlreadyRegistered() { return new DomainProblem(409, 'PATIENT_PHONE_ALREADY_REGISTERED',
+    'This phone number already has a Health ID account. Sign in instead.'); }
   private reconciliationRequired() { return new DomainProblem(503, 'ENROLLMENT_RECONCILIATION_REQUIRED',
     'Patient enrollment is temporarily unavailable while identity reconciliation is incomplete'); }
   private databaseErrorCode(error: unknown) { return typeof error === 'object' && error
@@ -685,6 +880,8 @@ export class PatientEnrollmentService {
       if (error instanceof Error && error.message === 'PATIENT_CONTACT_ALREADY_BOUND') {
         return this.contactAlreadyRegistered();
       }
+      if (error instanceof Error && error.message === 'PATIENT_EMAIL_ALREADY_BOUND') return this.emailAlreadyRegistered();
+      if (error instanceof Error && error.message === 'PATIENT_PHONE_ALREADY_BOUND') return this.phoneAlreadyRegistered();
       if (constraint === 'accounts_email_ci_uq' || constraint === 'patients_phone_hmac_uq'
         || constraint === 'patients_email_hmac_uq') {
         return new DomainProblem(409, 'CONTACT_ALREADY_REGISTERED',

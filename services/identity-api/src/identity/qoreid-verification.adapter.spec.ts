@@ -615,6 +615,24 @@ describe('QoreID verification adapter', () => {
       .verifyNin('12345678901', claims)).resolves.toMatchObject({ state: 'not_verified' });
   });
 
+  it('compares a sign-up patient\'s names in either order and the stated date on the returned record (nameOrder either)', async () => {
+    const swapped = { ...complete, summary: { nin_check: { status: 'PARTIAL_MATCH',
+      fieldMatches: { firstname: false, lastname: false } } },
+      nin: { ...complete.nin, firstname: ' samplelast ', lastname: 'SAMPLEFIRST' } };
+    const fetch = jest.fn().mockResolvedValueOnce(response(token)).mockResolvedValueOnce(response(swapped));
+    const result = await new QoreIdVerificationAdapter(configuration, fetch as unknown as typeof globalThis.fetch)
+      .verifyNin('12345678901', claims, 'either');
+    expect(result).toMatchObject({ state: 'verified', ninBinding: { nin: '12345678901',
+      firstName: 'samplelast', lastName: 'SAMPLEFIRST', dateOfBirth: '1991-03-04' } });
+    for (const changed of [{ ...complete.nin, firstname: 'Other' }, { ...complete.nin, birthdate: '07-01-1974' },
+      { ...complete.nin, nin: '99999999999' }]) {
+      const again = jest.fn().mockResolvedValueOnce(response(token))
+        .mockResolvedValueOnce(response({ ...complete, nin: changed }));
+      await expect(new QoreIdVerificationAdapter(configuration, again as unknown as typeof globalThis.fetch)
+        .verifyNin('12345678901', claims, 'either')).resolves.toMatchObject({ state: 'not_verified' });
+    }
+  });
+
   it('does not bind the logged-in patient when returned NIN or DOB differs', async () => {
     for (const changed of [{ ...complete.nin, nin: '99999999999' },
       { ...complete.nin, birthdate: '07-01-1974' }]) {
