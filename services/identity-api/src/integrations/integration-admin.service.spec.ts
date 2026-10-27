@@ -74,9 +74,10 @@ describe('IntegrationAdminService', () => {
       QOREID_ENABLED: 'true', QOREID_CLIENT_ID: 'test-client-id',
       QOREID_CLIENT_SECRET: 'test-client-secret',
       QOREID_NIN_ONLY_ENROLLMENT_ENABLED: 'false',
+      // On when unset (owner decision of 2026-10-27); these tests start from an explicit 'false'.
+      QOREID_PATIENT_SELF_NIN_BINDING_ENABLED: 'false',
     });
-    for (const key of ['QOREID_PATIENT_SELF_NIN_BINDING_ENABLED', 'NIN_LOOKUP_HMAC_KEY_B64',
-      'NIN_ENCRYPTION_KEY_B64']) delete process.env[key];
+    for (const key of ['NIN_LOOKUP_HMAC_KEY_B64', 'NIN_ENCRYPTION_KEY_B64']) delete process.env[key];
     resetEnvironmentForTests();
   });
 
@@ -97,7 +98,7 @@ describe('IntegrationAdminService', () => {
       provider: 'qoreid', enabled: true, managementMode: 'runtime', activeCapabilities: ['provider_cac'],
       operationGates: [
         expect.objectContaining({ operation: 'existing_patient_nin', state: 'closed',
-          detail: expect.stringContaining('That gate is off until the owner decides.') }),
+          detail: expect.stringContaining('That gate is turned off (QOREID_PATIENT_SELF_NIN_BINDING_ENABLED=false)') }),
         expect.objectContaining({ operation: 'patient_nin_enrollment', state: 'closed' }),
         expect.objectContaining({ operation: 'provider_cac', state: 'open' }),
       ],
@@ -151,7 +152,15 @@ describe('IntegrationAdminService', () => {
       ],
     });
     // The detail describes the state shown beside it.
-    expect(result.items[0]?.operationGates[0]?.detail).not.toContain('off until the owner decides');
+    expect(result.items[0]?.operationGates[0]?.detail).not.toContain('turned off');
+  });
+
+  it('opens existing-patient NIN binding when its deployment gate is unset (owner decision)', async () => {
+    delete process.env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED;
+    resetEnvironmentForTests();
+    const { service } = harness(listRows);
+    const result = await service.list(context);
+    expect(result.items[0]?.operationGates[0]).toMatchObject({ operation: 'existing_patient_nin', state: 'open' });
   });
 
   it('shows NIN enrollment closed, and says why, without the enrollment keys', async () => {

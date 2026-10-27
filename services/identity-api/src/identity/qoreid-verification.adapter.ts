@@ -67,15 +67,24 @@ export class QoreIdVerificationAdapter {
     await this.accessToken(true);
   }
 
-  async verifyNin(nin: string, claims: QoreIdNinClaims): Promise<QoreIdVerificationResult> {
+  /**
+   * `nameOrder: 'either'` (a sign-up patient's first NIN, 0092): the record's
+   * first and last name must equal the claims' in either order and its date of
+   * birth the claimed one, compared here on the record QoreID returns rather
+   * than on its field matches; anything else is not_verified.
+   */
+  async verifyNin(nin: string, claims: QoreIdNinClaims,
+    nameOrder: 'exact' | 'either' = 'exact'): Promise<QoreIdVerificationResult> {
     // QoreID requires first and last name claims. The caller derives these
-    // from the session-bound canonical patient, never from browser input.
+    // from the session-bound canonical patient (and, for a profile without a
+    // date of birth, the date the patient states), never other browser input.
     const response = await this.requestVerification(
       `/v1/ng/identities/nin/${encodeURIComponent(nin)}`,
       JSON.stringify({ firstname: claims.firstName, lastname: claims.lastName,
         dob: claims.dateOfBirth }),
     );
-    return this.normalizedNinVerification(response, nin, claims);
+    return nameOrder === 'either' ? this.declaredNinVerification(response, nin, claims)
+      : this.normalizedNinVerification(response, nin, claims);
   }
 
   /**
@@ -269,6 +278,27 @@ export class QoreIdVerificationAdapter {
       ...(providerReference ? { providerReference } : {}),
       respondedAt: new Date().toISOString(),
     };
+  }
+
+  private declaredNinVerification(payload: unknown, submittedNin: string,
+    claims: QoreIdNinClaims): QoreIdVerificationResult {
+    const result = this.normalizedVerification(payload);
+    if (result.state !== 'verified') return result;
+    const bio = this.record(this.record(payload)?.nin);
+    const returnedNin = bio?.nin;
+    const firstName = this.safeName(bio?.firstname);
+    const lastName = this.safeName(bio?.lastname);
+    const dateOfBirth = this.dateOfBirth(bio?.birthdate);
+    if (typeof returnedNin !== 'string' || !/^\d{11}$/.test(returnedNin)
+      || !firstName || !lastName || !dateOfBirth) throw this.invalidProviderResponse();
+    const [first, last] = [this.normalizedName(firstName), this.normalizedName(lastName)];
+    const [claimedFirst, claimedLast] = [this.normalizedName(claims.firstName), this.normalizedName(claims.lastName)];
+    const namesMatch = (first === claimedFirst && last === claimedLast)
+      || (first === claimedLast && last === claimedFirst);
+    if (returnedNin !== submittedNin || !namesMatch || dateOfBirth !== claims.dateOfBirth) {
+      return { ...result, state: 'not_verified' };
+    }
+    return { ...result, ninBinding: { nin: returnedNin, firstName, lastName, dateOfBirth } };
   }
 
   private normalizedNinVerification(payload: unknown, submittedNin: string,

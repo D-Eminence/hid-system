@@ -86,6 +86,18 @@ enrollment path. It keeps provider identity evidence encrypted in a pending,
 unique-NIN record; a single selected contact OTP must be consumed before a
 password-backed account, canonical patient, NIN binding, and HIDCode can be
 created atomically. Its rate counters and OTPs are scoped to the enrollment.
+Migration `0092_public_patient_signup_without_nin.sql` (owner decision of
+2026-10-27) lets a pending public enrollment exist without a NIN: the four NIN
+columns are all null or all set, and a NIN-less row holds the declared email's
+lookup HMAC and the declared phone and can verify only that email.
+`identity.start_public_patient_signup` refuses a registered email or phone and
+inserts the row; `identity.activate_public_patient_signup` creates the account,
+the patient from the declared profile (no date of birth), the HID and assurance
+`CONTACT_VERIFIED` (source `hid-public-signup`), with no NIN identifier or
+authoritative profile. Such a patient may bind a NIN later through 0058's
+command (`patient_self_nin_eligibility` answers `legacy_unbound`), and
+`identity.record_my_verified_nin_date_of_birth` stores the date QoreID matched
+when the profile had none. `patient_self_profile` gains `ninVerified`.
 Migration `0052_authoritative_cac_identity.sql` makes the registration
 identifier the public organization lookup key and introduced a complete-QoreID-
 profile guard for review and legal-entity binding. Migration `0056` revises

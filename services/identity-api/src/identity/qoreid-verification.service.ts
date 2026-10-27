@@ -47,7 +47,7 @@ export class QoreIdVerificationService {
     private readonly ninProtector: NinIdentifierProtector,
   ) {}
 
-  async verifyPatientNin(request: HidRequest, nin: string): Promise<VerificationResponse> {
+  async verifyPatientNin(request: HidRequest, nin: string, declaredDateOfBirth?: string): Promise<VerificationResponse> {
     const actor = requirePatient(request.actor);
     // This route binds a NIN on a name and date-of-birth match, with no proof
     // that the patient holds the NIN. Off unless configured on, and refused
@@ -57,13 +57,21 @@ export class QoreIdVerificationService {
         'Verifying a NIN from your account is not available');
     }
     let verifiedProfile: QoreIdNinBinding | undefined;
+    // Set when the profile had no date of birth and the request supplied it:
+    // recorded on the profile in the binding's transaction, once QoreID matched.
+    let recordDateOfBirth: string | undefined;
+    let declaredProfile = false;
     const persist = (result: EvidenceResult, reference?: string, failure?: VerificationFailureCategory) =>
       result === 'verified'
-        ? this.bindVerifiedPatientNin(request, actor.subject, actor.sessionId, nin, verifiedProfile, reference)
+        ? this.bindVerifiedPatientNin(request, actor.subject, actor.sessionId, nin, verifiedProfile, reference,
+          recordDateOfBirth)
         : this.recordPatientEvidence(request, actor.subject, actor.sessionId, result, reference, failure);
-    return this.verify(
+    const response = await this.verify(
       async () => {
-        const claims = await this.patientClaims(request, actor.subject, actor.sessionId, actor.patientId);
+        const profileClaims = await this.patientClaims(request, actor.subject, actor.sessionId, actor.patientId,
+          declaredDateOfBirth);
+        const claims = profileClaims.claims;
+        declaredProfile = profileClaims.declaredDateOfBirth;
         const lookupHmac = this.ninProtector.lookup(nin);
         const eligibility = await this.patientNinEligibility(request, actor.subject, actor.sessionId, lookupHmac);
         if (eligibility === 'denied') {
@@ -71,18 +79,24 @@ export class QoreIdVerificationService {
             'This NIN requires identity review before it can be verified');
         }
         await this.integrations.consumePatientQuota(request.correlationId, actor.subject, actor.sessionId);
-        const result = await this.provider.verifyNin(nin, claims);
+        const result = await this.provider.verifyNin(nin, claims, declaredProfile ? 'either' : 'exact');
         if (result.state === 'verified') {
           const binding = result.ninBinding;
           const normalizeName = (name: string) => name.trim().replace(/\s+/g, ' ').toLocaleUpperCase('en-NG');
+          const sameOrder = binding !== undefined
+            && normalizeName(binding.firstName) === normalizeName(claims.firstName)
+            && normalizeName(binding.lastName) === normalizeName(claims.lastName);
+          const swapped = declaredProfile && binding !== undefined
+            && normalizeName(binding.firstName) === normalizeName(claims.lastName)
+            && normalizeName(binding.lastName) === normalizeName(claims.firstName);
           if (!binding || binding.nin !== nin || !result.providerReference
-            || normalizeName(binding.firstName) !== normalizeName(claims.firstName)
-            || normalizeName(binding.lastName) !== normalizeName(claims.lastName)
-            || binding.dateOfBirth !== claims.dateOfBirth) {
+            || !(sameOrder || swapped) || binding.dateOfBirth !== claims.dateOfBirth) {
             throw new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',
               'External verification returned an invalid response');
           }
           verifiedProfile = binding;
+          // A profile without a date of birth keeps the record's once bound.
+          recordDateOfBirth = declaredProfile ? binding.dateOfBirth : undefined;
         }
         return result;
       },
@@ -90,6 +104,14 @@ export class QoreIdVerificationService {
       'patient',
       'nin',
     );
+    // A sign-up patient's details (no date of birth on the profile) must match
+    // the record; the not_verified evidence is already recorded.
+    if (declaredProfile && response.state === 'not_verified') throw this.ninDetailsMismatch();
+    return response;
+  }
+
+  private ninDetailsMismatch() {
+    return new DomainProblem(409, 'PATIENT_NIN_DETAILS_MISMATCH', 'The NIN details do not match your profile.');
   }
 
   private async patientNinEligibility(request: HidRequest, subject: string,
@@ -111,7 +133,8 @@ export class QoreIdVerificationService {
   }
 
   private async bindVerifiedPatientNin(request: HidRequest, subject: string, sessionId: string,
-    nin: string, profile: QoreIdNinBinding | undefined, providerReference?: string): Promise<StoredEvidence> {
+    nin: string, profile: QoreIdNinBinding | undefined, providerReference?: string,
+    recordDateOfBirth?: string): Promise<StoredEvidence> {
     if (!providerReference || !profile || profile.nin !== nin) throw new DomainProblem(502, 'QOREID_PROVIDER_RESPONSE_INVALID',
       'External verification returned an invalid response');
     const evidenceId = randomUUID();
@@ -129,6 +152,10 @@ export class QoreIdVerificationService {
             protectedNin.keyVersion, protectedNin.last4, providerReference,
             protectedProfile.ciphertext, protectedProfile.sha256],
         );
+        if (recordDateOfBirth) {
+          await client.query('select identity.record_my_verified_nin_date_of_birth($1,$2,$3,$4::date)',
+            [subject, sessionId, evidenceId, recordDateOfBirth]);
+        }
         return this.evidenceRow(recorded.rows[0]);
       });
     } catch (error) {
@@ -141,8 +168,13 @@ export class QoreIdVerificationService {
     }
   }
 
+  /**
+   * The profile's claims. A profile without a date of birth (a sign-up
+   * without NIN) takes the request's `declaredDateOfBirth` (required); one with
+   * a date of birth uses its own, and refuses a stated date that differs.
+   */
   private async patientClaims(request: HidRequest, subject: string, sessionId: string,
-    patientId: string): Promise<QoreIdNinClaims> {
+    patientId: string, declaredDateOfBirth?: string): Promise<{ claims: QoreIdNinClaims; declaredDateOfBirth: boolean }> {
     const profile = await this.database.withSystemTransaction(request.correlationId, async (client) => {
       await client.query("select set_config('app.actor_subject',$1,true)", [subject]);
       const result = await client.query<PatientProfileRow>(
@@ -153,18 +185,34 @@ export class QoreIdVerificationService {
       ? profile as Record<string, unknown> : undefined;
     const firstName = value?.firstName;
     const lastName = value?.lastName;
-    const dateOfBirth = value?.dateOfBirth;
+    // A profile without a date of birth (a sign-up without NIN, 0092) needs
+    // the stated one; a profile with one keeps it, and a stated date that
+    // differs from it is refused before any lookup.
+    const declared = value !== undefined && (value.dateOfBirth === null || value.dateOfBirth === undefined);
+    if (declared && declaredDateOfBirth === undefined) {
+      throw new DomainProblem(400, 'VALIDATION_FAILED', 'One or more request fields are invalid.',
+        [{ field: 'dateOfBirth', messages: ['Enter your date of birth (YYYY-MM-DD) as it is on your NIN record'] }]);
+    }
+    if (value !== undefined && !declared && declaredDateOfBirth !== undefined
+      && declaredDateOfBirth !== value.dateOfBirth) {
+      throw this.ninDetailsMismatch();
+    }
+    const dateOfBirth = declared ? declaredDateOfBirth : value?.dateOfBirth;
     const date = typeof dateOfBirth === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)
       ? new Date(`${dateOfBirth}T00:00:00Z`) : new Date(NaN);
     const validName = (name: unknown): name is string => typeof name === 'string'
       && name.trim().length >= 1 && name.trim().length <= 100 && !/[\x00-\x1f\x7f]/.test(name);
     if (value?.patientId !== patientId || !validName(firstName) || !validName(lastName)
       || !Number.isFinite(date.getTime()) || date.toISOString().slice(0, 10) !== dateOfBirth
-      || date.getTime() > Date.now()) {
+      || date.getTime() > Date.now() || (declared && date.getUTCFullYear() < 1900)) {
+      if (declared && value?.patientId === patientId && validName(firstName) && validName(lastName)) {
+        throw new DomainProblem(400, 'VALIDATION_FAILED', 'One or more request fields are invalid.',
+          [{ field: 'dateOfBirth', messages: ['Enter a valid date of birth (YYYY-MM-DD)'] }]);
+      }
       throw new DomainProblem(422, 'PATIENT_IDENTITY_PROFILE_INCOMPLETE',
         'The patient profile cannot support NIN identity verification');
     }
-    return { firstName: firstName.trim(), lastName: lastName.trim(), dateOfBirth };
+    return { claims: { firstName: firstName.trim(), lastName: lastName.trim(), dateOfBirth }, declaredDateOfBirth: declared };
   }
 
   async verifyOrganizationCac(
@@ -231,6 +279,7 @@ export class QoreIdVerificationService {
           'VERIFICATION_QUOTA_EXCEEDED', 'VERIFICATION_QUOTA_UNAVAILABLE', 'PERMISSION_DENIED',
           'INTEGRATION_UNAVAILABLE', 'PATIENT_NIN_BINDING_CONFLICT', 'PATIENT_NIN_BINDING_UNAVAILABLE',
           'NIN_PROTECTION_UNAVAILABLE', 'PATIENT_IDENTITY_PROFILE_INCOMPLETE',
+          'VALIDATION_FAILED', 'PATIENT_NIN_DETAILS_MISMATCH',
         ].includes(error.code))) throw error;
       const failure = this.failureCategory(error);
       await this.persistFailure(persist, failure);

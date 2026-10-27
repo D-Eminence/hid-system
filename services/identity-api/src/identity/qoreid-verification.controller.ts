@@ -20,7 +20,7 @@ export class QoreIdVerificationController {
   @AuditFailuresOnly()
   @AuditAction('identity.patient.nin-verification.command')
   verifyMyNin(@Body() input: VerifyNinDto, @Req() request: HidRequest) {
-    return this.verification.verifyPatientNin(request, input.nin);
+    return this.verification.verifyPatientNin(request, input.nin, input.dateOfBirth);
   }
 
   @Post('organizations/verification/cac/:organizationContext')

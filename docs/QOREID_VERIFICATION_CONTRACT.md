@@ -26,7 +26,7 @@ The server must refresh or re-authenticate before using an internally stale toke
 
 ## Existing-patient NIN evidence
 
-`POST /api/v1/identity/me/verification/nin` remains a separate governed route for a signed-in patient with an existing verified NIN binding. It uses canonical patient names and birth date for QoreID's documented name-matching request, and records evidence only. It cannot create or relink a patient. Migration `0050` removed the earlier unbound evidence command.
+`POST /api/v1/identity/me/verification/nin` remains a separate governed route for a signed-in patient (on unless `QOREID_PATIENT_SELF_NIN_BINDING_ENABLED=false`, owner decision of 2026-10-27). A patient who signed up without a NIN (0092) binds one here: the body adds `dateOfBirth`, required while the profile has none; the record must carry it and the profile's names in either order (else 409 `PATIENT_NIN_DETAILS_MISMATCH`), and the record's date is then stored on the profile. It uses canonical patient names and birth date for QoreID's documented name-matching request, and records evidence only. It cannot create or relink a patient. Migration `0050` removed the earlier unbound evidence command.
 
 ## Organization application and CAC
 

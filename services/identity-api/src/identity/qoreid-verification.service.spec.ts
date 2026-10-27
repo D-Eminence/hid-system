@@ -117,9 +117,10 @@ describe('QoreID verification service', () => {
     });
     expect(provider.verifyNin).toHaveBeenCalledWith('12345678901', {
       firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1991-03-04',
-    });
+    }, 'exact');
     expect(integrations.consumePatientQuota).toHaveBeenCalledWith(patientRequest.correlationId,
       'patient:subject', patientRequest.actor!.sessionId);
+    expect(query.mock.calls.some(([sql]) => sql.includes('record_my_verified_nin_date_of_birth'))).toBe(false);
     const bindingCall = query.mock.calls.find(([sql]) => sql.includes('bind_my_verified_nin'));
     expect(bindingCall?.[1]).toEqual([
       'patient:subject', patientRequest.actor!.sessionId, expect.any(String), 'a'.repeat(64),
@@ -146,13 +147,61 @@ describe('QoreID verification service', () => {
     ]);
   });
 
-  it('does not call QoreID when the canonical patient lacks a complete identity profile', async () => {
-    const { service, provider, integrations, setProfileDateOfBirth } = setup(true);
+  it('requires dateOfBirth, before any lookup, when the profile has none (a sign-up without NIN)', async () => {
+    const { service, provider, integrations, query, setProfileDateOfBirth } = setup(true);
     setProfileDateOfBirth(null);
     await expect(service.verifyPatientNin(patientRequest, '12345678901'))
-      .rejects.toMatchObject({ code: 'PATIENT_IDENTITY_PROFILE_INCOMPLETE', status: 422 });
+      .rejects.toMatchObject({ code: 'VALIDATION_FAILED', status: 400, errors: [expect.objectContaining({ field: 'dateOfBirth' })] });
+    await expect(service.verifyPatientNin(patientRequest, '12345678901', '2999-01-01'))
+      .rejects.toMatchObject({ code: 'VALIDATION_FAILED', status: 400 });
     expect(provider.verifyNin).not.toHaveBeenCalled();
     expect(integrations.consumePatientQuota).not.toHaveBeenCalled();
+    expect(query.mock.calls.some(([sql]) => sql.includes('record_my_nin_verification_evidence'))).toBe(false);
+  });
+
+  it('binds a sign-up patient on the stated date of birth and names in either order, and records the date', async () => {
+    const { service, provider, query, setProfileDateOfBirth, setNinEligibility } = setup(true);
+    setProfileDateOfBirth(null); setNinEligibility('legacy_unbound');
+    (provider.verifyNin as jest.Mock).mockResolvedValue({ provider: 'qoreid', state: 'verified', providerReference: '99',
+      ninBinding: { nin: '12345678901', firstName: 'SAMPLELAST', lastName: 'Samplefirst', dateOfBirth: '1990-02-03' },
+      respondedAt: new Date().toISOString() });
+    await expect(service.verifyPatientNin(patientRequest, '12345678901', '1990-02-03'))
+      .resolves.toMatchObject({ state: 'verified' });
+    expect(provider.verifyNin).toHaveBeenCalledWith('12345678901',
+      { firstName: 'Samplefirst', lastName: 'Samplelast', dateOfBirth: '1990-02-03' }, 'either');
+    const dateCall = query.mock.calls.find(([sql]) => sql.includes('record_my_verified_nin_date_of_birth'));
+    expect(dateCall?.[1]).toEqual(['patient:subject', patientRequest.actor!.sessionId, expect.any(String), '1990-02-03']);
+    const bindingCall = query.mock.calls.find(([sql]) => sql.includes('bind_my_verified_nin'));
+    expect(dateCall?.[1]?.[2]).toBe(bindingCall?.[1]?.[2]);
+  });
+
+  it('refuses a sign-up patient 409 PATIENT_NIN_DETAILS_MISMATCH when the record does not match, after recording the outcome', async () => {
+    const { service, provider, query, setProfileDateOfBirth, setNinEligibility } = setup(true);
+    setProfileDateOfBirth(null); setNinEligibility('legacy_unbound');
+    (provider.verifyNin as jest.Mock).mockResolvedValue({ provider: 'qoreid', state: 'not_verified',
+      providerReference: '99', respondedAt: new Date().toISOString() });
+    await expect(service.verifyPatientNin(patientRequest, '12345678901', '1990-02-03'))
+      .rejects.toMatchObject({ status: 409, code: 'PATIENT_NIN_DETAILS_MISMATCH', message: 'The NIN details do not match your profile.' });
+    expect(query.mock.calls.some(([sql]) => sql.includes('record_my_nin_verification_evidence'))).toBe(true);
+    expect(query.mock.calls.some(([sql]) => sql.includes('bind_my_verified_nin'))).toBe(false);
+  });
+
+  it('keeps a profile date of birth: a stated date that differs is refused before any lookup, an equal one is accepted', async () => {
+    const { service, provider, integrations } = setup(true);
+    await expect(service.verifyPatientNin(patientRequest, '12345678901', '1990-01-01'))
+      .rejects.toMatchObject({ status: 409, code: 'PATIENT_NIN_DETAILS_MISMATCH' });
+    expect(provider.verifyNin).not.toHaveBeenCalled();
+    expect(integrations.consumePatientQuota).not.toHaveBeenCalled();
+    await expect(service.verifyPatientNin(patientRequest, '12345678901', '1991-03-04'))
+      .resolves.toMatchObject({ state: 'verified' });
+    expect(provider.verifyNin).toHaveBeenCalledWith('12345678901', expect.anything(), 'exact');
+  });
+
+  it('keeps today\'s answer for a profile with a date of birth whose record does not match (state not_verified)', async () => {
+    const { service, provider } = setup(true);
+    (provider.verifyNin as jest.Mock).mockResolvedValue({ provider: 'qoreid', state: 'not_verified',
+      providerReference: '99', respondedAt: new Date().toISOString() });
+    await expect(service.verifyPatientNin(patientRequest, '12345678901')).resolves.toMatchObject({ state: 'not_verified' });
   });
 
   it('binds an unbound active legacy patient only after exact QoreID verification', async () => {

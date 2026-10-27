@@ -59,11 +59,21 @@ is read-only and owning-service disclosure/audit is atomic. The internal
 current patient session and the exact authenticated EHR workload caller.
 
 `POST /api/v1/identity/me/verification/nin` is a separate patient-session
-command for QoreID evidence verification. Its body is exactly `{ "nin":
-"<11-digit-NIN>" }`; it returns only a normalized provider/result state, optional
-opaque provider reference, and timestamp. It does not accept patient identity
-attributes, create a patient, or modify a canonical identity. The integration
-is disabled by default and does not expose provider credentials or tokens.
+command for QoreID evidence verification and progressive NIN binding. Its body
+is `{ "nin": "<11-digit-NIN>", "dateOfBirth"?: "YYYY-MM-DD" }`; it returns only
+a normalized provider/result state, optional opaque provider reference, and
+timestamp. `dateOfBirth` is required when the profile has none (a patient who
+signed up without a NIN, 0092; 400 `VALIDATION_FAILED` on `dateOfBirth` if
+missing or invalid); the NIN record must then carry that date and the
+profile's first and last name in either order (else 409
+`PATIENT_NIN_DETAILS_MISMATCH`), and on success the record's date of birth is
+stored on the profile. A profile with a date of birth keeps using it; a stated
+date that differs is refused 409 `PATIENT_NIN_DETAILS_MISMATCH` before any
+lookup. It accepts no other identity attributes and never creates a patient.
+It is on unless `QOREID_PATIENT_SELF_NIN_BINDING_ENABLED=false` (owner decision
+of 2026-10-27) and needs QoreID enabled; it does not expose provider
+credentials or tokens. `GET /api/v1/identity/me` answers `ninVerified`
+(a verified, unrevoked NIN identifier is bound).
 
 `GET /api/v1/ehr/patients/:patientId/emergency-records` requires current workforce
 permissions, emergency purpose and a freshly checked break-glass grant authorizing
@@ -240,8 +250,9 @@ For sensitive NIN lookup, prefer a body-based protected request when query-strin
 
 ### QoreID self and organization verification
 
-This is distinct from governed NIN resolution above. The browser sends only the
-11-digit NIN; the server adds required first/last name and DOB claims from the
+This is distinct from governed NIN resolution above. The browser sends the
+11-digit NIN (and, only for a profile without a date of birth, `dateOfBirth`);
+the server adds required first/last name and DOB claims from the
 authenticated patient's canonical profile to QoreID's request. HID never
 returns the NIN or provider demographics. Extra browser body fields are rejected.
 
@@ -260,6 +271,32 @@ safe HID result state (`verified`, `not_verified`, `incomplete`) or static
 Problem Details; raw QoreID payloads, NIN/CAC inputs, OAuth tokens, and
 diagnostic text are excluded. Full configuration and activation controls are in
 [QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).
+
+### Patient sign-up without NIN
+
+Owner decision of 2026-10-27 (as hid-1.0): no NIN at sign-up.
+
+```text
+POST /api/v1/identity/patient-enrollments/signup
+```
+
+Public, with the NIN start's origin, Turnstile (`patient-enrollment`),
+signed-out and `Idempotency-Key` rules. Body: `firstName`, `lastName` (1-80),
+`email` (<=254), `phone` (`0XXXXXXXXXX` or `+234XXXXXXXXXX`, stored as E.164),
+`gender` (`male`, `female`, `intersex`, `other`, `unknown`), optional
+`hospitalCurrentlyUsing` (<=120), `termsAccepted: true`, `turnstileToken`,
+`turnstileAction`. It stores the declared profile in a pending enrollment
+without a NIN (0092), sets the `hid_enrollment` cookie and sends a
+`SIGNUP_VERIFY` code to the email at once; it answers the enrollment progress
+(`stage: verify_contact`, `contactChannel: email`, `maskedContact`,
+`challengeId`, `expiresInSeconds`, `resendAfterSeconds`, `expiresAt`). Refusals:
+400 `VALIDATION_FAILED`; 409 `PATIENT_EMAIL_ALREADY_REGISTERED`, 409
+`PATIENT_PHONE_ALREADY_REGISTERED`, 409 `IDEMPOTENCY_KEY_REUSED`; Turnstile and
+rate limits as the NIN start. `POST .../contact` resends only to the declared
+email (else 400 `ENROLLMENT_CONTACT_MISMATCH`); `POST .../contact/verify` and
+`POST .../activate` are unchanged for the browser. `GET .../availability`
+answers `{ open, signup: true, ninStart }`: `open` is the sign-up's, independent
+of QoreID and the NIN keys; `ninStart` is the NIN-first start's.
 
 ### HID Resolution
 

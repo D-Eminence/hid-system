@@ -24,7 +24,7 @@ function request(cookie?: string, requestOrigin: string | undefined = origin,
 
 describe('PatientEnrollmentController', () => {
   let service: {
-    start: jest.Mock; availability: jest.Mock; current: jest.Mock; startContact: jest.Mock;
+    start: jest.Mock; signup: jest.Mock; availability: jest.Mock; current: jest.Mock; startContact: jest.Mock;
     verifyContact: jest.Mock; activate: jest.Mock; bindGoogle: jest.Mock;
   };
   let turnstile: { verify: jest.Mock };
@@ -41,7 +41,11 @@ describe('PatientEnrollmentController', () => {
     });
     resetEnvironmentForTests();
     service = { start: jest.fn().mockResolvedValue({ cookie: 'opaque-enrollment-cookie',
-      progress: { stage: 'verify_contact' } }), availability: jest.fn().mockResolvedValue({ open: false }), current: jest.fn(), startContact: jest.fn(),
+      progress: { stage: 'verify_contact' } }),
+      signup: jest.fn(async (_input: unknown, _key: string, _ip: string, _correlation: string,
+        setCookie: (cookie: string) => void) => { setCookie('opaque-signup-cookie');
+        return { cookie: 'opaque-signup-cookie', progress: { stage: 'verify_contact', contactChannel: 'email' } }; }),
+      availability: jest.fn().mockResolvedValue({ open: false }), current: jest.fn(), startContact: jest.fn(),
       verifyContact: jest.fn(), bindGoogle: jest.fn().mockResolvedValue({ bound: true }),
       activate: jest.fn().mockResolvedValue({ stage: 'active', hidCode: 'HID-TEST' }) };
     turnstile = { verify: jest.fn().mockResolvedValue(undefined) };
@@ -65,6 +69,33 @@ describe('PatientEnrollmentController', () => {
     expect(service.start).not.toHaveBeenCalled();
     expect(turnstile.verify).not.toHaveBeenCalled();
     expect(google.onboardingStatus).not.toHaveBeenCalled();
+  });
+
+  describe('POST signup (no NIN)', () => {
+    const body = { firstName: 'Ada', lastName: 'Obi', email: 'ada@example.test', phone: '08031234567',
+      gender: 'female' as const, hospitalCurrentlyUsing: 'LUTH', termsAccepted: true as const,
+      turnstileToken: 'token', turnstileAction: 'patient-enrollment' as const };
+
+    it('checks origin, then Turnstile with the enrollment action, then sets the scoped enrollment cookie', async () => {
+      const response = { cookie: jest.fn() };
+      await expect(controller.signup(body, 'key', request(), response as unknown as Response))
+        .resolves.toEqual({ stage: 'verify_contact', contactChannel: 'email' });
+      expect(turnstile.verify).toHaveBeenCalledWith({ token: 'token', action: 'patient-enrollment',
+        origin, remoteIp: '203.0.113.10' });
+      expect(service.signup).toHaveBeenCalledWith({ firstName: 'Ada', lastName: 'Obi', email: 'ada@example.test',
+        phone: '08031234567', gender: 'female', hospitalCurrentlyUsing: 'LUTH' }, 'key', '203.0.113.10',
+      correlationId, expect.any(Function));
+      expect(response.cookie).toHaveBeenCalledWith('hid_enrollment', 'opaque-signup-cookie', expect.objectContaining({
+        httpOnly: true, sameSite: 'strict', secure: true, path: '/api/v1/identity/patient-enrollments' }));
+    });
+
+    it('refuses another origin and a signed-in caller before Turnstile or any write', async () => {
+      await expect(controller.signup(body, 'key', request(undefined, 'https://attacker.example'),
+        { cookie: jest.fn() } as unknown as Response)).rejects.toMatchObject({ code: 'ORIGIN_DENIED' });
+      await expect(controller.signup(body, 'key', request(undefined, origin, 'Bearer token'),
+        { cookie: jest.fn() } as unknown as Response)).rejects.toMatchObject({ code: 'PATIENT_ENROLLMENT_REQUIRES_SIGN_OUT' });
+      expect(service.signup).not.toHaveBeenCalled();
+    });
   });
 
   it('requires an approved origin before Turnstile or provider work', async () => {

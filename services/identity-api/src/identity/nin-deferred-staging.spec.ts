@@ -193,8 +193,9 @@ describe('explicitly deferred staging NIN', () => {
     expect(invalid.status).toBe(400);
     expect(database.withSystemTransaction).not.toHaveBeenCalled();
 
-    // The signed-in binding proves no holder, so it is off by default and
+    // The signed-in binding proves no holder; turned off explicitly, it is
     // refused before any database access or lookup.
+    process.env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED = 'false'; resetEnvironmentForTests();
     const bindingOff = await request(app!.getHttpServer()).post('/api/v1/identity/me/verification/nin')
       .set('authorization', 'Bearer synthetic-token').send({ nin: '12345678901' });
     expect(bindingOff.status).toBe(503);
@@ -203,7 +204,8 @@ describe('explicitly deferred staging NIN', () => {
     expect(database.withSystemTransaction).not.toHaveBeenCalled();
     expect(globalThis.fetch).not.toHaveBeenCalled();
 
-    process.env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED = 'true'; resetEnvironmentForTests();
+    // On when unset (owner decision of 2026-10-27): it reaches the QoreID gate.
+    delete process.env.QOREID_PATIENT_SELF_NIN_BINDING_ENABLED; resetEnvironmentForTests();
     const disabled = await request(app!.getHttpServer()).post('/api/v1/identity/me/verification/nin')
       .set('authorization', 'Bearer synthetic-token').send({ nin: '12345678901' });
     expect(disabled.status).toBe(503);
