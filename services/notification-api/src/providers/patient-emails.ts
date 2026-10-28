@@ -70,3 +70,53 @@ export function passwordUpdatedContent(input: {
     ],
   });
 }
+
+/**
+ * The code that confirms a new email address on a Health ID account (0094),
+ * in the reset code's design: sent to the NEW address only. That address is
+ * not yet proved to be the patient's (it may be mistyped, or anyone's), so
+ * the email names neither the patient nor their Health ID; the notices to
+ * the previous, verified address do.
+ */
+export function emailChangeCodeContent(input: {
+  code: string;
+  expiresInMinutes: number;
+}): MessageContent {
+  const minutes = `${input.expiresInMinutes} minute${input.expiresInMinutes === 1 ? '' : 's'}`;
+  return content('Confirm your new Health ID email address', {
+    accent: '#1a6fd4',
+    heading: 'Confirm your email',
+    paragraphs: ['Use the code below to make this address the email for a Health ID account.'],
+    codeBox: { label: 'Verification Code', value: input.code, letterSpacing: '0.24em' },
+    closing: [`This code expires in ${minutes}. If you did not ask for this, ignore this email; `
+      + 'nothing changes on the account.'],
+  });
+}
+
+/**
+ * "Your Health ID email was changed" (to the previous address) or "Your
+ * Health ID phone number was changed" (to the account's verified email),
+ * 0094, in the password-updated design. It shows the new contact masked
+ * only, and Health ID support's address.
+ */
+export function contactChangedContent(input: {
+  kind: 'email' | 'phone';
+  firstName?: string;
+  healthId?: string;
+  newContactHint: string;
+  supportEmail: string;
+}): MessageContent {
+  const what = input.kind === 'email' ? 'email address' : 'phone number';
+  const account = input.healthId ? `Health ID account ${input.healthId}` : 'your Health ID account';
+  return content(input.kind === 'email' ? 'Your Health ID email was changed' : 'Your Health ID phone number was changed', {
+    accent: '#0f766e',
+    heading: input.kind === 'email' ? 'Email Changed' : 'Phone Number Changed',
+    ...(input.firstName ? { greetingName: input.firstName } : {}),
+    paragraphs: [
+      `The ${what} for ${account} was changed to ${input.newContactHint}.`
+        + (input.kind === 'email' ? ' This address will no longer be used to sign in or reset the password.' : ''),
+      `If this was not you, contact Health ID support at ${input.supportEmail} immediately `
+        + 'and secure your phone and email accounts.',
+    ],
+  });
+}

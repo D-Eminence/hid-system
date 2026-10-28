@@ -56,6 +56,23 @@ export async function lockRateLimitBucket(client: PoolClient, scope: RateLimitSc
   await client.query('select pg_advisory_xact_lock(hashtextextended($1, 0))', [`otp-rate:${scope}:${bucket}`]);
 }
 
+/**
+ * Gives back one request counted by `consumeRateLimit` (for a reserved
+ * attempt that turned out to be allowed, such as a right password), under the
+ * same transaction lock. A blocked bucket stays blocked; a count never goes
+ * below zero.
+ */
+export async function releaseRateLimit(client: PoolClient, scope: RateLimitScope, bucket: string): Promise<void> {
+  await lockRateLimitBucket(client, scope, bucket);
+  await client.query(
+    `update auth.otp_rate_limits
+        set request_count = greatest(request_count - 1, 0), updated_at = clock_timestamp()
+      where scope = $1 and bucket_hmac = $2 and request_count > 0
+        and (blocked_until is null or blocked_until <= clock_timestamp())`,
+    [scope, bucket],
+  );
+}
+
 /** True while a bucket is blocked. Reads only; it does not count a request. */
 export async function rateLimitBlocked(client: PoolClient, scope: RateLimitScope, bucket: string): Promise<boolean> {
   const result = await client.query<{ blocked: boolean }>(

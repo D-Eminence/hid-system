@@ -84,6 +84,25 @@ async function main() {
     const seen = new Map();
     const legacyChanges = [];
     const enrollmentChanges = [];
+    // A contact a patient changed from their profile (0094) is encrypted by
+    // Identity under its own change and keyed with the current contact lookup
+    // key already: it is neither decrypted nor rekeyed here, only checked for
+    // uniqueness and counted. Before 0094 there is no such contact.
+    const changed = new Map();
+    if ((await client.query("select to_regclass('identity.patient_contact_changes') is not null as present")).rows[0].present) {
+      for (const row of (await client.query(`
+        select change.patient_id, change.channel, change.new_lookup_hmac, change.new_ciphertext
+        from identity.patient_contact_changes change
+        join identity.patients patient on patient.id = change.patient_id
+        where change.state = 'completed' and change.new_ciphertext is not null
+          and ((change.channel = 'phone' and patient.phone_lookup_hmac = change.new_lookup_hmac
+                and patient.phone_e164_ciphertext = change.new_ciphertext)
+            or (change.channel = 'email' and patient.email_lookup_hmac = change.new_lookup_hmac
+                and patient.email_ciphertext = change.new_ciphertext))`)).rows) {
+        changed.set(`${row.patient_id}:${row.channel}`, row);
+      }
+    }
+    const changedContact = (patientId, channel) => changed.get(`${patientId}:${channel}`);
 
     const legacy = await client.query(`
       select id, phone_e164_ciphertext, phone_lookup_hmac, email_ciphertext, email_lookup_hmac
@@ -96,6 +115,10 @@ async function main() {
       ]) {
         if (ciphertext === null) {
           if (prior !== null) throw new Error('Legacy contact lookup lacks ciphertext');
+          continue;
+        }
+        if (changedContact(row.id, channel)) {
+          assertUnique(seen, channel, String(prior).trim(), row.id);
           continue;
         }
         const plaintext = legacyContact(ciphertext, row.id, channel);
@@ -135,6 +158,20 @@ async function main() {
       const canonical = contactLookupHmac(channel, normalized, contactKey);
       if (row.contact_lookup_hmac && !identical(row.contact_lookup_hmac, canonical)) {
         throw new Error('Existing canonical enrollment lookup does not match evidence');
+      }
+      if (row.state === 'active' && changedContact(row.patient_id, channel)) {
+        // The patient changed this contact from their profile (0094): the
+        // enrollment keeps its own evidence; the patient's contact is not its.
+        if (row.patient_source_system !== 'hid-public-qoreid-enrollment') {
+          throw new Error('Active enrollment has no exact public patient');
+        }
+        assertUnique(seen, channel, String(channel === 'phone' ? row.phone_lookup_hmac : row.email_lookup_hmac).trim(),
+          row.patient_id);
+        if (!identical(row.contact_lookup_hmac, canonical)) {
+          enrollmentChanges.push({ id: row.id, patientId: row.patient_id, channel, canonical,
+            updateEnrollment: true, updatePatient: false });
+        }
+        continue;
       }
       if (row.state === 'active') {
         if (!row.patient_id || row.patient_source_system !== 'hid-public-qoreid-enrollment') {

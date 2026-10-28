@@ -197,6 +197,211 @@ An Identity image before 0093's release does not serve the two GET routes
 (404), answers phone sign-in and reset with 400 `VALIDATION_FAILED`, and keeps
 its Google refusals; the website treats a 404 as not available yet.
 
+### Patient profile parity with hid-1.0 (0094; owner decisions of 2026-10-28)
+
+Patient sessions only on every Identity route below (`@PatientOnly`: a staff
+session answers 403 `PATIENT_SESSION_REQUIRED`; a revoked or ended session 403
+`PATIENT_ACCESS_DENIED`); every write is a cookie write with Origin and
+`x-csrf-token`, as the other patient writes. Every success writes its own
+audit row in its transaction, with no contact, code, photo or health value in
+it; the interceptor records refusals.
+
+**`GET /api/v1/identity/me` gains four keys** (and `emailVerified`, for the
+profile's "email verified" item): `"email": string | null` (the account's
+email, the one sign-in and recovery use), `"emailVerified": boolean`,
+`"phone": string | null` (E.164; the website masks it), `"phoneVerified":
+boolean` and `"hasPhoto": boolean`. The phone is null when there is none and
+also for a phone migrated from hid-1.0 until the patient changes it (it is
+encrypted with the migration's key, which Identity does not hold; phone
+sign-in still finds it). A phone is verified only while it is the NIN route's
+verified contact; a sign-up's declared phone and a changed phone are not
+(production sends no SMS). Every other key is unchanged.
+
+**Hospital and HMO.**
+
+```text
+GET /api/v1/identity/me/profile-details
+PUT /api/v1/identity/me/profile-details   { "hospitalCurrentlyUsing": string | null, "hmoName": string | null, "expectedVersion": number }
+```
+
+Both answer `{ "hospitalCurrentlyUsing": string | null, "hmoName": string |
+null, "rowVersion": number }`. Before the first save `rowVersion` is 0 and the
+hospital is the one the patient declared at sign-up, if any; the first save
+sends `expectedVersion: 0`. Values are trimmed (blank is null), at most 120
+characters, no control characters (400 `PROFILE_DETAILS_INVALID` on the
+field); a stale version answers 409 `VERSION_CONFLICT`. Free text, as
+hid-1.0; the website offers the sign-up hospital picker. The read is audited
+as `identity.patient.self.profile-details`, a save as
+`identity.patient.profile-details.update`.
+
+**Photo.**
+
+```text
+PUT    /api/v1/identity/me/photo   { "mediaType": "image/jpeg" | "image/png", "data": "<base64>" }   -> { "hasPhoto": true }
+GET    /api/v1/identity/me/photo   -> the image bytes
+DELETE /api/v1/identity/me/photo   -> { "hasPhoto": false }
+```
+
+The browser crops and re-encodes to a JPEG of at most 256 x 256 (the largest of
+256, 224, 192, 160 and 128 px, best quality first, whose JSON body is at most
+8,000 bytes) and drops all metadata; the
+server checks again: strict base64 of at most 300 KB decoded (the route
+admits a body of about 410 KB; every other Identity route keeps 256 KB), the
+type proved by the magic bytes (JPEG `FF D8 FF` ... `FF D9`; PNG signature,
+`IHDR` first, `IEND` last), so nothing may follow the image, the frame size
+read from the JPEG start-of-frame or PNG `IHDR`, 1 to 1024 pixels a side, and
+no Exif, XMP, IPTC or PNG text chunk. Anything else answers 400 `PHOTO_INVALID`.
+At the production edge the request body must stay under 8,192 bytes: the
+regional WAF in front of the API (AWS managed rule group
+`AWSManagedRulesCommonRuleSet`, rule `SizeRestrictions_BODY`, on the public
+ALB) answers 403 to a larger body before the gateway or Identity sees it. So
+in practice the base64 JSON body carries a JPEG of at most about 6 KB (6,100
+bytes); the website keeps the body under that limit. Identity's own limits
+above are unchanged (they are what a request that reaches Identity meets).
+It is stored encrypted in the database (AES-256-GCM with
+`NIN_ENCRYPTION_KEY_B64`, bound to the patient and the image's sha256; no new
+AWS infrastructure). `GET` answers the bytes with `Content-Type` the stored
+type, `Content-Disposition: inline`, `Cache-Control: private, no-store` and
+`X-Content-Type-Options: nosniff`, or 404 `PHOTO_NOT_FOUND`; it is not
+audited when it succeeds (the header shows it on every page). `DELETE`
+answers `{ "hasPhoto": false }` whether or not one was saved. Clinicians do
+not see the photo. Without the encryption key a save or read answers 503
+`PROFILE_PROTECTION_UNAVAILABLE`.
+
+**Changing the email or the phone.**
+
+```text
+POST /api/v1/identity/me/contact-changes   { "channel": "email", "email": string, "currentPassword": string }
+  -> { "changeId", "maskedContact", "expiresInSeconds", "resendAfterSeconds" }
+POST /api/v1/identity/me/contact-changes/{changeId}/verify   { "code": "123456" }   -> { "email": string }
+POST /api/v1/identity/me/contact-changes   { "channel": "phone", "phone": string, "currentPassword": string }
+  -> { "phone": string, "phoneVerified": false }
+```
+
+Both channels need the current password (bcrypt for an account migrated from
+hid-1.0, else argon2id): a wrong one answers 403 `PASSWORD_INCORRECT`. Every
+attempt is counted, under the account's budget lock and before the hash is
+checked (a right password gives its count back), so at most four passwords
+are checked in 15 minutes however many requests arrive at once; the next
+attempt answers 429 `CONTACT_CHANGE_RATE_LIMITED` and blocks contact changes
+for 15 minutes. For 24 hours after an OTP account recovery both channels,
+and the verify step, answer 403 `PATIENT_RECENT_RECOVERY_HOLD` before the
+password is checked (as emergency contacts, access approvals and the Access
+PIN: REC-NOTIFY), so whoever recovered the account with a code cannot also
+move its email or phone. An account without a password (Google only)
+answers 409 `PASSWORD_REQUIRED` "Set a password first to change your contact
+details." A contact another account, patient or staff record holds answers
+409 `CONTACT_UNAVAILABLE` "That email address or phone number can't be
+used." with no further detail; the refused attempt counts toward the limits
+and is audited as denied. A malformed or mixed body answers 400
+`CONTACT_INVALID` (or `VALIDATION_FAILED`).
+
+- Email: a patient account that is also a staff login (a platform role, a
+  staff record or a facility membership: its email is the staff sign-in too)
+  answers 409 `CONTACT_CHANGE_STAFF_ACCOUNT` "This account is also used to
+  sign in as facility staff, so its email can't be changed here. Contact
+  Health ID support to change it.", at the start and at verify. The new
+  address (normalized to lower case) must differ from the account's verified
+  address (400 `CONTACT_UNCHANGED` "That is already the email address on your
+  account."). The account's own address while it is not verified
+  (`emailVerified: false`) is accepted and goes through the same code step: on
+  success it becomes verified and nothing else changes (no Google link,
+  recovery code or session ends, and no notice is sent, since the previous
+  address is the same one). A 6-digit code goes to the NEW address ("Confirm
+  your new Health ID email address", hid-1.0's design, naming neither the
+  patient nor the Health ID, since the address is not yet proved to be theirs;
+  an older notification-api gets the generic `EMAIL_VERIFY` code instead); it
+  expires after `OTP_EXPIRY_SECONDS` (300), allows `OTP_MAX_ATTEMPTS` (5)
+  tries, and a new start is refused for `OTP_RESEND_COOLDOWN_SECONDS` (60) and
+  after five in an hour (429 `CONTACT_CHANGE_RATE_LIMITED`); a new start
+  replaces the open one. A code that cannot be delivered answers 422
+  `CONTACT_CODE_UNDELIVERABLE`. `maskedContact` is the address as
+  `n•••@example.com`. Verify: a wrong, used or expired code answers 400
+  `OTP_INVALID_OR_EXPIRED` (the attempt is counted first; the fifth wrong one
+  ends the change); an address taken meanwhile answers 409
+  `CONTACT_UNAVAILABLE`. On success the account's email becomes the new
+  address, verified, and so does the patient's contact email: sign-in,
+  recovery, Google's automatic link and Novu's emails use it from then on, and
+  the old address is free. Whoever holds the old mailbox keeps nothing it gave
+  them: a Google account linked automatically because Google verified the old
+  address no longer signs in (a Google account the patient linked or signed up
+  with stays linked; the patient can link the unlinked one again from
+  Settings, with the password, and it is then an explicit link, announced as
+  `SECURITY_GOOGLE_LINKED`; another account still cannot link it), open
+  recovery codes (password reset and hid-1.0 recovery) no longer complete, and
+  the account's other sessions end (the caller's session and its refreshes go
+  on). The OLD address gets "Your Health ID email was changed" (best-effort,
+  after the answer), with the new one masked from letters, digits, "." and "-"
+  only (any other character as "•", an international domain in punycode), so
+  that no spelling of the new address can stop the notice.
+- Phone: E.164 of any country or a Nigerian `0` and 10 digits (as sign-up;
+  400 `CONTACT_INVALID` otherwise). It takes effect at once: phone sign-in
+  and reset use the new number, the old one stops working, and the answer
+  says `phoneVerified: false`. The number the profile already shows answers
+  400 `CONTACT_UNCHANGED` "That is already the phone number on your account."
+  and nothing is sent; a stored number the profile cannot show (one migrated
+  from hid-1.0, under the migration's key) entered again is written again
+  under Identity's key, as a change (announced, `phoneVerified: false`), so
+  GET me shows it from then on. A number another patient holds, in either of
+  a Nigerian number's stored forms, answers 409; five changes an hour at most
+  (429). The account's verified email gets "Your Health ID phone number was
+  changed" (best-effort), with the new number masked; an account without a
+  verified email gets nothing.
+
+A phone change ends no session and no recovery code. Audit:
+`identity.patient.contact-change.start` (success, or denied for an
+unavailable address), `.delivery` (failure: a code that could not be
+delivered ended the change), `.verify` (refused codes, denied) and
+`.complete` (resource type `patient-contact-change`, details
+`{ channel, result }`, and for a completed email change the counts
+`otherSessionsRevoked`, `recoveryCodesInvalidated`, `googleLinksRevoked`, or
+`addressUnchanged: true` when the account's own address was verified),
+and `auth.google.auto-link.revoke` (resource type `account`) when a Google
+link ended; never an address, a number or a code.
+
+**The patient's health information (EHR).**
+
+```text
+GET /api/v1/ehr/me/health-profile
+PUT /api/v1/ehr/me/health-profile   { "bloodGroup", "genotype", "allergies", "currentMedications", "chronicConditions", "medicalNotes", "expectedVersion" }
+```
+
+Patient session (Identity authorizes it, as `GET /ehr/me/records`), facility
+optional. Both answer `{ "bloodGroup": "A+" | "A-" | "B+" | "B-" | "AB+" |
+"AB-" | "O+" | "O-" | null, "genotype": "AA" | "AS" | "AC" | "SS" | "SC" |
+"CC" | null, "allergies", "currentMedications", "chronicConditions",
+"medicalNotes": string | null, "rowVersion": number, "updatedAt": ISO | null }`.
+Nothing saved is all null, `rowVersion` 0, `updatedAt` null; the website then
+starts the form from the imported hid-1.0 profile (`importedHealthProfile` of
+`GET /ehr/me/records`) and saves it as the patient's. Text is trimmed (blank
+is null; CRLF is a newline), at most 1000 characters, no control character
+but the newline (400 `HEALTH_PROFILE_INVALID`); another list value fails
+validation (400 `VALIDATION_FAILED`); a stale `expectedVersion` answers 409
+`VERSION_CONFLICT`. As for the photo, the request body must stay under 8,192
+bytes at the production edge (the WAF answers 403 to a larger one before EHR
+sees it): four 1000-character texts fit when they are plain ASCII, but text
+with many accented or non-Latin characters (two or more bytes each in UTF-8)
+can pass the limit, so the website keeps the body under it. Stored apart from
+clinician records and from the imported profile; audited as
+`ehr.patient.self.health-profile.read` and `.update` (the fields set, never
+their values).
+
+```text
+GET /api/v1/ehr/patients/{patientId}/reported-health-profile
+```
+
+A clinician with `ehr.note.read` and `X-Facility-ID`/`X-Purpose-Of-Use`,
+authorized and audited exactly as the chart's other reads
+(`ClinicalRepository.run`, `read_records`; database RLS checks the same grant
+again): `200` with the six fields and `updatedAt` (no `rowVersion`; all null
+when the patient entered nothing), 403 `CONSENT_REQUIRED` without current
+access. The read is audited as `ehr.record.read` on resource type
+`patient-reported-health-profile`, which the patient's access log shows as a
+view. The website labels it "Reported by the patient".
+
+An Identity or EHR image before 0094's release answers these routes 404 and
+`GET /identity/me` without the new keys; the website hides each section then.
+
 `GET /api/v1/identity/me` returns the authenticated patient's profile and HID.
 `GET /api/v1/identity/me/access-history` returns at most 50 safe grant summaries;
 grant status does not assert notification delivery. Access-history items

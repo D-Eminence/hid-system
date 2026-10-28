@@ -73,6 +73,10 @@ describe('Patient-only routes (A9)', () => {
     'EmergencyContactController.sendVerification', 'EmergencyContactController.confirmVerification',
     'ConsentController.listMyAccessRequests', 'ConsentController.approveAccessRequest',
     'ConsentController.denyAccessRequest', 'ConsentController.revokeMyConsentGrant',
+    // The patient's profile (0094).
+    'PatientProfileController.details', 'PatientProfileController.saveDetails', 'PatientProfileController.photo',
+    'PatientProfileController.savePhoto', 'PatientProfileController.removePhoto',
+    'PatientProfileController.startContactChange', 'PatientProfileController.verifyContactChange',
   ];
   const declared = identityControllers().flatMap((controller) => routes(controller)
     .map((route) => ({ ...route, handler: `${controller.name}.${route.name}` })));
@@ -82,7 +86,7 @@ describe('Patient-only routes (A9)', () => {
       'PatientSelfController', 'ConsentController', 'EmergencyContactController', 'AdminController', 'HealthController']));
   });
 
-  it('marks exactly the emergency-contact, access-request decision and grant revocation routes patient-only, each also patient-allowed and facility-optional', () => {
+  it('marks exactly the emergency-contact, access-request decision, grant revocation and profile routes patient-only, each also patient-allowed and facility-optional', () => {
     const patientOnly = declared.filter((route) => route.patientOnly === true);
     expect(patientOnly.map((route) => route.handler).sort()).toEqual([...PATIENT_ONLY_HANDLERS].sort());
     for (const route of patientOnly) {
