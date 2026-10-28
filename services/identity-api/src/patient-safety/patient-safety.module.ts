@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { WebPushModule } from '../web-push/web-push.module';
 import { AccountDeletionNoticeDispatcher } from './account-deletion-notice.dispatcher';
 import { EmergencyContactController } from './emergency-contact.controller';
 import { EmergencyContactNotificationDispatcher } from './emergency-contact-notification.dispatcher';
@@ -10,6 +11,8 @@ import { PatientLifecycleSweeper } from './patient-lifecycle.sweeper';
 import { RecordAccessAlertDispatcher } from './record-access-alert.dispatcher';
 
 @Module({
+  // The sweeper's web push steps (0097, B6).
+  imports: [WebPushModule],
   controllers: [EmergencyContactController, PatientAccountDeletionController],
   providers: [
     EmergencyContactProtector, EmergencyContactService,

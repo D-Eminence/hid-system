@@ -8,10 +8,13 @@ import { AccountDeletionNoticeDispatcher } from './account-deletion-notice.dispa
 import { EmergencyContactNotificationDispatcher } from './emergency-contact-notification.dispatcher';
 import { PatientAccountDeletionService } from './patient-account-deletion.service';
 import { RecordAccessAlertDispatcher } from './record-access-alert.dispatcher';
+import { WEB_PUSH_DELIVERY_TIMEOUT_MS, WebPushDispatcher } from '../web-push/web-push.dispatcher';
+import { webPushConfiguration } from '../web-push/web-push.config';
 
 /**
- * How long shutdown waits for a tick beyond EMERGENCY_CONTACT_ALERT_TIMEOUT_MS:
- * the database writes around the alert in flight.
+ * How long shutdown waits for a tick beyond the longest send in flight (an
+ * emergency-contact alert's EMERGENCY_CONTACT_ALERT_TIMEOUT_MS or a web
+ * push's WEB_PUSH_DELIVERY_TIMEOUT_MS): the database writes around it.
  */
 export const PATIENT_LIFECYCLE_SHUTDOWN_GRACE_MS = 5_000;
 /** Share invitations past their end closed per tick (0095). */
@@ -30,7 +33,11 @@ export const ACCOUNT_DELETION_FINALIZE_BATCH = 10;
  *   4. identity.finalize_due_patient_account_deletions(10) (0096), always: a
  *      scheduled deletion is the patient's decision;
  *   5. the account-deletion emails (0096), always (scheduled, cancelled and
- *      completed).
+ *      completed);
+ *   6. identity.prune_web_push_subscriptions(100) (0097), always, even while
+ *      push is off: a subscription whose sign-in has ended is erased;
+ *   7. the web pushes due (0097), while Identity's push is on
+ *      (web-push.config.ts).
  * The timer no longer depends on the emergency-contact switch. Multiple
  * replicas are safe: claims use row locks with SKIP LOCKED and leases.
  */
@@ -48,6 +55,7 @@ export class PatientLifecycleSweeper implements OnApplicationBootstrap, BeforeAp
     @Optional() private readonly recordAccessAlerts?: RecordAccessAlertDispatcher,
     @Optional() private readonly accountDeletion?: PatientAccountDeletionService,
     @Optional() private readonly accountDeletionNotices?: AccountDeletionNoticeDispatcher,
+    @Optional() private readonly webPush?: WebPushDispatcher,
   ) {}
 
   onApplicationBootstrap(): void {
@@ -77,10 +85,12 @@ export class PatientLifecycleSweeper implements OnApplicationBootstrap, BeforeAp
     this.dispatcher.stop();
     this.recordAccessAlerts?.stop();
     this.accountDeletionNotices?.stop();
+    this.webPush?.stop();
     if (!this.inFlight) return;
     let timer: NodeJS.Timeout | undefined;
     const expired = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, this.environment.EMERGENCY_CONTACT_ALERT_TIMEOUT_MS + PATIENT_LIFECYCLE_SHUTDOWN_GRACE_MS);
+      timer = setTimeout(resolve, Math.max(this.environment.EMERGENCY_CONTACT_ALERT_TIMEOUT_MS, WEB_PUSH_DELIVERY_TIMEOUT_MS)
+        + PATIENT_LIFECYCLE_SHUTDOWN_GRACE_MS);
       timer.unref();
     });
     await Promise.race([this.inFlight, expired]);
@@ -119,6 +129,13 @@ export class PatientLifecycleSweeper implements OnApplicationBootstrap, BeforeAp
     if (this.accountDeletionNotices) {
       const notices = this.accountDeletionNotices;
       await this.step('account_deletion_notices', correlationId, () => notices.dispatch(correlationId));
+    }
+    if (this.webPush) {
+      const webPush = this.webPush;
+      await this.step('web_push_prune', correlationId, () => webPush.prune(correlationId));
+      if (webPushConfiguration().on) {
+        await this.step('web_push_dispatch', correlationId, () => webPush.dispatch(correlationId));
+      }
     }
   }
 

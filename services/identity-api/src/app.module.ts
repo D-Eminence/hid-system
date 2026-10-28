@@ -14,10 +14,11 @@ import { IdentityModule } from './identity/identity.module';
 import { IntegrationModule } from './integrations/integration.module';
 import { PatientSafetyModule } from './patient-safety/patient-safety.module';
 import { PatientProfileModule } from './patient-profile/patient-profile.module';
+import { WebPushModule } from './web-push/web-push.module';
 
 @Module({
   imports: [DatabaseModule, AuditModule, IntegrationModule, AuthModule, ConsentModule, IdentityModule, AdminModule, CommercialModule,
-    PatientSafetyModule, PatientProfileModule],
+    PatientSafetyModule, PatientProfileModule, WebPushModule],
   controllers: [HealthController],
   providers: [
     { provide: APP_GUARD, useExisting: SecurityGuard },

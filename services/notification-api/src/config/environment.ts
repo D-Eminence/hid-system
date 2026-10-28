@@ -48,6 +48,15 @@ const schema = z.object({
   // facility has no alert phone, for questions. Configured in this service only.
   EMERGENCY_CONTACT_SUPPORT_PHONE: z.preprocess(empty, z.string().trim().regex(/^\+[1-9]\d{7,14}$/, 'must be an E.164 phone number').default('+2347026717252')),
   EMERGENCY_CONTACT_SUPPORT_EMAIL: z.preprocess(empty, z.string().trim().email().max(254).default('support@healthidentitydirectory.com')),
+  // Phone and computer notifications (B6, 0097): the VAPID key pair and
+  // contact. Plain optional strings, never refused at boot (no production
+  // requirement below): providers/web-push.ts decides whether push is on, and
+  // anything missing, invalid or mismatched is off (N1 answers 404). The
+  // private key is an ECS secret (webPushVapidPrivateKey in the
+  // notification-provider secret) and never appears in a log or answer.
+  WEB_PUSH_VAPID_PUBLIC_KEY: optional,
+  WEB_PUSH_VAPID_PRIVATE_KEY: optional,
+  WEB_PUSH_SUBJECT: optional,
 }).superRefine((value, context) => {
   if (value.NOTIFICATION_PROVIDER_MODE === 'test' && value.NODE_ENV !== 'test') {
     context.addIssue({ code: 'custom', path: ['NOTIFICATION_PROVIDER_MODE'], message: 'Deterministic notification providers are test-only' });

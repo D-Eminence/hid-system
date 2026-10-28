@@ -2,9 +2,17 @@ import { readFile } from 'node:fs/promises';
 import { Injectable, Logger } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
 import { IntegrationRuntimeService } from '../integrations/integration-runtime.service';
+import { WEB_PUSH_DELIVERY_TIMEOUT_MS } from '../web-push/web-push-endpoint';
 import type { RecoveryOtpPurpose } from './dto/otp.dto';
 
 export type OtpDeliveryOutcome = 'accepted' | 'definitive_failure' | 'unknown';
+
+/** One web push send's result (B6, N1): what the dispatcher records with identity.record_web_push_outcome. */
+export interface WebPushDeliveryResult {
+  outcome: 'accepted' | 'gone' | 'retry' | 'rejected';
+  retryAfterSeconds?: number;
+  safeCode?: string;
+}
 
 type WorkloadCredential = { readonly headers: Record<string, string> }
   | { readonly unavailable: 'missing' | 'invalid' | 'expired' };
@@ -339,6 +347,71 @@ export class NotificationOtpClient {
       ...(input.kind === 'scheduled' && input.scheduledFor ? { scheduledFor: input.scheduledFor.toISOString() } : {}),
       plan,
     }, OTP_TIMEOUT_MS);
+  }
+
+  /**
+   * N1 (B6, 0097): ask notification-api to send one empty web push (it signs
+   * the VAPID token; Identity never holds the private key). Keyed
+   * web-push:<subscriptionId>:<claimedThrough epoch ms>, the round. No
+   * delivery plan. Its own mapping, not post()'s: only `gone` (404/410 from
+   * the push service itself) ever removes a subscription; a 404 from
+   * notification-api (push not configured there, or an image before B6) is
+   * retried; 400/422 are refusals of this request; everything else retries.
+   */
+  async deliverWebPush(input: {
+    subscriptionId: string;
+    endpoint: string;
+    vapidKeyId: string;
+    claimedThrough: Date;
+    correlationId: string;
+  }): Promise<WebPushDeliveryResult> {
+    const credential = await this.credentials();
+    if ('unavailable' in credential) {
+      this.unavailableTokens += 1;
+      this.logger.warn(`Notification workload token unavailable; nothing was sent `
+        + `(event=notification_workload_token_unavailable reason=${credential.unavailable} count=${this.unavailableTokens})`);
+      return { outcome: 'retry', safeCode: 'workload_token_unavailable' };
+    }
+    let response: Response;
+    try {
+      response = await fetch(`${this.environment.NOTIFICATION_API_URL.replace(/\/+$/, '')}/api/v1/notifications/web-push`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'idempotency-key': `web-push:${input.subscriptionId}:${input.claimedThrough.getTime()}`,
+          'x-correlation-id': input.correlationId,
+          'x-hid-internal-caller': 'identity-api',
+          ...credential.headers,
+        },
+        body: JSON.stringify({ endpoint: input.endpoint, vapidKeyId: input.vapidKeyId }),
+        signal: AbortSignal.timeout(WEB_PUSH_DELIVERY_TIMEOUT_MS),
+      });
+    } catch {
+      return { outcome: 'retry', safeCode: 'transport_error' };
+    }
+    const status = response.status;
+    if (status === 202) {
+      try {
+        const body = await response.json() as { outcome?: unknown; retryAfterSeconds?: unknown; safeCode?: unknown };
+        if (!['accepted', 'gone', 'retry', 'rejected'].includes(String(body.outcome))) {
+          return { outcome: 'retry', safeCode: 'bad_response' };
+        }
+        const retryAfter = typeof body.retryAfterSeconds === 'number' && Number.isFinite(body.retryAfterSeconds)
+          ? Math.min(3600, Math.max(1, Math.round(body.retryAfterSeconds))) : undefined;
+        const safeCode = typeof body.safeCode === 'string' && /^[a-z][a-z0-9_]{1,63}$/.test(body.safeCode)
+          ? body.safeCode : undefined;
+        return { outcome: body.outcome as WebPushDeliveryResult['outcome'],
+          ...(retryAfter !== undefined ? { retryAfterSeconds: retryAfter } : {}),
+          ...(safeCode ? { safeCode } : {}) };
+      } catch {
+        return { outcome: 'retry', safeCode: 'bad_response' };
+      }
+    }
+    if (status >= 200 && status < 300) return { outcome: 'retry', safeCode: 'bad_response' };
+    if (status === 404) return { outcome: 'retry', safeCode: 'notification_404' };
+    if (status === 409) return { outcome: 'retry', safeCode: 'key_mismatch' };
+    if (status === 400 || status === 422) return { outcome: 'rejected', safeCode: `http_${status}` };
+    return { outcome: 'retry', safeCode: `http_${status}` };
   }
 
   private async post(path: 'otp' | 'emergency-contact-alert' | 'staff-invitation' | 'patient-welcome'

@@ -1,8 +1,10 @@
-import { BadRequestException, Body, Controller, ForbiddenException, Headers, HttpCode, Post, Req, ServiceUnavailableException } from '@nestjs/common';
+import { BadRequestException, Body, ConflictException, Controller, ForbiddenException, Headers, HttpCode, NotFoundException,
+  Optional, Post, Req, ServiceUnavailableException } from '@nestjs/common';
 import type { Request } from 'express';
 import { randomUUID } from 'node:crypto';
 import { WorkloadAuthService } from '../auth/workload-auth.service';
 import { getEnvironment } from '../config/environment';
+import { WebPushProvider, webPushServiceOf } from '../providers/web-push';
 import { DeliverAccountDeletionDto } from './dto/deliver-account-deletion.dto';
 import { DeliverEmergencyContactAlertDto } from './dto/deliver-emergency-contact-alert.dto';
 import { DeliverOtpDto, OtpPurpose, validateRecipient } from './dto/deliver-otp.dto';
@@ -11,11 +13,13 @@ import { DeliverContactChangedDto, DeliverEmailChangeCodeDto, DeliverPasswordRes
 import { DeliverPatientShareInvitationDto, DeliverRecordAccessAlertDto, DeliverShareReceivedDto }
   from './dto/deliver-sharing-emails.dto';
 import { DeliverStaffInvitationDto } from './dto/deliver-staff-invitation.dto';
+import { DeliverWebPushDto } from './dto/deliver-web-push.dto';
 import { type DeliveryResult, NotificationService } from './notification.service';
 
 @Controller('notifications')
 export class NotificationController {
-  constructor(private readonly auth: WorkloadAuthService, private readonly notifications: NotificationService) {}
+  constructor(private readonly auth: WorkloadAuthService, private readonly notifications: NotificationService,
+    @Optional() private readonly webPush?: WebPushProvider) {}
 
   @Post('otp') @HttpCode(202)
   async otp(@Body() input: DeliverOtpDto, @Req() request: Request,
@@ -206,6 +210,42 @@ export class NotificationController {
       ...(input.kind === 'scheduled' && input.scheduledFor ? { scheduledFor: new Date(input.scheduledFor) } : {}),
       idempotencyKey: idempotencyKey! }, input.plan);
     return this.response(result);
+  }
+
+  /**
+   * N1 (B6, 0097): one empty, VAPID-signed web push to a browser subscription
+   * Identity holds. Not routed by the gateway (VPC only). The DTO through the
+   * pipe, then workload authentication and the idempotency key as every
+   * route; then 404 WEB_PUSH_NOT_CONFIGURED while the key pair is not
+   * configured (Identity retries; it never removes a subscription for it),
+   * 400 WEB_PUSH_ENDPOINT_NOT_ALLOWED outside rule E, 409
+   * WEB_PUSH_KEY_MISMATCH for another key id; then the send. 202 with the
+   * push service's answer classified; never the endpoint or the token.
+   */
+  @Post('web-push') @HttpCode(202)
+  async deliverWebPush(@Body() input: DeliverWebPushDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    await this.auth.authenticate(request.header('x-hid-internal-caller'), request.header('x-hid-service-authorization'), request.header('x-hid-service-token'));
+    if (!idempotencyKey || !/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(idempotencyKey)) {
+      throw new BadRequestException('A valid idempotency key is required');
+    }
+    const webPush = this.webPush;
+    if (!webPush?.on) {
+      throw new NotFoundException({ statusCode: 404, error: 'Not Found', code: 'WEB_PUSH_NOT_CONFIGURED',
+        message: 'Web push is not configured' });
+    }
+    const pushService = webPushServiceOf(input.endpoint);
+    if (!pushService) {
+      throw new BadRequestException({ statusCode: 400, error: 'Bad Request', code: 'WEB_PUSH_ENDPOINT_NOT_ALLOWED',
+        message: 'The endpoint is not an allowed push service' });
+    }
+    if (input.vapidKeyId !== webPush.keyId) {
+      throw new ConflictException({ statusCode: 409, error: 'Conflict', code: 'WEB_PUSH_KEY_MISMATCH',
+        message: 'The subscription was made with another key' });
+    }
+    const result = await webPush.send(input.endpoint, pushService);
+    return { requestId: randomUUID(), outcome: result.outcome, pushStatus: result.pushStatus,
+      retryAfterSeconds: result.retryAfterSeconds, safeCode: result.safeCode };
   }
 
   /** Workload authentication first, then the idempotency key, then an email recipient on the email channel. */

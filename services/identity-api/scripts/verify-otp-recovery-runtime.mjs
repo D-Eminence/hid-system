@@ -26,6 +26,8 @@ const notification = {
   deliverShareReceived: async () => ({ outcome:'accepted',provider:'ses' }),
   deliverRecordAccessAlert: async () => ({ outcome:'accepted',provider:'ses' }),
   deliverAccountDeletionNotice: async () => ({ outcome:'accepted',provider:'ses' }),
+  // 0097's (B6) web push: no service this verifier builds sends one; stubbed for the same reason.
+  deliverWebPush: async () => ({ outcome:'accepted' }),
 };
 const database = {
   query: async (sql, values) => {

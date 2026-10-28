@@ -1324,6 +1324,29 @@ revoke all on function auth.protect_deleted_account(),
   identity.claim_account_deletion_notices(text,integer,integer),
   identity.record_account_deletion_notice_outcome(uuid,text,text,text,text) from public;
 
+-- Patient web push (0097, B6): the patient's subscribe, unsubscribe and list, and the sweeper's claim, outcome and
+-- prune, to the Identity runtime and the schema test runtime. Nothing to the EHR or Notification runtimes; no grant
+-- on notification.web_push_subscriptions (only these SECURITY DEFINER commands touch it); the audit, remove and
+-- liveness helpers and the two trigger functions are granted to no role.
+grant execute on function identity.subscribe_my_web_push(text,uuid,uuid,text,bytea,text,text,text),
+  identity.unsubscribe_my_web_push(text,uuid,text),
+  identity.list_my_web_push_subscriptions(text,uuid),
+  identity.claim_web_push_deliveries(text,integer,integer,text),
+  identity.record_web_push_outcome(uuid,text,text,integer,text),
+  identity.prune_web_push_subscriptions(integer)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.web_push_audit(text,text,uuid,uuid,text,text,uuid,jsonb),
+  identity.web_push_remove(uuid,text,text,text,uuid),
+  identity.web_push_sign_in_live(uuid,uuid,uuid,boolean),
+  notification.remove_web_push_for_deleted_account(),
+  notification.guard_web_push_subscription_mutation(),
+  identity.subscribe_my_web_push(text,uuid,uuid,text,bytea,text,text,text),
+  identity.unsubscribe_my_web_push(text,uuid,text),
+  identity.list_my_web_push_subscriptions(text,uuid),
+  identity.claim_web_push_deliveries(text,integer,integer,text),
+  identity.record_web_push_outcome(uuid,text,text,integer,text),
+  identity.prune_web_push_subscriptions(integer) from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),

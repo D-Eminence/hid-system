@@ -83,6 +83,8 @@ describe('Patient-only routes (A9)', () => {
     // Delete my account (0096).
     'PatientAccountDeletionController.status', 'PatientAccountDeletionController.requestDeletion',
     'PatientAccountDeletionController.confirm', 'PatientAccountDeletionController.cancel',
+    // Phone and computer notifications (0097).
+    'WebPushController.state', 'WebPushController.subscribe', 'WebPushController.unsubscribe',
   ];
   const declared = identityControllers().flatMap((controller) => routes(controller)
     .map((route) => ({ ...route, handler: `${controller.name}.${route.name}` })));
