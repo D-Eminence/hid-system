@@ -30,6 +30,10 @@ test('scoped Novu dispatch builds only worker and migration',()=>assert.deepEqua
 test('scoped admin correction builds only Identity and migration',()=>assert.deepEqual(selectComponents([],'admin-update'),['identity-api','database-migration']));
 test('patient chat release builds exactly its three APIs and compatible migration runner',()=>assert.deepEqual(selectComponents([],'patient-chat-update'),['identity-api','ehr-api','lab-api','database-migration']));
 test('production policy edits rebuild every component for fresh native verification',()=>assert.deepEqual(selectComponents(['security/production-runtime-assessment.json']),components));
+test('a migration with its ledger entry rebuilds only the migration runner and the changed services',()=>assert.deepEqual(
+  selectComponents(['scripts/verify-migration-ledger.mjs','services/ehr-api/database/migrations/0095_example.sql','services/identity-api/src/app.module.ts',
+    'release/config/components.json','config/production-schema-compatibility.json','docs/DATABASE.md']),['identity-api','ehr-api','database-migration']));
+test('any other script still rebuilds every component',()=>assert.deepEqual(selectComponents(['scripts/production_deployment.py']),components));
 test('database changes also rebuild the migration runner',()=>assert.deepEqual(selectComponents(['services/ehr-api/database/migrations/0063_example.sql']),['ehr-api','database-migration']));
 test('shared client and CI changes select the complete backend matrix',()=>assert.deepEqual(selectComponents(['packages/api-client/src/index.ts']),components));
 test('reject unknown/path-injection components',()=>assert.throws(()=>componentConfig('../production')));
