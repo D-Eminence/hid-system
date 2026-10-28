@@ -7,6 +7,7 @@ import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import type { RecoveryOtpPurpose } from './dto/otp.dto';
+import { emailFirstName } from './email-first-name';
 import { NotificationOtpClient, type OtpDeliveryOutcome } from './notification-otp.client';
 import { consumeRateLimit, lockRateLimitBucket, rateLimitBlocked } from './rate-limit';
 
@@ -17,8 +18,13 @@ interface AccountRow {
   phone_enrollment_id: string | null;
   phone_ciphertext: Buffer | null;
   phone_key_version: string | null;
+  /** The account's active patient, when this service may read it (RLS: patients from public enrollment). */
+  patient_first_name: string | null;
+  patient_hid_code: string | null;
 }
 interface RecoveryRecipient { channel: 'email' | 'sms'; value: string }
+/** Who a patient email names: their first name (if any) and Health ID. */
+interface PatientNaming { firstName?: string; healthId: string }
 interface ActiveChallengeRow { id: string; cooling: boolean }
 interface StartCooldownRow { challenge_id: string; cooling: boolean }
 interface ChallengeRow {
@@ -36,6 +42,9 @@ interface VerifiedChallengeRow {
   account_id: string;
   completion_token_hmac: string;
   completion_expires_at: Date;
+  email: string | null;
+  patient_first_name: string | null;
+  patient_hid_code: string | null;
 }
 
 export function generateSixDigitOtp(draw: (minimum: number, maximum: number) => number = randomInt): string {
@@ -56,8 +65,12 @@ export class OtpService implements BeforeApplicationShutdown {
   private readonly environment = getEnvironment();
   private readonly key = this.environment.OTP_HMAC_KEY_B64
     ? Buffer.from(this.environment.OTP_HMAC_KEY_B64, 'base64') : undefined;
-  private readonly deliveries = new AfterResponseTasks(new Logger(OtpService.name),
+  private readonly logger = new Logger(OtpService.name);
+  private readonly deliveries = new AfterResponseTasks(this.logger,
     'Recovery code delivery or its bookkeeping failed');
+  /** "Your Health ID password was updated": sent after a completed reset answers, never waited for. */
+  private readonly confirmations = new AfterResponseTasks(this.logger,
+    'Password-updated email could not be sent');
 
   constructor(
     private readonly database: DatabaseService,
@@ -65,13 +78,14 @@ export class OtpService implements BeforeApplicationShutdown {
   ) {}
 
   /** Waits for the deliveries started so far, and any started meanwhile. */
-  settleDeliveries(): Promise<void> {
-    return this.deliveries.settle();
+  async settleDeliveries(): Promise<void> {
+    await Promise.all([this.deliveries.settle(), this.confirmations.settle()]);
   }
 
   /** Runs before DatabaseService ends the pool, so deliveries can record their outcome. */
-  beforeApplicationShutdown(): Promise<void> {
-    return this.deliveries.settle(AFTER_RESPONSE_SHUTDOWN_GRACE_MS);
+  async beforeApplicationShutdown(): Promise<void> {
+    await Promise.all([this.deliveries.settle(AFTER_RESPONSE_SHUTDOWN_GRACE_MS),
+      this.confirmations.settle(AFTER_RESPONSE_SHUTDOWN_GRACE_MS)]);
   }
 
   async start(input: {
@@ -96,7 +110,7 @@ export class OtpService implements BeforeApplicationShutdown {
     const candidateChallengeId = randomUUID();
 
     const challenge = await this.database.withSystemTransaction(input.correlationId, async (client): Promise<
-      { kind: 'challenge'; id: string; recipient: RecoveryRecipient }
+      { kind: 'challenge'; id: string; recipient: RecoveryRecipient; patient?: PatientNaming }
       | { kind: 'none' }
       | { kind: 'rate_limited' }
       | { kind: 'cooldown'; id: string }
@@ -105,7 +119,9 @@ export class OtpService implements BeforeApplicationShutdown {
         `select account.id::text, lower(account.email)::text as email, account.token_version::text,
                 enrollment.id::text as phone_enrollment_id,
                 enrollment.contact_ciphertext as phone_ciphertext,
-                enrollment.key_version as phone_key_version
+                enrollment.key_version as phone_key_version,
+                case when patient.status = 'active' then patient.first_name end as patient_first_name,
+                case when patient.status = 'active' then patient.hid_code end as patient_hid_code
            from auth.accounts account
            left join identity.patients patient on patient.account_id = account.id
            left join identity.public_patient_enrollments enrollment
@@ -190,7 +206,14 @@ export class OtpService implements BeforeApplicationShutdown {
           this.environment.OTP_HMAC_KEY_VERSION, this.environment.OTP_EXPIRY_SECONDS,
           this.environment.OTP_MAX_ATTEMPTS, ipHmac, account.token_version],
       );
-      return { kind: 'challenge', id: candidateChallengeId, recipient };
+      // A patient's reset code by email names them and their Health ID
+      // (owner decision of 2026-10-28, hid-1.0's design). Staff, admin and
+      // legacy recovery, an SMS code, and a patient this service cannot read
+      // keep the generic code message. Read in the same query, so the start
+      // answers every identifier alike and in the same time.
+      const patient = input.purpose === 'PASSWORD_RESET' && recipient.channel === 'email'
+        ? this.patientNaming(account.patient_first_name, account.patient_hid_code) : undefined;
+      return { kind: 'challenge', id: candidateChallengeId, recipient, ...(patient ? { patient } : {}) };
     });
 
     if (challenge.kind === 'rate_limited') throw this.rateLimited();
@@ -199,13 +222,20 @@ export class OtpService implements BeforeApplicationShutdown {
       // wait for it: its timing would tell that the account exists. The
       // delivery request starts here, synchronously; its outcome is recorded
       // after the response.
-      const { id, recipient } = challenge;
+      const { id, recipient, patient } = challenge;
       this.deliveries.run(input.correlationId, async () => {
-        const delivery = await this.notification.deliver({
-          challengeId: id, recipient: recipient.value, code, purpose: input.purpose,
-          channel: recipient.channel,
-          correlationId: input.correlationId,
-        });
+        const delivery = patient
+          ? await this.notification.deliverPasswordResetCode({
+            challengeId: id, recipient: recipient.value, code,
+            ...(patient.firstName ? { firstName: patient.firstName } : {}), healthId: patient.healthId,
+            expiresInMinutes: Math.ceil(this.environment.OTP_EXPIRY_SECONDS / 60),
+            correlationId: input.correlationId,
+          })
+          : await this.notification.deliver({
+            challengeId: id, recipient: recipient.value, code, purpose: input.purpose,
+            channel: recipient.channel,
+            correlationId: input.correlationId,
+          });
         await this.recordDelivery(id, delivery);
       });
     }
@@ -317,9 +347,13 @@ export class OtpService implements BeforeApplicationShutdown {
     const outcome = await this.database.withSystemTransaction(input.correlationId, async (client) => {
       const challenge = (await client.query<VerifiedChallengeRow>(
         `select challenge.id::text, challenge.account_id::text,
-                challenge.completion_token_hmac::text, challenge.completion_expires_at
+                challenge.completion_token_hmac::text, challenge.completion_expires_at,
+                lower(account.email)::text as email,
+                patient.first_name as patient_first_name, patient.hid_code as patient_hid_code
            from auth.otp_challenges challenge
            join auth.accounts account on account.id = challenge.account_id
+           left join identity.patients patient
+             on patient.account_id = account.id and patient.status = 'active'
           where challenge.id = $1 and challenge.purpose = $2 and challenge.verified_at is not null
             and challenge.consumed_at is null and challenge.invalidated_at is null
             and challenge.account_token_version = account.token_version
@@ -329,7 +363,7 @@ export class OtpService implements BeforeApplicationShutdown {
         [input.challengeId, input.purpose],
       )).rows[0];
       if (!challenge || challenge.completion_expires_at.getTime() <= Date.now()
-        || !this.equalHex(challenge.completion_token_hmac, suppliedTokenHmac)) return 'invalid' as const;
+        || !this.equalHex(challenge.completion_token_hmac, suppliedTokenHmac)) return { kind: 'invalid' as const };
 
       const passwordHash = await argon2.hash(input.newPassword, {
         type: argon2.argon2id, memoryCost: 65_536, timeCost: 3, parallelism: 1,
@@ -338,10 +372,46 @@ export class OtpService implements BeforeApplicationShutdown {
         'select auth.complete_recovery_otp($1, $2, $3, $4) as completed',
         [input.challengeId, input.purpose, suppliedTokenHmac, passwordHash],
       );
-      return completed.rows[0]?.completed === true ? 'completed' as const : 'invalid' as const;
+      return completed.rows[0]?.completed === true
+        ? { kind: 'completed' as const, challenge } : { kind: 'invalid' as const };
     });
-    if (outcome !== 'completed') throw this.invalid();
+    if (outcome.kind !== 'completed') throw this.invalid();
+    this.confirmPasswordUpdated(outcome.challenge, input.correlationId);
     return { completed: true };
+  }
+
+  /**
+   * "Your Health ID password was updated" (owner decision of 2026-10-28,
+   * hid-1.0's design), to the account's email after a completed reset. A
+   * patient this service can read is named, with their Health ID; any other
+   * account gets it without them. Best-effort: the reset has already
+   * answered and never fails because of it; a failure is logged with the
+   * correlation id and the outcome only. An account without an email gets
+   * nothing (production delivers email only).
+   */
+  private confirmPasswordUpdated(challenge: VerifiedChallengeRow, correlationId: string): void {
+    const recipient = challenge.email;
+    if (!recipient) return;
+    const patient = this.patientNaming(challenge.patient_first_name, challenge.patient_hid_code);
+    this.confirmations.run(correlationId, async () => {
+      const delivery = await this.notification.deliverPasswordUpdated({
+        challengeId: challenge.id, recipient,
+        ...(patient?.firstName ? { firstName: patient.firstName } : {}),
+        ...(patient ? { healthId: patient.healthId } : {}),
+        correlationId,
+      });
+      if (delivery.outcome !== 'accepted') {
+        this.logger.warn(`Password-updated email was not accepted (correlation ${correlationId}, `
+          + `outcome ${delivery.outcome}${delivery.safeCode ? `, code ${delivery.safeCode}` : ''})`);
+      }
+    });
+  }
+
+  /** A patient's first name and Health ID as an email names them, or undefined without a valid Health ID. */
+  private patientNaming(firstName: string | null | undefined, hidCode: string | null | undefined): PatientNaming | undefined {
+    if (!hidCode || !/^HID-[A-HJ-NP-Z2-9]{6,32}$/.test(hidCode)) return undefined;
+    const name = emailFirstName(firstName);
+    return { ...(name ? { firstName: name } : {}), healthId: hidCode };
   }
 
   /** Its own HMAC domain, apart from the account's start bucket hmac('account', id). */

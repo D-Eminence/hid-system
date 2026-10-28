@@ -5,6 +5,8 @@ import { WorkloadAuthService } from '../auth/workload-auth.service';
 import { getEnvironment } from '../config/environment';
 import { DeliverEmergencyContactAlertDto } from './dto/deliver-emergency-contact-alert.dto';
 import { DeliverOtpDto, OtpPurpose, validateRecipient } from './dto/deliver-otp.dto';
+import { DeliverPasswordResetCodeDto, DeliverPasswordUpdatedDto,
+  DeliverPatientWelcomeDto } from './dto/deliver-patient-emails.dto';
 import { DeliverStaffInvitationDto } from './dto/deliver-staff-invitation.dto';
 import { type DeliveryResult, NotificationService } from './notification.service';
 
@@ -81,6 +83,60 @@ export class NotificationController {
       expiresAt: new Date(input.expiresAt), idempotencyKey,
     }, input.plan);
     return this.response(result);
+  }
+
+  /**
+   * "Your Health ID is ready" (owner decision of 2026-10-28): the welcome
+   * email of a first activation. Fixed fields, email only, workload
+   * authentication and idempotency key as the invitation.
+   */
+  @Post('patient-welcome') @HttpCode(202)
+  async patientWelcome(@Body() input: DeliverPatientWelcomeDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    await this.authenticateEmailRequest(request, idempotencyKey, input);
+    const result = await this.notifications.deliverPatientWelcome({ recipient: input.recipient,
+      ...(input.firstName ? { firstName: input.firstName } : {}), healthId: input.healthId,
+      idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  /**
+   * A patient's password reset code in hid-1.0's design (owner decision of
+   * 2026-10-28). Its own route, not new fields on POST otp, so an older
+   * notification-api answers a newer Identity 404 and Identity sends the
+   * generic code instead.
+   */
+  @Post('password-reset-code') @HttpCode(202)
+  async passwordResetCode(@Body() input: DeliverPasswordResetCodeDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    await this.authenticateEmailRequest(request, idempotencyKey, input);
+    const result = await this.notifications.deliverPasswordResetCode({ recipient: input.recipient,
+      code: input.code, ...(input.firstName ? { firstName: input.firstName } : {}), healthId: input.healthId,
+      expiresInMinutes: input.expiresInMinutes, idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  /** "Your Health ID password was updated", after a completed reset (owner decision of 2026-10-28). */
+  @Post('password-updated') @HttpCode(202)
+  async passwordUpdated(@Body() input: DeliverPasswordUpdatedDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    await this.authenticateEmailRequest(request, idempotencyKey, input);
+    const result = await this.notifications.deliverPasswordUpdated({ recipient: input.recipient,
+      ...(input.firstName ? { firstName: input.firstName } : {}),
+      ...(input.healthId ? { healthId: input.healthId } : {}), idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  /** Workload authentication first, then the idempotency key, then an email recipient on the email channel. */
+  private async authenticateEmailRequest(request: Request, idempotencyKey: string | undefined,
+    input: { channel: string; recipient: string }): Promise<void> {
+    await this.auth.authenticate(request.header('x-hid-internal-caller'), request.header('x-hid-service-authorization'), request.header('x-hid-service-token'));
+    if (!idempotencyKey || !/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(idempotencyKey)) {
+      throw new BadRequestException('A valid idempotency key is required');
+    }
+    if (input.channel !== 'email' || !validateRecipient('email', input.recipient)) {
+      throw new BadRequestException('Recipient does not match the selected channel');
+    }
   }
 
   private response(result: DeliveryResult) {

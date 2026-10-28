@@ -7,11 +7,16 @@ export class SesEmailProvider implements OtpProvider {
   constructor(private readonly environment: Environment, private readonly client = new SESv2Client({ region: environment.AWS_REGION, maxAttempts: 1 })) {}
   async send(message: OtpMessage): Promise<ProviderResult> {
     if (message.channel !== 'email' || !this.environment.SES_FROM_ADDRESS) return { outcome: 'definitive_failure', provider: this.name, safeCode: 'not_configured' };
+    const { subject, text, html } = messageContent(message);
     try {
       const response = await this.client.send(new SendEmailCommand({
         FromEmailAddress: this.environment.SES_FROM_ADDRESS,
         Destination: { ToAddresses: [message.recipient] },
-        Content: { Simple: { Subject: { Data: messageContent(message).subject, Charset: 'UTF-8' }, Body: { Text: { Data: messageContent(message).text, Charset: 'UTF-8' } } } },
+        // With an HTML part SES sends multipart/alternative: text and HTML.
+        Content: { Simple: { Subject: { Data: subject, Charset: 'UTF-8' }, Body: {
+          Text: { Data: text, Charset: 'UTF-8' },
+          ...(html ? { Html: { Data: html, Charset: 'UTF-8' } } : {}),
+        } } },
       }), { abortSignal: AbortSignal.timeout(this.environment.NOTIFICATION_PROVIDER_TIMEOUT_MS) });
       return response.MessageId ? { outcome: 'accepted', provider: this.name, providerMessageId: response.MessageId }
         : { outcome: 'unknown', provider: this.name, safeCode: 'missing_message_id' };

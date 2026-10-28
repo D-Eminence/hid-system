@@ -11,6 +11,12 @@ export interface ProviderResult {
 export interface MessageContent {
   subject: string;
   text: string;
+  /**
+   * The HTML part of an email (the patient emails in hid-1.0's design),
+   * sent with the text part as multipart/alternative. SMS and WhatsApp use
+   * the text only.
+   */
+  html?: string;
 }
 
 export interface OtpMessage {
@@ -19,7 +25,7 @@ export interface OtpMessage {
   code: string;
   purpose: string;
   idempotencyKey: string;
-  /** Fixed, server-rendered non-OTP content (emergency-contact alerts). */
+  /** Fixed, server-rendered content (emergency-contact alerts, invitations, the patient emails). */
   content?: MessageContent;
 }
 
@@ -147,8 +153,8 @@ export function staffInvitationReference(invitationId: string): string {
 }
 
 /**
- * A facility staff invitation (P4b, SPEC 4.6), plain text like every Health
- * ID email. It names no person: no invitee, no inviter and no free text (S3).
+ * A facility staff invitation (P4b, SPEC 4.6), plain text (only the patient
+ * emails of patient-emails.ts have an HTML part). It names no person: no invitee, no inviter and no free text (S3).
  * The facility's name appears only when Identity sent one that the DTO
  * accepted (no link-like or domain-like text); otherwise "a facility". The
  * link carries the invitation id and its 256-bit token in the fragment, which

@@ -1,6 +1,12 @@
-import { Body, Controller, Get, Headers, HttpCode, Post, Req, Res } from '@nestjs/common';
+import { Body, Controller, Get, Headers, HttpCode, HttpException, Logger, Post, Req, Res } from '@nestjs/common';
 import type { Response } from 'express';
+import { AuditService } from '../audit/audit.service';
+import { AuthService } from '../auth/auth.service';
+import type { LoginResult } from '../auth/auth.types';
+import type { PatientLoginDto } from '../auth/dto/patient-login.dto';
 import { GoogleAuthenticationService } from '../auth/google-authentication.service';
+import { setSessionCookies } from '../auth/session-cookies';
+import { sessionEventFromRequest, sessionSuccessAuditEvent } from '../auth/session-success-audit';
 import { TurnstileService } from '../auth/turnstile.service';
 import { AuditAction, Public } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
@@ -18,9 +24,13 @@ export class PatientEnrollmentController {
   private readonly allowedOrigins = new Set(
     this.environment.CORS_ORIGINS.split(',').map((origin) => origin.trim()));
 
+  private readonly logger = new Logger(PatientEnrollmentController.name);
+
   constructor(private readonly enrollments: PatientEnrollmentService,
     private readonly turnstile: TurnstileService,
-    private readonly google: GoogleAuthenticationService) {}
+    private readonly google: GoogleAuthenticationService,
+    private readonly auth: AuthService,
+    private readonly audit: AuditService) {}
 
   @Get('availability')
   availability(@Req() request: HidRequest) {
@@ -112,6 +122,19 @@ export class PatientEnrollmentController {
       input.code, request.correlationId);
   }
 
+  /**
+   * Sets the password and activates the Health ID, for the sign-up without a
+   * NIN and the NIN route alike, then signs the new patient in (owner
+   * decision of 2026-10-28): a first activation signs in exactly as POST
+   * /auth/patient/login does with the new Health ID and this password (the
+   * same session rules, the three session cookies, the x-csrf-token header,
+   * the 'auth.login' audit and the session's device facts) and answers
+   * `signedIn: true`. A replay (the enrollment was already active) verified
+   * no password, so it signs nobody in: only the browser holding the
+   * enrollment cookie, and only its first activation, gets a session. If the
+   * session cannot be created the activation still succeeds, with
+   * `signedIn: false`, and the patient signs in as before.
+   */
   @Post('activate')
   @HttpCode(200)
   @AuditAction('identity.patient-enrollment.activate')
@@ -129,7 +152,37 @@ export class PatientEnrollmentController {
       secure: this.environment.AUTH_COOKIE_SECURE,
       sameSite: 'strict', httpOnly: true, path: '/api/v1',
     });
-    return result;
+    const signedIn = result.replayed ? false
+      : await this.signIn(result.hidCode, input.password, request, response);
+    return { stage: result.stage, hidCode: result.hidCode, signedIn };
+  }
+
+  /**
+   * POST /auth/patient/login's sign-in, after activation: AuthService.login
+   * as a patient with the Health ID and the password just set, the 'auth.login'
+   * audit, then the cookies and header. Any failure leaves no cookie and
+   * answers false; it is logged with the correlation id and a status only.
+   */
+  private async signIn(hidCode: string, password: string, request: HidRequest,
+    response: Response): Promise<boolean> {
+    const event = sessionEventFromRequest(request);
+    let session: LoginResult | undefined;
+    try {
+      session = await this.auth.login({ email: hidCode, password } as PatientLoginDto, event, 'patient');
+      await this.audit.record(sessionSuccessAuditEvent('auth.login', session.actor, request));
+      setSessionCookies(response, session, this.environment);
+      response.setHeader('x-csrf-token', session.csrfToken);
+      return true;
+    } catch (error) {
+      // A session created but not handed over (its audit failed) is revoked,
+      // best-effort: no browser holds it.
+      if (session) await this.auth.revoke(session.actor.sessionId, session.actor.subject, event)
+        .catch(() => undefined);
+      const status = error instanceof HttpException ? String(error.getStatus()) : 'error';
+      this.logger.warn(`Health ID activated, but the sign-in after it was not completed; the patient signs in `
+        + `instead (correlation ${request.correlationId}, status ${status})`);
+      return false;
+    }
   }
 
   private assertOrigin(request: HidRequest) {

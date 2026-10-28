@@ -25,7 +25,7 @@ export class BrevoFallbackProvider implements OtpProvider {
   }
 
   private request(message: OtpMessage): { path: string; body: object } | null {
-    const { subject, text } = messageContent(message);
+    const { subject, text, html } = messageContent(message);
     if (message.channel === 'email' && this.environment.BREVO_EMAIL_FROM) {
       return {
         path: '/v3/smtp/email',
@@ -34,6 +34,7 @@ export class BrevoFallbackProvider implements OtpProvider {
           to: [{ email: message.recipient }],
           subject,
           textContent: text,
+          ...(html ? { htmlContent: html } : {}),
         },
       };
     }

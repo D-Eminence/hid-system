@@ -19,6 +19,7 @@ import type { PoolClient } from 'pg';
 import type { ActorContext } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
+import type { CurrentPatientContextService } from './current-patient-context.service';
 import type { CurrentStaffContextService } from './current-staff-context.service';
 import { TokenService } from './token.service';
 
@@ -155,6 +156,115 @@ describe('TokenService legacy password continuity', () => {
     expect(sql).toContain('account.disabled_until');
     expect(sql).toContain('account.token_version = session.account_token_version');
     expect(currentStaff.resolve).not.toHaveBeenCalled();
+  });
+});
+
+describe('TokenService session lifetimes (patients: owner decision of 2026-10-28)', () => {
+  const HOUR = 3_600_000;
+  const DAY = 24 * HOUR;
+  const now = new Date('2026-10-28T09:00:00.000Z');
+  const patientActor: ActorContext = { kind: 'patient', patientId: '51000000-0000-4000-8000-000000000001',
+    id: 'patient:41000000-0000-4000-8000-000000000001', subject: 'patient:41000000-0000-4000-8000-000000000001',
+    accountId: '41000000-0000-4000-8000-000000000001', roles: [], permissions: [], platformRoles: [],
+    platformPermissions: [], facilities: [], facilityIds: [], authenticationMethod: 'local' };
+
+  beforeEach(() => {
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost:5432/hid',
+      CORS_ORIGINS: 'http://localhost:5173', AUTH_MODE: 'local',
+      AUTH_SIGNING_SECRET: 'test-signing-secret-with-at-least-32-characters',
+      AUTH_LOGIN_PEPPER: 'test-login-pepper-with-at-least-32-characters',
+    });
+    for (const key of ['AUTH_REFRESH_TTL_SECONDS', 'AUTH_ABSOLUTE_TTL_SECONDS',
+      'AUTH_PATIENT_REFRESH_TTL_SECONDS', 'AUTH_PATIENT_ABSOLUTE_TTL_SECONDS']) delete process.env[key];
+    resetEnvironmentForTests();
+    jest.useFakeTimers({ now, doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] });
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+    for (const key of ['AUTH_REFRESH_TTL_SECONDS', 'AUTH_ABSOLUTE_TTL_SECONDS',
+      'AUTH_PATIENT_REFRESH_TTL_SECONDS', 'AUTH_PATIENT_ABSOLUTE_TTL_SECONDS']) delete process.env[key];
+    resetEnvironmentForTests();
+  });
+
+  function harness(oldSession?: Record<string, unknown>) {
+    const clientQuery = jest.fn(async (_sql: string, _values?: readonly unknown[]) => ({ rows: [], rowCount: 1 }));
+    const query = jest.fn(async (sql: string) => sql.includes('from auth.sessions session')
+      ? { rows: oldSession ? [oldSession] : [], rowCount: oldSession ? 1 : 0 }
+      : { rows: [{ token_version: '1' }], rowCount: 1 });
+    const database = { query, withSystemTransaction: jest.fn(async (_id: string,
+      work: (client: PoolClient) => Promise<unknown>) => work({ query: clientQuery } as unknown as PoolClient)) };
+    const staff = { resolve: jest.fn(async () => actor) };
+    const patient = { resolve: jest.fn(async () => patientActor) };
+    const service = new TokenService(database as unknown as DatabaseService,
+      staff as unknown as CurrentStaffContextService, patient as unknown as CurrentPatientContextService);
+    const insertedSession = () => {
+      const insert = clientQuery.mock.calls.find(([sql]) => String(sql).includes('insert into auth.sessions'));
+      const values = insert?.[1] as unknown[];
+      return { issuedAt: values[7] as Date, expiresAt: values[8] as Date, absoluteExpiresAt: values[9] as Date };
+    };
+    return { service, insertedSession };
+  }
+
+  it('issues a patient session for 7 days idle and 30 days at most; the cookies follow the idle expiry', async () => {
+    const { service, insertedSession } = harness();
+    const result = await service.issue({ subject: patientActor.subject, accountId: patientActor.accountId,
+      actorKind: 'patient', displayName: '', facilities: [], authenticationMethod: 'local' }, { correlationId: 'patient-ttl' });
+    expect(result.refreshExpiresAt).toEqual(new Date(now.getTime() + 7 * DAY));
+    expect(result.expiresAt).toEqual(new Date(now.getTime() + 15 * 60_000));
+    expect(insertedSession()).toEqual({ issuedAt: now, expiresAt: new Date(now.getTime() + 7 * DAY),
+      absoluteExpiresAt: new Date(now.getTime() + 30 * DAY) });
+  });
+
+  it('keeps staff and platform sessions at 8 hours idle and 24 hours at most', async () => {
+    const { service, insertedSession } = harness();
+    const result = await service.issue({ subject: actor.subject, accountId: actor.accountId, displayName: '',
+      facilities: [], authenticationMethod: 'local' }, { correlationId: 'staff-ttl' });
+    expect(result.refreshExpiresAt).toEqual(new Date(now.getTime() + 8 * HOUR));
+    expect(insertedSession()).toEqual({ issuedAt: now, expiresAt: new Date(now.getTime() + 8 * HOUR),
+      absoluteExpiresAt: new Date(now.getTime() + DAY) });
+  });
+
+  it('caps a configured idle lifetime above the absolute one at the absolute expiry', async () => {
+    Object.assign(process.env, { AUTH_PATIENT_REFRESH_TTL_SECONDS: '604800', AUTH_PATIENT_ABSOLUTE_TTL_SECONDS: '86400' });
+    resetEnvironmentForTests();
+    const { service, insertedSession } = harness();
+    const result = await service.issue({ subject: patientActor.subject, accountId: patientActor.accountId,
+      actorKind: 'patient', displayName: '', facilities: [], authenticationMethod: 'local' }, { correlationId: 'patient-cap' });
+    expect(result.refreshExpiresAt).toEqual(new Date(now.getTime() + DAY));
+    expect(insertedSession().expiresAt).toEqual(insertedSession().absoluteExpiresAt);
+  });
+
+  function stored(kind: 'staff' | 'patient', absoluteExpiresAt: Date) {
+    return { id: '00000000-0000-4000-8000-000000000001', account_id: kind === 'patient' ? patientActor.accountId : actor.accountId,
+      actor_subject: kind === 'patient' ? patientActor.subject : actor.subject, family_id: 'family-1',
+      access_jti: 'jti', token_version: '1', authentication_method: 'password', session_kind: kind,
+      patient_id: kind === 'patient' ? patientActor.patientId : null, revoked_at: null,
+      expires_at: new Date(now.getTime() + HOUR), absolute_expires_at: absoluteExpiresAt };
+  }
+
+  it('renews a patient session for 7 more days idle, keeping the family\'s absolute expiry', async () => {
+    const absolute = new Date(now.getTime() + 20 * DAY);
+    const { service, insertedSession } = harness(stored('patient', absolute));
+    const result = await service.refresh('00000000-0000-4000-8000-000000000001.secret.local', { correlationId: 'patient-refresh' });
+    expect(result.refreshExpiresAt).toEqual(new Date(now.getTime() + 7 * DAY));
+    expect(insertedSession()).toEqual({ issuedAt: now, expiresAt: new Date(now.getTime() + 7 * DAY), absoluteExpiresAt: absolute });
+  });
+
+  it('never renews past the family\'s absolute expiry: min(now + 7 days, absolute)', async () => {
+    const absolute = new Date(now.getTime() + 2 * DAY);
+    const { service, insertedSession } = harness(stored('patient', absolute));
+    const result = await service.refresh('00000000-0000-4000-8000-000000000001.secret.local', { correlationId: 'patient-refresh-cap' });
+    expect(result.refreshExpiresAt).toEqual(absolute);
+    expect(insertedSession()).toMatchObject({ expiresAt: absolute, absoluteExpiresAt: absolute });
+  });
+
+  it('renews a staff session for 8 hours idle only', async () => {
+    const absolute = new Date(now.getTime() + 20 * HOUR);
+    const { service } = harness(stored('staff', absolute));
+    const result = await service.refresh('00000000-0000-4000-8000-000000000001.secret.local', { correlationId: 'staff-refresh' });
+    expect(result.refreshExpiresAt).toEqual(new Date(now.getTime() + 8 * HOUR));
   });
 });
 

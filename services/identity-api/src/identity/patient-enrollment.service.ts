@@ -1,12 +1,14 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { type BeforeApplicationShutdown, Inject, Injectable, Logger } from '@nestjs/common';
 import { createCipheriv, createDecipheriv, createHash, createHmac, hkdfSync, randomBytes, randomInt,
   randomUUID, timingSafeEqual } from 'node:crypto';
 import { isIP } from 'node:net';
 import * as argon2 from 'argon2';
 import type { PoolClient, QueryResultRow } from 'pg';
+import { emailFirstName } from '../auth/email-first-name';
 import { GoogleAuthenticationService } from '../auth/google-authentication.service';
 import { NotificationOtpClient } from '../auth/notification-otp.client';
 import { consumeRateLimit, rateLimitBlocked, type RateLimitWindow } from '../auth/rate-limit';
+import { AFTER_RESPONSE_SHUTDOWN_GRACE_MS, AfterResponseTasks } from '../common/after-response-tasks';
 import { DomainProblem } from '../common/problem';
 import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
@@ -72,11 +74,15 @@ const RECORD_NAME_REDISPLAY_WINDOW_MS = 15 * 60 * 1000;
 const PASSWORD_HASH_OPTIONS = { type: argon2.argon2id, memoryCost: 65_536, timeCost: 3, parallelism: 1 };
 
 @Injectable()
-export class PatientEnrollmentService {
+export class PatientEnrollmentService implements BeforeApplicationShutdown {
   private readonly env = getEnvironment();
   private readonly otpKey = this.env.OTP_HMAC_KEY_B64
     ? Buffer.from(this.env.OTP_HMAC_KEY_B64, 'base64') : localOtpKey;
   private replayPlaceholder?: Promise<string>;
+  private readonly logger = new Logger(PatientEnrollmentService.name);
+  /** The welcome email: sent after the activation answers, never waited for. */
+  private readonly welcomes = new AfterResponseTasks(this.logger,
+    'Health ID welcome email could not be sent');
 
   constructor(private readonly database: DatabaseService,
     private readonly ninProtector: NinIdentifierProtector,
@@ -84,6 +90,16 @@ export class PatientEnrollmentService {
     private readonly notification: NotificationOtpClient,
     private readonly hidCodes: HidCodeGenerator,
     private readonly google: GoogleAuthenticationService) {}
+
+  /** Waits for the welcome emails started so far, and any started meanwhile. */
+  settleWelcomeEmails(): Promise<void> {
+    return this.welcomes.settle();
+  }
+
+  /** Lets a welcome email in flight finish before the process stops. */
+  beforeApplicationShutdown(): Promise<void> {
+    return this.welcomes.settle(AFTER_RESPONSE_SHUTDOWN_GRACE_MS);
+  }
 
   /**
    * `open`: whether a sign-up without a NIN (POST signup) would now pass the
@@ -497,7 +513,13 @@ export class PatientEnrollmentService {
         const activated = result.rows[0];
         if (!activated) throw new DomainProblem(503, 'ENROLLMENT_ACTIVATION_UNAVAILABLE',
           'Health ID activation is unavailable');
-        return { stage: 'active' as const, hidCode: activated.hid_code };
+        // `replayed`: the enrollment was already active, so this call
+        // verified no password (it hashed a placeholder). The controller signs
+        // in only a first activation, and only it sends the welcome email.
+        const replayed = activated.replayed === true;
+        if (!replayed) this.sendWelcome(row.contact_channel, contact, profileJson,
+          activated.patient_id, activated.hid_code, correlationId);
+        return { stage: 'active' as const, hidCode: activated.hid_code, replayed };
       } catch (error) {
         if (this.databaseErrorCode(error) === '23505'
           && this.databaseConstraint(error) === 'patients_hid_code_ci_uq') continue;
@@ -506,6 +528,32 @@ export class PatientEnrollmentService {
     }
     throw new DomainProblem(503, 'ENROLLMENT_ACTIVATION_UNAVAILABLE',
       'Health ID activation is unavailable');
+  }
+
+  /**
+   * The welcome email of a first activation ("Your Health ID is ready"), to
+   * the contact the enrollment verified, when it is an email address
+   * (production delivers email only). Best-effort: it starts now and the
+   * activation does not wait for it; a failure is logged with the correlation
+   * id and the outcome only, never the address, name or Health ID.
+   */
+  private sendWelcome(channel: ContactChannel | null, contact: string, profileJson: string,
+    patientId: string, hidCode: string, correlationId: string) {
+    if (channel !== 'email') return;
+    let firstName: string | undefined;
+    try {
+      firstName = emailFirstName((JSON.parse(profileJson) as { firstName?: unknown }).firstName);
+    } catch {
+      firstName = undefined;
+    }
+    this.welcomes.run(correlationId, async () => {
+      const delivery = await this.notification.deliverPatientWelcome({ patientId, recipient: contact,
+        ...(firstName ? { firstName } : {}), healthId: hidCode, correlationId });
+      if (delivery.outcome !== 'accepted') {
+        this.logger.warn(`Health ID welcome email was not accepted (correlation ${correlationId}, `
+          + `outcome ${delivery.outcome}${delivery.safeCode ? `, code ${delivery.safeCode}` : ''})`);
+      }
+    });
   }
 
   /** `withRecordName`: whether this answer may carry the name on the NIN record (a start, or a reload soon after). */

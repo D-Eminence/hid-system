@@ -15,6 +15,8 @@ import { SelectFacilityDto } from './dto/select-facility.dto';
 import { GoogleAuthenticationService } from './google-authentication.service';
 import type { LoginResult } from './auth.types';
 import { setSessionCookies } from './session-cookies';
+import { sessionEventFromRequest, sessionSuccessAuditEvent } from './session-success-audit';
+import { AccountSuspendedProblem } from './account-suspended';
 import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { TurnstileService } from './turnstile.service';
@@ -26,6 +28,10 @@ import { TurnstileService } from './turnstile.service';
  * credentials changed during sign-in) gets the same 401 detail as a wrong
  * password, so the answer never confirms a correct password; the internal
  * reason stays out of the response. Other refusals keep their answer.
+ * One carve-out (owner decision of 2026-10-28): the right password for a
+ * suspended patient account answers 403 ACCOUNT_SUSPENDED
+ * (AccountSuspendedProblem, raised only after the password was verified); it
+ * is not an UnauthorizedException, so it passes through unchanged.
  */
 function credentialRefusal(error: unknown): unknown {
   return error instanceof UnauthorizedException ? new UnauthorizedException('Invalid credentials') : error;
@@ -216,6 +222,19 @@ export class AuthController {
     } catch (error) {
       if (error instanceof UnauthorizedException) {
         await this.sessionAudit.recordLoginFailure(input.email, this.event(request));
+      } else if (error instanceof AccountSuspendedProblem) {
+        // The right password for a suspended account (patient sign-in only):
+        // a denied sign-in on that account, not a failed password, so it
+        // neither counts towards nor clears the principal's lockout.
+        await this.sessionAudit.record({
+          correlationId: request.correlationId,
+          actorSubject: error.accountSubject,
+          eventType: 'login_failed',
+          outcome: 'denied',
+          sourceIp: request.ip,
+          userAgent: request.header('user-agent'),
+          details: { reason: 'account_suspended' },
+        });
       } else {
         await this.sessionAudit.record({
           correlationId: request.correlationId,
@@ -365,21 +384,7 @@ export class AuthController {
   }
 
   private recordSuccess(action: string, actor: ActorContext, request: HidRequest): Promise<void> {
-    return this.audit.record({
-      correlationId: request.correlationId,
-      actorType: actor.kind === 'patient' ? 'patient' : 'staff',
-      actorSubject: actor.subject,
-      actorAccountId: actor.accountId,
-      actorMembershipId: actor.facility?.membershipId,
-      organizationId: actor.facility?.organizationId,
-      facilityId: actor.facility?.id,
-      action,
-      resourceType: 'session',
-      resourceId: actor.sessionId,
-      outcome: 'success',
-      sourceIp: request.ip,
-      userAgent: request.header('user-agent'),
-    });
+    return this.audit.record(sessionSuccessAuditEvent(action, actor, request));
   }
 
   private setCookies(response: Response, result: LoginResult): void {
@@ -489,11 +494,7 @@ export class AuthController {
   }
 
   private event(request: HidRequest) {
-    return {
-      correlationId: request.correlationId,
-      sourceIp: request.ip,
-      userAgent: request.header('user-agent'),
-    };
+    return sessionEventFromRequest(request);
   }
 
   private cookies(request: HidRequest): Record<string, string> {

@@ -66,8 +66,16 @@ const environmentSchema = z.object({
   AUTH_ISSUER: z.string().min(3).default('hid-identity'),
   AUTH_AUDIENCE: z.string().min(3).default('hid-api'),
   AUTH_ACCESS_TTL_SECONDS: z.coerce.number().int().min(300).max(3600).default(900),
+  // Staff and platform sessions: 8 hours idle, 24 hours at most.
   AUTH_REFRESH_TTL_SECONDS: z.coerce.number().int().min(900).max(604800).default(28800),
   AUTH_ABSOLUTE_TTL_SECONDS: z.coerce.number().int().min(3600).max(2592000).default(86400),
+  // Patient sessions only (owner decision of 2026-10-28): 7 days idle, 30 days
+  // at most. Production sets neither key, so these code defaults are what it
+  // runs; the staff pair above is unchanged, so clinicians on shared hospital
+  // computers keep 8 hours and 24 hours. A refresh lifetime above its absolute
+  // lifetime is capped at it (TokenService), never refused at boot.
+  AUTH_PATIENT_REFRESH_TTL_SECONDS: z.coerce.number().int().min(900).max(604800).default(604800),
+  AUTH_PATIENT_ABSOLUTE_TTL_SECONDS: z.coerce.number().int().min(3600).max(2592000).default(2592000),
   AUTH_LOGIN_PEPPER: optionalString,
   AUTH_LOGIN_PEPPER_VERSION: z.coerce.number().int().min(1).max(32767).default(1),
   AUTH_COOKIE_NAME: z.string().regex(/^[A-Za-z0-9_-]+$/).default('hid_access'),

@@ -69,9 +69,12 @@ export class TokenService {
     const refreshToken = this.newRefreshToken(sessionId, authenticationMethod);
     const csrfToken = this.deriveRefreshCsrf(refreshToken);
     const now = new Date();
+    const lifetimes = this.lifetimes(actor.kind ?? 'staff');
     const expiresAt = new Date(now.getTime() + this.environment.AUTH_ACCESS_TTL_SECONDS * 1_000);
-    const refreshExpiresAt = new Date(now.getTime() + this.environment.AUTH_REFRESH_TTL_SECONDS * 1_000);
-    const absoluteExpiresAt = new Date(now.getTime() + this.environment.AUTH_ABSOLUTE_TTL_SECONDS * 1_000);
+    const absoluteExpiresAt = new Date(now.getTime() + lifetimes.absoluteSeconds * 1_000);
+    // Never past the family's absolute expiry (auth.sessions CHECK, 0002).
+    const refreshExpiresAt = new Date(Math.min(now.getTime() + lifetimes.refreshSeconds * 1_000,
+      absoluteExpiresAt.getTime()));
     const tokenVersion = await this.accountTokenVersion(actor.accountId);
     const accessToken = await this.signAccessToken(actor, sessionId, accessJti, tokenVersion, csrfToken, expiresAt);
 
@@ -184,7 +187,7 @@ export class TokenService {
     const csrfToken = this.deriveRefreshCsrf(newRefreshToken);
     const accessExpiresAt = new Date(now.getTime() + this.environment.AUTH_ACCESS_TTL_SECONDS * 1_000);
     const refreshExpiresAt = new Date(Math.min(
-      now.getTime() + this.environment.AUTH_REFRESH_TTL_SECONDS * 1_000,
+      now.getTime() + this.lifetimes(actor.kind ?? 'staff').refreshSeconds * 1_000,
       oldSession.absolute_expires_at.getTime(),
     ));
     const accessToken = await this.signAccessToken(
@@ -486,6 +489,20 @@ export class TokenService {
         sessionId: session.id, event,
       });
     });
+  }
+
+  /**
+   * A session's idle (refresh) and absolute lifetimes by its kind. Patients:
+   * 7 days idle, 30 days at most (owner decision of 2026-10-28); staff and
+   * platform sessions keep their own pair (8 hours and 24 hours by default).
+   * The access token's lifetime is the same for both.
+   */
+  private lifetimes(kind: 'staff' | 'patient'): { refreshSeconds: number; absoluteSeconds: number } {
+    return kind === 'patient'
+      ? { refreshSeconds: this.environment.AUTH_PATIENT_REFRESH_TTL_SECONDS,
+          absoluteSeconds: this.environment.AUTH_PATIENT_ABSOLUTE_TTL_SECONDS }
+      : { refreshSeconds: this.environment.AUTH_REFRESH_TTL_SECONDS,
+          absoluteSeconds: this.environment.AUTH_ABSOLUTE_TTL_SECONDS };
   }
 
   private newRefreshToken(sessionId: string, method: 'local' | 'oidc'): string {

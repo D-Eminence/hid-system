@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypt
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import type { PoolClient, QueryResultRow } from 'pg';
+import { AccountSuspendedProblem } from './account-suspended';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
@@ -173,6 +174,9 @@ export class GoogleAuthenticationService {
     try {
       credential = await this.localProvider.authenticate(principal, password, 'patient', event.correlationId);
     } catch (error) {
+      // A suspended account is never linked; it is not this session's
+      // account (that one is active), so it gets the one denial.
+      if (error instanceof AccountSuspendedProblem) throw this.denied();
       if (!(error instanceof UnauthorizedException)) {
         throw this.unavailable();
       }
