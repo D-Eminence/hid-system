@@ -147,6 +147,11 @@ module "application" {
   emergency_contact_delivery_enabled     = var.emergency_contact_delivery_enabled
   emergency_contact_dispatch_seconds     = var.emergency_contact_dispatch_seconds
   emergency_contact_pilot_account_ids    = var.emergency_contact_pilot_account_ids
+
+  # Patient web push (B6). Adds its keys and secret only while on.
+  web_push_enabled          = var.web_push_enabled
+  web_push_vapid_public_key = var.web_push_vapid_public_key
+  web_push_subject          = var.web_push_subject
 }
 
 # 5. Private Bedrock access for the EHR patient-record chat.

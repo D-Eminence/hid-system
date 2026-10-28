@@ -121,7 +121,7 @@ locals {
       { name = "QOREID_CLIENT_SECRET", arn = var.qoreid_secret_arn, key = "secret" },
     ] : [])
 
-    notification-api = local.notification_profile != "full" ? concat([
+    notification-api = concat(local.notification_profile != "full" ? concat([
       {
         name = "SES_FROM_ADDRESS"
         arn  = var.runtime_secret_arns["notification-provider"]
@@ -152,7 +152,7 @@ locals {
         arn  = var.runtime_secret_arns["notification-provider"]
         key  = pair[1]
       }
-    ]
+    ], local.web_push_secret_specs)
 
     notification-worker = [
       {
@@ -203,6 +203,17 @@ locals {
     EMERGENCY_CONTACT_DELIVERY_ENABLED = tostring(var.emergency_contact_notification_enabled)
   }
 
+  # Patient web push (B6). Off adds nothing, so no task definition changes.
+  # Identity never receives the private key; notification-api reads it from
+  # its provider secret, which its execution role may already read.
+  web_push_environment = var.web_push_enabled ? {
+    WEB_PUSH_VAPID_PUBLIC_KEY = var.web_push_vapid_public_key
+    WEB_PUSH_SUBJECT          = var.web_push_subject
+  } : {}
+  web_push_secret_specs = var.web_push_enabled ? [
+    { name = "WEB_PUSH_VAPID_PRIVATE_KEY", arn = var.runtime_secret_arns["notification-provider"], key = "webPushVapidPrivateKey" }
+  ] : []
+
   workload_environment = {
     identity-api = merge(local.common_api_environment, local.workload_token_files.identity-api, {
       # The separate staging public website calls only Identity's public APIs.
@@ -243,7 +254,7 @@ locals {
       ADMIN_OCR_STATUS_URL               = local.service_urls.ocr-api
       ADMIN_OUTREACH_STATUS_URL          = local.service_urls.outreach-api
       ADMIN_EVENT_DISPATCHER_STATUS_URL  = local.service_urls.event-dispatcher
-    }, local.emergency_contact_identity_environment)
+    }, local.emergency_contact_identity_environment, local.web_push_environment)
 
     ehr-api = merge(local.common_api_environment, local.workload_token_files.ehr-api, {
       PORT                                    = "3002"
@@ -329,7 +340,7 @@ locals {
       WORKLOAD_AUDIENCE                   = "hid-notification-api"
       IDENTITY_CALLER_SUBJECT             = lookup(local.identity_subjects, "identity", "")
       AWS_REGION                          = var.aws_region
-    }, { NOTIFICATION_DELIVERY_PROFILE = local.notification_profile }, local.emergency_contact_notification_environment)
+    }, { NOTIFICATION_DELIVERY_PROFILE = local.notification_profile }, local.emergency_contact_notification_environment, local.web_push_environment)
 
     notification-worker = merge({
       NODE_ENV                                          = "production"

@@ -206,6 +206,65 @@ a service off:
   unreadable; rotating `OTP_HMAC_KEY_B64` breaks contact matching and pending
   verification codes. Do not rotate them without a re-encryption plan.
 
+### Web push (B6)
+
+Patient phone and computer notifications ship with the backend
+(hid-system `staging-novu-ci-20261005` `ef81b4f`) but stay off until this
+Terraform switch is applied: both services treat absent `WEB_PUSH_` keys as off,
+and with `web_push_enabled = false` (the default) the plan changes no task
+definition. The owner's runbook is contract B6 section 13.
+
+1. Store the private key first. Secrets Manager, account `659225405023`,
+   `eu-west-1`: `/hid/staging/notification-provider` (production's
+   notification-api secret; the staging name is retained), add the key
+   `webPushVapidPrivateKey` with the 43-character PRIVATE key and change nothing
+   else. Never put the private key in Git, tfvars, a ticket, chat or a CLI
+   argument. Identity never receives it.
+2. Only then, in a reviewed commit on dev, replace the commented web push block
+   in `environments/production.tfvars` with:
+
+   ```hcl
+   web_push_enabled          = true
+   web_push_vapid_public_key = "<the 87-character PUBLIC key>"
+   web_push_subject          = "mailto:support@healthidentitydirectory.com"
+   ```
+
+   Terraform refuses `web_push_enabled = true` without a public key.
+3. From that commit, plan and apply exactly as above: `python
+   scripts/production_release_infrastructure.py plan --var-file
+   environments/production.tfvars --manifest private-release-review.json`,
+   review, then `apply ... --accepted-review-sha256 "<sha256>"`. The plan should
+   only replace the task definitions of identity-api and notification-api
+   (`WEB_PUSH_VAPID_PUBLIC_KEY` and `WEB_PUSH_SUBJECT` on both, the secret
+   `WEB_PUSH_VAPID_PRIVATE_KEY` from `webPushVapidPrivateKey` on
+   notification-api only) and update their services in place, with no image
+   change.
+4. Check it is on, names only:
+
+   ```powershell
+   foreach ($service in "notification-api", "identity-api") {
+     $td = aws ecs describe-services --cluster hid-production --services "hid-production-$service" --region eu-west-1 --query "services[0].taskDefinition" --output text
+     aws ecs describe-task-definition --task-definition $td --region eu-west-1 --output text `
+       --query "taskDefinition.containerDefinitions[?name=='$service'] | [0].[environment[?starts_with(name, 'WEB_PUSH_')].name, secrets[?starts_with(name, 'WEB_PUSH_')].name]"
+   }
+   ```
+
+   Expect notification-api `WEB_PUSH_VAPID_PUBLIC_KEY`, `WEB_PUSH_SUBJECT` and
+   the secret `WEB_PUSH_VAPID_PRIVATE_KEY`; identity-api the two environment
+   names. CloudWatch `/hid/staging/notification-api` and
+   `/hid/staging/identity-api` each log `Web push is on (keyId=...)` with the
+   same key id. A patient sees "Notifications on this device" in Settings; with
+   it on, a test clinician's access request reaches the phone as "Health ID /
+   You have a new notification." within about 1-3 minutes.
+- Off switch: commit `web_push_enabled = false` on dev, plan and apply as
+  above. Identity's web push routes answer 404 (the website hides the section)
+  and nothing is sent; subscriptions are erased as their sign-ins end. Remove
+  `webPushVapidPrivateKey` from the secret only after that apply, never while
+  `web_push_enabled = true`.
+- Rotation makes every browser subscription useless until the patient next
+  visits Settings; do it only if the private key is exposed (steps 1 to 3
+  again with a new pair).
+
 ## 5. Build flow and deployment controls
 
 ### What runs automatically

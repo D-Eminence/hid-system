@@ -34,6 +34,15 @@ emergency_contact_delivery_enabled     = true
 emergency_contact_dispatch_seconds     = 60
 emergency_contact_pilot_account_ids    = []
 
+# Patient web push (B6): off until the owner has stored webPushVapidPrivateKey
+# in /hid/staging/notification-provider and sent the PUBLIC key. Then replace
+# this comment with the three lines below in a reviewed commit on dev; see
+# DEVOPS_HANDOVER.md "Web push (B6)". A missing secret key stops
+# notification-api's new tasks from starting.
+# web_push_enabled          = true
+# web_push_vapid_public_key = "<the 87-character PUBLIC key>"
+# web_push_subject          = "mailto:support@healthidentitydirectory.com"
+
 google_oidc_client_ids = ["690536667193-l90c5cqm86g5pt5o93dpvplms2h507l6.apps.googleusercontent.com"]
 
 qoreid_enabled                     = true

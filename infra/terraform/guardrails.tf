@@ -47,6 +47,10 @@ resource "terraform_data" "deployment_guard" {
       error_message = "Identity emergency-contact delivery requires notification-api delivery; switch emergency_contact_notification_enabled on first and off last."
     }
     precondition {
+      condition     = !var.web_push_enabled || var.web_push_vapid_public_key != ""
+      error_message = "Web push requires web_push_vapid_public_key, and webPushVapidPrivateKey already stored in the notification-provider secret."
+    }
+    precondition {
       condition     = var.environment == "staging" || var.staging_mode == "sleep"
       error_message = "staging_mode is only meaningful for staging; leave it at sleep elsewhere."
     }

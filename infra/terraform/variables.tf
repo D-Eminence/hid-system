@@ -484,6 +484,37 @@ variable "emergency_contact_pilot_account_ids" {
   }
 }
 
+variable "web_push_enabled" {
+  description = "Turn on patient web push (B6): WEB_PUSH_VAPID_PUBLIC_KEY and WEB_PUSH_SUBJECT on identity-api and notification-api, and WEB_PUSH_VAPID_PRIVATE_KEY (notification-provider secret key webPushVapidPrivateKey) on notification-api only. Store the private key first: a missing key stops notification-api's new tasks from starting."
+  type        = bool
+  default     = false
+}
+
+variable "web_push_vapid_public_key" {
+  description = "VAPID public key (87 base64url characters) whose private half is webPushVapidPrivateKey in the notification-provider secret. Required while web_push_enabled; never the private key."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.web_push_vapid_public_key == "" || can(regex("^[A-Za-z0-9_-]{87}$", var.web_push_vapid_public_key))
+    error_message = "web_push_vapid_public_key must be empty or the 87-character base64url VAPID public key."
+  }
+}
+
+variable "web_push_subject" {
+  description = "VAPID subject the push services may contact (WEB_PUSH_SUBJECT): mailto: and an address, or an https URL."
+  type        = string
+  default     = "mailto:support@healthidentitydirectory.com"
+
+  validation {
+    condition = length(var.web_push_subject) <= 256 && (
+      can(regex("^mailto:[^@/?#\\s]+@[^@/?#\\s]+\\.[^@/?#\\s]+$", var.web_push_subject)) ||
+      can(regex("^https://[^/?#@\\s]+(/\\S*)?$", var.web_push_subject))
+    )
+    error_message = "web_push_subject must be mailto: and an address, or an https URL with a host, at most 256 characters."
+  }
+}
+
 variable "alert_email" {
   type    = string
   default = ""
