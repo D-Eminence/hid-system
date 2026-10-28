@@ -4,11 +4,12 @@ import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
-import type { Express } from 'express';
+import { json, type Express } from 'express';
 import { AppModule } from './app.module';
 import { DomainProblem, ProblemDetailsFilter } from './common/problem';
 import { preventResponseCaching } from './common/response-security.middleware';
 import { getEnvironment } from './config/environment';
+import { PROFILE_PHOTO_BODY_LIMIT_BYTES } from './patient-profile/profile-photo';
 
 async function bootstrap(): Promise<void> {
   const environment = getEnvironment();
@@ -20,6 +21,11 @@ async function bootstrap(): Promise<void> {
   app.setGlobalPrefix('api/v1');
   app.use(preventResponseCaching);
   app.use(cookieParser());
+  // PUT identity/me/photo (0094) carries a photo of at most 300 KB as base64:
+  // its own parser, registered first, admits that one body; the general
+  // parser then sees the body already read and keeps 256 KB for every other route.
+  app.use('/api/v1/identity/me/photo', json({ limit: PROFILE_PHOTO_BODY_LIMIT_BYTES, strict: true,
+    type: ['application/json', 'application/*+json'] }));
   app.useBodyParser('json', { limit: 256 * 1024, strict: true, type: ['application/json', 'application/*+json'] });
   app.use(helmet({
     contentSecurityPolicy: false,

@@ -5,7 +5,7 @@ import { WorkloadAuthService } from '../auth/workload-auth.service';
 import { getEnvironment } from '../config/environment';
 import { DeliverEmergencyContactAlertDto } from './dto/deliver-emergency-contact-alert.dto';
 import { DeliverOtpDto, OtpPurpose, validateRecipient } from './dto/deliver-otp.dto';
-import { DeliverPasswordResetCodeDto, DeliverPasswordUpdatedDto,
+import { DeliverContactChangedDto, DeliverEmailChangeCodeDto, DeliverPasswordResetCodeDto, DeliverPasswordUpdatedDto,
   DeliverPatientWelcomeDto } from './dto/deliver-patient-emails.dto';
 import { DeliverStaffInvitationDto } from './dto/deliver-staff-invitation.dto';
 import { type DeliveryResult, NotificationService } from './notification.service';
@@ -123,6 +123,31 @@ export class NotificationController {
     await this.authenticateEmailRequest(request, idempotencyKey, input);
     const result = await this.notifications.deliverPasswordUpdated({ recipient: input.recipient,
       ...(input.firstName ? { firstName: input.firstName } : {}),
+      ...(input.healthId ? { healthId: input.healthId } : {}), idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  /**
+   * The code that confirms a patient's new email address (0094). Its own
+   * route, so an older notification-api answers a newer Identity 404 and
+   * Identity sends the generic EMAIL_VERIFY code instead.
+   */
+  @Post('email-change-code') @HttpCode(202)
+  async emailChangeCode(@Body() input: DeliverEmailChangeCodeDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    await this.authenticateEmailRequest(request, idempotencyKey, input);
+    const result = await this.notifications.deliverEmailChangeCode({ recipient: input.recipient, code: input.code,
+      expiresInMinutes: input.expiresInMinutes, idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  /** "Your Health ID email / phone number was changed" (0094): fixed fields, the new contact masked. */
+  @Post('contact-changed') @HttpCode(202)
+  async contactChanged(@Body() input: DeliverContactChangedDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    await this.authenticateEmailRequest(request, idempotencyKey, input);
+    const result = await this.notifications.deliverContactChanged({ recipient: input.recipient, kind: input.kind,
+      newContactHint: input.newContactHint, ...(input.firstName ? { firstName: input.firstName } : {}),
       ...(input.healthId ? { healthId: input.healthId } : {}), idempotencyKey: idempotencyKey! }, input.plan);
     return this.response(result);
   }

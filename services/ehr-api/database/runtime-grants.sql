@@ -1210,6 +1210,45 @@ revoke all on function auth.find_patient_account(text,text),
   identity.count_my_unread_notifications(text,uuid),
   identity.patient_self_access_log(text,uuid,integer,timestamptz,bigint) from public;
 
+-- Patient parity with hid-1.0, the profile (0094), as that migration grants
+-- it (its section 9): the patient's own contact, contact-change, profile
+-- details and photo commands to the Identity runtime and the schema test
+-- runtime; the patient's health-information command and SELECT on the table
+-- (forced RLS: the patient-self or consented clinician read) to the EHR
+-- runtime and the schema test runtime. The three Identity tables of 0094
+-- get no grant (only these commands read and write them). The readiness
+-- function 0094 replaces (identity.patient_contact_lookup_ready) keeps its
+-- grants above.
+grant execute on function identity.patient_self_contact(text,uuid),
+  identity.my_contact_change_credentials(text,uuid),
+  identity.start_my_email_change(text,uuid,uuid,text,char,bytea,text,char,text,integer,integer,integer),
+  identity.read_my_pending_email_change(text,uuid,uuid),
+  identity.record_my_contact_change_delivery(text,uuid,uuid,text,text),
+  identity.complete_my_email_change(text,uuid,uuid,char,text),
+  identity.change_my_phone(text,uuid,uuid,char,char[],bytea,text,boolean),
+  identity.read_my_profile_details(text,uuid),
+  identity.save_my_profile_details(text,uuid,bigint,text,text),
+  identity.set_my_profile_photo(text,uuid,bytea,text,char,integer,integer,integer,text),
+  identity.read_my_profile_photo(text,uuid),
+  identity.remove_my_profile_photo(text,uuid)
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant select on ehr.patient_reported_health_profiles to hid_ehr_runtime, hid_schema_test_runtime;
+grant execute on function ehr.save_my_reported_health_profile(bigint,text,text,text,text,text,text)
+  to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function identity.patient_self_contact(text,uuid),
+  identity.my_contact_change_credentials(text,uuid),
+  identity.start_my_email_change(text,uuid,uuid,text,char,bytea,text,char,text,integer,integer,integer),
+  identity.read_my_pending_email_change(text,uuid,uuid),
+  identity.record_my_contact_change_delivery(text,uuid,uuid,text,text),
+  identity.complete_my_email_change(text,uuid,uuid,char,text),
+  identity.change_my_phone(text,uuid,uuid,char,char[],bytea,text,boolean),
+  identity.read_my_profile_details(text,uuid),
+  identity.save_my_profile_details(text,uuid,bigint,text,text),
+  identity.set_my_profile_photo(text,uuid,bytea,text,char,integer,integer,integer,text),
+  identity.read_my_profile_photo(text,uuid),
+  identity.remove_my_profile_photo(text,uuid),
+  ehr.save_my_reported_health_profile(bigint,text,text,text,text,text,text) from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),

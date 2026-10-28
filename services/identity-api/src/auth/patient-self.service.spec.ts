@@ -3,6 +3,7 @@ import type { AuditService } from '../audit/audit.service';
 import type { HidRequest } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import { PatientSelfService, publishAccessHistory } from './patient-self.service';
+import type { PatientContactReader } from '../patient-profile/patient-contact-reader';
 
 const request = { actor: { kind: 'patient', patientId: 'patient-id', accountId: 'account-id',
   subject: 'patient-subject', sessionId: 'session-id' }, correlationId: 'self-test-request',
@@ -43,6 +44,23 @@ describe('Patient self service', () => {
     expect(record).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       actorType: 'patient', actorAccountId: 'account-id', patientId: 'patient-id', outcome: 'success',
     }));
+  });
+  it('adds the account email, the phone, their verification and the photo flag to GET me (0094)', async () => {
+    const query = jest.fn().mockResolvedValue({ rows: [{ value: { patientId: 'patient-id', hid: 'HID-ABCDEF' } }] });
+    const client = { query } as unknown as PoolClient;
+    const transaction = jest.fn(async (_id: string, callback: (c: PoolClient) => Promise<unknown>) => callback(client));
+    const read = jest.fn().mockResolvedValue({ email: 'pat@example.invalid', emailVerified: true,
+      phone: '+447700900123', phoneVerified: false, hasPhoto: true });
+    const service = new PatientSelfService({ withSystemTransaction: transaction } as unknown as DatabaseService,
+      { recordWithClient: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService,
+      { read } as unknown as PatientContactReader);
+    await expect(service.profile(request)).resolves.toEqual({ patientId: 'patient-id', hid: 'HID-ABCDEF',
+      email: 'pat@example.invalid', emailVerified: true, phone: '+447700900123', phoneVerified: false, hasPhoto: true });
+    expect(read).toHaveBeenCalledWith(client, expect.objectContaining({ subject: 'patient-subject', sessionId: 'session-id' }));
+    // Only GET me: the access history and the authorization answer are unchanged.
+    query.mockResolvedValue({ rows: [{ value: { items: [] } }] });
+    await service.history(request);
+    expect(read).toHaveBeenCalledTimes(1);
   });
   it('does not return PHI if required audit persistence fails', async () => {
     await expect(setup({ patientId: 'patient-id' }, true).service.profile(request)).rejects.toThrow('audit unavailable');

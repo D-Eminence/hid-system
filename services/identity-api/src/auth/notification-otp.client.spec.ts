@@ -539,3 +539,62 @@ describe('NotificationOtpClient patient emails (owner decision of 2026-10-28)', 
     warn.mockRestore();
   });
 });
+
+describe('NotificationOtpClient contact-change emails (0094)', () => {
+  const plan = { capability: 'email', primary: 'ses', fallback: 'brevo', configuration: {} };
+  const accepted = () => new Response(JSON.stringify({ outcome: 'accepted', primary: { provider: 'ses' } }), { status: 202 });
+
+  beforeEach(() => {
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+      CORS_ORIGINS: 'https://www.healthidentitydirectory.com', AUTH_MODE: 'local',
+      AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
+      AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
+      NOTIFICATION_API_URL: 'http://127.0.0.1:3007',
+      NOTIFICATION_SERVICE_IDENTITY_MODE: 'local-secret',
+      NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN: 'test-service-token-with-32-characters',
+    });
+    resetEnvironmentForTests();
+  });
+  afterEach(() => {
+    global.fetch = originalFetch;
+    for (const key of Object.keys(process.env)) if (!(key in originalEnvironment)) delete process.env[key];
+    Object.assign(process.env, originalEnvironment);
+    resetEnvironmentForTests();
+  });
+  const notification = () => new NotificationOtpClient({ deliveryPlan: jest.fn().mockResolvedValue(plan) } as
+    unknown as IntegrationRuntimeService);
+  const calls = () => (global.fetch as jest.Mock).mock.calls.map(([url, init]: [string, RequestInit]) => ({
+    route: String(url).split('/api/v1/notifications/')[1],
+    key: (init.headers as Record<string, string>)['idempotency-key'],
+    body: JSON.parse(String(init.body)) as Record<string, unknown>,
+  }));
+
+  it('posts the new address\'s code to email-change-code, keyed by the change, and falls back to EMAIL_VERIFY on 404', async () => {
+    global.fetch = jest.fn().mockResolvedValue(accepted());
+    await expect(notification().deliverEmailChangeCode({ changeId: 'change-1', recipient: 'new@example.test',
+      code: '012345', expiresInMinutes: 5, correlationId: 'request-21' }))
+      .resolves.toEqual({ outcome: 'accepted', provider: 'ses' });
+    // The new address is not yet proved to be the patient's: no name, no Health ID.
+    expect(calls()).toEqual([{ route: 'email-change-code', key: 'contact-change:change-1',
+      body: { channel: 'email', recipient: 'new@example.test', code: '012345', expiresInMinutes: 5, plan } }]);
+    global.fetch = jest.fn().mockResolvedValueOnce(new Response('{}', { status: 404 })).mockResolvedValueOnce(accepted());
+    await notification().deliverEmailChangeCode({ changeId: 'change-2', recipient: 'new@example.test', code: '012345',
+      expiresInMinutes: 5, correlationId: 'request-22' });
+    expect(calls()).toEqual([
+      { route: 'email-change-code', key: 'contact-change:change-2', body: expect.objectContaining({ code: '012345' }) },
+      { route: 'otp', key: 'contact-change:change-2',
+        body: { channel: 'email', recipient: 'new@example.test', code: '012345', purpose: 'EMAIL_VERIFY', plan } },
+    ]);
+  });
+
+  it('posts the notice to contact-changed with the masked new contact, and never retries another route', async () => {
+    global.fetch = jest.fn().mockResolvedValue(new Response('{}', { status: 404 }));
+    await expect(notification().deliverContactChanged({ changeId: 'change-3', recipient: 'old@example.test', kind: 'email',
+      newContactHint: 'n•••@example.test', firstName: 'Ada', healthId: 'HID-ABC234', correlationId: 'request-23' }))
+      .resolves.toEqual({ outcome: 'definitive_failure', safeCode: 'http_404' });
+    expect(calls()).toEqual([{ route: 'contact-changed', key: 'contact-changed:change-3',
+      body: { channel: 'email', recipient: 'old@example.test', kind: 'email', newContactHint: 'n•••@example.test',
+        firstName: 'Ada', healthId: 'HID-ABC234', plan } }]);
+  });
+});

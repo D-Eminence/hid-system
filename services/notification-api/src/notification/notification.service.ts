@@ -4,7 +4,8 @@ import { BrevoFallbackProvider } from '../providers/brevo.provider';
 import { MetaWhatsAppProvider } from '../providers/meta.provider';
 import { emergencyContactAlertContent, type OtpMessage, type OtpProvider, type ProviderResult, staffInvitationContent,
   staffInvitationLinkOrigin, type StaffInvitationRole } from '../providers/provider.types';
-import { passwordResetCodeContent, passwordUpdatedContent, patientWelcomeContent } from '../providers/patient-emails';
+import { contactChangedContent, emailChangeCodeContent, passwordResetCodeContent, passwordUpdatedContent,
+  patientWelcomeContent } from '../providers/patient-emails';
 import { SesEmailProvider } from '../providers/ses.provider';
 import { TermiiSmsProvider } from '../providers/termii.provider';
 
@@ -139,6 +140,29 @@ export class NotificationService {
       channel: 'email', recipient: input.recipient, code: '', purpose: 'PASSWORD_UPDATED',
       idempotencyKey: input.idempotencyKey,
       content: passwordUpdatedContent({ ...(input.firstName ? { firstName: input.firstName } : {}),
+        ...(input.healthId ? { healthId: input.healthId } : {}),
+        supportEmail: this.environment.EMERGENCY_CONTACT_SUPPORT_EMAIL }),
+    }, rawPlan);
+  }
+
+  /** The code that confirms a new email address (0094), to the new address, naming no one. */
+  deliverEmailChangeCode(input: { recipient: string; code: string; expiresInMinutes: number; idempotencyKey: string },
+    rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'EMAIL_VERIFY',
+      idempotencyKey: input.idempotencyKey,
+      content: emailChangeCodeContent({ code: input.code, expiresInMinutes: input.expiresInMinutes }),
+    }, rawPlan);
+  }
+
+  /** "Your Health ID email / phone number was changed" (0094). */
+  deliverContactChanged(input: { recipient: string; kind: 'email' | 'phone'; newContactHint: string; firstName?: string;
+    healthId?: string; idempotencyKey: string }, rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'CONTACT_CHANGED',
+      idempotencyKey: input.idempotencyKey,
+      content: contactChangedContent({ kind: input.kind, newContactHint: input.newContactHint,
+        ...(input.firstName ? { firstName: input.firstName } : {}),
         ...(input.healthId ? { healthId: input.healthId } : {}),
         supportEmail: this.environment.EMERGENCY_CONTACT_SUPPORT_EMAIL }),
     }, rawPlan);

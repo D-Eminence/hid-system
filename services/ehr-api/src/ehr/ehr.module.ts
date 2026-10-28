@@ -22,6 +22,8 @@ import { PatientChatService } from './patient-records/patient-chat.service';
 import { PatientChatHistoryService } from './patient-records/patient-chat-history.service';
 import { PatientEvidenceService } from './patient-records/patient-evidence.service';
 import { PatientAttachmentTextService } from './patient-records/patient-attachment-text.service';
+import { HealthProfileController } from './health-profile/health-profile.controller';
+import { HealthProfileService } from './health-profile/health-profile.service';
 
 @Module({
   imports: [
@@ -36,7 +38,8 @@ import { PatientAttachmentTextService } from './patient-records/patient-attachme
     LabRequestsModule,
     OrderRoutesModule,
   ],
-  controllers: [PatientRecordsController,StaffPatientChatController],
-  providers: [StaffChatScopeService,StaffEvidenceService,StaffChatHistoryService,PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService],
+  controllers: [PatientRecordsController,StaffPatientChatController,HealthProfileController],
+  providers: [StaffChatScopeService,StaffEvidenceService,StaffChatHistoryService,PatientRecordsService, ImportedAttachmentService, BedrockAiService, ClaudeAiService, PatientAttachmentTextService,PatientEvidenceService, PatientChatService, PatientChatHistoryService,
+    HealthProfileService],
 })
 export class EhrModule {}

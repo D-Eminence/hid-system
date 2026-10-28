@@ -1,10 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { requireNoRecentRecoveryHold, requireRecentPatientAuthentication } from './recent-authentication';
 import { type AccessLogCursor, type AccessLogPage, publishAccessLog } from './patient-access-log';
+import { PatientContactReader } from '../patient-profile/patient-contact-reader';
 
 export function requirePatient(actor: ActorContext | undefined): ActorContext & { patientId: string; sessionId: string } {
   if (actor?.kind !== 'patient' || !actor.patientId || !actor.sessionId) {
@@ -35,7 +36,8 @@ export function publishAccessHistory(value: unknown): unknown {
 
 @Injectable()
 export class PatientSelfService {
-  constructor(private readonly database: DatabaseService, private readonly audit: AuditService) {}
+  constructor(private readonly database: DatabaseService, private readonly audit: AuditService,
+    @Optional() private readonly contacts?: PatientContactReader) {}
 
   profile(request: HidRequest) { return this.read(request, 'profile'); }
   history(request: HidRequest) { return this.read(request, 'access-history'); }
@@ -202,6 +204,10 @@ export class PatientSelfService {
       const value = result.rows[0]?.value;
       const allowed = value !== null && value !== undefined
         && (operation !== 'authorize' || value === actor.patientId);
+      // GET identity/me (0094): the account email, the phone, whether each
+      // is verified, and whether a photo is saved, from the same session.
+      const contact = allowed && operation === 'profile' && this.contacts
+        ? await this.contacts.read(client, actor) : undefined;
       await this.audit.recordWithClient(client, {
         correlationId: request.correlationId, actorType: 'patient', actorSubject: actor.subject,
         actorAccountId: actor.accountId, patientId: actor.patientId,
@@ -213,7 +219,8 @@ export class PatientSelfService {
       return allowed ? operation === 'authorize'
         ? { allowed: true, patientId: actor.patientId, accountId: actor.accountId, subject: actor.subject,
           sessionId: actor.sessionId, expiresAt: new Date(Date.now() + 30_000).toISOString() }
-        : operation === 'access-history' ? publishAccessHistory(value) : value : null;
+        : operation === 'access-history' ? publishAccessHistory(value)
+          : contact && typeof value === 'object' ? { ...value, ...contact } : value : null;
     }).then((value) => {
       if (value === null) throw new DomainProblem(403, 'PATIENT_ACCESS_DENIED', 'Patient access is unavailable');
       return value;

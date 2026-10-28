@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0093",
-    "count": 94,
+    "last": "0094",
+    "count": 95,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -473,6 +473,10 @@
       {
         "name": "0093_patient_parity_identity.sql",
         "sha256": "f4182a94448ba53c644348dd18f1109e437bed8d5c7f61bc2e478efb7edc5d78"
+      },
+      {
+        "name": "0094_patient_parity_profile.sql",
+        "sha256": "69687acdfc94279505dbd6c39fcdce029618493ecc3d440865365ccf5bb76152"
       }
     ]
   },

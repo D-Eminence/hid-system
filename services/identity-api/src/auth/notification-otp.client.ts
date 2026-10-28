@@ -201,8 +201,61 @@ export class NotificationOtpClient {
     }, OTP_TIMEOUT_MS);
   }
 
+  /**
+   * The code that confirms a patient's new email address (0094), in
+   * hid-1.0's design: to the NEW address, which is not yet proved to be the
+   * patient's, so it names neither the patient nor their Health ID. An older
+   * notification-api, which does not serve this route, answers 404 having
+   * sent nothing; the code then goes once through the generic OTP route
+   * (EMAIL_VERIFY), under the same idempotency key, as the password reset
+   * code does. Any other answer is final.
+   */
+  async deliverEmailChangeCode(input: {
+    changeId: string;
+    recipient: string;
+    code: string;
+    expiresInMinutes: number;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'definitive_failure', safeCode: 'delivery_policy_unavailable' };
+    const delivered = await this.post('email-change-code', `contact-change:${input.changeId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, code: input.code, expiresInMinutes: input.expiresInMinutes, plan,
+    }, OTP_TIMEOUT_MS);
+    if (delivered.safeCode !== 'http_404') return delivered;
+    return this.post('otp', `contact-change:${input.changeId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, code: input.code, purpose: 'EMAIL_VERIFY', plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  /**
+   * "Your Health ID email was changed" (to the previous address) or "Your
+   * Health ID phone number was changed" (to the verified email), 0094: the
+   * patient's first name and Health ID when known and the new contact masked
+   * (never in full). Keyed by the change. Best-effort: the change never
+   * waits for it; an older notification-api answers 404 and nothing is sent.
+   */
+  async deliverContactChanged(input: {
+    changeId: string;
+    recipient: string;
+    kind: 'email' | 'phone';
+    newContactHint: string;
+    firstName?: string;
+    healthId?: string;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'definitive_failure', safeCode: 'delivery_policy_unavailable' };
+    return this.post('contact-changed', `contact-changed:${input.changeId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, kind: input.kind, newContactHint: input.newContactHint,
+      ...(input.firstName ? { firstName: input.firstName } : {}),
+      ...(input.healthId ? { healthId: input.healthId } : {}), plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
   private async post(path: 'otp' | 'emergency-contact-alert' | 'staff-invitation' | 'patient-welcome'
-    | 'password-reset-code' | 'password-updated', idempotencyKey: string, correlationId: string,
+    | 'password-reset-code' | 'password-updated' | 'email-change-code' | 'contact-changed',
+    idempotencyKey: string, correlationId: string,
     body: Record<string, unknown>, timeoutMs: number,
   ): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
     const credential = await this.credentials();
@@ -214,7 +267,8 @@ export class NotificationOtpClient {
       this.unavailableTokens += 1;
       this.logger.warn(`Notification workload token unavailable; nothing was sent `
         + `(event=notification_workload_token_unavailable reason=${credential.unavailable} count=${this.unavailableTokens})`);
-      return { outcome: path === 'otp' || path === 'password-reset-code' ? 'definitive_failure' : 'unknown',
+      return { outcome: path === 'otp' || path === 'password-reset-code' || path === 'email-change-code'
+        ? 'definitive_failure' : 'unknown',
         safeCode: 'workload_token_unavailable' };
     }
     let response: Response;
@@ -241,7 +295,7 @@ export class NotificationOtpClient {
       // lasts; a code keeps the definitive mapping.
       // A staff invitation likewise: a 401 is Notification's own key fetch, not
       // the address, so it must not count towards the facility's delivery pause.
-      if (path !== 'otp' && path !== 'password-reset-code' && response.status === 401) {
+      if (path !== 'otp' && path !== 'password-reset-code' && path !== 'email-change-code' && response.status === 401) {
         return { outcome: 'unknown', safeCode: 'http_401' };
       }
       return { outcome: response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429
