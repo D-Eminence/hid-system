@@ -1,10 +1,11 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn(), SignJWT: jest.fn() }));
-import { HttpException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { type ArgumentsHost, HttpException, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
 import type { Response } from 'express';
 import type { AuditService } from '../audit/audit.service';
-import { DomainProblem } from '../common/problem';
+import { DomainProblem, ProblemDetailsFilter } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
+import { AccountSuspendedProblem } from './account-suspended';
 import { AuthController } from './auth.controller';
 import type { AuthService } from './auth.service';
 import type { AuthSessionAuditService } from './auth-session-audit.service';
@@ -105,5 +106,46 @@ describe('sign-in refusals carry one uniform detail (LOGIN-DETAIL-ORACLE)', () =
     await expect(controller.login(staffLogin, requestFor(), responseFor())).rejects.toBe(fault);
     expect(sessionAudit.recordLoginFailure).not.toHaveBeenCalled();
     expect(sessionAudit.record).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('the suspended-account carve-out (owner decision of 2026-10-28)', () => {
+  it('patient sign-in: the right password for a suspended account is 403 ACCOUNT_SUSPENDED with the support detail', async () => {
+    const { controller, auth, sessionAudit } = harness();
+    auth.login.mockRejectedValue(new AccountSuspendedProblem('patient:suspended-account'));
+    const error = await failure(controller.patientLogin(patientLogin, requestFor(), responseFor()));
+    expect(error).toBeInstanceOf(AccountSuspendedProblem);
+    expect(error.getStatus()).toBe(403);
+    expect(error).toMatchObject({ code: 'ACCOUNT_SUSPENDED',
+      message: 'This account is suspended. Contact support@healthidentitydirectory.com.' });
+    // A denied sign-in on that account, not a failed password: the lockout is neither charged nor cleared.
+    expect(sessionAudit.recordLoginFailure).not.toHaveBeenCalled();
+    expect(sessionAudit.record).toHaveBeenCalledWith({ correlationId: 'sign-in-refusal-test',
+      actorSubject: 'patient:suspended-account', eventType: 'login_failed', outcome: 'denied',
+      sourceIp: '203.0.113.10', userAgent: 'sign-in-refusal-spec', details: { reason: 'account_suspended' } });
+  });
+
+  it('the problem response carries the code and detail only, never the account', () => {
+    const json = jest.fn();
+    const response = { status: jest.fn().mockReturnThis(), type: jest.fn().mockReturnThis(), json };
+    const host = { switchToHttp: () => ({ getRequest: () => ({ correlationId: 'sign-in-refusal-test' }),
+      getResponse: () => response }) } as unknown as ArgumentsHost;
+    new ProblemDetailsFilter().catch(new AccountSuspendedProblem('patient:suspended-account'), host);
+    expect(response.status).toHaveBeenCalledWith(403);
+    expect(json).toHaveBeenCalledWith({
+      type: 'https://healthidentitydirectory.com/problems/account-suspended', title: 'FORBIDDEN', status: 403,
+      detail: 'This account is suspended. Contact support@healthidentitydirectory.com.',
+      instance: 'urn:hid:request:sign-in-refusal-test', correlationId: 'sign-in-refusal-test', code: 'ACCOUNT_SUSPENDED',
+    });
+    expect(JSON.stringify(json.mock.calls[0]?.[0])).not.toContain('suspended-account');
+  });
+
+  it('a wrong password for that account is still the uniform 401, counted as a failed sign-in', async () => {
+    const { controller, auth, sessionAudit } = harness();
+    auth.login.mockRejectedValue(new UnauthorizedException('Invalid credentials'));
+    const error = await failure(controller.patientLogin(patientLogin, requestFor(), responseFor()));
+    expect(error.getStatus()).toBe(401);
+    expect(error.message).toBe('Invalid credentials');
+    expect(sessionAudit.recordLoginFailure).toHaveBeenCalledWith(patientLogin.email, expect.any(Object));
   });
 });

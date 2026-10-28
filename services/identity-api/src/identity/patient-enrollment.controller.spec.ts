@@ -1,6 +1,9 @@
 jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }));
 
+import { UnauthorizedException } from '@nestjs/common';
 import type { Response } from 'express';
+import type { AuditService } from '../audit/audit.service';
+import type { AuthService } from '../auth/auth.service';
 import type { HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { TurnstileService } from '../auth/turnstile.service';
@@ -18,9 +21,20 @@ function request(cookie?: string, requestOrigin: string | undefined = origin,
     if (name === 'origin') return requestOrigin;
     if (name === 'cookie') return cookie;
     if (name === 'authorization') return authorization;
+    if (name === 'user-agent') return 'enrollment-browser';
     return undefined;
   }) } as unknown as HidRequest;
 }
+
+/** The session POST /auth/patient/login would issue for the new Health ID. */
+const session = {
+  actor: { kind: 'patient' as const, id: 'patient:account-7', subject: 'patient:account-7', accountId: 'account-7',
+    patientId: 'patient-7', sessionId: 'session-7', roles: [], permissions: [], platformRoles: [],
+    platformPermissions: [], facilityIds: [], facilities: [], authenticationMethod: 'local' as const },
+  accessToken: 'access-token', refreshToken: 'refresh-token', csrfToken: 'csrf-token',
+  expiresAt: new Date('2030-01-01T00:15:00.000Z'), refreshExpiresAt: new Date('2030-01-08T00:00:00.000Z'),
+};
+const responseFor = () => ({ cookie: jest.fn(), clearCookie: jest.fn(), setHeader: jest.fn() });
 
 describe('PatientEnrollmentController', () => {
   let service: {
@@ -29,6 +43,8 @@ describe('PatientEnrollmentController', () => {
   };
   let turnstile: { verify: jest.Mock };
   let google: { onboardingStatus: jest.Mock; onboardingCookieName: string };
+  let auth: { login: jest.Mock; revoke: jest.Mock };
+  let audit: { record: jest.Mock };
   let controller: PatientEnrollmentController;
 
   beforeEach(() => {
@@ -47,14 +63,17 @@ describe('PatientEnrollmentController', () => {
         return { cookie: 'opaque-signup-cookie', progress: { stage: 'verify_contact', contactChannel: 'email' } }; }),
       availability: jest.fn().mockResolvedValue({ open: false }), current: jest.fn(), startContact: jest.fn(),
       verifyContact: jest.fn(), bindGoogle: jest.fn().mockResolvedValue({ bound: true }),
-      activate: jest.fn().mockResolvedValue({ stage: 'active', hidCode: 'HID-TEST' }) };
+      activate: jest.fn().mockResolvedValue({ stage: 'active', hidCode: 'HID-ABC234', replayed: false }) };
     turnstile = { verify: jest.fn().mockResolvedValue(undefined) };
     google = { onboardingStatus: jest.fn().mockResolvedValue({
       stage: 'GOOGLE_AUTHENTICATED_PENDING_IDENTITY' }),
     onboardingCookieName: 'hid_access_google_onboarding' };
+    auth = { login: jest.fn().mockResolvedValue(session), revoke: jest.fn().mockResolvedValue(undefined) };
+    audit = { record: jest.fn().mockResolvedValue(undefined) };
     controller = new PatientEnrollmentController(service as unknown as PatientEnrollmentService,
       turnstile as unknown as TurnstileService,
-      google as unknown as GoogleAuthenticationService);
+      google as unknown as GoogleAuthenticationService,
+      auth as unknown as AuthService, audit as unknown as AuditService);
   });
 
   afterEach(() => {
@@ -135,7 +154,7 @@ describe('PatientEnrollmentController', () => {
   it('rejects duplicate enrollment cookies and keeps the enrollment cookie for replay after activation', async () => {
     await controller.current(request('hid_enrollment=first; hid_enrollment=second'));
     expect(service.current).toHaveBeenCalledWith(undefined, correlationId);
-    const response = { clearCookie: jest.fn() };
+    const response = responseFor();
     await controller.activate({ password: 'a-strong-test-password' },
       request('hid_enrollment=opaque-value'), response as unknown as Response);
     expect(service.activate).toHaveBeenCalledWith('opaque-value', 'a-strong-test-password',
@@ -148,7 +167,7 @@ describe('PatientEnrollmentController', () => {
   it('binds pending Google proof to enrollment and clears it only after successful activation', async () => {
     const pending = '30000000-0000-4000-8000-000000000001.' + 'A'.repeat(43);
     const cookie = `hid_access_google_onboarding=${pending}; hid_enrollment=opaque-value`;
-    const response = { cookie: jest.fn(), clearCookie: jest.fn() };
+    const response = responseFor();
     await controller.start({ nin: '12345678901', turnstileToken: 'token',
       turnstileAction: 'patient-enrollment' }, 'idempotency-key', request(cookie),
     response as unknown as Response);
@@ -223,5 +242,97 @@ describe('PatientEnrollmentController', () => {
       code: 'PATIENT_ENROLLMENT_REQUIRES_SIGN_OUT',
     });
     expect(service.start).not.toHaveBeenCalled();
+  });
+
+  describe('POST activate signs the new patient in (owner decision of 2026-10-28)', () => {
+    const cookieOptions = { secure: true, sameSite: 'strict' };
+
+    it.each([
+      ['the sign-up without a NIN', 'hid_enrollment=opaque-value', undefined],
+      ['the NIN route with Google onboarding', `hid_access_google_onboarding=${'30000000-0000-4000-8000-000000000001.' + 'A'.repeat(43)}; hid_enrollment=opaque-value`,
+        '30000000-0000-4000-8000-000000000001.' + 'A'.repeat(43)],
+    ])('%s: a first activation signs in as POST /auth/patient/login does and answers signedIn true', async (_route, cookie, pending) => {
+      const response = responseFor();
+      await expect(controller.activate({ password: 'a-strong-test-password' }, request(cookie),
+        response as unknown as Response)).resolves.toEqual({ stage: 'active', hidCode: 'HID-ABC234', signedIn: true });
+      // The patient sign-in itself: the new Health ID and this password, with the request's device facts.
+      expect(auth.login).toHaveBeenCalledWith({ email: 'HID-ABC234', password: 'a-strong-test-password' },
+        { correlationId, sourceIp: '203.0.113.10', userAgent: 'enrollment-browser' }, 'patient');
+      expect(audit.record).toHaveBeenCalledWith({ correlationId, actorType: 'patient', actorSubject: 'patient:account-7',
+        actorAccountId: 'account-7', actorMembershipId: undefined, organizationId: undefined, facilityId: undefined,
+        action: 'auth.login', resourceType: 'session', resourceId: 'session-7', outcome: 'success',
+        sourceIp: '203.0.113.10', userAgent: 'enrollment-browser' });
+      expect(response.cookie.mock.calls).toEqual([
+        ['hid_access', 'access-token', { ...cookieOptions, httpOnly: true, path: '/', expires: session.expiresAt }],
+        ['hid_access_refresh', 'refresh-token', { ...cookieOptions, httpOnly: true, path: '/api/v1/auth',
+          expires: session.refreshExpiresAt }],
+        ['hid_access_csrf', 'csrf-token', { ...cookieOptions, httpOnly: false, path: '/', expires: session.refreshExpiresAt }],
+      ]);
+      expect(response.setHeader).toHaveBeenCalledWith('x-csrf-token', 'csrf-token');
+      // The Google onboarding cookie is still cleared on the NIN route; the enrollment cookie is kept.
+      if (pending) {
+        expect(response.clearCookie).toHaveBeenCalledWith('hid_access_google_onboarding', {
+          secure: true, sameSite: 'strict', httpOnly: true, path: '/api/v1' });
+      } else {
+        expect(response.clearCookie).not.toHaveBeenCalled();
+      }
+      expect(response.clearCookie).not.toHaveBeenCalledWith('hid_enrollment', expect.anything());
+    });
+
+    it('a replay (the enrollment was already active) signs nobody in and answers signedIn false', async () => {
+      service.activate.mockResolvedValue({ stage: 'active', hidCode: 'HID-ABC234', replayed: true });
+      const response = responseFor();
+      await expect(controller.activate({ password: 'any-other-password' }, request('hid_enrollment=opaque-value'),
+        response as unknown as Response)).resolves.toEqual({ stage: 'active', hidCode: 'HID-ABC234', signedIn: false });
+      expect(auth.login).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+      expect(response.cookie).not.toHaveBeenCalled();
+      expect(response.setHeader).not.toHaveBeenCalled();
+    });
+
+    it('a browser that is signed in after its activation cannot activate again: no second session', async () => {
+      await expect(controller.activate({ password: 'a-strong-test-password' },
+        request('hid_enrollment=opaque-value; hid_access=access-token'), responseFor() as unknown as Response))
+        .rejects.toMatchObject({ code: 'PATIENT_ENROLLMENT_REQUIRES_SIGN_OUT' });
+      expect(service.activate).not.toHaveBeenCalled();
+      expect(auth.login).not.toHaveBeenCalled();
+    });
+
+    it('still activates, with signedIn false and no cookie, when the session cannot be created', async () => {
+      auth.login.mockRejectedValue(new UnauthorizedException('Patient account is unavailable'));
+      const warn = jest.spyOn((controller as unknown as { logger: { warn: (message: string) => void } }).logger, 'warn')
+        .mockImplementation(() => undefined);
+      const response = responseFor();
+      await expect(controller.activate({ password: 'a-strong-test-password' }, request('hid_enrollment=opaque-value'),
+        response as unknown as Response)).resolves.toEqual({ stage: 'active', hidCode: 'HID-ABC234', signedIn: false });
+      expect(response.cookie).not.toHaveBeenCalled();
+      expect(response.setHeader).not.toHaveBeenCalled();
+      expect(audit.record).not.toHaveBeenCalled();
+      // Logged with the correlation id and a status only: no Health ID, password or address.
+      expect(warn).toHaveBeenCalledTimes(1);
+      const logged = String(warn.mock.calls[0]?.[0]);
+      expect(logged).toContain(correlationId);
+      expect(logged).toContain('401');
+      for (const secret of ['HID-ABC234', 'a-strong-test-password', 'account-7']) expect(logged).not.toContain(secret);
+    });
+
+    it('revokes a session whose audit failed and hands over no cookie', async () => {
+      audit.record.mockRejectedValue(new Error('audit unavailable'));
+      jest.spyOn((controller as unknown as { logger: { warn: (message: string) => void } }).logger, 'warn')
+        .mockImplementation(() => undefined);
+      const response = responseFor();
+      await expect(controller.activate({ password: 'a-strong-test-password' }, request('hid_enrollment=opaque-value'),
+        response as unknown as Response)).resolves.toMatchObject({ signedIn: false });
+      expect(auth.revoke).toHaveBeenCalledWith('session-7', 'patient:account-7',
+        { correlationId, sourceIp: '203.0.113.10', userAgent: 'enrollment-browser' });
+      expect(response.cookie).not.toHaveBeenCalled();
+    });
+
+    it('a failed activation signs nobody in', async () => {
+      service.activate.mockRejectedValue(new Error('activation failed'));
+      await expect(controller.activate({ password: 'a-strong-test-password' }, request('hid_enrollment=opaque-value'),
+        responseFor() as unknown as Response)).rejects.toThrow('activation failed');
+      expect(auth.login).not.toHaveBeenCalled();
+    });
   });
 });

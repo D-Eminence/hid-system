@@ -207,3 +207,50 @@ describe('Facility self sign-up daily QoreID cap (PROVIDER_SELF_SERVICE_QOREID_D
   });
 });
 
+describe('Session lifetimes (patients: owner decision of 2026-10-28)', () => {
+  const original = { ...process.env };
+  const keys = ['AUTH_REFRESH_TTL_SECONDS', 'AUTH_ABSOLUTE_TTL_SECONDS',
+    'AUTH_PATIENT_REFRESH_TTL_SECONDS', 'AUTH_PATIENT_ABSOLUTE_TTL_SECONDS'] as const;
+  afterEach(() => {
+    for (const key of Object.keys(process.env)) if (!(key in original)) delete process.env[key];
+    Object.assign(process.env, original);
+    resetEnvironmentForTests();
+  });
+
+  function local(values: Record<string, string> = {}): void {
+    for (const key of keys) delete process.env[key];
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+      CORS_ORIGINS: 'https://www.healthidentitydirectory.com', AUTH_MODE: 'local',
+      AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
+      AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
+    }, values);
+    resetEnvironmentForTests();
+  }
+
+  function lifetimes() {
+    const environment = getEnvironment();
+    return Object.fromEntries(keys.map((key) => [key, environment[key]]));
+  }
+
+  it('defaults to 7 days idle and 30 days at most for patients, and keeps staff at 8 hours and 24 hours', () => {
+    local();
+    expect(lifetimes()).toEqual({
+      AUTH_REFRESH_TTL_SECONDS: 28_800, AUTH_ABSOLUTE_TTL_SECONDS: 86_400,
+      AUTH_PATIENT_REFRESH_TTL_SECONDS: 604_800, AUTH_PATIENT_ABSOLUTE_TTL_SECONDS: 2_592_000,
+    });
+  });
+
+  it('accepts patient lifetimes within their bounds and refuses ones outside them', () => {
+    local({ AUTH_PATIENT_REFRESH_TTL_SECONDS: '900', AUTH_PATIENT_ABSOLUTE_TTL_SECONDS: '3600' });
+    expect(lifetimes()).toMatchObject({ AUTH_PATIENT_REFRESH_TTL_SECONDS: 900, AUTH_PATIENT_ABSOLUTE_TTL_SECONDS: 3600 });
+    const outside: Array<[string, string]> = [
+      ['AUTH_PATIENT_REFRESH_TTL_SECONDS', '899'], ['AUTH_PATIENT_REFRESH_TTL_SECONDS', '604801'],
+      ['AUTH_PATIENT_ABSOLUTE_TTL_SECONDS', '3599'], ['AUTH_PATIENT_ABSOLUTE_TTL_SECONDS', '2592001'],
+    ];
+    for (const [key, value] of outside) {
+      local({ [key]: value });
+      expect(() => getEnvironment()).toThrow(new RegExp(`${key}: `));
+    }
+  });
+});

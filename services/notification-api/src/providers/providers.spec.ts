@@ -4,6 +4,7 @@ import { BrevoFallbackProvider } from './brevo.provider';
 import { MetaWhatsAppProvider } from './meta.provider';
 import { SesEmailProvider } from './ses.provider';
 import { emergencyContactAlertContent, genericOtpText, isTemplateOtp, messageContent } from './provider.types';
+import { patientWelcomeContent } from './patient-emails';
 import { TermiiSmsProvider } from './termii.provider';
 
 describe('OTP provider adapters', () => {
@@ -107,6 +108,31 @@ describe('OTP provider adapters', () => {
       sender: { email:'security@example.test' }, to: [{ email:'contact@example.test' }],
       subject:'Health ID emergency access notice', textContent:content.text,
     });
+  });
+
+  it('SES and Brevo send a patient email as text and HTML; SMS and WhatsApp stay text only', async () => {
+    const content = patientWelcomeContent({ firstName:'Ada', healthId:'HID-ABC234' });
+    const welcome = { ...base, channel:'email' as const, recipient:'ada@example.test', code:'', purpose:'PATIENT_WELCOME', content };
+    const client = { send: jest.fn().mockResolvedValue({ MessageId:'ses-id' }) } as unknown as SESv2Client;
+    await expect(new SesEmailProvider(getEnvironment(), client).send(welcome)).resolves.toMatchObject({ outcome:'accepted' });
+    expect((client.send as jest.Mock).mock.calls[0][0].input.Content).toEqual({ Simple: {
+      Subject: { Data:'Your Health ID is ready', Charset:'UTF-8' },
+      Body: { Text: { Data:content.text, Charset:'UTF-8' }, Html: { Data:content.html, Charset:'UTF-8' } } } });
+
+    const transport = jest.fn().mockResolvedValue(new Response('{"messageId":"email-id"}', { status: 201 }));
+    await expect(new BrevoFallbackProvider(getEnvironment(), transport).send(welcome)).resolves.toMatchObject({ outcome:'accepted' });
+    expect(JSON.parse(String(transport.mock.calls[0]![1].body))).toEqual({
+      sender: { email:'security@example.test' }, to: [{ email:'ada@example.test' }],
+      subject:'Your Health ID is ready', textContent:content.text, htmlContent:content.html,
+    });
+
+    const smsTransport = jest.fn().mockResolvedValue(new Response('{"messageId":1}', { status: 201 }));
+    await new BrevoFallbackProvider(getEnvironment(), smsTransport).send({ ...welcome, channel:'sms', recipient:'+2348000000000' });
+    expect(JSON.parse(String(smsTransport.mock.calls[0]![1].body))).toEqual({
+      sender:'HID', recipient:'+2348000000000', content:content.text, type:'transactional' });
+    const whatsappTransport = jest.fn().mockResolvedValue(new Response('{}', { status: 201 }));
+    await new BrevoFallbackProvider(getEnvironment(), whatsappTransport).send({ ...welcome, channel:'whatsapp', recipient:'+2348000000000' });
+    expect(String(whatsappTransport.mock.calls[0]![1].body)).not.toContain('<');
   });
 
   it('Brevo SMS sends the emergency-contact verification wording', async () => {

@@ -124,7 +124,85 @@ export class NotificationOtpClient {
     }, OTP_TIMEOUT_MS);
   }
 
-  private async post(path: 'otp' | 'emergency-contact-alert' | 'staff-invitation', idempotencyKey: string, correlationId: string,
+  /**
+   * The welcome email of a first activation, "Your Health ID is ready" (owner
+   * decision of 2026-10-28, hid-1.0's design): to the verified email, with the
+   * patient's first name when it has one and the Health ID. notification-api
+   * renders it from these fixed fields only. Keyed by the patient, so a retry
+   * is not delivered twice. Best-effort: the caller never waits for it.
+   */
+  async deliverPatientWelcome(input: {
+    patientId: string;
+    recipient: string;
+    firstName?: string;
+    healthId: string;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'definitive_failure', safeCode: 'delivery_policy_unavailable' };
+    return this.post('patient-welcome', `patient-welcome:${input.patientId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient,
+      ...(input.firstName ? { firstName: input.firstName } : {}),
+      healthId: input.healthId, plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  /**
+   * A patient's password reset code in hid-1.0's design: greets them by first
+   * name and names their Health ID. An older notification-api, which does not
+   * serve this route yet, answers 404 having sent nothing; the code then goes
+   * once through the generic OTP route, under the same idempotency key, so a
+   * release that updates identity-api first never stops password resets. Any
+   * other answer (accepted, a refusal, 5xx, a timeout) is final: never sent
+   * twice.
+   */
+  async deliverPasswordResetCode(input: {
+    challengeId: string;
+    recipient: string;
+    code: string;
+    firstName?: string;
+    healthId: string;
+    expiresInMinutes: number;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'definitive_failure' };
+    const delivered = await this.post('password-reset-code', `otp:${input.challengeId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, code: input.code,
+      ...(input.firstName ? { firstName: input.firstName } : {}),
+      healthId: input.healthId, expiresInMinutes: input.expiresInMinutes, plan,
+    }, OTP_TIMEOUT_MS);
+    if (delivered.safeCode !== 'http_404') return delivered;
+    return this.post('otp', `otp:${input.challengeId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, code: input.code, purpose: 'PASSWORD_RESET', plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  /**
+   * "Your Health ID password was updated", after a completed password reset
+   * (owner decision of 2026-10-28, hid-1.0's design): to the account's email,
+   * with the patient's first name and Health ID when the account is a patient
+   * the reset could read, otherwise without them. Keyed by the reset
+   * challenge. Best-effort: the reset never waits for it.
+   */
+  async deliverPasswordUpdated(input: {
+    challengeId: string;
+    recipient: string;
+    firstName?: string;
+    healthId?: string;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'definitive_failure', safeCode: 'delivery_policy_unavailable' };
+    return this.post('password-updated', `password-updated:${input.challengeId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient,
+      ...(input.firstName ? { firstName: input.firstName } : {}),
+      ...(input.healthId ? { healthId: input.healthId } : {}), plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  private async post(path: 'otp' | 'emergency-contact-alert' | 'staff-invitation' | 'patient-welcome'
+    | 'password-reset-code' | 'password-updated', idempotencyKey: string, correlationId: string,
     body: Record<string, unknown>, timeoutMs: number,
   ): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
     const credential = await this.credentials();
@@ -136,7 +214,8 @@ export class NotificationOtpClient {
       this.unavailableTokens += 1;
       this.logger.warn(`Notification workload token unavailable; nothing was sent `
         + `(event=notification_workload_token_unavailable reason=${credential.unavailable} count=${this.unavailableTokens})`);
-      return { outcome: path === 'otp' ? 'definitive_failure' : 'unknown', safeCode: 'workload_token_unavailable' };
+      return { outcome: path === 'otp' || path === 'password-reset-code' ? 'definitive_failure' : 'unknown',
+        safeCode: 'workload_token_unavailable' };
     }
     let response: Response;
     try {
@@ -162,7 +241,9 @@ export class NotificationOtpClient {
       // lasts; a code keeps the definitive mapping.
       // A staff invitation likewise: a 401 is Notification's own key fetch, not
       // the address, so it must not count towards the facility's delivery pause.
-      if (path !== 'otp' && response.status === 401) return { outcome: 'unknown', safeCode: 'http_401' };
+      if (path !== 'otp' && path !== 'password-reset-code' && response.status === 401) {
+        return { outcome: 'unknown', safeCode: 'http_401' };
+      }
       return { outcome: response.status >= 400 && response.status < 500 && response.status !== 408 && response.status !== 429
         ? 'definitive_failure' : 'unknown', safeCode: `http_${response.status}` };
     }

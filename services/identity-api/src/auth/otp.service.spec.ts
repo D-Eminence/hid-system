@@ -943,3 +943,194 @@ describe('Identity OTP credentials', () => {
     return code === '000000' ? '000001' : '000000';
   }
 });
+
+describe('Patient recovery emails in hid-1.0\'s design (owner decision of 2026-10-28)', () => {
+  const original = { ...process.env };
+  const key = Buffer.alloc(32, 7);
+  const challengeId = '86e1e934-dac3-40a4-b15f-bd76904a9a32';
+  const verificationToken = 'opaque-completion-token-with-more-than-32-characters';
+  const hmac = (...parts: string[]) => createHmac('sha256', key).update(parts.join('\u001f'), 'utf8').digest('hex');
+
+  beforeEach(() => {
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+      CORS_ORIGINS: 'https://www.healthidentitydirectory.com', AUTH_MODE: 'local',
+      AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
+      AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
+      OTP_HMAC_KEY_B64: key.toString('base64'), OTP_EXPIRY_SECONDS: '300',
+    });
+    resetEnvironmentForTests();
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    for (const name of Object.keys(process.env)) if (!(name in original)) delete process.env[name];
+    Object.assign(process.env, original);
+    resetEnvironmentForTests();
+  });
+
+  function notificationMock() {
+    return {
+      deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'ses' }),
+      deliverPasswordResetCode: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'ses' }),
+      deliverPasswordUpdated: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'ses' }),
+    };
+  }
+
+  function database(account: Record<string, unknown> | undefined, challenge?: Record<string, unknown>, completed = true) {
+    const calls: SqlCall[] = [];
+    const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
+      calls.push({ sql, values });
+      if (sql.includes('from auth.accounts account')) return { rows: account ? [account] : [] };
+      if (sql.includes('select challenge.id::text, challenge.account_id::text,')) return { rows: challenge ? [challenge] : [] };
+      if (sql.includes('select auth.complete_recovery_otp')) return { rows: [{ completed }] };
+      return { rows: [] };
+    }) } as unknown as PoolClient;
+    return { calls, database: {
+      withSystemTransaction: jest.fn(async (_c: string, work: (value: PoolClient) => Promise<unknown>) => work(client)),
+      query: jest.fn().mockResolvedValue({ rows: [] }),
+    } as unknown as DatabaseService };
+  }
+
+  const patientAccount = { id: 'account-1', email: 'ada@example.test', token_version: '1', phone_enrollment_id: null,
+    phone_ciphertext: null, phone_key_version: null, patient_first_name: 'Ada', patient_hid_code: 'HID-ABC234' };
+  const staffAccount = { ...patientAccount, email: 'doctor@example.test', patient_first_name: null, patient_hid_code: null };
+
+  describe('the reset code', () => {
+    it('greets a patient by first name and names their Health ID, through the new route', async () => {
+      const notification = notificationMock();
+      const { calls, database: db } = database(patientAccount);
+      const service = new OtpService(db, notification as unknown as NotificationOtpClient);
+      const result = await service.start({ identifier: 'ada@example.test', purpose: 'PASSWORD_RESET',
+        remoteIp: '192.0.2.10', correlationId: 'reset-named-0001' });
+      await service.settleDeliveries();
+      expect(notification.deliver).not.toHaveBeenCalled();
+      expect(notification.deliverPasswordResetCode).toHaveBeenCalledWith({ challengeId: result.challengeId,
+        recipient: 'ada@example.test', code: expect.stringMatching(/^\d{6}$/), firstName: 'Ada',
+        healthId: 'HID-ABC234', expiresInMinutes: 5, correlationId: 'reset-named-0001' });
+      // Read in the same lookup, from the active patient only.
+      const lookup = calls.find(({ sql }) => sql.includes('from auth.accounts account'));
+      expect(lookup?.sql).toContain("case when patient.status = 'active' then patient.first_name end as patient_first_name");
+      expect(lookup?.sql).toContain("case when patient.status = 'active' then patient.hid_code end as patient_hid_code");
+    });
+
+    it('answers a patient, a staff member and an unknown identifier with the same body', async () => {
+      const answers = [];
+      for (const account of [patientAccount, staffAccount, undefined]) {
+        const service = new OtpService(database(account).database, notificationMock() as unknown as NotificationOtpClient);
+        const answer = await service.start({ identifier: 'someone@example.test', purpose: 'PASSWORD_RESET',
+          remoteIp: '192.0.2.10', correlationId: 'reset-alike-0001' });
+        answers.push({ ...answer, challengeId: typeof answer.challengeId });
+        await service.settleDeliveries();
+      }
+      expect(answers[1]).toEqual(answers[0]);
+      expect(answers[2]).toEqual(answers[0]);
+    });
+
+    it.each<[string, Record<string, unknown>, RecoveryOtpPurpose]>([
+      ['a staff or admin account', staffAccount, 'PASSWORD_RESET'],
+      ['a legacy recovery', patientAccount, 'LEGACY_ACCOUNT_RECOVERY'],
+      ['a patient whose Health ID is not readable', { ...patientAccount, patient_hid_code: null }, 'PASSWORD_RESET'],
+    ])('keeps the generic code message for %s', async (_label, account, purpose) => {
+      const notification = notificationMock();
+      const service = new OtpService(database(account).database, notification as unknown as NotificationOtpClient);
+      await service.start({ identifier: 'someone@example.test', purpose, remoteIp: '192.0.2.10', correlationId: 'reset-generic-0001' });
+      await service.settleDeliveries();
+      expect(notification.deliverPasswordResetCode).not.toHaveBeenCalled();
+      expect(notification.deliver).toHaveBeenCalledWith(expect.objectContaining({ purpose, channel: 'email' }));
+      expect(JSON.stringify(notification.deliver.mock.calls)).not.toMatch(/HID-ABC234|"Ada"/);
+    });
+
+    it('greets "there" when the stored first name cannot be shown', async () => {
+      const notification = notificationMock();
+      const service = new OtpService(database({ ...patientAccount, patient_first_name: '1234' }).database,
+        notification as unknown as NotificationOtpClient);
+      await service.start({ identifier: 'ada@example.test', purpose: 'PASSWORD_RESET', remoteIp: '192.0.2.10',
+        correlationId: 'reset-nameless-0001' });
+      await service.settleDeliveries();
+      expect(notification.deliverPasswordResetCode.mock.calls[0]?.[0]).not.toHaveProperty('firstName');
+    });
+  });
+
+  describe('"Your Health ID password was updated"', () => {
+    const challenge = (overrides: Record<string, unknown> = {}) => ({
+      id: challengeId, account_id: 'account-1', completion_token_hmac: hmac('otp-completion', challengeId, verificationToken),
+      completion_expires_at: new Date(Date.now() + 60_000), email: 'ada@example.test',
+      patient_first_name: 'Ada', patient_hid_code: 'HID-ABC234', ...overrides,
+    });
+    const complete = (service: OtpService, purpose: RecoveryOtpPurpose = 'PASSWORD_RESET') => service.complete({
+      challengeId, purpose, verificationToken, newPassword: 'a-strong-test-password', correlationId: 'reset-complete-0001' });
+
+    it('is sent once after a completed reset, naming the patient and their Health ID', async () => {
+      const notification = notificationMock();
+      const { calls, database: db } = database(undefined, challenge());
+      const service = new OtpService(db, notification as unknown as NotificationOtpClient);
+      await expect(complete(service)).resolves.toEqual({ completed: true });
+      await service.settleDeliveries();
+      expect(notification.deliverPasswordUpdated).toHaveBeenCalledTimes(1);
+      expect(notification.deliverPasswordUpdated).toHaveBeenCalledWith({ challengeId, recipient: 'ada@example.test',
+        firstName: 'Ada', healthId: 'HID-ABC234', correlationId: 'reset-complete-0001' });
+      const lookup = calls.find(({ sql }) => sql.includes('select challenge.id::text, challenge.account_id::text,'));
+      expect(lookup?.sql).toContain("left join identity.patients patient\n             on patient.account_id = account.id and patient.status = 'active'");
+      expect(JSON.stringify(notification.deliverPasswordUpdated.mock.calls)).not.toContain('a-strong-test-password');
+    });
+
+    it('is sent without a name or Health ID to any other account (staff, admin, or a patient this service cannot read)', async () => {
+      const notification = notificationMock();
+      const service = new OtpService(database(undefined, challenge({ email: 'doctor@example.test',
+        patient_first_name: null, patient_hid_code: null })).database, notification as unknown as NotificationOtpClient);
+      await complete(service, 'LEGACY_ACCOUNT_RECOVERY');
+      await service.settleDeliveries();
+      expect(notification.deliverPasswordUpdated).toHaveBeenCalledWith({ challengeId, recipient: 'doctor@example.test',
+        correlationId: 'reset-complete-0001' });
+    });
+
+    it('is not sent for an invalid or expired completion, or an account without an email', async () => {
+      for (const [row, completed] of [[undefined, true], [challenge({ completion_expires_at: new Date(Date.now() - 1) }), true],
+        [challenge(), false]] as const) {
+        const notification = notificationMock();
+        const service = new OtpService(database(undefined, row, completed).database, notification as unknown as NotificationOtpClient);
+        await expect(complete(service)).rejects.toMatchObject({ code: 'OTP_INVALID_OR_EXPIRED' });
+        await service.settleDeliveries();
+        expect(notification.deliverPasswordUpdated).not.toHaveBeenCalled();
+      }
+      const notification = notificationMock();
+      const service = new OtpService(database(undefined, challenge({ email: null })).database,
+        notification as unknown as NotificationOtpClient);
+      await expect(complete(service)).resolves.toEqual({ completed: true });
+      await service.settleDeliveries();
+      expect(notification.deliverPasswordUpdated).not.toHaveBeenCalled();
+    });
+
+    it.each<[string, () => Promise<unknown>]>([
+      ['fails', () => Promise.reject(new Error('ECONNRESET ada@example.test HID-ABC234'))],
+      ['is refused', () => Promise.resolve({ outcome: 'definitive_failure', safeCode: 'http_404' })],
+    ])('a send that %s never fails the reset, and is logged without personal data', async (_label, outcome) => {
+      const notification = notificationMock();
+      notification.deliverPasswordUpdated.mockImplementation(outcome);
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const service = new OtpService(database(undefined, challenge()).database, notification as unknown as NotificationOtpClient);
+      await expect(complete(service)).resolves.toEqual({ completed: true });
+      await service.settleDeliveries();
+      expect(warn).toHaveBeenCalledTimes(1);
+      const logged = String(warn.mock.calls[0]?.[0]);
+      expect(logged).toContain('reset-complete-0001');
+      for (const secret of ['ada@example.test', 'Ada', 'HID-ABC234', 'a-strong-test-password']) expect(logged).not.toContain(secret);
+    });
+
+    it('waits for it at shutdown', async () => {
+      const notification = notificationMock();
+      let finish: (value: unknown) => void = () => undefined;
+      notification.deliverPasswordUpdated.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+      const service = new OtpService(database(undefined, challenge()).database, notification as unknown as NotificationOtpClient);
+      await complete(service);
+      let settled = false;
+      const shutdown = service.beforeApplicationShutdown().then(() => { settled = true; });
+      await flush();
+      expect(settled).toBe(false);
+      finish({ outcome: 'accepted' });
+      await shutdown;
+      expect(settled).toBe(true);
+    });
+  });
+});

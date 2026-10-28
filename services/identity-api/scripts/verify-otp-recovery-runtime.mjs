@@ -15,7 +15,13 @@ const { Pool } = require('pg');
 const { OtpService } = require(join(service, 'src/auth/otp.service.ts'));
 const pool = new Pool({ host: socket, user: process.env.PGUSER, database: process.env.PGDATABASE, max: 20 });
 let delivered;
-const notification = { deliver: async input => { delivered=input;return { outcome:'accepted',provider:'ses' }; } };
+// B1: a reset also sends the patient-named code email and, once completed, "password updated".
+let passwordUpdated = 0;
+const notification = {
+  deliver: async input => { delivered=input;return { outcome:'accepted',provider:'ses' }; },
+  deliverPasswordResetCode: async input => { delivered=input;return { outcome:'accepted',provider:'ses' }; },
+  deliverPasswordUpdated: async () => { passwordUpdated += 1;return { outcome:'accepted',provider:'ses' }; },
+};
 const database = {
   query: async (sql, values) => {
     const client=await pool.connect();
@@ -49,6 +55,9 @@ try {
   assert.equal(current.token_version,2);assert.equal(current.password_algorithm,'argon2id');
   assert(await require('argon2').verify(current.password_hash,completion.newPassword));
   assert.equal((await pool.query("select count(*)::integer as n from audit.events where actor_account_id=$1 and action='auth.otp.recovery.completed'",[id])).rows[0].n,1);
+  // The confirmation is best-effort and runs after the answer: wait for it, briefly.
+  for (let wait=0; passwordUpdated===0 && wait<40; wait+=1) await new Promise(done=>setTimeout(done,50));
+  assert.equal(passwordUpdated,1,'One "password updated" email per completed reset');
   const disabledId=randomUUID(), disabledEmail=`synthetic-${disabledId}@example.invalid`;
   await pool.query("insert into auth.accounts(id,subject,email,status) values($1,$2,$3,'active')",
     [disabledId,`synthetic:otp-disabled:${disabledId}`,disabledEmail]);
@@ -64,5 +73,5 @@ try {
   const rate=await Promise.allSettled(Array.from({length:8},()=>otp.start({identifier:unknownIdentifier,purpose:'PASSWORD_RESET',remoteIp:'192.0.2.220',correlationId:'otp-runtime-rate-001'})));
   assert.equal(rate.filter(result=>result.status==='fulfilled').length,5,'Exactly five concurrent first-bucket requests may be accepted');
   assert.equal(rate.filter(result=>result.status==='rejected'&&result.reason.code==='OTP_RATE_LIMITED').length,3);
-  process.stdout.write(JSON.stringify({status:'passed',scope:'local-synthetic-only',role:'hid_identity_api_runtime',otp_start_verify_complete:'passed',provider:'test-double-no-delivery',concurrent_completion_successes:1,concurrent_completion_denials:1,argon2_password_verified:true,semantic_audit_count:1,disabled_after_verification_denied:true,reenabled_old_challenge_denied:true,concurrent_rate_allowed:5,concurrent_rate_denied:3})+'\n');
+  process.stdout.write(JSON.stringify({status:'passed',scope:'local-synthetic-only',role:'hid_identity_api_runtime',otp_start_verify_complete:'passed',provider:'test-double-no-delivery',concurrent_completion_successes:1,concurrent_completion_denials:1,argon2_password_verified:true,semantic_audit_count:1,password_updated_email_requested:1,disabled_after_verification_denied:true,reenabled_old_challenge_denied:true,concurrent_rate_allowed:5,concurrent_rate_denied:3})+'\n');
 } finally { await pool.end(); }

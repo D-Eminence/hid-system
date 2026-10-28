@@ -19,6 +19,7 @@ import type { QoreIdVerificationAdapter } from './qoreid-verification.adapter';
 import type { NinIdentifierProtector } from './nin-identifier-protector';
 import type { HidCodeGenerator } from './hid-code-generator.service';
 import { createContactLookupHmac } from './contact-lookup';
+import { emailFirstName } from '../auth/email-first-name';
 
 const originalEnvironment = { ...process.env };
 const nin = '12345678901';
@@ -183,7 +184,8 @@ function fixture(otpRates = new Map<string, OtpRateRow>(),
     work: (client: PoolClient) => Promise<unknown>) => work(client)) } as unknown as DatabaseService;
   const provider = { assertAvailable: jest.fn().mockResolvedValue(undefined),
     isAvailable: jest.fn().mockResolvedValue(true), verifyNin: jest.fn().mockResolvedValue(identity) };
-  const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'test_sms' }) };
+  const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'test_sms' }),
+    deliverPatientWelcome: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'ses' }) };
   const protector = { lookup: jest.fn().mockReturnValue('a'.repeat(64)) };
   const hidCodes = { generate: jest.fn().mockReturnValue('HID-TEST-00000001') };
   const google = { bindPendingInTransaction: jest.fn().mockResolvedValue(undefined),
@@ -442,7 +444,7 @@ describe('PatientEnrollmentService', () => {
     await expect(f.service.verifyContact(started.cookie, contact.challengeId, deliveredCode, correlationId))
       .resolves.toEqual({ stage: 'set_password' });
     await expect(f.service.activate(started.cookie, 'a-strong-test-password', correlationId))
-      .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001', replayed: false });
     const activation = f.queries.find(({ sql }) => sql.includes('identity.activate_public_patient_enrollment'))!;
     expect(activation.values[0]).toBe(f.enrollment?.id);
     expect(activation.values[1]).toMatch(/^[0-9a-f]{64}$/);
@@ -738,7 +740,7 @@ describe('PatientEnrollmentService', () => {
       .resolves.toEqual({ stage: 'set_password' });
     expect(f.enrollment?.contact_channel).toBe('email');
     await expect(f.service.activate(started.cookie, 'a-strong-test-password', correlationId))
-      .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001', replayed: false });
     const activation = f.queries.find(({ sql }) => sql.includes('identity.activate_public_patient_enrollment'))!;
     expect(activation.values[3]).toBe('patient@example.test');
   });
@@ -767,7 +769,7 @@ describe('PatientEnrollmentService', () => {
       const cookie = await verifiedEnrollment(f);
       const before = passwordHash().mock.calls.length;
       await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
-        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001', replayed: false });
       expect(passwordHash().mock.calls.slice(before)).toEqual([['a-strong-test-password',
         { type: 2, memoryCost: 65_536, timeCost: 3, parallelism: 1 }]]);
       expect(activation(f.queries).at(-1)?.values[5]).toBe(PASSWORD_HASH);
@@ -781,7 +783,7 @@ describe('PatientEnrollmentService', () => {
       const before = passwordHash().mock.calls.length;
 
       await expect(f.service.activate(cookie, 'a-different-test-password', correlationId))
-        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001', replayed: true });
 
       // A replay sets no credential (0058 returns the HID first), so the
       // presented password is never hashed. The command still receives a
@@ -810,7 +812,7 @@ describe('PatientEnrollmentService', () => {
       await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
         .rejects.toThrow('argon2 unavailable');
       await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
-        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001', replayed: true });
       expect(activation(f.queries).at(-1)?.values[5]).toBe(PLACEHOLDER_HASH);
     });
 
@@ -843,7 +845,7 @@ describe('PatientEnrollmentService', () => {
       expect(budget).toBe(15);
       f.rateCount = budget - 1;
       await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
-        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001', replayed: false });
       f.queries.length = 0;
       const before = passwordHash().mock.calls.length;
       // The sixteenth is refused.
@@ -1060,7 +1062,7 @@ describe('PatientEnrollmentService', () => {
         activated_at: new Date(Date.now() - 14 * 60_000) });
       f.queries.length = 0;
       await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
-        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001', replayed: true });
       expect(activationCalls(f)).toHaveLength(1);
     });
 
@@ -1123,7 +1125,7 @@ describe('PatientEnrollmentService', () => {
     f.provider.verifyNin.mockResolvedValue({ ...bare, residence: { town: 'Fixture Town', state: 'Fixture State' } });
     const cookie = await verifiedEnrollment(f);
     await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
-      .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+      .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001', replayed: false });
     const activation = f.queries.find(({ sql }) => sql.includes('identity.activate_public_patient_enrollment'))!;
     const profile = JSON.parse(activation.values[2] as string);
     expect(profile.residence).toEqual({ town: 'Fixture Town', state: 'Fixture State' });
@@ -1188,7 +1190,7 @@ describe('PatientEnrollmentService', () => {
       const f = fixture();
       const cookie = await verifiedEnrollment(f);
       await expect(f.service.activate(cookie, 'a-strong-test-password', correlationId))
-        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001', replayed: false });
       Object.assign(f.enrollment!, { state: 'active', patient_id: 'patient-7', activated_at: new Date(Date.now() - 60_000) });
       const progress = await f.service.current(cookie, correlationId);
       expect(progress).toMatchObject({ stage: 'active', hidCode: 'HID-TEST-00000001' });
@@ -1251,7 +1253,7 @@ describe('PatientEnrollmentService', () => {
       await expect(f.service.verifyContact(started.cookie, challengeOf(started.progress), code, correlationId))
         .resolves.toEqual({ stage: 'set_password' });
       await expect(f.service.activate(started.cookie, 'correct horse battery', correlationId))
-        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001' });
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001', replayed: false });
       const activation = f.queries.find(({ sql }) => sql.includes('identity.activate_public_patient_signup'));
       expect(JSON.parse(String(activation?.values[2]))).toEqual({ kind: 'signup', firstName: 'Ada', lastName: 'Obi',
         email: 'ada@example.test', phone: '+2348031234567', gender: 'female', hospitalCurrentlyUsing: 'LUTH',
@@ -1321,5 +1323,102 @@ describe('PatientEnrollmentService', () => {
       await expect(f.service.start(nin, requestKey, '203.0.113.10', correlationId))
         .rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_KEY_REUSED' });
     });
+  });
+
+  describe('the welcome email at activation (owner decision of 2026-10-28)', () => {
+    const declared = { firstName: ' Ada ', lastName: 'Obi', email: 'Ada@Example.test',
+      phone: '0803 123 4567', gender: 'female' as const, hospitalCurrentlyUsing: 'LUTH' };
+    const challengeOf = (progress: unknown) => String((progress as { challengeId?: string }).challengeId);
+
+    async function signedUp(f: ReturnType<typeof fixture>) {
+      const started = await f.service.signup(declared, requestKey, '203.0.113.10', correlationId, () => undefined);
+      const code = f.notification.deliver.mock.calls[0]?.[0].code as string;
+      await f.service.verifyContact(started.cookie, challengeOf(started.progress), code, correlationId);
+      return started.cookie;
+    }
+
+    function capturedWarnings(f: ReturnType<typeof fixture>) {
+      return jest.spyOn((f.service as unknown as { logger: { warn: (message: string) => void } }).logger, 'warn')
+        .mockImplementation(() => undefined);
+    }
+
+    it('sends "Your Health ID is ready" once to the verified email of a sign-up, never on a replay', async () => {
+      const f = fixture();
+      const cookie = await signedUp(f);
+      await f.service.activate(cookie, 'correct horse battery', correlationId);
+      await f.service.settleWelcomeEmails();
+      expect(f.notification.deliverPatientWelcome).toHaveBeenCalledTimes(1);
+      expect(f.notification.deliverPatientWelcome).toHaveBeenCalledWith({ patientId: 'patient-8',
+        recipient: 'ada@example.test', firstName: 'Ada', healthId: 'HID-TEST-00000001', correlationId });
+
+      await expect(f.service.activate(cookie, 'correct horse battery', correlationId))
+        .resolves.toMatchObject({ replayed: true });
+      await f.service.settleWelcomeEmails();
+      expect(f.notification.deliverPatientWelcome).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends it on the NIN route to a verified email, with the record\'s first name and never the NIN', async () => {
+      const f = fixture();
+      const cookie = await verifiedEnrollment(f);
+      await f.service.activate(cookie, 'a-strong-test-password', correlationId);
+      await f.service.settleWelcomeEmails();
+      expect(f.notification.deliverPatientWelcome).toHaveBeenCalledWith({ patientId: 'patient-7',
+        recipient: 'patient@example.test', firstName: 'Amina', healthId: 'HID-TEST-00000001', correlationId });
+      expect(JSON.stringify(f.notification.deliverPatientWelcome.mock.calls)).not.toContain(nin);
+      expect(JSON.stringify(f.notification.deliverPatientWelcome.mock.calls)).not.toContain('a-strong-test-password');
+    });
+
+    it('sends nothing when the verified contact is a phone number (production delivers email only)', async () => {
+      const f = fixture();
+      const started = await f.service.start(nin, requestKey, '203.0.113.10', correlationId);
+      const contact = await f.service.startContact(started.cookie, 'phone', '08012345678', '203.0.113.10', correlationId);
+      const code = f.notification.deliver.mock.calls[0]?.[0].code as string;
+      await f.service.verifyContact(started.cookie, contact.challengeId, code, correlationId);
+      await expect(f.service.activate(started.cookie, 'a-strong-test-password', correlationId))
+        .resolves.toMatchObject({ stage: 'active', replayed: false });
+      await f.service.settleWelcomeEmails();
+      expect(f.notification.deliverPatientWelcome).not.toHaveBeenCalled();
+    });
+
+    it('never holds the activation up: it answers before the email is sent', async () => {
+      const f = fixture();
+      let finish: (value: { outcome: 'accepted' }) => void = () => undefined;
+      f.notification.deliverPatientWelcome.mockReturnValue(new Promise((resolve) => { finish = resolve; }));
+      const cookie = await signedUp(f);
+      await expect(f.service.activate(cookie, 'correct horse battery', correlationId))
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001', replayed: false });
+      expect(f.notification.deliverPatientWelcome).toHaveBeenCalledTimes(1);
+      finish({ outcome: 'accepted' });
+      await f.service.settleWelcomeEmails();
+    });
+
+    it.each<[string, () => Promise<unknown>]>([
+      ['fails', () => Promise.reject(new Error('connect ECONNREFUSED ada@example.test HID-TEST-00000001'))],
+      ['is refused', () => Promise.resolve({ outcome: 'definitive_failure', safeCode: 'http_404' })],
+    ])('a send that %s never fails the sign-up, and is logged without personal data', async (_label, outcome) => {
+      const f = fixture();
+      f.notification.deliverPatientWelcome.mockImplementation(outcome);
+      const warn = capturedWarnings(f);
+      const cookie = await signedUp(f);
+      await expect(f.service.activate(cookie, 'correct horse battery', correlationId))
+        .resolves.toEqual({ stage: 'active', hidCode: 'HID-TEST-00000001', replayed: false });
+      await f.service.settleWelcomeEmails();
+      expect(warn).toHaveBeenCalledTimes(1);
+      const logged = String(warn.mock.calls[0]?.[0]);
+      expect(logged).toContain(correlationId);
+      for (const secret of ['ada@example.test', 'Ada', 'HID-TEST-00000001', 'patient-8', 'correct horse battery']) {
+        expect(logged).not.toContain(secret);
+      }
+    });
+  });
+});
+
+describe('emailFirstName', () => {
+  it.each<[unknown, string | undefined]>([
+    ['Ada', 'Ada'], [' Ada ', 'Ada'], ['Ọlá', 'Ọlá'], ['Mary-Jane', 'Mary-Jane'], ['O’Neil', "O'Neil"],
+    ['ADA2', 'ADA'], ['1Ada', 'Ada'], ['<b>Ada</b>', 'b Ada b'], ['', undefined], ['123', undefined],
+    [null, undefined], [7, undefined], ['A'.repeat(130), 'A'.repeat(120)],
+  ])('%p becomes %p', (value, expected) => {
+    expect(emailFirstName(value)).toBe(expected);
   });
 });

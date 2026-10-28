@@ -4,6 +4,7 @@ import { BrevoFallbackProvider } from '../providers/brevo.provider';
 import { MetaWhatsAppProvider } from '../providers/meta.provider';
 import { emergencyContactAlertContent, type OtpMessage, type OtpProvider, type ProviderResult, staffInvitationContent,
   staffInvitationLinkOrigin, type StaffInvitationRole } from '../providers/provider.types';
+import { passwordResetCodeContent, passwordUpdatedContent, patientWelcomeContent } from '../providers/patient-emails';
 import { SesEmailProvider } from '../providers/ses.provider';
 import { TermiiSmsProvider } from '../providers/termii.provider';
 
@@ -103,6 +104,43 @@ export class NotificationService {
         origin: staffInvitationLinkOrigin(this.environment.HID_DEPLOYMENT_ENV),
         supportEmail: this.environment.EMERGENCY_CONTACT_SUPPORT_EMAIL,
       }),
+    }, rawPlan);
+  }
+
+  /**
+   * The patient emails in hid-1.0's design (owner decision of 2026-10-28):
+   * rendered here from fixed fields, with text and HTML parts, and delivered
+   * by email like an OTP (the same profile checks, delivery plan and
+   * fallback). The content is set, so no WhatsApp template is ever used.
+   */
+  deliverPatientWelcome(input: { recipient: string; firstName?: string; healthId: string; idempotencyKey: string },
+    rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'PATIENT_WELCOME',
+      idempotencyKey: input.idempotencyKey,
+      content: patientWelcomeContent({ ...(input.firstName ? { firstName: input.firstName } : {}),
+        healthId: input.healthId }),
+    }, rawPlan);
+  }
+
+  deliverPasswordResetCode(input: { recipient: string; code: string; firstName?: string; healthId: string;
+    expiresInMinutes: number; idempotencyKey: string }, rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'PASSWORD_RESET',
+      idempotencyKey: input.idempotencyKey,
+      content: passwordResetCodeContent({ ...(input.firstName ? { firstName: input.firstName } : {}),
+        healthId: input.healthId, code: input.code, expiresInMinutes: input.expiresInMinutes }),
+    }, rawPlan);
+  }
+
+  deliverPasswordUpdated(input: { recipient: string; firstName?: string; healthId?: string; idempotencyKey: string },
+    rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'PASSWORD_UPDATED',
+      idempotencyKey: input.idempotencyKey,
+      content: passwordUpdatedContent({ ...(input.firstName ? { firstName: input.firstName } : {}),
+        ...(input.healthId ? { healthId: input.healthId } : {}),
+        supportEmail: this.environment.EMERGENCY_CONTACT_SUPPORT_EMAIL }),
     }, rawPlan);
   }
 

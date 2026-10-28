@@ -1,6 +1,7 @@
 import { IsDateString, IsIn, IsObject, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 
-const PERSON_NAME = /^[\p{L}\p{M}][\p{L}\p{M}' .-]{0,119}$/u;
+/** A person's name as an email or alert may show it: letters, marks, apostrophes, spaces, dots and hyphens. */
+export const PERSON_NAME = /^[\p{L}\p{M}][\p{L}\p{M}' .-]{0,119}$/u;
 
 /**
  * The emergency-access alert to a verified contact. The message is rendered

@@ -402,3 +402,140 @@ describe('NotificationOtpClient staff invitation delivery', () => {
     }
   });
 });
+
+describe('NotificationOtpClient patient emails (owner decision of 2026-10-28)', () => {
+  const plan = { capability: 'email', primary: 'ses', fallback: 'brevo', configuration: {} };
+  const accepted = () => new Response(JSON.stringify({ outcome: 'accepted', primary: { provider: 'ses' } }), { status: 202 });
+
+  beforeEach(() => {
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+      CORS_ORIGINS: 'https://www.healthidentitydirectory.com', AUTH_MODE: 'local',
+      AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
+      AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
+      NOTIFICATION_API_URL: 'http://127.0.0.1:3007',
+      NOTIFICATION_SERVICE_IDENTITY_MODE: 'local-secret',
+      NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN: 'test-service-token-with-32-characters',
+    });
+    resetEnvironmentForTests();
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    for (const key of Object.keys(process.env)) if (!(key in originalEnvironment)) delete process.env[key];
+    Object.assign(process.env, originalEnvironment);
+    resetEnvironmentForTests();
+  });
+
+  function client() {
+    const integrations = { deliveryPlan: jest.fn().mockResolvedValue(plan) };
+    return { integrations, client: new NotificationOtpClient(integrations as unknown as IntegrationRuntimeService) };
+  }
+  const calls = () => (global.fetch as jest.Mock).mock.calls.map(([url, init]: [string, RequestInit]) => ({
+    route: String(url).split('/api/v1/notifications/')[1],
+    key: (init.headers as Record<string, string>)['idempotency-key'],
+    body: JSON.parse(String(init.body)) as Record<string, unknown>,
+  }));
+
+  it('posts the welcome email to patient-welcome, keyed by the patient, with the email plan', async () => {
+    global.fetch = jest.fn().mockResolvedValue(accepted());
+    const { client: notification, integrations } = client();
+    await expect(notification.deliverPatientWelcome({ patientId: 'patient-7', recipient: 'ada@example.test',
+      firstName: 'Ada', healthId: 'HID-ABC234', correlationId: 'request-11' }))
+      .resolves.toEqual({ outcome: 'accepted', provider: 'ses' });
+    expect(integrations.deliveryPlan).toHaveBeenCalledWith('email');
+    expect(calls()).toEqual([{ route: 'patient-welcome', key: 'patient-welcome:patient-7',
+      body: { channel: 'email', recipient: 'ada@example.test', firstName: 'Ada', healthId: 'HID-ABC234', plan } }]);
+  });
+
+  it('posts the named reset code to password-reset-code under the challenge\'s OTP key', async () => {
+    global.fetch = jest.fn().mockResolvedValue(accepted());
+    const { client: notification } = client();
+    await expect(notification.deliverPasswordResetCode({ challengeId: 'challenge-12', recipient: 'ada@example.test',
+      code: '012345', firstName: 'Ada', healthId: 'HID-ABC234', expiresInMinutes: 5, correlationId: 'request-12' }))
+      .resolves.toEqual({ outcome: 'accepted', provider: 'ses' });
+    expect(calls()).toEqual([{ route: 'password-reset-code', key: 'otp:challenge-12',
+      body: { channel: 'email', recipient: 'ada@example.test', code: '012345', firstName: 'Ada',
+        healthId: 'HID-ABC234', expiresInMinutes: 5, plan } }]);
+  });
+
+  it('falls back once to the generic OTP route, under the same key, when an older notification-api answers 404', async () => {
+    global.fetch = jest.fn().mockResolvedValueOnce(new Response('{}', { status: 404 })).mockResolvedValueOnce(accepted());
+    const { client: notification } = client();
+    await expect(notification.deliverPasswordResetCode({ challengeId: 'challenge-13', recipient: 'ada@example.test',
+      code: '012345', healthId: 'HID-ABC234', expiresInMinutes: 5, correlationId: 'request-13' }))
+      .resolves.toEqual({ outcome: 'accepted', provider: 'ses' });
+    expect(calls()).toEqual([
+      { route: 'password-reset-code', key: 'otp:challenge-13', body: expect.objectContaining({ healthId: 'HID-ABC234' }) },
+      { route: 'otp', key: 'otp:challenge-13',
+        body: { channel: 'email', recipient: 'ada@example.test', code: '012345', purpose: 'PASSWORD_RESET', plan } },
+    ]);
+  });
+
+  it.each([[500, 'unknown'], [503, 'unknown'], [400, 'definitive_failure'], [401, 'definitive_failure']] as const)(
+    'never sends the code twice after a %s from the new route', async (status, outcome) => {
+      global.fetch = jest.fn().mockResolvedValue(new Response('{}', { status }));
+      const { client: notification } = client();
+      await expect(notification.deliverPasswordResetCode({ challengeId: 'challenge-14', recipient: 'ada@example.test',
+        code: '012345', healthId: 'HID-ABC234', expiresInMinutes: 5, correlationId: 'request-14' }))
+        .resolves.toEqual({ outcome, safeCode: `http_${status}` });
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    });
+
+  it('never sends the code twice after a transport failure', async () => {
+    global.fetch = jest.fn().mockRejectedValue(new Error('timeout'));
+    const { client: notification } = client();
+    await expect(notification.deliverPasswordResetCode({ challengeId: 'challenge-15', recipient: 'ada@example.test',
+      code: '012345', healthId: 'HID-ABC234', expiresInMinutes: 5, correlationId: 'request-15' }))
+      .resolves.toEqual({ outcome: 'unknown', safeCode: 'transport_error' });
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('posts the password-updated email keyed by the reset challenge, with or without a name and Health ID', async () => {
+    global.fetch = jest.fn().mockImplementation(async () => accepted());
+    const { client: notification } = client();
+    await notification.deliverPasswordUpdated({ challengeId: 'challenge-16', recipient: 'ada@example.test',
+      firstName: 'Ada', healthId: 'HID-ABC234', correlationId: 'request-16' });
+    await notification.deliverPasswordUpdated({ challengeId: 'challenge-17', recipient: 'doctor@example.test',
+      correlationId: 'request-17' });
+    expect(calls()).toEqual([
+      { route: 'password-updated', key: 'password-updated:challenge-16',
+        body: { channel: 'email', recipient: 'ada@example.test', firstName: 'Ada', healthId: 'HID-ABC234', plan } },
+      { route: 'password-updated', key: 'password-updated:challenge-17',
+        body: { channel: 'email', recipient: 'doctor@example.test', plan } },
+    ]);
+  });
+
+  it('sends nothing without an email delivery plan', async () => {
+    global.fetch = jest.fn();
+    const integrations = { deliveryPlan: jest.fn().mockRejectedValue(new Error('no plan')) };
+    const notification = new NotificationOtpClient(integrations as unknown as IntegrationRuntimeService);
+    await expect(notification.deliverPatientWelcome({ patientId: 'p', recipient: 'ada@example.test',
+      healthId: 'HID-ABC234', correlationId: 'r' })).resolves.toMatchObject({ outcome: 'definitive_failure' });
+    await expect(notification.deliverPasswordResetCode({ challengeId: 'c', recipient: 'ada@example.test', code: '012345',
+      healthId: 'HID-ABC234', expiresInMinutes: 5, correlationId: 'r' })).resolves.toMatchObject({ outcome: 'definitive_failure' });
+    await expect(notification.deliverPasswordUpdated({ challengeId: 'c', recipient: 'ada@example.test',
+      correlationId: 'r' })).resolves.toMatchObject({ outcome: 'definitive_failure' });
+    expect(global.fetch).not.toHaveBeenCalled();
+  });
+
+  it('without a workload token, a reset code is not delivered (as an OTP) and the other emails are unknown; nothing personal is logged', async () => {
+    Object.assign(process.env, { NOTIFICATION_SERVICE_IDENTITY_MODE: 'jwt',
+      NOTIFICATION_IDENTITY_WORKLOAD_TOKEN_FILE: '/nonexistent/notification.jwt' });
+    delete process.env.NOTIFICATION_IDENTITY_INTERNAL_SERVICE_TOKEN;
+    resetEnvironmentForTests();
+    global.fetch = jest.fn();
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const { client: notification } = client();
+    await expect(notification.deliverPasswordResetCode({ challengeId: 'c', recipient: 'ada@example.test', code: '012345',
+      healthId: 'HID-ABC234', expiresInMinutes: 5, correlationId: 'r' })).resolves.toMatchObject({ outcome: 'definitive_failure' });
+    await expect(notification.deliverPatientWelcome({ patientId: 'p', recipient: 'ada@example.test',
+      healthId: 'HID-ABC234', correlationId: 'r' })).resolves.toMatchObject({ outcome: 'unknown' });
+    await expect(notification.deliverPasswordUpdated({ challengeId: 'c', recipient: 'ada@example.test',
+      correlationId: 'r' })).resolves.toMatchObject({ outcome: 'unknown' });
+    expect(global.fetch).not.toHaveBeenCalled();
+    const logged = warn.mock.calls.flat().join('\n');
+    for (const secret of ['ada@example.test', 'HID-ABC234', '012345']) expect(logged).not.toContain(secret);
+    warn.mockRestore();
+  });
+});

@@ -35,6 +35,36 @@ host-only Secure/HttpOnly cookies, Origin/CSRF checks and refresh-family reuse
 revocation. The server rechecks account eligibility, token version, session and
 patient mapping on use.
 
+Session lifetimes (owner decision of 2026-10-28): a patient session lasts 7
+days idle and 30 days at most (`AUTH_PATIENT_REFRESH_TTL_SECONDS`, default
+604800, 900-604800; `AUTH_PATIENT_ABSOLUTE_TTL_SECONDS`, default 2592000,
+3600-2592000). Each refresh renews the idle expiry to the earlier of now plus 7
+days and the family's absolute expiry. Staff and platform sessions keep 8 hours
+idle and 24 hours at most (`AUTH_REFRESH_TTL_SECONDS`,
+`AUTH_ABSOLUTE_TTL_SECONDS`); the access token lasts 15 minutes for both. The
+refresh and CSRF cookies expire with the idle expiry. An idle lifetime
+configured above its absolute one is capped at it. Sessions issued before this
+release keep the absolute expiry stored with them.
+
+Suspended account (owner decision of 2026-10-28): when the password is right
+but the account is suspended, blocked or disabled (`auth.accounts.status`
+`disabled` or `locked`, or `disabled_until` in the future), patient sign-in
+answers `403 ACCOUNT_SUSPENDED` with the detail "This account is suspended.
+Contact support@healthidentitydirectory.com." A wrong password, an unknown
+email or Health ID, a locked-out principal (5 failures in 15 minutes) and every
+other refusal still answer the one `401` "Invalid credentials". The suspended
+answer is recorded as a denied sign-in on that account; it neither counts
+towards nor clears the lockout, and no hash is upgraded. The 403 is for
+patient accounts only: an account that has, or ever had, a platform or
+facility role, a staff record or a facility membership (a clinician or platform
+administrator, even when its roles are revoked) answers the uniform `401`
+"Invalid credentials" on the patient route too, whatever its state, so the
+patient route never confirms a workforce password; so does a patient account
+that is also a workforce account. Staff sign-in (`POST /api/v1/auth/login`)
+is unchanged. Google sign-in cannot say it yet: a Google identity mapped to a
+suspended account is filtered by `auth.resolve_google_identity` before Identity
+sees it, so it stays `401 GOOGLE_SIGN_IN_DENIED`.
+
 `GET /api/v1/identity/me` returns the authenticated patient's profile and HID.
 `GET /api/v1/identity/me/access-history` returns at most 50 safe grant summaries;
 grant status does not assert notification delivery. Access-history items
@@ -272,6 +302,67 @@ Problem Details; raw QoreID payloads, NIN/CAC inputs, OAuth tokens, and
 diagnostic text are excluded. Full configuration and activation controls are in
 [QoreID verification contract](QOREID_VERIFICATION_CONTRACT.md).
 
+### Patient enrollment activation signs the patient in
+
+```text
+POST /api/v1/identity/patient-enrollments/activate
+```
+
+Owner decision of 2026-10-28, for the sign-up without a NIN and the NIN route
+alike. Body `{ password }` (12-256), with the `hid_enrollment` cookie, an
+approved Origin and no session (else 409 `PATIENT_ENROLLMENT_REQUIRES_SIGN_OUT`
+or `GOOGLE_ONBOARDING_REQUIRES_SIGN_OUT`). It answers
+`200 { stage: "active", hidCode, signedIn }`:
+
+- A first activation then signs the new patient in exactly as a successful
+  `POST /api/v1/auth/patient/login` does with the new Health ID and this
+  password: the same patient session (7 days idle, 30 days at most), the three
+  session cookies (`hid_access`, `hid_access_refresh`, `hid_access_csrf`), the
+  `x-csrf-token` header, the `auth.login` audit event and the session's
+  device facts (address and hashed user agent). `signedIn: true`.
+- A replay (the enrollment was already active, within the 15 minutes the
+  enrollment cookie still shows the Health ID) verified no password, so it
+  signs nobody in: `signedIn: false`, no cookie. Only the browser holding the
+  enrollment cookie, and only its first activation, gets a session; once it
+  holds the session, a further activation answers 409
+  `PATIENT_ENROLLMENT_REQUIRES_SIGN_OUT`.
+- If the session cannot be created (for example the audit write fails), the
+  activation still succeeds with `signedIn: false` and no cookie; the patient
+  signs in as before.
+
+The enrollment cookie is kept and the Google onboarding cookie is cleared, as
+before. A browser that reads `signedIn` as missing or `false` shows the Health
+ID and asks the patient to sign in.
+
+A first activation also sends "Your Health ID is ready" (below) to the contact
+the enrollment verified when it is an email address. It is sent after the
+answer and never holds it up or fails it.
+
+### Patient emails (owner decision of 2026-10-28)
+
+Identity sends these emails through notification-api, which renders them in
+hid-1.0's design (its layout, colours and wording, with "HID" spelt "Health
+ID"), as a text part and an HTML part (SES multipart/alternative; Brevo
+`textContent` and `htmlContent`). Each is best-effort: a failed or refused send
+never fails the sign-up or the reset, and Identity logs only the correlation
+id, the outcome and a safe code. None carries a password, a NIN, a link or a
+code in a URL or subject.
+
+| Email | When | notification-api route (workload-authenticated, `Idempotency-Key`) |
+| --- | --- | --- |
+| "Your Health ID is ready": greets the patient by first name and shows the Health ID | A first activation, to the verified email (key `patient-welcome:<patientId>`) | `POST /api/v1/notifications/patient-welcome` `{ channel: "email", recipient, firstName?, healthId, plan }` |
+| "Your Health ID password reset code": greets the patient by first name, names their Health ID, shows the code and its expiry in minutes | `POST /api/v1/auth/otp/start` with `PASSWORD_RESET` for a patient account with an email whose patient record Identity can read (key `otp:<challengeId>`). Staff, admin, legacy recovery, SMS, and patients Identity cannot read yet keep the generic code message | `POST /api/v1/notifications/password-reset-code` `{ channel: "email", recipient, code, firstName?, healthId, expiresInMinutes (1-60), plan }` |
+| "Your Health ID password was updated": names the Health ID when known and Health ID support's address | After `POST /api/v1/auth/otp/complete` completes, to the account's email (key `password-updated:<challengeId>`); an account without an email gets nothing | `POST /api/v1/notifications/password-updated` `{ channel: "email", recipient, firstName?, healthId?, plan }` |
+
+All three routes take email only and refuse unknown fields (400). `firstName`
+is letters, marks, apostrophes, spaces, dots and hyphens (at most 120);
+`healthId` is `HID-` and 6-32 Health ID characters. A notification-api that
+does not serve `password-reset-code` yet answers 404 having sent nothing;
+Identity then sends the code once through `POST /api/v1/notifications/otp`
+under the same key. Any other answer is final, so a code is never sent twice.
+The start still answers every identifier alike and does not wait for any
+delivery.
+
 ### Patient sign-up without NIN
 
 Owner decision of 2026-10-27 (as hid-1.0): no NIN at sign-up.
@@ -293,8 +384,9 @@ without a NIN (0092), sets the `hid_enrollment` cookie and sends a
 400 `VALIDATION_FAILED`; 409 `PATIENT_EMAIL_ALREADY_REGISTERED`, 409
 `PATIENT_PHONE_ALREADY_REGISTERED`, 409 `IDEMPOTENCY_KEY_REUSED`; Turnstile and
 rate limits as the NIN start. `POST .../contact` resends only to the declared
-email (else 400 `ENROLLMENT_CONTACT_MISMATCH`); `POST .../contact/verify` and
-`POST .../activate` are unchanged for the browser. `GET .../availability`
+email (else 400 `ENROLLMENT_CONTACT_MISMATCH`); `POST .../contact/verify` is
+unchanged for the browser, and `POST .../activate` is described below, for both
+routes. `GET .../availability`
 answers `{ open, signup: true, ninStart }`: `open` is the sign-up's, independent
 of QoreID and the NIN keys; `ninStart` is the NIN-first start's.
 
