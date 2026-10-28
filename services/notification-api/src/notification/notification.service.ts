@@ -6,6 +6,9 @@ import { emergencyContactAlertContent, type OtpMessage, type OtpProvider, type P
   staffInvitationLinkOrigin, type StaffInvitationRole } from '../providers/provider.types';
 import { contactChangedContent, emailChangeCodeContent, passwordResetCodeContent, passwordUpdatedContent,
   patientWelcomeContent } from '../providers/patient-emails';
+import { accountDeletionContent, type AccountDeletionNoticeKind } from '../providers/account-deletion-emails';
+import { patientShareInvitationContent, recordAccessAlertContent, shareReceivedContent, type ShareDuration,
+  type ShareLevel } from '../providers/sharing-emails';
 import { SesEmailProvider } from '../providers/ses.provider';
 import { TermiiSmsProvider } from '../providers/termii.provider';
 
@@ -164,6 +167,49 @@ export class NotificationService {
       content: contactChangedContent({ kind: input.kind, newContactHint: input.newContactHint,
         ...(input.firstName ? { firstName: input.firstName } : {}),
         ...(input.healthId ? { healthId: input.healthId } : {}),
+        supportEmail: this.environment.EMERGENCY_CONTACT_SUPPORT_EMAIL }),
+    }, rawPlan);
+  }
+
+  /** E1 (0095): a patient's invitation to share, to the invited address; no patient, no invitee name. */
+  deliverPatientShareInvitation(input: { recipient: string; reference: string; level: ShareLevel; duration: ShareDuration;
+    expiresAt: Date; idempotencyKey: string }, rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'PATIENT_SHARE_INVITATION',
+      idempotencyKey: input.idempotencyKey,
+      content: patientShareInvitationContent({ reference: input.reference, level: input.level, duration: input.duration,
+        expiresAt: input.expiresAt, origin: staffInvitationLinkOrigin(this.environment.HID_DEPLOYMENT_ENV) }),
+    }, rawPlan);
+  }
+
+  /** E2 (0095): a patient shared their record with this clinician; the facility only. */
+  deliverShareReceived(input: { recipient: string; facilityName?: string; idempotencyKey: string },
+    rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'SHARE_RECEIVED',
+      idempotencyKey: input.idempotencyKey,
+      content: shareReceivedContent(input.facilityName ? { facilityName: input.facilityName } : {}),
+    }, rawPlan);
+  }
+
+  /** E3 (0095): "Your Health ID records were opened"; the time only, never the facility. */
+  deliverRecordAccessAlert(input: { recipient: string; occurredAt: Date; idempotencyKey: string },
+    rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'RECORD_ACCESS_ALERT',
+      idempotencyKey: input.idempotencyKey,
+      content: recordAccessAlertContent({ occurredAt: input.occurredAt,
+        supportEmail: this.environment.EMERGENCY_CONTACT_SUPPORT_EMAIL }),
+    }, rawPlan);
+  }
+
+  /** E4 (0096): the account deletion was scheduled (with its date), cancelled or completed; nothing else. */
+  deliverAccountDeletion(input: { recipient: string; kind: AccountDeletionNoticeKind; scheduledFor?: Date;
+    idempotencyKey: string }, rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'ACCOUNT_DELETION',
+      idempotencyKey: input.idempotencyKey,
+      content: accountDeletionContent({ kind: input.kind, ...(input.scheduledFor ? { scheduledFor: input.scheduledFor } : {}),
         supportEmail: this.environment.EMERGENCY_CONTACT_SUPPORT_EMAIL }),
     }, rawPlan);
   }

@@ -1,4 +1,4 @@
-import { ForbiddenException, Inject, Injectable, NotFoundException,ServiceUnavailableException } from '@nestjs/common';
+import { ForbiddenException, Inject, Injectable, NotFoundException, Optional, ServiceUnavailableException } from '@nestjs/common';
 import { AuditService } from '../audit/audit.service';
 import type { DataAccessContext, PurposeOfUse } from '../common/request-context';
 import type {
@@ -9,12 +9,14 @@ import type {
   ConsentStatus,
 } from './identity.types';
 import { IDENTITY_PROVIDER } from './identity.types';
+import { RecordAccessNoticeService } from './record-access-notice.service';
 
 @Injectable()
 export class IdentityService {
   constructor(
     @Inject(IDENTITY_PROVIDER) private readonly provider: IdentityProvider,
     private readonly audit: AuditService,
+    @Optional() private readonly notices?: RecordAccessNoticeService,
   ) {}
 
   async staffPatientProfile(patientId:string,context:DataAccessContext) {
@@ -63,6 +65,8 @@ export class IdentityService {
       consentGrantId: decision.consentGrantId,
       breakGlass: decision.breakGlass,
     });
+    // "Your records were opened" (0095, D9): after the answer, never failing it.
+    this.notices?.afterAuthorization(context, patient.id, decision);
     return {
       patient: {
         patientId: patient.id,
@@ -111,6 +115,10 @@ export class IdentityService {
       purpose,
       { scope, consentGrantId: decision.consentGrantId, breakGlass: decision.breakGlass },
     );
+    // "Your records were opened" (0095, D9): every staff read path (EHR,
+    // documents, imported records, staff chat, Lab, Pharmacy) authorizes here;
+    // after the answer, never failing it. consentStatus does not note.
+    this.notices?.afterAuthorization(context, patientId, decision);
     return decision;
   }
 

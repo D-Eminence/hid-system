@@ -90,6 +90,11 @@ const delivered = [];
 const notification = {
   deliver: async (input) => { delivered.push({ kind: 'verification', ...input }); return { outcome: 'accepted', provider: 'brevo' }; },
   deliverEmergencyContactAlert: async (input) => { delivered.push({ kind: 'alert', ...input }); return { outcome: 'accepted', provider: 'brevo' }; },
+  // 0095's (B4) and 0096's (B5) emails: no service this verifier builds calls them; stubbed so a wiring change cannot reach the network.
+  deliverPatientShareInvitation: async () => ({ outcome: 'accepted', provider: 'brevo' }),
+  deliverShareReceived: async () => ({ outcome: 'accepted', provider: 'brevo' }),
+  deliverRecordAccessAlert: async () => ({ outcome: 'accepted', provider: 'brevo' }),
+  deliverAccountDeletionNotice: async () => ({ outcome: 'accepted', provider: 'brevo' }),
 };
 let app;
 try {

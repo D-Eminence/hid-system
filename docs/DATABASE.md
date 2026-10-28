@@ -157,6 +157,84 @@ for the new foreign keys, NOWAIT for at most 5 seconds (then 55P03), held to
 commit: writes to those two tables wait, reads do not. The contact rekey
 script (`scripts/rekey-patient-contact-lookups.mjs`) skips contacts a change
 wrote.
+Migration `0095_patient_sharing.sql` (B4, owner decisions of 2026-10-28:
+patient sharing) adds three tables, each with forced RLS, an owner policy only
+and no grant: `identity.patient_share_invitations` (a patient's invitation to
+an email address, lowercased; level `view_only`, `clinical_review` or
+`clinical_collaboration`; duration `24h`, `7d`, `30d` or `until_revoked`; an
+8-character reference; `pending` -> `accepted` -> `confirmed`, or `cancelled`
+/ `expired`, 30 days; the accepting membership; the email's delivery outcome;
+the Idempotency-Key; a guard trigger keeps identity fields fixed and closed
+statuses terminal; never deleted), `identity.patient_consent_shares` (per
+consent grant made by a share or a confirmed invitation: level, duration,
+membership, origin, the share it replaced; immutable) and
+`identity.record_access_notices` (one "your records were opened" notice per
+patient, facility and Africa/Lagos day, at most 10 a day, with its email's
+state, lease and retry; never deleted). A share is an ordinary
+`identity.consent_grants` row (`request_id` null, `granted_by_patient_id` the
+patient, `direct-care`; `view_only` and `clinical_review` are `read_records`,
+`clinical_collaboration` is `write_records`; `until_revoked` is 365 days), so
+every consent check, 0087's revoke and the access history (which gains
+`shareLevel`, `shareDuration` and `clinicianName`, 0087's body otherwise,
+pinned by md5) treat it as they treat an approval; sharing again with the same
+membership revokes the earlier share ("Replaced by a new share"). Only an
+active doctor, clinician or nurse membership with `identity.consent.write` at
+a facility that is not a pending or released self sign-up can be shared with.
+Creating an invitation reads no workforce table or account (no oracle of who
+is registered); the invitee accepts from the provider portal with a verified
+sign-in email equal to the address, and only the patient's confirmation
+creates the grant. Twenty SECURITY DEFINER functions with `search_path
+pg_catalog, pg_temp`: the patient commands bound to the live patient session,
+the staff ones to the request's subject, membership and facility, the sweep,
+claim and outcome to `system:auth`; fourteen are granted to the Identity
+runtime and the schema test runtime, the six helpers to no role. Locks: SHARE
+ROW EXCLUSIVE on `identity.patients` and `identity.consent_grants` for the new
+foreign keys, NOWAIT for at most 5 seconds (then 55P03), held to commit:
+writes to those two tables wait, reads do not; no other application table is
+locked. Retention: invitations, shares and notices are kept (no delete);
+account deletion (B5, 0096) cancels a patient's open invitations and
+suppresses their pending notice emails.
+Migration `0096_patient_account_deletion.sql` (B5, owner decisions of
+2026-10-28: main's 0064 patient login/account deletion, adapted) adds five
+tables, each with forced RLS, an owner policy only and no grant:
+`platform.record_class_retention_policies` (the seven record classes, `retain`
+only, never an automatic purge: a non-retain disposition is an erasure decision
+for a separately approved migration under sections 3.5 and 15),
+`platform.legal_holds` (placed and released by governance, never deleted or
+rewritten: a guard trigger), `platform.patient_account_deletion_settings` (a
+14-day waiting period, a 10-minute confirmation, 5 requests a day, 5
+attempts), `identity.patient_account_deletion_requests` (the lifecycle
+`awaiting_confirmation` -> `pending` -> `completed`, or `blocked`, `cancelled`,
+`expired`, `superseded`; one open request per login; only the confirmation
+token's SHA-256; the retention decision and completion summary; no foreign key
+to `auth.sessions`; never deleted) and
+`identity.patient_account_deletion_notices` (the scheduled, cancelled and
+completed emails with their delivery state, lease and retry; never deleted). A
+trigger `accounts_deleted_terminal` on `auth.accounts`, fired only for a
+deleted row, keeps a deleted login deleted, without a password, with its token
+version and subject. `identity.current_patient_account` and
+`identity.patient_self_session` keep 0030's bodies with
+`identity.patient_account_deletion_due` appended (pinned by md5), so a login
+stops working at its scheduled time. Completion keeps every record class: it
+revokes sessions, federated links, the access PIN, patient-granted grants
+(approvals, PIN grants and 0095's shares; never break-glass), expires pending
+access requests, revokes notification devices, deactivates emergency contacts
+(`account_deleted`, the contact erased), cancels open share invitations,
+invalidates a pending contact change (`contact_unavailable`, the new contact
+erased), suppresses pending records-opened emails and sets the account
+`deleted` without a password. Legal holds and workforce accounts (0093's test)
+block. Eleven SECURITY DEFINER functions with `search_path pg_catalog,
+pg_temp`; seven are granted to the Identity runtime and the schema test
+runtime (status, request, confirm and cancel bound to the live patient
+session; the finalizer, claim and outcome to `system:auth`), the due check,
+evaluation, completion and audit helper to no role. Locks: SHARE ROW EXCLUSIVE
+on `auth.accounts` and `identity.patients` for the new foreign keys and the
+trigger, NOWAIT for at most 5 seconds (then 55P03), held to commit: writes to
+those two tables wait, reads do not; no other application table is locked
+(the two replaced SQL bodies are created with `check_function_bodies` off).
+Known limit, as on main: a deleted login's patient record keeps its email and
+phone lookups, so signing up again with the same contact is refused; support
+handles it.
 Migration `0052_authoritative_cac_identity.sql` makes the registration
 identifier the public organization lookup key and introduced a complete-QoreID-
 profile guard for review and legal-entity binding. Migration `0056` revises

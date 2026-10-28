@@ -124,6 +124,18 @@ const environmentSchema = z.object({
   // Interval for dispatching emergency-contact notifications while delivery is
   // enabled (owner decision O9: every 60 s). Zero disables it.
   PATIENT_LIFECYCLE_SWEEP_SECONDS: z.coerce.number().int().min(0).max(3600).default(60),
+  // Patient sharing (B4, migration 0095): a code default, on; production's
+  // task definitions set no new key. While false, the patient and staff share
+  // routes answer 404 as an older Identity does, and the website hides them.
+  PATIENT_SHARES_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
+  // The "your records were opened" email (0095, D9): a code default, on. While
+  // false the inbox notice is still written and no email is sent.
+  RECORD_ACCESS_EMAIL_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
+  // Delete my account (B5, migration 0096): a code default, on; production's
+  // task definitions set no new key. While false, the patient routes answer
+  // 404 as an older Identity does and the website hides the card; deletions
+  // already scheduled still complete and their emails are still sent.
+  ACCOUNT_DELETION_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
   // notification-api may spend two provider timeouts on one alert. The
   // dispatcher sends five alerts under a 120-second lease, so five of these
   // must stay below it (20 s at most).

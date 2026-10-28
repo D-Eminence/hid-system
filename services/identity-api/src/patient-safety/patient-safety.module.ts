@@ -1,15 +1,20 @@
 import { Module } from '@nestjs/common';
+import { AccountDeletionNoticeDispatcher } from './account-deletion-notice.dispatcher';
 import { EmergencyContactController } from './emergency-contact.controller';
 import { EmergencyContactNotificationDispatcher } from './emergency-contact-notification.dispatcher';
 import { EmergencyContactProtector } from './emergency-contact-protector';
 import { EmergencyContactService } from './emergency-contact.service';
+import { PatientAccountDeletionController } from './patient-account-deletion.controller';
+import { PatientAccountDeletionService } from './patient-account-deletion.service';
 import { PatientLifecycleSweeper } from './patient-lifecycle.sweeper';
+import { RecordAccessAlertDispatcher } from './record-access-alert.dispatcher';
 
 @Module({
-  controllers: [EmergencyContactController],
+  controllers: [EmergencyContactController, PatientAccountDeletionController],
   providers: [
     EmergencyContactProtector, EmergencyContactService,
-    EmergencyContactNotificationDispatcher, PatientLifecycleSweeper,
+    EmergencyContactNotificationDispatcher, RecordAccessAlertDispatcher,
+    PatientAccountDeletionService, AccountDeletionNoticeDispatcher, PatientLifecycleSweeper,
   ],
   // Support's opt-out (AdminService) keys a destination the same way.
   exports: [EmergencyContactProtector],

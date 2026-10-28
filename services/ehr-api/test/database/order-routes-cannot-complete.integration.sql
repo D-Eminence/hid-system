@@ -1744,7 +1744,9 @@ insert into d18_pins values
   ('identity.order_route_destination_listed(uuid)', '2a2025d538db2686c1ca5a03e0354923'),
   ('identity.order_route_platform_actor(text[])', '599cccfdba5e9b4c46cde4dd2814a541'),
   ('identity.organization_self_service_state(uuid)', 'c67aa5224b2aa3d95e4415e26787d470'),
-  ('identity.patient_self_session(text,uuid)', 'd4c7aeaf25317d0fae794a2764d7d72b'),
+  -- 0096 appended the due-deletion check to the patient session and added the check itself.
+  ('identity.patient_account_deletion_due(uuid)', 'b032c1a385770e20e4930534a203863d'),
+  ('identity.patient_self_session(text,uuid)', '378cd66a28347ef82a7faee8d2c65a15'),
   ('lab.context_allows(uuid,uuid,text)', '57e689661a6227e34d3bde9562468951'),
   ('lab.patient_self_context(uuid)', '39aeca12d2c59b69877800a9a3a7c50b'),
   ('notification.enqueue_patient_inbox_item(uuid,text,text,uuid,jsonb)', '0b5689f31a3ce00f9313fe1e55244fad'),
@@ -1757,13 +1759,13 @@ insert into d18_pins values
   ('platform.current_purpose_of_use()', '74f7f2ea17dbbe825f7cfe543ad3e83f'),
   ('platform.reject_mutation()', '398738f39f6eebed2c54da5009495def'),
   ('platform.require_control_enabled(text)', '90887489d15eab24f8f71b145bb02320');
-select pg_temp.assert('d18: the functions the new and replaced bodies reach are exactly the 40 0091 pins for them',
+select pg_temp.assert('d18: the functions the new and replaced bodies reach are exactly the 41 pins for them (the 40 of 0091 and the due check of 0096)',
   (select array_agg(reached order by reached) from d18_reached)
   = (select array_agg(signature order by signature) from d18_pins),
   (select string_agg(reached, ', ' order by reached) from d18_reached));
-select pg_temp.assert('d18: each reached function still has the body 0091 pinned',
+select pg_temp.assert('d18: each reached function still has the body 0091 pinned (the patient session as 0096 replaced it)',
   (select count(*) from d18_pins pinned
-     join pg_proc proc on proc.oid = pinned.signature::regprocedure and md5(proc.prosrc) = pinned.digest) = 40);
+     join pg_proc proc on proc.oid = pinned.signature::regprocedure and md5(proc.prosrc) = pinned.digest) = 41);
 -- The three CHECKs 0091 changed: their definitions, validated while the
 -- route table's heap held at most 117,145,600 bytes when 0091 ran, NOT VALID
 -- above (the form 0091 chose; the suite's own writes never move a copy
