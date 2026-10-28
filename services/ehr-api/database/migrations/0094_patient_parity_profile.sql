@@ -16,8 +16,8 @@
 --
 -- 0. Preconditions (catalog reads only): every prerequisite exists; no
 --    object of this migration exists (else 55000 "0094: already applied");
---    the body replaced in section 7 and the 12 bodies the new ones call or
---    rely on are byte for byte the ones measured on 0001-0093 (md5 of
+--    the two bodies replaced in section 7 and the 12 bodies the new ones call
+--    or rely on are byte for byte the ones measured on 0001-0093 (md5 of
 --    pg_proc.prosrc); identity.patients' contact CHECKs, the unique
 --    email and phone indexes and the staff email index are as 0002 made
 --    them, and the recovery-code invalidation reasons and the external
@@ -27,11 +27,11 @@
 --    new bodies read, write and call (among them UPDATE on auth.sessions,
 --    auth.otp_challenges and auth.external_identities, and SELECT on the
 --    workforce tables), owns identity.patients (so its RLS does not hide
---    migrated patients from them) and is itself the owner of the replaced
---    readiness function (whose new body reads a table with forced RLS
---    whose owner policy names the applying role). Every attribute of the
---    replaced function but the body is recorded and compared after the
---    replacement (section 8).
+--    migrated patients from them) and is itself the owner of the two
+--    replaced functions (the readiness function's new body reads a table
+--    with forced RLS whose owner policy names the applying role). Every
+--    attribute of the replaced functions but the body is recorded and
+--    compared after the replacement (section 8).
 --    Then the two locks the new foreign keys need are taken (see Locks).
 -- 1. identity.patient_profile_details: per patient, the hospital they use
 --    now and their HMO's name (free text, as hid-1.0), each 1-120
@@ -76,10 +76,11 @@
 --    c. identity.start_my_email_change: refuses an account that is also
 --       workforce (a platform role, a staff record or a facility membership,
 --       0093's test: its email is the staff sign-in and identity.staff's
---       address too) ('workforce'), the account's own email ('unchanged'),
---       more than one start a resend window or five an hour
---       ('rate_limited'), an email another account, patient or staff record
---       holds ('unavailable', recorded and audited as denied); else
+--       address too) ('workforce'), the account's own email once it is
+--       verified ('unchanged'; an unverified one goes through the code,
+--       which verifies it), more than one start a resend window or five an
+--       hour ('rate_limited'), an email another account, patient or staff
+--       record holds ('unavailable', recorded and audited as denied); else
 --       supersedes the open change and records the pending one ('started').
 --    d. identity.read_my_pending_email_change: the pending change's
 --       ciphertext (Identity decrypts the address to complete it).
@@ -102,7 +103,10 @@
 --       0029's completion does) and revokes the account's sessions outside
 --       the caller's session family ('contact_changed'; token_version is
 --       unchanged, so this session goes on). It answers the previous
---       address once (its notice).
+--       address once (its notice). The account's own address (an unverified
+--       one being verified) is only set and marked verified: the previous
+--       mailbox is that one, so nothing is unlinked, invalidated or ended, no
+--       previous address is answered, and the audit row says addressUnchanged.
 --    g. identity.change_my_phone: refuses the patient's current number
 --       ('unchanged', either of a Nigerian number's two stored forms) unless
 --       Identity says it cannot read the stored one (a number migrated from
@@ -124,34 +128,46 @@
 --       a stale version ('conflict').
 --    Every write records its audit.events row in the same transaction (no
 --    contact, code, photo or health value in it).
--- 7. identity.patient_contact_lookup_ready (0057), replaced: 0057's body but
---    two of its checks also accept a contact that a completed contact change
---    of section 3 wrote (Identity computed its lookup HMAC with the current
---    key, as the rekey does): an active enrollment whose patient's contact
---    on that channel is now another one that a completed change wrote; and
---    a migrated patient's contact added (none before) by a change completed
---    after the rekey marker, which counts with the marker's contacts.
---    Without changes the answer is 0057's. Without this, the first email
---    change of a sign-up patient made every sign-up answer 503. The migrated
---    patients' contacts are counted once, before the marker is read, so that
---    the marker query stays cheap (with 20,000 active enrollments it runs in
---    160-200 ms against 0057's 210-280 ms).
--- 8. Post-checks: the replaced function keeps its owner, ACL, language,
---    volatility, SECURITY DEFINER and search_path, and its body is the one
---    this file gives it; every new table and function belongs to the
---    applying role; RLS is forced on the four tables.
+-- 7. Two bodies replaced (CREATE OR REPLACE):
+--    a. identity.patient_contact_lookup_ready (0057): 0057's body but two
+--       of its checks also accept a contact that a completed contact change
+--       of section 3 wrote (Identity computed its lookup HMAC with the
+--       current key, as the rekey does): an active enrollment whose
+--       patient's contact on that channel is now another one that a
+--       completed change wrote; and a migrated patient's contact added (none
+--       before) by a change completed after the rekey marker, which counts
+--       with the marker's contacts. Without changes the answer is 0057's.
+--       Without this, the first email change of a sign-up patient made every
+--       sign-up answer 503. The migrated patients' contacts are counted
+--       once, before the marker is read, so that the marker query stays
+--       cheap (with 20,000 active enrollments it runs in 160-200 ms against
+--       0057's 210-280 ms).
+--    b. auth.link_google_identity_to_patient_account (0059, the patient's
+--       explicit Google link once Identity checked the current password):
+--       0059's body, but a Google account linked to this same account and
+--       revoked (an email change unlinked it, 6f) is linked again: active,
+--       no revoked_at, linked_at now (0093's SECURITY_GOOGLE_LINKED notice
+--       takes it as its evidence) and source_system hid-google-explicit-link,
+--       with 0059's audit row. Any other row of that Google account still
+--       answers GOOGLE_IDENTITY_ALREADY_LINKED. Without this, the Google
+--       account an email change unlinked could never sign in or be linked
+--       again.
+-- 8. Post-checks: the two replaced functions keep their owner, ACL,
+--    language, volatility, SECURITY DEFINER and search_path, and their
+--    bodies are the ones this file gives them; every new table and function
+--    belongs to the applying role; RLS is forced on the four tables.
 -- 9. Grants, here and in runtime-grants.sql: the Identity commands to
 --    hid_identity_runtime and hid_schema_test_runtime; the EHR command and
 --    SELECT on ehr.patient_reported_health_profiles to hid_ehr_runtime and
 --    hid_schema_test_runtime; no grant on the three Identity tables; every
---    new function revoked from PUBLIC. The replaced function keeps its ACL.
+--    new function revoked from PUBLIC. The replaced functions keep their ACLs.
 --
 -- Locks: SHARE ROW EXCLUSIVE on auth.accounts and identity.patients (the new
 -- foreign keys), taken up front in that order (registration writes accounts
 -- and then patients), NOWAIT every 10 ms for at most 5 seconds (then 55P03,
 -- nothing applied), held to commit: they block writes to those two tables,
--- never reads. No existing table is altered; replacing the readiness
--- function neither waits for nor blocks its calls. Measured with pg_locks
+-- never reads. No existing table is altered; replacing the two functions
+-- neither waits for nor blocks their calls. Measured with pg_locks
 -- before commit (the file applied in an open transaction): SHARE ROW
 -- EXCLUSIVE and ACCESS SHARE on auth.accounts and identity.patients, ACCESS
 -- SHARE on their primary keys; ACCESS EXCLUSIVE (and the weaker locks
@@ -163,14 +179,17 @@
 -- temporary schema; the catalogs' own locks; no lock on auth.sessions,
 -- auth.otp_challenges, auth.external_identities or the workforce tables
 -- (only the new bodies, when they run, write or read them). The apply took
--- 50-65 ms on a copy migrated through 0093; with a write held open on
--- identity.patients it stopped after 5.3 s with 55P03 and nothing applied.
+-- 77-143 ms over eight runs on a copy migrated through 0093 (this file
+-- before 7b took as long on that machine); with a write held open on
+-- identity.patients it stopped after 5.5 s with 55P03 and nothing applied.
 --
 -- Old services on this schema: every change is additive. The previous
 -- Identity and EHR images call none of the new commands and read none of
 -- the new tables; sign-up and the NIN route keep their readiness answer
--- (identical without contact changes). Applied migrations 0001 through 0093
--- are immutable.
+-- (identical without contact changes), and the explicit Google link keeps
+-- its arguments and answers (identical without a revoked link, which only
+-- an email change makes). Applied migrations 0001 through 0093 are
+-- immutable.
 
 -- 0. Preconditions. Whether holder holds a privilege on an object by
 -- ownership, membership (direct or through other roles) or grant (also to
@@ -197,7 +216,8 @@ create temporary table parity_0094_replaced as
          proc.provolatile, proc.prosecdef, proc.proconfig, proc.prorettype, proc.proretset,
          proc.proargnames, proc.proallargtypes
     from pg_proc proc
-   where proc.oid = to_regprocedure('identity.patient_contact_lookup_ready()');
+   where proc.oid in (to_regprocedure('identity.patient_contact_lookup_ready()'),
+                      to_regprocedure('auth.link_google_identity_to_patient_account(uuid,text)'));
 
 do $$
 declare
@@ -218,6 +238,7 @@ begin
      or to_regclass('migration.patient_contact_lookup_rekeys') is null
      or to_regprocedure('identity.patient_self_session(text,uuid)') is null
      or to_regprocedure('identity.patient_contact_lookup_ready()') is null
+     or to_regprocedure('auth.link_google_identity_to_patient_account(uuid,text)') is null
      or to_regprocedure('ehr.patient_self_context(uuid)') is null
      or to_regprocedure('ehr.imported_record_read_context(uuid)') is null
      or to_regprocedure('auth.find_patient_account(text,text)') is null then
@@ -239,17 +260,18 @@ begin
                    ('ehr', 'save_my_reported_health_profile'))) then
     raise exception using errcode = '55000', message = '0094: already applied';
   end if;
-  -- c. The body replaced (section 7), as 0057 left it.
+  -- c. The bodies replaced (section 7), as 0057 and 0059 left them.
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
     into mismatch
     from (values
-      ('identity.patient_contact_lookup_ready()', 'd6838ccecab98c38059e66e04ad75cea'))
+      ('identity.patient_contact_lookup_ready()', 'd6838ccecab98c38059e66e04ad75cea'),
+      ('auth.link_google_identity_to_patient_account(uuid,text)', '5ff52c21d7b4fd6635d9a6692432601c'))
          expected(proc, digest)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc)
    where md5(proc.prosrc) is distinct from expected.digest;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0094: the function this migration replaces has another body than 0001-0093 gave it: %s', mismatch);
+      message = format('0094: a function this migration replaces has another body than 0001-0093 gave it: %s', mismatch);
   end if;
   -- d. The bodies the new ones call or rely on, unchanged: the actor,
   -- correlation and facility readers, the patient session (Identity) and the
@@ -327,7 +349,7 @@ begin
   -- function: it must own identity.patients (through membership too) so that
   -- RLS does not hide migrated patients from the commands, reference and
   -- write what they reference and write, create in the two schemas, and run
-  -- what they call; it must be the readiness function's owner itself.
+  -- what they call; it must be the replaced functions' owner itself.
   select string_agg(missing.what, '; ') into mismatch
     from (
       select format('%s lacks %s on %s', holder.rolname, wanted.privilege, relation.oid::regclass) as what
@@ -336,6 +358,7 @@ begin
           ('auth.accounts', 'REFERENCES'), ('auth.sessions', 'SELECT'), ('auth.sessions', 'UPDATE'),
           ('auth.otp_challenges', 'SELECT'), ('auth.otp_challenges', 'UPDATE'),
           ('auth.external_identities', 'SELECT'), ('auth.external_identities', 'UPDATE'),
+          ('auth.external_identities', 'INSERT'),
           ('auth.account_roles', 'SELECT'), ('identity.staff', 'SELECT'),
           ('identity.staff_facility_memberships', 'SELECT'), ('audit.events', 'INSERT'),
           ('migration.patient_contact_lookup_rekeys', 'SELECT')) wanted(relation_name, privilege)
@@ -366,8 +389,8 @@ begin
   if mismatch is not null then
     raise exception using errcode = '42501', message = format('0094: missing privileges: %s', mismatch);
   end if;
-  if (select count(*) from parity_0094_replaced) <> 1 then
-    raise exception using errcode = '55000', message = '0094: the replaced function was not recorded';
+  if (select count(*) from parity_0094_replaced) <> 2 then
+    raise exception using errcode = '55000', message = '0094: the two replaced functions were not recorded';
   end if;
   raise notice '0094: owners checked: %', (
     select string_agg(format('%s=%s', owned.what, owned.owner), ', ' order by owned.what)
@@ -634,7 +657,11 @@ begin
                  where membership.account_id = account_row.id) then
     return 'workforce';
   end if;
-  if lower(account_row.email) = normalized_email then return 'unchanged'; end if;
+  -- The account's own address once verified; an unverified one goes through
+  -- the code, which verifies it (6f).
+  if lower(account_row.email) = normalized_email and account_row.email_verified_at is not null then
+    return 'unchanged';
+  end if;
   if exists (select 1 from identity.patient_contact_changes change_row
               where change_row.patient_id = patient_id_value and change_row.channel = 'email'
                 and change_row.created_at > clock_timestamp() - make_interval(secs => requested_resend_seconds))
@@ -757,6 +784,7 @@ declare
   account_row auth.accounts%rowtype;
   patient_row identity.patients%rowtype;
   result text;
+  same_address boolean := false;
   caller_family uuid;
   google_links_revoked integer := 0;
   recovery_codes_invalidated integer := 0;
@@ -806,6 +834,8 @@ begin
      where account.id = change_row.account_id for update;
     select patient.* into patient_row from identity.patients patient
      where patient.id = patient_id_value for update;
+    -- The account's own address (an unverified one, being verified).
+    same_address := lower(account_row.email) is not distinct from normalized_email;
     if patient_row.account_id is distinct from account_row.id
        or exists (select 1 from auth.accounts other
                    where lower(other.email) = normalized_email and other.status <> 'deleted'
@@ -846,48 +876,53 @@ begin
          set state = 'completed', completed_at = clock_timestamp(),
              replaced_contact = patient_row.email_ciphertext is not null, row_version = row_version + 1
        where id = change_row.id;
-      -- Whoever holds the previous mailbox keeps nothing it gave them. A
-      -- Google account 0093 linked because Google verified the previous
-      -- address no longer signs in (auth.resolve_google_identity reads active
-      -- links only); a link the patient made, or signed up with, stays.
-      with revoked as (
-        update auth.external_identities identity_row
-           set status = 'revoked', revoked_at = clock_timestamp()
-         where identity_row.account_id = account_row.id
-           and identity_row.issuer = 'https://accounts.google.com'
-           and identity_row.status = 'active'
-           and identity_row.source_system = 'hid-google-verified-email-link'
-        returning 1)
-      select count(*) into google_links_revoked from revoked;
-      -- A recovery code sent to the previous address no longer completes (as
-      -- 0029's completion invalidates the account's other recovery codes).
-      with invalidated as (
-        update auth.otp_challenges challenge
-           set invalidated_at = clock_timestamp(), invalidation_reason = 'completed',
-               row_version = challenge.row_version + 1
-         where challenge.account_id = account_row.id
-           and challenge.purpose in ('PASSWORD_RESET', 'LEGACY_ACCOUNT_RECOVERY', 'LEGACY_SESSION_FALLBACK')
-           and challenge.consumed_at is null and challenge.invalidated_at is null
-        returning 1)
-      select count(*) into recovery_codes_invalidated from invalidated;
-      -- Every other session of the account ends; the caller's session family
-      -- goes on (token_version is unchanged, which would end it too).
-      select session_row.family_id into caller_family from auth.sessions session_row
-       where session_row.id = requested_session;
-      with ended as (
-        update auth.sessions session_row
-           set revoked_at = clock_timestamp(), revocation_reason = 'contact_changed',
-               row_version = session_row.row_version + 1
-         where session_row.account_id = account_row.id and session_row.revoked_at is null
-           and session_row.family_id is distinct from caller_family
-        returning 1)
-      select count(*) into sessions_revoked from ended;
-      if google_links_revoked > 0 then
-        insert into audit.events (correlation_id, actor_type, actor_subject, actor_account_id, patient_id,
-          action, outcome, resource_type, resource_id, purpose_of_use, provenance, source_system, details)
-        values (platform.current_correlation_id(), 'patient', requested_subject, account_row.id, patient_id_value,
-          'auth.google.auto-link.revoke', 'success', 'account', account_row.id::text, 'patient-self', 'application',
-          'identity-api', jsonb_build_object('reason', 'email_changed', 'revoked', google_links_revoked));
+      -- Whoever holds the previous mailbox keeps nothing it gave them (the
+      -- account's own address, verified now, is the same mailbox: nothing
+      -- ends).
+      if not same_address then
+        -- A Google account 0093 linked because Google verified the previous
+        -- address no longer signs in (auth.resolve_google_identity reads
+        -- active links only; the patient can link it again, 7b); a link the
+        -- patient made, or signed up with, stays.
+        with revoked as (
+          update auth.external_identities identity_row
+             set status = 'revoked', revoked_at = clock_timestamp()
+           where identity_row.account_id = account_row.id
+             and identity_row.issuer = 'https://accounts.google.com'
+             and identity_row.status = 'active'
+             and identity_row.source_system = 'hid-google-verified-email-link'
+          returning 1)
+        select count(*) into google_links_revoked from revoked;
+        -- A recovery code sent to the previous address no longer completes (as
+        -- 0029's completion invalidates the account's other recovery codes).
+        with invalidated as (
+          update auth.otp_challenges challenge
+             set invalidated_at = clock_timestamp(), invalidation_reason = 'completed',
+                 row_version = challenge.row_version + 1
+           where challenge.account_id = account_row.id
+             and challenge.purpose in ('PASSWORD_RESET', 'LEGACY_ACCOUNT_RECOVERY', 'LEGACY_SESSION_FALLBACK')
+             and challenge.consumed_at is null and challenge.invalidated_at is null
+          returning 1)
+        select count(*) into recovery_codes_invalidated from invalidated;
+        -- Every other session of the account ends; the caller's session family
+        -- goes on (token_version is unchanged, which would end it too).
+        select session_row.family_id into caller_family from auth.sessions session_row
+         where session_row.id = requested_session;
+        with ended as (
+          update auth.sessions session_row
+             set revoked_at = clock_timestamp(), revocation_reason = 'contact_changed',
+                 row_version = session_row.row_version + 1
+           where session_row.account_id = account_row.id and session_row.revoked_at is null
+             and session_row.family_id is distinct from caller_family
+          returning 1)
+        select count(*) into sessions_revoked from ended;
+        if google_links_revoked > 0 then
+          insert into audit.events (correlation_id, actor_type, actor_subject, actor_account_id, patient_id,
+            action, outcome, resource_type, resource_id, purpose_of_use, provenance, source_system, details)
+          values (platform.current_correlation_id(), 'patient', requested_subject, account_row.id, patient_id_value,
+            'auth.google.auto-link.revoke', 'success', 'account', account_row.id::text, 'patient-self', 'application',
+            'identity-api', jsonb_build_object('reason', 'email_changed', 'revoked', google_links_revoked));
+        end if;
       end if;
     else
       update identity.patient_contact_changes
@@ -906,13 +941,14 @@ begin
     case when result = 'completed' then 'success' else 'denied' end,
     'patient-contact-change', requested_change_id::text, 'patient-self', 'application', 'identity-api',
     jsonb_build_object('channel', 'email', 'result', result)
-      || case when result = 'completed' then jsonb_build_object('otherSessionsRevoked', sessions_revoked,
+      || case when result = 'completed' and same_address then jsonb_build_object('addressUnchanged', true)
+           when result = 'completed' then jsonb_build_object('otherSessionsRevoked', sessions_revoked,
            'recoveryCodesInvalidated', recovery_codes_invalidated, 'googleLinksRevoked', google_links_revoked)
          else '{}'::jsonb end
     from identity.patients patient where patient.id = patient_id_value;
   return query select result,
     case when result = 'completed' then normalized_email end,
-    case when result = 'completed' then account_row.email end,
+    case when result = 'completed' and not same_address then account_row.email end,
     case when result = 'completed' then patient_row.first_name end,
     case when result = 'completed' then patient_row.hid_code end;
 end
@@ -1246,7 +1282,7 @@ begin
 end
 $$;
 
--- 7. Contact lookup readiness (0057), replaced: 0057's body plus the
+-- 7a. Contact lookup readiness (0057), replaced: 0057's body plus the
 -- contacts completed contact changes wrote. CREATE OR REPLACE keeps its
 -- owner and ACL.
 create or replace function identity.patient_contact_lookup_ready()
@@ -1323,6 +1359,70 @@ begin
 end;
 $$;
 
+-- 7b. The patient's explicit Google link (0059), replaced: 0059's body, but
+-- the account's own Google account that an email change unlinked (6f) is
+-- linked again. CREATE OR REPLACE keeps its owner and ACL.
+create or replace function auth.link_google_identity_to_patient_account(
+  requested_account_id uuid, requested_google_subject text
+) returns boolean language plpgsql security definer
+set search_path = pg_catalog, auth, identity, audit, platform, pg_temp as $$
+declare patient_id_value uuid;
+begin
+  if platform.current_actor_subject() <> 'system:auth'
+    or platform.current_correlation_id() is null
+    or requested_google_subject is null
+    or length(requested_google_subject) not between 1 and 255 then
+    raise exception using errcode = '42501', message = 'GOOGLE_LINK_DENIED';
+  end if;
+  select patient.id into patient_id_value from identity.patients patient
+    join auth.accounts account on account.id = patient.account_id
+    where account.id = requested_account_id and account.status = 'active'
+      and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
+      and patient.status = 'active'
+    for update of account, patient;
+  if patient_id_value is null then
+    raise exception using errcode = '42501', message = 'GOOGLE_LINK_DENIED';
+  end if;
+  -- Locking the account and patient during the status check serializes
+  -- concurrent link operations with account/patient deactivation.
+  if exists (select 1 from auth.external_identities identity_row
+    where identity_row.account_id = requested_account_id
+      and identity_row.issuer = 'https://accounts.google.com'
+      and identity_row.subject <> requested_google_subject
+      and identity_row.status = 'active') then
+    raise exception using errcode = '23505', message = 'GOOGLE_ACCOUNT_ALREADY_LINKED';
+  end if;
+  -- 0094: this account's own Google account, revoked when its email changed,
+  -- is linked again with this fresh proof: active and explicit from now on,
+  -- linked_at now (0093's SECURITY_GOOGLE_LINKED evidence). Any other row of
+  -- the Google account is still refused.
+  update auth.external_identities identity_row
+    set status = 'active', revoked_at = null, linked_at = clock_timestamp(),
+      source_system = 'hid-google-explicit-link'
+    where identity_row.issuer = 'https://accounts.google.com'
+      and identity_row.subject = requested_google_subject
+      and identity_row.account_id = requested_account_id
+      and identity_row.status = 'revoked';
+  if not found then
+    if exists (select 1 from auth.external_identities identity_row
+      where identity_row.issuer = 'https://accounts.google.com'
+        and identity_row.subject = requested_google_subject) then
+      raise exception using errcode = '23505', message = 'GOOGLE_IDENTITY_ALREADY_LINKED';
+    end if;
+    insert into auth.external_identities(id,account_id,issuer,subject,status,source_system)
+      values(gen_random_uuid(),requested_account_id,'https://accounts.google.com',
+        requested_google_subject,'active','hid-google-explicit-link');
+  end if;
+  insert into audit.events(correlation_id,actor_type,actor_subject,actor_account_id,patient_id,
+    action,resource_type,resource_id,outcome,purpose_of_use,provenance,source_system,details)
+  values(platform.current_correlation_id(),'patient',
+    (select subject from auth.accounts where id = requested_account_id),
+    requested_account_id,patient_id_value,'auth.google.link','account',requested_account_id::text,
+    'success','patient-self','application','identity-api','{}'::jsonb);
+  return true;
+end
+$$;
+
 -- 8. Post-checks.
 do $$
 declare mismatch text;
@@ -1336,16 +1436,17 @@ begin
           replaced.prosecdef, replaced.proconfig, replaced.prorettype, replaced.proretset,
           replaced.proargnames, replaced.proallargtypes);
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0094: the replaced function changed more than its body: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0094: a replaced function changed more than its body: %s', mismatch);
   end if;
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none')), '; ') into mismatch
     from (values
-      ('identity.patient_contact_lookup_ready()', 'e0370d523deb8fcfa40a33a41dfa9227'))
+      ('identity.patient_contact_lookup_ready()', 'e0370d523deb8fcfa40a33a41dfa9227'),
+      ('auth.link_google_identity_to_patient_account(uuid,text)', 'cd8cee2af536e34a896cda681546245f'))
          expected(proc, digest)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc)
    where md5(proc.prosrc) is distinct from expected.digest;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0094: the replaced body is not the one this file gives: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0094: a replaced body is not the one this file gives: %s', mismatch);
   end if;
   if exists (select 1 from pg_proc proc join pg_namespace namespace on namespace.oid = proc.pronamespace
               where (namespace.nspname, proc.proname) in (
@@ -1418,9 +1519,9 @@ $$;
 comment on function identity.patient_self_contact(text,uuid) is
   '0094: the live patient session''s account email (and whether it is verified), phone ciphertext and lookup, the contact change that wrote that phone, and whether a photo exists.';
 comment on function identity.start_my_email_change(text,uuid,uuid,text,char,bytea,text,char,text,integer,integer,integer) is
-  '0094: starts the live patient session''s email change (a code to the new address): started, workforce, unchanged, rate_limited or unavailable.';
+  '0094: starts the live patient session''s email change (a code to the new address): started, workforce, unchanged (the account''s verified email), rate_limited or unavailable.';
 comment on function identity.complete_my_email_change(text,uuid,uuid,char,text) is
-  '0094: completes the live patient session''s email change with its code; sets the account email and the patient''s contact email, unlinks the Google accounts linked by the previous address, invalidates open recovery codes and ends the account''s other sessions.';
+  '0094: completes the live patient session''s email change with its code; sets the account email and the patient''s contact email, unlinks the Google accounts linked by the previous address, invalidates open recovery codes and ends the account''s other sessions; the account''s own unverified address is only marked verified.';
 comment on function identity.change_my_phone(text,uuid,uuid,char,char[],bytea,text,boolean) is
   '0094: changes the live patient session''s phone (Identity checked the current password): changed, unchanged, rate_limited or unavailable; the same number is written again when Identity cannot read the stored one.';
 comment on function ehr.save_my_reported_health_profile(bigint,text,text,text,text,text,text) is

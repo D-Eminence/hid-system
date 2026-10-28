@@ -5,8 +5,8 @@
 -- Identity's keys never reach the database); uuid prefix b3. Identity's
 -- commands run as hid_identity_api_runtime, EHR's as hid_ehr_api_runtime.
 --   1. Security properties and privileges of the 13 new functions, the
---      replaced readiness function and the four tables (forced RLS, no
---      Identity table grant, EHR SELECT only).
+--      two replaced functions and the four tables (forced RLS, no Identity
+--      table grant, EHR SELECT only).
 --   2. identity.patient_self_contact: email and verification, the phone and
 --      the change that wrote it, the photo flag; bound to the live session.
 --   3. Email change: start (started, unchanged, rate limited, unavailable
@@ -18,9 +18,12 @@
 --      again and sign-in finds the new one; the Google account linked by the
 --      old address is unlinked (an explicit link stays), the open recovery
 --      code is invalidated, the account's other session families end (the
---      caller's family goes on); audit rows; no delete. A patient account
---      that is also workforce is refused at the start and at completion,
---      and a staff record's email is unavailable.
+--      caller's family goes on); audit rows; no delete. The patient links
+--      the unlinked Google account again (0059's explicit link, replaced):
+--      active, explicit, the notice's evidence, signs in; another account is
+--      still refused. A patient account that is also workforce is refused at
+--      the start and at completion, and a staff record's email is
+--      unavailable.
 --   4. Phone change: changed (phone sign-in finds the new number, not the
 --      old one; either Nigerian form counts as the current one), unchanged,
 --      unavailable in any stored form, the hourly limit; the notice email
@@ -37,6 +40,10 @@
 --      clinician with a grant at the facility reads it, without one or at
 --      another facility does not; another patient does not; the clinician's
 --      ehr.record.read audit row is a view in the patient's access log.
+--   9. The account's own unverified email address verified through the
+--      email change: started, completed and verified, with nothing unlinked,
+--      invalidated or ended and no previous address answered (audited as
+--      addressUnchanged); once verified, the same address is unchanged.
 set plpgsql.variable_conflict = error;
 begin;
 set constraints all deferred;
@@ -105,6 +112,18 @@ begin
        and prosecdef and provolatile = 's'
        and proconfig = '{"search_path=pg_catalog, identity, migration, platform, pg_temp"}'::text[]) then
     raise exception 'The replaced readiness function changed its ACL or security properties: %', mismatch;
+  end if;
+  -- The replaced explicit Google link keeps 0059's ACL.
+  select string_agg(coalesce(nullif(privilege.grantee::regrole::text, '-'), 'public'), ', '
+      order by privilege.grantee::regrole::text) into mismatch
+    from pg_proc p, aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) privilege
+   where p.oid = 'auth.link_google_identity_to_patient_account(uuid,text)'::regprocedure
+     and privilege.privilege_type = 'EXECUTE' and privilege.grantee <> p.proowner;
+  if mismatch is distinct from 'hid_identity_runtime, hid_schema_test_runtime'
+     or not exists (select 1 from pg_proc where oid = 'auth.link_google_identity_to_patient_account(uuid,text)'::regprocedure
+       and prosecdef and provolatile = 'v'
+       and proconfig = '{"search_path=pg_catalog, auth, identity, audit, platform, pg_temp"}'::text[]) then
+    raise exception 'The replaced Google link changed its ACL or security properties: %', mismatch;
   end if;
   -- Forced RLS on the four tables; no runtime holds any privilege on the
   -- three Identity tables; the EHR table is SELECT only.
@@ -582,6 +601,76 @@ begin
   end if;
 end $$;
 reset role;
+-- S links the Google account the change unlinked again (0059's explicit link,
+-- replaced: Identity checked the password first). While S has another Google
+-- account linked, 0059's rule refuses it; once that one is gone, the revoked
+-- row becomes S's explicit link, linked now (the SECURITY_GOOGLE_LINKED
+-- notice's evidence: the old linked_at is a day back), and sign-in finds it.
+-- Another account can never take it.
+update auth.external_identities set linked_at = linked_at - interval '1 day'
+ where id = 'b3c80000-0000-4000-8000-000000000001';
+set local role hid_identity_api_runtime;
+select pg_temp.as_system('b3-google-relink-0001');
+do $$
+declare answer text;
+begin
+  if exists (select 1 from auth.resolve_google_identity('b3-google-auto-s')) then
+    raise exception 'The unlinked Google account still signs in';
+  end if;
+  answer := pg_temp.sqlstate_of($q$select auth.link_google_identity_to_patient_account(
+    'b3a10000-0000-4000-8000-000000000001', 'b3-google-auto-s')$q$);
+  if answer not like '23505 GOOGLE_ACCOUNT_ALREADY_LINKED%' then
+    raise exception 'S linked a second Google account: %', answer;
+  end if;
+  answer := pg_temp.sqlstate_of($q$select auth.link_google_identity_to_patient_account(
+    'b3a10000-0000-4000-8000-000000000003', 'b3-google-auto-s')$q$);
+  if answer not like '23505 GOOGLE_IDENTITY_ALREADY_LINKED%' then
+    raise exception 'Another account linked S''s unlinked Google account: %', answer;
+  end if;
+end $$;
+reset role;
+update auth.external_identities set status = 'revoked', revoked_at = clock_timestamp()
+ where id = 'b3c80000-0000-4000-8000-000000000002';
+set local role hid_identity_api_runtime;
+select pg_temp.as_system('b3-google-relink-0002');
+do $$
+declare answer text;
+begin
+  if not auth.link_google_identity_to_patient_account('b3a10000-0000-4000-8000-000000000001', 'b3-google-auto-s') then
+    raise exception 'S could not link its own unlinked Google account again';
+  end if;
+  if auth.record_account_security_notice('b3a10000-0000-4000-8000-000000000001', 'SECURITY_GOOGLE_LINKED') is null then
+    raise exception 'The link again is no evidence for the SECURITY_GOOGLE_LINKED notice';
+  end if;
+  if (select account_id from auth.resolve_google_identity('b3-google-auto-s')) <> 'b3a10000-0000-4000-8000-000000000001' then
+    raise exception 'Sign-in does not find the Google account linked again';
+  end if;
+  -- Linked now: S again and another account are refused, as 0059 refuses.
+  answer := pg_temp.sqlstate_of($q$select auth.link_google_identity_to_patient_account(
+    'b3a10000-0000-4000-8000-000000000001', 'b3-google-auto-s')$q$);
+  if answer not like '23505 GOOGLE_IDENTITY_ALREADY_LINKED%' then raise exception 'S linked it twice: %', answer; end if;
+  answer := pg_temp.sqlstate_of($q$select auth.link_google_identity_to_patient_account(
+    'b3a10000-0000-4000-8000-000000000003', 'b3-google-auto-s')$q$);
+  if answer not like '23505 GOOGLE_IDENTITY_ALREADY_LINKED%' then
+    raise exception 'Another account took S''s Google account: %', answer;
+  end if;
+end $$;
+reset role;
+do $$
+begin
+  if not exists (select 1 from auth.external_identities where id = 'b3c80000-0000-4000-8000-000000000001'
+       and account_id = 'b3a10000-0000-4000-8000-000000000001' and status = 'active' and revoked_at is null
+       and source_system = 'hid-google-explicit-link' and linked_at > clock_timestamp() - interval '1 minute')
+     or (select count(*) from auth.external_identities
+          where issuer = 'https://accounts.google.com' and subject = 'b3-google-auto-s') <> 1
+     or (select count(*) from audit.events where actor_account_id = 'b3a10000-0000-4000-8000-000000000001'
+          and action = 'auth.google.link' and outcome = 'success' and correlation_id = 'b3-google-relink-0002') <> 1
+     or exists (select 1 from audit.events where correlation_id = 'b3-google-relink-0001')
+     or (select count(*) from notification.inbox_items where account_id = 'b3a10000-0000-4000-8000-000000000001'
+          and notification_code = 'SECURITY_GOOGLE_LINKED') <> 1 then
+    raise exception 'The Google account linked again is not S''s active explicit link, audited and announced once';
+  end if;
+end $$;
 do $$
 begin
   if pg_temp.sqlstate_of($q$delete from identity.patient_contact_changes
@@ -1246,5 +1335,93 @@ begin
   end if;
 end $$;
 reset role;
+
+-- 9. U verifies the unverified address the account already has: the same
+-- address goes through the code (any case), and its completion only sets it
+-- verified (and the patient's contact email). The previous mailbox is the
+-- same one, so U's other session, open recovery code and Google link (one
+-- 0093 would link from a verified address, standing for anything the address
+-- gave) all stay, no previous address is answered for a notice, and the audit
+-- row says addressUnchanged. Once verified, the address is unchanged.
+insert into auth.sessions (id, account_id, family_id, refresh_token_sha256, access_jti, account_token_version,
+  authentication_method, issued_at, expires_at, absolute_expires_at, session_kind, patient_id) values
+  ('b3f10000-0000-4000-8000-00000000007a', 'b3a10000-0000-4000-8000-000000000007', 'b3f10000-0000-4000-8000-00000000007a',
+   md5('b3-u-other-device') || md5('b3-u-other-device'), gen_random_uuid(), 1, 'password', clock_timestamp(),
+   clock_timestamp() + interval '1 hour', clock_timestamp() + interval '2 hours', 'patient',
+   'b3b10000-0000-4000-8000-000000000007');
+insert into auth.otp_challenges (id, account_id, recipient_hmac, purpose, channel, verifier_hmac, verifier_key_version,
+  expires_at, max_attempts, account_token_version) values
+  ('b3c90000-0000-4000-8000-000000000007', 'b3a10000-0000-4000-8000-000000000007', repeat('7', 64), 'PASSWORD_RESET',
+   'email', repeat('8', 64), 'otp-v3', clock_timestamp() + interval '10 minutes', 5, 1);
+insert into auth.external_identities (id, account_id, issuer, subject, status, source_system) values
+  ('b3c80000-0000-4000-8000-000000000007', 'b3a10000-0000-4000-8000-000000000007', 'https://accounts.google.com',
+   'b3-google-auto-u', 'active', 'hid-google-verified-email-link');
+update identity.patient_contact_changes set created_at = created_at - interval '61 seconds',
+  expires_at = expires_at - interval '61 seconds', invalidated_at = invalidated_at - interval '61 seconds',
+  completed_at = completed_at - interval '61 seconds'
+ where patient_id = 'b3b10000-0000-4000-8000-000000000007';
+set local role hid_identity_api_runtime;
+select pg_temp.as_patient('synthetic:b3:unverified', 'b3-email-verify-0001');
+do $$
+declare outcome_row record;
+begin
+  if pg_temp.contact('synthetic:b3:unverified', 'b3f10000-0000-4000-8000-000000000007') not like 'u.unverified@example.invalid|f|%' then
+    raise exception 'U''s address is not shown unverified';
+  end if;
+  if identity.start_my_email_change('synthetic:b3:unverified', 'b3f10000-0000-4000-8000-000000000007',
+       'b3c10000-0000-4000-8000-000000000063', 'U.Unverified@Example.invalid', repeat('6', 63) || '3',
+       decode(repeat('c7', 40), 'hex'), 'nin-v7', repeat('a', 63) || '8', 'otp-v3', 300, 5, 60) <> 'started' then
+    raise exception 'U''s own unverified address did not start';
+  end if;
+  perform identity.record_my_contact_change_delivery('synthetic:b3:unverified', 'b3f10000-0000-4000-8000-000000000007',
+    'b3c10000-0000-4000-8000-000000000063', 'accepted', 'brevo');
+  select * into outcome_row from identity.complete_my_email_change('synthetic:b3:unverified',
+    'b3f10000-0000-4000-8000-000000000007', 'b3c10000-0000-4000-8000-000000000063', repeat('a', 63) || '8',
+    'u.unverified@example.invalid');
+  if format('%s|%s|%s|%s|%s', outcome_row.outcome, outcome_row.email, outcome_row.previous_email,
+       outcome_row.patient_first_name, outcome_row.patient_hid_code)
+       <> 'completed|u.unverified@example.invalid||Uche|HID-UCHEEE' then
+    raise exception 'U''s verification: %', outcome_row;
+  end if;
+  if pg_temp.contact('synthetic:b3:unverified', 'b3f10000-0000-4000-8000-000000000007') not like 'u.unverified@example.invalid|t|%' then
+    raise exception 'U''s address is not shown verified';
+  end if;
+  -- Verified now: the same address (any case) is unchanged, and nothing is recorded.
+  if identity.start_my_email_change('synthetic:b3:unverified', 'b3f10000-0000-4000-8000-000000000007',
+       'b3c10000-0000-4000-8000-000000000064', 'u.UNVERIFIED@example.invalid', repeat('6', 63) || '3',
+       decode(repeat('c7', 40), 'hex'), 'nin-v7', repeat('a', 63) || '9', 'otp-v3', 300, 5, 60) <> 'unchanged' then
+    raise exception 'U''s verified address was not unchanged';
+  end if;
+end $$;
+reset role;
+do $$
+begin
+  if not exists (select 1 from auth.accounts where id = 'b3a10000-0000-4000-8000-000000000007'
+       and email = 'u.unverified@example.invalid' and email_verified_at > clock_timestamp() - interval '1 minute')
+     or not exists (select 1 from identity.patients where id = 'b3b10000-0000-4000-8000-000000000007'
+       and email_lookup_hmac = repeat('6', 63) || '3' and email_ciphertext = decode(repeat('c7', 40), 'hex'))
+     or not exists (select 1 from identity.patient_contact_changes where id = 'b3c10000-0000-4000-8000-000000000063'
+       and state = 'completed' and not replaced_contact)
+     or exists (select 1 from identity.patient_contact_changes where id = 'b3c10000-0000-4000-8000-000000000064') then
+    raise exception 'U''s address was not verified as recorded';
+  end if;
+  if exists (select 1 from auth.sessions where account_id = 'b3a10000-0000-4000-8000-000000000007'
+       and id in ('b3f10000-0000-4000-8000-000000000007', 'b3f10000-0000-4000-8000-00000000007a')
+       and revoked_at is not null)
+     or not exists (select 1 from auth.otp_challenges where id = 'b3c90000-0000-4000-8000-000000000007'
+       and invalidated_at is null)
+     or not exists (select 1 from auth.external_identities where id = 'b3c80000-0000-4000-8000-000000000007'
+       and status = 'active' and revoked_at is null) then
+    raise exception 'Verifying the same address ended a session, a recovery code or a Google link';
+  end if;
+  if (select count(*) from audit.events where patient_id = 'b3b10000-0000-4000-8000-000000000007'
+       and action = 'identity.patient.contact-change.complete' and outcome = 'success'
+       and resource_id = 'b3c10000-0000-4000-8000-000000000063'
+       and details = '{"channel": "email", "result": "completed", "addressUnchanged": true}'::jsonb) <> 1
+     or exists (select 1 from audit.events where actor_account_id = 'b3a10000-0000-4000-8000-000000000007'
+       and action = 'auth.google.auto-link.revoke') then
+    raise exception 'U''s verification is not audited as addressUnchanged (or a Google link was revoked)';
+  end if;
+end $$;
 
 rollback;

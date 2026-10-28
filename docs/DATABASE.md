@@ -136,17 +136,23 @@ bound to the live patient session read and write them, and the email and
 phone changes set `auth.accounts.email` and `identity.patients`' contact
 ciphertext and lookup HMAC under sign-up activation's advisory locks, so
 sign-in and recovery use the new contact. An email change refuses an account
-that is also workforce (0093's test) and an address a staff record holds;
-when it completes it also revokes the Google link 0093 made from the previous
-address (`hid-google-verified-email-link`), invalidates the account's open
-recovery codes and revokes its sessions outside the caller's family
-(`contact_changed`, token version unchanged). The EHR table is read by the
+that is also workforce (0093's test), an address a staff record holds and the
+account's own address once it is verified (an unverified own address goes
+through the code, and its completion only marks it verified); when it
+completes with another address it also revokes the Google link 0093 made from
+the previous address (`hid-google-verified-email-link`), invalidates the
+account's open recovery codes and revokes its sessions outside the caller's
+family (`contact_changed`, token version kept). The EHR table is read by the
 patient in a fresh patient-self transaction or by a clinician whose access is
 granted (`ehr.imported_record_read_context`, as 0062's imported profile) and
-written only by `ehr.save_my_reported_health_profile`. It replaces one body,
-pinned by md5: `identity.patient_contact_lookup_ready` (0057) also accepts a
-contact that a completed change wrote, so a contact change does not close
-sign-up. Locks: SHARE ROW EXCLUSIVE on `auth.accounts` and `identity.patients`
+written only by `ehr.save_my_reported_health_profile`. It replaces two
+bodies, pinned by md5: `identity.patient_contact_lookup_ready` (0057) also
+accepts a contact that a completed change wrote, so a contact change does not
+close sign-up; `auth.link_google_identity_to_patient_account` (0059) links
+again the account's own Google account that an email change revoked (active,
+`hid-google-explicit-link`, `linked_at` now), while any other existing row of
+that Google account still answers `GOOGLE_IDENTITY_ALREADY_LINKED`. Locks:
+SHARE ROW EXCLUSIVE on `auth.accounts` and `identity.patients`
 for the new foreign keys, NOWAIT for at most 5 seconds (then 55P03), held to
 commit: writes to those two tables wait, reads do not. The contact rekey
 script (`scripts/rekey-patient-contact-lookups.mjs`) skips contacts a change

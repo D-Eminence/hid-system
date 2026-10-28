@@ -1216,9 +1216,9 @@ revoke all on function auth.find_patient_account(text,text),
 -- runtime; the patient's health-information command and SELECT on the table
 -- (forced RLS: the patient-self or consented clinician read) to the EHR
 -- runtime and the schema test runtime. The three Identity tables of 0094
--- get no grant (only these commands read and write them). The readiness
--- function 0094 replaces (identity.patient_contact_lookup_ready) keeps its
--- grants above.
+-- get no grant (only these commands read and write them). The two functions
+-- 0094 replaces (identity.patient_contact_lookup_ready and
+-- auth.link_google_identity_to_patient_account) keep their grants above.
 grant execute on function identity.patient_self_contact(text,uuid),
   identity.my_contact_change_credentials(text,uuid),
   identity.start_my_email_change(text,uuid,uuid,text,char,bytea,text,char,text,integer,integer,integer),

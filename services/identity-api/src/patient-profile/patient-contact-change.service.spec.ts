@@ -401,4 +401,30 @@ describe('PatientContactChangeService (0094)', () => {
       expect(wrong.notification.deliverContactChanged).not.toHaveBeenCalled();
     }
   });
+
+  it('verifies the account\'s own unverified address with a code, and tells no previous address', async () => {
+    // The start is not refused here: 0094 answers unchanged only for a verified address.
+    const unverified = { email: 'same@example.invalid', email_verified: false };
+    const started = setup({ 'start_my_email_change': () => ({ rows: [{ outcome: 'started' }] }) }, unverified);
+    await started.service.start(request, { channel: 'email', email: 'Same@Example.invalid',
+      currentPassword: 'correct horse battery' });
+    expect(started.calls.find((call) => call.sql.includes('start_my_email_change'))?.values[3]).toBe('same@example.invalid');
+    expect(started.notification.deliverEmailChangeCode).toHaveBeenCalledWith(expect.objectContaining({
+      recipient: 'same@example.invalid' }));
+
+    // The completion answers no previous address for it (or the same one in any case): no notice.
+    const crypto = new PatientProfileCrypto();
+    const changeId = '1b2c3d4e-0000-4000-8000-000000000002';
+    for (const previous of [null, 'Same@Example.invalid']) {
+      const s = setup({
+        'read_my_pending_email_change': () => ({ rows: [{ new_ciphertext: crypto.encryptContact(changeId, 'email',
+          'same@example.invalid'), key_version: 'nin-v7' }] }),
+        'complete_my_email_change': () => ({ rows: [{ outcome: 'completed', email: 'same@example.invalid',
+          previous_email: previous, patient_first_name: 'Ada', patient_hid_code: 'HID-ADAAAA' }] }),
+      }, unverified);
+      await expect(s.service.verify(request, changeId, '123456')).resolves.toEqual({ email: 'same@example.invalid' });
+      await s.service.settleNotices();
+      expect(s.notification.deliverContactChanged).not.toHaveBeenCalled();
+    }
+  });
 });
