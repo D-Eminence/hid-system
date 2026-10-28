@@ -98,6 +98,25 @@ authoritative profile. Such a patient may bind a NIN later through 0058's
 command (`patient_self_nin_eligibility` answers `legacy_unbound`), and
 `identity.record_my_verified_nin_date_of_birth` stores the date QoreID matched
 when the profile had none. `patient_self_profile` gains `ninVerified`.
+Migration `0093_patient_parity_identity.sql` (owner decisions of 2026-10-28,
+patient parity with hid-1.0) adds SECURITY DEFINER functions only, because
+Identity's runtime reads `identity.patients` through RLS that shows system:auth
+public-enrollment patients alone: `auth.find_patient_account` (a patient's
+account by Health ID, phone lookup HMAC (or a Nigerian number's two forms,
++234... and +2340...; compared as char(64) so that `patients_phone_hmac_uq`
+answers it) or account id, migrated hid-1.0 patients included, for sign-in,
+recovery and the reset emails),
+`auth.patient_email_registered` and `auth.link_google_identity_by_verified_email`
+(Google sign-up and first sign-in by verified email), and
+`auth.record_account_security_notice` (evidence-bound security notices in the
+patient inbox), all system:auth only; `identity.count_my_unread_notifications`
+and `identity.patient_self_access_log` (the bell's count and who viewed or
+changed the record), bound to the live patient session. It replaces two bodies,
+each pinned by md5: `identity.activate_public_patient_signup` admits a sign-up
+phone of any country (E.164, 7-15 digits) and
+`identity.close_own_consent_grant` writes `CONSENT_GRANT_ENDED_BY_CLINICIAN`
+when a clinician ends a grant before it expires. No table, index or constraint
+changes and no table is locked.
 Migration `0052_authoritative_cac_identity.sql` makes the registration
 identifier the public organization lookup key and introduced a complete-QoreID-
 profile guard for review and legal-entity binding. Migration `0056` revises

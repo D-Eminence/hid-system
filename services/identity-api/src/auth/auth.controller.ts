@@ -17,6 +17,7 @@ import type { LoginResult } from './auth.types';
 import { setSessionCookies } from './session-cookies';
 import { sessionEventFromRequest, sessionSuccessAuditEvent } from './session-success-audit';
 import { AccountSuspendedProblem } from './account-suspended';
+import { loginPrincipalKey } from './patient-principal';
 import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { TurnstileService } from './turnstile.service';
@@ -33,6 +34,10 @@ import { TurnstileService } from './turnstile.service';
  * (AccountSuspendedProblem, raised only after the password was verified); it
  * is not an UnauthorizedException, so it passes through unchanged.
  */
+/** Google sign-in refusals with their own code (0093), recorded as the sign-in's reason. */
+const GOOGLE_AUDITED_REFUSALS = new Set(['GOOGLE_NOT_REGISTERED', 'GOOGLE_LINK_REQUIRED', 'GOOGLE_ACCOUNT_EXISTS',
+  'ACCOUNT_SUSPENDED']);
+
 function credentialRefusal(error: unknown): unknown {
   return error instanceof UnauthorizedException ? new UnauthorizedException('Invalid credentials') : error;
 }
@@ -154,13 +159,19 @@ export class AuthController {
       const answered = error instanceof UnauthorizedException
         ? new DomainProblem(401, 'GOOGLE_SIGN_IN_DENIED', 'Google sign-in could not be completed for this HID account')
         : error;
+      // A refusal a patient is told about (0093) is audited with its code as
+      // the reason; a suspended account's denial is recorded on that account.
+      const reason = answered instanceof DomainProblem && GOOGLE_AUDITED_REFUSALS.has(answered.code)
+        ? answered.code.toLowerCase() : undefined;
       await this.sessionAudit.record({
         correlationId: request.correlationId,
+        ...(answered instanceof AccountSuspendedProblem && answered.accountSubject
+          ? { actorSubject: answered.accountSubject } : {}),
         eventType: 'login_failed',
         outcome: answered instanceof DomainProblem && answered.getStatus() < 500 ? 'denied' : 'failure',
         sourceIp: request.ip,
         userAgent: request.header('user-agent'),
-        details: { authentication_method: 'oidc', identity_provider: 'google' },
+        details: { authentication_method: 'oidc', identity_provider: 'google', ...(reason ? { reason } : {}) },
       });
       throw answered;
     } finally {
@@ -221,7 +232,7 @@ export class AuthController {
       return this.sessionResponse(result.actor, result.expiresAt);
     } catch (error) {
       if (error instanceof UnauthorizedException) {
-        await this.sessionAudit.recordLoginFailure(input.email, this.event(request));
+        await this.sessionAudit.recordLoginFailure(loginPrincipalKey(input.email, kind), this.event(request));
       } else if (error instanceof AccountSuspendedProblem) {
         // The right password for a suspended account (patient sign-in only):
         // a denied sign-in on that account, not a failed password, so it

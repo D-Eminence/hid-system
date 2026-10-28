@@ -1189,6 +1189,27 @@ revoke all on function identity.start_public_patient_signup(uuid,char,char,text,
   identity.activate_public_patient_signup(uuid,char,text,text,text,text,char),
   identity.record_my_verified_nin_date_of_birth(text,uuid,uuid,date) from public;
 
+-- Patient parity with hid-1.0 (0093), as that migration grants it (its
+-- section 10): the patient lookup by Health ID, phone or account (sign-in,
+-- recovery, reset emails), Google's patient email check and automatic link,
+-- the security notices, the unread count and the access log, to the Identity
+-- runtime and the schema test runtime. The two bodies 0093 replaces
+-- (identity.activate_public_patient_signup, identity.close_own_consent_grant)
+-- keep their grants above.
+grant execute on function auth.find_patient_account(text,text),
+  auth.patient_email_registered(text,char),
+  auth.link_google_identity_by_verified_email(text,text,char),
+  auth.record_account_security_notice(uuid,text),
+  identity.count_my_unread_notifications(text,uuid),
+  identity.patient_self_access_log(text,uuid,integer,timestamptz,bigint)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function auth.find_patient_account(text,text),
+  auth.patient_email_registered(text,char),
+  auth.link_google_identity_by_verified_email(text,text,char),
+  auth.record_account_security_notice(uuid,text),
+  identity.count_my_unread_notifications(text,uuid),
+  identity.patient_self_access_log(text,uuid,integer,timestamptz,bigint) from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),

@@ -108,10 +108,13 @@ describe('Identity OTP credentials', () => {
     const calls: Array<{ sql: string; values: readonly unknown[] }> = [];
     const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
       calls.push({ sql, values });
-      if (sql.includes('from auth.accounts account')) return { rows: [{
-        id: 'account-1', email: null, token_version: '1', phone_enrollment_id: enrollmentId,
+      if (sql.includes('auth.find_patient_account')) {
+        return { rows: values[0] === 'hid' && values[1] === 'HID-ABCDEFGH' ? [{ account_id: 'account-1' }] : [] };
+      }
+      if (sql.includes('from auth.accounts account')) return { rows: values[0] === 'account-1' ? [{
+        id: 'account-1', email: null, email_verified: false, token_version: '1', phone_enrollment_id: enrollmentId,
         phone_ciphertext: ciphertext, phone_key_version: 'local-v1',
-      }] };
+      }] : [] };
       return { rows: [] };
     }) } as unknown as PoolClient;
     const notification = { deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'test_sms' }) };
@@ -125,8 +128,12 @@ describe('Identity OTP credentials', () => {
     expect(notification.deliver).toHaveBeenCalledWith(expect.objectContaining({
       channel: 'sms', recipient: phone, purpose: 'PASSWORD_RESET', challengeId: result.challengeId,
     }));
+    // The Health ID goes through 0093's lookup (migrated patients too), then
+    // the account row by id.
+    expect(calls.find(({ sql }) => sql.includes('auth.find_patient_account'))?.values).toEqual(['hid', 'HID-ABCDEFGH']);
     const lookup = calls.find(({ sql }) => sql.includes('from auth.accounts account'));
-    expect(lookup?.values).toEqual(['hid-abcdefgh']);
+    expect(lookup?.values).toEqual(['account-1']);
+    expect(lookup?.sql).toContain('account.id = $1::uuid');
     expect(lookup?.sql).toContain("enrollment.state = 'active'");
     expect(lookup?.sql).toContain('enrollment.contact_verified_at is not null');
     expect(lookup?.sql).toContain("patient.status = 'active'");
@@ -144,8 +151,11 @@ describe('Identity OTP credentials', () => {
     const tampered = Buffer.from(encryptedContact(enrollmentId, '+2348012345678'));
     tampered[tampered.length - 1] = tampered[tampered.length - 1]! ^ 1;
     const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
-      if (sql.includes('from auth.accounts account')) return { rows: values[0] === 'HID-ABCDEFGH' ? [{
-        id: 'account-1', email: null, token_version: '1', phone_enrollment_id: enrollmentId,
+      if (sql.includes('auth.find_patient_account')) {
+        return { rows: values[1] === 'HID-ABCDEFGH' ? [{ account_id: 'account-1' }] : [] };
+      }
+      if (sql.includes('from auth.accounts account')) return { rows: values[0] === 'account-1' ? [{
+        id: 'account-1', email: null, email_verified: false, token_version: '1', phone_enrollment_id: enrollmentId,
         phone_ciphertext: tampered, phone_key_version: 'local-v1',
       }] : [] };
       return { rows: [] };
@@ -276,6 +286,8 @@ describe('Identity OTP credentials', () => {
         completion_token_hmac: hmac('otp-completion', challengeId, verificationToken),
         completion_expires_at: new Date(Date.now() + 60_000),
       }] };
+      // The confirmation's naming (0093's lookup) is read before completing.
+      if (sql.includes('auth.find_patient_account')) return { rows: [] };
       expect(sql).toContain('auth.complete_recovery_otp');
       expect(values).not.toContain(verificationToken);
       expect(values).not.toContain('a-strong-test-password');
@@ -286,6 +298,9 @@ describe('Identity OTP credentials', () => {
       challengeId, purpose: 'PASSWORD_RESET', verificationToken,
       newPassword: 'a-strong-test-password', correlationId: 'otp-race-denial-0001',
     })).rejects.toMatchObject({ code: 'OTP_INVALID_OR_EXPIRED' });
+    // A refused completion writes no "password changed" notice.
+    expect((client.query as jest.Mock).mock.calls.some(([sql]) => String(sql).includes('record_account_security_notice')))
+      .toBe(false);
   });
 
   it('does not hash a password or complete recovery for an ineligible account or invalid token', async () => {
@@ -795,11 +810,20 @@ describe('Identity OTP credentials', () => {
       if (failure) throw failure.error;
       const now = Date.now();
       if (sql.includes('pg_advisory_xact_lock')) return { rows: [] };
+      if (sql.includes('auth.find_patient_account')) {
+        // 0093's lookup: by Health ID, or the account's (absent) patient naming.
+        const account = values[0] === 'hid'
+          ? accounts.find(({ hid }) => hid?.toUpperCase() === String(values[1]).toUpperCase()) : undefined;
+        return { rows: account ? [{ account_id: account.id }] : [] };
+      }
+      if (/^\s*(savepoint|release savepoint|rollback to savepoint) account_security_notice/.test(sql)
+        || sql.includes('auth.record_account_security_notice')) return { rows: [] };
       if (sql.includes('from auth.accounts account')) {
         const identifier = String(values[0]);
-        const account = accounts.find(({ email }) => email.toLowerCase() === identifier.toLowerCase())
-          ?? accounts.find(({ hid }) => hid?.toUpperCase() === identifier.toUpperCase());
-        return { rows: account ? [{ id: account.id, email: account.email, token_version: '1',
+        const account = sql.includes('account.id = $1::uuid')
+          ? accounts.find(({ id }) => id === identifier)
+          : accounts.find(({ email }) => email.toLowerCase() === identifier.toLowerCase());
+        return { rows: account ? [{ id: account.id, email: account.email, email_verified: true, token_version: '1',
           phone_enrollment_id: null, phone_ciphertext: null, phone_key_version: null }] : [] };
       }
       if (sql.includes('coalesce(blocked_until')) {
@@ -981,6 +1005,13 @@ describe('Patient recovery emails in hid-1.0\'s design (owner decision of 2026-1
     const calls: SqlCall[] = [];
     const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
       calls.push({ sql, values });
+      if (sql.includes('auth.find_patient_account')) {
+        // 0093's lookup answers the active patient's naming, or nothing (staff).
+        const named = account ?? challenge;
+        return { rows: named && named.patient_hid_code !== undefined
+          && (named.patient_hid_code !== null || named.patient_first_name !== null)
+          ? [{ patient_first_name: named.patient_first_name, patient_hid_code: named.patient_hid_code }] : [] };
+      }
       if (sql.includes('from auth.accounts account')) return { rows: account ? [account] : [] };
       if (sql.includes('select challenge.id::text, challenge.account_id::text,')) return { rows: challenge ? [challenge] : [] };
       if (sql.includes('select auth.complete_recovery_otp')) return { rows: [{ completed }] };
@@ -1008,10 +1039,14 @@ describe('Patient recovery emails in hid-1.0\'s design (owner decision of 2026-1
       expect(notification.deliverPasswordResetCode).toHaveBeenCalledWith({ challengeId: result.challengeId,
         recipient: 'ada@example.test', code: expect.stringMatching(/^\d{6}$/), firstName: 'Ada',
         healthId: 'HID-ABC234', expiresInMinutes: 5, correlationId: 'reset-named-0001' });
-      // Read in the same lookup, from the active patient only.
-      const lookup = calls.find(({ sql }) => sql.includes('from auth.accounts account'));
-      expect(lookup?.sql).toContain("case when patient.status = 'active' then patient.first_name end as patient_first_name");
-      expect(lookup?.sql).toContain("case when patient.status = 'active' then patient.hid_code end as patient_hid_code");
+      // Read through 0093's lookup, which also reads patients migrated from
+      // hid-1.0 (RLS hid them from the old join), in the start's transaction.
+      expect(calls.find(({ sql }) => sql.includes('auth.find_patient_account'))?.values).toEqual(['account', 'account-1']);
+      // "Someone asked to reset your Health ID password" in the inbox, under a savepoint.
+      const notice = calls.findIndex(({ sql }) => sql.includes('auth.record_account_security_notice'));
+      expect(calls[notice]?.values).toEqual(['account-1', 'SECURITY_PASSWORD_RESET_REQUESTED']);
+      expect(calls[notice - 1]?.sql).toBe('savepoint account_security_notice');
+      expect(calls[notice + 1]?.sql).toBe('release savepoint account_security_notice');
     });
 
     it('answers a patient, a staff member and an unknown identifier with the same body', async () => {
@@ -1070,8 +1105,12 @@ describe('Patient recovery emails in hid-1.0\'s design (owner decision of 2026-1
       expect(notification.deliverPasswordUpdated).toHaveBeenCalledTimes(1);
       expect(notification.deliverPasswordUpdated).toHaveBeenCalledWith({ challengeId, recipient: 'ada@example.test',
         firstName: 'Ada', healthId: 'HID-ABC234', correlationId: 'reset-complete-0001' });
-      const lookup = calls.find(({ sql }) => sql.includes('select challenge.id::text, challenge.account_id::text,'));
-      expect(lookup?.sql).toContain("left join identity.patients patient\n             on patient.account_id = account.id and patient.status = 'active'");
+      expect(calls.find(({ sql }) => sql.includes('auth.find_patient_account'))?.values).toEqual(['account', 'account-1']);
+      // "Your Health ID password was changed" in the inbox, after the completion, in its transaction.
+      const completedAt = calls.findIndex(({ sql }) => sql.includes('select auth.complete_recovery_otp'));
+      const notice = calls.findIndex(({ sql }) => sql.includes('auth.record_account_security_notice'));
+      expect(notice).toBeGreaterThan(completedAt);
+      expect(calls[notice]?.values).toEqual(['account-1', 'SECURITY_PASSWORD_CHANGED']);
       expect(JSON.stringify(notification.deliverPasswordUpdated.mock.calls)).not.toContain('a-strong-test-password');
     });
 
@@ -1132,5 +1171,189 @@ describe('Patient recovery emails in hid-1.0\'s design (owner decision of 2026-1
       await shutdown;
       expect(settled).toBe(true);
     });
+  });
+});
+
+describe('Recovery by phone, migrated patients and inbox notices (0093; owner decisions of 2026-10-28)', () => {
+  const original = { ...process.env };
+  const key = Buffer.alloc(32, 7);
+  const contactKey = Buffer.alloc(32, 9);
+  const hmac = (...parts: string[]) => createHmac('sha256', key).update(parts.join('\u001f'), 'utf8').digest('hex');
+  const phoneHmac = (phone: string) => createHmac('sha256', contactKey)
+    .update(['hid-contact-lookup:v1', 'phone', phone].join('\u001f'), 'utf8').digest('hex');
+  /** A Nigerian number's lookup: its +234... and +2340... forms, comma separated. */
+  const nigerianLookup = (canonical: string) => `${phoneHmac(canonical)},${phoneHmac(`+2340${canonical.slice(4)}`)}`;
+  const ACCOUNT = '70000000-0000-4000-8000-0000000000aa';
+
+  beforeEach(() => {
+    Object.assign(process.env, {
+      NODE_ENV: 'test', DATABASE_URL: 'postgresql://test:test@localhost/hid',
+      CORS_ORIGINS: 'https://www.healthidentitydirectory.com', AUTH_MODE: 'local',
+      AUTH_SIGNING_SECRET: '01234567890123456789012345678901',
+      AUTH_LOGIN_PEPPER: 'abcdefghijklmnopqrstuvwxyz123456',
+      OTP_HMAC_KEY_B64: key.toString('base64'), OTP_EXPIRY_SECONDS: '300',
+      CONTACT_LOOKUP_HMAC_KEY_B64: contactKey.toString('base64'),
+    });
+    resetEnvironmentForTests();
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    for (const name of Object.keys(process.env)) if (!(name in original)) delete process.env[name];
+    Object.assign(process.env, original);
+    resetEnvironmentForTests();
+  });
+
+  /**
+   * One migrated hid-1.0 patient (+2348031234567, HID-MGRA23, Ada), found only
+   * through 0093's auth.find_patient_account, as RLS hides them otherwise.
+   * storedPhone is the form the importer kept (hid-1.0 stored it as typed).
+   */
+  function store(options: {
+    emailVerified?: boolean; email?: string | null; noticeFails?: boolean; storedPhone?: string;
+  } = {}) {
+    const calls: SqlCall[] = [];
+    const client = { query: jest.fn(async (sql: string, values: readonly unknown[] = []) => {
+      calls.push({ sql, values });
+      if (sql.includes('auth.find_patient_account')) {
+        const found = (values[0] === 'phone'
+            && String(values[1]).split(',').includes(phoneHmac(options.storedPhone ?? '+2348031234567')))
+          || (values[0] === 'hid' && values[1] === 'HID-MGRA23') || (values[0] === 'account' && values[1] === ACCOUNT);
+        return { rows: found ? [{ account_id: ACCOUNT, patient_first_name: 'Ada', patient_hid_code: 'HID-MGRA23' }] : [] };
+      }
+      if (sql.includes('from auth.accounts account')) {
+        const matches = sql.includes('account.id = $1::uuid') ? values[0] === ACCOUNT
+          : String(values[0]).toLowerCase() === 'ada@example.test';
+        return { rows: matches ? [{ id: ACCOUNT, email: options.email === undefined ? 'ada@example.test' : options.email,
+          email_verified: options.emailVerified ?? true, token_version: '1', phone_enrollment_id: null,
+          phone_ciphertext: null, phone_key_version: null }] : [] };
+      }
+      if (sql.includes('auth.record_account_security_notice') && options.noticeFails) {
+        throw new Error('synthetic notice failure');
+      }
+      return { rows: [] };
+    }) } as unknown as PoolClient;
+    const database = {
+      withSystemTransaction: jest.fn(async (_c: string, work: (value: PoolClient) => Promise<unknown>) => work(client)),
+      query: jest.fn().mockResolvedValue({ rows: [] }),
+    } as unknown as DatabaseService;
+    return { calls, database };
+  }
+
+  function notificationMock() {
+    return {
+      deliver: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'ses' }),
+      deliverPasswordResetCode: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'ses' }),
+      deliverPasswordUpdated: jest.fn().mockResolvedValue({ outcome: 'accepted', provider: 'ses' }),
+    };
+  }
+
+  const start = (service: OtpService, identifier: string, purpose: RecoveryOtpPurpose = 'PASSWORD_RESET') =>
+    service.start({ identifier, purpose, remoteIp: '192.0.2.80', correlationId: 'phone-reset-0001' });
+
+  it.each(['0803 123 4567', '+234 (803) 123-4567', '+2340803.123.4567'])(
+    'sends the code for the phone %s to the account\'s verified email, naming the migrated patient', async (typed) => {
+      const notification = notificationMock();
+      const { calls, database } = store();
+      const service = new OtpService(database, notification as unknown as NotificationOtpClient);
+      const answer = await start(service, typed);
+      await service.settleDeliveries();
+      expect(calls.find(({ sql }) => sql.includes('auth.find_patient_account'))?.values)
+        .toEqual(['phone', nigerianLookup('+2348031234567')]);
+      expect(notification.deliverPasswordResetCode).toHaveBeenCalledWith(expect.objectContaining({
+        challengeId: answer.challengeId, recipient: 'ada@example.test', firstName: 'Ada', healthId: 'HID-MGRA23' }));
+      expect(notification.deliver).not.toHaveBeenCalled();
+      // One cooldown for every way of typing the number: its E.164 form.
+      const cooldown = calls.find(({ sql }) => sql.includes('from auth.otp_start_cooldowns'));
+      expect(cooldown?.values[1]).toBe(hmac('otp-start', 'PASSWORD_RESET', '+2348031234567'));
+      expect(JSON.stringify(calls.map(({ values }) => values))).not.toContain('+2348031234567');
+    });
+
+  it.each([
+    ['an unverified email', { emailVerified: false }],
+    ['no email', { email: null }],
+  ])('sends nothing for a phone whose account has %s (production sends no SMS), and answers alike', async (_label, options) => {
+    const answers = [];
+    for (const [identifier, opts] of [['08031234567', options], ['08039999999', {}]] as const) {
+      const notification = notificationMock();
+      const { calls, database } = store(opts);
+      const service = new OtpService(database, notification as unknown as NotificationOtpClient);
+      const answer = await start(service, identifier);
+      await service.settleDeliveries();
+      expect(notification.deliver).not.toHaveBeenCalled();
+      expect(notification.deliverPasswordResetCode).not.toHaveBeenCalled();
+      expect(calls.some(({ sql }) => sql.includes('insert into auth.otp_challenges'))).toBe(false);
+      expect(calls.some(({ sql }) => sql.includes('record_account_security_notice'))).toBe(false);
+      answers.push({ ...answer, challengeId: typeof answer.challengeId });
+    }
+    expect(answers[0]).toEqual(answers[1]);
+  });
+
+  it.each(['08031234567', '+2348031234567', '+234 0803 123 4567'])(
+    'finds a migrated patient hid-1.0 stored with the trunk 0 (+2340...) by the phone %s, under one cooldown', async (typed) => {
+      const notification = notificationMock();
+      const { calls, database } = store({ storedPhone: '+23408031234567' });
+      const service = new OtpService(database, notification as unknown as NotificationOtpClient);
+      await start(service, typed);
+      await service.settleDeliveries();
+      expect(calls.filter(({ sql }) => sql.includes('auth.find_patient_account') && sql.includes('account_id::text from')))
+        .toHaveLength(1);
+      expect(calls.find(({ sql }) => sql.includes('auth.find_patient_account'))?.values)
+        .toEqual(['phone', nigerianLookup('+2348031234567')]);
+      expect(notification.deliverPasswordResetCode).toHaveBeenCalledWith(expect.objectContaining({
+        recipient: 'ada@example.test', firstName: 'Ada', healthId: 'HID-MGRA23' }));
+      const cooldown = calls.find(({ sql }) => sql.includes('from auth.otp_start_cooldowns'));
+      expect(cooldown?.values[1]).toBe(hmac('otp-start', 'PASSWORD_RESET', '+2348031234567'));
+    });
+
+  it('finds a migrated patient by Health ID through the lookup and names them', async () => {
+    const notification = notificationMock();
+    const { calls, database } = store();
+    const service = new OtpService(database, notification as unknown as NotificationOtpClient);
+    await start(service, 'hid-mgra23');
+    await service.settleDeliveries();
+    expect(calls.find(({ sql }) => sql.includes('auth.find_patient_account'))?.values).toEqual(['hid', 'HID-MGRA23']);
+    expect(notification.deliverPasswordResetCode).toHaveBeenCalledWith(expect.objectContaining({
+      recipient: 'ada@example.test', firstName: 'Ada', healthId: 'HID-MGRA23' }));
+  });
+
+  it('answers a phone that is not one like an unknown email, reading no account', async () => {
+    const notification = notificationMock();
+    const { calls, database } = store();
+    const service = new OtpService(database, notification as unknown as NotificationOtpClient);
+    const invalid = await start(service, '+12 34');
+    const unknown = await start(service, 'nobody@example.test');
+    expect({ ...invalid, challengeId: typeof invalid.challengeId }).toEqual({ ...unknown, challengeId: typeof unknown.challengeId });
+    expect(calls.filter(({ sql }) => sql.includes('auth.find_patient_account'))).toHaveLength(0);
+    expect(notification.deliver).not.toHaveBeenCalled();
+  });
+
+  it('refuses every phone alike when the contact lookup key is not configured', async () => {
+    delete process.env.CONTACT_LOOKUP_HMAC_KEY_B64;
+    resetEnvironmentForTests();
+    const { database } = store();
+    await expect(start(new OtpService(database, notificationMock() as unknown as NotificationOtpClient), '08031234567'))
+      .rejects.toMatchObject({ code: 'CONTACT_LOOKUP_UNAVAILABLE' });
+  });
+
+  it('writes the reset-requested notice for every recovery purpose, and a failed notice never fails the start', async () => {
+    for (const purpose of ['PASSWORD_RESET', 'LEGACY_ACCOUNT_RECOVERY'] as const) {
+      const { calls, database } = store();
+      await start(new OtpService(database, notificationMock() as unknown as NotificationOtpClient), 'ada@example.test', purpose);
+      // The email path reads the account by email, then the naming by account.
+      expect(calls.find(({ sql }) => sql.includes('auth.find_patient_account'))?.values).toEqual(['account', ACCOUNT]);
+      expect(calls.find(({ sql }) => sql.includes('auth.record_account_security_notice'))?.values)
+        .toEqual([ACCOUNT, 'SECURITY_PASSWORD_RESET_REQUESTED']);
+    }
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const { calls, database } = store({ noticeFails: true });
+    const notification = notificationMock();
+    const service = new OtpService(database, notification as unknown as NotificationOtpClient);
+    await expect(start(service, '08031234567')).resolves.toMatchObject({ accepted: true });
+    await service.settleDeliveries();
+    expect(calls.some(({ sql }) => sql === 'rollback to savepoint account_security_notice')).toBe(true);
+    expect(notification.deliverPasswordResetCode).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toBe(
+      'Account security notice SECURITY_PASSWORD_RESET_REQUESTED was not written (correlation phone-reset-0001)');
   });
 });

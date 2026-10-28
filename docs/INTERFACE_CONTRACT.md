@@ -27,8 +27,9 @@ Event Dispatcher, EventBridge/SQS, Notification Worker, and Novu.
 
 ### Patient sessions and self service
 
-`POST /api/v1/auth/patient/login` accepts email/password and the `patient-login`
-Turnstile action. It binds a separate patient session to the existing canonical
+`POST /api/v1/auth/patient/login` accepts an email, a Health ID or a phone
+number (in the field `email`; see "Patient parity with hid-1.0" below) with the
+password and the `patient-login` Turnstile action. It binds a separate patient session to the existing canonical
 Identity patient; its actor has no staff roles, facility memberships or platform
 permissions. Existing session, refresh and logout routes retain that binding,
 host-only Secure/HttpOnly cookies, Origin/CSRF checks and refresh-family reuse
@@ -61,9 +62,140 @@ administrator, even when its roles are revoked) answers the uniform `401`
 "Invalid credentials" on the patient route too, whatever its state, so the
 patient route never confirms a workforce password; so does a patient account
 that is also a workforce account. Staff sign-in (`POST /api/v1/auth/login`)
-is unchanged. Google sign-in cannot say it yet: a Google identity mapped to a
-suspended account is filtered by `auth.resolve_google_identity` before Identity
-sees it, so it stays `401 GOOGLE_SIGN_IN_DENIED`.
+is unchanged. Since 0093 the same holds by Health ID and by phone for patients
+migrated from hid-1.0 (their bans were migrated as `disabled_until`), and
+Google sign-in answers a suspended patient the same `403 ACCOUNT_SUSPENDED`
+(below).
+
+### Patient parity with hid-1.0 (0093; owner decisions of 2026-10-28)
+
+Identity's runtime reads `identity.patients` through RLS that shows system:auth
+public-enrollment patients only, so the lookups below go through 0093's
+SECURITY DEFINER functions and find patients migrated from hid-1.0 as well
+(their Health ID sign-in failed before).
+
+**Sign-in and reset with a phone number.** `POST /api/v1/auth/patient/login`
+keeps its body field `email`, and `POST /api/v1/auth/otp/start` its field
+`identifier`; each takes an email, a Health ID (`HID-` and 6-32 Health ID
+characters, any case) or a phone number. A phone is `+` and 7-15 digits
+(E.164, any country) or a Nigerian local number, `0` and 10 digits, read as
+`+234`; spaces, dots, dashes and brackets anywhere are ignored, and a trunk
+`0` typed after `+234` is dropped (`+2340803...` is `+234803...`). Anything
+else fails validation (400 `VALIDATION_FAILED`), as a malformed email does.
+The phone is looked up by its contact lookup HMAC (`identity.patients.phone_lookup_hmac`,
+the same key for sign-up, NIN-route and migrated patients), for an active
+patient whose account is not deleted. A Nigerian number is looked up in both
+its forms, `+234803...` and `+2340803...`, because hid-1.0 stored a phone as
+typed and a patient who typed the trunk `0` after `+234` was migrated with it.
+A phone that matches no account, or more than one (across both forms too),
+gets the same answer as a wrong email: the dummy hashes are verified and
+sign-in answers 401 "Invalid credentials"; the recovery start answers its
+usual 202 and sends nothing. Sign-in's lockout (5 failures in 15 minutes) and
+the recovery start's cooldown are keyed by the E.164 number, so `0803...` and
+`+234803...` share one. Production sends no SMS: a reset started with a phone
+sends the code to the account's verified email (`email_verified_at` set) only;
+an account without a verified email gets nothing and the answer stays the same.
+A reset started with an email or a Health ID is unchanged. Without
+`CONTACT_LOOKUP_HMAC_KEY_B64`, a phone sign-in or reset answers 503
+`CONTACT_LOOKUP_UNAVAILABLE`. Suspension (above) applies by phone too.
+
+**International phones at sign-up.** `POST /api/v1/identity/patient-enrollments/signup`
+takes `phone` as E.164 of any country (`+` and 7-15 digits) or a Nigerian
+local number (stored as `+234...`); a refused phone answers 400
+`VALIDATION_FAILED` on `phone` with "Enter your phone number with its country
+code, like +44 7700 900123, or a Nigerian number like 08012345678." The
+activation command admits the same (0093 replaced 0092's `+234`-only rule).
+
+**Google sign-in for a registered patient.** `POST /api/v1/auth/oidc/exchange`
+with intent `sign_in` and `patient-login`: a Google identity already linked
+signs in as before. When none is linked and Google's token says
+`email_verified: true`, and that email is the verified email
+(`auth.accounts.email`, `email_verified_at` set) of exactly one active patient
+account (migrated hid-1.0 patients included), the Google account is linked to
+it (`auth.external_identities`, source `hid-google-verified-email-link`, audit
+`auth.google.auto-link`, inbox `SECURITY_GOOGLE_LINKED`) and the patient is
+signed in exactly as a linked Google sign-in is (session, cookies,
+`x-csrf-token`, `auth.google.login` audit). Otherwise:
+
+| Case | Answer |
+| --- | --- |
+| No patient account has the email | `404 GOOGLE_NOT_REGISTERED` "This Google account is not registered on Health ID. Use Sign Up first." |
+| Two or more patients have it (one account's email, another patient's contact email), the one account's email is not verified or is another, the account is pending a reset, it already has another Google link, or this Google subject is linked to another account | `409 GOOGLE_LINK_REQUIRED` "Sign in with your password, then link Google from Settings." |
+| The patient is suspended (also when this Google subject is linked to a suspended patient) | `403 ACCOUNT_SUSPENDED`, B1's detail |
+| No verified email, a workforce account (never linked), or anything else | `401 GOOGLE_SIGN_IN_DENIED`, as before |
+
+Each refusal is recorded as a failed sign-in with its code as the reason. Staff
+Google sign-in is unchanged. With intent `enroll` (the sign-up page's Google
+button), a verified email a patient account already uses (account email or
+patient contact email) answers `409 GOOGLE_ACCOUNT_EXISTS` "You already have a
+Health ID. Sign in with Google instead." and starts no sign-up; another
+account's email still answers 409 `GOOGLE_EXISTING_ACCOUNT_LINK_REQUIRED`, and
+a Google identity already linked still signs in. Accepted risk (owner's rule):
+Google's `email_verified` for a non-Gmail address means Google verified it
+once. There is no unlink route; support removes a link.
+
+**Inbox notices.** Written into the existing inbox
+(`GET /api/v1/identity/me/notifications`), each in the transaction of its event:
+
+| Code | `resourceType` | `resourceId` | `metadata` | When |
+| --- | --- | --- | --- | --- |
+| `SECURITY_PASSWORD_RESET_REQUESTED` | `account` | null | `{}` | A recovery start that created a challenge for the patient's account, at most once an hour |
+| `SECURITY_PASSWORD_CHANGED` | `account` | null | `{}` | A completed recovery |
+| `SECURITY_GOOGLE_LINKED` | `account` | null | `{}` | A Google link, from Settings or automatic |
+| `CONSENT_GRANT_ENDED_BY_CLINICIAN` | `consent-grant` | the grant | `{ "facilityName" }` only | A clinician ends their own access before it expires (`identity.close_own_consent_grant`); never on a replay, never after expiry, never the clinician's reason |
+
+Security notices carry no PHI and no secret, are written only for an account's
+active patient (never a staff-only or deleted account), never fail the sign-in,
+reset or link they belong to, and are written once per event.
+
+**Unread count.**
+
+```text
+GET /api/v1/identity/me/notifications/unread-count
+```
+
+Patient session only. `200 { "unread": number }`: unread inbox items plus
+unread imported hid-1.0 notifications, at most 1000. Not audited when it
+succeeds (the portal polls it); a staff session answers 403
+`PATIENT_SESSION_REQUIRED`, a revoked or ended session 403
+`PATIENT_ACCESS_DENIED`.
+
+**Access log.**
+
+```text
+GET /api/v1/identity/me/access-log?limit=<1..100, default 50>&before=<opaque cursor>
+```
+
+Patient session only. `200 { "events": [ { "id", "at", "action", "actorKind",
+"actorName", "facilityName" } ], "nextBefore": string | null }`, newest
+first: `id` is a string, `at` an ISO time (milliseconds, `Z`), `action` one of
+`viewed`, `changed`, `access_granted`, `access_ended`, `emergency_access`,
+`actorKind` one of `clinician`, `facility`, `patient`, `support`, `system`,
+`actorName` the clinician's name or null, `facilityName` or null. It is read
+from the patient's own successful audit events that record a clinician (or a
+facility's system) reading or changing the record (EHR, Lab and Pharmacy
+reads, lists and writes, document downloads and OCR source reads, OCR reads,
+routed orders sent and withdrawn, and read, accepted, marked cannot complete
+or wrong patient, or corrected by the receiving laboratory or pharmacy, work
+items accepted, a lookup by Health ID), the patient's approval of an
+access request and a clinician's use of the Access PIN (`access_granted`), a
+clinician closing their access and the patient revoking it (`access_ended`)
+and break-glass (`emergency_access`). Refused and failed attempts, request
+interceptor rows, authorization checks, replays, the patient's own reads and
+imported hid-1.0 rows are not shown; nothing about other patients and no
+record contents, resource ids, reasons, addresses or user agents. Consecutive
+views (or changes) by one person at one facility less than 10 minutes apart are
+one entry at the latest time. `nextBefore` is the cursor for the next page
+(`before`); null at the end. A page reads at most 2000 audit rows, so a page
+can hold fewer entries than `limit` while `nextBefore` is still set. Each read
+is audited as `identity.patient.self.access-log`. 400
+`INVALID_ACCESS_LOG_LIMIT`, 400 `INVALID_ACCESS_LOG_CURSOR`, 403
+`PATIENT_SESSION_REQUIRED` (staff), 403 `PATIENT_ACCESS_DENIED` (session no
+longer live).
+
+An Identity image before 0093's release does not serve the two GET routes
+(404), answers phone sign-in and reset with 400 `VALIDATION_FAILED`, and keeps
+its Google refusals; the website treats a 404 as not available yet.
 
 `GET /api/v1/identity/me` returns the authenticated patient's profile and HID.
 `GET /api/v1/identity/me/access-history` returns at most 50 safe grant summaries;
@@ -351,8 +483,8 @@ code in a URL or subject.
 | Email | When | notification-api route (workload-authenticated, `Idempotency-Key`) |
 | --- | --- | --- |
 | "Your Health ID is ready": greets the patient by first name and shows the Health ID | A first activation, to the verified email (key `patient-welcome:<patientId>`) | `POST /api/v1/notifications/patient-welcome` `{ channel: "email", recipient, firstName?, healthId, plan }` |
-| "Your Health ID password reset code": greets the patient by first name, names their Health ID, shows the code and its expiry in minutes | `POST /api/v1/auth/otp/start` with `PASSWORD_RESET` for a patient account with an email whose patient record Identity can read (key `otp:<challengeId>`). Staff, admin, legacy recovery, SMS, and patients Identity cannot read yet keep the generic code message | `POST /api/v1/notifications/password-reset-code` `{ channel: "email", recipient, code, firstName?, healthId, expiresInMinutes (1-60), plan }` |
-| "Your Health ID password was updated": names the Health ID when known and Health ID support's address | After `POST /api/v1/auth/otp/complete` completes, to the account's email (key `password-updated:<challengeId>`); an account without an email gets nothing | `POST /api/v1/notifications/password-updated` `{ channel: "email", recipient, firstName?, healthId?, plan }` |
+| "Your Health ID password reset code": greets the patient by first name, names their Health ID, shows the code and its expiry in minutes | `POST /api/v1/auth/otp/start` with `PASSWORD_RESET` for a patient account with an email, patients migrated from hid-1.0 included since 0093 (key `otp:<challengeId>`). Staff, admin, legacy recovery and SMS keep the generic code message | `POST /api/v1/notifications/password-reset-code` `{ channel: "email", recipient, code, firstName?, healthId, expiresInMinutes (1-60), plan }` |
+| "Your Health ID password was updated": names the Health ID when known (migrated hid-1.0 patients too, since 0093) and Health ID support's address | After `POST /api/v1/auth/otp/complete` completes, to the account's email (key `password-updated:<challengeId>`); an account without an email gets nothing | `POST /api/v1/notifications/password-updated` `{ channel: "email", recipient, firstName?, healthId?, plan }` |
 
 All three routes take email only and refuse unknown fields (400). `firstName`
 is letters, marks, apostrophes, spaces, dots and hyphens (at most 120);
@@ -373,7 +505,8 @@ POST /api/v1/identity/patient-enrollments/signup
 
 Public, with the NIN start's origin, Turnstile (`patient-enrollment`),
 signed-out and `Idempotency-Key` rules. Body: `firstName`, `lastName` (1-80),
-`email` (<=254), `phone` (`0XXXXXXXXXX` or `+234XXXXXXXXXX`, stored as E.164),
+`email` (<=254), `phone` (E.164 of any country, or a Nigerian `0XXXXXXXXXX`
+stored as `+234...`; since 0093, see above),
 `gender` (`male`, `female`, `intersex`, `other`, `unknown`), optional
 `hospitalCurrentlyUsing` (<=120), `termsAccepted: true`, `turnstileToken`,
 `turnstileAction`. It stores the declared profile in a pending enrollment

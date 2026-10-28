@@ -1307,7 +1307,8 @@ describe('PatientEnrollmentService', () => {
         () => undefined)).rejects.toMatchObject({ status: 409, code: 'IDEMPOTENCY_KEY_REUSED' });
     });
 
-    it.each([['phone', { phone: '0803123456' }], ['phone', { phone: '+447700900123' }],
+    it.each([['phone', { phone: '0803123456' }], ['phone', { phone: '447700900123' }], ['phone', { phone: '+123456' }],
+      ['phone', { phone: '+1234567890123456' }],
       ['firstName', { firstName: '   ' }], ['email', { email: 'not-an-email' }]] as const)(
       'refuses an invalid %s before anything is written', async (field, change) => {
         const f = fixture();
@@ -1315,6 +1316,22 @@ describe('PatientEnrollmentService', () => {
           () => undefined)).rejects.toMatchObject({ status: 400, code: 'VALIDATION_FAILED',
           errors: [expect.objectContaining({ field })] });
         expect(f.queries).toEqual([]);
+      });
+
+    it('says how to type a phone of any country when the phone is refused', async () => {
+      const f = fixture();
+      await expect(f.service.signup({ ...declared, phone: '447700900123' }, requestKey, '203.0.113.10', correlationId,
+        () => undefined)).rejects.toMatchObject({ errors: [{ field: 'phone', messages: [
+        'Enter your phone number with its country code, like +44 7700 900123, or a Nigerian number like 08012345678.'] }] });
+    });
+
+    it.each([['+44 7700 900123', '+447700900123'], ['+1 (415) 555-0100', '+14155550100'], ['+683 4002', '+6834002'],
+      ['0803-123-4567', '+2348031234567'], ['+234 0803 123 4567', '+2348031234567']])(
+      'stores the phone %s as E.164 (any country; owner decision of 2026-10-28)', async (typed, stored) => {
+        const f = fixture();
+        await f.service.signup({ ...declared, phone: typed }, requestKey, '203.0.113.10', correlationId, () => undefined);
+        const [call] = signupCalls(f);
+        expect(call?.values[5]).toBe(createContactLookupHmac('phone', stored));
       });
 
     it('the NIN start refuses a sign-up\'s key as reused', async () => {

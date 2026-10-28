@@ -14,7 +14,7 @@ import { getEnvironment } from '../config/environment';
 import { DatabaseService } from '../database/database.service';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
-import { createContactLookupHmac, normalizeContactForLookup } from './contact-lookup';
+import { createContactLookupHmac, normalizePatientPhone } from './contact-lookup';
 import type { SignupGender } from './dto/patient-enrollment.dto';
 import { enrollmentKeysConfigured } from './enrollment-keys';
 import { PUBLIC_PATIENT_IDENTITY_PROVIDER, type PublicPatientIdentityProvider,
@@ -72,6 +72,9 @@ const HID_REDISPLAY_WINDOW_MS = 15 * 60 * 1000;
 const RECORD_NAME_REDISPLAY_WINDOW_MS = 15 * 60 * 1000;
 /** The account password hash activation stores; the database command checks this form. */
 const PASSWORD_HASH_OPTIONS = { type: argon2.argon2id, memoryCost: 65_536, timeCost: 3, parallelism: 1 };
+/** The sign-up phone's refusal (owner decision of 2026-10-28: any country). */
+export const SIGNUP_PHONE_MESSAGE = 'Enter your phone number with its country code, like +44 7700 900123, '
+  + 'or a Nigerian number like 08012345678.';
 
 @Injectable()
 export class PatientEnrollmentService implements BeforeApplicationShutdown {
@@ -885,10 +888,10 @@ export class PatientEnrollmentService implements BeforeApplicationShutdown {
     if (hospital.length > 120 || control.test(hospital)) throw invalid('hospitalCurrentlyUsing', 'Enter at most 120 characters');
     const email = typeof input.email === 'string' ? input.email.trim().toLowerCase() : '';
     if (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw invalid('email', 'Enter a valid email address');
-    const rawPhone = typeof input.phone === 'string' ? input.phone.replace(/[\s()-]/g, '') : '';
-    let phone = '';
-    try { phone = normalizeContactForLookup('phone', rawPhone); } catch { phone = ''; }
-    if (!/^\+234\d{10}$/.test(phone)) throw invalid('phone', 'Enter a Nigerian phone number: 0XXXXXXXXXX or +234XXXXXXXXXX');
+    // Any country's E.164 number, or a Nigerian local number stored as +234
+    // (owner decision of 2026-10-28; 0093 admits it at activation).
+    const phone = typeof input.phone === 'string' ? normalizePatientPhone(input.phone) ?? '' : '';
+    if (!phone) throw invalid('phone', SIGNUP_PHONE_MESSAGE);
     if (!['male', 'female', 'intersex', 'other', 'unknown'].includes(input.gender)) throw invalid('gender', 'Choose a gender');
     return { kind: 'signup' as const, firstName, lastName, email, phone, gender: input.gender,
       ...(hospital ? { hospitalCurrentlyUsing: hospital } : {}), termsAccepted: true as const };

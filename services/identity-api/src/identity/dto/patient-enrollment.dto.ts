@@ -18,8 +18,10 @@ export class SignupPatientEnrollmentDto {
   @IsString() @MinLength(1) @MaxLength(80) @Matches(/^[^\x00-\x1f\x7f]*\S[^\x00-\x1f\x7f]*$/)
   lastName!: string;
   @IsString() @MaxLength(254) @IsEmail() email!: string;
-  // 0XXXXXXXXXX or +234XXXXXXXXXX; spaces, dashes and brackets are ignored.
-  @IsString() @MaxLength(32) @Matches(/^\s*(?:0|\+234)[\d\s()-]{10,24}$/) phone!: string;
+  // E.164 of any country (+ and 7-15 digits) or a Nigerian local number
+  // starting 0 (owner decision of 2026-10-28); spaces, dots, dashes and
+  // brackets are ignored. The service checks the digits after normalizing.
+  @IsString() @MaxLength(32) @Matches(/^[\s().-]*(?:\+[\s().-]*[1-9]|0)[\d\s().-]{5,28}$/) phone!: string;
   @IsIn(SIGNUP_GENDERS) gender!: SignupGender;
   @IsOptional() @IsString() @MaxLength(120) @Matches(/^[^\x00-\x1f\x7f]*$/)
   hospitalCurrentlyUsing?: string;
