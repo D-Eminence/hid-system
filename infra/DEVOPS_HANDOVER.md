@@ -212,14 +212,25 @@ Patient phone and computer notifications ship with the backend
 (hid-system `staging-novu-ci-20261005` `ef81b4f`) but stay off until this
 Terraform switch is applied: both services treat absent `WEB_PUSH_` keys as off,
 and with `web_push_enabled = false` (the default) the plan changes no task
-definition. The owner's runbook is contract B6 section 13.
+definition. These steps are the owner's runbook from contract B6 section 13,
+which is in neither repository.
 
+0. Generate the VAPID key pair once, on the owner's own computer (Node 22,
+   PowerShell or bash; nothing is downloaded):
+
+   ```sh
+   node -e "const c=require('node:crypto');const j=c.generateKeyPairSync('ec',{namedCurve:'prime256v1'}).privateKey.export({format:'jwk'});console.log('PUBLIC  (production.tfvars web_push_vapid_public_key): '+Buffer.concat([Buffer.from([4]),Buffer.from(j.x,'base64url'),Buffer.from(j.y,'base64url')]).toString('base64url'));console.log('PRIVATE (Secrets Manager webPushVapidPrivateKey only): '+j.d)"
+   ```
+
+   It prints an 87-character PUBLIC key and a 43-character PRIVATE key. The
+   PRIVATE value goes only into Secrets Manager (step 1), never into Git,
+   tfvars, a ticket, chat or a CLI argument. Close the terminal after copying.
 1. Store the private key first. Secrets Manager, account `659225405023`,
    `eu-west-1`: `/hid/staging/notification-provider` (production's
    notification-api secret; the staging name is retained), add the key
-   `webPushVapidPrivateKey` with the 43-character PRIVATE key and change nothing
-   else. Never put the private key in Git, tfvars, a ticket, chat or a CLI
-   argument. Identity never receives it.
+   `webPushVapidPrivateKey` with the 43-character PRIVATE key from step 0 and
+   change nothing else. Never put the private key in Git, tfvars, a ticket,
+   chat or a CLI argument. Identity never receives it.
 2. Only then, in a reviewed commit on dev, replace the commented web push block
    in `environments/production.tfvars` with:
 
@@ -262,7 +273,7 @@ definition. The owner's runbook is contract B6 section 13.
   `webPushVapidPrivateKey` from the secret only after that apply, never while
   `web_push_enabled = true`.
 - Rotation makes every browser subscription useless until the patient next
-  visits Settings; do it only if the private key is exposed (steps 1 to 3
+  visits Settings; do it only if the private key is exposed (steps 0 to 3
   again with a new pair).
 
 ## 5. Build flow and deployment controls
