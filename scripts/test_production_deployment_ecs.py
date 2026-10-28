@@ -47,7 +47,7 @@ class BackendControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(c.ReleaseError, 'VERIFIED_BOOTSTRAP'):
             b.rollback_receipt(store, release)
 
-    def execute(self, failure=False, alert_failure=False, loss=False):
+    def execute(self, failure=False, alert_failure=False, loss=False, components=('identity-api',), waves=None):
         baseline=index(); state={n:brow.copy() for n,brow in baseline['backend'].items()}
         physical=lambda:{n:{k:r[k] for k in ('image_uri','task_definition','config_sha256')} for n,r in state.items()}
         objects={c.INDEX_KEY:copy.deepcopy(baseline)}; calls=[]; lease=FakeLease()
@@ -66,8 +66,11 @@ class BackendControllerTests(unittest.TestCase):
                     if loss: lease.assert_owned=lambda:c.require(False,'LEASE_LOST')
                     raise c.ReleaseError('HEALTH_CHECK_FAILED')
                 lease.assert_owned()
+            def update_all(self,targets):
+                if waves is not None: waves.append(list(targets))
+                for name,arn in targets.items(): self.update(name,arn)
             def definition(self,arn): return {'containerDefinitions':[{'name':'database-migration','image':image('database-migration')}]}
-        candidate=c.make_candidate(ctx(),['identity-api'],{'identity-api':{'image_uri':image('identity-api','b'), 'publication_sha256':'d'*64}},{'select':'success'})
+        candidate=c.make_candidate(ctx(),list(components),{n:{'image_uri':image(n,'b'), 'publication_sha256':'d'*64} for n in components},{'select':'success'})
         with tempfile.TemporaryDirectory() as folder:
             root=pathlib.Path(folder); c.atomic_json(root/'release/candidate.json',candidate)
             env={'EXPECTED_CANDIDATE_SHA256':c.file_sha(root/'release/candidate.json')}
@@ -99,6 +102,19 @@ class BackendControllerTests(unittest.TestCase):
         self.assertEqual(current['backend']['ehr-api'],baseline['backend']['ehr-api'])
         self.assertTrue(lease.released)
 
+    def test_services_roll_out_together_and_the_gateway_after_them(self):
+        waves=[]
+        baseline,state,objects,calls,lease=self.execute(components=('gateway','ehr-api','identity-api'),waves=waves)
+        self.assertEqual(waves,[['identity-api','ehr-api'],['gateway']]); self.assertTrue(lease.released)
+        self.assertTrue(all(state[n]['task_definition'].endswith(':2') for n in ('gateway','ehr-api','identity-api')))
+        self.assertEqual(state['lab-api'],baseline['backend']['lab-api'])
+
+    def test_a_failed_wave_restores_every_service_it_started(self):
+        waves=[]
+        baseline,state,objects,calls,lease=self.execute(failure=True,components=('ehr-api','identity-api'),waves=waves)
+        self.assertEqual(waves[0],['identity-api','ehr-api']); self.assertEqual(state,baseline['backend'])
+        self.assertEqual(waves[-1],['ehr-api','identity-api']); self.assertTrue(lease.released)
+
     def test_alert_failure_reports_failure_without_rolling_back_healthy_release(self):
         baseline,state,objects,calls,lease=self.execute(alert_failure=True)
         self.assertEqual(len(calls),1); self.assertTrue(lease.released)
@@ -119,6 +135,28 @@ class BackendControllerTests(unittest.TestCase):
         expected=dict(old,taskDefinition='new'); settled=dict(old,pendingCount=0,deployments=[{'rolloutState':'COMPLETED'}])
         with patch.object(ecs,'service',side_effect=[expected,settled]),patch.object(b.time,'sleep'):
             with self.assertRaisesRegex(c.ReleaseError,'ROLLED_BACK'): ecs.healthy('identity-api','new')
+
+    def test_update_all_starts_every_rollout_before_waiting_for_any(self):
+        class RecordingAWS(FakeAWS):
+            def __init__(self): self.calls=[]
+            def call(self,service,operation,body,mutation=False): self.calls.append((operation,body['service'])); return {}
+        aws=RecordingAWS(); ecs=b.ECS(aws,FakeLease()); looks=[]
+        answers={'identity-api':[None,('service','definition')],'ehr-api':[('service','definition')]}
+        def check(component,expected,seen):
+            looks.append(component); return answers[component].pop(0),True
+        with patch.object(ecs,'check',side_effect=check),patch.object(b.time,'sleep') as sleep:
+            ecs.update_all({'identity-api':'arn:identity:2','ehr-api':'arn:ehr:2'})
+        self.assertEqual(aws.calls,[('update-service','hid-production-identity-api'),('update-service','hid-production-ehr-api')])
+        self.assertEqual(looks,['identity-api','ehr-api','identity-api']); self.assertEqual(sleep.call_count,1)
+
+    def test_update_all_times_out_while_any_rollout_is_unhealthy(self):
+        class QuietAWS(FakeAWS):
+            def call(self,*args,**kwargs): return {}
+        ecs=b.ECS(QuietAWS(),FakeLease())
+        clock=iter([0,0,1000])
+        with patch.object(ecs,'check',side_effect=lambda component,expected,seen:(None,seen)),patch.object(b.time,'sleep'),\
+                patch.object(b.time,'monotonic',side_effect=lambda:next(clock)):
+            with self.assertRaisesRegex(c.ReleaseError,'ECS_HEALTH_TIMEOUT'): ecs.update_all({'identity-api':'arn:1'})
 
     def test_log_delivery_delay_does_not_replay_migration(self):
         aws=FakeAWS(); aws.call=lambda *a,**k:{'events':[]}

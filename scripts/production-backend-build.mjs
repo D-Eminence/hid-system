@@ -25,6 +25,8 @@ export function selectComponents(paths, requested='changed') {
     if(p==='security/staging-novu-runtime-assessment.json'){
       result.add('notification-worker');result.add('database-migration');continue;
     }
+    // The migration ledger is read only by the migration runner's checks; no image contains it.
+    if(p==='scripts/verify-migration-ledger.mjs'){ result.add('database-migration'); continue; }
     if(p.startsWith('packages/') || p.startsWith('scripts/') || p.startsWith('.github/workflows/production-backend-')) return components;
     if(p.startsWith('gateway/')) result.add('gateway');
     for(const c of components.filter(x=>!['gateway','database-migration'].includes(x)))

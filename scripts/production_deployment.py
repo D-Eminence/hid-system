@@ -132,39 +132,45 @@ class ECS:
         end = time.monotonic()+deadline
         seen_expected = False
         while time.monotonic() < end:
-            self.lease.assert_owned()
-            service = self.service(component)
-            seen_expected = seen_expected or service["taskDefinition"] == expected
-            complete = (service["taskDefinition"] == expected and service["desiredCount"] > 0
-                and service["runningCount"] == service["desiredCount"] and service["pendingCount"] == 0
-                and len(service.get("deployments",[])) == 1
-                and service["deployments"][0].get("rolloutState") == "COMPLETED")
-            # A circuit breaker settling on the old revision is a failed candidate.
-            if seen_expected and service["taskDefinition"] != expected and service.get("deployments") and all(d.get("rolloutState") == "COMPLETED" for d in service["deployments"]):
-                raise ReleaseError("ECS_ROLLED_BACK_TO_DIFFERENT_REVISION")
-            if complete:
-                ids = self.aws.call("ecs","list-tasks",{"cluster":CLUSTER,"serviceName":service["serviceName"],
-                                                       "desiredStatus":"RUNNING"}).get("taskArns",[])
-                require(len(ids) == service["desiredCount"], "RUNNING_TASK_SET_DIFFERS")
-                tasks = self.aws.call("ecs","describe-tasks",{"cluster":CLUSTER,"tasks":ids})
-                definition = self.definition(expected)
-                primary = next(c for c in definition["containerDefinitions"] if c["name"] == component)
-                require(not tasks.get("failures") and len(tasks.get("tasks",[])) == len(ids) and all(t.get("taskDefinitionArn") == expected
-                    and t.get("lastStatus") == "RUNNING" for t in tasks["tasks"]), "RUNNING_TASK_REVISION_DIFFERS")
-                for task in tasks["tasks"]:
-                    container = next(c for c in task["containers"] if c["name"] == component)
-                    require(container.get("image") == primary["image"], "RUNNING_IMAGE_DIFFERS")
-                    if "healthCheck" in primary:
-                        require(container.get("healthStatus") == "HEALTHY", "CONTAINER_NOT_HEALTHY")
-                self.verify_discovery(service, tasks["tasks"])
-                for lb in service.get("loadBalancers",[]):
-                    targets = self.aws.call("elbv2","describe-target-health",{"TargetGroupArn":lb["targetGroupArn"]})
-                    # Container checks prove task health; target checks also require enough healthy registrations.
-                    healthy = [t for t in targets.get("TargetHealthDescriptions",[]) if t.get("TargetHealth",{}).get("State") == "healthy"]
-                    require(len(healthy) >= service["desiredCount"], "LOAD_BALANCER_NOT_HEALTHY")
-                return service, definition
+            result, seen_expected = self.check(component, expected, seen_expected)
+            if result: return result
             time.sleep(10)
         raise ReleaseError("ECS_HEALTH_TIMEOUT")
+
+    def check(self, component, expected, seen_expected):
+        """One look at a rollout: (service and definition once it is healthy, else None; whether the target was seen)."""
+        self.lease.assert_owned()
+        service = self.service(component)
+        seen_expected = seen_expected or service["taskDefinition"] == expected
+        complete = (service["taskDefinition"] == expected and service["desiredCount"] > 0
+            and service["runningCount"] == service["desiredCount"] and service["pendingCount"] == 0
+            and len(service.get("deployments",[])) == 1
+            and service["deployments"][0].get("rolloutState") == "COMPLETED")
+        # A circuit breaker settling on the old revision is a failed candidate.
+        if seen_expected and service["taskDefinition"] != expected and service.get("deployments") and all(d.get("rolloutState") == "COMPLETED" for d in service["deployments"]):
+            raise ReleaseError("ECS_ROLLED_BACK_TO_DIFFERENT_REVISION")
+        if complete:
+            ids = self.aws.call("ecs","list-tasks",{"cluster":CLUSTER,"serviceName":service["serviceName"],
+                                                   "desiredStatus":"RUNNING"}).get("taskArns",[])
+            require(len(ids) == service["desiredCount"], "RUNNING_TASK_SET_DIFFERS")
+            tasks = self.aws.call("ecs","describe-tasks",{"cluster":CLUSTER,"tasks":ids})
+            definition = self.definition(expected)
+            primary = next(c for c in definition["containerDefinitions"] if c["name"] == component)
+            require(not tasks.get("failures") and len(tasks.get("tasks",[])) == len(ids) and all(t.get("taskDefinitionArn") == expected
+                and t.get("lastStatus") == "RUNNING" for t in tasks["tasks"]), "RUNNING_TASK_REVISION_DIFFERS")
+            for task in tasks["tasks"]:
+                container = next(c for c in task["containers"] if c["name"] == component)
+                require(container.get("image") == primary["image"], "RUNNING_IMAGE_DIFFERS")
+                if "healthCheck" in primary:
+                    require(container.get("healthStatus") == "HEALTHY", "CONTAINER_NOT_HEALTHY")
+            self.verify_discovery(service, tasks["tasks"])
+            for lb in service.get("loadBalancers",[]):
+                targets = self.aws.call("elbv2","describe-target-health",{"TargetGroupArn":lb["targetGroupArn"]})
+                # Container checks prove task health; target checks also require enough healthy registrations.
+                healthy = [t for t in targets.get("TargetHealthDescriptions",[]) if t.get("TargetHealth",{}).get("State") == "healthy"]
+                require(len(healthy) >= service["desiredCount"], "LOAD_BALANCER_NOT_HEALTHY")
+            return (service, definition), seen_expected
+        return None, seen_expected
 
     def snapshot(self):
         result = {}
@@ -218,6 +224,23 @@ class ECS:
         self.aws.call("ecs","update-service",{"cluster":CLUSTER,"service":"hid-production-"+component,
             "taskDefinition":arn},mutation=True)
         return self.healthy(component,arn)
+
+    def update_all(self, targets, deadline=900):
+        """Starts every rollout, then waits for all of them together: services roll out side by side."""
+        for component, arn in targets.items():
+            self.lease.assert_owned()
+            self.aws.call("ecs","update-service",{"cluster":CLUSTER,"service":"hid-production-"+component,
+                "taskDefinition":arn},mutation=True)
+        end = time.monotonic()+deadline
+        seen = dict.fromkeys(targets, False)
+        pending = list(targets)
+        while True:
+            for component in list(pending):
+                result, seen[component] = self.check(component, targets[component], seen[component])
+                if result: pending.remove(component)
+            if not pending: return
+            if time.monotonic() >= end: raise ReleaseError("ECS_HEALTH_TIMEOUT")
+            time.sleep(10)
 
     def migrate(self, uri, contract, settings, release_id):
         template = settings["migration_task_definition"]
@@ -325,14 +348,18 @@ def deploy(mode="deploy", rollback_id=None):
             require(settings["migration_network"] == index["migration_network"], "MIGRATION_NETWORK_DIFFERS_FROM_INDEX")
             settings["migration_task_definition"] = index["migration_task_definition"]
             migration_arn = ecs.migrate(desired["database-migration"],candidate["schema_change"],settings,candidate["release_id"])
-        for name in ORDER:
-            if name not in desired: continue
-            arn = ecs.register(name,desired[name])
-            # Record mutation intent durably before sending update-service (including uncertain responses).
-            store.put(receipt_key+"intent-"+name+".json",{"component":name,"prior":previous[name],
-                "target_task_definition":arn})
-            updated.append(name)
-            ecs.update(name,arn)
+        # The services roll out side by side; the gateway, which routes to them, follows once they are healthy.
+        rollout = [name for name in ORDER if name in desired]
+        for wave in ([n for n in rollout if n != "gateway"], [n for n in rollout if n == "gateway"]):
+            targets = {}
+            for name in wave:
+                arn = ecs.register(name,desired[name])
+                # Record mutation intent durably before sending update-service (including uncertain responses).
+                store.put(receipt_key+"intent-"+name+".json",{"component":name,"prior":previous[name],
+                    "target_task_definition":arn})
+                updated.append(name)
+                targets[name] = arn
+            if targets: ecs.update_all(targets)
         after = ecs.snapshot()
         lease.assert_owned()
         current,_ = store.read(INDEX_KEY,index_meta["VersionId"])
@@ -363,9 +390,8 @@ def deploy(mode="deploy", rollback_id=None):
         # Never retry an uncertain update blindly. Describe live state, then restore only this release's intent targets.
         if started and previous is not None:
             try:
-                for name in reversed(updated):
-                    lease.assert_owned()
-                    ecs.update(name,previous[name]["task_definition"])
+                lease.assert_owned()
+                ecs.update_all({name:previous[name]["task_definition"] for name in reversed(updated)})
                 after = ecs.snapshot()
                 require(after == previous, "ROLLBACK_BASELINE_NOT_RESTORED")
                 # Schema may already be committed; preserve the admitted compatible migration pin.
