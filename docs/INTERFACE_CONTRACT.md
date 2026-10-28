@@ -539,6 +539,86 @@ notifications/account-deletion` `{ channel: 'email', recipient, kind:
 'scheduled'|'cancelled'|'completed', scheduledFor (scheduled only), plan? }`,
 keyed `account-deletion:<requestId>:<kind>`; no name, Health ID or record.
 
+### Phone and computer notifications (0097, B6; owner decisions of 2026-10-28)
+
+Standard Web Push (RFC 8030) with VAPID (RFC 8292) and no payload: the service
+worker shows the fixed "Health ID / You have a new notification." and opens
+Notifications. Patient routes under `identity/me/web-push`, `@PatientOnly` and
+`@AuditFailuresOnly` (the SECURITY DEFINER commands audit each success); the
+PUT and the POST are cookie writes with Origin and `x-csrf-token`. While push is
+not configured (Identity needs a valid `WEB_PUSH_VAPID_PUBLIC_KEY` and
+`WEB_PUSH_SUBJECT`; production sets neither until the owner creates the key
+pair) every route below answers a plain 404, a malformed body too, as an
+Identity before 0097 does: a middleware answers it before authentication, the
+Origin and CSRF checks and the ValidationPipe, so a request without a session
+gets the same 404 with no token check, control read or audit row; the website
+hides the section. Problems: 403 `PATIENT_SESSION_REQUIRED` (a non-patient session,
+or the database's 42501: no live patient session), 503 `WEB_PUSH_UNAVAILABLE`
+(any other database error, never its message).
+
+- R1 `GET /api/v1/identity/me/web-push`: 200 `{ applicationServerKey (87
+  base64url), keyId (16 hex: SHA-256 of the key's 65 bytes), limit: 10,
+  subscriptions: [{ id, endpointDigest (64 hex), pushService:
+  'fcm'|'mozilla'|'apple'|'windows', thisSignIn, keyCurrent, createdAt, boundAt,
+  lastDeliveredAt | null }] }`, the account's active subscriptions, most
+  recently bound first; never an endpoint, ciphertext, key, session or family id.
+- R2 `PUT /api/v1/identity/me/web-push/subscription` `{ endpoint, expirationTime
+  (null or a number, ignored), keys: { p256dh, auth }, keyId }` (at most about
+  2.3 KB): 200 `{ id, created, endpointDigest, pushService }`; `created: false`
+  when the endpoint was already this account's (now bound to this sign-in, same
+  id). Checked in this order: the body (400 `VALIDATION_FAILED`), the keys (65
+  bytes beginning 0x04 and 16 bytes, with or without padding; never stored; 400
+  `WEB_PUSH_SUBSCRIPTION_INVALID`), the endpoint (rule E: at most 2048
+  characters, its WHATWG serialization exactly itself, https, no user info,
+  port, `#` (an empty fragment too) or empty query (a bare `?`), else 400
+  `WEB_PUSH_SUBSCRIPTION_INVALID`; a host that is an IP
+  literal or not exactly `fcm.googleapis.com`, `updates.push.services.mozilla.com`,
+  `web.push.apple.com` / `*.push.apple.com` or `*.notify.windows.com`: 400
+  `WEB_PUSH_SERVICE_UNSUPPORTED`), the key id (409 `WEB_PUSH_KEY_CHANGED`: reload
+  R1 and subscribe again), 30 an hour per account (429 `WEB_PUSH_RATE_LIMITED`),
+  the contact key (503). The endpoint is stored AES-256-GCM encrypted (the
+  emergency contacts' key, associated data
+  `identity:web-push-subscription:<id>:endpoint`) and as its SHA-256. One
+  subscription per sign-in (a new endpoint replaces the sign-in's old one), at
+  most 10 per patient (the least recently bound is removed), an endpoint on one
+  account only (another account's subscription of the same browser is removed).
+- R3 `POST /api/v1/identity/me/web-push/subscription/remove` `{ endpoint }` (an
+  https URL of at most 2048 characters whose serialization is itself; no
+  allowlist): 200 `{ removed: true|false }`, idempotent, never rate limited; 400
+  `WEB_PUSH_SUBSCRIPTION_INVALID`.
+
+A subscription belongs to the sign-in (the session family) that turned it on and
+is pushed to only while that sign-in is live: not revoked, idle-expired or past
+its absolute end, the current token version, the account active and not
+deletion-due, the patient active (a temporary suspension pauses pushes and keeps
+the subscription). Signing out turns notifications off on that device: the
+website removes the subscription first, and the sweeper erases any subscription
+whose sign-in has ended (`session_ended`, or `account_closed`). Account deletion
+erases them in its completion. Every new unread inbox item makes the sweeper
+send at most one push per subscription per 2 minutes; retries after 1, 2, 4, 8
+and 16 minutes (a Retry-After up to an hour is honoured), the sixth failure
+gives up that round; a 404 or 410 from the push service removes the
+subscription; any other refusal waits an hour and the third in a row removes it.
+
+- N1 (notification-api, not routed by the gateway) `POST
+  /api/v1/notifications/web-push` `{ endpoint, vapidKeyId }`, workload
+  authentication and `Idempotency-Key: web-push:<subscriptionId>:<claimedThrough
+  epoch ms>` as the other routes: 202 `{ requestId, outcome:
+  'accepted'|'gone'|'retry'|'rejected', pushStatus: number|null,
+  retryAfterSeconds: number|null, safeCode: string|null }`; 404
+  `WEB_PUSH_NOT_CONFIGURED` while its public key, private key
+  (`WEB_PUSH_VAPID_PRIVATE_KEY`, held by notification-api only) and subject are
+  not all valid and matching (Identity retries; it never removes a subscription
+  for this); 400 `WEB_PUSH_ENDPOINT_NOT_ALLOWED` (rule E); 409
+  `WEB_PUSH_KEY_MISMATCH`. The push: `POST <endpoint>` with `TTL: 14400`,
+  `Urgency: normal`, `Topic: hid-inbox`, `Authorization: vapid t=<ES256 JWT: aud
+  the endpoint's origin, exp 12 hours, sub the subject>, k=<public key>`, an empty
+  body, no Content-Type, Content-Encoding or Crypto-Key, redirects never followed,
+  timed out after the lower of `NOTIFICATION_PROVIDER_TIMEOUT_MS` and 5 seconds
+  (inside Identity's 8-second wait for N1). 2xx accepted; 404/410 gone; 429 and 5xx retry; 3xx and other 4xx rejected;
+  timeouts and transport errors retry. Logs the push service, status and outcome
+  only.
+
 `GET /api/v1/identity/me` returns the authenticated patient's profile and HID.
 `GET /api/v1/identity/me/access-history` returns at most 50 safe grant summaries;
 grant status does not assert notification delivery. Access-history items

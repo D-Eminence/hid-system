@@ -136,6 +136,14 @@ const environmentSchema = z.object({
   // 404 as an older Identity does and the website hides the card; deletions
   // already scheduled still complete and their emails are still sent.
   ACCOUNT_DELETION_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
+  // Phone and computer notifications (B6, migration 0097): the VAPID public
+  // key (87 base64url characters) and contact (mailto: or https:). Both plain
+  // optional strings, never refused at boot: web-push.config.ts decides
+  // whether push is on, and anything missing or invalid is off (the routes
+  // answer 404 and nothing is sent). Production sets neither until the owner
+  // creates the key pair. Identity never holds the private key.
+  WEB_PUSH_VAPID_PUBLIC_KEY: optionalString,
+  WEB_PUSH_SUBJECT: optionalString,
   // notification-api may spend two provider timeouts on one alert. The
   // dispatcher sends five alerts under a 120-second lease, so five of these
   // must stay below it (20 s at most).

@@ -358,5 +358,60 @@ begin
   end if;
 end $$;
 
+-- Case 7 (0097, B6): no runtime login role reads, writes or locks the web
+-- push subscriptions directly (every command is refused before any row is
+-- read: the table has no grant and forced row-level security); the Identity
+-- login role runs the web push system commands as itself through
+-- hid_identity_runtime, and the Notification roles cannot.
+create temporary table web_push_probe (role_name text, command text, outcome text);
+grant all on web_push_probe to public;
+do $$
+declare runtime text; command text;
+begin
+  foreach runtime in array array['hid_identity_api_runtime', 'hid_ehr_api_runtime', 'hid_lab_api_runtime',
+      'hid_pharmacy_api_runtime', 'hid_notification_api_runtime', 'hid_notification_worker'] loop
+    foreach command in array array[
+        'select 1 from notification.web_push_subscriptions limit 1',
+        'select 1 from notification.web_push_subscriptions limit 1 for update',
+        'update notification.web_push_subscriptions set updated_at = updated_at where false',
+        'delete from notification.web_push_subscriptions where false'] loop
+      begin
+        execute format('set local role %I', runtime);
+        execute command;
+        reset role;
+        insert into web_push_probe values (runtime, command, 'allowed');
+      exception when others then
+        reset role;
+        insert into web_push_probe values (runtime, command, sqlstate);
+      end;
+    end loop;
+  end loop;
+  perform set_config('app.actor_subject', 'system:auth', true);
+  perform set_config('app.correlation_id', 'runtime-command-privileges-web-push', true);
+  foreach runtime in array array['hid_identity_api_runtime', 'hid_notification_api_runtime'] loop
+    begin
+      execute format('set local role %I', runtime);
+      perform identity.prune_web_push_subscriptions(1);
+      perform identity.claim_web_push_deliveries('runtime-command-privileges', 1, 15, '0000000000000000');
+      reset role;
+      insert into web_push_probe values (runtime, 'system commands', 'allowed');
+    exception when others then
+      reset role;
+      insert into web_push_probe values (runtime, 'system commands', sqlstate);
+    end;
+  end loop;
+end $$;
+do $$
+declare failures text := (select string_agg(format('%s %s: %s', role_name, command, outcome), '; ')
+                            from web_push_probe
+                           where (command = 'system commands'
+                                  and outcome <> case when role_name = 'hid_identity_api_runtime' then 'allowed' else '42501' end)
+                              or (command <> 'system commands' and outcome <> '42501'));
+begin
+  if failures is not null or (select count(*) from web_push_probe) <> 26 then
+    raise exception 'Web push runtime privileges: %', coalesce(failures, 'probe count');
+  end if;
+end $$;
+
 select 'runtime command privileges: ' || count(*) || ' probes passed' as result from runtime_command_probe;
 rollback;

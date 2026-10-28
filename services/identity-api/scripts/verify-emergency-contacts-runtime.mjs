@@ -95,6 +95,8 @@ const notification = {
   deliverShareReceived: async () => ({ outcome: 'accepted', provider: 'brevo' }),
   deliverRecordAccessAlert: async () => ({ outcome: 'accepted', provider: 'brevo' }),
   deliverAccountDeletionNotice: async () => ({ outcome: 'accepted', provider: 'brevo' }),
+  // 0097's (B6) web push: no service this verifier builds sends one; stubbed for the same reason.
+  deliverWebPush: async () => ({ outcome: 'accepted' }),
 };
 let app;
 try {

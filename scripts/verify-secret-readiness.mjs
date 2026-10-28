@@ -43,6 +43,7 @@ const serverSecretName = [
   'TURNSTILE_SECRET_KEY',
   'VERCEL_TOKEN',
   'WORKLOAD_(?:TOKEN|SIGNING)',
+  'WEB_PUSH_VAPID_PRIVATE_KEY',
   '(?:COOKIE|ENCRYPTION|HMAC|JWT|SESSION)_(?:SECRET|SIGNING_KEY)',
 ].join('|')
 const frontendServerIdentifiers = new RegExp(`(?:${serverSecretName}|DATABASE_URL)`, 'i')
