@@ -3,10 +3,13 @@ import type { Request } from 'express';
 import { randomUUID } from 'node:crypto';
 import { WorkloadAuthService } from '../auth/workload-auth.service';
 import { getEnvironment } from '../config/environment';
+import { DeliverAccountDeletionDto } from './dto/deliver-account-deletion.dto';
 import { DeliverEmergencyContactAlertDto } from './dto/deliver-emergency-contact-alert.dto';
 import { DeliverOtpDto, OtpPurpose, validateRecipient } from './dto/deliver-otp.dto';
 import { DeliverContactChangedDto, DeliverEmailChangeCodeDto, DeliverPasswordResetCodeDto, DeliverPasswordUpdatedDto,
   DeliverPatientWelcomeDto } from './dto/deliver-patient-emails.dto';
+import { DeliverPatientShareInvitationDto, DeliverRecordAccessAlertDto, DeliverShareReceivedDto }
+  from './dto/deliver-sharing-emails.dto';
 import { DeliverStaffInvitationDto } from './dto/deliver-staff-invitation.dto';
 import { type DeliveryResult, NotificationService } from './notification.service';
 
@@ -149,6 +152,59 @@ export class NotificationController {
     const result = await this.notifications.deliverContactChanged({ recipient: input.recipient, kind: input.kind,
       newContactHint: input.newContactHint, ...(input.firstName ? { firstName: input.firstName } : {}),
       ...(input.healthId ? { healthId: input.healthId } : {}), idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  /**
+   * E1 (0095): a patient's invitation to share, to the address the patient
+   * typed. Fixed fields only: the reference, the level, the duration and the
+   * end; never the patient, their Health ID or the invitee's name.
+   */
+  @Post('patient-share-invitation') @HttpCode(202)
+  async patientShareInvitation(@Body() input: DeliverPatientShareInvitationDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    await this.authenticateEmailRequest(request, idempotencyKey, input);
+    const result = await this.notifications.deliverPatientShareInvitation({ recipient: input.recipient,
+      reference: input.reference, level: input.level, duration: input.duration, expiresAt: new Date(input.expiresAt),
+      idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  /** E2 (0095): to the clinician a patient shared with; the facility's name only. */
+  @Post('share-received') @HttpCode(202)
+  async shareReceived(@Body() input: DeliverShareReceivedDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    await this.authenticateEmailRequest(request, idempotencyKey, input);
+    const result = await this.notifications.deliverShareReceived({ recipient: input.recipient,
+      ...(input.facilityName ? { facilityName: input.facilityName } : {}), idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  /** E3 (0095): "Your Health ID records were opened"; the time only. */
+  @Post('record-access-alert') @HttpCode(202)
+  async recordAccessAlert(@Body() input: DeliverRecordAccessAlertDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    await this.authenticateEmailRequest(request, idempotencyKey, input);
+    const result = await this.notifications.deliverRecordAccessAlert({ recipient: input.recipient,
+      occurredAt: new Date(input.occurredAt), idempotencyKey: idempotencyKey! }, input.plan);
+    return this.response(result);
+  }
+
+  /**
+   * E4 (0096): "Your Health ID account is scheduled for deletion" (the date),
+   * "... deletion was cancelled" or "... account was deleted". Fixed fields
+   * only: the kind and the date; never a name, a Health ID or a record.
+   */
+  @Post('account-deletion') @HttpCode(202)
+  async accountDeletion(@Body() input: DeliverAccountDeletionDto, @Req() request: Request,
+    @Headers('idempotency-key') idempotencyKey: string | undefined) {
+    await this.authenticateEmailRequest(request, idempotencyKey, input);
+    if (input.kind === 'scheduled' && !input.scheduledFor) {
+      throw new BadRequestException('A scheduled deletion email needs its date');
+    }
+    const result = await this.notifications.deliverAccountDeletion({ recipient: input.recipient, kind: input.kind,
+      ...(input.kind === 'scheduled' && input.scheduledFor ? { scheduledFor: new Date(input.scheduledFor) } : {}),
+      idempotencyKey: idempotencyKey! }, input.plan);
     return this.response(result);
   }
 

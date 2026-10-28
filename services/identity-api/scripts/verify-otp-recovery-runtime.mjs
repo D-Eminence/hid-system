@@ -21,6 +21,11 @@ const notification = {
   deliver: async input => { delivered=input;return { outcome:'accepted',provider:'ses' }; },
   deliverPasswordResetCode: async input => { delivered=input;return { outcome:'accepted',provider:'ses' }; },
   deliverPasswordUpdated: async () => { passwordUpdated += 1;return { outcome:'accepted',provider:'ses' }; },
+  // 0095's (B4) and 0096's (B5) emails: no service this verifier builds calls them; stubbed so a wiring change cannot reach the network.
+  deliverPatientShareInvitation: async () => ({ outcome:'accepted',provider:'ses' }),
+  deliverShareReceived: async () => ({ outcome:'accepted',provider:'ses' }),
+  deliverRecordAccessAlert: async () => ({ outcome:'accepted',provider:'ses' }),
+  deliverAccountDeletionNotice: async () => ({ outcome:'accepted',provider:'ses' }),
 };
 const database = {
   query: async (sql, values) => {

@@ -77,6 +77,12 @@ describe('Patient-only routes (A9)', () => {
     'PatientProfileController.details', 'PatientProfileController.saveDetails', 'PatientProfileController.photo',
     'PatientProfileController.savePhoto', 'PatientProfileController.removePhoto',
     'PatientProfileController.startContactChange', 'PatientProfileController.verifyContactChange',
+    // The patient's sharing (0095).
+    'PatientSharesController.search', 'PatientSharesController.create', 'PatientSharesController.invitations',
+    'PatientSharesController.invite', 'PatientSharesController.cancel', 'PatientSharesController.confirm',
+    // Delete my account (0096).
+    'PatientAccountDeletionController.status', 'PatientAccountDeletionController.requestDeletion',
+    'PatientAccountDeletionController.confirm', 'PatientAccountDeletionController.cancel',
   ];
   const declared = identityControllers().flatMap((controller) => routes(controller)
     .map((route) => ({ ...route, handler: `${controller.name}.${route.name}` })));

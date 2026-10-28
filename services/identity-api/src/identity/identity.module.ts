@@ -8,6 +8,7 @@ import { IdentityController } from './identity.controller';
 import { NinRegistrationController } from './nin-registration.controller';
 import { PostgresIdentityProvider } from './postgres-identity.provider';
 import { IdentityService } from './identity.service';
+import { RecordAccessNoticeService } from './record-access-notice.service';
 import { IDENTITY_PROVIDER } from './identity.types';
 import { HidCodeGenerator } from './hid-code-generator.service';
 import { NinIdentifierProtector } from './nin-identifier-protector';
@@ -61,6 +62,7 @@ import { OrderDestinationsService } from './order-destinations.service';
     OrderDestinationsController],
   providers: [
     IdentityService,
+    RecordAccessNoticeService,
     NinRegistrationService,
     NinIdentifierProtector,
     HidCodeGenerator,

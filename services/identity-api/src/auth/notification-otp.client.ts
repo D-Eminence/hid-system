@@ -253,8 +253,97 @@ export class NotificationOtpClient {
     }, OTP_TIMEOUT_MS);
   }
 
+  /**
+   * E1 (0095): a patient's invitation to share, to the address the patient
+   * typed: the reference, level, duration and end only; never the patient,
+   * their Health ID or the invitee's name. Keyed by the invitation. Without a
+   * delivery plan nothing is sent (definitive_failure); an older
+   * notification-api answers 404, a definitive non-send.
+   */
+  async deliverPatientShareInvitation(input: {
+    invitationId: string;
+    recipient: string;
+    reference: string;
+    level: 'view_only' | 'clinical_review' | 'clinical_collaboration';
+    duration: '24h' | '7d' | '30d' | 'until_revoked';
+    expiresAt: Date;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'definitive_failure', safeCode: 'delivery_policy_unavailable' };
+    return this.post('patient-share-invitation', `patient-share-invitation:${input.invitationId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, reference: input.reference, level: input.level,
+      duration: input.duration, expiresAt: input.expiresAt.toISOString(), plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  /**
+   * E2 (0095): to the clinician a patient shared with, at their verified
+   * sign-in email: the facility's name when Identity found it safe, nothing
+   * about the patient. Keyed by the grant; best-effort.
+   */
+  async deliverShareReceived(input: {
+    consentGrantId: string;
+    recipient: string;
+    facilityName?: string;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'definitive_failure', safeCode: 'delivery_policy_unavailable' };
+    return this.post('share-received', `share-received:${input.consentGrantId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient,
+      ...(input.facilityName ? { facilityName: input.facilityName } : {}), plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  /**
+   * E3 (0095): "Your Health ID records were opened", to the patient's
+   * verified email: the time only, never the facility. Keyed by the notice;
+   * the dispatcher retries an unknown outcome.
+   */
+  async deliverRecordAccessAlert(input: {
+    noticeId: string;
+    recipient: string;
+    occurredAt: Date;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'unknown', safeCode: 'delivery_policy_unavailable' };
+    return this.post('record-access-alert', `record-access-alert:${input.noticeId}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, occurredAt: input.occurredAt.toISOString(), plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
+  /**
+   * E4 (0096): "Your Health ID account is scheduled for deletion" (with the
+   * date), "... deletion was cancelled" or "... account was deleted", to the
+   * account's verified email: the kind and the date only, never a name, a
+   * Health ID or a record. Keyed account-deletion:<requestId>:<kind>; the
+   * dispatcher retries an unknown outcome. An older notification-api answers
+   * 404, a definitive non-send.
+   */
+  async deliverAccountDeletionNotice(input: {
+    requestId: string;
+    recipient: string;
+    kind: 'scheduled' | 'cancelled' | 'completed';
+    scheduledFor?: Date;
+    correlationId: string;
+  }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
+    if (input.kind === 'scheduled' && !input.scheduledFor) {
+      return { outcome: 'definitive_failure', safeCode: 'scheduled_for_missing' };
+    }
+    const plan = await this.integrations.deliveryPlan('email').catch(() => null);
+    if (!plan) return { outcome: 'unknown', safeCode: 'delivery_policy_unavailable' };
+    return this.post('account-deletion', `account-deletion:${input.requestId}:${input.kind}`, input.correlationId, {
+      channel: 'email', recipient: input.recipient, kind: input.kind,
+      ...(input.kind === 'scheduled' && input.scheduledFor ? { scheduledFor: input.scheduledFor.toISOString() } : {}),
+      plan,
+    }, OTP_TIMEOUT_MS);
+  }
+
   private async post(path: 'otp' | 'emergency-contact-alert' | 'staff-invitation' | 'patient-welcome'
-    | 'password-reset-code' | 'password-updated' | 'email-change-code' | 'contact-changed',
+    | 'password-reset-code' | 'password-updated' | 'email-change-code' | 'contact-changed'
+    | 'patient-share-invitation' | 'share-received' | 'record-access-alert' | 'account-deletion',
     idempotencyKey: string, correlationId: string,
     body: Record<string, unknown>, timeoutMs: number,
   ): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {

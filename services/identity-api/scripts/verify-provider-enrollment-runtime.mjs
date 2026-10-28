@@ -302,6 +302,11 @@ const notification = {
   // delivery plan, path, idempotency key, headers and body) sends each staff
   // invitation to the local route stub above; what Identity hands it is kept.
   deliverStaffInvitation: undefined,
+  // 0095's (B4) and 0096's (B5) emails: no service this verifier builds calls them; stubbed so a wiring change cannot reach the network.
+  deliverPatientShareInvitation: async () => ({ outcome: 'accepted', provider: 'brevo' }),
+  deliverShareReceived: async () => ({ outcome: 'accepted', provider: 'brevo' }),
+  deliverRecordAccessAlert: async () => ({ outcome: 'accepted', provider: 'brevo' }),
+  deliverAccountDeletionNotice: async () => ({ outcome: 'accepted', provider: 'brevo' }),
 };
 const staffInvitationInputs = [];
 // identity/patient-lookup's service is outside this verifier: a stub that

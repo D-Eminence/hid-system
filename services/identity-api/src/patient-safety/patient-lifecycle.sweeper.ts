@@ -1,21 +1,38 @@
 import { randomUUID } from 'node:crypto';
 import {
-  type BeforeApplicationShutdown, Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown,
+  type BeforeApplicationShutdown, Injectable, Logger, type OnApplicationBootstrap, type OnApplicationShutdown, Optional,
 } from '@nestjs/common';
 import { getEnvironment } from '../config/environment';
+import { DatabaseService } from '../database/database.service';
+import { AccountDeletionNoticeDispatcher } from './account-deletion-notice.dispatcher';
 import { EmergencyContactNotificationDispatcher } from './emergency-contact-notification.dispatcher';
+import { PatientAccountDeletionService } from './patient-account-deletion.service';
+import { RecordAccessAlertDispatcher } from './record-access-alert.dispatcher';
 
 /**
  * How long shutdown waits for a tick beyond EMERGENCY_CONTACT_ALERT_TIMEOUT_MS:
  * the database writes around the alert in flight.
  */
 export const PATIENT_LIFECYCLE_SHUTDOWN_GRACE_MS = 5_000;
+/** Share invitations past their end closed per tick (0095). */
+export const SHARE_INVITATION_EXPIRY_BATCH = 100;
+/** Due account deletions completed per tick (0096). */
+export const ACCOUNT_DELETION_FINALIZE_BATCH = 10;
 
 /**
- * Periodically dispatches emergency-contact notifications while delivery is
- * enabled; no timer runs while it is off. Multiple replicas are safe because
- * claims use row locks with SKIP LOCKED and leases. (main also finalizes due
- * account deletions here; account deletion is not on Novu.)
+ * The patient lifecycle's periodic work, every PATIENT_LIFECYCLE_SWEEP_SECONDS
+ * (no timer when 0, or under NODE_ENV=test). Each tick runs, in order, each
+ * step in its own try/catch that logs the code only:
+ *   1. the emergency-contact alerts, while EMERGENCY_CONTACT_DELIVERY_ENABLED;
+ *   2. identity.expire_share_invitations (0095): an invitation's end is the
+ *      patient's own deadline, so it runs whatever the sharing switch;
+ *   3. the records-opened emails (0095), while RECORD_ACCESS_EMAIL_ENABLED;
+ *   4. identity.finalize_due_patient_account_deletions(10) (0096), always: a
+ *      scheduled deletion is the patient's decision;
+ *   5. the account-deletion emails (0096), always (scheduled, cancelled and
+ *      completed).
+ * The timer no longer depends on the emergency-contact switch. Multiple
+ * replicas are safe: claims use row locks with SKIP LOCKED and leases.
  */
 @Injectable()
 export class PatientLifecycleSweeper implements OnApplicationBootstrap, BeforeApplicationShutdown, OnApplicationShutdown {
@@ -23,15 +40,23 @@ export class PatientLifecycleSweeper implements OnApplicationBootstrap, BeforeAp
   private readonly logger = new Logger(PatientLifecycleSweeper.name);
   private timer?: NodeJS.Timeout;
   private inFlight?: Promise<void>;
+  private stopped = false;
 
-  constructor(private readonly dispatcher: EmergencyContactNotificationDispatcher) {}
+  constructor(
+    private readonly dispatcher: EmergencyContactNotificationDispatcher,
+    @Optional() private readonly database?: DatabaseService,
+    @Optional() private readonly recordAccessAlerts?: RecordAccessAlertDispatcher,
+    @Optional() private readonly accountDeletion?: PatientAccountDeletionService,
+    @Optional() private readonly accountDeletionNotices?: AccountDeletionNoticeDispatcher,
+  ) {}
 
   onApplicationBootstrap(): void {
-    if (!this.environment.EMERGENCY_CONTACT_DELIVERY_ENABLED) return;
     const seconds = this.environment.PATIENT_LIFECYCLE_SWEEP_SECONDS;
     if (seconds === 0) {
-      this.logger.warn('Emergency-contact delivery is enabled but PATIENT_LIFECYCLE_SWEEP_SECONDS is 0; '
-        + 'no emergency-access alert will be sent');
+      if (this.environment.EMERGENCY_CONTACT_DELIVERY_ENABLED) {
+        this.logger.warn('Emergency-contact delivery is enabled but PATIENT_LIFECYCLE_SWEEP_SECONDS is 0; '
+          + 'no emergency-access alert will be sent');
+      }
       return;
     }
     if (this.environment.NODE_ENV === 'test') return;
@@ -41,14 +66,17 @@ export class PatientLifecycleSweeper implements OnApplicationBootstrap, BeforeAp
 
   /**
    * Runs before DatabaseService ends the pool (after-response-tasks.ts). Stops
-   * the timer and the dispatcher, then waits for the tick in flight, so an
-   * alert already sent records its outcome instead of being sent again by
+   * the timer and the dispatchers, then waits for the tick in flight, so an
+   * email already sent records its outcome instead of being sent again by
    * another task once its lease expires.
    */
   async beforeApplicationShutdown(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    this.stopped = true;
     this.dispatcher.stop();
+    this.recordAccessAlerts?.stop();
+    this.accountDeletionNotices?.stop();
     if (!this.inFlight) return;
     let timer: NodeJS.Timeout | undefined;
     const expired = new Promise<void>((resolve) => {
@@ -71,12 +99,38 @@ export class PatientLifecycleSweeper implements OnApplicationBootstrap, BeforeAp
 
   private async tick(): Promise<void> {
     const correlationId = `patient-lifecycle-${randomUUID()}`;
+    if (this.environment.EMERGENCY_CONTACT_DELIVERY_ENABLED) {
+      await this.step('emergency_contact_alerts', correlationId, () => this.dispatcher.dispatch(correlationId));
+    }
+    if (this.database) {
+      const database = this.database;
+      await this.step('share_invitation_expiry', correlationId, () => database.withSystemTransaction(correlationId,
+        (client) => client.query('select identity.expire_share_invitations($1)', [SHARE_INVITATION_EXPIRY_BATCH])));
+    }
+    if (this.environment.RECORD_ACCESS_EMAIL_ENABLED && this.recordAccessAlerts) {
+      const alerts = this.recordAccessAlerts;
+      await this.step('record_access_alerts', correlationId, () => alerts.dispatch(correlationId));
+    }
+    if (this.accountDeletion) {
+      const deletion = this.accountDeletion;
+      await this.step('account_deletion_finalize', correlationId,
+        () => deletion.finalizeDue(correlationId, ACCOUNT_DELETION_FINALIZE_BATCH));
+    }
+    if (this.accountDeletionNotices) {
+      const notices = this.accountDeletionNotices;
+      await this.step('account_deletion_notices', correlationId, () => notices.dispatch(correlationId));
+    }
+  }
+
+  private async step(name: string, correlationId: string, work: () => Promise<unknown>): Promise<void> {
+    // Once shutdown has begun, the steps not yet started do not start.
+    if (this.stopped) return;
     try {
-      await this.dispatcher.dispatch(correlationId);
+      await work();
     } catch (error) {
       // Never log driver or provider messages: they can contain identifiers.
       const code = typeof (error as { code?: unknown })?.code === 'string' ? (error as { code: string }).code : 'unknown';
-      this.logger.error(`Patient lifecycle sweep failed (code=${code}, correlation=${correlationId})`);
+      this.logger.error(`Patient lifecycle sweep failed (step=${name}, code=${code}, correlation=${correlationId})`);
     }
   }
 }

@@ -402,6 +402,143 @@ view. The website labels it "Reported by the patient".
 An Identity or EHR image before 0094's release answers these routes 404 and
 `GET /identity/me` without the new keys; the website hides each section then.
 
+### Patient sharing (0095, B4; owner decisions of 2026-10-28)
+
+Patient routes are `@PatientOnly` (a staff session answers 403
+`PATIENT_SESSION_REQUIRED`); every POST is a cookie write with Origin and
+`x-csrf-token`. Staff routes need a staff session, `X-Facility-ID`,
+`X-Purpose-Of-Use: direct-care` and `identity.consent.write`. Errors are
+problem+json with `code` and a patient-written `detail`; unknown fields answer
+400 `VALIDATION_FAILED`. Every request body is under 1 KB. While
+`PATIENT_SHARES_ENABLED` is `false` (code default `true`; production sets no
+key) every route below answers 404, as an Identity before 0095 does.
+
+- `POST /api/v1/identity/me/share-providers/search` `{ query }` (3-80
+  characters): 200 `{ items: [{ membershipId, clinicianName, role:
+  'doctor'|'clinician'|'nurse', facilityName, organizationName, newOnHealthId
+  }] }`, at most 10, never an email, phone, licence or account id; 400
+  `SHARE_SEARCH_QUERY_INVALID`; 429 `SHARE_SEARCH_LIMITED` (30 an hour per
+  account); 503 `SHARE_UNAVAILABLE`.
+- `POST /api/v1/identity/me/shares` with `Idempotency-Key`: `{ membershipId,
+  level: 'view_only'|'clinical_review'|'clinical_collaboration', duration:
+  '24h'|'7d'|'30d'|'until_revoked' }`: 201 `{ consentGrantId, membershipId,
+  scope, level, duration, startsAt, expiresAt, clinicianName, facilityName,
+  replacedConsentGrantId, replayed: false }` (200 with `replayed: true` for a
+  replay); 403 `PATIENT_RECENT_AUTH_REQUIRED` (sign-in older than 10 minutes),
+  `PATIENT_RECENT_RECOVERY_HOLD`; 404 `SHARE_PROVIDER_UNAVAILABLE`; 409
+  `IDEMPOTENCY_KEY_REUSED`; 429 `SHARE_CREATE_LIMITED` (20 a day). The
+  clinician is emailed (`share-received`, no patient name or Health ID). A
+  share is ended with `POST /identity/me/consent-grants/:grantId/revoke`.
+- `GET /api/v1/identity/me/access-history`: each item gains `shareLevel`,
+  `shareDuration` and `clinicianName`, null unless the grant came from a share
+  or a confirmed invitation.
+- `GET /api/v1/identity/me/share-invitations` (the website's served probe): 200
+  `{ items: ShareInvitation[], limits: { maxOpen: 20, maxNewPerDay: 5,
+  remainingToday } }`, open invitations and those ended in 30 days, newest
+  first, at most 50; `ShareInvitation` = `{ invitationId, reference,
+  inviteeEmail, inviteeName, level, duration, status:
+  'pending'|'accepted'|'confirmed'|'cancelled'|'expired', createdAt, expiresAt,
+  acceptedAt, deliveryOutcome: 'pending'|'sent'|'not_confirmed', offer: {
+  clinicianName, role, facilityName, organizationName, newOnHealthId } | null
+  (accepted only), consentGrantId (confirmed only) }`.
+- `POST /api/v1/identity/me/share-invitations` with `Idempotency-Key`: `{
+  email, name?, level, duration }`: 201 `{ invitationId, reference, status:
+  'pending', expiresAt, deliveryOutcome: 'sent'|'not_confirmed', replayed }`,
+  the same whether or not the address is registered (200 for a replay); 400
+  `SHARE_INVITATION_EMAIL_INVALID`; 403 `PATIENT_RECENT_RECOVERY_HOLD`; 409
+  `SHARE_INVITATION_ALREADY_OPEN`, `SHARE_INVITATION_TOO_MANY_OPEN` (20 open),
+  `IDEMPOTENCY_KEY_REUSED`; 429 `SHARE_INVITATION_LIMITED` (5 a day). Past 3
+  emails a day to one address the invitation is created and no email is sent
+  (`not_confirmed`).
+- `POST /api/v1/identity/me/share-invitations/:invitationId/cancel`: 200 `{
+  invitationId, status: 'cancelled', replayed }`; 404
+  `SHARE_INVITATION_NOT_FOUND`; 409 `SHARE_INVITATION_NOT_CANCELLABLE`.
+- `POST /api/v1/identity/me/share-invitations/:invitationId/confirm`: 201 `{
+  invitationId, status: 'confirmed', consentGrantId, scope, level, duration,
+  startsAt, expiresAt, clinicianName, facilityName, replacedConsentGrantId,
+  replayed }` (200 on a repeat); 403 as `shares`; 404
+  `SHARE_INVITATION_NOT_FOUND`; 409 `SHARE_INVITATION_NOT_ACCEPTED`,
+  `SHARE_PROVIDER_UNAVAILABLE`.
+- Staff `GET /api/v1/identity/shared-with-me`: 200 `{ items: [{
+  consentGrantId, patientId, hid, fullName, level, duration, scope, startsAt,
+  expiresAt }] }`, the active shares to the caller's membership, at most 100.
+- Staff `GET /api/v1/identity/share-invitations`: 200 `{ eligible, items: [{
+  invitationId, reference, inviteeName, level, duration, createdAt, expiresAt
+  }] }`, the pending invitations to the caller's verified sign-in email; no
+  patient identity.
+- Staff `POST /api/v1/identity/share-invitations/:invitationId/accept`: 200 `{
+  invitationId, status: 'accepted', acceptedAt, replayed }`; 404
+  `SHARE_INVITATION_NOT_FOUND`; 403 `SHARE_PROVIDER_NOT_ELIGIBLE`; 409
+  `SHARE_INVITATION_NOT_PENDING`. The patient gets `SHARE_INVITATION_ACCEPTED`.
+
+"Your records were opened": after every allowed staff authorization that
+carries a non-emergency grant (`service/patients/:id/record-read-authorization`,
+`authorization/check`, `service/authorization/check`, `patient-lookup`),
+Identity notes the access once per patient, facility and Africa/Lagos day (at
+most 10 a day), after the answer and never failing it: the inbox item
+`RECORDS_OPENED` (resource `record-access`, metadata `facilityName`,
+`accessKind` standard, share or pin) and, for a verified email with
+notifications on, the email `record-access-alert` naming nothing but the time
+(`RECORD_ACCESS_EMAIL_ENABLED`, default `true`). Other inbox codes:
+`SHARE_INVITATION_ACCEPTED` (`facilityName`) and `SHARE_INVITATION_EXPIRED`
+(resource `share-invitation`). notification-api gains `POST
+notifications/patient-share-invitation`, `share-received` and
+`record-access-alert` (fixed fields only; an older notification-api's 404 is a
+definitive non-send).
+
+### Delete my account (0096, B5; main 0064, owner decisions of 2026-10-28)
+
+Patient routes, `@PatientOnly` and `@AuditFailuresOnly` (the SECURITY DEFINER
+commands audit each success); every POST is a cookie write with Origin and
+`x-csrf-token`; bodies are under 200 bytes. While `ACCOUNT_DELETION_ENABLED` is
+`false` (code default `true`; production sets no key) every route below answers
+404, as an Identity before 0096 does, and deletions already scheduled still
+complete. Deletion closes the login only: the patient, the NIN binding,
+clinical, consent and access, audit, authentication and notification records
+are all kept.
+
+- `GET /api/v1/identity/me/account-deletion` (the website's served probe): 200
+  `{ waitingPeriodSeconds, confirmationTtlSeconds, request: null | { requestId,
+  state: 'awaiting_confirmation'|'pending'|'blocked'|'cancelled'|'completed'|
+  'expired'|'superseded', requestedAt, confirmationExpiresAt, scheduledFor,
+  blockedReasonCode: 'LEGAL_HOLD'|'RETENTION_POLICY_UNAVAILABLE'|
+  'WORKFORCE_ACCOUNT'|null, cancelledAt, cancellable } }`; 403
+  `PATIENT_ACCESS_DENIED`.
+- `POST /api/v1/identity/me/account-deletion` (no body): 201 `{ requestId,
+  confirmationToken (43-character base64url, single use; only its SHA-256 is
+  stored), confirmationExpiresAt (10 minutes), waitingPeriodSeconds }`; 403
+  `PATIENT_RECENT_AUTH_REQUIRED` (sign-in older than 10 minutes),
+  `PATIENT_RECENT_RECOVERY_HOLD` (24 hours after an OTP recovery),
+  `PATIENT_SESSION_REQUIRED`; 409 `ACCOUNT_DELETION_ALREADY_PENDING`; 429
+  `ACCOUNT_DELETION_RATE_LIMITED` (the sixth in a day); 503
+  `ACCOUNT_DELETION_UNAVAILABLE`.
+- `POST /api/v1/identity/me/account-deletion/confirm` `{ requestId (uuid v4),
+  confirmationToken, confirmation }` (`DELETE MY ACCOUNT`, any case and
+  spacing): 200 `{ requestId, state: 'pending'|'blocked'|'completed',
+  scheduledFor, blockedReasonCode }`; 403
+  `ACCOUNT_DELETION_CONFIRMATION_INVALID` (wrong token or phrase, or already
+  used; the fifth failure expires the request),
+  `ACCOUNT_DELETION_CONFIRMATION_EXPIRED`, `PATIENT_RECENT_AUTH_REQUIRED`; 400
+  `INVALID_ACCOUNT_DELETION_COMMAND`; 503.
+- `POST /api/v1/identity/me/account-deletion/cancel` `{ requestId }`: 200 `{
+  requestId, state: 'cancelled', replayed }`; 404 `ACCOUNT_DELETION_NOT_FOUND`;
+  409 `ACCOUNT_DELETION_NOT_CANCELLABLE` (completed, blocked, expired or due);
+  503.
+
+The login stops working at `scheduledFor` (14 days after confirmation); the
+sweeper completes the deletion within a minute: sessions, federated links, the
+access PIN, patient-granted access (approvals, PIN grants and 0095's shares;
+break-glass is untouched), pending access requests and notification devices are
+closed, emergency contacts deactivated, open share invitations cancelled, a
+pending contact change invalidated and pending records-opened emails
+suppressed. Inbox codes (resource `account-deletion`, the request id):
+`ACCOUNT_DELETION_SCHEDULED` (`scheduledFor`), `ACCOUNT_DELETION_CANCELLED`
+(`{}`), `ACCOUNT_DELETION_BLOCKED` (`reasonCode`). Emails, durable and sent by
+the sweeper to the account's verified email: notification-api `POST
+notifications/account-deletion` `{ channel: 'email', recipient, kind:
+'scheduled'|'cancelled'|'completed', scheduledFor (scheduled only), plan? }`,
+keyed `account-deletion:<requestId>:<kind>`; no name, Health ID or record.
+
 `GET /api/v1/identity/me` returns the authenticated patient's profile and HID.
 `GET /api/v1/identity/me/access-history` returns at most 50 safe grant summaries;
 grant status does not assert notification delivery. Access-history items

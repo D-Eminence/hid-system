@@ -1249,6 +1249,81 @@ revoke all on function identity.patient_self_contact(text,uuid),
   identity.remove_my_profile_photo(text,uuid),
   ehr.save_my_reported_health_profile(bigint,text,text,text,text,text,text) from public;
 
+-- Patient sharing (0095), as that migration grants them: the patient's
+-- search, share and invitation commands, the staff "shared with you",
+-- invitation list and accept, the invitation sweep and the records-opened
+-- notice, claim and outcome to the Identity runtime and the schema test
+-- runtime. Nothing to the EHR runtime; no grant on the three 0095 tables
+-- (only these SECURITY DEFINER commands touch them); the internal helpers
+-- (eligibility, role, staff actor, share writer, expiry, audit, the guard
+-- trigger) are granted to no role. The replaced access history keeps its ACL.
+grant execute on function identity.search_share_providers(text,uuid,text),
+  identity.create_my_consent_share(text,uuid,uuid,text,text,text,text),
+  identity.list_my_share_invitations(text,uuid),
+  identity.create_my_share_invitation(text,uuid,text,text,text,text,text,text),
+  identity.record_my_share_invitation_delivery(text,uuid,uuid,text,text,text),
+  identity.cancel_my_share_invitation(text,uuid,uuid),
+  identity.confirm_my_share_invitation(text,uuid,uuid),
+  identity.list_shared_with_me(),
+  identity.list_share_invitations_for_me(),
+  identity.accept_share_invitation(uuid),
+  identity.expire_share_invitations(integer),
+  identity.note_record_access(uuid),
+  identity.claim_record_access_alerts(text,integer,integer),
+  identity.record_record_access_alert_outcome(uuid,text,text,text,text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.share_audit(text,text,uuid,uuid,uuid,uuid,text,text,text,uuid,text,jsonb),
+  identity.share_provider_eligible(uuid),
+  identity.share_provider_role(uuid),
+  identity.share_staff_actor(),
+  identity.write_patient_share(uuid,uuid,text,uuid,text,text,text,uuid,text,text),
+  identity.close_expired_share_invitations(uuid,integer),
+  identity.guard_share_invitation_mutation(),
+  identity.search_share_providers(text,uuid,text),
+  identity.create_my_consent_share(text,uuid,uuid,text,text,text,text),
+  identity.list_my_share_invitations(text,uuid),
+  identity.create_my_share_invitation(text,uuid,text,text,text,text,text,text),
+  identity.record_my_share_invitation_delivery(text,uuid,uuid,text,text,text),
+  identity.cancel_my_share_invitation(text,uuid,uuid),
+  identity.confirm_my_share_invitation(text,uuid,uuid),
+  identity.list_shared_with_me(),
+  identity.list_share_invitations_for_me(),
+  identity.accept_share_invitation(uuid),
+  identity.expire_share_invitations(integer),
+  identity.note_record_access(uuid),
+  identity.claim_record_access_alerts(text,integer,integer),
+  identity.record_record_access_alert_outcome(uuid,text,text,text,text) from public;
+
+-- Delete my account (0096, main 0064), as that migration grants them: the
+-- patient's status, request, confirm and cancel, the system finalizer and the
+-- deletion emails' claim and outcome to the Identity runtime and the schema
+-- test runtime. Nothing to the EHR runtime; no grant on the five 0096 tables
+-- (only these SECURITY DEFINER commands touch them); the due check, the
+-- retention evaluation, the completion, the audit helper and the two trigger
+-- functions are granted to no role. The replaced current_patient_account and
+-- patient_self_session keep their ACLs.
+grant execute on function identity.my_account_deletion_status(text,uuid),
+  identity.request_my_account_deletion(text,uuid,text),
+  identity.confirm_my_account_deletion(text,uuid,uuid,text,text),
+  identity.cancel_my_account_deletion(text,uuid,uuid),
+  identity.finalize_due_patient_account_deletions(integer),
+  identity.claim_account_deletion_notices(text,integer,integer),
+  identity.record_account_deletion_notice_outcome(uuid,text,text,text,text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function auth.protect_deleted_account(),
+  platform.guard_legal_hold_mutation(),
+  identity.patient_account_deletion_due(uuid),
+  identity.account_deletion_audit(text,text,uuid,uuid,text,text,text,uuid,jsonb),
+  platform.evaluate_patient_account_deletion(uuid,uuid),
+  identity.complete_patient_account_deletion(uuid,text),
+  identity.my_account_deletion_status(text,uuid),
+  identity.request_my_account_deletion(text,uuid,text),
+  identity.confirm_my_account_deletion(text,uuid,uuid,text,text),
+  identity.cancel_my_account_deletion(text,uuid,uuid),
+  identity.finalize_due_patient_account_deletions(integer),
+  identity.claim_account_deletion_notices(text,integer,integer),
+  identity.record_account_deletion_notice_outcome(uuid,text,text,text,text) from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),
