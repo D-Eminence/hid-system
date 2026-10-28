@@ -16,6 +16,7 @@ jest.mock('jose', () => ({
 import { UnauthorizedException } from '@nestjs/common';
 import type { Response } from 'express';
 import { DomainProblem } from '../common/problem';
+import { AccountSuspendedProblem } from './account-suspended';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { AuditService } from '../audit/audit.service';
@@ -353,6 +354,32 @@ describe('AuthController Google exchange', () => {
       eventType: 'login_failed', outcome: 'denied',
     }));
   });
+
+  it.each([
+    [new DomainProblem(404, 'GOOGLE_NOT_REGISTERED', 'This Google account is not registered on Health ID. Use Sign Up first.'),
+      404, 'google_not_registered', undefined],
+    [new DomainProblem(409, 'GOOGLE_LINK_REQUIRED', 'Sign in with your password, then link Google from Settings.'),
+      409, 'google_link_required', undefined],
+    [new DomainProblem(409, 'GOOGLE_ACCOUNT_EXISTS', 'You already have a Health ID. Sign in with Google instead.'),
+      409, 'google_account_exists', undefined],
+    [new AccountSuspendedProblem('suspended-subject'), 403, 'account_suspended', 'suspended-subject'],
+  ] as const)('passes a patient Google refusal (0093) through as it is, audited with its reason (%#)',
+    async (problem, status, reason, actorSubject) => {
+      const challenge = issueNonce(controller);
+      google.login.mockRejectedValue(problem);
+      const request = requestFor({ cookies: { [nonceCookie]: challenge.cookie } });
+      const response = responseFor();
+      const error = await controller.exchangeGoogleIdToken(googleInput('patient-login'), request, response)
+        .catch((caught: unknown) => caught);
+      expect(error).toBe(problem);
+      expect((error as DomainProblem).getStatus()).toBe(status);
+      expect(sessionAudit.record).toHaveBeenCalledWith({
+        correlationId: expect.any(String), ...(actorSubject ? { actorSubject } : {}),
+        eventType: 'login_failed', outcome: 'denied', sourceIp: expect.anything(), userAgent: 'Google-exchange-test',
+        details: { authentication_method: 'oidc', identity_provider: 'google', reason },
+      });
+      expect(response.clearCookie).toHaveBeenCalledWith(nonceCookie, expect.any(Object));
+    });
 
   // A pending enrollment lives only in the hid_enrollment cookie, and this
   // branch refuses a second start key for a NIN while its enrollment is

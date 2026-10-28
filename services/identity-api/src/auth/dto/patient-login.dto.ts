@@ -1,12 +1,17 @@
 import { Transform } from 'class-transformer';
 import { IsIn, IsOptional, IsString, Matches, MaxLength, MinLength } from 'class-validator';
+import { PATIENT_PRINCIPAL_PATTERN } from '../patient-principal';
 import { LOGIN_TURNSTILE_ACTIONS } from './login.dto';
 
-/** The existing email login also accepts the issued HID for phone-only accounts. */
+/**
+ * Patient sign-in. The field keeps its wire name `email` but takes an email,
+ * the issued Health ID or the phone number on the account (owner decision of
+ * 2026-10-28): "+" and 7-15 digits, or a Nigerian local number starting 0.
+ */
 export class PatientLoginDto {
   @Transform(({ value }: { value: unknown }) => typeof value === 'string'
     ? (/^hid-/i.test(value.trim()) ? value.trim().toUpperCase() : value.trim()) : value)
-  @Matches(/^(?:[^\s@]+@[^\s@]+\.[^\s@]+|HID-[A-HJ-NP-Z2-9]{6,32})$/)
+  @Matches(PATIENT_PRINCIPAL_PATTERN)
   @MaxLength(254)
   email!: string;
 

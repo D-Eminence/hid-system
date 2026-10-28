@@ -5,6 +5,7 @@ import type { HidRequest } from '../common/request-context';
 import { PatientSelfService } from './patient-self.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { SetPatientAccessPinDto } from './dto/set-patient-access-pin.dto';
+import { decodeAccessLogCursor } from './patient-access-log';
 
 @Controller('identity')
 @PatientAllowed()
@@ -26,6 +27,23 @@ export class PatientSelfController {
       throw new DomainProblem(400, 'INVALID_NOTIFICATION_LIMIT', 'Notification limit must be an integer from 1 to 100');
     }
     return this.self.notificationInbox(request, parsed);
+  }
+
+  /** The bell's count (0093): unread inbox items plus unread imported hid-1.0 notifications. Not audited when it succeeds: it is polled. */
+  @Get('me/notifications/unread-count')
+  unreadNotificationCount(@Req() request: HidRequest) { return this.self.unreadNotificationCount(request); }
+
+  /** Who viewed or changed the patient's record (0093), newest first; `before` is the previous page's nextBefore. */
+  @Get('me/access-log')
+  accessLog(@Req() request: HidRequest, @Query('limit') limit?: string, @Query('before') before?: string) {
+    const parsed = limit === undefined ? 50 : Number(limit);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+      throw new DomainProblem(400, 'INVALID_ACCESS_LOG_LIMIT', 'Access log limit must be an integer from 1 to 100');
+    }
+    if (before !== undefined && typeof before !== 'string') {
+      throw new DomainProblem(400, 'INVALID_ACCESS_LOG_CURSOR', 'The access log cursor is invalid');
+    }
+    return this.self.accessLog(request, parsed, before === undefined ? undefined : decodeAccessLogCursor(before));
   }
 
   @Get('me/imported-notifications')

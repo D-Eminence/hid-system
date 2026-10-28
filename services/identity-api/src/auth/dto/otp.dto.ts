@@ -1,5 +1,6 @@
 import { Transform } from 'class-transformer';
 import { IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength, MinLength } from 'class-validator';
+import { PATIENT_PRINCIPAL_PATTERN } from '../patient-principal';
 import type { TurnstileAction } from '../turnstile.service';
 
 export const RECOVERY_OTP_PURPOSES = [
@@ -12,9 +13,10 @@ export const RECOVERY_TURNSTILE_ACTIONS = [
 ] as const satisfies readonly TurnstileAction[];
 
 export class StartOtpDto {
+  /** An email, a Health ID or a phone number (owner decision of 2026-10-28), as patient sign-in takes them. */
   @Transform(({ value }: { value: unknown }) => typeof value === 'string' ? value.trim() : value)
   @IsString()
-  @Matches(/^(?:[^\s@]+@[^\s@]+\.[^\s@]+|HID-[A-HJ-NP-Z2-9]{6,32})$/i)
+  @Matches(PATIENT_PRINCIPAL_PATTERN)
   @MaxLength(254)
   identifier!: string;
 

@@ -31,9 +31,10 @@ describe('Patient enrollment request contract', () => {
     const valid = { firstName: 'Ada', lastName: 'Obi', email: 'ada@example.test', phone: '08031234567',
       gender: 'female', termsAccepted: true, turnstileToken: 'opaque-token', turnstileAction: 'patient-enrollment' };
 
-    it('accepts the declared profile, with or without the hospital, and both phone forms', async () => {
+    it('accepts the declared profile, with or without the hospital, a Nigerian or any country\'s number', async () => {
       for (const body of [valid, { ...valid, hospitalCurrentlyUsing: 'LUTH' }, { ...valid, phone: '+2348031234567' },
-        { ...valid, gender: 'male' }]) {
+        { ...valid, gender: 'male' }, { ...valid, phone: '+447700900123' }, { ...valid, phone: '+1 (415) 555-0100' },
+        { ...valid, phone: '+683 4002' }, { ...valid, phone: '0803-123-4567' }]) {
         expect(await validate(plainToInstance(SignupPatientEnrollmentDto, body), options)).toHaveLength(0);
       }
     });
@@ -41,7 +42,8 @@ describe('Patient enrollment request contract', () => {
     it.each([
       ['firstName', { firstName: '' }], ['firstName', { firstName: 'a'.repeat(81) }],
       ['lastName', { lastName: undefined }], ['email', { email: 'not-an-email' }],
-      ['phone', { phone: '+447700900123' }], ['gender', { gender: 'robot' }],
+      ['phone', { phone: '447700900123' }], ['phone', { phone: '+0447700900123' }], ['phone', { phone: 'call me' }],
+      ['gender', { gender: 'robot' }],
       ['hospitalCurrentlyUsing', { hospitalCurrentlyUsing: 'h'.repeat(121) }],
       ['termsAccepted', { termsAccepted: false }], ['turnstileAction', { turnstileAction: 'login' }],
       ['nin', { nin: '12345678901' }],

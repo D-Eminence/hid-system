@@ -149,3 +149,36 @@ describe('the suspended-account carve-out (owner decision of 2026-10-28)', () =>
     expect(sessionAudit.recordLoginFailure).toHaveBeenCalledWith(patientLogin.email, expect.any(Object));
   });
 });
+
+describe('phone sign-in refusals (0093; owner decision of 2026-10-28)', () => {
+  it.each(['08031234567', '0803 123 4567', '+234 803 123 4567'])(
+    'a wrong password for the phone %s is the uniform 401, counted under the E.164 number', async (typed) => {
+      const { controller, auth, sessionAudit } = harness();
+      auth.login.mockRejectedValue(new UnauthorizedException('Invalid credentials'));
+      const refusal = await failure(controller.patientLogin({ ...patientLogin, email: typed }, requestFor(), responseFor()));
+      expect(refusal.getStatus()).toBe(401);
+      expect(refusal.message).toBe('Invalid credentials');
+      expect(sessionAudit.recordLoginFailure).toHaveBeenCalledWith('+2348031234567', expect.anything());
+    });
+
+  it('a phone that matches no account answers exactly as an unknown email does', async () => {
+    const answers = [];
+    for (const email of ['08039999999', 'nobody@example.invalid']) {
+      const { controller, auth } = harness();
+      auth.login.mockRejectedValue(new UnauthorizedException('Invalid credentials'));
+      const refusal = await failure(controller.patientLogin({ ...patientLogin, email }, requestFor(), responseFor()));
+      answers.push({ status: refusal.getStatus(), body: refusal.getResponse() });
+    }
+    expect(answers[0]).toEqual(answers[1]);
+  });
+
+  it('the right password for a suspended migrated patient by phone is 403 ACCOUNT_SUSPENDED, not a counted failure', async () => {
+    const { controller, auth, sessionAudit } = harness();
+    auth.login.mockRejectedValue(new AccountSuspendedProblem('legacy-subject'));
+    const refusal = await failure(controller.patientLogin({ ...patientLogin, email: '08031234567' }, requestFor(), responseFor()));
+    expect(refusal).toMatchObject({ status: 403, code: 'ACCOUNT_SUSPENDED' });
+    expect(sessionAudit.recordLoginFailure).not.toHaveBeenCalled();
+    expect(sessionAudit.record).toHaveBeenCalledWith(expect.objectContaining({ actorSubject: 'legacy-subject',
+      outcome: 'denied', details: { reason: 'account_suspended' } }));
+  });
+});

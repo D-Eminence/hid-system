@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from 'node:crypto';
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { Injectable, Logger, UnauthorizedException } from '@nestjs/common';
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from 'jose';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AccountSuspendedProblem } from './account-suspended';
@@ -12,6 +12,9 @@ import { AuthSessionAuditService } from './auth-session-audit.service';
 import { LocalAuthProvider } from './local-auth.provider';
 import type { SessionEventMetadata } from './token.service';
 import { TokenService } from './token.service';
+import { recordAccountSecurityNotice } from './account-security-notice';
+import { loginPrincipalKey } from './patient-principal';
+import { createContactLookupHmac } from '../identity/contact-lookup';
 
 const GOOGLE_ISSUERS = ['https://accounts.google.com', 'accounts.google.com'] as const;
 const GOOGLE_JWKS_URL = 'https://www.googleapis.com/oauth2/v3/certs';
@@ -37,6 +40,19 @@ export type GoogleExchangeResult =
 
 const PENDING_TOKEN_TTL_MS = 30 * 60 * 1_000;
 
+/** Google sign-in refusals a patient is told about (owner decisions of 2026-10-28). */
+export const GOOGLE_NOT_REGISTERED_DETAIL = 'This Google account is not registered on Health ID. Use Sign Up first.';
+export const GOOGLE_LINK_REQUIRED_DETAIL = 'Sign in with your password, then link Google from Settings.';
+export const GOOGLE_ACCOUNT_EXISTS_DETAIL = 'You already have a Health ID. Sign in with Google instead.';
+
+/** What auth.link_google_identity_by_verified_email (0093) answers. */
+interface GoogleEmailLinkRow extends QueryResultRow {
+  outcome: 'linked' | 'suspended' | 'none' | 'ambiguous' | 'not_verified' | 'linked_elsewhere'
+    | 'already_linked' | 'workforce' | 'unverified';
+  account_id: string | null;
+  account_subject: string | null;
+}
+
 @Injectable()
 export class GoogleAuthenticationService {
   private readonly environment = getEnvironment();
@@ -47,6 +63,7 @@ export class GoogleAuthenticationService {
       .filter(Boolean),
   );
   private readonly jwks = createRemoteJWKSet(new URL(GOOGLE_JWKS_URL));
+  private readonly logger = new Logger(GoogleAuthenticationService.name);
 
   constructor(
     private readonly database: DatabaseService,
@@ -70,8 +87,15 @@ export class GoogleAuthenticationService {
     const mapped = await this.resolveExisting(identity.subject);
     if (mapped) return { kind: 'session', session: await this.issueMapped(mapped, actorKind, event) };
     if (intent !== 'enroll' || actorKind !== 'patient') throw this.denied();
-    // A verified Google email is a conflict hint only. It never authenticates
-    // an HID account or proves two patient identities belong to one person.
+    // The sign-up page's Google button: an email a patient account already
+    // uses starts no sign-up (owner decision of 2026-10-28); the patient signs
+    // in with Google instead, which links it (login below). Patients migrated
+    // from hid-1.0 count too (0093's auth.patient_email_registered).
+    if (identity.verifiedEmail && await this.patientEmailRegistered(identity.verifiedEmail, event)) {
+      throw new DomainProblem(409, 'GOOGLE_ACCOUNT_EXISTS', GOOGLE_ACCOUNT_EXISTS_DETAIL);
+    }
+    // Any other account with the email (a workforce account) is a conflict
+    // hint only. It never authenticates an HID account.
     if (identity.verifiedEmail && await this.hasExistingAccountEmail(identity.verifiedEmail)) {
       throw new DomainProblem(409, 'GOOGLE_EXISTING_ACCOUNT_LINK_REQUIRED',
         'Sign in to your existing Health ID account to link Google');
@@ -109,8 +133,54 @@ export class GoogleAuthenticationService {
   ): Promise<LoginResult> {
     const identity = await this.verifiedIdentity(idToken, nonce);
     const mapped = await this.resolveExisting(identity.subject);
-    if (!mapped) throw this.denied();
-    return this.issueMapped(mapped, actorKind, event);
+    if (mapped) return this.issueMapped(mapped, actorKind, event);
+    if (actorKind !== 'patient') throw this.denied();
+    return this.linkByVerifiedEmail(identity, event);
+  }
+
+  /**
+   * A patient's first Google sign-in (owner decision of 2026-10-28): when no
+   * Google link exists and Google says the email is verified, 0093's
+   * auth.link_google_identity_by_verified_email links the Google account to
+   * the one active patient account whose verified email it is (migrated
+   * hid-1.0 patients included, never a workforce account), with its audit row
+   * and the SECURITY_GOOGLE_LINKED inbox notice, and the patient is signed in
+   * exactly as a linked Google sign-in is. No patient with the email: 404
+   * GOOGLE_NOT_REGISTERED. Two or more, an unverified or other account email,
+   * an inactive account, or a Google link the account or subject already has:
+   * 409 GOOGLE_LINK_REQUIRED. A suspended patient (the email's, or the one
+   * this Google subject is linked to): 403 ACCOUNT_SUSPENDED. No verified
+   * email, or a workforce account: the one 401 GOOGLE_SIGN_IN_DENIED.
+   */
+  private async linkByVerifiedEmail(identity: VerifiedGoogleIdentity, event: SessionEventMetadata): Promise<LoginResult> {
+    let linked: GoogleEmailLinkRow | undefined;
+    try {
+      const lookup = identity.verifiedEmail ? this.emailLookupHmac(identity.verifiedEmail) : null;
+      linked = (await this.database.withSystemTransaction(event.correlationId, (client) =>
+        client.query<GoogleEmailLinkRow>(
+          `select outcome, account_id::text, account_subject
+             from auth.link_google_identity_by_verified_email($1, $2, $3)`,
+          [identity.subject, identity.verifiedEmail ?? null, lookup]))).rows[0];
+    } catch {
+      throw this.denied();
+    }
+    switch (linked?.outcome) {
+      case 'linked':
+        if (!linked.account_id || !linked.account_subject) throw this.denied();
+        return this.issueMapped({ account_id: linked.account_id, account_subject: linked.account_subject },
+          'patient', event);
+      case 'suspended':
+        throw new AccountSuspendedProblem(linked.account_subject ?? '');
+      case 'none':
+        throw new DomainProblem(404, 'GOOGLE_NOT_REGISTERED', GOOGLE_NOT_REGISTERED_DETAIL);
+      case 'ambiguous':
+      case 'not_verified':
+      case 'linked_elsewhere':
+      case 'already_linked':
+        throw new DomainProblem(409, 'GOOGLE_LINK_REQUIRED', GOOGLE_LINK_REQUIRED_DETAIL);
+      default:
+        throw this.denied();
+    }
   }
 
   async onboardingStatus(cookie: string | undefined): Promise<GooglePendingOnboarding> {
@@ -180,18 +250,21 @@ export class GoogleAuthenticationService {
       if (!(error instanceof UnauthorizedException)) {
         throw this.unavailable();
       }
-      await this.sessionAudit.recordLoginFailure(principal, event);
+      await this.sessionAudit.recordLoginFailure(loginPrincipalKey(principal, 'patient'), event);
       throw this.denied();
     }
     if (credential.accountId !== actor.accountId) {
-      await this.sessionAudit.recordLoginFailure(principal, event);
+      await this.sessionAudit.recordLoginFailure(loginPrincipalKey(principal, 'patient'), event);
       throw this.denied();
     }
     const { subject } = await this.verifiedIdentity(idToken, nonce);
     try {
-      await this.database.withSystemTransaction(event.correlationId, (client) =>
-        client.query('select auth.link_google_identity_to_patient_account($1,$2)',
-          [actor.accountId, subject]));
+      const accountId = actor.accountId;
+      await this.database.withSystemTransaction(event.correlationId, async (client) => {
+        await client.query('select auth.link_google_identity_to_patient_account($1,$2)', [accountId, subject]);
+        // "A Google account was linked to your Health ID" (0093).
+        await recordAccountSecurityNotice(client, accountId, 'SECURITY_GOOGLE_LINKED', this.logger, event.correlationId);
+      });
     } catch {
       throw this.denied();
     }
@@ -229,6 +302,27 @@ export class GoogleAuthenticationService {
       ...(verifiedEmail && verifiedEmail.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(verifiedEmail)
         ? { verifiedEmail } : {}),
     };
+  }
+
+  private async patientEmailRegistered(email: string, event: SessionEventMetadata): Promise<boolean> {
+    try {
+      const lookup = this.emailLookupHmac(email);
+      const result = await this.database.withSystemTransaction(event.correlationId, (client) =>
+        client.query<{ registered: boolean }>('select auth.patient_email_registered($1, $2) as registered',
+          [email, lookup]));
+      return result.rows[0]?.registered === true;
+    } catch {
+      throw this.unavailable();
+    }
+  }
+
+  /** The email's contact lookup HMAC (a patient's contact email), or null when the key is not configured. */
+  private emailLookupHmac(email: string): string | null {
+    try {
+      return createContactLookupHmac('email', email);
+    } catch {
+      return null;
+    }
   }
 
   private async hasExistingAccountEmail(email: string): Promise<boolean> {

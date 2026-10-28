@@ -4,6 +4,7 @@ import { DomainProblem } from '../common/problem';
 import type { ActorContext, HidRequest } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { requireNoRecentRecoveryHold, requireRecentPatientAuthentication } from './recent-authentication';
+import { type AccessLogCursor, type AccessLogPage, publishAccessLog } from './patient-access-log';
 
 export function requirePatient(actor: ActorContext | undefined): ActorContext & { patientId: string; sessionId: string } {
   if (actor?.kind !== 'patient' || !actor.patientId || !actor.sessionId) {
@@ -64,6 +65,52 @@ export class PatientSelfService {
         resourceType: 'imported-notification', resourceId: itemId, outcome: 'success', purposeOfUse: 'account-self' });
       return itemId ? result.rows[0] : result.rows;
     });
+  }
+
+  /**
+   * The patient's unread count for the bell (0093): unread inbox items plus
+   * unread imported hid-1.0 notifications, at most 1000, for the live patient
+   * session. A read only, polled by the portal: no audit row when it succeeds
+   * (@AuditFailuresOnly records a refusal).
+   */
+  async unreadNotificationCount(request: HidRequest): Promise<{ unread: number }> {
+    const actor = requirePatient(request.actor);
+    const unread = await this.database.withSystemTransaction(request.correlationId, async (client) => {
+      await client.query("select set_config('app.actor_subject',$1,true)", [actor.subject]);
+      const result = await client.query<{ unread: number | null }>(
+        'select identity.count_my_unread_notifications($1, $2) as unread', [actor.subject, actor.sessionId]);
+      return result.rows[0]?.unread;
+    });
+    if (typeof unread !== 'number' || !Number.isInteger(unread) || unread < 0) {
+      throw new DomainProblem(403, 'PATIENT_ACCESS_DENIED', 'Patient access is unavailable');
+    }
+    return { unread };
+  }
+
+  /**
+   * Who viewed or changed the patient's record (0093), newest first: names
+   * of clinicians and facilities, never record contents. Audited as
+   * identity.patient.self.access-log, in the read's transaction.
+   */
+  async accessLog(request: HidRequest, limit: number, before?: AccessLogCursor): Promise<AccessLogPage> {
+    const actor = requirePatient(request.actor);
+    const value = await this.database.withSystemTransaction(request.correlationId, async (client) => {
+      await client.query("select set_config('app.actor_subject',$1,true)", [actor.subject]);
+      const result = await client.query<{ value: unknown }>(
+        'select identity.patient_self_access_log($1, $2, $3, $4::timestamptz, $5::bigint) as value',
+        [actor.subject, actor.sessionId, limit, before?.occurredAt ?? null, before?.sequenceId ?? null]);
+      const answer = result.rows[0]?.value ?? null;
+      await this.audit.recordWithClient(client, {
+        correlationId: request.correlationId, actorType: 'patient', actorSubject: actor.subject,
+        actorAccountId: actor.accountId, patientId: actor.patientId,
+        action: 'identity.patient.self.access-log', resourceType: 'patient-self',
+        outcome: answer === null ? 'denied' : 'success', purposeOfUse: 'patient-self',
+        sourceIp: request.ip, userAgent: request.header('user-agent'),
+      });
+      return answer;
+    });
+    if (value === null) throw new DomainProblem(403, 'PATIENT_ACCESS_DENIED', 'Patient access is unavailable');
+    return publishAccessLog(value);
   }
 
   async notificationInbox(request: HidRequest, limit?: number) {

@@ -6,6 +6,8 @@ import { DatabaseService } from '../database/database.service';
 import { getEnvironment } from '../config/environment';
 import type { CredentialIdentity } from './auth.types';
 import { AccountSuspendedProblem } from './account-suspended';
+import { patientPhoneLookupValue } from '../identity/contact-lookup';
+import { loginPrincipalKey, patientPrincipal } from './patient-principal';
 
 interface AccountRow {
   id: string;
@@ -37,13 +39,20 @@ export class LocalAuthProvider {
     timeCost: 3,
     parallelism: 1,
   });
+  /**
+   * A bcrypt hash at cost 10, hid-1.0's (Supabase's) cost, verified on every
+   * attempt whose account holds no bcrypt hash (see authenticate).
+   */
+  private readonly dummyBcryptHash = bcrypt.hash(randomBytes(32).toString('base64'), 10);
 
   constructor(private readonly database: DatabaseService) {}
 
   async authenticate(principal: string, password: string,
     actorKind: 'staff' | 'patient' = 'staff', correlationId?: string): Promise<CredentialIdentity> {
-    const hidLogin = actorKind === 'patient' && /^HID-[A-HJ-NP-Z2-9]{6,32}$/i.test(principal);
-    const principalHash = this.principalHash(principal);
+    // A patient signs in with an email, a Health ID or a phone number (owner
+    // decision of 2026-10-28); staff with an email only.
+    const patient = actorKind === 'patient' ? patientPrincipal(principal) : undefined;
+    const principalHash = this.principalHash(loginPrincipalKey(principal, actorKind));
     const attempt = await this.database.query<{ locked: boolean }>(
       `select locked_until is not null and locked_until > clock_timestamp() as locked
          from auth.login_attempts
@@ -74,34 +83,49 @@ export class LocalAuthProvider {
               or exists (select 1 from identity.staff_facility_memberships staff_membership where staff_membership.account_id = account.id)
             ) as workforce`
       : '';
-    const accountSql = `select account.id::text, account.subject, account.email,
+    let account: AccountRow | undefined;
+    if (patient?.kind === 'hid' || patient?.kind === 'phone') {
+      // By Health ID or phone (its contact lookup HMAC) through 0093's
+      // auth.find_patient_account: identity.patients' RLS lets this service
+      // read public-enrollment patients only, so a direct query never found a
+      // patient migrated from hid-1.0. It answers the one active patient's
+      // account (any status but deleted, as the email lookup below) or
+      // nothing, also when a phone matches more than one account. A Nigerian
+      // number is looked up in both its stored forms (+234... and +2340...,
+      // as hid-1.0 kept a trunk 0), still under the one lockout above.
+      const lookup = patient.kind === 'phone' ? patientPhoneLookupValue(patient.value) : patient.value;
+      account = (await this.database.withSystemTransaction(correlationId ?? 'auth-patient-login-lookup',
+        (client) => client.query<AccountRow>(
+          `select found.account_id::text as id, found.account_subject as subject, found.email,
+                  found.display_name, found.password_hash, found.password_algorithm,
+                  found.row_version::text, found.account_status as status, found.disabled_now, found.workforce
+             from auth.find_patient_account($1, $2) found`,
+          [patient.kind, lookup]))).rows[0];
+    } else if (patient?.kind !== 'invalid') {
+      const accountSql = `select account.id::text, account.subject, account.email,
             account.display_name, account.password_hash, account.password_algorithm,
             account.row_version::text, account.status,
             coalesce(account.disabled_until > clock_timestamp(), false) as disabled_now${workforceSql}
        from auth.accounts account
-      where ${hidLogin
-        ? `exists (select 1 from identity.patients patient
-             where patient.account_id=account.id and upper(patient.hid_code)=upper($1)
-               and patient.status='active')`
-        : 'lower(account.email) = lower($1)'}
+      where lower(account.email) = lower($1)
         and ${actorKind === 'patient'
           ? "account.status <> 'deleted'"
           : `account.status = 'active'
         and (account.disabled_until is null or account.disabled_until <= clock_timestamp())`}
       limit 1`;
-    const accountResult = hidLogin
-      ? await this.database.withSystemTransaction(correlationId ?? 'auth-hid-login-lookup', (client) =>
-          client.query<AccountRow>(accountSql, [principal]))
-      : await this.database.query<AccountRow>(accountSql, [principal]);
-    const account = accountResult.rows[0];
-    const hash = account?.password_hash ?? await this.dummyHash;
-    let passwordValid: boolean;
-    if (account?.password_algorithm === 'bcrypt_legacy') {
-      passwordValid = await bcrypt.compare(password, hash).catch(() => false);
-      if (!passwordValid) await argon2.verify(await this.dummyHash, password).catch(() => false);
-    } else {
-      passwordValid = await argon2.verify(hash, password).catch(() => false);
+      account = (await this.database.query<AccountRow>(accountSql, [principal.trim()])).rows[0];
     }
+    // Every attempt runs one bcrypt and one argon2 verification, in that
+    // order, the account's hash in its own algorithm and a dummy hash in the
+    // other (both dummies without an account), so that timing tells neither
+    // which accounts still hold a hid-1.0 bcrypt hash (by email, Health ID or
+    // phone) nor whether a refused password was right.
+    const legacy = account?.password_algorithm === 'bcrypt_legacy';
+    const bcryptValid = await bcrypt.compare(password,
+      legacy && account?.password_hash ? account.password_hash : await this.dummyBcryptHash).catch(() => false);
+    const argonValid = await argon2.verify(
+      !legacy && account?.password_hash ? account.password_hash : await this.dummyHash, password).catch(() => false);
+    const passwordValid = legacy ? bcryptValid : argonValid;
     if (!account || !passwordValid || !['argon2id', 'bcrypt_legacy'].includes(account.password_algorithm ?? '')) {
       throw new UnauthorizedException('Invalid credentials');
     }

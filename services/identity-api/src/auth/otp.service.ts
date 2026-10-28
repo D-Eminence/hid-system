@@ -10,18 +10,25 @@ import type { RecoveryOtpPurpose } from './dto/otp.dto';
 import { emailFirstName } from './email-first-name';
 import { NotificationOtpClient, type OtpDeliveryOutcome } from './notification-otp.client';
 import { consumeRateLimit, lockRateLimitBucket, rateLimitBlocked } from './rate-limit';
+import { recordAccountSecurityNotice } from './account-security-notice';
+import { patientPhoneLookupValue } from '../identity/contact-lookup';
+import { patientPrincipal } from './patient-principal';
 
 interface AccountRow {
   id: string;
   email: string | null;
+  email_verified: boolean;
   token_version: string;
   phone_enrollment_id: string | null;
   phone_ciphertext: Buffer | null;
   phone_key_version: string | null;
-  /** The account's active patient, when this service may read it (RLS: patients from public enrollment). */
+}
+/** The account's active patient as the reset emails name them (0093's auth.find_patient_account). */
+interface PatientNamingRow {
   patient_first_name: string | null;
   patient_hid_code: string | null;
 }
+const NO_ACCOUNT = '00000000-0000-0000-0000-000000000000';
 interface RecoveryRecipient { channel: 'email' | 'sms'; value: string }
 /** Who a patient email names: their first name (if any) and Health ID. */
 interface PatientNaming { firstName?: string; healthId: string }
@@ -43,8 +50,6 @@ interface VerifiedChallengeRow {
   completion_token_hmac: string;
   completion_expires_at: Date;
   email: string | null;
-  patient_first_name: string | null;
-  patient_hid_code: string | null;
 }
 
 export function generateSixDigitOtp(draw: (minimum: number, maximum: number) => number = randomInt): string {
@@ -102,9 +107,18 @@ export class OtpService implements BeforeApplicationShutdown {
   }> {
     this.assertConfigured();
     const identifier = input.identifier.trim();
+    // An email, a Health ID or a phone number (owner decision of 2026-10-28).
+    // Emails and Health IDs are matched without regard to case, and a phone
+    // by its E.164 number, so 0803... and +234803... share one cooldown.
+    const principal = patientPrincipal(identifier);
+    const canonical = principal.value.toLowerCase();
     const ipHmac = this.hmac('ip', input.remoteIp ?? 'unavailable');
-    // Email addresses and HIDs are both matched without regard to case.
-    const identifierHmac = this.hmac('otp-start', input.purpose, identifier.toLowerCase());
+    const identifierHmac = this.hmac('otp-start', input.purpose, canonical);
+    // A phone is looked up by its contact lookup HMAC, a Nigerian number in
+    // both its stored forms (+234... and +2340..., as hid-1.0 kept a trunk 0);
+    // the cooldown stays keyed by the E.164 number. Without the key every
+    // phone start fails alike (503), before any account is read.
+    const phoneLookup = principal.kind === 'phone' ? patientPhoneLookupValue(principal.value) : undefined;
     const cooldownSeconds = this.environment.OTP_RESEND_COOLDOWN_SECONDS;
     const code = generateSixDigitOtp();
     const candidateChallengeId = randomUUID();
@@ -115,13 +129,23 @@ export class OtpService implements BeforeApplicationShutdown {
       | { kind: 'rate_limited' }
       | { kind: 'cooldown'; id: string }
     > => {
-      const account = (await client.query<AccountRow>(
-        `select account.id::text, lower(account.email)::text as email, account.token_version::text,
+      // Health ID and phone go through 0093's auth.find_patient_account, which
+      // also finds patients migrated from hid-1.0 (identity.patients' RLS
+      // hides them from this service); it answers nothing for a phone that
+      // more than one account uses. Every identifier of a kind runs the same
+      // queries whether or not an account exists; a phone or Health ID that
+      // matches none reads the account row of no account.
+      const found = principal.kind === 'hid' || principal.kind === 'phone'
+        ? (await client.query<{ account_id: string }>(
+          'select account_id::text from auth.find_patient_account($1, $2)',
+          [principal.kind, principal.kind === 'phone' ? phoneLookup : principal.value])).rows[0]
+        : undefined;
+      const account = principal.kind === 'invalid' ? undefined : (await client.query<AccountRow>(
+        `select account.id::text, lower(account.email)::text as email,
+                account.email_verified_at is not null as email_verified, account.token_version::text,
                 enrollment.id::text as phone_enrollment_id,
                 enrollment.contact_ciphertext as phone_ciphertext,
-                enrollment.key_version as phone_key_version,
-                case when patient.status = 'active' then patient.first_name end as patient_first_name,
-                case when patient.status = 'active' then patient.hid_code end as patient_hid_code
+                enrollment.key_version as phone_key_version
            from auth.accounts account
            left join identity.patients patient on patient.account_id = account.id
            left join identity.public_patient_enrollments enrollment
@@ -135,15 +159,20 @@ export class OtpService implements BeforeApplicationShutdown {
             and patient.source_system = 'hid-public-qoreid-enrollment'
           where account.status in ('active', 'pending_reset')
             and (account.disabled_until is null or account.disabled_until <= clock_timestamp())
-            and (lower(account.email) = lower($1) or upper(patient.hid_code) = upper($1))
-          order by case when lower(account.email) = lower($1) then 0 else 1 end
+            and ${principal.kind === 'email' ? 'lower(account.email) = lower($1)' : 'account.id = $1::uuid'}
+          order by enrollment.id nulls last
           limit 1`,
-        [identifier],
+        [principal.kind === 'email' ? identifier : found?.account_id ?? NO_ACCOUNT],
       )).rows[0];
-      const recipient = account?.email
-        ? { channel: 'email' as const, value: account.email }
-        : account ? this.verifiedEnrollmentPhone(account) : null;
-      const recipientHmac = this.hmac('recipient', recipient?.value ?? identifier.toLowerCase());
+      // A phone's code goes to the account's verified email only: production
+      // sends no SMS, and a declared phone never proved who holds it. Without
+      // a verified email nothing is sent and the answer stays the same.
+      const recipient = principal.kind === 'phone'
+        ? (account?.email && account.email_verified ? { channel: 'email' as const, value: account.email } : null)
+        : account?.email
+          ? { channel: 'email' as const, value: account.email }
+          : account ? this.verifiedEnrollmentPhone(account) : null;
+      const recipientHmac = this.hmac('recipient', recipient?.value ?? canonical);
       const recipientLimited = await this.consumeRateLimit(client, 'recipient', recipientHmac);
       const ipLimited = await this.consumeRateLimit(client, 'ip', ipHmac);
       const accountLimited = account
@@ -207,12 +236,19 @@ export class OtpService implements BeforeApplicationShutdown {
           this.environment.OTP_MAX_ATTEMPTS, ipHmac, account.token_version],
       );
       // A patient's reset code by email names them and their Health ID
-      // (owner decision of 2026-10-28, hid-1.0's design). Staff, admin and
-      // legacy recovery, an SMS code, and a patient this service cannot read
-      // keep the generic code message. Read in the same query, so the start
-      // answers every identifier alike and in the same time.
+      // (owner decision of 2026-10-28, hid-1.0's design), patients migrated
+      // from hid-1.0 too (0093's lookup). Staff, admin and legacy recovery and
+      // an SMS code keep the generic code message.
+      const naming = (await client.query<PatientNamingRow>(
+        'select patient_first_name, patient_hid_code from auth.find_patient_account($1, $2)',
+        ['account', account.id])).rows[0];
       const patient = input.purpose === 'PASSWORD_RESET' && recipient.channel === 'email'
-        ? this.patientNaming(account.patient_first_name, account.patient_hid_code) : undefined;
+        ? this.patientNaming(naming?.patient_first_name, naming?.patient_hid_code) : undefined;
+      // "Someone asked to reset your Health ID password" in the patient's
+      // inbox, in this transaction (0093; nothing for a staff-only account,
+      // at most once an hour).
+      await recordAccountSecurityNotice(client, account.id, 'SECURITY_PASSWORD_RESET_REQUESTED', this.logger,
+        input.correlationId);
       return { kind: 'challenge', id: candidateChallengeId, recipient, ...(patient ? { patient } : {}) };
     });
 
@@ -348,12 +384,9 @@ export class OtpService implements BeforeApplicationShutdown {
       const challenge = (await client.query<VerifiedChallengeRow>(
         `select challenge.id::text, challenge.account_id::text,
                 challenge.completion_token_hmac::text, challenge.completion_expires_at,
-                lower(account.email)::text as email,
-                patient.first_name as patient_first_name, patient.hid_code as patient_hid_code
+                lower(account.email)::text as email
            from auth.otp_challenges challenge
            join auth.accounts account on account.id = challenge.account_id
-           left join identity.patients patient
-             on patient.account_id = account.id and patient.status = 'active'
           where challenge.id = $1 and challenge.purpose = $2 and challenge.verified_at is not null
             and challenge.consumed_at is null and challenge.invalidated_at is null
             and challenge.account_token_version = account.token_version
@@ -368,15 +401,22 @@ export class OtpService implements BeforeApplicationShutdown {
       const passwordHash = await argon2.hash(input.newPassword, {
         type: argon2.argon2id, memoryCost: 65_536, timeCost: 3, parallelism: 1,
       });
+      // Who the confirmation names, patients migrated from hid-1.0 too (0093).
+      const naming = (await client.query<PatientNamingRow>(
+        'select patient_first_name, patient_hid_code from auth.find_patient_account($1, $2)',
+        ['account', challenge.account_id])).rows[0];
       const completed = await client.query<{ completed: boolean }>(
         'select auth.complete_recovery_otp($1, $2, $3, $4) as completed',
         [input.challengeId, input.purpose, suppliedTokenHmac, passwordHash],
       );
-      return completed.rows[0]?.completed === true
-        ? { kind: 'completed' as const, challenge } : { kind: 'invalid' as const };
+      if (completed.rows[0]?.completed !== true) return { kind: 'invalid' as const };
+      // "Your Health ID password was changed" in the patient's inbox (0093).
+      await recordAccountSecurityNotice(client, challenge.account_id, 'SECURITY_PASSWORD_CHANGED', this.logger,
+        input.correlationId);
+      return { kind: 'completed' as const, challenge, naming };
     });
     if (outcome.kind !== 'completed') throw this.invalid();
-    this.confirmPasswordUpdated(outcome.challenge, input.correlationId);
+    this.confirmPasswordUpdated(outcome.challenge, outcome.naming, input.correlationId);
     return { completed: true };
   }
 
@@ -389,10 +429,11 @@ export class OtpService implements BeforeApplicationShutdown {
    * correlation id and the outcome only. An account without an email gets
    * nothing (production delivers email only).
    */
-  private confirmPasswordUpdated(challenge: VerifiedChallengeRow, correlationId: string): void {
+  private confirmPasswordUpdated(challenge: VerifiedChallengeRow, naming: PatientNamingRow | undefined,
+    correlationId: string): void {
     const recipient = challenge.email;
     if (!recipient) return;
-    const patient = this.patientNaming(challenge.patient_first_name, challenge.patient_hid_code);
+    const patient = this.patientNaming(naming?.patient_first_name, naming?.patient_hid_code);
     this.confirmations.run(correlationId, async () => {
       const delivery = await this.notification.deliverPasswordUpdated({
         challengeId: challenge.id, recipient,

@@ -3,6 +3,7 @@ import { getEnvironment } from '../config/environment';
 import type { LoginDto } from './dto/login.dto';
 import type { PatientLoginDto } from './dto/patient-login.dto';
 import { LocalAuthProvider } from './local-auth.provider';
+import { loginPrincipalKey } from './patient-principal';
 import { TokenService, type SessionEventMetadata } from './token.service';
 import type { LoginResult } from './auth.types';
 
@@ -23,7 +24,9 @@ export class AuthService {
       event.correlationId);
     return this.tokens.issue({ ...identity, actorKind }, {
       ...event,
-      principalHmac: this.localProvider.principalHash(input.email),
+      // The lockout's key: a phone's E.164 number, so 0803... and +234803...
+      // share one lockout (owner decision of 2026-10-28).
+      principalHmac: this.localProvider.principalHash(loginPrincipalKey(input.email, actorKind)),
       pepperVersion: this.environment.AUTH_LOGIN_PEPPER_VERSION,
     });
   }
