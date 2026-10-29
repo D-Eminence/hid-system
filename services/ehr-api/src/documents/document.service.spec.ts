@@ -202,3 +202,55 @@ describe('DocumentService.complete: only the uploader completes an upload', () =
     expect(stored.status).toBe('initiated');
   });
 });
+
+// Offline contract A8.6: a device that lost the first answer replays the same
+// complete. The replay is answered 2xx from the row, with no write, no second
+// audit event and no new storage read, after the same uploader, facility and
+// write-grant checks as the first call.
+describe('DocumentService.complete: a replayed complete', () => {
+  it('answers the first complete and its replay with the same body, writing and auditing once', async () => {
+    const { service, storage, updates, completionAudits } = harness();
+    const first = await service.complete(documentId, uploader);
+    storage.inspect.mockClear();
+    const replay = await service.complete(documentId, uploader);
+    expect(replay).toStrictEqual(first);
+    expect(replay).toStrictEqual(uploadedView);
+    expect(storage.inspect).not.toHaveBeenCalled();
+    expect(updates()).toHaveLength(1);
+    expect(completionAudits()).toHaveLength(1);
+  });
+
+  it.each(['available', 'rejected'])('answers 2xx with the current view once the scanner made it %s', async (status) => {
+    const { service, stored, updates, completionAudits } = harness();
+    await service.complete(documentId, uploader);
+    stored.status = status;
+    await expect(service.complete(documentId, uploader)).resolves.toStrictEqual({ ...uploadedView, status });
+    expect(updates()).toHaveLength(1);
+    expect(completionAudits()).toHaveLength(1);
+  });
+
+  it('still refuses another account (404) and another facility (404) after the upload completed', async () => {
+    const { service, identity, completionAudits } = harness();
+    await service.complete(documentId, uploader);
+    identity.authorize.mockClear();
+    await expect(service.complete(documentId, colleague)).rejects.toBeInstanceOf(NotFoundException);
+    await expect(service.complete(documentId, contextFor(uploaderAccountId, uploaderMembershipId, otherFacilityId)))
+      .rejects.toBeInstanceOf(NotFoundException);
+    expect(identity.authorize).not.toHaveBeenCalled();
+    expect(completionAudits()).toHaveLength(1);
+  });
+
+  it('still refuses the uploader without a write grant (403) on a replay', async () => {
+    const { service, identity } = harness();
+    await service.complete(documentId, uploader);
+    identity.authorize.mockResolvedValueOnce({ allowed: false });
+    await expect(service.complete(documentId, uploader)).rejects.toBeInstanceOf(ForbiddenException);
+  });
+
+  it('answers 409 for a document entered in error, not a replayed success', async () => {
+    const { service, stored } = harness();
+    await service.complete(documentId, uploader);
+    stored.status = 'entered_in_error';
+    await expect(service.complete(documentId, uploader)).rejects.toBeInstanceOf(ConflictException);
+  });
+});

@@ -2172,3 +2172,16 @@ others it answers `unknown`, and the client re-reads instead.
 | `identity.grant.close` | POST `/api/v1/identity/consent-grants/{gid}/close` | not an EHR route |
 
 `E` is `/api/v1/ehr/patients/{patientId}/encounters`.
+
+**Document upload completion is idempotent (offline contract A8.6).**
+`POST /api/v1/ehr/documents/{id}/complete` on a document whose upload is
+already complete (status `uploaded`, or `available` or `rejected` after the
+scan, with its object bound) answers 201 with the document as it is now: no
+write, no second `ehr.document.upload.complete` event, and storage is not
+read again. While nothing has changed since the first call, the body is the
+same as the first answer; after the scan, `status` and `scanStatus` show the
+scan result. The checks before answering are unchanged: the caller must be the
+account that created the upload intent, at the document's facility (anyone else
+gets 404), with write access to the patient (403 otherwise). A document entered
+in error still answers 409. The offline client treats a document as applied
+only on its own `/complete` 2xx.

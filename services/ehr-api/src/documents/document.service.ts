@@ -38,6 +38,9 @@ interface IdempotencyRow {
   result_resource_id: string | null;
 }
 
+/** Statuses of ehr.documents_effective reached only through a completed upload. */
+const COMPLETED_STATUSES = new Set(['uploaded', 'available', 'rejected']);
+
 @Injectable()
 export class DocumentService {
   constructor(
@@ -188,37 +191,46 @@ export class DocumentService {
     this.assertUploader(initial, context);
     const authorization = await this.identity.authorize(initial.patient_id, 'write_records', context.purposeOfUse, context);
     if (!authorization.allowed) throw new ForbiddenException('Patient write access is not authorized');
-    const metadata = await this.storage.inspect(initial.storage_key);
-    if (metadata.sizeBytes !== Number(initial.size_bytes)
+    // A replayed complete (offline contract A8.6) is answered from the row
+    // after the same uploader, facility and write checks; the object is
+    // already bound, so storage is not inspected again.
+    const replay = initial.status !== 'initiated';
+    const metadata = replay ? undefined : await this.storage.inspect(initial.storage_key);
+    if (metadata && (metadata.sizeBytes !== Number(initial.size_bytes)
       || metadata.sha256Hex !== initial.sha256_hex
-      || metadata.mediaType !== initial.declared_media_type) {
+      || metadata.mediaType !== initial.declared_media_type)) {
       throw new ConflictException('Uploaded object does not match the declared content metadata');
     }
 
     return this.database.withTransaction(context, async (client) => {
-      await client.query(`select set_config('app.change_reason', 'verified S3 upload completion', true)`);
-      const result = await client.query<DocumentRow>(
-        `update ehr.documents
-            set object_version_id = $3,
-                size_bytes = $4, sha256_hex = $5, status = 'uploaded'
-          where id = $1 and facility_id = $2 and status = 'initiated' and created_by = $6
-          returning id::text, patient_id::text, facility_id::text, created_by::text, storage_bucket, storage_key,
-                    object_version_id, declared_media_type, null::text as detected_media_type,
-                    size_bytes::text, sha256_hex, null::text as scan_status, status, row_version::text`,
-        [documentId, context.facilityId, metadata.versionId, metadata.sizeBytes, metadata.sha256Hex,
-          context.actor.accountId],
-      );
-      const row = result.rows[0];
-      if (!row) {
-        const current = await this.findById(client, documentId, context.facilityId);
-        this.assertUploader(current, context);
-        if (current.status === 'uploaded' && current.object_version_id === metadata.versionId) return this.view(current);
-        throw new ConflictException('Document is not in an upload-completable state');
+      if (metadata) {
+        await client.query(`select set_config('app.change_reason', 'verified S3 upload completion', true)`);
+        const result = await client.query<DocumentRow>(
+          `update ehr.documents
+              set object_version_id = $3,
+                  size_bytes = $4, sha256_hex = $5, status = 'uploaded'
+            where id = $1 and facility_id = $2 and status = 'initiated' and created_by = $6
+            returning id::text, patient_id::text, facility_id::text, created_by::text, storage_bucket, storage_key,
+                      object_version_id, declared_media_type, null::text as detected_media_type,
+                      size_bytes::text, sha256_hex, null::text as scan_status, status, row_version::text`,
+          [documentId, context.facilityId, metadata.versionId, metadata.sizeBytes, metadata.sha256Hex,
+            context.actor.accountId],
+        );
+        const row = result.rows[0];
+        if (row) {
+          await this.audit.recordWithClient(client, this.auditEvent(
+            context, 'ehr.document.upload.complete', 'success', row.patient_id, row.id,
+          ));
+          return this.view(row);
+        }
       }
-      await this.audit.recordWithClient(client, this.auditEvent(
-        context, 'ehr.document.upload.complete', 'success', row.patient_id, row.id,
-      ));
-      return this.view(row);
+      // Already completed, by an earlier call or a concurrent one: no write and
+      // no second audit event. The answer is the document as it is now.
+      const current = await this.findById(client, documentId, context.facilityId);
+      this.assertUploader(current, context);
+      if (COMPLETED_STATUSES.has(current.status) && current.object_version_id
+        && (!metadata || current.object_version_id === metadata.versionId)) return this.view(current);
+      throw new ConflictException('Document is not in an upload-completable state');
     });
   }
 
