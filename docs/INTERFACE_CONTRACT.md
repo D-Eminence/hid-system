@@ -2094,8 +2094,9 @@ migration's own (`actor_type` `system`, `provenance` `migration`,
 correlation id `0098-sealed-demo-install`, the grant as its resource, the
 patient and the facility as its subject), and the install one more
 (`identity.sealed-demo.install`, the same actor, provenance, source system and
-correlation id, counts only): five rows. They appear in the facility's and the
-platform's audit lists; a patient's access log leaves migration rows out. The
+correlation id, counts only): five rows. The four share rows appear in Demo
+Hospital's and Demo Outreach's facility audit lists and all five in the
+platform's audit list; a patient's access log leaves migration rows out. The
 three accounts are seeded `pending_reset`
 without a password, their email verified: the owner sets each password with
 Forgot password (`POST /api/v1/auth/otp/start|verify|complete`, unchanged; a
@@ -2182,9 +2183,10 @@ real actor and a demo one):
   written or sent. The database checks the contact too, as far as it can see
   (trigger `patient_emergency_contacts_sealed_demo`): Identity asks
   `identity.sealed_demo_contact_allowed(subject, session, channel,
-  destination, destination HMAC)`, which for a demo patient and an allowed
-  mailbox records the HMAC it was given for the rest of the transaction; the
-  trigger refuses a demo patient's SMS contact, and an email contact whose
+  destination, destination HMAC)`, which for a demo patient, an allowed
+  mailbox and a well-formed HMAC (64 lowercase hex characters) records the
+  HMAC it was given for the rest of the transaction; the trigger refuses a
+  demo patient's SMS contact, and an email contact whose
   HMAC the check did not record in that transaction (an Identity image before
   0098 never asks the check, so it answers 403 with nothing added or sent).
   The database holds only the contact's HMAC and ciphertext, so it cannot

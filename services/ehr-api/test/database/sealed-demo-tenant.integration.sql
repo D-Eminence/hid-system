@@ -27,17 +27,21 @@
 --      PIN (the right PIN answers as a wrong one), a direct grant, the order
 --      directory and send, staff invitations, memberships, platform roles,
 --      QoreID, share invitations both ways, a phone, an email change, the
---      emergency-contact check and the database's own contact rule (G7, and
---      its documented limit: a session that sets the recorded HMAC itself);
+--      emergency-contact check (an HMAC that is not 64 lowercase hex
+--      characters refused, as its comment says) and the database's own
+--      contact rule (G7, and its documented limit: a session that sets the
+--      recorded HMAC itself);
 --   5. real to demo: the same boundary from the real side;
 --   6. within the demo tenant: recovery as the owner will do it, the seeded
 --      shares in the patients' access history and the staff login's
---      shared-with-me list, writing in Patient One's and Two's charts through
---      them (break-glass only reads), the patient's revoke (a second install
---      restores nothing), a request approved by Patient One, break-glass on a
---      fictional patient, an order from Demo Hospital accepted at Demo
---      Laboratory, the permissions every portal needs, the admin markers, the
---      off switch;
+--      shared-with-me list, the seed's five audit rows in the audit lists
+--      (each share's in its facility's list, the install's in none; all five
+--      in the platform's list), writing in Patient One's and Two's charts
+--      through them (break-glass only reads), the patient's revoke (a second
+--      install restores nothing), a request approved by Patient One,
+--      break-glass on a fictional patient, an order from Demo Hospital
+--      accepted at Demo Laboratory, the permissions every portal needs, the
+--      admin markers, the off switch;
 --   7. real tenants unchanged: each changed function and the policy answer
 --      the real fixture alike before and after the install.
 -- Synthetic values only: the real tenant uses uuid prefix 98a and
@@ -974,6 +978,20 @@ select pg_temp.assert('the emergency-contact check',
   and pg_temp.try($q$select identity.sealed_demo_contact_allowed('patient:98d00008-0000-4000-8000-000000000001',
     '98a0000b-0000-4000-8000-000000000012', 'email', 'operations@healthidentitydirectory.com', repeat('e', 64))$q$)
     = '42501 Patient self session is required');
+-- True for a demo patient only with a well-formed HMAC (64 lowercase hex
+-- characters), as the function's comment says; any other is refused and
+-- recorded nowhere.
+select pg_temp.assert('the emergency-contact check refuses a demo mailbox with an HMAC that is not 64 lowercase hex characters',
+  (select bool_and(not identity.sealed_demo_contact_allowed('patient:98d00008-0000-4000-8000-000000000001',
+            '98a0000b-0000-4000-8000-000000000011', 'email', 'patient2@healthidentitydirectory.com', malformed.hmac))
+     from (values (repeat('A', 64)), (repeat('a', 63)), (repeat('a', 65)), ('abc'), (' ' || repeat('a', 63)),
+                  (repeat('g', 64)), (null)) malformed(hmac))
+  and current_setting('hid.sealed_demo_contact_hmac') = repeat('a', 64)
+  and identity.sealed_demo_contact_allowed('patient:98d00008-0000-4000-8000-000000000001',
+    '98a0000b-0000-4000-8000-000000000011', 'email', 'patient2@healthidentitydirectory.com', repeat('0123456789abcdef', 4))
+  and current_setting('hid.sealed_demo_contact_hmac') = repeat('0123456789abcdef', 4)
+  and position('not an email to a demo mailbox with a well-formed HMAC (64 lowercase hex characters)'
+    in obj_description('identity.sealed_demo_contact_allowed(text,uuid,text,text,character)'::regprocedure, 'pg_proc')) > 0);
 rollback to savepoint contact_probe;
 savepoint contact_probe;
 select set_config('hid.sealed_demo_contact_hmac', '', true);
@@ -1228,6 +1246,34 @@ select pg_temp.assert('the staff login''s shared-with-me list at Demo Hospital l
 select pg_temp.as_demo_staff(4);
 select pg_temp.assert('and at Demo Outreach',
   (select count(*) from identity.list_shared_with_me()) = 2);
+-- The seed's five audit rows in the audit lists: a facility's list (the demo
+-- login's org_admin role there holds audit.read) shows that facility's two
+-- seed-share rows and never the install's row, which names no facility; the
+-- platform's list shows all five.
+select pg_temp.as_demo_staff(1);
+select pg_temp.assert('Demo Hospital''s facility audit list shows its two seed-share rows, not the install''s',
+  (select array_agg(listed.action || '|' || listed.actor_type || '|' || listed.patient_id order by listed.patient_id)
+     from audit.list_facility_events(200, null) listed where listed.correlation_id = '0098-sealed-demo-install')
+  = array['identity.sealed-demo.seed-share|system|98d00009-0000-4000-8000-000000000001',
+          'identity.sealed-demo.seed-share|system|98d00009-0000-4000-8000-000000000002']);
+select pg_temp.as_demo_staff(4);
+select pg_temp.assert('and Demo Outreach''s its two',
+  (select array_agg(listed.action || '|' || listed.actor_type || '|' || listed.patient_id order by listed.patient_id)
+     from audit.list_facility_events(200, null) listed where listed.correlation_id = '0098-sealed-demo-install')
+  = array['identity.sealed-demo.seed-share|system|98d00009-0000-4000-8000-000000000001',
+          'identity.sealed-demo.seed-share|system|98d00009-0000-4000-8000-000000000002']);
+select pg_temp.as_demo_staff(2);
+select pg_temp.assert('and Demo Laboratory''s none of the five',
+  not exists (select 1 from audit.list_facility_events(200, null) listed
+               where listed.correlation_id = '0098-sealed-demo-install'));
+select pg_temp.as_staff('synthetic:sealed:admin', null, null, 'healthcare-operations');
+select pg_temp.assert('the platform''s audit list shows all five, the install''s without a facility',
+  (select array_agg(listed.action || '|' || coalesce(facility.name, '-') order by listed.action, facility.name)
+     from audit.list_platform_events(200, null, null, null, null, '0098-sealed-demo-install') listed
+     left join identity.facilities facility on facility.id = listed.facility_id)
+  = array['identity.sealed-demo.install|-', 'identity.sealed-demo.seed-share|Demo Hospital',
+          'identity.sealed-demo.seed-share|Demo Hospital', 'identity.sealed-demo.seed-share|Demo Outreach',
+          'identity.sealed-demo.seed-share|Demo Outreach']);
 reset role;
 -- A share revoked by the patient stays revoked: a second install writes no
 -- new one, and no audit row.

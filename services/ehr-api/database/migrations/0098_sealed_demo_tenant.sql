@@ -138,9 +138,10 @@
 --    session, channel, destination, destination HMAC), volatile, for
 --    Identity's emergency-contact check (42501 without a live patient
 --    session; true unless the patient is demo and the contact is not an
---    email to a demo mailbox; when it is true for a demo patient it records
---    the HMAC in hid.sealed_demo_contact_hmac for the rest of the
---    transaction, which G7 requires); and identity.sealed_demo_install(),
+--    email to a demo mailbox with a well-formed HMAC (64 lowercase hex
+--    characters); when it is true for a demo patient it records the HMAC in
+--    hid.sealed_demo_contact_hmac for the rest of the transaction, which G7
+--    requires); and identity.sealed_demo_install(),
 --    the seed (section 10), the owner's.
 -- 4. Seven triggers, each BEFORE, FOR EACH ROW, its function SECURITY DEFINER
 --    and the owner's:
@@ -1006,13 +1007,14 @@ $$;
 -- holds only the contact's ciphertext and HMAC, so Identity asks with the
 -- normalized destination and its HMAC): true unless the live session's
 -- patient is a demo patient and the contact is not an email to one of the
--- owner's mailboxes. When it is true for a demo patient, the HMAC it was
--- given is recorded in hid.sealed_demo_contact_hmac for the rest of the
--- transaction, and G7 admits a demo patient's email contact only with the
--- recorded HMAC. It cannot verify that the HMAC is the given address's, and
--- any session can set that setting itself: that a demo patient's contact is
--- a demo mailbox rests on Identity, which computes the HMAC from the same
--- normalized address it checks and encrypts.
+-- owner's mailboxes with a well-formed HMAC (64 lowercase hex characters).
+-- When it is true for a demo patient, the HMAC it was given is recorded in
+-- hid.sealed_demo_contact_hmac for the rest of the transaction, and G7
+-- admits a demo patient's email contact only with the recorded HMAC. It
+-- cannot verify that the HMAC is the given address's, and any session can
+-- set that setting itself: that a demo patient's contact is a demo mailbox
+-- rests on Identity, which computes the HMAC from the same normalized
+-- address it checks and encrypts.
 create function identity.sealed_demo_contact_allowed(requested_subject text, requested_session uuid,
   requested_channel text, requested_destination text, requested_destination_hmac character(64))
 returns boolean
@@ -3100,7 +3102,7 @@ comment on function identity.sealed_demo_account(uuid) is
 comment on function identity.sealed_demo_recipient(text) is
   '0098: whether an address is one of the owner''s three demo mailboxes, an exact allowlist (any case, outer blanks trimmed): operations@healthidentitydirectory.com, patient1@healthidentitydirectory.com, patient2@healthidentitydirectory.com.';
 comment on function identity.sealed_demo_contact_allowed(text,uuid,text,text,character) is
-  '0098: Identity''s check before a patient adds an emergency contact: true unless the live session''s patient is a demo patient and the contact is not an email to a demo mailbox (42501 without a live patient session). True for a demo patient records the HMAC it was given in hid.sealed_demo_contact_hmac for the transaction, which G7 requires of a demo patient''s email contact. It cannot verify that the HMAC is the given address''s, and any session can set that setting itself: that the contact is a demo mailbox rests on Identity (EmergencyContactService.add computes the HMAC from the same normalized address it checks and encrypts).';
+  '0098: Identity''s check before a patient adds an emergency contact: true unless the live session''s patient is a demo patient and the contact is not an email to a demo mailbox with a well-formed HMAC (64 lowercase hex characters) (42501 without a live patient session). True for a demo patient records the HMAC it was given in hid.sealed_demo_contact_hmac for the transaction, which G7 requires of a demo patient''s email contact. It cannot verify that the HMAC is the given address''s, and any session can set that setting itself: that the contact is a demo mailbox rests on Identity (EmergencyContactService.add computes the HMAC from the same normalized address it checks and encrypts).';
 comment on function identity.sealed_demo_application(uuid) is
   '0098: whether an organization application belongs to a sealed demo facility (the admin applications list marks it demo).';
 comment on function identity.sealed_demo_install() is
