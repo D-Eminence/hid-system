@@ -192,7 +192,7 @@ describe('EmergencyContactService', () => {
       expect(query).not.toHaveBeenCalled();
     });
 
-    it('asks the sealed demo check with the session, the channel and the normalized destination before adding', async () => {
+    it('asks the sealed demo check with the session, the channel, the normalized destination and its HMAC before adding', async () => {
       const { query, database } = fakeDatabase();
       const protector = new EmergencyContactProtector();
       const service = new EmergencyContactService(database, protector, {} as NotificationOtpClient);
@@ -206,12 +206,33 @@ describe('EmergencyContactService', () => {
         }
         return { rows: [] };
       });
-      await service.add(patientRequest, { ...emailContact, destination: ' Operations+Mum@HealthIdentityDirectory.com ' });
+      await service.add(patientRequest, { ...emailContact, destination: ' Patient2@HealthIdentityDirectory.com ' });
       const statements = query.mock.calls.map(([sql]) => String(sql));
       const check = statements.findIndex((sql) => sql.includes('sealed_demo_contact_allowed'));
       expect(check).toBeGreaterThan(statements.findIndex((sql) => sql.includes('from auth.otp_challenges')));
       expect(check).toBeLessThan(statements.findIndex((sql) => sql.includes('add_my_emergency_contact')));
-      expect(query.mock.calls[check][1]).toEqual([...patientSession, 'email', 'operations+mum@healthidentitydirectory.com']);
+      const hmac = protector.destinationHmac('email', 'patient2@healthidentitydirectory.com');
+      expect(query.mock.calls[check][1]).toEqual([...patientSession, 'email', 'patient2@healthidentitydirectory.com', hmac]);
+      // The add stores the very HMAC the check recorded (0098 G7 admits a demo patient's contact only with it).
+      expect(written[7]).toBe(hmac);
+    });
+
+    it('answers the database\'s own refusal of a demo contact (0098 G7) as 400, not as a missing session', async () => {
+      const { query, database } = fakeDatabase();
+      const deliver = jest.fn();
+      const service = new EmergencyContactService(database, new EmergencyContactProtector(),
+        { deliver } as unknown as NotificationOtpClient);
+      query.mockImplementation(async (sql: string) => {
+        if (sql.includes('from auth.otp_challenges')) return { rows: [{ held: false }] };
+        if (sql.includes('sealed_demo_contact_allowed')) return { rows: [{ allowed: true }] };
+        if (sql.includes('add_my_emergency_contact')) {
+          throw { code: '42501', message: 'EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED' };
+        }
+        return { rows: [] };
+      });
+      await expect(service.add(patientRequest, emailContact)).rejects.toMatchObject({
+        code: 'EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED', status: 400 });
+      expect(deliver).not.toHaveBeenCalled();
     });
 
     it.each([

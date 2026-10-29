@@ -105,16 +105,19 @@ export class EmergencyContactService {
     }
     this.protector.assertConfigured();
     const destination = this.protector.normalizeDestination(input.channel, input.destination);
+    const destinationHmac = this.protector.destinationHmac(input.channel, destination);
     const contactId = randomUUID();
     try {
       const row = await this.asPatient(request, actor, async (client) => {
         await requireNoRecentRecoveryHold(client, actor.accountId, EMERGENCY_CONTACT_CHANGES);
         // 0098: a sealed demo patient adds only an email to one of the owner's demo mailboxes, so no alert or
         // code ever reaches anyone else. The database holds only ciphertext and an HMAC of the destination, so
-        // Identity asks with the normalized one; true for every real patient. Nothing is added otherwise.
+        // Identity asks with the normalized one and its HMAC; true for every real patient. For a demo patient
+        // the database records that HMAC for this transaction and refuses the add below without it (G7).
+        // Nothing is added otherwise.
         const sealed = await client.query<{ allowed: boolean | null }>(
-          'select identity.sealed_demo_contact_allowed($1, $2, $3, $4) as allowed',
-          [actor.subject, actor.sessionId, input.channel, destination],
+          'select identity.sealed_demo_contact_allowed($1, $2, $3, $4, $5) as allowed',
+          [actor.subject, actor.sessionId, input.channel, destination, destinationHmac],
         );
         if (sealed.rows[0]?.allowed !== true) {
           throw new DomainProblem(400, 'EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED',
@@ -124,7 +127,7 @@ export class EmergencyContactService {
           'select identity.add_my_emergency_contact($1, $2, $3, $4, $5, $6, $7, $8, $9)',
           [actor.subject, actor.sessionId, contactId, input.relationship, input.channel,
             this.protector.encrypt(contactId, { name: input.name, destination }), this.protector.keyVersion,
-            this.protector.destinationHmac(input.channel, destination), input.notifyOnEmergencyAccess ?? true],
+            destinationHmac, input.notifyOnEmergencyAccess ?? true],
         );
         return (await this.rows(client, actor)).find((candidate) => candidate.contact_id === contactId);
       });
@@ -312,6 +315,11 @@ function translate(error: unknown): unknown {
   const message = databaseMessage(error);
   switch (error.code) {
     case '42501':
+      // 0098 G7: the database's own refusal of a sealed demo patient's contact outside the demo mailboxes.
+      if (message === 'EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED') {
+        return new DomainProblem(400, 'EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED',
+          'A demo account can only add the demo mailboxes.');
+      }
       return new DomainProblem(403, 'PATIENT_SESSION_REQUIRED', 'An active patient session is required');
     case 'P0001':
       return message === 'EMERGENCY_CONTACT_LIMIT_REACHED'

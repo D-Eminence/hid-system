@@ -174,6 +174,21 @@ function wrongPatientReport(row: WrongPatientReportRow) {
   };
 }
 
+/**
+ * 0098: the sealed demo tenant's facility ids, read once in the request's own
+ * transaction (identity.sealed_demo_ids; empty for a real tenant's rows). An
+ * item is demo when either facility on it is a demo facility, which 0098
+ * makes the same as both.
+ */
+async function demoFacilityIds(client: PoolClient): Promise<ReadonlySet<string>> {
+  const result = await client.query<{ ids: string[] | null }>("select identity.sealed_demo_ids('facility')::text[] as ids");
+  const ids = result.rows[0]?.ids;
+  return new Set(Array.isArray(ids) ? ids : []);
+}
+
+const isDemo = (demo: ReadonlySet<string>, orderingFacilityId: string, receivingFacilityId: string) =>
+  demo.has(orderingFacilityId) || demo.has(receivingFacilityId);
+
 function iso(value: Date | string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
   const date = value instanceof Date ? value : new Date(value);
@@ -342,6 +357,9 @@ export class AdminOrderRoutesService {
    * D18 (0091): the answer adds `cannotComplete: true`, so support's console
    * learns this backend serves "We can't complete this order" (an order ended
    * that way is found as any other: `cancelled`, `receiving_unable`).
+   *
+   * 0098: each route answers `demo` (true when it is between the sealed demo
+   * tenant's facilities), read in the same transaction.
    */
   async find(context: PlatformAdminContext, reference: string | undefined, healthId: string | undefined) {
     const byReference = reference ? reference.toUpperCase() : null;
@@ -354,12 +372,14 @@ export class AdminOrderRoutesService {
         // node-postgres answers uuid and bigint as text, as the earlier casts did.
         const result = await client.query<FoundRouteRow>(
           'select * from identity.admin_find_order_routes($1, $2)', [byReference, byHealthId]);
+        const demo = await demoFacilityIds(client);
         return { items: result.rows.map((row) => ({
           routeId: row.route_id, reference: row.reference, kind: row.kind, version: Number(row.row_version),
           effectiveState: row.effective_state, orderingFacilityId: row.ordering_facility_id,
           orderingFacilityName: row.ordering_facility_name, receivingFacilityId: row.receiving_facility_id,
           receivingFacilityName: row.receiving_facility_name, createdAt: iso(row.created_at),
           acceptedAt: iso(row.accepted_at), endedAt: iso(row.ended_at), endedKind: row.ended_kind,
+          demo: isDemo(demo, row.ordering_facility_id, row.receiving_facility_id),
           ...('access_ends_at' in row ? { accessEndsAt: iso(row.access_ends_at ?? null) } : {}),
           ...(typeof row.closable === 'boolean' ? { closable: row.closable } : {}),
           ...('correction' in row ? { correction: row.correction ?? null } : {}),
@@ -385,13 +405,16 @@ export class AdminOrderRoutesService {
    * it carries the `late_correction` flag, so it is listed among the flagged
    * reports, first; `endedKindBefore: 'receiving_unable'` names the earlier
    * ending. The rows are answered in C26's order, never re-sorted here.
+   * 0098: each report answers `demo` (true for the sealed demo tenant's).
    */
   async listWrongPatientReports(context: PlatformAdminContext, status: 'unreviewed' | 'recent', facilityId?: string) {
     try {
       return await this.database.withPlatformTransaction(context, async (client) => {
         const result = await client.query<WrongPatientReportRow>(
           'select * from identity.admin_list_wrong_patient_reports($1, $2)', [status, facilityId ?? null]);
-        return { items: result.rows.map(wrongPatientReport), lateCorrection: true };
+        const demo = await demoFacilityIds(client);
+        return { items: result.rows.map((row) => ({ ...wrongPatientReport(row),
+          demo: isDemo(demo, row.ordering_facility_id, row.receiving_facility_id) })), lateCorrection: true };
       }, { readOnly: true });
     } catch (error) {
       throw adminOrderRouteProblem(error, 'facility');

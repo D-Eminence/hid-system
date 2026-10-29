@@ -290,6 +290,65 @@ describe('AdminService sealed demo facilities (0098)', () => {
     expect(String(client.query.mock.calls[0]?.[0])).toContain('identity.sealed_demo_facility(facility.id) as demo');
     expect(String(client.query.mock.calls[1]?.[0])).not.toContain('sealed_demo');
   });
+
+  const principalRow = { id: '98d00003-0000-4000-8000-000000000001', subject: 'sealed-demo:98d00003',
+    email: 'operations@healthidentitydirectory.com', displayName: 'Demo Operations', status: 'pending_reset',
+    version: '1', createdAt: new Date('2026-10-29T10:00:00Z'), activeSessionCount: '0', memberships: [],
+    platformRoles: [] };
+  const demoColumn = "(account.id = any((select identity.sealed_demo_ids('account'))::uuid[])) as demo";
+
+  it.each([[true, true], [false, false], [null, false], [undefined, false]] as const)(
+    'marks each listed or searched principal demo: %s -> %s, and leaves the count query as it was',
+    async (answer, demo) => {
+      const { service, client } = harness({ ...principalRow, demo: answer, count: '1' });
+      const listed = await service.listPrincipals(platformAdmin,
+        { page: 1, pageSize: 20, query: 'operations' } as never);
+      expect(listed.items).toEqual([expect.objectContaining({ id: principalRow.id, demo, version: 1 })]);
+      expect(String(client.query.mock.calls[0]?.[0])).toContain(demoColumn);
+      expect(String(client.query.mock.calls[1]?.[0])).not.toContain('sealed_demo');
+    });
+
+  it('marks an identity review at a demo facility', async () => {
+    const { service, client } = harness({ id: 'review', facilityId: '98d00002-0000-4000-8000-000000000001',
+      facilityName: 'Demo Hospital', status: 'review_required', maskedNin: 'NIN-****1234', provider: 'qoreid',
+      candidateCount: '0', version: '1', createdAt: new Date(), updatedAt: new Date(), demo: true, count: '1' });
+    const listed = await service.listIdentityReviews(platformAdmin, { page: 1, pageSize: 20 } as never);
+    expect(listed.items.map((item) => item.demo)).toEqual([true]);
+    expect(String(client.query.mock.calls[0]?.[0])).toContain('identity.sealed_demo_facility(registration.facility_id) as demo');
+    expect(String(client.query.mock.calls[1]?.[0])).not.toContain('sealed_demo');
+  });
+
+  it('marks platform audit events at a demo facility or by a demo login, from one read per page', async () => {
+    const events = [
+      { sequenceId: '3', facilityId: '98d00002-0000-4000-8000-000000000002', actorSubject: 'staff:real' },
+      { sequenceId: '2', facilityId: null, actorSubject: 'patient:98d00008-0000-4000-8000-000000000001' },
+      { sequenceId: '1', facilityId: '10000000-0000-4000-8000-000000000002', actorSubject: 'staff:real' },
+    ];
+    const client = { query: jest.fn(async (sql: string) => sql.includes('audit.list_platform_events')
+      ? { rows: events }
+      : { rows: [{ facilities: ['98d00002-0000-4000-8000-000000000002'],
+          subjects: ['patient:98d00008-0000-4000-8000-000000000001'] }] }) };
+    const database = { withPlatformTransaction: jest.fn(async (_context, operation) =>
+      operation(client as unknown as PoolClient)) };
+    const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) };
+    const service = new AdminService(database as unknown as DatabaseService, audit as unknown as AuditService,
+      {} as EmergencyContactProtector);
+    const listed = await service.listAudit(platformAdmin, { limit: 3 } as never);
+    expect(listed.items.map((item) => [item.sequenceId, item.demo])).toEqual([['3', true], ['2', true], ['1', false]]);
+    expect(listed.nextBeforeSequenceId).toBe('1');
+    expect(client.query.mock.calls.filter(([sql]) => String(sql).includes("identity.sealed_demo_ids('account')")))
+      .toHaveLength(1);
+  });
+
+  it('adds a demo column to the principal export', async () => {
+    const { service, client } = harness({ ...principalRow, demo: true });
+    // The export's own row and cell separators and quoting (this.csv) are unchanged; the last cell is the flag.
+    const lastCells = (csv: string) => csv.split('\\n').slice(0, 2).map((line) => line.split(',').at(-1)?.replace(/"/g, ''));
+    expect(lastCells(await service.exportPrincipals(platformAdmin, {} as never))).toEqual(['demo', 'true']);
+    expect(String(client.query.mock.calls[0]?.[0])).toContain(demoColumn);
+    const real = harness({ ...principalRow, id: '20000000-0000-4000-8000-000000000009', demo: false });
+    expect(lastCells(await real.service.exportPrincipals(platformAdmin, {} as never))).toEqual(['demo', 'false']);
+  });
 });
 
 describe('AdminService emergency-contact opt-out', () => {
