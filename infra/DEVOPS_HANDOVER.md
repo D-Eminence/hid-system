@@ -403,6 +403,98 @@ all running processes use it.
   OTP and migration readiness checks; never bypass them to open the form.
 - Pierflow integration is deferred because the partner is unavailable.
 
+### Offline escrow key (D6)
+
+The offline escrow master key lets ehr-api derive a separate escrow key for
+each EHR offline vault (`POST /api/v1/ehr/offline/escrow-key`, C4). Each vault
+key is derived with HKDF-SHA256 (salt `hid-offline-escrow/v1`; info
+`accountId|membershipId|facilityId|vaultId`, lower-cased; 32 bytes). The master
+key lives in its own Secrets Manager secret. Terraform wires the variable and
+secret names only and never reads or stores the value. Escrow is off by
+default (`offline_escrow_enabled = false`); while it is off, ehr-api receives
+no `OFFLINE_ESCROW_` key and C4 returns 503.
+
+Prerequisite: the ehr-api image with offline escrow support must already be
+released to production. Leave escrow off until then.
+
+0. On your own computer, with Node 22, generate the value:
+
+   ```powershell
+   node -e "console.log(JSON.stringify({'1':require('node:crypto').randomBytes(32).toString('base64url')}))"
+   ```
+
+   It prints `{"1":"<43 characters>"}`: key version 1 and 32 random bytes in
+   base64url. Never put it in Git, CLI arguments, tickets or chat.
+1. In the Secrets Manager console, region eu-west-1, store a new secret:
+   - Type "Other type of secret", Key/value tab: key `offlineEscrowKeys`,
+     value the printed JSON. It is stored as a string; do not nest it as an
+     object.
+   - Encryption key `aws/secretsmanager`. A customer-managed key would need a
+     `kms:Decrypt` grant for ehr-api that Terraform does not wire.
+   - Name `/hid/staging/offline-escrow`. The `/hid/staging/` prefix is the
+     retained production namespace.
+   - No automatic rotation.
+   - Copy the secret ARN. It is not secret.
+2. In a reviewed commit on dev, set in `environments/production.tfvars`:
+
+   ```hcl
+   offline_escrow_enabled    = true
+   offline_escrow_secret_arn = "<ARN>"
+   ```
+
+   Terraform refuses escrow without an ARN in this account and region, and
+   refuses a value that is not a Secrets Manager ARN.
+3. Plan and apply from that commit with the section 4 procedure
+   (`production_release_infrastructure.py plan`, then `apply` with the
+   accepted review SHA256). The escrow changes are exactly these, with no
+   image change:
+   - `aws_ecs_task_definition.production["ehr-api"]` and the retained
+     `aws_ecs_task_definition.workload["ehr-api"]` are replaced;
+   - `aws_ecs_service.production["ehr-api"]` is updated in place;
+   - the ehr-api `runtime-secrets` execution-role policy
+     (`aws_iam_role_policy.execution_secrets["ehr-api"]`) is updated in place
+     to include the new ARN.
+
+   Any other change in the plan comes from other unapplied dev commits; review
+   it on its own merits.
+4. After the apply, list the keys by name only. Expect `OFFLINE_ESCROW_ENABLED`
+   and `OFFLINE_ESCROW_KEYS`:
+
+   ```powershell
+   $td = aws ecs describe-services --cluster hid-production --services hid-production-ehr-api --region eu-west-1 --query "services[0].taskDefinition" --output text
+   aws ecs describe-task-definition --task-definition $td --region eu-west-1 --output text `
+     --query "taskDefinition.containerDefinitions[?name=='ehr-api'] | [0].[environment[?starts_with(name, 'OFFLINE_ESCROW_')].name, secrets[?starts_with(name, 'OFFLINE_ESCROW_')].name]"
+   ```
+
+   A successful apply does not prove escrow is on. If this shows no
+   `OFFLINE_ESCROW_` names, the circuit breaker rolled the service back; check
+   the stopped-task reasons for ehr-api.
+
+   Then, in the Demo Hospital staff session only, send
+   `POST /api/v1/ehr/offline/escrow-key` with body
+   `{"vaultId":"<freshly generated random UUID that belongs to no real vault>","keyVersion":null}`.
+   Expect 200 and `keyVersion` 1; 503 means escrow is still off. Check only
+   the status code and `keyVersion`. Do not record or screenshot the `key`
+   field. The call writes one `ehr.offline.escrow-key.issue` audit row.
+
+- Failure mode: a missing JSON key, an unreadable secret or a malformed value
+  stops new ehr-api tasks at start-up. The ECS circuit breaker rolls the
+  service back to the previous task definition (without escrow), and the
+  section 4 apply can still report success. Terraform state still holds the
+  escrow revision, so the next apply, even an unrelated one, points the
+  service back at it. Recover in either of two ways:
+  - commit `offline_escrow_enabled = false` on dev and apply; or
+  - fix the secret, then run the section 4 plan and apply again, which puts
+    the service back on the escrow revision. A forced new deployment alone
+    does not: it restarts the rolled-back revision.
+- Off switch: commit `offline_escrow_enabled = false` on dev, then plan and
+  apply. Keep the secret.
+- Rotation: add the next version (`"2"`) alongside `"1"` in the same value;
+  the highest version is used for new escrow. Then force a new ehr-api
+  deployment, because ECS reads secrets only when a task starts. Keep the
+  previous version for at least 30 days. Never delete the secret or a version
+  while escrow is on.
+
 ## 10. Database migration and registration status
 
 The legacy Supabase data was backed up, staged, transformed into the new

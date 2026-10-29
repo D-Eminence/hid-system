@@ -181,9 +181,19 @@ locals {
   workload_secret_specs = {
     for name, workload in local.runtime_workloads : name => concat(
       lookup(local.database_secret_specs, name, []),
-      lookup(local.fixed_secret_specs, name, [])
+      lookup(local.fixed_secret_specs, name, []),
+      name == "ehr-api" ? local.offline_escrow_secret_specs : []
     )
   }
+
+  # EHR offline escrow (D6). Off adds nothing, so no task definition changes.
+  # Only ehr-api reads the dedicated secret; no other workload is granted it.
+  offline_escrow_environment = var.offline_escrow_enabled ? {
+    OFFLINE_ESCROW_ENABLED = "true"
+  } : {}
+  offline_escrow_secret_specs = var.offline_escrow_enabled ? [
+    { name = "OFFLINE_ESCROW_KEYS", arn = var.offline_escrow_secret_arn, key = "offlineEscrowKeys" }
+  ] : []
 
   # Since hid-system staging-novu-ci-20261005 #112/#113, both services default
   # emergency-contact delivery to on when the key is absent (owner approval of
@@ -272,7 +282,7 @@ locals {
       AI_GENERATION_MODEL_ID                  = var.ai_generation_provider == "anthropic" ? var.anthropic_model_id : "eu.anthropic.claude-sonnet-4-6"
       ANTHROPIC_PROCESSING_APPROVED           = tostring(var.ai_allow_anthropic_us_processing)
       AI_EMBEDDING_MODEL_ID                   = "amazon.titan-embed-text-v2:0"
-    })
+    }, local.offline_escrow_environment)
     lab-api = merge(local.common_api_environment, local.workload_token_files.lab-api, {
       PORT                           = "3003"
       DATABASE_POOL_MAX              = "5"

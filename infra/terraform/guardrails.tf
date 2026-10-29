@@ -144,5 +144,10 @@ resource "terraform_data" "deployment_guard" {
       condition     = !var.enable_cost_governance || can(regex("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$", var.cost_notification_email))
       error_message = "Cost governance requires a valid notification email address."
     }
+
+    precondition {
+      condition     = !var.offline_escrow_enabled || startswith(var.offline_escrow_secret_arn, "arn:aws:secretsmanager:${var.aws_region}:${var.expected_account_id}:secret:")
+      error_message = "Offline escrow requires offline_escrow_secret_arn: an existing secret in this deployment account and region that already holds offlineEscrowKeys."
+    }
   }
 }
