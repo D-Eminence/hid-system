@@ -1,10 +1,10 @@
 {
-  "base_digest": "sha256:55e7cd155c86d8956af63fec0a9d0790dd6d0ba98c7d38e63c0866557ee7aff8",
+  "base_digest": "sha256:f643bc05bdcf5a8d98442e8a2a5c7a3a4c3a0e3bc4cdc5f10557d47f1ddd5812",
   "node_source": {
-    "node_version": "22.23.3",
-    "source_url": "https://nodejs.org/dist/v22.23.3/node-v22.23.3.tar.xz",
-    "sha256": "bd97093e1a1e9243338950c174a693a64d4e0926a9c6ce259962bc58d5e96909",
-    "source_files_inspected": 11700,
+    "node_version": "22.23.4",
+    "source_url": "https://nodejs.org/dist/v22.23.4/node-v22.23.4.tar.xz",
+    "sha256": "7b9adc82d612d0a2a863d96c46de2292552e250cee51956ebbe0146c42aacae9",
+    "source_files_inspected": 11703,
     "pattern_hits": []
   },
   "upstream_sources": [
@@ -35,7 +35,7 @@
         "libc6": "2.41-12+deb13u4"
       },
       "justification": "vulnerable_code_not_in_execute_path",
-      "rationale": "No final ELF imports ns_printrrf, ns_printrr or fp_nquery. The checksum-verified Node 22.23.3 source has no calls. All native binaries are bound by exact hashes."
+      "rationale": "No final ELF imports ns_printrrf, ns_printrr or fp_nquery. The checksum-verified Node 22.23.4 source has no calls. All native binaries are bound by exact hashes."
     },
     {
       "id": "CVE-2026-19499",
@@ -46,7 +46,7 @@
         "libc6": "2.41-12+deb13u4"
       },
       "justification": "vulnerable_code_not_in_execute_path",
-      "rationale": "No final ELF imports strfmon or strfmon_l. The checksum-verified Node 22.23.3 source has no calls. All native binaries are bound by exact hashes."
+      "rationale": "No final ELF imports strfmon or strfmon_l. The checksum-verified Node 22.23.4 source has no calls. All native binaries are bound by exact hashes."
     },
     {
       "id": "CVE-2026-95619",
@@ -84,8 +84,8 @@
     }
   ],
   "schema": "hid.production-runtime-assessment-policy/v1",
-  "assessed_at": "2026-10-18T00:00:00+00:00",
-  "expires_at": "2026-11-17T00:00:00+00:00",
+  "assessed_at": "2026-10-29T00:00:00+00:00",
+  "expires_at": "2026-11-28T00:00:00+00:00",
   "elf_inventory": {
     "identity-api": {
       "app/services/identity-api/node_modules/argon2/prebuilds/freebsd-arm64/argon2.armv8.glibc.node": "7dd03e05e2712b31475776c6cdeef461d16aafa5c2d8a7a8459769e0b1f14045",
@@ -96,7 +96,7 @@
       "app/services/identity-api/node_modules/argon2/prebuilds/linux-arm64/argon2.armv8.musl.node": "6b40b4db7f48ce350d0e3699805121c5431e37f52cac37238b0f36f96fa86971",
       "app/services/identity-api/node_modules/argon2/prebuilds/linux-x64/argon2.glibc.node": "d573da575d5c8a1ad71edd066d8222a7d99e590bf09daa9204847143b3ba8cd0",
       "app/services/identity-api/node_modules/argon2/prebuilds/linux-x64/argon2.musl.node": "90d12fb13b719fcb8deae23607d093166bc2ba44791a2fd51c966f626e0ec47a",
-      "nodejs/bin/node": "d09e299258c24f7cdf6f5d5ec185e3a56512b27a697113735dac909f1cac7b8d",
+      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -389,7 +389,7 @@
       "app/services/ehr-api/node_modules/argon2/prebuilds/linux-arm64/argon2.armv8.musl.node": "6b40b4db7f48ce350d0e3699805121c5431e37f52cac37238b0f36f96fa86971",
       "app/services/ehr-api/node_modules/argon2/prebuilds/linux-x64/argon2.glibc.node": "d573da575d5c8a1ad71edd066d8222a7d99e590bf09daa9204847143b3ba8cd0",
       "app/services/ehr-api/node_modules/argon2/prebuilds/linux-x64/argon2.musl.node": "90d12fb13b719fcb8deae23607d093166bc2ba44791a2fd51c966f626e0ec47a",
-      "nodejs/bin/node": "d09e299258c24f7cdf6f5d5ec185e3a56512b27a697113735dac909f1cac7b8d",
+      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -674,7 +674,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "lab-api": {
-      "nodejs/bin/node": "d09e299258c24f7cdf6f5d5ec185e3a56512b27a697113735dac909f1cac7b8d",
+      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -959,7 +959,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "pharmacy-api": {
-      "nodejs/bin/node": "d09e299258c24f7cdf6f5d5ec185e3a56512b27a697113735dac909f1cac7b8d",
+      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -1244,7 +1244,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "ocr-api": {
-      "nodejs/bin/node": "d09e299258c24f7cdf6f5d5ec185e3a56512b27a697113735dac909f1cac7b8d",
+      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -1529,7 +1529,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "ocr-worker": {
-      "nodejs/bin/node": "d09e299258c24f7cdf6f5d5ec185e3a56512b27a697113735dac909f1cac7b8d",
+      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -1814,7 +1814,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "outreach-api": {
-      "nodejs/bin/node": "d09e299258c24f7cdf6f5d5ec185e3a56512b27a697113735dac909f1cac7b8d",
+      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -2099,7 +2099,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "notification-api": {
-      "nodejs/bin/node": "d09e299258c24f7cdf6f5d5ec185e3a56512b27a697113735dac909f1cac7b8d",
+      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -2384,7 +2384,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "notification-worker": {
-      "nodejs/bin/node": "d09e299258c24f7cdf6f5d5ec185e3a56512b27a697113735dac909f1cac7b8d",
+      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -2669,7 +2669,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "event-dispatcher": {
-      "nodejs/bin/node": "d09e299258c24f7cdf6f5d5ec185e3a56512b27a697113735dac909f1cac7b8d",
+      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -2954,7 +2954,7 @@
       "usr/lib/aarch64-linux-gnu/libzstd.so.1.5.7": "1279c4edfbfb08878b5b7fb40d392c1bdc9b30100d9b7a019d4aefaf10d2046c"
     },
     "support-api": {
-      "nodejs/bin/node": "d09e299258c24f7cdf6f5d5ec185e3a56512b27a697113735dac909f1cac7b8d",
+      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -3247,7 +3247,7 @@
       "app/services/ehr-api/node_modules/argon2/prebuilds/linux-arm64/argon2.armv8.musl.node": "6b40b4db7f48ce350d0e3699805121c5431e37f52cac37238b0f36f96fa86971",
       "app/services/ehr-api/node_modules/argon2/prebuilds/linux-x64/argon2.glibc.node": "d573da575d5c8a1ad71edd066d8222a7d99e590bf09daa9204847143b3ba8cd0",
       "app/services/ehr-api/node_modules/argon2/prebuilds/linux-x64/argon2.musl.node": "90d12fb13b719fcb8deae23607d093166bc2ba44791a2fd51c966f626e0ec47a",
-      "nodejs/bin/node": "d09e299258c24f7cdf6f5d5ec185e3a56512b27a697113735dac909f1cac7b8d",
+      "nodejs/bin/node": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
       "usr/lib/aarch64-linux-gnu/engines-3/afalg.so": "e2ccaaa8e5b4ceeba4bb83d3aa0c838144b9c38de083df019676afda0a87b388",
       "usr/lib/aarch64-linux-gnu/engines-3/loader_attic.so": "e763e9a5c6985025fa4e718f293274f8f13bd9de70008e70689d42cba2ea4600",
       "usr/lib/aarch64-linux-gnu/gconv/ANSI_X3.110.so": "0a170860ace28d8d25b9f8d3758219e9ed93933b07dcb6ffc38348fa4c86a09b",
@@ -3539,5 +3539,5 @@
     "staging-lab-runtime-assessment.json": "11c50190a2ec3c678adb81d301010cc88769a4924470d9c6d7101e95df751996"
   },
   "admission": "Expected previously reviewed native bytes only. Every current image must independently match this complete inventory; a changed or extra ELF fails closed. Original raw reports retained. No exploitable-risk waiver.",
-  "review_basis": "Upstream advisory/code references rechecked 2026-10-18. Node source and native bytes remain checksum-bound to the retained assessment; exact current image confirmation is mandatory in CI."
+  "review_basis": "Advisories rechecked 2026-10-29 for this base: glibc announcements, Debian tracker, GCC commits (via gcc.gnu.org), and zlib via the Debian tracker and the Debian 1.3.1 source, which has no gz_vacate. Versus the retained assessment only nodejs/bin/node changed: it is byte-identical to bin/node in the signed Node 22.23.4 release node-v22.23.4-linux-arm64.tar.xz (SHASUMS256 6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b) and has no affected glibc import or PBDS content. All other native bytes remain checksum-bound to the retained assessment; exact current image confirmation is mandatory in CI."
 }

@@ -4,7 +4,7 @@ COPY services/support-api/package.json services/support-api/package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY services/support-api/src ./dist
 
-FROM gcr.io/distroless/nodejs22-debian13@sha256:55e7cd155c86d8956af63fec0a9d0790dd6d0ba98c7d38e63c0866557ee7aff8 AS runtime
+FROM gcr.io/distroless/nodejs22-debian13@sha256:f643bc05bdcf5a8d98442e8a2a5c7a3a4c3a0e3bc4cdc5f10557d47f1ddd5812 AS runtime
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --chown=65532:65532 --from=build /app/node_modules ./node_modules
