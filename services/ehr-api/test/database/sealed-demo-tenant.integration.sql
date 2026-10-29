@@ -9,9 +9,14 @@
 --      the nine triggers, the policy, the new bodies' md5; no runtime role
 --      reads the members;
 --   2. the install: every row, accounts pending_reset without a password and
---      with a verified email, the four shares of Patient One and Two (D6),
---      the audit row without an address or Health ID, a second call inserts
---      nothing, the platform overview unchanged;
+--      with a verified email, the four shares of Patient One and Two (D6)
+--      with the values identity.write_patient_share writes (compared with a
+--      share that function writes for the same pair, undone), no audit row
+--      that names a patient as its actor and one migration row per share,
+--      the install's audit row without an address or Health ID, a second
+--      call inserts nothing, a pair with an active share is left alone, a
+--      share to a membership the patient could not choose is refused, the
+--      platform overview unchanged;
 --   3. its refusals, each writing nothing: an address of the tenant held by
 --      another account (any case, pending_reset too), a staff record, an open
 --      organization application or a pending staff invitation, a Health ID,
@@ -22,11 +27,14 @@
 --      PIN (the right PIN answers as a wrong one), a direct grant, the order
 --      directory and send, staff invitations, memberships, platform roles,
 --      QoreID, share invitations both ways, a phone, an email change, the
---      emergency-contact check and the database's own contact rule (G7);
+--      emergency-contact check and the database's own contact rule (G7, and
+--      its documented limit: a session that sets the recorded HMAC itself);
 --   5. real to demo: the same boundary from the real side;
---   6. within the demo tenant: recovery as the owner will do it, writing in
---      Patient One's and Two's charts through the seeded shares (break-glass
---      only reads), a request approved by Patient One, break-glass on a
+--   6. within the demo tenant: recovery as the owner will do it, the seeded
+--      shares in the patients' access history and the staff login's
+--      shared-with-me list, writing in Patient One's and Two's charts through
+--      them (break-glass only reads), the patient's revoke (a second install
+--      restores nothing), a request approved by Patient One, break-glass on a
 --      fictional patient, an order from Demo Hospital accepted at Demo
 --      Laboratory, the permissions every portal needs, the admin markers, the
 --      off switch;
@@ -519,7 +527,7 @@ select pg_temp.assert('a rejected application and a lapsed invitation at the add
 rollback to savepoint refusal;
 select pg_temp.assert('the savepoint left no demo row', not exists (select 1 from identity.sealed_demo_members));
 
--- 2. The install (it restores the caller's correlation id after the shares).
+-- 2. The install (it leaves the caller's correlation id alone).
 select set_config('app.correlation_id', 'sealed-suite-before-install', true);
 create temp table sealed_install_1 as select identity.sealed_demo_install() as summary;
 create temp table sealed_install_2 as select identity.sealed_demo_install() as summary;
@@ -618,15 +626,140 @@ begin
             '98d00009-0000-4000-8000-000000000002|DEMO-HOSPITAL|write_records|direct-care|active|true|365 days|true|clinical_collaboration|until_revoked|search',
             '98d00009-0000-4000-8000-000000000002|DEMO-OUTREACH|write_records|direct-care|active|true|365 days|true|clinical_collaboration|until_revoked|search']
     and (select count(*) from identity.consent_grants grant_row where identity.sealed_demo_patient(grant_row.patient_id)) = 4
-    and (select count(*) from audit.events event where event.action = 'identity.consent-grant.patient-share'
-          and event.correlation_id = '0098-sealed-demo-install') = 4
+    and (select bool_and(share.idempotency_key = 'sealed-demo-share-' || share.patient_id || '-' || share.membership_id
+                         and share.request_sha256 = encode(sha256(convert_to('sealed-demo-share:' || share.patient_id
+                           || ':' || share.membership_id, 'UTF8')), 'hex')
+                         and share.created_at >= grant_row.created_at and grant_row.source_system = 'hid'
+                         and grant_row.reason = 'Shared by the patient' and grant_row.row_version = 1)
+           from identity.consent_grants grant_row
+           join identity.patient_consent_shares share on share.consent_grant_id = grant_row.id
+          where grant_row.correlation_id = '0098-sealed-demo-install')
     and current_setting('app.correlation_id', true) = 'sealed-suite-before-install');
-  perform pg_temp.assert('one audit row, counts only',
+  -- The audit tells the truth: the patients did not share, the migration did.
+  perform pg_temp.assert('the seed writes no audit row that names a patient (or any person) as its actor',
+    not exists (select 1 from audit.events event
+                 where event.correlation_id = '0098-sealed-demo-install'
+                   and (event.actor_type <> 'system' or event.provenance <> 'migration'
+                     or num_nonnulls(event.actor_subject, event.actor_account_id, event.actor_membership_id) > 0))
+    and not exists (select 1 from audit.events event
+                     where event.action = 'identity.consent-grant.patient-share'
+                        or identity.sealed_demo_account(event.actor_account_id)));
+  perform pg_temp.assert('one migration row per seeded share: system, provenance migration, the install''s source system, the grant, its patient and facility',
+    (select count(*) from audit.events event where event.action = 'identity.sealed-demo.seed-share') = 4
+    and (select bool_and(event.correlation_id = '0098-sealed-demo-install' and event.actor_type = 'system'
+                         and event.provenance = 'migration' and event.outcome = 'success'
+                         and event.source_system = install_row.source_system and event.source_system = 'hid-sealed-demo'
+                         and event.resource_type = 'consent-grant' and event.resource_uuid = grant_row.id
+                         and event.patient_id = grant_row.patient_id and event.facility_id = grant_row.facility_id
+                         and event.purpose_of_use is null and event.reason is null
+                         and event.details = '{"scope": "write_records", "purpose": "direct-care", "level": "clinical_collaboration", "duration": "until_revoked", "via": "search"}'::jsonb)
+           from audit.events event
+           join identity.consent_grants grant_row on grant_row.id = event.resource_uuid
+           cross join (select source_system from audit.events where action = 'identity.sealed-demo.install') install_row
+          where event.action = 'identity.sealed-demo.seed-share')
+    and (select count(distinct event.resource_uuid) from audit.events event
+          join identity.consent_grants grant_row on grant_row.id = event.resource_uuid
+           and grant_row.correlation_id = '0098-sealed-demo-install'
+         where event.action = 'identity.sealed-demo.seed-share') = 4);
+  perform pg_temp.assert('one install audit row, counts only; five audit rows in all',
     (select count(*) from audit.events where action = 'identity.sealed-demo.install') = 1
     and (select event.details::text !~ '(@|HID-|operations)' and event.actor_type = 'system'
            and event.provenance = 'migration' and event.correlation_id = '0098-sealed-demo-install'
-           from audit.events event where event.action = 'identity.sealed-demo.install'));
+           from audit.events event where event.action = 'identity.sealed-demo.install')
+    and (select count(*) from audit.events event where event.correlation_id = '0098-sealed-demo-install') = 5
+    and not exists (select 1 from audit.events event
+                     where event.correlation_id = '0098-sealed-demo-install' and event.details::text ~ '(@|HID-)'));
 end $$;
+
+-- The seeded share has every value identity.write_patient_share gives the same
+-- pair: in an undone subtransaction the seeded Demo Hospital share of Patient
+-- One is revoked (so that the function replaces nothing), the function writes
+-- that share again as the old seed called it (the patient's own Share, under
+-- the install's correlation id, another idempotency key), and the two grants
+-- and share rows are compared column for column (every column, by to_jsonb;
+-- only the random id, the clock and the idempotency key and its digest
+-- differ). The function's audit row is the patient's; the seed's is not.
+create function pg_temp.share_shape(requested_grant uuid)
+returns jsonb language sql as $f$
+  select (to_jsonb(grant_row) - 'id' - 'created_at' - 'updated_at' - 'starts_at' - 'expires_at')
+         || jsonb_build_object('span', (grant_row.expires_at - grant_row.starts_at)::text,
+              'startsByCreation', grant_row.starts_at <= grant_row.created_at,
+              'share', to_jsonb(share) - 'consent_grant_id' - 'created_at' - 'idempotency_key' - 'request_sha256')
+    from identity.consent_grants grant_row
+    join identity.patient_consent_shares share on share.consent_grant_id = grant_row.id
+   where grant_row.id = requested_grant
+$f$;
+do $$
+declare
+  seeded_id uuid := (select grant_row.id from identity.consent_grants grant_row
+                      where grant_row.patient_id = '98d00009-0000-4000-8000-000000000001'
+                        and grant_row.membership_id = '98d00005-0000-4000-8000-000000000001'
+                        and grant_row.correlation_id = '0098-sealed-demo-install');
+  seeded jsonb := pg_temp.share_shape(seeded_id);
+  reference jsonb;
+  reference_audit text;
+begin
+  begin
+    update identity.consent_grants set status = 'revoked', revoked_at = clock_timestamp(),
+      revoked_reason = 'Undone in the suite', row_version = row_version + 1 where id = seeded_id;
+    perform set_config('app.correlation_id', '0098-sealed-demo-install', true);
+    reference := pg_temp.share_shape((select written.consent_grant_id
+      from identity.write_patient_share('98d00009-0000-4000-8000-000000000001', '98d00008-0000-4000-8000-000000000001',
+        'patient:98d00008-0000-4000-8000-000000000001', '98d00005-0000-4000-8000-000000000001', 'clinical_collaboration',
+        'until_revoked', 'search', null, 'sealed-suite-reference-share-0001', repeat('f', 64)) written));
+    reference_audit := (select string_agg(event.actor_type || '|' || event.provenance || '|' || event.source_system
+                                          || '|' || event.action || '|' || event.actor_subject, ',')
+                          from audit.events event where event.correlation_id = '0098-sealed-demo-install'
+                           and event.action = 'identity.consent-grant.patient-share');
+    raise exception using errcode = 'P0999', message = 'undo';
+  exception when sqlstate 'P0999' then
+    null;
+  end;
+  perform set_config('app.correlation_id', 'sealed-suite-before-install', true);
+  perform pg_temp.assert('the seeded share has every value identity.write_patient_share writes for the same pair',
+    reference is not null and seeded = reference, coalesce(seeded::text, 'none') || ' / ' || coalesce(reference::text, 'none'));
+  perform pg_temp.assert('identity.write_patient_share would have audited the share as the patient''s; the seed does not',
+    reference_audit = 'patient|application|identity-api|identity.consent-grant.patient-share|patient:98d00008-0000-4000-8000-000000000001'
+    and not exists (select 1 from audit.events event where event.action = 'identity.consent-grant.patient-share'),
+    reference_audit);
+  perform pg_temp.assert('the comparison left the seeded share as it was',
+    (select grant_row.status = 'active' and grant_row.row_version = 1 from identity.consent_grants grant_row
+      where grant_row.id = seeded_id)
+    and not exists (select 1 from identity.patient_consent_shares share
+                     where share.idempotency_key = 'sealed-suite-reference-share-0001'));
+end $$;
+
+-- Each seeded share is written once only and never beside, or over, a share
+-- the patient holds, and only to a membership the patient could choose.
+-- (Each in a savepoint, undone.)
+savepoint share_guard;
+update identity.consent_grants set correlation_id = 'sealed-suite-moved-share-0001'
+ where patient_id = '98d00009-0000-4000-8000-000000000001' and membership_id = '98d00005-0000-4000-8000-000000000001'
+   and correlation_id = '0098-sealed-demo-install';
+select pg_temp.assert('a pair that already has an active share is left alone (nothing replaced, revoked or added)',
+  (identity.sealed_demo_install()->>'inserted')::integer = 0
+  and (select count(*) from identity.consent_grants grant_row
+        where grant_row.patient_id = '98d00009-0000-4000-8000-000000000001'
+          and grant_row.membership_id = '98d00005-0000-4000-8000-000000000001') = 1
+  and (select grant_row.status from identity.consent_grants grant_row
+        where grant_row.correlation_id = 'sealed-suite-moved-share-0001') = 'active'
+  and (select count(*) from audit.events event where event.action = 'identity.sealed-demo.seed-share') = 4);
+rollback to savepoint share_guard;
+update identity.consent_grants set correlation_id = 'sealed-suite-moved-share-0002', status = 'revoked',
+  revoked_at = clock_timestamp(), revoked_reason = 'Moved in the suite'
+ where patient_id = '98d00009-0000-4000-8000-000000000002' and membership_id = '98d00005-0000-4000-8000-000000000004'
+   and correlation_id = '0098-sealed-demo-install';
+update auth.account_roles set revoked_at = clock_timestamp(), revoked_by = '98d00003-0000-4000-8000-000000000001',
+  revocation_reason = 'Revoked in the suite' where id = '98d00006-0000-4000-8000-000000000041';
+select pg_temp.assert('a share to a membership the patient could not choose (no clinical role) is refused, nothing written',
+  pg_temp.try('select identity.sealed_demo_install()') = '55000 0098: SEALED_DEMO_SHARE_INELIGIBLE'
+  and (select count(*) from identity.consent_grants grant_row
+        where grant_row.patient_id = '98d00009-0000-4000-8000-000000000002'
+          and grant_row.membership_id = '98d00005-0000-4000-8000-000000000004') = 1);
+rollback to savepoint share_guard;
+select pg_temp.assert('the savepoint left the four seeded shares',
+  (select count(*) from identity.consent_grants grant_row
+    where grant_row.correlation_id = '0098-sealed-demo-install' and grant_row.status = 'active') = 4);
 
 -- 6a. Recovery as the owner will do it: forgot-password to each mailbox, the
 -- code verified (the challenge written here as Identity's verify step leaves
@@ -806,10 +939,14 @@ select pg_temp.assert('only the live rule''s denied change is recorded, without 
 set local role hid_identity_api_runtime;
 select pg_temp.as_demo_patient(1);
 -- The emergency-contact check (each probe in a savepoint, undone, so that no
--- recorded HMAC outlives it) and the database's own rule, G7: a demo
--- patient's contact is an email whose HMAC the check recorded in the same
--- transaction; anything else, and any add that skipped the check (an Identity
--- before 0098, another caller), is refused; removal never is.
+-- recorded HMAC outlives it) and the database's own rule, G7: for a demo
+-- patient it refuses an SMS contact, and an email contact whose HMAC the
+-- check did not record in the same transaction (an Identity before 0098
+-- never asks the check); removal never is. Its limit, as documented: the
+-- database holds only an HMAC and ciphertext, so it cannot tell whether
+-- either belongs to the checked address, and a session that sets
+-- hid.sealed_demo_contact_hmac itself is admitted; that the destination is a
+-- demo mailbox rests on Identity.
 reset role;
 create function pg_temp.add_contact(subject text, session uuid, contact uuid, channel text, hmac text)
 returns text language sql as $f$
@@ -875,6 +1012,15 @@ select pg_temp.assert('G7: the one contact added is the checked mailbox, now rem
   (select array_agg(contact.channel || '|' || contact.status || '|' || (contact.destination_hmac is null))
      from identity.patient_emergency_contacts contact where identity.sealed_demo_patient(contact.patient_id))
   = array['email|deactivated|true']);
+rollback to savepoint contact_probe;
+savepoint contact_probe;
+set local role hid_identity_api_runtime;
+select pg_temp.as_demo_patient(1);
+select set_config('hid.sealed_demo_contact_hmac', repeat('3', 64), true);
+select pg_temp.assert('G7''s limit, as documented: a session that records an HMAC itself, without the check, is admitted',
+  pg_temp.add_contact('patient:98d00008-0000-4000-8000-000000000001', '98a0000b-0000-4000-8000-000000000011',
+    '98a00010-0000-4000-8000-000000000003', 'email', repeat('3', 64)) = 'ok');
+reset role;
 rollback to savepoint contact_probe;
 set local role hid_identity_api_runtime;
 select pg_temp.as_real_patient();
@@ -1055,8 +1201,36 @@ select pg_temp.assert('and the demo nurse at Demo Outreach',
   ehr.context_allows('98d00009-0000-4000-8000-000000000001', '98d00002-0000-4000-8000-000000000004', 'write_records')
   and ehr.context_allows('98d00009-0000-4000-8000-000000000002', '98d00002-0000-4000-8000-000000000004', 'write_records'));
 reset role;
+-- The patient-side and staff-side views of the seeded shares are those of a
+-- share the patient made: each patient's access history lists both as
+-- clinical_collaboration shares to Demo Operations that the patient may
+-- revoke; the staff login's shared-with-me list at Demo Hospital and Demo
+-- Outreach lists both patients; the patients' access log shows no seed row
+-- (it shows application rows only).
+set local role hid_identity_api_runtime;
+select pg_temp.as_demo_patient(1);
+select pg_temp.assert('Patient One''s access history lists the two seeded shares as the patient''s, revocable',
+  (select array_agg(item->>'facilityName' || '|' || (item->>'shareLevel') || '|' || (item->>'shareDuration') || '|'
+                    || (item->>'clinicianName') || '|' || (item->>'scope') || '|' || (item->>'status') || '|'
+                    || (item->>'revocableByPatient') || '|' || (item->>'reason') order by item->>'facilityName')
+     from jsonb_array_elements(identity.patient_self_access_history('patient:98d00008-0000-4000-8000-000000000001',
+       '98a0000b-0000-4000-8000-000000000011')->'items') item)
+  = array['Demo Hospital|clinical_collaboration|until_revoked|Demo Operations|write_records|active|true|Shared by the patient',
+          'Demo Outreach|clinical_collaboration|until_revoked|Demo Operations|write_records|active|true|Shared by the patient']
+  and identity.patient_self_access_log('patient:98d00008-0000-4000-8000-000000000001',
+        '98a0000b-0000-4000-8000-000000000011', 50, null, null)->'events' = '[]'::jsonb);
+select pg_temp.as_demo_staff(1);
+select pg_temp.assert('the staff login''s shared-with-me list at Demo Hospital lists both patients',
+  (select array_agg(listed.full_name || '|' || listed.level || '|' || listed.duration_preset || '|' || listed.scope
+                    order by listed.full_name) from identity.list_shared_with_me() listed)
+  = array['Demo Patient One|clinical_collaboration|until_revoked|write_records',
+          'Demo Patient Two|clinical_collaboration|until_revoked|write_records']);
+select pg_temp.as_demo_staff(4);
+select pg_temp.assert('and at Demo Outreach',
+  (select count(*) from identity.list_shared_with_me()) = 2);
+reset role;
 -- A share revoked by the patient stays revoked: a second install writes no
--- new one.
+-- new one, and no audit row.
 select set_config('hid.test.outreach_share', (select grant_row.id::text from identity.consent_grants grant_row
   where grant_row.patient_id = '98d00009-0000-4000-8000-000000000002'
     and grant_row.membership_id = '98d00005-0000-4000-8000-000000000004'
@@ -1068,13 +1242,29 @@ select pg_temp.assert('Patient Two revokes the Demo Outreach share in the portal
      from identity.revoke_my_consent_grant('patient:98d00008-0000-4000-8000-000000000002',
        '98a0000b-0000-4000-8000-000000000012', current_setting('hid.test.outreach_share')::uuid,
        'Testing the revocation')));
+select pg_temp.assert('the revoked share shows revoked in Patient Two''s access history, and the revoke in the access log',
+  (select item->>'status' from jsonb_array_elements(identity.patient_self_access_history(
+     'patient:98d00008-0000-4000-8000-000000000002', '98a0000b-0000-4000-8000-000000000012')->'items') item
+    where item->>'consentGrantId' = current_setting('hid.test.outreach_share')) = 'revoked'
+  and (select array_agg(event->>'action' || '|' || (event->>'actorKind') || '|' || (event->>'facilityName'))
+         from jsonb_array_elements(identity.patient_self_access_log('patient:98d00008-0000-4000-8000-000000000002',
+           '98a0000b-0000-4000-8000-000000000012', 50, null, null)->'events') event)
+    = array['access_ended|patient|Demo Outreach']);
 reset role;
-select pg_temp.assert('a second install neither restores nor adds a share',
+select pg_temp.assert('the revocation is the patient''s, and audited as the patient''s',
+  (select grant_row.revoked_by = '98d00008-0000-4000-8000-000000000002' and grant_row.revoked_reason = 'Testing the revocation'
+     from identity.consent_grants grant_row where grant_row.id = current_setting('hid.test.outreach_share')::uuid)
+  and (select count(*) from audit.events event
+        where event.action = 'identity.consent-grant.patient-revoke' and event.actor_type = 'patient'
+          and event.actor_account_id = '98d00008-0000-4000-8000-000000000002'
+          and event.resource_uuid = current_setting('hid.test.outreach_share')::uuid) = 1);
+select pg_temp.assert('a second install neither restores nor adds a share, nor audits anything',
   (identity.sealed_demo_install()->>'inserted')::integer = 0
   and (select count(*) from identity.consent_grants grant_row
         where grant_row.correlation_id = '0098-sealed-demo-install') = 4
   and (select count(*) from identity.consent_grants grant_row
-        where grant_row.correlation_id = '0098-sealed-demo-install' and grant_row.status = 'active') = 3);
+        where grant_row.correlation_id = '0098-sealed-demo-install' and grant_row.status = 'active') = 3
+  and (select count(*) from audit.events event where event.correlation_id = '0098-sealed-demo-install') = 5);
 set local role hid_ehr_api_runtime;
 select pg_temp.as_demo_staff(4);
 select pg_temp.assert('the revoked share no longer lets the nurse in',

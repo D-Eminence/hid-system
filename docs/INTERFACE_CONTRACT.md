@@ -2079,11 +2079,24 @@ sign-in as for any member of several facilities; two patient logins,
 `patient2@healthidentitydirectory.com` (`HID-ZDEMAAA3`); eight
 fictional patients without a login or any contact detail (`HID-ZDEMBBB2` to
 `HID-ZDEMBBB9`). Patient One and Patient Two each share their record with the
-demo login at Demo Hospital (doctor) and at Demo Outreach (nurse), written by
-the patient's own Share action (`identity.write_patient_share`: clinical
-collaboration until revoked, 365 days of direct-care write access, revocable
-in the patient portal); these four shares are the only grants seeded, and a
-revoked one is never restored. The three accounts are seeded `pending_reset`
+demo login at Demo Hospital (doctor) and at Demo Outreach (nurse): the seed
+writes the consent grant and share row that the patient's own Share action
+writes, with `identity.write_patient_share`'s values (clinical collaboration
+until revoked, 365 days of direct-care write access, granted by the patient
+and revocable in the patient portal), so they read like any share in the
+patient's access history and the staff login's shared-with-me list; these
+four shares are the only grants seeded, a revoked one is never restored, and
+none is written beside a share the patient already holds or to a membership
+the patient could not choose. The audit says who wrote them: no audit row
+names a patient (or anyone) as its actor. Each share has one row of the
+migration's own (`actor_type` `system`, `provenance` `migration`,
+`source_system` `hid-sealed-demo`, `action` `identity.sealed-demo.seed-share`,
+correlation id `0098-sealed-demo-install`, the grant as its resource, the
+patient and the facility as its subject), and the install one more
+(`identity.sealed-demo.install`, the same actor, provenance, source system and
+correlation id, counts only): five rows. They appear in the facility's and the
+platform's audit lists; a patient's access log leaves migration rows out. The
+three accounts are seeded `pending_reset`
 without a password, their email verified: the owner sets each password with
 Forgot password (`POST /api/v1/auth/otp/start|verify|complete`, unchanged; a
 patient may start with the email or the Health ID).
@@ -2098,7 +2111,9 @@ invitation's acceptance. It also refuses a Health ID, facility code, slug,
 CAC or fixed id held by a real row, and never attaches demo access to an
 existing account. The read-only query in the migration's header (including
 `open_applications` and `pending_invitations`) is run on production before
-signing.
+signing. A share the seed would write to a membership the patient could not
+choose in the share directory is refused too (55000
+`SEALED_DEMO_SHARE_INELIGIBLE`, nothing written).
 
 Before testers start, the owner sets the three passwords once, at least 24
 hours before patient approvals, new shares, the PIN, emergency contacts or
@@ -2164,14 +2179,20 @@ real actor and a demo one):
   contact `POST /api/v1/identity/me/emergency-contacts` 400
   `EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED` ("A demo account can only add the
   demo mailboxes."), checked after the recovery hold and before anything is
-  written or sent. The database enforces the contact rule too (trigger
-  `patient_emergency_contacts_sealed_demo`): Identity asks
+  written or sent. The database checks the contact too, as far as it can see
+  (trigger `patient_emergency_contacts_sealed_demo`): Identity asks
   `identity.sealed_demo_contact_allowed(subject, session, channel,
-  destination, destination HMAC)`, which for a demo patient records the HMAC
-  of an allowed mailbox for the rest of the transaction, and a demo patient's
-  contact is stored only as an email with that HMAC; an SMS contact, or an add
-  that skipped the check (an Identity image before 0098 answers it 403), is
-  refused with nothing added or sent. Removing a contact is never refused. A
+  destination, destination HMAC)`, which for a demo patient and an allowed
+  mailbox records the HMAC it was given for the rest of the transaction; the
+  trigger refuses a demo patient's SMS contact, and an email contact whose
+  HMAC the check did not record in that transaction (an Identity image before
+  0098 never asks the check, so it answers 403 with nothing added or sent).
+  The database holds only the contact's HMAC and ciphertext, so it cannot
+  tell whether either belongs to the checked address, and any session can set
+  `hid.sealed_demo_contact_hmac` itself: that the destination is one of the
+  three demo mailboxes rests on Identity (`EmergencyContactService.add`
+  computes the HMAC from the same normalized address it checks and
+  encrypts). Removing a contact is never refused. A
   demo patient never holds a phone: a phone change answers 400
   `PROFILE_REQUEST_INVALID`, so no SMS is ever due for one.
 - QoreID: a demo account consumes no quota (`QOREID_QUOTA_PERMISSION_DENIED`, the
@@ -2208,7 +2229,8 @@ rules, audit, the PIN, break-glass, requests and approvals, orders from Demo
 Hospital to Demo Laboratory or Demo Pharmacy and their acceptance, results and
 dispensing, document upload and imports, outreach. Notifications go only to the
 owner's three demo mailboxes (the demo logins' own addresses, which are the
-allowlist above) and the testers' own devices.
+allowlist above; for emergency contacts as Identity enforces it, see above) and
+the testers' own devices.
 
 Off switch and removal. To switch the demo off (if the seal is ever found
 wanting, or testing ends), a platform administrator disables the three demo

@@ -34,10 +34,18 @@
 --    (auth.complete_recovery_otp accepts pending_reset and makes the account
 --    active). No password or password hash is in this file.
 -- D6 Patient One and Patient Two each share their record with the demo login
---    at Demo Hospital (doctor) and at Demo Outreach (nurse), as the patient's
---    own Share action does (identity.write_patient_share: level
+--    at Demo Hospital (doctor) and at Demo Outreach (nurse): the install
+--    writes the consent grant and share row the patient's own Share action
+--    writes (identity.write_patient_share's values, column for column: level
 --    clinical_collaboration, until revoked, which is 365 days of direct-care
---    write_records; the patient can revoke it in the portal), so testers
+--    write_records, granted by the patient, so the patient can revoke it in
+--    the portal), but the audit tells the truth: the patients did not share,
+--    the migration did. So no audit row names a patient as its actor; each
+--    share has one row of the migration's own (actor system, provenance
+--    migration, source system hid-sealed-demo, action
+--    identity.sealed-demo.seed-share, correlation id
+--    0098-sealed-demo-install, the grant as its resource, the patient and
+--    facility as its subject). Testers
 --    write in those two charts from the first day: visits, notes, vitals,
 --    orders, outreach links, documents. These four shares are the only
 --    grants seeded. The eight fictional patients have no login, so no
@@ -66,11 +74,15 @@
 --    a pending staff invitation: seeding the account would break that
 --    application's approval or that invitation's acceptance.
 -- D11 A demo patient's emergency contact is checked in the database too (G7):
---    an email whose HMAC identity.sealed_demo_contact_allowed recorded in
---    this transaction after finding the address a demo mailbox; anything
---    else (an SMS, an Identity that skips the check) is refused, so the
---    verification code and the emergency alerts reach the owner's mailboxes
---    only.
+--    it refuses an SMS contact, and an email contact added in a transaction
+--    where identity.sealed_demo_contact_allowed did not record that
+--    contact's HMAC (an Identity before 0098 never asks it). The database
+--    holds only the contact's HMAC and ciphertext, so it cannot tell whether
+--    either belongs to the address the check was given, and any session can
+--    set hid.sealed_demo_contact_hmac itself. That the destination is one of
+--    the three demo mailboxes rests on Identity
+--    (EmergencyContactService.add computes the HMAC from the same normalized
+--    address it checks and encrypts).
 --
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
 --    and nothing is applied): 0001-0097 applied (0097's table among the
@@ -85,14 +97,17 @@
 --    roles, purpose of use and columns the seed and the seal rely on are as
 --    0001-0097 made them; no table the seed reads forces row-level security,
 --    except identity.staff_invitations, whose forced policies must let the
---    applier read every row; the applying role, which will own every new
+--    applier read every row, and identity.patient_consent_shares, whose
+--    forced policy must let the applier read and insert every row; the
+--    applying role, which will own every new
 --    object, owns (or is a member of the owners of) the eight replaced
 --    functions, identity.patients, the seven tables that get a trigger and
---    every table the seed reads or writes, may create in schema identity and
---    run identity.write_patient_share, and each replaced function's owner
---    holds the applier's privileges (so the replaced bodies may call the new
---    helpers). Every attribute of the replaced functions but the body is
---    recorded and compared after the replacement (section 7).
+--    every table the seed reads or writes (identity.patient_consent_shares
+--    among them), may create in schema identity, read the role and
+--    permission tables and insert into audit.events, and each replaced
+--    function's owner holds the applier's privileges (so the replaced bodies
+--    may call the new helpers). Every attribute of the replaced functions but
+--    the body is recorded and compared after the replacement (section 7).
 -- 1. SHARE ROW EXCLUSIVE on the seven tables that get a trigger, up front
 --    (see Locks).
 -- 2. identity.sealed_demo_members: (member_kind organization, facility,
@@ -160,14 +175,19 @@
 --       causes a QoreID call (platform.consume_qoreid_quota upserts that row
 --       before every call; a BEFORE INSERT trigger fires on ON CONFLICT too).
 --    G7 patient_emergency_contacts_sealed_demo (insert, or update of channel
---       or destination_hmac, of a contact that is not deactivated): a demo
---       patient's contact is an email whose HMAC
---       identity.sealed_demo_contact_allowed recorded in this transaction;
---       else 42501 EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED. An SMS contact,
---       or any add that skipped the check (an Identity image before 0098,
---       another caller), is refused, so no code or alert is ever sent to
---       anyone but the owner. Deactivation (removal, opt-out, account
---       deletion) is never refused.
+--       or destination_hmac, of a contact that is not deactivated): for a
+--       demo patient it refuses (42501
+--       EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED) an SMS contact, and an
+--       email contact whose HMAC identity.sealed_demo_contact_allowed did not
+--       record in this transaction (so an Identity image before 0098, which
+--       never asks the check, adds none). The database holds only the
+--       contact's HMAC and ciphertext, so it cannot tell whether either
+--       belongs to the address the check was given, and any session can set
+--       hid.sealed_demo_contact_hmac itself: that the destination is one of
+--       the three demo mailboxes rests on Identity
+--       (EmergencyContactService.add computes the HMAC from the same
+--       normalized address it checks and encrypts). Deactivation (removal,
+--       opt-out, account deletion) is never refused.
 -- 5. Eight bodies replaced (CREATE OR REPLACE), each its latest body byte for
 --    byte plus one clause that is always true for real tenants:
 --    R1 identity.create_access_request (0010), R2
@@ -218,14 +238,26 @@
 --    facility code, Health ID or CAC is held by a real row
 --    (SEALED_DEMO_KEY_TAKEN); or when a demo account has a real membership,
 --    a platform role or (the staff login) a patient record
---    (SEALED_DEMO_ACCOUNT_NOT_SEALED). It never attaches demo access to an
+--    (SEALED_DEMO_ACCOUNT_NOT_SEALED); or when a share would be written to a
+--    membership the patient could not choose in the share directory
+--    (identity.share_provider_eligible's rule, less the active sign-in the
+--    owner's password reset gives the staff login: an active staff record,
+--    membership, facility and organization, a clinical role, the
+--    identity.consent.write permission, no self-service application;
+--    SEALED_DEMO_SHARE_INELIGIBLE). It never attaches demo access to an
 --    existing account. Rows are inserted ON CONFLICT DO NOTHING and nothing
 --    existing is updated (passwords, statuses, names); the four shares (D6)
---    are written once each, through identity.write_patient_share under the
---    correlation id 0098-sealed-demo-install, and never again (not even
---    after the patient revokes one): a second call inserts nothing and
---    answers the same counts. Its audit row (system, provenance migration)
---    holds counts only.
+--    are written once each under the correlation id 0098-sealed-demo-install
+--    (a consent grant and a share row each, with the values
+--    identity.write_patient_share gives, and one audit row each: actor
+--    system, provenance migration, source system hid-sealed-demo, action
+--    identity.sealed-demo.seed-share, no patient as actor), and never again
+--    (not even after the patient revokes one; nor beside an active share the
+--    patient already holds; nothing is replaced or revoked): a second call
+--    inserts nothing and answers the same counts. Its own audit row (action
+--    identity.sealed-demo.install, the same actor, provenance, source system
+--    and correlation id) holds counts only. So the seed writes five audit
+--    rows, none of them a patient's.
 -- 11. Last, identity.patients' policy patients_registration_read (0011): the
 --    same two permission checks, and the row is a demo patient exactly when
 --    the current facility is a demo facility. A registration clerk or doctor
@@ -235,7 +267,9 @@
 --    query). Checked at once: the expression as written here, and still six
 --    policies on identity.patients.
 --
--- The seeded tenant (every row source_system hid-sealed-demo):
+-- The seeded tenant (source_system hid-sealed-demo on every row that has the
+-- column, except the four consent grants, which keep the default hid as
+-- every patient share does):
 --   Organizations and facilities, each verified and active, Africa/Lagos:
 --     Demo Hospital (DEMO-HOSPITAL), Demo Laboratory (DEMO-LABORATORY),
 --     Demo Pharmacy (DEMO-PHARMACY), Demo Outreach (DEMO-OUTREACH).
@@ -650,6 +684,24 @@ begin
                           in ('true', format('(CURRENT_USER = %L::name)', current_user))) then
     mismatch := 'identity.staff_invitations row-level security hides rows from the applier';
   end if;
+  -- identity.patient_consent_shares forces row-level security too (0095); the
+  -- install reads and inserts its share rows as the applier, so a permissive
+  -- policy for every role and every command must admit the applier (true, or
+  -- the applier's own name) in both its USING and its WITH CHECK.
+  if mismatch is null
+     and exists (select 1 from pg_class relation
+                  where relation.oid = 'identity.patient_consent_shares'::regclass and relation.relrowsecurity)
+     and not exists (select 1 from pg_policy policy_row
+                      where policy_row.polrelid = 'identity.patient_consent_shares'::regclass
+                        and policy_row.polpermissive and policy_row.polcmd = '*'
+                        and policy_row.polroles = '{0}'::oid[]
+                        and pg_get_expr(policy_row.polqual, policy_row.polrelid)
+                          in ('true', format('(CURRENT_USER = %L::name)', current_user))
+                        and coalesce(pg_get_expr(policy_row.polwithcheck, policy_row.polrelid),
+                              pg_get_expr(policy_row.polqual, policy_row.polrelid))
+                          in ('true', format('(CURRENT_USER = %L::name)', current_user))) then
+    mismatch := 'identity.patient_consent_shares row-level security hides rows from the applier or refuses its inserts';
+  end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
       message = format('0098: an index, CHECK, role or row-level security setting this migration relies on differs from 0001-0097: %s', mismatch);
@@ -729,6 +781,30 @@ begin
       ('identity.patient_assurance_states', 'contact_verified_at', 'timestamp with time zone', false),
       ('identity.consent_grants', 'patient_id', 'uuid', true), ('identity.consent_grants', 'membership_id', 'uuid', true),
       ('identity.consent_grants', 'facility_id', 'uuid', false),
+      ('identity.consent_grants', 'id', 'uuid', true), ('identity.consent_grants', 'request_id', 'uuid', false),
+      ('identity.consent_grants', 'staff_id', 'uuid', true), ('identity.consent_grants', 'account_id', 'uuid', true),
+      ('identity.consent_grants', 'scope', 'text', true), ('identity.consent_grants', 'status', 'text', true),
+      ('identity.consent_grants', 'granted_by_patient_id', 'uuid', false),
+      ('identity.consent_grants', 'reason', 'text', true),
+      ('identity.consent_grants', 'starts_at', 'timestamp with time zone', true),
+      ('identity.consent_grants', 'expires_at', 'timestamp with time zone', true),
+      ('identity.consent_grants', 'break_glass', 'boolean', true),
+      ('identity.consent_grants', 'purpose_of_use', 'text', false),
+      ('identity.consent_grants', 'authorization_method', 'text', false),
+      ('identity.patient_consent_shares', 'consent_grant_id', 'uuid', true),
+      ('identity.patient_consent_shares', 'patient_id', 'uuid', true),
+      ('identity.patient_consent_shares', 'membership_id', 'uuid', true),
+      ('identity.patient_consent_shares', 'level', 'text', true),
+      ('identity.patient_consent_shares', 'duration_preset', 'text', true),
+      ('identity.patient_consent_shares', 'created_via', 'text', true),
+      ('identity.patient_consent_shares', 'invitation_id', 'uuid', false),
+      ('identity.patient_consent_shares', 'replaced_consent_grant_id', 'uuid', false),
+      ('identity.patient_consent_shares', 'idempotency_key', 'text', false),
+      ('identity.patient_consent_shares', 'request_sha256', 'character(64)', false),
+      ('identity.staff_facility_memberships', 'migration_hold_reason', 'text', false),
+      ('auth.roles', 'code', 'text', true), ('auth.roles', 'active', 'boolean', true),
+      ('auth.role_permissions', 'role_code', 'text', true), ('auth.role_permissions', 'permission_code', 'text', true),
+      ('auth.permissions', 'code', 'text', true), ('auth.permissions', 'active', 'boolean', true),
       ('identity.patient_share_invitations', 'patient_id', 'uuid', true),
       ('identity.patient_share_invitations', 'invitee_email', 'text', true),
       ('identity.patient_share_invitations', 'accepted_membership_id', 'uuid', false),
@@ -760,10 +836,11 @@ begin
   -- replaced functions, identity.patients (its policy), the seven tables
   -- that get a trigger and every table the install reads or writes (so that
   -- row-level security, enabled but not forced on some of them, hides no
-  -- row from the install), and may run identity.write_patient_share (the
-  -- shares); each replaced function's owner holds the applier's privileges,
-  -- so that the replaced bodies may call the new helpers, which the applier
-  -- owns.
+  -- row from the install; identity.patient_consent_shares among them, whose
+  -- forced policy is checked above), and may read the role and permission
+  -- tables (the shares' eligibility) and insert into audit.events; each
+  -- replaced function's owner holds the applier's privileges, so that the
+  -- replaced bodies may call the new helpers, which the applier owns.
   select string_agg(missing.what, '; ') into mismatch
     from (
       select format('%s does not own %s', holder.rolname, relation.oid::regclass) as what
@@ -777,11 +854,12 @@ begin
                'identity.organization_applications'::regclass, 'identity.organization_products'::regclass,
                'identity.patient_identifiers'::regclass, 'identity.patient_assurance_states'::regclass,
                'identity.registration_cases'::regclass, 'identity.patient_emergency_contacts'::regclass,
-               'identity.staff_invitations'::regclass)
+               'identity.staff_invitations'::regclass, 'identity.patient_consent_shares'::regclass)
          and not pg_temp.sealed_demo_0098_holds(applier, relation.relowner, null::aclitem[], 'r', 'OWNER')
       union all
       select format('%s lacks %s on %s', holder.rolname, wanted.privilege, relation.oid::regclass)
-        from (values ('audit.events', 'INSERT'), ('auth.roles', 'SELECT')) wanted(relation_name, privilege)
+        from (values ('audit.events', 'INSERT'), ('auth.roles', 'SELECT'), ('auth.role_permissions', 'SELECT'),
+                     ('auth.permissions', 'SELECT')) wanted(relation_name, privilege)
         join pg_class relation on relation.oid = wanted.relation_name::regclass
         join pg_roles holder on holder.oid = applier
        where not pg_temp.sealed_demo_0098_holds(applier, relation.relowner, relation.relacl, 'r', wanted.privilege)
@@ -795,8 +873,7 @@ begin
       union all
       select format('%s lacks EXECUTE on %s', holder.rolname, proc.oid::regprocedure)
         from (values ('identity.patient_self_session(text,uuid)'), ('platform.reject_mutation()'),
-                     ('platform.current_facility_id()'),
-                     ('identity.write_patient_share(uuid,uuid,text,uuid,text,text,text,uuid,text,text)')) wanted(proc_name)
+                     ('platform.current_facility_id()')) wanted(proc_name)
         join pg_proc proc on proc.oid = wanted.proc_name::regprocedure
         join pg_roles holder on holder.oid = applier
        where not pg_temp.sealed_demo_0098_holds(applier, proc.proowner, proc.proacl, 'f', 'EXECUTE')
@@ -929,9 +1006,13 @@ $$;
 -- holds only the contact's ciphertext and HMAC, so Identity asks with the
 -- normalized destination and its HMAC): true unless the live session's
 -- patient is a demo patient and the contact is not an email to one of the
--- owner's mailboxes. When it is true for a demo patient, the HMAC is recorded
--- in hid.sealed_demo_contact_hmac for the rest of the transaction; G7 admits
--- a demo patient's contact only with that HMAC.
+-- owner's mailboxes. When it is true for a demo patient, the HMAC it was
+-- given is recorded in hid.sealed_demo_contact_hmac for the rest of the
+-- transaction, and G7 admits a demo patient's email contact only with the
+-- recorded HMAC. It cannot verify that the HMAC is the given address's, and
+-- any session can set that setting itself: that a demo patient's contact is
+-- a demo mailbox rests on Identity, which computes the HMAC from the same
+-- normalized address it checks and encrypts.
 create function identity.sealed_demo_contact_allowed(requested_subject text, requested_session uuid,
   requested_channel text, requested_destination text, requested_destination_hmac character(64))
 returns boolean
@@ -1060,17 +1141,15 @@ declare
   -- D6: Patient One and Patient Two share with the doctor membership at Demo
   -- Hospital and the nurse membership at Demo Outreach.
   demo_shares constant jsonb := '[
-    {"patient_id": "98d00009-0000-4000-8000-000000000001", "account_id": "98d00008-0000-4000-8000-000000000001",
-     "membership_id": "98d00005-0000-4000-8000-000000000001"},
-    {"patient_id": "98d00009-0000-4000-8000-000000000001", "account_id": "98d00008-0000-4000-8000-000000000001",
-     "membership_id": "98d00005-0000-4000-8000-000000000004"},
-    {"patient_id": "98d00009-0000-4000-8000-000000000002", "account_id": "98d00008-0000-4000-8000-000000000002",
-     "membership_id": "98d00005-0000-4000-8000-000000000001"},
-    {"patient_id": "98d00009-0000-4000-8000-000000000002", "account_id": "98d00008-0000-4000-8000-000000000002",
-     "membership_id": "98d00005-0000-4000-8000-000000000004"}]';
+    {"patient_id": "98d00009-0000-4000-8000-000000000001", "membership_id": "98d00005-0000-4000-8000-000000000001"},
+    {"patient_id": "98d00009-0000-4000-8000-000000000001", "membership_id": "98d00005-0000-4000-8000-000000000004"},
+    {"patient_id": "98d00009-0000-4000-8000-000000000002", "membership_id": "98d00005-0000-4000-8000-000000000001"},
+    {"patient_id": "98d00009-0000-4000-8000-000000000002", "membership_id": "98d00005-0000-4000-8000-000000000004"}]';
   share_correlation constant text := '0098-sealed-demo-install';
   demo_share record;
-  previous_correlation text;
+  share_membership record;
+  share_grant uuid;
+  share_start timestamptz;
   step bigint;
   inserted bigint := 0;
 begin
@@ -1290,32 +1369,88 @@ begin
   on conflict (patient_id) do nothing;
   get diagnostics step = row_count; inserted := inserted + step;
 
-  -- D6: the four shares, each through identity.write_patient_share as the
-  -- patient's own Share action writes it (a consent grant and its share row,
-  -- clinical_collaboration until revoked, the patient's audit row), under the
-  -- install's correlation id; once only: a pair that already has a grant
-  -- with that correlation id (also revoked by the patient) is left alone.
-  -- The correlation id is restored afterwards.
-  previous_correlation := current_setting('app.correlation_id', true);
-  perform set_config('app.correlation_id', share_correlation, true);
-  for demo_share in select * from jsonb_to_recordset(demo_shares) demo(patient_id uuid, account_id uuid,
-                       membership_id uuid)
+  -- D6: the four shares. Each is the consent grant and the share row that the
+  -- patient's own Share action writes (identity.write_patient_share, 0095,
+  -- whose body section 0 pins), column for column: clinical_collaboration
+  -- until revoked, 365 days of direct-care write_records, granted by the
+  -- patient (so the patient revokes it in the portal), created_via search,
+  -- under the install's correlation id. Not that function's audit row: the
+  -- patients did not share, this migration did, so each share gets one audit
+  -- row of its own (system, provenance migration,
+  -- identity.sealed-demo.seed-share) and no audit row names a patient as its
+  -- actor. Each is written under the patient's advisory lock (0087's key),
+  -- only to a membership the patient could choose in the share directory
+  -- (identity.share_provider_eligible's rule, less the active sign-in the
+  -- staff login gets from the owner's password reset; else
+  -- SEALED_DEMO_SHARE_INELIGIBLE), and once only: a pair that already has a
+  -- grant with the install's correlation id (also one the patient revoked)
+  -- or an active share is left alone, so nothing is ever replaced, revoked or
+  -- restored. G1 checks each grant as it checks any other.
+  for demo_share in select * from jsonb_to_recordset(demo_shares) demo(patient_id uuid, membership_id uuid)
   loop
     perform pg_advisory_xact_lock(hashtextextended('patient-access-pin:' || demo_share.patient_id::text, 0));
-    if not exists (select 1 from identity.consent_grants grant_row
-                    where grant_row.patient_id = demo_share.patient_id
-                      and grant_row.membership_id = demo_share.membership_id
-                      and grant_row.correlation_id = share_correlation) then
-      perform identity.write_patient_share(demo_share.patient_id, demo_share.account_id,
-        'patient:' || demo_share.account_id::text, demo_share.membership_id, 'clinical_collaboration',
-        'until_revoked', 'search', null,
-        'sealed-demo-share-' || demo_share.patient_id::text || '-' || demo_share.membership_id::text,
-        encode(sha256(convert_to('sealed-demo-share:' || demo_share.patient_id::text || ':'
-          || demo_share.membership_id::text, 'UTF8')), 'hex'));
-      inserted := inserted + 2;
+    continue when exists (select 1 from identity.consent_grants grant_row
+                           where grant_row.patient_id = demo_share.patient_id
+                             and grant_row.membership_id = demo_share.membership_id
+                             and grant_row.correlation_id = share_correlation)
+               or exists (select 1 from identity.patient_consent_shares share
+                            join identity.consent_grants grant_row on grant_row.id = share.consent_grant_id
+                           where share.patient_id = demo_share.patient_id
+                             and share.membership_id = demo_share.membership_id
+                             and grant_row.status = 'active' and grant_row.expires_at > clock_timestamp());
+    select membership.id, membership.staff_id, membership.account_id, membership.facility_id
+      into share_membership
+      from identity.staff_facility_memberships membership
+      join identity.staff staff_row on staff_row.id = membership.staff_id
+      join identity.facilities facility on facility.id = membership.facility_id
+      join identity.organizations organization on organization.id = membership.organization_id
+     where membership.id = demo_share.membership_id and membership.account_id = staff_account
+       and membership.active and membership.migration_hold_reason is null
+       and staff_row.active and lower(staff_row.verification_status) in ('verified', 'approved', 'active')
+       and facility.active and facility.organization_id = membership.organization_id and organization.active
+       and exists (select 1 from auth.account_roles assignment
+                    where assignment.account_id = membership.account_id and assignment.membership_id = membership.id
+                      and assignment.facility_id = membership.facility_id and assignment.scope_type = 'facility'
+                      and assignment.revoked_at is null and assignment.role_code in ('doctor', 'clinician', 'nurse'))
+       and exists (select 1 from auth.account_roles assignment
+                     join auth.roles role_row on role_row.code = assignment.role_code and role_row.active
+                     join auth.role_permissions role_permission on role_permission.role_code = role_row.code
+                      and role_permission.permission_code = 'identity.consent.write'
+                     join auth.permissions permission_row on permission_row.code = role_permission.permission_code
+                      and permission_row.active
+                    where assignment.account_id = membership.account_id and assignment.membership_id = membership.id
+                      and assignment.facility_id = membership.facility_id and assignment.scope_type = 'facility'
+                      and assignment.revoked_at is null)
+       and not exists (select 1 from identity.organization_applications application
+                        where application.organization_id = membership.organization_id
+                          and application.approval_mode = 'self_service');
+    if not found then
+      raise exception using errcode = '55000', message = '0098: SEALED_DEMO_SHARE_INELIGIBLE';
     end if;
+    share_grant := gen_random_uuid();
+    share_start := clock_timestamp();
+    insert into identity.consent_grants (id, request_id, patient_id, staff_id, account_id, membership_id, facility_id,
+      scope, status, granted_by_patient_id, reason, starts_at, expires_at, break_glass, correlation_id,
+      purpose_of_use, authorization_method)
+    values (share_grant, null, demo_share.patient_id, share_membership.staff_id, share_membership.account_id,
+      share_membership.id, share_membership.facility_id, 'write_records', 'active', demo_share.patient_id,
+      'Shared by the patient', share_start, share_start + interval '365 days', false, share_correlation,
+      'direct-care', null);
+    insert into identity.patient_consent_shares (consent_grant_id, patient_id, membership_id, level, duration_preset,
+      created_via, invitation_id, replaced_consent_grant_id, idempotency_key, request_sha256)
+    values (share_grant, demo_share.patient_id, demo_share.membership_id, 'clinical_collaboration', 'until_revoked',
+      'search', null, null,
+      'sealed-demo-share-' || demo_share.patient_id::text || '-' || demo_share.membership_id::text,
+      encode(sha256(convert_to('sealed-demo-share:' || demo_share.patient_id::text || ':'
+        || demo_share.membership_id::text, 'UTF8')), 'hex'));
+    insert into audit.events (correlation_id, actor_type, facility_id, patient_id, action, outcome, resource_type,
+      resource_id, provenance, source_system, details)
+    values (share_correlation, 'system', share_membership.facility_id, demo_share.patient_id,
+      'identity.sealed-demo.seed-share', 'success', 'consent-grant', share_grant::text, 'migration',
+      'hid-sealed-demo', jsonb_build_object('scope', 'write_records', 'purpose', 'direct-care',
+        'level', 'clinical_collaboration', 'duration', 'until_revoked', 'via', 'search'));
+    inserted := inserted + 2;
   end loop;
-  perform set_config('app.correlation_id', coalesce(previous_correlation, ''), true);
 
   if inserted > 0 then
     insert into audit.events (correlation_id, actor_type, action, outcome, resource_type, provenance,
@@ -1464,10 +1599,14 @@ create trigger qoreid_quota_counters_sealed_demo
   for each row when (new.scope_type = 'account')
   execute function identity.qoreid_quota_counters_sealed_demo();
 
--- G7: a demo patient's emergency contact is an email whose HMAC
--- identity.sealed_demo_contact_allowed recorded in this transaction (after
--- finding the address one of the owner's mailboxes). An SMS contact, or an
--- add that skipped the check, is refused. Deactivation is never refused.
+-- G7: for a demo patient, refuses an SMS contact, and an email contact whose
+-- HMAC identity.sealed_demo_contact_allowed did not record in this
+-- transaction. The database holds only the contact's HMAC and ciphertext, so
+-- it cannot tell whether either belongs to the address the check was given,
+-- and any session can set hid.sealed_demo_contact_hmac itself: that the
+-- destination is one of the three demo mailboxes rests on Identity
+-- (EmergencyContactService.add computes the HMAC from the same normalized
+-- address it checks and encrypts). Deactivation is never refused.
 create function identity.patient_emergency_contacts_sealed_demo()
 returns trigger
 language plpgsql security definer
@@ -2961,11 +3100,11 @@ comment on function identity.sealed_demo_account(uuid) is
 comment on function identity.sealed_demo_recipient(text) is
   '0098: whether an address is one of the owner''s three demo mailboxes, an exact allowlist (any case, outer blanks trimmed): operations@healthidentitydirectory.com, patient1@healthidentitydirectory.com, patient2@healthidentitydirectory.com.';
 comment on function identity.sealed_demo_contact_allowed(text,uuid,text,text,character) is
-  '0098: Identity''s check before a patient adds an emergency contact: true unless the live session''s patient is a demo patient and the contact is not an email to a demo mailbox (42501 without a live patient session). True for a demo patient records the destination HMAC in hid.sealed_demo_contact_hmac for the transaction, which G7 requires.';
+  '0098: Identity''s check before a patient adds an emergency contact: true unless the live session''s patient is a demo patient and the contact is not an email to a demo mailbox (42501 without a live patient session). True for a demo patient records the HMAC it was given in hid.sealed_demo_contact_hmac for the transaction, which G7 requires of a demo patient''s email contact. It cannot verify that the HMAC is the given address''s, and any session can set that setting itself: that the contact is a demo mailbox rests on Identity (EmergencyContactService.add computes the HMAC from the same normalized address it checks and encrypts).';
 comment on function identity.sealed_demo_application(uuid) is
   '0098: whether an organization application belongs to a sealed demo facility (the admin applications list marks it demo).';
 comment on function identity.sealed_demo_install() is
-  '0098: installs the sealed demo tenant (Demo Hospital, Demo Laboratory, Demo Pharmacy, Demo Outreach; the staff login operations@healthidentitydirectory.com, pending_reset without a password; two patient logins patient1@healthidentitydirectory.com and patient2@healthidentitydirectory.com, each sharing with the demo login at Demo Hospital and Demo Outreach; eight fictional patients). Refuses (55000) an address, id or key held by a real row, or an address named by an open organization application or a pending staff invitation. Inserts only; a second call inserts nothing. The owner sets each password through forgot-password; testers write in Patient One''s and Two''s charts through the shares, break-glass (read-only) the fictional patients, and test patient approvals and new shares after the 24-hour recovery hold.';
+  '0098: installs the sealed demo tenant (Demo Hospital, Demo Laboratory, Demo Pharmacy, Demo Outreach; the staff login operations@healthidentitydirectory.com, pending_reset without a password; two patient logins patient1@healthidentitydirectory.com and patient2@healthidentitydirectory.com, each sharing with the demo login at Demo Hospital and Demo Outreach, written with identity.write_patient_share''s grant and share values and audited as the migration''s (system, provenance migration, identity.sealed-demo.seed-share), never as the patient''s; eight fictional patients). Refuses (55000) an address, id or key held by a real row, an address named by an open organization application or a pending staff invitation, or a share to a membership the patient could not choose. Inserts only; a second call inserts nothing. The owner sets each password through forgot-password; testers write in Patient One''s and Two''s charts through the shares, break-glass (read-only) the fictional patients, and test patient approvals and new shares after the 24-hour recovery hold.';
 comment on function identity.consent_grants_sealed_demo() is
   '0098 G1: a consent grant links a facility and a patient on the same side of the sealed demo boundary (42501 SEALED_DEMO_BOUNDARY).';
 comment on function identity.staff_memberships_sealed_demo() is
@@ -2979,7 +3118,7 @@ comment on function identity.patient_contact_changes_sealed_demo() is
 comment on function identity.qoreid_quota_counters_sealed_demo() is
   '0098 G6: a sealed demo account consumes no QoreID quota, so it causes no QoreID call (42501 QOREID_QUOTA_PERMISSION_DENIED).';
 comment on function identity.patient_emergency_contacts_sealed_demo() is
-  '0098 G7: a demo patient''s emergency contact (not deactivated) is an email whose HMAC identity.sealed_demo_contact_allowed recorded in this transaction (42501 EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED).';
+  '0098 G7: for a demo patient, refuses (42501 EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED) an SMS contact, and an email contact (not deactivated) whose HMAC identity.sealed_demo_contact_allowed did not record in this transaction. The database holds only an HMAC and ciphertext, so it cannot tell whether either belongs to the checked address, and any session can set hid.sealed_demo_contact_hmac itself: that the destination is one of the three demo mailboxes rests on Identity (EmergencyContactService.add computes the HMAC from the same normalized address it checks and encrypts).';
 
 -- 9. Section 0's helpers.
 drop function pg_temp.sealed_demo_0098_holds(oid, oid, aclitem[], "char", text);
