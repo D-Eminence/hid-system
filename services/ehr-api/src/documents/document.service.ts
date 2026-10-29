@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { AuditService } from '../audit/audit.service';
-import type { DataAccessContext } from '../common/request-context';
+import { offlineAuditDetails, type DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { IdentityApiService } from '../integrations/identity-api.service';
 import type { StorageProvider } from '../storage/storage.types';
@@ -366,6 +366,7 @@ export class DocumentService {
       resourceId,
       outcome,
       purposeOfUse: context.purposeOfUse,
+      details: offlineAuditDetails(context),
     };
   }
 

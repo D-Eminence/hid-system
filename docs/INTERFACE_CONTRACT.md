@@ -2053,3 +2053,122 @@ the right type.
 backend serves the ending (D18-13: the website ships first and stays
 dormant). An earlier backend sends none of these fields, and its Lab and
 Pharmacy answer the new route 404.
+
+## 25. Offline-first support (ehr-api, code-only; offline contract §2.10)
+
+Four routes under `/api/v1/ehr/offline`, built for the offline-first staff
+client (contract: D-Eminence/health `offline/base`, `docs/OFFLINE-CONTRACT.md`
+§2.10, paths and headers in `packages/offline/src/contracts.ts`). No migration,
+no grant change, no change to how a clinical write is authorized.
+
+Common to C1, C2 and C4: a staff session (cookie or bearer; a patient session
+answers 403 `PATIENT_SCOPE_DENIED`, none 401), `X-Facility-ID` at a facility the
+actor works at, `X-Purpose-Of-Use: direct-care` (else 400
+`PURPOSE_OF_USE_REQUIRED`), `X-CSRF-Token` on POST as on every browser write,
+and either `ehr.encounter.read` or `ehr.document.write` (`@RequireAnyPermission`;
+neither answers 403 `PERMISSION_DENIED`). Every answer is `private, no-store`
+and every error is problem+json. None of them checks consent.
+
+**C0. `GET /api/v1/ehr/offline/ping`** (public, not audited). 200
+`{"service":"ehr-api","serverTime":"2026-10-29T10:42:00.123Z"}`.
+
+**C1. `POST /api/v1/ehr/offline/receipts/lookup`** `{"keys":["off1.…"]}`, 1 to
+50 keys of the Idempotency-Key format (repeats looked up once). 200:
+
+```json
+{ "receipts": [ { "key": "off1.…", "operation": "encounter.create", "state": "completed",
+                  "resourceType": "encounter", "resourceId": "uuid", "responseStatus": 201,
+                  "createdAt": "…", "completedAt": "…" } ],
+  "unknown": ["off1.…"] }
+```
+
+Reads `ehr.idempotency_keys` in the caller's transaction context; its owner-only
+RLS (and the query's own predicates) limit rows to the caller's account,
+membership and facility, so another account's key, or the caller's key at
+another facility, is `unknown`. `state` is `processing`, `completed` or
+`failed`; `resourceType`, `resourceId` and `completedAt` are null unless
+completed. No patient id or clinical content. 400 `INVALID_KEYS` for any other
+body. Audit: `ehr.offline.receipts.lookup` with `{requested, found}`.
+
+**C2. `POST /api/v1/ehr/offline/audit-events`** `{"vaultId":"uuid","events":[…]}`,
+1 to 20 events, each with a UUID `eventId` (otherwise 400 `VALIDATION_FAILED`).
+Each event is checked on its own; 200
+`{"accepted":[…],"duplicate":[…],"rejected":[{"eventId":"…","code":"…"}]}`.
+
+| `action` | `patientId` | `section` |
+|---|---|---|
+| `ehr.record.read` | required | `consent`, `encounters`, `encounter`, `clinical-notes`, `vitals`, `diagnoses`, `prescriptions`, `lab-requests`, `documents`, `note-revisions`, `vital-corrections`, `reported-health`, `lab-results`, `summary` |
+| `ehr.offline.unlock` | none | none |
+| `ehr.offline.wipe` | none | the reason: `sign-out`, `failed-unlocks`, `lease`, `membership`, `kill-switch`, `account` |
+| `ehr.offline.command.discarded` | required | none or a chart section; `details` is exactly `{op, reason, bodySha256, capturedAt}` |
+
+Rejections: `INVALID_ACTION` (not in the table), `PATIENT_NOT_FOUND` (the
+patient foreign key fails), `INVALID_EVENT` (anything else: unknown field, bad
+`seq`, `occurredAt`, `clock`, `grantExpiresAt`, `resourceId`, section or
+patient presence). Each event is one `audit.events` row under its own
+savepoint: `event_id` = `eventId`; `occurred_at` = `occurredAt` clamped into
+[database now − 26 h, database now]; actor, membership, organization and
+facility from the session; `resource_type` `offline-chart-section` (patient
+events) or `offline-session`; `outcome` `success`, `purpose_of_use`
+`direct-care`, `provenance` `application`; `source_system` `health-id-offline`,
+`source_event_id` `<vaultId>:<seq>`; `details`
+`{offline:true, vaultId, seq, section, clock, deviceOccurredAt, clamped, grantExpiresAt}`
+(plus the four discard fields). A repeated `event_id` writes nothing and is
+`duplicate`. The statement is `insert … on conflict do nothing` without a
+conflict target: naming `(event_id)` needs SELECT on `audit.events`, which
+`hid_audit_writer` does not have; `event_id` is the only unique key a caller
+supplies, so the effect is the same.
+
+**C4. `POST /api/v1/ehr/offline/escrow-key`** `{"vaultId":"uuid","keyVersion":null}`.
+200 `{"keyVersion":1,"key":"<base64url of 32 bytes>","algorithm":"HKDF-SHA256"}`,
+the key being HKDF-SHA256(ikm = secret of that version, salt =
+`hid-offline-escrow/v1`, info = `accountId|membershipId|facilityId|vaultId`,
+lower-case UUIDs, 32 bytes). `keyVersion` null or absent gives the highest
+version. 503 `OFFLINE_ESCROW_UNAVAILABLE` unless `OFFLINE_ESCROW_ENABLED=true`
+(it is not set anywhere yet; the Terraform wiring is held by the owner); 404
+`OFFLINE_ESCROW_VERSION_UNKNOWN`; 429 `OFFLINE_ESCROW_RATE_LIMITED` past 30 per
+account per hour (counted per running task, like the patient chat admission
+limit); 400 `VALIDATION_FAILED` for another body. `OFFLINE_ESCROW_KEYS` is
+`{"<version>":"<base64url of 32 bytes>"}`; with escrow enabled, a missing or
+malformed value stops the service at start-up. Audit:
+`ehr.offline.escrow-key.issue` with `{vaultId, keyVersion}` (never the key, no
+patient).
+
+**C3. Offline replay headers.** Any route that builds its request context
+(`requireRequestContext`) reads, all optional:
+
+| Header | Valid value |
+|---|---|
+| `X-HID-Offline-Command` | `off1.<uuid>` |
+| `X-HID-Captured-At` | ISO-8601 UTC, `…Z`, up to milliseconds |
+| `X-HID-Clock` | `anchored`, `wall` or `suspect` |
+
+An invalid header is ignored and none ever refuses a request. Valid values go
+to `DataAccessContext.offline`, and the clinical write audit
+(`ClinicalRepository.record`) and the document audit
+(`DocumentService.auditEvent`) add
+`details.offline = {commandId, capturedAt, clock, capturedClamped}` (null for a
+header that was missing or invalid). A capture time outside [now − 24 h,
+now + 5 min] is recorded clamped into that window with `capturedClamped: true`.
+
+**`operation` per keyed route of the offline registry (§2.8).** C1 finds a
+command only if its route stores the key in `ehr.idempotency_keys`; for the
+others it answers `unknown`, and the client re-reads instead.
+
+| Registry op | Route | `operation` in `ehr.idempotency_keys` |
+|---|---|---|
+| `ehr.encounter.create` | POST `E` | `encounter.create` (`encounters.service.ts`) |
+| `ehr.note.create` | POST `E/{eid}/clinical-notes` | `clinical-note.create` (`clinical-notes.service.ts`) |
+| `ehr.vital.create` | POST `E/{eid}/vitals` | `vital.create` (`vitals.service.ts`) |
+| `ehr.diagnosis.create` | POST `E/{eid}/diagnoses` | `diagnosis.create` (`diagnoses.service.ts`) |
+| `ehr.prescription.create` | POST `E/{eid}/prescriptions` | `prescription.create` (`prescriptions.service.ts`) |
+| `ehr.lab-request.create` | POST `E/{eid}/lab-requests` | `lab-request.create` (`lab-requests.service.ts`) |
+| `ehr.note.revise` | POST `E/{eid}/clinical-notes/{nid}/revisions` | `clinical-note-revision.create` (`clinical-notes.service.ts`) |
+| `ehr.vital.correct` | POST `E/{eid}/vitals/{vid}/corrections` | `vital-correction.create` (`vitals.service.ts`) |
+| `ehr.document.upload` (upload intent) | POST `/api/v1/ehr/documents/upload-intents` | `document.upload-intent` (`document.service.ts`); `…/complete` takes no key |
+| `ehr.prescription.to-pharmacy` | POST `E/{eid}/prescriptions/{id}/pharmacy-work-item` | **none**: the key is passed to Pharmacy (`acceptEhrPrescription`), which keeps its own idempotency |
+| `ehr.lab-request.to-lab` | POST `E/{eid}/lab-requests/{id}/lab-work-item` | **none**: the key is checked and not used; Lab is called with `ehr-order:<requestId>:<rowVersion>` |
+| `ehr.encounter.update`, `ehr.note.update`, `ehr.diagnosis.update` | PATCH | **none**: the PATCH routes take no key (A1 not built) |
+| `identity.grant.close` | POST `/api/v1/identity/consent-grants/{gid}/close` | not an EHR route |
+
+`E` is `/api/v1/ehr/patients/{patientId}/encounters`.

@@ -4,6 +4,7 @@ export const PUBLIC_ROUTE = Symbol('PUBLIC_ROUTE');
 export const PATIENT_ALLOWED = Symbol('PATIENT_ALLOWED');
 export const PatientAllowed = (): MethodDecorator & ClassDecorator => SetMetadata(PATIENT_ALLOWED, true);
 export const REQUIRED_PERMISSIONS = Symbol('REQUIRED_PERMISSIONS');
+export const ANY_PERMISSIONS = Symbol('ANY_PERMISSIONS');
 export const AUDIT_ACTION = Symbol('AUDIT_ACTION');
 export const FACILITY_OPTIONAL = Symbol('FACILITY_OPTIONAL');
 export const NO_AUDIT = Symbol('NO_AUDIT');
@@ -13,6 +14,9 @@ export const Public = (): MethodDecorator & ClassDecorator => SetMetadata(PUBLIC
 export const FacilityOptional = (): MethodDecorator & ClassDecorator => SetMetadata(FACILITY_OPTIONAL, true);
 export const RequirePermissions = (...permissions: string[]): MethodDecorator & ClassDecorator =>
   SetMetadata(REQUIRED_PERMISSIONS, permissions);
+/** At least one of these permissions; @RequirePermissions needs all of its own. */
+export const RequireAnyPermission = (...permissions: string[]): MethodDecorator & ClassDecorator =>
+  SetMetadata(ANY_PERMISSIONS, permissions);
 export const AuditAction = (action: string): MethodDecorator & ClassDecorator => SetMetadata(AUDIT_ACTION, action);
 export const NoAudit = (): MethodDecorator & ClassDecorator => SetMetadata(NO_AUDIT, true);
 export const AuditFailuresOnly = (): MethodDecorator & ClassDecorator => SetMetadata(AUDIT_FAILURES_ONLY, true);
