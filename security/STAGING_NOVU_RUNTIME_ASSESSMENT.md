@@ -8,6 +8,12 @@
 > native evidence that assessment cites in `native_evidence_provenance`. Its
 > SHA-256 values are over these files with CRLF line endings; no check reads
 > them, and editing these files no longer changes what staging admits.
+> They record the earlier base
+> `sha256:55e7cd155c86d8956af63fec0a9d0790dd6d0ba98c7d38e63c0866557ee7aff8` and its
+> Node 22.23.3 binary.
+> Since 2026-10-29 the production assessment pins the Node 22.23.4 base, whose
+> only changed ELF is `nodejs/bin/node`; that binary is reviewed in the
+> assessment's `review_basis` and `node_source`, not in these files.
 
 Assessed 2026-10-05; expires 2026-11-04. Covers only the notification worker
 and database migration runner with the exact native file inventories in
