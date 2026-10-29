@@ -71,8 +71,14 @@ and CVE-2026-106069 (High) against that base's Node 22.23.3 (for example run
 `sha256:f643bc05bdcf5a8d98442e8a2a5c7a3a4c3a0e3bc4cdc5f10557d47f1ddd5812`, the
 same image variant carrying Node 22.23.4. Its only changed ELF is
 `/nodejs/bin/node`, byte-identical to the signed nodejs.org linux-arm64 release
-binary; the Debian library layers are unchanged. Scanning that ARM64 base reports
-no Node finding and the same eleven High matches listed above.
+binary; the Debian library layers are unchanged. The only other changes are data
+packages: tzdata and tzdata-legacy 2026c-0+deb13u1 to 2026e-0+deb13u1, and
+ca-certificates 20250419 to 20250419+deb13u1, which removes the AAA Certificate
+Services (Comodo) and emSign ECC Root CA - G3 roots from
+`/etc/ssl/certs/ca-certificates.crt`. Node uses its bundled root store by default,
+and no HID service reads the system bundle or switches Node to it. These checks
+are recorded in `security/node-22.23.4-runtime-evidence.json`. Scanning that ARM64
+base reports no Node finding and the same eleven High matches listed above.
 
 Every staging image with High scan findings (all but the gateway, whose scan is
 clean) is admitted against the same exact-image not-affected assessment as
