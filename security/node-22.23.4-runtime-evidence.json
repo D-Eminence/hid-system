@@ -1,0 +1,50 @@
+{
+  "schema": "hid.native-runtime-evidence/v1",
+  "reviewed_at": "2026-10-29",
+  "scope": "Native evidence for the Node 22.23.4 base pinned by production-runtime-assessment.json. Versus the base recorded in the staging-*-runtime-assessment.json evidence, nodejs/bin/node is the only changed ELF; every other ELF hash is unchanged and stays covered by that evidence.",
+  "base_digest": "sha256:f643bc05bdcf5a8d98442e8a2a5c7a3a4c3a0e3bc4cdc5f10557d47f1ddd5812",
+  "platform": "linux/arm64/v8",
+  "platform_manifest": "sha256:d9e2b473b36e61248531d7b6d3ead4645e2b7ddef2ac1c2a352b74a0a0d35338",
+  "previous_base_digest": "sha256:55e7cd155c86d8956af63fec0a9d0790dd6d0ba98c7d38e63c0866557ee7aff8",
+  "previous_platform_manifest": "sha256:a3f4443b79d9b5950c9e4e62fb2986fd7b2e6e12afa7ac7c3fdf6ab32ae2d762",
+  "image_config": "User 0, Entrypoint /nodejs/bin/node and Env (PATH, SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt) unchanged.",
+  "changed_layers": {
+    "2": "tzdata 2026c-0+deb13u1 to 2026e-0+deb13u1 (zoneinfo data, changelogs, dpkg status); no ELF.",
+    "3": "tzdata-legacy 2026c-0+deb13u1 to 2026e-0+deb13u1 (same kind of files); no ELF.",
+    "12": "ca-certificates 20250419 to 20250419+deb13u1: etc/ssl/certs/ca-certificates.crt goes from 150 to 148 certificates, removing CN=AAA Certificate Services,O=Comodo CA Limited and CN=emSign ECC Root CA - G3; no ELF.",
+    "21": "nodejs/bin/node only."
+  },
+  "system_ca_bundle_use": "None found. This node binary defaults to its bundled root store (its --use-bundled-ca help text says (default)). It reads the system bundle named by SSL_CERT_FILE only with --use-openssl-ca, --use-system-ca, NODE_USE_SYSTEM_CA=1 or tls.getCACertificates('system'); no HID Dockerfile, service, script, workflow or infra file, and no installed dependency of the services' current lockfiles, uses any of these, NODE_EXTRA_CA_CERTS or /etc/ssl.",
+  "node_binary": {
+    "path": "nodejs/bin/node",
+    "sha256": "7e48183361053f039294fbbc3ba586722fe756bf296d6cb8195356d10819cd16",
+    "previous_sha256": "d09e299258c24f7cdf6f5d5ec185e3a56512b27a697113735dac909f1cac7b8d",
+    "release_tarball": "https://nodejs.org/dist/v22.23.4/node-v22.23.4-linux-arm64.tar.xz",
+    "release_tarball_sha256": "6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b",
+    "release_member": "node-v22.23.4-linux-arm64/bin/node",
+    "byte_identical_to_release_member": true,
+    "release_checksums": "https://nodejs.org/dist/v22.23.4/SHASUMS256.txt",
+    "release_checksums_signer": "5BE8A3F6C8A5C01D106C0AD820B1A390B168D356",
+    "signer_listed_in": "Release keys in README.md of node-v22.23.3.tar.xz (the previously pinned source) and node-v22.23.4.tar.xz.",
+    "undefined_imports": 1134,
+    "imports_added_vs_previous": ["recv@GLIBC_2.17"],
+    "forbidden_glibc_imports": 0,
+    "aligned_new_symbols": 0,
+    "pbds_strings": 0
+  },
+  "node_source": {
+    "source_url": "https://nodejs.org/dist/v22.23.4/node-v22.23.4.tar.xz",
+    "sha256": "7b9adc82d612d0a2a863d96c46de2292552e250cee51956ebbe0146c42aacae9",
+    "listed_in_signed_checksums": true,
+    "source_files_inspected": 11703,
+    "pattern_hits": []
+  },
+  "methods": {
+    "layers": "Index, platform manifests, configs and the four differing layer blobs fetched by digest from gcr.io/distroless/nodejs22-debian13 and checked against those digests. Every entry of each differing layer was compared with the layer at the same position in the previous manifest; the other 18 layers have identical digests.",
+    "release_identity": "SHASUMS256.txt and its detached .sig and clearsigned .asc each verify with the key of that fingerprint; the release tarball and source tarball hashes equal the listed values.",
+    "forbidden_glibc_imports": "Undefined .dynsym and .symtab names read with elf_imports() from scripts/assess-staging-runtime.py (undefined_imports counts them) that are in its forbidden list: strfmon, strfmon_l, __strfmon_l, ns_printrr, ns_printrrf, fp_nquery.",
+    "aligned_new_symbols": ".dynsym and .symtab names containing align_val_t (C++17 aligned new and delete).",
+    "pbds_strings": "Occurrences of pb_ds, __gnu_pbds or binary_heap in the binary's bytes; strfmon, ns_printrr and fp_nquery also occur 0 times.",
+    "source_files_inspected": "Regular files in the source tarball whose extension is .c, .cc, .cpp, .h, .hpp, .gyp or .gypi; the same rule gives the recorded 11700 for node-v22.23.3.tar.xz. pattern_hits lists those containing a forbidden glibc name, pb_ds, __gnu_pbds or binary_heap; no other file in the tarball contains one either."
+  }
+}
