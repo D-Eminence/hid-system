@@ -3536,8 +3536,9 @@
     "staging-novu-runtime-assessment.json": "1951e3191a134da6d46ea9456775cbd1bcee97e49fcc26117a9d3639a1651ead",
     "staging-identity-runtime-assessment.json": "8ac92ab64a154967ac14b831c31c7603392906c1bef408a4d1bbae9a562c1ec8",
     "staging-ehr-runtime-assessment.json": "363ae61ae9573b6613205c9d36d299db25362e1e75973053fe52eb78c44d14e0",
-    "staging-lab-runtime-assessment.json": "11c50190a2ec3c678adb81d301010cc88769a4924470d9c6d7101e95df751996"
+    "staging-lab-runtime-assessment.json": "11c50190a2ec3c678adb81d301010cc88769a4924470d9c6d7101e95df751996",
+    "node-22.23.4-runtime-evidence.json": "64fd6c7ad36a60fd1597b8bbe1973630473677f5e81a37e630a8ce9ba2fa5fcc"
   },
   "admission": "Expected previously reviewed native bytes only. Every current image must independently match this complete inventory; a changed or extra ELF fails closed. Original raw reports retained. No exploitable-risk waiver.",
-  "review_basis": "Advisories rechecked 2026-10-29 for this base: glibc announcements, Debian tracker, GCC commits (via gcc.gnu.org), and zlib via the Debian tracker and the Debian 1.3.1 source, which has no gz_vacate. Versus the retained assessment only nodejs/bin/node changed: it is byte-identical to bin/node in the signed Node 22.23.4 release node-v22.23.4-linux-arm64.tar.xz (SHASUMS256 6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b) and has no affected glibc import or PBDS content. All other native bytes remain checksum-bound to the retained assessment; exact current image confirmation is mandatory in CI."
+  "review_basis": "Advisories rechecked 2026-10-29 for this base: glibc announcements, Debian tracker, GCC commits (via gcc.gnu.org), and zlib via the Debian tracker and the Debian 1.3.1 source, which has no gz_vacate. Versus the retained assessment the only changed ELF is nodejs/bin/node. Its review (byte-identical to bin/node in the signed Node 22.23.4 linux-arm64 release; no affected glibc import, aligned new or PBDS content) and the base's non-ELF package changes are checksum-bound in node-22.23.4-runtime-evidence.json. All other native bytes remain checksum-bound to the retained assessment; exact current image confirmation is mandatory in CI."
 }
