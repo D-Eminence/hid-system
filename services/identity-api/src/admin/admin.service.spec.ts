@@ -270,6 +270,28 @@ describe('AdminService facility alert phone', () => {
   });
 });
 
+describe('AdminService sealed demo facilities (0098)', () => {
+  const platformAdmin = platformContext;
+  const facilityRow = { id: '10000000-0000-4000-8000-000000000009', organizationId: 'organization',
+    organizationName: 'Demo Hospital', name: 'Demo Hospital', code: 'DEMO-HOSPITAL', status: 'verified', version: '1',
+    statusReason: null, statusChangedAt: null, createdAt: new Date('2026-10-29T10:00:00Z'), membershipCount: '1' };
+
+  it.each([[true, true], [false, false], [null, false], [undefined, false]] as const)(
+    'marks the facility detail demo: %s -> %s, from the database helper', async (answer, demo) => {
+      const { service, client } = harness({ ...facilityRow, demo: answer });
+      await expect(service.facility(platformAdmin, facilityRow.id)).resolves.toMatchObject({ demo, version: 1 });
+      expect(String(client.query.mock.calls[0]?.[0])).toContain('identity.sealed_demo_facility(facility.id) as demo');
+    });
+
+  it('marks each listed facility and leaves the count query as it was', async () => {
+    const { service, client } = harness({ ...facilityRow, demo: true, count: '1' });
+    const listed = await service.listFacilities(platformAdmin, { page: 1, pageSize: 20 } as never);
+    expect(listed.items.map((item) => item.demo)).toEqual([true]);
+    expect(String(client.query.mock.calls[0]?.[0])).toContain('identity.sealed_demo_facility(facility.id) as demo');
+    expect(String(client.query.mock.calls[1]?.[0])).not.toContain('sealed_demo');
+  });
+});
+
 describe('AdminService emergency-contact opt-out', () => {
   usePatientSafetyTestEnvironment();
 

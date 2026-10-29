@@ -2053,3 +2053,83 @@ the right type.
 backend serves the ending (D18-13: the website ships first and stays
 dormant). An earlier backend sends none of these fields, and its Lab and
 Pharmacy answer the new route 404.
+
+## 25. The sealed demo tenant (0098)
+
+Migration 0098 (`0098_sealed_demo_tenant.sql`, owner decision of 2026-10-29
+"Sealed demo, yes") keeps a demo tenant beside the real ones in production so
+that testers sign in and use every portal without creating accounts. It is
+sealed in the database: a facility and a patient are linked (a consent grant, an
+order route, a share, an accepted invitation) only when both belong to the demo
+tenant or neither does, and so are an account and a facility (a staff
+membership). The marker is the owner-only table `identity.sealed_demo_members`;
+no existing API field changes for real tenants, and every answer below is one a
+real tenant already gets for an unknown or ineligible value.
+
+The tenant (seeded only on Amazon RDS, i.e. production; CI and rehearsals get the
+seal without the seed): Demo Hospital (`DEMO-HOSPITAL`), Demo Laboratory
+(`DEMO-LABORATORY`), Demo Pharmacy (`DEMO-PHARMACY`) and Demo Outreach
+(`DEMO-OUTREACH`), verified and active; one staff login,
+`operations@healthidentitydirectory.com` ("Demo Operations"), with a membership
+at each (doctor, lab, pharmacist, nurse) and `org_admin` at each, chosen after
+sign-in as for any member of several facilities; two patient logins,
+`operations+patient1@healthidentitydirectory.com` (`HID-ZDEMAAA2`) and
+`operations+patient2@healthidentitydirectory.com` (`HID-ZDEMAAA3`); eight
+fictional patients without a login or any contact detail (`HID-ZDEMBBB2` to
+`HID-ZDEMBBB9`). The three accounts are seeded `pending_reset` without a
+password, their email verified: the owner sets each password with Forgot
+password (`POST /api/v1/auth/otp/start|verify|complete`, unchanged; a patient
+may start with the email or the Health ID). The live 24-hour hold after a
+recovery applies (approvals, shares, invitations, PIN, contacts, deletion).
+
+Answers across the boundary (a demo actor and a real patient or facility, or a
+real actor and a demo one):
+
+- Identity's Health ID lookups (`lookupExactHid`, `lookupPatientId`, and Lab's
+  and Pharmacy's through them): not found (404), as an unknown Health ID; the
+  registration read policy of `identity.patients` shows demo patients only at a
+  demo facility and real ones only at a real one.
+- Access request (`identity.create_access_request`) and break-glass
+  (`identity.activate_break_glass`): `P0002 Patient is not available`, as an
+  unknown Health ID; nothing is written and no inbox item, outbox event or alert
+  is created. Access PIN (`identity.access_patient_with_pin`): `verified: false`,
+  as an unknown Health ID (the PIN is not read; the actor's window counts it).
+- Orders between facilities: the directory (`identity.search_order_destinations`)
+  lists facilities on the sender's side only; sending to the other side answers
+  `ORDER_ROUTE_DESTINATION_INELIGIBLE` (409) with nothing written.
+- Share directory (`identity.search_share_providers`): clinicians on the
+  patient's side only. A share to a membership on the other side is refused
+  with nothing written (the database's 42501 `SEALED_DEMO_BOUNDARY`, which
+  Identity answers as any 42501 there, 403 `PATIENT_SESSION_REQUIRED`);
+  accepting a patient's invitation from the other side answers 403
+  `SHARE_PERMISSION_DENIED` and the invitation stays pending.
+- A demo patient may invite, add as an emergency contact or change their email to
+  the owner's mailboxes only: `operations@healthidentitydirectory.com` or
+  `operations+<1-64 of a-z 0-9 . _ ->@healthidentitydirectory.com` (any case,
+  trimmed). Otherwise: invitation 400 `SHARE_INVITATION_EMAIL_INVALID`; email
+  change 409 `CONTACT_UNAVAILABLE` (nothing recorded, no code sent); emergency
+  contact `POST /api/v1/identity/me/emergency-contacts` 400
+  `EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED` ("A demo account can only add the
+  demo mailboxes."), checked after the recovery hold and before anything is
+  written or sent. A demo patient never holds a phone: a phone change answers 400
+  `PROFILE_REQUEST_INVALID`, so no SMS is ever due for one.
+- QoreID: a demo account consumes no quota (`QOREID_QUOTA_PERMISSION_DENIED`, the
+  existing refusal), so it never causes a QoreID call (a demo patient's NIN
+  check, a demo administrator's CAC check).
+- Demo facilities send no staff invitations (`STAFF_MANAGEMENT_NOT_AVAILABLE`, as
+  any governed facility); the demo login never joins a real facility and no
+  real account a demo one (42501 `SEALED_DEMO_MEMBERSHIP_REFUSED`); a demo
+  account never holds a platform role (42501 `SEALED_DEMO_PLATFORM_ROLE_REFUSED`).
+
+Platform administration: `GET /api/v1/admin/overview` counts real tenants only
+(patients, facilities, memberships and pending reviews of the demo tenant are
+left out). `GET /api/v1/admin/facilities` items and `GET
+/api/v1/admin/facilities/:facilityId` add `demo: boolean` (true for the four demo
+facilities); an Identity before 0098 sends no `demo` field.
+
+Within the demo tenant everything works as for a real tenant: consent rules,
+audit, the PIN, break-glass, requests and approvals, orders from Demo Hospital
+to Demo Laboratory or Demo Pharmacy and their acceptance, results and
+dispensing, OCR and imports, outreach. Notifications go only to the owner's
+mailboxes (the accounts' own addresses and the allowlisted ones above) and the
+testers' own devices.

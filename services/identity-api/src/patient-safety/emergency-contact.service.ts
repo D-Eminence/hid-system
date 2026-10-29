@@ -109,6 +109,17 @@ export class EmergencyContactService {
     try {
       const row = await this.asPatient(request, actor, async (client) => {
         await requireNoRecentRecoveryHold(client, actor.accountId, EMERGENCY_CONTACT_CHANGES);
+        // 0098: a sealed demo patient adds only an email to one of the owner's demo mailboxes, so no alert or
+        // code ever reaches anyone else. The database holds only ciphertext and an HMAC of the destination, so
+        // Identity asks with the normalized one; true for every real patient. Nothing is added otherwise.
+        const sealed = await client.query<{ allowed: boolean | null }>(
+          'select identity.sealed_demo_contact_allowed($1, $2, $3, $4) as allowed',
+          [actor.subject, actor.sessionId, input.channel, destination],
+        );
+        if (sealed.rows[0]?.allowed !== true) {
+          throw new DomainProblem(400, 'EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED',
+            'A demo account can only add the demo mailboxes.');
+        }
         await client.query(
           'select identity.add_my_emergency_contact($1, $2, $3, $4, $5, $6, $7, $8, $9)',
           [actor.subject, actor.sessionId, contactId, input.relationship, input.channel,

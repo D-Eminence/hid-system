@@ -20,6 +20,8 @@ interface FacilityRow extends QueryResultRow {
   id: string; organizationId: string; organizationName: string; name: string; code: string;
   status: string; version: string; statusReason: string | null; statusChangedAt: Date | null;
   createdAt: Date; membershipCount: string;
+  /** 0098: the facility belongs to the sealed demo tenant (Demo Hospital, Laboratory, Pharmacy, Outreach). */
+  demo: boolean;
   alertPhoneE164?: string | null; alertPhoneUpdatedAt?: Date | null;
 }
 
@@ -123,7 +125,8 @@ export class AdminService {
           facility.status_reason as "statusReason", facility.status_changed_at as "statusChangedAt",
           facility.created_at as "createdAt",
           (select count(*) from identity.staff_facility_memberships membership
-            where membership.facility_id = facility.id and membership.active)::text as "membershipCount"
+            where membership.facility_id = facility.id and membership.active)::text as "membershipCount",
+          identity.sealed_demo_facility(facility.id) as demo
         from identity.facilities facility
         join identity.organizations organization on organization.id = facility.organization_id
         where ($1::text is null or facility.lifecycle_status = $1)
@@ -135,7 +138,8 @@ export class AdminService {
             and ($2::text is null or facility.name ilike $2 escape '\\' or facility.code ilike $2 escape '\\')`,
         [query.status ?? null, term]),
       ]);
-      return { items: items.rows.map((row) => ({ ...row, version: Number(row.version), membershipCount: Number(row.membershipCount) })),
+      return { items: items.rows.map((row) => ({ ...row, version: Number(row.version), membershipCount: Number(row.membershipCount),
+          demo: row.demo === true })),
         page: query.page, pageSize: query.pageSize, total: Number(total.rows[0]?.count ?? 0) };
     }, { readOnly: true });
   }
@@ -149,6 +153,7 @@ export class AdminService {
         facility.status_changed_at as "statusChangedAt", facility.created_at as "createdAt",
         (select count(*) from identity.staff_facility_memberships membership
           where membership.facility_id = facility.id and membership.active)::text as "membershipCount",
+        identity.sealed_demo_facility(facility.id) as demo,
         alert_phone.phone_e164 as "alertPhoneE164", alert_phone.updated_at as "alertPhoneUpdatedAt"
       from identity.facilities facility
       join identity.organizations organization on organization.id = facility.organization_id
@@ -156,7 +161,7 @@ export class AdminService {
       where facility.id = $1`, [facilityId]);
       const row = result.rows[0];
       if (!row) throw new DomainProblem(404, 'ADMIN_FACILITY_NOT_FOUND', 'Facility was not found');
-      return { ...row, version: Number(row.version), membershipCount: Number(row.membershipCount),
+      return { ...row, version: Number(row.version), membershipCount: Number(row.membershipCount), demo: row.demo === true,
         alertPhoneE164: row.alertPhoneE164 ?? null, alertPhoneUpdatedAt: row.alertPhoneUpdatedAt ?? null };
     }, { readOnly: true });
   }

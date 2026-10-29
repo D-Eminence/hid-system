@@ -166,6 +166,7 @@ describe('EmergencyContactService', () => {
       let written: unknown[] = [];
       query.mockImplementation(async (sql: string, values: unknown[] = []) => {
         if (sql.includes('from auth.otp_challenges')) return { rows: [{ held: false }] };
+        if (sql.includes('sealed_demo_contact_allowed')) return { rows: [{ allowed: true }] };
         if (sql.includes('add_my_emergency_contact')) { written = values; return { rows: [] }; }
         if (sql.includes('list_my_emergency_contacts')) {
           return { rows: [row(protector, { contact_id: written[2], channel: 'email', contact_ciphertext: written[5] })] };
@@ -189,6 +190,63 @@ describe('EmergencyContactService', () => {
       await expect(service.add(patientRequest, { ...emailContact, channel: 'sms', destination: '0803 123 4567' }))
         .rejects.toMatchObject({ code: 'EMERGENCY_CONTACT_CHANNEL_UNAVAILABLE', status: 400 });
       expect(query).not.toHaveBeenCalled();
+    });
+
+    it('asks the sealed demo check with the session, the channel and the normalized destination before adding', async () => {
+      const { query, database } = fakeDatabase();
+      const protector = new EmergencyContactProtector();
+      const service = new EmergencyContactService(database, protector, {} as NotificationOtpClient);
+      let written: unknown[] = [];
+      query.mockImplementation(async (sql: string, values: unknown[] = []) => {
+        if (sql.includes('from auth.otp_challenges')) return { rows: [{ held: false }] };
+        if (sql.includes('sealed_demo_contact_allowed')) return { rows: [{ allowed: true }] };
+        if (sql.includes('add_my_emergency_contact')) { written = values; return { rows: [] }; }
+        if (sql.includes('list_my_emergency_contacts')) {
+          return { rows: [row(protector, { contact_id: written[2], channel: 'email', contact_ciphertext: written[5] })] };
+        }
+        return { rows: [] };
+      });
+      await service.add(patientRequest, { ...emailContact, destination: ' Operations+Mum@HealthIdentityDirectory.com ' });
+      const statements = query.mock.calls.map(([sql]) => String(sql));
+      const check = statements.findIndex((sql) => sql.includes('sealed_demo_contact_allowed'));
+      expect(check).toBeGreaterThan(statements.findIndex((sql) => sql.includes('from auth.otp_challenges')));
+      expect(check).toBeLessThan(statements.findIndex((sql) => sql.includes('add_my_emergency_contact')));
+      expect(query.mock.calls[check][1]).toEqual([...patientSession, 'email', 'operations+mum@healthidentitydirectory.com']);
+    });
+
+    it.each([
+      [{ allowed: false }],
+      [{ allowed: null }],
+      [undefined],
+    ])('refuses a demo patient\'s contact outside the demo mailboxes with 400 and adds nothing (%o)', async (answer) => {
+      const { query, database, withSystemTransaction } = fakeDatabase();
+      const deliver = jest.fn();
+      const service = new EmergencyContactService(database, new EmergencyContactProtector(),
+        { deliver } as unknown as NotificationOtpClient);
+      query.mockImplementation(async (sql: string) => {
+        if (sql.includes('from auth.otp_challenges')) return { rows: [{ held: false }] };
+        if (sql.includes('sealed_demo_contact_allowed')) return { rows: answer ? [answer] : [] };
+        return { rows: [] };
+      });
+      await expect(service.add(patientRequest, emailContact)).rejects.toMatchObject({
+        code: 'EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED', status: 400,
+        message: 'A demo account can only add the demo mailboxes.' });
+      // Thrown inside the transaction callback: nothing is added and nothing is sent.
+      await expect(withSystemTransaction.mock.results[0]?.value).rejects.toMatchObject({ status: 400 });
+      expect(contactCommands(query)).toEqual([]);
+      expect(deliver).not.toHaveBeenCalled();
+    });
+
+    it('lets the database refuse a check without a live patient session as before (403)', async () => {
+      const { query, database } = fakeDatabase();
+      const service = new EmergencyContactService(database, new EmergencyContactProtector(), {} as NotificationOtpClient);
+      query.mockImplementation(async (sql: string) => {
+        if (sql.includes('from auth.otp_challenges')) return { rows: [{ held: false }] };
+        if (sql.includes('sealed_demo_contact_allowed')) throw { code: '42501', message: 'Patient self session is required' };
+        return { rows: [] };
+      });
+      await expect(service.add(patientRequest, emailContact)).rejects.toMatchObject({ code: 'PATIENT_SESSION_REQUIRED', status: 403 });
+      expect(contactCommands(query)).toEqual([]);
     });
 
     it('refuses to send a code to a contact whose channel was switched off, inside the start transaction', async () => {
@@ -216,6 +274,7 @@ describe('EmergencyContactService', () => {
       const service = new EmergencyContactService(database, new EmergencyContactProtector(), {} as NotificationOtpClient);
       query.mockImplementation(async (sql: string) => {
         if (sql.includes('from auth.otp_challenges')) return { rows: [{ held: false }] };
+        if (sql.includes('sealed_demo_contact_allowed')) return { rows: [{ allowed: true }] };
         if (sql.includes('add_my_emergency_contact')) throw failure;
         return { rows: [] };
       });
@@ -379,6 +438,7 @@ describe('EmergencyContactService', () => {
       let written: unknown[] = [];
       query.mockImplementation(async (sql: string, values: unknown[] = []) => {
         if (sql.includes('from auth.otp_challenges')) return { rows: [{ held: false }] };
+        if (sql.includes('sealed_demo_contact_allowed')) return { rows: [{ allowed: true }] };
         if (sql.includes('add_my_emergency_contact')) { written = values; return { rows: [] }; }
         if (sql.includes('list_my_emergency_contacts')) return { rows: [row(protector, { contact_id: written[2], contact_ciphertext: written[5] })] };
         return { rows: [] };

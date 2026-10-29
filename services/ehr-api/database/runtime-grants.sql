@@ -1347,6 +1347,28 @@ revoke all on function identity.web_push_audit(text,text,uuid,uuid,text,text,uui
   identity.record_web_push_outcome(uuid,text,text,integer,text),
   identity.prune_web_push_subscriptions(integer) from public;
 
+-- Sealed demo tenant (0098): identity.patients' registration read calls the two member helpers as the reader, and
+-- Identity asks the emergency-contact check, so those three go to the Identity runtime and the schema test runtime.
+-- Nothing to the EHR, Lab, Pharmacy or Notification runtimes; no grant on identity.sealed_demo_members; the other
+-- helpers, the install and the six trigger functions are granted to no role.
+grant execute on function identity.sealed_demo_ids(text),
+  identity.sealed_demo_facility(uuid),
+  identity.sealed_demo_contact_allowed(text,uuid,text,text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.sealed_demo_ids(text),
+  identity.sealed_demo_facility(uuid),
+  identity.sealed_demo_patient(uuid),
+  identity.sealed_demo_account(uuid),
+  identity.sealed_demo_recipient(text),
+  identity.sealed_demo_contact_allowed(text,uuid,text,text),
+  identity.sealed_demo_install(),
+  identity.consent_grants_sealed_demo(),
+  identity.staff_memberships_sealed_demo(),
+  identity.account_roles_sealed_demo(),
+  identity.patient_share_invitations_sealed_demo(),
+  identity.patient_contact_changes_sealed_demo(),
+  identity.qoreid_quota_counters_sealed_demo() from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),
