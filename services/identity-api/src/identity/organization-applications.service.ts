@@ -43,6 +43,8 @@ interface ApplicationRow extends QueryResultRow {
   created_at: Date;
   verified_at: Date | null;
   reviewed_at: Date | null;
+  /** 0098: the application is a sealed demo facility's (Demo Laboratory, Demo Pharmacy). */
+  demo: boolean | null;
 }
 interface ApplicationSecretRow extends QueryResultRow {
   application_id: string;
@@ -76,8 +78,11 @@ export class OrganizationApplicationsService {
 
   async list(context: PlatformAdminContext, status?: string) {
     try {
+      // 0098: each row says whether it is the sealed demo tenant's (in the function's order; Identity may not read
+      // the applications table, so the database's marker answers).
       const result = await this.database.withPlatformTransaction(context, (client) =>
-        client.query<ApplicationRow>('select * from identity.admin_list_organization_applications($1)', [status ?? null]),
+        client.query<ApplicationRow>(`select list.*, identity.sealed_demo_application(list.application_id) as demo
+            from identity.admin_list_organization_applications($1) list`, [status ?? null]),
         { readOnly: true });
       return { items: result.rows.map((row) => ({
         applicationId: row.application_id, productCode: row.product_code,
@@ -104,6 +109,7 @@ export class OrganizationApplicationsService {
         version: Number(row.row_version), createdAt: row.created_at.toISOString(),
         verifiedAt: row.verified_at?.toISOString() ?? null,
         reviewedAt: row.reviewed_at?.toISOString() ?? null,
+        demo: row.demo === true,
       })) };
     } catch (error) {
       throw this.mapDatabaseError(error);

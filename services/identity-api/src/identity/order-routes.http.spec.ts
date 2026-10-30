@@ -276,7 +276,7 @@ describe('order-route routes in Identity over HTTP', () => {
       expect([found.status, found.body.items[0]]).toEqual([200, { routeId, reference: '70000000', kind: 'lab_request', version: 3,
         effectiveState: 'accepted', orderingFacilityId: facilityId, orderingFacilityName: 'Synthetic Hospital Ltd',
         receivingFacilityId: laboratoryId, receivingFacilityName: 'Synthetic Laboratory', createdAt: '2026-10-25T09:00:00.000Z',
-        acceptedAt: '2026-10-25T10:00:00.000Z', endedAt: null, endedKind: null }]);
+        acceptedAt: '2026-10-25T10:00:00.000Z', endedAt: null, endedKind: null, demo: false }]);
       expect(sqlCalls('identity.admin_find_order_routes')[0]?.values).toEqual(['7000000A', null]);
       // This Identity serves the wrong-patient report (item 3): the Close form may send support to the receiver first.
       expect(found.body.wrongPatientReports).toBe(true);
@@ -400,8 +400,8 @@ describe('order-route routes in Identity over HTTP', () => {
       expect(found.body).toEqual({ items: [{ routeId, reference: '70000000', kind: 'lab_request', version: 4,
         effectiveState: 'completed', orderingFacilityId: facilityId, orderingFacilityName: 'Synthetic Hospital Ltd',
         receivingFacilityId: laboratoryId, receivingFacilityName: 'Synthetic Laboratory', createdAt: '2026-10-01T08:00:00.000Z',
-        acceptedAt: '2026-10-01T09:00:00.000Z', endedAt: null, endedKind: null, accessEndsAt: '2026-10-19T11:12:00.123Z',
-        closable: false }, expect.objectContaining({ reference: '70000002', effectiveState: 'sent', accessEndsAt: null,
+        acceptedAt: '2026-10-01T09:00:00.000Z', endedAt: null, endedKind: null, demo: false,
+        accessEndsAt: '2026-10-19T11:12:00.123Z', closable: false }, expect.objectContaining({ reference: '70000002', effectiveState: 'sent', accessEndsAt: null,
         closable: true })], wrongPatientReports: true, lateCorrection: true, cannotComplete: true });
       expect(Object.keys(found.body.items[0]).slice(-2)).toEqual(['accessEndsAt', 'closable']);
       expect(sqlCalls('identity.admin_find_order_routes').map((call) => call.sql))
@@ -413,7 +413,8 @@ describe('order-route routes in Identity over HTTP', () => {
       expect(earlier.status).toBe(200);
       expect(earlier.body.items[0]).not.toHaveProperty('accessEndsAt');
       expect(earlier.body.items[0]).not.toHaveProperty('closable');
-      expect(Object.keys(earlier.body.items[0])).toHaveLength(13);
+      // 13 columns and 0098's demo flag.
+      expect(Object.keys(earlier.body.items[0])).toHaveLength(14);
       // A closable the database did not answer as a boolean is left out; an unreadable time is null.
       handlers['identity.admin_find_order_routes'] = () => ({ rows: [{ ...base, access_ends_at: 'not a time', closable: null },
         { ...base, access_ends_at: '2026-10-19T11:12:00+00:00', closable: 'false' }] });
@@ -512,7 +513,7 @@ describe('order-route routes in Identity over HTTP', () => {
         noteRemoved: false, stateBefore: 'completed', resultsVoided: 1, resultReportsMarked: 1, dispensingReversed: false,
         specimensCollected: 1, recordedBy: [{ accountId: '20000000-0000-4000-8000-000000000031', name: 'Remi Lab' }],
         reporterRecordedWork: true, flags: ['something_came_back', 'reporter_recorded_work'], facilityReportsLast30Days: 2,
-        memberReportsLast30Days: 1, review: null }], lateCorrection: true }]);
+        memberReportsLast30Days: 1, review: null, demo: false }], lateCorrection: true }]);
       expect(sqlCalls('identity.admin_list_wrong_patient_reports')[0]?.values).toEqual(['unreviewed', null]);
       expect(database.withPlatformTransaction).toHaveBeenCalledWith(expect.objectContaining({
         purposeOfUse: 'healthcare-operations' }), expect.any(Function), { readOnly: true });
@@ -669,7 +670,8 @@ describe('order-route routes in Identity over HTTP', () => {
         .set('Authorization', 'Bearer synthetic').send({ healthId: 'HID-ABC234' });
       expect(earlier.status).toBe(200);
       for (const key of ['correction', 'correctableUntil', 'wrongPatient']) expect(earlier.body.items[0]).not.toHaveProperty(key);
-      expect(Object.keys(earlier.body.items[0])).toHaveLength(15);
+      // 15 columns and 0098's demo flag.
+      expect(Object.keys(earlier.body.items[0])).toHaveLength(16);
     });
 
     it('lists a late report with its facts and what the review requires; an in-window one late false; an earlier schema none',
@@ -870,5 +872,66 @@ describe('order-route routes in Identity over HTTP', () => {
         expect(other).toMatchObject({ reportId: '80000000-0000-4000-8000-000000000012', late: false, flags: [] });
         expect(sqlCalls('identity.admin_list_wrong_patient_reports')[0]?.values).toEqual(['unreviewed', null]);
       });
+  });
+
+  describe('support and the sealed demo tenant (0098: C21, C26)', () => {
+    const admin = (permissions: string[]) => tokens.verify.mockResolvedValue({ actor: standaloneAdmin(permissions), claims: {} });
+    const all = ['platform.admin.access', 'platform.facility.read', 'platform.facility.manage', 'platform.principal.read'];
+    const demoHospital = '98d00002-0000-4000-8000-000000000001';
+    const demoLaboratory = '98d00002-0000-4000-8000-000000000002';
+    const route = (id: string, ordering: string, receiving: string) => ({ route_id: id, reference: id.slice(0, 8).toUpperCase(),
+      kind: 'lab_request', row_version: '1', effective_state: 'accepted', ordering_facility_id: ordering,
+      ordering_facility_name: 'A', receiving_facility_id: receiving, receiving_facility_name: 'B',
+      created_at: '2026-10-29T09:00:00Z', accepted_at: '2026-10-29T10:00:00Z', ended_at: null, ended_kind: null });
+    const demoIds = () => ({ rows: [{ ids: [demoHospital, demoLaboratory, '98d00002-0000-4000-8000-000000000003'] }] });
+
+    it('marks a route between demo facilities demo: true and a real one false, from one read in the same transaction',
+      async () => {
+        admin(all);
+        handlers['identity.admin_find_order_routes'] = () => ({ rows: [route(routeId, facilityId, laboratoryId),
+          route('7000000d-0000-4000-8000-000000000001', demoHospital, demoLaboratory)] });
+        handlers["identity.sealed_demo_ids('facility')"] = demoIds;
+        const found = await request(server()).post('/api/v1/admin/order-routes/search')
+          .set('Authorization', 'Bearer synthetic').send({ healthId: 'HID-ZDEMAAA2' });
+        expect(found.status).toBe(200);
+        expect(found.body.items.map((item: Record<string, unknown>) => [item.routeId, item.demo]))
+          .toEqual([[routeId, false], ['7000000d-0000-4000-8000-000000000001', true]]);
+        expect(sqlCalls('sealed_demo_ids').map((call) => call.sql))
+          .toEqual(["select identity.sealed_demo_ids('facility')::text[] as ids"]);
+        // Both reads in the one read-only platform transaction of the lookup.
+        expect(database.withPlatformTransaction).toHaveBeenCalledTimes(1);
+        const byReference = await request(server()).get('/api/v1/admin/order-routes?reference=7000000D')
+          .set('Authorization', 'Bearer synthetic');
+        expect(byReference.body.items.map((item: Record<string, unknown>) => item.demo)).toEqual([false, true]);
+      });
+
+    it('marks a wrong-patient report of the demo tenant demo: true, keeping C26\'s order', async () => {
+      admin(all);
+      const report = (id: string, ordering: string, receiving: string) => ({ report_id: id, row_version: '1',
+        route_id: routeId, reference: '70000000', kind: 'lab_request', receiving_facility_id: receiving,
+        receiving_facility_name: 'B', ordering_facility_id: ordering, ordering_facility_name: 'A',
+        reported_at: new Date('2026-10-29T08:00:00Z'), reported_by_account_id: '20000000-0000-4000-8000-000000000031',
+        reported_by_name: 'R', accepted_by_account_id: '20000000-0000-4000-8000-000000000031', accepted_by_name: 'R',
+        same_member: true, accepted_with: 'health_id', accepted_at: new Date('2026-10-28T10:00:00Z'),
+        reason_code: 'someone_elses_details', note: 'A synthetic note for the demo', note_removed: false,
+        state_before: 'completed', results_voided: 0, result_reports_marked: 0, dispensing_reversed: false,
+        specimens_collected: 0, recorded_by: [], reporter_recorded_work: false, flags: [], facility_reports_last_30_days: 1,
+        member_reports_last_30_days: 1, reviewed_at: null, reviewed_by_account_id: null, reviewed_by_name: null,
+        review_actions: null, review_note: null });
+      handlers['identity.admin_list_wrong_patient_reports'] = () => ({ rows: [
+        report('80000000-0000-4000-8000-0000000000d1', demoHospital, demoLaboratory),
+        report('80000000-0000-4000-8000-000000000001', facilityId, laboratoryId)] });
+      handlers["identity.sealed_demo_ids('facility')"] = demoIds;
+      const answer = await request(server()).get('/api/v1/admin/wrong-patient-reports?status=recent')
+        .set('Authorization', 'Bearer synthetic');
+      expect(answer.status).toBe(200);
+      expect(answer.body.items.map((item: Record<string, unknown>) => [item.reportId, item.demo]))
+        .toEqual([['80000000-0000-4000-8000-0000000000d1', true], ['80000000-0000-4000-8000-000000000001', false]]);
+      // No member ids read (an unreadable answer): nothing is demo.
+      handlers["identity.sealed_demo_ids('facility')"] = () => ({ rows: [{ ids: null }] });
+      const unreadable = await request(server()).get('/api/v1/admin/wrong-patient-reports?status=recent')
+        .set('Authorization', 'Bearer synthetic');
+      expect(unreadable.body.items.map((item: Record<string, unknown>) => item.demo)).toEqual([false, false]);
+    });
   });
 });

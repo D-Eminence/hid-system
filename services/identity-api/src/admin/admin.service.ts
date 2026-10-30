@@ -20,6 +20,8 @@ interface FacilityRow extends QueryResultRow {
   id: string; organizationId: string; organizationName: string; name: string; code: string;
   status: string; version: string; statusReason: string | null; statusChangedAt: Date | null;
   createdAt: Date; membershipCount: string;
+  /** 0098: the facility belongs to the sealed demo tenant (Demo Hospital, Laboratory, Pharmacy, Outreach). */
+  demo: boolean;
   alertPhoneE164?: string | null; alertPhoneUpdatedAt?: Date | null;
 }
 
@@ -27,12 +29,19 @@ interface PrincipalRow extends QueryResultRow {
   id: string; subject: string; email: string | null; displayName: string | null;
   status: string; version: string; createdAt: Date; activeSessionCount: string;
   memberships: unknown; platformRoles: string[];
+  /** 0098: the account belongs to the sealed demo tenant (the staff login and the two demo patient logins). */
+  demo: boolean;
 }
+
+/** 0098: whether each listed account belongs to the sealed demo tenant (one read of the member ids a query). */
+const PRINCIPAL_DEMO_COLUMN = `(account.id = any((select identity.sealed_demo_ids('account'))::uuid[])) as demo`;
 
 interface ReviewRow extends QueryResultRow {
   id: string; facilityId: string; facilityName: string; status: string;
   maskedNin: string; provider: string; candidateCount: string; version: string;
   createdAt: Date; updatedAt: Date;
+  /** 0098: the review is at a sealed demo facility. */
+  demo: boolean;
 }
 
 interface CommandRow extends QueryResultRow { replayed: boolean }
@@ -123,7 +132,8 @@ export class AdminService {
           facility.status_reason as "statusReason", facility.status_changed_at as "statusChangedAt",
           facility.created_at as "createdAt",
           (select count(*) from identity.staff_facility_memberships membership
-            where membership.facility_id = facility.id and membership.active)::text as "membershipCount"
+            where membership.facility_id = facility.id and membership.active)::text as "membershipCount",
+          identity.sealed_demo_facility(facility.id) as demo
         from identity.facilities facility
         join identity.organizations organization on organization.id = facility.organization_id
         where ($1::text is null or facility.lifecycle_status = $1)
@@ -135,7 +145,8 @@ export class AdminService {
             and ($2::text is null or facility.name ilike $2 escape '\\' or facility.code ilike $2 escape '\\')`,
         [query.status ?? null, term]),
       ]);
-      return { items: items.rows.map((row) => ({ ...row, version: Number(row.version), membershipCount: Number(row.membershipCount) })),
+      return { items: items.rows.map((row) => ({ ...row, version: Number(row.version), membershipCount: Number(row.membershipCount),
+          demo: row.demo === true })),
         page: query.page, pageSize: query.pageSize, total: Number(total.rows[0]?.count ?? 0) };
     }, { readOnly: true });
   }
@@ -149,6 +160,7 @@ export class AdminService {
         facility.status_changed_at as "statusChangedAt", facility.created_at as "createdAt",
         (select count(*) from identity.staff_facility_memberships membership
           where membership.facility_id = facility.id and membership.active)::text as "membershipCount",
+        identity.sealed_demo_facility(facility.id) as demo,
         alert_phone.phone_e164 as "alertPhoneE164", alert_phone.updated_at as "alertPhoneUpdatedAt"
       from identity.facilities facility
       join identity.organizations organization on organization.id = facility.organization_id
@@ -156,7 +168,7 @@ export class AdminService {
       where facility.id = $1`, [facilityId]);
       const row = result.rows[0];
       if (!row) throw new DomainProblem(404, 'ADMIN_FACILITY_NOT_FOUND', 'Facility was not found');
-      return { ...row, version: Number(row.version), membershipCount: Number(row.membershipCount),
+      return { ...row, version: Number(row.version), membershipCount: Number(row.membershipCount), demo: row.demo === true,
         alertPhoneE164: row.alertPhoneE164 ?? null, alertPhoneUpdatedAt: row.alertPhoneUpdatedAt ?? null };
     }, { readOnly: true });
   }
@@ -252,7 +264,8 @@ export class AdminService {
             where membership.account_id = account.id), '[]'::jsonb) as memberships,
           coalesce((select array_agg(assignment.role_code order by assignment.role_code)
             from auth.account_roles assignment where assignment.account_id = account.id
-              and assignment.scope_type = 'platform' and assignment.revoked_at is null), array[]::text[]) as "platformRoles"
+              and assignment.scope_type = 'platform' and assignment.revoked_at is null), array[]::text[]) as "platformRoles",
+          ${PRINCIPAL_DEMO_COLUMN}
         from auth.accounts account
         where ($1::text is null or account.email ilike $1 escape '\\' or account.display_name ilike $1 escape '\\'
           or account.subject ilike $1 escape '\\')
@@ -261,11 +274,11 @@ export class AdminService {
         limit 10000`, [term, query.status ?? null]);
 
       const header = ['account_id', 'subject', 'email', 'display_name', 'status', 'version',
-        'created_at', 'active_sessions', 'platform_roles', 'facility_memberships'];
+        'created_at', 'active_sessions', 'platform_roles', 'facility_memberships', 'demo'];
       const rows = result.rows.map((row) => [
         row.id, row.subject, row.email ?? '', row.displayName ?? '', row.status, Number(row.version),
         new Date(row.createdAt).toISOString(), Number(row.activeSessionCount),
-        (row.platformRoles ?? []).join('|'), JSON.stringify(row.memberships ?? []),
+        (row.platformRoles ?? []).join('|'), JSON.stringify(row.memberships ?? []), row.demo === true,
       ]);
       await this.audit.recordWithClient(client, this.auditEvent(context, 'admin.principals.export',
         'authentication-account-collection', null, 'Administrative principal export',
@@ -292,7 +305,8 @@ export class AdminService {
             where membership.account_id = account.id), '[]'::jsonb) as memberships,
           coalesce((select array_agg(assignment.role_code order by assignment.role_code)
             from auth.account_roles assignment where assignment.account_id = account.id
-              and assignment.scope_type = 'platform' and assignment.revoked_at is null), array[]::text[]) as "platformRoles"
+              and assignment.scope_type = 'platform' and assignment.revoked_at is null), array[]::text[]) as "platformRoles",
+          ${PRINCIPAL_DEMO_COLUMN}
         from auth.accounts account
         where (account.email ilike $1 escape '\\' or account.display_name ilike $1 escape '\\'
           or account.subject ilike $1 escape '\\')
@@ -305,7 +319,7 @@ export class AdminService {
         [term, query.status ?? null]),
       ]);
       return { items: items.rows.map((row) => ({ ...row, version: Number(row.version),
-          activeSessionCount: Number(row.activeSessionCount) })), page: query.page,
+          activeSessionCount: Number(row.activeSessionCount), demo: row.demo === true })), page: query.page,
         pageSize: query.pageSize, total: Number(total.rows[0]?.count ?? 0) };
     }, { readOnly: true });
   }
@@ -365,7 +379,7 @@ export class AdminService {
           (select count(*) from identity.registration_case_candidates candidate
             where candidate.case_id = registration.id)::text as "candidateCount",
           registration.row_version::text as version, registration.created_at as "createdAt",
-          registration.updated_at as "updatedAt"
+          registration.updated_at as "updatedAt", identity.sealed_demo_facility(registration.facility_id) as demo
         from identity.registration_cases registration
         join identity.facilities facility on facility.id = registration.facility_id
         where ($1::text is null or registration.status = $1)
@@ -374,7 +388,8 @@ export class AdminService {
         client.query<{ count: string }>(`select count(*)::text from identity.registration_cases
           where ($1::text is null or status = $1)`, [query.status ?? null]),
       ]);
-      return { items: items.rows.map((row) => ({ ...row, candidateCount: Number(row.candidateCount), version: Number(row.version) })),
+      return { items: items.rows.map((row) => ({ ...row, candidateCount: Number(row.candidateCount), version: Number(row.version),
+          demo: row.demo === true })),
         page: query.page, pageSize: query.pageSize, total: Number(total.rows[0]?.count ?? 0) };
     }, { readOnly: true });
   }
@@ -391,10 +406,19 @@ export class AdminService {
         [query.limit, query.beforeSequenceId ?? null, query.actor ?? null, query.facilityId ?? null,
           query.action ?? null, query.correlationId ?? null, query.outcome ?? null,
           query.from ?? null, query.to ?? null]);
+      // 0098: an event at a demo facility or by a demo login is the sealed demo tenant's (one read per page).
+      const sealed = await client.query<{ facilities: string[] | null; subjects: string[] | null }>(
+        `select identity.sealed_demo_ids('facility')::text[] as facilities,
+          array(select account.subject from auth.accounts account
+                 where account.id = any((select identity.sealed_demo_ids('account'))::uuid[])) as subjects`);
+      const demoFacilities = new Set(sealed.rows[0]?.facilities ?? []);
+      const demoSubjects = new Set(sealed.rows[0]?.subjects ?? []);
       await this.audit.recordWithClient(client, this.auditEvent(context, 'admin.audit.list',
         'audit-event-collection', null, 'Platform audit review', { returnedCount: result.rows.length }));
       const tail = result.rows.at(-1) as { sequenceId?: string } | undefined;
-      return { items: result.rows, nextBeforeSequenceId: result.rows.length === query.limit ? tail?.sequenceId ?? null : null };
+      return { items: result.rows.map((row): Record<string, unknown> => ({ ...row,
+          demo: demoFacilities.has(String(row.facilityId)) || demoSubjects.has(String(row.actorSubject)) })),
+        nextBeforeSequenceId: result.rows.length === query.limit ? tail?.sequenceId ?? null : null };
     });
   }
 

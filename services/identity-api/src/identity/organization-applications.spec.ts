@@ -26,6 +26,31 @@ const context = { correlationId: request.correlationId } as DataAccessContext;
 describe('organization onboarding boundary', () => {
   afterEach(() => jest.restoreAllMocks());
 
+  it('marks the sealed demo tenant\'s applications in the platform administrator\'s list (0098), in the list\'s order',
+    async () => {
+      const listed = (id: string, demo: boolean | null | undefined) => ({ application_id: id, product_code: 'laboratory',
+        organization_name: 'Demo Laboratory', organization_type: 'laboratory', cac_hint: 'RC…8002',
+        administrator_name: 'Demo Operations', administrator_email: 'operations@healthidentitydirectory.com',
+        application_status: 'approved', verification_result: 'verified', row_version: '1',
+        created_at: new Date('2026-10-29T10:00:00Z'), verified_at: null, reviewed_at: null, demo });
+      const query = jest.fn().mockResolvedValue({ rows: [listed('98d00007-0000-4000-8000-000000000002', true),
+        listed(applicationId, false), listed('c4600000-0000-4000-8000-000000000003', null),
+        listed('c4600000-0000-4000-8000-000000000004', undefined)] });
+      const database = { withPlatformTransaction: jest.fn(async (_context, work, options) => {
+        expect(options).toEqual({ readOnly: true });
+        return work({ query });
+      }) };
+      const service = new OrganizationApplicationsService(database as unknown as DatabaseService,
+        {} as QoreIdVerificationAdapter, {} as IntegrationRuntimeService);
+      const answer = await service.list(context, 'approved');
+      expect(answer.items.map((item) => [item.applicationId, item.demo])).toEqual([
+        ['98d00007-0000-4000-8000-000000000002', true], [applicationId, false],
+        ['c4600000-0000-4000-8000-000000000003', false], ['c4600000-0000-4000-8000-000000000004', false]]);
+      expect(String(query.mock.calls[0]?.[0])).toMatch(
+        /select list\.\*, identity\.sealed_demo_application\(list\.application_id\) as demo\s+from identity\.admin_list_organization_applications\(\$1\) list/);
+      expect(query.mock.calls[0]?.[1]).toEqual(['approved']);
+    });
+
   it('requires an allowed origin and Turnstile before public intake, and returns no identifier', async () => {
     jest.spyOn(environment, 'getEnvironment').mockReturnValue({
       CORS_ORIGINS: 'https://www.healthidentitydirectory.com',

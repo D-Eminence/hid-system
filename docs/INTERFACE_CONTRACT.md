@@ -2203,3 +2203,197 @@ gets 404), with write access to the patient (403 otherwise). A document entered
 in error still answers 409, with code `INVALID_DOCUMENT_TRANSITION` (not the
 generic `CONFLICT`, which the offline client retries). The offline client treats a document as applied
 only on its own `/complete` 2xx.
+
+## 26. The sealed demo tenant (0098)
+
+Migration 0098 (`0098_sealed_demo_tenant.sql`, owner decision of 2026-10-29
+"Sealed demo, yes") keeps a demo tenant beside the real ones in production so
+that testers sign in and use every portal without creating accounts. It is
+sealed in the database: a facility and a patient are linked (a consent grant, an
+order route, a share, an accepted invitation) only when both belong to the demo
+tenant or neither does, and so are an account and a facility (a staff
+membership). The marker is the owner-only table `identity.sealed_demo_members`
+(row-level security enabled but not forced, so the owner's helpers always read
+it and fail closed if they lose access; no update, delete or TRUNCATE). No
+existing API field changes for real tenants, and every answer below is one a
+real tenant already gets for an unknown or ineligible value.
+
+The tenant (seeded only on Amazon RDS, i.e. production; CI and rehearsals get the
+seal without the seed): Demo Hospital (`DEMO-HOSPITAL`), Demo Laboratory
+(`DEMO-LABORATORY`), Demo Pharmacy (`DEMO-PHARMACY`) and Demo Outreach
+(`DEMO-OUTREACH`), verified and active; one staff login,
+`operations@healthidentitydirectory.com` ("Demo Operations"), with a membership
+at each (doctor, lab, pharmacist, nurse) and `org_admin` at each, chosen after
+sign-in as for any member of several facilities; two patient logins,
+`patient1@healthidentitydirectory.com` (`HID-ZDEMAAA2`) and
+`patient2@healthidentitydirectory.com` (`HID-ZDEMAAA3`); eight
+fictional patients without a login or any contact detail (`HID-ZDEMBBB2` to
+`HID-ZDEMBBB9`). Patient One and Patient Two each share their record with the
+demo login at Demo Hospital (doctor) and at Demo Outreach (nurse): the seed
+writes the consent grant and share row that the patient's own Share action
+writes, with `identity.write_patient_share`'s values (clinical collaboration
+until revoked, 365 days of direct-care write access, granted by the patient
+and revocable in the patient portal), so they read like any share in the
+patient's access history and the staff login's shared-with-me list; these
+four shares are the only grants seeded, a revoked one is never restored, and
+none is written beside a share the patient already holds or to a membership
+the patient could not choose. The audit says who wrote them: no audit row
+names a patient (or anyone) as its actor. Each share has one row of the
+migration's own (`actor_type` `system`, `provenance` `migration`,
+`source_system` `hid-sealed-demo`, `action` `identity.sealed-demo.seed-share`,
+correlation id `0098-sealed-demo-install`, the grant as its resource, the
+patient and the facility as its subject), and the install one more
+(`identity.sealed-demo.install`, the same actor, provenance, source system and
+correlation id, counts only): five rows. The four share rows appear in Demo
+Hospital's and Demo Outreach's facility audit lists and all five in the
+platform's audit list; a patient's access log leaves migration rows out. The
+three accounts are seeded `pending_reset`
+without a password, their email verified: the owner sets each password with
+Forgot password (`POST /api/v1/auth/otp/start|verify|complete`, unchanged; a
+patient may start with the email or the Health ID).
+
+The seed refuses (55000 `SEALED_DEMO_ADDRESS_TAKEN`, nothing written, the
+release stops) while any of the three addresses belongs to an account that is
+not deleted or to a staff record, or is named by an open organization
+application (its first administrator, `pending_verification` or
+`ready_for_review`) or by a pending staff invitation that has not expired:
+seeding the account would break that application's approval or that
+invitation's acceptance. It also refuses a Health ID, facility code, slug,
+CAC or fixed id held by a real row, and never attaches demo access to an
+existing account. The read-only query in the migration's header (including
+`open_applications` and `pending_invitations`) is run on production before
+signing. A share the seed would write to a membership the patient could not
+choose in the share directory is refused too (55000
+`SEALED_DEMO_SHARE_INELIGIBLE`, nothing written).
+
+Before testers start, the owner sets the three passwords once, at least 24
+hours before patient approvals, new shares, the PIN, emergency contacts or
+invitations are tested: Identity holds those patient actions for 24 hours after
+any OTP recovery of the account (live rule). The logins are shared by every
+tester: testers never use Forgot password on them (each recovery restarts that
+patient's 24-hour hold), and five wrong passwords in 15 minutes lock a shared
+login for 15 minutes for everyone (live rule).
+
+What testers can do, from the first day: at Demo Hospital (doctor) or Demo
+Outreach (nurse), open Patient One's or Patient Two's chart through the seeded
+share and write in it (visits, notes, vitals, lab requests and prescriptions,
+outreach links, documents; Migrate's document upload and lab and pharmacy
+imports); send orders from Demo Hospital to Demo Laboratory or Demo Pharmacy
+for Patient One or Two and accept, return results or dispense with the same
+login at those facilities. Break-glass (emergency purpose) on any demo patient
+opens a read-only emergency summary, never a write; the eight fictional
+patients can only be looked up and break-glassed, and their charts are empty.
+After the 24-hour hold, the patients approve requests, share, set a PIN and add
+emergency contacts and invitees (each one of the three demo addresses below). To
+test accepting a patient's invitation, the patient invites
+`operations@healthidentitydirectory.com` (the staff login's own address), which
+accepts it at Demo Hospital or Demo Outreach; an invitation to
+`patient1@healthidentitydirectory.com` or `patient2@healthidentitydirectory.com`
+is delivered to that mailbox but can never be accepted (acceptance needs a staff
+login whose own verified address it is). Migrate's OCR
+job creation is not available to testers, nor to any tenant: `POST
+/api/v1/ocr/jobs` needs a `healthcare-operations` grant, which no portal path
+issues (a platform-wide limitation tracked separately; 0098 widens nothing).
+The owner can check production's purposes with `select code, active from
+identity.purpose_of_use_codes order by 1;`.
+
+Answers across the boundary (a demo actor and a real patient or facility, or a
+real actor and a demo one):
+
+- Identity's Health ID lookups (`lookupExactHid`, `lookupPatientId`, and Lab's
+  and Pharmacy's through them): not found (404), as an unknown Health ID; the
+  registration read policy of `identity.patients` shows demo patients only at a
+  demo facility and real ones only at a real one.
+- Access request (`identity.create_access_request`) and break-glass
+  (`identity.activate_break_glass`): `P0002 Patient is not available`, as an
+  unknown Health ID; nothing is written and no inbox item, outbox event or alert
+  is created. Access PIN (`identity.access_patient_with_pin`): `verified: false`,
+  as an unknown Health ID (the PIN is not read; the actor's window counts it).
+- Orders between facilities: the directory (`identity.search_order_destinations`)
+  lists facilities on the sender's side only; sending to the other side answers
+  `ORDER_ROUTE_DESTINATION_INELIGIBLE` (409) with nothing written.
+- Share directory (`identity.search_share_providers`): clinicians on the
+  patient's side only. A share to a membership on the other side is refused
+  with nothing written (the database's 42501 `SEALED_DEMO_BOUNDARY`, which
+  Identity answers as any 42501 there, 403 `PATIENT_SESSION_REQUIRED`);
+  accepting a patient's invitation from the other side answers 403
+  `SHARE_PERMISSION_DENIED` and the invitation stays pending.
+- A demo patient may invite, add as an emergency contact or change their email to
+  the owner's three demo mailboxes only, an exact allowlist (any case, trimmed;
+  no pattern and no plus-address): `operations@healthidentitydirectory.com`,
+  `patient1@healthidentitydirectory.com` and
+  `patient2@healthidentitydirectory.com`, the demo logins' own addresses.
+  Otherwise: invitation 400 `SHARE_INVITATION_EMAIL_INVALID`; email change 409
+  `CONTACT_UNAVAILABLE` (nothing recorded, no code sent; each allowlisted address
+  already belongs to a demo login, so a demo patient's email change never
+  completes and the patient keeps its address); emergency
+  contact `POST /api/v1/identity/me/emergency-contacts` 400
+  `EMERGENCY_CONTACT_DESTINATION_NOT_ALLOWED` ("A demo account can only add the
+  demo mailboxes."), checked after the recovery hold and before anything is
+  written or sent. The database checks the contact too, as far as it can see
+  (trigger `patient_emergency_contacts_sealed_demo`): Identity asks
+  `identity.sealed_demo_contact_allowed(subject, session, channel,
+  destination, destination HMAC)`, which for a demo patient, an allowed
+  mailbox and a well-formed HMAC (64 lowercase hex characters) records the
+  HMAC it was given for the rest of the transaction; the trigger refuses a
+  demo patient's SMS contact, and an email contact whose
+  HMAC the check did not record in that transaction (an Identity image before
+  0098 never asks the check, so it answers 403 with nothing added or sent).
+  The database holds only the contact's HMAC and ciphertext, so it cannot
+  tell whether either belongs to the checked address, and any session can set
+  `hid.sealed_demo_contact_hmac` itself: that the destination is one of the
+  three demo mailboxes rests on Identity (`EmergencyContactService.add`
+  computes the HMAC from the same normalized address it checks and
+  encrypts). Removing a contact is never refused. A
+  demo patient never holds a phone: a phone change answers 400
+  `PROFILE_REQUEST_INVALID`, so no SMS is ever due for one.
+- QoreID: a demo account consumes no quota (`QOREID_QUOTA_PERMISSION_DENIED`, the
+  existing refusal), so it never causes a QoreID call (a demo patient's NIN
+  check, a demo administrator's CAC check).
+- Demo facilities send no staff invitations (`STAFF_MANAGEMENT_NOT_AVAILABLE`, as
+  any governed facility); the demo login never joins a real facility and no
+  real account a demo one (42501 `SEALED_DEMO_MEMBERSHIP_REFUSED`); a demo
+  account never holds a platform role (42501 `SEALED_DEMO_PLATFORM_ROLE_REFUSED`).
+
+Platform administration: `GET /api/v1/admin/overview` counts real tenants only
+(patients, facilities, memberships and pending reviews of the demo tenant are
+left out). Every admin list that shows the demo tenant marks it with `demo:
+boolean` (true for the demo tenant's rows, false otherwise; an Identity before
+0098 sends no `demo` field):
+
+- `GET /api/v1/admin/facilities` items and `GET
+  /api/v1/admin/facilities/:facilityId` (the four demo facilities);
+- `GET /api/v1/admin/principals` and `POST /api/v1/admin/principals/search`
+  items (the three demo accounts), and a last `demo` column (`true` or `false`)
+  in `GET /api/v1/admin/principals/export`;
+- `GET /api/v1/admin/identity/reviews` items (a review at a demo facility);
+- `GET /api/v1/admin/audit/events` items (an event at a demo facility or by a
+  demo login);
+- `GET /api/v1/admin/order-routes` and `POST /api/v1/admin/order-routes/search`
+  items, and `GET /api/v1/admin/wrong-patient-reports` items (between demo
+  facilities), each read in the request's own transaction;
+- `GET /api/v1/admin/organization-applications` items (the approved Demo
+  Laboratory and Demo Pharmacy applications), through
+  `identity.sealed_demo_application`.
+
+Within the demo tenant everything else works as for a real tenant: consent
+rules, audit, the PIN, break-glass, requests and approvals, orders from Demo
+Hospital to Demo Laboratory or Demo Pharmacy and their acceptance, results and
+dispensing, document upload and imports, outreach. Notifications go only to the
+owner's three demo mailboxes (the demo logins' own addresses, which are the
+allowlist above; for emergency contacts as Identity enforces it, see above) and
+the testers' own devices.
+
+Off switch and removal. To switch the demo off (if the seal is ever found
+wanting, or testing ends), a platform administrator disables the three demo
+accounts and revokes their sessions in the admin console (`POST
+/api/v1/admin/principals/:accountId/status` with `disabled`, `POST
+/api/v1/admin/principals/:accountId/sessions/revoke`) and suspends Demo
+Hospital, Demo Laboratory, Demo Pharmacy and Demo Outreach (`POST
+/api/v1/admin/facilities/:facilityId/status` with `suspended`); nothing in 0098
+stands in the way, and the rows stay sealed (the triggers, the policy and the
+replaced bodies' clauses stay in force). Removing the demo needs a new reviewed
+migration that drops the triggers `sealed_demo_members_immutable` and
+`sealed_demo_members_no_truncate` before deleting the demo rows and their member
+rows. 0098 has no down migration, and rolling back the service images leaves the
+seed and the seal in place.

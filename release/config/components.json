@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0097",
-    "count": 98,
+    "last": "0098",
+    "count": 99,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -489,6 +489,10 @@
       {
         "name": "0097_patient_web_push.sql",
         "sha256": "be7145f9fe32493ed7319422bf3e76443908f00a48c97bf02e26ad5cecc530bb"
+      },
+      {
+        "name": "0098_sealed_demo_tenant.sql",
+        "sha256": "66bd3c23e2cdc4bf27532629ca48ddac3b25dd78bd27c5ba8b0b781d1708bab3"
       }
     ]
   },
