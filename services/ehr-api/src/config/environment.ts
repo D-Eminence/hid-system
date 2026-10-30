@@ -33,6 +33,32 @@ function databaseUrlOverridesTls(connectionString: string): boolean {
     .some((parameter) => url.searchParams.has(parameter));
 }
 
+/**
+ * OFFLINE_ESCROW_KEYS is `{"<version>":"<base64url of 32 bytes>"}`. Returns the
+ * versions and their secrets, or undefined when the value is missing or any
+ * entry is malformed (a partly valid set is never used).
+ */
+export function parseOfflineEscrowKeys(value: string | undefined): ReadonlyMap<number, Buffer> | undefined {
+  if (!value) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;
+  const keys = new Map<number, Buffer>();
+  for (const [version, secret] of Object.entries(parsed)) {
+    if (!/^[1-9][0-9]{0,5}$/.test(version) || typeof secret !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(secret)) {
+      return undefined;
+    }
+    const bytes = Buffer.from(secret, 'base64url');
+    if (bytes.length !== 32) return undefined;
+    keys.set(Number(version), bytes);
+  }
+  return keys.size > 0 ? keys : undefined;
+}
+
 const environmentSchema = z
   .object({
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
@@ -81,6 +107,8 @@ const environmentSchema = z
     S3_SECRET_ACCESS_KEY: optionalString,
     S3_FORCE_PATH_STYLE: booleanString,
     S3_KMS_KEY_ID: optionalString,
+    OFFLINE_ESCROW_ENABLED: booleanString,
+    OFFLINE_ESCROW_KEYS: optionalString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {
@@ -132,6 +160,10 @@ const environmentSchema = z
           });
         }
       }
+    }
+    if (environment.OFFLINE_ESCROW_ENABLED && !parseOfflineEscrowKeys(environment.OFFLINE_ESCROW_KEYS)) {
+      context.addIssue({ code: 'custom', path: ['OFFLINE_ESCROW_KEYS'],
+        message: 'Offline escrow requires OFFLINE_ESCROW_KEYS as a JSON object of key versions to 32-byte base64url secrets' });
     }
     if (environment.STORAGE_MODE === 's3') {
       for (const key of ['S3_BUCKET'] as const) {

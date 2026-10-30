@@ -2,7 +2,7 @@ import { CanActivate, ExecutionContext, Injectable } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
 import { AuditService } from '../audit/audit.service';
 import { DatabaseService } from '../database/database.service';
-import { FACILITY_OPTIONAL, PUBLIC_ROUTE, REQUIRED_PERMISSIONS, PATIENT_ALLOWED } from '../common/decorators';
+import { ANY_PERMISSIONS, FACILITY_OPTIONAL, PUBLIC_ROUTE, REQUIRED_PERMISSIONS, PATIENT_ALLOWED } from '../common/decorators';
 import { DomainProblem } from '../common/problem';
 import type { HidRequest } from '../common/request-context';
 import { IdentityApiService } from '../integrations/identity-api.service';
@@ -44,6 +44,10 @@ export class RemoteSecurityGuard implements CanActivate {
       }
       const required = this.metadata<readonly string[]>(REQUIRED_PERMISSIONS, context) ?? [];
       if (required.some((permission) => !request.actor?.permissions.includes(permission))) {
+        throw new DomainProblem(403, 'PERMISSION_DENIED', 'Required permission is missing');
+      }
+      const anyOf = this.metadata<readonly string[]>(ANY_PERMISSIONS, context) ?? [];
+      if (anyOf.length > 0 && !anyOf.some((permission) => request.actor?.permissions.includes(permission))) {
         throw new DomainProblem(403, 'PERMISSION_DENIED', 'Required permission is missing');
       }
       return true;
