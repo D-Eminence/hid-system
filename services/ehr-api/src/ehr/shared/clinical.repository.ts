@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../../audit/audit.service';
 import { DomainProblem } from '../../common/problem';
-import type { DataAccessContext } from '../../common/request-context';
+import { offlineAuditDetails, type DataAccessContext } from '../../common/request-context';
 import { DatabaseService } from '../../database/database.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 
@@ -213,7 +213,7 @@ export class ClinicalRepository {
       resourceId: event.resourceId,
       outcome,
       purposeOfUse: context.purposeOfUse,
-      details: { ...event.details, ...additionalDetails },
+      details: { ...event.details, ...additionalDetails, ...offlineAuditDetails(context) },
     });
   }
 

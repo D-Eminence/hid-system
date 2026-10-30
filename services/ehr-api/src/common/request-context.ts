@@ -55,6 +55,67 @@ export interface DataAccessContext {
   requestMethod?: string;
   csrfToken?: string;
   origin?: string;
+  /** Offline replay headers (contract §2.10 C3); present only when at least one was valid. */
+  offline?: OfflineCommandContext;
+}
+
+export type OfflineClock = 'anchored' | 'wall' | 'suspect';
+
+/** What a replayed offline write says about itself. Recorded in audit, never used to authorize. */
+export interface OfflineCommandContext {
+  commandId: string | null;
+  capturedAt: string | null;
+  clock: OfflineClock | null;
+  capturedClamped: boolean;
+  /** The header as sent, kept only when it was clamped (held and reviewed commands arrive late). */
+  deviceCapturedAt?: string;
+}
+
+const OFFLINE_COMMAND = /^off1\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const OFFLINE_CAPTURED_AT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/;
+const OFFLINE_CLOCKS = new Set<OfflineClock>(['anchored', 'wall', 'suspect']);
+const CAPTURE_PAST_MS = 24 * 3600_000;
+const CAPTURE_FUTURE_MS = 5 * 60_000;
+
+/**
+ * Reads X-HID-Offline-Command, X-HID-Captured-At and X-HID-Clock. Each is
+ * optional and an invalid one is ignored: these headers never refuse a
+ * request. A capture time outside [now - 24 h, now + 5 min] is clamped into
+ * that window and flagged.
+ */
+export function parseOfflineHeaders(request: Pick<HidRequest, 'header'>, now = Date.now()): OfflineCommandContext | undefined {
+  const command = request.header('x-hid-offline-command')?.trim();
+  const captured = request.header('x-hid-captured-at')?.trim();
+  const clock = request.header('x-hid-clock')?.trim();
+  const commandId = command && OFFLINE_COMMAND.test(command) ? command.toLowerCase() : null;
+  const capturedMs = captured && OFFLINE_CAPTURED_AT.test(captured) && isCalendarTimestamp(captured)
+    ? Date.parse(captured) : Number.NaN;
+  const validClock = clock && OFFLINE_CLOCKS.has(clock as OfflineClock) ? clock as OfflineClock : null;
+  let capturedAt: string | null = null;
+  let capturedClamped = false;
+  if (Number.isFinite(capturedMs)) {
+    const bounded = Math.min(Math.max(capturedMs, now - CAPTURE_PAST_MS), now + CAPTURE_FUTURE_MS);
+    capturedClamped = bounded !== capturedMs;
+    capturedAt = new Date(bounded).toISOString();
+  }
+  if (!commandId && !capturedAt && !validClock) return undefined;
+  return { commandId, capturedAt, clock: validClock, capturedClamped,
+    ...(capturedClamped && captured ? { deviceCapturedAt: captured } : {}) };
+}
+
+/**
+ * The date and time fields name a real wall-clock instant. Date.parse rolls
+ * 31 September over to 1 October and hour 24 to the next day; this refuses
+ * both. Only the first 19 characters (YYYY-MM-DDTHH:mm:ss) are checked.
+ */
+export function isCalendarTimestamp(text: string): boolean {
+  const wall = Date.parse(`${text.slice(0, 19)}Z`);
+  return Number.isFinite(wall) && new Date(wall).toISOString().slice(0, 19) === text.slice(0, 19);
+}
+
+/** The `details.offline` merged into a write's audit event, or nothing for an online write. */
+export function offlineAuditDetails(context: Pick<DataAccessContext, 'offline'>): { offline?: OfflineCommandContext } {
+  return context.offline ? { offline: { ...context.offline } } : {};
 }
 
 export function requireRequestContext(request: HidRequest, suppliedPurpose?: string): DataAccessContext {
@@ -71,6 +132,7 @@ export function requireRequestContext(request: HidRequest, suppliedPurpose?: str
   }
   const purposeOfUse = candidate as PurposeOfUse;
   request.purposeOfUse = purposeOfUse;
+  const offline = parseOfflineHeaders(request);
   return {
     actor: request.actor,
     facilityId: request.facilityId,
@@ -82,5 +144,6 @@ export function requireRequestContext(request: HidRequest, suppliedPurpose?: str
     csrfToken: request.header('x-csrf-token'),
     origin: request.header('origin'),
     requestMethod: request.method,
+    ...(offline ? { offline } : {}),
   };
 }

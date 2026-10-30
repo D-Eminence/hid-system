@@ -9,6 +9,7 @@ import { DocumentModule } from './documents/document.module';
 import { EhrModule } from './ehr/ehr.module';
 import { HealthController } from './health.controller';
 import { ServiceClientsModule } from './integrations/service-clients.module';
+import { OfflineModule } from './offline/offline.module';
 import { StorageModule } from './storage/storage.module';
 
 @Module({
@@ -19,6 +20,7 @@ import { StorageModule } from './storage/storage.module';
     StorageModule,
     EhrModule,
     ServiceClientsModule,
+    OfflineModule,
   ],
   controllers: [HealthController],
   providers: [
