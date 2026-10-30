@@ -144,10 +144,15 @@ export class OfflineService {
     const valid = parsed.flatMap((item) => ('event' in item ? [item.event] : []));
     if (valid.length === 0) return result;
     await this.database.withTransaction(context, async (client) => {
+      const allowed = await this.patientsAllowed(client, valid);
       const clock = await client.query<{ now: Date }>('select now() as now');
       const now = clock.rows[0]?.now.getTime();
       if (now === undefined || !Number.isFinite(now)) throw new Error('Database time is unavailable');
       for (const event of valid) {
+        if (event.patientId && !allowed.has(event.patientId)) {
+          result.rejected.push({ eventId: event.eventId, code: 'PATIENT_NOT_FOUND' });
+          continue;
+        }
         const outcome = await this.insertAuditEvent(client, context, input.vaultId, event, now);
         if (outcome === 'accepted') result.accepted.push(event.eventId);
         else if (outcome === 'duplicate') result.duplicate.push(event.eventId);
@@ -184,6 +189,42 @@ export class OfflineService {
       details: { vaultId, keyVersion },
     });
     return { keyVersion, key: key.toString('base64url'), algorithm: 'HKDF-SHA256' as const };
+  }
+
+  /**
+   * The patients this caller may record offline reads for: those the
+   * database's ehr.offline_audit_patient_allowed accepts (a consent grant to
+   * this account, membership and facility, whatever its status now, so a
+   * late-synced read still counts). Without it any staff member could put a
+   * "viewed your record" row in any patient's access log. Until the function
+   * is installed, or if the runtime may not call it, a batch naming a patient
+   * is refused whole with 503 and nothing is written; the device keeps its
+   * events and sends them again. Session events never need it.
+   */
+  private async patientsAllowed(client: PoolClient, events: readonly OfflineAuditEventInput[]): Promise<Set<string>> {
+    const patients = [...new Set(events.flatMap((event) => (event.patientId ? [event.patientId.toLowerCase()] : [])))];
+    const allowed = new Set<string>();
+    if (patients.length === 0) return allowed;
+    try {
+      const installed = await client.query<{ present: boolean }>(
+        `select to_regprocedure('ehr.offline_audit_patient_allowed(uuid)') is not null as present`,
+      );
+      if (installed.rows[0]?.present !== true) throw auditUnavailable();
+      for (const patientId of patients) {
+        const answer = await client.query<{ allowed: boolean }>(
+          'select ehr.offline_audit_patient_allowed($1) as allowed', [patientId],
+        );
+        if (answer.rows[0]?.allowed === true) allowed.add(patientId);
+      }
+    } catch (error) {
+      if (error instanceof DomainProblem) throw error;
+      throw auditUnavailable();
+    }
+    // Events carry the patient id as sent; match it the way Postgres compares uuids.
+    for (const event of events) {
+      if (event.patientId && allowed.has(event.patientId.toLowerCase())) allowed.add(event.patientId);
+    }
+    return allowed;
   }
 
   private async insertAuditEvent(client: PoolClient, context: DataAccessContext, vaultId: string,
@@ -234,7 +275,8 @@ export class OfflineService {
       return inserted.rowCount === 1 ? 'accepted' : 'duplicate';
     } catch (error) {
       const code = databaseCode(error);
-      // A missing patient fails the patient foreign key; data the table's
+      // A missing patient fails the patient foreign key (a backstop: the check
+      // above already refuses a patient it does not know); data the table's
       // checks refuse is the event's fault. Anything else fails the batch, and
       // the device sends it again.
       if (code === '23503' && event.patientId) {
@@ -297,6 +339,10 @@ function requireStaffScope(context: DataAccessContext): void {
   if (context.actor.kind === 'patient' || !context.facilityId || !context.membershipId || !context.actor.accountId) {
     throw new DomainProblem(403, 'STAFF_FACILITY_REQUIRED', 'Offline routes need a staff member at a facility');
   }
+}
+
+function auditUnavailable(): DomainProblem {
+  return new DomainProblem(503, 'OFFLINE_AUDIT_UNAVAILABLE', 'Offline audit events cannot be accepted yet; send them again later');
 }
 
 function databaseCode(error: unknown): string | undefined {

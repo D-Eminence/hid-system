@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { ConflictException, ForbiddenException, Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { PoolClient } from 'pg';
 import { AuditService } from '../audit/audit.service';
+import { DomainProblem } from '../common/problem';
 import { offlineAuditDetails, type DataAccessContext } from '../common/request-context';
 import { DatabaseService } from '../database/database.service';
 import { IdentityApiService } from '../integrations/identity-api.service';
@@ -230,7 +231,7 @@ export class DocumentService {
       this.assertUploader(current, context);
       if (COMPLETED_STATUSES.has(current.status) && current.object_version_id
         && (!metadata || current.object_version_id === metadata.versionId)) return this.view(current);
-      throw new ConflictException('Document is not in an upload-completable state');
+      throw new DomainProblem(409, 'INVALID_DOCUMENT_TRANSITION', 'Document is not in an upload-completable state');
     });
   }
 

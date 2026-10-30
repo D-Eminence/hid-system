@@ -67,6 +67,8 @@ export interface OfflineCommandContext {
   capturedAt: string | null;
   clock: OfflineClock | null;
   capturedClamped: boolean;
+  /** The header as sent, kept only when it was clamped (held and reviewed commands arrive late). */
+  deviceCapturedAt?: string;
 }
 
 const OFFLINE_COMMAND = /^off1\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -86,7 +88,8 @@ export function parseOfflineHeaders(request: Pick<HidRequest, 'header'>, now = D
   const captured = request.header('x-hid-captured-at')?.trim();
   const clock = request.header('x-hid-clock')?.trim();
   const commandId = command && OFFLINE_COMMAND.test(command) ? command.toLowerCase() : null;
-  const capturedMs = captured && OFFLINE_CAPTURED_AT.test(captured) ? Date.parse(captured) : Number.NaN;
+  const capturedMs = captured && OFFLINE_CAPTURED_AT.test(captured) && isCalendarTimestamp(captured)
+    ? Date.parse(captured) : Number.NaN;
   const validClock = clock && OFFLINE_CLOCKS.has(clock as OfflineClock) ? clock as OfflineClock : null;
   let capturedAt: string | null = null;
   let capturedClamped = false;
@@ -96,7 +99,18 @@ export function parseOfflineHeaders(request: Pick<HidRequest, 'header'>, now = D
     capturedAt = new Date(bounded).toISOString();
   }
   if (!commandId && !capturedAt && !validClock) return undefined;
-  return { commandId, capturedAt, clock: validClock, capturedClamped };
+  return { commandId, capturedAt, clock: validClock, capturedClamped,
+    ...(capturedClamped && captured ? { deviceCapturedAt: captured } : {}) };
+}
+
+/**
+ * The date and time fields name a real wall-clock instant. Date.parse rolls
+ * 31 September over to 1 October and hour 24 to the next day; this refuses
+ * both. Only the first 19 characters (YYYY-MM-DDTHH:mm:ss) are checked.
+ */
+export function isCalendarTimestamp(text: string): boolean {
+  const wall = Date.parse(`${text.slice(0, 19)}Z`);
+  return Number.isFinite(wall) && new Date(wall).toISOString().slice(0, 19) === text.slice(0, 19);
 }
 
 /** The `details.offline` merged into a write's audit event, or nothing for an online write. */

@@ -2103,9 +2103,23 @@ Each event is checked on its own; 200
 | `ehr.offline.command.discarded` | required | none or a chart section; `details` is exactly `{op, reason, bodySha256, capturedAt}` |
 
 Rejections: `INVALID_ACTION` (not in the table), `PATIENT_NOT_FOUND` (the
-patient foreign key fails), `INVALID_EVENT` (anything else: unknown field, bad
-`seq`, `occurredAt`, `clock`, `grantExpiresAt`, `resourceId`, section or
-patient presence). Each event is one `audit.events` row under its own
+caller may not record reads of that patient, or the patient does not exist:
+the same answer for both), `INVALID_EVENT` (anything else: unknown field,
+`seq` outside 1..2147483647, an `occurredAt`, `grantExpiresAt` or discard
+`capturedAt` that is not a real calendar instant (31 September, hour 24),
+bad `clock`, `resourceId`, section or patient presence).
+
+**Patient check (contract A10).** An event that names a patient is written
+only if `ehr.offline_audit_patient_allowed(patientId)` answers true: a consent
+grant for that patient to the caller's account, membership and facility,
+scope `read_records` or `write_records`, not break-glass, not held for
+migration, already started, whatever its status or expiry now (a read synced
+late still counts). The function comes with a later migration. Until it is
+installed, or if the runtime may not execute it, a request with any patient
+event answers **503 `OFFLINE_AUDIT_UNAVAILABLE`** and writes nothing; the
+device keeps its events and sends them again. A request with only session
+events (`ehr.offline.unlock`, `ehr.offline.wipe`) never calls it and is
+accepted as before. The patient foreign key stays as a backstop. Each event is one `audit.events` row under its own
 savepoint: `event_id` = `eventId`; `occurred_at` = `occurredAt` clamped into
 [database now − 26 h, database now]; actor, membership, organization and
 facility from the session; `resource_type` `offline-chart-section` (patient
@@ -2148,8 +2162,11 @@ to `DataAccessContext.offline`, and the clinical write audit
 (`ClinicalRepository.record`) and the document audit
 (`DocumentService.auditEvent`) add
 `details.offline = {commandId, capturedAt, clock, capturedClamped}` (null for a
-header that was missing or invalid). A capture time outside [now − 24 h,
-now + 5 min] is recorded clamped into that window with `capturedClamped: true`.
+header that was missing or invalid; a capture time that is not a real calendar
+instant is invalid). A capture time outside [now − 24 h, now + 5 min] is
+recorded clamped into that window with `capturedClamped: true`, and the header
+as sent is kept as `deviceCapturedAt` (held and reviewed commands arrive more
+than 24 h after capture).
 
 **`operation` per keyed route of the offline registry (§2.8).** C1 finds a
 command only if its route stores the key in `ehr.idempotency_keys`; for the
@@ -2183,5 +2200,6 @@ same as the first answer; after the scan, `status` and `scanStatus` show the
 scan result. The checks before answering are unchanged: the caller must be the
 account that created the upload intent, at the document's facility (anyone else
 gets 404), with write access to the patient (403 otherwise). A document entered
-in error still answers 409. The offline client treats a document as applied
+in error still answers 409, with code `INVALID_DOCUMENT_TRANSITION` (not the
+generic `CONFLICT`, which the offline client retries). The offline client treats a document as applied
 only on its own `/complete` 2xx.

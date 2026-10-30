@@ -49,6 +49,8 @@ describe('parseOfflineHeaders', () => {
     ['captured time with an offset', { 'X-HID-Captured-At': '2026-10-29T10:12:03+01:00' }],
     ['captured time that is not a date', { 'X-HID-Captured-At': '2026-13-45T99:99:99Z' }],
     ['clock in another case', { 'X-HID-Clock': 'Anchored' }],
+    ['captured time on 31 September', { 'X-HID-Captured-At': '2026-09-31T10:00:00Z' }],
+    ['captured time at hour 24', { 'X-HID-Captured-At': '2026-10-28T24:00:00.000Z' }],
   ])('ignores %s and keeps the valid headers', (_case, invalid) => {
     const parsed = parseOfflineHeaders(headers({ 'X-HID-Clock': 'wall', 'X-HID-Offline-Command': COMMAND, ...invalid }), NOW);
     expect(parsed).toBeDefined();
@@ -63,6 +65,13 @@ describe('parseOfflineHeaders', () => {
     expect(at('2026-10-29T10:47:00.000Z')).toMatchObject({ capturedAt: '2026-10-29T10:47:00.000Z', capturedClamped: false });
     expect(at('2026-10-29T12:00:00.000Z')).toMatchObject({ capturedAt: '2026-10-29T10:47:00.000Z', capturedClamped: true });
     expect(at('2026-10-27T10:00:00.000Z')).toMatchObject({ capturedAt: '2026-10-28T10:42:00.000Z', capturedClamped: true });
+  });
+
+  it('keeps the device capture time as deviceCapturedAt only when it was clamped (contract A10)', () => {
+    const at = (value: string) => parseOfflineHeaders(headers({ 'X-HID-Captured-At': value }), NOW);
+    expect(at('2026-10-27T10:00:00.000Z')).toEqual({ commandId: null, capturedAt: '2026-10-28T10:42:00.000Z', clock: null,
+      capturedClamped: true, deviceCapturedAt: '2026-10-27T10:00:00.000Z' });
+    expect(at('2026-10-29T09:00:00.000Z')).not.toHaveProperty('deviceCapturedAt');
   });
 });
 

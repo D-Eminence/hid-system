@@ -128,3 +128,23 @@ describe('OFFLINE_ESCROW_KEYS', () => {
     expect(() => getEnvironment()).toThrow(/OFFLINE_ESCROW_KEYS/);
   });
 });
+
+// C2 inserts with a targetless ON CONFLICT DO NOTHING, because naming
+// (event_id) needs SELECT that hid_audit_writer lacks. That equals
+// ON CONFLICT (event_id) only while event_id is the one unique key a caller
+// can set (sequence_id is generated always). A later migration that adds
+// another unique key to audit.events must revisit the C2 insert.
+describe('audit.events unique keys (contract A10, Q1)', () => {
+  it('has event_id as its only caller-settable unique key across all migrations', () => {
+    const { readdirSync, readFileSync } = jest.requireActual<typeof import('node:fs')>('node:fs');
+    const directory = `${__dirname}/../../database/migrations`;
+    const sql = readdirSync(directory).filter((name) => name.endsWith('.sql')).sort()
+      .map((name) => readFileSync(`${directory}/${name}`, 'utf8')).join('\n').toLowerCase();
+    const table = /create table audit\.events \(([\s\S]*?)\n\);/.exec(sql)?.[1] ?? '';
+    expect(table).toContain('sequence_id bigint generated always as identity primary key');
+    expect(table.split('\n').filter((line) => /\bunique\b/.test(line)).map((line) => line.trim()))
+      .toEqual(['event_id uuid not null unique default gen_random_uuid(),']);
+    expect(sql).not.toMatch(/create unique index[^;]*\bon audit\.events\b/);
+    expect(sql).not.toMatch(/alter table audit\.events[^;]*\b(unique|primary key|exclude)\b/);
+  });
+});

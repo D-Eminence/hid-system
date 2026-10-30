@@ -1,7 +1,10 @@
 import { DomainProblem } from '../../common/problem';
-import type { OfflineClock } from '../../common/request-context';
+import { isCalendarTimestamp, type OfflineClock } from '../../common/request-context';
 
 export const MAX_AUDIT_EVENTS = 20;
+/** `seq` fits Postgres int4, and so does the gap query's max - min + 1 (§2.11). */
+export const MIN_AUDIT_SEQ = 1;
+export const MAX_AUDIT_SEQ = 2_147_483_647;
 
 export const OFFLINE_AUDIT_ACTIONS = [
   'ehr.record.read', 'ehr.offline.unlock', 'ehr.offline.wipe', 'ehr.offline.command.discarded',
@@ -74,7 +77,7 @@ export function parseAuditEvent(value: unknown): { event: OfflineAuditEventInput
   if (Object.keys(value).some((field) => !EVENT_FIELDS.has(field))) return { rejected: 'INVALID_EVENT' };
   const { seq, patientId, section, resourceId, occurredAt, clock, grantExpiresAt } = value;
   const occurredMs = timestamp(occurredAt);
-  if (!Number.isSafeInteger(seq) || (seq as number) < 0
+  if (!Number.isSafeInteger(seq) || (seq as number) < MIN_AUDIT_SEQ || (seq as number) > MAX_AUDIT_SEQ
     || !isNullable(patientId, (id) => UUID.test(id))
     || !isNullable(section, () => true)
     || !isNullable(resourceId, (id) => RESOURCE_ID.test(id))
@@ -120,7 +123,7 @@ export function parseAuditEvent(value: unknown): { event: OfflineAuditEventInput
 }
 
 function timestamp(value: unknown): number | undefined {
-  if (typeof value !== 'string' || !TIMESTAMP.test(value)) return undefined;
+  if (typeof value !== 'string' || !TIMESTAMP.test(value) || !isCalendarTimestamp(value)) return undefined;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : undefined;
 }

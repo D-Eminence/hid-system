@@ -247,10 +247,11 @@ describe('DocumentService.complete: a replayed complete', () => {
     await expect(service.complete(documentId, uploader)).rejects.toBeInstanceOf(ForbiddenException);
   });
 
-  it('answers 409 for a document entered in error, not a replayed success', async () => {
+  it('answers 409 INVALID_DOCUMENT_TRANSITION for a document entered in error, not a replayed success', async () => {
     const { service, stored } = harness();
     await service.complete(documentId, uploader);
     stored.status = 'entered_in_error';
-    await expect(service.complete(documentId, uploader)).rejects.toBeInstanceOf(ConflictException);
+    await expect(service.complete(documentId, uploader)).rejects.toMatchObject({
+      code: 'INVALID_DOCUMENT_TRANSITION', status: 409 });
   });
 });

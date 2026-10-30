@@ -45,6 +45,8 @@ const patientActor: IdentityActorContext = { kind: 'patient', patientId: '600000
 
 const PATIENT = '60000000-0000-4000-8000-0000000000aa';
 const UNKNOWN_PATIENT = '60000000-0000-4000-8000-0000000000ff';
+/** Exists (the foreign key holds) but the caller has no consent grant for them at this facility. */
+const UNRELATED_PATIENT = '60000000-0000-4000-8000-0000000000bb';
 const VAULT = '70000000-0000-4000-8000-000000000001';
 const NOW = new Date('2026-10-29T10:42:00.123Z');
 const key = (n: number) => `off1.0b5c0000-0000-4000-8000-${String(n).padStart(12, '0')}`;
@@ -67,6 +69,9 @@ let authenticate: jest.Mock;
 let keys: KeyRow[];
 let events: StoredEvent[];
 let semantic: Semantic[];
+/** ehr.offline_audit_patient_allowed (the coordinator's next migration): installed, missing, or not executable. */
+let auditFunction: 'present' | 'absent' | 'no-execute';
+let functionCalls: string[];
 const environment = { ...process.env };
 
 function database() {
@@ -77,6 +82,16 @@ function database() {
     query: jest.fn(async (sql: string, values: unknown[] = []) => {
       if (/^\s*(savepoint|release savepoint|rollback to savepoint)/.test(sql)) return { rows: [], rowCount: 0 };
       if (sql.trim() === 'select now() as now') return { rows: [{ now: NOW }], rowCount: 1 };
+      if (sql.includes("to_regprocedure('ehr.offline_audit_patient_allowed(uuid)')")) {
+        return { rows: [{ present: auditFunction !== 'absent' }], rowCount: 1 };
+      }
+      if (sql.includes('ehr.offline_audit_patient_allowed($1)')) {
+        functionCalls.push(values[0] as string);
+        if (auditFunction === 'absent') throw Object.assign(new Error('function does not exist'), { code: '42883' });
+        if (auditFunction === 'no-execute') throw Object.assign(new Error('permission denied for function'), { code: '42501' });
+        // Allowed only for a patient this account holds a grant for at this facility.
+        return { rows: [{ allowed: values[0] === PATIENT && context.actor.accountId === ME }], rowCount: 1 };
+      }
       if (sql.includes('from ehr.idempotency_keys')) {
         // Owner-only RLS (0005 idempotency_keys_owner_all) from the session context.
         const visible = keys.filter((row) => row.created_by === context.actor.accountId
@@ -96,7 +111,9 @@ function database() {
         expect(subject).toBe(`staff:${accountId}`);
         if (Date.parse(occurredAt as string) > NOW.getTime()) throw Object.assign(new Error('recorded_at check'), { code: '23514' });
         if (events.some((row) => row.eventId === id)) return { rows: [], rowCount: 0 };
-        if (patientId && patientId !== PATIENT) throw Object.assign(new Error('patient foreign key'), { code: '23503' });
+        if (patientId && patientId !== PATIENT && patientId !== UNRELATED_PATIENT) {
+          throw Object.assign(new Error('patient foreign key'), { code: '23503' });
+        }
         events.push({ eventId: id as string, occurredAt: occurredAt as string, actorAccountId: accountId as string,
           actorMembershipId: membershipId as string, facilityId: facilityId as string, patientId: patientId ?? null,
           action: action as string, resourceType: resourceType as string, resourceId: resourceId ?? null,
@@ -131,6 +148,8 @@ beforeEach(async () => {
   resetEnvironmentForTests();
   keys = [];
   events = [];
+  auditFunction = 'present';
+  functionCalls = [];
   semantic = [];
   liveActor = me;
   authenticate = jest.fn(async () => {
@@ -453,5 +472,71 @@ describe('C4 POST /api/v1/ehr/offline/escrow-key', () => {
     ['an extra field', { vaultId: VAULT, accountId: ME }],
   ])('answers 400 VALIDATION_FAILED for %s', async (_case, body) => {
     expect((await call('POST', 'escrow-key', body)).body).toMatchObject({ status: 400, code: 'VALIDATION_FAILED' });
+  });
+});
+
+describe('C2 patient relationship (contract A10)', () => {
+  it('answers 503 OFFLINE_AUDIT_UNAVAILABLE and writes nothing until the check function is installed', async () => {
+    auditFunction = 'absent';
+    const answer = await call('POST', 'audit-events', { vaultId: VAULT, events: [
+      readEvent(1, { action: 'ehr.offline.unlock', patientId: null, section: null }), readEvent(2)] });
+    expect(answer.body).toMatchObject({ status: 503, code: 'OFFLINE_AUDIT_UNAVAILABLE' });
+    expect(events).toEqual([]);
+  });
+
+  it('answers 503 and writes nothing when the runtime may not execute the check', async () => {
+    auditFunction = 'no-execute';
+    const answer = await call('POST', 'audit-events', { vaultId: VAULT, events: [readEvent(1)] });
+    expect(answer.body).toMatchObject({ status: 503, code: 'OFFLINE_AUDIT_UNAVAILABLE' });
+    expect(events).toEqual([]);
+  });
+
+  it('rejects an existing patient the caller has no grant for exactly as a missing one', async () => {
+    const answer = await call('POST', 'audit-events', { vaultId: VAULT, events: [
+      readEvent(1, { patientId: UNRELATED_PATIENT }), readEvent(2, { patientId: UNKNOWN_PATIENT }), readEvent(3)] });
+    expect(answer.body).toEqual({ accepted: [eventId(3)], duplicate: [], rejected: [
+      { eventId: eventId(1), code: 'PATIENT_NOT_FOUND' }, { eventId: eventId(2), code: 'PATIENT_NOT_FOUND' }] });
+    expect(events.map((row) => row.patientId)).toEqual([PATIENT]);
+  });
+
+  it('checks a patient the caller holds a grant for and accepts the event', async () => {
+    const answer = await call('POST', 'audit-events', { vaultId: VAULT, events: [readEvent(1), readEvent(2)] });
+    expect(answer.body).toEqual({ accepted: [eventId(1), eventId(2)], duplicate: [], rejected: [] });
+    expect(functionCalls).toContain(PATIENT);
+  });
+
+  it('accepts session-only batches without the check, even while the function is missing', async () => {
+    auditFunction = 'absent';
+    const answer = await call('POST', 'audit-events', { vaultId: VAULT, events: [
+      readEvent(1, { action: 'ehr.offline.unlock', patientId: null, section: null }),
+      readEvent(2, { action: 'ehr.offline.wipe', patientId: null, section: 'sign-out' })] });
+    expect(answer.body).toEqual({ accepted: [eventId(1), eventId(2)], duplicate: [], rejected: [] });
+    expect(functionCalls).toEqual([]);
+  });
+});
+
+describe('C2 seq and calendar bounds (contract A10)', () => {
+  it.each([[2147483648], [0]])('rejects seq %p as INVALID_EVENT', async (seq) => {
+    const answer = await call('POST', 'audit-events', { vaultId: VAULT, events: [readEvent(1, { seq })] });
+    expect(answer.body).toEqual({ accepted: [], duplicate: [], rejected: [{ eventId: eventId(1), code: 'INVALID_EVENT' }] });
+  });
+
+  it('accepts seq 2147483647', async () => {
+    const answer = await call('POST', 'audit-events', { vaultId: VAULT, events: [readEvent(1, { seq: 2147483647 })] });
+    expect(answer.body).toEqual({ accepted: [eventId(1)], duplicate: [], rejected: [] });
+  });
+
+  it.each(['2026-09-31T10:00:00Z', '2026-09-30T24:00:00+01:00'])('rejects the impossible occurredAt %s', async (occurredAt) => {
+    const answer = await call('POST', 'audit-events', { vaultId: VAULT, events: [readEvent(1, { occurredAt })] });
+    expect(answer.body).toEqual({ accepted: [], duplicate: [], rejected: [{ eventId: eventId(1), code: 'INVALID_EVENT' }] });
+  });
+
+  it('rejects an impossible grantExpiresAt or discard capturedAt', async () => {
+    const answer = await call('POST', 'audit-events', { vaultId: VAULT, events: [
+      readEvent(1, { grantExpiresAt: '2026-02-30T00:00:00Z' }),
+      readEvent(2, { action: 'ehr.offline.command.discarded', section: null, details: { op: 'ehr.vital.create',
+        reason: 'Entered for the wrong visit', bodySha256: 'a'.repeat(64), capturedAt: '2026-10-28T24:00:00.000Z' } })] });
+    expect(answer.body).toMatchObject({ accepted: [], rejected: [
+      { eventId: eventId(1), code: 'INVALID_EVENT' }, { eventId: eventId(2), code: 'INVALID_EVENT' }] });
   });
 });
