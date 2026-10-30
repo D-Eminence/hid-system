@@ -75,6 +75,10 @@ export function parseAuditEvent(value: unknown): { event: OfflineAuditEventInput
     return { rejected: 'INVALID_ACTION' };
   }
   if (Object.keys(value).some((field) => !EVENT_FIELDS.has(field))) return { rejected: 'INVALID_EVENT' };
+  // Only a discard carries details; on any other action they would be dropped unseen.
+  if (action !== 'ehr.offline.command.discarded' && value.details !== undefined && value.details !== null) {
+    return { rejected: 'INVALID_EVENT' };
+  }
   const { seq, patientId, section, resourceId, occurredAt, clock, grantExpiresAt } = value;
   const occurredMs = timestamp(occurredAt);
   if (!Number.isSafeInteger(seq) || (seq as number) < MIN_AUDIT_SEQ || (seq as number) > MAX_AUDIT_SEQ

@@ -111,7 +111,9 @@ function database() {
         expect(subject).toBe(`staff:${accountId}`);
         if (Date.parse(occurredAt as string) > NOW.getTime()) throw Object.assign(new Error('recorded_at check'), { code: '23514' });
         if (events.some((row) => row.eventId === id)) return { rows: [], rowCount: 0 };
-        if (patientId && patientId !== PATIENT && patientId !== UNRELATED_PATIENT) {
+        // A uuid foreign key compares case-insensitively, as Postgres does.
+        const patientKey = patientId ? String(patientId).toLowerCase() : null;
+        if (patientKey && patientKey !== PATIENT && patientKey !== UNRELATED_PATIENT) {
           throw Object.assign(new Error('patient foreign key'), { code: '23503' });
         }
         events.push({ eventId: id as string, occurredAt: occurredAt as string, actorAccountId: accountId as string,
@@ -402,6 +404,7 @@ describe('C2 POST /api/v1/ehr/offline/audit-events', () => {
       readEvent(9, { action: 'ehr.offline.wipe', patientId: null, section: 'stolen' }),
       readEvent(10, { action: 'ehr.offline.command.discarded', details: { op: 'ehr.vital.create' } }),
       readEvent(11, { diagnosis: 'malaria' }),
+      readEvent(13, { details: { reasonTruncated: true } }),
       readEvent(12),
     ] });
     expect(answer.body).toEqual({
@@ -418,6 +421,7 @@ describe('C2 POST /api/v1/ehr/offline/audit-events', () => {
         { eventId: eventId(9), code: 'INVALID_EVENT' },
         { eventId: eventId(10), code: 'INVALID_EVENT' },
         { eventId: eventId(11), code: 'INVALID_EVENT' },
+        { eventId: eventId(13), code: 'INVALID_EVENT' },
         { eventId: eventId(5), code: 'PATIENT_NOT_FOUND' },
       ],
     });
@@ -497,6 +501,12 @@ describe('C2 patient relationship (contract A10)', () => {
     expect(answer.body).toEqual({ accepted: [eventId(3)], duplicate: [], rejected: [
       { eventId: eventId(1), code: 'PATIENT_NOT_FOUND' }, { eventId: eventId(2), code: 'PATIENT_NOT_FOUND' }] });
     expect(events.map((row) => row.patientId)).toEqual([PATIENT]);
+  });
+
+  it('matches a patient id sent in upper case to the lower-case answer of the check', async () => {
+    const answer = await call('POST', 'audit-events', { vaultId: VAULT, events: [readEvent(1, { patientId: PATIENT.toUpperCase() })] });
+    expect(answer.body).toEqual({ accepted: [eventId(1)], duplicate: [], rejected: [] });
+    expect(functionCalls).toEqual([PATIENT]);
   });
 
   it('checks a patient the caller holds a grant for and accepts the event', async () => {

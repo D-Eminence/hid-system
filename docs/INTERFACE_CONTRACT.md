@@ -2067,7 +2067,7 @@ actor works at, `X-Purpose-Of-Use: direct-care` (else 400
 `PURPOSE_OF_USE_REQUIRED`), `X-CSRF-Token` on POST as on every browser write,
 and either `ehr.encounter.read` or `ehr.document.write` (`@RequireAnyPermission`;
 neither answers 403 `PERMISSION_DENIED`). Every answer is `private, no-store`
-and every error is problem+json. None of them checks consent.
+and every error is problem+json. None of them is gated on current consent; C2's patient check (A10) asks only whether a qualifying grant once existed.
 
 **C0. `GET /api/v1/ehr/offline/ping`** (public, not audited). 200
 `{"service":"ehr-api","serverTime":"2026-10-29T10:42:00.123Z"}`.
@@ -2105,7 +2105,7 @@ Each event is checked on its own; 200
 Rejections: `INVALID_ACTION` (not in the table), `PATIENT_NOT_FOUND` (the
 caller may not record reads of that patient, or the patient does not exist:
 the same answer for both), `INVALID_EVENT` (anything else: unknown field,
-`seq` outside 1..2147483647, an `occurredAt`, `grantExpiresAt` or discard
+`details` on any action but a discard, `seq` outside 1..2147483647, an `occurredAt`, `grantExpiresAt` or discard
 `capturedAt` that is not a real calendar instant (31 September, hour 24),
 bad `clock`, `resourceId`, section or patient presence).
 

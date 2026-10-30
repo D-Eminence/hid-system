@@ -132,7 +132,7 @@ export class OfflineService {
    * unique key a caller can supply (sequence_id is always generated), so the
    * two are the same here. The
    * device time is clamped into [now - 26 h, now] by the database's clock, so
-   * recorded_at >= occurred_at always holds. Never consent-gated.
+   * recorded_at >= occurred_at always holds. Never gated on current consent (see patientsAllowed).
    */
   async ingestAuditEvents(context: DataAccessContext, input: AuditEventsDto): Promise<AuditIngestResult> {
     requireStaffScope(context);
