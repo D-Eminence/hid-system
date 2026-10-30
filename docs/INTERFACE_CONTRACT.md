@@ -2397,3 +2397,55 @@ migration that drops the triggers `sealed_demo_members_immutable` and
 `sealed_demo_members_no_truncate` before deleting the demo rows and their member
 rows. 0098 has no down migration, and rolling back the service images leaves the
 seed and the seal in place.
+
+## 27. Offline audit: the patient check (0099)
+
+Migration 0099 (`0099_offline_audit_patient_allowed.sql`, OFFLINE-CONTRACT.md
+amendment A10 item 1, after the review of hid-system#131; signed by D-Eminence
+on 2026-10-30) adds one database function for the EHR API's offline audit ingest
+(C2). It changes no table, policy, trigger or existing function and no API
+field. The EHR API's C2 (from #131, live since 2026-10-30) looks for this
+function on every request that names a patient and calls it once it exists.
+
+`ehr.offline_audit_patient_allowed(requested_patient_id uuid) returns boolean`
+answers, for the request context the EHR API sets on every request
+(`app.actor_subject`, `app.membership_id`, `app.facility_id`), whether that
+account, membership and facility ever held a consent grant for the patient
+that:
+
+- has scope `read_records` or `write_records`;
+- is not break-glass (owner decision D5: break-glass records are never written
+  to a device; the scope and the `break_glass` flag are both checked, since a
+  legacy row may carry one without the other);
+- is not held by the cutover (`migration_hold_reason` is null);
+- has started (`starts_at <= now()`).
+
+It ignores the grant's `status`, `revoked_at` and `expires_at` on purpose: a
+read made offline while the grant was open may sync after the grant expired,
+was revoked by the patient or was closed by the clinician, and its audit event
+must still be accepted (the ingest is never gated on current consent).
+Everything else answers false: another membership of the same account, another
+facility, another account, a patient with no qualifying grant, a patient that
+does not exist, a null argument, a disabled or deleted account, a request
+without context. C2 answers a missing and an unrelated patient alike,
+`rejected: PATIENT_NOT_FOUND`. Until 0099 is applied, C2 answers 503
+`OFFLINE_AUDIT_UNAVAILABLE` to any request containing a patient event and
+writes nothing; session events (unlock, wipe) never ask the check.
+
+The function is SQL, STABLE and SECURITY DEFINER with `search_path =
+pg_catalog, pg_temp`, owned by `ehr.context_allows`'s owner, so it reads
+`identity.consent_grants` as the existing consent gate does. EXECUTE is granted
+to `hid_ehr_runtime` only (the ehr-api login inherits it), in the migration
+and in `runtime-grants.sql`; never to PUBLIC, the Identity runtime or any other
+runtime. The EHR runtime gains no privilege on any Identity table. The answer
+is only true or false about the caller's own grants (rows that
+`consent_grants_actor_read` already shows that account, membership and
+facility). The sealed demo (0098) needs nothing: grants never cross its
+boundary, so a demo session answers true only for demo patients and a real one
+only for real patients. Creating the function takes ACCESS SHARE on
+`identity.consent_grants` until commit (the body's validation) and no other
+lock on an application table.
+
+The suite is `services/ehr-api/test/database/offline-audit-patient-allowed.integration.sql`.
+0099 has no down migration; an EHR API image from before #131 never calls the
+function, and #131's image answers 503 without it.

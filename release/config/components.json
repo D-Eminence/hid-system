@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0098",
-    "count": 99,
+    "last": "0099",
+    "count": 100,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -493,6 +493,10 @@
       {
         "name": "0098_sealed_demo_tenant.sql",
         "sha256": "66bd3c23e2cdc4bf27532629ca48ddac3b25dd78bd27c5ba8b0b781d1708bab3"
+      },
+      {
+        "name": "0099_offline_audit_patient_allowed.sql",
+        "sha256": "1d677ad9a706c938758c140fec6fc3069f932561954d6476c5dfa615e35917a4"
       }
     ]
   },

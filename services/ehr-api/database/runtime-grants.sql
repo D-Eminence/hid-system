@@ -427,7 +427,10 @@ grant execute on function platform.current_actor_subject(),
   auth.account_id_for_subject(text),
   auth.account_has_active_role(uuid, text),
   identity.has_active_consent_grant(uuid, text, uuid, uuid, text, text, timestamptz),
-  ehr.context_allows(uuid, uuid, text) to hid_ehr_runtime;
+  ehr.context_allows(uuid, uuid, text),
+  -- 0099: the offline audit ingest's (C2) patient check, as 0099 grants it:
+  -- EHR only, no other runtime, never PUBLIC (revoked below).
+  ehr.offline_audit_patient_allowed(uuid) to hid_ehr_runtime;
 
 -- Append-only audit is isolated from both domain roles. Environment-specific
 -- Identity, EHR, or transitional API logins inherit this role separately.
@@ -738,6 +741,7 @@ revoke all on function auth.account_id_for_subject(text),
   identity.close_own_consent_grant(uuid, text),
   audit.list_facility_events(integer, bigint),
   ehr.context_allows(uuid, uuid, text),
+  ehr.offline_audit_patient_allowed(uuid),
   ocr.claim_next_job(text),
   ocr.record_extraction(uuid, text, text, text, text, text, jsonb, numeric, jsonb, text),
   ocr.fail_job(uuid, text, text, boolean, integer, text),
