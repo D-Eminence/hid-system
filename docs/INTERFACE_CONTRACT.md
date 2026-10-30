@@ -2401,8 +2401,8 @@ seed and the seal in place.
 ## 27. Offline audit: the patient check (0099)
 
 Migration 0099 (`0099_offline_audit_patient_allowed.sql`, OFFLINE-CONTRACT.md
-amendment A10 item 1, after the review of hid-system#131; unsigned until the
-lead signs) adds one database function for the EHR API's offline audit ingest
+amendment A10 item 1, after the review of hid-system#131; signed by D-Eminence
+on 2026-10-30) adds one database function for the EHR API's offline audit ingest
 (C2). It changes no table, policy, trigger or existing function and no API
 field. The EHR API's C2 (from #131, live since 2026-10-30) looks for this
 function on every request that names a patient and calls it once it exists.
