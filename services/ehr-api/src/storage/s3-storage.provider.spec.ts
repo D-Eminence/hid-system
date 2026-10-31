@@ -15,7 +15,7 @@ describe('S3 presigned document upload', () => {
     Object.assign(process.env, {
       NODE_ENV: 'test', DATABASE_URL: 'postgresql://synthetic:test@localhost/hid', CORS_ORIGINS: 'https://app.example',
       STORAGE_MODE: 's3', S3_BUCKET: 'hid-documents', S3_REGION: 'eu-west-1', S3_KMS_KEY_ID: 'kms-key',
-      S3_ACCESS_KEY_ID: 'AKIASYNTHETICNOTREAL', S3_SECRET_ACCESS_KEY: 'synthetic-secret-never-a-real-credential',
+      S3_ACCESS_KEY_ID: 'AKIAIOSFODNN7EXAMPLE', S3_SECRET_ACCESS_KEY: 'synthetic-secret-never-a-real-credential',
     });
     resetEnvironmentForTests();
     const sha256Hex = 'a'.repeat(64);
