@@ -1,9 +1,12 @@
 # The workload issuer parses its caller policy when the Lambda loads and
 # refuses more than eight rules (runtime/workload-issuer/issuer.mjs). A policy
 # over the cap stops every service token, so the plan must never render one.
-# Six callers are configured today; the cap was raised from six to eight on its
-# own, before any seventh caller, so that a single apply never ships a seventh
-# caller to an issuer that still allows six.
+# Six ECS callers are configured with the support bot off. The support bot
+# (on in production) adds support-api for the Health ID check, and document
+# scanning adds the scanner bridge: with both there are exactly eight, which
+# fills the cap. The cap was raised from six to eight on its own, before any
+# seventh caller, so that a single apply never ships a seventh caller to an
+# issuer that still allows six.
 mock_provider "aws" {
   mock_data "aws_caller_identity" {
     defaults = {
@@ -72,6 +75,15 @@ variables {
     notification-worker = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/production/hid/notification-worker@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     event-dispatcher    = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/production/hid/event-dispatcher@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     gateway             = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/production/hid/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    support-api         = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/production/hid/support-api@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+  # Used only by the runs that switch the support bot on.
+  support_contact = "mailto:support@example.invalid"
+  support_faqs = {
+    Help = {
+      utterances = ["I need help", "How do I get help"]
+      answer     = "Please contact the support team for help."
+    }
   }
 }
 
@@ -93,5 +105,33 @@ run "issuer_caller_policy_fits_the_cap" {
       "hid:production:pharmacy-api",
     ])
     error_message = "Raising the cap must not add, remove or rename a caller: the six ECS callers stay exactly as they are."
+  }
+}
+
+run "support_bot_adds_support_api_as_a_caller" {
+  command = plan
+  variables { enable_support_bot = true }
+
+  assert {
+    condition     = length(module.application.workload_caller_policy) == 7 && length(module.application.workload_caller_policy) <= 8
+    error_message = "The support bot adds support-api to the six ECS callers: seven, within the eight-caller limit (eight once the document scanner bridge is on too)."
+  }
+
+  assert {
+    condition = jsonencode(sort(keys(module.application.workload_caller_policy))) == jsonencode([
+      "hid:production:ehr-api",
+      "hid:production:identity-api",
+      "hid:production:lab-api",
+      "hid:production:ocr-api",
+      "hid:production:outreach-api",
+      "hid:production:pharmacy-api",
+      "hid:production:support-api",
+    ])
+    error_message = "The support bot adds exactly one caller, support-api, and leaves the six ECS callers as they are."
+  }
+
+  assert {
+    condition     = jsonencode(module.application.workload_caller_policy["hid:production:support-api"]) == jsonencode(["hid-identity-api"])
+    error_message = "support-api may ask the issuer for identity-api tokens only."
   }
 }
