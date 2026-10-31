@@ -550,3 +550,19 @@ variable "cost_anomaly_threshold_usd" {
   type    = number
   default = 10
 }
+
+variable "offline_escrow_enabled" {
+  description = "Turn on the EHR offline escrow key (D6): OFFLINE_ESCROW_ENABLED=true and the secret OFFLINE_ESCROW_KEYS (key offlineEscrowKeys of offline_escrow_secret_arn) on ehr-api only. Store the key first: with escrow on, a missing or malformed value stops ehr-api's new tasks from starting."
+  type        = bool
+  default     = false
+}
+
+variable "offline_escrow_secret_arn" {
+  description = "Existing Secrets Manager secret whose JSON key offlineEscrowKeys holds {\"<version>\":\"<43-character base64url of 32 random bytes>\"} as a string. Terraform never reads or stores the value."
+  type        = string
+  default     = ""
+  validation {
+    condition     = var.offline_escrow_secret_arn == "" || can(regex("^arn:aws:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:", var.offline_escrow_secret_arn))
+    error_message = "Supply a Secrets Manager ARN, not key material."
+  }
+}

@@ -234,3 +234,7 @@ deployment_automation_bootstrap = false
 enforce_release_index = true
 
 ecs_migration_phase = "retired"
+
+# EHR offline escrow (D6): off. See DEVOPS_HANDOVER.md section 9 before switching on.
+# offline_escrow_enabled    = true
+# offline_escrow_secret_arn = "<ARN of /hid/staging/offline-escrow>"

@@ -389,3 +389,13 @@ variable "deployment_release_environment" {
     error_message = "Release environment must be staging or production."
   }
 }
+
+variable "offline_escrow_enabled" {
+  type    = bool
+  default = false
+}
+
+variable "offline_escrow_secret_arn" {
+  type    = string
+  default = ""
+}

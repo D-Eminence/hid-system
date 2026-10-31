@@ -125,3 +125,13 @@ output "runtime_environment_configuration" {
     repositories = { for name, repository in aws_ecr_repository.workload : name => repository.name }
   }
 }
+
+output "offline_escrow_bindings" {
+  description = "OFFLINE_ESCROW_ environment and secret bindings in each workload's container definition, for tests; names, ARNs and JSON keys only, never a value."
+  value = {
+    for name, environment in local.workload_environment : name => {
+      environment = { for key, value in environment : key => value if startswith(key, "OFFLINE_ESCROW_") }
+      secrets     = [for spec in lookup(local.workload_secret_specs, name, []) : spec if startswith(spec.name, "OFFLINE_ESCROW_")]
+    }
+  }
+}

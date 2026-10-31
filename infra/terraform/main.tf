@@ -143,6 +143,10 @@ module "application" {
   deployment_account_id               = var.expected_account_id
   deployment_alert_kms_key_arn        = module.operations.alert_topic_kms_key_arn
 
+  # EHR offline escrow (D6). Adds its key and secret to ehr-api only while on.
+  offline_escrow_enabled    = var.offline_escrow_enabled
+  offline_escrow_secret_arn = var.offline_escrow_secret_arn
+
   # Emergency-contact delivery. Each switch adds its keys only while on.
   emergency_contact_notification_enabled = var.emergency_contact_notification_enabled
   emergency_contact_delivery_enabled     = var.emergency_contact_delivery_enabled
