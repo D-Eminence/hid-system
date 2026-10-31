@@ -130,3 +130,35 @@ output "workload_caller_policy" {
   description = "Issuer caller rules as subject => audiences, for tests; no role ARNs, not exported by the root module. The issuer refuses more than eight rules at load."
   value       = { for name, caller in local.managed_callers : caller.subject => caller.audiences }
 }
+
+output "support_identity_check" {
+  description = "support-api's Health ID check wiring for tests: environment names and non-secret values, the support-api task containers, the token request policy and port rules; no role ARNs, not exported by the root module."
+  value = {
+    identity_caller_subjects = { for key, value in local.workload_environment["identity-api"] : key => value if endswith(key, "_CALLER_SUBJECT") }
+    support_environment      = local.workload_environment["support-api"]
+    token_requests           = lookup(local.workload_token_requests, "support-api", [])
+    task_containers = {
+      for family, definitions in { legacy = aws_ecs_task_definition.workload, production = aws_ecs_task_definition.production } : family => {
+        for container in jsondecode(definitions["support-api"].container_definitions) : container.name => {
+          environment = { for pair in try(container.environment, []) : pair.name => pair.value }
+          mounts      = [for mount in try(container.mountPoints, []) : "${mount.sourceVolume}:${mount.containerPath}:${mount.readOnly ? "ro" : "rw"}"]
+          depends_on  = [for dependency in try(container.dependsOn, []) : "${dependency.containerName}:${dependency.condition}"]
+          secrets     = [for secret in try(container.secrets, []) : secret.name]
+        }
+      } if contains(keys(definitions), "support-api")
+    }
+    task_volumes = {
+      for family, definitions in { legacy = aws_ecs_task_definition.workload, production = aws_ecs_task_definition.production } :
+      family => [for volume in definitions["support-api"].volume : volume.name] if contains(keys(definitions), "support-api")
+    }
+    token_invoke_resources = try(flatten([for statement in jsondecode(aws_iam_role_policy.workload_token_invoke["support-api"].policy).Statement : statement.Resource]), [])
+    network = {
+      to_internal_lb        = try("${aws_vpc_security_group_egress_rule.workload_to_internal_lb["support-api"].ip_protocol}/${aws_vpc_security_group_egress_rule.workload_to_internal_lb["support-api"].from_port}", null)
+      internal_lb_admits    = try("${aws_vpc_security_group_ingress_rule.internal_lb_from_workload["support-api"].ip_protocol}/${aws_vpc_security_group_ingress_rule.internal_lb_from_workload["support-api"].from_port}", null)
+      identity_behind_lb    = try("${aws_vpc_security_group_ingress_rule.workload_from_internal_lb["identity-api"].ip_protocol}/${aws_vpc_security_group_ingress_rule.workload_from_internal_lb["identity-api"].from_port}", null)
+      provider_https        = try("${aws_vpc_security_group_egress_rule.provider_https["support-api"].ip_protocol}/${aws_vpc_security_group_egress_rule.provider_https["support-api"].from_port}", null)
+      database              = contains(keys(aws_vpc_security_group_egress_rule.workload_to_database), "support-api")
+      identity_host_routing = try(flatten([for condition in aws_lb_listener_rule.internal["identity-api"].condition : [for header in condition.host_header : header.values]]), [])
+    }
+  }
+}

@@ -131,6 +131,15 @@ resource "aws_lambda_function" "workload_issuer" {
     }
   }
 
+  lifecycle {
+    precondition {
+      # issuer.mjs refuses a policy of more than eight callers at load, which
+      # would stop every service token; refuse to plan one instead.
+      condition     = length(local.managed_callers) >= 1 && length(local.managed_callers) <= 8
+      error_message = "The workload issuer accepts one to eight callers."
+    }
+  }
+
   depends_on = [
     aws_cloudwatch_log_group.workload_issuer,
     aws_iam_role_policy_attachment.workload_issuer_logs,

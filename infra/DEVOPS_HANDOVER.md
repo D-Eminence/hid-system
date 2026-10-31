@@ -74,14 +74,18 @@ these registrations and workload issuer/subject configuration. Healthy ALB
 targets alone do not prove gateway upstream discovery works.
 
 The workload issuer (`hid-staging-workload-issuer`) reads its caller policy
-when the Lambda loads and accepts one to eight callers. Six are configured
-today, one per ECS task role: identity-api, ehr-api, lab-api, pharmacy-api,
-ocr-api and outreach-api. The limit was six until the document scanner needed
-a seventh caller. A policy over the limit makes the issuer fail at load and
-stops every service-to-service token, so the limit is always raised in its own
+when the Lambda loads and accepts one to eight callers. Six ECS task roles are
+callers: identity-api, ehr-api, lab-api, pharmacy-api, ocr-api and
+outreach-api. support-api is one more while `enable_support_bot` is on (it is
+in production), for the support chat Health ID check below, and the document
+scanner bridge is one more while document scanning is on: with both, there are
+exactly eight, which fills the limit. The limit was six until these callers
+were needed. A policy over the limit makes the issuer fail at load and stops
+every service-to-service token, so the limit is always raised in its own
 reviewed apply, and a new caller only arrives in a later one.
 `tests/workload-issuer-cap.tftest.hcl` keeps the planned policy at eight or
-fewer.
+fewer, and the issuer Lambda refuses to plan more. A ninth caller needs
+another limit raise, applied on its own first.
 
 The old `hid-staging` ECS cluster/services have been retired. There is currently
 no separate disposable staging stack. Do not apply the historical staging
@@ -285,6 +289,72 @@ which is in neither repository.
 - Rotation makes every browser subscription useless until the patient next
   visits Settings; do it only if the private key is exposed (steps 0 to 3
   again with a new pair).
+
+### Support chat Health ID check
+
+The public support chat (`POST /api/v1/support/chat`, support-api, Lex) must
+never pass a Health ID to Lex. The website removes the shapes it can recognise
+(health PR #61); support-api also checks every message against the Health IDs
+actually issued, through identity-api's internal service route
+`POST /api/v1/identity/service/support/health-id-matches`, and replaces each
+match with a fixed placeholder before calling Lex. The answer never shows
+whether a match was found. If identity-api, the token or the check is
+unavailable or slow, support-api answers `503 SUPPORT_BOT_UNAVAILABLE` (the
+same as a Lex failure) and sends nothing to Lex. No candidate, message text or
+match is logged anywhere; identity-api logs counts only.
+
+Terraform wires it only while `enable_support_bot = true`; with the bot off the
+plan changes nothing. With the bot on:
+
+- support-api becomes a workload caller, subject `hid:staging:support-api` in
+  production (the retained issuer namespace), for audience `hid-identity-api`
+  only. Its task role may call only the issuer's `POST /token`.
+- Both support-api task definitions get the `workload-token-agent` sidecar and
+  the `workload-tokens` volume, exactly as outreach-api's do. support-api
+  starts only after the sidecar is healthy and reads the token read-only.
+- support-api gets `IDENTITY_API_URL`
+  (`https://identity.internal.staging.healthidentitydirectory.com`),
+  `IDENTITY_SERVICE_IDENTITY_MODE` (`jwt`) and
+  `IDENTITY_SUPPORT_WORKLOAD_TOKEN_FILE`
+  (`/var/run/hid/workload-tokens/identity.jwt`). No secret is added.
+- identity-api gets `IDENTITY_SUPPORT_CALLER_SUBJECT`
+  (`hid:staging:support-api`), the one caller its support route accepts.
+- No security group rule is added: support-api already reaches the internal
+  load balancer on 443 (as every internal caller does) and AWS endpoints on
+  443, and it has no database access.
+
+Apply order (each a separate reviewed plan and apply, as in section 4):
+
+1. The issuer limit raise (six to eight) on its own, first.
+2. This change. The plan should show the issuer Lambda's caller policy (one
+   more caller), a `request-workload-tokens` role policy on the support-api
+   task role, and new task definition revisions for support-api (sidecar,
+   volume, three environment keys) and identity-api (one environment key), with
+   the services updated in place and no image change. The running images
+   ignore the new keys: identity-api drops environment keys it does not know,
+   and the current support-api reads none of them.
+3. The backend release: identity-api with migration 0102 (the match
+   function) first, then support-api with the check. A support-api with the
+   check that starts without the token or the URL answers every message with
+   503 and never sends text to Lex.
+4. Only then merge health #61 (the website's own guard).
+
+Check after step 2, names only:
+
+```powershell
+$td = aws ecs describe-services --cluster hid-production --services hid-production-support-api --region eu-west-1 --query "services[0].taskDefinition" --output text
+aws ecs describe-task-definition --task-definition $td --region eu-west-1 --output text `
+  --query "taskDefinition.containerDefinitions[].[name, join(',', environment[?starts_with(name, 'IDENTITY_') || name == 'WORKLOAD_SUBJECT'].name)]"
+```
+
+Expect `support-api` with `IDENTITY_API_URL`, `IDENTITY_SERVICE_IDENTITY_MODE`
+and `IDENTITY_SUPPORT_WORKLOAD_TOKEN_FILE`, and `workload-token-agent` with
+`WORKLOAD_SUBJECT`. CloudWatch `/hid/staging/support-api` (stream prefix
+`workload-token-agent`) must not show `Workload token renewal unavailable`
+after start-up. Off switch for the check alone: none in Terraform; roll
+support-api back to the image before the check (section 8). Switching the bot
+off (`enable_support_bot = false`) removes the bot, the caller and this wiring
+together.
 
 ### Document upload (CORS)
 

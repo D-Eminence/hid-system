@@ -6,7 +6,14 @@ locals {
   # workload-token sidecar through an ephemeral task volume.
   token_root = "/var/run/hid/workload-tokens"
 
-  workload_token_files = {
+  # support-api checks every support chat message against issued Health IDs
+  # through identity-api's internal service route before any text reaches Lex
+  # (owner decision of 2026-10-31). It is a workload caller only while the
+  # support bot exists, so with the bot off no caller, task definition or
+  # identity-api setting changes.
+  support_workload_caller = var.enable_support_bot
+
+  workload_token_files = merge({
     identity-api = {
       NOTIFICATION_IDENTITY_WORKLOAD_TOKEN_FILE = "${local.token_root}/notification.jwt"
     }
@@ -30,7 +37,11 @@ locals {
     outreach-api = {
       OUTREACH_IDENTITY_WORKLOAD_TOKEN_FILE = "${local.token_root}/identity.jwt"
     }
-  }
+    }, local.support_workload_caller ? {
+    support-api = {
+      IDENTITY_SUPPORT_WORKLOAD_TOKEN_FILE = "${local.token_root}/identity.jwt"
+    }
+  } : {})
 
   workload_token_requests = {
     for name, files in local.workload_token_files : name => [
@@ -45,14 +56,16 @@ locals {
     name => "https://${label}.${local.private_zone_name}"
   }
 
-  identity_subjects = local.managed_identity_enabled ? {
+  identity_subjects = local.managed_identity_enabled ? merge({
     identity = "hid:${local.workload_identity_environment}:identity-api"
     ehr      = "hid:${local.workload_identity_environment}:ehr-api"
     lab      = "hid:${local.workload_identity_environment}:lab-api"
     pharmacy = "hid:${local.workload_identity_environment}:pharmacy-api"
     ocr      = "hid:${local.workload_identity_environment}:ocr-api"
     outreach = "hid:${local.workload_identity_environment}:outreach-api"
-  } : var.workload_subjects
+    }, local.support_workload_caller ? {
+    support = "hid:${local.workload_identity_environment}:support-api"
+  } : {}) : var.workload_subjects
 
   common_api_environment = {
     NODE_ENV                      = "production"
@@ -254,7 +267,10 @@ locals {
       ADMIN_OCR_STATUS_URL               = local.service_urls.ocr-api
       ADMIN_OUTREACH_STATUS_URL          = local.service_urls.outreach-api
       ADMIN_EVENT_DISPATCHER_STATUS_URL  = local.service_urls.event-dispatcher
-    }, local.emergency_contact_identity_environment, local.web_push_environment)
+      }, local.support_workload_caller ? {
+      # The one caller allowed on the support Health ID match route.
+      IDENTITY_SUPPORT_CALLER_SUBJECT = lookup(local.identity_subjects, "support", "")
+    } : {}, local.emergency_contact_identity_environment, local.web_push_environment)
 
     ehr-api = merge(local.common_api_environment, local.workload_token_files.ehr-api, {
       PORT                                    = "3002"
@@ -393,7 +409,10 @@ locals {
       OUTREACH_API_UPSTREAM      = "http://outreach-api.services.${var.environment}.hid:3006"
       SUPPORT_API_UPSTREAM       = var.enable_support_bot ? "http://support-api.services.${var.environment}.hid:3011" : "http://127.0.0.1:9"
     }
-    support-api = {
+    # The Health ID check calls identity-api through the internal load
+    # balancer with the identity.jwt token the sidecar writes. support-api
+    # fails closed (503 SUPPORT_BOT_UNAVAILABLE) without either.
+    support-api = merge({
       SUPPORT_CONTACT  = var.support_contact
       NODE_ENV         = "production"
       PORT             = "3011"
@@ -401,7 +420,10 @@ locals {
       LEX_BOT_ID       = var.support_bot_id
       LEX_BOT_ALIAS_ID = var.support_bot_alias_id
       LEX_LOCALE_ID    = "en_GB"
-    }
+      }, lookup(local.workload_token_files, "support-api", {}), local.support_workload_caller ? {
+      IDENTITY_API_URL               = local.service_urls.identity-api
+      IDENTITY_SERVICE_IDENTITY_MODE = "jwt"
+    } : {})
   }
 }
 
