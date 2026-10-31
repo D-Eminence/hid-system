@@ -276,6 +276,37 @@ which is in neither repository.
   visits Settings; do it only if the private key is exposed (steps 0 to 3
   again with a new pair).
 
+### Document upload (CORS)
+
+Pages upload documents straight to the documents bucket
+(`module.data.aws_s3_bucket.documents`, the retained `hid-staging-documents-*`
+bucket) with the presigned PUT link from ehr-api. The browser asks S3 first,
+so without a CORS rule every upload fails with "The document could not be
+uploaded. Please try again." Terraform adds one rule
+(`module.data.aws_s3_bucket_cors_configuration.documents[0]`):
+
+- Origins: only the upload hosts the owner approved on 31 October 2026, from
+  `production_hosts`: `web` (app.), `ehr`, `lab`, `pharmacy` and `ocr`
+  (migrate.). Admin, outreach and the public site get none.
+- PUT only, with only the headers ehr-api's `createUpload` asks for. Downloads
+  open the signed link as a page and need no rule.
+
+Before applying, read the live rule (read-only). A Terraform-managed rule
+replaces any rule set by hand:
+
+```powershell
+aws s3api get-bucket-cors --bucket <documents bucket name> --region eu-west-1
+```
+
+`NoSuchCORSConfiguration` means there is none. Then plan and apply as in
+section 4. The CORS rule itself is one resource to add, with no change to the
+bucket. If the plan also shows other changes, they are dev commits not yet
+applied (for example new task definition revisions with the same images,
+which restart those services). Review them as part of the same plan, and do
+not start a backend release between plan and apply, or the helper refuses.
+To check afterwards, upload a fictional document at Demo Hospital
+(Consultation, Documents, Upload document).
+
 ## 5. Build flow and deployment controls
 
 ### What runs automatically

@@ -114,6 +114,17 @@ run "prepare_retains_current_runtime" {
     condition     = local.runtime_support_faqs["Help"].answer == var.support_faqs["Help"].answer
     error_message = "Preparing production must not switch current support FAQ links."
   }
+  assert {
+    condition = jsonencode(local.document_upload_origins) == jsonencode([
+      "https://staging.healthidentitydirectory.com",
+      "https://ehr.staging.healthidentitydirectory.com",
+      "https://lab.staging.healthidentitydirectory.com",
+      "https://pharmacy.staging.healthidentitydirectory.com",
+      "https://ocr.staging.healthidentitydirectory.com",
+      "https://migrate.staging.healthidentitydirectory.com",
+    ])
+    error_message = "Before cutover only the current patient, EHR, Lab, Pharmacy and OCR hosts may upload documents."
+  }
 
 
 }
@@ -200,6 +211,16 @@ run "cutover_uses_production_identity_and_approved_hosts" {
   assert {
     condition     = local.runtime_support_faqs["Help"].answer == "Public: https://${var.production_hosts["public"]}/about Patient: https://${var.production_hosts["web"]}/sign-in"
     error_message = "Production FAQ actions must use the approved public and patient hosts."
+  }
+  assert {
+    condition = jsonencode(local.document_upload_origins) == jsonencode([
+      "https://healthidentitydirectory.com",
+      "https://ehr.healthidentitydirectory.com",
+      "https://lab.healthidentitydirectory.com",
+      "https://pharmacy.healthidentitydirectory.com",
+      "https://migrate.healthidentitydirectory.com",
+    ])
+    error_message = "In production only the approved patient, EHR, Lab, Pharmacy and Migrate hosts may upload documents; admin, outreach and the public site may not."
   }
 
 }

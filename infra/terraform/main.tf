@@ -31,6 +31,7 @@ module "data" {
   enable_database              = var.enable_database
   database_workload_names      = local.database_workload_names
   use_existing_secrets         = var.use_existing_secrets
+  document_upload_origins      = local.document_upload_origins
 }
 
 # 3. Asynchronous domain events and notification delivery.
