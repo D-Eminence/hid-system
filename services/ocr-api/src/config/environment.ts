@@ -50,7 +50,9 @@ const environmentSchema = z.object({
   PHARMACY_SERVICE_IDENTITY_MODE: z.enum(['local-secret', 'jwt']).default('local-secret'),
   PHARMACY_INTERNAL_SERVICE_TOKEN: optionalSecret,
   PHARMACY_OCR_WORKLOAD_TOKEN_FILE: optionalString,
-  OCR_PUBLICATION_ENABLED: booleanString,
+  // On unless set to 'false': the owner turned OCR publication on in production on 2026-10-31 ("turn on ocr
+  // publishing"). OCR_PUBLICATION_ENABLED=false still pauses it (503 OCR_PUBLICATION_PAUSED).
+  OCR_PUBLICATION_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
 }).superRefine((environment, context) => {
   const modes = [
     ['IDENTITY_SERVICE_IDENTITY_MODE', 'IDENTITY_OCR_INTERNAL_SERVICE_TOKEN', 'IDENTITY_OCR_WORKLOAD_TOKEN_FILE'],
