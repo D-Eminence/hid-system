@@ -443,8 +443,7 @@ describe('OCR validation refuses a candidate that publication would refuse', () 
 });
 
 // OCR publication writes validated OCR evidence into EHR, Lab and Pharmacy.
-// It stays paused until the owner sets OCR_PUBLICATION_ENABLED=true, and this
-// release ships the switch before a later migration lets publication commit.
+// It is on unless OCR_PUBLICATION_ENABLED=false, which pauses it again.
 describe('OCR publication switch', () => {
   it('answers 503 OCR_PUBLICATION_PAUSED and starts no transaction while publication is paused', async () => {
     const { service, database, audit } = harness({ jobRow: { ...job, status: 'validated', row_version: '5' },
