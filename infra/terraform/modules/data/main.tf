@@ -137,6 +137,31 @@ resource "aws_s3_bucket_policy" "documents" {
   policy = data.aws_iam_policy_document.documents.json
 }
 
+# Pages upload documents straight to S3 with the presigned PUT link from
+# ehr-api (services/ehr-api/src/storage/s3-storage.provider.ts createUpload).
+# The browser asks S3 first, so without this rule every upload is refused.
+# Only the approved upload hosts, only PUT, and only the headers createUpload
+# tells the browser to send. Downloads open the signed link as a page and need
+# no rule.
+resource "aws_s3_bucket_cors_configuration" "documents" {
+  count  = length(var.document_upload_origins) > 0 ? 1 : 0
+  bucket = aws_s3_bucket.documents.id
+
+  cors_rule {
+    id              = "presigned-document-upload"
+    allowed_methods = ["PUT"]
+    allowed_origins = var.document_upload_origins
+    allowed_headers = [
+      "content-type",
+      "x-amz-checksum-sha256",
+      "x-amz-meta-declared-sha256",
+      "x-amz-server-side-encryption",
+      "x-amz-server-side-encryption-aws-kms-key-id",
+    ]
+    max_age_seconds = 600
+  }
+}
+
 # This removes only unfinished uploads. Completed clinical objects do not expire.
 resource "aws_s3_bucket_lifecycle_configuration" "documents" {
   bucket = aws_s3_bucket.documents.id

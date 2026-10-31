@@ -66,6 +66,16 @@ locals {
   browser_origins = var.promote_existing_staging && var.activate_production_runtime ? local.production_origins : [
     for subdomain in local.browser_subdomains : "https://${subdomain}.${var.root_domain_name}"
   ]
+  # The hosts whose pages upload documents (owner, 31 October 2026): the
+  # patient portal (web), EHR, Lab, Pharmacy and Migrate (the ocr app). Admin,
+  # Outreach and the public site upload none.
+  document_upload_apps = ["web", "ehr", "lab", "pharmacy", "ocr"]
+  document_upload_origins = var.promote_existing_staging && var.activate_production_runtime ? [
+    for app in local.document_upload_apps : "https://${var.production_hosts[app]}" if contains(keys(var.production_hosts), app)
+    ] : [
+    for subdomain in local.browser_subdomains : "https://${subdomain}.${var.root_domain_name}"
+    if contains(["ehr", "lab", "pharmacy", "ocr", "migrate", local.runtime_environment], split(".", subdomain)[0])
+  ]
   # Keep the current FAQ untouched during preparation. Only the coordinated
   # runtime cutover moves its public links to the approved production hosts.
   runtime_support_faqs = var.promote_existing_staging && var.activate_production_runtime ? {

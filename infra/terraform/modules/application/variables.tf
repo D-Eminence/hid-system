@@ -49,6 +49,21 @@ variable "emergency_contact_pilot_account_ids" {
   default = []
 }
 
+variable "web_push_enabled" {
+  type    = bool
+  default = false
+}
+
+variable "web_push_vapid_public_key" {
+  type    = string
+  default = ""
+}
+
+variable "web_push_subject" {
+  type    = string
+  default = "mailto:support@healthidentitydirectory.com"
+}
+
 variable "name_prefix" {
   type = string
 }

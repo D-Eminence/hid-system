@@ -55,3 +55,13 @@ variable "use_existing_secrets" {
   type        = bool
   default     = false
 }
+
+variable "document_upload_origins" {
+  description = "Browser origins whose pages upload documents straight to the documents bucket with presigned PUT links. Empty adds no CORS rule."
+  type        = list(string)
+  default     = []
+  validation {
+    condition     = alltrue([for origin in var.document_upload_origins : can(regex("^https://[a-z0-9]+([.-][a-z0-9]+)*$", origin))])
+    error_message = "Each document upload origin must be an exact https origin: no wildcard, path or port."
+  }
+}

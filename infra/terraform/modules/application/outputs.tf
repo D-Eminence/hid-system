@@ -46,6 +46,16 @@ output "emergency_contact_environment" {
   }
 }
 
+output "web_push_bindings" {
+  description = "WEB_PUSH_ environment and secret names in each workload's container definition, for tests; names only, not exported by the root module."
+  value = {
+    for name, environment in local.workload_environment : name => {
+      environment = sort([for key, value in environment : key if startswith(key, "WEB_PUSH_")])
+      secrets     = sort([for spec in lookup(local.workload_secret_specs, name, []) : spec.name if startswith(spec.name, "WEB_PUSH_")])
+    }
+  }
+}
+
 output "operational_target_dimensions" {
   value = var.enable_ingress ? merge({
     for name, group in local.active_internal_groups : name => {
