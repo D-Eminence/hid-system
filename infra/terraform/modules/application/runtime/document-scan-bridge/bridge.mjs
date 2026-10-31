@@ -27,7 +27,9 @@ export const RECONCILE_RESTART_SECONDS = 3_600;
 export const RECONCILE_MAX_LIMIT = 50;
 export const RECONCILE_DEFAULT_OLDER_THAN_SECONDS = 900;
 export const RECONCILE_SCAN_SPACING_MS = 500;
-const KEY_PATTERN = /^clinical\/objects\/[0-9a-f-]{36}$/;
+// Exactly the key shape ehr-api's upload intent writes and its resolve DTO
+// accepts (clinical/objects/<lower-case UUID>); anything else is not a document.
+const KEY_PATTERN = /^clinical\/objects\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const sha256 = value => createHash('sha256').update(value).digest('hex');
 
 export function bridgeConfiguration(environment) {
@@ -444,8 +446,12 @@ function writeOutcome(response, fields, { metrics, logger }) {
     return 'ack';
   }
   if (status === 404) {
-    metrics.count('Orphans');
-    log(logger, 'info', 'Document disappeared before the write; acknowledged', fields);
+    // Resolve has just found this document, and documents are never deleted:
+    // a 404 here means the append cannot see the row (a database fault, such
+    // as a missing row-level security policy), not an orphan. Acknowledged
+    // with the refusal alarm; reconcile scans the document again once fixed.
+    metrics.count('ScanEventRefused');
+    log(logger, 'error', 'ehr-api could not find a document it had just resolved', { ...fields, status, code });
     return 'ack';
   }
   if (status === 401 || status === 403 || status === 429 || status >= 500) {

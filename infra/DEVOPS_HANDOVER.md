@@ -491,7 +491,7 @@ denied.
 | `...-access-denied` | GuardDuty could not read a version | Plan role, bucket policy, KMS |
 | `...-reconcile-exhausted` | Three on-demand scans gave no result | Bridge log, plan status |
 | `...-plan-status` | GuardDuty reported a plan warning or error, or failed tagging | `get-malware-protection-plan` status reasons |
-| `...-event-refused` | ehr-api refused an event the bridge cannot retry | Bridge log `code`; the document stays blocked |
+| `...-event-refused` | ehr-api refused an event the bridge cannot retry, or answered 404 for a document resolve had just found | Bridge log `code`; the document stays blocked. A 404 there means the database cannot see the row: check 0101's `documents_scanner_function_lock` policy and the schema owner's row-level security |
 
 **Rollback, in reverse order**, each as its own commit and apply:
 `document_scan_enforce_tags = false` first, so that S3 stops refusing untagged

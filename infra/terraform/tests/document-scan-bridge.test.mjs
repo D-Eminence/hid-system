@@ -154,6 +154,11 @@ test('envelope validation accepts only our plan, account, Region, bucket and cli
   refused(scanEvent({ key: 'malware-protection-resource-validation-object' }), 'key');
   refused(scanEvent({ key: 'migration-quarantine/scan-me.pdf' }), 'key');
   refused(scanEvent({ key: `${KEY}/../other` }), 'key');
+  // Only the key shape ehr-api writes and its resolve DTO accepts: a lower-case
+  // UUID in 8-4-4-4-12 form.
+  refused(scanEvent({ key: `clinical/objects/${'-'.repeat(36)}` }), 'key');
+  refused(scanEvent({ key: 'clinical/objects/0f8fad5bd9cb469fa16570867728950e0000' }), 'key');
+  refused(scanEvent({ key: KEY.toUpperCase().replace('CLINICAL/OBJECTS/', 'clinical/objects/') }), 'key');
   refused(scanEvent({ versionId: '' }), 'version');
   refused(scanEvent({ versionId: 'has space' }), 'version');
   refused(scanEvent({ scanStatus: 'PENDING' }), 'scan-status');
@@ -370,8 +375,11 @@ test('scan-events responses: written, terminal, not uploaded, auth, outage, refu
     r = await outcome(problem(status, code));
     assert.equal(r.failed, true, `${status} retries`);
   }
+  // A 404 right after resolve found the document is a database fault, not an
+  // orphan: acknowledged with the refusal alarm, never counted as an orphan.
   r = await outcome(problem(404, 'DOCUMENT_NOT_FOUND'));
-  assert.deepEqual([r.failed, r.h.metric('Orphans')], [false, 1]);
+  assert.deepEqual([r.failed, r.h.metric('ScanEventRefused'), r.h.metric('Orphans')], [false, 1, 0]);
+  assert.equal(r.h.logs.at(-1).level, 'error');
   r = await outcome(problem(409, 'DOCUMENT_NOT_SCANNABLE'));
   assert.deepEqual([r.failed, r.h.metric('NotScannable')], [false, 1]);
   r = await outcome(problem(409, 'OBJECT_VERSION_MISMATCH'));
@@ -522,9 +530,10 @@ test('reconcile skips recent attempts, gives up after three with an alarm, and i
     item({ scanStartedCount: 3, lastScanStartedAt: '2026-10-30T11:30:00Z' }),
     item({ storageBucket: 'another-bucket' }),
     item({ storageKey: 'migration-quarantine/x.pdf' }),
+    item({ storageKey: `clinical/objects/${'-'.repeat(36)}` }),
   ] }) });
   const summary = await reconcile({ action: 'reconcile' }, context);
-  assert.deepEqual([summary.inProgress, summary.exhausted, summary.skipped, summary.started], [1, 1, 2, 0]);
+  assert.deepEqual([summary.inProgress, summary.exhausted, summary.skipped, summary.started], [1, 1, 3, 0]);
   assert.equal(posted(net).length, 0);
   assert.equal(net.calls.filter(call => call.url.endsWith('/send')).length, 0);
   assert.equal(metric('ReconcileExhausted'), 1);
