@@ -28,7 +28,7 @@ export class HidCodeGenerator {
   generate(): string {
     for (let draw = 0; draw < MAX_DRAWS; draw += 1) {
       let code = '';
-      for (const byte of this.entropy(6)) code += HID_ALPHABET[byte & 31];
+      for (const byte of this.entropy()) code += HID_ALPHABET[byte & 31];
       if (HAS_LETTER.test(code) && HAS_DIGIT.test(code)) return `HID-${code}`;
     }
     throw new ServiceUnavailableException('A HID could not be generated');
@@ -45,8 +45,8 @@ export class HidCodeGenerator {
     throw new ServiceUnavailableException('A unique HID could not be reserved');
   }
 
-  /** The random bytes behind one draw; a test may replace them. */
-  protected entropy(size: number): Uint8Array {
-    return randomBytes(size);
+  /** The six random bytes behind one draw; a test may replace them. */
+  protected entropy(): Uint8Array {
+    return randomBytes(6);
   }
 }
