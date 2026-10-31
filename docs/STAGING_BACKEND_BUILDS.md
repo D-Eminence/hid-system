@@ -46,7 +46,7 @@ The original Node 22 distroless base had outdated OpenSSL and glibc libraries.
 The pinned base was then updated within the same Node 22/Debian 13 image family to
 `sha256:55e7cd155c86d8956af63fec0a9d0790dd6d0ba98c7d38e63c0866557ee7aff8`.
 Scanning that exact ARM64 base removed all Critical findings and the High findings
-with available Debian fixes. Five unique High advisory IDs remain (eleven package
+with available Debian fixes. Six unique High advisory IDs remain (twelve package
 matches), with no packaged fix reported:
 
 | Advisory | Package(s) | Current scan result |
@@ -56,12 +56,14 @@ matches), with no packaged fix reported:
 | CVE-2026-19499 | libc6 | wont-fix; Debian calls this a minor formatting-function issue |
 | CVE-2026-95619 | GCC runtime packages including libstdc++6 | not-fixed |
 | CVE-2026-102010 | GCC runtime packages including libstdc++6 | not-fixed |
+| CVE-2026-84243 | libc6 | not-fixed; gettext accepts LANGUAGE paths (added 2026-10-31) |
 
 Sources: [zlib](https://security-tracker.debian.org/tracker/CVE-2026-85091),
 [glibc deprecated functions](https://security-tracker.debian.org/tracker/CVE-2026-5435),
 [glibc formatting](https://security-tracker.debian.org/tracker/CVE-2026-19499),
 [GCC allocation](https://security-tracker.debian.org/tracker/CVE-2026-95619),
-[GCC queue](https://security-tracker.debian.org/tracker/CVE-2026-102010).
+[GCC queue](https://security-tracker.debian.org/tracker/CVE-2026-102010),
+[glibc gettext](https://security-tracker.debian.org/tracker/CVE-2026-84243).
 These are scanner findings, not a claim that each is exploitable through HID.
 No blanket ignore, severity downgrade or security exception is applied.
 
