@@ -59,7 +59,12 @@ export class S3StorageProvider implements StorageProvider {
         ? { ServerSideEncryption: 'aws:kms', SSEKMSKeyId: this.environment.S3_KMS_KEY_ID }
         : { ServerSideEncryption: 'AES256' }),
     });
-    const url = await getSignedUrl(this.client, command, { expiresIn: intent.expiresInSeconds });
+    // The presigner would move the checksum and the declared-sha256 metadata into the link's query; keep them as
+    // signed headers, sent by the browser from requiredHeaders, so S3 stores both on the object and inspect() finds them.
+    const url = await getSignedUrl(this.client, command, {
+      expiresIn: intent.expiresInSeconds,
+      unhoistableHeaders: new Set(['x-amz-checksum-sha256', 'x-amz-meta-declared-sha256']),
+    });
     return {
       method: 'PUT',
       url,

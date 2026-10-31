@@ -24,9 +24,9 @@ polling, leases, retries, and immutable extraction writes remain worker-owned.
 
 Publication (`POST /api/v1/ocr/validations/:validationId/publications`) writes
 validated OCR evidence into EHR, Lab or Pharmacy. It answers
-`503 OCR_PUBLICATION_PAUSED` unless `OCR_PUBLICATION_ENABLED=true`, so the first
-OCR-to-clinical writes wait for the owner; job, validation and patient
-confirmation do not depend on it.
+`503 OCR_PUBLICATION_PAUSED` when `OCR_PUBLICATION_ENABLED=false`. It is on by
+default since the owner turned OCR publication on in production (2026-10-31);
+job, validation and patient confirmation do not depend on it.
 
 Run `npm run start:dev`, `npm test`, `npm run typecheck`, or `npm run build` in
 this directory. The authoritative platform documents define deployment,

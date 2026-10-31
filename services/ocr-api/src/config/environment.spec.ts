@@ -18,6 +18,17 @@ describe('OCR environment', () => {
     expect(getEnvironment().PORT).toBe(3005);
   });
 
+  // The owner turned OCR publication on in production (2026-10-31); only an explicit 'false' pauses it.
+  it('publishes OCR evidence unless OCR_PUBLICATION_ENABLED is false', () => {
+    delete process.env.OCR_PUBLICATION_ENABLED;
+    expect(getEnvironment().OCR_PUBLICATION_ENABLED).toBe(true);
+    process.env.OCR_PUBLICATION_ENABLED = 'false'; resetEnvironmentForTests();
+    expect(getEnvironment().OCR_PUBLICATION_ENABLED).toBe(false);
+    process.env.OCR_PUBLICATION_ENABLED = 'true'; resetEnvironmentForTests();
+    expect(getEnvironment().OCR_PUBLICATION_ENABLED).toBe(true);
+    delete process.env.OCR_PUBLICATION_ENABLED;
+  });
+
   it('fails closed when a local downstream workload secret is absent', () => {
     delete process.env.EHR_INTERNAL_SERVICE_TOKEN;
     expect(() => getEnvironment()).toThrow(/EHR_INTERNAL_SERVICE_TOKEN/);

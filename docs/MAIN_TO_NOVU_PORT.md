@@ -43,7 +43,7 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | #88 | CAC sign-up reads the Java-printed registration date that QoreID's CAC Basic v2 returns in production | — |
 | #88 | Termii receives the SMS recipient as international digits without `+`, as its API documents | — |
 | #76 A24 (search only) | `POST /admin/principals/search` takes the user search (a name or an email address) in its body, so request-line access logs do not keep it; `GET /admin/principals` stays. The production admin console's Users & roles search uses it. Not ported: main's `@HighRiskAction` policy and the export's POST form (this branch has no `platform.principal.export`) | — |
-| — | This branch only: OCR publication answers 503 `OCR_PUBLICATION_PAUSED` until `OCR_PUBLICATION_ENABLED=true` on ocr-api. It ships before the migration that lets publication commit, so no running ocr-api (during a rollout or after a rollback) can publish before the owner decides | — |
+| — | This branch only: OCR publication answers 503 `OCR_PUBLICATION_PAUSED` when `OCR_PUBLICATION_ENABLED=false` on ocr-api. It was paused by default until the owner turned it on in production on 2026-10-31 ("turn on ocr publishing"); since then it is on unless set to `false` | — |
 | #32 (7B) | The OCR patient-confirmation and validation guards refuse a missing source, extraction, account or membership, and bind the confirming account and membership to the session | 0080 (main 0076) |
 | #30 | OCR patient confirmation and publication can write their outbox events (every one failed with 42501); a repeated confirmation answers 409 `OCR_PATIENT_ALREADY_CONFIRMED` | 0081 (main 0075) |
 | #30 | The OCR worker reports queue depth and age through `ocr.worker_queue_metrics()`, owned like `ocr.claim_worker_job` (main's dedicated owner role is not ported) | 0082 (main 0075), runtime-grants.sql |
@@ -1922,8 +1922,9 @@ Decided by the owner, D-Eminence:
   numbers and hashes after it.
 - health is re-pinned after every backend release, and the owner signs each pin
   (below).
-- OCR patient confirmation is live; publication stays paused
-  (`OCR_PUBLICATION_ENABLED` is not `true`) until a synthetic-patient test.
+- OCR patient confirmation is live, and so is publication since the owner
+  turned it on on 2026-10-31 (`OCR_PUBLICATION_ENABLED=false` pauses it again).
+  The first publication is a synthetic-patient test at the sealed Demo Hospital.
 - Break-glass is enabled in production now (2026-10-24, "Enable break-glass
   now"): 0085 seeds the `emergency` purpose and Identity enforces
   `break_glass_enabled`, which the release does not change (0039 seeded it
