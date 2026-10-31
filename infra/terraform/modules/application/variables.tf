@@ -389,3 +389,32 @@ variable "deployment_release_environment" {
     error_message = "Release environment must be staging or production."
   }
 }
+
+# Document virus scanning (GuardDuty result bridge). Off by default.
+variable "enable_document_scanning" {
+  description = "Create the GuardDuty result bridge: results rule, queue and DLQ, the bridge Lambda, the seventh workload caller, the reconcile schedule and the alarms. Needs malware_protection_plan_arn."
+  type        = bool
+  default     = false
+}
+
+variable "document_scan_bridge_mode" {
+  description = "observe: resolve and log each mapped result, write nothing and start no scan. write: append scan events and run reconcile scans."
+  type        = string
+  default     = "observe"
+  validation {
+    condition     = contains(["observe", "write"], var.document_scan_bridge_mode)
+    error_message = "document_scan_bridge_mode must be observe or write."
+  }
+}
+
+variable "document_scan_reconcile_enabled" {
+  description = "Enable the 15-minute reconcile schedule (created disabled)."
+  type        = bool
+  default     = false
+}
+
+variable "malware_protection_plan_arn" {
+  description = "GuardDuty Malware Protection plan on the documents bucket; empty while protection is off."
+  type        = string
+  default     = ""
+}

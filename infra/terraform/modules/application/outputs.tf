@@ -130,3 +130,59 @@ output "workload_caller_policy" {
   description = "Issuer caller rules as subject => audiences, for tests; no role ARNs, not exported by the root module. The issuer refuses more than eight rules at load."
   value       = { for name, caller in local.managed_callers : caller.subject => caller.audiences }
 }
+
+output "document_scanning" {
+  description = "Names an operator needs for the document scanning runbook; no secrets."
+  value = local.document_scanner_enabled ? {
+    function_name     = aws_lambda_function.document_scan_bridge[0].function_name
+    mode              = var.document_scan_bridge_mode
+    reconcile_rule    = aws_cloudwatch_event_rule.document_scan_reconcile[0].name
+    reconcile_enabled = var.document_scan_reconcile_enabled
+    results_queue     = aws_sqs_queue.document_scan_results[0].name
+    dead_letter_queue = aws_sqs_queue.document_scan_results_dlq[0].name
+    log_group         = aws_cloudwatch_log_group.document_scan_bridge[0].name
+    subject           = local.document_scan_subject
+  } : null
+}
+
+output "document_scan_review" {
+  description = "Rendered bridge settings for tests; names and policies only, not exported by the root module."
+  value = local.document_scanner_enabled ? {
+    function = {
+      runtime              = aws_lambda_function.document_scan_bridge[0].runtime
+      architectures        = aws_lambda_function.document_scan_bridge[0].architectures
+      memory_size          = aws_lambda_function.document_scan_bridge[0].memory_size
+      timeout              = aws_lambda_function.document_scan_bridge[0].timeout
+      reserved_concurrency = aws_lambda_function.document_scan_bridge[0].reserved_concurrent_executions
+      in_vpc               = length(aws_lambda_function.document_scan_bridge[0].vpc_config) == 1
+      environment          = aws_lambda_function.document_scan_bridge[0].environment[0].variables
+      log_group            = aws_lambda_function.document_scan_bridge[0].logging_config[0].log_group
+    }
+    role_policy           = jsondecode(aws_iam_role_policy.document_scan_bridge[0].policy)
+    role_managed_policies = [aws_iam_role_policy_attachment.document_scan_bridge_vpc[0].policy_arn]
+    event_source = {
+      batch_size          = aws_lambda_event_source_mapping.document_scan_results[0].batch_size
+      response_types      = aws_lambda_event_source_mapping.document_scan_results[0].function_response_types
+      maximum_concurrency = aws_lambda_event_source_mapping.document_scan_results[0].scaling_config[0].maximum_concurrency
+    }
+    queue = {
+      visibility = aws_sqs_queue.document_scan_results[0].visibility_timeout_seconds
+      retention  = aws_sqs_queue.document_scan_results[0].message_retention_seconds
+      encrypted  = aws_sqs_queue.document_scan_results[0].sqs_managed_sse_enabled
+      redrive    = jsondecode(aws_sqs_queue.document_scan_results[0].redrive_policy).maxReceiveCount
+      policy     = jsondecode(aws_sqs_queue_policy.document_scan_results[0].policy)
+    }
+    results_pattern = jsondecode(aws_cloudwatch_event_rule.document_scan_results[0].event_pattern)
+    status_pattern  = jsondecode(aws_cloudwatch_event_rule.malware_plan_status[0].event_pattern)
+    reconcile_state = aws_cloudwatch_event_rule.document_scan_reconcile[0].state
+    reconcile_rate  = aws_cloudwatch_event_rule.document_scan_reconcile[0].schedule_expression
+    reconcile_input = jsondecode(aws_cloudwatch_event_target.document_scan_reconcile[0].input)
+    alarm_names     = sort(concat([aws_cloudwatch_metric_alarm.document_scan_dlq[0].alarm_name, aws_cloudwatch_metric_alarm.document_scan_errors[0].alarm_name], [for alarm in aws_cloudwatch_metric_alarm.document_scan_metric : alarm.alarm_name]))
+    alarm_actions   = distinct(flatten(concat([aws_cloudwatch_metric_alarm.document_scan_dlq[0].alarm_actions], [for alarm in aws_cloudwatch_metric_alarm.document_scan_metric : alarm.alarm_actions])))
+    security_group_egress = [for rule in [
+      aws_vpc_security_group_egress_rule.document_scan_bridge_to_internal_lb[0],
+      aws_vpc_security_group_egress_rule.document_scan_bridge_to_endpoint[0],
+      aws_vpc_security_group_egress_rule.document_scan_bridge_https[0],
+    ] : "${rule.ip_protocol}/${rule.from_port}-${rule.to_port}"]
+  } : null
+}

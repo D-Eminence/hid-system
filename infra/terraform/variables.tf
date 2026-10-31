@@ -515,6 +515,44 @@ variable "web_push_subject" {
   }
 }
 
+# Document virus scanning (owner decisions D1-D5, 31 October 2026). Every flag
+# is off, so an apply without a tfvars change creates nothing. The owner turns
+# them on in the staged applies of DEVOPS_HANDOVER.md "Document virus
+# scanning"; the workload issuer limit (six to eight callers) is applied first.
+variable "enable_document_malware_protection" {
+  description = "Stage 3: GuardDuty Malware Protection for S3 on clinical/objects/ of the documents bucket (plan, plan role, bucket EventBridge notification). No GuardDuty detector."
+  type        = bool
+  default     = false
+}
+
+variable "enable_document_scanning" {
+  description = "Stage 3: the result bridge (rule, queue, DLQ, Lambda, seventh workload caller, reconcile schedule, alarms). Needs enable_document_malware_protection."
+  type        = bool
+  default     = false
+}
+
+variable "document_scan_bridge_mode" {
+  description = "observe (stage 3, the default) logs what the bridge would write; write (stage 3, after the demo checks) appends scan events and runs reconcile scans."
+  type        = string
+  default     = "observe"
+  validation {
+    condition     = contains(["observe", "write"], var.document_scan_bridge_mode)
+    error_message = "document_scan_bridge_mode must be observe or write."
+  }
+}
+
+variable "document_scan_reconcile_enabled" {
+  description = "Stage 4, after the backfill: run reconcile every 15 minutes."
+  type        = bool
+  default     = false
+}
+
+variable "document_scan_enforce_tags" {
+  description = "Stage 5, only after the backfill check passes (owner decision D4): S3 refuses reads of clinical objects GuardDuty has not tagged clean, except GuardDuty and ehr-api."
+  type        = bool
+  default     = false
+}
+
 variable "alert_email" {
   type    = string
   default = ""

@@ -317,6 +317,199 @@ not start a backend release between plan and apply, or the helper refuses.
 To check afterwards, upload a fictional document at Demo Hospital
 (Consultation, Documents, Upload document).
 
+### Document virus scanning (GuardDuty)
+
+Every uploaded clinical document stays `scan: pending` until a virus scan
+writes a `clean` event bound to its exact S3 version and SHA-256. Only then can
+it be opened, downloaded or sent to OCR. The owner chose GuardDuty Malware
+Protection for S3 on 31 October 2026:
+
+- D1: GuardDuty, not ClamAV.
+- D2: a file GuardDuty cannot scan, for example a password-protected PDF, is
+  refused (`rejected`, reason `guardduty.unsupported.<reason>`).
+- D3: a clean file whose real type is PDF, JPEG, PNG or TIFF is accepted under
+  that type even when it was declared as another. Any other real type is refused
+  (`media.unsupported`).
+- D4: S3 tag enforcement happens only after the backfill (stage 5).
+- D5: no GuardDuty detector.
+
+How it works: GuardDuty scans each new object version under `clinical/objects/`
+of the retained `hid-staging-documents-*` bucket in eu-west-1. It tags the
+version `GuardDutyMalwareScanStatus` and publishes the result. The rule
+`hid-staging-document-scan-results` puts the result on the queue
+`hid-staging-document-scan-results`. The Lambda
+`hid-staging-document-scan-bridge`, in the application subnets, then:
+
+1. gets a workload token for `hid-identity-api` as
+   `hid:staging:document-scanner` (the issuer's seventh caller);
+2. asks ehr-api, on the internal ALB, which document holds that version
+   (`POST /api/v1/ehr/documents/scan-targets/resolve`);
+3. writes the scan event (`POST /api/v1/ehr/documents/scan-events`).
+
+The bridge has no S3 or KMS rights; ehr-api reads the first KiB itself to find
+the real media type. A result that arrives before `/complete` waits on the
+queue: retries start at one minute and double up to 12 hours. After 12 receives
+the message goes to `hid-staging-document-scan-results-dlq`. A 15-minute
+reconcile run of the same Lambda starts GuardDuty on-demand scans for uploaded
+documents that have no result. It records each attempt as `scan_started`, waits
+an hour between attempts and gives up after three. Logs are in CloudWatch
+`/hid/staging/document-scan-bridge`; they carry object keys (random UUIDs),
+document IDs, statuses and threat names, never patient data.
+
+Every switch is off in `production.tfvars`, so a routine apply from dev creates
+none of this. Turn the switches on in this order. Each stage is its own
+reviewed commit on dev, then a plan and an apply with the guarded helper exactly
+as in section 4. Do not start a backend release between plan and apply.
+
+**Stage 0. Read-only checks (owner).**
+
+```powershell
+aws guardduty list-malware-protection-plans --region eu-west-1
+aws s3api get-bucket-notification-configuration --bucket <documents bucket name> --region eu-west-1
+aws events list-rules --name-prefix DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3 --region eu-west-1
+aws lambda get-account-settings --region eu-west-1 --query AccountLimit
+```
+
+Expect no plan, an empty notification configuration and no managed rule; if
+any exists, stop: Terraform would take it over. The bridge reserves 2
+concurrent executions, and Lambda keeps at least 100 unreserved, so
+`UnreservedConcurrentExecutions` must be 102 or more (new accounts can have a
+limit of 10; ask AWS for a raise first). In SQL, size the backfill with
+`select status, count(*) from ehr.documents group by 1` and
+`select count(*) from ehr.document_scan_events`.
+
+**Stage 1. Backend release.** The backend PR carries migration 0101: the
+scanner account `hid:staging:document-scanner` with the platform
+`document_scanner` role, and the resolve and list functions. It stacks on OCR
+Stage 1's 0100. The PR also carries the ehr-api `scan-targets` routes, the
+media-type sniff, the SQLSTATE-to-409 mapping, and the gateway block that keeps
+`/api/v1/ehr/documents/scan-(events|targets)` off the public API. The owner signs
+0101. Check: `https://api.healthidentitydirectory.com/api/v1/ehr/documents/scan-events`
+answers 404.
+
+**Stage 2. Workload issuer limit, on its own.** Apply the commit that raises
+the issuer's caller limit from six to eight (see section 3), and nothing else.
+The plan must show only `module.application.aws_lambda_function.workload_issuer[0]`
+updated in place (new code hash). Check that every workload-token-agent sidecar
+stays healthy, that service-to-service calls work, and that the JWKS `kid` is
+unchanged. Never combine this apply with stage 3: a seventh caller that reaches
+an issuer still limited to six stops every service token.
+
+**Stage 3. GuardDuty and the bridge, observe mode.** In `production.tfvars`:
+
+```hcl
+enable_document_malware_protection = true
+enable_document_scanning           = true
+```
+
+The plan adds:
+
+- in `module.data`: the GuardDuty plan role and its policy, the bucket
+  notification (`eventbridge = true`) and `aws_guardduty_malware_protection_plan.documents[0]`
+  on `clinical/objects/` with tagging on;
+- in `module.application`: the bridge role, its policy and the VPC policy
+  attachment, the log group, the queue, the DLQ and their policies, the two
+  rules and their targets, the Lambda and its security group rules, the event
+  source mapping, the reconcile schedule (disabled), two Lambda permissions and
+  eight alarms `hid-staging-document-scan-*`.
+
+The plan also updates the issuer Lambda's `WORKLOAD_CALLER_POLICY_JSON` to seven
+callers. It must not change the bucket policy. After the apply, the bucket sends
+all its S3 events to the default event bus; only the rule above routes any,
+and only for `clinical/objects/`.
+
+Check:
+
+```powershell
+aws guardduty get-malware-protection-plan --malware-protection-plan-id <plan id from the document_scanning output> --region eu-west-1 --query "[Status,StatusReasons]"
+aws s3api head-object --bucket <documents bucket name> --key malware-protection-resource-validation-object --region eu-west-1
+```
+
+Expect `ACTIVE`. In the sealed Demo Hospital tenant upload a clean PDF, a
+JPEG declared as a PDF, an EICAR test file declared as `application/pdf` and a
+password-protected PDF. The EICAR file holds only the standard 68-byte
+anti-virus test string from eicar.org; it is harmless. In the bridge log each
+one appears as `Observe mode: scan event not written`, with `clean`
+`application/pdf`; `clean` `image/jpeg` (D3); `rejected`
+`guardduty.threats-found`; and `rejected` `guardduty.unsupported.<reason>` (D2).
+The object tags show `NO_THREATS_FOUND` or `THREATS_FOUND`. Nothing is
+written yet, so the documents stay pending.
+
+Then commit `document_scan_bridge_mode = "write"`, plan (only the bridge
+Lambda's `BRIDGE_MODE` changes) and apply. Upload the same four files again:
+the clean ones show `scan: clean` and Open file and Extract with OCR appear;
+the JPEG shows as `image/jpeg`; the other two show `scan rejected`.
+
+**Stage 4. Backfill, then reconcile.** Results seen in observe mode were not
+written, and documents uploaded before stage 3 never had a scan. Run the
+backfill by hand, repeating until a run reports `"started":0` and
+`"deferred":0`:
+
+```powershell
+Set-Content -NoNewline -Path reconcile.json -Value '{"action":"reconcile","olderThanSeconds":0,"limit":50}'
+aws lambda invoke --function-name hid-staging-document-scan-bridge --payload fileb://reconcile.json --region eu-west-1 reconcile-out.json
+Get-Content reconcile-out.json
+```
+
+Each run starts about 20 on-demand scans (two a second within the 30 s
+timeout); documents scanned in the last hour are skipped (`inProgress`) until
+their result lands, usually within minutes. The `oldest-pending` alarm fires
+during the backfill because documents from 31 October have waited for days; it
+clears when they are done. Then commit `document_scan_reconcile_enabled = true`,
+plan (only the schedule's state changes to `ENABLED`) and apply. Check: the
+stage 0 query shows no `uploaded` document without a terminal event, except
+those still `initiated` (their upload never completed; they are not scanned).
+The DLQ is empty and the alarms are OK. Imported attachments under
+`migration-quarantine/` stay out of scope; they keep their ClamAV evidence.
+
+**Stage 5. Tag enforcement, only after the stage 4 check passes (D4).** Commit
+`document_scan_enforce_tags = true`. The plan updates only
+`module.data.aws_s3_bucket_policy.documents[0]`, adding four statements on
+`clinical/objects/*`:
+
+- reads are denied unless the version is tagged `NO_THREATS_FOUND`, except for
+  GuardDuty's role and the ehr-api task role (ehr-api needs `HeadObject` at
+  `/complete` before the scan, and the media sniff);
+- reads of `THREATS_FOUND` versions are denied to everyone but GuardDuty;
+- scan-tag writes and deletes are denied to everyone but GuardDuty;
+- uploads that carry tags are denied.
+
+Terraform refuses enforcement without GuardDuty or without the ehr-api
+exemption. Check at Demo Hospital: upload, completion, Open file and an OCR job
+on a clean document all work. Check with the IAM policy simulator, or a test
+read with the ocr-worker role, that an untagged or `THREATS_FOUND` version is
+denied.
+
+**Alarms** (topic `hid-staging-operations-alerts`):
+
+| Alarm | Meaning | First step |
+| --- | --- | --- |
+| `hid-staging-document-scan-dead-letters` | A result failed 12 times, or EventBridge could not deliver it | Read the bridge log for that key; fix the cause; then `aws sqs start-message-move-task --source-arn <DLQ ARN> --region eu-west-1` moves the messages back |
+| `...-errors` | The Lambda failed (bad configuration, reconcile listing, crash) | Bridge log |
+| `...-oldest-pending` | An uploaded document has waited over an hour | Reconcile on? GuardDuty plan `ACTIVE`? |
+| `...-threats-found` | GuardDuty found a threat; the document was refused | Threat name in the log; tell the facility |
+| `...-access-denied` | GuardDuty could not read a version | Plan role, bucket policy, KMS |
+| `...-reconcile-exhausted` | Three on-demand scans gave no result | Bridge log, plan status |
+| `...-plan-status` | GuardDuty reported a plan warning or error, or failed tagging | `get-malware-protection-plan` status reasons |
+| `...-event-refused` | ehr-api refused an event the bridge cannot retry | Bridge log `code`; the document stays blocked |
+
+**Rollback, in reverse order**, each as its own commit and apply:
+`document_scan_enforce_tags = false` first, so that S3 stops refusing untagged
+reads. Then `document_scan_reconcile_enabled = false`, then
+`document_scan_bridge_mode = "observe"`, then `enable_document_scanning = false`
+together with `enable_document_malware_protection = false`. That last apply
+removes the plan, the notification, the rules, the queues, the Lambda and the
+seventh caller; the issuer limit stays at eight, which is harmless. Scan events
+already written stay. New uploads stay pending again, so access fails closed.
+Emergency stop without an apply: revoke the scanner's `document_scanner` row in
+`auth.account_roles` (backend runbook for 0101); every scan event is then
+refused.
+
+Cost is roughly USD 2.5 to 3.5 a month at 5,000 documents and 10 GB, plus about
+USD 0.40 for the backfill (list prices, not checked against billing). Eight
+alarms cost USD 0.80 a month of that. The bytes are scanned by AWS inside
+eu-west-1, outside the account boundary; record this in the RoPA and DPIA.
+
 ## 5. Build flow and deployment controls
 
 ### What runs automatically

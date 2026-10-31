@@ -83,3 +83,13 @@ output "support_bot_id" {
   value       = var.enable_support_bot ? module.support_bot[0].bot_id : null
   description = "Lex V2 bot ID used by the support API when enabled."
 }
+
+output "document_scanning" {
+  value = {
+    malware_protection_plan_arn = module.data.malware_protection_plan_arn
+    guardduty_malware_role_arn  = module.data.guardduty_malware_role_arn
+    tag_enforcement             = var.document_scan_enforce_tags
+    bridge                      = module.application.document_scanning
+  }
+  description = "Document virus scanning switches and the names the runbook uses; empty or null while off."
+}
