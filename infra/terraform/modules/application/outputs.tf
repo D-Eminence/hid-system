@@ -125,3 +125,8 @@ output "runtime_environment_configuration" {
     repositories = { for name, repository in aws_ecr_repository.workload : name => repository.name }
   }
 }
+
+output "workload_caller_policy" {
+  description = "Issuer caller rules as subject => audiences, for tests; no role ARNs, not exported by the root module. The issuer refuses more than eight rules at load."
+  value       = { for name, caller in local.managed_callers : caller.subject => caller.audiences }
+}

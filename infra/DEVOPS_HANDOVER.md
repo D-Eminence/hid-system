@@ -73,6 +73,16 @@ Production services maintain ten discovery registrations through ECS. Preserve
 these registrations and workload issuer/subject configuration. Healthy ALB
 targets alone do not prove gateway upstream discovery works.
 
+The workload issuer (`hid-staging-workload-issuer`) reads its caller policy
+when the Lambda loads and accepts one to eight callers. Six are configured
+today, one per ECS task role: identity-api, ehr-api, lab-api, pharmacy-api,
+ocr-api and outreach-api. The limit was six until the document scanner needed
+a seventh caller. A policy over the limit makes the issuer fail at load and
+stops every service-to-service token, so the limit is always raised in its own
+reviewed apply, and a new caller only arrives in a later one.
+`tests/workload-issuer-cap.tftest.hcl` keeps the planned policy at eight or
+fewer.
+
 The old `hid-staging` ECS cluster/services have been retired. There is currently
 no separate disposable staging stack. Do not apply the historical staging
 inputs against the retained production resources. Creating an independent
