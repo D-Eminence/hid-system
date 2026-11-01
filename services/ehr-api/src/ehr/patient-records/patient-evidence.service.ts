@@ -9,7 +9,7 @@ import { AuditService } from '../../audit/audit.service';
 import { LOCAL_EVIDENCE_QUERY } from './patient-evidence.query';
 import { PatientAttachmentTextService } from './patient-attachment-text.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
-import { evidence,evidenceKey,type Evidence,type EvidenceSnapshot,type EvidenceBinding,type SourceKind } from './patient-evidence.types';
+import { evidence,evidenceKey,originLabel,type Evidence,type EvidenceSnapshot,type EvidenceBinding,type SourceKind } from './patient-evidence.types';
 
 const iso=(value:unknown):string|null=>value instanceof Date?value.toISOString():typeof value==='string'&&Number.isFinite(Date.parse(value))?new Date(value).toISOString():null;
 @Injectable()
@@ -31,7 +31,8 @@ export class PatientEvidenceService {
     for(let page=0;page<10;page++) {
       const rows=(await client.query(LOCAL_EVIDENCE_QUERY,[patientId,kind,id])).rows;
       for(const r of rows.slice(0,200)) records.push(evidence({kind:r.kind as SourceKind,id:r.id,version:r.version,
-        title:r.title,recordedAt:iso(r.recorded_at),effectiveAt:iso(r.effective_at),provenance:r.provenance,quality:r.quality,fields:r.fields}));
+        title:r.title,recordedAt:iso(r.recorded_at),effectiveAt:iso(r.effective_at),provenance:r.provenance,quality:r.quality,fields:r.fields,
+        originHint:r.origin_hint}));
       if(rows.length<=200){complete=true;break;}
       const last=rows[199];kind=last.kind;id=last.id;
     }
@@ -90,6 +91,6 @@ export class PatientEvidenceService {
     const source=snapshot.records.find(r=>r.kind===kind&&r.id===id);
     if(!source)throw new DomainProblem(404,'CHAT_SOURCE_UNAVAILABLE','This source is unavailable');
     await this.records.authorizeSelf(request);
-    return source;
+    return {...source,originLabel:originLabel(source.origin,'patient')};
   }
 }

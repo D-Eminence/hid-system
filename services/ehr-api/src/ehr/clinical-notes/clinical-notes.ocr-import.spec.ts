@@ -2,6 +2,7 @@ import type { PoolClient } from 'pg';
 import type { DataAccessContext } from '../../common/request-context';
 import { ClinicalRepository, type OperationResult, type SemanticEvent } from '../shared/clinical.repository';
 import { ClinicalNotesService, type ClinicalNoteRow } from './clinical-notes.service';
+import { LOCAL_EVIDENCE_QUERY } from '../patient-records/patient-evidence.query';
 
 const context = {
   correlationId: 'ocr-import-correlation', facilityId: '10000000-0000-4000-8000-000000000001',
@@ -51,5 +52,11 @@ describe('ClinicalNotesService OCR ingestion boundary', () => {
     expect(queries.some((sql) => sql.includes('insert into ehr.clinical_notes'))).toBe(true);
     expect(queries.some((sql) => sql.includes('insert into ehr.clinical_note_revisions'))).toBe(true);
     expect(queries.some((sql) => sql.includes('insert into ehr.ocr_import_provenance'))).toBe(true);
+    // The patient's chat cannot read the provenance row (staff-only RLS), so it knows a note read from a
+    // scanned paper record by this first revision's fixed reason: the two must stay the same.
+    const revision = queries.find((sql) => sql.includes('insert into ehr.clinical_note_revisions'))!;
+    const reason = /values \(\$1,\$2,\$3,1,\$4,'([^']+)'/.exec(revision.replace(/\s+/g, ' '))?.[1];
+    expect(reason).toBe('OCR import from human-validated source evidence');
+    expect(LOCAL_EVIDENCE_QUERY).toContain(`r.revision_no=1 and r.change_reason='${reason}'`);
   });
 });

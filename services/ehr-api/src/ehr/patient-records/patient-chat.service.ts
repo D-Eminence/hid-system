@@ -9,7 +9,7 @@ import { BedrockAiService } from './bedrock-ai.service';
 import { ClaudeAiService, type ConversationExchange } from './claude-ai.service';
 import { PatientRecordsService } from './patient-records.service';
 import { PatientEvidenceService } from './patient-evidence.service';
-import { binding,chunks,evidenceKey,type Evidence } from './patient-evidence.types';
+import { binding,chunks,evidenceKey,originLabel,type Evidence,type OriginAudience } from './patient-evidence.types';
 import { selectEvidence,answerCoverage,boundEvidence } from './patient-evidence.selection';
 import { PatientChatHistoryService, type ChatReply } from './patient-chat-history.service';
 
@@ -97,7 +97,9 @@ export class PatientChatService {
     if(recordIntent==='search'&&snapshot.records.length)selection=await this.semantic(request,snapshot.records,searchQuestion,environment,signal,access);
     const coverage=answerCoverage(snapshot.coverage,selection.sources.length,selection.partial);
     await access.authorize(request);signal.throwIfAborted();
-    const generated=await this.claude.answer(question,selection.sources,history,signal,coverage);
+    // Who reads the answer decides the origin wording ("You added this" to the patient, "Added by the patient" to staff).
+    const audience:OriginAudience=access.audit.actorType==='staff'?'staff':'patient';
+    const generated=await this.claude.answer(question,selection.sources,history,signal,coverage,audience);
     const citations=[...generated.matchAll(/\[(\d+)\]/g)].map(match=>Number(match[1]));
     const valid=selection.sources.length?citations.length>0&&citations.every(n=>n>=1&&n<=selection.sources.length):citations.length===0;
     // Currentness/authorization is checked before save and return; an index is
@@ -110,7 +112,8 @@ export class PatientChatService {
       details:{sourceCount:selection.sources.length,citationsValid:valid,complete:coverage.complete}}));
     return {status:'ready',answer:valid?generated:NO_GROUNDED_ANSWER,coverage,
       sources:valid?selection.sources.map((source,index)=>({...binding(source),number:index+1,title:source.title,
-        recordedAt:source.recordedAt,effectiveAt:source.effectiveAt,provenance:source.provenance,quality:source.quality})):[]};
+        recordedAt:source.recordedAt,effectiveAt:source.effectiveAt,provenance:source.provenance,quality:source.quality,
+        origin:source.origin,originLabel:originLabel(source.origin,audience)})):[]};
   }
 
   private async semantic(request:HidRequest,records:Evidence[],question:string,

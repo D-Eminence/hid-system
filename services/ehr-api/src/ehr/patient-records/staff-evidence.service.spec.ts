@@ -54,3 +54,15 @@ it('uses staff-owned document extraction storage and preserves pending coverage'
   expect(access.query).toContain('ehr.staff_attachment_extractions');expect(access.query).not.toContain('ehr.patient_document_extractions');
   expect(access.table('document')).toBe('ehr.staff_document_extractions');expect(snapshot.coverage.pendingDocuments).toBe(2);
 });
+it('reads each row\'s origin and answers a source with where it came from, in staff words',async()=>{
+  const s=setup();const scannedId='22222222-2222-4222-8222-222222222299';
+  s.query.mockResolvedValue({rows:[{...s.row,origin_hint:null},{...s.row,id:scannedId,origin_hint:'scanned_paper'},
+    {...s.row,kind:'import',id:'22222222-2222-4222-8222-222222222298',origin_hint:'patient-provided'}]});
+  const snapshot=await s.service.bind(s.scope).snapshot(s.request);
+  expect(snapshot.records.map(r=>r.origin)).toEqual(['health_worker','scanned_paper','patient']);
+  expect(snapshot.records.every(r=>!('originHint' in r))).toBe(true);
+  await expect(s.service.source(s.scope,s.request,'note',scannedId)).resolves.toMatchObject({id:scannedId,origin:'scanned_paper',
+    originLabel:'From a scanned paper record'});
+  await expect(s.service.source(s.scope,s.request,'note',sourceId)).resolves.toMatchObject({originLabel:'Recorded by a health worker'});
+  await expect(s.service.source(s.scope,s.request,'import','22222222-2222-4222-8222-222222222298')).resolves.toMatchObject({originLabel:'Added by the patient'});
+});

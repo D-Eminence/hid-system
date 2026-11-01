@@ -272,10 +272,37 @@ try {
   const denied=await database.withPatientTransaction(await records.authorizeSelf(request),'synthetic-forbidden-clinical-write',client=>
     client.query("update ehr.prescriptions set status='cancelled' where patient_id=$1",[a]));
   assert.equal(denied.rowCount,0,'Patient self cannot mutate clinician prescriptions');
+  // Where each fact came from (owner decision 25), set by the server from the record itself: a note read from
+  // a scanned paper record (its first revision is the OCR import's, and the patient session cannot read the
+  // facility's OCR provenance row), a health worker's own note and orders, the patient's imported report.
+  const scannedNote='a8000000-0000-4000-8000-000000000009';
+  await preparedBatch(admin,`begin;select set_config('app.actor_subject','synthetic:self:3',true),
+    set_config('app.membership_id','a6000000-0000-4000-8000-000000000001',true),
+    set_config('app.facility_id','a4000000-0000-4000-8000-000000000002',true),
+    set_config('app.correlation_id','synthetic-scanned-note',true),set_config('app.purpose_of_use','direct-care',true),
+    set_config('app.change_reason','Synthetic scanned note',true);
+    insert into ehr.clinical_notes(id,encounter_id,patient_id,facility_id,created_by,created_by_membership_id,note_type,title,status,
+      current_revision_no,signed_at,signed_by)
+    select '${scannedNote}',encounter_id,patient_id,facility_id,created_by,created_by_membership_id,'historical-record','Synthetic scanned record',
+      'signed',1,clock_timestamp(),created_by from ehr.clinical_notes where id='a8000000-0000-4000-8000-000000000001';
+    insert into ehr.clinical_note_revisions(clinical_note_id,patient_id,facility_id,revision_no,content,change_reason,created_by,created_by_membership_id)
+    select id,patient_id,facility_id,1,'Synthetic scanned content','OCR import from human-validated source evidence',created_by,created_by_membership_id
+    from ehr.clinical_notes where id='${scannedNote}';commit;`);
+  snapshot=await evidence.snapshot(request);
+  const originOf=(kind,id)=>snapshot.records.find(r=>r.kind===kind&&(!id||r.id===id))?.origin;
+  assert.equal(originOf('note',scannedNote),'scanned_paper','A note read from a scanned paper record says so to the patient');
+  assert.equal(originOf('note','a8000000-0000-4000-8000-000000000001'),'health_worker','A health worker\'s amended note');
+  for(const kind of ['prescription','diagnosis','vital','investigation'])assert.equal(originOf(kind),'health_worker',kind+' recorded by a health worker');
+  assert.equal(originOf('import',importId),'patient','A patient-provided import is the patient\'s');
+  assert.equal(originOf('import_version',priorVersion),'patient');
+  assert.equal(originOf('profile'),'health_id_profile');
+  // The origin is outside the content and hash, so saved bindings and stored vectors stay current.
+  const scanned=snapshot.records.find(r=>r.id===scannedNote);
+  assert.ok(!scanned.content.includes('scanned_paper')&&!('originHint' in scanned));
   const {staffChatRuntimeChecks}=await import('./staff-chat-runtime-checks.mjs');
   await staffChatRuntimeChecks({admin,runtime,patientA:a,patientB:b,staffAccount});
   console.log(JSON.stringify({passed:true,restricted_login:true,legacy_checks:15,
-    evidence_checks:['typed imports','patient-reported provenance','draft exclusion','cross-patient vectors','restricted Lab released results','staff Lab patient and facility isolation','exact result invalidation'],
+    evidence_checks:['typed imports','patient-reported provenance','draft exclusion','cross-patient vectors','restricted Lab released results','staff Lab patient and facility isolation','exact result invalidation','server-set record origin'],
     conversation_checks:['bounded context','patient isolation','clear generation','current source bindings','stale inherited reply withheld'],customer_data:false}));
 } finally {
   await runtime?.end().catch(()=>{}); await admin?.end().catch(()=>{});

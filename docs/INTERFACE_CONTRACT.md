@@ -1361,6 +1361,36 @@ require active facility context, direct-care purpose, Lab permission,
 canonical-patient non-break-glass authorization, idempotency, and expected
 versions. Receipt records custody only; it creates no execution, QC, or result.
 
+### Work list order (Lab and Pharmacy)
+
+`GET /api/v1/lab/work-items` and `GET /api/v1/pharmacy/work-items` answer at
+most 200 items: open work first, oldest first, then done work, newest first.
+Lab work is open while any test it asks for has no released result at its
+current version (or that result is marked entered in error); a work item with
+no requested test is open. Pharmacy work is open while it has no dispensing,
+or its dispensing was reversed. Earlier backends answered the 200 oldest items
+the member could read whatever their state, so a busy facility stopped seeing
+new work. The answer's shape and audit rows are unchanged.
+
+### Record chat: where each source came from
+
+Each source in a record chat answer (`POST /api/v1/ehr/me/chat`,
+`POST /api/v1/ehr/patients/:patientId/chat`) and each source read
+(`GET …/chat/sources/:kind/:sourceId`) carries `origin` and `originLabel`.
+The server sets them from the record itself, never the model:
+
+| `origin` | Source kinds | `originLabel` (patient / staff) |
+|---|---|---|
+| `patient` | imported history recorded as patient provided, imported health profile | "You added this" / "Added by the patient" |
+| `health_worker` | notes, encounters, diagnoses, prescriptions, investigations, vitals, released lab results, imported history recorded as provider authored | "Recorded by a health worker" |
+| `scanned_paper` | readable documents and imported files, and a clinical note imported from a scanned record | "From a scanned paper record" |
+| `health_id_profile` | the Health ID profile | "Your Health ID profile" / "The patient's Health ID profile" |
+
+The model is given the label and told to say where each fact came from. Both
+fields are optional to clients: answers saved before this change have neither.
+The origin is outside each source's content and hash, so saved conversations
+and stored vectors stay current.
+
 ## 18. API Documentation
 
 Public and internal service APIs should maintain OpenAPI documentation.

@@ -56,6 +56,20 @@ const WORK_ITEM_SELECT = `select w.*,d.id::text as dispensing_id,d.status as dis
   left join pharmacy.dispensings d on d.work_item_id=w.id
   left join pharmacy.dispensing_reversals r on r.dispensing_id=d.id`;
 
+/**
+ * The work list (200 rows, as before). A work item is open while it has no
+ * dispensing, or its dispensing was reversed; open work comes first, oldest
+ * first, so new and waiting prescriptions always show however much is done,
+ * and done work fills the rest, newest first. Before, the oldest 200 rows the
+ * member could read were answered whatever their state, so a busy pharmacy
+ * stopped seeing new work. One dispensing per work item and one reversal per
+ * dispensing (0023), so the joins add no rows. Exported for the tests.
+ */
+export const WORK_LIST_QUERY = `${WORK_ITEM_SELECT}
+  cross join lateral (select d.id is null or r.id is not null as open_work) o
+  order by o.open_work desc,case when o.open_work then w.accepted_at end asc,case when o.open_work then null else w.accepted_at end desc,
+  case when o.open_work then w.id end asc,case when o.open_work then null else w.id end desc limit 200`;
+
 const DISPENSING_SELECT = `select d.*,r.id::text as reversal_id,r.reversed_at
   from pharmacy.dispensings d left join pharmacy.dispensing_reversals r on r.dispensing_id=d.id`;
 
@@ -200,7 +214,9 @@ export class PharmacyService {
   /**
    * The work list. Row-level security shows this facility's rows the member
    * may read: under consent, or bound to an order route that allows a read
-   * now (P4c, strict policy). A route-backed row carries its route card and,
+   * now (P4c, strict policy). Open work comes first, oldest first, then done
+   * work, newest first, 200 rows in all (WORK_LIST_QUERY); the answer's shape
+   * is unchanged. A route-backed row carries its route card and,
    * while the route allows a read, its patient (C18). To a member who may
    * receive prescriptions from other facilities, the answer says whether this
    * facility receives them now and whether any wait or are held here (item 4,
@@ -212,8 +228,7 @@ export class PharmacyService {
    */
   async listWorkItems(context: DataAccessContext) {
     const page = await this.database.withTransaction(context, async (client) => {
-      const result = await client.query<WorkItemRow>(`${WORK_ITEM_SELECT}
-        order by w.accepted_at asc,w.id asc limit 200`);
+      const result = await client.query<WorkItemRow>(WORK_LIST_QUERY);
       await this.audit.recordWithClient(client, context, 'pharmacy.work-item.list', {
         resourceType: 'pharmacy-work-item-collection', resourceId: context.facilityId,
       }, { returnedCount: result.rows.length });

@@ -91,6 +91,21 @@ describe('Patient evidence chat',()=>{
   await expect(s.service.answer(request,'Medicine')).rejects.toThrow('wait');release();await running;
  });
  it.each(['','x'.repeat(501)])('rejects invalid question length',async q=>{await expect(setup().service.answer(request,q)).rejects.toThrow('characters');});
+ it('says where each returned source came from, in the patient\'s words, and asks the model to say so too',async()=>{
+  const records=[item('prescription',1),evidence({...item('import',2),originHint:'patient-provided'}),item('document',3),
+   evidence({...item('note',4),originHint:'scanned_paper'})];
+  const s=setup(records);s.plan.mockResolvedValue({intent:'records',recordIntent:'summary',query:'history'});
+  s.answer.mockResolvedValue('Recorded facts [1] [2] [3] [4].');
+  const reply=await s.service.answer(request,'Summarise my history');
+  const byId=new Map(reply.sources.map(source=>[(source as {id:string}).id,source]));
+  expect(byId.get(records[0]!.id)).toMatchObject({origin:'health_worker',originLabel:'Recorded by a health worker'});
+  expect(byId.get(records[1]!.id)).toMatchObject({origin:'patient',originLabel:'You added this'});
+  expect(byId.get(records[2]!.id)).toMatchObject({origin:'scanned_paper',originLabel:'From a scanned paper record'});
+  expect(byId.get(records[3]!.id)).toMatchObject({origin:'scanned_paper',originLabel:'From a scanned paper record'});
+  expect(s.answer.mock.calls[0][5]).toBe('patient');
+  // The saved reply keeps the labels for history; it still carries no hash.
+  expect(s.save.mock.calls[0][3].sources[0]).toHaveProperty('originLabel');
+ });
 });
 
 describe('Shared engine with explicit staff access',()=>{
@@ -104,7 +119,9 @@ describe('Shared engine with explicit staff access',()=>{
     evidence:{snapshot:staffSnapshot,assertCurrent:jest.fn(),prepareDocuments:jest.fn().mockResolvedValue([])},
     history:{start:jest.fn().mockResolvedValue('staff-generation'),context:s.context,save:s.save}} as never;
   const reply=await s.service.answer(request,'Latest medicine for this patient',access);
-  expect(reply.sources[0]).toMatchObject({id:item('prescription',2).id});
+  expect(reply.sources[0]).toMatchObject({id:item('prescription',2).id,origin:'health_worker',originLabel:'Recorded by a health worker'});
+  // Staff read the patient's own entries as the patient's, not as "you".
+  expect(s.answer.mock.calls[0][5]).toBe('staff');
   expect(s.authorizeSelf).not.toHaveBeenCalled();expect(s.snapshot).not.toHaveBeenCalled();expect(transaction).toHaveBeenCalled();
  });
  it('shares the per-clinician admission key across different selected patients',async()=>{
