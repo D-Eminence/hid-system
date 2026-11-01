@@ -97,7 +97,7 @@ resource "aws_ecs_cluster" "main" {
   name  = var.name_prefix
   setting {
     name  = "containerInsights"
-    value = "enhanced"
+    value = var.ecs_container_insights
   }
 }
 

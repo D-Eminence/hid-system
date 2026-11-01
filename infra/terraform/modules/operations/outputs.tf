@@ -6,6 +6,15 @@ output "alert_topic_kms_key_arn" {
   value = aws_kms_key.alerts.arn
 }
 
+output "runtime_task_alarms" {
+  value = { for name, alarm in aws_cloudwatch_metric_alarm.runtime_tasks : alarm.alarm_name => {
+    namespace   = alarm.namespace
+    metric_name = alarm.metric_name
+    statistic   = alarm.statistic
+    threshold   = alarm.threshold
+  } }
+}
+
 output "monitoring_coverage" {
   value = {
     services      = length(aws_cloudwatch_metric_alarm.runtime_tasks)

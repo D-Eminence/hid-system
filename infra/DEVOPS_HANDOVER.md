@@ -307,6 +307,67 @@ not start a backend release between plan and apply, or the helper refuses.
 To check afterwards, upload a fictional document at Demo Hospital
 (Consultation, Documents, Upload document).
 
+### Monitoring cost
+
+The owner approved turning off CloudWatch Container Insights "enhanced" on the
+`hid-production` cluster (about USD 104 a month; AWS budget USD 400 a month).
+`ecs_container_insights` (`enhanced`, `enabled` or `disabled`; default
+`enhanced`, so other inputs do not change) is `disabled` in production.tfvars.
+
+The 12 `hid-production-<service>-running-tasks` alarms used Container Insights'
+`RunningTaskCount`, which stops when Insights is off; with missing data
+treated as breaching they would all fire. They now read the free
+`AWS/ECS` `LiveTaskCount` metric, with the same names, thresholds (each
+service's task count), Minimum over 1 minute, 3 of 3 periods, missing data
+breaching, and the same SNS topic for alarm and OK. `LiveTaskCount` also counts
+tasks still starting or draining (30 s, 60 s for event-dispatcher), so an alarm
+can fire up to about a minute later than before. Autoscaling and the other
+alarms do not use Insights, and there are no dashboards.
+
+Before applying (read-only), check that AWS publishes the metric for all 12
+services. Fewer than 12 names means stop: those alarms would go to ALARM.
+
+```powershell
+aws cloudwatch list-metrics --namespace AWS/ECS --metric-name LiveTaskCount --dimensions Name=ClusterName,Value=hid-production --region eu-west-1 --query "Metrics[].Dimensions[?Name=='ServiceName'].Value[]" --output text
+```
+
+Expected plan from this change, all updated in place, nothing added, replaced
+or destroyed: `module.application.aws_ecs_cluster.production[0]`
+(containerInsights `enhanced` to `disabled`) and the 12
+`module.operations.aws_cloudwatch_metric_alarm.runtime_tasks[...]` (namespace
+and metric name only), plus a `container_insights` field in the
+`ecs_migration_configuration` output. Plan and apply as in section 4; other
+changes in the plan come from other dev commits not yet applied.
+
+After applying, within a few minutes all 12 alarms should be `OK` on
+`AWS/ECS`/`LiveTaskCount`, and the cluster setting `disabled`:
+
+```powershell
+aws cloudwatch describe-alarms --alarm-name-prefix hid-production- --region eu-west-1 --query "MetricAlarms[?ends_with(AlarmName,'-running-tasks')].[AlarmName,StateValue,Namespace,MetricName]" --output table
+aws ecs describe-clusters --clusters hid-production --include SETTINGS --region eu-west-1 --query "clusters[0].settings"
+```
+
+Stopping one service's task to see the alarm is optional: only in a
+non-business window and only if the owner agrees (ECS usually replaces it
+within the 3 minutes, so no alarm is not a failure). Otherwise rely on the
+plan and the alarm states.
+
+Rollback: set `ecs_container_insights = "enhanced"` and apply; Insights
+restarts from then (cost returns, no data for the gap). The alarms work either
+way. To re-point them to `ECS/ContainerInsights` `RunningTaskCount`, revert the
+metric in `modules/operations/runtime.tf` in a second apply, once that metric
+appears again, or they breach while it is missing.
+
+Found while checking, not changed here: the alerts topic policy and KMS key
+policy let CloudWatch publish only for alarms named `hid-staging-*`
+(`name_prefix`), but these alarms are named `hid-production-*`, so their
+emails may never have arrived. "Failed to execute action" in this history
+confirms it; the fix is a separate reviewed policy change:
+
+```powershell
+aws cloudwatch describe-alarm-history --alarm-name hid-production-gateway-running-tasks --history-item-type Action --region eu-west-1
+```
+
 ## 5. Build flow and deployment controls
 
 ### What runs automatically

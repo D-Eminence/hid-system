@@ -234,3 +234,8 @@ deployment_automation_bootstrap = false
 enforce_release_index = true
 
 ecs_migration_phase = "retired"
+
+# Monitoring cost (owner approved, USD 400 a month AWS budget): Container
+# Insights "enhanced" cost about USD 104 a month. The running-task alarms read
+# the free AWS/ECS LiveTaskCount metric. See DEVOPS_HANDOVER.md "Monitoring cost".
+ecs_container_insights = "disabled"

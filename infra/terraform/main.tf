@@ -70,6 +70,7 @@ module "application" {
   name_prefix                         = local.name_prefix
   environment                         = local.resource_environment
   ecs_migration_phase                 = var.ecs_migration_phase
+  ecs_container_insights              = var.ecs_container_insights
   runtime_environment                 = local.runtime_environment
   browser_origins                     = local.browser_origins
   deployment_profile                  = local.deployment_profile

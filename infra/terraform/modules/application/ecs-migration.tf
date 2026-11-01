@@ -8,6 +8,16 @@ variable "ecs_migration_phase" {
   }
 }
 
+variable "ecs_container_insights" {
+  description = "CloudWatch Container Insights level for the ECS clusters: enhanced, enabled or disabled. Insights metrics are billed; the running-task alarms use the free AWS/ECS LiveTaskCount metric and do not need them."
+  type        = string
+  default     = "enhanced"
+  validation {
+    condition     = contains(["enhanced", "enabled", "disabled"], var.ecs_container_insights)
+    error_message = "ecs_container_insights must be enhanced, enabled or disabled."
+  }
+}
+
 locals {
   production_ecs_enabled    = var.ecs_migration_phase != "legacy"
   production_ecs_active     = contains(["active", "retired"], var.ecs_migration_phase)
@@ -35,7 +45,7 @@ resource "aws_ecs_cluster" "production" {
   name  = "hid-production"
   setting {
     name  = "containerInsights"
-    value = "enhanced"
+    value = var.ecs_container_insights
   }
   tags = { Environment = "production", Name = "hid-production" }
 }
@@ -44,6 +54,7 @@ output "ecs_migration_configuration" {
   value = {
     phase                          = var.ecs_migration_phase
     cluster                        = local.active_ecs_cluster.name
+    container_insights             = one([for setting in local.active_ecs_cluster.setting : setting.value if setting.name == "containerInsights"])
     services                       = { for name, service in local.active_ecs_services : name => service.name }
     legacy_cluster_count           = length(aws_ecs_cluster.main)
     legacy_desired_counts          = { for name, service in aws_ecs_service.workload : name => service.desired_count }
