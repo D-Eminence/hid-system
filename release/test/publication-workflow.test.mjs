@@ -10,6 +10,13 @@ import { AWS_AUDIT_GATE, LOCAL_GATE_AUDITS, parseWorkflow, verifyLocalGateWorkfl
 const source = await readFile(new URL('../../.github/workflows/tuf-publish.yml', import.meta.url), 'utf8')
 const localGates = await readFile(new URL('../../.github/workflows/tuf-local-gates.yml', import.meta.url), 'utf8')
 const auditStep = (w) => w.jobs.tooling.steps.find(s => s.id === 'audit')
+// Reasons pinned for attacks whose only defence is one specific check.
+const JOB_RUNTIME = /cannot be skipped, allowed to fail or moved into another runtime/
+const LATER_STEPS = /cannot change the environment or PATH of later steps/
+const DEFAULT_SHELL = /workflow cannot change the default shell or directory/
+const preload = { name: 'Preload code into later node processes', run: 'echo "NODE_OPTIONS=--import=/tmp/p.mjs" >> "$GITHUB_ENV"' }
+const fakeNpm = { name: 'Put a fake npm first on PATH', run: 'echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"' }
+const before = (steps, id, step) => steps.splice(steps.findIndex(s => s.id === id), 0, step)
 test('protected publisher workflow pins code, permissions, ordering and retained evidence', () => assert.equal(verifyPublicationWorkflow(source), true))
 test('publisher audits release and Cloudflare as before and only infra/aws through the exception gate', () => {
   assert.equal(auditStep(parseWorkflow(source)).run, [
@@ -38,11 +45,23 @@ test('local gates keep every npm audit and run only infra/aws through the except
     'security file replaced by glob': (w) => { w.jobs['aws-release-trust'].steps.splice(2, 0, { run: 'cp /tmp/empty.json security/*.json' }) },
     'npm registry redirected': (w) => { w.jobs['aws-release-trust'].steps.find(s => s.uses?.startsWith('actions/setup-node@')).with['registry-url'] = 'https://registry.invalid/' },
     'default shell replaced': (w) => { w.jobs['aws-release-trust'].defaults = { run: { shell: 'true {0}' } } },
+    'workflow default shell replaced': [(w) => { w.defaults = { run: { shell: 'true {0}' } } }, DEFAULT_SHELL],
+    'install step npm configuration': [(w) => { w.jobs['aws-release-trust'].steps.find(s => s.id === 'gate_1').env = { npm_config_registry: 'https://registry.invalid/' } }, /workflow cannot set npm_config_registry/],
+    'infra/aws audit job skipped': [(w) => { w.jobs['aws-release-trust'].if = '${{ false }}' }, JOB_RUNTIME],
+    'release audit job skipped': [(w) => { w.jobs['release-contracts'].if = '${{ false }}' }, JOB_RUNTIME],
+    'infra/aws audit job may fail': [(w) => { w.jobs['aws-release-trust']['continue-on-error'] = true }, JOB_RUNTIME],
+    'infra/aws audit job moved into a container': [(w) => { w.jobs['aws-release-trust'].container = 'node:22' }, JOB_RUNTIME],
+    'Cloudflare audit job given a service container': [(w) => { w.jobs['cloudflare-tuf'].services = { registry: { image: 'verdaccio/verdaccio' } } }, JOB_RUNTIME],
+    'EHR audit job given a matrix': [(w) => { w.jobs['ehr-release-cache'].strategy = { matrix: { node: ['18'] } } }, JOB_RUNTIME],
+    'node preload written to GITHUB_ENV': [(w) => { before(w.jobs['aws-release-trust'].steps, 'gate_2', preload) }, LATER_STEPS],
+    'fake npm added through GITHUB_PATH': [(w) => { before(w.jobs['aws-release-trust'].steps, 'gate_2', fakeNpm) }, LATER_STEPS],
+    'fake npm added through job PATH': [(w) => { w.jobs['aws-release-trust'].env = { PATH: '/tmp/bin:/usr/bin:/bin' } }, /workflow cannot set PATH/],
   }
   for (const [name, attack] of Object.entries(attacks)) {
+    const [edit, reason] = [attack].flat()
     const workflow = parseWorkflow(localGates)
-    attack(workflow)
-    assert.throws(() => verifyLocalGateWorkflow(stringify(workflow)), undefined, name)
+    edit(workflow)
+    assert.throws(() => verifyLocalGateWorkflow(stringify(workflow)), reason, name)
   }
 })
 test('forbidden workflow paths are rejected statically', () => {
@@ -89,11 +108,20 @@ test('forbidden workflow paths are rejected statically', () => {
     'security file replaced by glob': (w) => { w.jobs.tooling.steps.splice(3, 0, { run: 'cp /tmp/empty.json security/*.json' }) },
     'npm registry redirected': (w) => { w.jobs.tooling.steps.find(s => s.uses?.startsWith('actions/setup-node@')).with['registry-url'] = 'https://registry.invalid/' },
     'default shell replaced': (w) => { w.jobs.tooling.defaults = { run: { shell: 'true {0}' } } },
+    'workflow default shell replaced': [(w) => { w.defaults = { run: { shell: 'true {0}' } } }, DEFAULT_SHELL],
+    'install step npm configuration': [(w) => { w.jobs.tooling.steps.find(s => s.name === 'Install locked tooling without cloud authority').env = { npm_config_registry: 'https://registry.invalid/' } }, /workflow cannot set npm_config_registry/],
+    'tooling job skipped': [(w) => { w.jobs.tooling.if = '${{ false }}' }, JOB_RUNTIME],
+    'tooling job may fail': [(w) => { w.jobs.tooling['continue-on-error'] = true }, JOB_RUNTIME],
+    'tooling job moved into a container': [(w) => { w.jobs.tooling.container = 'node:22' }, JOB_RUNTIME],
+    'node preload written to GITHUB_ENV': [(w) => { before(w.jobs.tooling.steps, 'audit', preload) }, LATER_STEPS],
+    'fake npm added through GITHUB_PATH': [(w) => { before(w.jobs.tooling.steps, 'audit', fakeNpm) }, LATER_STEPS],
+    'fake npm added through tooling PATH': [(w) => { w.jobs.tooling.env.PATH = '/tmp/bin:/usr/bin:/bin' }, /workflow cannot set PATH/],
   }
   for (const [name, attack] of Object.entries(attacks)) {
+    const [edit, reason] = [attack].flat()
     const workflow = parseWorkflow(source)
-    attack(workflow)
-    assert.throws(() => verifyPublicationWorkflow(stringify(workflow)), undefined, name)
+    edit(workflow)
+    assert.throws(() => verifyPublicationWorkflow(stringify(workflow)), reason, name)
   }
 })
 test('duplicate YAML fields and aliases cannot hide workflow permissions', () => {

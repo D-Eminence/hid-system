@@ -29,8 +29,16 @@ export const LOCAL_GATE_AUDITS = Object.freeze({
 const AUDIT_COMMAND = /\bnpm\b[^\n]*\baudit\b|npm-audit-with-exceptions/
 
 // Pins every npm audit in a workflow: one audit step in each reviewed job with
-// exactly the reviewed commands, and nothing that can skip, reconfigure or
-// redirect an audit or rewrite the exception file before it is read.
+// exactly the reviewed commands. It also rejects the plain ways to skip,
+// reconfigure or redirect an audit: a workflow or job default shell; a
+// condition, continue-on-error, container, service or matrix on an audit job;
+// any key but id, name and run on the audit step; npm_config_*,
+// NODE_OPTIONS or PATH set in a workflow, job or step env map; a step in an
+// audit job that writes GITHUB_ENV or GITHUB_PATH; a setup-node registry; and
+// any other step that names the gate or security/. These are static text
+// checks, not a sandbox: obfuscated shell (for example a path built from
+// pieces, or an .npmrc written by a script) can still get past them, so owner
+// review of every workflow change remains the real control.
 export function verifyAuditSteps(workflow, expected) {
   assert.equal(workflow.defaults, undefined, 'workflow cannot change the default shell or directory')
   const found = new Map()
@@ -39,6 +47,8 @@ export function verifyAuditSteps(workflow, expected) {
     if (steps.length === 0) continue
     assert.equal(steps.length, 1, `job ${name} runs more than one audit step`)
     assert.equal(job.defaults, undefined, `job ${name} cannot change the default shell or directory`)
+    for (const key of ['if', 'continue-on-error', 'container', 'services', 'strategy']) assert.equal(job[key], undefined, `job ${name} cannot be skipped, allowed to fail or moved into another runtime`)
+    for (const step of job.steps) assert.ok(!/GITHUB_(?:ENV|PATH)/.test(JSON.stringify(step)), `job ${name} cannot change the environment or PATH of later steps`)
     for (const step of job.steps) {
       if (step.uses?.startsWith('actions/setup-node@')) {
         assert.deepEqual(Object.keys(step.with ?? {}).sort(), ['node-version', 'package-manager-cache'], `job ${name} cannot configure an npm registry`)
@@ -53,7 +63,7 @@ export function verifyAuditSteps(workflow, expected) {
   }
   const environments = [workflow.env, ...Object.values(workflow.jobs).flatMap(job => [job.env, ...(job.steps ?? []).map(step => step.env)])]
   for (const env of environments) {
-    for (const key of Object.keys(env ?? {})) assert.ok(!/^(?:npm_config_|node_options$)/i.test(key), `workflow cannot set ${key}`)
+    for (const key of Object.keys(env ?? {})) assert.ok(!/^(?:npm_config_|node_options$|path$)/i.test(key), `workflow cannot set ${key}`)
   }
   const audits = new Set(found.values())
   for (const job of Object.values(workflow.jobs)) {
