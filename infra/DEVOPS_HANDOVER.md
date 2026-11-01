@@ -460,7 +460,8 @@ setting in this Terraform. Plan and apply them with the section 4 helper,
 together with the Monitoring cost change above. The helper reads the committed
 `production.tfvars`; a plan from the Terraform CI workflow uses the `TFVARS`
 secret instead and shows the Bedrock and ECR changes only if that secret also
-has the `bedrock_endpoint_az_count` line and the two `ecr_` lines.
+has the `bedrock_endpoint_az_count` line and the two `ecr_` lines. That workflow
+only plans; nothing in it applies, so the secret cannot undo these settings.
 
 #### Expected plan for this branch
 
