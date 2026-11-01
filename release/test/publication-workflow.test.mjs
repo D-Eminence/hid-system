@@ -53,6 +53,7 @@ test('local gates keep every npm audit and run only infra/aws through the except
     'infra/aws audit job moved into a container': [(w) => { w.jobs['aws-release-trust'].container = 'node:22' }, JOB_RUNTIME],
     'Cloudflare audit job given a service container': [(w) => { w.jobs['cloudflare-tuf'].services = { registry: { image: 'verdaccio/verdaccio' } } }, JOB_RUNTIME],
     'EHR audit job given a matrix': [(w) => { w.jobs['ehr-release-cache'].strategy = { matrix: { node: ['18'] } } }, JOB_RUNTIME],
+    'infra/aws audit job waits on a skipped job': [(w) => { w.jobs['tuf-client'].if = '${{ false }}'; w.jobs['aws-release-trust'].needs = 'tuf-client' }, JOB_RUNTIME],
     'node preload written to GITHUB_ENV': [(w) => { before(w.jobs['aws-release-trust'].steps, 'gate_2', preload) }, LATER_STEPS],
     'fake npm added through GITHUB_PATH': [(w) => { before(w.jobs['aws-release-trust'].steps, 'gate_2', fakeNpm) }, LATER_STEPS],
     'fake npm added through job PATH': [(w) => { w.jobs['aws-release-trust'].env = { PATH: '/tmp/bin:/usr/bin:/bin' } }, /workflow cannot set PATH/],
