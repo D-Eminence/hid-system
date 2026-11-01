@@ -147,6 +147,55 @@ Store them privately and exclude them from Git. The reviewed production tfvars
 are tracked configuration; secret values must remain outside those files.
 Remove TF_VAR_cloudflare_origin_secret from the operator shell after use.
 
+### If a helper apply stops part-way
+
+If `apply` fails once Terraform has started changing resources (for example
+`TERRAFORM_FAILED`), the helper rolls nothing back and keeps the release lease
+on purpose. Until the lease is released, the next helper `plan` or `apply` and
+every backend release stop when they try to take it
+(`AWS_ConditionalCheckFailedException`). Running the apply again does not help:
+the lease is still held, and the reviewed plan no longer matches what is left
+(`INFRASTRUCTURE_PLAN_CHANGED_REVIEW_REQUIRED`). Recover in the same PowerShell
+session, from `infra/terraform`:
+
+1. Make safe what the stopped apply left half done. For the ECR clean-up, first
+   do "If the apply stops part-way" under item 2 of "AWS cost" below.
+2. Make sure nothing is still running: no `terraform` or `python` process of
+   the helper on your machine (`Get-Process terraform, python -ErrorAction
+   SilentlyContinue`) and no other operator running the helper. Wait three
+   minutes after the helper stopped: the release below refuses a lease that is
+   still being renewed.
+3. Read the lease. Release it only if the Terraform helper holds it
+   (`terraform-` and 32 hex characters). The condition removes exactly that
+   holder and generation, and only once its renewal has run out:
+
+   ```powershell
+   '{"environment":{"S":"hid-production"}}' | Set-Content -Encoding ascii lease-key.json
+   $lease = (aws dynamodb get-item --table-name hid-staging-deployment-leases --key file://lease-key.json --consistent-read --region eu-west-1 --output json | ConvertFrom-Json).Item
+   'holder {0}, generation {1}, status {2}, renewed until {3}' -f $lease.holder.S, $lease.generation.N, $lease.status.S, $(if ($lease.expires_at) { [datetimeoffset]::FromUnixTimeSeconds([long]$lease.expires_at.N).ToString('u') })
+   if (-not $lease.holder) { 'Not held: nothing to release' } elseif ($lease.holder.S -notmatch '^terraform-[0-9a-f]{32}$') { 'STOP (held by a release or the bootstrap, not the Terraform helper)' } else {
+     @{ ':h' = @{ S = $lease.holder.S }; ':g' = @{ N = $lease.generation.N }; ':now' = @{ N = [string][datetimeoffset]::UtcNow.ToUnixTimeSeconds() }; ':ready' = @{ S = 'ready' } } | ConvertTo-Json -Depth 3 -Compress | Set-Content -Encoding ascii lease-values.json
+     '{"#s":"status"}' | Set-Content -Encoding ascii lease-names.json
+     aws dynamodb update-item --table-name hid-staging-deployment-leases --key file://lease-key.json --update-expression 'REMOVE holder, expires_at SET #s = :ready' --condition-expression 'holder = :h AND generation = :g AND expires_at < :now' --expression-attribute-names file://lease-names.json --expression-attribute-values file://lease-values.json --return-values ALL_NEW --region eu-west-1 --output json
+   }
+   Remove-Item lease-key.json, lease-values.json, lease-names.json -ErrorAction SilentlyContinue
+   ```
+
+   Expect the returned item to show `status` `ready`, the same `generation` and
+   no `holder`: the same release the helper makes itself after a successful
+   apply. `ConditionalCheckFailedException` means the holder is still renewing
+   the lease or another run has taken it: go back to step 2, and never remove a
+   holder whose renewal has not run out. On `STOP`, do not touch the lease: a
+   backend release holds it and its own recovery applies.
+4. Plan again with the helper above and review the new plan. It shows only what
+   the stopped apply did not finish; what it finished shows no change. If the
+   plan says `Error acquiring the state lock`, the stopped run left Terraform's
+   state lock behind: after step 2, run `terraform force-unlock <lock ID from
+   the message>` and plan again. If the helper stops with `LIVE_INDEX_DIFFERS`,
+   the stopped apply changed a running service: report it, and do not edit the
+   release index by hand. Otherwise apply the new review manifest's SHA256 as
+   usual.
+
 ### Emergency contacts
 
 The owner approved production delivery on 24 October 2026 for every patient
@@ -518,7 +567,8 @@ before the apply.
   seconds apart. No image is touched by this. While a repository has no policy
   nothing expires, and a deployment would stop at its check of rule 1; none
   can start, because the section 4 helper holds the release lease during the
-  apply. If an apply stops between a delete and a put, run it again.
+  apply. If the apply stops between a delete and a put, running it again does
+  not work: follow "If the apply stops part-way" below.
 
 Before applying, back up, check and dry-run from `infra/terraform`, in the same
 PowerShell session as section 4 (it needs `$env:RELEASE_KMS_KEY_ARN`). All
@@ -645,6 +695,46 @@ foreach ($r in $repos) { $rules = (aws ecr get-lifecycle-policy --repository-nam
 A day later, `aws ecr describe-images` per repository lists exactly the
 inventory minus the `expire` (and accepted `note`) lines. The next backend
 release runs as usual: the helper reads rule 1 before tagging.
+
+If the apply stops part-way: a repository whose old policy was deleted before
+the stop has no rules. Nothing expires there, so no image is lost, but a backend
+release would refuse it (`ROLLBACK_RETENTION_POLICY_REQUIRED`), and none can
+start anyway while the helper keeps the release lease. Running the apply again
+does not work (section 4, "If a helper apply stops part-way"). From
+`infra/terraform`:
+
+1. Read every repository's rules:
+
+   ```powershell
+   $repos = @((aws ecr describe-repositories --region eu-west-1 --output json | ConvertFrom-Json).repositories.repositoryName | Where-Object { $_ -like 'staging/hid/*' } | Sort-Object)
+   $missing = @()
+   foreach ($r in $repos) {
+     $out = aws ecr get-lifecycle-policy --repository-name $r --region eu-west-1 --query lifecyclePolicyText --output text 2>&1 | Out-String
+     if ($LASTEXITCODE -eq 0) { '{0}: {1}' -f $r, ((($out | ConvertFrom-Json).rules | ForEach-Object { '{0}:{1}/{2}' -f $_.rulePriority, $_.selection.countType, $_.selection.countNumber }) -join ' ') } elseif ($out -match 'LifecyclePolicyNotFoundException') { '{0}: no policy' -f $r; $missing += $r } else { 'STOP {0}: could not read the policy ({1})' -f $r, $out.Trim() }
+   }
+   ```
+
+   Each of the 12 lines shows the new rules
+   (`1:imageCountMoreThan/1000000 2:sinceImagePushed/14 3:sinceImagePushed/90`),
+   the old ones (`... 2:sinceImagePushed/7 3:imageCountMoreThan/25`, not reached
+   before the stop) or `no policy`. On a `STOP` line, run it again.
+2. Put the new rules on every repository with no policy. `ecr-new-rules.json`
+   is the file the dry run wrote (the third check above; if it is gone, run that
+   block's first command again). It holds exactly the rules Terraform puts (a
+   test checks this):
+
+   ```powershell
+   foreach ($r in $missing) { aws ecr put-lifecycle-policy --repository-name $r --lifecycle-policy-text file://ecr-new-rules.json --region eu-west-1 --query repositoryName --output text }
+   ```
+
+   Run step 1 again: no repository may show `no policy`.
+3. Release the lease and plan again: section 4, "If a helper apply stops
+   part-way", steps 2 to 4. In the new plan, a repository whose rules you put
+   back shows no change, or `will be created` with the same rules where
+   Terraform had already dropped the old policy from its state (putting the
+   same rules again changes nothing). A repository not reached before the stop
+   still "must be replaced". The items this branch already finished show no
+   change. Review that plan and apply it.
 
 Rollback:
 
@@ -817,7 +907,8 @@ Successful controlled deployments:
 Both controllers and the infrastructure helper use one persistent DynamoDB lease
 and a versioned encrypted release index. Releases cannot mutate concurrently.
 Failure restores the release's recorded changes; uncertain reconciliation retains
-the lease for operator recovery. A build does not certify untested features.
+the lease for operator recovery (for the infrastructure helper: section 4, "If a
+helper apply stops part-way"). A build does not certify untested features.
 
 Release bucket: `hid-staging-releases-659225405023-eu-west-1`. Index: `production/current.json`.
 Lease table: `hid-staging-deployment-leases`. Immutable receipts and versioned
