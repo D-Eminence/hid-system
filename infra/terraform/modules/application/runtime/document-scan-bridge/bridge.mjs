@@ -601,7 +601,7 @@ export async function reconcile(event, context) {
   const items = readTargetList(listed.body);
   const summary = { mode: configuration.mode, listed: items.length, started: 0, inProgress: 0, exhausted: 0, skipped: 0, failed: 0, deferred: 0 };
   let oldest = 0;
-  let scansSent = 0;
+  let requestsSent = 0;
   for (const item of items) {
     oldest = Math.max(oldest, Math.floor((now() - Date.parse(item.updatedAt)) / 1000));
     if (remainingMs() < 14_000) { summary.deferred += 1; continue; }
@@ -626,7 +626,10 @@ export async function reconcile(event, context) {
       continue;
     }
     const attempt = item.scanStartedCount + 1;
-    if (scansSent > 0) await sleep(RECONCILE_SCAN_SPACING_MS);
+    // Every request waits its turn, accepted or not: a throttled GuardDuty
+    // answers 429 at once, and a burst of the rest would keep it throttled.
+    if (requestsSent > 0) await sleep(RECONCILE_SCAN_SPACING_MS);
+    requestsSent += 1;
     try {
       await aws.sendObjectMalwareScan(configuration.bucket, item.storageKey, item.objectVersionId);
     } catch (error) {
@@ -636,7 +639,6 @@ export async function reconcile(event, context) {
       log(logger, 'error', 'GuardDuty did not start the scan; no attempt recorded', { ...fields, attempt, status: error.status, code: error.code, error: error.message });
       continue;
     }
-    scansSent += 1;
     summary.started += 1;
     await recordScanStarted(item, attempt, fields, context, correlation);
   }

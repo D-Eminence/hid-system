@@ -471,8 +471,8 @@ scan; no attempt recorded` gives the status and code. A failed request uses no
 attempt, so nothing is lost by waiting, but repeating runs only repeats the
 failure.
 
-Each run starts about 20 on-demand scans (two a second within the 30 s
-timeout); documents scanned in the last hour are skipped (`inProgress`) until
+Each run starts about 20 on-demand scans (two requests a second within the
+30 s timeout, refused ones included); documents scanned in the last hour are skipped (`inProgress`) until
 their result lands, usually within minutes. The list has no second page: each
 run sees only the 50 oldest documents still waiting, so a run that lists 50
 and starts none (all `inProgress`) means more may wait behind them. Wait about

@@ -735,6 +735,21 @@ test('reconcile: GuardDuty refusing or not answering never uses up the three att
   assert.ok(model.documents.every(document => document.started.length <= 1));
 });
 
+// A throttled GuardDuty answers 429 at once. Spacing only the accepted scans
+// would send every remaining request of the run in a burst, which keeps it
+// throttled; every request, accepted or not, waits its turn.
+test('reconcile: requests GuardDuty refuses are spaced like accepted ones', async () => {
+  let sends = 0;
+  const { context, sleeps, net } = harness({
+    list: () => json(200, { items: ['v1', 'v2', 'v3', 'v4'].map(objectVersionId => item({ objectVersionId })) }),
+    guardduty: () => (++sends % 2 === 1 ? json(429, { __type: 'ThrottlingException' }) : json(200, {})),
+  });
+  const summary = await reconcile({ action: 'reconcile' }, context);
+  assert.deepEqual([summary.started, summary.failed], [2, 2]);
+  assert.equal(net.calls.filter(call => call.url.endsWith('/send')).length, 4);
+  assert.deepEqual(sleeps, [500, 500, 500], 'one wait before every request but the first');
+});
+
 test('reconcile requests are checked, and a failed listing fails the run', async () => {
   assert.deepEqual(reconcileRequest({ action: 'reconcile' }), { olderThanSeconds: 900, limit: 50 });
   assert.deepEqual(reconcileRequest({ action: 'reconcile', olderThanSeconds: 0, limit: 50 }), { olderThanSeconds: 0, limit: 50 });
