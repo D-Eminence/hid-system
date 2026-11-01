@@ -311,33 +311,62 @@ To check afterwards, upload a fictional document at Demo Hospital
 
 The owner approved turning off CloudWatch Container Insights "enhanced" on the
 `hid-production` cluster (about USD 104 a month; AWS budget USD 400 a month).
-`ecs_container_insights` (`enhanced`, `enabled` or `disabled`; default
-`enhanced`, so other inputs do not change) is `disabled` in production.tfvars.
+`ecs_container_insights` (`enhanced`, `enabled` or `disabled`) is `disabled` in
+production.tfvars. Its default is `enhanced`, so the Insights level changes
+only in an environment that sets it.
 
 The 12 `hid-production-<service>-running-tasks` alarms used Container Insights'
 `RunningTaskCount`, which stops when Insights is off; with missing data
-treated as breaching they would all fire. They now read the free
-`AWS/ECS` `LiveTaskCount` metric, with the same names, thresholds (each
-service's task count), Minimum over 1 minute, 3 of 3 periods, missing data
-breaching, and the same SNS topic for alarm and OK. `LiveTaskCount` also counts
-tasks still starting or draining (30 s, 60 s for event-dispatcher), so an alarm
-can fire up to about a minute later than before. Autoscaling and the other
-alarms do not use Insights, and there are no dashboards.
+treated as breaching they would all fire. The running-task alarms now read the
+free `AWS/ECS` `LiveTaskCount` metric in every environment, not only
+production, with the same names, thresholds (each service's task count),
+Minimum over 1 minute, 3 of 3 periods, missing data breaching, and the same SNS
+topic for alarm and OK. A plan with the retired staging inputs would therefore
+re-point its `hid-staging-*-running-tasks` alarms too, while its Insights stays
+`enhanced`; the metric works either way. `LiveTaskCount` also counts tasks
+still starting or draining (30 s, 60 s for event-dispatcher), so an alarm can
+fire up to about a minute later than before. Autoscaling and the other alarms
+do not use Insights, and there are no dashboards.
 
-Before applying (read-only), check that AWS publishes the metric for all 12
-services. Fewer than 12 names means stop: those alarms would go to ALARM.
+Before applying (read-only), dry-run the new alarms on the last 3 hours of
+`LiveTaskCount`, just before the apply and outside a deployment. The script
+reads the 12 live alarms, whose names, services and thresholds this change
+keeps, and prints one line per service:
 
 ```powershell
-aws cloudwatch list-metrics --namespace AWS/ECS --metric-name LiveTaskCount --dimensions Name=ClusterName,Value=hid-production --region eu-west-1 --query "Metrics[].Dimensions[?Name=='ServiceName'].Value[]" --output text
+$n = [datetime]::UtcNow; $end = [datetimeoffset]::new($n.Year, $n.Month, $n.Day, $n.Hour, $n.Minute, 0, [timespan]::Zero).AddMinutes(-5); $start = $end.AddHours(-3)
+$alarms = @((aws cloudwatch describe-alarms --alarm-name-prefix hid-production- --region eu-west-1 --output json | ConvertFrom-Json).MetricAlarms | Where-Object { $_.AlarmName -like '*-running-tasks' })
+"$($alarms.Count) alarms (expect 12)"
+foreach ($a in $alarms) {
+  $svc = ($a.Dimensions | Where-Object { $_.Name -eq 'ServiceName' }).Value
+  $rows = @(aws cloudwatch get-metric-statistics --namespace AWS/ECS --metric-name LiveTaskCount --dimensions "Name=ClusterName,Value=hid-production" "Name=ServiceName,Value=$svc" --statistics Minimum --period 60 --start-time ($start.UtcDateTime.ToString('s') + 'Z') --end-time ($end.UtcDateTime.ToString('s') + 'Z') --region eu-west-1 --query "Datapoints[].[Timestamp,Minimum]" --output text | Where-Object { $_ })
+  $p = @($rows | ForEach-Object { $f = $_ -split "`t"; [pscustomobject]@{ T = [datetimeoffset]::Parse($f[0], [cultureinfo]::InvariantCulture); V = [double]$f[1] } } | Sort-Object T)
+  $t = @($start.AddMinutes(-1)) + @($p | ForEach-Object T) + @($end)
+  $gap = 0; for ($i = 1; $i -lt $t.Count; $i++) { $gap = [math]::Max($gap, ($t[$i] - $t[$i - 1]).TotalMinutes) }
+  $low = if ($p.Count) { ($p | Measure-Object -Property V -Minimum).Minimum } else { 'none' }
+  $verdict = if ($p.Count -eq 0 -or $gap -ge 4 -or $low -lt $a.Threshold) { 'STOP' } elseif ($gap -gt 1) { 'note' } else { 'ok' }
+  '{0} {1}: {2} points, longest gap {3} min, lowest {4}, threshold {5}' -f $verdict, $svc, $p.Count, $gap, $low, $a.Threshold
+}
 ```
+
+Expected: `12 alarms (expect 12)`, then 12 lines starting `ok`, each with 180
+points (one a minute), longest gap 1 min and lowest at or above the threshold.
+Do not apply if there are fewer than 12 alarms or any line starts `STOP`: no
+data, a gap of 4 min or more (3 missing minutes in a row, which fires the
+alarm), or a minute below the threshold (look at that service first). A `note`
+line (a gap of 2 or 3 min) would not have fired; record it and go on.
 
 Expected plan from this change, all updated in place, nothing added, replaced
 or destroyed: `module.application.aws_ecs_cluster.production[0]`
 (containerInsights `enhanced` to `disabled`) and the 12
 `module.operations.aws_cloudwatch_metric_alarm.runtime_tasks[...]` (namespace
 and metric name only), plus a `container_insights` field in the
-`ecs_migration_configuration` output. Plan and apply as in section 4; other
-changes in the plan come from other dev commits not yet applied.
+`ecs_migration_configuration` output. Plan and apply with the section 4 helper,
+which reads the committed production.tfvars; other changes in the plan come
+from other dev commits not yet applied. A plan from the Terraform CI workflow
+replaces production.tfvars with the `TFVARS` secret, so it shows the 12 alarm
+updates but not the Insights change unless that secret also has
+`ecs_container_insights = "disabled"`; update the secret first if you use it.
 
 After applying, within a few minutes all 12 alarms should be `OK` on
 `AWS/ECS`/`LiveTaskCount`, and the cluster setting `disabled`:
@@ -358,15 +387,20 @@ way. To re-point them to `ECS/ContainerInsights` `RunningTaskCount`, revert the
 metric in `modules/operations/runtime.tf` in a second apply, once that metric
 appears again, or they breach while it is missing.
 
-Found while checking, not changed here: the alerts topic policy and KMS key
-policy let CloudWatch publish only for alarms named `hid-staging-*`
-(`name_prefix`), but these alarms are named `hid-production-*`, so their
-emails may never have arrived. "Failed to execute action" in this history
-confirms it; the fix is a separate reviewed policy change:
+Found while checking, already broken before this change and not fixed by it:
+the alerts topic policy and its KMS key policy (`modules/operations/main.tf`)
+let CloudWatch publish only for alarms named `hid-staging-*` (`name_prefix`),
+but these 12 alarms are named `hid-production-*`. Their state changes, before
+and after this change, probably never reached the alert email. This change
+keeps the alarm states working; it does not fix the emails. Check first:
+"Failed to execute action" entries in this history confirm it.
 
 ```powershell
 aws cloudwatch describe-alarm-history --alarm-name hid-production-gateway-running-tasks --history-item-type Action --region eu-west-1
 ```
+
+The fix is a separate reviewed change: in both policies, let the
+`aws:SourceArn` condition also match `alarm:hid-production-*-running-tasks`.
 
 ## 5. Build flow and deployment controls
 
