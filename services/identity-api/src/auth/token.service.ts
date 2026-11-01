@@ -71,17 +71,15 @@ export type StaffSessionAssurance = PlatformSessionAssurance;
 /**
  * Where a staff or patient sign-in came from when a product issued it after
  * single sign-on on `auth.` (ADR-070, 0102): the product's client, the
- * provider's session id (`sid`, which back-channel logout names), the ID token
- * (kept server-side for `id_token_hint` at sign-out) and when the person
- * signed in at the provider (`auth_time`). Stored on the new family in the
- * session's own transaction. The sign-in's absolute end then counts from
+ * provider's session id (`sid`, which back-channel logout names) and when the
+ * person signed in at the provider (`auth_time`). The ID token itself is not
+ * kept. Stored on the new family in the session's own transaction. The sign-in's absolute end then counts from
  * `authenticatedAt`, not from the hand-off, and a recent-sign-in check reads it
  * too (recent-authentication.ts).
  */
 export interface SingleSignOnProvenance {
   clientId: string;
   providerSid: string;
-  idToken: string;
   authenticatedAt: Date;
 }
 
@@ -1103,10 +1101,9 @@ export class TokenService {
     singleSignOn: SingleSignOnProvenance): Promise<void> {
     await client.query(
       `insert into auth.session_single_sign_on
-         (family_id, account_id, client_id, provider_sid, id_token, authenticated_at)
-       values ($1, $2, $3, $4, $5, $6)`,
-      [familyId, accountId, singleSignOn.clientId, singleSignOn.providerSid, singleSignOn.idToken,
-        singleSignOn.authenticatedAt],
+         (family_id, account_id, client_id, provider_sid, authenticated_at)
+       values ($1, $2, $3, $4, $5)`,
+      [familyId, accountId, singleSignOn.clientId, singleSignOn.providerSid, singleSignOn.authenticatedAt],
     );
   }
 

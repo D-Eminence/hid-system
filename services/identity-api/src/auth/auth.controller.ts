@@ -614,12 +614,10 @@ export class AuthController {
    * the answer is the provider's end-session address for the frontend to
    * navigate to. The provider ends its own session there and sends
    * back-channel logout to every product, so signing out of one product signs
-   * out of all of them. The address carries `id_token_hint` only for the
-   * sign-in this request proved it holds (a verified access token, or the
-   * refresh cookie with the CSRF token derived from it, which sign-out
-   * checked); otherwise it names only the client. The ID token never reaches
-   * the browser any other way. While single sign-on is off, or on a host that
-   * is not one of its clients, this is no route at all (SsoRouteGuard).
+   * out of all of them. The address names only the client and the product's
+   * root: no token reaches page JavaScript or an address (no
+   * `id_token_hint`). While single sign-on is off, or on a host that is not
+   * one of its clients, this is no route at all (SsoRouteGuard).
    */
   @Post('sso/logout')
   @UseGuards(SsoRouteGuard)
@@ -631,18 +629,10 @@ export class AuthController {
     const sso = this.sso;
     const client = sso?.clientFor(request);
     if (!sso || !client) throw new ServiceUnavailableException('Single sign-on is unavailable');
-    // Read before sign-out clears it: without a live access token, this
-    // refresh cookie is the sign-in that sign-out ends.
-    const refreshToken = this.cookies(request)[`${this.environment.AUTH_COOKIE_NAME}_refresh`];
     await this.logout(request, response);
-    // Sign-out returned, so it accepted what the request presented: request.actor
-    // is set only from a verified token, and a refresh cookie it used passed
-    // the CSRF check derived from it.
-    const proof = request.actor?.sessionId ? { sessionId: request.actor.sessionId }
-      : refreshToken ? { refreshToken } : {};
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('Referrer-Policy', 'no-referrer');
-    return { endSessionUrl: await sso.endSessionUrl(client, proof) };
+    return { endSessionUrl: await sso.endSessionUrl(client) };
   }
 
   @Post('facility')

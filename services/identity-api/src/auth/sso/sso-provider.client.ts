@@ -85,9 +85,8 @@ export interface VerifiedIdToken {
   readonly mfaMethod?: 'totp' | 'recovery_code';
 }
 
+/** The ID token itself is not kept: nothing the product does needs it after these checks. */
 export interface CompletedCodeFlow {
-  /** The ID token as the provider issued it, kept server-side for `id_token_hint`. */
-  readonly idToken: string;
   readonly verified: VerifiedIdToken;
 }
 
@@ -188,20 +187,22 @@ export class SsoProviderClient {
     if (!claims || typeof tokens.id_token !== 'string' || tokens.id_token.length > 16_384) {
       throw new SsoTokenRefused('id_token');
     }
-    return { idToken: tokens.id_token, verified: checkIdTokenClaims(client, claims) };
+    return { verified: checkIdTokenClaims(client, claims) };
   }
 
   /**
    * The provider's end-session address for a product sign-out
-   * (openid-client buildEndSessionUrl): `client_id`, `post_logout_redirect_uri`
-   * the product's own root, and `id_token_hint` when one is given.
+   * (openid-client buildEndSessionUrl): `client_id` and
+   * `post_logout_redirect_uri`, the product's own root, and nothing else.
+   * The browser opens it, so it never carries `id_token_hint`: the ID token
+   * names the account (`sub`), the provider session (`sid`) and how the
+   * person signed in (`amr`), and would reach page JavaScript, the address
+   * bar and the history. RP-Initiated Logout 1.0 lets `client_id` stand in
+   * for the hint; the provider ends its own session by its cookie.
    */
-  async endSessionUrl(configuration: SsoConfiguration, client: SsoClient, idTokenHint?: string): Promise<string> {
+  async endSessionUrl(configuration: SsoConfiguration, client: SsoClient): Promise<string> {
     const config = await this.configurationOf(configuration, client);
-    return openid().buildEndSessionUrl(config, {
-      ...(idTokenHint ? { id_token_hint: idTokenHint } : {}),
-      post_logout_redirect_uri: client.postLogoutRedirectUri,
-    }).href;
+    return openid().buildEndSessionUrl(config, { post_logout_redirect_uri: client.postLogoutRedirectUri }).href;
   }
 
   /**

@@ -778,7 +778,7 @@ read from the request.
 | `GET /auth/sso/start?return_to=<path>[&prompt=none\|login]` | A live session of this product, unless `prompt=login`: `303` to `return_to`. Otherwise `303` to the provider's authorization endpoint (`client_id`, `redirect_uri=https://<host>/api/v1/auth/sso/callback`, `response_type=code`, `scope=openid`, `state`, `nonce`, S256 `code_challenge`, `max_age` = `AUTH_ABSOLUTE_TTL_SECONDS`, `prompt` when given) with the transaction cookie. `return_to` must be a page path on this host (no other host, scheme, `//`, `\`, dot segment, encoded `/`, `\` or control character, encoded unreserved character (a letter, digit, `-`, `.`, `_` or `~`, which a browser decodes), fragment, `/api/` route or Health ID); anything else becomes `/`. `prompt=login` (a fresh sign-in, as before a PIN change) always goes to the provider; over a live session the callback then accepts only that session's account and ends the earlier sign-in. Provider unreachable: `303` to the client's `sign_in_path` |
 | `GET /auth/sso/callback` | Signed in: today's three session cookies (above), `303` to the transaction's return page. A silent attempt answered `login_required` (or `interaction_required`, `consent_required`, `account_selection_required`): `303` to the provider again, without `prompt`, with a new transaction. Anything else: `303` to `sign_in_path`, nothing in the address |
 | `POST /auth/sso/backchannel-logout` | Form `logout_token`, server to server, no cookie, CSRF token or Origin. `200` (empty) when accepted; `400 SSO_LOGOUT_TOKEN_INVALID` when refused (also a reused `jti`); `413` over 16 KiB; `503 SSO_PROVIDER_UNAVAILABLE` when the key set cannot be read |
-| `POST /auth/sso/logout` | Product sign-out: today's `POST /auth/logout` runs first, with its Origin and CSRF checks, refusals and audit, then `200 { "endSessionUrl": "<end_session_endpoint>?client_id=…&post_logout_redirect_uri=https://<host>/[&id_token_hint=…]" }` for the frontend to navigate to. The hint is the ID token kept server-side for the sign-in this request proved it holds; it never reaches the browser otherwise. Provider unreachable: `503 SSO_PROVIDER_UNAVAILABLE` (this product is signed out all the same). `POST /auth/logout` itself is unchanged (`204`) |
+| `POST /auth/sso/logout` | Product sign-out: today's `POST /auth/logout` runs first, with its Origin and CSRF checks, refusals and audit, then `200 { "endSessionUrl": "<end_session_endpoint>?client_id=…&post_logout_redirect_uri=https%3A%2F%2F<host>%2F" }` for the frontend to navigate to. It never carries `id_token_hint` (the ID token names the account and would reach page JavaScript, the address bar and the history); RP-Initiated Logout 1.0 lets `client_id` stand in for it. Provider unreachable: `503 SSO_PROVIDER_UNAVAILABLE` (this product is signed out all the same). `POST /auth/logout` itself is unchanged (`204`) |
 
 Cookies of the hand-off, each `HttpOnly`, `Secure`, `Path=/`, no `Domain`,
 `SameSite=Lax`:
@@ -797,8 +797,8 @@ Cookies of the hand-off, each `HttpOnly`, `Secure`, `Path=/`, no `Domain`,
 client through `TokenService.issueStaffSession` with the account's active,
 enrolment-proven authenticator as its MFA evidence (no such authenticator:
 refused), a patient client through `TokenService.issue`. The family records
-the client, the provider `sid`, the ID token and the provider `auth_time`
-(`auth.session_single_sign_on`); the sign-in's absolute end, and a patient's
+the client, the provider `sid` and the provider `auth_time`
+(`auth.session_single_sign_on`; the ID token is not kept); the sign-in's absolute end, and a patient's
 recent-sign-in check (`PATIENT_RECENT_AUTH_REQUIRED`), count from that
 `auth_time`, so a hand-off is never a fresh sign-in. Idle and absolute
 lifetimes are otherwise unchanged. A provider sign-in older than the

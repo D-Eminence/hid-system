@@ -68,7 +68,7 @@ function harness() {
 }
 
 function provenance(authenticatedAt: Date, clientId = 'lab'): SingleSignOnProvenance {
-  return { clientId, providerSid: 'provider-session-1', idToken: 'synthetic.id.token', authenticatedAt };
+  return { clientId, providerSid: 'provider-session-1', authenticatedAt };
 }
 
 describe('a staff session issued after single sign-on', () => {
@@ -78,7 +78,9 @@ describe('a staff session issued after single sign-on', () => {
     const issued = await service.issueStaffSession(client, assurance, event, provenance(signedIn));
     const family = issued.actor.sessionId;
     expect(statement('insert into auth.session_single_sign_on')?.values)
-      .toEqual([family, staff.accountId, 'lab', 'provider-session-1', 'synthetic.id.token', signedIn]);
+      .toEqual([family, staff.accountId, 'lab', 'provider-session-1', signedIn]);
+    // The ID token is never stored.
+    expect(statement('insert into auth.session_single_sign_on')?.sql).not.toContain('id_token');
     // The provider verified the second factor at its auth_time.
     expect(statement('insert into auth.session_assurance')?.values)
       .toEqual([family, staff.accountId, assurance.factorId, 'totp', signedIn]);
@@ -130,7 +132,7 @@ describe('a patient session issued after single sign-on', () => {
     const signedIn = new Date(Date.now() - 23.5 * 3_600_000);
     const issued = await service.issue(identity, event, provenance(signedIn, 'web'));
     expect(statement('insert into auth.session_single_sign_on')?.values)
-      .toEqual([issued.actor.sessionId, patient.accountId, 'web', 'provider-session-1', 'synthetic.id.token', signedIn]);
+      .toEqual([issued.actor.sessionId, patient.accountId, 'web', 'provider-session-1', signedIn]);
     expect((statement('insert into auth.sessions')!.values[9] as Date).getTime()).toBe(signedIn.getTime() + DAY_MS);
     expect(JSON.parse(String(statement('insert into auth.session_events')?.values[7])))
       .toEqual({ password_upgraded: false, sso_client: 'web' });

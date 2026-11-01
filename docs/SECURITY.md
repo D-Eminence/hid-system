@@ -175,8 +175,9 @@ coordinator's; these are the product's rules.
   clears its session cookies.
 * Nothing identifying travels in an address: the return page stays in the
   transaction cookie, failures go to the sign-in page with an empty address,
-  and audit rows record the client and the failed check, never a token, code
-  or claim value.
+  the end-session address names only the client and the product's root (no
+  `id_token_hint`; the ID token is not even kept), and audit rows record the
+  client and the failed check, never a token, code or claim value.
 
 ## 3. Authorization
 

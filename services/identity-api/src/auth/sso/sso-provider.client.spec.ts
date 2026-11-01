@@ -202,7 +202,8 @@ describe('the authorization request', () => {
 
 describe('the code exchange', () => {
   it('authenticates a private_key_jwt client with a short-lived assertion for the issuer, and sends the verifier', async () => {
-    await expect(signIn(lab, staffClaims())).resolves.toMatchObject({ idToken: expect.stringMatching(/^ey/) });
+    // The ID token itself is not handed on: nothing keeps it.
+    await expect(signIn(lab, staffClaims())).resolves.toEqual({ verified: expect.objectContaining({ accountId: ACCOUNT }) });
     const form = provider.lastTokenRequest!.form;
     expect(form.get('code_verifier')).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(form.get('redirect_uri')).toBe(`https://${LAB}/api/v1/auth/sso/callback`);
@@ -327,11 +328,11 @@ describe('ID token checks', () => {
 });
 
 describe('the end-session address', () => {
-  it('names the client, the product\'s own root and the hint when one is given', async () => {
+  it('names only the client and the product\'s own root: no token travels in an address', async () => {
     const rp = new SsoProviderClient(provider.http, clock);
-    const address = new URL(await rp.endSessionUrl(configuration, lab, 'an.id.token'));
+    const address = new URL(await rp.endSessionUrl(configuration, lab));
     expect(address.origin + address.pathname).toBe(`${ISSUER}/session/end`);
-    expect(Object.fromEntries(address.searchParams)).toEqual({ client_id: 'lab', id_token_hint: 'an.id.token',
+    expect(Object.fromEntries(address.searchParams)).toEqual({ client_id: 'lab',
       post_logout_redirect_uri: `https://${LAB}/` });
     expect(Object.fromEntries(new URL(await rp.endSessionUrl(configuration, portal)).searchParams))
       .toEqual({ client_id: 'web', post_logout_redirect_uri: `https://${PORTAL}/` });

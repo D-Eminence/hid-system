@@ -7,11 +7,11 @@
 --
 -- 1. auth.session_single_sign_on: where a sign-in (session family) came from
 --    when a product issued it after single sign-on: the client (site key),
---    the provider's session id (sid), which back-channel logout names, the ID
---    token, kept server-side for id_token_hint at sign-out and never sent to
---    the browser otherwise, and when the person signed in at the provider
---    (auth_time), from which the sign-in's absolute end and a patient's
---    recent-sign-in check count. Keyed by family, as auth.session_assurance
+--    the provider's session id (sid), which back-channel logout names, and
+--    when the person signed in at the provider (auth_time), from which the
+--    sign-in's absolute end and a patient's recent-sign-in check count. The
+--    ID token is not kept: product sign-out sends no id_token_hint, since the
+--    browser would carry it. Keyed by family, as auth.session_assurance
 --    (0069) and auth.session_facility_selection (0089) are: refresh rotates
 --    the session row but keeps the family. One row per family, written with
 --    the family's first session in the same transaction, never changed.
@@ -32,13 +32,12 @@ create table auth.session_single_sign_on (
   -- client (ADR-038).
   client_id text not null check (client_id in ('ehr', 'lab', 'pharmacy', 'migrate', 'outreach', 'web')),
   provider_sid text not null check (provider_sid ~ '^[!-~]{1,255}$'),
-  id_token text not null check (length(id_token) between 16 and 16384),
   authenticated_at timestamptz not null,
   created_at timestamptz not null default clock_timestamp()
 );
 create index session_single_sign_on_provider_sid_idx on auth.session_single_sign_on (provider_sid);
 comment on table auth.session_single_sign_on is
-  'Single sign-on provenance of a staff or patient sign-in (session family) a product issued after the provider on auth. (ADR-070): client, provider sid, ID token for id_token_hint, provider auth_time. Never an authorization.';
+  'Single sign-on provenance of a staff or patient sign-in (session family) a product issued after the provider on auth. (ADR-070): client, provider sid, provider auth_time. Never an authorization.';
 
 -- Admits a row only for the root session of a staff or patient sign-in of the
 -- same account whose kind is the client's (a staff product never holds a

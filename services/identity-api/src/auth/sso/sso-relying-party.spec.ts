@@ -57,7 +57,7 @@ const CORRELATION = 'sso-relying-party-0001';
 
 interface StoredSession { id: string; familyId: string; accountId: string; kind: 'staff' | 'patient'; refreshHash: string;
   revoked: boolean }
-interface StoredLink { familyId: string; accountId: string; clientId: string; sid: string; idToken: string }
+interface StoredLink { familyId: string; accountId: string; clientId: string; sid: string }
 
 let app: INestApplication | undefined;
 /** Moves the relying party's clock (its discovery and key-set caches) forward. */
@@ -82,8 +82,7 @@ function newSession(kind: 'staff' | 'patient', accountId: string, provenance?: S
   const csrfToken = `csrf-${id}`;
   store.sessions.push({ id, familyId: id, accountId, kind, refreshHash: sha256(refreshToken), revoked: false });
   if (provenance) {
-    store.links.push({ familyId: id, accountId, clientId: provenance.clientId, sid: provenance.providerSid,
-      idToken: provenance.idToken });
+    store.links.push({ familyId: id, accountId, clientId: provenance.clientId, sid: provenance.providerSid });
   }
   const actor = { ...(kind === 'patient' ? { kind } : {}), id: `synthetic:${kind}`, subject: `synthetic:${kind}`,
     accountId, sessionId: id, roles: [], permissions: [], platformRoles: [], platformPermissions: [], facilityIds: [],
@@ -131,13 +130,6 @@ async function runQuery(sql: string, values: unknown[] = []) {
     for (const session of ended) session.revoked = true;
     return { rows: ended.map((session) => ({ id: session.id, account_id: session.accountId, family_id: session.familyId })),
       rowCount: ended.length };
-  }
-  if (sql.includes('select single_sign_on.id_token')) {
-    const session = sql.includes('session.id = $1')
-      ? store.sessions.find((candidate) => candidate.id === values[0])
-      : store.sessions.find((candidate) => candidate.refreshHash === values[0]);
-    const link = store.links.find((candidate) => candidate.familyId === session?.familyId && candidate.clientId === values[1]);
-    return link ? { rows: [{ id_token: link.idToken }], rowCount: 1 } : none;
   }
   if (sql.includes('platform.control_enabled')) return { rows: [{ enabled: true }], rowCount: 1 };
   throw new Error(`unexpected SQL: ${sql}`);
@@ -461,8 +453,7 @@ describe('with single sign-on configured', () => {
       expect(tokens.issueStaffSession).toHaveBeenCalledWith(expect.anything(),
         { accountId: STAFF_ACCOUNT, subject: 'synthetic:staff', factorId: 'f1000000-0000-4000-8000-000000000001', method: 'totp' },
         expect.objectContaining({ correlationId: CORRELATION }),
-        expect.objectContaining({ clientId: 'lab', providerSid: 'provider-session-1', idToken: expect.stringMatching(/^ey/),
-          authenticatedAt: expect.any(Date) }));
+        { clientId: 'lab', providerSid: 'provider-session-1', authenticatedAt: expect.any(Date) });
       expect(database.withSystemTransaction).toHaveBeenCalled();
       expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
         action: 'auth.login', actorType: 'staff', actorAccountId: STAFF_ACCOUNT, outcome: 'success',
@@ -794,7 +785,7 @@ describe('with single sign-on configured', () => {
       return { access: cookie('hid_access'), refresh: cookie('hid_access_refresh'), csrf: cookie('hid_access_csrf') };
     }
 
-    it('ends this sign-in as today\'s sign-out does, then answers the end-session address with the hint of that sign-in', async () => {
+    it('ends this sign-in as today\'s sign-out does, then answers the end-session address, which carries no token', async () => {
       const session = await signedIn();
       const response = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', LAB).set('Origin', LAB)
         .set('X-CSRF-Token', session.csrf).set('Cookie', [`hid_access=${session.access}`, `hid_access_csrf=${session.csrf}`,
@@ -807,21 +798,23 @@ describe('with single sign-on configured', () => {
         /Expires=Thu, 01 Jan 1970/.test(cookie))).toBe(true);
       const address = new URL(response.body.endSessionUrl);
       expect(address.origin + address.pathname).toBe(`${ISSUER}/session/end`);
-      expect(Object.fromEntries(address.searchParams)).toEqual({ id_token_hint: store.links[0]!.idToken,
-        post_logout_redirect_uri: `${LAB}/`, client_id: 'lab' });
+      // Only the client and the product's root: no ID token (no id_token_hint) reaches page JavaScript or an address.
+      expect(Object.fromEntries(address.searchParams)).toEqual({ post_logout_redirect_uri: `${LAB}/`, client_id: 'lab' });
+      expect(response.text).not.toMatch(/eyJ/);
     });
 
-    it('finds the hint by the refresh cookie once the access token has expired', async () => {
+    it('ends the sign-in by the refresh cookie once the access token has expired, with the same address', async () => {
       const session = await signedIn();
       const response = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', LAB).set('Origin', LAB)
         .set('X-CSRF-Token', `csrf-${session.refresh.split('.')[0]}`)
         .set('Cookie', [`hid_access_csrf=csrf-${session.refresh.split('.')[0]}`, `hid_access_refresh=${session.refresh}`]);
       expect(response.status).toBe(200);
       expect(auth.revokeByRefreshToken).toHaveBeenCalled();
-      expect(new URL(response.body.endSessionUrl).searchParams.get('id_token_hint')).toBe(store.links[0]!.idToken);
+      expect(Object.fromEntries(new URL(response.body.endSessionUrl).searchParams))
+        .toEqual({ post_logout_redirect_uri: `${LAB}/`, client_id: 'lab' });
     });
 
-    it('names only the client for a browser with no sign-in, and never a hint it did not prove', async () => {
+    it('answers the same address to a browser with no sign-in, and nothing to a refused sign-out', async () => {
       const session = await signedIn();
       // The refresh cookie without its CSRF token: refused, and no address at all.
       const refused = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', LAB).set('Origin', LAB)

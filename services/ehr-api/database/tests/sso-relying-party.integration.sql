@@ -1,8 +1,8 @@
 \set ON_ERROR_STOP on
 -- Single sign-on on auth., the product side (0102, ADR-070). A product that
 -- issues its own sign-in after the provider on auth. records where it came
--- from in auth.session_single_sign_on (client, provider sid, ID token, the
--- provider's auth_time), one row per sign-in family, only for the root
+-- from in auth.session_single_sign_on (client, provider sid, the provider's
+-- auth_time; never the ID token), one row per sign-in family, only for the root
 -- session of a staff or patient sign-in of the client's kind, never changed.
 -- Spent sign-in transactions and logout tokens are kept in
 -- auth.sso_spent_tokens by digest. This suite also runs, as the Identity
@@ -116,15 +116,15 @@ declare
   rejected record;
 begin
   -- The API's insert (TokenService.recordSingleSignOn), for each kind.
-  insert into auth.session_single_sign_on (family_id, account_id, client_id, provider_sid, id_token, authenticated_at)
+  insert into auth.session_single_sign_on (family_id, account_id, client_id, provider_sid, authenticated_at)
   values ('d1040000-0000-4000-8000-0000000000a1', 'd1020000-0000-4000-8000-00000000000a', 'lab', 'provider-session-1',
-          'synthetic.id.token-a1', now() - interval '1 minute'),
+          now() - interval '1 minute'),
          ('d1040000-0000-4000-8000-0000000000a2', 'd1020000-0000-4000-8000-00000000000a', 'ehr', 'provider-session-1',
-          'synthetic.id.token-a2', now() - interval '1 minute'),
+          now() - interval '1 minute'),
          ('d1040000-0000-4000-8000-0000000000b1', 'd1020000-0000-4000-8000-00000000000b', 'lab', 'provider-session-2',
-          'synthetic.id.token-b1', now() - interval '1 minute'),
+          now() - interval '1 minute'),
          ('d1040000-0000-4000-8000-0000000000e2', 'd1020000-0000-4000-8000-0000000000e0', 'web', 'provider-session-3',
-          'synthetic.id.token-p2', now() - interval '30 minutes');
+          now() - interval '30 minutes');
 
   for rejected in select * from (values
     ('a staff product on a patient sign-in', 'd1040000-0000-4000-8000-0000000000e1', 'd1020000-0000-4000-8000-0000000000e0', 'ehr'),
@@ -133,18 +133,17 @@ begin
     ('a session that is not its family''s root', 'd1040000-0000-4000-8000-0000000000a3', 'd1020000-0000-4000-8000-00000000000a', 'lab')
   ) as candidate(label, family_id, account_id, client_id) loop
     begin
-      insert into auth.session_single_sign_on (family_id, account_id, client_id, provider_sid, id_token, authenticated_at)
-      values (rejected.family_id::uuid, rejected.account_id::uuid, rejected.client_id, 'provider-session-9',
-              'synthetic.id.token-x', now());
+      insert into auth.session_single_sign_on (family_id, account_id, client_id, provider_sid, authenticated_at)
+      values (rejected.family_id::uuid, rejected.account_id::uuid, rejected.client_id, 'provider-session-9', now());
       raise exception 'the guard accepted %', rejected.label;
     exception when check_violation or unique_violation then
       if sqlerrm <> 'SESSION_SINGLE_SIGN_ON_INVALID' and sqlstate <> '23505' then raise; end if;
     end;
   end loop;
   begin
-    insert into auth.session_single_sign_on (family_id, account_id, client_id, provider_sid, id_token, authenticated_at)
+    insert into auth.session_single_sign_on (family_id, account_id, client_id, provider_sid, authenticated_at)
     values ('d1040000-0000-4000-8000-0000000000e1', 'd1020000-0000-4000-8000-0000000000e0', 'admin', 'provider-session-9',
-            'synthetic.id.token-x', now());
+            now());
     raise exception 'administration was accepted as a single sign-on client';
   exception when check_violation then
     -- Refused by the guard or by the client_id check, whichever runs first.

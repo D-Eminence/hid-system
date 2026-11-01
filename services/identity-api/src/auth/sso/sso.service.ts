@@ -49,12 +49,6 @@ export type SsoCallbackOutcome =
   | { readonly kind: 'ask'; readonly authorization: SsoAuthorization }
   | { readonly kind: 'refused' };
 
-/** What a sign-out proved it holds, for the ID token hint. */
-export interface SsoSignOutProof {
-  readonly sessionId?: string;
-  readonly refreshToken?: string;
-}
-
 /**
  * The relying party of a product host (ADR-070, contract v2 "The relying
  * party in identity-api"). It starts a sign-in at the provider, finishes it at
@@ -167,7 +161,7 @@ export class SsoService {
         throw new SsoTokenRefused(`provider_error:${code}`);
       }
       const configuration = this.requireConfiguration();
-      const { idToken, verified } = await this.provider.completeCodeFlow(configuration, client, parameters, {
+      const { verified } = await this.provider.completeCodeFlow(configuration, client, parameters, {
         state: transaction.state,
         nonce: transaction.nonce,
         verifier: transaction.verifier,
@@ -178,7 +172,7 @@ export class SsoService {
         throw new SsoTokenRefused('account_changed');
       }
       const provenance: SingleSignOnProvenance = {
-        clientId: client.id, providerSid: verified.sid, idToken, authenticatedAt: verified.authenticatedAt,
+        clientId: client.id, providerSid: verified.sid, authenticatedAt: verified.authenticatedAt,
       };
       const session = client.kind === 'staff'
         ? await this.issueStaffSession(client, verified, provenance, event)
@@ -263,13 +257,11 @@ export class SsoService {
   /**
    * The provider's end-session address for a product sign-out:
    * `post_logout_redirect_uri` is the product's own root and `client_id` this
-   * client; `id_token_hint` is the ID token kept for the sign-in the sign-out
-   * proved it holds, when that sign-in came from this client's single sign-on.
+   * client. No token travels in it (SsoProviderClient.endSessionUrl).
    */
-  async endSessionUrl(client: SsoClient, proof: SsoSignOutProof): Promise<string> {
-    const hint = await this.idTokenHint(client, proof);
+  async endSessionUrl(client: SsoClient): Promise<string> {
     try {
-      return await this.provider.endSessionUrl(this.requireConfiguration(), client, hint);
+      return await this.provider.endSessionUrl(this.requireConfiguration(), client);
     } catch (error) {
       if (!(error instanceof SsoProviderUnavailable)) throw error;
       throw new PublicDetailProblem(503, 'SSO_PROVIDER_UNAVAILABLE',
@@ -355,26 +347,6 @@ export class SsoService {
       details: { singleSignOn: client.id },
     });
     return session;
-  }
-
-  private async idTokenHint(client: SsoClient, proof: SsoSignOutProof): Promise<string | undefined> {
-    if (proof.sessionId) {
-      return (await this.database.query<{ id_token: string }>(
-        `select single_sign_on.id_token
-           from auth.sessions session
-           join auth.session_single_sign_on single_sign_on on single_sign_on.family_id = session.family_id
-          where session.id = $1 and single_sign_on.client_id = $2`,
-        [proof.sessionId, client.id])).rows[0]?.id_token;
-    }
-    if (proof.refreshToken) {
-      return (await this.database.query<{ id_token: string }>(
-        `select single_sign_on.id_token
-           from auth.sessions session
-           join auth.session_single_sign_on single_sign_on on single_sign_on.family_id = session.family_id
-          where session.refresh_token_sha256 = $1 and single_sign_on.client_id = $2`,
-        [createHash('sha256').update(proof.refreshToken, 'utf8').digest('hex'), client.id])).rows[0]?.id_token;
-    }
-    return undefined;
   }
 
   /**

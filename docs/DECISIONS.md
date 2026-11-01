@@ -6451,14 +6451,14 @@ Decision:
 - **The session is today's.** The callback issues the product's session
   through `TokenService.issueStaffSession` (with the account's enrolment-proven
   authenticator as MFA evidence) or `TokenService.issue`, sets today's
-  cookies, and stores the provider `sid`, the ID token (for `id_token_hint`)
-  and `auth_time` on the family (0102). The absolute end and a patient's
+  cookies, and stores the provider `sid` and `auth_time` on the family (0102),
+  not the ID token. The absolute end and a patient's
   recent-sign-in check count from `auth_time`. A provider sign-in older than
   the account's password change or, for staff, its authenticator's activation
   opens no session.
 - **Sign-out on a product signs out everywhere.** Product sign-out runs
-  today's sign-out, then answers the provider's end-session address for the
-  frontend to navigate to; the provider ends its session and sends back-channel
+  today's sign-out, then answers the provider's end-session address (only
+  `client_id` and `post_logout_redirect_uri`) for the frontend to navigate to; the provider ends its session and sends back-channel
   logout to every product, which ends every sign-in of that `sid` (or of `sub`).
   The first refused session check or refresh on another host then clears that
   host's cookies, so the edge shows its landing page.
@@ -6481,6 +6481,11 @@ Options considered:
 - Hand-written OpenID Connect checks with `jose` alone (the first draft):
   replaced by the owner's approval of `openid-client`, a certified library, so
   the protocol checks are not ours to get right.
+- Sending `id_token_hint` at sign-out (contract v2 named it): the browser
+  opens the end-session address, so the ID token, which names the account,
+  the provider session and how the person signed in, would reach page
+  JavaScript, the address bar and the history. `client_id` stands in for it
+  (RP-Initiated Logout 1.0), and the ID token is not kept at all.
 - Changing `POST /auth/logout` to answer the end-session address: its `204`
   is relied on by every app, and Nest cannot answer `200` with a body from a
   `204` route; a separate route that runs it keeps it unchanged.
