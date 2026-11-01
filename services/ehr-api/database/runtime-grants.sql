@@ -1387,6 +1387,11 @@ revoke all on function pharmacy.validate_work_item() from public;
 -- granted to no role; a trigger needs no EXECUTE to fire.
 revoke all on function pharmacy.validate_dispensing() from public;
 
+-- Pharmacy source checks rollback (0102): 0102 puts pharmacy.validate_work_item
+-- and pharmacy.validate_dispensing back as 0086 left them (owner and ACL
+-- kept); both stay granted to no role, as the two blocks above say.
+revoke all on function pharmacy.validate_work_item(), pharmacy.validate_dispensing() from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),
