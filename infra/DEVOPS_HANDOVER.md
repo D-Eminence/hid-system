@@ -361,7 +361,10 @@ or destroyed: `module.application.aws_ecs_cluster.production[0]`
 (containerInsights `enhanced` to `disabled`) and the 12
 `module.operations.aws_cloudwatch_metric_alarm.runtime_tasks[...]` (namespace
 and metric name only), plus a `container_insights` field in the
-`ecs_migration_configuration` output. Plan and apply with the section 4 helper,
+`ecs_migration_configuration` output. That is 13 resources changed in place,
+0 added, 0 destroyed (`Plan: 0 to add, 13 to change, 0 to destroy` when no
+other dev change is pending). The retired legacy cluster has count 0 in
+production, so it is not in the plan. Plan and apply with the section 4 helper,
 which reads the committed production.tfvars; other changes in the plan come
 from other dev commits not yet applied. A plan from the Terraform CI workflow
 replaces production.tfvars with the `TFVARS` secret, so it shows the 12 alarm
