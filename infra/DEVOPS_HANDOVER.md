@@ -425,10 +425,13 @@ has the `bedrock_endpoint_az_count` line and the two `ecr_` lines.
 
 Total: `Plan: 12 to add, 16 to change, 14 to destroy` when no other dev change
 is pending: the 12 added are the 12 replaced lifecycle policies, which with the
-2 scaling policies make the 14 destroyed. Nothing else is replaced or
-destroyed: no service, task definition, database, bucket, key, topic or
-endpoint. Other changes in the plan come from dev commits not yet applied;
-review them as part of the same plan.
+2 scaling policies make the 14 destroyed. The 12 replaced lifecycle policies
+are the one exception to "every change in place": the AWS provider cannot
+update a lifecycle policy in place (item 2), no image is touched, and the owner
+accepts this before the apply. Nothing else is replaced or destroyed: no
+service, task definition, database, bucket, key, topic or endpoint. Other
+changes in the plan come from dev commits not yet applied; review them as part
+of the same plan.
 
 #### 1. Bedrock endpoint in one zone
 
@@ -474,11 +477,16 @@ only, approved models only), its security group and private DNS do not change.
 
 Each of the 12 repositories `staging/hid/<service>` has three lifecycle rules.
 Rule 1 keeps every image with a `retain-` tag. Before every production
-deployment the release helpers tag the image the service runs and the image
-that replaces it `retain-<digest hex>` (and the token agent image), never
-remove those tags, and refuse to deploy unless rule 1 keeps every `retain-`
-image. So the image each service runs, the previous release and every earlier
-production release are never expired. Rule 1 does not change.
+deployment the release helper tags the image the service runs and the image
+that replaces it `retain-<digest hex>` (and the token agent image, and the
+migration image before a migration), never removes those tags, and refuses to
+deploy unless rule 1 keeps every `retain-` image. That is `protect_image` in
+`scripts/production_deployment.py` on the release branch
+`staging-novu-ci-20261005`; the bootstrap inventory did the same with `retain`
+in `scripts/production_release_inventory.py` here. So the image each service
+runs, the previous release and every earlier production release are never
+expired. Rule 1 does not change. The second check below confirms the tags
+before the apply.
 
 | Rule | Before | Production from this change |
 | --- | --- | --- |
@@ -486,14 +494,19 @@ production release are never expired. Rule 1 does not change.
 | 2 | untagged images 7 days after push | untagged images 14 days after push (`ecr_untagged_image_expiry_days = 14`) |
 | 3 | any other image beyond the newest 25, at any age | any other image older than 90 days (`ecr_tagged_image_expiry_days = 90`) |
 
-- ECR never expires an image that an image index still references, and decides
-  each image by the first rule its tags match, one count type per rule. "Beyond
-  the newest 10 and older than 90 days" therefore cannot be one rule. Rule 3
-  uses the age, so no image younger than 90 days expires. Every release stays
-  (all of them, not only the newest 10); trimming releases would need a release
-  helper change. A build that never ran in production can expire once older
-  than 90 days even if its repository had fewer than 10 newer builds; the dry
-  run below marks those `note`.
+- The owner asked to keep the newest 10 releases per repository and expire
+  only images older than 90 days beyond those. ECR never expires an image that
+  an image index still references, and decides each image by the first rule
+  its tags match, one count type per rule, so "beyond the newest 10 and older
+  than 90 days" cannot be one rule. What this change does instead, in the words
+  the owner is asked to accept before the apply: **every deployed release is
+  kept, and every other image is kept for 90 days after push.** Every release
+  stays by its `retain-` tag (all of them, not only the newest 10; trimming
+  releases would need a release helper change), and rule 3 uses the age, so no
+  image younger than 90 days expires. The one difference from the request: a
+  build that never ran in production can expire once older than 90 days even
+  if its repository has fewer than 10 newer builds. The dry run below marks
+  those `note`; they are in the backup and can be rebuilt (rollback below).
 - Cost: ECR storage is USD 0.10 per GB a month. Busy repositories can now keep
   more than 25 images (every build of the last 90 days); the gain is that no
   image a rollback might want is lost. The dry run totals what would go now.
@@ -530,9 +543,13 @@ Expect 24 files (an `ecr-staging-hid-<service>-<date>.json` inventory and a
 `lifecycle-...` rules file per repository). The inventory records every digest,
 tag, push date and size. Keep the local folder until the clean-up has run.
 
-Second, every image production uses must carry a `retain-` tag: the images of
-the 12 running task definitions (with the token agent), the latest migration
-task definition and the images in `production.tfvars`:
+Second, every image production runs or can roll back to must carry a
+`retain-` tag: the images of the 12 running task definitions (with the token
+agent), the latest migration task definition, the images in `production.tfvars`,
+the release index (`production/current.json`) and every backend release receipt
+in the release bucket (`production/releases/<release>/complete.json`, both its
+`before` and its `after`; a rollback re-deploys a release's `after`). The tags
+come from the inventory saved in the first step:
 
 ```powershell
 $used = @{}
@@ -543,19 +560,39 @@ foreach ($s in (aws ecs list-services --cluster hid-production --region eu-west-
 $mig = aws ecs list-task-definitions --family-prefix hid-staging-database-migration --status ACTIVE --sort DESC --region eu-west-1 --query "taskDefinitionArns[0]" --output text
 (aws ecs describe-task-definition --task-definition $mig --region eu-west-1 --output json | ConvertFrom-Json).taskDefinition.containerDefinitions.image | ForEach-Object { $used[$_] = $mig }
 [regex]::Matches((Get-Content environments/production.tfvars -Raw), '(?m)^\s*("[a-z-]+"|migration_image_uri|production_workload_token_agent_image_uri)\s*=\s*"([^"]+@sha256:[a-f0-9]{64})"') | ForEach-Object { if (-not $used.ContainsKey($_.Groups[2].Value)) { $used[$_.Groups[2].Value] = 'production.tfvars' } }
-"$($used.Count) images in use"
+$bucket = 'hid-staging-releases-659225405023-eu-west-1'
+$add = { param($uri, $from) if ($uri -and -not $used.ContainsKey($uri)) { $used[$uri] = $from } }
+$index = aws s3 cp "s3://$bucket/production/current.json" - --region eu-west-1 | Out-String | ConvertFrom-Json
+if (-not $index.backend) { 'STOP (could not read production/current.json)' }
+foreach ($row in @($index.backend.PSObject.Properties.Value)) { & $add $row.image_uri 'production/current.json' }
+& $add $index.migration_image_uri 'production/current.json'
+$receipts = @((aws s3api list-objects-v2 --bucket $bucket --prefix production/releases/ --region eu-west-1 --query "Contents[?ends_with(Key, '/complete.json')].Key" --output json | ConvertFrom-Json) | Where-Object { $_ })
+foreach ($k in $receipts) {
+  $receipt = aws s3 cp "s3://$bucket/$k" - --region eu-west-1 | Out-String | ConvertFrom-Json
+  if ($receipt.kind -ne 'backend') { continue }
+  foreach ($side in 'after', 'before') { foreach ($row in @($receipt.$side.PSObject.Properties.Value)) { & $add $row.image_uri $k } }
+}
+"$($receipts.Count) release receipts; $($used.Count) images in use or kept for rollback"
+$tagsOf = @{}
+foreach ($r in $repos) { foreach ($d in @((Get-Content "$dir/ecr-$($r -replace '/', '-')-$date.json" -Raw | ConvertFrom-Json).imageDetails)) { $tagsOf["$r@$($d.imageDigest)"] = @($d.imageTags) } }
 foreach ($i in $used.Keys) {
   $repo, $digest = ($i -replace '^[^/]+/', '') -split '@'
-  $tags = if ($digest) { aws ecr describe-images --repository-name $repo --image-ids imageDigest=$digest --region eu-west-1 --query "imageDetails[0].imageTags" --output json | ConvertFrom-Json }
-  $verdict = if (-not $digest) { 'STOP (not pinned to a digest)' } elseif (@($tags | Where-Object { $_ -like 'retain-*' }).Count) { 'ok' } else { 'STOP (missing or no retain- tag)' }
+  $verdict = if (-not $digest) { 'STOP (not pinned to a digest)' } elseif (-not $tagsOf.ContainsKey("$repo@$digest")) { 'STOP (not in the inventory)' } elseif (@($tagsOf["$repo@$digest"] | Where-Object { $_ -like 'retain-*' }).Count) { 'ok' } else { 'STOP (no retain- tag)' }
   "$verdict $i ($($used[$i]))"
 }
 ```
 
-Expect every line `ok`. On a `STOP`, do not apply this item: drop the two
-`ecr_` lines from the commit (the other items can go ahead) and find out why
-the image was not tagged; the next release of that service through the helper
-tags it.
+Expect at least one release receipt and every line `ok`. On a `STOP`, do not
+apply this item: drop the two `ecr_` lines from the commit (the other items
+can go ahead) and report it. An image a service runs now gets its tag at that
+service's next release through the helper. An earlier release's image without
+the tag (for example one deployed before the helper tagged images) is for the
+owner to decide: keep it as a rollback target by tagging it
+`retain-<digest hex>` as the helper does, or accept that this release can no
+longer be rolled back to once its image is 90 days old (it stays in the backup
+and can be rebuilt). An image `not in the inventory` is already gone from ECR:
+that release cannot be rolled back to today whatever this change does, and the
+owner may accept that and go ahead.
 
 Third, a dry run: ECR's lifecycle preview applies the new rules to today's
 images without expiring anything or changing the live rules:
@@ -590,8 +627,9 @@ foreach ($r in $repos) {
 'At most {0:N1} GB, about USD {1:N2} a month' -f ($bytes / 1GB), ($bytes / 1GB * 0.10)
 ```
 
-Every repository must say `preview COMPLETE`. `STOP` (an image in use or with a
-`retain-` tag would expire) must never appear: do not apply, and report it.
+Every repository must say `preview COMPLETE`. `STOP` (an image in use, kept for
+rollback or with a `retain-` tag would expire) must never appear: do not apply,
+and report it.
 `note` is one of the 10 newest images of its repository: older than 90 days,
 never run in production, and in the backup; apply only if the owner accepts
 losing it. `expire` lines are what ECR removes within a day of the apply. The
