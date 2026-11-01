@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0101",
-    "count": 102,
+    "last": "0102",
+    "count": 103,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -505,6 +505,10 @@
       {
         "name": "0101_pharmacy_dispensing_source_check.sql",
         "sha256": "2c10b2adfc40bb68b46a57b94036daa2a391d62ec06bebfdde3aeaa26f2d18b6"
+      },
+      {
+        "name": "0102_pharmacy_source_checks_rollback.sql",
+        "sha256": "71b0ac928130745b0234b2d334869fd2dc74b39a9df41e97b9d26a433a80c065"
       }
     ]
   },

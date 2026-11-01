@@ -2573,9 +2573,11 @@ they name and the version that was current when they were accepted), and
 those whose prescription changed or stopped after acceptance, before or after
 they were dispensed (§29), without returning any patient data.
 
-The suite is `services/ehr-api/test/database/pharmacy-prescription-source.integration.sql`;
+The suite is `services/ehr-api/test/database/pharmacy-prescription-source.integration.sql`
+(removed with 0102, §30); while 0100 and 0101 were in force,
 `pharmacy-session-guards.integration.sql` and `database/tests/schema.integration.sql`
-now name real prescriptions in their acceptances. 0100 has no down migration;
+named real prescriptions in their acceptances (with 0102 they are 0099's text
+again). 0100 has no down migration;
 applying 0086's text of `pharmacy.validate_work_item()` restores the old
 behaviour. Today's pharmacy-api image sends the same INSERT and keeps working:
 a legitimate acceptance passes, and the four new refusals reach it as 23514
@@ -2637,14 +2639,15 @@ changed, or that the EHR changed after the dispensing's snapshot, fails with
 `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`. A route-backed dispensing takes no new
 lock.
 
-The suite is `services/ehr-api/test/database/pharmacy-dispensing-source.integration.sql`;
-`pharmacy-session-guards.integration.sql` now creates the prescriptions its
-work items name. 0101 has no down migration; applying 0086's text of
-`pharmacy.validate_dispensing()` restores the old behaviour. Today's
-pharmacy-api image sends the same INSERT and keeps working: a dispensing of a
-work item whose prescription is still active at the accepted version passes,
-and the new refusal reaches it as a 23514 error it answers 500 until the new
-image maps it.
+The suite is `services/ehr-api/test/database/pharmacy-dispensing-source.integration.sql`
+(removed with 0102, §30); while 0100 and 0101 were in force,
+`pharmacy-session-guards.integration.sql` created the prescriptions its work
+items name (with 0102 it is 0099's text again). 0101 has no down migration;
+applying 0086's text of `pharmacy.validate_dispensing()` restores the old
+behaviour. Today's pharmacy-api image sends the same INSERT and keeps
+working: a dispensing of a work item whose prescription is still active at
+the accepted version passes, and the new refusal reaches it as a 23514 error
+it answers 500 until the new image maps it.
 
 `audit-existing-work-items.sql` (beside the branch for the owner, not shipped)
 counts, besides §28's reasons, the same-facility work items not yet dispensed
@@ -2652,3 +2655,37 @@ whose prescription is now not active or at another version (what 0101 will
 hold back), those dispensed whose prescription has since changed, and those
 dispensed after a newer version of their prescription was recorded (what 0101
 now refuses), with no patient data.
+
+## 30. Pharmacy source checks switched off (0102, rollback)
+
+Migration 0102 (`0102_pharmacy_source_checks_rollback.sql`) exists only on
+the rollback branch, prepared at the owner's request so that it is ready if
+§28 and §29 ever have to be switched off; it is merged only then, and its
+declaration is unsigned until the owner decides to use it. It replaces
+`pharmacy.validate_work_item()` and `pharmacy.validate_dispensing()` with
+0086's text byte for byte and removes the two comments 0100 and 0101 added, so
+`pg_dump --schema-only` of the database equals a 0099 database's. It changes
+no table, column, policy, grant or API field.
+
+With it applied, §28 and §29 no longer hold: the database does not compare a
+same-facility acceptance with its `ehr.prescriptions` row, and a same-facility
+work item stays dispensable after its prescription is cancelled, held,
+completed, entered in error or changed, as before 0100. pharmacy-api keeps its
+mappings of `PRESCRIPTION_SOURCE_NOT_FOUND`, `PRESCRIPTION_SOURCE_NOT_ACTIVE`,
+`PRESCRIPTION_SOURCE_VERSION_MISMATCH`, `PRESCRIPTION_SOURCE_MISMATCH` and
+`PRESCRIPTION_SOURCE_NOT_DISPENSABLE`, but the database no longer raises
+them, so no request gets those answers; every other answer (among them
+`PRESCRIPTION_ROUTED` and the route-backed `PHARMACY_PRESCRIPTION_NOT_DISPENSABLE`)
+is unchanged. The EHR API's SERIALIZABLE order-route send and its calendar
+dates (§28) do not depend on the checks and stay. Route-backed work (orders
+between facilities) is unchanged: both order-route branches are byte for byte
+the same before and after.
+
+It refuses to run, with nothing applied, unless both functions are exactly as
+0100 and 0101 made them (and `pharmacy.validate_dispensing_reversal()`, the
+session readers, the two triggers, the columns read and the owner's
+privileges are as 0001-0101 left them). The guard's two suites are removed on
+that branch, and `schema.integration.sql` and
+`pharmacy-session-guards.integration.sql` go back to 0099's text.
+`ROLLBACK.md` at the root of that branch (not shipped) says when and how to
+use it, and how to renumber it if 0102 has been taken.
