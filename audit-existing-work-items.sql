@@ -1,12 +1,16 @@
--- Pharmacy acceptance source check (0100): how many EXISTING same-facility
--- Pharmacy work items do not match their EHR prescription. Read-only; counts
--- only (no id, name, patient, medicine or any other value leaves the
--- database). For the owner to run on production, before or after 0100: 0100
--- checks new acceptances only and changes no existing row, so the answer is
--- the same either way.
+-- Pharmacy source checks (0100 at acceptance, 0101 at dispensing): how many
+-- EXISTING same-facility Pharmacy work items do not match their EHR
+-- prescription, and how many are or were dispensed after that prescription
+-- changed or stopped. Read-only; counts only (no id, name, patient, medicine
+-- or any other value leaves the database). For the owner to run on
+-- production, before or after 0100 and 0101: they check new acceptances and
+-- dispensings only and change no existing row, so the answer is the same
+-- either way (except that the "now" counts below move as the EHR and
+-- Pharmacy keep working).
 --
 -- How to run: psql (or any client) connected to the production database,
---   psql "$DATABASE_URL" -X -f audit-existing-work-items.sql
+--   psql "$DATABASE_URL" -X -x -f audit-existing-work-items.sql
+-- (-x prints one count per line)
 -- as a role that bypasses row-level security (rolsuper or rolbypassrls):
 -- pharmacy.work_items, ehr.prescriptions and ehr.record_versions force
 -- row-level security, so any other role would see only part of them. The
@@ -27,6 +31,13 @@
 -- 0100's own rules: texts equal as stored or with what JavaScript's trim()
 -- removes cut from the stored text; the dose by value; prescribed_at equal to
 -- created_at or created_at cut to the millisecond; ids and dates exactly.
+-- It also finds the version that was current when the work item was accepted:
+-- the newest ehr.record_versions row recorded at or before accepted_at (both
+-- are the database's clock_timestamp()). 0100 compares an acceptance with the
+-- prescription as it stands at that moment, so a work item that names an
+-- older version than that one, or that was accepted when the prescription
+-- was no longer active, is one 0100 would have refused. When no history row
+-- was recorded by accepted_at, only the version it names is judged.
 --
 -- Each work item lands in exactly one row of the answer, in this order:
 --   missing                     no ehr.prescriptions row has its id;
@@ -36,17 +47,53 @@
 --   other_encounter             same patient and facility, another encounter;
 --   version_not_found           neither the history nor the current row has
 --                               the version it names;
---   not_active_at_acceptance    that version's status was not 'active';
+--   not_active_at_acceptance    the version it names, or the version current
+--                               when it was accepted, was not 'active' (for
+--                               example cancelled or completed before Pharmacy
+--                               accepted it; 0100: PRESCRIPTION_SOURCE_NOT_ACTIVE);
+--   stale_version_at_acceptance a newer, still active version was current when
+--                               it was accepted (the prescription had changed;
+--                               0100: PRESCRIPTION_SOURCE_VERSION_MISMATCH);
 --   fields_differ               medication, dose, route, frequency,
 --                               instructions, dates, prescriber or time
---                               differ from that version;
+--                               differ from the version it names;
 --   matches                     none of the above (0100 would have accepted
 --                               it), of which matches_exactly needed no trim
 --                               or millisecond rule.
--- total = the sum of the seven. Also: route_backed (not judged here) and
--- fields_differ_dispensed / not_active_dispensed (of those two rows, how
--- many were dispensed and not reversed: the ones that matter clinically).
--- Every count should be 0 except matches, matches_exactly and route_backed.
+-- total = the sum of the eight. Also: route_backed (not judged here) and
+-- not_active_dispensed / stale_version_dispensed / fields_differ_dispensed
+-- (of those three rows, how many were dispensed and not reversed: the ones
+-- that matter clinically).
+--
+-- Then, for the same work items whose prescription exists, what has happened
+-- SINCE they were accepted (the prescription as it stands now; "dispensed"
+-- means a dispensing that was not reversed):
+--   undispensed_now_not_active  not dispensed, and the prescription is now
+--                               not 'active' (cancelled, on hold, completed,
+--                               entered in error). From 0101 Pharmacy cannot
+--                               dispense these (409
+--                               PHARMACY_PRESCRIPTION_NOT_DISPENSABLE); the
+--                               prescriber writes a new prescription if one is
+--                               still needed;
+--   undispensed_now_changed     not dispensed, and the prescription is now at
+--                               another version than the one accepted (any
+--                               change, including the status changes above);
+--                               from 0101 none of these can be dispensed;
+--   dispensed_now_changed       dispensed, and the prescription is now not
+--                               'active' or at another version (often normal:
+--                               completed after it was dispensed);
+--   dispensed_after_a_change    dispensed, and a newer version of the
+--                               prescription than the one accepted was
+--                               recorded at or before the first dispensing:
+--                               dispensed after the prescription had been
+--                               cancelled, held or changed (what 0101 now
+--                               refuses; these matter clinically).
+-- Every count should be 0 except matches, matches_exactly, route_backed and
+-- the three "now" counts undispensed_now_not_active, undispensed_now_changed
+-- and dispensed_now_changed. The first two are the work items 0101 holds
+-- back from dispensing (not an error in the data: the prescription changed
+-- after Pharmacy accepted it); the third is mostly ordinary (a prescription
+-- completed after it was dispensed).
 
 begin transaction isolation level repeatable read read only;
 set local row_security = off;
@@ -72,19 +119,42 @@ accepted as (
          prescription.id as prescription_id,
          prescription.patient_id as rx_patient_id, prescription.facility_id as rx_facility_id,
          prescription.encounter_id as rx_encounter_id,
+         work.source_ehr_prescription_version as named_version,
+         at_acceptance.version_no as version_at_acceptance,
+         at_acceptance.resulting_state->>'status' as status_at_acceptance,
          coalesce(history.resulting_state,
                   case when prescription.row_version = work.source_ehr_prescription_version
                        then to_jsonb(prescription) end) as state,
+         prescription.status as rx_status_now,
+         prescription.row_version as rx_version_now,
          exists (select 1 from pharmacy.dispensings dispensing
                   where dispensing.work_item_id = work.id
                     and not exists (select 1 from pharmacy.dispensing_reversals reversal
-                                     where reversal.dispensing_id = dispensing.id)) as dispensed
+                                     where reversal.dispensing_id = dispensing.id)) as dispensed,
+         -- A newer version than the one accepted, recorded at or before the
+         -- first dispensing (reversed or not) of this work item.
+         exists (select 1 from ehr.record_versions newer
+                  where newer.resource_type = 'prescriptions'
+                    and newer.resource_id = work.source_ehr_prescription_id::text
+                    and newer.version_no > work.source_ehr_prescription_version
+                    and newer.recorded_at <= (select min(dispensing.dispensed_at) from pharmacy.dispensings dispensing
+                                               where dispensing.work_item_id = work.id)) as dispensed_after_change
     from same_facility work
     left join ehr.prescriptions prescription on prescription.id = work.source_ehr_prescription_id
     left join ehr.record_versions history
       on history.resource_type = 'prescriptions'
      and history.resource_id = work.source_ehr_prescription_id::text
      and history.version_no = work.source_ehr_prescription_version
+    -- The version current when the work item was accepted (the newest one
+    -- recorded before accepted_at): 0100 refuses any other.
+    left join lateral (
+      select later.version_no, later.resulting_state
+        from ehr.record_versions later
+       where later.resource_type = 'prescriptions'
+         and later.resource_id = work.source_ehr_prescription_id::text
+         and later.recorded_at <= work.accepted_at
+       order by later.version_no desc
+       limit 1) at_acceptance on true
 ),
 compared as (
   select accepted.*,
@@ -121,7 +191,8 @@ compared as (
     from accepted cross join js_whitespace ws
 ),
 judged as (
-  select compared.dispensed, compared.texts_and_time_exact,
+  select compared.dispensed, compared.texts_and_time_exact, compared.prescription_id, compared.named_version,
+         compared.rx_status_now, compared.rx_version_now, compared.dispensed_after_change,
          case
            when compared.prescription_id is null then 'missing'
            when compared.rx_patient_id is distinct from compared.patient_id
@@ -129,7 +200,11 @@ judged as (
              or compared.rx_facility_id is distinct from compared.ordering_facility_id then 'other_patient_or_facility'
            when compared.rx_encounter_id is distinct from compared.source_encounter_id then 'other_encounter'
            when compared.state is null then 'version_not_found'
-           when compared.state->>'status' is distinct from 'active' then 'not_active_at_acceptance'
+           when compared.state->>'status' is distinct from 'active'
+             or (compared.version_at_acceptance is not null
+                 and compared.status_at_acceptance is distinct from 'active') then 'not_active_at_acceptance'
+           when compared.version_at_acceptance is not null
+            and compared.version_at_acceptance <> compared.named_version then 'stale_version_at_acceptance'
            when not compared.fields_match then 'fields_differ'
            else 'matches'
          end as outcome
@@ -141,12 +216,23 @@ select count(*) as total,
        count(*) filter (where outcome = 'other_encounter') as other_encounter,
        count(*) filter (where outcome = 'version_not_found') as version_not_found,
        count(*) filter (where outcome = 'not_active_at_acceptance') as not_active_at_acceptance,
+       count(*) filter (where outcome = 'stale_version_at_acceptance') as stale_version_at_acceptance,
        count(*) filter (where outcome = 'fields_differ') as fields_differ,
        count(*) filter (where outcome = 'matches') as matches,
        count(*) filter (where outcome = 'matches' and texts_and_time_exact) as matches_exactly,
        count(*) filter (where outcome = 'not_active_at_acceptance' and dispensed) as not_active_dispensed,
        count(*) filter (where outcome = 'fields_differ' and dispensed) as fields_differ_dispensed,
-       (select count(*) from pharmacy.work_items work where work.order_route_id is not null) as route_backed
+       count(*) filter (where outcome = 'stale_version_at_acceptance' and dispensed) as stale_version_dispensed,
+       (select count(*) from pharmacy.work_items work where work.order_route_id is not null) as route_backed,
+       count(*) filter (where prescription_id is not null and not dispensed
+                          and rx_status_now is distinct from 'active') as undispensed_now_not_active,
+       count(*) filter (where prescription_id is not null and not dispensed
+                          and rx_version_now is distinct from named_version) as undispensed_now_changed,
+       count(*) filter (where prescription_id is not null and dispensed
+                          and (rx_status_now is distinct from 'active'
+                               or rx_version_now is distinct from named_version)) as dispensed_now_changed,
+       count(*) filter (where prescription_id is not null and dispensed and dispensed_after_change)
+         as dispensed_after_a_change
   from judged;
 
 rollback;
