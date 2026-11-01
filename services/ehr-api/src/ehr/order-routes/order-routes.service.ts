@@ -145,7 +145,12 @@ export class OrderRoutesService {
         resourceId: row.route_id,
         details: { routeId: row.route_id, replayed },
       };
-    });
+    // SERIALIZABLE (the review of 0100): the send locks the order only FOR NO KEY UPDATE and
+    // reads the Lab or Pharmacy work items, so a same-facility acceptance of the same order
+    // that overlaps it fails with 40001 (its retry then sees the route) instead of leaving a
+    // live route and a dispensable work item. DatabaseService runs a send PostgreSQL cancels
+    // again; ehr.send_order_route replays its own idempotency key.
+    }, undefined, { isolationLevel: 'SERIALIZABLE' });
   }
 
   /** The order's routes, newest first, with the attestation, events and what came back (C3). */

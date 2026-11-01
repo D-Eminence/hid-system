@@ -1382,6 +1382,11 @@ revoke all on function identity.sealed_demo_ids(text),
 -- granted to no role; a trigger needs no EXECUTE to fire.
 revoke all on function pharmacy.validate_work_item() from public;
 
+-- Pharmacy dispensing source check (0101): pharmacy.validate_dispensing, the
+-- SECURITY DEFINER trigger function 0101 replaces (owner and ACL kept), is
+-- granted to no role; a trigger needs no EXECUTE to fire.
+revoke all on function pharmacy.validate_dispensing() from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),

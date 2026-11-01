@@ -51,7 +51,7 @@ declare
   body text := (select prosrc from pg_proc where oid = 'pharmacy.validate_work_item()'::regprocedure);
   mismatch text;
 begin
-  if md5(body) <> '8fb2944de050dedd973e5d7f07d9c301' then
+  if md5(body) <> 'e2411539ee8c95a02dad46c03e24db05' then
     raise exception 'pharmacy.validate_work_item is not 0100''s (md5 %)', md5(body);
   end if;
   -- 0086's order-route branch (the 2327 characters after its IF) and 0086's
