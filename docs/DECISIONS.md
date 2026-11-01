@@ -6457,11 +6457,15 @@ Decision:
   the account's password change or, for staff, its authenticator's activation
   opens no session.
 - **Sign-out on a product signs out everywhere.** Product sign-out runs
-  today's sign-out, then answers the provider's end-session address (only
-  `client_id` and `post_logout_redirect_uri`) for the frontend to navigate to; the provider ends its session and sends back-channel
-  logout to every product, which ends every sign-in of that `sid` (or of `sub`).
-  The first refused session check or refresh on another host then clears that
-  host's cookies, so the edge shows its landing page.
+  today's sign-out and ends every other sign-in of the account of the same
+  kind, which covers sign-ins the provider never saw (a product's own sign-in
+  page, the fallback) or an earlier provider session opened. It then answers
+  the provider's end-session address (only `client_id` and
+  `post_logout_redirect_uri`) for the frontend to navigate to; the provider
+  ends its session and sends back-channel logout to every product, which ends
+  every sign-in of that `sid` (or of `sub`). The first refused session check
+  or refresh on another host then clears that host's cookies, so the edge
+  shows its landing page.
 - **Fail closed, and never loop.** Discovery and key sets are cached five
   minutes at most and never used stale; a provider that cannot be reached
   sends the browser to the product's own sign-in page. For two minutes after
@@ -6511,6 +6515,9 @@ Residual risks:
   database; a browser keeps its cookies until its next request reaches
   Identity, which then clears them. Until that request, the edge shows the
   workspace, which then finds the sign-in ended.
+- Product sign-out ends the account's sign-ins of that kind on other devices
+  too: Identity cannot tell browsers apart. Where the provider session on that
+  device lives, its next page hands off again without asking.
 - The back-channel route is reachable through the edge like every API; only a
   fresh logout token signed by the provider for that client ends anything, and
   each is accepted once.
