@@ -99,7 +99,16 @@ uses an implemented IAM-authenticated issuer with the following exact bindings:
 | OCR API | `hid:staging:ocr-api` | `hid-identity-api`, `hid-ehr-api`, `hid-lab-api`, `hid-pharmacy-api` |
 | Outreach API | `hid:staging:outreach-api` | `hid-identity-api` |
 
-These are six subjects and eleven caller/audience bindings. Only API Gateway's
+These are six subjects and eleven caller/audience bindings for the stack this
+file describes (`infra/aws`, whose issuer copy accepts at most six callers).
+Production runs on the Terraform stack on `dev`, whose issuer
+(`infra/terraform/modules/application/runtime/workload-issuer/issuer.mjs`)
+accepts one to eight callers. When its document scanning switch is on, a
+seventh caller joins the same six: the document scan bridge Lambda's role,
+subject `hid:staging:document-scanner`, audience `hid-identity-api` only
+(owner decision D1 of 2026-10-31; [INTERFACE_CONTRACT.md section
+29](INTERFACE_CONTRACT.md)). That issuer's limit is raised in its own apply
+before the seventh caller is added. Only API Gateway's
 IAM request context identifies the caller; the token request contains an
 audience and cannot select a subject or role. The issuer rejects unmapped IAM
 roles, foreign account/API/stage context, and unauthorized audiences. Its
