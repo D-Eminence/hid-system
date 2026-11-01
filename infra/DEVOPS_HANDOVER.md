@@ -409,7 +409,10 @@ The fix is a separate reviewed change: in both policies, let the
 
 Further cost items the owner approved on 1 November 2026, each a reviewed
 setting in this Terraform. Plan and apply them with the section 4 helper,
-together with the Monitoring cost change above.
+together with the Monitoring cost change above. The helper reads the committed
+`production.tfvars`; a plan from the Terraform CI workflow uses the `TFVARS`
+secret instead and shows the ECR change only if that secret also has the two
+`ecr_` lines.
 
 #### Expected plan for this branch
 
@@ -417,9 +420,11 @@ together with the Monitoring cost change above.
 | --- | --- | --- |
 | Monitoring cost (above) | `module.application.aws_ecs_cluster.production[0]` and 12 `module.operations.aws_cloudwatch_metric_alarm.runtime_tasks[...]` | 13 updated in place |
 | 1. Bedrock endpoint in one zone | `module.ai[0].aws_vpc_endpoint.bedrock_runtime` | 1 updated in place |
+| 2. ECR clean-up | 12 `module.application.aws_ecr_lifecycle_policy.workload["<service>"]` | 12 replaced (the provider cannot edit a lifecycle policy; see item 2) |
 
-Total: `Plan: 0 to add, 14 to change, 0 to destroy` when no other dev change is
-pending. Other changes in the plan come from dev commits not yet applied.
+Total: `Plan: 12 to add, 14 to change, 12 to destroy` when no other dev change
+is pending; the 12 added and 12 destroyed are the same 12 lifecycle policies.
+Other changes in the plan come from dev commits not yet applied.
 
 #### 1. Bedrock endpoint in one zone
 
@@ -459,6 +464,162 @@ models only), its security group and private DNS do not change.
 - Rollback: set economy's `bedrock_endpoint_az_count = null` in `locals.tf` in a
   reviewed commit on dev and apply; the endpoint gets its eu-west-1b interface
   back in place within a few minutes.
+
+#### 2. ECR clean-up
+
+Each of the 12 repositories `staging/hid/<service>` has three lifecycle rules.
+Rule 1 keeps every image with a `retain-` tag. Before every production
+deployment the release helpers tag the image the service runs and the image
+that replaces it `retain-<digest hex>` (and the token agent image), never
+remove those tags, and refuse to deploy unless rule 1 keeps every `retain-`
+image. So the image each service runs, the previous release and every earlier
+production release are never expired. Rule 1 does not change.
+
+| Rule | Before | Production from this change |
+| --- | --- | --- |
+| 1 | keep every `retain-` image | unchanged |
+| 2 | untagged images 7 days after push | untagged images 14 days after push (`ecr_untagged_image_expiry_days = 14`) |
+| 3 | any other image beyond the newest 25, at any age | any other image older than 90 days (`ecr_tagged_image_expiry_days = 90`) |
+
+- ECR never expires an image that an image index still references, and decides
+  each image by the first rule its tags match, one count type per rule. "Beyond
+  the newest 10 and older than 90 days" therefore cannot be one rule. Rule 3
+  uses the age, so no image younger than 90 days expires. Every release stays
+  (all of them, not only the newest 10); trimming releases would need a release
+  helper change. A build that never ran in production can expire once older
+  than 90 days even if its repository had fewer than 10 newer builds; the dry
+  run below marks those `note`.
+- Cost: ECR storage is USD 0.10 per GB a month. Busy repositories can now keep
+  more than 25 images (every build of the last 90 days); the gain is that no
+  image a rollback might want is lost. The dry run totals what would go now.
+- Other environments keep today's rules (the two inputs default to 7 and
+  null). Terraform refuses age-based expiry where rule 1 is absent.
+- Plan: the 12 `module.application.aws_ecr_lifecycle_policy.workload["<service>"]`
+  "must be replaced". The AWS provider (6.66.0) cannot edit a lifecycle policy:
+  for each repository it deletes the policy and puts the new one straight after,
+  seconds apart. No image is touched by this. While a repository has no policy
+  nothing expires, and a deployment would stop at its check of rule 1; none
+  can start, because the section 4 helper holds the release lease during the
+  apply. If an apply stops between a delete and a put, run it again.
+
+Before applying, back up, check and dry-run from `infra/terraform`, in the same
+PowerShell session as section 4 (it needs `$env:RELEASE_KMS_KEY_ARN`). All
+three steps are read-only for ECR. First, the inventory of every repository's
+images, and today's rules, to the private release bucket:
+
+```powershell
+$date = [datetime]::UtcNow.ToString('yyyy-MM-dd'); $dir = "ecr-inventory-$date"
+New-Item -ItemType Directory -Force $dir | Out-Null
+$repos = @((aws ecr describe-repositories --region eu-west-1 --output json | ConvertFrom-Json).repositories.repositoryName | Where-Object { $_ -like 'staging/hid/*' } | Sort-Object)
+"$($repos.Count) repositories (expect 12)"
+foreach ($r in $repos) {
+  $n = $r -replace '/', '-'
+  aws ecr describe-images --repository-name $r --region eu-west-1 --output json | Set-Content -Encoding ascii "$dir/ecr-$n-$date.json"
+  aws ecr get-lifecycle-policy --repository-name $r --region eu-west-1 --query lifecyclePolicyText --output text | Set-Content -Encoding ascii "$dir/lifecycle-$n-$date.json"
+}
+aws s3 cp $dir "s3://hid-staging-releases-659225405023-eu-west-1/ecr-inventory/$date/" --recursive --sse aws:kms --sse-kms-key-id $env:RELEASE_KMS_KEY_ARN --region eu-west-1
+aws s3 ls "s3://hid-staging-releases-659225405023-eu-west-1/ecr-inventory/$date/" --region eu-west-1
+```
+
+Expect 24 files (an `ecr-staging-hid-<service>-<date>.json` inventory and a
+`lifecycle-...` rules file per repository). The inventory records every digest,
+tag, push date and size. Keep the local folder until the clean-up has run.
+
+Second, every image production uses must carry a `retain-` tag: the images of
+the 12 running task definitions (with the token agent), the latest migration
+task definition and the images in `production.tfvars`:
+
+```powershell
+$used = @{}
+foreach ($s in (aws ecs list-services --cluster hid-production --region eu-west-1 --output json | ConvertFrom-Json).serviceArns) {
+  $td = aws ecs describe-services --cluster hid-production --services $s --region eu-west-1 --query "services[0].taskDefinition" --output text
+  (aws ecs describe-task-definition --task-definition $td --region eu-west-1 --output json | ConvertFrom-Json).taskDefinition.containerDefinitions.image | ForEach-Object { $used[$_] = $td }
+}
+$mig = aws ecs list-task-definitions --family-prefix hid-staging-database-migration --status ACTIVE --sort DESC --region eu-west-1 --query "taskDefinitionArns[0]" --output text
+(aws ecs describe-task-definition --task-definition $mig --region eu-west-1 --output json | ConvertFrom-Json).taskDefinition.containerDefinitions.image | ForEach-Object { $used[$_] = $mig }
+[regex]::Matches((Get-Content environments/production.tfvars -Raw), '(?m)^\s*("[a-z-]+"|migration_image_uri|production_workload_token_agent_image_uri)\s*=\s*"([^"]+@sha256:[a-f0-9]{64})"') | ForEach-Object { if (-not $used.ContainsKey($_.Groups[2].Value)) { $used[$_.Groups[2].Value] = 'production.tfvars' } }
+"$($used.Count) images in use"
+foreach ($i in $used.Keys) {
+  $repo, $digest = ($i -replace '^[^/]+/', '') -split '@'
+  $tags = if ($digest) { aws ecr describe-images --repository-name $repo --image-ids imageDigest=$digest --region eu-west-1 --query "imageDetails[0].imageTags" --output json | ConvertFrom-Json }
+  $verdict = if (-not $digest) { 'STOP (not pinned to a digest)' } elseif (@($tags | Where-Object { $_ -like 'retain-*' }).Count) { 'ok' } else { 'STOP (missing or no retain- tag)' }
+  "$verdict $i ($($used[$i]))"
+}
+```
+
+Expect every line `ok`. On a `STOP`, do not apply this item: drop the two
+`ecr_` lines from the commit (the other items can go ahead) and find out why
+the image was not tagged; the next release of that service through the helper
+tags it.
+
+Third, a dry run: ECR's lifecycle preview applies the new rules to today's
+images without expiring anything or changing the live rules:
+
+```powershell
+@'
+{"rules": [
+  {"rulePriority": 1, "description": "Protect named live and rollback digests from lower priority cleanup",
+   "selection": {"tagStatus": "tagged", "tagPrefixList": ["retain-"], "countType": "imageCountMoreThan", "countNumber": 1000000},
+   "action": {"type": "expire"}},
+  {"rulePriority": 2, "description": "Expire untagged build residue",
+   "selection": {"tagStatus": "untagged", "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 14},
+   "action": {"type": "expire"}},
+  {"rulePriority": 3, "description": "Expire images older than 90 days that carry no retain- tag",
+   "selection": {"tagStatus": "any", "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 90},
+   "action": {"type": "expire"}}
+]}
+'@ | Set-Content -Encoding ascii ecr-new-rules.json
+$inUse = @($used.Keys | ForEach-Object { ($_ -split '@')[1] }); $bytes = 0
+foreach ($r in $repos) {
+  $images = @((Get-Content "$dir/ecr-$($r -replace '/', '-')-$date.json" -Raw | ConvertFrom-Json).imageDetails)
+  $newest = @($images | Sort-Object { [datetimeoffset]$_.imagePushedAt } -Descending | Select-Object -First 10 | ForEach-Object imageDigest)
+  aws ecr start-lifecycle-policy-preview --repository-name $r --lifecycle-policy-text file://ecr-new-rules.json --region eu-west-1 | Out-Null
+  do { Start-Sleep -Seconds 5; $p = aws ecr get-lifecycle-policy-preview --repository-name $r --region eu-west-1 --output json | ConvertFrom-Json } while ($p.status -eq 'IN_PROGRESS')
+  foreach ($x in @($p.previewResults)) {
+    $size = ($images | Where-Object imageDigest -eq $x.imageDigest | Select-Object -First 1).imageSizeInBytes; $bytes += $size
+    $verdict = if ($inUse -contains $x.imageDigest -or @($x.imageTags | Where-Object { $_ -like 'retain-*' }).Count) { 'STOP' } elseif ($newest -contains $x.imageDigest) { 'note' } else { 'expire' }
+    '{0} {1} {2} {3} pushed {4}, rule {5}, {6:N0} MB' -f $verdict, $r, $x.imageDigest.Substring(7, 12), (@($x.imageTags) -join ','), $x.imagePushedAt, $x.appliedRulePriority, ($size / 1MB)
+  }
+  '{0}: preview {1}, {2} of {3} images would expire' -f $r, $p.status, @($p.previewResults).Count, $images.Count
+}
+'At most {0:N1} GB, about USD {1:N2} a month' -f ($bytes / 1GB), ($bytes / 1GB * 0.10)
+```
+
+Every repository must say `preview COMPLETE`. `STOP` (an image in use or with a
+`retain-` tag would expire) must never appear: do not apply, and report it.
+`note` is one of the 10 newest images of its repository: older than 90 days,
+never run in production, and in the backup; apply only if the owner accepts
+losing it. `expire` lines are what ECR removes within a day of the apply. The
+total is an upper bound, since images share layers.
+
+After applying, every repository shows the new rules (expect
+`1:imageCountMoreThan/1000000 2:sinceImagePushed/14 3:sinceImagePushed/90`):
+
+```powershell
+foreach ($r in $repos) { $rules = (aws ecr get-lifecycle-policy --repository-name $r --region eu-west-1 --query lifecyclePolicyText --output text | ConvertFrom-Json).rules; '{0}: {1}' -f $r, (($rules | ForEach-Object { '{0}:{1}/{2}' -f $_.rulePriority, $_.selection.countType, $_.selection.countNumber }) -join ' ') }
+```
+
+A day later, `aws ecr describe-images` per repository lists exactly the
+inventory minus the `expire` (and accepted `note`) lines. The next backend
+release runs as usual: the helper reads rule 1 before tagging.
+
+Rollback:
+
+- Rules: delete the two `ecr_` lines from `production.tfvars` in a reviewed
+  commit on dev, plan (the same 12 policies replaced, back to 7 days and the
+  newest 25) and apply. In an emergency, put a repository's backed-up rules
+  back at once with `aws ecr put-lifecycle-policy --repository-name <repository>
+  --lifecycle-policy-text file://<folder>/lifecycle-<repository with dashes>-<date>.json --region eu-west-1`,
+  then make the same Terraform change, or the next apply puts the new rules
+  back.
+- Images: ECR cannot restore an expired image. Rebuild it from its code
+  version: its `ci-<commit>-<run>-<attempt>-<target>` tag in the inventory
+  names the commit. Put that version of the service's code on the release
+  branch `staging-novu-ci-20261005` in a reviewed commit and run "Production
+  backend candidates" for that component (it publishes only from that branch).
+  The rebuilt image has a new digest and goes through the normal release
+  review. The live and previous releases never need this: they keep their
+  `retain-` tags.
 
 ## 5. Build flow and deployment controls
 

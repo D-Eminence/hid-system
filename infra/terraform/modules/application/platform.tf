@@ -48,14 +48,13 @@ locals {
   # Manual production releases need the same live/rollback image protection as
   # automated releases. This creates no deployment roles or release resources.
   protect_release_images = var.enable_deployment_automation || var.deployment_release_environment == "production"
-}
 
-resource "aws_ecr_lifecycle_policy" "workload" {
-  for_each   = aws_ecr_repository.workload
-  repository = each.value.name
-  policy = jsonencode({ rules = concat(local.protect_release_images ? [{
-    rulePriority = 1
-    description  = "Protect named live and rollback digests from lower priority cleanup"
+  # ECR expires an image under at most one rule: the first, by priority, whose
+  # tags it matches. Rule 1 must stay exactly as it is: the release helpers tag
+  # the image each service runs and the previous one retain-<digest hex> and
+  # refuse to deploy unless rule 1 keeps every retain- image.
+  ecr_lifecycle_rules = concat(local.protect_release_images ? [{
+    description = "Protect named live and rollback digests from lower priority cleanup"
     selection = {
       tagStatus     = "tagged"
       tagPrefixList = ["retain-"]
@@ -65,21 +64,19 @@ resource "aws_ecr_lifecycle_policy" "workload" {
     action = { type = "expire" }
     }] : [], [
     {
-      rulePriority = local.protect_release_images ? 2 : 1
-      description  = "Expire untagged build residue"
+      description = "Expire untagged build residue"
       selection = {
         tagStatus   = "untagged"
         countType   = "sinceImagePushed"
         countUnit   = "days"
-        countNumber = 7
+        countNumber = var.ecr_untagged_image_expiry_days
       }
       action = {
         type = "expire"
       }
-    },
+    }], var.ecr_tagged_image_expiry_days == null ? [
     {
-      rulePriority = local.protect_release_images ? 3 : 2
-      description  = "Bound retained immutable releases"
+      description = "Bound retained immutable releases"
       selection = {
         tagStatus   = "any"
         countType   = "imageCountMoreThan"
@@ -88,8 +85,27 @@ resource "aws_ecr_lifecycle_policy" "workload" {
       action = {
         type = "expire"
       }
-    }
-  ]) })
+    }] : [], var.ecr_tagged_image_expiry_days == null ? [] : [
+    {
+      description = "Expire images older than ${var.ecr_tagged_image_expiry_days} days that carry no retain- tag"
+      selection = {
+        tagStatus   = "any"
+        countType   = "sinceImagePushed"
+        countUnit   = "days"
+        countNumber = var.ecr_tagged_image_expiry_days
+      }
+      action = {
+        type = "expire"
+      }
+  }])
+}
+
+resource "aws_ecr_lifecycle_policy" "workload" {
+  for_each   = aws_ecr_repository.workload
+  repository = each.value.name
+  # The root deployment guard refuses age-based expiry where rule 1 is absent.
+  policy = jsonencode({ rules = [for index, rule in local.ecr_lifecycle_rules :
+  merge(rule, { rulePriority = index + 1 })] })
 }
 
 resource "aws_ecs_cluster" "main" {

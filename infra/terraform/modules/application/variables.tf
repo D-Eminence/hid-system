@@ -332,6 +332,18 @@ variable "repository_image_count" {
   type = number
 }
 
+variable "ecr_untagged_image_expiry_days" {
+  description = "Days after push before an untagged image expires."
+  type        = number
+  default     = 7
+}
+
+variable "ecr_tagged_image_expiry_days" {
+  description = "null: tagged images beyond the newest repository_image_count expire. A number: tagged images without a retain- tag expire that many days after push."
+  type        = number
+  default     = null
+}
+
 variable "alarm_topic_arn" {
   type = string
 }

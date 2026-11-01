@@ -138,6 +138,8 @@ module "application" {
   application_log_retention_days      = var.application_log_retention_days
   security_log_retention_days         = var.security_log_retention_days
   repository_image_count              = local.profile.repository_image_count
+  ecr_untagged_image_expiry_days      = var.ecr_untagged_image_expiry_days
+  ecr_tagged_image_expiry_days        = var.ecr_tagged_image_expiry_days
   alarm_topic_arn                     = module.operations.alert_topic_arn
   enable_deployment_automation        = var.enable_deployment_automation
   production_deployment_approval_mode = var.production_deployment_approval_mode

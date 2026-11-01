@@ -1,3 +1,8 @@
+output "ecr_lifecycle_policies" {
+  description = "Lifecycle rules of each workload repository."
+  value       = { for name, policy in aws_ecr_lifecycle_policy.workload : name => jsondecode(policy.policy) }
+}
+
 output "ecr_repository_urls" {
   value = {
     for name, repository in aws_ecr_repository.workload :

@@ -51,6 +51,10 @@ resource "terraform_data" "deployment_guard" {
       error_message = "Web push requires web_push_vapid_public_key, and webPushVapidPrivateKey already stored in the notification-provider secret."
     }
     precondition {
+      condition     = var.ecr_tagged_image_expiry_days == null || var.enable_deployment_automation || var.promote_existing_staging || var.environment == "production"
+      error_message = "Age-based ECR expiry needs the retain- rule that keeps live and rollback images (production or deployment automation)."
+    }
+    precondition {
       condition     = var.environment == "staging" || var.staging_mode == "sleep"
       error_message = "staging_mode is only meaningful for staging; leave it at sleep elsewhere."
     }

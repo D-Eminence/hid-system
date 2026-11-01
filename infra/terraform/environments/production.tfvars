@@ -239,3 +239,11 @@ ecs_migration_phase = "retired"
 # Insights "enhanced" cost about USD 104 a month. The running-task alarms read
 # the free AWS/ECS LiveTaskCount metric. See DEVOPS_HANDOVER.md "Monitoring cost".
 ecs_container_insights = "disabled"
+
+# ECR clean-up (owner approved 1 November 2026): untagged build residue expires
+# 14 days after push, other images 90 days after push. Images with a retain- tag
+# (the image each service runs, the previous release and every earlier
+# release) never expire. Back up the image inventory before applying; see
+# DEVOPS_HANDOVER.md "AWS cost".
+ecr_untagged_image_expiry_days = 14
+ecr_tagged_image_expiry_days   = 90

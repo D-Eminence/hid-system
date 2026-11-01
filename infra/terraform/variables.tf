@@ -515,6 +515,35 @@ variable "web_push_subject" {
   }
 }
 
+# ECR clean-up. Images with a retain- tag (the image each service runs, the
+# previous release and every earlier production release) never expire: the
+# release helpers tag them and refuse to deploy unless lifecycle rule 1 keeps
+# every retain- image. These settings only time the other images.
+variable "ecr_untagged_image_expiry_days" {
+  description = "Days after push before an untagged image (build residue) expires. ECR never expires an image that an image index still references."
+  type        = number
+  default     = 7
+
+  validation {
+    condition     = var.ecr_untagged_image_expiry_days >= 1 && var.ecr_untagged_image_expiry_days <= 365 && floor(var.ecr_untagged_image_expiry_days) == var.ecr_untagged_image_expiry_days
+    error_message = "ecr_untagged_image_expiry_days must be a whole number of days from 1 to 365."
+  }
+}
+
+variable "ecr_tagged_image_expiry_days" {
+  description = "null keeps the profile's count rule (images beyond the newest repository_image_count expire at any age). A number expires tagged images without a retain- tag that many days after push instead, so no image younger than that expires."
+  type        = number
+  default     = null
+
+  validation {
+    condition = var.ecr_tagged_image_expiry_days == null || try(
+      var.ecr_tagged_image_expiry_days >= 30 && var.ecr_tagged_image_expiry_days <= 3650 &&
+      floor(var.ecr_tagged_image_expiry_days) == var.ecr_tagged_image_expiry_days,
+    false)
+    error_message = "ecr_tagged_image_expiry_days must be null or a whole number of days from 30 to 3650."
+  }
+}
+
 variable "alert_email" {
   type    = string
   default = ""
