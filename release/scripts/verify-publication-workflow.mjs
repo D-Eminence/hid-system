@@ -13,8 +13,64 @@ export function parseWorkflow(source) {
   return doc.toJS({ maxAliasCount: 0 })
 }
 
+// Only the infra/aws audit runs through the reviewed exception gate
+// (release/scripts/npm-audit-with-exceptions.mjs reading
+// security/npm-audit-exceptions.json); every other audit is plain npm audit.
+export const AWS_AUDIT_GATE = 'node release/scripts/npm-audit-with-exceptions.mjs infra/aws'
+export const PUBLISHER_AUDITS = Object.freeze({
+  tooling: ['npm --prefix release audit --audit-level=moderate', 'npm --prefix infra/cloudflare audit --audit-level=moderate', AWS_AUDIT_GATE, ''].join('\n'),
+})
+export const LOCAL_GATE_AUDITS = Object.freeze({
+  'release-contracts': 'npm --prefix release audit --audit-level=moderate',
+  'aws-release-trust': AWS_AUDIT_GATE,
+  'cloudflare-tuf': 'npm --prefix infra/cloudflare audit --audit-level=moderate',
+  'ehr-release-cache': 'for package in packages/offline packages/telemetry packages/ui apps/ehr; do\n  npm --prefix "${package}" audit --audit-level=moderate\ndone\n',
+})
+const AUDIT_COMMAND = /\bnpm\b[^\n]*\baudit\b|npm-audit-with-exceptions/
+
+// Pins every npm audit in a workflow: one audit step in each reviewed job with
+// exactly the reviewed commands, and nothing that can skip, reconfigure or
+// redirect an audit or rewrite the exception file before it is read.
+export function verifyAuditSteps(workflow, expected) {
+  assert.equal(workflow.defaults, undefined, 'workflow cannot change the default shell or directory')
+  const found = new Map()
+  for (const [name, job] of Object.entries(workflow.jobs)) {
+    const steps = (job.steps ?? []).filter(step => typeof step.run === 'string' && AUDIT_COMMAND.test(step.run))
+    if (steps.length === 0) continue
+    assert.equal(steps.length, 1, `job ${name} runs more than one audit step`)
+    assert.equal(job.defaults, undefined, `job ${name} cannot change the default shell or directory`)
+    for (const step of job.steps) {
+      if (step.uses?.startsWith('actions/setup-node@')) {
+        assert.deepEqual(Object.keys(step.with ?? {}).sort(), ['node-version', 'package-manager-cache'], `job ${name} cannot configure an npm registry`)
+      }
+    }
+    found.set(name, steps[0])
+  }
+  assert.deepEqual([...found.keys()].sort(), Object.keys(expected).sort(), 'npm audits run only in the reviewed jobs')
+  for (const [name, step] of found) {
+    assert.deepEqual(Object.keys(step).sort(), ['id', 'name', 'run'], `audit step in ${name} cannot be conditional, configured or allowed to fail`)
+    assert.equal(step.run, expected[name], `audit commands in ${name} must be exactly the reviewed ones`)
+  }
+  const environments = [workflow.env, ...Object.values(workflow.jobs).flatMap(job => [job.env, ...(job.steps ?? []).map(step => step.env)])]
+  for (const env of environments) {
+    for (const key of Object.keys(env ?? {})) assert.ok(!/^(?:npm_config_|node_options$)/i.test(key), `workflow cannot set ${key}`)
+  }
+  const audits = new Set(found.values())
+  for (const job of Object.values(workflow.jobs)) {
+    for (const step of job.steps ?? []) {
+      if (!audits.has(step)) assert.ok(!/npm-audit-|security\//.test(JSON.stringify(step)), 'only the reviewed audit step may use the audit gate or the exception file')
+    }
+  }
+  return true
+}
+
+export function verifyLocalGateWorkflow(source) {
+  return verifyAuditSteps(parseWorkflow(source), LOCAL_GATE_AUDITS)
+}
+
 export function verifyPublicationWorkflow(source) {
   const workflow = parseWorkflow(source)
+  verifyAuditSteps(workflow, PUBLISHER_AUDITS)
   assert.deepEqual(Object.keys(workflow.on), ['workflow_call'], 'publisher must be reusable-only')
   assert.deepEqual(workflow.permissions, { contents: 'read' }, 'default permissions are read-only')
   assert.deepEqual(Object.keys(workflow.jobs).sort(), ['publish', 'tooling'], 'unexpected authority-bearing job')
