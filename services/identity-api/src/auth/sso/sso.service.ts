@@ -231,14 +231,7 @@ export class SsoService {
             where account_id = $1 and session_kind in ('staff', 'patient') and revoked_at is null
             returning id::text, account_id::text, family_id::text`,
           [verified.accountId]);
-      const families = new Map<string, { id: string; account_id: string }>();
-      for (const row of ended.rows) if (!families.has(row.family_id)) families.set(row.family_id, row);
-      for (const row of families.values()) {
-        await this.tokens.recordSessionEvent(database, {
-          eventType: 'revoked', outcome: 'success', accountId: row.account_id, sessionId: row.id, event,
-          details: { reason: 'sso_logout', sso_client: client.id },
-        });
-      }
+      const endedSignIns = await this.recordEndedSignIns(database, client, ended.rows, event);
       await this.audit.recordWithClient(database, {
         correlationId: event.correlationId,
         actorType: 'system',
@@ -247,10 +240,49 @@ export class SsoService {
         outcome: 'success',
         sourceIp: event.sourceIp,
         userAgent: event.userAgent,
-        details: { client: client.id, matchedBy: verified.sid ? 'sid' : 'sub', endedSignIns: families.size },
+        details: { client: client.id, matchedBy: verified.sid ? 'sid' : 'sub', endedSignIns },
         provenance: 'system',
       });
-      return families.size;
+      return endedSignIns;
+    });
+  }
+
+  /**
+   * Product sign-out signs out everywhere (contract v2). After today's
+   * sign-out has ended the sign-in the request proved it holds, every other
+   * unrevoked sign-in of that account and kind ends too, whichever product
+   * issued it and however: through this provider session, an earlier one, or
+   * a product's own sign-in page (single sign-on's fallback), which the
+   * provider never saw, so its back-channel logout cannot reach it. A sign-in
+   * on another device ends as well, as the product cannot tell browsers
+   * apart; while that device's provider session lives, its next page hands
+   * off again quietly. Ended as back-channel logout ends them: the account
+   * row first (0073), reason `sso_logout`, a `revoked` session event per
+   * sign-in and one audit row. Answers how many ended.
+   */
+  async endAccountSignIns(client: SsoClient, signedOut: { accountId: string; kind: 'staff' | 'patient' },
+    event: SessionEventMetadata): Promise<number> {
+    return this.database.withSystemTransaction(event.correlationId, async (database) => {
+      await database.query('select auth.lock_account_sessions($1)', [signedOut.accountId]);
+      const ended = await database.query<{ id: string; account_id: string; family_id: string }>(
+        `update auth.sessions
+            set revoked_at = clock_timestamp(), revocation_reason = 'sso_logout', row_version = row_version + 1
+          where account_id = $1 and session_kind = $2 and revoked_at is null
+          returning id::text, account_id::text, family_id::text`,
+        [signedOut.accountId, signedOut.kind]);
+      const endedSignIns = await this.recordEndedSignIns(database, client, ended.rows, event);
+      await this.audit.recordWithClient(database, {
+        correlationId: event.correlationId,
+        actorType: signedOut.kind,
+        actorAccountId: signedOut.accountId,
+        action: 'auth.sso.logout',
+        resourceType: 'session',
+        outcome: 'success',
+        sourceIp: event.sourceIp,
+        userAgent: event.userAgent,
+        details: { client: client.id, endedSignIns },
+      });
+      return endedSignIns;
     });
   }
 
@@ -347,6 +379,20 @@ export class SsoService {
       details: { singleSignOn: client.id },
     });
     return session;
+  }
+
+  /** A `revoked` session event for each sign-in (family) a single sign-on sign-out ended; answers how many. */
+  private async recordEndedSignIns(database: PoolClient, client: SsoClient,
+    rows: readonly { id: string; account_id: string; family_id: string }[], event: SessionEventMetadata): Promise<number> {
+    const families = new Map<string, { id: string; account_id: string }>();
+    for (const row of rows) if (!families.has(row.family_id)) families.set(row.family_id, row);
+    for (const row of families.values()) {
+      await this.tokens.recordSessionEvent(database, {
+        eventType: 'revoked', outcome: 'success', accountId: row.account_id, sessionId: row.id, event,
+        details: { reason: 'sso_logout', sso_client: client.id },
+      });
+    }
+    return families.size;
   }
 
   /**

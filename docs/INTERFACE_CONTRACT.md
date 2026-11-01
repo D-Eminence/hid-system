@@ -778,7 +778,7 @@ read from the request.
 | `GET /auth/sso/start?return_to=<path>[&prompt=none\|login]` | A live session of this product, unless `prompt=login`: `303` to `return_to`. Otherwise `303` to the provider's authorization endpoint (`client_id`, `redirect_uri=https://<host>/api/v1/auth/sso/callback`, `response_type=code`, `scope=openid`, `state`, `nonce`, S256 `code_challenge`, `max_age` = `AUTH_ABSOLUTE_TTL_SECONDS`, `prompt` when given) with the transaction cookie. `return_to` must be a page path on this host (no other host, scheme, `//`, `\`, dot segment, encoded `/`, `\` or control character, encoded unreserved character (a letter, digit, `-`, `.`, `_` or `~`, which a browser decodes), fragment, `/api/` route or Health ID); anything else becomes `/`. `prompt=login` (a fresh sign-in, as before a PIN change) always goes to the provider; over a live session the callback then accepts only that session's account and ends the earlier sign-in. Provider unreachable: `303` to the client's `sign_in_path` |
 | `GET /auth/sso/callback` | Signed in: today's three session cookies (above), `303` to the transaction's return page. A silent attempt answered `login_required` (or `interaction_required`, `consent_required`, `account_selection_required`): `303` to the provider again, without `prompt`, with a new transaction. Anything else: `303` to `sign_in_path`, nothing in the address |
 | `POST /auth/sso/backchannel-logout` | Form `logout_token`, server to server, no cookie, CSRF token or Origin. `200` (empty) when accepted; `400 SSO_LOGOUT_TOKEN_INVALID` when refused (also a reused `jti`); `413` over 16 KiB; `503 SSO_PROVIDER_UNAVAILABLE` when the key set cannot be read |
-| `POST /auth/sso/logout` | Product sign-out: today's `POST /auth/logout` runs first, with its Origin and CSRF checks, refusals and audit, then `200 { "endSessionUrl": "<end_session_endpoint>?client_id=…&post_logout_redirect_uri=https%3A%2F%2F<host>%2F" }` for the frontend to navigate to. It never carries `id_token_hint` (the ID token names the account and would reach page JavaScript, the address bar and the history); RP-Initiated Logout 1.0 lets `client_id` stand in for it. Provider unreachable: `503 SSO_PROVIDER_UNAVAILABLE` (this product is signed out all the same). `POST /auth/logout` itself is unchanged (`204`) |
+| `POST /auth/sso/logout` | Product sign-out: today's `POST /auth/logout` runs first, with its Origin and CSRF checks, refusals and audit; when it ended a sign-in, every other unrevoked sign-in of that account and kind ends too (reason `sso_logout`); then `200 { "endSessionUrl": "<end_session_endpoint>?client_id=…&post_logout_redirect_uri=https%3A%2F%2F<host>%2F" }` for the frontend to navigate to. It never carries `id_token_hint` (the ID token names the account and would reach page JavaScript, the address bar and the history); RP-Initiated Logout 1.0 lets `client_id` stand in for it. Provider unreachable: `503 SSO_PROVIDER_UNAVAILABLE` (this product is signed out all the same). `POST /auth/logout` itself is unchanged (`204`) |
 
 Cookies of the hand-off, each `HttpOnly`, `Secure`, `Path=/`, no `Domain`,
 `SameSite=Lax`:
@@ -810,7 +810,12 @@ reset opens nothing.
 **Sign-out everywhere.** Back-channel logout ends every unrevoked staff or
 patient sign-in that the provider session `sid` opened, whichever product
 (revocation reason `sso_logout`), or, when the token names only `sub`, every
-staff and patient sign-in of that account. The other hosts keep their cookies
+staff and patient sign-in of that account. Product sign-out also ends, itself,
+every other sign-in of the account of the same kind: back-channel logout
+cannot reach one made on a product's own sign-in page (single sign-on's
+fallback) or through an earlier provider session. Identity cannot tell
+browsers apart, so this includes the account's sign-ins on other devices;
+while a device's provider session lives, its next page hands off again. The other hosts keep their cookies
 until a request reaches Identity: then a refused `POST /auth/refresh` clears
 them, as today, and so does a refused `GET /auth/session` on a single sign-on
 host when nothing of the sign-in can still renew (no refresh cookie, or one

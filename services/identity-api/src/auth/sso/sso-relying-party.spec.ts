@@ -52,6 +52,7 @@ const ADMIN = 'https://admin.sso-rp.invalid';
 const STAFF_ACCOUNT = '3b9a1c2d-4e5f-4a6b-8c7d-0e1f2a3b4c5d';
 const PATIENT_ACCOUNT = '6d5c4b3a-2f1e-4d0c-9b8a-7f6e5d4c3b2a';
 const OTHER_PATIENT_ACCOUNT = '9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b';
+const OTHER_STAFF_ACCOUNT = '2c3d4e5f-6a7b-4c8d-9e0f-1a2b3c4d5e6f';
 const SIGNING_SECRET = 'test-signing-secret-with-at-least-32-characters';
 const CORRELATION = 'sso-relying-party-0001';
 
@@ -126,7 +127,8 @@ async function runQuery(sql: string, values: unknown[] = []) {
         .map((link) => link.familyId))
       : undefined;
     const ended = store.sessions.filter((session) => !session.revoked
-      && (families ? families.has(session.familyId) : session.accountId === values[0]));
+      && (families ? families.has(session.familyId) : session.accountId === values[0])
+      && (!sql.includes('session_kind = $2') || session.kind === values[1]));
     for (const session of ended) session.revoked = true;
     return { rows: ended.map((session) => ({ id: session.id, account_id: session.accountId, family_id: session.familyId })),
       rowCount: ended.length };
@@ -803,19 +805,53 @@ describe('with single sign-on configured', () => {
       expect(response.text).not.toMatch(/eyJ/);
     });
 
+    const revoked = (sessionId: string | undefined) => store.sessions.find((session) => session.id === sessionId)?.revoked;
+
+    it('also ends the account\'s other sign-ins of that kind, one made on a product\'s own sign-in page included', async () => {
+      const session = await signedIn();
+      // The provider never saw this one (the fallback page), so its back-channel logout cannot reach it.
+      const ownPage = newSession('staff', STAFF_ACCOUNT);
+      // Nor one from an earlier provider session.
+      await (await signIn(LAB, staffClaims({ sid: 'provider-session-0' }))).callback();
+      const earlier = store.sessions.at(-1)!;
+      const patientOfSameAccount = newSession('patient', STAFF_ACCOUNT);
+      const otherAccount = newSession('staff', OTHER_STAFF_ACCOUNT);
+      const response = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', LAB).set('Origin', LAB)
+        .set('X-CSRF-Token', session.csrf).set('Cookie', [`hid_access=${session.access}`, `hid_access_csrf=${session.csrf}`]);
+      expect(response.status).toBe(200);
+      expect([revoked(ownPage.actor.sessionId), revoked(earlier.id)]).toEqual([true, true]);
+      expect(store.sessions.filter((each) => each.accountId === STAFF_ACCOUNT && each.kind === 'staff')
+        .every((each) => each.revoked)).toBe(true);
+      expect([revoked(patientOfSameAccount.actor.sessionId), revoked(otherAccount.actor.sessionId)]).toEqual([false, false]);
+      expect(tokens.recordSessionEvent).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+        eventType: 'revoked', sessionId: ownPage.actor.sessionId, details: { reason: 'sso_logout', sso_client: 'lab' } }));
+      expect(audit.recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
+        action: 'auth.sso.logout', actorType: 'staff', actorAccountId: STAFF_ACCOUNT, outcome: 'success',
+        details: { client: 'lab', endedSignIns: 2 } }));
+    });
+
     it('ends the sign-in by the refresh cookie once the access token has expired, with the same address', async () => {
       const session = await signedIn();
+      const ownPage = newSession('staff', STAFF_ACCOUNT);
       const response = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', LAB).set('Origin', LAB)
         .set('X-CSRF-Token', `csrf-${session.refresh.split('.')[0]}`)
         .set('Cookie', [`hid_access_csrf=csrf-${session.refresh.split('.')[0]}`, `hid_access_refresh=${session.refresh}`]);
       expect(response.status).toBe(200);
       expect(auth.revokeByRefreshToken).toHaveBeenCalled();
+      expect(revoked(ownPage.actor.sessionId)).toBe(true);
       expect(Object.fromEntries(new URL(response.body.endSessionUrl).searchParams))
         .toEqual({ post_logout_redirect_uri: `${LAB}/`, client_id: 'lab' });
     });
 
     it('answers the same address to a browser with no sign-in, and nothing to a refused sign-out', async () => {
       const session = await signedIn();
+      // Neither ends any other sign-in: neither proved one.
+      const ownPage = newSession('staff', STAFF_ACCOUNT);
+      const afterwards = () => {
+        expect(revoked(ownPage.actor.sessionId)).toBe(false);
+        expect(audit.recordWithClient).not.toHaveBeenCalledWith(expect.anything(),
+          expect.objectContaining({ action: 'auth.sso.logout' }));
+      };
       // The refresh cookie without its CSRF token: refused, and no address at all.
       const refused = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', LAB).set('Origin', LAB)
         .set('Cookie', [`hid_access_refresh=${session.refresh}`]);
@@ -823,6 +859,7 @@ describe('with single sign-on configured', () => {
       const none = await http().post('/api/v1/auth/sso/logout').set('X-HID-Edge-Origin', LAB).set('Origin', LAB);
       expect(Object.fromEntries(new URL(none.body.endSessionUrl).searchParams))
         .toEqual({ post_logout_redirect_uri: `${LAB}/`, client_id: 'lab' });
+      afterwards();
     });
 
     it('refuses another origin before anything ends, as today\'s sign-out does', async () => {

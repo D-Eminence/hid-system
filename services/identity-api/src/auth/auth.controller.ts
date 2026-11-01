@@ -49,6 +49,17 @@ interface SessionReport {
   facilitySelection?: FacilitySelectionState;
 }
 
+/** The sign-in today's sign-out ended: its account and kind (product sign-out ends the account's others). */
+interface SignedOut {
+  readonly accountId: string;
+  readonly kind: 'staff' | 'patient';
+}
+
+/** A staff actor carries no kind; a platform actor never gets here (endSignIn refuses it). */
+function signedOutAs(actor: ActorContext): SignedOut {
+  return { accountId: actor.accountId, kind: actor.kind === 'patient' ? 'patient' : 'staff' };
+}
+
 @Controller('auth')
 @AuditFailuresOnly()
 export class AuthController {
@@ -542,6 +553,16 @@ export class AuthController {
   @Public()
   @HttpCode(204)
   async logout(@Req() request: HidRequest, @Res({ passthrough: true }) response: Response): Promise<void> {
+    await this.signOut(request, response);
+  }
+
+  /**
+   * Today's sign-out (`logout`, above), unchanged. Answers the account and
+   * kind of the sign-in the request proved it holds and that sign-out ended
+   * (a verified access token, or the refresh cookie with the CSRF token
+   * derived from it), or nothing; only product sign-out reads the answer.
+   */
+  private async signOut(request: HidRequest, response: Response): Promise<SignedOut | undefined> {
     const authorization = request.header('authorization');
     const bearer = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
     // A cookie sign-out from an unapproved origin changes nothing, cookies included.
@@ -555,7 +576,7 @@ export class AuthController {
         if (!verified) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
         request.actor = verified.actor;
         await this.endSignIn(verified.actor, request);
-        return;
+        return signedOutAs(verified.actor);
       }
       const cookies = this.cookies(request);
       const csrfCookie = cookies[`${this.environment.AUTH_COOKIE_NAME}_csrf`];
@@ -575,11 +596,11 @@ export class AuthController {
           throw this.clientMismatch(kind, request);
         }
         await this.endSignIn(verified.actor, request);
-        return;
+        return signedOutAs(verified.actor);
       }
       const refreshToken = cookies[`${this.environment.AUTH_COOKIE_NAME}_refresh`];
       // No sign-in left to end: the cookies are cleared all the same.
-      if (!refreshToken) return;
+      if (!refreshToken) return undefined;
       if (!this.tokens.verifyRefreshCsrf(refreshToken, csrfCookie, csrfHeader)) {
         throw new DomainProblem(403, 'CSRF_VALIDATION_FAILED', 'CSRF validation failed');
       }
@@ -601,7 +622,9 @@ export class AuthController {
           sourceIp: request.ip,
           userAgent: request.header('user-agent'),
         });
+        return { accountId: ended.accountId, kind: ended.kind };
       }
+      return undefined;
     } finally {
       if (!keepCookies) this.clearCookies(response);
     }
@@ -614,10 +637,14 @@ export class AuthController {
    * the answer is the provider's end-session address for the frontend to
    * navigate to. The provider ends its own session there and sends
    * back-channel logout to every product, so signing out of one product signs
-   * out of all of them. The address names only the client and the product's
-   * root: no token reaches page JavaScript or an address (no
-   * `id_token_hint`). While single sign-on is off, or on a host that is not
-   * one of its clients, this is no route at all (SsoRouteGuard).
+   * out of all of them. Before that, every other sign-in of the same account
+   * and kind ends here too (SsoService.endAccountSignIns): the provider's
+   * back-channel logout reaches only the sign-ins its session opened, not one
+   * made on a product's own sign-in page, which single sign-on keeps as the
+   * fallback. The address names only the client and the product's root: no
+   * token reaches page JavaScript or an address (no `id_token_hint`). While
+   * single sign-on is off, or on a host that is not one of its clients, this
+   * is no route at all (SsoRouteGuard).
    */
   @Post('sso/logout')
   @UseGuards(SsoRouteGuard)
@@ -629,7 +656,8 @@ export class AuthController {
     const sso = this.sso;
     const client = sso?.clientFor(request);
     if (!sso || !client) throw new ServiceUnavailableException('Single sign-on is unavailable');
-    await this.logout(request, response);
+    const signedOut = await this.signOut(request, response);
+    if (signedOut) await sso.endAccountSignIns(client, signedOut, this.event(request));
     response.setHeader('Cache-Control', 'no-store');
     response.setHeader('Referrer-Policy', 'no-referrer');
     return { endSessionUrl: await sso.endSessionUrl(client) };

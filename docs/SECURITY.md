@@ -173,6 +173,9 @@ coordinator's; these are the product's rules.
 * A refused hand-off never becomes a redirect loop, and after sign-out
   everywhere the first refused session check or refresh on a product host
   clears its session cookies.
+* Product sign-out ends every other sign-in of the account of that kind, not
+  only those the provider session opened: a sign-in made on a product's own
+  sign-in page while the provider was down is never left behind.
 * Nothing identifying travels in an address: the return page stays in the
   transaction cookie, failures go to the sign-in page with an empty address,
   the end-session address names only the client and the product's root (no

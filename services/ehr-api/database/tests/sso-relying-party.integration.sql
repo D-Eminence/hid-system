@@ -7,7 +7,8 @@
 -- Spent sign-in transactions and logout tokens are kept in
 -- auth.sso_spent_tokens by digest. This suite also runs, as the Identity
 -- runtime, the statements the API sends: the back-channel logout revocation
--- by sid and the patient recent-sign-in check. Rollback-only; synthetic data.
+-- by sid, product sign-out's revocation of the account's sign-ins of one kind
+-- and the patient recent-sign-in check. Rollback-only; synthetic data.
 begin;
 
 insert into auth.accounts (id, subject, email, status, password_hash, password_algorithm) values
@@ -19,7 +20,8 @@ insert into identity.patients (id, account_id, hid_code, first_name, last_name, 
    'Pat Sso', 'active');
 
 -- Sign-ins: SA1 and SA2 are staff sign-ins of A (SA2 since rotated into SA3,
--- which is not its family's root), SB1 a staff sign-in of B, PP1 and PP2
+-- which is not its family's root), SB1 a staff sign-in of B and SB2 one B made
+-- on a product's own sign-in page (no single sign-on row), PP1 and PP2
 -- patient sign-ins of P (PP2 from 30 minutes ago at the provider).
 insert into auth.sessions (id, account_id, family_id, refresh_token_sha256, access_jti, account_token_version,
     authentication_method, issued_at, expires_at, absolute_expires_at, revoked_at, revocation_reason,
@@ -32,6 +34,7 @@ from (values
   ('d1040000-0000-4000-8000-0000000000a2', 'd1020000-0000-4000-8000-00000000000a', 'd1040000-0000-4000-8000-0000000000a2', now(), 'staff', null),
   ('d1040000-0000-4000-8000-0000000000a3', 'd1020000-0000-4000-8000-00000000000a', 'd1040000-0000-4000-8000-0000000000a2', null, 'staff', null),
   ('d1040000-0000-4000-8000-0000000000b1', 'd1020000-0000-4000-8000-00000000000b', 'd1040000-0000-4000-8000-0000000000b1', null, 'staff', null),
+  ('d1040000-0000-4000-8000-0000000000b2', 'd1020000-0000-4000-8000-00000000000b', 'd1040000-0000-4000-8000-0000000000b2', null, 'staff', null),
   ('d1040000-0000-4000-8000-0000000000e1', 'd1020000-0000-4000-8000-0000000000e0', 'd1040000-0000-4000-8000-0000000000e1', null, 'patient', 'd1030000-0000-4000-8000-0000000000e0'),
   ('d1040000-0000-4000-8000-0000000000e2', 'd1020000-0000-4000-8000-0000000000e0', 'd1040000-0000-4000-8000-0000000000e2', null, 'patient', 'd1030000-0000-4000-8000-0000000000e0')
 ) as fixture(session_id, account_id, family_id, revoked_at, kind, patient_id);
@@ -180,6 +183,29 @@ begin
   if exists (select 1 from auth.sessions where id in ('d1040000-0000-4000-8000-0000000000b1',
        'd1040000-0000-4000-8000-0000000000e1', 'd1040000-0000-4000-8000-0000000000e2') and revoked_at is not null) then
     raise exception 'back-channel logout ended a sign-in of another provider session';
+  end if;
+end $$;
+
+-- Product sign-out ends the account's other sign-ins of that kind
+-- (SsoService.endAccountSignIns), as the runtime: both of B's staff sign-ins
+-- end, SB2 included, which the provider never saw; P's do not.
+select auth.lock_account_sessions('d1020000-0000-4000-8000-00000000000b');
+do $$
+declare
+  ended text[];
+begin
+  with revoked as (
+    update auth.sessions
+       set revoked_at = clock_timestamp(), revocation_reason = 'sso_logout', row_version = row_version + 1
+     where account_id = 'd1020000-0000-4000-8000-00000000000b'::uuid and session_kind = 'staff' and revoked_at is null
+    returning id::text
+  ) select array_agg(id order by id) into ended from revoked;
+  if ended is distinct from array['d1040000-0000-4000-8000-0000000000b1', 'd1040000-0000-4000-8000-0000000000b2'] then
+    raise exception 'product sign-out ended %', ended;
+  end if;
+  if exists (select 1 from auth.sessions where id in ('d1040000-0000-4000-8000-0000000000e1',
+       'd1040000-0000-4000-8000-0000000000e2') and revoked_at is not null) then
+    raise exception 'product sign-out ended a sign-in of another account';
   end if;
 end $$;
 
