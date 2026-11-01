@@ -474,8 +474,14 @@ RUNTIME_GRANTS = "services/ehr-api/database/runtime-grants.sql"
 def migration_files(contract):
     return [name for name in contract.get("files", {}) if name.startswith(MIGRATIONS)]
 
+# Database test suites live beside the migrations but the release never applies
+# them (it runs only scripts/apply-migrations.mjs), so a suite that changes with
+# a migration is not part of the schema change to declare.
+SCHEMA_TESTS = "services/ehr-api/database/tests/"
+
 def schema_contract(root, changed_paths, carry=False):
-    affected = [p for p in changed_paths if p.startswith("services/ehr-api/database/")]
+    affected = [p for p in changed_paths
+                if p.startswith("services/ehr-api/database/") and not p.startswith(SCHEMA_TESTS)]
     metadata = pathlib.Path(root)/"config/production-schema-compatibility.json"
     if not affected:
         # A release that fails after its schema is reviewed leaves those migrations
