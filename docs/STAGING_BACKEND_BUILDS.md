@@ -95,3 +95,68 @@ publishes only the worker and migration images; no frontend is rebuilt.
 Publication remains blocked until supported patches or evidence-backed affectedness
 decisions resolve the actual findings. Gateway findings remain in its separate
 scan artifact; its Nginx/base image is unchanged by this scoped Novu update.
+
+## npm audit exception: minimatch in aws-cdk-lib (2026-11-01)
+
+Since 31 October every backend run has failed the infra/aws dependency audit
+(`npm --prefix infra/aws audit --audit-level=moderate`, in the AWS release-trust
+job of `tuf-local-gates.yml` and the tooling audit of `tuf-publish.yml`). It
+reports one moderate advisory,
+[GHSA-g3hv-75wg-m249](https://github.com/advisories/GHSA-g3hv-75wg-m249):
+minimatch below 11.0.1 can be made to do excessive work by a crafted glob pattern
+(globparts amplification, CWE-405). The affected copy is minimatch 10.2.5,
+bundled inside aws-cdk-lib 2.273.0, which infra/aws pins; npm also lists
+aws-cdk-lib itself because of it. There is no fix to take: aws-cdk-lib 2.273.0,
+2.274.0 and 2.275.0 (the latest on 1 November) all bundle minimatch ^10.2.x, and
+npm overrides cannot replace a bundled dependency.
+
+The owner (D-Eminence) approved an exception in chat on 2026-11-01. It is
+recorded in `security/npm-audit-exceptions.json`, approved 2026-11-01 and
+expiring 2026-12-01 at 00:00 UTC. The basis:
+
+- minimatch runs only while CDK synthesizes infra/aws: asset exclude patterns,
+  the bundling-stacks context patterns and construct-id selectors. The patterns
+  come from this repository's source and CDK context, and the strings matched are
+  its own construct paths and asset file paths. No outside input reaches it.
+- infra/aws is not part of any runtime image. No Dockerfile copies it, its
+  `node_modules` are not in the TUF tooling archive, and its one Lambda asset
+  (`runtime/workload-issuer`) contains no CDK code.
+- The worst case is a slow synth on a developer or CI machine.
+
+Both infra/aws audit steps now run
+`node release/scripts/npm-audit-with-exceptions.mjs infra/aws` (Node built-ins
+only). It runs `npm --prefix infra/aws audit --json` and passes only if every
+advisory at moderate or above matches an entry for that directory with the same
+GHSA id, package, npm vulnerable range, severity and installed path. It fails when:
+
+- an advisory, or a new installed path of one, has no entry;
+- any entry in the file has expired;
+- an entry is stale: one of its paths no longer matches the audit. Stale entries
+  fail rather than warn, so the file cannot keep approvals for things that are gone;
+- the exceptions file is malformed: unknown or missing fields, a window longer
+  than 92 days, an approval date in the future, two entries for one advisory, or
+  text that is not canonical 2-space JSON (which also rules out duplicate keys);
+- npm cannot run, exits other than 0 or 1, prints anything but a version 2 audit
+  report, or reports an error.
+
+Advisories below moderate pass without an entry, as they did with
+`--audit-level=moderate`. Every other audit is unchanged: release,
+infra/cloudflare and the EHR and shared-package audits still run plain
+`npm audit --audit-level=moderate`. `release/scripts/verify-publication-workflow.mjs`
+now pins every npm audit command in both workflows, so any other change to them
+fails the release tests: dropping an audit, sending another directory through the
+exception gate, a different exceptions file, `|| true`, a condition, npm settings
+in the environment, a registry override, or another step touching `security/`.
+The local gate evidence records the exceptions file's SHA-256.
+
+This exception covers the infra/aws npm audit only. It changes nothing in the
+image scans or `security/production-runtime-assessment.json`. It is also the
+first npm audit exception: RF-005 in `docs/RELEASE_FINDINGS.md` declined one
+for a High in the same bundled tree. This one is a moderate, approved by the
+owner, limited to one installed path and expiring.
+
+Before 1 December, either move infra/aws to an aws-cdk-lib release that bundles
+minimatch 11.0.1 or later and delete the entry (left in place it fails as stale),
+or have the owner review the basis again and set new `approved_at` and
+`expires_at` dates. With no entries the gate behaves like the plain audit, so the
+workflows can keep it.

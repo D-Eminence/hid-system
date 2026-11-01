@@ -59,7 +59,7 @@ jobs:
         run: |
           npm --prefix release audit --audit-level=moderate
           npm --prefix infra/cloudflare audit --audit-level=moderate
-          npm --prefix infra/aws audit --audit-level=moderate
+          node release/scripts/npm-audit-with-exceptions.mjs infra/aws
       - name: Verify patched Go and reject reachable vulnerabilities
         id: go_audit
         run: |-
