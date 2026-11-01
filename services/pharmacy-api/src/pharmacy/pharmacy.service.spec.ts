@@ -88,6 +88,51 @@ describe('PharmacyService', () => {
     expect(audit.recordWithClient).not.toHaveBeenCalled();
   });
 
+  // 0100: pharmacy.validate_work_item refuses a same-facility work item that is not exactly its
+  // ehr.prescriptions row with 23514 and one of four messages; each is answered with its own code.
+  describe('acceptance refused by the prescription source check (0100)', () => {
+    const refusedBy = (error: unknown) => {
+      const query = jest.fn().mockResolvedValueOnce({ rows: [] }).mockRejectedValueOnce(error);
+      const database = { withTransaction: jest.fn(async (_context, operation) => operation({ query })) };
+      const service = new PharmacyService(database as never, identity as never, audit as never,
+        new PharmacyOrderRouteAccess(identity as never), new PharmacyOrderRouteCards(database as never));
+      return { query, run: () => service.acceptPrescription(context, command, 'acceptance-key-1234') };
+    };
+
+    it.each([
+      ['PRESCRIPTION_SOURCE_NOT_FOUND', 404, 'The prescription was not found at this facility'],
+      ['PRESCRIPTION_SOURCE_NOT_ACTIVE', 409, 'This prescription is no longer active, so Pharmacy did not accept it'],
+      ['PRESCRIPTION_SOURCE_VERSION_MISMATCH', 409,
+        'This prescription changed since it was read; reload it and send it again'],
+      ['PRESCRIPTION_SOURCE_MISMATCH', 422,
+        'The details sent do not match the prescription, so Pharmacy did not accept it'],
+      ['PRESCRIPTION_ROUTED', 409, 'This prescription has been sent to another pharmacy; withdraw it there first'],
+    ])('answers 23514 %s with %i and that code, writing nothing after the insert', async (message, status, detail) => {
+      const { query, run } = refusedBy(Object.assign(new Error(message), { code: '23514' }));
+      const refusal = await run().catch((error: unknown) => error);
+      expect(refusal).toMatchObject({ status, code: message });
+      expect((refusal as Error).message).toBe(detail);
+      // The replay read and the refused insert only: no event, outbox row or audit.
+      expect(query).toHaveBeenCalledTimes(2);
+      expect(audit.recordWithClient).not.toHaveBeenCalled();
+    });
+
+    it('passes the validator\'s other refusals and other errors on unchanged', async () => {
+      for (const error of [
+        Object.assign(new Error('Pharmacy acceptance patient, facility, prescription status, or actor context is invalid'),
+          { code: '23514' }),
+        // The message alone is not enough: only a check violation is the validator's answer.
+        Object.assign(new Error('PRESCRIPTION_SOURCE_MISMATCH'), { code: '42501' }),
+        Object.assign(new Error('could not serialize access'), { code: '40001' }),
+        // Not one of its own properties: an inherited name is never a refusal.
+        Object.assign(new Error('toString'), { code: '23514' }),
+      ]) {
+        const { run } = refusedBy(error);
+        await expect(run()).rejects.toBe(error);
+      }
+    });
+  });
+
   it('records dispensing separately and never changes the accepted work-item status', async () => {
     const dispensingRow = { id: ids.dispensing, work_item_id: ids.work, work_item_version: '1',
       patient_id: ids.patient, facility_id: ids.facility, medication_code_system: null,

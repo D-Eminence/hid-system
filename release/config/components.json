@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0099",
-    "count": 100,
+    "last": "0101",
+    "count": 102,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -497,6 +497,14 @@
       {
         "name": "0099_offline_audit_patient_allowed.sql",
         "sha256": "1d677ad9a706c938758c140fec6fc3069f932561954d6476c5dfa615e35917a4"
+      },
+      {
+        "name": "0100_pharmacy_prescription_source_check.sql",
+        "sha256": "8c37599452f7432f7d2fa44c29cbf4ac8f6c7728809be28c553c2bd2f0d9927c"
+      },
+      {
+        "name": "0101_pharmacy_dispensing_source_check.sql",
+        "sha256": "2c10b2adfc40bb68b46a57b94036daa2a391d62ec06bebfdde3aeaa26f2d18b6"
       }
     ]
   },

@@ -8,6 +8,23 @@ export interface TransactionOptions {
   isolationLevel?: 'READ COMMITTED' | 'REPEATABLE READ' | 'SERIALIZABLE';
 }
 
+/** How many times a SERIALIZABLE transaction PostgreSQL cancels is run in all (as pharmacy-api). */
+export const SERIALIZABLE_ATTEMPTS = 12;
+
+/**
+ * The pause before attempt `attempt + 1`: a random time within a window that doubles from 20 ms
+ * up to 1000 ms, so transactions that cancelled each other commit in turn (as pharmacy-api).
+ */
+export function retryDelayMs(attempt: number, random: () => number = Math.random): number {
+  return Math.floor(random() * Math.min(1000, 20 * 2 ** (attempt - 1)));
+}
+
+/** A serialization failure (40001) or a deadlock (40P01): PostgreSQL cancelled the transaction. */
+export function isSerializationConflict(error: unknown): boolean {
+  const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
+  return code === '40001' || code === '40P01';
+}
+
 @Injectable()
 export class DatabaseService implements OnApplicationShutdown {
   private readonly pool: Pool;
@@ -43,10 +60,38 @@ export class DatabaseService implements OnApplicationShutdown {
     return this.pool.query<Row>(text, [...values]);
   }
 
+  /**
+   * Runs the operation in one transaction with the request context. A SERIALIZABLE transaction
+   * that PostgreSQL cancels to keep concurrent ones serializable (40001, 40P01) is run again from
+   * the start, up to SERIALIZABLE_ATTEMPTS in all; any other transaction or error is not retried.
+   * The operation must therefore do nothing outside the database (the order route send, its one
+   * SERIALIZABLE caller, does not).
+   */
   async withTransaction<Result>(
     context: DataAccessContext,
     operation: (client: PoolClient) => Promise<Result>,
     options: TransactionOptions = {},
+  ): Promise<Result> {
+    const attempts = options.isolationLevel === 'SERIALIZABLE' ? SERIALIZABLE_ATTEMPTS : 1;
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.transaction(context, operation, options);
+      } catch (error) {
+        if (attempt >= attempts || !isSerializationConflict(error)) throw error;
+        await this.pauseBeforeRetry(attempt);
+      }
+    }
+  }
+
+  /** Waits before the next attempt of a cancelled SERIALIZABLE transaction. */
+  protected async pauseBeforeRetry(attempt: number): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+  }
+
+  private async transaction<Result>(
+    context: DataAccessContext,
+    operation: (client: PoolClient) => Promise<Result>,
+    options: TransactionOptions,
   ): Promise<Result> {
     const client = await this.pool.connect();
     try {
