@@ -61,7 +61,9 @@ const DISPENSING_SELECT = `select d.*,r.id::text as reversal_id,r.reversed_at
 
 // Work items, dispensings, reversals and imports are insert-only: a trigger
 // refuses every UPDATE and DELETE (0023), and the runtime role has no UPDATE
-// on them, so it cannot lock them (42501). The commands take no row locks.
+// on them, so it cannot lock them (42501). The commands take no row locks of
+// their own; since 0100 an acceptance's validator holds its EHR prescription
+// FOR SHARE until commit, so the EHR cannot change it under the acceptance.
 // Unique constraints allow one work item per prescription, one dispensing per
 // work item, one reversal per dispensing, one import per publication and one
 // row per idempotency key; the SERIALIZABLE transaction cancels the loser of a
@@ -83,15 +85,35 @@ function routedDispensingRefusal(error: unknown): DomainProblem | undefined {
 }
 
 /**
- * P4c (SPEC-FINAL §7.5): the same-facility acceptance of a prescription with
- * a live route to another facility's pharmacy is refused by
- * pharmacy.validate_work_item with 23514 PRESCRIPTION_ROUTED, answered 409 by
- * that code, as the EHR answers it. Any other error is passed on unchanged.
+ * The same-facility acceptance refusals pharmacy.validate_work_item raises
+ * with 23514, by message, each answered with that message as its code:
+ * - PRESCRIPTION_ROUTED (P4c, SPEC-FINAL §7.5): the prescription has a live
+ *   route to another facility's pharmacy, 409 as the EHR answers it;
+ * - from 0100, the work item must be exactly its ehr.prescriptions row, read
+ *   FOR SHARE: none the session may read and write (404), not active (409), at
+ *   another version, so it changed since it was read and the client reloads
+ *   (409), or any field differs (422).
+ * Any other error, the validator's other 23514 messages among them, is passed
+ * on unchanged.
  */
-function routedPrescriptionRefusal(error: unknown): DomainProblem | undefined {
+const ACCEPTANCE_REFUSALS: Readonly<Record<string, { status: number; detail: string }>> = {
+  PRESCRIPTION_ROUTED: { status: 409,
+    detail: 'This prescription has been sent to another pharmacy; withdraw it there first' },
+  PRESCRIPTION_SOURCE_NOT_FOUND: { status: 404,
+    detail: 'The prescription was not found at this facility' },
+  PRESCRIPTION_SOURCE_NOT_ACTIVE: { status: 409,
+    detail: 'This prescription is no longer active, so Pharmacy did not accept it' },
+  PRESCRIPTION_SOURCE_VERSION_MISMATCH: { status: 409,
+    detail: 'This prescription changed since it was read; reload it and send it again' },
+  PRESCRIPTION_SOURCE_MISMATCH: { status: 422,
+    detail: 'The details sent do not match the prescription, so Pharmacy did not accept it' },
+};
+
+function acceptanceRefusal(error: unknown): DomainProblem | undefined {
   const { code, message } = (typeof error === 'object' && error !== null ? error : {}) as { code?: unknown; message?: unknown };
-  return code === '23514' && message === 'PRESCRIPTION_ROUTED' ? new DomainProblem(409, 'PRESCRIPTION_ROUTED',
-    'This prescription has been sent to another pharmacy; withdraw it there first') : undefined;
+  if (code !== '23514' || typeof message !== 'string' || !Object.hasOwn(ACCEPTANCE_REFUSALS, message)) return undefined;
+  const { status, detail } = ACCEPTANCE_REFUSALS[message]!;
+  return new DomainProblem(status, message, detail);
 }
 
 @Injectable()
@@ -134,7 +156,7 @@ export class PharmacyService {
         input.doseQuantity ?? null, input.doseUnit ?? null, input.routeCode ?? null, input.frequency,
         input.instructions, input.startsOn ?? null, input.endsOn ?? null, input.prescribedBy,
         input.prescribedAt, context.actor.accountId, context.membershipId, input.acceptanceReason,
-        key, digest, context.correlationId]).catch((error: unknown) => { throw routedPrescriptionRefusal(error) ?? error; });
+        key, digest, context.correlationId]).catch((error: unknown) => { throw acceptanceRefusal(error) ?? error; });
       const row = inserted.rows[0];
       if (!row) throw new DomainProblem(503, 'PHARMACY_WORK_ITEM_NOT_CREATED',
         'Pharmacy could not accept the prescription');

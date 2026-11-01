@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0099",
-    "count": 100,
+    "last": "0100",
+    "count": 101,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -497,6 +497,10 @@
       {
         "name": "0099_offline_audit_patient_allowed.sql",
         "sha256": "1d677ad9a706c938758c140fec6fc3069f932561954d6476c5dfa615e35917a4"
+      },
+      {
+        "name": "0100_pharmacy_prescription_source_check.sql",
+        "sha256": "30a61389e5d52bf4f61e267b0baa6b1d0ddca16c5b9eceaae40c0bab00b562c4"
       }
     ]
   },
