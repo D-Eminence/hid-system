@@ -301,6 +301,13 @@ test('resolve outcomes: orphan, not completed, stale version, duplicate, not sca
   };
   let r = await outcome(problem(404, 'DOCUMENT_NOT_FOUND'));
   assert.deepEqual([r.failed, r.writes, r.h.metric('Orphans')], [false, 0, 1], 'orphan: acknowledged');
+  // A 404 without ehr-api's code (route not deployed, wrong host, Identity's
+  // own 404) says nothing about the document: kept and retried, never an orphan.
+  for (const response of [problem(404, 'NOT_FOUND'), json(404, undefined), new Response('<html>Not Found</html>', { status: 404 })]) {
+    r = await outcome(response);
+    assert.deepEqual([r.failed, r.writes, r.h.metric('Orphans'), r.h.metric('Retries')], [true, 0, 0, 1], 'an unexplained 404 is retried');
+    assert.equal(r.h.logs.at(-1).level, 'error');
+  }
   r = await outcome(problem(409, 'DOCUMENT_NOT_UPLOADED'));
   assert.deepEqual([r.failed, r.writes, r.h.metric('Retries')], [true, 0, 1], 'upload not completed: retried');
   r = await outcome(problem(409, 'OBJECT_VERSION_MISMATCH'));
@@ -380,6 +387,9 @@ test('scan-events responses: written, terminal, not uploaded, auth, outage, refu
   r = await outcome(problem(404, 'DOCUMENT_NOT_FOUND'));
   assert.deepEqual([r.failed, r.h.metric('ScanEventRefused'), r.h.metric('Orphans')], [false, 1, 0]);
   assert.equal(r.h.logs.at(-1).level, 'error');
+  // Any other 404 is not about the document: retried.
+  r = await outcome(problem(404, 'NOT_FOUND'));
+  assert.deepEqual([r.failed, r.h.metric('ScanEventRefused'), r.h.metric('Retries')], [true, 0, 1]);
   r = await outcome(problem(409, 'DOCUMENT_NOT_SCANNABLE'));
   assert.deepEqual([r.failed, r.h.metric('NotScannable')], [false, 1]);
   r = await outcome(problem(409, 'OBJECT_VERSION_MISMATCH'));

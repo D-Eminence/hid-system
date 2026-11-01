@@ -342,9 +342,18 @@ const RESOLVE_REFUSALS = {
   SCAN_ALREADY_TERMINAL: { outcome: 'ack', metric: 'Duplicates', level: 'info', message: 'Document already has a terminal scan result; acknowledged' },
 };
 
+// A 404 is an orphan only with ehr-api's DOCUMENT_NOT_FOUND code. Any other
+// 404 (a route not deployed yet, a wrong host behind the load balancer, or
+// Identity's own 404 passed through) says nothing about the document, so the
+// result is kept and retried rather than acknowledged.
+const UNEXPLAINED_NOT_FOUND = {
+  outcome: 'retry', metric: 'Retries', level: 'error',
+  message: 'ehr-api answered 404 without DOCUMENT_NOT_FOUND (is the scanner route deployed?); will retry',
+};
+
 function resolveRefusal({ status, code }) {
   if (status === 200) return undefined;
-  if (status === 404) return RESOLVE_REFUSALS.DOCUMENT_NOT_FOUND;
+  if (status === 404) return code === 'DOCUMENT_NOT_FOUND' ? RESOLVE_REFUSALS.DOCUMENT_NOT_FOUND : UNEXPLAINED_NOT_FOUND;
   if (status === 409 && RESOLVE_REFUSALS[code]) return RESOLVE_REFUSALS[code];
   if (status === 400 || status === 409) {
     return { outcome: 'ack', metric: 'ScanEventRefused', level: 'error', message: 'ehr-api refused the resolve request' };
@@ -445,7 +454,7 @@ function writeOutcome(response, fields, { metrics, logger }) {
     log(logger, 'info', 'Document is bound to another version now; acknowledged', fields);
     return 'ack';
   }
-  if (status === 404) {
+  if (status === 404 && code === 'DOCUMENT_NOT_FOUND') {
     // Resolve has just found this document, and documents are never deleted:
     // a 404 here means the append cannot see the row (a database fault, such
     // as a missing row-level security policy), not an orphan. Acknowledged
@@ -453,6 +462,11 @@ function writeOutcome(response, fields, { metrics, logger }) {
     metrics.count('ScanEventRefused');
     log(logger, 'error', 'ehr-api could not find a document it had just resolved', { ...fields, status, code });
     return 'ack';
+  }
+  if (status === 404) {
+    metrics.count('Retries');
+    log(logger, 'error', UNEXPLAINED_NOT_FOUND.message, { ...fields, status, code });
+    return 'retry';
   }
   if (status === 401 || status === 403 || status === 429 || status >= 500) {
     metrics.count('Retries');

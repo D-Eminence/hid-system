@@ -442,8 +442,8 @@ the JPEG shows as `image/jpeg`; the other two show `scan rejected`.
 
 **Stage 4. Backfill, then reconcile.** Results seen in observe mode were not
 written, and documents uploaded before stage 3 never had a scan. Run the
-backfill by hand, repeating until a run reports `"started":0` and
-`"deferred":0`:
+backfill by hand, repeating until a run reports `"started":0`,
+`"deferred":0` and `"listed"` below the limit of 50:
 
 ```powershell
 Set-Content -NoNewline -Path reconcile.json -Value '{"action":"reconcile","olderThanSeconds":0,"limit":50}'
@@ -453,7 +453,15 @@ Get-Content reconcile-out.json
 
 Each run starts about 20 on-demand scans (two a second within the 30 s
 timeout); documents scanned in the last hour are skipped (`inProgress`) until
-their result lands, usually within minutes. The `oldest-pending` alarm fires
+their result lands, usually within minutes. The list has no second page: each
+run sees only the 50 oldest documents still waiting, so a run that lists 50
+and starts none (all `inProgress`) means more may wait behind them. Wait about
+ten minutes for those results and run it again. Documents counted as
+`exhausted` keep their place at the front of the list until a person acts on
+the `reconcile-exhausted` alarm. A result for a key no document holds is
+counted as an orphan only when ehr-api answers `DOCUMENT_NOT_FOUND`; any other
+404 (a route not deployed, a wrong host) is retried and ends in the DLQ with
+its alarm. The `oldest-pending` alarm fires
 during the backfill because documents from 31 October have waited for days; it
 clears when they are done. Then commit `document_scan_reconcile_enabled = true`,
 plan (only the schedule's state changes to `ENABLED`) and apply. Check: the
