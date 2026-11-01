@@ -184,5 +184,8 @@ output "document_scan_review" {
       aws_vpc_security_group_egress_rule.document_scan_bridge_to_endpoint[0],
       aws_vpc_security_group_egress_rule.document_scan_bridge_https[0],
     ] : "${rule.ip_protocol}/${rule.from_port}-${rule.to_port}"]
+    metric_alarms = { for key, alarm in aws_cloudwatch_metric_alarm.document_scan_metric : key => {
+      metric = alarm.metric_name, statistic = alarm.statistic, threshold = alarm.threshold, period = alarm.period
+    } }
   } : null
 }

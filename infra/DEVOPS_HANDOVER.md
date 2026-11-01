@@ -347,14 +347,25 @@ version `GuardDutyMalwareScanStatus` and publishes the result. The rule
 3. writes the scan event (`POST /api/v1/ehr/documents/scan-events`).
 
 The bridge has no S3 or KMS rights; ehr-api reads the first KiB itself to find
-the real media type. A result that arrives before `/complete` waits on the
-queue: retries start at one minute and double up to 12 hours. After 12 receives
-the message goes to `hid-staging-document-scan-results-dlq`. A 15-minute
-reconcile run of the same Lambda starts GuardDuty on-demand scans for uploaded
-documents that have no result. It records each attempt as `scan_started`, waits
-an hour between attempts and gives up after three. Logs are in CloudWatch
-`/hid/staging/document-scan-bridge`; they carry object keys (random UUIDs),
-document IDs, statuses and threat names, never patient data.
+the real media type. A result that arrives before `/complete`, or during an
+ehr-api outage, waits on the queue: retries start at one minute and double,
+up to 42,900 s (SQS refuses a delay that ends more than 12 hours after the
+receive). The 12th receive comes about 29 hours after the first, and a result
+still failing then goes to `hid-staging-document-scan-results-dlq` about 41
+hours after it first arrived. One exception: a result for an upload that is
+still not completed on the 11th or 12th receive (about 17 hours) is
+acknowledged and counted as `UploadNotCompleted`, by design. Its browser PUT
+the file and never called `/complete` (a closed tab, a lost connection, an
+offline client); if the upload is completed later, reconcile scans it. A
+15-minute reconcile run of the same Lambda starts GuardDuty on-demand scans
+for uploaded documents that have no result. It asks GuardDuty first and
+records a scan as `scan_started` only once GuardDuty accepted it; a request
+GuardDuty refuses or does not answer uses no attempt and is tried again on the
+next run. It waits an hour between attempts and gives up after three accepted
+scans with no result. Scan events are append-only, so that count never
+resets. Logs are in CloudWatch `/hid/staging/document-scan-bridge`; they carry
+object keys (random UUIDs), S3 version IDs, document IDs, statuses and threat
+names, never patient data.
 
 Every switch is off in `production.tfvars`, so a routine apply from dev creates
 none of this. Turn the switches on in this order. Each stage is its own
@@ -411,7 +422,7 @@ The plan adds:
   attachment, the log group, the queue, the DLQ and their policies, the two
   rules and their targets, the Lambda and its security group rules, the event
   source mapping, the reconcile schedule (disabled), two Lambda permissions and
-  eight alarms `hid-staging-document-scan-*`.
+  ten alarms `hid-staging-document-scan-*`.
 
 The plan also updates the issuer Lambda's `WORKLOAD_CALLER_POLICY_JSON` to seven
 callers. It must not change the bucket policy. After the apply, the bucket sends
@@ -443,13 +454,22 @@ the JPEG shows as `image/jpeg`; the other two show `scan rejected`.
 **Stage 4. Backfill, then reconcile.** Results seen in observe mode were not
 written, and documents uploaded before stage 3 never had a scan. Run the
 backfill by hand, repeating until a run reports `"started":0`,
-`"deferred":0` and `"listed"` below the limit of 50:
+`"deferred":0`, `"failed":0` and `"listed"` below the limit of 50:
 
 ```powershell
 Set-Content -NoNewline -Path reconcile.json -Value '{"action":"reconcile","olderThanSeconds":0,"limit":50}'
 aws lambda invoke --function-name hid-staging-document-scan-bridge --payload fileb://reconcile.json --region eu-west-1 reconcile-out.json
 Get-Content reconcile-out.json
 ```
+
+If any run reports `"failed"` above 0, stop and fix the cause before running
+it again: GuardDuty refused or did not answer the scan request (the
+`scan-start-failed` alarm, and `access-denied` for a 403). Check the plan
+status, the bridge role's `guardduty:SendObjectMalwareScan` grant, and the NAT
+route to the GuardDuty API; the bridge log line `GuardDuty did not start the
+scan; no attempt recorded` gives the status and code. A failed request uses no
+attempt, so nothing is lost by waiting, but repeating runs only repeats the
+failure.
 
 Each run starts about 20 on-demand scans (two a second within the 30 s
 timeout); documents scanned in the last hour are skipped (`inProgress`) until
@@ -458,16 +478,18 @@ run sees only the 50 oldest documents still waiting, so a run that lists 50
 and starts none (all `inProgress`) means more may wait behind them. Wait about
 ten minutes for those results and run it again. Documents counted as
 `exhausted` keep their place at the front of the list until a person acts on
-the `reconcile-exhausted` alarm. A result for a key no document holds is
+the `reconcile-exhausted` alarm (see *Clearing an exhausted document* below). A result for a key no document holds is
 counted as an orphan only when ehr-api answers `DOCUMENT_NOT_FOUND`; any other
 404 (a route not deployed, a wrong host) is retried and ends in the DLQ with
 its alarm. The `oldest-pending` alarm fires
 during the backfill because documents from 31 October have waited for days; it
-clears when they are done. Then commit `document_scan_reconcile_enabled = true`,
-plan (only the schedule's state changes to `ENABLED`) and apply. Check: the
-stage 0 query shows no `uploaded` document without a terminal event, except
-those still `initiated` (their upload never completed; they are not scanned).
-The DLQ is empty and the alarms are OK. Imported attachments under
+clears when they are done. Only after a run with `"failed":0`, commit
+`document_scan_reconcile_enabled = true`, plan (only the schedule's state
+changes to `ENABLED`) and apply. Check: the stage 0 query shows no `uploaded`
+document without a terminal event, except those still `initiated` (their
+upload never completed; they are not scanned, and their results are
+acknowledged as `UploadNotCompleted` rather than dead-lettered). The DLQ is
+empty and the alarms are OK. Imported attachments under
 `migration-quarantine/` stay out of scope; they keep their ClamAV evidence.
 
 **Stage 5. Tag enforcement, only after the stage 4 check passes (D4).** Commit
@@ -492,14 +514,64 @@ denied.
 
 | Alarm | Meaning | First step |
 | --- | --- | --- |
-| `hid-staging-document-scan-dead-letters` | A result failed 12 times, or EventBridge could not deliver it | Read the bridge log for that key; fix the cause; then `aws sqs start-message-move-task --source-arn <DLQ ARN> --region eu-west-1` moves the messages back |
+| `hid-staging-document-scan-dead-letters` | A result failed 12 times (about 41 hours of retries), or EventBridge could not deliver it. A result for an upload never completed is not sent here: it is acknowledged as `UploadNotCompleted` | Read the bridge log for that key; fix the cause; then `aws sqs start-message-move-task --source-arn <DLQ ARN> --region eu-west-1` moves the messages back |
 | `...-errors` | The Lambda failed (bad configuration, reconcile listing, crash) | Bridge log |
 | `...-oldest-pending` | An uploaded document has waited over an hour | Reconcile on? GuardDuty plan `ACTIVE`? |
-| `...-threats-found` | GuardDuty found a threat; the document was refused | Threat name in the log; tell the facility |
+| `...-threats-found` | GuardDuty found a threat; the document was refused, unless `threat-after-terminal` fired too | Threat name in the log; tell the facility |
+| `...-threat-after-terminal` | GuardDuty found a threat in a version that already had a terminal result | Urgent: see *A threat after a terminal result* below |
 | `...-access-denied` | GuardDuty could not read a version | Plan role, bucket policy, KMS |
-| `...-reconcile-exhausted` | Three on-demand scans gave no result | Bridge log, plan status |
+| `...-scan-start-failed` | GuardDuty refused or did not answer an on-demand scan request. No attempt was used; the next run tries again | Bridge log `GuardDuty did not start the scan` (status, code); plan status, the bridge role's `guardduty:SendObjectMalwareScan` grant, the NAT |
+| `...-reconcile-exhausted` | Three on-demand scans GuardDuty accepted gave no result | See *Clearing an exhausted document* below |
 | `...-plan-status` | GuardDuty reported a plan warning or error, or failed tagging | `get-malware-protection-plan` status reasons |
-| `...-event-refused` | ehr-api refused an event the bridge cannot retry, or answered 404 for a document resolve had just found | Bridge log `code`; the document stays blocked. A 404 there means the database cannot see the row: check 0101's `documents_scanner_function_lock` policy and the schema owner's row-level security |
+| `...-event-refused` | ehr-api refused an event the bridge cannot retry, answered 404 for a document resolve had just found, or refused to record an on-demand scan attempt | Bridge log `code`; the document stays blocked. A 404 there means the database cannot see the row: check 0101's `documents_scanner_function_lock` policy and the schema owner's row-level security. While a scan attempt cannot be recorded, reconcile scans that document again on every run |
+
+**Clearing an exhausted document.** Scan events are append-only, so a
+document's three `scan_started` events never go away: reconcile never tries it
+again, and it keeps its place at the front of the work list (50 exhausted
+documents stop reconcile from reaching any other). First find out why no
+result came: the plan status, the bridge log for that key (a refused or
+dead-lettered result), and the DLQ. Then scan each one by hand, with a role
+allowed `guardduty:SendObjectMalwareScan` and an AWS CLI recent enough to have
+the command. The bridge log line `Three scan attempts gave no result; needs a
+person` gives the `key` and `versionId`; the bucket is the documents bucket:
+
+```powershell
+Set-Content -NoNewline -Path scan-object.json -Value '{"Bucket":"<documents bucket name>","Key":"<key>","VersionId":"<versionId>"}'
+aws guardduty send-object-malware-scan --s3-object file://scan-object.json --region eu-west-1
+```
+
+The result comes back by the normal path (result rule, queue, bridge). A
+`clean` or `rejected` result takes the document off the list. If the result
+is `failed` again, or none arrives, the document stays blocked (fail closed);
+raise it with the owner.
+
+**A threat after a terminal result.** A second scan of a version can disagree
+with the first: reconcile's on-demand scan racing an automatic scan whose
+result was delayed, or a re-scan after a signature update. ehr-api only says
+that the version already has a terminal result, not which one, so the bridge
+raises `threat-after-terminal` (and `threats-found`) and acknowledges the
+result. Take the `key` and `versionId` from the bridge log line `GuardDuty
+found a threat in a version that already has a terminal scan result` and list
+that version's scan events:
+
+```sql
+select e.event_type, e.reason_code, e.scanner_version, e.created_at
+  from ehr.document_scan_events e
+  join ehr.documents d on d.id = e.document_id
+ where d.storage_key = '<key>' and e.object_version_id = '<versionId>'
+ order by e.created_at;
+```
+
+If the terminal event is `rejected`, the document is already blocked: with
+`guardduty.threats-found` the result was a repeated delivery and nothing more
+is needed; with another reason, tell the facility that the file also carries a
+threat. If it is `clean`, the document can still be opened, downloaded and
+sent to OCR, and the page shows it as clean. After stage 5, S3 already refuses
+reads of that version, because GuardDuty has tagged it `THREATS_FOUND`. No
+route withdraws a document yet (nothing sets `entered_in_error`), so treat it
+as a security incident: tell the owner and the facility at once, and check
+from the audit log who opened, downloaded or ran OCR on the document since its
+`clean` event.
 
 **Rollback, in reverse order**, each as its own commit and apply:
 `document_scan_enforce_tags = false` first, so that S3 stops refusing untagged
@@ -514,8 +586,8 @@ Emergency stop without an apply: revoke the scanner's `document_scanner` row in
 refused.
 
 Cost is roughly USD 2.5 to 3.5 a month at 5,000 documents and 10 GB, plus about
-USD 0.40 for the backfill (list prices, not checked against billing). Eight
-alarms cost USD 0.80 a month of that. The bytes are scanned by AWS inside
+USD 0.40 for the backfill (list prices, not checked against billing). Ten
+alarms cost USD 1.00 a month of that. The bytes are scanned by AWS inside
 eu-west-1, outside the account boundary; record this in the RoPA and DPIA.
 
 ## 5. Build flow and deployment controls

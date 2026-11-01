@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import {
-  ALLOWED_MEDIA_TYPES, AwsClient, EhrClient, Metrics, OBJECT_PREFIX, SCANNER_ENGINE,
+  ALLOWED_MEDIA_TYPES, AwsClient, EhrClient, MAX_VISIBILITY_SECONDS, Metrics, OBJECT_PREFIX, SCANNER_ENGINE,
   backoffSeconds, bridgeConfiguration, correlationId, handleSqsBatch, idempotencyKey, mapResult,
   readResolvedTarget, reasonSlug, reconcile, reconcileRequest, route, scanStartedKey, validateEnvelope,
 } from '../modules/application/runtime/document-scan-bridge/bridge.mjs';
@@ -27,7 +28,7 @@ const environment = (overrides = {}) => ({
   WORKLOAD_ISSUER_URL: ISSUER, WORKLOAD_JWKS_URL: `${ISSUER}/.well-known/jwks.json`,
   WORKLOAD_SUBJECT: 'hid:staging:document-scanner', EHR_API_URL: EHR,
   DOCUMENT_BUCKET: BUCKET, OBJECT_PREFIX: 'clinical/objects/', MALWARE_PROTECTION_PLAN_ARN: PLAN,
-  RESULTS_QUEUE_URL: QUEUE_URL, BRIDGE_MODE: 'write', ...overrides,
+  RESULTS_QUEUE_URL: QUEUE_URL, RESULTS_MAX_RECEIVE_COUNT: '12', BRIDGE_MODE: 'write', ...overrides,
 });
 const configuration = bridgeConfiguration(environment());
 const observe = bridgeConfiguration(environment({ BRIDGE_MODE: 'observe' }));
@@ -119,6 +120,12 @@ test('configuration is checked at load and binds account, Region, plan, bucket a
   assert.throws(() => bridgeConfiguration(environment({ EHR_API_URL: 'http://ehr.internal.staging.example.org' })), /ehr-api/);
   assert.throws(() => bridgeConfiguration(environment({ RESULTS_QUEUE_URL: QUEUE_URL.replace(ACCOUNT, '999999999999') })), /queue/);
   assert.throws(() => bridgeConfiguration(environment({ WORKLOAD_JWKS_URL: 'https://elsewhere.example.org/jwks.json' })), /JWKS/);
+  // The queue's maxReceiveCount, from the same Terraform value as the redrive
+  // policy: the bridge needs it to know a receive is one of the last two.
+  assert.equal(configuration.maxReceiveCount, 12);
+  for (const value of [undefined, '', '1', '0', '-3', '12.5', 'twelve', '1001']) {
+    assert.throws(() => bridgeConfiguration(environment({ RESULTS_MAX_RECEIVE_COUNT: value })), /receive count/, String(value));
+  }
 });
 
 test('the Lambda entry point loads with the Terraform environment', async () => {
@@ -243,11 +250,20 @@ test('idempotency and correlation keys are deterministic and fit the ehr-api pat
 });
 
 // --- SQS backoff and batch failures ---------------------------------------
-test('backoff starts at one minute, doubles, and stops at the 12 hour SQS limit', () => {
+test('backoff starts at one minute, doubles, and stops just under the 12 hour SQS limit counted from the receive', () => {
   assert.deepEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 40].map(backoffSeconds),
-    [60, 120, 240, 480, 960, 1920, 3840, 7680, 15360, 30720, 43200, 43200, 43200]);
+    [60, 120, 240, 480, 960, 1920, 3840, 7680, 15360, 30720, 42900, 42900, 42900]);
   assert.equal(backoffSeconds(Number.NaN), 60);
   assert.equal(backoffSeconds(0), 60);
+  // SQS refuses a ChangeMessageVisibility that ends more than 43,200 s after
+  // the receive. The bridge asks at most 30 s (the Lambda timeout) after it.
+  assert.equal(MAX_VISIBILITY_SECONDS, 42_900);
+  assert.ok(MAX_VISIBILITY_SECONDS + 30 <= 43_200);
+  // The real retry window: the 12th receive comes about 29 h after the first,
+  // and a result still failing then reaches the DLQ about 41 h after it.
+  const delays = Array.from({ length: 12 }, (_, index) => backoffSeconds(index + 1));
+  assert.equal(delays.slice(0, 11).reduce((sum, value) => sum + value, 0), 104_280);
+  assert.equal(delays.reduce((sum, value) => sum + value, 0), 147_180);
 });
 
 test('a retry reports a batch item failure and delays the message with a signed ChangeMessageVisibility', async () => {
@@ -260,6 +276,38 @@ test('a retry reports a batch item failure and delays the message with a signed 
   assert.equal(call.headers['content-type'], 'application/x-amz-json-1.0');
   assert.match(call.headers.authorization, /^AWS4-HMAC-SHA256 Credential=ASIAEXAMPLE000000001\/20261031\/eu-west-1\/sqs\/aws4_request, SignedHeaders=content-type;host;x-amz-date;x-amz-security-token;x-amz-target, Signature=[0-9a-f]{64}$/);
   assert.equal(posted(net).length, 0, 'nothing is written while the upload is not complete');
+});
+
+// A browser that PUTs the file and never calls /complete leaves the document
+// 'initiated' for good. Its result is retried for about 17 hours and then
+// acknowledged on one of the last two receives, never dead-lettered: reconcile
+// scans the document if its upload is completed later.
+test('a result for an upload that is never completed is retried, then acknowledged before the DLQ', async () => {
+  const outcomes = [];
+  let visibilityCalls = 0;
+  let uploadNotCompleted = 0;
+  for (let receive = 1; receive <= 12; receive += 1) {
+    const h = harness({ resolve: () => problem(409, 'DOCUMENT_NOT_UPLOADED'), visibility: () => { visibilityCalls += 1; return json(200, {}); } });
+    const result = await handleSqsBatch({ Records: [record(scanEvent(), { messageId: `m-${receive}`, receiveCount: String(receive) })] }, h.context);
+    outcomes.push(result.batchItemFailures.length === 1 ? 'retry' : 'ack');
+    uploadNotCompleted += h.metric('UploadNotCompleted');
+    assert.equal(posted(h.net).length, 0);
+    if (receive >= 11) assert.equal(h.logs.at(-1).level, 'info');
+  }
+  assert.deepEqual(outcomes, [...Array(10).fill('retry'), 'ack', 'ack']);
+  assert.equal(visibilityCalls, 10, 'an acknowledged record is not delayed');
+  assert.equal(uploadNotCompleted, 2);
+  // The scan-events write answers the same way when the upload is not complete.
+  for (const [receive, expected] of [['3', 'retry'], ['11', 'ack']]) {
+    const h = harness({ post: () => problem(409, 'DOCUMENT_NOT_UPLOADED') });
+    const result = await handleSqsBatch({ Records: [record(scanEvent(), { receiveCount: receive })] }, h.context);
+    assert.equal(result.batchItemFailures.length === 1 ? 'retry' : 'ack', expected, `write at receive ${receive}`);
+    assert.equal(h.metric('UploadNotCompleted'), expected === 'ack' ? 1 : 0);
+  }
+  // Other retries keep going to the DLQ on the last receives: only an upload
+  // that was never completed is dropped by design.
+  const h = harness({ resolve: () => problem(503, 'DEPENDENCY_UNAVAILABLE') });
+  assert.equal((await handleSqsBatch({ Records: [record(scanEvent(), { receiveCount: '12' })] }, h.context)).batchItemFailures.length, 1);
 });
 
 test('a batch acknowledges what is done, fails only what must retry, and survives a failed delay', async () => {
@@ -333,6 +381,35 @@ test('resolve outcomes: orphan, not completed, stale version, duplicate, not sca
   r = await outcome(json(200, { ...target(), sniffResult: 'maybe' }));
   assert.deepEqual([r.failed, r.writes], [true, 0], 'an answer outside the contract is retried, never written');
   assert.throws(() => readResolvedTarget({ ...target(), sha256Hex: null }), /resolve/);
+});
+
+// A second scan of a version that already has a terminal result can disagree
+// with it: reconcile's on-demand scan racing a delayed automatic one, or an
+// operator's re-scan after a signature update. A threat then must never be
+// acknowledged as a plain duplicate: the earlier result may have been clean.
+test('a threat found in a version that already has a terminal result raises the threat alarms', async () => {
+  const threat = scanEvent({ scanResultStatus: 'THREATS_FOUND', threats: [{ name: 'EICAR-Test-File' }] });
+  // Refused at resolve: ehr-api says no more than SCAN_ALREADY_TERMINAL.
+  let h = harness({ resolve: () => problem(409, 'SCAN_ALREADY_TERMINAL') });
+  assert.deepEqual(await handleSqsBatch({ Records: [record(threat)] }, h.context), { batchItemFailures: [] });
+  assert.equal(posted(h.net).length, 0);
+  assert.deepEqual([h.metric('ThreatsFound'), h.metric('ThreatAfterTerminal'), h.metric('Duplicates')], [1, 1, 0]);
+  let line = h.logs.find(item => item.level === 'error');
+  assert.ok(line, 'logged at error level');
+  assert.deepEqual([line.key, line.versionId, line.threatName], [KEY, VERSION, 'EICAR-Test-File']);
+  assert.match(line.message, /withdraw/);
+  // Refused at the write: another terminal result landed between the two calls.
+  h = harness({ post: () => problem(409, 'SCAN_ALREADY_TERMINAL') });
+  assert.deepEqual(await handleSqsBatch({ Records: [record(threat)] }, h.context), { batchItemFailures: [] });
+  assert.deepEqual([h.metric('ThreatsFound'), h.metric('ThreatAfterTerminal'), h.metric('Duplicates')], [1, 1, 0], 'counted once, not twice');
+  line = h.logs.find(item => item.level === 'error');
+  assert.deepEqual([line.documentId, line.versionId, line.threatName], [DOCUMENT, VERSION, 'EICAR-Test-File']);
+  // A clean or unscannable result after a terminal one stays a plain duplicate.
+  for (const event of [scanEvent(), scanEvent({ scanStatus: 'SKIPPED', scanResultStatus: 'UNSUPPORTED' })]) {
+    h = harness({ resolve: () => problem(409, 'SCAN_ALREADY_TERMINAL') });
+    await handleSqsBatch({ Records: [record(event)] }, h.context);
+    assert.deepEqual([h.metric('ThreatsFound'), h.metric('ThreatAfterTerminal'), h.metric('Duplicates')], [0, 0, 1]);
+  }
 });
 
 test('the resolve request names the bucket, key and version, with the token and correlation ID', async () => {
@@ -507,7 +584,7 @@ const item = (overrides = {}) => ({
   scanStartedCount: 0, lastScanStartedAt: null, ...overrides,
 });
 
-test('reconcile records scan_started first, then asks GuardDuty to scan that exact version, about two per second', async () => {
+test('reconcile asks GuardDuty to scan that exact version first, then records scan_started, about two per second', async () => {
   const second = item({ documentId: 'c56a4180-65aa-42ec-a945-5fd21dec0538', storageKey: 'clinical/objects/c56a4180-65aa-42ec-a945-5fd21dec0538',
     objectVersionId: 'v2', scanStartedCount: 1, lastScanStartedAt: '2026-10-31T09:00:00Z', latestEventType: 'scan_started', updatedAt: '2026-10-30T12:00:00Z' });
   const { context, net, sleeps, metric } = harness({ list: () => json(200, { items: [item(), second] }) });
@@ -526,9 +603,9 @@ test('reconcile records scan_started first, then asks GuardDuty to scan that exa
     { s3Object: { bucket: BUCKET, key: second.storageKey, versionId: 'v2' } },
   ]);
   assert.match(scans[0].headers.authorization, /\/eu-west-1\/guardduty\/aws4_request, /);
-  // scan_started is written before each scan request.
+  // Only a scan GuardDuty accepted is recorded as an attempt.
   const order = net.calls.filter(call => call.url.endsWith('/scan-events') || call.url.endsWith('/send')).map(call => (call.url.endsWith('/send') ? 'scan' : 'started'));
-  assert.deepEqual(order, ['started', 'scan', 'started', 'scan']);
+  assert.deepEqual(order, ['scan', 'started', 'scan', 'started']);
   assert.deepEqual(sleeps, [500]);
   assert.equal(metric('OldestPendingScanSeconds'), 86_400);
   assert.equal(metric('ReconcileStarted'), 2);
@@ -558,18 +635,104 @@ test('reconcile in observe mode lists but writes nothing and starts no scan', as
   assert.equal(net.calls.filter(call => call.url.endsWith('/send')).length, 0);
 });
 
-test('reconcile: a refused scan_started skips the scan; a GuardDuty refusal is counted; the deadline defers the rest', async () => {
-  let posts = 0;
+test('reconcile: a GuardDuty refusal is counted and records nothing; the deadline defers the rest', async () => {
   const { context, net, metric } = harness({
     list: () => json(200, { items: [item(), item({ objectVersionId: 'v2' }), item({ objectVersionId: 'v3' })] }),
-    post: () => (++posts === 1 ? problem(409, 'SCAN_ALREADY_TERMINAL') : json(202, { eventId: 'e' })),
     guardduty: () => json(403, { __type: 'AccessDeniedException' }),
     remaining: (() => { let calls = 0; return () => (++calls >= 3 ? 1_000 : 30_000); })(),
   });
   const summary = await reconcile({ action: 'reconcile' }, context);
-  assert.deepEqual([summary.skipped, summary.failed, summary.deferred, summary.started], [1, 1, 1, 0]);
-  assert.equal(net.calls.filter(call => call.url.endsWith('/send')).length, 1);
-  assert.equal(metric('ScanAccessDenied'), 1);
+  assert.deepEqual([summary.skipped, summary.failed, summary.deferred, summary.started], [0, 2, 1, 0]);
+  assert.equal(net.calls.filter(call => call.url.endsWith('/send')).length, 2);
+  assert.equal(posted(net).length, 0, 'a scan GuardDuty did not accept uses no attempt');
+  assert.deepEqual([metric('ScanStartFailed'), metric('ScanAccessDenied')], [2, 2]);
+});
+
+test('reconcile: once GuardDuty accepted the scan, a refused or failed scan_started still counts as started', async () => {
+  const answers = [
+    () => json(202, { eventId: 'e' }),
+    () => problem(409, 'SCAN_ALREADY_TERMINAL'),
+    () => problem(503, 'DEPENDENCY_UNAVAILABLE'),
+    () => { throw new TypeError('fetch failed'); },
+    () => problem(409, 'DOCUMENT_NOT_SCANNABLE'),
+    () => problem(400, 'INVALID_SCAN_REQUEST'),
+  ];
+  let posts = 0;
+  const { context, net, metric, logs } = harness({
+    list: () => json(200, { items: answers.map((_, index) => item({ objectVersionId: `v${index}` })) }),
+    post: () => answers[posts++](),
+  });
+  const summary = await reconcile({ action: 'reconcile' }, context);
+  assert.deepEqual([summary.started, summary.failed, summary.skipped], [6, 0, 0]);
+  assert.equal(net.calls.filter(call => call.url.endsWith('/send')).length, 6);
+  assert.equal(metric('ScanStartFailed'), 0);
+  const levels = logs.filter(line => line.attempt === 1).map(line => line.level);
+  assert.deepEqual(levels, ['info', 'info', 'warn', 'warn', 'info', 'error']);
+  // A refusal ehr-api will repeat on every run means a rescan every 15 minutes:
+  // it raises the event-refused alarm.
+  assert.equal(metric('ScanEventRefused'), 1);
+});
+
+// A stateful model of ehr-api and 0101 for reconcile: scan_started is appended
+// idempotently, and the list counts scan_started rows per version, oldest
+// first, with no filter on that count (as ehr.list_documents_awaiting_scan).
+function scanTargetsModel(count) {
+  const documents = Array.from({ length: count }, (_, index) => {
+    const id = `${String(index).padStart(8, '0')}-d9cb-469f-a165-70867728950e`;
+    return { id, key: `clinical/objects/${id}`, version: `ver-${index}`, updatedAt: new Date(Date.parse('2026-10-30T00:00:00Z') + index * 1000).toISOString(), started: [], terminal: false };
+  });
+  const keys = new Set();
+  let clock = Date.parse('2026-10-31T12:00:00Z');
+  const list = () => json(200, { items: documents.filter(document => !document.terminal).slice(0, 50).map(document => item({
+    documentId: document.id, storageKey: document.key, objectVersionId: document.version, updatedAt: document.updatedAt,
+    latestEventType: document.started.length ? 'scan_started' : null, scanStartedCount: document.started.length,
+    lastScanStartedAt: document.started.length ? new Date(Math.max(...document.started)).toISOString() : null,
+  })) });
+  const post = call => {
+    const body = JSON.parse(call.body);
+    if (keys.has(body.idempotencyKey)) return json(200, { eventId: 'replay' });
+    keys.add(body.idempotencyKey);
+    documents.find(document => document.id === body.documentId).started.push(clock);
+    return json(202, { eventId: 'e' });
+  };
+  return { documents, run: async guardduty => {
+    const h = harness({ list, post, guardduty, now: clock });
+    const summary = await route({ action: 'reconcile', olderThanSeconds: 0, limit: 50 }, h.context);
+    clock += 3_601_000;
+    return { summary, h };
+  } };
+}
+
+test('reconcile: GuardDuty refusing or not answering never uses up the three attempts', async () => {
+  const failures = {
+    'throttled 429': () => json(429, { __type: 'ThrottlingException' }),
+    'internal 500': () => json(500, { __type: 'InternalServerErrorException' }),
+    'denied 403': () => json(403, { __type: 'AccessDeniedException' }),
+    'timeout': () => { const error = new Error('The operation was aborted due to timeout'); error.name = 'TimeoutError'; throw error; },
+  };
+  for (const [name, failing] of Object.entries(failures)) {
+    const model = scanTargetsModel(1);
+    for (let run = 1; run <= 5; run += 1) {
+      const { summary, h } = await model.run(failing);
+      assert.deepEqual([summary.started, summary.failed, summary.exhausted, summary.inProgress], [0, 1, 0, 0], `${name}, run ${run}`);
+      assert.equal(posted(h.net).length, 0, `${name}: no scan_started without an accepted scan`);
+      assert.equal(h.metric('ScanStartFailed'), 1, name);
+      assert.equal(h.metric('ReconcileExhausted'), 0, name);
+    }
+    assert.equal(model.documents[0].started.length, 0, name);
+    // GuardDuty recovers: the first accepted scan is attempt 1.
+    const { summary, h } = await model.run(() => json(200, {}));
+    assert.deepEqual([summary.started, summary.failed], [1, 0], name);
+    assert.equal(posted(h.net)[0].idempotencyKey, scanStartedKey('ver-0', 1), name);
+  }
+  // Three hours of throttling across 60 documents, then recovery: every
+  // document listed gets its scan, none is exhausted.
+  const model = scanTargetsModel(60);
+  for (let run = 1; run <= 3; run += 1) await model.run(failures['throttled 429']);
+  const { summary } = await model.run(() => json(200, {}));
+  assert.deepEqual([summary.listed, summary.exhausted, summary.failed], [50, 0, 0]);
+  assert.ok(summary.started > 0);
+  assert.ok(model.documents.every(document => document.started.length <= 1));
 });
 
 test('reconcile requests are checked, and a failed listing fails the run', async () => {
@@ -594,6 +757,14 @@ test('plan status warnings and errors raise the plan alarm metric; others are ig
   h = harness();
   assert.deepEqual(await route({ hello: 'world' }, h.context), { ignored: true });
   assert.equal(h.metric('EnvelopeRejected'), 1);
+});
+
+test('every bridge metric an alarm in document_scanning.tf watches is one the bridge writes', () => {
+  const terraform = readFileSync(new URL('../modules/application/document_scanning.tf', import.meta.url), 'utf8');
+  const bridge = readFileSync(new URL('../modules/application/runtime/document-scan-bridge/bridge.mjs', import.meta.url), 'utf8');
+  const watched = [...terraform.matchAll(/metric\s*=\s*"([A-Za-z]+)"/g)].map(match => match[1]);
+  assert.ok(watched.includes('ScanStartFailed') && watched.includes('ThreatAfterTerminal'), watched.join(','));
+  for (const name of watched) assert.match(bridge, new RegExp(`metrics\\.(count|max)\\('${name}'`), name);
 });
 
 test('metrics are written as one embedded-metric-format line per invocation', async () => {

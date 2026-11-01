@@ -15,16 +15,24 @@ locals {
   document_bucket_name       = trimprefix(var.document_bucket_arn, "arn:aws:s3:::")
   document_scan_subject      = "hid:${local.workload_identity_environment}:document-scanner"
   document_scan_alarm_prefix = "${var.name_prefix}-document-scan"
+  # The results queue's redrive limit. The bridge is told it as well, so that
+  # it acknowledges a result for an upload never completed on one of the last
+  # two receives instead of sending it to the DLQ.
+  document_scan_max_receive_count = 12
   # Bridge metrics (embedded metric format) and their alarms.
   document_scan_metric_alarms = local.document_scanner_enabled ? {
     oldest-pending = { metric = "OldestPendingScanSeconds", statistic = "Maximum", threshold = 3600, period = 900,
     description = "A completed upload has waited more than an hour for a virus scan result." }
     threats-found = { metric = "ThreatsFound", statistic = "Sum", threshold = 0, period = 300,
-    description = "GuardDuty found a threat in an uploaded document; it was refused." }
+    description = "GuardDuty found a threat in an uploaded document; it was refused, unless threat-after-terminal fired too." }
+    threat-after-terminal = { metric = "ThreatAfterTerminal", statistic = "Sum", threshold = 0, period = 300,
+    description = "GuardDuty found a threat in a version that already had a terminal scan result; if that result was clean, the document is still open and must be withdrawn." }
     access-denied = { metric = "ScanAccessDenied", statistic = "Sum", threshold = 0, period = 300,
     description = "GuardDuty could not read or scan a document (configuration fault)." }
+    scan-start-failed = { metric = "ScanStartFailed", statistic = "Sum", threshold = 0, period = 900,
+    description = "GuardDuty refused or did not answer an on-demand scan request; no attempt was used." }
     reconcile-exhausted = { metric = "ReconcileExhausted", statistic = "Sum", threshold = 0, period = 900,
-    description = "Three on-demand scans of a document gave no result; a person must look." }
+    description = "Three on-demand scans GuardDuty accepted gave no result for a document; a person must scan it by hand." }
     plan-status = { metric = "PlanStatusProblem", statistic = "Sum", threshold = 0, period = 300,
     description = "GuardDuty reported a warning or error for the malware protection plan." }
     event-refused = { metric = "ScanEventRefused", statistic = "Sum", threshold = 0, period = 300,
@@ -101,8 +109,11 @@ resource "aws_cloudwatch_log_group" "document_scan_bridge" {
   retention_in_days = var.security_log_retention_days
 }
 
-# Results queue. SQS holds a result that arrives before /complete, and every
-# ehr-api outage, for up to 14 days; after 12 receives it goes to the DLQ.
+# Results queue. A result that arrives before /complete, or during an ehr-api
+# outage, is retried with a doubling delay for about 41 hours (12 receives),
+# then goes to the DLQ, which keeps it for 14 days. A result for an upload
+# that is still not completed on one of the last two receives is acknowledged
+# by the bridge instead (reconcile scans it if the upload is completed later).
 resource "aws_sqs_queue" "document_scan_results_dlq" {
   count                     = local.document_scanner_enabled ? 1 : 0
   name                      = "${var.name_prefix}-document-scan-results-dlq"
@@ -119,7 +130,7 @@ resource "aws_sqs_queue" "document_scan_results" {
   receive_wait_time_seconds  = 20
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.document_scan_results_dlq[0].arn
-    maxReceiveCount     = 12
+    maxReceiveCount     = local.document_scan_max_receive_count
   })
 }
 
@@ -303,6 +314,7 @@ resource "aws_lambda_function" "document_scan_bridge" {
       OBJECT_PREFIX               = "clinical/objects/"
       MALWARE_PROTECTION_PLAN_ARN = var.malware_protection_plan_arn
       RESULTS_QUEUE_URL           = aws_sqs_queue.document_scan_results[0].url
+      RESULTS_MAX_RECEIVE_COUNT   = tostring(local.document_scan_max_receive_count)
       BRIDGE_MODE                 = var.document_scan_bridge_mode
     }
   }
@@ -403,7 +415,7 @@ resource "aws_lambda_permission" "malware_plan_status" {
 resource "aws_cloudwatch_metric_alarm" "document_scan_dlq" {
   count               = local.document_scanner_enabled ? 1 : 0
   alarm_name          = "${local.document_scan_alarm_prefix}-dead-letters"
-  alarm_description   = "A scan result could not be delivered or processed after 12 attempts; the document stays blocked."
+  alarm_description   = "A scan result could not be delivered or processed after ${local.document_scan_max_receive_count} attempts; the document stays blocked."
   namespace           = "AWS/SQS"
   metric_name         = "ApproximateNumberOfMessagesVisible"
   dimensions          = { QueueName = aws_sqs_queue.document_scan_results_dlq[0].name }

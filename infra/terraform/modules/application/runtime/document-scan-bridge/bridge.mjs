@@ -6,8 +6,8 @@ import { boundedJson, signRequest } from './sigv4.mjs';
 // The bridge never reads object bytes, tags, metadata or KMS. It turns each
 // GuardDuty scan result into one ehr-api scan event bound to the document's
 // exact S3 VersionId and SHA-256, through the internal ALB, with a workload
-// token from the managed issuer. Logs carry object keys (random UUIDs),
-// document IDs, statuses and threat names; never patient data.
+// token from the managed issuer. Logs carry object keys (random UUIDs), S3
+// version IDs, document IDs, statuses and threat names; never patient data.
 
 export const SCANNER_ENGINE = 'aws-guardduty-malware-protection-s3';
 export const ON_DEMAND_SCANNER_VERSION = 'on-demand';
@@ -20,7 +20,10 @@ export const PLAN_STATUS_DETAIL_TYPES = new Set([
 // The four types ehr-api accepts (dto/document-scan-event.dto.ts).
 export const ALLOWED_MEDIA_TYPES = new Set(['application/pdf', 'image/jpeg', 'image/png', 'image/tiff']);
 export const OBJECT_PREFIX = 'clinical/objects/';
-export const MAX_VISIBILITY_SECONDS = 43_200;
+// SQS counts its 12-hour visibility limit from the receive and refuses a
+// ChangeMessageVisibility that would end later. The bridge asks at most 30 s
+// (the Lambda timeout) after the receive, so 300 s of margin is enough.
+export const MAX_VISIBILITY_SECONDS = 43_200 - 300;
 export const FIRST_BACKOFF_SECONDS = 60;
 export const RECONCILE_MAX_ATTEMPTS = 3;
 export const RECONCILE_RESTART_SECONDS = 3_600;
@@ -56,12 +59,17 @@ export function bridgeConfiguration(environment) {
   if (!plan || plan[1] !== region) throw new Error('Invalid malware protection plan');
   const queue = new RegExp(`^https://sqs\\.${region}\\.amazonaws\\.com/${plan[2]}/([A-Za-z0-9_-]{1,80})$`).exec(environment.RESULTS_QUEUE_URL ?? '');
   if (!queue) throw new Error('Invalid results queue');
+  // The queue's maxReceiveCount (the same Terraform value as its redrive
+  // policy): the bridge needs it to know a receive is one of the last two.
+  const maxReceiveCount = /^[1-9]\d{0,3}$/.test(environment.RESULTS_MAX_RECEIVE_COUNT ?? '')
+    ? Number(environment.RESULTS_MAX_RECEIVE_COUNT) : Number.NaN;
+  if (!(maxReceiveCount >= 2 && maxReceiveCount <= 1000)) throw new Error('Invalid results queue maximum receive count');
   const mode = environment.BRIDGE_MODE;
   if (!['observe', 'write'].includes(mode)) throw new Error('Bridge mode must be observe or write');
   return Object.freeze({
     deployment, region, issuer: issuer.href, jwks: environment.WORKLOAD_JWKS_URL, subject,
     ehr: ehr.origin, bucket, accountId: plan[2], planArn: plan[0],
-    queueUrl: queue[0], queueArn: `arn:aws:sqs:${region}:${plan[2]}:${queue[1]}`, mode,
+    queueUrl: queue[0], queueArn: `arn:aws:sqs:${region}:${plan[2]}:${queue[1]}`, maxReceiveCount, mode,
   });
 }
 
@@ -179,6 +187,11 @@ export function correlationId(prefix, id) {
   const value = `${prefix}-${String(id).replace(/[^A-Za-z0-9._:-]/g, '').slice(0, 100)}`;
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(value)) throw new Error('Invalid correlation ID');
   return value;
+}
+
+export function receiveCountOf(record) {
+  const count = Number.parseInt(record?.attributes?.ApproximateReceiveCount ?? '1', 10);
+  return Number.isSafeInteger(count) && count > 0 ? count : 1;
 }
 
 export function backoffSeconds(receiveCount) {
@@ -334,6 +347,7 @@ const log = (logger, level, message, fields) => logger[level](JSON.stringify({ l
 
 // Resolve refusals (ehr-api scan-errors.ts): what each one means for the
 // result in hand. Anything not listed (401, 403, 429, 5xx) is retried.
+// DOCUMENT_NOT_UPLOADED and SCAN_ALREADY_TERMINAL have exceptions below.
 const RESOLVE_REFUSALS = {
   DOCUMENT_NOT_FOUND: { outcome: 'ack', metric: 'Orphans', level: 'info', message: 'No document holds this object; acknowledged' },
   DOCUMENT_NOT_UPLOADED: { outcome: 'retry', metric: 'Retries', level: 'info', message: 'Upload not completed yet; will retry' },
@@ -350,6 +364,28 @@ const UNEXPLAINED_NOT_FOUND = {
   outcome: 'retry', metric: 'Retries', level: 'error',
   message: 'ehr-api answered 404 without DOCUMENT_NOT_FOUND (is the scanner route deployed?); will retry',
 };
+
+// A browser that PUT the file and never called /complete leaves the document
+// 'initiated' for good. On one of the last two receives (about 17 hours after
+// the result first arrived) its result is acknowledged rather than sent to the
+// DLQ, where it would only hide real dead letters. Reconcile lists every
+// uploaded document with no terminal result, so it still scans this one if
+// the upload is completed later. ApproximateReceiveCount is approximate, and a
+// deferred record also uses a receive, hence the margin of one.
+const UPLOAD_NOT_COMPLETED = {
+  outcome: 'ack', metric: 'UploadNotCompleted', level: 'info',
+  message: 'Upload still not completed at the last retries; acknowledged (reconcile scans it if the upload is completed later)',
+};
+const isLastReceives = (record, configuration) => receiveCountOf(record) >= configuration.maxReceiveCount - 1;
+
+// SCAN_ALREADY_TERMINAL is a plain duplicate unless the result in hand is a
+// threat. A second scan of the same version can disagree with the first
+// (reconcile racing a delayed automatic scan, or a re-scan after a signature
+// update), and ehr-api does not say which result came first, so a threat is
+// never acknowledged quietly: the earlier result may have been clean.
+const THREAT_AFTER_TERMINAL_MESSAGE =
+  'GuardDuty found a threat in a version that already has a terminal scan result; check its scan events, and withdraw the document if that result was clean';
+const isThreat = scan => scan.scanResultStatus === 'THREATS_FOUND';
 
 function resolveRefusal({ status, code }) {
   if (status === 200) return undefined;
@@ -374,11 +410,19 @@ export async function processRecord(record, context) {
     return 'ack';
   }
   const correlation = correlationId('gdmp', scan.eventId);
-  const fields = { correlationId: correlation, key: scan.key, scanStatus: scan.scanStatus, scanResultStatus: scan.scanResultStatus };
+  const fields = { correlationId: correlation, key: scan.key, versionId: scan.versionId, scanStatus: scan.scanStatus, scanResultStatus: scan.scanResultStatus };
   if (scan.threatName) log(logger, 'warn', 'GuardDuty found a threat', { ...fields, threatName: scan.threatName });
+  const lastReceives = isLastReceives(record, configuration);
 
   const resolved = await ehr.resolveTarget(scan, correlation);
-  const refusal = resolveRefusal(resolved);
+  let refusal = resolveRefusal(resolved);
+  if (refusal === RESOLVE_REFUSALS.DOCUMENT_NOT_UPLOADED && lastReceives) refusal = UPLOAD_NOT_COMPLETED;
+  if (refusal === RESOLVE_REFUSALS.SCAN_ALREADY_TERMINAL && isThreat(scan)) {
+    metrics.count('ThreatsFound');
+    metrics.count('ThreatAfterTerminal');
+    log(logger, 'error', THREAT_AFTER_TERMINAL_MESSAGE, { ...fields, threatName: scan.threatName, status: resolved.status, code: resolved.code });
+    return 'ack';
+  }
   if (refusal) {
     metrics.count(refusal.metric);
     log(logger, refusal.level, refusal.message, { ...fields, status: resolved.status, code: resolved.code });
@@ -414,7 +458,8 @@ export async function processRecord(record, context) {
     idempotencyKey: idempotencyKey(scan),
   };
   const outcome = { ...documentFields, eventType: scanEvent.eventType, reasonCode: scanEvent.reasonCode,
-    detectedMediaType: scanEvent.detectedMediaType, declaredMediaType: target.declaredMediaType };
+    detectedMediaType: scanEvent.detectedMediaType, declaredMediaType: target.declaredMediaType,
+    ...(mapped.threatFound ? { threatName: scan.threatName } : {}) };
   if (mapped.declaredMismatch) {
     metrics.count('MediaTypeCorrected');
     log(logger, 'info', 'Accepted under its real media type, not the declared one', outcome);
@@ -424,19 +469,31 @@ export async function processRecord(record, context) {
     log(logger, 'info', 'Observe mode: scan event not written', outcome);
     return 'ack';
   }
-  return writeOutcome(await ehr.postScanEvent(scanEvent, correlation), outcome, context);
+  const write = { threatFound: mapped.threatFound === true, lastReceives };
+  return writeOutcome(await ehr.postScanEvent(scanEvent, correlation), outcome, context, write);
 }
 
-function writeOutcome(response, fields, { metrics, logger }) {
+function writeOutcome(response, fields, { metrics, logger }, { threatFound, lastReceives }) {
   const { status, code } = response;
   if (status === 202 || status === 200) {
     metrics.count('EventsWritten');
     log(logger, 'info', 'Scan event written', { ...fields, eventId: response.body?.eventId });
     return 'ack';
   }
+  if (status === 409 && code === 'SCAN_ALREADY_TERMINAL' && threatFound) {
+    // ThreatsFound was counted when the result was mapped.
+    metrics.count('ThreatAfterTerminal');
+    log(logger, 'error', THREAT_AFTER_TERMINAL_MESSAGE, { ...fields, status, code });
+    return 'ack';
+  }
   if (status === 409 && code === 'SCAN_ALREADY_TERMINAL') {
     metrics.count('Duplicates');
     log(logger, 'info', 'Document reached a terminal result first; acknowledged', fields);
+    return 'ack';
+  }
+  if (status === 409 && code === 'DOCUMENT_NOT_UPLOADED' && lastReceives) {
+    metrics.count(UPLOAD_NOT_COMPLETED.metric);
+    log(logger, UPLOAD_NOT_COMPLETED.level, UPLOAD_NOT_COMPLETED.message, fields);
     return 'ack';
   }
   if (status === 409 && code === 'DOCUMENT_NOT_UPLOADED') {
@@ -507,9 +564,8 @@ export async function handleSqsBatch(event, context) {
     }
     if (outcome !== 'retry') continue;
     batchItemFailures.push({ itemIdentifier: record.messageId });
-    const receiveCount = Number.parseInt(record.attributes?.ApproximateReceiveCount ?? '1', 10);
     try {
-      await aws.changeVisibility(record.receiptHandle, backoffSeconds(receiveCount));
+      await aws.changeVisibility(record.receiptHandle, backoffSeconds(receiveCountOf(record)));
     } catch (error) {
       // The queue's own 180 s visibility then applies.
       log(logger, 'warn', 'Could not extend the retry delay', { messageId: record.messageId, error: error.message, status: error.status });
@@ -520,9 +576,12 @@ export async function handleSqsBatch(event, context) {
 
 // ---------------------------------------------------------------------------
 // 5. Reconcile and backfill: on-demand scans for uploaded documents that have
-// no terminal result for their current version. Each attempt is recorded as
-// scan_started first, so a run skips anything started in the last hour and
-// gives up after three attempts (with an alarm).
+// no terminal result for their current version. GuardDuty is asked first, and
+// only a scan it accepted is recorded as scan_started: a request it refuses
+// or does not answer uses no attempt and is tried again on the next run (with
+// the scan-start-failed alarm). A run skips anything started in the last hour
+// and gives up after three accepted scans gave no result (with an alarm).
+// Scan events are append-only, so that count never resets.
 export function reconcileRequest(event) {
   const older = event.olderThanSeconds ?? RECONCILE_DEFAULT_OLDER_THAN_SECONDS;
   const limit = event.limit ?? RECONCILE_MAX_LIMIT;
@@ -546,7 +605,7 @@ export async function reconcile(event, context) {
   for (const item of items) {
     oldest = Math.max(oldest, Math.floor((now() - Date.parse(item.updatedAt)) / 1000));
     if (remainingMs() < 14_000) { summary.deferred += 1; continue; }
-    const fields = { correlationId: correlation, documentId: item.documentId, key: item.storageKey, attempts: item.scanStartedCount };
+    const fields = { correlationId: correlation, documentId: item.documentId, key: item.storageKey, versionId: item.objectVersionId, attempts: item.scanStartedCount };
     if (item.storageBucket !== configuration.bucket || !KEY_PATTERN.test(item.storageKey)) {
       summary.skipped += 1;
       log(logger, 'warn', 'Not a clinical/objects/ object of this bucket; skipped', fields);
@@ -567,7 +626,35 @@ export async function reconcile(event, context) {
       continue;
     }
     const attempt = item.scanStartedCount + 1;
-    const started = await ehr.postScanEvent({
+    if (scansSent > 0) await sleep(RECONCILE_SCAN_SPACING_MS);
+    try {
+      await aws.sendObjectMalwareScan(configuration.bucket, item.storageKey, item.objectVersionId);
+    } catch (error) {
+      summary.failed += 1;
+      metrics.count('ScanStartFailed');
+      if (error.status === 403) metrics.count('ScanAccessDenied');
+      log(logger, 'error', 'GuardDuty did not start the scan; no attempt recorded', { ...fields, attempt, status: error.status, code: error.code, error: error.message });
+      continue;
+    }
+    scansSent += 1;
+    summary.started += 1;
+    await recordScanStarted(item, attempt, fields, context, correlation);
+  }
+  metrics.max('OldestPendingScanSeconds', oldest);
+  metrics.count('ReconcileStarted', summary.started);
+  if (summary.exhausted) metrics.count('ReconcileExhausted', summary.exhausted);
+  log(logger, 'info', 'Reconcile finished', summary);
+  return summary;
+}
+
+// The scan is already running: nothing here counts as failed or skipped. If
+// the attempt is not recorded, the worst case is one more scan of this version
+// on the next run. A refusal ehr-api will repeat would mean a scan on every
+// run, so it raises the event-refused alarm.
+async function recordScanStarted(item, attempt, fields, { ehr, metrics, logger }, correlation) {
+  let response;
+  try {
+    response = await ehr.postScanEvent({
       documentId: item.documentId,
       objectVersionId: item.objectVersionId,
       objectSha256Hex: item.sha256Hex,
@@ -576,28 +663,23 @@ export async function reconcile(event, context) {
       scannerVersion: ON_DEMAND_SCANNER_VERSION,
       idempotencyKey: scanStartedKey(item.objectVersionId, attempt),
     }, correlation);
-    if (started.status !== 202 && started.status !== 200) {
-      summary.skipped += 1;
-      log(logger, started.status >= 500 ? 'warn' : 'info', 'Could not record the scan attempt; skipped', { ...fields, status: started.status, code: started.code });
-      continue;
-    }
-    if (scansSent > 0) await sleep(RECONCILE_SCAN_SPACING_MS);
-    try {
-      await aws.sendObjectMalwareScan(configuration.bucket, item.storageKey, item.objectVersionId);
-      scansSent += 1;
-      summary.started += 1;
-      log(logger, 'info', 'On-demand scan started', { ...fields, attempt });
-    } catch (error) {
-      summary.failed += 1;
-      if (error.status === 403) metrics.count('ScanAccessDenied');
-      log(logger, 'error', 'GuardDuty did not start the scan', { ...fields, attempt, status: error.status, code: error.code });
-    }
+  } catch (error) {
+    log(logger, 'warn', 'On-demand scan started, but the attempt was not recorded; the next run may scan it again', { ...fields, attempt, error: error.message });
+    return;
   }
-  metrics.max('OldestPendingScanSeconds', oldest);
-  metrics.count('ReconcileStarted', summary.started);
-  if (summary.exhausted) metrics.count('ReconcileExhausted', summary.exhausted);
-  log(logger, 'info', 'Reconcile finished', summary);
-  return summary;
+  const { status, code } = response;
+  if (status === 202 || status === 200) {
+    log(logger, 'info', 'On-demand scan started', { ...fields, attempt });
+  } else if (status === 409 && code === 'SCAN_ALREADY_TERMINAL') {
+    log(logger, 'info', 'On-demand scan started; a terminal result landed first', { ...fields, attempt });
+  } else if (status === 409 && (code === 'DOCUMENT_NOT_SCANNABLE' || code === 'OBJECT_VERSION_MISMATCH')) {
+    log(logger, 'info', 'On-demand scan started; the document changed since it was listed', { ...fields, attempt, status, code });
+  } else if (status === 401 || status === 403 || status === 429 || status >= 500) {
+    log(logger, 'warn', 'On-demand scan started, but the attempt was not recorded; the next run may scan it again', { ...fields, attempt, status, code });
+  } else {
+    metrics.count('ScanEventRefused');
+    log(logger, 'error', 'ehr-api refused to record an on-demand scan attempt; reconcile scans this document again on every run until fixed', { ...fields, attempt, status, code });
+  }
 }
 
 export function handlePlanStatus(event, { configuration, metrics, logger }) {
