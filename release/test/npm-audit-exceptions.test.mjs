@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { spawnSync } from 'node:child_process'
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -249,5 +249,38 @@ exit 1
     const missing = cli('report', empty)
     assert.equal(missing.status, 1)
     assert.match(missing.stderr, /npm audit could not run: ENOENT/)
+  } finally { await rm(directory, { recursive: true, force: true }) }
+})
+
+test('the CLI still runs the gate when reached through a symlink, so it cannot pass silently', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'hid-npm-audit-gate-link-'))
+  try {
+    const bin = join(directory, 'bin')
+    await mkdir(bin)
+    await writeFile(join(bin, 'npm'), '#!/bin/sh\ncat "$FAKE_NPM_REPORT"\nexit 1\n')
+    await chmod(join(bin, 'npm'), 0o755)
+    const today = new Date(), day = 86_400_000
+    const date = time => new Date(time).toISOString().slice(0, 10)
+    const exceptionsPath = join(directory, 'exceptions.json')
+    await writeFile(exceptionsPath, json(withEntries(entry({ approved_at: date(today.getTime() - day), expires_at: date(today.getTime() + 10 * day) }))))
+    const critical = { ...lowAdvisory('critical'), name: 'evil-glob', via: [{ ...lowAdvisory('critical').via[0], name: 'evil-glob', dependency: 'evil-glob',
+      url: 'https://github.com/advisories/GHSA-9999-8888-7777' }], nodes: ['node_modules/evil-glob'] }
+    await writeFile(join(directory, 'covered.json'), JSON.stringify(awsReport()))
+    await writeFile(join(directory, 'uncovered.json'), JSON.stringify(report({ 'aws-cdk-lib': cdk(), minimatch: minimatch(), 'evil-glob': critical })))
+    await symlink(REPOSITORY_ROOT, join(directory, 'checkout'), 'dir')
+    await symlink(SCRIPT, join(directory, 'gate.mjs'), 'file')
+    const linked = { 'symlinked checkout': join(directory, 'checkout', 'release', 'scripts', 'npm-audit-with-exceptions.mjs'),
+      'symlinked script': join(directory, 'gate.mjs') }
+    for (const [name, script] of Object.entries(linked)) {
+      const cli = auditReport => spawnSync(process.execPath, [script, 'infra/aws', '--exceptions', exceptionsPath], { cwd: REPOSITORY_ROOT, encoding: 'utf8',
+        timeout: 20000, env: { PATH: `${bin}:/usr/bin:/bin`, FAKE_NPM_REPORT: join(directory, auditReport) } })
+      const refused = cli('uncovered.json')
+      assert.equal(refused.status, 1, `${name}: ${refused.stdout}${refused.stderr}`)
+      assert.match(refused.stderr, /no reviewed exception: GHSA-9999-8888-7777 evil-glob <2\.0\.0 \(critical\) at node_modules\/evil-glob in infra\/aws/, name)
+      assert.match(refused.stderr, /npm audit gate failed for infra\/aws/, name)
+      const passed = cli('covered.json')
+      assert.equal(passed.status, 0, `${name}: ${passed.stderr}`)
+      assert.match(passed.stdout, /npm audit gate passed for infra\/aws: 1 covered/, name)
+    }
   } finally { await rm(directory, { recursive: true, force: true }) }
 })
