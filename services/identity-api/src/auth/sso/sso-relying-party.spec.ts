@@ -64,7 +64,8 @@ let app: INestApplication | undefined;
 let clockOffset = 0;
 let provider: FakeProvider;
 let store: { accounts: Map<string, string>; factors: Map<string, string>; sessions: StoredSession[]; links: StoredLink[];
-  spent: Set<string>; access: Map<string, { actor: ActorContext; claims: { csrf_hash: string }; mfaAssured: boolean }> };
+  spent: Set<string>; access: Map<string, { actor: ActorContext; claims: { csrf_hash: string }; mfaAssured: boolean }>;
+  passwordChangedAt: Map<string, Date>; factorActivatedAt: Map<string, Date> };
 let tokens: { issueStaffSession: jest.Mock; issue: jest.Mock; verify: jest.Mock; verifyCsrf: jest.Mock;
   verifyRefreshCsrf: jest.Mock; recordSessionEvent: jest.Mock; refreshSessionKind: jest.Mock; revoke: jest.Mock };
 let auth: { revoke: jest.Mock; revokeByRefreshToken: jest.Mock; refresh: jest.Mock };
@@ -73,6 +74,7 @@ let sessionAudit: { record: jest.Mock };
 let database: { query: jest.Mock; withSystemTransaction: jest.Mock };
 
 const sha256 = (value: string) => createHash('sha256').update(value, 'utf8').digest('hex');
+const nowSeconds = () => Math.floor(Date.now() / 1_000);
 
 function newSession(kind: 'staff' | 'patient', accountId: string, provenance?: SingleSignOnProvenance) {
   const id = randomUUID();
@@ -102,15 +104,17 @@ async function runQuery(sql: string, values: unknown[] = []) {
     return { rows: [], rowCount: 1 };
   }
   if (sql.includes('auth.lock_account_for_mfa') || sql.includes('auth.lock_account_sessions')) return { rows: [{}], rowCount: 1 };
-  if (sql.includes('select subject from auth.accounts')) {
+  if (sql.includes('select subject, password_changed_at from auth.accounts')) {
     const subject = store.accounts.get(String(values[0]));
-    return subject ? { rows: [{ subject }], rowCount: 1 } : none;
+    return subject ? { rows: [{ subject, password_changed_at: store.passwordChangedAt.get(String(values[0])) ?? null }],
+      rowCount: 1 } : none;
   }
   if (sql.includes('from auth.mfa_factors')) {
     expect(sql).toContain('enrollment_proof is not null');
     expect(sql).toContain('for update');
     const id = store.factors.get(String(values[0]));
-    return id ? { rows: [{ id }], rowCount: 1 } : none;
+    return id ? { rows: [{ id, activated_at: store.factorActivatedAt.get(String(values[0])) ?? new Date(0) }], rowCount: 1 }
+      : none;
   }
   if (sql.includes('select distinct account_id::text from auth.session_single_sign_on')) {
     const accounts = [...new Set(store.links.filter((link) => link.sid === values[0]
@@ -168,7 +172,7 @@ async function buildApp(ssoOn: boolean): Promise<void> {
   store = { accounts: new Map([[STAFF_ACCOUNT, 'synthetic:staff'], [PATIENT_ACCOUNT, 'synthetic:patient'],
     [OTHER_PATIENT_ACCOUNT, 'synthetic:other-patient']]),
     factors: new Map([[STAFF_ACCOUNT, 'f1000000-0000-4000-8000-000000000001']]), sessions: [], links: [], spent: new Set(),
-    access: new Map() };
+    access: new Map(), passwordChangedAt: new Map(), factorActivatedAt: new Map() };
   tokens = {
     issueStaffSession: jest.fn(async (_client: unknown, assurance: { accountId: string }, _event: unknown,
       provenance?: SingleSignOnProvenance) => newSession('staff', assurance.accountId, provenance)),
@@ -555,6 +559,16 @@ describe('with single sign-on configured', () => {
         provider.idTokenOverrides = { auth_time: Math.floor(Date.now() / 1_000) - 86_400 - 120 }; },
       /too much time has elapsed/],
       ['an account without a proven authenticator', () => { store.factors.clear(); }, 'session_refused_403'],
+      ['a provider sign-in from before the password was changed (recovery)', () => {
+        provider.idTokenOverrides = { auth_time: nowSeconds() - 600 };
+        store.passwordChangedAt.set(STAFF_ACCOUNT, new Date(Date.now() - 60_000));
+      }, 'stale_provider_sign_in'],
+      ['a provider sign-in from before its authenticator was activated (a new enrolment after a reset)', () => {
+        provider.idTokenOverrides = { auth_time: nowSeconds() - 600 };
+        store.factorActivatedAt.set(STAFF_ACCOUNT, new Date(Date.now() - 60_000));
+      }, 'stale_provider_sign_in'],
+      ['a password change that cannot be read', () => { store.passwordChangedAt.set(STAFF_ACCOUNT, new Date(Number.NaN)); },
+        'stale_provider_sign_in'],
       ['an unknown account', () => { store.accounts.clear(); }, 'session_refused_401'],
       ['a refused code', () => { provider.tokenAnswer = { status: 400, body: { error: 'invalid_grant' } }; },
         'token endpoint refused the code: invalid_grant'],
@@ -598,6 +612,25 @@ describe('with single sign-on configured', () => {
         expect(tokens.revoke).not.toHaveBeenCalled();
         expect(earlierRevoked(earlier.actor.sessionId)).toBe(false);
       });
+    });
+
+    it('refuses a patient\'s provider sign-in from before the password was changed', async () => {
+      store.passwordChangedAt.set(PATIENT_ACCOUNT, new Date(Date.now() - 60_000));
+      const { callback } = await signIn(PORTAL, { sub: PATIENT_ACCOUNT, sid: 'provider-session-2', hid_kind: 'patient',
+        auth_time: nowSeconds() - 600 }, '/');
+      await refusedCallback(await callback(), 'stale_provider_sign_in', '/sign-in');
+    });
+
+    it('accepts credentials changed before the provider sign-in, or within five seconds after it', async () => {
+      const signedInAt = nowSeconds() - 600;
+      store.passwordChangedAt.set(STAFF_ACCOUNT, new Date(signedInAt * 1_000 - 86_400_000));
+      store.factorActivatedAt.set(STAFF_ACCOUNT, new Date(signedInAt * 1_000 + 4_000));
+      store.passwordChangedAt.set(PATIENT_ACCOUNT, new Date(signedInAt * 1_000 + 4_000));
+      const staff = await (await signIn(LAB, staffClaims({ auth_time: signedInAt }))).callback();
+      expect([staff.status, staff.headers.location]).toEqual([303, '/lab/queue']);
+      const patient = await (await signIn(PORTAL, { sub: PATIENT_ACCOUNT, sid: 'provider-session-2', hid_kind: 'patient',
+        auth_time: signedInAt }, '/')).callback();
+      expect([patient.status, patient.headers.location]).toEqual([303, '/']);
     });
 
     it('never hands off silently again just after a fallback: the person is asked, or the browser goes to the root', async () => {

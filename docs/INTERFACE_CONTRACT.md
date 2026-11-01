@@ -801,7 +801,11 @@ the client, the provider `sid`, the ID token and the provider `auth_time`
 (`auth.session_single_sign_on`); the sign-in's absolute end, and a patient's
 recent-sign-in check (`PATIENT_RECENT_AUTH_REQUIRED`), count from that
 `auth_time`, so a hand-off is never a fresh sign-in. Idle and absolute
-lifetimes are otherwise unchanged.
+lifetimes are otherwise unchanged. A provider sign-in older than the
+account's `password_changed_at`, or, for staff, than the authenticator's
+`activated_at`, is refused (`stale_provider_sign_in`, five seconds'
+allowance), so a provider session from before a password recovery or an MFA
+reset opens nothing.
 
 **Sign-out everywhere.** Back-channel logout ends every unrevoked staff or
 patient sign-in that the provider session `sid` opened, whichever product
@@ -827,6 +831,10 @@ Back-Channel Logout 1.0 (`typ` `logout+jwt` or none, `jti`, the event, `sid`
 and/or `sub`, no `nonce`); and, per client, `redirect_uris`,
 `post_logout_redirect_uris` and `backchannel_logout_uri` as above, with
 `backchannel_logout_session_required`, PKCE required and no consent screen.
+`auth_time` is when the sign-in finished (after the second factor, so never
+before a factor enrolled during it), and the provider ends its sessions
+whenever the account's `token_version` changes (suspension, reactivation,
+MFA reset, password recovery, deletion).
 
 ### Staff facility binding (N5, migration 0087)
 

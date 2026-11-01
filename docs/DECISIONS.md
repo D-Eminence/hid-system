@@ -6453,7 +6453,9 @@ Decision:
   authenticator as MFA evidence) or `TokenService.issue`, sets today's
   cookies, and stores the provider `sid`, the ID token (for `id_token_hint`)
   and `auth_time` on the family (0102). The absolute end and a patient's
-  recent-sign-in check count from `auth_time`.
+  recent-sign-in check count from `auth_time`. A provider sign-in older than
+  the account's password change or, for staff, its authenticator's activation
+  opens no session.
 - **Sign-out on a product signs out everywhere.** Product sign-out runs
   today's sign-out, then answers the provider's end-session address for the
   frontend to navigate to; the provider ends its session and sends back-channel
@@ -6509,6 +6511,13 @@ Residual risks:
   each is accepted once.
 - The claim names (`hid_kind`, `amr` values, `sid`) and the provider's
   behaviour are assumptions until the coordinator's provider confirms them.
+- Suspension, reactivation and deletion end every session of an account
+  today, but the product cannot date them: a provider session from before
+  them is stopped only if the provider ends its sessions whenever the
+  account's `token_version` changes. The product checks only the password
+  change and the authenticator's activation. A legacy password rehash on a
+  product's own sign-in page also sets `password_changed_at`, which then
+  refuses that account's next hand-off once.
 
 Related: ADR-033; ADR-038; ADR-044; ADR-059; MFA-1 (0088);
 `INTERFACE_CONTRACT.md`, "Single sign-on hand-off on product hosts";

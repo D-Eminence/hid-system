@@ -163,6 +163,13 @@ coordinator's; these are the product's rules.
   fresh sign-in (`prompt=login`) always goes to the provider, even over a live
   session; it must then be of the same account, and it ends the earlier
   sign-in, so a browser keeps one sign-in per product.
+* A provider sign-in older than the account's last password change, or, for
+  staff, than the activation of the authenticator recorded as its second
+  factor, opens no session (`stale_provider_sign_in`; a change up to five
+  seconds after `auth_time` counts as before it). Recovery and a new
+  enrolment after an MFA reset are caught this way. Suspension, reactivation
+  and deletion cannot be dated here: the provider must end its own sessions
+  whenever the account's `token_version` changes.
 * A refused hand-off never becomes a redirect loop, and after sign-out
   everywhere the first refused session check or refresh on a product host
   clears its session cookies.

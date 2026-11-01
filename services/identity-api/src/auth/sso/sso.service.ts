@@ -27,6 +27,12 @@ import {
 const ASK_THE_PERSON = new Set(['login_required', 'interaction_required', 'consent_required', 'account_selection_required']);
 /** A callback's query is a code, a state and an issuer: anything longer is refused unread. */
 const MAX_CALLBACK_QUERY_LENGTH = 4_096;
+/**
+ * How far a credential change may follow the provider's `auth_time` and still
+ * count as before it: `auth_time` is in whole seconds, and the provider's
+ * clock and the database's may differ by a little.
+ */
+export const SSO_CREDENTIAL_CHANGE_ALLOWANCE_MS = 5_000;
 
 /** What a start may ask of the provider: no page (a quiet check), or a fresh sign-in (a recent sign-in is needed). */
 export type SsoPrompt = 'none' | 'login';
@@ -293,6 +299,8 @@ export class SsoService {
    * the account's active factor with a staff enrolment proof, recorded as this
    * sign-in's MFA evidence (0088); no such factor is 403 STAFF_MFA_REQUIRED
    * and no session. Eligibility is re-checked by issueStaffSession (ADR-066).
+   * The provider's sign-in must not be older than the account's password
+   * change or that factor's activation (signedInSinceCredentials).
    */
   private async issueStaffSession(client: SsoClient, verified: VerifiedIdToken, provenance: SingleSignOnProvenance,
     event: SessionEventMetadata): Promise<LoginResult> {
@@ -300,15 +308,16 @@ export class SsoService {
     if (!method) throw new SsoTokenRefused('staff_mfa');
     return this.database.withSystemTransaction(event.correlationId, async (database) => {
       await database.query('select auth.lock_account_for_mfa($1)', [verified.accountId]);
-      const account = (await database.query<{ subject: string }>(
-        'select subject from auth.accounts where id = $1', [verified.accountId])).rows[0];
+      const account = (await database.query<{ subject: string; password_changed_at: Date | string | null }>(
+        'select subject, password_changed_at from auth.accounts where id = $1', [verified.accountId])).rows[0];
       if (!account) throw new UnauthorizedException('Unknown account');
-      const factor = (await database.query<{ id: string }>(
-        `select id::text from auth.mfa_factors
+      const factor = (await database.query<{ id: string; activated_at: Date | string | null }>(
+        `select id::text, activated_at from auth.mfa_factors
           where account_id = $1 and status = 'active' and enrollment_proof is not null
           for update`,
         [verified.accountId])).rows[0];
       if (!factor) throw staffMfaRequired();
+      signedInSinceCredentials(verified, account.password_changed_at, factor.activated_at);
       const session = await this.tokens.issueStaffSession(database,
         { accountId: verified.accountId, subject: account.subject, factorId: factor.id, method }, event, provenance);
       const facility = session.actor.facility;
@@ -324,12 +333,17 @@ export class SsoService {
     });
   }
 
-  /** A patient session from a single sign-on, as a patient sign-in issues one (TokenService.issue). */
+  /**
+   * A patient session from a single sign-on, as a patient sign-in issues one
+   * (TokenService.issue), when the provider's sign-in is not older than the
+   * account's password change (signedInSinceCredentials).
+   */
   private async issuePatientSession(client: SsoClient, verified: VerifiedIdToken, provenance: SingleSignOnProvenance,
     event: SessionEventMetadata): Promise<LoginResult> {
-    const account = (await this.database.query<{ subject: string }>(
-      'select subject from auth.accounts where id = $1', [verified.accountId])).rows[0];
+    const account = (await this.database.query<{ subject: string; password_changed_at: Date | string | null }>(
+      'select subject, password_changed_at from auth.accounts where id = $1', [verified.accountId])).rows[0];
     if (!account) throw new UnauthorizedException('Unknown account');
+    signedInSinceCredentials(verified, account.password_changed_at);
     const session = await this.tokens.issue({
       actorKind: 'patient', subject: account.subject, accountId: verified.accountId, email: '', displayName: '',
       facilities: [], authenticationMethod: 'local',
@@ -389,5 +403,26 @@ export class SsoService {
     const secret = this.environment.AUTH_SIGNING_SECRET;
     if (!secret) throw new SsoProviderUnavailable('no signing secret');
     return secret;
+  }
+}
+
+/**
+ * Refuses a provider sign-in made before a credential it relies on changed.
+ * Password recovery, an administrator's MFA reset, suspension and deletion
+ * end every session of the account today (they raise its token_version); a
+ * provider session from before them must not open a new one. The provider is
+ * asked to end its own sessions then too; this is the product's check of the
+ * two changes it can date: the password (`password_changed_at`, which
+ * recovery sets) and, for staff, the activation of the authenticator recorded
+ * as the sign-in's second factor (`activated_at`, which a new enrolment after
+ * a reset sets). A change up to SSO_CREDENTIAL_CHANGE_ALLOWANCE_MS after
+ * `auth_time` counts as before it. A change that cannot be read is refused.
+ */
+function signedInSinceCredentials(verified: VerifiedIdToken, ...changes: (Date | string | null)[]): void {
+  const latestAccepted = verified.authenticatedAt.getTime() + SSO_CREDENTIAL_CHANGE_ALLOWANCE_MS;
+  for (const change of changes) {
+    if (change === null) continue;
+    const changedAt = new Date(change).getTime();
+    if (!Number.isFinite(changedAt) || changedAt > latestAccepted) throw new SsoTokenRefused('stale_provider_sign_in');
   }
 }
