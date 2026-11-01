@@ -81,8 +81,10 @@ the record by eye before they dispense.
 1. **Check the number** (see "If 0102 is already taken" below).
 2. **Bring the branch up to date** with the production branch
    (`origin/staging-novu-ci-20261005`): rebase it onto the newest release.
-   Leave this file's commit out. If other migrations shipped after the guard,
-   renumber now.
+   Leave this file's commit out. The rollback itself is every other commit
+   on this branch after the guard's (a25fc7a): the migration, and a later
+   commit that corrects its notes; both go in. If other migrations shipped
+   after the guard, renumber now.
 3. **Re-run the checks** on the updated branch:
    - `node scripts/verify-migration-ledger.mjs`;
    - the release tests (`release/test/staging-migration-ledger.test.mjs` and
@@ -162,5 +164,7 @@ Steps, in one commit:
    its sha256, and the number in the evidence text. `runtime-grants.sql`'s
    sha256 changes too.
 6. In `docs/INTERFACE_CONTRACT.md`, change the number in the rollback
-   section's heading and first paragraph.
+   section's heading and first paragraph. Sections 28 and 29 (the guard's
+   sections) also name 0102 twice each, where they say the guard's test
+   suites were removed with it: change those four too.
 7. Run the checks in "How to use it", step 3.
