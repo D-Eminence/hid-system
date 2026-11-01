@@ -234,7 +234,26 @@ class CoreTests(unittest.TestCase):
             declare(grants)
             with self.assertRaisesRegex(c.ReleaseError,'RUNTIME_GRANTS_NEED_A_MIGRATION'): c.schema_contract(root,[grants])
             declare(migration,suite)
-            with self.assertRaisesRegex(c.ReleaseError,'CONTENT'): c.schema_contract(root,[migration,suite])
+            # A suite is never part of the schema change, so declaring one is still refused.
+            with self.assertRaisesRegex(c.ReleaseError,'EXACT_SCHEMA_CHANGE_DECLARATION_REQUIRED'):
+                c.schema_contract(root,[migration,suite])
+
+    def test_schema_ignores_database_test_suites_that_change_with_a_migration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=pathlib.Path(folder); migration='services/ehr-api/database/migrations/0099_add.sql'
+            suite='services/ehr-api/database/tests/schema.integration.sql'
+            for name,text in ((migration,'select 1;'),(suite,'select 1;')):
+                (root/name).parent.mkdir(parents=True,exist_ok=True); (root/name).write_text(text)
+            (root/'config').mkdir()
+            c.atomic_json(root/'config/production-schema-compatibility.json',{'schema':'hid.schema-compatibility/v1',
+                'backward_compatible':True,'reviewed_by':'HID reviewer','evidence':'existing check',
+                'files':{migration:c.file_sha(root/migration)}})
+            contract=c.schema_contract(root,[migration,suite])
+            self.assertEqual(c.migration_files(contract),[migration])
+            self.assertEqual(c.schema_contract(root,[suite]),{'changed':False})
+            other='services/ehr-api/database/seed.sql'; (root/other).write_text('select 2;')
+            with self.assertRaisesRegex(c.ReleaseError,'EXACT_SCHEMA_CHANGE_DECLARATION_REQUIRED'):
+                c.schema_contract(root,[migration,suite,other])
 
     def test_schema_carries_only_a_complete_reviewed_declaration_when_the_diff_has_no_schema_change(self):
         with tempfile.TemporaryDirectory() as folder:
