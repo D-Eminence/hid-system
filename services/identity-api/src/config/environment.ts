@@ -1,5 +1,6 @@
 import { isIP } from 'node:net';
 import { z } from 'zod';
+import { ssoConfigurationIssues } from '../auth/sso/sso-config';
 import { turnstileActionsFor } from '../auth/turnstile-actions';
 
 const emptyToUndefined = (value: unknown): unknown =>
@@ -49,6 +50,17 @@ const environmentSchema = z.object({
   AUTH_COOKIE_NAME: z.string().regex(/^[A-Za-z0-9_-]+$/).default('hid_access'),
   AUTH_COOKIE_SECURE: booleanString,
   AUTH_COOKIE_DOMAIN: optionalString,
+  // Single sign-on on auth. (ADR-070, proposed; the product side): each
+  // product host is an OpenID Connect relying party of the provider on auth.
+  // Off unless AUTH_SSO_ISSUER is set; with all four unset, no SSO route
+  // exists and sign-in, refresh and sign-out are exactly as before. Every
+  // cookie stays host-only (AUTH_COOKIE_DOMAIN is still refused in
+  // production). Formats and start-up refusals: auth/sso/sso-config.ts.
+  AUTH_SSO_ISSUER: optionalString,
+  AUTH_SSO_INTERNAL_BASE_URL: optionalString,
+  AUTH_SSO_CLIENTS: z.preprocess(emptyToUndefined, z.string().trim().max(16_384).optional()),
+  // Client keys or secrets from the secret store; never logged or echoed.
+  AUTH_SSO_CLIENT_CREDENTIALS: z.preprocess(emptyToUndefined, z.string().trim().max(65_536).optional()),
   // Platform administration sessions (0069). Idle is measured from the last
   // refresh; the database refuses longer idle or absolute lifetimes.
   PLATFORM_ACCESS_TTL_SECONDS: z.coerce.number().int().min(60).max(600).default(300),
@@ -249,6 +261,11 @@ const environmentSchema = z.object({
         || new Set(clientIds).size !== clientIds.length) {
       context.addIssue({ code: 'custom', path: ['GOOGLE_OIDC_CLIENT_IDS'], message: 'Google client IDs must be unique, non-empty values' });
     }
+  }
+  // ADR-070: a single sign-on configuration with any issue never starts, in
+  // any environment; with nothing set there is nothing to check.
+  for (const message of ssoConfigurationIssues(environment)) {
+    context.addIssue({ code: 'custom', path: ['AUTH_SSO_ISSUER'], message });
   }
   if (environment.NIN_PROVIDER_MODE === 'test') {
     if (environment.NODE_ENV !== 'test') context.addIssue({ code: 'custom', path: ['NIN_PROVIDER_MODE'], message: 'The deterministic NIN provider is test-only' });

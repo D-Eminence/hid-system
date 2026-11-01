@@ -69,6 +69,23 @@ export interface SessionEventMetadata {
 export type StaffSessionAssurance = PlatformSessionAssurance;
 
 /**
+ * Where a staff or patient sign-in came from when a product issued it after
+ * single sign-on on `auth.` (ADR-070, 0102): the product's client, the
+ * provider's session id (`sid`, which back-channel logout names), the ID token
+ * (kept server-side for `id_token_hint` at sign-out) and when the person
+ * signed in at the provider (`auth_time`). Stored on the new family in the
+ * session's own transaction. The sign-in's absolute end then counts from
+ * `authenticatedAt`, not from the hand-off, and a recent-sign-in check reads it
+ * too (recent-authentication.ts).
+ */
+export interface SingleSignOnProvenance {
+  clientId: string;
+  providerSid: string;
+  idToken: string;
+  authenticatedAt: Date;
+}
+
+/**
  * The 403 for a staff session without live MFA assurance (MFA-1, 0088): a
  * sign-in from before staff MFA, or one whose authenticator was reset. The
  * client signs in again with the password and an authenticator code.
@@ -196,8 +213,10 @@ export class TokenService {
    * a mapped Google identity). A staff session is never issued here: only
    * issueStaffSession issues one, after its second factor (MFA-1, 0088), so
    * no path issues a staff session from a password or an ID token alone.
+   * `singleSignOn` is set only by a product's single sign-on callback (ADR-070).
    */
-  async issue(identity: CredentialIdentity, event: SessionEventMetadata): Promise<LoginResult> {
+  async issue(identity: CredentialIdentity, event: SessionEventMetadata,
+    singleSignOn?: SingleSignOnProvenance): Promise<LoginResult> {
     if ((identity.actorKind ?? 'staff') !== 'patient') {
       throw new UnauthorizedException('A staff session requires multi-factor authentication');
     }
@@ -219,9 +238,10 @@ export class TokenService {
     const refreshToken = this.newRefreshToken(sessionId, authenticationMethod);
     const csrfToken = this.deriveRefreshCsrf(refreshToken);
     const now = new Date();
-    const expiresAt = new Date(now.getTime() + this.environment.AUTH_ACCESS_TTL_SECONDS * 1_000);
-    const refreshExpiresAt = new Date(now.getTime() + this.environment.AUTH_REFRESH_TTL_SECONDS * 1_000);
-    const absoluteExpiresAt = new Date(now.getTime() + this.environment.AUTH_ABSOLUTE_TTL_SECONDS * 1_000);
+    const end = this.singleSignOnEnd(now, this.environment.AUTH_ABSOLUTE_TTL_SECONDS, singleSignOn);
+    const expiresAt = end(new Date(now.getTime() + this.environment.AUTH_ACCESS_TTL_SECONDS * 1_000));
+    const refreshExpiresAt = end(new Date(now.getTime() + this.environment.AUTH_REFRESH_TTL_SECONDS * 1_000));
+    const absoluteExpiresAt = end(new Date(now.getTime() + this.environment.AUTH_ABSOLUTE_TTL_SECONDS * 1_000));
     const tokenVersion = await this.accountTokenVersion(actor.accountId);
     const accessToken = await this.signAccessToken(actor, sessionId, accessJti, tokenVersion, csrfToken, expiresAt);
 
@@ -263,8 +283,10 @@ export class TokenService {
       });
       await this.insertSessionEvent(client, {
         eventType: 'login_succeeded', outcome: 'success', accountId: actor.accountId,
-        sessionId, event, details: { password_upgraded: Boolean(identity.passwordUpgrade) },
+        sessionId, event, details: { password_upgraded: Boolean(identity.passwordUpgrade),
+          ...(singleSignOn ? { sso_client: singleSignOn.clientId } : {}) },
       });
+      if (singleSignOn) await this.recordSingleSignOn(client, sessionId, actor.accountId, singleSignOn);
     });
 
     return { actor: { ...actor, sessionId }, accessToken, refreshToken, csrfToken, expiresAt, refreshExpiresAt };
@@ -286,11 +308,13 @@ export class TokenService {
    * after the password and a second factor were verified there. The session
    * has the standard lifetimes and the staff actor's facility memberships, and
    * records its MFA evidence in auth.session_assurance; no staff session is
-   * issued any other way.
+   * issued any other way. `singleSignOn` is set only by a product's single
+   * sign-on callback (ADR-070), whose provider verified the second factor at
+   * `authenticatedAt`.
    */
   issueStaffSession(client: PoolClient, assurance: StaffSessionAssurance,
-    event: SessionEventMetadata): Promise<LoginResult> {
-    return this.issueAssuredSession(client, 'staff', assurance, event);
+    event: SessionEventMetadata, singleSignOn?: SingleSignOnProvenance): Promise<LoginResult> {
+    return this.issueAssuredSession(client, 'staff', assurance, event, singleSignOn);
   }
 
   /**
@@ -313,7 +337,8 @@ export class TokenService {
   }
 
   private async issueAssuredSession(client: PoolClient, kind: 'platform' | 'staff',
-    assurance: PlatformSessionAssurance, event: SessionEventMetadata): Promise<LoginResult> {
+    assurance: PlatformSessionAssurance, event: SessionEventMetadata,
+    singleSignOn?: SingleSignOnProvenance): Promise<LoginResult> {
     // On this transaction's client: the caller holds the account row lock (Stage 7A).
     const resolved = kind === 'platform'
       ? await this.currentStaff.resolvePlatform(assurance.subject, undefined, client)
@@ -335,9 +360,10 @@ export class TokenService {
     const csrfToken = this.deriveRefreshCsrf(refreshToken);
     const now = new Date();
     const lifetimes = this.lifetimes(kind);
-    const expiresAt = new Date(now.getTime() + lifetimes.access * 1_000);
-    const refreshExpiresAt = new Date(now.getTime() + lifetimes.refresh * 1_000);
-    const absoluteExpiresAt = new Date(now.getTime() + lifetimes.absolute * 1_000);
+    const end = this.singleSignOnEnd(now, lifetimes.absolute, kind === 'staff' ? singleSignOn : undefined);
+    const expiresAt = end(new Date(now.getTime() + lifetimes.access * 1_000));
+    const refreshExpiresAt = end(new Date(now.getTime() + lifetimes.refresh * 1_000));
+    const absoluteExpiresAt = end(new Date(now.getTime() + lifetimes.absolute * 1_000));
     const actor = { ...resolved, sessionId };
     const accessToken = await this.signAccessToken(actor, sessionId, accessJti, tokenVersion, csrfToken, expiresAt);
     await this.insertSession(client, {
@@ -345,15 +371,28 @@ export class TokenService {
       accountTokenVersion: tokenVersion, authenticationMethod: 'local', actorKind: kind,
       issuedAt: now, expiresAt: refreshExpiresAt, absoluteExpiresAt, event,
     });
-    await client.query(
-      `insert into auth.session_assurance (family_id, account_id, mfa_factor_id, mfa_method, mfa_verified_at)
-       values ($1, $2, $3, $4, clock_timestamp())`,
-      [sessionId, assurance.accountId, assurance.factorId, assurance.method],
-    );
+    if (kind === 'staff' && singleSignOn) {
+      // The provider verified this sign-in's second factor at its auth_time.
+      await client.query(
+        `insert into auth.session_assurance (family_id, account_id, mfa_factor_id, mfa_method, mfa_verified_at)
+         values ($1, $2, $3, $4, $5)`,
+        [sessionId, assurance.accountId, assurance.factorId, assurance.method, singleSignOn.authenticatedAt],
+      );
+    } else {
+      await client.query(
+        `insert into auth.session_assurance (family_id, account_id, mfa_factor_id, mfa_method, mfa_verified_at)
+         values ($1, $2, $3, $4, clock_timestamp())`,
+        [sessionId, assurance.accountId, assurance.factorId, assurance.method],
+      );
+    }
     await this.insertSessionEvent(client, {
       eventType: 'login_succeeded', outcome: 'success', accountId: assurance.accountId, sessionId, event,
-      details: { session_kind: kind, mfa_method: assurance.method },
+      details: { session_kind: kind, mfa_method: assurance.method,
+        ...(kind === 'staff' && singleSignOn ? { sso_client: singleSignOn.clientId } : {}) },
     });
+    if (kind === 'staff' && singleSignOn) {
+      await this.recordSingleSignOn(client, sessionId, assurance.accountId, singleSignOn);
+    }
     return kind === 'platform'
       ? { actor, accessToken, refreshToken, csrfToken, expiresAt, refreshExpiresAt, absoluteExpiresAt }
       : { actor, accessToken, refreshToken, csrfToken, expiresAt, refreshExpiresAt };
@@ -1040,6 +1079,35 @@ export class TokenService {
         sessionId: session.id, event,
       });
     });
+  }
+
+  /**
+   * The lifetimes of a new sign-in, as they are for any sign-in, except that
+   * a single sign-on's never run past `absoluteSeconds` after the person
+   * signed in at the provider: a hand-off is not a new sign-in, so the 24-hour
+   * absolute end (by default) counts from the provider's auth_time. Without a
+   * single sign-on every lifetime is returned unchanged.
+   */
+  private singleSignOnEnd(now: Date, absoluteSeconds: number,
+    singleSignOn: SingleSignOnProvenance | undefined): (lifetimeEnd: Date) => Date {
+    if (!singleSignOn) return (lifetimeEnd) => lifetimeEnd;
+    const signInEnd = singleSignOn.authenticatedAt.getTime() + absoluteSeconds * 1_000;
+    if (signInEnd <= now.getTime() + 1_000) {
+      throw new UnauthorizedException('The sign-in at the provider has reached its absolute end');
+    }
+    return (lifetimeEnd) => new Date(Math.min(lifetimeEnd.getTime(), signInEnd));
+  }
+
+  /** Stores a single sign-on's provenance on its new family (0102), in the session's transaction. */
+  private async recordSingleSignOn(client: PoolClient, familyId: string, accountId: string,
+    singleSignOn: SingleSignOnProvenance): Promise<void> {
+    await client.query(
+      `insert into auth.session_single_sign_on
+         (family_id, account_id, client_id, provider_sid, id_token, authenticated_at)
+       values ($1, $2, $3, $4, $5, $6)`,
+      [familyId, accountId, singleSignOn.clientId, singleSignOn.providerSid, singleSignOn.idToken,
+        singleSignOn.authenticatedAt],
+    );
   }
 
   private newRefreshToken(sessionId: string, method: 'local' | 'oidc'): string {

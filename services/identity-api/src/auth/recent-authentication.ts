@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { ActorContext } from '../common/request-context';
+import { ssoConfigured } from './sso/sso-config';
 
 export type PatientSessionActor = ActorContext & { patientId: string; sessionId: string };
 
@@ -10,6 +11,13 @@ export type PatientSessionActor = ActorContext & { patientId: string; sessionId:
  * the last ten minutes. Refresh rotates a session within the same family, so
  * checking the earliest issuance in that family prevents silent refresh from
  * counting as a fresh patient authentication.
+ *
+ * While single sign-on is configured (ADR-070, 0102), a family the patient
+ * portal issued after single sign-on counts from when the person signed in at
+ * the provider, not from the hand-off: a silent hand-off is not a fresh
+ * sign-in either (the portal asks for one with prompt=login). A family without
+ * a single sign-on row is checked as before (LEAST ignores the null). While it
+ * is not configured, the statement is today's, which reads no 0102 table.
  */
 export async function requireRecentPatientAuthentication(
   client: PoolClient,
@@ -17,7 +25,16 @@ export async function requireRecentPatientAuthentication(
   detail: string,
 ): Promise<void> {
   const result = await client.query<{ recent: boolean }>(
-    `select coalesce(min(family.issued_at) >= clock_timestamp() - interval '10 minutes', false) as recent
+    ssoConfigured()
+      ? `select coalesce(least(min(family.issued_at), max(single_sign_on.authenticated_at))
+                  >= clock_timestamp() - interval '10 minutes', false) as recent
+           from auth.sessions current_session
+           join auth.sessions family on family.family_id = current_session.family_id
+           left join auth.session_single_sign_on single_sign_on on single_sign_on.family_id = current_session.family_id
+          where current_session.id = $1 and current_session.account_id = $2
+            and current_session.patient_id = $3 and current_session.session_kind = 'patient'
+            and current_session.revoked_at is null`
+      : `select coalesce(min(family.issued_at) >= clock_timestamp() - interval '10 minutes', false) as recent
        from auth.sessions current_session
        join auth.sessions family on family.family_id = current_session.family_id
       where current_session.id = $1 and current_session.account_id = $2

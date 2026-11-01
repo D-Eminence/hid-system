@@ -501,6 +501,10 @@
       {
         "name": "0101_staff_record_chat.sql",
         "sha256": "bedcb5e1274228344f0e5b970cd9881af42094105b2277daab95d043014b8613"
+      },
+      {
+        "name": "0102_sso_relying_party.sql",
+        "sha256": "2f6b8ae9154dfe34b5c591367a4353a3cfd9723d5e9942c7353c0a1b3b03562a"
       }
     ]
   },
