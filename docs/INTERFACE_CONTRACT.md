@@ -798,14 +798,14 @@ client through `TokenService.issueStaffSession` with the account's active,
 enrolment-proven authenticator as its MFA evidence (no such authenticator:
 refused), a patient client through `TokenService.issue`. The family records
 the client, the provider `sid` and the provider `auth_time`
-(`auth.session_single_sign_on`; the ID token is not kept); the sign-in's absolute end, and a patient's
-recent-sign-in check (`PATIENT_RECENT_AUTH_REQUIRED`), count from that
-`auth_time`, so a hand-off is never a fresh sign-in. Idle and absolute
-lifetimes are otherwise unchanged. A provider sign-in older than the
-account's `password_changed_at`, or, for staff, than the authenticator's
-`activated_at`, is refused (`stale_provider_sign_in`, five seconds'
-allowance), so a provider session from before a password recovery or an MFA
-reset opens nothing.
+(`auth.session_single_sign_on`; the ID token is not kept); the sign-in's
+absolute end, and a patient's recent-sign-in check
+(`PATIENT_RECENT_AUTH_REQUIRED`), count from that `auth_time`, so a hand-off
+is never a fresh sign-in. Idle and absolute lifetimes are otherwise unchanged.
+A provider sign-in older than the account's `password_changed_at`, or, for
+staff, than the authenticator's `activated_at`, is refused
+(`stale_provider_sign_in`, five seconds' allowance), so a provider session
+from before a password recovery or an MFA reset opens nothing.
 
 **Sign-out everywhere.** Back-channel logout ends every unrevoked staff or
 patient sign-in that the provider session `sid` opened, whichever product
@@ -815,12 +815,13 @@ every other sign-in of the account of the same kind: back-channel logout
 cannot reach one made on a product's own sign-in page (single sign-on's
 fallback) or through an earlier provider session. Identity cannot tell
 browsers apart, so this includes the account's sign-ins on other devices;
-while a device's provider session lives, its next page hands off again. The other hosts keep their cookies
-until a request reaches Identity: then a refused `POST /auth/refresh` clears
-them, as today, and so does a refused `GET /auth/session` on a single sign-on
-host when nothing of the sign-in can still renew (no refresh cookie, or one
-that is ended, expired or reused). An access token that merely expired while
-its refresh still renews keeps its cookies.
+while a device's provider session lives, its next page hands off again. The
+other hosts keep their cookies until a request reaches Identity: then a
+refused `POST /auth/refresh` clears them, as today, and so does a refused
+`GET /auth/session` on a single sign-on host when nothing of the sign-in can
+still renew (no refresh cookie, or one that is ended, expired or reused). An
+access token that merely expired while its refresh still renews keeps its
+cookies.
 
 **Expected of the provider (to confirm with the coordinator).** Discovery at
 `<issuer>/.well-known/openid-configuration` whose `issuer` is exactly
