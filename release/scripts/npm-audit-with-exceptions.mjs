@@ -19,7 +19,7 @@
 //     version 2 audit report, or reporting an error.
 // Advisories below moderate pass without an entry, as with --audit-level=moderate.
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
+import { readFileSync, realpathSync } from 'node:fs'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -236,7 +236,10 @@ export function main(argv, { now = new Date(), cwd = process.cwd(), spawn = spaw
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+// Compare real paths: Node resolves symlinks in import.meta.url for the main
+// module but not in process.argv[1], so a plain path comparison would skip
+// main() and exit 0 when the script is reached through a symlink.
+if (process.argv[1] && realpathSync(process.argv[1]) === realpathSync(fileURLToPath(import.meta.url))) {
   try { process.exitCode = main(process.argv.slice(2)) } catch (error) {
     process.stderr.write(`npm audit gate failed: ${error?.message ?? error}\n`)
     process.exitCode = 1
