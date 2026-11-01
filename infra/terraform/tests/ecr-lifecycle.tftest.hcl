@@ -167,8 +167,10 @@ run "production_keeps_releases_and_expires_only_old_images" {
     error_message = "Production repositories must keep every retain- image, expire untagged images after 14 days and other images only after 90 days."
   }
 
-  # The release helpers (production_deployment_core.retain_image and the
-  # inventory's retain) refuse to deploy unless exactly this rule exists.
+  # The release helpers refuse to deploy unless exactly this rule exists:
+  # protect_image in scripts/production_deployment.py on the release branch
+  # staging-novu-ci-20261005 (ROLLBACK_RETENTION_POLICY_REQUIRED), and retain in
+  # scripts/production_release_inventory.py here.
   assert {
     condition = alltrue([for name, policy in module.application.ecr_lifecycle_policies :
       length([for rule in policy.rules : rule if try(rule.selection.tagPrefixList, null) == ["retain-"]]) == 1 &&
