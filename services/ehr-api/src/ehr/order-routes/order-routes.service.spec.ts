@@ -85,8 +85,10 @@ describe('OrderRoutesService send (C1)', () => {
         encounterId, orderId: requestId, ...sendInput })]);
     expect(values[0]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
     expect(String(values[9])).toMatch(/^[0-9a-f]{64}$/);
+    // SERIALIZABLE (the review of 0100): a Pharmacy acceptance of the same prescription that
+    // overlaps the send then fails 40001, and its retry sees the route (PRESCRIPTION_ROUTED).
     expect(repository.run).toHaveBeenCalledWith(expect.anything(), patientId, 'write_records', expect.anything(),
-      expect.any(Function));
+      expect.any(Function), undefined, { isolationLevel: 'SERIALIZABLE' });
     expect(audits).toEqual([{ action: 'ehr.order-route.send', patientId, access: 'write_records',
       purposeOfUse: 'direct-care', resourceType: 'order-route', resourceId: routeId,
       details: { kind: 'lab_request', receivingFacilityId, attestationTextVersion: 'order-route-lab-attestation-v1',

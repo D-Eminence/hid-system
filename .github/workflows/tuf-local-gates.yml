@@ -213,8 +213,8 @@ jobs:
           npm --prefix infra/aws ci
           npm --prefix release ci --ignore-scripts
         id: gate_1
-      - name: Audit AWS infrastructure dependencies
-        run: npm --prefix infra/aws audit --audit-level=moderate
+      - name: Audit AWS infrastructure dependencies against reviewed exceptions
+        run: node release/scripts/npm-audit-with-exceptions.mjs infra/aws
         id: gate_2
       - name: Type-check release-trust infrastructure
         run: npm --prefix infra/aws run typecheck

@@ -3,7 +3,7 @@ import type { PoolClient, QueryResultRow } from 'pg';
 import { AuditService } from '../../audit/audit.service';
 import { DomainProblem } from '../../common/problem';
 import { offlineAuditDetails, type DataAccessContext } from '../../common/request-context';
-import { DatabaseService } from '../../database/database.service';
+import { DatabaseService, type TransactionOptions } from '../../database/database.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 
 export type ClinicalAccess = 'read_records' | 'write_records';
@@ -49,6 +49,7 @@ export class ClinicalRepository {
     event: SemanticEvent,
     operation: (client: PoolClient) => Promise<OperationResult<Value>>,
     scopedLookup?: (client: PoolClient) => Promise<boolean>,
+    transaction: TransactionOptions = {},
   ): Promise<Value> {
     try {
       const authorization = await this.identity.authorize(
@@ -91,7 +92,7 @@ export class ClinicalRepository {
           details: { ...event.details, ...operationResult.details },
         }, 'success');
         return { state: 'ok', result: operationResult };
-      });
+      }, transaction);
 
       if (result.state === 'denied') {
         throw new DomainProblem(403, 'CONSENT_REQUIRED', 'Active consent and facility membership are required');
