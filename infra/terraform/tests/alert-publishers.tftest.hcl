@@ -333,4 +333,18 @@ run "production_plan_admits_all_twelve_running_task_alarms" {
     )
     error_message = "In production the alerts topic and key must admit the twelve hid-production running-task alarms, besides the hid-staging alarms."
   }
+
+  # Every alarm in the configuration notifies the alerts topic (operations and
+  # application modules, all modules share the name prefix). Each must be named
+  # after the name prefix or be a running-task alarm, so the two policies admit
+  # it; an alarm named any other way needs a policy statement first.
+  assert {
+    condition = (
+      length(module.operations.alert_source_arns) == 2 &&
+      length(flatten([for path in fileset(".", "modules/**/*.tf") : regexall("(?m)^\\s*alarm_name\\s*=", file(path))])) >= 9 &&
+      length(flatten([for path in fileset(".", "modules/**/*.tf") : regexall("(?m)^\\s*alarm_name\\s*=", file(path))])) ==
+      length(flatten([for path in fileset(".", "modules/**/*.tf") : regexall("(?m)^\\s*alarm_name\\s*=\\s*\"(?:\\$\\{var\\.name_prefix\\}-[^\"]+|\\$\\{each\\.key\\}-running-tasks)\"\\s*$", file(path))]))
+    )
+    error_message = "Every alarm must be named after the name prefix or be a running-task alarm, or the alerts topic and key refuse its notifications."
+  }
 }

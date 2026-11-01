@@ -707,6 +707,21 @@ topic is named `hid-staging-*`.
   aws cloudwatch describe-alarm-history --alarm-name hid-production-gateway-running-tasks --history-item-type Action --max-items 5 --region eu-west-1 --query "AlarmHistoryItems[].[Timestamp,HistorySummary]" --output text
   ```
 
+  Then list every alarm that notifies the topic and print any name neither
+  statement admits:
+
+  ```powershell
+  $topic = "arn:aws:sns:eu-west-1:659225405023:hid-staging-operations-alerts"
+  $names = @(aws cloudwatch describe-alarms --region eu-west-1 --query "MetricAlarms[?contains(AlarmActions, '$topic') || contains(OKActions, '$topic')].AlarmName" --output json | ConvertFrom-Json)
+  "$($names.Count) alarms notify the topic"
+  $names | Where-Object { $_ -notlike 'hid-staging-*' -and $_ -notlike 'hid-production-*-running-tasks' }
+  ```
+
+  Expect the count line only. A name printed below it is an alarm whose
+  notifications both policies still refuse after this change; the Terraform
+  tests check every alarm defined here, so it was made outside this Terraform.
+  Report it before applying.
+
 - After applying, send one test alert: tell the operations mailbox first, then
   set one alarm to `ALARM` by hand. Nothing touches the service, and the alarm
   returns to `OK` at its next one-minute evaluation:
