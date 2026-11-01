@@ -3,8 +3,8 @@
 This branch, `claude/ecstatic-ramanujan-q4i1eo-pharmacy-rollback`, is a ready
 undo for the Pharmacy guard (migrations 0100 and 0101). It is kept ready and
 is never merged unless it is needed. This file is for you; it is not part of
-the release. Leave the commit that adds it out of what is merged (or delete
-the file on the release branch).
+the release. Leave the commits that add and update it out of what is merged
+(or delete the file on the release branch).
 
 ## In short
 
@@ -81,9 +81,10 @@ the record by eye before they dispense.
 1. **Check the number** (see "If 0102 is already taken" below).
 2. **Bring the branch up to date** with the production branch
    (`origin/staging-novu-ci-20261005`): rebase it onto the newest release.
-   Leave this file's commit out. The rollback itself is every other commit
-   on this branch after the guard's (a25fc7a): the migration, and a later
-   commit that corrects its notes; both go in. If other migrations shipped
+   Leave out the commits that only touch this file (their subjects end
+   "not for release"). The rollback itself is every other commit on this
+   branch after the guard's (a25fc7a): the migration, and a later commit
+   that corrects its notes; both go in. If other migrations shipped
    after the guard, renumber now.
 3. **Re-run the checks** on the updated branch:
    - `node scripts/verify-migration-ledger.mjs`;
