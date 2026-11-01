@@ -449,7 +449,7 @@ service straight after its LOGIN gets the new password
 service that connects to the database also refuses to start over a superuser,
 `BYPASSRLS` or owner connection.
 
-Confirm the candidate ledger reaches `0101`, no unexpected constraint remains
+Confirm the candidate ledger reaches `0102`, no unexpected constraint remains
 unvalidated, and each runtime LOGIN can perform only its intended commands.
 After the legacy import, record (read-only, counts only, no identifiers) how
 many imported patient accounts have `email_verified_at` null and no verified
@@ -791,7 +791,7 @@ with synthetic data (`rehearse-imported-history-import.mjs`).
 3. Record the final snapshot/LSN and source/object counts.
 4. Stage the final delta/snapshot.
 5. Promote and reconcile to zero blocking conflicts.
-6. Verify the ledger at `0101`, runtime grants (`db:verify-roles`) and logins
+6. Verify the ledger at `0102`, runtime grants (`db:verify-roles`) and logins
    (`db:verify-logins`), RLS and purpose/deny behavior, and list the
    purpose-of-use codes (release checklist P10; after `0097` `direct-care` and
    `emergency`). After `0097`, confirm the
@@ -861,7 +861,11 @@ with synthetic data (`rehearse-imported-history-import.mjs`).
    `DELETE` on the staff history and `EXECUTE` on the staff proof and its
    legal hold check, and nothing on the limit tables; until it runs, the staff
    history routes of that EHR build fail. Run the P40 check before
-   `RECORD_CHAT_STAFF_ENABLED` is set.
+   `RECORD_CHAT_STAFF_ENABLED` is set. After `0102` (single sign-on, product
+   side), likewise: the bootstrap grants the Identity runtime `SELECT` and
+   `INSERT` on `auth.session_single_sign_on` and `SELECT`, `INSERT` and
+   `DELETE` on `auth.sso_spent_tokens`; set `AUTH_SSO_ISSUER` only after it
+   runs.
 7. Prove local/OIDC login, exact bcrypt upgrade, session revocation and OTP
    fallback against migrated accounts. A migrated staff account signs in with
    its password, then enrols an authenticator with the code emailed to it
