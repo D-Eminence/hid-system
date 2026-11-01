@@ -136,15 +136,36 @@ export const STAFF_ROLE_LABELS = {
 export type StaffInvitationRole = keyof typeof STAFF_ROLE_LABELS;
 export const STAFF_INVITATION_ROLES = Object.keys(STAFF_ROLE_LABELS) as readonly StaffInvitationRole[];
 
+/** The staff sites a link in a staff email opens on: each is a product's own site. */
+export type StaffSite = 'ehr' | 'lab' | 'pharmacy';
+
+const STAFF_SITE_ORIGINS: Readonly<Record<'staging' | 'production', Readonly<Record<StaffSite, string>>>> = Object.freeze({
+  production: Object.freeze({ ehr: 'https://ehr.healthidentitydirectory.com', lab: 'https://lab.healthidentitydirectory.com',
+    pharmacy: 'https://pharmacy.healthidentitydirectory.com' }),
+  staging: Object.freeze({ ehr: 'https://ehr.staging.healthidentitydirectory.com',
+    lab: 'https://lab.staging.healthidentitydirectory.com', pharmacy: 'https://pharmacy.staging.healthidentitydirectory.com' }),
+});
+
 /**
- * Where the invitation link opens: the portal host of this deployment, fixed
- * by HID_DEPLOYMENT_ENV and never taken from a request (SPEC 4.6), so a caller
- * cannot point the link at another site.
+ * The staff site a facility role works on, as the website's staffSiteForRole
+ * (D-Eminence/health productHostname.ts): laboratory scientists on lab,
+ * pharmacists on pharmacy, everyone else on ehr. The invitation is opened and
+ * accepted there, and the new member signs in there.
  */
-export function staffInvitationLinkOrigin(deployment: 'development' | 'staging' | 'production'): string {
-  if (deployment === 'staging') return 'https://staging.healthidentitydirectory.com';
+export function staffSiteForRole(role: StaffInvitationRole): StaffSite {
+  return role === 'lab' ? 'lab' : role === 'pharmacist' ? 'pharmacy' : 'ehr';
+}
+
+/**
+ * Where a link in a staff email opens: the staff site `site` of this
+ * deployment, fixed by HID_DEPLOYMENT_ENV and never taken from a request
+ * (SPEC 4.6), so a caller cannot point the link at another site. Never the
+ * patient portal (app.), which is for patients only (owner, 1 November 2026).
+ * Development serves every site at one local address.
+ */
+export function staffSiteOrigin(deployment: 'development' | 'staging' | 'production', site: StaffSite): string {
   if (deployment === 'development') return 'http://localhost:5173';
-  return 'https://app.healthidentitydirectory.com';
+  return STAFF_SITE_ORIGINS[deployment][site];
 }
 
 /** The invitation's reference for support: the first 8 hex characters of its id, upper case (S10.4). */

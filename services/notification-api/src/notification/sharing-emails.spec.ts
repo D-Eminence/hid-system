@@ -42,14 +42,14 @@ describe('Sharing emails (0095)', () => {
 
   it('E1 names the level, duration, end and reference, the portal and enrolment paths, and no person', () => {
     const content = patientShareInvitationContent({ reference: 'K7M2Q9XZ', level: 'clinical_review', duration: '7d',
-      expiresAt: new Date(invitation.expiresAt), origin: 'https://app.healthidentitydirectory.com' });
+      expiresAt: new Date(invitation.expiresAt), origin: 'https://ehr.healthidentitydirectory.com' });
     expect(content.subject).toBe('A patient wants to share their health records with you on Health ID');
     expect(content.text).toBe('Hello there,\n\n'
       + 'Someone who uses Health ID wants to share their health records with you (Clinical Review, 7 days).\n\n'
-      + 'To accept, sign in to the Health ID provider portal at https://app.healthidentitydirectory.com/provider '
+      + 'To accept, sign in to the Health ID provider portal at https://ehr.healthidentitydirectory.com/provider '
       + 'with this email address and open Patients → Invitations.\n\n'
       + 'If you are not on Health ID yet, ask your facility\'s administrator to invite you, or set up your facility at '
-      + 'https://app.healthidentitydirectory.com/provider/enroll.\n\n'
+      + 'https://ehr.healthidentitydirectory.com/provider/enroll.\n\n'
       + 'This invitation ends on 27 Nov 2026, 11:15 (WAT).\n\n'
       + 'Reference: K7M2Q9XZ\n\n'
       + 'If you were not expecting this, ignore this email.');
@@ -89,6 +89,23 @@ describe('Sharing emails (0095)', () => {
       ['RECORD_ACCESS_ALERT', 'email', 'Your Health ID records were opened'],
     ]);
     expect(sent[2]?.idempotencyKey).toBe('record-access-alert:3c0e1a2b-4d5f-4a6b-8c7d-9e0f1a2b3c4d');
+  });
+
+  // E1 goes to a health worker: its links open on the EHR site, never the patient portal.
+  it.each([
+    ['production', 'https://ehr.healthidentitydirectory.com'],
+    ['staging', 'https://ehr.staging.healthidentitydirectory.com'],
+    ['development', 'http://localhost:5173'],
+  ])('E1 links to the %s EHR site for sign-in and facility sign-up', async (deployment, origin) => {
+    process.env.HID_DEPLOYMENT_ENV = deployment;
+    resetEnvironmentForTests();
+    const email = provider('ses');
+    await controller(email).patientShareInvitation(invitation, request,
+      'patient-share-invitation:3c0e1a2b-4d5f-4a6b-8c7d-9e0f1a2b3c4d');
+    const text = String((email.send as jest.Mock).mock.calls[0][0].content.text);
+    expect(text).toContain(`provider portal at ${origin}/provider with this email address`);
+    expect(text).toContain(`set up your facility at ${origin}/provider/enroll.`);
+    expect(text).not.toMatch(/app\.healthidentitydirectory|\/\/staging\.healthidentitydirectory/);
   });
 
   it('refuses a missing key, a phone recipient and an unauthenticated caller', async () => {

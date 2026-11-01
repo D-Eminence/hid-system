@@ -56,8 +56,10 @@ const port = Number(process.env.PGPORT ?? 5432);
 // Run in a disposable copy so synthetic organizations, quota counters, the
 // opened control and the enabled QoreID provider never leak into later steps.
 const isolated = `${rehearsal ? 'hid_rehearsal' : process.env.PGDATABASE}_provider_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
-// Production hosts: the portal (app.*) is the only host Turnstile accepts the
-// provider-enrollment action on; staff sign in on ehr.*, administrators on admin.*.
+// Production hosts: the patient portal (app.*) still accepts the
+// provider-enrollment and staff-invitation actions, as the staff product sites
+// now do too (the Turnstile spec pins the table); staff sign in on ehr.*,
+// administrators on admin.*.
 const origin = 'https://app.healthidentitydirectory.com';
 const ehrOrigin = 'https://ehr.healthidentitydirectory.com';
 // Staff of a laboratory or a pharmacy sign in on their product's host (P4b).
@@ -159,7 +161,7 @@ const notificationRequire = createRequire(join(notificationService, 'package.jso
 const { DeliverStaffInvitationDto } = notificationRequire(join(notificationService,
   'src/notification/dto/deliver-staff-invitation.dto.ts'));
 const { validateRecipient } = notificationRequire(join(notificationService, 'src/notification/dto/deliver-otp.dto.ts'));
-const { staffInvitationContent, staffInvitationLinkOrigin } = notificationRequire(join(notificationService,
+const { staffInvitationContent, staffSiteForRole, staffSiteOrigin } = notificationRequire(join(notificationService,
   'src/providers/provider.types.ts'));
 const notificationValidator = notificationRequire('class-validator');
 const notificationTransformer = notificationRequire('class-transformer');
@@ -180,7 +182,8 @@ const verifiedTokens = new Map();
 // order: the internal caller and workload token, the idempotency key's
 // pattern, the body against the route's own DTO (whitelist, no unknown
 // field) and recipient check; it then renders the email with the route's own
-// template for the production deployment and answers 202 with the outcome
+// template and link for the production deployment (the staff site of the
+// invitee's role) and answers 202 with the outcome
 // set in invitationOutcome (as Novu answers), keeping each email.
 const staffInvitationUrl = `${getEnvironment().NOTIFICATION_API_URL.replace(/\/+$/, '')}/api/v1/notifications/staff-invitation`;
 const invitationEmails = [];
@@ -202,7 +205,7 @@ const staffInvitationRoute = async (init) => {
   assert(validateRecipient('email', body.recipient), 'notification-api would refuse the recipient');
   const content = staffInvitationContent({ facilityName: body.facilityName ?? null, roleCode: body.roleCode,
     invitationId: body.invitationId, token: body.token, code: body.code, expiresAt: new Date(body.expiresAt),
-    origin: staffInvitationLinkOrigin('production'), supportEmail: 'support@verifier.invalid' });
+    origin: staffSiteOrigin('production', staffSiteForRole(body.roleCode)), supportEmail: 'support@verifier.invalid' });
   invitationEmails.push({ headers, body, subject: content.subject, text: content.text });
   return Response.json({ requestId: randomUUID(), outcome: invitationOutcome,
     primary: { provider: 'ses', outcome: invitationOutcome } }, { status: 202 });
@@ -2396,9 +2399,11 @@ try {
   const reference = chidi.invitationId.replaceAll('-', '').slice(0, 8).toUpperCase();
   assert.equal(chidi.sent.subject, `Invitation to join ${hospital.facilityName} on Health ID`);
   assert(chidi.sent.text.includes(`as a doctor.`));
-  assert(chidi.sent.text.includes(`https://app.healthidentitydirectory.com/provider/invitation#${chidi.invitationId}.${chidi.sent.body.token}`));
+  // A doctor's invitation opens on the EHR site, never the patient portal.
+  assert(chidi.sent.text.includes(`https://ehr.healthidentitydirectory.com/provider/invitation#${chidi.invitationId}.${chidi.sent.body.token}`));
+  assert(!chidi.sent.text.includes('app.healthidentitydirectory.com'), 'The invitation email links to the patient portal');
   // The typed fallback: the page opened without a link shows the code form at once.
-  assert(chidi.sent.text.includes('If the link does not open, go to https://app.healthidentitydirectory.com/provider/invitation'
+  assert(chidi.sent.text.includes('If the link does not open, go to https://ehr.healthidentitydirectory.com/provider/invitation'
     + ` and enter this email address and the code ${chidi.sent.body.code}.`));
   assert(chidi.sent.text.includes(`quote reference ${reference}.`));
   // Replay (same key, same request): 200 with the stored values, no second email.
@@ -2440,7 +2445,7 @@ try {
     invite: { status: 201, version: 1, deliveryOutcome: 'accepted', versionAfterDelivery: 1 },
     email: { route: 'POST /api/v1/notifications/staff-invitation', idempotencyKey: 'staff-invitation:<sendId>',
       fields: Object.keys(chidi.sent.body).sort(), validatedBy: 'notification-api DeliverStaffInvitationDto',
-      noPersonName: true, subject: chidi.sent.subject, link: 'https://app.healthidentitydirectory.com/provider/invitation#<id>.<token>',
+      noPersonName: true, subject: chidi.sent.subject, link: 'https://ehr.healthidentitydirectory.com/provider/invitation#<id>.<token>',
       reference },
     replay: { status: 200, replayed: true, emails: 0 }, reusedKey: 'IDEMPOTENCY_KEY_REUSED', self: 'STAFF_INVITATION_SELF',
     duplicate: 'STAFF_INVITATION_ALREADY_PENDING', wrongPassword: 'STAFF_REAUTHENTICATION_FAILED (counted)',

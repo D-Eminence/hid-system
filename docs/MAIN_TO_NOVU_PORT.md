@@ -801,7 +801,9 @@ their builds; the items Identity carries are listed here too.
   future hold on other staff commands takes the same marker); the
   invitation email through notification-api's fixed template, with no
   person's name, the facility name dropped when it looks like a domain and
-  the origin from the deployment; Turnstile action `staff-invitation` on
+  the origin from the deployment (since 1 November 2026 the staff site of the
+  invitee's role, not the patient portal: Owner decisions, "Each product is
+  its own site"); Turnstile action `staff-invitation` on
   `app.` and `staging.` only (since 1 November 2026 also on the five staff
   product sites: Owner decisions, "Each product is its own site"); 429
   `EMERGENCY_PROBATION_LIMITED`;
@@ -1967,6 +1969,21 @@ Decided by the owner, D-Eminence:
   | `migrate.` | `ocr-login`, `staff-reset`, `staff-invitation`, `provider-enrollment` | the same |
   | `outreach.` | `outreach-login`, `staff-reset`, `staff-invitation`, `provider-enrollment` | the same |
   | `admin.` | `admin-login`, `admin-reset` | the same |
+
+  Staff emails link to the product sites, never the patient portal
+  (notification-api's `staffSiteOrigin`, fixed by `HID_DEPLOYMENT_ENV`
+  alone, which Terraform already sets): a staff invitation opens on the site
+  the invitee's role works on (`lab.` for a laboratory scientist, `pharmacy.`
+  for a pharmacist, `ehr.` for a doctor, nurse or receptionist, as the
+  website's `staffSiteForRole`), and a patient's invitation to share (E1)
+  links to `ehr.` for sign-in and facility sign-up. Invitations already sent
+  keep their `app.` links, which still work. No other backend email carries
+  a link: password reset, email confirmation and facility sign-up emails send
+  a code only. Release order: Identity's table first, then the website's
+  staff pages on the product sites, then the notification-api change. Until
+  the website opens an invitation for a new account on a product site (today
+  a product site sends `/provider/invitation` to the signed-in join page), a
+  link there cannot be accepted by someone who has no account yet.
 - Facility self sign-up (D14, 2026-10-23, and 2026-10-24): hospitals,
   laboratories and pharmacies sign themselves up, finishing with a password
   (no authenticator); every new facility appears for support, who review it

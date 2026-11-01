@@ -3,8 +3,8 @@ import type { Request } from 'express';
 import { getEnvironment, resetEnvironmentForTests } from '../config/environment';
 import type { WorkloadAuthService } from '../auth/workload-auth.service';
 import {
-  isTemplateOtp, messageContent, type OtpProvider, type ProviderResult, STAFF_ROLE_LABELS, staffInvitationContent,
-  staffInvitationLinkOrigin, staffInvitationReference,
+  isTemplateOtp, messageContent, type OtpProvider, type ProviderResult, STAFF_INVITATION_ROLES, STAFF_ROLE_LABELS,
+  staffInvitationContent, type StaffInvitationRole, staffInvitationReference, staffSiteForRole, staffSiteOrigin,
 } from '../providers/provider.types';
 import { DeliverStaffInvitationDto, STAFF_INVITATION_FACILITY_NAME } from './dto/deliver-staff-invitation.dto';
 import { NotificationController } from './notification.controller';
@@ -22,9 +22,9 @@ const body = {
   channel: 'email' as const, recipient: 'invitee@example.test', facilityName: 'Synthetic Clinic Ltd',
   roleCode: 'doctor' as const, invitationId, token, code: '482913', expiresAt,
 };
-const page = 'https://app.healthidentitydirectory.com/provider/invitation';
+const page = 'https://ehr.healthidentitydirectory.com/provider/invitation';
 
-function expectedText(facility: string, label: string, origin = 'https://app.healthidentitydirectory.com',
+function expectedText(facility: string, label: string, origin = 'https://ehr.healthidentitydirectory.com',
   support = 'support@healthidentitydirectory.com') {
   return 'Hello,\n\n'
     + `The administrator of ${facility} has invited you to join the facility on Health ID as a ${label}.\n\n`
@@ -59,7 +59,7 @@ describe('Facility staff invitation email (P4b)', () => {
   describe('content', () => {
     it.each(Object.entries(STAFF_ROLE_LABELS))('names the role %s as "%s", with the facility\'s name', (roleCode, label) => {
       expect(staffInvitationContent({ facilityName: 'Synthetic Clinic Ltd', roleCode: roleCode as keyof typeof STAFF_ROLE_LABELS,
-        invitationId, token, code: '482913', expiresAt: new Date(expiresAt), origin: 'https://app.healthidentitydirectory.com',
+        invitationId, token, code: '482913', expiresAt: new Date(expiresAt), origin: 'https://ehr.healthidentitydirectory.com',
         supportEmail: 'support@healthidentitydirectory.com' })).toEqual({
         subject: 'Invitation to join Synthetic Clinic Ltd on Health ID',
         text: expectedText('Synthetic Clinic Ltd', label),
@@ -69,7 +69,7 @@ describe('Facility staff invitation email (P4b)', () => {
     it('says "a facility" in the subject and the text when no facility name is sent', () => {
       for (const facilityName of [undefined, null, '']) {
         expect(staffInvitationContent({ facilityName, roleCode: 'lab', invitationId, token, code: '482913',
-          expiresAt: new Date(expiresAt), origin: 'https://app.healthidentitydirectory.com',
+          expiresAt: new Date(expiresAt), origin: 'https://ehr.healthidentitydirectory.com',
           supportEmail: 'support@healthidentitydirectory.com' })).toEqual({
           subject: 'Invitation to join a facility on Health ID',
           text: expectedText('a facility', 'laboratory scientist'),
@@ -82,10 +82,19 @@ describe('Facility staff invitation email (P4b)', () => {
         pharmacist: 'pharmacist', receptionist: 'receptionist' });
     });
 
-    it('takes the link origin from the deployment, never from a request', () => {
-      expect(staffInvitationLinkOrigin('production')).toBe('https://app.healthidentitydirectory.com');
-      expect(staffInvitationLinkOrigin('staging')).toBe('https://staging.healthidentitydirectory.com');
-      expect(staffInvitationLinkOrigin('development')).toBe('http://localhost:5173');
+    it('opens the link on the staff site the role works on, never the patient portal', () => {
+      expect(Object.fromEntries(STAFF_INVITATION_ROLES.map((role) => [role, staffSiteForRole(role)]))).toEqual({
+        doctor: 'ehr', nurse: 'ehr', lab: 'lab', pharmacist: 'pharmacy', receptionist: 'ehr' });
+    });
+
+    it('takes the link origin from the deployment and the site, never from a request', () => {
+      expect(staffSiteOrigin('production', 'ehr')).toBe('https://ehr.healthidentitydirectory.com');
+      expect(staffSiteOrigin('production', 'lab')).toBe('https://lab.healthidentitydirectory.com');
+      expect(staffSiteOrigin('production', 'pharmacy')).toBe('https://pharmacy.healthidentitydirectory.com');
+      expect(staffSiteOrigin('staging', 'ehr')).toBe('https://ehr.staging.healthidentitydirectory.com');
+      expect(staffSiteOrigin('staging', 'lab')).toBe('https://lab.staging.healthidentitydirectory.com');
+      expect(staffSiteOrigin('staging', 'pharmacy')).toBe('https://pharmacy.staging.healthidentitydirectory.com');
+      for (const site of ['ehr', 'lab', 'pharmacy'] as const) expect(staffSiteOrigin('development', site)).toBe('http://localhost:5173');
     });
 
     it('quotes the first 8 hex characters of the invitation id, upper case, as the reference', () => {
@@ -96,7 +105,7 @@ describe('Facility staff invitation email (P4b)', () => {
     it('is not an OTP: the content is set, so no WhatsApp template and no generic code wording', () => {
       const message = { channel: 'email' as const, recipient: 'invitee@example.test', code: '', purpose: 'STAFF_INVITATION',
         idempotencyKey: `staff-invitation:${invitationId}`, content: staffInvitationContent({ roleCode: 'nurse', invitationId,
-          token, code: '482913', expiresAt: new Date(expiresAt), origin: 'https://app.healthidentitydirectory.com',
+          token, code: '482913', expiresAt: new Date(expiresAt), origin: 'https://ehr.healthidentitydirectory.com',
           supportEmail: 'support@healthidentitydirectory.com' }) };
       expect(isTemplateOtp(message)).toBe(false);
       expect(messageContent(message)).toBe(message.content);
@@ -106,22 +115,30 @@ describe('Facility staff invitation email (P4b)', () => {
 
   describe('route', () => {
     it.each([
-      ['production', 'https://app.healthidentitydirectory.com'],
-      ['staging', 'https://staging.healthidentitydirectory.com'],
-      ['development', 'http://localhost:5173'],
-    ])('delivers by email with the %s portal link, the stable key and Novu\'s response shape', async (deployment, origin) => {
+      ['production', 'doctor', 'https://ehr.healthidentitydirectory.com'],
+      ['production', 'nurse', 'https://ehr.healthidentitydirectory.com'],
+      ['production', 'receptionist', 'https://ehr.healthidentitydirectory.com'],
+      ['production', 'lab', 'https://lab.healthidentitydirectory.com'],
+      ['production', 'pharmacist', 'https://pharmacy.healthidentitydirectory.com'],
+      ['staging', 'doctor', 'https://ehr.staging.healthidentitydirectory.com'],
+      ['staging', 'lab', 'https://lab.staging.healthidentitydirectory.com'],
+      ['staging', 'pharmacist', 'https://pharmacy.staging.healthidentitydirectory.com'],
+      ['development', 'doctor', 'http://localhost:5173'],
+    ] as const)('delivers by email in %s for a %s with the link on %s, the stable key and Novu\'s response shape',
+      async (deployment, roleCode: StaffInvitationRole, origin) => {
       process.env.HID_DEPLOYMENT_ENV = deployment;
       resetEnvironmentForTests();
       const email = provider('ses');
       const sms = provider('termii');
-      await expect(controller(email, sms).staffInvitation(body, request, `staff-invitation:${invitationId}`)).resolves.toEqual({
+      await expect(controller(email, sms).staffInvitation({ ...body, roleCode }, request, `staff-invitation:${invitationId}`))
+        .resolves.toEqual({
         requestId: expect.stringMatching(/^[0-9a-f-]{36}$/), outcome: 'accepted', primary: { provider: 'ses', outcome: 'accepted' },
       });
       expect(email.send).toHaveBeenCalledWith({
         channel: 'email', recipient: 'invitee@example.test', code: '', purpose: 'STAFF_INVITATION',
         idempotencyKey: `staff-invitation:${invitationId}`,
         content: { subject: 'Invitation to join Synthetic Clinic Ltd on Health ID',
-          text: expectedText('Synthetic Clinic Ltd', 'doctor', origin) },
+          text: expectedText('Synthetic Clinic Ltd', STAFF_ROLE_LABELS[roleCode], origin) },
       });
       // No SMS and no WhatsApp: only the email provider is used.
       expect(sms.send).not.toHaveBeenCalled();
@@ -135,7 +152,7 @@ describe('Facility staff invitation email (P4b)', () => {
         `staff-invitation:${invitationId}`);
       expect((email.send as jest.Mock).mock.calls[0][0].content).toEqual({
         subject: 'Invitation to join a facility on Health ID',
-        text: expectedText('a facility', 'pharmacist', 'https://app.healthidentitydirectory.com', 'help@example.test'),
+        text: expectedText('a facility', 'pharmacist', 'https://pharmacy.healthidentitydirectory.com', 'help@example.test'),
       });
     });
 
