@@ -53,7 +53,7 @@ resource "aws_vpc_endpoint" "bedrock_runtime" {
   service_name        = "com.amazonaws.${var.aws_region}.bedrock-runtime"
   vpc_endpoint_type   = "Interface"
   private_dns_enabled = true
-  subnet_ids          = var.application_subnet_ids
+  subnet_ids          = var.endpoint_subnet_ids
   security_group_ids  = [aws_security_group.bedrock_endpoint.id]
 
   policy = jsonencode({

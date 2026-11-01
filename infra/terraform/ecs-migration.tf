@@ -8,6 +8,16 @@ variable "ecs_migration_phase" {
   }
 }
 
+variable "ecs_container_insights" {
+  description = "CloudWatch Container Insights level for the ECS clusters: enhanced, enabled or disabled. Enhanced is billed per container metric; the running-task alarms use the free AWS/ECS LiveTaskCount metric instead. The default keeps today's level, so only environments that set this change."
+  type        = string
+  default     = "enhanced"
+  validation {
+    condition     = contains(["enhanced", "enabled", "disabled"], var.ecs_container_insights)
+    error_message = "ecs_container_insights must be enhanced, enabled or disabled."
+  }
+}
+
 output "ecs_migration_configuration" {
   value = module.application.ecs_migration_configuration
 }

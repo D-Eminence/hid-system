@@ -232,6 +232,10 @@ run "ecs_retired" {
     error_message = "Legacy cluster must remain until retirement."
   }
   assert {
+    condition     = output.ecs_migration_configuration.container_insights == "enhanced"
+    error_message = "Without an explicit input, Container Insights must stay at today's level."
+  }
+  assert {
     condition = length(output.ecs_migration_configuration.production_desired_counts) == 12 && alltrue([
       for name, count in output.ecs_migration_configuration.production_desired_counts :
       count == (contains(["notification-worker", "ocr-worker", "event-dispatcher"], name) && contains(["prepare", "drain"], var.ecs_migration_phase) ? 0 : 1)
@@ -249,4 +253,39 @@ run "ecs_retired" {
     condition     = output.ecs_migration_configuration.cluster == "hid-production" && output.deployment_environment_configuration.application.issuer_path == "staging"
     error_message = "Monitoring/deployment must track the selected cluster without changing retained workload authentication."
   }
+}
+
+# Production turns Container Insights off (monitoring cost, owner approved);
+# the twelve running-task alarms keep working on the free AWS/ECS metric.
+run "ecs_retired_production_container_insights_off" {
+  command = plan
+  variables {
+    ecs_migration_phase    = "retired"
+    ecs_container_insights = regex("(?m)^ecs_container_insights\\s*=\\s*\"([a-z]+)\"", file("environments/production.tfvars"))[0]
+  }
+  assert {
+    condition     = length(regexall("(?m)^ecs_container_insights\\s*=", file("environments/production.tfvars"))) == 1 && var.ecs_container_insights == "disabled"
+    error_message = "environments/production.tfvars must set ecs_container_insights = \"disabled\" exactly once."
+  }
+  assert {
+    condition     = output.ecs_migration_configuration.cluster == "hid-production" && output.ecs_migration_configuration.container_insights == "disabled"
+    error_message = "Production must turn Container Insights off on the hid-production cluster."
+  }
+  assert {
+    condition = length(module.operations.runtime_task_alarms) == 12 && alltrue([
+      for name, alarm in module.operations.runtime_task_alarms :
+      alarm.namespace == "AWS/ECS" && alarm.metric_name == "LiveTaskCount" && alarm.statistic == "Minimum" &&
+      startswith(name, "hid-production-") && endswith(name, "-running-tasks")
+    ])
+    error_message = "All twelve running-task alarms must keep their names and read the free AWS/ECS metric, not ECS/ContainerInsights."
+  }
+}
+
+run "reject_unknown_container_insights_level" {
+  command = plan
+  variables {
+    ecs_migration_phase    = "retired"
+    ecs_container_insights = "basic"
+  }
+  expect_failures = [var.ecs_container_insights]
 }

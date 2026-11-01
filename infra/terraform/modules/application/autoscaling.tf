@@ -102,53 +102,12 @@ resource "aws_appautoscaling_policy" "notification_backlog" {
   }
 }
 
-resource "aws_appautoscaling_policy" "ocr_backlog" {
-  for_each = contains(keys(aws_appautoscaling_target.workload), "ocr-worker") ? {
-    ocr-worker = aws_appautoscaling_target.workload["ocr-worker"]
-  } : {}
-
-  name               = "${var.name_prefix}-ocr-worker-backlog"
-  policy_type        = "TargetTrackingScaling"
-  resource_id        = each.value.resource_id
-  scalable_dimension = each.value.scalable_dimension
-  service_namespace  = each.value.service_namespace
-
-  target_tracking_scaling_policy_configuration {
-    target_value       = 10
-    scale_in_cooldown  = 600
-    scale_out_cooldown = 60
-
-    customized_metric_specification {
-      metric_name = "QueueDepth"
-      namespace   = "HID/OCR"
-      statistic   = "Average"
-    }
-  }
-}
-
-resource "aws_appautoscaling_policy" "outbox_backlog" {
-  for_each = contains(keys(aws_appautoscaling_target.workload), "event-dispatcher") ? {
-    event-dispatcher = aws_appautoscaling_target.workload["event-dispatcher"]
-  } : {}
-
-  name               = "${var.name_prefix}-event-dispatcher-backlog"
-  policy_type        = "TargetTrackingScaling"
-  resource_id        = each.value.resource_id
-  scalable_dimension = each.value.scalable_dimension
-  service_namespace  = each.value.service_namespace
-
-  target_tracking_scaling_policy_configuration {
-    target_value       = 25
-    scale_in_cooldown  = 600
-    scale_out_cooldown = 60
-
-    customized_metric_specification {
-      metric_name = "PendingCount"
-      namespace   = "HID/EventDelivery"
-      statistic   = "Average"
-    }
-  }
-}
+# ocr-worker and event-dispatcher scale on CPU and memory only. Their former
+# backlog policies read HID/OCR QueueDepth and HID/EventDelivery PendingCount,
+# which nothing publishes (the workers only log the values, and only while they
+# claim work). A target tracking policy without data never agrees to scale in,
+# and AWS scales in only when every policy agrees, so those policies also kept
+# both services from scaling back in after a CPU or memory scale-out.
 
 # Operational alarms
 // Running-task alarms are now owned by the operations module for every workload.

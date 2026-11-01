@@ -70,6 +70,7 @@ module "application" {
   name_prefix                         = local.name_prefix
   environment                         = local.resource_environment
   ecs_migration_phase                 = var.ecs_migration_phase
+  ecs_container_insights              = var.ecs_container_insights
   runtime_environment                 = local.runtime_environment
   browser_origins                     = local.browser_origins
   deployment_profile                  = local.deployment_profile
@@ -137,6 +138,8 @@ module "application" {
   application_log_retention_days      = var.application_log_retention_days
   security_log_retention_days         = var.security_log_retention_days
   repository_image_count              = local.profile.repository_image_count
+  ecr_untagged_image_expiry_days      = var.ecr_untagged_image_expiry_days
+  ecr_tagged_image_expiry_days        = var.ecr_tagged_image_expiry_days
   alarm_topic_arn                     = module.operations.alert_topic_arn
   enable_deployment_automation        = var.enable_deployment_automation
   production_deployment_approval_mode = var.production_deployment_approval_mode
@@ -155,7 +158,14 @@ module "application" {
   web_push_subject          = var.web_push_subject
 }
 
-# 5. Private Bedrock access for the EHR patient-record chat.
+# 5. Private Bedrock access for the EHR patient-record chat. Production sets
+# bedrock_endpoint_az_count = 1: the endpoint stays in the first application
+# subnet, the same one as its other interface endpoints, and tasks in the other
+# zone reach it across zones. Other environments keep every application subnet.
+locals {
+  bedrock_endpoint_subnet_ids = var.bedrock_endpoint_az_count == null ? module.network.application_subnet_ids : slice(module.network.application_subnet_ids, 0, min(var.bedrock_endpoint_az_count, length(module.network.application_subnet_ids)))
+}
+
 module "ai" {
   count  = var.enable_ai ? 1 : 0
   source = "./modules/ai"
@@ -163,7 +173,7 @@ module "ai" {
   name_prefix               = local.name_prefix
   aws_region                = var.aws_region
   vpc_id                    = module.network.vpc_id
-  application_subnet_ids    = module.network.application_subnet_ids
+  endpoint_subnet_ids       = local.bedrock_endpoint_subnet_ids
   enable_runtime            = var.enable_runtime
   ehr_security_group_id     = module.application.ehr_security_group_id
   ehr_task_role_arn         = module.application.ehr_task_role_arn

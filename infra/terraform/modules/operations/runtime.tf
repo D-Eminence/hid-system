@@ -1,8 +1,11 @@
+# Free AWS/ECS task count: no Container Insights needed. LiveTaskCount also
+# counts tasks still starting or draining (deregistration delay 30-60 s), and
+# ECS sends nothing for a service with no tasks, so missing data stays breaching.
 resource "aws_cloudwatch_metric_alarm" "runtime_tasks" {
   for_each            = var.runtime_services
   alarm_name          = "${each.key}-running-tasks"
-  namespace           = "ECS/ContainerInsights"
-  metric_name         = "RunningTaskCount"
+  namespace           = "AWS/ECS"
+  metric_name         = "LiveTaskCount"
   statistic           = "Minimum"
   period              = 60
   evaluation_periods  = 3

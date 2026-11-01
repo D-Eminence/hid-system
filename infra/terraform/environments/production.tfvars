@@ -63,6 +63,11 @@ ai_allow_eu_processing = true
 enable_support_bot     = true
 use_existing_secrets   = true
 
+# Bedrock runtime endpoint (EHR patient-record chat) in the first application
+# subnet only, where the other interface endpoints are (owner approved
+# 1 November 2026, about USD 8 a month). See DEVOPS_HANDOVER.md "AWS cost".
+bedrock_endpoint_az_count = 1
+
 enable_migration_task        = true
 migration_image_uri          = "659225405023.dkr.ecr.eu-west-1.amazonaws.com/staging/hid/ehr-api@sha256:d255dfbfff81839a3238f4e94ee1254e7c10291d31ba4666c8369f4e0ac27602"
 migration_source_bucket_arn  = "arn:aws:s3:::hid-migration-source-1da62383fb59593cb2679f3ce9"
@@ -234,3 +239,16 @@ deployment_automation_bootstrap = false
 enforce_release_index = true
 
 ecs_migration_phase = "retired"
+
+# Monitoring cost (owner approved, USD 400 a month AWS budget): Container
+# Insights "enhanced" cost about USD 104 a month. The running-task alarms read
+# the free AWS/ECS LiveTaskCount metric. See DEVOPS_HANDOVER.md "Monitoring cost".
+ecs_container_insights = "disabled"
+
+# ECR clean-up (owner approved 1 November 2026): untagged build residue expires
+# 14 days after push, other images 90 days after push. Images with a retain- tag
+# (the image each service runs, the previous release and every earlier
+# release) never expire. Back up the image inventory before applying; see
+# DEVOPS_HANDOVER.md "AWS cost".
+ecr_untagged_image_expiry_days = 14
+ecr_tagged_image_expiry_days   = 90
