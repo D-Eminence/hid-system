@@ -405,6 +405,61 @@ aws cloudwatch describe-alarm-history --alarm-name hid-production-gateway-runnin
 The fix is a separate reviewed change: in both policies, let the
 `aws:SourceArn` condition also match `alarm:hid-production-*-running-tasks`.
 
+### AWS cost
+
+Further cost items the owner approved on 1 November 2026, each a reviewed
+setting in this Terraform. Plan and apply them with the section 4 helper,
+together with the Monitoring cost change above.
+
+#### Expected plan for this branch
+
+| Change | Resources | Action |
+| --- | --- | --- |
+| Monitoring cost (above) | `module.application.aws_ecs_cluster.production[0]` and 12 `module.operations.aws_cloudwatch_metric_alarm.runtime_tasks[...]` | 13 updated in place |
+| 1. Bedrock endpoint in one zone | `module.ai[0].aws_vpc_endpoint.bedrock_runtime` | 1 updated in place |
+
+Total: `Plan: 0 to add, 14 to change, 0 to destroy` when no other dev change is
+pending. Other changes in the plan come from dev commits not yet applied.
+
+#### 1. Bedrock endpoint in one zone
+
+The record assistant (the EHR patient-record chat) reaches Bedrock for Titan
+embeddings through the interface endpoint
+`module.ai[0].aws_vpc_endpoint.bedrock_runtime` (tag
+`hid-staging-bedrock-runtime`). It had a network interface in both application
+subnets, and each costs USD 0.011 an hour (about USD 8 a month). The economy
+profile, which production uses, now sets `bedrock_endpoint_az_count = 1` in
+`locals.tf`: the endpoint keeps only the first application subnet
+(`hid-staging-application-0`, eu-west-1a), where production's other interface
+endpoints (ECR, logs, Secrets Manager, EventBridge, SQS, Textract) already are.
+Every other profile keeps every application subnet; the retired staging inputs
+also use the economy profile. The endpoint policy (EHR task role only, approved
+models only), its security group and private DNS do not change.
+
+- Plan: `module.ai[0].aws_vpc_endpoint.bedrock_runtime` updated in place;
+  `subnet_ids` loses the eu-west-1b subnet and `network_interface_ids` shows
+  "known after apply". Nothing is replaced.
+- Effect: AWS removes the eu-west-1b network interface and the endpoint's DNS
+  name then answers with the eu-west-1a address only. EHR tasks in eu-west-1b
+  reach it across zones (a millisecond or two; cross-zone data is USD 0.01 per
+  GB each way, negligible for chat text). A chat request on a connection to the
+  removed interface can fail once while it goes, so apply outside clinic
+  hours. If eu-west-1a is down, the chat cannot reach Bedrock until it returns,
+  as production's images, logs and secrets already depend on that zone.
+- Before applying (read-only), record the endpoint as it is (two subnets, two
+  interfaces, `available`):
+
+  ```powershell
+  aws ec2 describe-vpc-endpoints --filters Name=tag:Name,Values=hid-staging-bedrock-runtime --region eu-west-1 --query "VpcEndpoints[].[VpcEndpointId,State,SubnetIds,NetworkInterfaceIds]"
+  ```
+
+- After applying: the same command shows one subnet, one interface and
+  `available` (AWS takes a minute or two). Then ask the record assistant about a
+  fictional patient at Demo Hospital; it answers as before.
+- Rollback: set economy's `bedrock_endpoint_az_count = null` in `locals.tf` in a
+  reviewed commit on dev and apply; the endpoint gets its eu-west-1b interface
+  back in place within a few minutes.
+
 ## 5. Build flow and deployment controls
 
 ### What runs automatically

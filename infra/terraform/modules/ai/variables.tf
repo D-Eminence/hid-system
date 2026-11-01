@@ -10,8 +10,14 @@ variable "vpc_id" {
   type = string
 }
 
-variable "application_subnet_ids" {
-  type = list(string)
+variable "endpoint_subnet_ids" {
+  description = "Application subnets that hold the Bedrock runtime endpoint, one network interface each (USD 0.011 an hour per subnet)."
+  type        = list(string)
+
+  validation {
+    condition     = length(var.endpoint_subnet_ids) > 0
+    error_message = "The Bedrock runtime endpoint needs at least one application subnet."
+  }
 }
 
 variable "enable_runtime" {

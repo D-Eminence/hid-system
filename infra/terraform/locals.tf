@@ -5,12 +5,17 @@ locals {
   partner_apn_id     = "pc:elrusap42k3opao8syw9gd5s1"
 
   # Capacity profiles are independent of the configurable retention baselines.
+  # bedrock_endpoint_az_count: null keeps the Bedrock runtime endpoint in every
+  # application subnet; economy (production's profile) uses only the first, the
+  # same subnet as its other interface endpoints (owner approved 1 November
+  # 2026; one endpoint zone is about USD 8 a month).
   profiles = {
     development = {
       vpc_cidr                     = "10.20.0.0/16"
       nat_gateway_count            = 1
       interface_endpoint_services  = ["ecr.api", "ecr.dkr", "logs", "secretsmanager", "kms", "events", "sqs", "textract"]
       interface_endpoint_az_count  = 2
+      bedrock_endpoint_az_count    = null
       enable_autoscaling           = true
       database_instance_class      = "db.t4g.small"
       database_allocated_storage   = 50
@@ -27,6 +32,7 @@ locals {
       nat_gateway_count            = 0
       interface_endpoint_services  = []
       interface_endpoint_az_count  = 0
+      bedrock_endpoint_az_count    = null
       enable_autoscaling           = false
       database_instance_class      = "db.t4g.small"
       database_allocated_storage   = 100
@@ -43,6 +49,7 @@ locals {
       nat_gateway_count            = 1
       interface_endpoint_services  = ["ecr.api", "ecr.dkr", "logs", "secretsmanager", "events", "sqs", "textract"]
       interface_endpoint_az_count  = 1
+      bedrock_endpoint_az_count    = 1
       enable_autoscaling           = true
       database_instance_class      = "db.t4g.small"
       database_allocated_storage   = 100
@@ -59,6 +66,7 @@ locals {
       nat_gateway_count            = 2
       interface_endpoint_services  = ["ecr.api", "ecr.dkr", "logs", "secretsmanager", "kms", "events", "sqs", "textract"]
       interface_endpoint_az_count  = 2
+      bedrock_endpoint_az_count    = null
       enable_autoscaling           = true
       database_instance_class      = "db.t4g.medium"
       database_allocated_storage   = 100
@@ -75,6 +83,7 @@ locals {
       nat_gateway_count            = 2
       interface_endpoint_services  = ["ecr.api", "ecr.dkr", "logs", "secretsmanager", "kms", "events", "sqs", "textract"]
       interface_endpoint_az_count  = 3
+      bedrock_endpoint_az_count    = null
       enable_autoscaling           = true
       database_instance_class      = "db.r6g.large"
       database_allocated_storage   = 200
