@@ -2,8 +2,8 @@
 
 DEVOPS_HANDOVER.md section 4, "If a helper apply stops part-way", releases the
 lease the infrastructure helper keeps after an uncertain apply; AWS cost item 2
-puts the ECR rules back. These commands are run by hand against production, so
-they must stay in step with the code.
+puts the ECR rules back and checks every release receipt. These commands are
+run by hand against production, so they must stay in step with the code.
 """
 import importlib.util
 import json
@@ -87,6 +87,13 @@ class EcrRecovery(unittest.TestCase):
         self.assertIn("'LifecyclePolicyNotFoundException'", recovery)
         self.assertIn('If a helper apply stops part-way', recovery)
         self.assertNotIn('run it again.', self.item.split('Before applying, back up')[0])
+
+    def test_an_unreadable_release_receipt_stops_the_check(self):
+        loop = self.item[self.item.index('foreach ($k in $receipts) {'):]
+        loop = loop[:loop.index('\n}\n')]
+        lines = [line.strip() for line in loop.splitlines()]
+        stop = lines.index('if (-not $receipt) { "STOP (could not read $k)"; continue }')
+        self.assertLess(stop, lines.index("if ($receipt.kind -ne 'backend') { continue }"))
 
 
 if __name__ == '__main__':

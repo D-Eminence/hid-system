@@ -617,12 +617,15 @@ if (-not $index.backend) { 'STOP (could not read production/current.json)' }
 foreach ($row in @($index.backend.PSObject.Properties.Value)) { & $add $row.image_uri 'production/current.json' }
 & $add $index.migration_image_uri 'production/current.json'
 $receipts = @((aws s3api list-objects-v2 --bucket $bucket --prefix production/releases/ --region eu-west-1 --query "Contents[?ends_with(Key, '/complete.json')].Key" --output json | ConvertFrom-Json) | Where-Object { $_ })
+$backend = 0
 foreach ($k in $receipts) {
   $receipt = aws s3 cp "s3://$bucket/$k" - --region eu-west-1 | Out-String | ConvertFrom-Json
+  if (-not $receipt) { "STOP (could not read $k)"; continue }
   if ($receipt.kind -ne 'backend') { continue }
+  $backend++
   foreach ($side in 'after', 'before') { foreach ($row in @($receipt.$side.PSObject.Properties.Value)) { & $add $row.image_uri $k } }
 }
-"$($receipts.Count) release receipts; $($used.Count) images in use or kept for rollback"
+"$backend backend release receipts read of $($receipts.Count) listed; $($used.Count) images in use or kept for rollback"
 $tagsOf = @{}
 foreach ($r in $repos) { foreach ($d in @((Get-Content "$dir/ecr-$($r -replace '/', '-')-$date.json" -Raw | ConvertFrom-Json).imageDetails)) { $tagsOf["$r@$($d.imageDigest)"] = @($d.imageTags) } }
 foreach ($i in $used.Keys) {
@@ -632,12 +635,15 @@ foreach ($i in $used.Keys) {
 }
 ```
 
-Expect at least one release receipt and every line `ok`. On a `STOP`, do not
-apply this item: drop the two `ecr_` lines from the commit (the other items
-can go ahead) and report it. An image a service runs now gets its tag at that
-service's next release through the helper. An earlier release's image without
-the tag (for example one deployed before the helper tagged images) is for the
-owner to decide: keep it as a rollback target by tagging it
+Expect at least one backend release receipt, no `could not read` line and every
+line `ok`. A `could not read` line is a receipt whose read failed (for example a
+throttled S3 or KMS call), so its images were not checked: run the block again,
+and if the same receipt still cannot be read, treat it as a `STOP`. On a
+`STOP`, do not apply this item: drop the two `ecr_` lines from the commit (the
+other items can go ahead) and report it. An image a service runs now gets its
+tag at that service's next release through the helper. An earlier release's
+image without the tag (for example one deployed before the helper tagged
+images) is for the owner to decide: keep it as a rollback target by tagging it
 `retain-<digest hex>` as the helper does, or accept that this release can no
 longer be rolled back to once its image is 90 days old (it stays in the backup
 and can be rebuilt). An image `not in the inventory` is already gone from ECR:
