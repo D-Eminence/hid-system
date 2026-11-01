@@ -2573,9 +2573,11 @@ they name and the version that was current when they were accepted), and
 those whose prescription changed or stopped after acceptance, before or after
 they were dispensed (§29), without returning any patient data.
 
-The suite is `services/ehr-api/test/database/pharmacy-prescription-source.integration.sql`;
+The suite is `services/ehr-api/test/database/pharmacy-prescription-source.integration.sql`
+(removed with 0102, §30); while 0100 and 0101 were in force,
 `pharmacy-session-guards.integration.sql` and `database/tests/schema.integration.sql`
-now name real prescriptions in their acceptances. 0100 has no down migration;
+named real prescriptions in their acceptances (with 0102 they are 0099's text
+again). 0100 has no down migration;
 applying 0086's text of `pharmacy.validate_work_item()` restores the old
 behaviour. Today's pharmacy-api image sends the same INSERT and keeps working:
 a legitimate acceptance passes, and the four new refusals reach it as 23514
@@ -2637,14 +2639,15 @@ changed, or that the EHR changed after the dispensing's snapshot, fails with
 `PRESCRIPTION_SOURCE_NOT_DISPENSABLE`. A route-backed dispensing takes no new
 lock.
 
-The suite is `services/ehr-api/test/database/pharmacy-dispensing-source.integration.sql`;
-`pharmacy-session-guards.integration.sql` now creates the prescriptions its
-work items name. 0101 has no down migration; applying 0086's text of
-`pharmacy.validate_dispensing()` restores the old behaviour. Today's
-pharmacy-api image sends the same INSERT and keeps working: a dispensing of a
-work item whose prescription is still active at the accepted version passes,
-and the new refusal reaches it as a 23514 error it answers 500 until the new
-image maps it.
+The suite is `services/ehr-api/test/database/pharmacy-dispensing-source.integration.sql`
+(removed with 0102, §30); while 0100 and 0101 were in force,
+`pharmacy-session-guards.integration.sql` created the prescriptions its work
+items name (with 0102 it is 0099's text again). 0101 has no down migration;
+applying 0086's text of `pharmacy.validate_dispensing()` restores the old
+behaviour. Today's pharmacy-api image sends the same INSERT and keeps
+working: a dispensing of a work item whose prescription is still active at
+the accepted version passes, and the new refusal reaches it as a 23514 error
+it answers 500 until the new image maps it.
 
 `audit-existing-work-items.sql` (beside the branch for the owner, not shipped)
 counts, besides §28's reasons, the same-facility work items not yet dispensed
