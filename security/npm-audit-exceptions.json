@@ -1,6 +1,6 @@
 {
   "schema_version": "hid.npm-audit-exceptions/v1",
-  "description": "Reviewed npm audit exceptions, read by release/scripts/npm-audit-with-exceptions.mjs. Only the infra/aws audit steps in .github/workflows/tuf-local-gates.yml and tuf-publish.yml use it; every other npm audit runs plain npm audit --audit-level=moderate. An entry covers one advisory in one package, at npm's exact vulnerable range, severity and installed paths, in one audited directory, until expires_at (00:00 UTC). An uncovered advisory, an expired entry or a stale entry fails the audit. See docs/STAGING_BACKEND_BUILDS.md.",
+  "description": "Reviewed npm audit exceptions, read by release/scripts/npm-audit-with-exceptions.mjs. Only the infra/aws audit steps in .github/workflows/tuf-local-gates.yml and tuf-publish.yml use it; every other npm audit runs plain npm audit --audit-level=moderate. An entry covers one advisory in one package, at npm's exact vulnerable range, severity and installed paths, in one audited directory, until expires_at (00:00 UTC). An uncovered advisory, an expired entry or a stale entry fails the audit. See docs/TUF-CI-PROTECTION.md.",
   "exceptions": [
     {
       "directory": "infra/aws",
