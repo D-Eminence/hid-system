@@ -402,8 +402,7 @@ keeps the alarm states working; it does not fix the emails. Check first:
 aws cloudwatch describe-alarm-history --alarm-name hid-production-gateway-running-tasks --history-item-type Action --region eu-west-1
 ```
 
-The fix is a separate reviewed change: in both policies, let the
-`aws:SourceArn` condition also match `alarm:hid-production-*-running-tasks`.
+The fix is item 4 of "AWS cost" below, a separate commit on this branch.
 
 ### AWS cost
 
@@ -422,11 +421,14 @@ secret instead and shows the ECR change only if that secret also has the two
 | 1. Bedrock endpoint in one zone | `module.ai[0].aws_vpc_endpoint.bedrock_runtime` | 1 updated in place |
 | 2. ECR clean-up | 12 `module.application.aws_ecr_lifecycle_policy.workload["<service>"]` | 12 replaced (the provider cannot edit a lifecycle policy; see item 2) |
 | 3. Worker scaling on dead metrics | `module.application.aws_appautoscaling_policy.ocr_backlog["ocr-worker"]` and `module.application.aws_appautoscaling_policy.outbox_backlog["event-dispatcher"]` | 2 destroyed |
+| 4. Alerts from the production alarms | `module.operations.aws_kms_key.alerts` and `module.operations.aws_sns_topic_policy.alerts` | 2 updated in place (policy only) |
 
-Total: `Plan: 12 to add, 14 to change, 14 to destroy` when no other dev change
+Total: `Plan: 12 to add, 16 to change, 14 to destroy` when no other dev change
 is pending: the 12 added are the 12 replaced lifecycle policies, which with the
-2 scaling policies make the 14 destroyed. Other changes in the plan come from
-dev commits not yet applied.
+2 scaling policies make the 14 destroyed. Nothing else is replaced or
+destroyed: no service, task definition, database, bucket, key, topic or
+endpoint. Other changes in the plan come from dev commits not yet applied;
+review them as part of the same plan.
 
 #### 1. Bedrock endpoint in one zone
 
@@ -675,6 +677,51 @@ policies go in every environment; nothing publishes the metrics anywhere.
   scale-in cooldown).
 - Rollback: revert this commit on dev in a reviewed commit and apply; the two
   policies and their alarms come back, still without data.
+
+#### 4. Alerts from the production alarms
+
+The alerts topic `hid-staging-operations-alerts` is encrypted with its own KMS
+key. The topic policy and the key policy let CloudWatch publish only for alarms
+named `hid-staging-*` (`aws:SourceArn`, with `aws:SourceAccount` =
+`659225405023`), but the 12 running-task alarms are named after the ECS cluster,
+`hid-production-<service>-running-tasks`, so AWS refused their notifications
+(see "Monitoring cost"). Each policy now has one more statement for CloudWatch:
+the same actions (`sns:Publish`; `kms:Decrypt` and `kms:GenerateDataKey*`), the
+same account condition, and `aws:SourceArn` like
+`arn:aws:cloudwatch:eu-west-1:659225405023:alarm:hid-production-*-running-tasks`,
+so only the hid-production cluster's running-task alarms in this account and
+region. The `hid-staging-*` statements and the key's account administration
+statement stay as they are. Terraform adds the statement only where the
+running-task alarm names fall outside the name prefix, which is production;
+elsewhere both policies stay unchanged. Every other alarm that notifies the
+topic is named `hid-staging-*`.
+
+- Plan: `module.operations.aws_kms_key.alerts` and
+  `module.operations.aws_sns_topic_policy.alerts` updated in place, policy
+  only. The key keeps its ID, alias and rotation; the topic and its email
+  subscription do not change.
+- Before applying (read-only), the alarm history shows the refused
+  notifications ("Failed to execute action"):
+
+  ```powershell
+  aws cloudwatch describe-alarm-history --alarm-name hid-production-gateway-running-tasks --history-item-type Action --max-items 5 --region eu-west-1 --query "AlarmHistoryItems[].[Timestamp,HistorySummary]" --output text
+  ```
+
+- After applying, send one test alert: tell the operations mailbox first, then
+  set one alarm to `ALARM` by hand. Nothing touches the service, and the alarm
+  returns to `OK` at its next one-minute evaluation:
+
+  ```powershell
+  aws cloudwatch set-alarm-state --alarm-name hid-production-gateway-running-tasks --state-value ALARM --state-reason "Alert delivery test after the alerts topic policy change" --region eu-west-1
+  ```
+
+  `operations@healthidentitydirectory.com` receives an ALARM email and, about a
+  minute later, an OK email, and the history command above shows
+  "Successfully executed action" for both. If not, look at the topic and key
+  policies (`aws sns get-topic-attributes`, `aws kms get-key-policy`) before
+  anything else.
+- Rollback: revert this commit on dev in a reviewed commit and apply; the
+  extra statements go and these 12 alarms' notifications are refused again.
 
 ## 5. Build flow and deployment controls
 

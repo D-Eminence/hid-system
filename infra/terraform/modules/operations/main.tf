@@ -1,3 +1,17 @@
+locals {
+  alarm_arn_prefix        = "arn:aws:cloudwatch:${var.aws_region}:${var.aws_account_id}:alarm:"
+  prefix_alarm_source_arn = "${local.alarm_arn_prefix}${var.name_prefix}-*"
+
+  # The running-task alarms are named after the ECS cluster
+  # ("<cluster>-<service>-running-tasks"). In production the cluster is
+  # hid-production while every other alarm keeps the retained hid-staging
+  # prefix, so CloudWatch may also publish for exactly those alarms there.
+  # Where the prefix already covers them, the policies stay as they were.
+  runtime_alarm_source_arns = length(var.runtime_services) > 0 && !startswith("${var.ecs_cluster_name}-", "${var.name_prefix}-") ? [
+    "${local.alarm_arn_prefix}${var.ecs_cluster_name}-*-running-tasks"
+  ] : []
+}
+
 # Shared operational alert channel
 resource "aws_sns_topic" "alerts" {
   name              = "${var.name_prefix}-operations-alerts"
@@ -12,7 +26,7 @@ resource "aws_kms_key" "alerts" {
   deletion_window_in_days = 30
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       { Sid       = "AccountAdministration", Effect = "Allow",
         Principal = { AWS = "arn:aws:iam::${var.aws_account_id}:root" },
       Action = "kms:*", Resource = "*" },
@@ -21,9 +35,17 @@ resource "aws_kms_key" "alerts" {
         Action    = ["kms:Decrypt", "kms:GenerateDataKey*"], Resource = "*",
         Condition = {
           StringEquals = { "aws:SourceAccount" = var.aws_account_id }
-          ArnLike      = { "aws:SourceArn" = "arn:aws:cloudwatch:${var.aws_region}:${var.aws_account_id}:alarm:${var.name_prefix}-*" }
+          ArnLike      = { "aws:SourceArn" = local.prefix_alarm_source_arn }
       } }
-    ]
+      ], [for source_arn in local.runtime_alarm_source_arns : {
+        Sid       = "ScopedCloudWatchRunningTaskAlerts", Effect = "Allow",
+        Principal = { Service = "cloudwatch.amazonaws.com" },
+        Action    = ["kms:Decrypt", "kms:GenerateDataKey*"], Resource = "*",
+        Condition = {
+          StringEquals = { "aws:SourceAccount" = var.aws_account_id }
+          ArnLike      = { "aws:SourceArn" = source_arn }
+        }
+    }])
   })
 }
 
@@ -36,7 +58,7 @@ resource "aws_sns_topic_policy" "alerts" {
   arn = aws_sns_topic.alerts.arn
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       { Sid       = "AccountAdministration", Effect = "Allow",
         Principal = { AWS = "arn:aws:iam::${var.aws_account_id}:root" },
         Action = ["sns:GetTopicAttributes", "sns:SetTopicAttributes", "sns:AddPermission", "sns:RemovePermission",
@@ -46,9 +68,17 @@ resource "aws_sns_topic_policy" "alerts" {
         Action    = "sns:Publish", Resource = aws_sns_topic.alerts.arn,
         Condition = {
           StringEquals = { "aws:SourceAccount" = var.aws_account_id }
-          ArnLike      = { "aws:SourceArn" = "arn:aws:cloudwatch:${var.aws_region}:${var.aws_account_id}:alarm:${var.name_prefix}-*" }
+          ArnLike      = { "aws:SourceArn" = local.prefix_alarm_source_arn }
       } }
-    ]
+      ], [for source_arn in local.runtime_alarm_source_arns : {
+        Sid       = "ScopedCloudWatchRunningTaskPublish", Effect = "Allow",
+        Principal = { Service = "cloudwatch.amazonaws.com" },
+        Action    = "sns:Publish", Resource = aws_sns_topic.alerts.arn,
+        Condition = {
+          StringEquals = { "aws:SourceAccount" = var.aws_account_id }
+          ArnLike      = { "aws:SourceArn" = source_arn }
+        }
+    }])
   })
 }
 

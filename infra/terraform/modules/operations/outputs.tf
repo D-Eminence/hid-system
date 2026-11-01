@@ -6,6 +6,11 @@ output "alert_topic_kms_key_arn" {
   value = aws_kms_key.alerts.arn
 }
 
+output "alert_source_arns" {
+  description = "Alarm ARN patterns CloudWatch may publish to the alerts topic for (topic and key policies)."
+  value       = concat([local.prefix_alarm_source_arn], local.runtime_alarm_source_arns)
+}
+
 output "runtime_task_alarms" {
   value = { for name, alarm in aws_cloudwatch_metric_alarm.runtime_tasks : alarm.alarm_name => {
     namespace   = alarm.namespace
