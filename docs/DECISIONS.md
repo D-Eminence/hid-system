@@ -6534,4 +6534,5 @@ Residual risks:
 Related: ADR-033; ADR-038; ADR-044; ADR-059; MFA-1 (0088);
 `INTERFACE_CONTRACT.md`, "Single sign-on hand-off on product hosts";
 `SECURITY.md`, "Single sign-on on auth., the product side";
-`MIGRATION_RUNBOOK.md`, 0102.
+`MIGRATION_RUNBOOK.md`, 0102; `DATABASE.md`, "Single sign-on relying party
+(0102)"; `PHASE_4_STAGE_5_RELEASE_READINESS.md` §5 step 30e.

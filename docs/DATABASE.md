@@ -5355,3 +5355,84 @@ patient suite it waits for the next UTC hour within a minute of a boundary.
 administrator is neither a superuser nor `BYPASSRLS`, and on the RDS-path database.
 `verify-staff-record-chat-runtime.mjs` covers the HTTP behaviour through the real
 Identity API (release checklist S4ac).
+
+## Single sign-on relying party (0102)
+
+`0102_sso_relying_party.sql` (ADR-070, proposed; the product side of single
+sign-on on `auth.`, D-Eminence/hid-system#142) follows `0101` (staff record
+chat). Migrations `0001`–`0101` are unchanged; no existing row, function,
+policy or grant changes. Creating the provenance table's two foreign keys
+takes `SHARE ROW EXCLUSIVE` on `auth.sessions` and `auth.accounts` until the
+migration commits, within the runner's 5 s lock timeout
+(`MIGRATION_RUNBOOK.md`; release checklist §5 step 30e). Nothing reads or
+writes either table while the Identity API's `AUTH_SSO_ISSUER` is unset.
+
+- `auth.session_single_sign_on` records where a sign-in came from when a
+  product issued it after a sign-in at the provider: `family_id` (primary
+  key, the sign-in's root session in `auth.sessions`), `account_id`,
+  `client_id` (`ehr`, `lab`, `pharmacy`, `migrate`, `outreach` or `web`;
+  platform administration is never a client, ADR-038), `provider_sid` (the
+  provider's session id, printable ASCII, 1 to 255 characters), and
+  `authenticated_at` (the provider's `auth_time`) and `created_at`
+  (`clock_timestamp()`). Both foreign keys are `ON DELETE RESTRICT`, and
+  `provider_sid` has an index, which back-channel logout uses. Like
+  `auth.session_assurance` (0069) and `auth.session_facility_selection` (0089)
+  it is keyed by the session family, so the refresh rotation keeps it. It
+  never holds the ID token: product sign-out sends no `id_token_hint`.
+- The row grants nothing; it only shortens. The sign-in's absolute end
+  counts from `authenticated_at` as well as from its own first session, and
+  with single sign-on configured a patient's recent-sign-in check (10
+  minutes) needs both to be recent.
+- `auth.guard_session_single_sign_on_change()` (invoker, fixed
+  `search_path`, revoked from `PUBLIC`) fires before every row insert, update
+  and delete. An insert must name the root session (`id = family_id`) of a
+  sign-in of the same account whose `session_kind` is `patient` for `web` and
+  `staff` for every other client; otherwise
+  `23514 SESSION_SINGLE_SIGN_ON_INVALID`. Any update or delete is refused with
+  `55000 SESSION_SINGLE_SIGN_ON_IMMUTABLE`. Sign-out and revocation leave the
+  row in place, as they leave `auth.session_assurance`.
+- `auth.sso_spent_tokens` is the single-use record of a product's sign-in
+  transactions (a digest of their state) and of the provider's logout tokens
+  (a digest of issuer and `jti`): `purpose` (`transaction` or
+  `logout_token`), `token_sha256` (64 lower-case hex digits), `expires_at`
+  and `spent_at`, with primary key `(purpose, token_sha256)` and an index on
+  `expires_at`. The Identity API first deletes rows past `expires_at` (such a
+  token is refused by its own expiry), then inserts with `ON CONFLICT DO
+  NOTHING`: no inserted row means the token was spent before.
+- The Identity API writes the provenance row with the family's first session,
+  in that session's transaction. Back-channel logout runs in one system
+  transaction: it spends the logout token, locks each named account's
+  sessions (`auth.lock_account_sessions`, 0073) in id order, and revokes every
+  live session of the families with that `provider_sid` (or, for a token that
+  names only the account, every staff and patient sign-in of it) with reason
+  `sso_logout`, then audits `auth.sso.backchannel-logout`.
+- `runtime-grants.sql` grants `hid_identity_runtime` (so
+  `hid_identity_api_runtime`) `SELECT` and `INSERT` on
+  `auth.session_single_sign_on` and `SELECT`, `INSERT` and `DELETE` on
+  `auth.sso_spent_tokens`; no other role gets any privilege. The guard reads
+  only `auth.sessions`, which the Identity runtime already reads. The
+  bootstrap fails on a database without 0102.
+- `sso-relying-party.integration.sql` (rollback-only, synthetic fixtures)
+  checks:
+  - the catalog contract: keys, the guard's attributes and trigger timing,
+    and the spent-token key;
+  - that the Identity runtime reads and inserts the provenance but never
+    changes or deletes it, reads, inserts and deletes spent tokens, and that
+    no other runtime has any access.
+  As `hid_identity_api_runtime`, it then runs the API's statements:
+  - the insert for each kind, and the guard's refusals: a staff product on a
+    patient sign-in, the patient portal on a staff sign-in, another
+    account's sign-in, a session that is not its family's root, and an
+    `admin` client;
+  - the back-channel logout revocation by `sid`: every sign-in of that
+    provider session ends, whichever product it opened, a rotated session
+    included, and other accounts' sign-ins do not;
+  - product sign-out's revocation of the account's sign-ins of one kind,
+    including one made on a product's own sign-in page;
+  - spent tokens: accepted once, by digest, and expired rows removed;
+  - the patient recent-sign-in check: a sign-in issued now after a sign-in
+    at the provider 30 minutes ago is not recent.
+  An update is refused to the runtime by privilege, and a delete to the
+  owner by the guard. `scripts/run-container-database-acceptance.sh` runs
+  it after `session-facility-selection.integration.sql`, and the TUF
+  rehearsal runs it with the other rollback-only suites.
