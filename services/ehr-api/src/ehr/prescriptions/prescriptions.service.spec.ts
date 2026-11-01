@@ -1,3 +1,4 @@
+import { types } from 'pg';
 import type { DataAccessContext } from '../../common/request-context';
 import { OrderStatus } from '../shared/clinical.dto';
 import { PrescriptionsService, type PrescriptionRow } from './prescriptions.service';
@@ -58,6 +59,30 @@ describe('PrescriptionsService Pharmacy handoff', () => {
       { expectedRowVersion: 3, reason: 'Reviewed for Pharmacy acceptance' }, 'handoff-key-1234'))
       .rejects.toMatchObject({ status: 409, code: 'PRESCRIPTION_NOT_ELIGIBLE' });
     expect(pharmacyApi.acceptEhrPrescription).not.toHaveBeenCalled();
+  });
+
+  // The review of 0100: node-postgres makes a date column a JavaScript Date at local midnight, so
+  // its ISO string is the day before east of UTC; the hand-off sends the calendar date instead,
+  // which 0100 compares exactly, whatever the EHR API process's TZ (calendar-date.spec.ts runs
+  // the conversion under Africa/Lagos and other zones).
+  it('sends the start and end dates node-postgres read as calendar dates', async () => {
+    const parseDate = types.getTypeParser(1082) as (text: string) => unknown;
+    const row = { ...prescription(OrderStatus.Active), startsOn: parseDate('2026-11-01'), endsOn: parseDate('2026-12-31') };
+    expect(row.startsOn).toBeInstanceOf(Date);
+    const service = serviceFor(row as unknown as PrescriptionRow);
+    await service.acceptForPharmacy(context, patientId, encounterId, prescriptionId,
+      { expectedRowVersion: 3, reason: 'Reviewed for Pharmacy acceptance' }, 'handoff-key-1234');
+    const body = pharmacyApi.acceptEhrPrescription.mock.calls[0][1];
+    expect(JSON.parse(JSON.stringify(body))).toMatchObject({ startsOn: '2026-11-01', endsOn: '2026-12-31' });
+  });
+
+  it('sends absent dates as absent and a date already read as text unchanged', async () => {
+    const service = serviceFor({ ...prescription(OrderStatus.Active), startsOn: null, endsOn: '2026-08-17' });
+    await service.acceptForPharmacy(context, patientId, encounterId, prescriptionId,
+      { expectedRowVersion: 3, reason: 'Reviewed for Pharmacy acceptance' }, 'handoff-key-1234');
+    const body = pharmacyApi.acceptEhrPrescription.mock.calls[0][1];
+    expect(body.startsOn).toBeUndefined();
+    expect(body.endsOn).toBe('2026-08-17');
   });
 
   it('forwards the exact active snapshot and original idempotency key', async () => {

@@ -2489,13 +2489,17 @@ or with what JavaScript's `String.prototype.trim()` removes cut from the stored
 text (the 25 characters it removes, listed in the migration); the dose matches
 by numeric value (the row's `1.5000` arrives as the number `1.5`); prescribed
 at matches `created_at` or `created_at` cut to the millisecond (a JavaScript
-Date keeps milliseconds); ids and dates exactly; null only null. Dates match
-because the EHR API runs in UTC: it sends a date column as the JavaScript
-Date node-postgres makes of it (local midnight), so a process east of UTC
-would send the day before, and its acceptances with a start or end date would
-be refused as a mismatch. The EHR API image sets no `TZ` and no Terraform task
-sets one; if one ever is, the EHR API must send `starts_on::text` and
-`ends_on::text` instead (not a website change).
+Date keeps milliseconds); ids and dates exactly; null only null. Dates: from
+this release the EHR API sends `startsOn` and `endsOn` as calendar dates
+(`YYYY-MM-DD`, the local year, month and day of the Date node-postgres makes
+of a date column, which are the stored date whatever `TZ` the process runs
+in; `src/ehr/shared/calendar-date.ts`, tested under Africa/Lagos, UTC,
+Europe/London, America/New_York, Asia/Kolkata, Pacific/Kiritimati and
+Pacific/Pago_Pago). An older EHR API image sends that Date itself (local
+midnight as an ISO string), which matches only while the process runs in UTC,
+as it does today (its image and the Terraform task definitions set no `TZ`);
+east of UTC it would send the day before and the acceptance would be refused
+as a mismatch. pharmacy-api accepts both forms (`IsDateString`).
 
 The website never sends these fields: both "Send to Pharmacy" actions (the
 classic clinical record, `staff/routes/Clinical.tsx`, and the blue order page,
@@ -2522,17 +2526,52 @@ checks answer first.
 Locks: the acceptance holds the prescription FOR SHARE until it commits. A
 second reader or an order route's foreign key check proceeds; the EHR's own
 change of that prescription (FOR UPDATE, UPDATE) and the route send (FOR NO
-KEY UPDATE) wait for the acceptance. An acceptance that reaches a prescription
-being changed waits, then fails with 40001 (SERIALIZABLE), which pharmacy-api
-retries; the retry answers `PRESCRIPTION_SOURCE_VERSION_MISMATCH`. Every EHR
-writer already locks the prescription before the routes, so the order
-prescription, then routes, adds no deadlock.
+KEY UPDATE) wait for the acceptance, so the EHR cannot change or cancel the
+prescription under it. An acceptance that reaches a prescription being changed
+waits, then fails with 40001 (SERIALIZABLE), which pharmacy-api retries; the
+retry answers `PRESCRIPTION_SOURCE_VERSION_MISMATCH`. Every EHR writer already
+locks the prescription before the routes, so the order prescription, then
+routes, adds no deadlock.
+
+The lock does not by itself stop a route send to another facility that
+overlaps the acceptance. The send (`ehr.send_order_route`) only locks the
+prescription FOR NO KEY UPDATE and inserts the route, it does not update the
+prescription row; so an acceptance that waited for it gets its FOR SHARE lock
+without a serialization error, and its `PRESCRIPTION_ROUTED` check reads
+`ehr.order_routes` with the snapshot it took before the send committed. From
+this release the EHR API runs the send SERIALIZABLE
+(`OrderRoutesService.send`, `ClinicalRepository.run`'s transaction options,
+and `DatabaseService.withTransaction` running a SERIALIZABLE transaction that
+PostgreSQL cancels with 40001 or 40P01 again, up to 12 times, as pharmacy-api
+does); the send reads the Pharmacy work items, so PostgreSQL's serializable
+checks cancel the overlapping acceptance with 40001, and pharmacy-api's retry
+answers `PRESCRIPTION_ROUTED` (proved with two sessions: the route committed
+after the acceptance's snapshot, and the send holding the prescription while
+the acceptance waited). With an older EHR API image that sends READ COMMITTED,
+such an overlap leaves a live route and a same-facility work item; only the
+one-work-item-per-prescription key then stops the receiving pharmacy from
+accepting it too, so nothing is dispensed twice. The send's own limits (per
+sender, per facility pair, open per destination: an advisory lock, then a
+count of `ehr.order_routes`) stay exact under SERIALIZABLE: two sends that
+overlap are cancelled and retried, and the retry counts the one that
+committed (proved with two sessions). Only while the older image's READ
+COMMITTED send overlaps a new SERIALIZABLE one during the rollout can the
+new one's count miss the older one's route, so a daily limit can be passed
+by one in that window. The send's statements are unchanged. Run with every
+transaction SERIALIZABLE, the order route suites that send, receive and
+withdraw (send, receive, privileges, wrong-patient, wrong-patient overview)
+and the three Pharmacy suites pass; the others stop only at the late
+correction and "can't complete" commands, which refuse anything but READ
+COMMITTED by design and stay READ COMMITTED, or at a lock check that counts
+SERIALIZABLE's own predicate locks.
 
 Existing work items are not touched (the trigger fires on INSERT only, and
 work items are insert-only). `audit-existing-work-items.sql`, kept beside the
 branch for the owner (not shipped), counts the existing same-facility work
-items that 0100 would have refused, by reason, without returning any patient
-data.
+items that 0100 would have refused, by reason (judged against the version
+they name and the version that was current when they were accepted), and
+those whose prescription changed or stopped after acceptance, before or after
+they were dispensed (§29), without returning any patient data.
 
 The suite is `services/ehr-api/test/database/pharmacy-prescription-source.integration.sql`;
 `pharmacy-session-guards.integration.sql` and `database/tests/schema.integration.sql`
@@ -2541,3 +2580,75 @@ applying 0086's text of `pharmacy.validate_work_item()` restores the old
 behaviour. Today's pharmacy-api image sends the same INSERT and keeps working:
 a legitimate acceptance passes, and the four new refusals reach it as 23514
 errors it answers 500 until the new image maps them.
+
+## 29. Pharmacy dispensing checks its EHR prescription (0101)
+
+Migration 0101 (`0101_pharmacy_dispensing_source_check.sql`, the review of
+0100 under the same owner decision of 2026-11-01, "Fix it now"; main 0080's
+dispensing half; unsigned until the owner signs the declaration) makes the
+database refuse to dispense a same-facility Pharmacy work item once its EHR
+prescription is no longer what Pharmacy accepted. It changes no table,
+column, policy, grant or API field; it replaces `pharmacy.validate_dispensing()`
+(the BEFORE INSERT trigger function on `pharmacy.dispensings`) from its 0086
+definition with one declaration and one block added after its existing checks.
+The order-route branch (`ORDER_ROUTE_CLOSED`) and 0077's actor and work-item
+check are byte for byte as they were and still answer first.
+
+0100's FOR SHARE lock ends when the acceptance commits. Before 0101 the EHR
+could then cancel the prescription, put it on hold, complete it, mark it
+entered in error, or change its instructions, frequency or dates, and the
+same-facility work item stayed dispensable (work items are insert-only and
+nothing updated them). Since 0101, for a work item with no order route, the
+trigger reads the `ehr.prescriptions` row the work item names FOR SHARE (held
+until the dispensing commits) and refuses with SQLSTATE 23514 and the message
+`PRESCRIPTION_SOURCE_NOT_DISPENSABLE` when the row is missing, or its patient,
+facility or encounter is not the work item's, or its status is not `active`,
+or its `row_version` is not the version Pharmacy accepted
+(`source_ehr_prescription_version`). The version is the EHR's row version,
+raised by every change of the row, and 0100 made the work item equal to that
+version, so no field needs comparing again.
+
+`POST .../pharmacy/work-items/:id/dispensings` answers that message 409
+`PHARMACY_PRESCRIPTION_NOT_DISPENSABLE` ("This prescription can no longer be
+dispensed here"), the code it already answers for a route-backed work item
+whose prescription changed; the website already handles it (it marks the work
+"Not dispensable"). Only that message is mapped for same-facility work: the
+validator's other 23514 refusals (0077's) pass on unchanged, and a
+serialization failure goes to pharmacy-api's retry.
+
+Owner decision this carries (as on `main`): once its prescription has changed
+or stopped, a same-facility work item can be neither dispensed nor accepted
+again (one work item per prescription; a second acceptance is answered 409),
+so the prescriber writes a new prescription. A prescription put on hold and
+resumed is a new version, and its work item stays undispensable too. A
+dispensing recorded while the prescription was active can still be reversed
+after it is cancelled: `pharmacy.validate_dispensing_reversal()` is unchanged.
+
+Row-level security: as in §28, the read is the function owner's, so on
+production only a prescription the session may read and write is found;
+pharmacy-api's dispensing already requires write consent for a same-facility
+work item, and any other session is refused by 0077's check first.
+
+Locks: a dispensing holds the prescription FOR SHARE until it commits; another
+reader proceeds, and the EHR's change (FOR UPDATE, UPDATE) and the route send
+(FOR NO KEY UPDATE) wait for it. A dispensing that reaches a prescription being
+changed, or that the EHR changed after the dispensing's snapshot, fails with
+40001 (SERIALIZABLE); pharmacy-api's retry is then refused
+`PRESCRIPTION_SOURCE_NOT_DISPENSABLE`. A route-backed dispensing takes no new
+lock.
+
+The suite is `services/ehr-api/test/database/pharmacy-dispensing-source.integration.sql`;
+`pharmacy-session-guards.integration.sql` now creates the prescriptions its
+work items name. 0101 has no down migration; applying 0086's text of
+`pharmacy.validate_dispensing()` restores the old behaviour. Today's
+pharmacy-api image sends the same INSERT and keeps working: a dispensing of a
+work item whose prescription is still active at the accepted version passes,
+and the new refusal reaches it as a 23514 error it answers 500 until the new
+image maps it.
+
+`audit-existing-work-items.sql` (beside the branch for the owner, not shipped)
+counts, besides §28's reasons, the same-facility work items not yet dispensed
+whose prescription is now not active or at another version (what 0101 will
+hold back), those dispensed whose prescription has since changed, and those
+dispensed after a newer version of their prescription was recorded (what 0101
+now refuses), with no patient data.

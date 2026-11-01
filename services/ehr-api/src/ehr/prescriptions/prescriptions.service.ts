@@ -9,6 +9,7 @@ import { ClinicalRepository } from '../shared/clinical.repository';
 import { PharmacyApiService } from '../../integrations/pharmacy-api.service';
 import { OrderRouteReader } from '../order-routes/order-route-reader';
 import { routeInForce, withOrderRoute } from '../order-routes/order-route.mapping';
+import { calendarDate } from '../shared/calendar-date';
 
 export interface PrescriptionRow extends QueryResultRow {
   id: string;
@@ -252,8 +253,10 @@ export class PrescriptionsService {
       routeCode: row.routeCode ?? undefined,
       frequency: row.frequency,
       instructions: row.instructions,
-      startsOn: row.startsOn ?? undefined,
-      endsOn: row.endsOn ?? undefined,
+      // Calendar dates, not the local-midnight Date node-postgres makes of a date column
+      // (its ISO string is the day before east of UTC); 0100 compares them exactly.
+      startsOn: calendarDate(row.startsOn),
+      endsOn: calendarDate(row.endsOn),
       prescribedBy: row.createdBy,
       prescribedAt: row.createdAt.toISOString(),
       acceptanceReason: input.reason,

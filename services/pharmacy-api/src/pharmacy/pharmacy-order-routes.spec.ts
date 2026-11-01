@@ -343,6 +343,28 @@ describe('Pharmacy per-item routes authorize the resource they act on (P12)', ()
     await expect(ITEM_ROUTES[1]![4](h.service)).rejects.toMatchObject({ code: '23514' });
   });
 
+  // 0101: a same-facility work item is dispensable only while its EHR prescription is active at the
+  // version Pharmacy accepted; the validator refuses with 23514 PRESCRIPTION_SOURCE_NOT_DISPENSABLE,
+  // answered with the code the website already handles for route-backed work.
+  it('answers the same-facility refusal PRESCRIPTION_SOURCE_NOT_DISPENSABLE (0101) as 409 PHARMACY_PRESCRIPTION_NOT_DISPENSABLE, writing nothing after the insert', async () => {
+    const h = pharmacyHarness({ outcome: 'none', route_id: null }, { allowed: true, breakGlass: false }, false,
+      databaseError('23514', 'PRESCRIPTION_SOURCE_NOT_DISPENSABLE'));
+    const refusal = await ITEM_ROUTES[1]![4](h.service).catch((error: unknown) => error);
+    expect(refusal).toMatchObject({ status: 409, code: 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE' });
+    expect((refusal as Error).message).toBe('This prescription can no longer be dispensed here');
+    expect(h.statements.filter((s) => s.sql.includes('pharmacy.outbox_events'))).toEqual([]);
+    expect(h.audits.filter((a) => a.action === 'pharmacy.dispensing.create')).toEqual([]);
+  });
+
+  it('passes a same-facility dispensing\'s other errors on unchanged: the message under another code, 40001 for the retry', async () => {
+    for (const error of [databaseError('42501', 'PRESCRIPTION_SOURCE_NOT_DISPENSABLE'),
+      databaseError('40001', 'could not serialize access due to concurrent update'),
+      databaseError('23514', 'PRESCRIPTION_SOURCE_MISMATCH')]) {
+      const h = pharmacyHarness({ outcome: 'none', route_id: null }, { allowed: true, breakGlass: false }, false, error);
+      await expect(ITEM_ROUTES[1]![4](h.service)).rejects.toBe(error);
+    }
+  });
+
   it('answers the same-facility acceptance of a routed prescription 409 PRESCRIPTION_ROUTED, any other 23514 unchanged', async () => {
     const accept = { patientId, orderingFacilityId: facilityId, sourceEhrPrescriptionId: prescriptionId,
       sourceEhrPrescriptionVersion: 2, sourceEncounterId: encounterId, sourceStatus: 'active' as const,

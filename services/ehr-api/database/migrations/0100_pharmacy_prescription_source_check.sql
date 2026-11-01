@@ -1,7 +1,10 @@
 -- 0100 Pharmacy acceptance checks its EHR prescription (owner decision of
 -- 2026-11-01, D-Eminence: "Fix it now"; the declaration signed separately).
--- Numbered 0100 while it sits on the released 0099; RENUMBER.md (beside the
--- branch, not shipped) says how it becomes 0103 if 0100-0102 ship first.
+-- Written on the released 0099 (82f52b9); RENUMBER.md (beside the branch,
+-- not shipped) says how it and 0101 (the same check at dispensing) are
+-- renumbered when other migrations ship first: the two numbers are replaced
+-- mechanically throughout both files. No migration number appears inside the
+-- function body, so renumbering leaves its md5.
 --
 -- The gap: pharmacy-api's acceptPrescription inserts a dispensable
 -- pharmacy.work_items row from fields its caller supplies (the prescription's
@@ -25,10 +28,20 @@
 -- (pharmacy, platform, pg_temp; every new name is schema-qualified), owner,
 -- ACL and trigger are unchanged. In the same-facility branch, in this order:
 --   1. The ehr.prescriptions row whose id is new.source_ehr_prescription_id is
---      read FOR SHARE (held to commit: the EHR cannot change, cancel or route
---      the prescription under the acceptance; the EHR's own writers take it
---      FOR UPDATE or FOR NO KEY UPDATE first, then the routes, so the order
---      prescription-then-route is the one every writer already uses). None:
+--      read FOR SHARE (held to commit: the EHR cannot change or cancel the
+--      prescription under the acceptance; the EHR's own writers take it FOR
+--      UPDATE or FOR NO KEY UPDATE first, then the routes, so the order
+--      prescription-then-route is the one every writer already uses). The
+--      lock does not stop a route send to another facility: the send
+--      (ehr.send_order_route) only locks the prescription FOR NO KEY UPDATE
+--      and writes ehr.order_routes, so an acceptance that waited for it
+--      gets the lock without a serialization error and then reads the routes
+--      (step 5) with the snapshot it took before the send committed. Such a
+--      send is caught only when the EHR API runs it SERIALIZABLE, as it does
+--      from this release (OrderRoutesService.send): the acceptance then fails
+--      40001 and pharmacy-api's retry answers PRESCRIPTION_ROUTED. With an
+--      older EHR API image only the unique work-item key stops the receiving
+--      pharmacy from accepting it too (nothing is dispensed twice). None:
 --      23514 PRESCRIPTION_SOURCE_NOT_FOUND. It is read as this function's
 --      owner, so on production, where ehr.prescriptions forces row-level
 --      security on its owner, only a row the session may read and update
@@ -56,17 +69,21 @@
 --      compared by value (500.0000 equals 500, which is what JSON carries);
 --      prescribed_at equals created_at or created_at cut to the millisecond
 --      (the EHR API sends it through a JavaScript Date, which keeps
---      milliseconds); dates and ids exactly. Null equals only null. The
---      dates match because the EHR API runs in UTC (its image sets no TZ):
---      it sends a date column as the JavaScript Date node-postgres makes of
---      it, local midnight, so a process east of UTC would send the day
---      before and its acceptances with dates would be refused as a mismatch.
+--      milliseconds); dates and ids exactly. Null equals only null. From
+--      this release the EHR API sends each date as its calendar date
+--      (YYYY-MM-DD), whatever the process's TZ. An older EHR API image sends
+--      the JavaScript Date node-postgres makes of a date column (local
+--      midnight), which matches only while it runs in UTC, as it does (its
+--      image and task definitions set no TZ); east of UTC it would send the
+--      day before and the acceptance would be refused as a mismatch.
 --   5. Then 0077's and 0086's checks as before (session, facility, actor,
 --      source_status 'active', 23514 with their messages, and 23514
 --      PRESCRIPTION_ROUTED while the prescription has a live route).
 -- All new refusals keep errcode 23514 (check_violation); pharmacy-api maps the
 -- four messages to 404, 409, 409 and 422. Existing work items are not touched:
--- the trigger fires on INSERT only (work items are insert-only, 0023).
+-- the trigger fires on INSERT only (work items are insert-only, 0023). The
+-- lock ends when the acceptance commits; 0101 makes a same-facility work item
+-- undispensable once its prescription is no longer active at that version.
 -- Who can still be refused: only a work item that differs from its
 -- prescription. The EHR API builds every same-facility acceptance from the
 -- row it has just read and checked (active, the version the client read, not
@@ -110,7 +127,9 @@
 -- acceptance's transaction: an EHR change of that prescription waits for the
 -- acceptance to commit, and an acceptance that reaches a prescription being
 -- changed waits, then (SERIALIZABLE) fails with 40001, which pharmacy-api
--- retries and the retry answers PRESCRIPTION_SOURCE_VERSION_MISMATCH.
+-- retries and the retry answers PRESCRIPTION_SOURCE_VERSION_MISMATCH. A route
+-- send only locks the prescription, so the lock orders an acceptance after a
+-- send that has not committed yet but does not refuse it (see step 1).
 --
 -- Old services on this schema: today's pharmacy-api sends the same INSERT;
 -- a legitimate acceptance (the EHR API's handoff) passes, and the four new
@@ -161,7 +180,7 @@ begin
   end if;
   -- b. Not applied yet: the body is not this file's already.
   if (select md5(proc.prosrc) from pg_proc proc where proc.oid = 'pharmacy.validate_work_item()'::regprocedure)
-     = '8fb2944de050dedd973e5d7f07d9c301' then
+     = 'e2411539ee8c95a02dad46c03e24db05' then
     raise exception using errcode = '55000', message = '0100: already applied';
   end if;
   -- c. The bodies relied on, as 0001-0099 left them: the function replaced
@@ -373,7 +392,7 @@ begin
     end if;
     return new;
   end if;
-  -- Same facility (0100): the work item is exactly the EHR prescription it
+  -- Same facility: the work item is exactly the EHR prescription it
   -- names, at the version accepted, held FOR SHARE until commit so the EHR
   -- cannot change or cancel it under the acceptance. Read as this function's
   -- owner: under production's forced row-level security only a prescription
@@ -464,7 +483,7 @@ begin
     from pg_proc proc
     join pg_language language_row on language_row.oid = proc.prolang
    where proc.oid = 'pharmacy.validate_work_item()'::regprocedure
-     and (md5(proc.prosrc) <> '8fb2944de050dedd973e5d7f07d9c301'
+     and (md5(proc.prosrc) <> 'e2411539ee8c95a02dad46c03e24db05'
        or not proc.prosecdef or proc.provolatile <> 'v' or language_row.lanname <> 'plpgsql' or proc.proisstrict
        or proc.proconfig is distinct from '{"search_path=pharmacy, platform, pg_temp"}'::text[]
        or proc.prorettype <> 'trigger'::regtype);

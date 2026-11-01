@@ -143,11 +143,13 @@ insert into pharmacy.dispensings (id, work_item_id, work_item_version, patient_i
    'amoxicillin-500mg', 'Amoxicillin 500 mg', 21, 'tablet', 'e8d10000-0000-4000-8000-000000000001',
    'e8d30000-0000-4000-8000-000000000001', 'Synthetic medication supplied', 'pharmacy-guard-dispense-0005',
    repeat('b', 64), 'pharmacy-guard-fixture');
--- The EHR prescriptions the new acceptances name (e8d6...10 for the probe
--- W10, e8d6...20 for the lifecycle's W20): active, version 1, prescribed by B
--- at the clinic, exactly as work_item_insert below carries them, so that
--- since 0100 the work-item guard's source check passes and only the session
--- can differ (as replica: no encounter row or version history is needed).
+-- The EHR prescriptions the work items name: e8d6...01-05 for W1-W5 above,
+-- e8d6...10 for the probe W10 and e8d6...20 for the lifecycle's W20. Active,
+-- version 1, prescribed by B at the clinic for the patient in encounter
+-- e8dc...01, exactly as work_item_insert below carries them, so that since
+-- 0100 the work-item guard's source check and since 0101 the dispensing
+-- guard's source check pass and only the session can differ (as replica: no
+-- encounter row or version history is needed).
 insert into ehr.prescriptions (id, encounter_id, patient_id, facility_id, created_by, created_by_membership_id,
   medication_code_system, medication_code, medication_display, dose_quantity, dose_unit, route_code, frequency,
   instructions, starts_on, ends_on, status, row_version, created_at, updated_at)
@@ -156,7 +158,7 @@ select ('e8d60000-0000-4000-8000-0000000000' || n)::uuid, 'e8dc0000-0000-4000-80
        'e8d10000-0000-4000-8000-000000000002', 'e8d30000-0000-4000-8000-000000000002', 'urn:synthetic:medication',
        'amoxicillin-500mg', 'Amoxicillin 500 mg', 1, 'tablet', 'oral', 'Every 8 hours', 'Take after food', null, null,
        'active', 1, '2026-10-01 08:00:00+00', '2026-10-01 08:00:00+00'
-  from (values ('10'), ('20')) prescription(n);
+  from (values ('01'), ('02'), ('03'), ('04'), ('05'), ('10'), ('20')) prescription(n);
 set local session_replication_role = origin;
 
 -- The session, exactly as services/pharmacy-api/src/database/database.service.ts

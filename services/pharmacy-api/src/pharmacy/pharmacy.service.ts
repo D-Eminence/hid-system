@@ -62,8 +62,9 @@ const DISPENSING_SELECT = `select d.*,r.id::text as reversal_id,r.reversed_at
 // Work items, dispensings, reversals and imports are insert-only: a trigger
 // refuses every UPDATE and DELETE (0023), and the runtime role has no UPDATE
 // on them, so it cannot lock them (42501). The commands take no row locks of
-// their own; since 0100 an acceptance's validator holds its EHR prescription
-// FOR SHARE until commit, so the EHR cannot change it under the acceptance.
+// their own; since 0100 an acceptance's validator, and since 0101 a
+// same-facility dispensing's, holds its EHR prescription FOR SHARE until
+// commit, so the EHR cannot change it under the acceptance or the dispensing.
 // Unique constraints allow one work item per prescription, one dispensing per
 // work item, one reversal per dispensing, one import per publication and one
 // row per idempotency key; the SERIALIZABLE transaction cancels the loser of a
@@ -76,12 +77,31 @@ const DISPENSING_SELECT = `select d.*,r.id::text as reversal_id,r.reversed_at
  * prescription changed (P4c, SPEC-FINAL §8.5, V9): 23514 on the insert of a
  * route-backed work item's dispensing, answered 409 as the website already
  * handles it (Operations.tsx). A serialization failure is passed on to
- * DatabaseService's retry; same-facility work is unchanged.
+ * DatabaseService's retry. Same-facility work: sameFacilityDispensingRefusal.
  */
 function routedDispensingRefusal(error: unknown): DomainProblem | undefined {
   const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;
-  return code === '23514' ? new DomainProblem(409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE',
-    'This prescription can no longer be dispensed here') : undefined;
+  return code === '23514' ? notDispensable() : undefined;
+}
+
+/**
+ * Since 0101 the dispensing validator refuses a same-facility work item whose
+ * EHR prescription is missing, no longer active, or no longer at the version
+ * Pharmacy accepted (cancelled, held, completed, entered in error or changed
+ * after the acceptance): 23514 with the message
+ * PRESCRIPTION_SOURCE_NOT_DISPENSABLE, answered 409 with the code the website
+ * already handles (Operations.tsx, PharmacyRecord.tsx: "Not dispensable"). Only
+ * that message: the validator's other 23514 refusals (the dispensing does not
+ * match its work item or the session, 0077) pass on unchanged, and a
+ * serialization failure goes to DatabaseService's retry.
+ */
+function sameFacilityDispensingRefusal(error: unknown): DomainProblem | undefined {
+  const { code, message } = (typeof error === 'object' && error !== null ? error : {}) as { code?: unknown; message?: unknown };
+  return code === '23514' && message === 'PRESCRIPTION_SOURCE_NOT_DISPENSABLE' ? notDispensable() : undefined;
+}
+
+function notDispensable(): DomainProblem {
+  return new DomainProblem(409, 'PHARMACY_PRESCRIPTION_NOT_DISPENSABLE', 'This prescription can no longer be dispensed here');
 }
 
 /**
@@ -272,7 +292,9 @@ export class PharmacyService {
         work.medication_code_system, work.medication_code, work.medication_display,
         input.quantityDispensed, input.quantityUnit, context.actor.accountId, context.membershipId,
         input.reason, key, digest, context.correlationId])
-        .catch((error: unknown) => { throw (work.order_route_id ? routedDispensingRefusal(error) : undefined) ?? error; });
+        .catch((error: unknown) => {
+          throw (work.order_route_id ? routedDispensingRefusal(error) : sameFacilityDispensingRefusal(error)) ?? error;
+        });
       const row = inserted.rows[0];
       if (!row) throw new DomainProblem(503, 'PHARMACY_DISPENSING_NOT_CREATED',
         'Pharmacy could not record the dispensing');
