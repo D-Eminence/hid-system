@@ -38,7 +38,15 @@ describe('the return path (no open redirect, nothing identifying)', () => {
     ['a malformed escape', '/page%zz'], ['javascript', 'javascript:alert(1)'], ['an API route', '/api/v1/auth/logout'],
     ['an API route in another case', '/API/v1/auth'], ['a Health ID', '/patients/HID-ABCDEFGH'],
     ['a Health ID in the query', '/search?q=hid-abcdefgh'], ['a Health ID without its hyphen', '/patients/HIDZDEMAAA2'],
-    ['an older Health ID', '/patients/hid_ab12'], ['an over-long value', `/${'a'.repeat(512)}`],
+    ['an older Health ID', '/patients/hid_ab12'],
+    ['an API route spelled with an escape', '/%61pi/v1/auth/sso/start?return_to=/x'],
+    ['an API route spelled with an escape in capitals', '/%41PI/v1/patients'],
+    ['a Health ID spelled with an escape', '/patients/h%69d-ABCD1234'],
+    ['a Health ID spelled with another escape', '/patients/%68id-ABCD1234'],
+    ['a Health ID spelled with an escape in the query', '/x?id=%48ID-ABCD1234'],
+    ['an escaped hyphen', '/a%2Db'], ['an escaped tilde', '/a%7eb'], ['an escaped underscore', '/a%5Fb'],
+    ['an escaped digit', '/a%31'], ['an escaped dot', '/a%2Eb'],
+    ['an over-long value', `/${'a'.repeat(512)}`],
     ['an empty value', ''], ['a list', ['/a', '/b']], ['no value', undefined],
   ])('refuses %s', (_label, value) => {
     expect(safeReturnPath(value)).toBeUndefined();

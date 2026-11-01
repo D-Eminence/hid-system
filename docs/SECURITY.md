@@ -131,7 +131,9 @@ coordinator's; these are the product's rules.
   its configured host, the provider's endpoints from discovery, which must
   name exactly the configured issuer and keep every endpoint on its origin.
   The only value read from the request is the return path, checked to be a
-  page on the same host with no Health ID, never an API route.
+  page on the same host with no Health ID, never an API route. An escaped
+  unreserved character (`/%61pi/`, `h%69d-`) is refused: a browser decodes it,
+  so it would spell either rule around.
 * Start-up refuses an HTTP issuer or internal base in production, a wildcard,
   unknown (`CORS_ORIGINS`), administration or issuer host, administration as a
   client, a client whose kind is not its site's, and missing or unusable

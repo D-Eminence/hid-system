@@ -392,7 +392,7 @@ describe('with single sign-on configured', () => {
     });
 
     it.each(['//evil.invalid/', 'https://evil.invalid/', '/api/v1/auth/logout', '/patients/HID-ABCDEFGH',
-      '/patients/HIDZDEMAAA2', '/a/../b'])(
+      '/patients/HIDZDEMAAA2', '/a/../b', '/%61pi/v1/auth/logout', '/patients/h%69d-ABCDEFGH'])(
       'never returns to %s: the page is replaced by / and never repaired', async (returnTo) => {
         const { callback } = await signIn(LAB, staffClaims(), returnTo);
         const response = await callback();

@@ -10,9 +10,16 @@
  * Accepted: exactly one leading `/`, then RFC 3986 path and query characters,
  * at most 512 characters. Refused: a scheme or another host (`//`, `\`), a
  * fragment, spaces and control characters, dot segments, an empty segment, a
- * percent-encoded `/`, `\`, `.` or control character, a malformed escape, any
- * `/api/` route, and anything that looks like a Health ID. A refused value is
- * replaced by `/` by the caller, never repaired.
+ * percent-encoded `/`, `\` or control character, a percent-encoded unreserved
+ * character, a malformed escape, any `/api/` route, and anything that looks
+ * like a Health ID. A refused value is replaced by `/` by the caller, never
+ * repaired.
+ *
+ * An unreserved character (RFC 3986 section 2.3: letters, digits, `-`, `.`,
+ * `_`, `~`) never needs an escape, and browsers decode such an escape in a
+ * path (`/%61pi/` is requested as `/api/`). So an escaped one is refused, and
+ * the API and Health ID rules, which read the text as written, cannot be
+ * spelled around with escapes: every character they look for is unreserved.
  */
 export const SSO_RETURN_PATH_MAX_LENGTH = 512;
 
@@ -25,6 +32,8 @@ const ALLOWED = /^[A-Za-z0-9\-._~!$&'()*+,;=:@/?%]+$/;
  * four or more characters. Record ids are UUIDs, whose hex never spells "hid".
  */
 const HEALTH_ID = /hid[-_]?[a-z0-9]{4,}/i;
+/** RFC 3986 section 2.3. */
+const UNRESERVED = /^[A-Za-z0-9\-._~]$/;
 
 export function safeReturnPath(raw: unknown): string | undefined {
   if (typeof raw !== 'string' || raw.length === 0 || raw.length > SSO_RETURN_PATH_MAX_LENGTH) return undefined;
@@ -37,8 +46,11 @@ export function safeReturnPath(raw: unknown): string | undefined {
     const escape = raw.slice(index + 1, index + 3);
     if (!/^[0-9A-Fa-f]{2}$/.test(escape)) return undefined;
     const code = Number.parseInt(escape, 16);
-    // `/`, `\` and `.` spell a separator or a dot segment; controls are never a page.
-    if (code === 0x2f || code === 0x5c || code === 0x2e || code < 0x20 || code >= 0x7f) return undefined;
+    // An unreserved character (`.` among them, which would spell a dot segment)
+    // is never escaped in a page path; a browser decodes it.
+    if (UNRESERVED.test(String.fromCharCode(code))) return undefined;
+    // `/` and `\` spell a separator; controls are never a page.
+    if (code === 0x2f || code === 0x5c || code < 0x20 || code >= 0x7f) return undefined;
   }
   if (path.split('/').some((segment) => segment === '.' || segment === '..')) return undefined;
   if (/^\/api(?:\/|$)/i.test(path)) return undefined;
