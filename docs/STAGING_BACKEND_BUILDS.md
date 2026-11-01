@@ -146,17 +146,20 @@ infra/cloudflare and the EHR and shared-package audits still run plain
 now pins every npm audit command in both workflows. It rejects these changes, and
 the release tests try each one: dropping an audit, sending another directory
 through the exception gate, a different exceptions file, `|| true`, a condition or
-`continue-on-error` on an audit step or its job, a container, service or matrix
-on an audit job, a workflow or job default shell, `npm_config_*`, `NODE_OPTIONS`
-or `PATH` in any `env` map, a step in an audit job that writes `GITHUB_ENV` or
-`GITHUB_PATH`, a registry override, or another step touching `security/`. These
-are static checks on the workflow text, not a sandbox. Shell written to hide what
-it does (a file path built from pieces, an `.npmrc` written by a script) can still
-get past them, so the owner's review of every workflow change (CODEOWNERS) is
-still the real control. The local gate evidence records the exceptions file's
-SHA-256. The gate compares real paths when it decides whether it was run
-directly, so running it through a symlink still runs the audit instead of
-exiting 0 without output.
+`continue-on-error` on an audit step or its job, a `needs` on an audit job (it
+would be skipped whenever the job it waits on is), a container, service or
+matrix on an audit job, a workflow or job default shell, `npm_config_*`,
+`NODE_OPTIONS` or `PATH` in any `env` map, a step in an audit job that writes
+`GITHUB_ENV` or `GITHUB_PATH`, a registry override, or another step touching
+`security/`. These are static checks on the workflow text, not a sandbox, and
+the list is not complete. Shell written to hide what it does (a file path built
+from pieces, an `.npmrc` written by a script) can still get past them, and so
+can settings they do not look at, such as an HTTPS proxy plus an extra CA in the
+environment. The owner's review of every workflow change (CODEOWNERS) is still
+the real control. The local gate evidence records
+the exceptions file's SHA-256. The gate compares real paths when it decides
+whether it was run directly, so running it through a symlink still runs the
+audit instead of exiting 0 without output.
 
 This exception covers the infra/aws npm audit only. It changes nothing in the
 image scans or `security/production-runtime-assessment.json`. It is also the

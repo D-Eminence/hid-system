@@ -29,16 +29,18 @@ export const LOCAL_GATE_AUDITS = Object.freeze({
 const AUDIT_COMMAND = /\bnpm\b[^\n]*\baudit\b|npm-audit-with-exceptions/
 
 // Pins every npm audit in a workflow: one audit step in each reviewed job with
-// exactly the reviewed commands. It also rejects the plain ways to skip,
+// exactly the reviewed commands. It also rejects these ways to skip,
 // reconfigure or redirect an audit: a workflow or job default shell; a
-// condition, continue-on-error, container, service or matrix on an audit job;
+// condition, needs (a job waiting on a skipped job is skipped too),
+// continue-on-error, container, service or matrix on an audit job;
 // any key but id, name and run on the audit step; npm_config_*,
 // NODE_OPTIONS or PATH set in a workflow, job or step env map; a step in an
 // audit job that writes GITHUB_ENV or GITHUB_PATH; a setup-node registry; and
 // any other step that names the gate or security/. These are static text
-// checks, not a sandbox: obfuscated shell (for example a path built from
-// pieces, or an .npmrc written by a script) can still get past them, so owner
-// review of every workflow change remains the real control.
+// checks, not a sandbox and not a complete list: obfuscated shell (for
+// example a path built from pieces, or an .npmrc written by a script), or an
+// HTTPS proxy plus an extra CA set in the environment, can still get past
+// them, so owner review of every workflow change remains the real control.
 export function verifyAuditSteps(workflow, expected) {
   assert.equal(workflow.defaults, undefined, 'workflow cannot change the default shell or directory')
   const found = new Map()
@@ -47,7 +49,7 @@ export function verifyAuditSteps(workflow, expected) {
     if (steps.length === 0) continue
     assert.equal(steps.length, 1, `job ${name} runs more than one audit step`)
     assert.equal(job.defaults, undefined, `job ${name} cannot change the default shell or directory`)
-    for (const key of ['if', 'continue-on-error', 'container', 'services', 'strategy']) assert.equal(job[key], undefined, `job ${name} cannot be skipped, allowed to fail or moved into another runtime`)
+    for (const key of ['if', 'needs', 'continue-on-error', 'container', 'services', 'strategy']) assert.equal(job[key], undefined, `job ${name} cannot be skipped, allowed to fail or moved into another runtime`)
     for (const step of job.steps) assert.ok(!/GITHUB_(?:ENV|PATH)/.test(JSON.stringify(step)), `job ${name} cannot change the environment or PATH of later steps`)
     for (const step of job.steps) {
       if (step.uses?.startsWith('actions/setup-node@')) {
