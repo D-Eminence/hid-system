@@ -60,10 +60,12 @@ export class SsoController {
   /**
    * `GET /auth/sso/start?return_to=<path>[&prompt=none|login]`: a signed-out
    * product page navigates here. With a live session of this product already,
-   * straight back to the page; otherwise to the provider, with the
-   * transaction kept in this host's cookie. `prompt=none` asks the provider
-   * for no page (a quiet check); `prompt=login` for a fresh sign-in (a recent
-   * sign-in is needed). When the provider cannot be asked, the product's own
+   * straight back to the page, unless the page asked for a fresh sign-in;
+   * otherwise to the provider, with the transaction kept in this host's
+   * cookie. `prompt=none` asks the provider for no page (a quiet check);
+   * `prompt=login` for a fresh sign-in (a recent sign-in is needed, as before
+   * a PIN change), which with a live session must be of the same account and
+   * replaces that sign-in. When the provider cannot be asked, the product's own
    * sign-in page, so signing in still works. Just after such a fallback
    * (SSO_FALLBACK_COOKIE), never silently: the person is asked, or, while the
    * provider stays unreachable, the browser goes to the product's root.
@@ -75,15 +77,17 @@ export class SsoController {
     const query = request.query as Record<string, unknown>;
     const returnTo = safeReturnPath(query.return_to) ?? '/';
     const cookies = this.cookies(request);
-    if (await this.sso.hasLiveSession(client, cookies[this.environment.AUTH_COOKIE_NAME])) {
+    const asked: SsoPrompt | undefined = query.prompt === 'none' || query.prompt === 'login' ? query.prompt : undefined;
+    const live = await this.sso.liveSession(client, cookies[this.environment.AUTH_COOKIE_NAME]);
+    // A fresh sign-in is never answered by the session it is meant to renew.
+    if (live && asked !== 'login') {
       this.seeOther(response, returnTo);
       return;
     }
     const fellBack = cookies[SSO_FALLBACK_COOKIE] !== undefined;
-    const asked: SsoPrompt | undefined = query.prompt === 'none' || query.prompt === 'login' ? query.prompt : undefined;
     let authorization: SsoAuthorization;
     try {
-      authorization = await this.sso.authorization(client, returnTo, fellBack ? 'login' : asked);
+      authorization = await this.sso.authorization(client, returnTo, fellBack ? 'login' : asked, live);
     } catch (error) {
       if (!(error instanceof SsoProviderUnavailable)) throw error;
       await this.sso.recordRefusal(client, error, this.event(request));

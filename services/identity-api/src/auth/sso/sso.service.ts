@@ -16,6 +16,7 @@ import {
   openTransaction,
   pkceChallenge,
   RANDOM_VALUE,
+  type ReplacedSignIn,
   sameValue,
   sealTransaction,
   transactionCookieName,
@@ -76,20 +77,22 @@ export class SsoService {
   }
 
   /**
-   * Whether the browser already holds a live session of this product: its
+   * The live session of this product the browser already holds, if any: its
    * access cookie verifies (TokenService.verify), is of the client's kind and,
    * for staff, has live MFA assurance (MFA-1). A refused token is no session; a
    * fault is answered as one (ADR-059), never as "signed out".
    */
-  async hasLiveSession(client: SsoClient, accessToken: string | undefined): Promise<boolean> {
-    if (!accessToken) return false;
+  async liveSession(client: SsoClient, accessToken: string | undefined): Promise<ReplacedSignIn | undefined> {
+    if (!accessToken) return undefined;
     try {
       const verified = await this.tokens.verify(accessToken);
       const kind = verified.actor.kind === 'patient' ? 'patient'
         : verified.actor.kind === 'platform' ? 'platform' : 'staff';
-      return kind === client.kind && (kind === 'patient' || verified.mfaAssured === true);
+      if (kind !== client.kind || (kind !== 'patient' && verified.mfaAssured !== true)) return undefined;
+      return { accountId: verified.actor.accountId.toLowerCase(),
+        ...(verified.actor.sessionId ? { sessionId: verified.actor.sessionId.toLowerCase() } : {}) };
     } catch (error) {
-      if (error instanceof UnauthorizedException) return false;
+      if (error instanceof UnauthorizedException) return undefined;
       throw error;
     }
   }
@@ -99,11 +102,15 @@ export class SsoService {
    * builds (code flow, `openid`, S256 PKCE, `state`, `nonce`, `max_age` equal
    * to the absolute sign-in lifetime, and `prompt` when asked) and the
    * transaction cookie that keeps the verifier, nonce and return page on the
-   * product host.
+   * product host. A fresh sign-in (`prompt=login`) asked for over a live
+   * session of this product also keeps that sign-in (`replaces`): the callback
+   * then accepts only its account, and ends it.
    */
-  async authorization(client: SsoClient, returnTo: string, prompt?: SsoPrompt): Promise<SsoAuthorization> {
+  async authorization(client: SsoClient, returnTo: string, prompt?: SsoPrompt,
+    live?: ReplacedSignIn): Promise<SsoAuthorization> {
     const configuration = this.requireConfiguration();
-    const transaction = newTransaction(client.id, returnTo, prompt === 'none');
+    const transaction = newTransaction(client.id, returnTo, prompt === 'none', Date.now(),
+      prompt === 'login' ? live : undefined);
     const location = await this.provider.authorizationUrl(configuration, client, {
       state: transaction.state,
       nonce: transaction.nonce,
@@ -125,6 +132,9 @@ export class SsoService {
    * with a page. A code is exchanged with the verifier and the client's
    * authentication, the ID token checked, and the product's session issued as
    * today's sign-in issues it, with the provider's `sid` stored on the family.
+   * A fresh sign-in asked for over a live session (`replaces`) must be of the
+   * same account, and then ends that earlier sign-in as today's sign-out ends
+   * one (TokenService.revoke), so a browser keeps one sign-in per product.
    * Every other outcome is refused and audited; the caller then sends the
    * browser to the product's own sign-in page with nothing in the address.
    */
@@ -157,12 +167,19 @@ export class SsoService {
         verifier: transaction.verifier,
         maxAgeSeconds: this.environment.AUTH_ABSOLUTE_TTL_SECONDS,
       });
+      // A fresh sign-in as another account would leave the earlier one behind: refused.
+      if (transaction.replaces && transaction.replaces.accountId !== verified.accountId) {
+        throw new SsoTokenRefused('account_changed');
+      }
       const provenance: SingleSignOnProvenance = {
         clientId: client.id, providerSid: verified.sid, idToken, authenticatedAt: verified.authenticatedAt,
       };
       const session = client.kind === 'staff'
         ? await this.issueStaffSession(client, verified, provenance, event)
         : await this.issuePatientSession(client, verified, provenance, event);
+      if (transaction.replaces?.sessionId) {
+        await this.tokens.revoke(transaction.replaces.sessionId, session.actor.subject, event);
+      }
       return { kind: 'signed_in', session, returnTo: transaction.returnTo };
     } catch (error) {
       await this.recordRefusal(client, error, event);

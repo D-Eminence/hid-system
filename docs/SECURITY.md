@@ -159,7 +159,10 @@ coordinator's; these are the product's rules.
   the issuer's origin (or the configured internal base), never follow a
   redirect, time out after five seconds and read at most 256 KiB.
 * A hand-off is not a fresh sign-in: the session's absolute end and a
-  patient's recent-sign-in check count from the provider's `auth_time`.
+  patient's recent-sign-in check count from the provider's `auth_time`. A
+  fresh sign-in (`prompt=login`) always goes to the provider, even over a live
+  session; it must then be of the same account, and it ends the earlier
+  sign-in, so a browser keeps one sign-in per product.
 * A refused hand-off never becomes a redirect loop, and after sign-out
   everywhere the first refused session check or refresh on a product host
   clears its session cookies.

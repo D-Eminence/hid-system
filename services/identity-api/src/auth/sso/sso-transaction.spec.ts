@@ -83,6 +83,20 @@ describe('the transaction cookie', () => {
     }
   });
 
+  it('keeps the sign-in a fresh sign-in replaces, and refuses one that is not an account and session id', () => {
+    const accountId = '6d5c4b3a-2f1e-4d0c-9b8a-7f6e5d4c3b2a';
+    const sessionId = '0f1e2d3c-4b5a-4968-8776-655443322110';
+    for (const replaces of [{ accountId, sessionId }, { accountId }]) {
+      const transaction = newTransaction('web', '/settings', false, NOW, replaces);
+      expect(openTransaction(SECRET, sealTransaction(SECRET, transaction), NOW)).toEqual(transaction);
+    }
+    for (const replaces of [{ accountId: 'HID-ABCDEFGH' }, { accountId, sessionId: 'not-a-session' },
+      { accountId: accountId.toUpperCase() }]) {
+      expect(openTransaction(SECRET, sealTransaction(SECRET, newTransaction('web', '/', false, NOW, replaces)), NOW))
+        .toBeUndefined();
+    }
+  });
+
   it('refuses a correctly signed transaction whose content this server never writes', () => {
     // A return page off the host, and administration as the client.
     expect(openTransaction(SECRET, sealTransaction(SECRET, newTransaction('lab', '//evil.invalid/', false, NOW)), NOW))

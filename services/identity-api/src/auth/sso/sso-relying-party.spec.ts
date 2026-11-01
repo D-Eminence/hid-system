@@ -51,6 +51,7 @@ const PORTAL = 'https://app.sso-rp.invalid';
 const ADMIN = 'https://admin.sso-rp.invalid';
 const STAFF_ACCOUNT = '3b9a1c2d-4e5f-4a6b-8c7d-0e1f2a3b4c5d';
 const PATIENT_ACCOUNT = '6d5c4b3a-2f1e-4d0c-9b8a-7f6e5d4c3b2a';
+const OTHER_PATIENT_ACCOUNT = '9e8d7c6b-5a4f-4e3d-8c2b-1a0f9e8d7c6b';
 const SIGNING_SECRET = 'test-signing-secret-with-at-least-32-characters';
 const CORRELATION = 'sso-relying-party-0001';
 
@@ -65,7 +66,7 @@ let provider: FakeProvider;
 let store: { accounts: Map<string, string>; factors: Map<string, string>; sessions: StoredSession[]; links: StoredLink[];
   spent: Set<string>; access: Map<string, { actor: ActorContext; claims: { csrf_hash: string }; mfaAssured: boolean }> };
 let tokens: { issueStaffSession: jest.Mock; issue: jest.Mock; verify: jest.Mock; verifyCsrf: jest.Mock;
-  verifyRefreshCsrf: jest.Mock; recordSessionEvent: jest.Mock; refreshSessionKind: jest.Mock };
+  verifyRefreshCsrf: jest.Mock; recordSessionEvent: jest.Mock; refreshSessionKind: jest.Mock; revoke: jest.Mock };
 let auth: { revoke: jest.Mock; revokeByRefreshToken: jest.Mock; refresh: jest.Mock };
 let audit: { record: jest.Mock; recordWithClient: jest.Mock };
 let sessionAudit: { record: jest.Mock };
@@ -164,7 +165,8 @@ async function buildApp(ssoOn: boolean): Promise<void> {
     lab: { kind: 'staff', redirectUri: `${LAB}/api/v1/auth/sso/callback`, publicJwk: labKeys.publicJwk },
     web: { kind: 'patient', redirectUri: `${PORTAL}/api/v1/auth/sso/callback`, secret },
   });
-  store = { accounts: new Map([[STAFF_ACCOUNT, 'synthetic:staff'], [PATIENT_ACCOUNT, 'synthetic:patient']]),
+  store = { accounts: new Map([[STAFF_ACCOUNT, 'synthetic:staff'], [PATIENT_ACCOUNT, 'synthetic:patient'],
+    [OTHER_PATIENT_ACCOUNT, 'synthetic:other-patient']]),
     factors: new Map([[STAFF_ACCOUNT, 'f1000000-0000-4000-8000-000000000001']]), sessions: [], links: [], spent: new Set(),
     access: new Map() };
   tokens = {
@@ -188,6 +190,13 @@ async function buildApp(ssoOn: boolean): Promise<void> {
     refreshSessionKind: jest.fn(async (refresh: string) => {
       const session = store.sessions.find((candidate) => candidate.refreshHash === sha256(refresh));
       return session && !session.revoked ? session.kind : undefined;
+    }),
+    // As TokenService.revoke (today's sign-out): the whole sign-in of that session.
+    revoke: jest.fn(async (sessionId: string) => {
+      const session = store.sessions.find((candidate) => candidate.id === sessionId);
+      if (!session || session.revoked) return false;
+      for (const member of store.sessions) if (member.familyId === session.familyId) member.revoked = true;
+      return true;
     }),
   };
   auth = {
@@ -391,6 +400,19 @@ describe('with single sign-on configured', () => {
       expect(new URL(other.headers.location as string).origin).toBe(ISSUER);
     });
 
+    it('asks the provider for a fresh sign-in when asked, even over a live session of this product', async () => {
+      // As before a PIN change: the recent sign-in check counts from the provider's auth_time.
+      for (const [origin, session] of [[PORTAL, newSession('patient', PATIENT_ACCOUNT)],
+        [LAB, newSession('staff', STAFF_ACCOUNT)]] as const) {
+        const response = await http().get('/api/v1/auth/sso/start?return_to=%2Fsettings&prompt=login')
+          .set('X-HID-Edge-Origin', origin).set('Cookie', `hid_access=${session.accessToken}`);
+        expect(response.status).toBe(303);
+        const location = new URL(response.headers.location as string);
+        expect([location.origin, location.searchParams.get('prompt')]).toEqual([ISSUER, 'login']);
+        expect(cookieNamed(response, '__Host-hid_sso_tx_')).toMatch(/Max-Age=600/);
+      }
+    });
+
     it.each(['//evil.invalid/', 'https://evil.invalid/', '/api/v1/auth/logout', '/patients/HID-ABCDEFGH',
       '/patients/HIDZDEMAAA2', '/a/../b', '/%61pi/v1/auth/logout', '/patients/h%69d-ABCDEFGH'])(
       'never returns to %s: the page is replaced by / and never repaired', async (returnTo) => {
@@ -541,6 +563,41 @@ describe('with single sign-on configured', () => {
       const { callback } = await signIn(LAB, staffClaims());
       arrange();
       await refusedCallback(await callback(), reason);
+    });
+
+    describe('a fresh sign-in asked for over a live session', () => {
+      async function freshSignIn(claims: JWTPayload) {
+        const earlier = newSession('patient', PATIENT_ACCOUNT);
+        const started = await http().get('/api/v1/auth/sso/start?return_to=%2Fsettings&prompt=login')
+          .set('X-HID-Edge-Origin', PORTAL).set('Cookie', `hid_access=${earlier.accessToken}`);
+        const location = new URL(started.headers.location as string);
+        const code = provider.authorize(location.href, claims);
+        const response = await http()
+          .get(`/api/v1/auth/sso/callback?code=${encodeURIComponent(code)}&state=${location.searchParams.get('state')}`)
+          .set('X-HID-Edge-Origin', PORTAL)
+          .set('Cookie', [cookieNamed(started, '__Host-hid_sso_tx_')!.split(';')[0]!, `hid_access=${earlier.accessToken}`]);
+        return { earlier, response };
+      }
+      const earlierRevoked = (sessionId: string | undefined) =>
+        store.sessions.find((session) => session.id === sessionId)?.revoked;
+
+      it('replaces the earlier sign-in of the same account, so the browser keeps one', async () => {
+        const { earlier, response } = await freshSignIn({ sub: PATIENT_ACCOUNT, sid: 'provider-session-2', hid_kind: 'patient' });
+        expect([response.status, response.headers.location]).toEqual([303, '/settings']);
+        expect(valueOf(cookieNamed(response, 'hid_access='))).not.toBe(earlier.accessToken);
+        expect(tokens.issue).toHaveBeenCalledTimes(1);
+        expect(tokens.revoke).toHaveBeenCalledWith(earlier.actor.sessionId, 'synthetic:patient',
+          expect.objectContaining({ correlationId: CORRELATION }));
+        expect(earlierRevoked(earlier.actor.sessionId)).toBe(true);
+      });
+
+      it('refuses a fresh sign-in as another account, and leaves the earlier sign-in as it was', async () => {
+        const { earlier, response } = await freshSignIn({ sub: OTHER_PATIENT_ACCOUNT, sid: 'provider-session-3',
+          hid_kind: 'patient' });
+        await refusedCallback(response, 'account_changed', '/sign-in');
+        expect(tokens.revoke).not.toHaveBeenCalled();
+        expect(earlierRevoked(earlier.actor.sessionId)).toBe(false);
+      });
     });
 
     it('never hands off silently again just after a fallback: the person is asked, or the browser goes to the root', async () => {

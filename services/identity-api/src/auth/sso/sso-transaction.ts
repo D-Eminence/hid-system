@@ -28,7 +28,17 @@ export const SSO_TRANSACTION_COOKIE_LIMIT = 4;
 
 /** 32 random bytes in base64url (openid-client's state, nonce and verifier). */
 export const RANDOM_VALUE = /^[A-Za-z0-9_-]{43}$/;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const MAX_SEALED_LENGTH = 2_048;
+
+/**
+ * The live sign-in of this product a fresh sign-in (prompt=login) was asked
+ * for over: its account, and its session when the access token named one.
+ */
+export interface ReplacedSignIn {
+  readonly accountId: string;
+  readonly sessionId?: string;
+}
 
 export interface SsoTransaction {
   readonly clientId: string;
@@ -40,9 +50,16 @@ export interface SsoTransaction {
   readonly silent: boolean;
   /** Unix seconds. */
   readonly expiresAt: number;
+  /**
+   * Set when a fresh sign-in was asked for while this browser held a live
+   * session of the product: the callback accepts only the same account, and
+   * then ends that earlier sign-in.
+   */
+  readonly replaces?: ReplacedSignIn;
 }
 
-export function newTransaction(clientId: string, returnTo: string, silent: boolean, now = Date.now()): SsoTransaction {
+export function newTransaction(clientId: string, returnTo: string, silent: boolean, now = Date.now(),
+  replaces?: ReplacedSignIn): SsoTransaction {
   const library = openid();
   return {
     clientId,
@@ -52,6 +69,7 @@ export function newTransaction(clientId: string, returnTo: string, silent: boole
     returnTo,
     silent,
     expiresAt: Math.floor(now / 1_000) + SSO_TRANSACTION_SECONDS,
+    ...(replaces ? { replaces } : {}),
   };
 }
 
@@ -83,6 +101,7 @@ export function sealTransaction(signingSecret: string, transaction: SsoTransacti
   const payload = Buffer.from(JSON.stringify({
     v: 1, c: transaction.clientId, s: transaction.state, n: transaction.nonce, pv: transaction.verifier,
     r: transaction.returnTo, p: transaction.silent ? 1 : 0, e: transaction.expiresAt,
+    ...(transaction.replaces ? { ra: transaction.replaces.accountId, rs: transaction.replaces.sessionId } : {}),
   }), 'utf8').toString('base64url');
   return `${payload}.${mac(signingSecret, payload)}`;
 }
@@ -106,13 +125,16 @@ export function openTransaction(signingSecret: string, sealed: unknown, now = Da
     return undefined;
   }
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
-  const { v, c, s, n, pv, r, p, e } = value as Record<string, unknown>;
+  const { v, c, s, n, pv, r, p, e, ra, rs } = value as Record<string, unknown>;
   if (v !== 1 || typeof c !== 'string' || !Object.hasOwn(SSO_SITE_KINDS, c)) return undefined;
   if (![s, n, pv].every((part) => typeof part === 'string' && RANDOM_VALUE.test(part))) return undefined;
   if (safeReturnPath(r) !== r || (p !== 0 && p !== 1)) return undefined;
   if (typeof e !== 'number' || !Number.isSafeInteger(e) || e <= Math.floor(now / 1_000)) return undefined;
+  if (ra !== undefined && (typeof ra !== 'string' || !UUID.test(ra))) return undefined;
+  if (rs !== undefined && (ra === undefined || typeof rs !== 'string' || !UUID.test(rs))) return undefined;
   return { clientId: c, state: s as string, nonce: n as string, verifier: pv as string, returnTo: r as string,
-    silent: p === 1, expiresAt: e };
+    silent: p === 1, expiresAt: e,
+    ...(typeof ra === 'string' ? { replaces: { accountId: ra, ...(typeof rs === 'string' ? { sessionId: rs } : {}) } } : {}) };
 }
 
 /** Constant-time comparison of two strings. */
