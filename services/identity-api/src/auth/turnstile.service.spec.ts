@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
-import { TurnstileService } from './turnstile.service';
+import { LOGIN_TURNSTILE_ACTIONS } from './dto/login.dto';
+import { ACTIONS_BY_DEPLOYMENT, type TurnstileAction, TurnstileService } from './turnstile.service';
 import { resetEnvironmentForTests } from '../config/environment';
 
 describe('TurnstileService', () => {
@@ -56,16 +57,23 @@ describe('TurnstileService', () => {
         origin: 'https://app.healthidentitydirectory.com' })).rejects.toMatchObject({ code: 'TURNSTILE_HOSTNAME_MISMATCH' });
     });
 
-  // Staff password recovery runs on the portal (/provider/recover); product
-  // hosts redirect there and www redirects to the public site (#41).
-  it('accepts staff-reset on the production portal and still refuses it on staff product hosts', async () => {
+  // Staff password recovery runs on each staff product site (owner decision of
+  // 2026-11-01); the patient portal keeps it while old links lead there (#41).
+  it('accepts staff-reset on the five staff product sites and, for now, the production portal; never on admin', async () => {
+    for (const host of ['ehr', 'lab', 'pharmacy', 'migrate', 'outreach', 'app']) {
+      result({ success: true, hostname: `${host}.healthidentitydirectory.com`, action: 'staff-reset' });
+      await expect(new TurnstileService().verify({ token: 'staff-reset-proof', action: 'staff-reset',
+        origin: `https://${host}.healthidentitydirectory.com` })).resolves.toBeUndefined();
+    }
     result({ success: true, hostname: 'app.healthidentitydirectory.com', action: 'staff-reset' });
-    await expect(new TurnstileService().verify({ token: 'staff-reset-proof', action: 'staff-reset',
-      origin: 'https://app.healthidentitydirectory.com' })).resolves.toBeUndefined();
-    for (const host of ['ehr', 'lab', 'pharmacy', 'migrate', 'outreach', 'admin']) {
+    await expect(new TurnstileService().verify({ token: 'wrong-host-proof', action: 'staff-reset',
+      origin: 'https://ehr.healthidentitydirectory.com' })).rejects.toMatchObject({ code: 'TURNSTILE_HOSTNAME_MISMATCH' });
+    global.fetch = jest.fn();
+    for (const host of ['admin', 'ocr']) {
       await expect(new TurnstileService().verify({ token: 'staff-reset-proof', action: 'staff-reset',
         origin: `https://${host}.healthidentitydirectory.com` })).rejects.toMatchObject({ code: 'TURNSTILE_CONTEXT_MISMATCH' });
     }
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 
   it.each(['book-demo', 'organization-application', 'organization-completion'] as const)(
@@ -158,24 +166,27 @@ describe('TurnstileService', () => {
     })).resolves.toBeUndefined();
   });
 
-  // Facility self sign-up (P4) runs on the portal host: production app.* and
-  // staging's portal. www is not a production CORS origin; product hosts and
-  // admin.* accept only their own actions.
-  it('accepts provider-enrollment only on the production portal and the staging portal', async () => {
+  // Facility self sign-up (P4) runs on each staff product site, production and
+  // staging; the patient portal (app.*, staging.*) keeps it while old links
+  // lead there. www is not a production CORS origin; admin.* and the public
+  // site accept only their own actions.
+  it('accepts provider-enrollment on the staff product sites and the patient portals, and nowhere else', async () => {
+    for (const host of ['ehr', 'lab', 'pharmacy', 'migrate', 'outreach', 'app']) {
+      result({ success: true, hostname: `${host}.healthidentitydirectory.com`, action: 'provider-enrollment' });
+      await expect(new TurnstileService().verify({ token: 'provider-proof', action: 'provider-enrollment',
+        origin: `https://${host}.healthidentitydirectory.com`, remoteIp: '203.0.113.4' })).resolves.toBeUndefined();
+    }
     result({ success: true, hostname: 'app.healthidentitydirectory.com', action: 'provider-enrollment' });
-    await expect(new TurnstileService().verify({ token: 'provider-proof', action: 'provider-enrollment',
-      origin: 'https://app.healthidentitydirectory.com', remoteIp: '203.0.113.4' })).resolves.toBeUndefined();
-    result({ success: true, hostname: 'www.healthidentitydirectory.com', action: 'provider-enrollment' });
     await expect(new TurnstileService().verify({ token: 'wrong-host-proof', action: 'provider-enrollment',
-      origin: 'https://app.healthidentitydirectory.com' })).rejects.toMatchObject({ code: 'TURNSTILE_HOSTNAME_MISMATCH' });
-    result({ success: true, hostname: 'app.healthidentitydirectory.com', action: 'patient-enrollment' });
+      origin: 'https://ehr.healthidentitydirectory.com' })).rejects.toMatchObject({ code: 'TURNSTILE_HOSTNAME_MISMATCH' });
+    result({ success: true, hostname: 'lab.healthidentitydirectory.com', action: 'lab-login' });
     await expect(new TurnstileService().verify({ token: 'wrong-action-proof', action: 'provider-enrollment',
-      origin: 'https://app.healthidentitydirectory.com' })).rejects.toMatchObject({ code: 'TURNSTILE_ACTION_MISMATCH' });
+      origin: 'https://lab.healthidentitydirectory.com' })).rejects.toMatchObject({ code: 'TURNSTILE_ACTION_MISMATCH' });
 
     global.fetch = jest.fn();
-    for (const host of ['ehr.healthidentitydirectory.com', 'lab.healthidentitydirectory.com',
-      'pharmacy.healthidentitydirectory.com', 'admin.healthidentitydirectory.com',
-      'healthidentitydirectory.com', 'www.healthidentitydirectory.com', 'staging.healthidentitydirectory.com']) {
+    for (const host of ['admin.healthidentitydirectory.com', 'ocr.healthidentitydirectory.com',
+      'healthidentitydirectory.com', 'www.healthidentitydirectory.com', 'staging.healthidentitydirectory.com',
+      'ehr.staging.healthidentitydirectory.com']) {
       await expect(new TurnstileService().verify({ token: 'provider-proof', action: 'provider-enrollment',
         origin: `https://${host}` })).rejects.toMatchObject({ status: 403, code: 'TURNSTILE_CONTEXT_MISMATCH' });
     }
@@ -183,33 +194,36 @@ describe('TurnstileService', () => {
 
     process.env.HID_DEPLOYMENT_ENV = 'staging';
     resetEnvironmentForTests();
-    result({ success: true, hostname: 'staging.healthidentitydirectory.com', action: 'provider-enrollment' });
-    await expect(new TurnstileService().verify({ token: 'staging-provider-proof', action: 'provider-enrollment',
-      origin: 'https://staging.healthidentitydirectory.com' })).resolves.toBeUndefined();
+    for (const host of ['ehr.staging', 'lab.staging', 'pharmacy.staging', 'migrate.staging', 'outreach.staging', 'staging']) {
+      result({ success: true, hostname: `${host}.healthidentitydirectory.com`, action: 'provider-enrollment' });
+      await expect(new TurnstileService().verify({ token: 'staging-provider-proof', action: 'provider-enrollment',
+        origin: `https://${host}.healthidentitydirectory.com` })).resolves.toBeUndefined();
+    }
     global.fetch = jest.fn();
-    for (const host of ['ehr.staging.healthidentitydirectory.com', 'admin.staging.healthidentitydirectory.com',
-      'www.staging.healthidentitydirectory.com', 'app.healthidentitydirectory.com']) {
+    for (const host of ['admin.staging.healthidentitydirectory.com', 'www.staging.healthidentitydirectory.com',
+      'app.healthidentitydirectory.com', 'ehr.healthidentitydirectory.com']) {
       await expect(new TurnstileService().verify({ token: 'provider-proof', action: 'provider-enrollment',
         origin: `https://${host}` })).rejects.toMatchObject({ status: 403, code: 'TURNSTILE_CONTEXT_MISMATCH' });
     }
     expect(global.fetch).not.toHaveBeenCalled();
   });
 
-  // Opening a staff invitation (P4b) runs on the portal host only, like
-  // facility self sign-up: production app.* and staging's portal.
-  it('accepts staff-invitation only on the production portal and the staging portal', async () => {
-    result({ success: true, hostname: 'app.healthidentitydirectory.com', action: 'staff-invitation' });
-    await expect(new TurnstileService().verify({ token: 'invitation-proof', action: 'staff-invitation',
-      origin: 'https://app.healthidentitydirectory.com', remoteIp: '203.0.113.4' })).resolves.toBeUndefined();
-    result({ success: true, hostname: 'app.healthidentitydirectory.com', action: 'provider-enrollment' });
+  // Opening a staff invitation (P4b) runs where facility self sign-up does:
+  // each staff product site, and the patient portals while old links lead there.
+  it('accepts staff-invitation on the staff product sites and the patient portals, and nowhere else', async () => {
+    for (const host of ['ehr', 'lab', 'pharmacy', 'migrate', 'outreach', 'app']) {
+      result({ success: true, hostname: `${host}.healthidentitydirectory.com`, action: 'staff-invitation' });
+      await expect(new TurnstileService().verify({ token: 'invitation-proof', action: 'staff-invitation',
+        origin: `https://${host}.healthidentitydirectory.com`, remoteIp: '203.0.113.4' })).resolves.toBeUndefined();
+    }
+    result({ success: true, hostname: 'pharmacy.healthidentitydirectory.com', action: 'provider-enrollment' });
     await expect(new TurnstileService().verify({ token: 'wrong-action-proof', action: 'staff-invitation',
-      origin: 'https://app.healthidentitydirectory.com' })).rejects.toMatchObject({ code: 'TURNSTILE_ACTION_MISMATCH' });
+      origin: 'https://pharmacy.healthidentitydirectory.com' })).rejects.toMatchObject({ code: 'TURNSTILE_ACTION_MISMATCH' });
 
     global.fetch = jest.fn();
-    for (const host of ['ehr.healthidentitydirectory.com', 'lab.healthidentitydirectory.com',
-      'pharmacy.healthidentitydirectory.com', 'migrate.healthidentitydirectory.com',
-      'outreach.healthidentitydirectory.com', 'admin.healthidentitydirectory.com',
-      'healthidentitydirectory.com', 'www.healthidentitydirectory.com', 'staging.healthidentitydirectory.com']) {
+    for (const host of ['admin.healthidentitydirectory.com', 'ocr.healthidentitydirectory.com',
+      'healthidentitydirectory.com', 'www.healthidentitydirectory.com', 'staging.healthidentitydirectory.com',
+      'lab.staging.healthidentitydirectory.com']) {
       await expect(new TurnstileService().verify({ token: 'invitation-proof', action: 'staff-invitation',
         origin: `https://${host}` })).rejects.toMatchObject({ status: 403, code: 'TURNSTILE_CONTEXT_MISMATCH' });
     }
@@ -217,18 +231,78 @@ describe('TurnstileService', () => {
 
     process.env.HID_DEPLOYMENT_ENV = 'staging';
     resetEnvironmentForTests();
-    result({ success: true, hostname: 'staging.healthidentitydirectory.com', action: 'staff-invitation' });
-    await expect(new TurnstileService().verify({ token: 'staging-invitation-proof', action: 'staff-invitation',
-      origin: 'https://staging.healthidentitydirectory.com' })).resolves.toBeUndefined();
+    for (const host of ['ehr.staging', 'lab.staging', 'pharmacy.staging', 'migrate.staging', 'outreach.staging', 'staging']) {
+      result({ success: true, hostname: `${host}.healthidentitydirectory.com`, action: 'staff-invitation' });
+      await expect(new TurnstileService().verify({ token: 'staging-invitation-proof', action: 'staff-invitation',
+        origin: `https://${host}.healthidentitydirectory.com` })).resolves.toBeUndefined();
+    }
     global.fetch = jest.fn();
-    for (const host of ['ehr.staging.healthidentitydirectory.com', 'lab.staging.healthidentitydirectory.com',
-      'pharmacy.staging.healthidentitydirectory.com', 'admin.staging.healthidentitydirectory.com',
-      'www.staging.healthidentitydirectory.com', 'app.healthidentitydirectory.com']) {
+    for (const host of ['admin.staging.healthidentitydirectory.com', 'www.staging.healthidentitydirectory.com',
+      'app.healthidentitydirectory.com', 'pharmacy.healthidentitydirectory.com']) {
       await expect(new TurnstileService().verify({ token: 'invitation-proof', action: 'staff-invitation',
         origin: `https://${host}` })).rejects.toMatchObject({ status: 403, code: 'TURNSTILE_CONTEXT_MISMATCH' });
     }
     expect(global.fetch).not.toHaveBeenCalled();
   });
+
+  // The whole table, pinned: every host and every action it accepts there.
+  const STAFF_SITE = ['staff-reset', 'staff-invitation', 'provider-enrollment'];
+  const EXPECTED_ACTIONS = {
+    production: {
+      'app.healthidentitydirectory.com': ['patient-login', 'patient-reset-start', 'staff-reset', 'legacy-recovery',
+        'patient-enrollment', 'provider-enrollment', 'staff-invitation'],
+      'healthidentitydirectory.com': ['book-demo', 'organization-application', 'organization-completion'],
+      'www.healthidentitydirectory.com': ['patient-login', 'staff-login', 'admin-login', 'patient-reset-start',
+        'staff-reset', 'admin-reset', 'legacy-recovery', 'book-demo', 'organization-application',
+        'organization-completion', 'patient-enrollment'],
+      'ehr.healthidentitydirectory.com': ['ehr-login', 'staff-login', ...STAFF_SITE],
+      'lab.healthidentitydirectory.com': ['lab-login', ...STAFF_SITE],
+      'pharmacy.healthidentitydirectory.com': ['pharmacy-login', ...STAFF_SITE],
+      'migrate.healthidentitydirectory.com': ['ocr-login', ...STAFF_SITE],
+      'outreach.healthidentitydirectory.com': ['outreach-login', ...STAFF_SITE],
+      'admin.healthidentitydirectory.com': ['admin-login', 'admin-reset'],
+    },
+    staging: {
+      'www.staging.healthidentitydirectory.com': ['book-demo', 'organization-application', 'organization-completion'],
+      'staging.healthidentitydirectory.com': ['patient-login', 'staff-login', 'admin-login', 'patient-reset-start',
+        'staff-reset', 'admin-reset', 'legacy-recovery', 'book-demo', 'organization-application',
+        'organization-completion', 'patient-enrollment', 'provider-enrollment', 'staff-invitation'],
+      'ehr.staging.healthidentitydirectory.com': ['ehr-login', 'staff-login', ...STAFF_SITE],
+      'lab.staging.healthidentitydirectory.com': ['lab-login', ...STAFF_SITE],
+      'pharmacy.staging.healthidentitydirectory.com': ['pharmacy-login', ...STAFF_SITE],
+      'migrate.staging.healthidentitydirectory.com': ['ocr-login', ...STAFF_SITE],
+      'outreach.staging.healthidentitydirectory.com': ['outreach-login', ...STAFF_SITE],
+      'admin.staging.healthidentitydirectory.com': ['admin-login', 'admin-reset'],
+    },
+  } as const;
+  // Every action there is: the compile-time check below fails if one is added without being listed here.
+  const ALL_ACTIONS = [...LOGIN_TURNSTILE_ACTIONS, 'patient-reset-start', 'staff-reset', 'admin-reset', 'legacy-recovery',
+    'book-demo', 'organization-application', 'organization-completion', 'patient-enrollment', 'provider-enrollment',
+    'staff-invitation'] as const satisfies readonly TurnstileAction[];
+  const everyActionListed: [Exclude<TurnstileAction, typeof ALL_ACTIONS[number]>] extends [never] ? true : never = true;
+
+  it('pins the whole table of hosts and the actions each accepts', () => {
+    expect(everyActionListed).toBe(true);
+    expect(ACTIONS_BY_DEPLOYMENT).toEqual(EXPECTED_ACTIONS);
+    expect(Object.isFrozen(ACTIONS_BY_DEPLOYMENT.production['ehr.healthidentitydirectory.com'])).toBe(true);
+  });
+
+  it.each(['production', 'staging'] as const)(
+    'in %s, accepts exactly the pinned actions on each host and nothing on any other host', async (deployment) => {
+      process.env.HID_DEPLOYMENT_ENV = deployment;
+      resetEnvironmentForTests();
+      const table: Readonly<Record<string, readonly string[]>> = EXPECTED_ACTIONS[deployment];
+      const hosts = [...Object.keys(EXPECTED_ACTIONS.production), ...Object.keys(EXPECTED_ACTIONS.staging),
+        'ocr.healthidentitydirectory.com', 'app.staging.healthidentitydirectory.com', 'api.healthidentitydirectory.com'];
+      for (const host of hosts) {
+        for (const action of ALL_ACTIONS) {
+          result({ success: true, hostname: host, action });
+          const check = new TurnstileService().verify({ token: 'matrix-proof', action, origin: `https://${host}` });
+          if (table[host]?.includes(action)) await expect(check).resolves.toBeUndefined();
+          else await expect(check).rejects.toMatchObject({ status: 403, code: 'TURNSTILE_CONTEXT_MISMATCH' });
+        }
+      }
+    });
 
   it('answers a missing, empty or oversized token, Origin or action before calling Cloudflare', async () => {
     global.fetch = jest.fn();
