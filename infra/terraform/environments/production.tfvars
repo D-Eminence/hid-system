@@ -63,6 +63,11 @@ ai_allow_eu_processing = true
 enable_support_bot     = true
 use_existing_secrets   = true
 
+# Bedrock runtime endpoint (EHR patient-record chat) in the first application
+# subnet only, where the other interface endpoints are (owner approved
+# 1 November 2026, about USD 8 a month). See DEVOPS_HANDOVER.md "AWS cost".
+bedrock_endpoint_az_count = 1
+
 enable_migration_task        = true
 migration_image_uri          = "659225405023.dkr.ecr.eu-west-1.amazonaws.com/staging/hid/ehr-api@sha256:d255dfbfff81839a3238f4e94ee1254e7c10291d31ba4666c8369f4e0ac27602"
 migration_source_bucket_arn  = "arn:aws:s3:::hid-migration-source-1da62383fb59593cb2679f3ce9"

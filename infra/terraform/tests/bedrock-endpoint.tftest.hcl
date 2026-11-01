@@ -1,7 +1,8 @@
 # Bedrock runtime endpoint in one zone (owner approved 1 November 2026, about
-# USD 8 a month). Production's economy profile keeps the endpoint in the first
-# application subnet, where its other interface endpoints already are; every
-# other profile keeps every application subnet. The endpoint policy is unchanged.
+# USD 8 a month). production.tfvars sets bedrock_endpoint_az_count = 1, so the
+# endpoint keeps only the first application subnet, where production's other
+# interface endpoints already are. No other environment sets it, so they keep
+# every application subnet. The endpoint policy is unchanged.
 mock_provider "aws" {
   mock_resource "aws_lb" {
     override_during = plan
@@ -134,9 +135,16 @@ variables {
 run "production_endpoint_uses_one_zone" {
   command = plan
 
+  variables {
+    bedrock_endpoint_az_count = tonumber(regex("(?m)^bedrock_endpoint_az_count\\s*=\\s*([0-9]+)\\s*$", file("environments/production.tfvars"))[0])
+  }
+
   assert {
-    condition     = local.deployment_profile == "economy" && local.profile.bedrock_endpoint_az_count == 1
-    error_message = "Production uses the economy profile, which keeps the Bedrock endpoint in one zone."
+    condition = (
+      length(regexall("(?m)^bedrock_endpoint_az_count\\s*=", file("environments/production.tfvars"))) == 1 &&
+      var.bedrock_endpoint_az_count == 1
+    )
+    error_message = "environments/production.tfvars must set bedrock_endpoint_az_count = 1, once."
   }
 
   assert {
@@ -148,13 +156,35 @@ run "production_endpoint_uses_one_zone" {
     condition     = module.ai[0].bedrock_endpoint_subnet_ids == toset(slice(module.network.application_subnet_ids, 0, local.profile.interface_endpoint_az_count))
     error_message = "The Bedrock endpoint must sit in the same subnet as production's other interface endpoints."
   }
+}
+
+run "other_environments_keep_every_subnet" {
+  command = plan
+
+  # No other environment's inputs set the variable, so they get its default.
+  assert {
+    condition = var.bedrock_endpoint_az_count == null && length(fileset("environments", "*.tfvars")) >= 3 && alltrue([
+      for name in fileset("environments", "*.tfvars") :
+      length(regexall("(?m)^\\s*bedrock_endpoint_az_count\\s*=", file("environments/${name}"))) == 0
+      if name != "production.tfvars"
+    ])
+    error_message = "Only production may narrow the Bedrock endpoint; no other environment's inputs may set bedrock_endpoint_az_count, whose default is null."
+  }
 
   assert {
-    condition = alltrue([for name, profile in local.profiles :
-      name == "economy" ? profile.bedrock_endpoint_az_count == 1 : profile.bedrock_endpoint_az_count == null
-    ])
-    error_message = "Only the economy profile may narrow the Bedrock endpoint; the others keep every application subnet."
+    condition     = module.ai[0].bedrock_endpoint_subnet_ids == toset(["subnet-0aaaaaaaaaaaaaaa1", "subnet-0bbbbbbbbbbbbbbb2"])
+    error_message = "Without bedrock_endpoint_az_count the endpoint must keep every application subnet, as before."
   }
+}
+
+run "refuse_zero_endpoint_zones" {
+  command = plan
+
+  variables {
+    bedrock_endpoint_az_count = 0
+  }
+
+  expect_failures = [var.bedrock_endpoint_az_count]
 }
 
 run "endpoint_follows_the_given_subnets_and_keeps_its_policy" {
@@ -179,7 +209,7 @@ run "endpoint_follows_the_given_subnets_and_keeps_its_policy" {
 
   assert {
     condition     = aws_vpc_endpoint.bedrock_runtime.subnet_ids == toset(["subnet-0aaaaaaaaaaaaaaa1", "subnet-0bbbbbbbbbbbbbbb2"])
-    error_message = "Profiles that keep every application subnet must keep the endpoint in both zones."
+    error_message = "An environment that keeps every application subnet must keep the endpoint in both zones."
   }
 
   assert {

@@ -158,11 +158,12 @@ module "application" {
   web_push_subject          = var.web_push_subject
 }
 
-# 5. Private Bedrock access for the EHR patient-record chat. The economy profile
-# keeps the endpoint in one zone, in the same subnet as its other interface
-# endpoints; tasks in the other zone reach it across zones.
+# 5. Private Bedrock access for the EHR patient-record chat. Production sets
+# bedrock_endpoint_az_count = 1: the endpoint stays in the first application
+# subnet, the same one as its other interface endpoints, and tasks in the other
+# zone reach it across zones. Other environments keep every application subnet.
 locals {
-  bedrock_endpoint_subnet_ids = local.profile.bedrock_endpoint_az_count == null ? module.network.application_subnet_ids : slice(module.network.application_subnet_ids, 0, local.profile.bedrock_endpoint_az_count)
+  bedrock_endpoint_subnet_ids = var.bedrock_endpoint_az_count == null ? module.network.application_subnet_ids : slice(module.network.application_subnet_ids, 0, min(var.bedrock_endpoint_az_count, length(module.network.application_subnet_ids)))
 }
 
 module "ai" {

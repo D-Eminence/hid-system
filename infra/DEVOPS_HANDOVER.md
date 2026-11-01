@@ -410,8 +410,8 @@ Further cost items the owner approved on 1 November 2026, each a reviewed
 setting in this Terraform. Plan and apply them with the section 4 helper,
 together with the Monitoring cost change above. The helper reads the committed
 `production.tfvars`; a plan from the Terraform CI workflow uses the `TFVARS`
-secret instead and shows the ECR change only if that secret also has the two
-`ecr_` lines.
+secret instead and shows the Bedrock and ECR changes only if that secret also
+has the `bedrock_endpoint_az_count` line and the two `ecr_` lines.
 
 #### Expected plan for this branch
 
@@ -436,14 +436,15 @@ The record assistant (the EHR patient-record chat) reaches Bedrock for Titan
 embeddings through the interface endpoint
 `module.ai[0].aws_vpc_endpoint.bedrock_runtime` (tag
 `hid-staging-bedrock-runtime`). It had a network interface in both application
-subnets, and each costs USD 0.011 an hour (about USD 8 a month). The economy
-profile, which production uses, now sets `bedrock_endpoint_az_count = 1` in
-`locals.tf`: the endpoint keeps only the first application subnet
-(`hid-staging-application-0`, eu-west-1a), where production's other interface
-endpoints (ECR, logs, Secrets Manager, EventBridge, SQS, Textract) already are.
-Every other profile keeps every application subnet; the retired staging inputs
-also use the economy profile. The endpoint policy (EHR task role only, approved
-models only), its security group and private DNS do not change.
+subnets, and each costs USD 0.011 an hour (about USD 8 a month).
+`production.tfvars` now sets `bedrock_endpoint_az_count = 1`: the endpoint
+keeps only the first application subnet (`hid-staging-application-0`,
+eu-west-1a), where production's other interface endpoints (ECR, logs, Secrets
+Manager, EventBridge, SQS, Textract) already are. The variable defaults to
+null (every application subnet) and no other environment's inputs set it, so
+staging (including the retired staging inputs, which share production's economy
+profile) and development do not change. The endpoint policy (EHR task role
+only, approved models only), its security group and private DNS do not change.
 
 - Plan: `module.ai[0].aws_vpc_endpoint.bedrock_runtime` updated in place;
   `subnet_ids` loses the eu-west-1b subnet and `network_interface_ids` shows
@@ -465,9 +466,9 @@ models only), its security group and private DNS do not change.
 - After applying: the same command shows one subnet, one interface and
   `available` (AWS takes a minute or two). Then ask the record assistant about a
   fictional patient at Demo Hospital; it answers as before.
-- Rollback: set economy's `bedrock_endpoint_az_count = null` in `locals.tf` in a
-  reviewed commit on dev and apply; the endpoint gets its eu-west-1b interface
-  back in place within a few minutes.
+- Rollback: delete the `bedrock_endpoint_az_count` line from `production.tfvars`
+  in a reviewed commit on dev and apply; the endpoint gets its eu-west-1b
+  interface back in place within a few minutes.
 
 #### 2. ECR clean-up
 
