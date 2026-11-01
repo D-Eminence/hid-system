@@ -1,3 +1,12 @@
+output "autoscaling_policies" {
+  description = "Scaling policies of each scaled service; every one reads a metric AWS publishes."
+  value = { for name, target in aws_appautoscaling_target.workload : name => concat(
+    [for policy in [aws_appautoscaling_policy.cpu[name], aws_appautoscaling_policy.memory[name]] : policy.name],
+    contains(keys(aws_appautoscaling_policy.request), name) ? [aws_appautoscaling_policy.request[name].name] : [],
+    contains(keys(aws_appautoscaling_policy.notification_backlog), name) ? [aws_appautoscaling_policy.notification_backlog[name].name] : [],
+  ) }
+}
+
 output "ecr_lifecycle_policies" {
   description = "Lifecycle rules of each workload repository."
   value       = { for name, policy in aws_ecr_lifecycle_policy.workload : name => jsondecode(policy.policy) }

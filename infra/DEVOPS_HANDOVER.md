@@ -421,10 +421,12 @@ secret instead and shows the ECR change only if that secret also has the two
 | Monitoring cost (above) | `module.application.aws_ecs_cluster.production[0]` and 12 `module.operations.aws_cloudwatch_metric_alarm.runtime_tasks[...]` | 13 updated in place |
 | 1. Bedrock endpoint in one zone | `module.ai[0].aws_vpc_endpoint.bedrock_runtime` | 1 updated in place |
 | 2. ECR clean-up | 12 `module.application.aws_ecr_lifecycle_policy.workload["<service>"]` | 12 replaced (the provider cannot edit a lifecycle policy; see item 2) |
+| 3. Worker scaling on dead metrics | `module.application.aws_appautoscaling_policy.ocr_backlog["ocr-worker"]` and `module.application.aws_appautoscaling_policy.outbox_backlog["event-dispatcher"]` | 2 destroyed |
 
-Total: `Plan: 12 to add, 14 to change, 12 to destroy` when no other dev change
-is pending; the 12 added and 12 destroyed are the same 12 lifecycle policies.
-Other changes in the plan come from dev commits not yet applied.
+Total: `Plan: 12 to add, 14 to change, 14 to destroy` when no other dev change
+is pending: the 12 added are the 12 replaced lifecycle policies, which with the
+2 scaling policies make the 14 destroyed. Other changes in the plan come from
+dev commits not yet applied.
 
 #### 1. Bedrock endpoint in one zone
 
@@ -620,6 +622,59 @@ Rollback:
   The rebuilt image has a new digest and goes through the normal release
   review. The live and previous releases never need this: they keep their
   `retain-` tags.
+
+#### 3. Worker scaling on dead metrics
+
+ocr-worker and event-dispatcher each had a third target tracking policy:
+`ocr_backlog` on `HID/OCR` `QueueDepth` (target 10) and `outbox_backlog` on
+`HID/EventDelivery` `PendingCount` (target 25). Nothing publishes those
+metrics. The workers only log the values (`ocr.job.claimed` with `queueDepth`,
+`event_dispatcher.backlog` with `pendingCount`, both only when they claim
+work); the old CDK stack's metric filters are gone and this Terraform has
+none. The 4 alarms AWS created for the two policies
+(`TargetTracking-service/hid-production/hid-production-<service>-AlarmHigh-...`
+and `-AlarmLow-...`) therefore sit in `INSUFFICIENT_DATA`. AWS scales a service
+in only when every target tracking policy on it is ready to scale in, and a
+policy without data never is: after the CPU or memory policy adds a second
+task, neither service goes back to one.
+
+This change removes the two policies (AWS deletes their 4 alarms with them)
+rather than adding metric filters for those log lines. Filters would publish
+only while there is work, so idle periods would still have no data and still
+block scale-in, and a total backlog does not fall as tasks are added, which
+target tracking needs. They would also cost USD 0.60 a month (2 custom metrics
+at USD 0.30). Without the policies both services scale on CPU and memory, 1 to
+2 tasks, as every scale-out already did, and scale back in again. This saves
+the 4 alarms (USD 0.40 a month) and, whenever a second task was stuck, that
+task (0.5 vCPU and 1 GB on Fargate ARM, about USD 14 a month each). The
+notification-worker keeps its SQS backlog policy, which AWS publishes. The
+policies go in every environment; nothing publishes the metrics anywhere.
+
+- Plan: `module.application.aws_appautoscaling_policy.ocr_backlog["ocr-worker"]`
+  and `module.application.aws_appautoscaling_policy.outbox_backlog["event-dispatcher"]`
+  destroyed. The services and their CPU and memory policies do not change.
+- Before applying (read-only): each service shows three policies, the 4 alarms
+  are in `INSUFFICIENT_DATA` and both metrics are absent. A desired count of 2
+  while the service is idle is a second task stuck this way. Stop if
+  `list-metrics` returns `QueueDepth` or `PendingCount` (something then
+  publishes them):
+
+  ```powershell
+  foreach ($svc in "ocr-worker", "event-dispatcher") {
+    aws ecs describe-services --cluster hid-production --services "hid-production-$svc" --region eu-west-1 --query "services[0].[serviceName,desiredCount,runningCount]" --output text
+    aws application-autoscaling describe-scaling-policies --service-namespace ecs --resource-id "service/hid-production/hid-production-$svc" --region eu-west-1 --query "ScalingPolicies[].PolicyName" --output text
+  }
+  aws cloudwatch describe-alarms --alarm-name-prefix "TargetTracking-service/hid-production/" --region eu-west-1 --query "MetricAlarms[?Namespace=='HID/OCR' || Namespace=='HID/EventDelivery'].[AlarmName,StateValue]" --output table
+  aws cloudwatch list-metrics --namespace HID/OCR --region eu-west-1
+  aws cloudwatch list-metrics --namespace HID/EventDelivery --region eu-west-1
+  ```
+
+- After applying: the same commands show two policies per service (`-cpu`,
+  `-memory`) and no `HID/` alarms. A service at 2 tasks with low CPU and memory
+  returns to 1 within about half an hour (15 low minutes, then the 10-minute
+  scale-in cooldown).
+- Rollback: revert this commit on dev in a reviewed commit and apply; the two
+  policies and their alarms come back, still without data.
 
 ## 5. Build flow and deployment controls
 
