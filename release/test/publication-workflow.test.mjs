@@ -119,6 +119,12 @@ test('local gates keep every npm audit and run only infra/aws through the except
     'npm registry in upper case in a step of a job without an audit': [(w) => { w.jobs['tuf-client'].steps.find(s => s.run !== undefined).env = { NPM_CONFIG_REGISTRY: 'https://registry.invalid/' } }, DENIED('NPM_CONFIG_REGISTRY')],
     'NODE_OPTIONS in the container env of a job without an audit': [(w) => { w.jobs.workspace.container = { image: 'node:22', env: { NODE_OPTIONS: '--import=/tmp/p.mjs' } } }, DENIED('NODE_OPTIONS')],
     'container env of a job without an audit given as an expression': [(w) => { w.jobs.workspace.container = { image: 'node:22', env: '${{ fromJSON(vars.CONTAINER_ENV) }}' } }, ANY_ENV_MAP],
+    'container of a job without an audit given as an expression': [(w) => { w.jobs.workspace.container = '${{ fromJSON(vars.WORKSPACE_CONTAINER) }}' }, /gives a container or service as an expression/],
+    'container from a matrix': [(w) => { w.jobs.workspace.strategy = { matrix: { c: [{ image: 'node:22', env: { NODE_OPTIONS: '--import=/tmp/p.mjs' } }] } }; w.jobs.workspace.container = '${{ matrix.c }}' }, /gives a container or service as an expression/],
+    'services given as an expression': [(w) => { w.jobs.workspace.services = '${{ fromJSON(vars.SERVICES) }}' }, /gives a container or service as an expression/],
+    'one service given as an expression': [(w) => { w.jobs.workspace.services = { db: '${{ fromJSON(vars.DB) }}' } }, /gives a container or service as an expression/],
+    'NODE_OPTIONS through container options': [(w) => { w.jobs.workspace.container = { image: 'node:22', options: '--cpus 1 -e NODE_OPTIONS=--import=/tmp/p.mjs' } }, /sets container environment through options/],
+    'environment file through service options': [(w) => { w.jobs.workspace.services = { db: { image: 'postgres:16', options: '--env-file /tmp/env' } } }, /sets container environment through options/],
     'PATH in a service env of a job without an audit': [(w) => { w.jobs.workspace.services = { db: { image: 'postgres:16', env: { PATH: '/tmp/bin' } } } }, DENIED('PATH')],
     'npm registry in a step of a job without an audit': [(w) => { w.jobs['tuf-client'].steps.find(s => s.run !== undefined).env = { npm_config_registry: 'https://registry.invalid/' } }, DENIED('npm_config_registry')],
     'step env of a job without an audit given as an expression': [(w) => { w.jobs.workspace.steps.find(s => s.run !== undefined).env = '${{ fromJSON(vars.WORKSPACE_ENV) }}' }, ANY_ENV_MAP],
@@ -140,7 +146,7 @@ test('local gates keep every npm audit and run only infra/aws through the except
     const [edit, reason] = [attack].flat()
     const workflow = parseWorkflow(localGates)
     edit(workflow)
-    assert.throws(() => verifyLocalGateWorkflow(stringify(workflow)), reason, name)
+    assert.throws(() => verifyLocalGateWorkflow(stringify(workflow, { lineWidth: 0 })), reason, name)
   }
 })
 test('forbidden workflow paths are rejected statically', () => {
@@ -225,7 +231,7 @@ test('forbidden workflow paths are rejected statically', () => {
     const [edit, reason] = [attack].flat()
     const workflow = parseWorkflow(source)
     edit(workflow)
-    assert.throws(() => verifyPublicationWorkflow(stringify(workflow)), reason, name)
+    assert.throws(() => verifyPublicationWorkflow(stringify(workflow, { lineWidth: 0 })), reason, name)
   }
 })
 test('the audit shell reads no BASH_ENV and imports no shell function, as plain bash would', { skip: process.platform !== 'linux' }, async () => {
@@ -286,6 +292,13 @@ test('only block-style YAML that this parser and libyaml read the same way is ac
     // An escaped line break followed by an empty line folds to a space here and to a newline in libyaml.
     'a double-quoted value over several lines': [['id: gate_2', 'id: "gate_\\\n\n          2"'], /quote a value over several lines/],
     'a merge key': [['    runs-on: ubuntu-24.04\n', '    runs-on: ubuntu-24.04\n    <<:\n      if: false\n'], /merge key/],
+    'an anchor on a block sequence': [['    steps:\n', '    steps: &a:b\n'], /an anchor or a tag/],
+    'a tag on a block mapping': [['        with:\n          persist-credentials: false', '        with: !!map\n          persist-credentials: false'], /an anchor or a tag/],
+    'a single-quoted value over several lines': [['id: gate_2', "id: 'gate_\n          2'"], /quote a value over several lines/],
+    'a one-item flow sequence': [['id: gate_2', 'id: gate_2\n        x: [a]'], /block style, not a flow collection/],
+    // After a bare '-' and a comment, this parser joins the following items into one value; libyaml reads them apart.
+    'a plain value over several lines': [['    runs-on: ubuntu-24.04\n', '    runs-on: ubuntu-24.04\n    x:\n      -\n      #c\n        a\n      - b\n'], /plain value over several lines/],
+    'a block scalar indentation indicator': [['run: npm --prefix release ci --ignore-scripts', 'run: |1\n           npm --prefix release ci --ignore-scripts'], /indentation indicator/],
   }
   for (const [name, [[line, replacement], reason]] of Object.entries(refused)) {
     const edited = localGates.replace(line, replacement)

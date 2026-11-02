@@ -23,17 +23,20 @@ export function parseWorkflow(source) {
   // where '?if' is a key named "?if" here but the key "if" to libyaml; an empty
   // {} has no key to differ on), no anchor (libyaml ends
   // its name at ':' or '?'), no explicit tag, no '<<' key (YAML 1.1 loaders
-  // merge it), and no quoted value over several lines (an escaped line break
-  // folds differently).
+  // merge it), no quoted or plain value over several lines (an escaped line
+  // break folds differently, and after a bare '-' and a comment this parser
+  // joins the following items into one value), and no block scalar
+  // indentation indicator (trailing whitespace lines differ).
   const plain = node => assert.ok(!node.anchor && !node.tag, 'workflow cannot use an anchor or a tag')
   visit(doc, {
     Map(_, node) { assert.ok(!node.flow || node.items.length === 0, 'workflow must use block style, not a flow collection'); plain(node) },
     Seq(_, node) { assert.ok(!node.flow || node.items.length === 0, 'workflow must use block style, not a flow collection'); plain(node) },
     Scalar(_, node) {
       plain(node)
-      if (node.type === 'QUOTE_DOUBLE' || node.type === 'QUOTE_SINGLE') {
-        assert.ok(!source.slice(node.range[0], node.range[1]).includes('\n'), 'workflow cannot quote a value over several lines')
-      }
+      const text = source.slice(node.range[0], node.range[1])
+      if (node.type === 'QUOTE_DOUBLE' || node.type === 'QUOTE_SINGLE') assert.ok(!text.includes('\n'), 'workflow cannot quote a value over several lines')
+      if (node.type === 'PLAIN') assert.ok(!text.includes('\n'), 'workflow cannot write a plain value over several lines')
+      if (node.type === 'BLOCK_LITERAL' || node.type === 'BLOCK_FOLDED') assert.ok(!/^[|>][-+]?[1-9]/.test(text), 'workflow cannot give a block scalar an indentation indicator')
     },
     Pair(_, pair) { assert.ok(!(isScalar(pair.key) && pair.key.value === '<<'), 'workflow cannot use a merge key') },
   })
@@ -111,8 +114,10 @@ const AUDIT_COMMAND = /\bnpm\b[^\n]*\baudit\b|npm-audit-with-exceptions/
 // job; any key but id, name, run and shell on the audit step; an
 // env that is not a plain map anywhere in the workflow; any variable outside
 // AUDIT_ENV_ALLOWLIST in the workflow env or in an audit job's or its steps'
-// env; npm_config_*, NODE_OPTIONS, PATH, BASH_ENV or ENV in any env of any
-// other job, the publish job included; any action in an audit job outside AUDIT_JOB_ACTIONS, at another
+// env; npm_config_*, NODE_OPTIONS, PATH, BASH_ENV or ENV (in any case) in any
+// env of any other job, the publish job included, its container's and
+// services' envs too; a container or service given as an expression, or with
+// Docker options that set an environment variable; any action in an audit job outside AUDIT_JOB_ACTIONS, at another
 // commit or with other inputs; a setup-node of another Node; a step in an
 // audit job that writes GITHUB_ENV or GITHUB_PATH; and any other step that
 // names the gate or security/. These are static checks on the workflow text,
@@ -178,6 +183,17 @@ export function verifyAuditSteps(workflow, expected, { checkoutRef } = {}) {
   // Every env in the workflow, audit jobs or not (the publish job included),
   // with each job's container and services: a plain map, and never
   // npm_config_*, NODE_OPTIONS, PATH, BASH_ENV or ENV (in any case).
+  // A container or service is a literal image name or a plain map, never an
+  // expression whose env a reviewer cannot see, and its Docker options set no
+  // environment variable.
+  const literal = value => typeof value === 'string' && !value.includes('${{')
+  for (const [name, job] of Object.entries(workflow.jobs)) {
+    const runtimes = [job.container, ...(job.services === undefined ? [] : isMap(job.services) ? Object.values(job.services) : [job.services])]
+    for (const runtime of runtimes.filter(value => value !== undefined)) {
+      assert.ok(literal(runtime) || isMap(runtime), `job ${name} gives a container or service as an expression`)
+      assert.ok(runtime.options === undefined || (literal(runtime.options) && !/(?:^|\s)(?:-e|--env|--env-file)(?:[\s=]|$)/.test(runtime.options)), `job ${name} sets container environment through options`)
+    }
+  }
   const environments = [workflow.env, ...Object.values(workflow.jobs).flatMap(job => [job.env, job.container?.env,
     ...Object.values(isMap(job.services) ? job.services : {}).map(service => service?.env), ...(job.steps ?? []).map(step => step.env)])]
   for (const env of environments) {
