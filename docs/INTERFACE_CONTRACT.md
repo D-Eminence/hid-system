@@ -1367,8 +1367,9 @@ versions. Receipt records custody only; it creates no execution, QC, or result.
 most 200 items: open work first, oldest first, then done work, newest first.
 Lab work is open while any test it asks for has no released result at its
 current version (or that result is marked entered in error); a work item with
-no requested test is open. Pharmacy work is open while it has no dispensing,
-or its dispensing was reversed. Earlier backends answered the 200 oldest items
+no requested test is open. Pharmacy work is open while it has no dispensing;
+a reversed dispensing counts as done, because a work item takes one dispensing
+only and cannot be dispensed again. Earlier backends answered the 200 oldest items
 the member could read whatever their state, so a busy facility stopped seeing
 new work. The answer's shape and audit rows are unchanged.
 

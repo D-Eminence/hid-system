@@ -159,8 +159,9 @@ describe('PharmacyService', () => {
 /**
  * The work list answered the 200 oldest rows the member could read, dispensed
  * or not, so a busy pharmacy stopped seeing new prescriptions. Open work (no
- * dispensing, or a reversed one) now comes first, oldest first, and done work
- * fills the rest, newest first. The database does the ordering (checked
+ * dispensing) now comes first, oldest first, and done work (dispensed, or
+ * dispensed and reversed: a work item takes one dispensing only) fills the
+ * rest, newest first. The database does the ordering (checked
  * against Postgres 16 with 250 work items, 30 open, all 30 answered first);
  * these tests hold the query to that rule and the service to answering exactly
  * what the query returns, with the same audit rows.
@@ -188,8 +189,10 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
     return { service, statements, audits };
   };
 
-  it('asks for open work (no dispensing, or a reversed one) oldest first, then done work newest first, 200 rows in all', () => {
-    expect(WORK_LIST_QUERY).toContain('cross join lateral (select d.id is null or r.id is not null as open_work) o');
+  it('asks for open work (no dispensing) oldest first, then done work (dispensed or reversed) newest first, 200 rows in all', () => {
+    expect(WORK_LIST_QUERY).toContain('cross join lateral (select d.id is null as open_work) o');
+    // A reversed dispensing is done: the item cannot be dispensed again (one dispensing per work item, 0023).
+    expect(WORK_LIST_QUERY).not.toMatch(/r\.id is not null as open_work/);
     const order = WORK_LIST_QUERY.slice(WORK_LIST_QUERY.lastIndexOf('order by'));
     expect(order.replace(/\s+/g, ' ')).toBe('order by o.open_work desc,case when o.open_work then w.accepted_at end asc,'
       + 'case when o.open_work then null else w.accepted_at end desc, case when o.open_work then w.id end asc,'
@@ -200,13 +203,13 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
   });
 
   it('answers what the query returns, in its order and shape: 250 items with 30 open answers all 30 first', async () => {
-    // What Postgres answers for 250 work items of which 30 are open (indexes 0-9, 100-109, 240-249; every third
-    // one reversed): the 30 open oldest first, then the 170 newest done.
+    // What Postgres answers for 250 work items of which 30 are open (indexes 0-9, 100-109, 240-249): the 30 open
+    // oldest first, then the 170 newest done (every third one dispensed and reversed).
     const openIndexes = [...Array.from({ length: 10 }, (_, i) => i), ...Array.from({ length: 10 }, (_, i) => 100 + i),
       ...Array.from({ length: 10 }, (_, i) => 240 + i)];
-    const openRows = openIndexes.map((i) => row(i, i % 3 === 0 ? 'reversed' : 'open'));
+    const openRows = openIndexes.map((i) => row(i, 'open'));
     const doneRows = Array.from({ length: 250 }, (_, i) => i).filter((i) => !openIndexes.includes(i)).reverse().slice(0, 170)
-      .map((i) => row(i, 'dispensed'));
+      .map((i) => row(i, i % 3 === 0 ? 'reversed' : 'dispensed'));
     const { service, statements, audits } = build([...openRows, ...doneRows]);
     const answer = await service.listWorkItems(context);
     expect(answer.items).toHaveLength(200);
@@ -214,10 +217,11 @@ describe('PharmacyService.listWorkItems order: open work first', () => {
     expect(answer.items.slice(30).map((item) => item.id)).toEqual(doneRows.map((r) => r.id));
     expect(answer.items.map((item) => item.id)).toContain(row(249, 'open').id);
     expect(statements.filter((sql) => sql.includes('from pharmacy.work_items w'))).toEqual([WORK_LIST_QUERY]);
-    // Each row projected as before: a reversed dispensing, no dispensing, a dispensing.
-    expect(answer.items[0]).toMatchObject({ status: 'accepted', dispensing: { id: ids.dispensing, status: 'dispensed', reversed: true } });
+    // Each row projected as before: no dispensing (open), a dispensing, a reversed dispensing (done, item 237).
+    expect(answer.items[0]).toMatchObject({ status: 'accepted', dispensing: null });
     expect(answer.items[1]).toMatchObject({ status: 'accepted', dispensing: null });
     expect(answer.items[30]).toMatchObject({ dispensing: { id: ids.dispensing, status: 'dispensed', reversed: false } });
+    expect(answer.items[32]).toMatchObject({ id: row(237, 'reversed').id, dispensing: { id: ids.dispensing, status: 'dispensed', reversed: true } });
     // The audit rows are as before: the collection row with the count returned, and no patient row for own work.
     expect(audits).toEqual([{ action: 'pharmacy.work-item.list', resourceType: 'pharmacy-work-item-collection',
       resourceId: ids.facility, details: { returnedCount: 200 } }]);

@@ -58,7 +58,10 @@ const WORK_ITEM_SELECT = `select w.*,d.id::text as dispensing_id,d.status as dis
 
 /**
  * The work list (200 rows, as before). A work item is open while it has no
- * dispensing, or its dispensing was reversed; open work comes first, oldest
+ * dispensing. A reversed dispensing counts as done: a work item takes one
+ * dispensing only (0023), so a reversed item cannot be dispensed again and
+ * would otherwise stay at the top for good (owner, 2026-11-02, until
+ * dispensing again exists). Open work comes first, oldest
  * first, so new and waiting prescriptions always show however much is done,
  * and done work fills the rest, newest first. Before, the oldest 200 rows the
  * member could read were answered whatever their state, so a busy pharmacy
@@ -66,7 +69,7 @@ const WORK_ITEM_SELECT = `select w.*,d.id::text as dispensing_id,d.status as dis
  * dispensing (0023), so the joins add no rows. Exported for the tests.
  */
 export const WORK_LIST_QUERY = `${WORK_ITEM_SELECT}
-  cross join lateral (select d.id is null or r.id is not null as open_work) o
+  cross join lateral (select d.id is null as open_work) o
   order by o.open_work desc,case when o.open_work then w.accepted_at end asc,case when o.open_work then null else w.accepted_at end desc,
   case when o.open_work then w.id end asc,case when o.open_work then null else w.id end desc limit 200`;
 
