@@ -2799,3 +2799,53 @@ past hour (one count for every tester sharing the login).
 
 The suite is `services/ehr-api/test/database/sealed-demo-story.integration.sql`.
 0102 has no down migration; 0098's off switch still applies.
+
+## 31. Platform administrators review organization applications (0103)
+
+Owner request of 2026-11-01 (D-Eminence, "fix the two dashboard errors now"):
+the admin Overview showed "Organization applications: Your account does not
+have permission" for the platform super admin. 0103 is unsigned until the
+owner signs its declaration.
+
+Routes (unchanged): `GET /api/v1/admin/organization-applications`
+(`platform.identity-review.read`), `POST .../:applicationId/verify-cac`
+(`platform.facility.manage`), `POST .../:applicationId/approve`
+(`platform.facility.manage`, `platform.principal.manage`,
+`platform.role.manage`) and `POST .../:applicationId/reject`
+(`platform.facility.manage`). The Identity API runs each in a platform
+transaction, which sends no facility and no membership for an administrator
+who has none.
+
+Who may act:
+
+- A platform-scoped call (no facility and no membership in the request
+  context, and the account holds `platform.admin.access`) is authorized by the
+  route's platform permission alone. Before 0103 it also needed an active
+  facility membership, which a platform administrator does not have, so every
+  route answered 403.
+- A call that names a facility or a membership keeps exactly the old check:
+  an active membership of that facility, plus the platform permission.
+- Everyone still needs an active account, a correlation id, the purpose
+  `healthcare-operations` and the route's platform permission. No permission
+  is granted to anyone. The identity reviewer role can list but not check,
+  approve or reject (it lacks `platform.facility.manage`).
+
+Audit rows written by the database for a platform-scoped call:
+
+| Action | Outcome |
+| --- | --- |
+| `admin.organization-application.cac-verify` | `success` when verified; `denied` for not verified or incomplete; `failure` otherwise |
+| `admin.organization-application.approve` | `success` |
+| `admin.organization-application.reject` | `denied` |
+
+They are `actor_type = 'platform'` with facility, membership, organization and
+patient empty (0064's platform rules); approve's `details.organizationId`
+names the new or reused organization. A facility-scoped call still writes the
+old `staff` rows (`identity.organization.application.*`, with its facility,
+membership and, for approve, organization). The Identity API's own failure
+rows (`api.admin.organization-application*`) are unchanged.
+
+Responses, request bodies, `If-Match` versions and error mapping are
+unchanged. 0103 has no down migration; applying the previous bodies (0046,
+0056) restores the old behaviour. The suite is
+`services/ehr-api/test/database/platform-organization-applications.integration.sql`.

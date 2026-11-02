@@ -1393,6 +1393,12 @@ revoke all on function identity.demo_story_context(text,uuid,uuid,text),
   identity.demo_story_lab_result(uuid,uuid,uuid,text,text,text,text,text,text),
   identity.demo_story_install(text) from public;
 
+-- Platform organization applications (0103): 0103 replaces the bodies of
+-- identity.organization_application_admin_account (owner only; the commands
+-- below call it as its owner) and of the CAC-result, approve and reject
+-- commands, which keep the Identity grants above. No grant changes.
+revoke all on function identity.organization_application_admin_account(text) from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),
