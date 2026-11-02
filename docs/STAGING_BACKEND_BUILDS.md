@@ -185,10 +185,11 @@ Since the audit pin hardening (2 November 2026, owner's request) it also checks:
   `NODE_OPTIONS`, `PATH`, `BASH_ENV` and `ENV` (matched in any case) are refused
   in any env: the job's and its steps'. Every env anywhere in the workflow
   must be a plain map, not an expression whose keys a reviewer cannot see. No
-  job may run in a container or with services: their env, image, Docker
-  options, ports and volumes can each set an environment variable for every
-  step, in more spellings than a static check can list, and none of these
-  workflows uses one.
+  job may run in a container or with services. A job container's env, image,
+  Docker options, ports and volumes can each set an environment variable for
+  every step, in more spellings than a static check can list; a service
+  container runs beside the steps and, through its image, options or volumes,
+  can change what they reach. None of these workflows uses one.
 - **The actions and the runner, by allowlist.** An audit job may use only
   `actions/checkout`, `actions/setup-node`, `actions/setup-go` and
   `actions/upload-artifact`, each at its reviewed commit and with only the inputs
@@ -201,7 +202,7 @@ Since the audit pin hardening (2 November 2026, owner's request) it also checks:
   would hide every key and step after it from the verifier while GitHub runs
   them. So every workflow read through the verifier's parser (these two, and
   the protected readiness workflow) must be printable ASCII with LF line breaks
-  (tab allowed), and carry no `%YAML` directive. Release tests hide a checkout `ref`, a step before
+  (tab allowed), end with a line break, and carry no `%YAML` directive. Release tests hide a checkout `ref`, a step before
   the audit, `continue-on-error` and an npm cache behind each of the four. Those
   workflows must also keep to a block-style subset that a differential test
   against libyaml (about 150,000 generated documents) found both parsers read
