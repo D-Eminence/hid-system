@@ -18,8 +18,8 @@ export function parseWorkflow(source) {
   const doc = parseDocument(source, { uniqueKeys: true, strict: true, version: '1.2', stringKeys: true })
   assert.deepEqual(doc.errors, [], 'ambiguous or invalid workflow YAML')
   assert.deepEqual(doc.warnings, [], 'unsupported workflow YAML')
-  // Only the block-style subset that this parser and libyaml-family parsers
-  // read the same way: no flow collection but an empty one ({...} or [...],
+  // Only a block-style subset that a differential test against libyaml found
+  // both parsers read the same way: no flow collection but an empty one ({...} or [...],
   // where '?if' is a key named "?if" here but the key "if" to libyaml; an empty
   // {} has no key to differ on), no anchor (libyaml ends
   // its name at ':' or '?'), no explicit tag, no '<<' key (YAML 1.1 loaders
@@ -36,7 +36,13 @@ export function parseWorkflow(source) {
       const text = source.slice(node.range[0], node.range[1])
       if (node.type === 'QUOTE_DOUBLE' || node.type === 'QUOTE_SINGLE') assert.ok(!text.includes('\n'), 'workflow cannot quote a value over several lines')
       if (node.type === 'PLAIN') assert.ok(!text.includes('\n'), 'workflow cannot write a plain value over several lines')
-      if (node.type === 'BLOCK_LITERAL' || node.type === 'BLOCK_FOLDED') assert.ok(!/^[|>][-+]?[1-9]/.test(text), 'workflow cannot give a block scalar an indentation indicator')
+      if (node.type === 'BLOCK_LITERAL' || node.type === 'BLOCK_FOLDED') {
+        assert.ok(!/^[|>][-+]?[1-9]/.test(text), 'workflow cannot give a block scalar an indentation indicator')
+        // After a comment line, a header on a line of its own swallows the
+        // keys below it here; libyaml reads them as keys.
+        const line = source.slice(source.lastIndexOf('\n', node.range[0] - 1) + 1, node.range[0])
+        assert.ok(/\S/.test(line), 'workflow must start a block scalar on the line of its key')
+      }
     },
     Pair(_, pair) { assert.ok(!(isScalar(pair.key) && pair.key.value === '<<'), 'workflow cannot use a merge key') },
   })
@@ -115,9 +121,8 @@ const AUDIT_COMMAND = /\bnpm\b[^\n]*\baudit\b|npm-audit-with-exceptions/
 // env that is not a plain map anywhere in the workflow; any variable outside
 // AUDIT_ENV_ALLOWLIST in the workflow env or in an audit job's or its steps'
 // env; npm_config_*, NODE_OPTIONS, PATH, BASH_ENV or ENV (in any case) in any
-// env of any other job, the publish job included, its container's and
-// services' envs too; a container or service given as an expression, or with
-// Docker options that set an environment variable; any action in an audit job outside AUDIT_JOB_ACTIONS, at another
+// env of any other job, the publish job included; any job in a container or
+// with services; any action in an audit job outside AUDIT_JOB_ACTIONS, at another
 // commit or with other inputs; a setup-node of another Node; a step in an
 // audit job that writes GITHUB_ENV or GITHUB_PATH; and any other step that
 // names the gate or security/. These are static checks on the workflow text,
@@ -180,22 +185,17 @@ export function verifyAuditSteps(workflow, expected, { checkoutRef } = {}) {
     assert.equal(step.shell, AUDIT_SHELL, `audit step in ${name} must run in ${AUDIT_SHELL}`)
     assert.equal(step.run, expected[name], `audit commands in ${name} must be exactly the reviewed ones`)
   }
-  // Every env in the workflow, audit jobs or not (the publish job included),
-  // with each job's container and services: a plain map, and never
-  // npm_config_*, NODE_OPTIONS, PATH, BASH_ENV or ENV (in any case).
-  // A container or service is a literal image name or a plain map, never an
-  // expression whose env a reviewer cannot see, and its Docker options set no
-  // environment variable.
-  const literal = value => typeof value === 'string' && !value.includes('${{')
+  // Every env in the workflow, audit jobs or not (the publish job included):
+  // a plain map, and never npm_config_*, NODE_OPTIONS, PATH, BASH_ENV or ENV
+  // (in any case).
+  // No job runs in a container or with services: their env, image, Docker
+  // options, ports and volumes can each set an environment variable for every
+  // step, through spellings no static check lists in full, and none of these
+  // workflows needs one.
   for (const [name, job] of Object.entries(workflow.jobs)) {
-    const runtimes = [job.container, ...(job.services === undefined ? [] : isMap(job.services) ? Object.values(job.services) : [job.services])]
-    for (const runtime of runtimes.filter(value => value !== undefined)) {
-      assert.ok(literal(runtime) || isMap(runtime), `job ${name} gives a container or service as an expression`)
-      assert.ok(runtime.options === undefined || (literal(runtime.options) && !/(?:^|\s)(?:-e|--env|--env-file)(?:[\s=]|$)/.test(runtime.options)), `job ${name} sets container environment through options`)
-    }
+    assert.ok(job.container === undefined && job.services === undefined, `job ${name} cannot run in a container or with services`)
   }
-  const environments = [workflow.env, ...Object.values(workflow.jobs).flatMap(job => [job.env, job.container?.env,
-    ...Object.values(isMap(job.services) ? job.services : {}).map(service => service?.env), ...(job.steps ?? []).map(step => step.env)])]
+  const environments = [workflow.env, ...Object.values(workflow.jobs).flatMap(job => [job.env, ...(job.steps ?? []).map(step => step.env)])]
   for (const env of environments) {
     assert.ok(env === undefined || isMap(env), 'every env must be a plain map, not an expression')
     for (const key of Object.keys(env ?? {})) assert.ok(!/^(?:npm_config_|node_options$|path$|bash_env$|env$)/i.test(key), `workflow cannot set ${key}`)
