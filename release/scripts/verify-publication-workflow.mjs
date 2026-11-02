@@ -14,6 +14,9 @@ export function parseWorkflow(source) {
   // workflow must be printable ASCII with LF line breaks (tab allowed), and
   // carry no %YAML directive, which would switch this parser to YAML 1.1.
   assert.match(source, /^[\t\n\x20-\x7e]*$/, 'workflow must be printable ASCII with LF line breaks')
+  // Without a final LF, this parser keeps a line break that libyaml drops
+  // from a last block scalar.
+  assert.ok(source.endsWith('\n'), 'workflow must end with a line break')
   assert.ok(!/^%/m.test(source), 'workflow cannot carry a YAML directive')
   const doc = parseDocument(source, { uniqueKeys: true, strict: true, version: '1.2', stringKeys: true })
   assert.deepEqual(doc.errors, [], 'ambiguous or invalid workflow YAML')
@@ -25,8 +28,9 @@ export function parseWorkflow(source) {
   // its name at ':' or '?'), no explicit tag, no '<<' key (YAML 1.1 loaders
   // merge it), no quoted or plain value over several lines (an escaped line
   // break folds differently, and after a bare '-' and a comment this parser
-  // joins the following items into one value), and no block scalar
-  // indentation indicator (trailing whitespace lines differ).
+  // joins the following items into one value), no block scalar indentation
+  // indicator (trailing whitespace lines differ), and no block scalar header on
+  // a line of its own (after a comment line, it swallows the keys below it).
   const plain = node => assert.ok(!node.anchor && !node.tag, 'workflow cannot use an anchor or a tag')
   visit(doc, {
     Map(_, node) { assert.ok(!node.flow || node.items.length === 0, 'workflow must use block style, not a flow collection'); plain(node) },
@@ -188,10 +192,11 @@ export function verifyAuditSteps(workflow, expected, { checkoutRef } = {}) {
   // Every env in the workflow, audit jobs or not (the publish job included):
   // a plain map, and never npm_config_*, NODE_OPTIONS, PATH, BASH_ENV or ENV
   // (in any case).
-  // No job runs in a container or with services: their env, image, Docker
-  // options, ports and volumes can each set an environment variable for every
-  // step, through spellings no static check lists in full, and none of these
-  // workflows needs one.
+  // No job runs in a container or with services. A job container's env,
+  // image, Docker options, ports and volumes can each set an environment
+  // variable for every step, in more spellings than a static check can list;
+  // a service container runs beside the steps and, through its image, options
+  // or volumes, can change what they reach. None of these workflows needs one.
   for (const [name, job] of Object.entries(workflow.jobs)) {
     assert.ok(job.container === undefined && job.services === undefined, `job ${name} cannot run in a container or with services`)
   }

@@ -4,7 +4,7 @@ import { readFile, mkdtemp, rm } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { stringify } from 'yaml'
+import { parseDocument, stringify } from 'yaml'
 import { AUDIT_PATH, AUDIT_SHELL, AWS_AUDIT_GATE, LOCAL_GATE_AUDITS, NODE_RUNTIME, parseWorkflow, verifyLocalGateWorkflow, verifyPublicationWorkflow } from '../scripts/verify-publication-workflow.mjs'
 
 const source = await readFile(new URL('../../.github/workflows/tuf-publish.yml', import.meta.url), 'utf8')
@@ -199,6 +199,8 @@ test('forbidden workflow paths are rejected statically', () => {
     'tooling job skipped': [(w) => { w.jobs.tooling.if = '${{ false }}' }, JOB_RUNTIME],
     'tooling job may fail': [(w) => { w.jobs.tooling['continue-on-error'] = true }, JOB_RUNTIME],
     'tooling job moved into a container': [(w) => { w.jobs.tooling.container = 'node:22' }, JOB_RUNTIME],
+    'publish job in a container': [(w) => { w.jobs.publish.container = 'node:22' }, CONTAINER],
+    'publish job with services': [(w) => { w.jobs.publish.services = { db: { image: 'postgres:16' } } }, CONTAINER],
     'node preload written to GITHUB_ENV': [(w) => { before(w.jobs.tooling.steps, 'audit', preload) }, LATER_STEPS],
     'fake npm added through GITHUB_PATH': [(w) => { before(w.jobs.tooling.steps, 'audit', fakeNpm) }, LATER_STEPS],
     'fake npm added through tooling PATH': [(w) => { w.jobs.tooling.env.PATH = '/tmp/bin:/usr/bin:/bin' }, UNLISTED('PATH')],
@@ -301,8 +303,6 @@ test('only block-style YAML that this parser and libyaml read the same way is ac
     'a block scalar indentation indicator': [['run: npm --prefix release ci --ignore-scripts', 'run: |1\n           npm --prefix release ci --ignore-scripts'], /indentation indicator/],
     'a chomped literal with an indentation indicator': [['run: npm --prefix release ci --ignore-scripts', 'run: |-1\n           npm --prefix release ci --ignore-scripts'], /indentation indicator/],
     'a folded scalar with an indentation indicator': [['run: npm --prefix release ci --ignore-scripts', 'run: >1\n           npm --prefix release ci --ignore-scripts'], /indentation indicator/],
-    // After '#x', a header on a line of its own swallows the keys below it here; libyaml reads continue-on-error as a key.
-    'continue-on-error hidden under a block scalar header': [['        id: gate_2', '        id: gate_2\n        x:\n        #c\n          >-\n        continue-on-error: true'], /block scalar on the line of its key/],
   }
   for (const [name, [[line, replacement], reason]] of Object.entries(refused)) {
     const edited = localGates.replace(line, replacement)
@@ -310,7 +310,27 @@ test('only block-style YAML that this parser and libyaml read the same way is ac
     assert.throws(() => verifyLocalGateWorkflow(edited), reason, name)
   }
   assert.throws(() => verifyPublicationWorkflow(source.replace('    runs-on: ubuntu-24.04\n', '    runs-on: ubuntu-24.04\n    <<:\n      if: false\n')), /merge key/, 'a merge key in the publisher')
-  assert.throws(() => verifyPublicationWorkflow(source.replace('        id: audit\n', '        id: audit\n        x:\n        #c\n          |\n        continue-on-error: true\n')), /block scalar on the line of its key/, 'continue-on-error hidden in the publisher')
+  // The real attack: move an audit step's name to its end, as a block scalar after a '#x' comment line. This parser then
+  // reads continue-on-error as the name's text, so the step keeps exactly id, name, run and shell; libyaml reads it as a key.
+  const hideUnderName = (text, nameLine, nextStep, header) => {
+    const start = text.indexOf(`${nameLine}\n        shell:`)
+    assert.ok(start >= 0, nameLine)
+    const moved = text.slice(0, start) + '      - shell:' + text.slice(start + nameLine.length + '\n        shell:'.length)
+    const at = moved.indexOf(nextStep, start)
+    assert.ok(at > start, nextStep)
+    return moved.slice(0, at) + `        name:\n        #c\n          ${header}\n        continue-on-error: true\n` + moved.slice(at)
+  }
+  const hiddenLocal = hideUnderName(localGates, '      - name: Audit release verifier dependencies', '      - name: Install release and shared validator dependencies', '>-')
+  const hiddenPublisher = hideUnderName(source, '      - name: Audit all publication tooling dependencies', '      - uses: actions/setup-go@', '|')
+  const auditOf = (text, job, id) => parseDocument(text).toJS().jobs[job].steps.find(step => step.id === id)
+  for (const [text, job, id] of [[hiddenLocal, 'release-contracts', 'gate_2'], [hiddenPublisher, 'tooling', 'audit']]) {
+    const step = auditOf(text, job, id)
+    assert.deepEqual(Object.keys(step).sort(), ['id', 'name', 'run', 'shell'], `${job}: without the rule the audit step keeps its four keys`)
+    assert.match(step.name, /^continue-on-error: true\n?$/)
+  }
+  assert.throws(() => verifyLocalGateWorkflow(hiddenLocal), /block scalar on the line of its key/, 'continue-on-error hidden in the local gates')
+  assert.throws(() => verifyPublicationWorkflow(hiddenPublisher), /block scalar on the line of its key/, 'continue-on-error hidden in the publisher')
+  assert.throws(() => verifyLocalGateWorkflow(localGates.trimEnd()), /end with a line break/, 'no final line break')
   // An empty flow collection has no key or item to read differently, as in the readiness workflow's `permissions: {}`.
   assert.deepEqual(parseWorkflow('permissions: {}\nitems: []\n'), { permissions: {}, items: [] })
   assert.throws(() => parseWorkflow('permissions: {contents: read}\n'), /block style, not a flow collection/)
