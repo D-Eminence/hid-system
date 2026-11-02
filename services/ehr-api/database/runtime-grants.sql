@@ -1387,6 +1387,12 @@ revoke all on function pharmacy.validate_work_item() from public;
 -- granted to no role; a trigger needs no EXECUTE to fire.
 revoke all on function pharmacy.validate_dispensing() from public;
 
+-- Sealed demo story (0102): the seed and its two helpers are the applier's
+-- alone and granted to no role; nothing new is called by a service.
+revoke all on function identity.demo_story_context(text,uuid,uuid,text),
+  identity.demo_story_lab_result(uuid,uuid,uuid,text,text,text,text,text,text),
+  identity.demo_story_install(text) from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),
