@@ -931,7 +931,12 @@ their builds; the items Identity carries are listed here too.
   and revocation; the recipient, cross-facility, first-30-days and
   delivery-pause limits and the recovery hold; a governed facility
   unchanged; release after review; support's reads; an audit scan; and the
-  staff context's cost.
+  staff context's cost. Since 1 November 2026 (Owner decisions, "Each
+  product is its own site") P4b's facilities sign up on their product's own
+  site (start, code and password on `ehr.`, `lab.` or `pharmacy.`), the
+  doctor's, laboratory scientist's and pharmacist's invitations open there,
+  and the administrators' console (`admin.`) refuses both; P4's flow still
+  runs on the patient portal, which keeps accepting the two for now.
 - Tests (`services/ehr-api/test/database/`, rollback-only): new
   `self-service-review-unlock`, `staff-invitations`,
   `staff-invitation-acceptance`, `facility-staff-management`,
