@@ -398,11 +398,13 @@ Since the audit pin hardening (2 November 2026, owner's request) it also checks:
   setup-node must say `package-manager-cache: false` (it takes a missing or
   empty value as true), and setup-go comes after the audit, because a cache
   restored before it could bring back whatever an earlier run's dependency code
-  saved, a replaced `npm` in the tool cache included. The publisher's setup-go
-  must also say `cache: false`. Each audit job checks out exactly once, before
-  its audit: the local gates at the event's own commit (no `ref`), the publisher
-  at `inputs.tooling_sha`, so an audit never reads another tree than the steps
-  after it test. The step runs in
+  saved, a replaced `npm` in the tool cache included. The publisher tooling
+  job's setup-go must also say `cache: false`. Each audit job has exactly one
+  checkout step, before its audit: the local gates at the event's own commit
+  (no `ref`), the publisher at `inputs.tooling_sha`, so no checkout step can
+  point the audit at another commit. A later `run` step that rewrites the tree
+  or a lockfile is not checked: like any step after the audit, it is left to
+  owner review. The step runs in
   `shell: /usr/bin/bash -p -e {0}`: an absolute path, so no `bash` found on PATH
   runs it, and privileged mode, so bash reads no `BASH_ENV` or `ENV` file and
   imports no shell function from the environment, even one written to
@@ -423,6 +425,13 @@ Since the audit pin hardening (2 November 2026, owner's request) it also checks:
   it takes today (`AUDIT_JOB_ACTIONS`); any other action, a local action or a
   container action is refused. setup-node must install the reviewed Node
   (22.23.2), and every audit job runs on `ubuntu-24.04`.
+- **One reading of the YAML.** The verifier's YAML parser ends a line only at
+  LF, but YAML 1.2 and GitHub's own parser also end one at a lone CR, NEL, LS
+  or PS. Such a character in a comment would hide every key and step after it
+  from the verifier while GitHub runs them. So every workflow the release
+  scripts read must be printable ASCII with LF line breaks (tab allowed), and
+  carry no `%YAML` directive. Release tests hide a checkout `ref`, a step before
+  the audit, `continue-on-error` and an npm cache behind each of the four.
 - **PATH, pinned in the audit step.** Every audit command starts with
   `export PATH="$RUNNER_TOOL_CACHE/node/22.23.2/x64/bin:/usr/bin:/bin"` and
   `test "$(node --version)" = v22.23.2`, where setup-node installs that Node.
