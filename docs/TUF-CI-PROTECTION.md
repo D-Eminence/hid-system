@@ -410,15 +410,18 @@ Since the audit pin hardening (2 November 2026, owner's request) it also checks:
   imports no shell function from the environment, even one written to
   `GITHUB_ENV` at run time. A release test runs both shells to show the
   difference.
-- **The environment, by allowlist.** The workflow env and every audit job's and
-  audit step's env may set only the variables these workflows use today
+- **The environment, by allowlist.** The workflow env, every audit job's env
+  and the env of every step in an audit job may set only the variables these
+  workflows use today
   (`AUDIT_ENV_ALLOWLIST`: `CI`, `NODE_VERSION`, `GO_VERSION`, the two broker
   images, `GOTOOLCHAIN`, `TOOLING_SHA`, `PLAN_JSON`, `WRANGLER_SEND_METRICS`,
   `HID_REQUIRE_CLOUDFLARE_VALIDATOR`, `HID_PUBLIC_BASE` and `GATE_STEPS_JSON`;
   `NODE_VERSION` only in the workflow env). `BASH_ENV`, `ENV`, `NODE_OPTIONS`,
-  `npm_config_*`, `PATH`, a proxy, an extra CA and anything else are refused,
-  and every env anywhere in the workflow must be a plain map, not an expression
-  whose keys a reviewer cannot see.
+  `npm_config_*`, `PATH`, a proxy, an extra CA and anything else are refused
+  there. In every other job, the publish job included, `npm_config_*`,
+  `NODE_OPTIONS`, `PATH`, `BASH_ENV` and `ENV` are refused in any env. Every env
+  anywhere in the workflow must be a plain map, not an expression whose keys a
+  reviewer cannot see.
 - **The actions and the runner, by allowlist.** An audit job may use only
   `actions/checkout`, `actions/setup-node`, `actions/setup-go` and
   `actions/upload-artifact`, each at its reviewed commit and with only the inputs
@@ -426,11 +429,12 @@ Since the audit pin hardening (2 November 2026, owner's request) it also checks:
   container action is refused. setup-node must install the reviewed Node
   (22.23.2), and every audit job runs on `ubuntu-24.04`.
 - **One reading of the YAML.** The verifier's YAML parser ends a line only at
-  LF, but YAML 1.2 and GitHub's own parser also end one at a lone CR, NEL, LS
-  or PS. Such a character in a comment would hide every key and step after it
-  from the verifier while GitHub runs them. So every workflow the release
-  scripts read must be printable ASCII with LF line breaks (tab allowed), and
-  carry no `%YAML` directive. Release tests hide a checkout `ref`, a step before
+  LF. YAML 1.2 also ends one at a lone CR, and libyaml-family parsers (the
+  family of GitHub's) also at NEL, LS and PS. Such a character in a comment
+  would hide every key and step after it from the verifier while GitHub runs
+  them. So every workflow read through the verifier's parser (these two, and
+  the protected readiness workflow) must be printable ASCII with LF line breaks
+  (tab allowed), and carry no `%YAML` directive. Release tests hide a checkout `ref`, a step before
   the audit, `continue-on-error` and an npm cache behind each of the four.
 - **PATH, pinned in the audit step.** Every audit command starts with
   `export PATH="$RUNNER_TOOL_CACHE/node/22.23.2/x64/bin:/usr/bin:/bin"` and

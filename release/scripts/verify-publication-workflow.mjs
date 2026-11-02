@@ -7,9 +7,10 @@ import { parseDocument } from 'yaml'
 
 export function parseWorkflow(source) {
   assert.ok(source.length < 100000, 'workflow exceeds source bound')
-  // The yaml parser ends a line only at LF, but YAML 1.2 and GitHub's own
-  // parser also end one at a lone CR, NEL, LS or PS, so such a character in a
-  // comment would hide every key and step after it from these checks. So a
+  // The yaml parser ends a line only at LF. YAML 1.2 also ends one at a lone
+  // CR, and libyaml-family parsers (the family of GitHub's) also at NEL, LS
+  // and PS, so such a character in a comment would hide every key and step
+  // after it from these checks while GitHub runs them. So a
   // workflow must be printable ASCII with LF line breaks (tab allowed), and
   // carry no %YAML directive, which would switch this parser to YAML 1.1.
   assert.match(source, /^[\t\n\x20-\x7e]*$/, 'workflow must be printable ASCII with LF line breaks')
@@ -91,7 +92,8 @@ const AUDIT_COMMAND = /\bnpm\b[^\n]*\baudit\b|npm-audit-with-exceptions/
 // job; any key but id, name, run and shell on the audit step; an
 // env that is not a plain map anywhere in the workflow; any variable outside
 // AUDIT_ENV_ALLOWLIST in the workflow env or in an audit job's or its steps'
-// env; any action in an audit job outside AUDIT_JOB_ACTIONS, at another
+// env; npm_config_*, NODE_OPTIONS, PATH, BASH_ENV or ENV in any env of any
+// other job, the publish job included; any action in an audit job outside AUDIT_JOB_ACTIONS, at another
 // commit or with other inputs; a setup-node of another Node; a step in an
 // audit job that writes GITHUB_ENV or GITHUB_PATH; and any other step that
 // names the gate or security/. These are static checks on the workflow text,
@@ -104,7 +106,7 @@ export function verifyAuditSteps(workflow, expected, { checkoutRef } = {}) {
   assert.equal(workflow.defaults, undefined, 'workflow cannot change the default shell or directory')
   // The workflow env reaches every job, the audit jobs included.
   assert.ok(workflow.env === undefined || isMap(workflow.env), 'every env must be a plain map, not an expression')
-  for (const key of Object.keys(workflow.env ?? {})) assert.ok(AUDIT_ENV_ALLOWLIST.has(key), `workflow cannot set ${key}`)
+  for (const key of Object.keys(workflow.env ?? {})) assert.ok(AUDIT_ENV_ALLOWLIST.has(key), `workflow cannot set ${key}: not in AUDIT_ENV_ALLOWLIST`)
   const found = new Map()
   for (const [name, job] of Object.entries(workflow.jobs)) {
     const steps = (job.steps ?? []).filter(step => typeof step.run === 'string' && AUDIT_COMMAND.test(step.run))
@@ -115,6 +117,7 @@ export function verifyAuditSteps(workflow, expected, { checkoutRef } = {}) {
     assert.equal(job['runs-on'], AUDIT_RUNNER, `job ${name} cannot be skipped, allowed to fail or moved into another runtime`)
     for (const step of job.steps) assert.ok(!/GITHUB_(?:ENV|PATH)/.test(JSON.stringify(step)), `job ${name} cannot change the environment or PATH of later steps`)
     for (const step of job.steps) {
+      assert.ok(step.uses === undefined || typeof step.uses === 'string', `job ${name} uses an unreviewed action`)
       if (step.uses?.startsWith('actions/setup-node@')) {
         // setup-node takes a missing or empty value as true.
         assert.equal(step.with?.['package-manager-cache'], false, `job ${name} cannot restore a package-manager cache`)
@@ -123,7 +126,6 @@ export function verifyAuditSteps(workflow, expected, { checkoutRef } = {}) {
         assert.equal(String(version), NODE_RUNTIME, `job ${name} must set up the reviewed Node ${NODE_RUNTIME}`)
       }
       if (step.uses !== undefined) {
-        assert.equal(typeof step.uses, 'string', `job ${name} uses an unreviewed action`)
         const at = step.uses.lastIndexOf('@')
         const action = AUDIT_JOB_ACTIONS.get(at > 0 ? step.uses.slice(0, at) : step.uses)
         assert.ok(action && step.uses.slice(at + 1) === action.pin, `job ${name} cannot use ${step.uses}: only the reviewed actions at their reviewed commits`)
@@ -131,10 +133,10 @@ export function verifyAuditSteps(workflow, expected, { checkoutRef } = {}) {
         for (const input of Object.keys(step.with ?? {})) assert.ok(action.inputs.includes(input), `job ${name} cannot give ${step.uses} the input ${input}`)
       }
       assert.ok(step.env === undefined || isMap(step.env), `job ${name} has a step env that is not a plain map`)
-      for (const key of Object.keys(step.env ?? {})) assert.ok(jobEnvAllowed(key), `workflow cannot set ${key}`)
+      for (const key of Object.keys(step.env ?? {})) assert.ok(jobEnvAllowed(key), `workflow cannot set ${key}: not in AUDIT_ENV_ALLOWLIST`)
     }
     assert.ok(job.env === undefined || isMap(job.env), `job ${name} has an env that is not a plain map`)
-    for (const key of Object.keys(job.env ?? {})) assert.ok(jobEnvAllowed(key), `workflow cannot set ${key}`)
+    for (const key of Object.keys(job.env ?? {})) assert.ok(jobEnvAllowed(key), `workflow cannot set ${key}: not in AUDIT_ENV_ALLOWLIST`)
     // Only checkout and setup-node run before the audit: no install, script,
     // test or cache restore.
     const first = job.steps.indexOf(steps[0])
@@ -154,6 +156,8 @@ export function verifyAuditSteps(workflow, expected, { checkoutRef } = {}) {
     assert.equal(step.shell, AUDIT_SHELL, `audit step in ${name} must run in ${AUDIT_SHELL}`)
     assert.equal(step.run, expected[name], `audit commands in ${name} must be exactly the reviewed ones`)
   }
+  // Every env in the workflow, audit jobs or not (the publish job included):
+  // a plain map, and never npm_config_*, NODE_OPTIONS, PATH, BASH_ENV or ENV.
   const environments = [workflow.env, ...Object.values(workflow.jobs).flatMap(job => [job.env, ...(job.steps ?? []).map(step => step.env)])]
   for (const env of environments) {
     assert.ok(env === undefined || isMap(env), 'every env must be a plain map, not an expression')

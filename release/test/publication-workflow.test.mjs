@@ -17,7 +17,9 @@ const DEFAULT_SHELL = /workflow cannot change the default shell or directory/
 const preload = { name: 'Preload code into later node processes', run: 'echo "NODE_OPTIONS=--import=/tmp/p.mjs" >> "$GITHUB_ENV"' }
 const fakeNpm = { name: 'Put a fake npm first on PATH', run: 'echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"' }
 // Reasons for the environment and action allowlists and the pinned PATH.
-const UNLISTED = (key) => new RegExp(`workflow cannot set ${key}$`)
+const UNLISTED = (key) => new RegExp(`workflow cannot set ${key}: not in AUDIT_ENV_ALLOWLIST$`)
+const DENIED = (key) => new RegExp(`: workflow cannot set ${key}$`)
+const ANY_ENV_MAP = /: every env must be a plain map, not an expression$/
 const NOT_A_MAP = /plain map/
 const ACTION = /only the reviewed actions at their reviewed commits/
 const ACTION_INPUT = /cannot give actions\/[a-z-]+@[0-9a-f]+ the input/
@@ -71,7 +73,7 @@ test('local gates keep every npm audit and run only infra/aws through the except
     'npm registry redirected': (w) => { w.jobs['aws-release-trust'].steps.find(s => s.uses?.startsWith('actions/setup-node@')).with['registry-url'] = 'https://registry.invalid/' },
     'default shell replaced': (w) => { w.jobs['aws-release-trust'].defaults = { run: { shell: 'true {0}' } } },
     'workflow default shell replaced': [(w) => { w.defaults = { run: { shell: 'true {0}' } } }, DEFAULT_SHELL],
-    'install step npm configuration': [(w) => { w.jobs['aws-release-trust'].steps.find(s => s.id === 'gate_1').env = { npm_config_registry: 'https://registry.invalid/' } }, /workflow cannot set npm_config_registry/],
+    'install step npm configuration': [(w) => { w.jobs['aws-release-trust'].steps.find(s => s.id === 'gate_1').env = { npm_config_registry: 'https://registry.invalid/' } }, UNLISTED('npm_config_registry')],
     'infra/aws audit job skipped': [(w) => { w.jobs['aws-release-trust'].if = '${{ false }}' }, JOB_RUNTIME],
     'release audit job skipped': [(w) => { w.jobs['release-contracts'].if = '${{ false }}' }, JOB_RUNTIME],
     'infra/aws audit job may fail': [(w) => { w.jobs['aws-release-trust']['continue-on-error'] = true }, JOB_RUNTIME],
@@ -81,7 +83,7 @@ test('local gates keep every npm audit and run only infra/aws through the except
     'infra/aws audit job waits on a skipped job': [(w) => { w.jobs['tuf-client'].if = '${{ false }}'; w.jobs['aws-release-trust'].needs = 'tuf-client' }, JOB_RUNTIME],
     'node preload written to GITHUB_ENV': [(w) => { before(w.jobs['aws-release-trust'].steps, 'gate_2', preload) }, LATER_STEPS],
     'fake npm added through GITHUB_PATH': [(w) => { before(w.jobs['aws-release-trust'].steps, 'gate_2', fakeNpm) }, LATER_STEPS],
-    'fake npm added through job PATH': [(w) => { w.jobs['aws-release-trust'].env = { PATH: '/tmp/bin:/usr/bin:/bin' } }, /workflow cannot set PATH/],
+    'fake npm added through job PATH': [(w) => { w.jobs['aws-release-trust'].env = { PATH: '/tmp/bin:/usr/bin:/bin' } }, UNLISTED('PATH')],
     'BASH_ENV in the workflow env': [(w) => { w.env.BASH_ENV = '/tmp/skip.sh' }, UNLISTED('BASH_ENV')],
     'BASH_ENV in an audit job env': [(w) => { w.jobs['aws-release-trust'].env = { BASH_ENV: '/tmp/skip.sh' } }, UNLISTED('BASH_ENV')],
     'BASH_ENV in an audit job step env': [(w) => { w.jobs['release-contracts'].steps.find(s => s.id === 'gate_1').env = { BASH_ENV: '/tmp/skip.sh' } }, UNLISTED('BASH_ENV')],
@@ -108,6 +110,16 @@ test('local gates keep every npm audit and run only infra/aws through the except
     'NODE_VERSION in an audit job env': [(w) => { w.jobs['release-contracts'].env = { NODE_VERSION: '20.0.0' } }, UNLISTED('NODE_VERSION')],
     'NODE_VERSION in an audit step env': [(w) => { w.jobs['aws-release-trust'].steps.find(x => x.id === 'gate_1').env = { NODE_VERSION: '20.0.0' } }, UNLISTED('NODE_VERSION')],
     'infra/aws audit job on another runner': [(w) => { w.jobs['aws-release-trust']['runs-on'] = 'self-hosted' }, JOB_RUNTIME],
+    // Jobs without an audit get only the whole-workflow rules: no npm_config_*, NODE_OPTIONS, PATH, BASH_ENV or ENV in any env,
+    // and every env a plain map.
+    'NODE_OPTIONS in a job without an audit': [(w) => { w.jobs['tuf-client'].env.NODE_OPTIONS = '--import=/tmp/p.mjs' }, DENIED('NODE_OPTIONS')],
+    'BASH_ENV in a step of a job without an audit': [(w) => { w.jobs.workspace.steps.find(s => s.run !== undefined).env = { BASH_ENV: '/tmp/skip.sh' } }, DENIED('BASH_ENV')],
+    'PATH in a job without an audit': [(w) => { w.jobs['tuf-client'].env.PATH = '/tmp/bin:/usr/bin:/bin' }, DENIED('PATH')],
+    'ENV in a step of a job without an audit': [(w) => { w.jobs.workspace.steps.find(s => s.run !== undefined).env = { ENV: '/tmp/skip.sh' } }, DENIED('ENV')],
+    'npm registry in a step of a job without an audit': [(w) => { w.jobs['tuf-client'].steps.find(s => s.run !== undefined).env = { npm_config_registry: 'https://registry.invalid/' } }, DENIED('npm_config_registry')],
+    'step env of a job without an audit given as an expression': [(w) => { w.jobs.workspace.steps.find(s => s.run !== undefined).env = '${{ fromJSON(vars.WORKSPACE_ENV) }}' }, ANY_ENV_MAP],
+    'action given as a number': [(w) => { w.jobs['release-contracts'].steps.find(s => s.uses?.startsWith('actions/checkout@')).uses = 7 }, /uses an unreviewed action/],
+    'action inputs given as an expression': [(w) => { w.jobs['release-contracts'].steps.find(s => s.uses?.startsWith('actions/checkout@')).with = '${{ fromJSON(vars.CHECKOUT) }}' }, /inputs that are not a plain map/],
     // A cache restored before an audit can bring back what an earlier run's dependency code saved, a replaced npm included.
     'Go cache restored before the Cloudflare audit': [(w) => { const steps = w.jobs['cloudflare-tuf'].steps; move(steps, setupGo(steps), 'gate_3') }, BEFORE_AUDIT],
     'Go set up without a cache before the EHR audit': [(w) => { before(w.jobs['ehr-release-cache'].steps, 'gate_2', { ...setupGo(w.jobs['cloudflare-tuf'].steps), with: { 'go-version': '${{ env.GO_VERSION }}', cache: false } }) }, BEFORE_AUDIT],
@@ -179,7 +191,7 @@ test('forbidden workflow paths are rejected statically', () => {
     'tooling job moved into a container': [(w) => { w.jobs.tooling.container = 'node:22' }, JOB_RUNTIME],
     'node preload written to GITHUB_ENV': [(w) => { before(w.jobs.tooling.steps, 'audit', preload) }, LATER_STEPS],
     'fake npm added through GITHUB_PATH': [(w) => { before(w.jobs.tooling.steps, 'audit', fakeNpm) }, LATER_STEPS],
-    'fake npm added through tooling PATH': [(w) => { w.jobs.tooling.env.PATH = '/tmp/bin:/usr/bin:/bin' }, /workflow cannot set PATH/],
+    'fake npm added through tooling PATH': [(w) => { w.jobs.tooling.env.PATH = '/tmp/bin:/usr/bin:/bin' }, UNLISTED('PATH')],
     'BASH_ENV in the tooling env': [(w) => { w.jobs.tooling.env.BASH_ENV = '/tmp/skip.sh' }, UNLISTED('BASH_ENV')],
     'BASH_ENV in the workflow env': [(w) => { w.env = { BASH_ENV: '/tmp/skip.sh' } }, UNLISTED('BASH_ENV')],
     'proxy in the tooling env': [(w) => { w.jobs.tooling.env.HTTPS_PROXY = 'http://127.0.0.1:8080' }, UNLISTED('HTTPS_PROXY')],
@@ -200,6 +212,11 @@ test('forbidden workflow paths are rejected statically', () => {
     'npm cache restored for the tooling': [(w) => { setupNode(w.jobs.tooling.steps).with['package-manager-cache'] = true }, NPM_CACHE],
     'tooling checked out again after the audit': [(w) => { const steps = w.jobs.tooling.steps; steps.splice(steps.findIndex(s => s.id === 'audit') + 1, 0, structuredClone(checkout(steps))) }, ONE_CHECKOUT],
   }
+  Object.assign(attacks, {
+    'NODE_OPTIONS in the publish job env': [(w) => { w.jobs.publish.env.NODE_OPTIONS = '--import=/tmp/p.mjs' }, DENIED('NODE_OPTIONS')],
+    'BASH_ENV in a publish step env': [(w) => { w.jobs.publish.steps.filter(s => s.run !== undefined)[1].env = { BASH_ENV: '/tmp/skip.sh' } }, DENIED('BASH_ENV')],
+    'publish step env given as an expression': [(w) => { w.jobs.publish.steps.filter(s => s.run !== undefined)[1].env = '${{ fromJSON(inputs.plan_json).env }}' }, ANY_ENV_MAP],
+  })
   for (const [name, attack] of Object.entries(attacks)) {
     const [edit, reason] = [attack].flat()
     const workflow = parseWorkflow(source)
