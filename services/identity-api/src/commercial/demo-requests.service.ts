@@ -79,7 +79,9 @@ export class DemoRequestsService {
          order by created_at desc, id desc limit $3`,
         [filters.status ?? null, filters.productCode ?? null, limit],
       );
-      await this.audit.recordWithClient(client, this.adminAudit(context, 'commercial.demo-requests.list',
+      // An administrator's audit action starts with 'admin.': 0064's audit_platform_scope_ck refuses any other
+      // action from a platform actor, and the refused insert failed the whole read.
+      await this.audit.recordWithClient(client, this.adminAudit(context, 'admin.demo-requests.list',
         'demo-request-collection', undefined, { returnedCount: result.rows.length }));
       return { items: result.rows.map(this.present) };
     });
@@ -109,7 +111,7 @@ export class DemoRequestsService {
          values ($1,$2,$3,$4,$5,$6)`,
         [requestId, row.status, input.status, input.reason, context.actor.accountId, context.correlationId],
       );
-      await this.audit.recordWithClient(client, this.adminAudit(context, 'commercial.demo-request.status',
+      await this.audit.recordWithClient(client, this.adminAudit(context, 'admin.demo-request.status',
         'demo-request', requestId, { from: row.status, to: input.status, version: Number(next.version) }));
       return { ...this.present(next), replayed: false };
     });

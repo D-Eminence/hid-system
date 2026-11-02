@@ -2699,3 +2699,153 @@ whose prescription is now not active or at another version (what 0101 will
 hold back), those dispensed whose prescription has since changed, and those
 dispensed after a newer version of their prescription was recorded (what 0101
 now refuses), with no patient data.
+
+## 30. The sealed demo story (0102)
+
+Migration 0102 (`0102_sealed_demo_story.sql`, owner request of 2026-11-02 in
+chat: "i need the access pin and emergency to work in demo account now and fill
+both patient and ehr with the informaton you filled in the demo video";
+unsigned until the owner signs) fills the sealed demo tenant of section 26 with
+the demo video's made-up story. It changes no table, column, policy, trigger or
+existing function and no API field. It adds three functions, owned by the
+applier and granted to no role (revoked from PUBLIC here and in
+`runtime-grants.sql`): `identity.demo_story_install(text)` (the seed,
+SECURITY DEFINER), `identity.demo_story_context(text,uuid,uuid,text)`
+and `identity.demo_story_lab_result(...)`. No service calls them. The
+seed runs on Amazon RDS only, as 0098's install does; every other database gets
+the functions only.
+
+What the screens show after the seed (every row demo, written once):
+
+- Names: Patient One is Adaeze Okafor (female, born 1991-03-04, Lagos,
+  Nigeria), Patient Two Chinedu Okafor (male, 1990-07-02, Lagos, Nigeria);
+  Patients Three to Ten are Abubakar Bello, Halima Yusuf, Emeka Nwosu, Ngozi
+  Eze, Musa Ibrahim, Funke Adebayo, Ifeanyi Okeke and Zainab Lawal. The patient
+  logins' display names follow; the staff login is Dr Tunde Bello. Health IDs
+  are unchanged.
+- Profiles: the hospital and HMO (Sample Teaching Hospital, Sample HMO) and the
+  health information (Adaeze: O+, AA, "Penicillin — rash", ferrous sulphate,
+  iron deficiency anaemia; Chinedu: A+, AS), where the patient saved none.
+  Adaeze's completion card counts 8 of 12; the photo and an emergency contact
+  are added by the owner in the app (10 of 12); a phone (0098 G5) and a
+  verified NIN (0098 G6) cannot be held by a demo patient.
+- The access PIN: both patient logins hold the owner's PIN (the bcrypt hash
+  `identity.set_my_patient_access_pin` would store, cost 12), unless the
+  patient already has a PIN row. `identity.access_patient_with_pin` at Demo
+  Hospital (the demo login's doctor membership, direct care) answers
+  `verified: true` for it.
+- EHR at Demo Hospital: Adaeze's completed visit six weeks before the apply
+  (vitals, a consultation note and a patient summary, diagnoses Z88.0 and
+  D50.9, ferrous sulphate) and today's visit in progress (triage vitals, the
+  signed consultation note, B54 malaria, artemether-lumefantrine and
+  paracetamol, a malaria rapid test and a full blood count); Chinedu checked in
+  today (triage vitals, a malaria rapid test and paracetamol).
+- Orders: all six sent from Demo Hospital with `ehr.send_order_route` and
+  accepted with `lab.accept_order_route` / `pharmacy.accept_order_route`.
+  Adaeze's two tests have their results entered at Demo Laboratory and are not
+  checked or released: `lab.validate_result_governance` requires a second
+  person for the check and the demo has one staff login. Her two prescriptions
+  are dispensed at Demo Pharmacy (6 and 18 tablets), which completes those
+  routes. Chinedu's test waits for his sample at Demo Laboratory and his
+  paracetamol waits at Demo Pharmacy.
+- Demo Outreach: "Ajegunle health week" (active) and "Makoko school screening"
+  (planned), and four field registrations awaiting resolution, without phone
+  numbers and not linked to the campaign: the campaign check
+  (`outreach.validate_registration_campaign_write`, 0045) reads the member row
+  FOR SHARE, which forced row-level security refuses an owner without
+  BYPASSRLS (`outreach.campaign_members` has no UPDATE policy). The same check
+  runs for outreach-api, so a live registration into a campaign may meet the
+  same refusal; 0102 reports it and changes nothing.
+
+Nothing is sent: the order commands' inbox notices are marked read in the same
+transaction (no web push is due), the services' outbox rows for results and
+dispensings are not written, and no identity outbox row or delivery attempt is
+made. The accept commands queue `LabWorkItemCreated` and
+`PharmacyWorkItemCreated` integration events, as for every order; no
+notification workflow reads them. The audit has one row of the migration's own
+per row written (actor system, provenance `migration`, source system
+`hid-sealed-demo`, correlation id `0102-sealed-demo-story`) and a story row
+with counts; no audit row names a patient or clinician. The order commands add
+their own system rows (received, accepted, dispensing returned).
+
+The seed refuses with 55000 and writes nothing while the three demo logins are
+not all active (`SEALED_DEMO_STORY_LOGINS_NOT_READY`), while
+`cross_facility_orders_enabled` or `cross_facility_route_access_enabled` is off
+(`SEALED_DEMO_STORY_ORDERS_OFF`), when a 0098 share at Demo Hospital was
+revoked (`SEALED_DEMO_STORY_SHARE_MISSING`) or a target is not the demo's
+(`SEALED_DEMO_STORY_NOT_DEMO`); a PIN hash that is not bcrypt cost 12 is 22023
+`SEALED_DEMO_STORY_PIN_HASH_INVALID`. Before any order command runs it also
+asks what those commands would refuse on live data, so the release never stops
+inside them: `SEALED_DEMO_STORY_ROLE_MISSING` (a demo membership inactive, a
+send or receive permission gone, or the staff record without a name),
+`SEALED_DEMO_STORY_DESTINATION_OFF` (Demo Laboratory or Demo Pharmacy not
+eligible to receive, for example unlisted by support, or Demo Hospital not
+active and verified), `SEALED_DEMO_STORY_PATIENT_RESTRICTED` (Adaeze or
+Chinedu not active, without a Health ID, or with a deny directive naming Demo
+Laboratory or Demo Pharmacy) and `SEALED_DEMO_STORY_ORDER_LIMIT` (the six sends
+would pass a daily send limit, a destination is full of open orders, or a demo
+receiving membership has used its daily wrong-patient tries). The Health IDs
+and the attestation texts the commands are given are read from the database.
+The owner's read-only pre-signing query in the file's header asks the same
+and must answer rds 1, active_logins 3, orders_on, roles_ok, destinations_on,
+patients_open and limits_ok true, hospital_shares 2, pins 0 and story 0. A
+second call changes nothing.
+
+Emergency needs nothing from 0102: the demo login break-glasses any demo
+patient at Demo Hospital or Demo Outreach (emergency purpose, a reason) for a
+read-only emergency view, while `break_glass_enabled` is on, the `emergency`
+purpose is active, and the login has made fewer than 10 activations in the
+past hour (one count for every tester sharing the login).
+
+The suite is `services/ehr-api/test/database/sealed-demo-story.integration.sql`.
+0102 has no down migration; 0098's off switch still applies.
+
+## 31. Platform administrators review organization applications (0103)
+
+Owner request of 2026-11-01 (D-Eminence, "fix the two dashboard errors now"):
+the admin Overview showed "Organization applications: Your account does not
+have permission" for the platform super admin. 0103 is unsigned until the
+owner signs its declaration.
+
+Routes (unchanged): `GET /api/v1/admin/organization-applications`
+(`platform.identity-review.read`), `POST .../:applicationId/verify-cac`
+(`platform.facility.manage`), `POST .../:applicationId/approve`
+(`platform.facility.manage`, `platform.principal.manage`,
+`platform.role.manage`) and `POST .../:applicationId/reject`
+(`platform.facility.manage`). The Identity API runs each in a platform
+transaction, which sends no facility and no membership for an administrator
+who has none.
+
+Who may act:
+
+- A platform-scoped call (no facility and no membership in the request
+  context, and the account holds `platform.admin.access`) is authorized by the
+  route's platform permission alone. Before 0103 it also needed an active
+  facility membership, which a platform administrator does not have, so every
+  route answered 403.
+- A call that names a facility or a membership keeps exactly the old check:
+  an active membership of that facility, plus the platform permission.
+- Everyone still needs an active account, a correlation id, the purpose
+  `healthcare-operations` and the route's platform permission. No permission
+  is granted to anyone. The identity reviewer role can list but not check,
+  approve or reject (it lacks `platform.facility.manage`).
+
+Audit rows written by the database for a platform-scoped call:
+
+| Action | Outcome |
+| --- | --- |
+| `admin.organization-application.cac-verify` | `success` when verified; `denied` for not verified or incomplete; `failure` otherwise |
+| `admin.organization-application.approve` | `success` |
+| `admin.organization-application.reject` | `denied` |
+
+They are `actor_type = 'platform'` with facility, membership, organization and
+patient empty (0064's platform rules); approve's `details.organizationId`
+names the new or reused organization. A facility-scoped call still writes the
+old `staff` rows (`identity.organization.application.*`, with its facility,
+membership and, for approve, organization). The Identity API's own failure
+rows (`api.admin.organization-application*`) are unchanged.
+
+Responses, request bodies, `If-Match` versions and error mapping are
+unchanged. 0103 has no down migration; applying the previous bodies (0046,
+0056) restores the old behaviour. The suite is
+`services/ehr-api/test/database/platform-organization-applications.integration.sql`.
