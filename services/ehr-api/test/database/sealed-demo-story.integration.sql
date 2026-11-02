@@ -11,7 +11,12 @@
 --      here (no demo PIN, no story audit row);
 --   2. refusals, each writing nothing: a hash that is not bcrypt cost 12, a
 --      target that is not the demo's, the demo logins before the owner's
---      password resets, cross-facility orders switched off, a revoked share;
+--      password resets, cross-facility orders or route access switched off,
+--      a revoked share; and, asked before any order command runs, what those
+--      commands would refuse on live data: Demo Laboratory or Demo Pharmacy
+--      unlisted by support, a patient's deny directive naming Demo
+--      Laboratory, a revoked doctor role or an inactive lab membership, the
+--      daily send limit and the daily wrong-patient tries;
 --   3. the owner's hash: stored verbatim, cost 12, in the table's shape, and
 --      an envelope pgcrypto accepts (undone; never verified against a PIN);
 --   4. the seed: names, display names, the staff name; profile details and
@@ -197,6 +202,81 @@ select pg_temp.assert('a revoked share at Demo Hospital: refused',
   pg_temp.try(format('select identity.demo_story_install(%L)', current_setting('hid.test.pin_hash')))
     = '55000 0102: SEALED_DEMO_STORY_SHARE_MISSING');
 rollback to savepoint share_revoked;
+savepoint route_access_off;
+update platform.control_settings set enabled = false where control_key = 'cross_facility_route_access_enabled';
+select pg_temp.assert('route access between facilities switched off: refused',
+  pg_temp.try(format('select identity.demo_story_install(%L)', current_setting('hid.test.pin_hash')))
+    = '55000 0102: SEALED_DEMO_STORY_ORDERS_OFF');
+rollback to savepoint route_access_off;
+savepoint lab_unlisted;
+insert into identity.order_route_destination_settings (facility_id, organization_id, listed, reason,
+  set_by_account_id, set_at, correlation_id)
+select facility.id, facility.organization_id, false, 'Paused for a test', '98d00003-0000-4000-8000-000000000001',
+  clock_timestamp(), 'sealed-story-test'
+  from identity.facilities facility where facility.id = '98d00002-0000-4000-8000-000000000002';
+select pg_temp.assert('Demo Laboratory unlisted by support: refused before any order is sent',
+  pg_temp.try(format('select identity.demo_story_install(%L)', current_setting('hid.test.pin_hash')))
+    = '55000 0102: SEALED_DEMO_STORY_DESTINATION_OFF');
+rollback to savepoint lab_unlisted;
+savepoint pharmacy_unlisted;
+insert into identity.order_route_destination_settings (facility_id, organization_id, listed, reason,
+  set_by_account_id, set_at, correlation_id)
+select facility.id, facility.organization_id, false, 'Paused for a test', '98d00003-0000-4000-8000-000000000001',
+  clock_timestamp(), 'sealed-story-test'
+  from identity.facilities facility where facility.id = '98d00002-0000-4000-8000-000000000003';
+select pg_temp.assert('Demo Pharmacy unlisted by support: refused before any order is sent',
+  pg_temp.try(format('select identity.demo_story_install(%L)', current_setting('hid.test.pin_hash')))
+    = '55000 0102: SEALED_DEMO_STORY_DESTINATION_OFF');
+rollback to savepoint pharmacy_unlisted;
+savepoint patient_denies;
+insert into identity.consent_directives (id, patient_id)
+values ('98a10200-0000-4000-8000-000000000001', '98d00009-0000-4000-8000-000000000002');
+insert into identity.consent_directive_versions (id, directive_id, patient_id, version_no, status, provision_type,
+  grantee_type, grantee_id, starts_at, source_reference, reason, content_sha256)
+values ('98a10200-0000-4000-8000-000000000002', '98a10200-0000-4000-8000-000000000001',
+  '98d00009-0000-4000-8000-000000000002', 1, 'active', 'deny', 'facility', '98d00002-0000-4000-8000-000000000002',
+  clock_timestamp() - interval '1 minute', 'sealed-story-test', 'Not this laboratory', repeat('a', 64));
+select pg_temp.assert('Chinedu''s deny directive naming Demo Laboratory: refused before any order is sent',
+  pg_temp.try(format('select identity.demo_story_install(%L)', current_setting('hid.test.pin_hash')))
+    = '55000 0102: SEALED_DEMO_STORY_PATIENT_RESTRICTED');
+rollback to savepoint patient_denies;
+savepoint doctor_revoked;
+update auth.account_roles set revoked_at = clock_timestamp(), revoked_by = '98d00003-0000-4000-8000-000000000001',
+  revocation_reason = 'Revoked for a test' where id = '98d00006-0000-4000-8000-000000000011';
+select pg_temp.assert('the demo doctor role revoked: refused',
+  pg_temp.try(format('select identity.demo_story_install(%L)', current_setting('hid.test.pin_hash')))
+    = '55000 0102: SEALED_DEMO_STORY_ROLE_MISSING');
+rollback to savepoint doctor_revoked;
+savepoint lab_inactive;
+update identity.staff_facility_memberships set active = false where id = '98d00005-0000-4000-8000-000000000002';
+select pg_temp.assert('the demo lab membership inactive: refused',
+  pg_temp.try(format('select identity.demo_story_install(%L)', current_setting('hid.test.pin_hash')))
+    = '55000 0102: SEALED_DEMO_STORY_ROLE_MISSING');
+rollback to savepoint lab_inactive;
+savepoint send_limit;
+create or replace function ehr.order_route_limits()
+returns table (sends_per_member_per_day integer, sends_per_pair_per_day integer, open_per_destination integer,
+  routes_per_order integer, searches_per_member_per_hour integer, respond_days integer, work_days integer,
+  after_completion_days integer, access_cap_days integer, read_after_cancel_days integer,
+  mismatches_per_route integer, mismatches_per_member_per_day integer, mismatches_per_route_any integer)
+language sql immutable parallel safe set search_path = pg_catalog, pg_temp
+as $f$ select 5, 200, 500, 5, 60, 7, 30, 14, 45, 7, 5, 20, 20 $f$;
+select pg_temp.assert('six sends would pass the daily send limit: refused before any order is sent',
+  pg_temp.try(format('select identity.demo_story_install(%L)', current_setting('hid.test.pin_hash')))
+    = '55000 0102: SEALED_DEMO_STORY_ORDER_LIMIT');
+rollback to savepoint send_limit;
+savepoint tries_used;
+create or replace function ehr.order_route_limits()
+returns table (sends_per_member_per_day integer, sends_per_pair_per_day integer, open_per_destination integer,
+  routes_per_order integer, searches_per_member_per_hour integer, respond_days integer, work_days integer,
+  after_completion_days integer, access_cap_days integer, read_after_cancel_days integer,
+  mismatches_per_route integer, mismatches_per_member_per_day integer, mismatches_per_route_any integer)
+language sql immutable parallel safe set search_path = pg_catalog, pg_temp
+as $f$ select 100, 200, 500, 5, 60, 7, 30, 14, 45, 7, 5, 0, 20 $f$;
+select pg_temp.assert('the receivers'' daily wrong-patient tries used: refused',
+  pg_temp.try(format('select identity.demo_story_install(%L)', current_setting('hid.test.pin_hash')))
+    = '55000 0102: SEALED_DEMO_STORY_ORDER_LIMIT');
+rollback to savepoint tries_used;
 select pg_temp.assert('nothing written by the refusals', pg_temp.story_counts() = current_setting('hid.test.before'));
 
 -- 3. The owner's hash (the constant 0102 seeds on production): stored

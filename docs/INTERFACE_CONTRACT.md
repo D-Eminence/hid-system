@@ -2770,11 +2770,26 @@ their own system rows (received, accepted, dispensing returned).
 
 The seed refuses with 55000 and writes nothing while the three demo logins are
 not all active (`SEALED_DEMO_STORY_LOGINS_NOT_READY`), while
-`cross_facility_orders_enabled` is off (`SEALED_DEMO_STORY_ORDERS_OFF`), when a
-0098 share at Demo Hospital was revoked (`SEALED_DEMO_STORY_SHARE_MISSING`) or a
-target is not the demo's (`SEALED_DEMO_STORY_NOT_DEMO`); a PIN hash that is not
-bcrypt cost 12 is 22023 `SEALED_DEMO_STORY_PIN_HASH_INVALID`. A second call
-changes nothing.
+`cross_facility_orders_enabled` or `cross_facility_route_access_enabled` is off
+(`SEALED_DEMO_STORY_ORDERS_OFF`), when a 0098 share at Demo Hospital was
+revoked (`SEALED_DEMO_STORY_SHARE_MISSING`) or a target is not the demo's
+(`SEALED_DEMO_STORY_NOT_DEMO`); a PIN hash that is not bcrypt cost 12 is 22023
+`SEALED_DEMO_STORY_PIN_HASH_INVALID`. Before any order command runs it also
+asks what those commands would refuse on live data, so the release never stops
+inside them: `SEALED_DEMO_STORY_ROLE_MISSING` (a demo membership inactive, a
+send or receive permission gone, or the staff record without a name),
+`SEALED_DEMO_STORY_DESTINATION_OFF` (Demo Laboratory or Demo Pharmacy not
+eligible to receive, for example unlisted by support, or Demo Hospital not
+active and verified), `SEALED_DEMO_STORY_PATIENT_RESTRICTED` (Adaeze or
+Chinedu not active, without a Health ID, or with a deny directive naming Demo
+Laboratory or Demo Pharmacy) and `SEALED_DEMO_STORY_ORDER_LIMIT` (the six sends
+would pass a daily send limit, a destination is full of open orders, or a demo
+receiving membership has used its daily wrong-patient tries). The Health IDs
+and the attestation texts the commands are given are read from the database.
+The owner's read-only pre-signing query in the file's header asks the same
+and must answer rds 1, active_logins 3, orders_on, roles_ok, destinations_on,
+patients_open and limits_ok true, hospital_shares 2, pins 0 and story 0. A
+second call changes nothing.
 
 Emergency needs nothing from 0102: the demo login break-glasses any demo
 patient at Demo Hospital or Demo Outreach (emergency purpose, a reason) for a

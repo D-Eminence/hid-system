@@ -140,15 +140,31 @@
 --    audit row exists. A second call changes nothing and answers zero counts.
 --    It refuses (55000, nothing written) while the three demo logins are not
 --    all active (SEALED_DEMO_STORY_LOGINS_NOT_READY: the owner sets their
---    passwords with Forgot password first), while cross-facility orders are
---    switched off (SEALED_DEMO_STORY_ORDERS_OFF), or when a 0098 share no
---    longer lets the demo doctor write for Adaeze and Chinedu at Demo
---    Hospital (SEALED_DEMO_STORY_SHARE_MISSING: the patient revoked it).
+--    passwords with Forgot password first), while cross-facility orders or
+--    route access are switched off (SEALED_DEMO_STORY_ORDERS_OFF), or when a
+--    0098 share no longer lets the demo doctor write for Adaeze and Chinedu
+--    at Demo Hospital (SEALED_DEMO_STORY_SHARE_MISSING: the patient revoked
+--    it). It also asks first everything the order commands it calls would
+--    refuse on live data, so the release never stops inside them:
+--    SEALED_DEMO_STORY_ROLE_MISSING (a demo membership is not active, or has
+--    lost the send or receive permission an order needs, or the staff record
+--    has no name), SEALED_DEMO_STORY_DESTINATION_OFF (Demo Laboratory or
+--    Demo Pharmacy is not eligible to receive orders, for example support
+--    unlisted it with identity.admin_set_order_route_destination, or Demo
+--    Hospital is not active and verified), SEALED_DEMO_STORY_PATIENT_RESTRICTED
+--    (Adaeze or Chinedu is not active, has no Health ID, or has a deny
+--    directive naming Demo Laboratory or Demo Pharmacy), and
+--    SEALED_DEMO_STORY_ORDER_LIMIT (the six sends would pass the per-member
+--    or per-pair daily limit, a destination is full of open orders, or a demo
+--    receiving membership has used its daily wrong-patient tries). The Health
+--    IDs the receivers type and the attestation texts are read from the
+--    database (identity.patients.hid_code; the newest
+--    ehr.order_route_attestation_texts row per kind), as the services do.
 --
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
 --    and nothing is applied): 0001-0101 applied and every object relied on
 --    exists (else "0102: 0001-0101 must be applied first"); no function of
---    this file exists (else "0102: already applied"); the 35 bodies the seed
+--    this file exists (else "0102: already applied"); the 40 bodies the seed
 --    calls or fires are byte for byte the ones 0001-0101 gave them (md5 of
 --    pg_proc.prosrc); the two profile tables' owner policies name the
 --    applier, and the applier may create in schema identity (else 42501).
@@ -167,17 +183,65 @@
 -- 0098 still applies.
 --
 -- Before signing, the owner runs this read-only query on production; it must
--- answer rds 1, active_logins 3, orders_on true, hospital_shares 2, pins 0
--- (a PIN a patient set is kept, so the owner's would not apply), story 0:
+-- answer rds 1, active_logins 3, orders_on true, roles_ok true,
+-- hospital_shares 2, destinations_on true, patients_open true, limits_ok
+-- true, pins 0 (a PIN a patient set is kept, so the owner's would not apply),
+-- story 0. Any other answer is the named 55000 refusal of D14, and the
+-- release would stop with nothing applied:
 --   select (select count(*) from pg_roles where rolname = 'rds_superuser') as rds,
 --          (select count(*) from auth.accounts where id in ('98d00003-0000-4000-8000-000000000001',
 --             '98d00008-0000-4000-8000-000000000001', '98d00008-0000-4000-8000-000000000002')
 --             and status = 'active') as active_logins,
---          (select enabled from platform.control_settings
---            where control_key = 'cross_facility_orders_enabled') as orders_on,
+--          (select count(*) = 2 and bool_and(enabled) from platform.control_settings
+--            where control_key in ('cross_facility_orders_enabled', 'cross_facility_route_access_enabled')) as orders_on,
+--          (select bool_and(identity.has_active_membership('sealed-demo:98d00003-0000-4000-8000-000000000001', m, f)
+--                  and auth.membership_has_permission('sealed-demo:98d00003-0000-4000-8000-000000000001', m, f, p))
+--             from (values ('98d00005-0000-4000-8000-000000000001'::uuid, '98d00002-0000-4000-8000-000000000001'::uuid,
+--                           'ehr.order-route.send'),
+--                          ('98d00005-0000-4000-8000-000000000001', '98d00002-0000-4000-8000-000000000001',
+--                           'ehr.lab-request.write'),
+--                          ('98d00005-0000-4000-8000-000000000001', '98d00002-0000-4000-8000-000000000001',
+--                           'ehr.prescription.write'),
+--                          ('98d00005-0000-4000-8000-000000000002', '98d00002-0000-4000-8000-000000000002',
+--                           'lab.order-route.receive'),
+--                          ('98d00005-0000-4000-8000-000000000003', '98d00002-0000-4000-8000-000000000003',
+--                           'pharmacy.order-route.receive')) needed(m, f, p)) as roles_ok,
 --          (select count(*) from identity.consent_grants where correlation_id = '0098-sealed-demo-install'
 --             and membership_id = '98d00005-0000-4000-8000-000000000001'
 --             and status = 'active' and expires_at > now()) as hospital_shares,
+--          (identity.order_route_destination_eligible('98d00002-0000-4000-8000-000000000002', 'lab_request')
+--             and identity.order_route_destination_eligible('98d00002-0000-4000-8000-000000000003', 'prescription')
+--             and exists (select 1 from identity.facilities facility
+--                           join identity.organizations organization on organization.id = facility.organization_id
+--                          where facility.id = '98d00002-0000-4000-8000-000000000001' and facility.active
+--                            and facility.lifecycle_status = 'verified' and organization.active)) as destinations_on,
+--          (select count(*) = 2 and bool_and(patient.status = 'active' and patient.hid_code is not null
+--                  and not identity.patient_denies_order_route(patient.id, '98d00002-0000-4000-8000-000000000002')
+--                  and not identity.patient_denies_order_route(patient.id, '98d00002-0000-4000-8000-000000000003'))
+--             from identity.patients patient where patient.id in ('98d00009-0000-4000-8000-000000000001',
+--               '98d00009-0000-4000-8000-000000000002')) as patients_open,
+--          (select (select count(*) from ehr.order_routes route
+--                    where route.sent_by_membership_id = '98d00005-0000-4000-8000-000000000001'
+--                      and route.created_at > now() - interval '24 hours') + 6 <= limits.sends_per_member_per_day
+--              and (select count(*) from ehr.order_routes route
+--                    where route.ordering_facility_id = '98d00002-0000-4000-8000-000000000001'
+--                      and route.receiving_facility_id = '98d00002-0000-4000-8000-000000000002'
+--                      and route.created_at > now() - interval '24 hours') + 3 <= limits.sends_per_pair_per_day
+--              and (select count(*) from ehr.order_routes route
+--                    where route.ordering_facility_id = '98d00002-0000-4000-8000-000000000001'
+--                      and route.receiving_facility_id = '98d00002-0000-4000-8000-000000000003'
+--                      and route.created_at > now() - interval '24 hours') + 3 <= limits.sends_per_pair_per_day
+--              and coalesce((select max(open_count) from (select count(*) as open_count from ehr.order_routes route
+--                    where route.receiving_facility_id in ('98d00002-0000-4000-8000-000000000002',
+--                      '98d00002-0000-4000-8000-000000000003')
+--                      and route.state = 'sent' and route.respond_by > now()
+--                    group by route.receiving_facility_id) open_routes), 0) < limits.open_per_destination
+--              and coalesce((select max(tries) from (select count(*) as tries from ehr.order_route_accept_attempts attempt
+--                    where attempt.membership_id in ('98d00005-0000-4000-8000-000000000002',
+--                      '98d00005-0000-4000-8000-000000000003')
+--                      and attempt.outcome = 'mismatch' and attempt.attempted_at > now() - interval '24 hours'
+--                    group by attempt.membership_id) wrong_tries), 0) < limits.mismatches_per_member_per_day
+--             from ehr.order_route_limits() limits) as limits_ok,
 --          (select count(*) from identity.patient_access_pins where patient_id in
 --             ('98d00009-0000-4000-8000-000000000001', '98d00009-0000-4000-8000-000000000002')) as pins,
 --          (select count(*) from audit.events where correlation_id = '0102-sealed-demo-story') as story;
@@ -199,7 +263,9 @@ begin
      or to_regclass('ehr.clinical_note_revisions') is null or to_regclass('ehr.vitals') is null
      or to_regclass('ehr.diagnoses') is null or to_regclass('ehr.prescriptions') is null
      or to_regclass('ehr.lab_requests') is null or to_regclass('ehr.order_routes') is null
-     or to_regclass('ehr.record_versions') is null
+     or to_regclass('ehr.record_versions') is null or to_regclass('ehr.order_route_attestation_texts') is null
+     or to_regclass('ehr.order_route_accept_attempts') is null
+     or to_regclass('identity.facilities') is null or to_regclass('identity.organizations') is null
      or to_regclass('lab.work_items') is null or to_regclass('lab.accessions') is null
      or to_regclass('lab.specimen_requirements') is null or to_regclass('lab.specimens') is null
      or to_regclass('lab.specimen_events') is null or to_regclass('lab.accession_events') is null
@@ -225,8 +291,10 @@ begin
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
     into mismatch
     from (values
+      ('auth.membership_has_permission(text,uuid,uuid,text)', '65e3eaff93fe729fd5c5b986b80c9dd6'),
       ('ehr.capture_record_version()', '70daa16f05bb3ec28f05292e6358a702'),
       ('ehr.context_allows(uuid,uuid,text)', '75016690184a80bd246c365b4d108082'),
+      ('ehr.order_route_limits()', 'e5f4a3718fd4e3d32fcf9932790cc55d'),
       ('ehr.order_route_notify_patient(ehr.order_routes,text)', '31a11a44325846699036367b7e56b46e'),
       ('ehr.send_order_route(uuid,text,uuid,uuid,uuid,bigint,uuid,text,text,character)', '4202ba3bbf02abd7db34606d42adca9c'),
       ('ehr.sync_order_routes_on_order_change()', '8ce6b42450cc06fc02fec8d1cf63af41'),
@@ -236,6 +304,9 @@ begin
       ('identity.consent_grants_sealed_demo()', '2b5da08703d2cd221c94559a45ce223b'),
       ('identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamp with time zone)',
        '8b12ce866ee75cce411a2721795ffb92'),
+      ('identity.has_active_membership(text,uuid,uuid)', 'bb52953ef1cd08527db61230a671859e'),
+      ('identity.order_route_destination_eligible(uuid,text)', '6b274d9be9056cefc831a9fd92040bc6'),
+      ('identity.patient_denies_order_route(uuid,uuid)', 'ab0dae381c56b599c318b065bf77de47'),
       ('identity.sealed_demo_install()', '8a5dfb0feee0b699b2d13faffbc4a178'),
       ('identity.set_my_patient_access_pin(text,uuid,text)', '78ef55c9025781647ef87e3d76a3e6c3'),
       ('lab.accept_order_route(uuid,bigint,text,text,text,character,text)', '316378c286534d6177d562f9edcb4aac'),
@@ -465,6 +536,12 @@ declare
   two_rx uuid := gen_random_uuid();
   ferrous_rx uuid := gen_random_uuid();
   routes uuid[] := array[]::uuid[];
+  -- What the order commands are given, read as the services read it (D14).
+  health_one text;
+  health_two text;
+  lab_attestation text;
+  rx_attestation text;
+  order_limits record;
   renamed_patients uuid[];
   renamed_accounts uuid[];
   renamed_staff uuid[];
@@ -628,13 +705,83 @@ begin
            and (account.disabled_until is null or account.disabled_until <= clock_timestamp())) <> 3 then
       raise exception using errcode = '55000', message = '0102: SEALED_DEMO_STORY_LOGINS_NOT_READY';
     end if;
-    if not platform.control_enabled('cross_facility_orders_enabled') then
+    -- The order commands' own refusals on live data (D14), asked here, in
+    -- the order the commands ask them, so that a refusal names its cause and
+    -- nothing is written; the release never stops inside a command. The
+    -- owner's pre-signing query in the header asks the same.
+    select attestation.version into lab_attestation from ehr.order_route_attestation_texts attestation
+     where attestation.kind = 'lab_request' order by attestation.created_at desc, attestation.version desc limit 1;
+    select attestation.version into rx_attestation from ehr.order_route_attestation_texts attestation
+     where attestation.kind = 'prescription' order by attestation.created_at desc, attestation.version desc limit 1;
+    if not (platform.control_enabled('cross_facility_orders_enabled')
+            and platform.control_enabled('cross_facility_route_access_enabled'))
+       or lab_attestation is null or rx_attestation is null then
       raise exception using errcode = '55000', message = '0102: SEALED_DEMO_STORY_ORDERS_OFF';
+    end if;
+    if not (identity.has_active_membership(staff_subject, doctor_membership, hospital)
+            and identity.has_active_membership(staff_subject, lab_membership, laboratory)
+            and identity.has_active_membership(staff_subject, pharmacist_membership, pharmacy_site)
+            and auth.membership_has_permission(staff_subject, doctor_membership, hospital, 'ehr.order-route.send')
+            and auth.membership_has_permission(staff_subject, doctor_membership, hospital, 'ehr.lab-request.write')
+            and auth.membership_has_permission(staff_subject, doctor_membership, hospital, 'ehr.prescription.write')
+            and auth.membership_has_permission(staff_subject, lab_membership, laboratory, 'lab.order-route.receive')
+            and auth.membership_has_permission(staff_subject, pharmacist_membership, pharmacy_site,
+                  'pharmacy.order-route.receive'))
+       or coalesce((select length(btrim(staff_row.full_name)) from identity.staff staff_row
+                     where staff_row.id = staff_record), 0) < 2 then
+      raise exception using errcode = '55000', message = '0102: SEALED_DEMO_STORY_ROLE_MISSING';
     end if;
     perform identity.demo_story_context(staff_subject, doctor_membership, hospital, story_correlation);
     if not (ehr.context_allows(patient_one, hospital, 'write_records')
             and ehr.context_allows(patient_two, hospital, 'write_records')) then
       raise exception using errcode = '55000', message = '0102: SEALED_DEMO_STORY_SHARE_MISSING';
+    end if;
+    if not (identity.order_route_destination_eligible(laboratory, 'lab_request')
+            and identity.order_route_destination_eligible(pharmacy_site, 'prescription')
+            and exists (select 1 from identity.facilities facility
+                          join identity.organizations organization on organization.id = facility.organization_id
+                         where facility.id = hospital and facility.active and facility.lifecycle_status = 'verified'
+                           and organization.active)) then
+      raise exception using errcode = '55000', message = '0102: SEALED_DEMO_STORY_DESTINATION_OFF';
+    end if;
+    select patient.hid_code into health_one from identity.patients patient
+     where patient.id = patient_one and patient.status = 'active';
+    select patient.hid_code into health_two from identity.patients patient
+     where patient.id = patient_two and patient.status = 'active';
+    if health_one is null or health_two is null
+       or identity.patient_denies_order_route(patient_one, laboratory)
+       or identity.patient_denies_order_route(patient_one, pharmacy_site)
+       or identity.patient_denies_order_route(patient_two, laboratory)
+       or identity.patient_denies_order_route(patient_two, pharmacy_site) then
+      raise exception using errcode = '55000', message = '0102: SEALED_DEMO_STORY_PATIENT_RESTRICTED';
+    end if;
+    -- Six sends by the doctor membership (three to each destination), each
+    -- accepted before the next is sent, and no wrong-patient try.
+    select * into order_limits from ehr.order_route_limits();
+    if (select count(*) from ehr.order_routes route
+         where route.sent_by_membership_id = doctor_membership
+           and route.created_at > clock_timestamp() - interval '24 hours') + 6 > order_limits.sends_per_member_per_day
+       or (select count(*) from ehr.order_routes route
+            where route.ordering_facility_id = hospital and route.receiving_facility_id = laboratory
+              and route.created_at > clock_timestamp() - interval '24 hours') + 3 > order_limits.sends_per_pair_per_day
+       or (select count(*) from ehr.order_routes route
+            where route.ordering_facility_id = hospital and route.receiving_facility_id = pharmacy_site
+              and route.created_at > clock_timestamp() - interval '24 hours') + 3 > order_limits.sends_per_pair_per_day
+       or (select count(*) from ehr.order_routes route
+            where route.receiving_facility_id = laboratory and route.state = 'sent'
+              and route.respond_by > clock_timestamp()) >= order_limits.open_per_destination
+       or (select count(*) from ehr.order_routes route
+            where route.receiving_facility_id = pharmacy_site and route.state = 'sent'
+              and route.respond_by > clock_timestamp()) >= order_limits.open_per_destination
+       or (select count(*) from ehr.order_route_accept_attempts attempt
+            where attempt.membership_id = lab_membership and attempt.outcome = 'mismatch'
+              and attempt.attempted_at > clock_timestamp() - interval '24 hours')
+          >= order_limits.mismatches_per_member_per_day
+       or (select count(*) from ehr.order_route_accept_attempts attempt
+            where attempt.membership_id = pharmacist_membership and attempt.outcome = 'mismatch'
+              and attempt.attempted_at > clock_timestamp() - interval '24 hours')
+          >= order_limits.mismatches_per_member_per_day then
+      raise exception using errcode = '55000', message = '0102: SEALED_DEMO_STORY_ORDER_LIMIT';
     end if;
 
     -- 6a. Adaeze's visit six weeks ago (D6): tiredness, iron deficiency
@@ -759,14 +906,14 @@ begin
     -- 7. The orders (D9), through the live commands: sent from Demo Hospital,
     -- accepted at Demo Laboratory and Demo Pharmacy by the same login (as a
     -- tester would), each identifying the patient by Health ID.
-    for lab_order in select * from (values (1, mrdt_request, today_encounter, patient_one, 'HID-ZDEMAAA2'),
-                                           (2, fbc_request, today_encounter, patient_one, 'HID-ZDEMAAA2'),
-                                           (3, two_request, two_encounter, patient_two, 'HID-ZDEMAAA3'))
+    for lab_order in select * from (values (1, mrdt_request, today_encounter, patient_one, health_one),
+                                           (2, fbc_request, today_encounter, patient_one, health_one),
+                                           (3, two_request, two_encounter, patient_two, health_two))
                                    orders(n, order_id, encounter_id, patient_id, health_id)
     loop
       perform identity.demo_story_context(staff_subject, doctor_membership, hospital, story_correlation);
       select sent.route_id into route_row from ehr.send_order_route(gen_random_uuid(), 'lab_request',
-        lab_order.patient_id, lab_order.order_id, lab_order.encounter_id, 1, laboratory, 'order-route-lab-attestation-v1',
+        lab_order.patient_id, lab_order.order_id, lab_order.encounter_id, 1, laboratory, lab_attestation,
         'sealed-demo-story-lab-send-' || lab_order.n, encode(sha256(convert_to('sealed-demo-story-lab-send-' || lab_order.n, 'UTF8')), 'hex')) sent;
       routes := routes || route_row.route_id;
       perform identity.demo_story_context(staff_subject, lab_membership, laboratory, story_correlation);
@@ -789,15 +936,15 @@ begin
         lab_results := lab_results || jsonb_build_object('id', result_id, 'patient', lab_order.patient_id);
       end if;
     end loop;
-    for rx_order in select * from (values (1, coartem_rx, today_encounter, patient_one, 'HID-ZDEMAAA2', 6),
-                                          (2, paracetamol_rx, today_encounter, patient_one, 'HID-ZDEMAAA2', 18),
-                                          (3, two_rx, two_encounter, patient_two, 'HID-ZDEMAAA3', null))
+    for rx_order in select * from (values (1, coartem_rx, today_encounter, patient_one, health_one, 6),
+                                          (2, paracetamol_rx, today_encounter, patient_one, health_one, 18),
+                                          (3, two_rx, two_encounter, patient_two, health_two, null))
                                   orders(n, order_id, encounter_id, patient_id, health_id, quantity)
     loop
       perform identity.demo_story_context(staff_subject, doctor_membership, hospital, story_correlation);
       select sent.route_id into route_row from ehr.send_order_route(gen_random_uuid(), 'prescription',
         rx_order.patient_id, rx_order.order_id, rx_order.encounter_id, 1, pharmacy_site,
-        'order-route-prescription-attestation-v1', 'sealed-demo-story-rx-send-' || rx_order.n,
+        rx_attestation, 'sealed-demo-story-rx-send-' || rx_order.n,
         encode(sha256(convert_to('sealed-demo-story-rx-send-' || rx_order.n, 'UTF8')), 'hex')) sent;
       routes := routes || route_row.route_id;
       perform identity.demo_story_context(staff_subject, pharmacist_membership, pharmacy_site, story_correlation);
