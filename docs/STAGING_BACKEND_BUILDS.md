@@ -148,14 +148,48 @@ the release tests try each one: dropping an audit, sending another directory
 through the exception gate, a different exceptions file, `|| true`, a condition or
 `continue-on-error` on an audit step or its job, a `needs` on an audit job (it
 would be skipped whenever the job it waits on is), a container, service or
-matrix on an audit job, a workflow or job default shell, `npm_config_*`,
-`NODE_OPTIONS` or `PATH` in any `env` map, a step in an audit job that writes
-`GITHUB_ENV` or `GITHUB_PATH`, a registry override, or another step touching
-`security/`. These are static checks on the workflow text, not a sandbox, and
-the list is not complete. Shell written to hide what it does (a file path built
-from pieces, an `.npmrc` written by a script) can still get past them, and so
-can settings they do not look at, such as an HTTPS proxy plus an extra CA in the
-environment. The owner's review of every workflow change (CODEOWNERS) is still
+matrix on an audit job, a workflow or job default shell, a step in an audit job
+that writes `GITHUB_ENV` or `GITHUB_PATH`, a registry override, or another step
+touching `security/`.
+
+Since the audit pin hardening (2 November 2026, owner's request) it also checks:
+
+- **The audit runs first, in a shell that reads no BASH_ENV.** In every audit job
+  the audit step comes straight after the reviewed setup actions, before any
+  `npm ci`, install script, build or test: `npm audit` reads only the lockfile,
+  and the exception gate uses only Node built-ins. The step runs in
+  `shell: /usr/bin/bash -p -e {0}`: an absolute path, so no `bash` found on PATH
+  runs it, and privileged mode, so bash reads no `BASH_ENV` or `ENV` file and
+  imports no shell function from the environment, even one written to
+  `GITHUB_ENV` at run time. A release test runs both shells to show the
+  difference.
+- **The environment, by allowlist.** The workflow env and every audit job's and
+  audit step's env may set only the variables these workflows use today
+  (`AUDIT_ENV_ALLOWLIST`: `CI`, `NODE_VERSION`, `GO_VERSION`, the two broker
+  images, `GOTOOLCHAIN`, `TOOLING_SHA`, `PLAN_JSON`, `WRANGLER_SEND_METRICS`,
+  `HID_REQUIRE_CLOUDFLARE_VALIDATOR`, `HID_PUBLIC_BASE` and `GATE_STEPS_JSON`;
+  `NODE_VERSION` only in the workflow env). `BASH_ENV`, `ENV`, `NODE_OPTIONS`,
+  `npm_config_*`, `PATH`, a proxy, an extra CA and anything else are refused,
+  and every env anywhere in the workflow must be a plain map, not an expression
+  whose keys a reviewer cannot see.
+- **The actions and the runner, by allowlist.** An audit job may use only
+  `actions/checkout`, `actions/setup-node`, `actions/setup-go` and
+  `actions/upload-artifact`, each at its reviewed commit and with only the inputs
+  it takes today (`AUDIT_JOB_ACTIONS`); any other action, a local action or a
+  container action is refused. setup-node must install the reviewed Node
+  (22.23.2), and every audit job runs on `ubuntu-24.04`.
+- **PATH, pinned in the audit step.** Every audit command starts with
+  `export PATH="$RUNNER_TOOL_CACHE/node/22.23.2/x64/bin:/usr/bin:/bin"` and
+  `test "$(node --version)" = v22.23.2`, where setup-node installs that Node.
+  Whatever a reviewed action added to PATH does not reach npm or the gate, and a
+  workflow cannot redirect `RUNNER_TOOL_CACHE`: the runner sets `RUNNER_*`
+  itself after `GITHUB_ENV` and env maps.
+
+These are still static checks on the workflow text, not a sandbox, and the list
+is not complete. One of the four reviewed actions itself turned hostile (it runs
+as the runner user and could replace files in the tool cache or write
+`~/.npmrc`), or a self-hosted runner set up to answer `ubuntu-24.04`, can still
+get past them. The owner's review of every workflow change (CODEOWNERS) is still
 the real control. The local gate evidence records
 the exceptions file's SHA-256. The gate compares real paths when it decides
 whether it was run directly, so running it through a symlink still runs the
