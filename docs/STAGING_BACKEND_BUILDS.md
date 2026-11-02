@@ -183,12 +183,12 @@ Since the audit pin hardening (2 November 2026, owner's request) it also checks:
   `npm_config_*`, `PATH`, a proxy, an extra CA and anything else are refused
   there. In every other job, the publish job included, `npm_config_*`,
   `NODE_OPTIONS`, `PATH`, `BASH_ENV` and `ENV` (matched in any case) are refused
-  in any env: the job's, its steps', its container's and its services'. Every
-  env anywhere in the workflow must be a plain map, not an expression whose
-  keys a reviewer cannot see. A container or service must be a literal image
-  name or a plain map, never an expression (a matrix value included), and its
-  Docker options may not set an environment variable (`-e`, `--env`,
-  `--env-file`).
+  in any env: the job's and its steps'. Every env anywhere in the workflow
+  must be a plain map, not an expression whose keys a reviewer cannot see. No
+  job may run in a container or with services: their env, image, Docker
+  options, ports and volumes can each set an environment variable for every
+  step, in more spellings than a static check can list, and none of these
+  workflows uses one.
 - **The actions and the runner, by allowlist.** An audit job may use only
   `actions/checkout`, `actions/setup-node`, `actions/setup-go` and
   `actions/upload-artifact`, each at its reviewed commit and with only the inputs
@@ -203,13 +203,16 @@ Since the audit pin hardening (2 November 2026, owner's request) it also checks:
   the protected readiness workflow) must be printable ASCII with LF line breaks
   (tab allowed), and carry no `%YAML` directive. Release tests hide a checkout `ref`, a step before
   the audit, `continue-on-error` and an npm cache behind each of the four. Those
-  workflows must also keep to the block-style YAML both parsers read the same
-  way: no flow collection except an empty one (in `{?ref: …}` the key is "?ref"
+  workflows must also keep to a block-style subset that a differential test
+  against libyaml (about 150,000 generated documents) found both parsers read
+  the same way: no flow collection except an empty one (in `{?ref: …}` the key is "?ref"
   to the verifier and "ref" to libyaml), no anchor (libyaml ends its name at
   `:` or `?`), no explicit tag, no `<<` merge key, no quoted or plain value over
   several lines (an escaped line break folds differently, and after a bare `-`
-  and a comment the verifier joins the following items into one value), and no
-  block scalar indentation indicator (trailing whitespace lines differ).
+  and a comment the verifier joins the following items into one value), no
+  block scalar indentation indicator (trailing whitespace lines differ), and no
+  block scalar header on a line of its own (after a comment line, it swallows
+  the keys below it in the verifier's parser, `continue-on-error` included).
 - **PATH, pinned in the audit step.** Every audit command starts with
   `export PATH="$RUNNER_TOOL_CACHE/node/22.23.2/x64/bin:/usr/bin:/bin"` and
   `test "$(node --version)" = v22.23.2`, where setup-node installs that Node.

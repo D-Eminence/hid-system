@@ -30,6 +30,7 @@ const dockerAction = { name: 'Prepare', uses: 'docker://alpine:3' }
 const SHELL = /must run in \/usr\/bin\/bash -p -e/
 const STEP_KEYS = /cannot be conditional, configured or allowed to fail/
 const CODE_FIRST = /runs code before its audit/
+const CONTAINER = /cannot run in a container or with services/
 const GATE_ONLY = /only the reviewed audit step may use the audit gate or the exception file/
 const BEFORE_AUDIT = /before its audit: only checkout and setup-node come first/
 const NPM_CACHE = /cannot restore a package-manager cache/
@@ -116,16 +117,15 @@ test('local gates keep every npm audit and run only infra/aws through the except
     'BASH_ENV in a step of a job without an audit': [(w) => { w.jobs.workspace.steps.find(s => s.run !== undefined).env = { BASH_ENV: '/tmp/skip.sh' } }, DENIED('BASH_ENV')],
     'PATH in a job without an audit': [(w) => { w.jobs['tuf-client'].env.PATH = '/tmp/bin:/usr/bin:/bin' }, DENIED('PATH')],
     'ENV in a step of a job without an audit': [(w) => { w.jobs.workspace.steps.find(s => s.run !== undefined).env = { ENV: '/tmp/skip.sh' } }, DENIED('ENV')],
+    // No job may run in a container or with services, in any form.
+    'a job without an audit in a container': [(w) => { w.jobs.workspace.container = 'node:22' }, CONTAINER],
+    'a container with env': [(w) => { w.jobs.workspace.container = { image: 'node:22', env: { NODE_OPTIONS: '--import=/tmp/p.mjs' } } }, CONTAINER],
+    'a container from a matrix': [(w) => { w.jobs.workspace.strategy = { matrix: { c: [{ image: 'node:22' }] } }; w.jobs.workspace.container = '${{ matrix.c }}' }, CONTAINER],
+    'a container with Docker options': [(w) => { w.jobs.workspace.container = { image: 'node:22', options: '--cpus 1 -eNODE_OPTIONS=--import=/tmp/p.mjs' } }, CONTAINER],
+    'a container with ports': [(w) => { w.jobs.workspace.container = { image: 'node:22', ports: ['8080:80 -e NODE_OPTIONS=x'] } }, CONTAINER],
+    'services given as an expression': [(w) => { w.jobs.workspace.services = '${{ fromJSON(vars.SERVICES) }}' }, CONTAINER],
+    'a service with env': [(w) => { w.jobs['tuf-client'].services = { db: { image: 'postgres:16', env: { PATH: '/tmp/bin' } } } }, CONTAINER],
     'npm registry in upper case in a step of a job without an audit': [(w) => { w.jobs['tuf-client'].steps.find(s => s.run !== undefined).env = { NPM_CONFIG_REGISTRY: 'https://registry.invalid/' } }, DENIED('NPM_CONFIG_REGISTRY')],
-    'NODE_OPTIONS in the container env of a job without an audit': [(w) => { w.jobs.workspace.container = { image: 'node:22', env: { NODE_OPTIONS: '--import=/tmp/p.mjs' } } }, DENIED('NODE_OPTIONS')],
-    'container env of a job without an audit given as an expression': [(w) => { w.jobs.workspace.container = { image: 'node:22', env: '${{ fromJSON(vars.CONTAINER_ENV) }}' } }, ANY_ENV_MAP],
-    'container of a job without an audit given as an expression': [(w) => { w.jobs.workspace.container = '${{ fromJSON(vars.WORKSPACE_CONTAINER) }}' }, /gives a container or service as an expression/],
-    'container from a matrix': [(w) => { w.jobs.workspace.strategy = { matrix: { c: [{ image: 'node:22', env: { NODE_OPTIONS: '--import=/tmp/p.mjs' } }] } }; w.jobs.workspace.container = '${{ matrix.c }}' }, /gives a container or service as an expression/],
-    'services given as an expression': [(w) => { w.jobs.workspace.services = '${{ fromJSON(vars.SERVICES) }}' }, /gives a container or service as an expression/],
-    'one service given as an expression': [(w) => { w.jobs.workspace.services = { db: '${{ fromJSON(vars.DB) }}' } }, /gives a container or service as an expression/],
-    'NODE_OPTIONS through container options': [(w) => { w.jobs.workspace.container = { image: 'node:22', options: '--cpus 1 -e NODE_OPTIONS=--import=/tmp/p.mjs' } }, /sets container environment through options/],
-    'environment file through service options': [(w) => { w.jobs.workspace.services = { db: { image: 'postgres:16', options: '--env-file /tmp/env' } } }, /sets container environment through options/],
-    'PATH in a service env of a job without an audit': [(w) => { w.jobs.workspace.services = { db: { image: 'postgres:16', env: { PATH: '/tmp/bin' } } } }, DENIED('PATH')],
     'npm registry in a step of a job without an audit': [(w) => { w.jobs['tuf-client'].steps.find(s => s.run !== undefined).env = { npm_config_registry: 'https://registry.invalid/' } }, DENIED('npm_config_registry')],
     'step env of a job without an audit given as an expression': [(w) => { w.jobs.workspace.steps.find(s => s.run !== undefined).env = '${{ fromJSON(vars.WORKSPACE_ENV) }}' }, ANY_ENV_MAP],
     'action given as a number': [(w) => { w.jobs['release-contracts'].steps.find(s => s.uses?.startsWith('actions/checkout@')).uses = 7 }, /uses an unreviewed action/],
@@ -299,6 +299,10 @@ test('only block-style YAML that this parser and libyaml read the same way is ac
     // After a bare '-' and a comment, this parser joins the following items into one value; libyaml reads them apart.
     'a plain value over several lines': [['    runs-on: ubuntu-24.04\n', '    runs-on: ubuntu-24.04\n    x:\n      -\n      #c\n        a\n      - b\n'], /plain value over several lines/],
     'a block scalar indentation indicator': [['run: npm --prefix release ci --ignore-scripts', 'run: |1\n           npm --prefix release ci --ignore-scripts'], /indentation indicator/],
+    'a chomped literal with an indentation indicator': [['run: npm --prefix release ci --ignore-scripts', 'run: |-1\n           npm --prefix release ci --ignore-scripts'], /indentation indicator/],
+    'a folded scalar with an indentation indicator': [['run: npm --prefix release ci --ignore-scripts', 'run: >1\n           npm --prefix release ci --ignore-scripts'], /indentation indicator/],
+    // After '#x', a header on a line of its own swallows the keys below it here; libyaml reads continue-on-error as a key.
+    'continue-on-error hidden under a block scalar header': [['        id: gate_2', '        id: gate_2\n        x:\n        #c\n          >-\n        continue-on-error: true'], /block scalar on the line of its key/],
   }
   for (const [name, [[line, replacement], reason]] of Object.entries(refused)) {
     const edited = localGates.replace(line, replacement)
@@ -306,6 +310,7 @@ test('only block-style YAML that this parser and libyaml read the same way is ac
     assert.throws(() => verifyLocalGateWorkflow(edited), reason, name)
   }
   assert.throws(() => verifyPublicationWorkflow(source.replace('    runs-on: ubuntu-24.04\n', '    runs-on: ubuntu-24.04\n    <<:\n      if: false\n')), /merge key/, 'a merge key in the publisher')
+  assert.throws(() => verifyPublicationWorkflow(source.replace('        id: audit\n', '        id: audit\n        x:\n        #c\n          |\n        continue-on-error: true\n')), /block scalar on the line of its key/, 'continue-on-error hidden in the publisher')
   // An empty flow collection has no key or item to read differently, as in the readiness workflow's `permissions: {}`.
   assert.deepEqual(parseWorkflow('permissions: {}\nitems: []\n'), { permissions: {}, items: [] })
   assert.throws(() => parseWorkflow('permissions: {contents: read}\n'), /block style, not a flow collection/)
