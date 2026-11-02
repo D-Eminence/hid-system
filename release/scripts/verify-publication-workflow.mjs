@@ -68,9 +68,14 @@ const AUDIT_COMMAND = /\bnpm\b[^\n]*\baudit\b|npm-audit-with-exceptions/
 
 // Pins every npm audit in a workflow: one audit step in each reviewed job with
 // exactly the reviewed commands, each starting with the pinned PATH and Node
-// check above, run in AUDIT_SHELL, and placed before every run step of its job
-// (only reviewed actions come first), so no dependency code, install script
-// or test runs before the audit. It also rejects these ways to skip,
+// check above, run in AUDIT_SHELL, and placed before every run step of its job,
+// so no dependency code, install script or test runs before the audit. Only
+// checkout and setup-node come first, and setup-node must not restore a
+// package-manager cache: no cache restore (setup-go's included) can bring an
+// earlier run's dependency code into the tool cache before the audit. Each
+// audit job checks out exactly once, at `checkoutRef` (none in the local
+// gates, so the event's own commit), so the audit cannot read another tree
+// than the steps after it. It also rejects these ways to skip,
 // reconfigure or redirect an audit: a workflow or job default shell; a
 // condition, needs (a job waiting on a skipped job is skipped too),
 // continue-on-error, container, service, matrix or another runner on an audit
@@ -86,7 +91,7 @@ const AUDIT_COMMAND = /\bnpm\b[^\n]*\baudit\b|npm-audit-with-exceptions/
 // tool cache or write ~/.npmrc), or a self-hosted runner set up to answer
 // ubuntu-24.04, can still get past them, so owner review of every workflow
 // change remains the real control.
-export function verifyAuditSteps(workflow, expected) {
+export function verifyAuditSteps(workflow, expected, { checkoutRef } = {}) {
   assert.equal(workflow.defaults, undefined, 'workflow cannot change the default shell or directory')
   // The workflow env reaches every job, the audit jobs included.
   assert.ok(workflow.env === undefined || isMap(workflow.env), 'every env must be a plain map, not an expression')
@@ -102,6 +107,8 @@ export function verifyAuditSteps(workflow, expected) {
     for (const step of job.steps) assert.ok(!/GITHUB_(?:ENV|PATH)/.test(JSON.stringify(step)), `job ${name} cannot change the environment or PATH of later steps`)
     for (const step of job.steps) {
       if (step.uses?.startsWith('actions/setup-node@')) {
+        // setup-node takes a missing or empty value as true.
+        assert.equal(step.with?.['package-manager-cache'], false, `job ${name} cannot restore a package-manager cache`)
         assert.deepEqual(Object.keys(step.with ?? {}).sort(), ['node-version', 'package-manager-cache'], `job ${name} cannot configure an npm registry`)
         const version = step.with['node-version'] === '${{ env.NODE_VERSION }}' ? workflow.env?.NODE_VERSION : step.with['node-version']
         assert.equal(String(version), NODE_RUNTIME, `job ${name} must set up the reviewed Node ${NODE_RUNTIME}`)
@@ -119,9 +126,17 @@ export function verifyAuditSteps(workflow, expected) {
     }
     assert.ok(job.env === undefined || isMap(job.env), `job ${name} has an env that is not a plain map`)
     for (const key of Object.keys(job.env ?? {})) assert.ok(jobEnvAllowed(key), `workflow cannot set ${key}`)
-    // Only reviewed actions run before the audit: no install, script or test.
+    // Only checkout and setup-node run before the audit: no install, script,
+    // test or cache restore.
     const first = job.steps.indexOf(steps[0])
-    for (const step of job.steps.slice(0, first)) assert.ok(step.run === undefined && step.uses !== undefined, `job ${name} runs code before its audit`)
+    for (const step of job.steps.slice(0, first)) {
+      assert.ok(step.run === undefined && step.uses !== undefined, `job ${name} runs code before its audit`)
+      assert.ok(/^actions\/(?:checkout|setup-node)@/.test(step.uses), `job ${name} cannot run ${step.uses} before its audit: only checkout and setup-node come first`)
+    }
+    const checkouts = job.steps.filter(step => typeof step.uses === 'string' && step.uses.startsWith('actions/checkout@'))
+    assert.equal(checkouts.length, 1, `job ${name} must check out its source exactly once`)
+    assert.ok(job.steps.indexOf(checkouts[0]) < first, `job ${name} must check out its source before its audit`)
+    assert.equal(checkouts[0].with?.ref, checkoutRef, `job ${name} cannot check out another tree for its audit`)
     found.set(name, steps[0])
   }
   assert.deepEqual([...found.keys()].sort(), Object.keys(expected).sort(), 'npm audits run only in the reviewed jobs')
@@ -151,7 +166,7 @@ export function verifyLocalGateWorkflow(source) {
 
 export function verifyPublicationWorkflow(source) {
   const workflow = parseWorkflow(source)
-  verifyAuditSteps(workflow, PUBLISHER_AUDITS)
+  verifyAuditSteps(workflow, PUBLISHER_AUDITS, { checkoutRef: '${{ inputs.tooling_sha }}' })
   assert.deepEqual(Object.keys(workflow.on), ['workflow_call'], 'publisher must be reusable-only')
   assert.deepEqual(workflow.permissions, { contents: 'read' }, 'default permissions are read-only')
   assert.deepEqual(Object.keys(workflow.jobs).sort(), ['publish', 'tooling'], 'unexpected authority-bearing job')
@@ -159,6 +174,8 @@ export function verifyPublicationWorkflow(source) {
   assert.equal(workflow.concurrency?.['cancel-in-progress'], false, 'never cancel a live publication for a newer run')
   const { tooling, publish } = workflow.jobs
   assert.equal(tooling.steps.find(step => step.uses?.startsWith('actions/setup-go@'))?.with['go-version'], '1.26.10')
+  // setup-go takes a missing cache input as true. The publisher restores no cache.
+  for (const step of tooling.steps.filter(step => step.uses?.startsWith('actions/setup-go@'))) assert.equal(step.with?.cache, false, 'the publisher restores no Go cache')
   assert.ok(tooling.steps.some(step => step.id === 'go_audit' && step.run.includes('verify-production-toolchain.mjs') && step.run.includes('go-vulnerability-gate.mjs')))
   assert.deepEqual(tooling.permissions, { contents: 'read' })
   assert.equal(tooling.environment, undefined)

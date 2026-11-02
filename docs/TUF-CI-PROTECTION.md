@@ -392,9 +392,17 @@ touching `security/`.
 Since the audit pin hardening (2 November 2026, owner's request) it also checks:
 
 - **The audit runs first, in a shell that reads no BASH_ENV.** In every audit job
-  the audit step comes straight after the reviewed setup actions, before any
-  `npm ci`, install script, build or test: `npm audit` reads only the lockfile,
-  and the exception gate uses only Node built-ins. The step runs in
+  only `actions/checkout` and `actions/setup-node` come before the audit step:
+  no `npm ci`, install script, build or test, and no cache restore. `npm audit`
+  reads only the lockfile, and the exception gate uses only Node built-ins.
+  setup-node must say `package-manager-cache: false` (it takes a missing or
+  empty value as true), and setup-go comes after the audit, because a cache
+  restored before it could bring back whatever an earlier run's dependency code
+  saved, a replaced `npm` in the tool cache included. The publisher's setup-go
+  must also say `cache: false`. Each audit job checks out exactly once, before
+  its audit: the local gates at the event's own commit (no `ref`), the publisher
+  at `inputs.tooling_sha`, so an audit never reads another tree than the steps
+  after it test. The step runs in
   `shell: /usr/bin/bash -p -e {0}`: an absolute path, so no `bash` found on PATH
   runs it, and privileged mode, so bash reads no `BASH_ENV` or `ENV` file and
   imports no shell function from the environment, even one written to

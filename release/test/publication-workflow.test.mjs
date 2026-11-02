@@ -28,6 +28,14 @@ const dockerAction = { name: 'Prepare', uses: 'docker://alpine:3' }
 const SHELL = /must run in \/usr\/bin\/bash -p -e/
 const STEP_KEYS = /cannot be conditional, configured or allowed to fail/
 const CODE_FIRST = /runs code before its audit/
+const BEFORE_AUDIT = /before its audit: only checkout and setup-node come first/
+const NPM_CACHE = /cannot restore a package-manager cache/
+const ONE_CHECKOUT = /must check out its source exactly once/
+const OTHER_TREE = /cannot check out another tree for its audit/
+const setupGo = (steps) => steps.find(s => s.uses?.startsWith('actions/setup-go@'))
+const setupNode = (steps) => steps.find(s => s.uses?.startsWith('actions/setup-node@'))
+const checkout = (steps) => steps.find(s => s.uses?.startsWith('actions/checkout@'))
+const move = (steps, step, id, after = false) => { steps.splice(steps.indexOf(step), 1); steps.splice(steps.findIndex(s => s.id === id) + (after ? 1 : 0), 0, step) }
 const runFirst = (steps, id) => { const i = steps.findIndex(s => s.id === id); const [step] = steps.splice(i, 1); steps.splice(steps.findIndex(s => s.run !== undefined), 0, step) }
 const before = (steps, id, step) => steps.splice(steps.findIndex(s => s.id === id), 0, step)
 test('protected publisher workflow pins code, permissions, ordering and retained evidence', () => assert.equal(verifyPublicationWorkflow(source), true))
@@ -98,6 +106,17 @@ test('local gates keep every npm audit and run only infra/aws through the except
     'NODE_VERSION in an audit job env': [(w) => { w.jobs['release-contracts'].env = { NODE_VERSION: '20.0.0' } }, UNLISTED('NODE_VERSION')],
     'NODE_VERSION in an audit step env': [(w) => { w.jobs['aws-release-trust'].steps.find(x => x.id === 'gate_1').env = { NODE_VERSION: '20.0.0' } }, UNLISTED('NODE_VERSION')],
     'infra/aws audit job on another runner': [(w) => { w.jobs['aws-release-trust']['runs-on'] = 'self-hosted' }, JOB_RUNTIME],
+    // A cache restored before an audit can bring back what an earlier run's dependency code saved, a replaced npm included.
+    'Go cache restored before the Cloudflare audit': [(w) => { const steps = w.jobs['cloudflare-tuf'].steps; move(steps, setupGo(steps), 'gate_3') }, BEFORE_AUDIT],
+    'Go set up without a cache before the EHR audit': [(w) => { before(w.jobs['ehr-release-cache'].steps, 'gate_2', { ...setupGo(w.jobs['cloudflare-tuf'].steps), with: { 'go-version': '${{ env.GO_VERSION }}', cache: false } }) }, BEFORE_AUDIT],
+    'artifact step before the release audit': [(w) => { const steps = w.jobs['release-contracts'].steps; move(steps, steps.find(s => s.uses?.startsWith('actions/upload-artifact@')), 'gate_2') }, BEFORE_AUDIT],
+    'npm cache restored before the release audit': [(w) => { setupNode(w.jobs['release-contracts'].steps).with['package-manager-cache'] = true }, NPM_CACHE],
+    'npm cache input left empty for the infra/aws audit': [(w) => { setupNode(w.jobs['aws-release-trust'].steps).with['package-manager-cache'] = '' }, NPM_CACHE],
+    'npm cache input dropped for the EHR audit': [(w) => { delete setupNode(w.jobs['ehr-release-cache'].steps).with['package-manager-cache'] }, NPM_CACHE],
+    // The audit must read the tree the later steps test, not another commit.
+    'Cloudflare audit reads another commit': [(w) => { checkout(w.jobs['cloudflare-tuf'].steps).with.ref = '${{ github.event.pull_request.base.sha }}' }, OTHER_TREE],
+    'head checked out again after the release audit': [(w) => { const steps = w.jobs['release-contracts'].steps; steps.splice(steps.findIndex(s => s.id === 'gate_2') + 1, 0, { ...checkout(steps), with: { 'persist-credentials': false } }) }, ONE_CHECKOUT],
+    'source checked out only after the infra/aws audit': [(w) => { const steps = w.jobs['aws-release-trust'].steps; move(steps, checkout(steps), 'gate_2', true) }, /must check out its source before its audit/],
   }
   for (const [name, attack] of Object.entries(attacks)) {
     const [edit, reason] = [attack].flat()
@@ -171,6 +190,12 @@ test('forbidden workflow paths are rejected statically', () => {
     'policy tests run before the audit': [(w) => { runFirst(w.jobs.tooling.steps, 'policy') }, CODE_FIRST],
     'tooling install runs before the audit': [(w) => { const steps = w.jobs.tooling.steps; const i = steps.findIndex(s => s.name === 'Install locked tooling without cloud authority'); const [step] = steps.splice(i, 1); steps.splice(steps.findIndex(s => s.id === 'audit'), 0, step) }, CODE_FIRST],
     'NODE_VERSION in the tooling env': [(w) => { w.jobs.tooling.env.NODE_VERSION = '20.0.0' }, UNLISTED('NODE_VERSION')],
+    'Go set up before the audit': [(w) => { const steps = w.jobs.tooling.steps; move(steps, setupGo(steps), 'audit') }, BEFORE_AUDIT],
+    'publisher Go cache turned on': [(w) => { setupGo(w.jobs.tooling.steps).with.cache = true }, /the publisher restores no Go cache/],
+    'publisher Go cache input dropped': [(w) => { delete setupGo(w.jobs.tooling.steps).with.cache }, /the publisher restores no Go cache/],
+    'second publisher Go setup with a cache': [(w) => { const steps = w.jobs.tooling.steps; steps.splice(steps.indexOf(setupGo(steps)) + 1, 0, { uses: setupGo(steps).uses, with: { 'go-version': '1.26.10', cache: true } }) }, /the publisher restores no Go cache/],
+    'npm cache restored for the tooling': [(w) => { setupNode(w.jobs.tooling.steps).with['package-manager-cache'] = true }, NPM_CACHE],
+    'tooling checked out again after the audit': [(w) => { const steps = w.jobs.tooling.steps; steps.splice(steps.findIndex(s => s.id === 'audit') + 1, 0, structuredClone(checkout(steps))) }, ONE_CHECKOUT],
   }
   for (const [name, attack] of Object.entries(attacks)) {
     const [edit, reason] = [attack].flat()
