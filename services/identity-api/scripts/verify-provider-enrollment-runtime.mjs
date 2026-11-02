@@ -56,8 +56,13 @@ const port = Number(process.env.PGPORT ?? 5432);
 // Run in a disposable copy so synthetic organizations, quota counters, the
 // opened control and the enabled QoreID provider never leak into later steps.
 const isolated = `${rehearsal ? 'hid_rehearsal' : process.env.PGDATABASE}_provider_${randomUUID().replaceAll('-', '').slice(0, 12)}`;
-// Production hosts: the portal (app.*) is the only host Turnstile accepts the
-// provider-enrollment action on; staff sign in on ehr.*, administrators on admin.*.
+// Production hosts. Each staff product site (ehr.*, lab.*, pharmacy.*) runs
+// its own facility sign-up, staff invitations and staff sign-in (owner,
+// 2026-11-01): P4b's sign-ups and invitation opens run there. The patient
+// portal (app.*) still accepts provider-enrollment and staff-invitation while
+// links already sent lead there, so P4's flow and most opens still run on it.
+// The administrators' console (admin.*) accepts neither. The Turnstile spec
+// pins the whole table.
 const origin = 'https://app.healthidentitydirectory.com';
 const ehrOrigin = 'https://ehr.healthidentitydirectory.com';
 // Staff of a laboratory or a pharmacy sign in on their product's host (P4b).
@@ -159,7 +164,7 @@ const notificationRequire = createRequire(join(notificationService, 'package.jso
 const { DeliverStaffInvitationDto } = notificationRequire(join(notificationService,
   'src/notification/dto/deliver-staff-invitation.dto.ts'));
 const { validateRecipient } = notificationRequire(join(notificationService, 'src/notification/dto/deliver-otp.dto.ts'));
-const { staffInvitationContent, staffInvitationLinkOrigin } = notificationRequire(join(notificationService,
+const { staffInvitationContent, staffSiteForRole, staffSiteOrigin } = notificationRequire(join(notificationService,
   'src/providers/provider.types.ts'));
 const notificationValidator = notificationRequire('class-validator');
 const notificationTransformer = notificationRequire('class-transformer');
@@ -180,7 +185,8 @@ const verifiedTokens = new Map();
 // order: the internal caller and workload token, the idempotency key's
 // pattern, the body against the route's own DTO (whitelist, no unknown
 // field) and recipient check; it then renders the email with the route's own
-// template for the production deployment and answers 202 with the outcome
+// template and link for the production deployment (the staff site of the
+// invitee's role) and answers 202 with the outcome
 // set in invitationOutcome (as Novu answers), keeping each email.
 const staffInvitationUrl = `${getEnvironment().NOTIFICATION_API_URL.replace(/\/+$/, '')}/api/v1/notifications/staff-invitation`;
 const invitationEmails = [];
@@ -202,7 +208,7 @@ const staffInvitationRoute = async (init) => {
   assert(validateRecipient('email', body.recipient), 'notification-api would refuse the recipient');
   const content = staffInvitationContent({ facilityName: body.facilityName ?? null, roleCode: body.roleCode,
     invitationId: body.invitationId, token: body.token, code: body.code, expiresAt: new Date(body.expiresAt),
-    origin: staffInvitationLinkOrigin('production'), supportEmail: 'support@verifier.invalid' });
+    origin: staffSiteOrigin('production', staffSiteForRole(body.roleCode)), supportEmail: 'support@verifier.invalid' });
   invitationEmails.push({ headers, body, subject: content.subject, text: content.text });
   return Response.json({ requestId: randomUUID(), outcome: invitationOutcome,
     primary: { provider: 'ses', outcome: invitationOutcome } }, { status: 202 });
@@ -568,10 +574,13 @@ try {
   expectProblem(await start(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA,
     turnstileToken: turnstile('provider-enrollment', 'www.healthidentitydirectory.com') })), 403, 'TURNSTILE_HOSTNAME_MISMATCH');
   security.turnstile_hostname_mismatch = 'TURNSTILE_HOSTNAME_MISMATCH';
-  expectProblem(await http.post(ENROLL).set('Origin', ehrOrigin).set('X-Forwarded-For', MAIN)
+  // The administrators' console is neither the patient portal nor a staff
+  // product site: it refuses facility sign-up even with a check issued for it.
+  // The staff product sites accept it (P4b's sign-ups below run there).
+  expectProblem(await http.post(ENROLL).set('Origin', adminOrigin).set('X-Forwarded-For', MAIN)
     .send(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA,
-      turnstileToken: turnstile('provider-enrollment', 'ehr.healthidentitydirectory.com') })), 403, 'TURNSTILE_CONTEXT_MISMATCH');
-  security.product_host = 'TURNSTILE_CONTEXT_MISMATCH';
+      turnstileToken: turnstile('provider-enrollment', new URL(adminOrigin).hostname) })), 403, 'TURNSTILE_CONTEXT_MISMATCH');
+  security.non_product_host = { 'admin.': 'TURNSTILE_CONTEXT_MISMATCH' };
   expectProblem(await start(enrollment({ cacRegistrationNumber: cacA, administratorEmail: emailA,
     turnstileToken: 'replayed' })), 403, 'TURNSTILE_EXPIRED_OR_REPLAYED');
   security.turnstile_replay = 'TURNSTILE_EXPIRED_OR_REPLAYED';
@@ -1847,7 +1856,8 @@ try {
   });
 
   // Hosts: staff sign in on their role's product host (ehr.*, lab.*,
-  // pharmacy.*); accountless invitation pages run on the portal (app.*).
+  // pharmacy.*). Accountless invitation pages run there too, and on the
+  // patient portal (app.*) while older links lead there.
   const SIGN_IN = { ehr: [ehrOrigin, 'staff-login'], lab: [labOrigin, 'lab-login'],
     pharmacy: [pharmacyOrigin, 'pharmacy-login'] };
   let signIns = 0;
@@ -1886,22 +1896,35 @@ try {
         selfService: item.selfService })) };
   };
 
-  // Self sign-up of a new facility of a given type and product (P4's flow).
+  // Self sign-up of a new facility of a given type and product (P4's flow),
+  // on the product's own site (owner, 2026-11-01): start (with a Turnstile
+  // check issued for that site), the emailed code and the password all run on
+  // ehr., lab. or pharmacy., never the patient portal. The Origin header given
+  // as an extra replaces the helpers' portal Origin; Turnstile's hostname
+  // check proves it did on start.
+  const SIGN_UP_SITE = { ehr: ehrOrigin, laboratory: labOrigin, pharmacy: pharmacyOrigin };
+  const signUpSites = {};
   let signUps = 0;
   const signUp = async ({ cac, organizationType, productCode, administratorName }) => {
     signUps += 1;
+    const site = SIGN_UP_SITE[productCode];
+    assert(site, `No product site for ${productCode}`);
+    const onSite = { Origin: site };
     const address = email(`p4b-admin-${signUps}`);
     const started = await start(enrollment({ cacRegistrationNumber: cac, administratorEmail: address, organizationType,
-      productCode, ...(administratorName ? { administratorName } : {}) }), `198.51.121.${signUps}`);
-    assert.equal(started.status, 200, `P4b sign-up start ${cac}: ${JSON.stringify(started.body)}`);
-    const verifiedSignUp = await verify({ challengeId: started.body.challengeId, code: await codeFor(started.body.challengeId) });
-    assert.equal(verifiedSignUp.status, 200, `P4b sign-up verify ${cac}`);
+      productCode, turnstileToken: turnstile('provider-enrollment', new URL(site).hostname),
+      ...(administratorName ? { administratorName } : {}) }), `198.51.121.${signUps}`, onSite);
+    assert.equal(started.status, 200, `P4b sign-up start ${cac} on ${site}: ${JSON.stringify(started.body)}`);
+    const verifiedSignUp = await verify({ challengeId: started.body.challengeId, code: await codeFor(started.body.challengeId) },
+      onSite);
+    assert.equal(verifiedSignUp.status, 200, `P4b sign-up verify ${cac} on ${site}`);
     const activatedSignUp = await activate(cookies(verifiedSignUp).find(value => value.startsWith('hid_provider_enrollment=')),
-      password);
-    assert.equal(activatedSignUp.status, 200, `P4b sign-up activation ${cac}: ${JSON.stringify(activatedSignUp.body)}`);
+      password, onSite);
+    assert.equal(activatedSignUp.status, 200, `P4b sign-up activation ${cac} on ${site}: ${JSON.stringify(activatedSignUp.body)}`);
+    signUpSites[organizationType] = new URL(site).hostname;
     const applicationRow = (await owner.query('select id from identity.organization_applications where organization_id=$1',
       [activatedSignUp.body.organizationId])).rows[0];
-    return { email: address, password, organizationType, productCode, cac, origin,
+    return { email: address, password, organizationType, productCode, cac, origin: site,
       organizationId: activatedSignUp.body.organizationId, facilityId: activatedSignUp.body.facilityId,
       accountId: activatedSignUp.body.accountId, applicationId: applicationRow.id,
       facilityName: `Runtime Clinic ${cac} Ltd`, csrf: activatedSignUp.headers['x-csrf-token'],
@@ -1967,8 +1990,8 @@ try {
   const byLink = sent => ({ invitationId: sent.body.invitationId, token: sent.body.token });
   const byCode = sent => ({ email: sent.body.recipient, code: sent.body.code });
   const invitationCookie = response => cookies(response).find(value => value.startsWith('hid_staff_invitation='));
-  const acceptInvitation = (cookie, secret) => {
-    let call = http.post('/api/v1/identity/staff-invitations/accept').set('Origin', origin);
+  const acceptInvitation = (cookie, secret, site = origin) => {
+    let call = http.post('/api/v1/identity/staff-invitations/accept').set('Origin', site);
     if (cookie) call = call.set('Cookie', cookie);
     return call.send({ password: secret });
   };
@@ -2323,6 +2346,11 @@ try {
     administratorRole: { supportAdmin: 403, noLicence: 'SELF_SERVICE_REVIEW_LICENCE_REQUIRED', missingIfMatch: 428,
       status: 200, grantedRole: 'doctor', oldSession: 401, unchanged: 'SELF_SERVICE_ADMINISTRATOR_ROLE_UNCHANGED',
       staleVersion: 409, permissionsAfter: 'org_admin + doctor', audit: 2 } } };
+  // Every P4b facility signed up on its product's own site (start 200 with a
+  // check issued for that site, then the code and the password there).
+  assert.deepEqual(signUpSites, { hospital: 'ehr.healthidentitydirectory.com', laboratory: 'lab.healthidentitydirectory.com',
+    pharmacy: 'pharmacy.healthidentitydirectory.com', other: 'ehr.healthidentitydirectory.com' });
+  security.product_sites = { signUp: { ...signUpSites } };
 
   // ── 4. The first 30 days: 5 emergency activations a day per facility ──
   const emergencyPatients = [];
@@ -2396,9 +2424,11 @@ try {
   const reference = chidi.invitationId.replaceAll('-', '').slice(0, 8).toUpperCase();
   assert.equal(chidi.sent.subject, `Invitation to join ${hospital.facilityName} on Health ID`);
   assert(chidi.sent.text.includes(`as a doctor.`));
-  assert(chidi.sent.text.includes(`https://app.healthidentitydirectory.com/provider/invitation#${chidi.invitationId}.${chidi.sent.body.token}`));
+  // A doctor's invitation opens on the EHR site, never the patient portal.
+  assert(chidi.sent.text.includes(`https://ehr.healthidentitydirectory.com/provider/invitation#${chidi.invitationId}.${chidi.sent.body.token}`));
+  assert(!chidi.sent.text.includes('app.healthidentitydirectory.com'), 'The invitation email links to the patient portal');
   // The typed fallback: the page opened without a link shows the code form at once.
-  assert(chidi.sent.text.includes('If the link does not open, go to https://app.healthidentitydirectory.com/provider/invitation'
+  assert(chidi.sent.text.includes('If the link does not open, go to https://ehr.healthidentitydirectory.com/provider/invitation'
     + ` and enter this email address and the code ${chidi.sent.body.code}.`));
   assert(chidi.sent.text.includes(`quote reference ${reference}.`));
   // Replay (same key, same request): 200 with the stored values, no second email.
@@ -2440,7 +2470,7 @@ try {
     invite: { status: 201, version: 1, deliveryOutcome: 'accepted', versionAfterDelivery: 1 },
     email: { route: 'POST /api/v1/notifications/staff-invitation', idempotencyKey: 'staff-invitation:<sendId>',
       fields: Object.keys(chidi.sent.body).sort(), validatedBy: 'notification-api DeliverStaffInvitationDto',
-      noPersonName: true, subject: chidi.sent.subject, link: 'https://app.healthidentitydirectory.com/provider/invitation#<id>.<token>',
+      noPersonName: true, subject: chidi.sent.subject, link: 'https://ehr.healthidentitydirectory.com/provider/invitation#<id>.<token>',
       reference },
     replay: { status: 200, replayed: true, emails: 0 }, reusedKey: 'IDEMPOTENCY_KEY_REUSED', self: 'STAFF_INVITATION_SELF',
     duplicate: 'STAFF_INVITATION_ALREADY_PENDING', wrongPassword: 'STAFF_REAUTHENTICATION_FAILED (counted)',
@@ -2502,11 +2532,17 @@ try {
   // Typed mode works for a new account (a session too), and the link.
   const amakaTyped = await openedAs(byCode(amakaResent), 'new');
   assert(invitationCookie(amakaTyped), 'Typed mode opened no session for a new account');
-  // A signed-in browser, a wrong Origin, the action on the EHR host, both modes, neither.
+  // A signed-in browser, a wrong Origin, both modes, neither.
   expectProblem(await openInvitation(byLink(amakaResent), { cookie: `${cookieName}_csrf=x` }), 409,
     'STAFF_INVITATION_REQUIRES_SIGN_OUT');
   expectProblem(await openInvitation(byLink(amakaResent), { origin: null }), 403, 'ORIGIN_DENIED');
-  expectProblem(await openInvitation(byLink(amakaResent), { origin: ehrOrigin }), 403, 'TURNSTILE_CONTEXT_MISMATCH');
+  // The doctor's link opens on the EHR site, where her email sends her (each
+  // product is its own site), with a check issued for that site. The
+  // administrators' console is not a staff site and refuses the action even
+  // with a check issued for it.
+  const amakaOnEhr = await openedAs(byLink(amakaResent), 'new', { origin: ehrOrigin });
+  assert(invitationCookie(amakaOnEhr), 'Opening on the EHR site gave no acceptance cookie');
+  expectProblem(await openInvitation(byLink(amakaResent), { origin: adminOrigin }), 403, 'TURNSTILE_CONTEXT_MISMATCH');
   expectProblem(await openInvitation({ ...byLink(amakaResent), ...byCode(amakaResent) }), 400, 'VALIDATION_FAILED');
   expectProblem(await openInvitation({}), 400, 'VALIDATION_FAILED');
   // 20 opens an hour per network; the 21st is refused before any lookup.
@@ -2525,7 +2561,8 @@ try {
     resend: { tooSoon: 'STAFF_INVITATION_RESEND_TOO_SOON', status: 200, version: 2, staleVersion: 409,
       oldLink: 'STAFF_INVITATION_SUPERSEDED', oldCode: 'STAFF_INVITATION_SUPERSEDED', countersReset: true },
     typedNew: 200, signedIn: 'STAFF_INVITATION_REQUIRES_SIGN_OUT', noOrigin: 'ORIGIN_DENIED',
-    ehrHost: 'TURNSTILE_CONTEXT_MISMATCH', bothModes: 400, neither: 400, networkLimit: { perHour: 20, refused: 429 } };
+    productSite: { 'ehr.': 200 }, nonProductHost: { 'admin.': 'TURNSTILE_CONTEXT_MISMATCH' }, bothModes: 400, neither: 400,
+    networkLimit: { perHour: 20, refused: 429 } };
 
   // ── 7. Accept as a new account; sign in on the role's host ──
   expectProblem(await acceptInvitation(invitationCookie(amakaLink), 'Too-short-1'), 400, 'VALIDATION_FAILED');
@@ -2913,8 +2950,12 @@ try {
   const labPage = await staffCall(labAdmin, 'get', '/identity/facility-staff');
   assert.deepEqual([labPage.body.limits.invitationsToday, labPage.body.limits.invitationsPerDay, labPage.body.limits.emailsPerDay,
     labPage.body.canInvite, labPage.body.facility.firstThirtyDaysEndAt !== null], [10, 10, 20, false, true]);
-  const kemiOpened = await openedAs(byLink(kemi.sent), 'new');
-  assert.equal((await acceptInvitation(invitationCookie(kemiOpened), invitationPassword)).status, 200);
+  // A laboratory scientist's email links to the Laboratory site; she opens
+  // and accepts there, then signs in there.
+  assert(kemi.sent.text.includes(`https://lab.healthidentitydirectory.com/provider/invitation#${kemi.invitationId}.`),
+    'The laboratory scientist\'s invitation does not link to the Laboratory site');
+  const kemiOpened = await openedAs(byLink(kemi.sent), 'new', { origin: labOrigin });
+  assert.equal((await acceptInvitation(invitationCookie(kemiOpened), invitationPassword, labOrigin)).status, 200);
   const kemiSession = await signedIn(kemiEmail, invitationPassword, 'lab', laboratory.facilityId);
   assert.deepEqual((await facilityPermissions(kemiSession, laboratory.facilityId)).permissions, await permissionsOf('lab'));
   // Delivery pause at the pharmacy: a definitive failure recorded, nine more seeded, then paused.
@@ -2935,8 +2976,9 @@ try {
   const pharmacyPage = await staffCall(pharmacyAdmin, 'get', '/identity/facility-staff');
   assert.deepEqual([pharmacyPage.body.facility.deliveryPaused, pharmacyPage.body.canInvite], [true, false]);
   assert.equal((await listedFacility(pharmacy, 'reviewed')).deliveryFailuresLastDay, 10);
-  const femiOpened = await openedAs(byLink(femi.sent), 'new');
-  assert.equal((await acceptInvitation(invitationCookie(femiOpened), invitationPassword)).status, 200);
+  // A pharmacist opens and accepts on the Pharmacy site.
+  const femiOpened = await openedAs(byLink(femi.sent), 'new', { origin: pharmacyOrigin });
+  assert.equal((await acceptInvitation(invitationCookie(femiOpened), invitationPassword, pharmacyOrigin)).status, 200);
   const femiSession = await signedIn(femiEmail, invitationPassword, 'pharmacy', pharmacy.facilityId);
   assert.deepEqual((await facilityPermissions(femiSession, pharmacy.facilityId)).permissions, await permissionsOf('pharmacist'));
   p4b.limits = { recipient: { perFacilityIn30Days: 3, fourth: 'STAFF_INVITATION_RECIPIENT_LIMIT' },
@@ -2946,7 +2988,9 @@ try {
     firstThirtyDays: { invitationsPerDay: 10, eleventh: 'STAFF_INVITATION_DAILY_LIMIT', emailsPerDay: 20, canInvite: false },
     deliveryPause: { definitiveFailureRecorded: true, failuresIn24h: 10, next: 'STAFF_INVITATION_DELIVERY_PAUSED',
       deliveryPaused: true, supportCount: 10 },
-    roleHosts: { lab: 'lab.* (lab-login) → lab', pharmacist: 'pharmacy.* (pharmacy-login) → pharmacist' } };
+    roleHosts: { lab: 'lab.* (lab-login) → lab', pharmacist: 'pharmacy.* (pharmacy-login) → pharmacist' },
+    invitationSites: { lab: 'link, open and accept on lab.*', pharmacist: 'open and accept on pharmacy.*' } };
+  security.product_sites.invitationOpen = { 'ehr.': 200, 'lab.': 200, 'pharmacy.': 200 };
 
   // ── 15. Release ends the facility's invitations, members, consents and sessions ──
   const tundeEmail = email('invitee-tunde');
@@ -3119,7 +3163,8 @@ try {
       'open_list_ranked_searched', 'refusal_waiver', 'retry_rejection',
       'p4b_applicant_withdrawal', 'p4b_restricted_until_review', 'p4b_review_gate_trigger', 'p4b_own_licence',
       'p4b_review_unlock_and_sign_out', 'p4b_roles_by_type', 'p4b_administrator_role', 'p4b_first_30_days',
-      'p4b_invitation_email', 'p4b_open_link_and_code', 'p4b_accept_new', 'p4b_existing_staff_signed_in',
+      'p4b_sign_up_on_product_sites', 'p4b_invitation_email', 'p4b_open_link_and_code', 'p4b_open_on_product_sites',
+      'p4b_accept_new', 'p4b_existing_staff_signed_in',
       'p4b_patient_email_refused', 'p4b_remove_and_dormant', 'p4b_role_change', 'p4b_expiry_and_revoke', 'p4b_limits',
       'p4b_governed_unaffected', 'p4b_release', 'p4b_support_reads', 'p4b_audit_scan', 'p4b_staff_context_timing'],
     gate, security, quota, session, lapse, review, confirmation, noCode, p4b, qoreidCacLookups: qoreidCacLookups.length,

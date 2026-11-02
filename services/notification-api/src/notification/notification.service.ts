@@ -3,7 +3,7 @@ import { getEnvironment, type Environment } from '../config/environment';
 import { BrevoFallbackProvider } from '../providers/brevo.provider';
 import { MetaWhatsAppProvider } from '../providers/meta.provider';
 import { emergencyContactAlertContent, type OtpMessage, type OtpProvider, type ProviderResult, staffInvitationContent,
-  staffInvitationLinkOrigin, type StaffInvitationRole } from '../providers/provider.types';
+  type StaffInvitationRole, staffSiteForRole, staffSiteOrigin } from '../providers/provider.types';
 import { contactChangedContent, emailChangeCodeContent, passwordResetCodeContent, passwordUpdatedContent,
   patientWelcomeContent } from '../providers/patient-emails';
 import { accountDeletionContent, type AccountDeletionNoticeKind } from '../providers/account-deletion-emails';
@@ -85,9 +85,11 @@ export class NotificationService {
   /**
    * Renders a facility staff invitation (P4b) and delivers it by email like an
    * OTP: the same profile checks, delivery plan and fallback. The content is
-   * set, so no WhatsApp OTP template is ever used. The link's origin is this
-   * deployment's portal (HID_DEPLOYMENT_ENV); Health ID support's address is
-   * the alerts' EMERGENCY_CONTACT_SUPPORT_EMAIL.
+   * set, so no WhatsApp OTP template is ever used. The link opens on the
+   * staff site the role works on in this deployment (HID_DEPLOYMENT_ENV):
+   * lab for a laboratory scientist, pharmacy for a pharmacist, ehr for the
+   * others; never the patient portal. Health ID support's address is the
+   * alerts' EMERGENCY_CONTACT_SUPPORT_EMAIL.
    */
   deliverStaffInvitation(input: {
     recipient: string;
@@ -105,7 +107,7 @@ export class NotificationService {
       content: staffInvitationContent({
         facilityName: input.facilityName, roleCode: input.roleCode, invitationId: input.invitationId,
         token: input.token, code: input.code, expiresAt: input.expiresAt,
-        origin: staffInvitationLinkOrigin(this.environment.HID_DEPLOYMENT_ENV),
+        origin: staffSiteOrigin(this.environment.HID_DEPLOYMENT_ENV, staffSiteForRole(input.roleCode)),
         supportEmail: this.environment.EMERGENCY_CONTACT_SUPPORT_EMAIL,
       }),
     }, rawPlan);
@@ -171,14 +173,19 @@ export class NotificationService {
     }, rawPlan);
   }
 
-  /** E1 (0095): a patient's invitation to share, to the invited address; no patient, no invitee name. */
+  /**
+   * E1 (0095): a patient's invitation to share, to the invited address; no
+   * patient, no invitee name. Its sign-in and facility sign-up links open on
+   * this deployment's EHR site: the invitee is a health worker, and the
+   * patient portal is for patients only.
+   */
   deliverPatientShareInvitation(input: { recipient: string; reference: string; level: ShareLevel; duration: ShareDuration;
     expiresAt: Date; idempotencyKey: string }, rawPlan?: unknown): Promise<DeliveryResult> {
     return this.deliver({
       channel: 'email', recipient: input.recipient, code: '', purpose: 'PATIENT_SHARE_INVITATION',
       idempotencyKey: input.idempotencyKey,
       content: patientShareInvitationContent({ reference: input.reference, level: input.level, duration: input.duration,
-        expiresAt: input.expiresAt, origin: staffInvitationLinkOrigin(this.environment.HID_DEPLOYMENT_ENV) }),
+        expiresAt: input.expiresAt, origin: staffSiteOrigin(this.environment.HID_DEPLOYMENT_ENV, 'ehr') }),
     }, rawPlan);
   }
 

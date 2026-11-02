@@ -53,7 +53,7 @@ acceptance script runs after the suites in `services/ehr-api/database/tests/`.
 | #76 (LOGIN-DETAIL-ORACLE) | Every credential refusal at sign-in answers 401 "Invalid credentials", so the detail never confirms a correct password; a Google refusal while issuing the session is 401 `GOOGLE_SIGN_IN_DENIED`, audited as denied. One carve-out on this branch (owner decision of 2026-10-28, row below): the right password for a suspended patient account answers 403 `ACCOUNT_SUSPENDED` | — |
 | #76 (A18) | A delegated browser read cannot authorize `write_records` (403 `CSRF_VALIDATION_FAILED`) | — |
 | #79 (TS-2, TS-3, TS-8) | Turnstile retries Siteverify once (same idempotency key), answers its configuration errors as 503 `TURNSTILE_UNAVAILABLE`, logs one safe line per refusal, and a missing token answers 400 `TURNSTILE_REQUIRED` on enrollment, organization application and completion, and demo requests | — |
-| #41 | Staff password recovery: Identity accepts `staff-reset` on the production portal (app.), where /provider/recover is served; www only redirects to the public site. health sends staff recovery to app. (D-Eminence/health, "Send staff password recovery to the portal"). The portal's own staff sign-in (`staff-login` on app.) stays refused, as on main: an owner decision | — |
+| #41 | Staff password recovery: Identity accepts `staff-reset` on the production portal (app.), where /provider/recover is served; www only redirects to the public site. health sends staff recovery to app. (D-Eminence/health, "Send staff password recovery to the portal"). The portal's own staff sign-in (`staff-login` on app.) stays refused, as on main: an owner decision. Since 1 November 2026 staff recovery runs on each staff product site (Owner decisions, "Each product is its own site") | — |
 | #68 (ENR-4, FE-4) | Public enrollment checks the QoreID gate (QoreID and NIN-only enrollment on, QoreID not paused at runtime) before it reads the registry, so while the gate is closed a registered, a pending and an unknown NIN get the same 503 and no rate bucket is charged. Availability answers `{ open: false }`, not 503, when QoreID is paused or the enrollment keys are missing. `main`'s boot-time refusal of NIN-only enrollment in production is not ported | — |
 | #84 (adapter) | A QoreID NIN record with no usable phone, a null photo or a partial residence enrolls; what is unusable is left out instead of answering 502. Such records were refused only by this parsing, so more NINs can now enroll without the NIN holder proof, which is not ported (owner decision) | — |
 | #84 (signed-in NIN binding) | `POST /identity/me/verification/nin` binds a NIN on a name and date-of-birth match, without proof of holding it. It now answers 503 `QOREID_PATIENT_NIN_BINDING_DISABLED` before any lookup, quota charge or evidence write unless `QOREID_PATIENT_SELF_NIN_BINDING_ENABLED=true`. No production screen calls it. `main`'s production refusal of the flag is not ported: turning it on is the owner's decision | — |
@@ -392,7 +392,9 @@ Facility self sign-up differs from `main` (0061–0063, db49a0d, 46a173f,
   `PLATFORM_CONTROL_DISABLED:provider_self_service_enabled` and the gate's
   22023 answer the same 423. Other upstream failures keep `main`'s 5xx codes.
 - Turnstile accepts `provider-enrollment` on production `app.` and staging
-  `staging.` only (`main`: www and staging).
+  `staging.` only (`main`: www and staging). Since 1 November 2026 the five
+  staff product sites accept it too (Owner decisions, "Each product is its
+  own site").
 - Activation is P71's (owner, decision 2): `AuthService.login(..., 'staff')`,
   the three session cookies and `x-csrf-token`, answering `actor`; no MFA, and
   `hid_enrollment` is not cleared (this branch's decision under #50).
@@ -799,8 +801,12 @@ their builds; the items Identity carries are listed here too.
   future hold on other staff commands takes the same marker); the
   invitation email through notification-api's fixed template, with no
   person's name, the facility name dropped when it looks like a domain and
-  the origin from the deployment; Turnstile action `staff-invitation` on
-  `app.` and `staging.` only; 429 `EMERGENCY_PROBATION_LIMITED`;
+  the origin from the deployment (since 1 November 2026 the staff site of the
+  invitee's role, not the patient portal: Owner decisions, "Each product is
+  its own site"); Turnstile action `staff-invitation` on
+  `app.` and `staging.` only (since 1 November 2026 also on the five staff
+  product sites: Owner decisions, "Each product is its own site"); 429
+  `EMERGENCY_PROBATION_LIMITED`;
   emergency-contact alerts drop a domain-like clinician name everywhere
   (V1); the withdrawal route. The website treats a 404 from any new route as
   "not available yet". Routes: support's review now answers `grantedRole`
@@ -925,7 +931,12 @@ their builds; the items Identity carries are listed here too.
   and revocation; the recipient, cross-facility, first-30-days and
   delivery-pause limits and the recovery hold; a governed facility
   unchanged; release after review; support's reads; an audit scan; and the
-  staff context's cost.
+  staff context's cost. Since 1 November 2026 (Owner decisions, "Each
+  product is its own site") P4b's facilities sign up on their product's own
+  site (start, code and password on `ehr.`, `lab.` or `pharmacy.`), the
+  doctor's, laboratory scientist's and pharmacist's invitations open there,
+  and the administrators' console (`admin.`) refuses both; P4's flow still
+  runs on the patient portal, which keeps accepting the two for now.
 - Tests (`services/ehr-api/test/database/`, rollback-only): new
   `self-service-review-unlock`, `staff-invitations`,
   `staff-invitation-acceptance`, `facility-staff-management`,
@@ -1934,7 +1945,50 @@ Decided by the owner, D-Eminence:
   `main`'s other launch limits (cross-facility imported records; the N3
   document routes).
 - Staff password recovery runs on the portal (#41, ported above), and staff
-  sign-in on the portal sends staff to ehr.
+  sign-in on the portal sends staff to ehr. Superseded on 2026-11-01 by the
+  next decision.
+- Each product is its own site (owner, 2026-11-01): EHR (`ehr.`), Laboratory
+  (`lab.`), Pharmacy (`pharmacy.`), Migrate (`migrate.`) and Outreach
+  (`outreach.`) each have their own landing page, sign-up, sign-in, password
+  recovery and workspace, and the patient portal (`app.`) is for patients
+  only; patient registration stays in the EHR. Identity's Turnstile table
+  (`ACTIONS_BY_DEPLOYMENT` in `services/identity-api/src/auth/turnstile.service.ts`,
+  pinned whole by its spec) therefore accepts staff password recovery
+  (`staff-reset`), opening a staff invitation (`staff-invitation`) and
+  facility self sign-up (`provider-enrollment`) on all five, in production
+  and in staging (`<site>.staging.`). The patient portal (`app.`; staging's
+  `staging.`) keeps accepting the three while emails already sent and pages
+  kept in browsers lead there; a later change removes them. Every origin is
+  already in Identity's `CORS_ORIGINS` (Terraform's `production_hosts` and
+  `browser_subdomains`), so no configuration changes. A host not listed
+  accepts nothing:
+
+  | Host | Production | Staging (`*.staging.healthidentitydirectory.com`) |
+  | --- | --- | --- |
+  | Patient portal: `app.` (staging: `staging.`) | `patient-login`, `patient-reset-start`, `staff-reset`, `legacy-recovery`, `patient-enrollment`, `provider-enrollment`, `staff-invitation` | `patient-login`, `staff-login`, `admin-login`, `patient-reset-start`, `staff-reset`, `admin-reset`, `legacy-recovery`, `book-demo`, `organization-application`, `organization-completion`, `patient-enrollment`, `provider-enrollment`, `staff-invitation` |
+  | Public site: the apex (staging: `www.staging.`) | `book-demo`, `organization-application`, `organization-completion` | the same |
+  | `www.` (production only) | `patient-login`, `staff-login`, `admin-login`, `patient-reset-start`, `staff-reset`, `admin-reset`, `legacy-recovery`, `book-demo`, `organization-application`, `organization-completion`, `patient-enrollment` | — |
+  | `ehr.` | `ehr-login`, `staff-login`, `staff-reset`, `staff-invitation`, `provider-enrollment` | the same |
+  | `lab.` | `lab-login`, `staff-reset`, `staff-invitation`, `provider-enrollment` | the same |
+  | `pharmacy.` | `pharmacy-login`, `staff-reset`, `staff-invitation`, `provider-enrollment` | the same |
+  | `migrate.` | `ocr-login`, `staff-reset`, `staff-invitation`, `provider-enrollment` | the same |
+  | `outreach.` | `outreach-login`, `staff-reset`, `staff-invitation`, `provider-enrollment` | the same |
+  | `admin.` | `admin-login`, `admin-reset` | the same |
+
+  Staff emails link to the product sites, never the patient portal
+  (notification-api's `staffSiteOrigin`, fixed by `HID_DEPLOYMENT_ENV`
+  alone, which Terraform already sets): a staff invitation opens on the site
+  the invitee's role works on (`lab.` for a laboratory scientist, `pharmacy.`
+  for a pharmacist, `ehr.` for a doctor, nurse or receptionist, as the
+  website's `staffSiteForRole`), and a patient's invitation to share (E1)
+  links to `ehr.` for sign-in and facility sign-up. Invitations already sent
+  keep their `app.` links, which still work. No other backend email carries
+  a link: password reset, email confirmation and facility sign-up emails send
+  a code only. Release order: Identity's table first, then the website's
+  staff pages on the product sites, then the notification-api change. Until
+  the website opens an invitation for a new account on a product site (today
+  a product site sends `/provider/invitation` to the signed-in join page), a
+  link there cannot be accepted by someone who has no account yet.
 - Facility self sign-up (D14, 2026-10-23, and 2026-10-24): hospitals,
   laboratories and pharmacies sign themselves up, finishing with a password
   (no authenticator); every new facility appears for support, who review it

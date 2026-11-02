@@ -13,7 +13,9 @@ export const STAFF_INVITATION_COOKIE_PATH = '/api/v1/identity/staff-invitations'
 
 /**
  * Opening and accepting a staff invitation without an account (P4b, SPEC 4.7
- * and 4.8), on the portal host (app.* and staging.*). Open takes the link's
+ * and 4.8), on a staff product site (ehr, lab, pharmacy, migrate, outreach),
+ * or on the patient portal while older links lead there (Turnstile's table
+ * decides which hosts may open one). Open takes the link's
  * invitation id and token, or the email and code, with Turnstile; a new or
  * dormant account then sets its password with the acceptance cookie. No
  * session is issued here: the person signs in on their role's host.

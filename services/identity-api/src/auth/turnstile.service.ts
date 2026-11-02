@@ -20,18 +20,28 @@ interface SiteverifyResponse {
 }
 
 function deploymentActions(value: Record<string, readonly TurnstileAction[]>): Readonly<Record<string, readonly TurnstileAction[]>> {
+  for (const actions of Object.values(value)) Object.freeze(actions);
   return Object.freeze(value);
 }
 
-const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Readonly<Record<string, readonly TurnstileAction[]>>>> = Object.freeze({
+/**
+ * What every staff product site (ehr, lab, pharmacy, migrate, outreach)
+ * accepts besides its own sign-in, in production and staging: staff password
+ * recovery (staff-reset), opening a staff invitation (staff-invitation) and
+ * facility self sign-up (provider-enrollment). Each product is its own site
+ * with its own sign-up, sign-in and recovery, and the patient portal (app.)
+ * is for patients only (owner decision of 2026-11-01).
+ */
+const STAFF_SITE_ACTIONS = ['staff-reset', 'staff-invitation', 'provider-enrollment'] as const satisfies readonly TurnstileAction[];
+
+/** Exported only so the spec can pin the whole table; expectedEvidence is its one reader. */
+export const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Readonly<Record<string, readonly TurnstileAction[]>>>> = Object.freeze({
   production: deploymentActions({
-    // The portal serves staff recovery at /provider/recover (staff-reset), and
-    // product hosts redirect their /provider/recover there; www only redirects
-    // to the public site (main D-Eminence/hid-system#41).
-    // Facility self sign-up (provider-enrollment, P4) and opening a staff
-    // invitation (staff-invitation, P4b) run on the portal host only: www is
-    // not a production CORS origin, and product hosts accept only their own
-    // sign-in actions.
+    // The patient portal. Staff recovery (main D-Eminence/hid-system#41),
+    // facility self sign-up (P4) and staff invitations (P4b) used to run
+    // here; it keeps accepting their checks while emails already sent and
+    // pages kept in browsers still lead here, until a later change removes
+    // them. www only redirects to the public site.
     'app.healthidentitydirectory.com': [
       'patient-login', 'patient-reset-start', 'staff-reset', 'legacy-recovery', 'patient-enrollment',
       'provider-enrollment', 'staff-invitation',
@@ -43,17 +53,18 @@ const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Readonly<
       'organization-completion',
       'patient-enrollment',
     ],
-    'ehr.healthidentitydirectory.com': ['ehr-login', 'staff-login'],
-    'lab.healthidentitydirectory.com': ['lab-login'],
-    'pharmacy.healthidentitydirectory.com': ['pharmacy-login'],
-    'migrate.healthidentitydirectory.com': ['ocr-login'],
-    'outreach.healthidentitydirectory.com': ['outreach-login'],
+    'ehr.healthidentitydirectory.com': ['ehr-login', 'staff-login', ...STAFF_SITE_ACTIONS],
+    'lab.healthidentitydirectory.com': ['lab-login', ...STAFF_SITE_ACTIONS],
+    'pharmacy.healthidentitydirectory.com': ['pharmacy-login', ...STAFF_SITE_ACTIONS],
+    'migrate.healthidentitydirectory.com': ['ocr-login', ...STAFF_SITE_ACTIONS],
+    'outreach.healthidentitydirectory.com': ['outreach-login', ...STAFF_SITE_ACTIONS],
     'admin.healthidentitydirectory.com': ['admin-login', 'admin-reset'],
   }),
   staging: deploymentActions({
     'www.staging.healthidentitydirectory.com': [
       'book-demo', 'organization-application', 'organization-completion',
     ],
+    // Staging's patient portal, kept as production's app. is (above).
     'staging.healthidentitydirectory.com': [
       'patient-login', 'staff-login', 'admin-login', 'patient-reset-start',
       'staff-reset', 'admin-reset', 'legacy-recovery', 'book-demo', 'organization-application',
@@ -62,11 +73,11 @@ const ACTIONS_BY_DEPLOYMENT: Readonly<Record<'staging' | 'production', Readonly<
       'provider-enrollment',
       'staff-invitation',
     ],
-    'ehr.staging.healthidentitydirectory.com': ['ehr-login', 'staff-login'],
-    'lab.staging.healthidentitydirectory.com': ['lab-login'],
-    'pharmacy.staging.healthidentitydirectory.com': ['pharmacy-login'],
-    'migrate.staging.healthidentitydirectory.com': ['ocr-login'],
-    'outreach.staging.healthidentitydirectory.com': ['outreach-login'],
+    'ehr.staging.healthidentitydirectory.com': ['ehr-login', 'staff-login', ...STAFF_SITE_ACTIONS],
+    'lab.staging.healthidentitydirectory.com': ['lab-login', ...STAFF_SITE_ACTIONS],
+    'pharmacy.staging.healthidentitydirectory.com': ['pharmacy-login', ...STAFF_SITE_ACTIONS],
+    'migrate.staging.healthidentitydirectory.com': ['ocr-login', ...STAFF_SITE_ACTIONS],
+    'outreach.staging.healthidentitydirectory.com': ['outreach-login', ...STAFF_SITE_ACTIONS],
     'admin.staging.healthidentitydirectory.com': ['admin-login', 'admin-reset'],
   }),
 });
