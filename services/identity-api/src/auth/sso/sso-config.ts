@@ -23,7 +23,7 @@ import { safeReturnPath } from './sso-return-path';
  *   `{ "client_id", "host", "kind", "token_endpoint_auth_method", "sign_in_path"? }`.
  *   `sign_in_path` is the product's own sign-in page, where a failure sends
  *   the browser: by default `/provider/sign-in` on a staff site (its form)
- *   and `/sign-in` on app. (its entrance, which hands off again with single
+ *   and `/sign-in` on the patients' site (its entrance, which hands off again with single
  *   sign-on on; the start route then asks the person instead of looping,
  *   sso.controller.ts SSO_FALLBACK_COOKIE).
  * - `AUTH_SSO_CLIENT_CREDENTIALS`: a JSON object from the secret store, by
@@ -50,6 +50,18 @@ export const SSO_SITE_KINDS: Readonly<Record<string, SsoKind>> = Object.freeze({
   outreach: 'staff',
   web: 'patient',
 });
+
+/**
+ * The first label of a patients' site host, where the patient portal (`web`)
+ * signs in and no staff client may: `app.` (Health's edge; the owner's
+ * patients' site), `www.` (the portal on hid-system's own production edge,
+ * infra/cloudflare and infra/aws, and in Identity's production Turnstile table),
+ * and the bare environment name elsewhere (`staging.`, `development.`;
+ * infra/aws browserSubdomains). The patients' site is for patients only, with
+ * no staff pages (the owner's decision, 2 November 2026).
+ */
+const PATIENT_SITE_LABELS: ReadonlySet<string> = new Set(['app', 'www', 'staging', 'development']);
+const PATIENT_SITE_NAMES = 'app. or www., or staging. or development. in those environments';
 
 export const SSO_ROUTE_PREFIX = '/api/v1/auth/sso';
 /** The one redirect URI registered per product: the callback on its own host. */
@@ -140,8 +152,13 @@ export interface SsoConfigurationResult {
  * sites (administration included), a client whose kind is not its site's (a
  * staff product as `patient` or the patient portal as `staff`), a host that is
  * a wildcard, not an exact DNS name, the administration host, the issuer's
- * host, or not one of CORS_ORIGINS (unknown to the platform), a repeated
- * client or host, and missing or unusable credentials. Refused in production
+ * host, not one of CORS_ORIGINS (unknown to the platform), another site's host
+ * (siteProblem: a staff client on the patients' site or another product's, or
+ * the patient portal anywhere but the patients' site; outside production an
+ * IP address names no site, and a one-label name is checked only when it is a
+ * patients' site label or a staff product's name), a repeated client or host,
+ * and missing or unusable credentials.
+ * Refused in production
  * (NODE_ENV=production, which AWS staging tasks also run): an issuer or
  * internal base that is not HTTPS, and a host with a port or an IP address.
  */
@@ -162,7 +179,8 @@ export function parseSsoConfiguration(environment: SsoEnvironment): SsoConfigura
   }
   const issuerProblem = originProblem(issuerText, production);
   if (issuerProblem) issues.push(`AUTH_SSO_ISSUER ${issuerProblem}`);
-  const issuerHost = issuerProblem ? undefined : new URL(issuerText).hostname;
+  // The issuer's host and port (the scheme's default when none is named), so a client there is refused.
+  const issuerHost = issuerProblem ? undefined : hostAndPort(new URL(issuerText));
   if (internalText) {
     const internalProblem = originProblem(internalText, production);
     if (internalProblem) issues.push(`AUTH_SSO_INTERNAL_BASE_URL ${internalProblem}`);
@@ -193,7 +211,9 @@ export function parseSsoConfiguration(environment: SsoEnvironment): SsoConfigura
     clients.set(parsed.id, parsed);
     clientsByOrigin.set(parsed.origin, parsed);
   });
-  const unused = Object.keys(credentials).filter((id) => !clients.has(id));
+  // Against every client an entry names, refused ones included, so a refusal is not reported twice.
+  const named = new Set(entries.map((entry) => (isRecord(entry) ? entry.client_id : undefined)));
+  const unused = Object.keys(credentials).filter((id) => !named.has(id));
   if (unused.length > 0) issues.push('AUTH_SSO_CLIENT_CREDENTIALS names a client that AUTH_SSO_CLIENTS does not');
   if (issues.length > 0) return { issues };
   return {
@@ -274,10 +294,12 @@ function parseClient(entry: unknown, index: number, credentials: Record<string, 
   if (typeof host !== 'string') return `${where}.host must be one exact host name`;
   const hostIssue = hostProblem(host, rules.production);
   if (hostIssue) return `${where}.host ${hostIssue}`;
-  if (host.split('.')[0] === 'admin') return `${where}.host is the administration host, never a client (ADR-038)`;
-  if (rules.issuerHost && host === rules.issuerHost) return `${where}.host is the sign-in site itself`;
+  if (hostName(host).split('.')[0] === 'admin') return `${where}.host is the administration host, never a client (ADR-038)`;
+  if (rules.issuerHost && hostAndPort(new URL(`https://${host}`)) === rules.issuerHost) return `${where}.host is the sign-in site itself`;
   const origin = `https://${host}`;
   if (!rules.corsOrigins.has(origin)) return `${where}.host is not a known product host: ${origin} is not one of CORS_ORIGINS`;
+  const siteIssue = siteProblem(id, kind, host);
+  if (siteIssue) return `${where}.host ${siteIssue}`;
   let resolvedSignInPath = DEFAULT_SIGN_IN_PATH[kind];
   if (signInPath !== undefined) {
     const safe = safeReturnPath(signInPath);
@@ -345,12 +367,65 @@ function originProblem(value: string, production: boolean): string | undefined {
   return hostNameProblem(url.hostname, url.port || undefined, production);
 }
 
+/** A client's host without its port, if it names one (development only). */
+function hostName(host: string): string {
+  return host.replace(/:[0-9]+$/, '');
+}
+
+/**
+ * A client's host must be its own site's: a staff product's host starts with
+ * its client_id (`lab.`, `lab.staging.`) and the patient portal's with a
+ * patients' site label (PATIENT_SITE_LABELS). So no configuration can send a
+ * staff sign-in to the patients' site or to another product's, or put the
+ * portal on a staff product's host. Outside production, an IP address names
+ * no site, and a one-label name (`localhost`) is checked only when it is a
+ * patients' site label (refused for a staff client) or a staff product's name
+ * (refused for the portal and for another product's client).
+ */
+function siteProblem(id: string, kind: SsoKind, host: string): string | undefined {
+  const name = hostName(host);
+  if (isIP(name) !== 0) return undefined;
+  const labels = name.split('.');
+  const first = labels[0]!;
+  if (kind === 'staff' && PATIENT_SITE_LABELS.has(first)) {
+    return `is the patients' site, which has no staff sign-in: the ${id} client belongs on ${id}.`;
+  }
+  // A one-label name (development only) names a site only when it is a
+  // patients' site label or a staff product's name.
+  const oneLabel = labels.length < 2;
+  const product = Object.hasOwn(SSO_SITE_KINDS, first) && SSO_SITE_KINDS[first] === 'staff' ? first : undefined;
+  if (kind === 'patient') {
+    if (PATIENT_SITE_LABELS.has(first)) return undefined;
+    if (product) return `is the ${product} product's host: the patient portal belongs on the patients' site (${PATIENT_SITE_NAMES})`;
+    return oneLabel ? undefined : `must be the patients' site (${PATIENT_SITE_NAMES})`;
+  }
+  if (first === id) return undefined;
+  if (product) return `is the ${product} product's host: the ${id} client belongs on ${id}.`;
+  return oneLabel ? undefined : `must be the ${id} site's own host (${id}.)`;
+}
+
+/** A host and its port, the scheme's default when none is named, to compare origins' hosts. */
+function hostAndPort(url: URL): string {
+  return `${url.hostname}:${url.port || (url.protocol === 'http:' ? '80' : '443')}`;
+}
+
 /** A client's host: one exact host name, with a port only outside production. */
 function hostProblem(host: string, production: boolean): string | undefined {
   if (host.includes('*')) return 'must name one exact host, never a wildcard';
   const match = /^([^:]+)(?::([0-9]+))?$/.exec(host);
   if (!match) return 'must name one exact host';
-  return hostNameProblem(match[1]!, match[2], production);
+  const problem = hostNameProblem(match[1]!, match[2], production);
+  if (problem) return problem;
+  if (match[2] === '443') return 'must not name the default port 443';
+  // The edge names this host in its origin exactly as a URL spells it. A name
+  // a URL reads otherwise (a last label of digits reads as an IPv4 address,
+  // and fails) is refused here, not left to fail later.
+  try {
+    if (new URL(`https://${host}`).host !== host) return 'must name one exact host';
+  } catch {
+    return 'must name one exact host';
+  }
+  return undefined;
 }
 
 function hostNameProblem(name: string, port: string | undefined, production: boolean): string | undefined {

@@ -8,6 +8,7 @@ import { parseSsoConfiguration, ssoClientForRequest, ssoConfiguration, type SsoE
 const ISSUER = 'https://auth.sso-config.invalid';
 const LAB = 'lab.sso-config.invalid';
 const PORTAL = 'app.sso-config.invalid';
+const STAGING_PORTAL = 'staging.sso-config.invalid';
 const CORS = `https://${LAB},https://${PORTAL},https://ehr.sso-config.invalid,https://admin.sso-config.invalid`;
 
 const privateJwk = { ...generateKeyPairSync('ec', { namedCurve: 'P-256' }).privateKey.export({ format: 'jwk' }),
@@ -70,8 +71,44 @@ describe('single sign-on configuration (ADR-070)', () => {
     ['an unknown host', { entries: [{ ...labEntry, host: 'lab.elsewhere.invalid' }] }, 'not a known product host'],
     ['the sign-in site as a client', { entries: [{ ...labEntry, host: 'auth.sso-config.invalid' }],
       CORS_ORIGINS: `${CORS},${ISSUER}` }, 'the sign-in site itself'],
-    ['a repeated host', { entries: [labEntry, { ...labEntry, client_id: 'ehr' }],
-      credentials: { lab: { private_jwk: privateJwk }, ehr: { private_jwk: privateJwk } } }, 'repeats the host'],
+    ['a repeated client', { entries: [labEntry, portalEntry, labEntry] }, 'repeats the client lab'],
+    // Two different clients on one host: siteProblem refuses that for every DNS name, so only a one-label host (which
+    // only development allows) reaches the repeated-host check.
+    ['a repeated host', { entries: [{ ...labEntry, host: 'localhost' }, { ...portalEntry, host: 'localhost' }],
+      CORS_ORIGINS: `${CORS},https://localhost` }, 'repeats the host of web'],
+    ['the administration host with a port', { entries: [{ ...labEntry, host: 'admin:8080' }],
+      credentials: { lab: { private_jwk: privateJwk } }, CORS_ORIGINS: `${CORS},https://admin:8080` }, 'administration host'],
+    ['a mistyped host', { entries: [{ ...labEntry, host: 'lba.sso-config.invalid' }],
+      credentials: { lab: { private_jwk: privateJwk } } }, 'https://lba.sso-config.invalid is not one of CORS_ORIGINS'],
+    // The patients' site is for patients only (2 November 2026), and each staff product signs in on its own host.
+    ['a staff client on the patients’ site', { entries: [{ ...labEntry, host: PORTAL }],
+      credentials: { lab: { private_jwk: privateJwk } } }, 'is the patients\' site, which has no staff sign-in: the lab client belongs on lab.'],
+    ['a staff client on the staging patients’ site', { entries: [{ ...labEntry, host: STAGING_PORTAL }],
+      credentials: { lab: { private_jwk: privateJwk } }, CORS_ORIGINS: `${CORS},https://${STAGING_PORTAL}` }, 'is the patients\' site'],
+    ['a staff client on the development patients’ site', { entries: [{ ...labEntry, host: 'development.sso-config.invalid' }],
+      credentials: { lab: { private_jwk: privateJwk } }, CORS_ORIGINS: `${CORS},https://development.sso-config.invalid` },
+      'is the patients\' site'],
+    ['a staff client on a one-label patients’ site name', { entries: [{ ...labEntry, host: 'app:3000' }],
+      credentials: { lab: { private_jwk: privateJwk } }, CORS_ORIGINS: `${CORS},https://app:3000` }, 'is the patients\' site'],
+    ['a staff client on another product’s host', { entries: [{ ...labEntry, host: 'ehr.sso-config.invalid' }],
+      credentials: { lab: { private_jwk: privateJwk } } }, 'is the ehr product\'s host: the lab client belongs on lab.'],
+    ['a staff client on another product’s two-label host', { entries: [{ ...labEntry, host: 'ehr.localhost' }],
+      credentials: { lab: { private_jwk: privateJwk } }, CORS_ORIGINS: `${CORS},https://ehr.localhost` },
+      'is the ehr product\'s host: the lab client belongs on lab.'],
+    ['a staff client on a look-alike host', { entries: [{ ...labEntry, host: 'lab-app.sso-config.invalid' }],
+      credentials: { lab: { private_jwk: privateJwk } }, CORS_ORIGINS: `${CORS},https://lab-app.sso-config.invalid` },
+      'must be the lab site\'s own host (lab.)'],
+    ['a staff client on an unnamed site', { entries: [{ ...labEntry, host: 'portal.sso-config.invalid' }],
+      credentials: { lab: { private_jwk: privateJwk } }, CORS_ORIGINS: `${CORS},https://portal.sso-config.invalid` },
+      'must be the lab site\'s own host (lab.)'],
+    ['the patient portal on a staff product’s host', { entries: [{ ...portalEntry, host: LAB }],
+      credentials: { web: { client_secret: secret } } },
+      'is the lab product\'s host: the patient portal belongs on the patients\' site (app. or www., or staging. or development. in those environments)'],
+    ['the patient portal on an unnamed site', { entries: [{ ...portalEntry, host: 'portal.sso-config.invalid' }],
+      credentials: { web: { client_secret: secret } }, CORS_ORIGINS: `${CORS},https://portal.sso-config.invalid` },
+      'must be the patients\' site (app. or www., or staging. or development. in those environments)'],
+    ['a staff client on hid-system\'s www. patients’ site', { entries: [{ ...labEntry, host: 'www.sso-config.invalid' }],
+      credentials: { lab: { private_jwk: privateJwk } }, CORS_ORIGINS: `${CORS},https://www.sso-config.invalid` }, 'is the patients\' site'],
     ['missing credentials', { credentials: { lab: { private_jwk: privateJwk } } }, 'no credential for web'],
     ['a public key instead of a private one', { credentials: { lab: { private_jwk: { ...privateJwk, d: undefined } },
       web: { client_secret: secret } } }, 'one EC P-256 private_jwk with a kid'],
@@ -98,6 +135,85 @@ describe('single sign-on configuration (ADR-070)', () => {
   ])('refuses %s in production only', (_label, changes, message) => {
     expect(issues({ ...changes, NODE_ENV: 'production' })).toContain(message);
     expect(issues({ ...changes, NODE_ENV: 'development' })).not.toContain(message);
+  });
+
+  it.each([STAGING_PORTAL, 'development.sso-config.invalid'])('accepts each site on its own host under %s', (portal) => {
+    const hosts = { lab: `lab.${portal}`, ehr: `ehr.${portal}`, web: portal };
+    const result = parseSsoConfiguration(environment({
+      NODE_ENV: 'production',
+      CORS_ORIGINS: `${CORS},${Object.values(hosts).map((host) => `https://${host}`).join(',')}`,
+      entries: [{ ...labEntry, host: hosts.lab }, { ...labEntry, client_id: 'ehr', host: hosts.ehr }, { ...portalEntry, host: hosts.web }],
+      credentials: { lab: { private_jwk: privateJwk }, ehr: { private_jwk: privateJwk }, web: { client_secret: secret } },
+    }));
+    expect(result.issues).toEqual([]);
+    expect(result.configuration!.clients.get('web')!.origin).toBe(`https://${portal}`);
+    expect(result.configuration!.clients.get('ehr')!.redirectUri).toBe(`https://ehr.${portal}/api/v1/auth/sso/callback`);
+  });
+
+  it('accepts the patient portal on hid-system’s own production patients’ site, www.', () => {
+    expect(issues({ NODE_ENV: 'production', entries: [labEntry, { ...portalEntry, host: 'www.sso-config.invalid' }],
+      CORS_ORIGINS: `${CORS},https://www.sso-config.invalid` })).toBe('');
+  });
+
+  it('refuses a client on the sign-in site’s exact origin, its port included, and only there', () => {
+    const local = { AUTH_SSO_ISSUER: 'http://localhost:9000', NODE_ENV: 'development' as const,
+      CORS_ORIGINS: `${CORS},https://localhost:9000,https://localhost` };
+    expect(issues({ ...local, entries: [{ ...labEntry, host: 'localhost:9000' }], credentials: { lab: { private_jwk: privateJwk } } }))
+      .toContain('the sign-in site itself');
+    expect(issues({ ...local, entries: [{ ...labEntry, host: 'localhost' }], credentials: { lab: { private_jwk: privateJwk } } }))
+      .toBe('');
+  });
+
+  it('refuses a one-label host named after another staff product, outside production too', () => {
+    const local = (entry: Entry, host: string) => issues({ NODE_ENV: 'development', entries: [{ ...entry, host }],
+      credentials: entry.client_id === 'web' ? { web: { client_secret: secret } } : { [String(entry.client_id)]: { private_jwk: privateJwk } },
+      CORS_ORIGINS: `${CORS},https://${host}` });
+    expect(local(portalEntry, 'lab:3000')).toContain('is the lab product\'s host: the patient portal belongs on the patients\' site');
+    expect(local(labEntry, 'ehr:3001')).toContain('is the ehr product\'s host: the lab client belongs on lab.');
+    // Its own name, or a name that is no product's, stays a development host.
+    expect(local(labEntry, 'lab:3000')).toBe('');
+    expect(local({ ...labEntry, client_id: 'ehr' }, 'ehr')).toBe('');
+    expect(local(portalEntry, 'web:3000')).toBe('');
+  });
+
+  it('refuses a host that names the default port, or that a URL reads otherwise, without throwing', () => {
+    const one = (host: string, NODE_ENV: 'development' | 'production') => issues({ NODE_ENV, entries: [{ ...labEntry, host }],
+      credentials: { lab: { private_jwk: privateJwk } }, CORS_ORIGINS: `${CORS},https://${host}` });
+    expect(one('auth.sso-config.invalid:443', 'development')).toContain('must not name the default port 443');
+    // A last label of digits reads as an IPv4 address to a URL, which then fails.
+    for (const host of ['lab.sso-config.1', 'lab.staging.1', 'app.0x1']) {
+      expect(one(host, 'development')).toContain('must name one exact host');
+      expect(one(host, 'production')).toContain('must name one exact host');
+    }
+  });
+
+  it('refuses a client on the sign-in site’s host and port, the scheme’s default included', () => {
+    // An http issuer's default port is 80, and a client's (https) is 443.
+    const http = { AUTH_SSO_ISSUER: 'http://localhost', NODE_ENV: 'development' as const,
+      CORS_ORIGINS: `${CORS},https://localhost,https://localhost:80` };
+    expect(issues({ ...http, entries: [{ ...labEntry, host: 'localhost:80' }], credentials: { lab: { private_jwk: privateJwk } } }))
+      .toContain('the sign-in site itself');
+    expect(issues({ ...http, entries: [{ ...labEntry, host: 'localhost' }], credentials: { lab: { private_jwk: privateJwk } } })).toBe('');
+  });
+
+  it('reports a refused client once, without a second line about its credential', () => {
+    const text = issues({ entries: [{ ...labEntry, host: PORTAL }], credentials: { lab: { private_jwk: privateJwk } } });
+    expect(text).toContain('is the patients\' site');
+    expect(text).not.toContain('names a client that AUTH_SSO_CLIENTS does not');
+    expect(issues({ credentials: { lab: { private_jwk: privateJwk }, web: { client_secret: secret }, ehr: { private_jwk: privateJwk } } }))
+      .toContain('names a client that AUTH_SSO_CLIENTS does not');
+  });
+
+  it('leaves an IP address or a one-label host other than a patients’ site name to the production checks', () => {
+    const changes = {
+      entries: [{ ...labEntry, host: '10.0.0.7' }, { ...labEntry, client_id: 'ehr', host: '10.0.0.7:8443' },
+        { ...portalEntry, host: 'localhost' }],
+      credentials: { lab: { private_jwk: privateJwk }, ehr: { private_jwk: privateJwk }, web: { client_secret: secret } },
+      CORS_ORIGINS: `${CORS},https://10.0.0.7,https://10.0.0.7:8443,https://localhost`,
+    };
+    expect(issues({ ...changes, NODE_ENV: 'development' })).toBe('');
+    expect(issues({ ...changes, NODE_ENV: 'production' })).toContain('not an IP address');
+    expect(issues({ ...changes, NODE_ENV: 'production' })).toContain('fully qualified');
   });
 
   it('never echoes a credential in a refusal', () => {

@@ -136,8 +136,14 @@ coordinator's; these are the product's rules.
   so it would spell either rule around.
 * Start-up refuses an HTTP issuer or internal base in production, a wildcard,
   unknown (`CORS_ORIGINS`), administration or issuer host, administration as a
-  client, a client whose kind is not its site's, and missing or unusable
-  credentials.
+  client, a client whose kind is not its site's, a client on another site's
+  host (a staff client anywhere but `<client_id>.`, the patients' site
+  included; the portal anywhere but the patients' site, `app.` or `www.`, or
+  `staging.` or `development.` in those environments; the owner's decision of
+  2 November 2026 that the patients' site has no staff sign-in), and missing
+  or unusable credentials. Outside production, an IP address is not checked
+  for its site, and a one-label host only when it is `app`, `www`, `staging`,
+  `development` or a staff product's name.
 * The code flow uses `openid-client`: S256 PKCE, `state` and `nonce` kept in a
   signed, 10-minute, single-use transaction cookie bound to its product host;
   the code exchanged with the client's own authentication (`private_key_jwt`

@@ -6475,7 +6475,16 @@ Decision:
 - **Dark.** All four settings unset: no route, no new cookie, no read of 0102,
   and sign-in, refresh, session check and sign-out exactly as before. Start-up
   refuses an HTTP issuer in production, a wildcard or unknown host, `admin` as
-  a client, and a client whose kind is not its site's.
+  a client, a client whose kind is not its site's, and a client on another
+  site's host: a staff client must be on its own `<client_id>.` host, never the
+  patients' site (`app.` or `www.`, or the bare `staging.` or `development.`),
+  which has no staff sign-in (the owner's decision of 2 November 2026), and the
+  patient portal's host must start with a patients' site label. Outside
+  production, an IP address is not checked for its site, and a one-label host
+  only when it is one of those labels or a staff product's name. So the launch
+  layout's provider workspace on `www.` and `staging.` (ADR-052) gets no
+  single sign-on: staff there keep that host's own sign-in until they move to
+  their product's `<client_id>.` host.
 
 Options considered:
 
