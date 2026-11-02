@@ -181,10 +181,11 @@ Since the audit pin hardening (2 November 2026, owner's request) it also checks:
   `HID_REQUIRE_CLOUDFLARE_VALIDATOR`, `HID_PUBLIC_BASE` and `GATE_STEPS_JSON`;
   `NODE_VERSION` only in the workflow env). `BASH_ENV`, `ENV`, `NODE_OPTIONS`,
   `npm_config_*`, `PATH`, a proxy, an extra CA and anything else are refused
-  there. In every other job, the publish job included, `npm_config_*`,
-  `NODE_OPTIONS`, `PATH`, `BASH_ENV` and `ENV` are refused in any env. Every env
-  anywhere in the workflow must be a plain map, not an expression whose keys a
-  reviewer cannot see.
+  there. In every other job, the publish job included, `npm_config_*` (in any
+  case), `NODE_OPTIONS`, `PATH`, `BASH_ENV` and `ENV` are refused in any env:
+  the job's, its steps', its container's and its services'. Every env anywhere
+  in the workflow must be a plain map, not an expression whose keys a reviewer
+  cannot see.
 - **The actions and the runner, by allowlist.** An audit job may use only
   `actions/checkout`, `actions/setup-node`, `actions/setup-go` and
   `actions/upload-artifact`, each at its reviewed commit and with only the inputs
@@ -198,7 +199,12 @@ Since the audit pin hardening (2 November 2026, owner's request) it also checks:
   them. So every workflow read through the verifier's parser (these two, and
   the protected readiness workflow) must be printable ASCII with LF line breaks
   (tab allowed), and carry no `%YAML` directive. Release tests hide a checkout `ref`, a step before
-  the audit, `continue-on-error` and an npm cache behind each of the four.
+  the audit, `continue-on-error` and an npm cache behind each of the four. Those
+  workflows must also keep to the block-style YAML both parsers read the same
+  way: no flow collection except an empty one (in `{?ref: …}` the key is "?ref"
+  to the verifier and "ref" to libyaml), no anchor (libyaml ends its name at
+  `:` or `?`), no explicit tag, no `<<` merge key, and no quoted value over
+  several lines (an escaped line break folds differently).
 - **PATH, pinned in the audit step.** Every audit command starts with
   `export PATH="$RUNNER_TOOL_CACHE/node/22.23.2/x64/bin:/usr/bin:/bin"` and
   `test "$(node --version)" = v22.23.2`, where setup-node installs that Node.
