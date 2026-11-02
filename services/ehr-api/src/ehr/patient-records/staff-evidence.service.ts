@@ -6,7 +6,7 @@ import { LabApiService } from '../../integrations/lab-api.service';
 import { AuditService } from '../../audit/audit.service';
 import { LOCAL_EVIDENCE_QUERY } from './patient-evidence.query';
 import { PatientAttachmentTextService, ATTACHMENT_TEXT_QUERY } from './patient-attachment-text.service';
-import { evidence, evidenceKey, type Evidence, type EvidenceBinding, type EvidenceSnapshot, type SourceKind } from './patient-evidence.types';
+import { evidence, evidenceKey, originLabel, type Evidence, type EvidenceBinding, type EvidenceSnapshot, type SourceKind } from './patient-evidence.types';
 import type { AttachmentAccess } from './chat-access';
 import { STAFF_SOURCE_PERMISSIONS, type StaffChatScope } from './staff-chat-scope.service';
 
@@ -65,7 +65,7 @@ export class StaffEvidenceService {
     const source = snapshot.records.find(r => r.kind === kind && r.id === id);
     if (!source) throw new DomainProblem(404, 'CHAT_SOURCE_UNAVAILABLE', 'This source is unavailable');
     await scope.authorize(request);
-    return source;
+    return { ...source, originLabel: originLabel(source.origin, 'staff') };
   }
   private async snapshot(scope: StaffChatScope, request: HidRequest, signal?: AbortSignal, ids?: readonly string[]): Promise<EvidenceSnapshot> {
     const auth = await scope.authorize(request);
@@ -78,7 +78,7 @@ export class StaffEvidenceService {
         for (const r of rows.slice(0, 200)) records.push(evidence({ kind: r.kind, id: r.id, version: r.version,
           title: r.title, recordedAt: r.recorded_at ? new Date(r.recorded_at).toISOString() : null,
           effectiveAt: r.effective_at ? new Date(r.effective_at).toISOString() : null,
-          provenance: r.provenance, quality: r.quality, fields: r.fields }));
+          provenance: r.provenance, quality: r.quality, fields: r.fields, originHint: r.origin_hint }));
         if (rows.length <= 200) { complete = true; break; }
         kind = rows[199].kind; id = rows[199].id;
       }

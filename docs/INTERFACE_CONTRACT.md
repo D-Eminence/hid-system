@@ -1361,6 +1361,53 @@ require active facility context, direct-care purpose, Lab permission,
 canonical-patient non-break-glass authorization, idempotency, and expected
 versions. Receipt records custody only; it creates no execution, QC, or result.
 
+### Work list order (Lab and Pharmacy)
+
+`GET /api/v1/lab/work-items` and `GET /api/v1/pharmacy/work-items` answer at
+most 200 items: open work first, oldest first, then done work, newest first.
+Lab work is open while any test it asks for has no released result at its
+current version (or that result is marked entered in error); a work item with
+no requested test is open. Pharmacy work is open while it has no dispensing;
+a reversed dispensing counts as done, because a work item takes one dispensing
+only and cannot be dispensed again. Earlier backends answered the 200 oldest items
+the member could read whatever their state, so a busy facility stopped seeing
+new work. The answer's shape and audit rows are unchanged.
+
+Known limit of the Lab list (no schema change in this step). Every row the
+list reads from a Lab table pays its own row-level security check, mostly the
+member's consent check, over a millisecond each. The list reads each Lab
+table once: about 5 checks per work item at the laboratory plus 2 per row
+answered (the oldest-200 list read 3 per work item). Measured on PostgreSQL 16
+on a shared 2.1 GHz Xeon as the restricted Lab login with lab-api's 15-second
+statement limit: 1,041-1,050 work items 8.8-12.1 s, 1,541 work items 11.1 s,
+2,041 work items over the limit (the oldest-200 list: 4.7-5.7 s, 6.2 s and
+8.6 s). So a laboratory with more than roughly 1,800 to 2,000 work items gets
+an error instead of the list, and fewer on a slower database server. Raising
+that ceiling needs a migration (for example one row of open or done state per
+work item, kept by the database), which is a separate owner decision.
+`services/ehr-api/scripts/lab-work-list-runtime-checks.mjs` (run by
+`test-patient-evidence-runtime.mjs`) checks 1,050 work items within the
+limit and counts the checks.
+
+### Record chat: where each source came from
+
+Each source in a record chat answer (`POST /api/v1/ehr/me/chat`,
+`POST /api/v1/ehr/patients/:patientId/chat`) and each source read
+(`GET …/chat/sources/:kind/:sourceId`) carries `origin` and `originLabel`.
+The server sets them from the record itself, never the model:
+
+| `origin` | Source kinds | `originLabel` (patient / staff) |
+|---|---|---|
+| `patient` | imported history recorded as patient provided, imported health profile | "You added this" / "Added by the patient" |
+| `health_worker` | notes, encounters, diagnoses, prescriptions, investigations, vitals, released lab results, imported history recorded as provider authored | "Recorded by a health worker" |
+| `scanned_paper` | readable documents and imported files, and a clinical note imported from a scanned record | "From a scanned paper record" |
+| `health_id_profile` | the Health ID profile | "Your Health ID profile" / "The patient's Health ID profile" |
+
+The model is given the label and told to say where each fact came from. Both
+fields are optional to clients: answers saved before this change have neither.
+The origin is outside each source's content and hash, so saved conversations
+and stored vectors stay current.
+
 ## 18. API Documentation
 
 Public and internal service APIs should maintain OpenAPI documentation.

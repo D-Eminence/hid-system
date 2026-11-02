@@ -9,7 +9,7 @@ import type { HidRequest } from '../common/request-context';
 import type { DataAccessContext } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import type { IdentityService } from '../identity/identity.service';
-import { LabWorkItemsService } from './lab-work-items.service';
+import { LabWorkItemsService, WORK_LIST_QUERY } from './lab-work-items.service';
 import { LabOrderRouteAccess } from './order-route-access';
 import { LabOrderRouteCards } from './order-route-cards';
 import type { AcceptEhrLabOrderCommand } from './lab-work-items.types';
@@ -216,3 +216,112 @@ describe('LabWorkItemsService.acceptEhrOrder database refusals', () => {
       expect(answer(error)).toMatchObject({ status: 500, code: 'INTERNAL_ERROR' });
     });
 });
+
+/**
+ * The work list answered the 200 oldest rows the member could read, done or
+ * not, so a busy facility stopped seeing new work. Open work now comes first,
+ * oldest first, and done work fills the rest, newest first. The database does
+ * the ordering (checked against Postgres 16 with every open and done state, and
+ * with over 1,000 work items as the restricted Lab login within lab-api's
+ * 15-second limit: services/ehr-api/scripts/lab-work-list-runtime-checks.mjs);
+ * these tests hold the query to that rule and to its cost, and the service to
+ * answering exactly what the query returns.
+ */
+describe('LabWorkItemsService.list order: open work first', () => {
+  const RECEIVES = 'select lab.order_route_receives_here() as receives, lab.order_routes_here() as routes_here';
+  const row = (n: number) => ({ id: `61000000-0000-4000-8000-${String(n).padStart(12, '0')}`, patient_id: patientId,
+    facility_id: facilityId, ordering_facility_id: facilityId, source_ehr_order_id: orderId, source_ehr_order_version: '1',
+    source_encounter_id: '70000000-0000-4000-8000-000000000001', status: 'accepted', priority: 'routine', accepted_by: accountId,
+    accepted_at: new Date(Date.UTC(2026, 0, 1, 0, n)), row_version: '1', created_at: new Date(Date.UTC(2026, 0, 1, 0, n)),
+    order_route_id: null, test_name: `Test ${n}`, accession_id: null, accession_number: null, specimen_statuses: null });
+  const build = (rows: ReturnType<typeof row>[]) => {
+    const statements: string[] = [];
+    const workListValues: unknown[][] = [];
+    const client = { query: jest.fn(async (sql: string, values: unknown[] = []) => {
+      statements.push(sql);
+      if (sql === WORK_LIST_QUERY) { workListValues.push(values); return { rows }; }
+      if (sql === RECEIVES) return { rows: [{ receives: null, routes_here: null }] };
+      return { rows: [] };
+    }) } as unknown as PoolClient;
+    const database = { withTransaction: async <T>(_c: DataAccessContext, fn: (c: PoolClient) => Promise<T>) => fn(client),
+      query: jest.fn(async () => ({ rows: [{ orders: false, work: false }] })) } as unknown as DatabaseService;
+    const identity = { authorize: jest.fn() } as unknown as IdentityService;
+    const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) };
+    const service = new LabWorkItemsService(database, identity, audit as unknown as AuditService,
+      new LabOrderRouteAccess(identity), new LabOrderRouteCards(database));
+    return { service, statements, workListValues, audit };
+  };
+  const reader = { ...context, actor: { ...context.actor, permissions: ['lab.work-item.read'] } };
+  const flat = WORK_LIST_QUERY.replace(/\s+/g, ' ');
+  const cut = flat.indexOf(' limit 200)');
+  const ORDER = (q: string) => `${q}.open_work desc,case when ${q}.open_work then ${q}.accepted_at end asc,`
+    + `case when ${q}.open_work then null else ${q}.accepted_at end desc,case when ${q}.open_work then ${q}.id end asc,`
+    + `case when ${q}.open_work then null else ${q}.id end desc`;
+
+  it('asks for open work oldest first, then done work newest first, 200 rows in all', () => {
+    // The 200 rows are chosen in that order, and answered in it.
+    expect(cut).toBeGreaterThan(0);
+    expect(flat.slice(0, cut)).toMatch(new RegExp(`order by ${literal(ORDER('x'))}$`));
+    expect(flat.endsWith(`order by ${ORDER('w')}`)).toBe(true);
+    expect(flat.match(/ limit /g)).toHaveLength(1);
+    expect(WORK_LIST_QUERY).not.toMatch(/order by w\.accepted_at asc,w\.id asc/);
+  });
+
+  it('counts work as done only when every requested test has a released, current, valid result', () => {
+    // A work item is open unless every requested test it has is among the released ones; with no requested test
+    // the one row of the left join has none, so it is open.
+    expect(flat).toContain('not bool_and(d.requested_test_id is not null) as open_work from lab.work_items w '
+      + 'left join lab.work_item_requested_tests t on t.work_item_id=w.id left join released_tests d on d.requested_test_id=t.id');
+    // Released: a release of the result's current version, the result's execution naming the test...
+    expect(flat).toContain('select e.requested_test_id from lab.result_releases rel '
+      + 'join lab.results r on r.id=rel.result_id and r.current_version=rel.result_version join lab.test_executions e on e.id=r.execution_id');
+    // ...and not marked entered in error, so a corrected or withdrawn result brings the work back.
+    expect(flat).toContain('not exists(select 1 from lab.result_invalidations i where i.result_id=r.id and i.result_version=r.current_version)');
+  });
+
+  it('reads each Lab table once, and the accession and specimens only for the 200 rows answered', () => {
+    // Every row read from a Lab table pays its own row-level security check (the member's consent check, over a
+    // millisecond each), so a table read again for each work item multiplies the cost: the first open-first query
+    // read the requested tests twice and the accession and specimens again for each work item, and timed out at
+    // about 1,000 work items under lab-api's 15-second limit.
+    const reads = (table: string) => flat.match(new RegExp(`\\blab\\.${table}\\b`, 'g'))?.length ?? 0;
+    for (const table of ['work_items', 'work_item_requested_tests', 'result_releases', 'results', 'test_executions',
+      'result_invalidations', 'accessions', 'specimens']) expect([table, reads(table)]).toEqual([table, 1]);
+    // The released results are worked out once for the whole list, never once per work item...
+    expect(flat).toMatch(/^with released_tests as materialized \(/);
+    // ...and the accession and specimens are read after the 200 rows are chosen.
+    expect(flat.indexOf('lab.accessions')).toBeGreaterThan(cut);
+    expect(flat.indexOf('lab.specimens')).toBeGreaterThan(cut);
+    // Every read stays within the session's facility, as row-level security already requires.
+    for (const test of ['rel.facility_id=$1::uuid', 'e.facility_id=$1::uuid', 'w.facility_id=$1::uuid']) expect(flat).toContain(test);
+  });
+
+  it('answers what the query returns, in its order and shape: 250 items with 30 open answers all 30 first', async () => {
+    // What Postgres answers for 250 work items of which 30 are open (indexes 0-9, 120-129, 240-249):
+    // the 30 open oldest first, then the 170 newest done.
+    const openRows = [...Array.from({ length: 10 }, (_, i) => i), ...Array.from({ length: 10 }, (_, i) => 120 + i),
+      ...Array.from({ length: 10 }, (_, i) => 240 + i)].map(row);
+    const doneRows = Array.from({ length: 250 }, (_, i) => i).filter((i) => !(i < 10 || (i >= 120 && i < 130) || i >= 240))
+      .reverse().slice(0, 170).map(row);
+    const { service, statements, workListValues, audit } = build([...openRows, ...doneRows]);
+    const answer = await service.list(reader);
+    expect(answer.items).toHaveLength(200);
+    expect(answer.items.slice(0, 30).map((item) => item.id)).toEqual(openRows.map((r) => r.id));
+    expect(answer.items.slice(30).map((item) => item.id)).toEqual(doneRows.map((r) => r.id));
+    // The newest open work (which the old query left out once 200 older rows existed) is answered.
+    expect(answer.items.map((item) => item.id)).toContain(row(249).id);
+    // One work-list read, bound to the session's own facility; the answer's shape is as before.
+    expect(statements.filter((sql) => sql.includes('from lab.work_items w'))).toEqual([WORK_LIST_QUERY]);
+    expect(workListValues).toEqual([[facilityId]]);
+    expect(Object.keys(answer.items[0]!)).toEqual(['id', 'patientId', 'facilityId', 'sourceEhrOrderVersion', 'status',
+      'priority', 'acceptedAt', 'version', 'sourceEhrOrderId', 'testName', 'accessionId', 'accessionNumber', 'specimenStatuses']);
+    expect(Object.keys(answer)).toEqual(['items', 'crossFacilityOrders', 'crossFacilityWork']);
+    // Same-facility rows name no patient on the list, as before: no audit row.
+    expect(audit.recordWithClient).not.toHaveBeenCalled();
+  });
+});
+
+/** A literal for a regular expression. */
+function literal(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}

@@ -1,6 +1,6 @@
 import { requestDigest } from '../common/idempotency';
 import type { DataAccessContext } from '../common/request-context';
-import { PharmacyService } from './pharmacy.service';
+import { PharmacyService, WORK_LIST_QUERY } from './pharmacy.service';
 import { PharmacyOrderRouteAccess } from './order-route-access';
 import { PharmacyOrderRouteCards } from './order-route-cards';
 
@@ -153,5 +153,77 @@ describe('PharmacyService', () => {
     'dispensing-key-1234')).resolves.toMatchObject({ id: ids.dispensing, status: 'dispensed',
       effectiveStatus: 'dispensed' });
     expect(query.mock.calls.every(([sql]) => !/^update pharmacy\.work_items/i.test(String(sql).trim()))).toBe(true);
+  });
+});
+
+/**
+ * The work list answered the 200 oldest rows the member could read, dispensed
+ * or not, so a busy pharmacy stopped seeing new prescriptions. Open work (no
+ * dispensing) now comes first, oldest first, and done work (dispensed, or
+ * dispensed and reversed: a work item takes one dispensing only) fills the
+ * rest, newest first. The database does the ordering (checked
+ * against Postgres 16 with 250 work items, 30 open, all 30 answered first);
+ * these tests hold the query to that rule and the service to answering exactly
+ * what the query returns, with the same audit rows.
+ */
+describe('PharmacyService.listWorkItems order: open work first', () => {
+  const row = (n: number, state: 'open' | 'reversed' | 'dispensed') => ({ ...workRow,
+    id: `123e4567-e89b-42d3-a456-${String(n).padStart(12, '0')}`, accepted_at: new Date(Date.UTC(2026, 0, 1, 0, n)),
+    order_route_id: null, dispensing_id: state === 'open' ? null : ids.dispensing, dispensing_status: state === 'open' ? null : 'dispensed',
+    reversal_id: state === 'reversed' ? '123e4567-e89b-42d3-a456-426614174099' : null });
+  const build = (rows: ReturnType<typeof row>[]) => {
+    const statements: string[] = [];
+    const query = jest.fn(async (sql: string) => {
+      statements.push(sql);
+      return { rows: sql === WORK_LIST_QUERY ? rows : [] };
+    });
+    const database = { withTransaction: async <T>(_c: unknown, fn: (c: unknown) => Promise<T>) => fn({ query }),
+      query: jest.fn(async () => ({ rows: [{ orders: false, work: false }] })) };
+    const identity = { authorize: jest.fn() };
+    const audits: Array<Record<string, unknown>> = [];
+    const audit = { recordWithClient: jest.fn(async (_c: unknown, _x: unknown, action: string, resource: object, details = {}) => {
+      audits.push({ action, ...resource, details });
+    }) };
+    const service = new PharmacyService(database as never, identity as never, audit as never,
+      new PharmacyOrderRouteAccess(identity as never), new PharmacyOrderRouteCards(database as never));
+    return { service, statements, audits };
+  };
+
+  it('asks for open work (no dispensing) oldest first, then done work (dispensed or reversed) newest first, 200 rows in all', () => {
+    expect(WORK_LIST_QUERY).toContain('cross join lateral (select d.id is null as open_work) o');
+    // A reversed dispensing is done: the item cannot be dispensed again (one dispensing per work item, 0023).
+    expect(WORK_LIST_QUERY).not.toMatch(/r\.id is not null as open_work/);
+    const order = WORK_LIST_QUERY.slice(WORK_LIST_QUERY.lastIndexOf('order by'));
+    expect(order.replace(/\s+/g, ' ')).toBe('order by o.open_work desc,case when o.open_work then w.accepted_at end asc,'
+      + 'case when o.open_work then null else w.accepted_at end desc, case when o.open_work then w.id end asc,'
+      + 'case when o.open_work then null else w.id end desc limit 200');
+    expect(WORK_LIST_QUERY).not.toMatch(/order by w\.accepted_at asc,w\.id asc/);
+    // The same row source as a single read, so each row is projected as before.
+    expect(WORK_LIST_QUERY.startsWith('select w.*,d.id::text as dispensing_id,d.status as dispensing_status,')).toBe(true);
+  });
+
+  it('answers what the query returns, in its order and shape: 250 items with 30 open answers all 30 first', async () => {
+    // What Postgres answers for 250 work items of which 30 are open (indexes 0-9, 100-109, 240-249): the 30 open
+    // oldest first, then the 170 newest done (every third one dispensed and reversed).
+    const openIndexes = [...Array.from({ length: 10 }, (_, i) => i), ...Array.from({ length: 10 }, (_, i) => 100 + i),
+      ...Array.from({ length: 10 }, (_, i) => 240 + i)];
+    const openRows = openIndexes.map((i) => row(i, 'open'));
+    const doneRows = Array.from({ length: 250 }, (_, i) => i).filter((i) => !openIndexes.includes(i)).reverse().slice(0, 170)
+      .map((i) => row(i, i % 3 === 0 ? 'reversed' : 'dispensed'));
+    const { service, statements, audits } = build([...openRows, ...doneRows]);
+    const answer = await service.listWorkItems(context);
+    expect(answer.items).toHaveLength(200);
+    expect(answer.items.slice(0, 30).map((item) => item.id)).toEqual(openRows.map((r) => r.id));
+    expect(answer.items.slice(30).map((item) => item.id)).toEqual(doneRows.map((r) => r.id));
+    expect(answer.items.map((item) => item.id)).toContain(row(249, 'open').id);
+    expect(statements.filter((sql) => sql.includes('from pharmacy.work_items w'))).toEqual([WORK_LIST_QUERY]);
+    // Each row projected as before: no dispensing (open), a dispensing, a reversed dispensing (done, item 237).
+    expect(answer.items[0]).toMatchObject({ status: 'accepted', dispensing: null });
+    expect(answer.items[1]).toMatchObject({ status: 'accepted', dispensing: null });
+    expect(answer.items[30]).toMatchObject({ dispensing: { id: ids.dispensing, status: 'dispensed', reversed: false } });
+    expect(answer.items[32]).toMatchObject({ id: row(237, 'reversed').id, dispensing: { id: ids.dispensing, status: 'dispensed', reversed: true } });
+    // The audit rows are as before: the collection row with the count returned, and no patient row for own work.
+    expect(audits).toEqual([{ action: 'pharmacy.work-item.list', resourceType: 'pharmacy-work-item-collection',
+      resourceId: ids.facility, details: { returnedCount: 200 } }]);
   });
 });

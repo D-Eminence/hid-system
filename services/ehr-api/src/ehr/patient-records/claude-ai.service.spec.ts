@@ -23,6 +23,34 @@ describe('Direct Claude generation contract', () => {
     expect(JSON.parse(body.messages.at(-1).content).authorizedRecords[0]).toMatchObject({
       kind:'import',provenance:source.provenance,quality:source.quality,recordedAt:source.recordedAt,effectiveAt:null});
   });
+  it('gives the model each record\'s server-set origin in the reader\'s words and asks it to say where each fact came from', async () => {
+    const reported = evidence({ kind: 'import', id: '22222222-2222-4222-8222-222222222201', version: '1', title: 'Reported medicine',
+      recordedAt: '2026-10-01T00:00:00Z', effectiveAt: null, provenance: 'Patient reported imported history', quality: 'imported',
+      fields: { record: 'Synthetic medicine' }, originHint: 'patient-provided' });
+    const scanned = evidence({ kind: 'note', id: '22222222-2222-4222-8222-222222222202', version: '1', title: 'Old clinic letter',
+      recordedAt: '2026-10-02T00:00:00Z', effectiveAt: null, provenance: 'Signed clinical note', quality: 'released',
+      fields: { text: 'Synthetic letter' }, originHint: 'scanned_paper' });
+    const prescribed = evidence({ kind: 'prescription', id: '22222222-2222-4222-8222-222222222203', version: '1', title: 'Synthetic tablet',
+      recordedAt: '2026-10-03T00:00:00Z', effectiveAt: null, provenance: 'Clinician prescription', quality: 'active', fields: {} });
+    const blocks = JSON.stringify({ blocks: [{ kind: 'record', text: 'Facts.', references: [1, 2, 3] }] });
+    fetchMock.mockResolvedValue(payload(blocks));
+    await new ClaudeAiService().answer('Summarise', [reported, scanned, prescribed], [], AbortSignal.timeout(1000));
+    let body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(JSON.parse(body.messages.at(-1).content).authorizedRecords.map((r: { origin: string }) => r.origin))
+      .toEqual(['You added this', 'From a scanned paper record', 'Recorded by a health worker']);
+    expect(body.system).toContain('For every patient fact, say in plain words where it came from');
+    expect(body.system).toContain('never guess, merge or upgrade it');
+    expect(body.system).toContain('"you added this"');
+    fetchMock.mockResolvedValue(payload(blocks));
+    await new ClaudeAiService().answer('Summarise', [reported, scanned, prescribed], [], AbortSignal.timeout(1000), undefined, 'staff');
+    body = JSON.parse(fetchMock.mock.calls[1][1].body);
+    expect(JSON.parse(body.messages.at(-1).content).authorizedRecords[0].origin).toBe('Added by the patient');
+    expect(body.system).not.toContain('"you added this"');
+    // A record without a known origin (an untyped excerpt) carries none.
+    fetchMock.mockResolvedValue(payload(JSON.stringify({ blocks: [{ kind: 'record', text: 'Fact.', references: [1] }] })));
+    await new ClaudeAiService().answer('What?', [{ title: 'Synthetic note', content: 'Synthetic' }], [], AbortSignal.timeout(1000));
+    expect(JSON.parse(JSON.parse(fetchMock.mock.calls[2][1].body).messages.at(-1).content).authorizedRecords[0]).not.toHaveProperty('origin');
+  });
   it('interprets a natural purpose question and sends bounded prior turns to the fixed first-party API', async () => {
     fetchMock.mockResolvedValue(payload(JSON.stringify({ intent: 'conversation', answer: 'I can explain your released notes.', query: '' })));
     const history = [{ question: 'Hello', answer: 'Hello. How can I help?' }];

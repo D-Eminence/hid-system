@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { z } from 'zod';
 import { getEnvironment } from '../../config/environment';
-import type { RecordIntent,Coverage } from './patient-evidence.types';
+import { originLabel,type RecordIntent,type Coverage,type OriginAudience } from './patient-evidence.types';
 import { labComparisons } from './patient-evidence.selection';
 import type { Evidence } from './patient-evidence.types';
 
@@ -61,7 +61,7 @@ export class ClaudeAiService {
   }
 
   async answer(question: string, sources: readonly (Pick<Evidence,'title'|'content'> & Partial<Evidence>)[],
-    history: readonly ConversationExchange[], signal: AbortSignal,coverage?:Coverage): Promise<string> {
+    history: readonly ConversationExchange[], signal: AbortSignal,coverage?:Coverage,audience:OriginAudience='patient'): Promise<string> {
     if (sources.length > 60 || sources.reduce((sum,s)=>sum+s.content.length,0)>90_000 || sources.some(source => source.title.length > 1000)) {
       throw new Error('Invalid record context size');
     }
@@ -69,6 +69,8 @@ export class ClaudeAiService {
       number: index + 1, title: source.title, content: source.content,
       ...(source.kind?{kind:source.kind,provenance:source.provenance,quality:source.quality,
         recordedAt:source.recordedAt,effectiveAt:source.effectiveAt}:{}),
+      // Set by the server from the record itself (evidenceOrigin), in the reader's words.
+      ...(source.origin?{origin:originLabel(source.origin,audience)}:{}),
     })) : [];
     const messages = this.messages(question, history);
     messages[messages.length - 1]!.content = JSON.stringify({ question, authorizedRecords: evidence,
@@ -87,6 +89,10 @@ export class ClaudeAiService {
       + 'For lab comparisons cite both measurements; use supplied exact arithmetic changes, preserve units and dates, and do not infer clinical significance. '
       + 'When standardized test/specimen/unit mapping or a reliable numeric value is missing, present the recorded reports separately and explain why an exact trend cannot be verified. Do not compute a trend from uncertain OCR text alone. '
       + 'When sources conflict, present both with dates and provenance rather than choosing an invented truth. '
+      + 'Each record\'s origin says where it came from and is set by Health ID, not by you. For every patient fact, say in plain words where it came from, '
+      + 'matching that record\'s origin: the patient added it, a health worker recorded it, it came from a scanned paper record, or it is from the Health ID profile'
+      + (audience==='patient'?' (speak to the patient as "you": for example "you added this")':'')+'. '
+      + 'Use only the given origin; never guess, merge or upgrade it. Something the patient added, or read from a scanned paper record, is not a health worker\'s confirmed finding. '
       + 'If evidence is NONE, acknowledge the question naturally and explain what you cannot verify; '
       + 'you can explain what you would be able to do with released notes. Do not use citations when no evidence exists. '
       + (sources.length?' Return JSON blocks: kind=record for every paragraph with patient facts, with current source references. kind=explanation must contain no patient facts and no references. Do not embed citation markers in block text. ':'')
