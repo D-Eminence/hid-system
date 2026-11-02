@@ -6481,7 +6481,8 @@ Decision:
   which has no staff sign-in (the owner's decision of 2 November 2026), and the
   patient portal's host must start with a patients' site label. Outside
   production, an IP address is not checked for its site, and a one-label host
-  only when it is one of those labels or a staff product's name. So the launch
+  only when it is one of those labels or a staff product's name. A client host
+  never names the default port 443, or a name a URL reads differently. So the launch
   layout's provider workspace on `www.` and `staging.` (ADR-052) gets no
   single sign-on: staff there keep that host's own sign-in until they move to
   their product's `<client_id>.` host.

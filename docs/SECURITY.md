@@ -143,7 +143,9 @@ coordinator's; these are the product's rules.
   2 November 2026 that the patients' site has no staff sign-in), and missing
   or unusable credentials. Outside production, an IP address is not checked
   for its site, and a one-label host only when it is `app`, `www`, `staging`,
-  `development` or a staff product's name.
+  `development` or a staff product's name. In every environment a client host
+  never names the default port 443, or a name a URL reads differently (a last
+  label of digits).
 * The code flow uses `openid-client`: S256 PKCE, `state` and `nonce` kept in a
   signed, 10-minute, single-use transaction cookie bound to its product host;
   the code exchanged with the client's own authentication (`private_key_jwt`

@@ -263,8 +263,9 @@ export function ssoConfiguration(environment: SsoEnvironment): SsoConfiguration 
 /**
  * The client of the product host a request came through: the origin the edge
  * names in X-HID-Edge-Origin, matched exactly. Undefined for any other host
- * (administration, `auth.` itself, the portal on hid-system main, a request
- * that did not come through the edge), which then has no SSO route at all.
+ * (administration, `auth.` itself, a host no client is configured on, a
+ * request that did not come through the edge), which then has no SSO route at
+ * all.
  */
 export function ssoClientForRequest(configuration: SsoConfiguration,
   request: { header(name: string): string | undefined }): SsoClient | undefined {
