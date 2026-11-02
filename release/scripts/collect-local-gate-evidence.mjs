@@ -20,7 +20,8 @@ async function add(path, name) {
 }
 for (const path of ['.github/workflows/tuf-local-gates.yml', 'tools/tuf-release/toolchain/verified-upstream-build.json',
   'tools/tuf-release/toolchain/production-build.json',
-  'tools/tuf-release/go.mod', 'tools/tuf-release/go.sum', 'release/config/components.json']) await add(path, path)
+  'tools/tuf-release/go.mod', 'tools/tuf-release/go.sum', 'release/config/components.json',
+  'security/npm-audit-exceptions.json']) await add(path, path)
 for (const directory of ['hid-tuf-client-reproducibility', 'hid-tuf-signing-broker-reproducibility', 'hid-tuf-operator-reproducibility', 'upstream-tuf-client-reproducibility']) {
   const path = join(e.RUNNER_TEMP, directory)
   let entries
