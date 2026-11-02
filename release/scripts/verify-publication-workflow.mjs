@@ -7,6 +7,13 @@ import { parseDocument } from 'yaml'
 
 export function parseWorkflow(source) {
   assert.ok(source.length < 100000, 'workflow exceeds source bound')
+  // The yaml parser ends a line only at LF, but YAML 1.2 and GitHub's own
+  // parser also end one at a lone CR, NEL, LS or PS, so such a character in a
+  // comment would hide every key and step after it from these checks. So a
+  // workflow must be printable ASCII with LF line breaks (tab allowed), and
+  // carry no %YAML directive, which would switch this parser to YAML 1.1.
+  assert.match(source, /^[\t\n\x20-\x7e]*$/, 'workflow must be printable ASCII with LF line breaks')
+  assert.ok(!/^%/m.test(source), 'workflow cannot carry a YAML directive')
   const doc = parseDocument(source, { uniqueKeys: true, strict: true, version: '1.2', stringKeys: true })
   assert.deepEqual(doc.errors, [], 'ambiguous or invalid workflow YAML')
   assert.deepEqual(doc.warnings, [], 'unsupported workflow YAML')
@@ -73,9 +80,11 @@ const AUDIT_COMMAND = /\bnpm\b[^\n]*\baudit\b|npm-audit-with-exceptions/
 // checkout and setup-node come first, and setup-node must not restore a
 // package-manager cache: no cache restore (setup-go's included) can bring an
 // earlier run's dependency code into the tool cache before the audit. Each
-// audit job checks out exactly once, at `checkoutRef` (none in the local
-// gates, so the event's own commit), so the audit cannot read another tree
-// than the steps after it. It also rejects these ways to skip,
+// audit job has exactly one checkout step, before its audit, at `checkoutRef`
+// (none in the local gates, so the event's own commit), so no checkout step
+// can point the audit at another commit. A later run step that rewrites the
+// tree or a lockfile is left to owner review, like any step after the audit.
+// It also rejects these ways to skip,
 // reconfigure or redirect an audit: a workflow or job default shell; a
 // condition, needs (a job waiting on a skipped job is skipped too),
 // continue-on-error, container, service, matrix or another runner on an audit
@@ -174,8 +183,8 @@ export function verifyPublicationWorkflow(source) {
   assert.equal(workflow.concurrency?.['cancel-in-progress'], false, 'never cancel a live publication for a newer run')
   const { tooling, publish } = workflow.jobs
   assert.equal(tooling.steps.find(step => step.uses?.startsWith('actions/setup-go@'))?.with['go-version'], '1.26.10')
-  // setup-go takes a missing cache input as true. The publisher restores no cache.
-  for (const step of tooling.steps.filter(step => step.uses?.startsWith('actions/setup-go@'))) assert.equal(step.with?.cache, false, 'the publisher restores no Go cache')
+  // setup-go takes a missing cache input as true. The tooling job restores no Go cache.
+  for (const step of tooling.steps.filter(step => step.uses?.startsWith('actions/setup-go@'))) assert.equal(step.with?.cache, false, 'the publisher tooling job restores no Go cache')
   assert.ok(tooling.steps.some(step => step.id === 'go_audit' && step.run.includes('verify-production-toolchain.mjs') && step.run.includes('go-vulnerability-gate.mjs')))
   assert.deepEqual(tooling.permissions, { contents: 'read' })
   assert.equal(tooling.environment, undefined)

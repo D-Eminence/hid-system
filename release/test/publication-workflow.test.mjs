@@ -28,6 +28,7 @@ const dockerAction = { name: 'Prepare', uses: 'docker://alpine:3' }
 const SHELL = /must run in \/usr\/bin\/bash -p -e/
 const STEP_KEYS = /cannot be conditional, configured or allowed to fail/
 const CODE_FIRST = /runs code before its audit/
+const GATE_ONLY = /only the reviewed audit step may use the audit gate or the exception file/
 const BEFORE_AUDIT = /before its audit: only checkout and setup-node come first/
 const NPM_CACHE = /cannot restore a package-manager cache/
 const ONE_CHECKOUT = /must check out its source exactly once/
@@ -66,6 +67,7 @@ test('local gates keep every npm audit and run only infra/aws through the except
     'workflow npm configuration': (w) => { w.env.npm_config_audit_level = 'none' },
     'exception file rewritten before audit': (w) => { w.jobs['aws-release-trust'].steps.splice(2, 0, { run: 'cp /tmp/empty.json security/npm-audit-exceptions.json' }) },
     'security file replaced by glob': (w) => { w.jobs['aws-release-trust'].steps.splice(2, 0, { run: 'cp /tmp/empty.json security/*.json' }) },
+    'security file replaced after the infra/aws audit': [(w) => { const steps = w.jobs['aws-release-trust'].steps; steps.splice(steps.findIndex(s => s.id === 'gate_2') + 1, 0, { run: 'cp /tmp/empty.json security/*.json' }) }, GATE_ONLY],
     'npm registry redirected': (w) => { w.jobs['aws-release-trust'].steps.find(s => s.uses?.startsWith('actions/setup-node@')).with['registry-url'] = 'https://registry.invalid/' },
     'default shell replaced': (w) => { w.jobs['aws-release-trust'].defaults = { run: { shell: 'true {0}' } } },
     'workflow default shell replaced': [(w) => { w.defaults = { run: { shell: 'true {0}' } } }, DEFAULT_SHELL],
@@ -165,8 +167,9 @@ test('forbidden workflow paths are rejected statically', () => {
     'tooling npm configuration': (w) => { w.jobs.tooling.env.NPM_CONFIG_OMIT = 'dev' },
     'tooling node preload': (w) => { w.jobs.tooling.env.NODE_OPTIONS = '--import ./preload.mjs' },
     'second audit step': (w) => { w.jobs.tooling.steps.push({ name: 'Audit again', run: 'npm --prefix infra/aws audit || true', id: 'audit_2' }) },
-    'exception file rewritten before audit': (w) => { w.jobs.tooling.steps.splice(3, 0, { run: "echo '{}' > security/npm-audit-exceptions.json" }) },
-    'security file replaced by glob': (w) => { w.jobs.tooling.steps.splice(3, 0, { run: 'cp /tmp/empty.json security/*.json' }) },
+    'exception file rewritten before audit': (w) => { before(w.jobs.tooling.steps, 'audit', { run: "echo '{}' > security/npm-audit-exceptions.json" }) },
+    'security file replaced by glob': (w) => { before(w.jobs.tooling.steps, 'audit', { run: 'cp /tmp/empty.json security/*.json' }) },
+    'security file replaced after the audit': [(w) => { const steps = w.jobs.tooling.steps; steps.splice(steps.findIndex(s => s.id === 'audit') + 1, 0, { run: 'cp /tmp/empty.json security/*.json' }) }, GATE_ONLY],
     'npm registry redirected': (w) => { w.jobs.tooling.steps.find(s => s.uses?.startsWith('actions/setup-node@')).with['registry-url'] = 'https://registry.invalid/' },
     'default shell replaced': (w) => { w.jobs.tooling.defaults = { run: { shell: 'true {0}' } } },
     'workflow default shell replaced': [(w) => { w.defaults = { run: { shell: 'true {0}' } } }, DEFAULT_SHELL],
@@ -191,9 +194,9 @@ test('forbidden workflow paths are rejected statically', () => {
     'tooling install runs before the audit': [(w) => { const steps = w.jobs.tooling.steps; const i = steps.findIndex(s => s.name === 'Install locked tooling without cloud authority'); const [step] = steps.splice(i, 1); steps.splice(steps.findIndex(s => s.id === 'audit'), 0, step) }, CODE_FIRST],
     'NODE_VERSION in the tooling env': [(w) => { w.jobs.tooling.env.NODE_VERSION = '20.0.0' }, UNLISTED('NODE_VERSION')],
     'Go set up before the audit': [(w) => { const steps = w.jobs.tooling.steps; move(steps, setupGo(steps), 'audit') }, BEFORE_AUDIT],
-    'publisher Go cache turned on': [(w) => { setupGo(w.jobs.tooling.steps).with.cache = true }, /the publisher restores no Go cache/],
-    'publisher Go cache input dropped': [(w) => { delete setupGo(w.jobs.tooling.steps).with.cache }, /the publisher restores no Go cache/],
-    'second publisher Go setup with a cache': [(w) => { const steps = w.jobs.tooling.steps; steps.splice(steps.indexOf(setupGo(steps)) + 1, 0, { uses: setupGo(steps).uses, with: { 'go-version': '1.26.10', cache: true } }) }, /the publisher restores no Go cache/],
+    'publisher Go cache turned on': [(w) => { setupGo(w.jobs.tooling.steps).with.cache = true }, /the publisher tooling job restores no Go cache/],
+    'publisher Go cache input dropped': [(w) => { delete setupGo(w.jobs.tooling.steps).with.cache }, /the publisher tooling job restores no Go cache/],
+    'second publisher Go setup with a cache': [(w) => { const steps = w.jobs.tooling.steps; steps.splice(steps.indexOf(setupGo(steps)) + 1, 0, { uses: setupGo(steps).uses, with: { 'go-version': '1.26.10', cache: true } }) }, /the publisher tooling job restores no Go cache/],
     'npm cache restored for the tooling': [(w) => { setupNode(w.jobs.tooling.steps).with['package-manager-cache'] = true }, NPM_CACHE],
     'tooling checked out again after the audit': [(w) => { const steps = w.jobs.tooling.steps; steps.splice(steps.findIndex(s => s.id === 'audit') + 1, 0, structuredClone(checkout(steps))) }, ONE_CHECKOUT],
   }
@@ -225,6 +228,29 @@ test('the audit shell reads no BASH_ENV and imports no shell function, as plain 
   } finally {
     await rm(dir, { recursive: true, force: true })
   }
+})
+
+test('a line break the yaml parser does not see cannot hide workflow content', () => {
+  // yaml ends a line only at LF; YAML 1.2 and GitHub also end one at these. Each would hide what follows it in a comment.
+  const breaks = { CR: '\r', NEL: '\u0085', LS: '\u2028', PS: '\u2029' }
+  const hidden = {
+    'a checkout ref': ['persist-credentials: false', 'persist-credentials: false # reviewed{BREAK}          ref: ${{ github.event.pull_request.base.sha }}'],
+    'a step before the audit': ['package-manager-cache: false', 'package-manager-cache: false # reviewed{BREAK}      - run: npm --prefix release ci'],
+    'continue-on-error on the audit': ['id: gate_2', 'id: gate_2 # audit{BREAK}        continue-on-error: true'],
+  }
+  for (const [name, character] of Object.entries(breaks)) {
+    for (const [what, [line, replacement]] of Object.entries(hidden)) {
+      const edited = localGates.replace(line, replacement.replace('{BREAK}', character))
+      assert.notEqual(edited, localGates)
+      assert.throws(() => verifyLocalGateWorkflow(edited), /printable ASCII with LF line breaks/, `${what} behind ${name}`)
+    }
+    const publisher = source.replace('package-manager-cache: false', `package-manager-cache: false # reviewed${character}          cache: npm`)
+    assert.notEqual(publisher, source)
+    assert.throws(() => verifyPublicationWorkflow(publisher), /printable ASCII with LF line breaks/, `the publisher's npm cache behind ${name}`)
+  }
+  assert.throws(() => verifyLocalGateWorkflow(localGates.replace(/\n/g, '\r\n')), /printable ASCII with LF line breaks/, 'CRLF line breaks')
+  assert.throws(() => verifyLocalGateWorkflow(`%YAML 1.1\n---\n${localGates}`), /YAML directive/, 'a YAML 1.1 directive')
+  assert.throws(() => verifyPublicationWorkflow(`%YAML 1.2\n---\n${source}`), /YAML directive/, 'a YAML 1.2 directive')
 })
 
 test('duplicate YAML fields and aliases cannot hide workflow permissions', () => {
