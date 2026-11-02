@@ -301,7 +301,10 @@ try {
   assert.ok(!scanned.content.includes('scanned_paper')&&!('originHint' in scanned));
   const {staffChatRuntimeChecks}=await import('./staff-chat-runtime-checks.mjs');
   await staffChatRuntimeChecks({admin,runtime,patientA:a,patientB:b,staffAccount});
-  console.log(JSON.stringify({passed:true,restricted_login:true,legacy_checks:15,
+  // A busy laboratory's work list: over 1,000 work items, read as lab-api reads it, within its 15-second limit.
+  const {labWorkListRuntimeChecks}=await import('./lab-work-list-runtime-checks.mjs');
+  const labWorkList=await labWorkListRuntimeChecks({admin,connect,password});
+  console.log(JSON.stringify({passed:true,restricted_login:true,legacy_checks:15,labWorkList,
     evidence_checks:['typed imports','patient-reported provenance','draft exclusion','cross-patient vectors','restricted Lab released results','staff Lab patient and facility isolation','exact result invalidation','server-set record origin'],
     conversation_checks:['bounded context','patient isolation','clear generation','current source bindings','stale inherited reply withheld'],customer_data:false}));
 } finally {

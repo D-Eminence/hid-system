@@ -26,42 +26,70 @@ const WORK_ITEM_SELECT = `select id::text,patient_id::text,facility_id::text,ord
 
 const workItemDenied = () => new DomainProblem(403, 'LAB_WORK_ITEM_ACCESS_DENIED', 'Lab work-item access is not authorized');
 
-/**
- * Work that is still to be done here: a work item is open until every test it
- * asks for has a result whose current version is released and not marked
- * entered in error (the same released truth the patient and the chat read,
- * PATIENT_LAB_QUERY). A work item without a requested test is open. Every
- * relation is read under the session's row-level security, so a member sees
- * only what the list itself may show; each join walks a unique or indexed key
- * (accession by work item, specimens by accession, execution by specimen and
- * test, result by execution, release and invalidation by result version).
- */
-const OPEN_WORK = `not exists(select 1 from lab.work_item_requested_tests t where t.work_item_id=w.id)
-  or exists(select 1 from lab.work_item_requested_tests t where t.work_item_id=w.id and not exists(
-    select 1 from lab.accessions oa join lab.specimens os on os.accession_id=oa.id
-    join lab.test_executions oe on oe.specimen_id=os.id and oe.requested_test_id=t.id
-    join lab.results orr on orr.execution_id=oe.id
-    join lab.result_releases orel on orel.result_id=orr.id and orel.result_version=orr.current_version
-    where oa.work_item_id=w.id and not exists(select 1 from lab.result_invalidations oi
-      where oi.result_id=orr.id and oi.result_version=orr.current_version)))`;
+/** Open work first, oldest first; then done work, newest first; the id breaks ties. */
+const workOrder = (q: string) => `${q}.open_work desc,case when ${q}.open_work then ${q}.accepted_at end asc,`
+  + `case when ${q}.open_work then null else ${q}.accepted_at end desc,case when ${q}.open_work then ${q}.id end asc,`
+  + `case when ${q}.open_work then null else ${q}.id end desc`;
+
+/** A work item's own columns, as `w` (both in the ordering and in the answer). */
+const WORK_ITEM_COLUMNS = ['id', 'patient_id', 'facility_id', 'ordering_facility_id', 'source_ehr_order_id',
+  'source_ehr_order_version', 'source_encounter_id', 'status', 'priority', 'accepted_by', 'accepted_at', 'row_version',
+  'created_at', 'order_route_id', 'test_name'].map((column) => `w.${column}`).join(',');
 
 /**
  * The work list (200 rows, as before). Open work comes first, oldest first,
  * so new and waiting work always shows however much is done; done work fills
  * the rest, newest first. Before, the oldest 200 rows the member could read
  * were answered whatever their state, so a busy facility stopped seeing new
- * work. OFFSET 0 keeps the open test a subquery of its own, worked out once
- * per work item, rather than copied into each sort key. Exported for the tests.
+ * work. $1 is the session's facility (DataAccessContext.facilityId). Exported
+ * for the tests.
+ *
+ * A work item is open until every test it asks for has a result whose current
+ * version is released and not marked entered in error (the same released truth
+ * the patient and the chat read, PATIENT_LAB_QUERY); a work item without a
+ * requested test is open. Every relation is read under the session's
+ * row-level security, so a member sees only what the list itself may show.
+ * An execution's requested test always belongs to its accession's work item
+ * (lab.validate_execution_insert; requested tests, accessions and executions'
+ * keys never change, and none is deleted), so a released result for a work
+ * item's requested test is one on that work item's specimens.
+ *
+ * Cost. Every row read from a Lab table pays its own row-level security check
+ * (the member's consent check, about 1.4-1.8 ms a row on a 2.1 GHz Xeon), so
+ * the query reads each Lab table once: the facility's released results
+ * (release, result at that version, execution) once, kept by requested test
+ * (MATERIALIZED, so never re-read per work item); each work item and its
+ * requested test once; the accession and specimens only for the 200 rows
+ * answered. That is 5 checks per done work item, 2 per open one, plus 2 per
+ * row answered (the oldest-200 query read 3 per work item, the first open-first
+ * query 10). The facility test ($1, which row-level security already requires)
+ * keeps every read within the facility, before any row's check. Known limit
+ * (no schema change in this step, docs/INTERFACE_CONTRACT.md): past roughly
+ * 2,000 work items at a laboratory the list exceeds lab-api's 15-second limit.
  */
-export const WORK_LIST_QUERY = `select w.id::text,w.patient_id::text,w.facility_id::text,w.ordering_facility_id::text,
+export const WORK_LIST_QUERY = `with released_tests as materialized (
+    select e.requested_test_id from lab.result_releases rel
+    join lab.results r on r.id=rel.result_id and r.current_version=rel.result_version
+    join lab.test_executions e on e.id=r.execution_id
+    where rel.facility_id=$1::uuid and e.facility_id=$1::uuid
+      and not exists(select 1 from lab.result_invalidations i where i.result_id=r.id and i.result_version=r.current_version)),
+  shown as (
+    select x.* from (
+      select ${WORK_ITEM_COLUMNS},
+        not bool_and(d.requested_test_id is not null) as open_work
+      from lab.work_items w
+      left join lab.work_item_requested_tests t on t.work_item_id=w.id
+      left join released_tests d on d.requested_test_id=t.id
+      where w.facility_id=$1::uuid
+      group by w.id) x
+    order by ${workOrder('x')} limit 200)
+select w.id::text,w.patient_id::text,w.facility_id::text,w.ordering_facility_id::text,
   w.source_ehr_order_id::text,w.source_ehr_order_version::text,w.source_encounter_id::text,w.status,w.priority,
   w.accepted_by::text,w.accepted_at,w.row_version::text,w.created_at,w.order_route_id::text,w.test_name,a.id::text as accession_id,
-  a.accession_number,array_remove(array_agg(s.status order by s.created_at),null) as specimen_statuses from lab.work_items w
-  cross join lateral (select ${OPEN_WORK} as open_work offset 0) o
+  a.accession_number,array_remove(array_agg(s.status order by s.created_at),null) as specimen_statuses from shown w
   left join lab.accessions a on a.work_item_id=w.id left join lab.specimens s on s.accession_id=a.id
-  group by w.id,a.id,a.accession_number,o.open_work
-  order by o.open_work desc,case when o.open_work then w.accepted_at end asc,case when o.open_work then null else w.accepted_at end desc,
-  case when o.open_work then w.id end asc,case when o.open_work then null else w.id end desc limit 200`;
+  group by ${WORK_ITEM_COLUMNS},w.open_work,a.id,a.accession_number
+  order by ${workOrder('w')}`;
 
 @Injectable()
 export class LabWorkItemsService {
@@ -194,7 +222,7 @@ export class LabWorkItemsService {
     }
     const page = await this.database.withTransaction(context, async (client) => {
       const result = await client.query<WorkItemRow & { test_name:string; accession_id:string|null; accession_number:string|null;
-        specimen_statuses:string[]|null }>(WORK_LIST_QUERY);
+        specimen_statuses:string[]|null }>(WORK_LIST_QUERY, [context.facilityId]);
       const routed = result.rows.filter((row) => row.order_route_id).map((row) => row.id);
       const cards = await this.routeCards.cards(client, routed, context.correlationId);
       await this.auditShownPatients(client, context, result.rows, cards);

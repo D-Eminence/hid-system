@@ -1372,6 +1372,22 @@ or its dispensing was reversed. Earlier backends answered the 200 oldest items
 the member could read whatever their state, so a busy facility stopped seeing
 new work. The answer's shape and audit rows are unchanged.
 
+Known limit of the Lab list (no schema change in this step). Every row the
+list reads from a Lab table pays its own row-level security check, mostly the
+member's consent check, over a millisecond each. The list reads each Lab
+table once: about 5 checks per work item at the laboratory plus 2 per row
+answered (the oldest-200 list read 3 per work item). Measured on PostgreSQL 16
+on a shared 2.1 GHz Xeon as the restricted Lab login with lab-api's 15-second
+statement limit: 1,041-1,050 work items 8.8-12.1 s, 1,541 work items 11.1 s,
+2,041 work items over the limit (the oldest-200 list: 4.7-5.7 s, 6.2 s and
+8.6 s). So a laboratory with more than roughly 1,800 to 2,000 work items gets
+an error instead of the list, and fewer on a slower database server. Raising
+that ceiling needs a migration (for example one row of open or done state per
+work item, kept by the database), which is a separate owner decision.
+`services/ehr-api/scripts/lab-work-list-runtime-checks.mjs` (run by
+`test-patient-evidence-runtime.mjs`) checks 1,050 work items within the
+limit and counts the checks.
+
 ### Record chat: where each source came from
 
 Each source in a record chat answer (`POST /api/v1/ehr/me/chat`,
