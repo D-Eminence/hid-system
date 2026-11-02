@@ -39,6 +39,15 @@ jobs:
           go-version: 1.26.10
           check-latest: false
           cache: false
+      - name: Audit all publication tooling dependencies
+        shell: /usr/bin/bash -p -e {0}
+        id: audit
+        run: |
+          export PATH="$RUNNER_TOOL_CACHE/node/22.23.2/x64/bin:/usr/bin:/bin"
+          test "$(node --version)" = v22.23.2
+          npm --prefix release audit --audit-level=moderate
+          npm --prefix infra/cloudflare audit --audit-level=moderate
+          node release/scripts/npm-audit-with-exceptions.mjs infra/aws
       - name: Install locked tooling without cloud authority
         run: |
           npm --prefix release ci --ignore-scripts
@@ -54,12 +63,6 @@ jobs:
           npm --prefix infra/cloudflare test
           npm --prefix infra/aws run typecheck
           npm --prefix infra/aws test
-      - name: Audit all publication tooling dependencies
-        id: audit
-        run: |
-          npm --prefix release audit --audit-level=moderate
-          npm --prefix infra/cloudflare audit --audit-level=moderate
-          node release/scripts/npm-audit-with-exceptions.mjs infra/aws
       - name: Verify patched Go and reject reachable vulnerabilities
         id: go_audit
         run: |-
