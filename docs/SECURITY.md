@@ -117,6 +117,79 @@ cookie only under `/api/v1/auth`, so once the access cookie has expired, a
 browser whose refresh session is still live is not refused at the enrollment
 routes under `/api/v1/identity`.
 
+### Single sign-on on `auth.`, the product side (ADR-070, proposed)
+
+Proposed and dark: with `AUTH_SSO_ISSUER` unset nothing below runs, and the
+routes answer as routes that do not exist (`INTERFACE_CONTRACT.md`, "Single
+sign-on hand-off on product hosts"). The provider on `auth.` is the
+coordinator's; these are the product's rules.
+
+* No cookie crosses hosts. Each product keeps today's host-only session; the
+  hand-off cookies are `__Host-` cookies of the product host.
+* Every target comes from configuration: the client from the edge's
+  `X-HID-Edge-Origin` matched exactly, its redirect and sign-out return from
+  its configured host, the provider's endpoints from discovery, which must
+  name exactly the configured issuer and keep every endpoint on its origin.
+  The only value read from the request is the return path, checked to be a
+  page on the same host with no Health ID, never an API route. An escaped
+  unreserved character (`/%61pi/`, `h%69d-`) is refused: a browser decodes it,
+  so it would spell either rule around.
+* Start-up refuses an HTTP issuer or internal base in production, a wildcard,
+  unknown (`CORS_ORIGINS`), administration or issuer host, administration as a
+  client, a client whose kind is not its site's, a client on another site's
+  host (a staff client anywhere but `<client_id>.`, the patients' site
+  included; the portal anywhere but the patients' site, `app.` or `www.`, or
+  `staging.` or `development.` in those environments; the owner's decision of
+  2 November 2026 that the patients' site has no staff sign-in), and missing
+  or unusable credentials. Outside production, an IP address is not checked
+  for its site, and a one-label host only when it is `app`, `www`, `staging`,
+  `development` or a staff product's name. In every environment a client host
+  never names the default port 443, or a name a URL reads differently (a last
+  label of digits).
+* The code flow uses `openid-client`: S256 PKCE, `state` and `nonce` kept in a
+  signed, 10-minute, single-use transaction cookie bound to its product host;
+  the code exchanged with the client's own authentication (`private_key_jwt`
+  preferred); the ID token checked for signature against the provider's key
+  set, `iss`, `aud`, `exp`, `nonce`, `auth_time` within the absolute sign-in
+  lifetime, `azp` whenever present, `iat` within five minutes, `sub`, `sid`,
+  the kind the client accepts (a staff sign-in never opens `app.` and a
+  patient one never opens a staff product) and, for staff, a password and a
+  one-time code, as staff sign-in requires today (MFA-1). Only asymmetric
+  signatures are accepted.
+* Back-channel logout tokens are checked with `jose` (signature, `iss`, `aud`,
+  `azp`, `iat` within five minutes, `typ`, the event, `sid` or `sub`, no
+  `nonce`) and each `jti` is accepted once. The route needs no cookie; the
+  signed token for this client is the credential. Every request reaches it
+  only through the edge and gateway, as every API does.
+* Discovery and key sets are cached for at most five minutes and fail closed:
+  a stale copy is never used, and a provider that cannot be reached is a
+  `503` or the product's own sign-in page, never a session. Calls go only to
+  the issuer's origin (or the configured internal base), never follow a
+  redirect, time out after five seconds and read at most 256 KiB.
+* A hand-off is not a fresh sign-in: the session's absolute end and a
+  patient's recent-sign-in check count from the provider's `auth_time`. A
+  fresh sign-in (`prompt=login`) always goes to the provider, even over a live
+  session; it must then be of the same account, and it ends the earlier
+  sign-in, so a browser keeps one sign-in per product.
+* A provider sign-in older than the account's last password change, or, for
+  staff, than the activation of the authenticator recorded as its second
+  factor, opens no session (`stale_provider_sign_in`; a change up to five
+  seconds after `auth_time` counts as before it). Recovery and a new
+  enrolment after an MFA reset are caught this way. Suspension, reactivation
+  and deletion cannot be dated here: the provider must end its own sessions
+  whenever the account's `token_version` changes.
+* A refused hand-off never becomes a redirect loop, and after sign-out
+  everywhere the first refused session check or refresh on a product host
+  clears its session cookies.
+* Product sign-out ends every other sign-in of the account of that kind, not
+  only those the provider session opened: a sign-in made on a product's own
+  sign-in page while the provider was down is never left behind.
+* Nothing identifying travels in an address: the return page stays in the
+  transaction cookie, failures go to the sign-in page with an empty address,
+  the end-session address names only the client and the product's root (no
+  `id_token_hint`; the ID token is not even kept), and audit rows record the
+  client and the failed check, never a token, code or claim value.
+
 ## 3. Authorization
 
 Use RBAC and domain permissions.

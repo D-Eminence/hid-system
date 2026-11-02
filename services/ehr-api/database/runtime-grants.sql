@@ -1731,6 +1731,19 @@ revoke all on function auth.require_platform_step_up(uuid),
 grant select, insert, update on auth.session_facility_selection to hid_identity_runtime;
 revoke all on function auth.guard_session_facility_selection_change() from public;
 
+-- Single sign-on on auth., the product side (0102, ADR-070). The Identity
+-- runtime records a sign-in's single sign-on provenance with the sign-in, and
+-- reads it for back-channel logout and the patient recent-sign-in check; the
+-- 0102 guard admits only the root session of a staff or patient sign-in of
+-- the client's kind and refuses any change, so neither UPDATE nor DELETE is
+-- granted. It records spent sign-in
+-- transactions and logout tokens, by digest, and removes those past their
+-- acceptance. No other service reads either table. The guard runs as the
+-- invoker and reads only auth.sessions, which this runtime already reads.
+grant select, insert on auth.session_single_sign_on to hid_identity_runtime;
+grant select, insert, delete on auth.sso_spent_tokens to hid_identity_runtime;
+revoke all on function auth.guard_session_single_sign_on_change() from public;
+
 -- Phase 4 Stage 5B (0073): the Identity API's own revocations (refresh-token
 -- reuse, an administrator revoking their own session, sign-out, expiry) take the
 -- account row lock through this helper before revoking, as the 0073 admin

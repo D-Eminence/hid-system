@@ -1,6 +1,6 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import { Body, Controller, Get, HttpCode, MethodNotAllowedException, Post, Req, Res, ServiceUnavailableException,
-  UnauthorizedException } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, MethodNotAllowedException, Optional, Post, Req, Res,
+  ServiceUnavailableException, UnauthorizedException, UseFilters, UseGuards } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import type { PoolClient } from 'pg';
 import { AuditService, type AuditEventInput } from '../audit/audit.service';
@@ -8,7 +8,6 @@ import { AuditFailuresOnly, AuditSessionEvent, FacilityOptional, PatientAllowed,
 import { DomainProblem } from '../common/problem';
 import type { ActorContext, FacilityAssignment, HidRequest } from '../common/request-context';
 import { getEnvironment } from '../config/environment';
-import { clearEnrollmentCookie } from '../identity/enrollment-cookie';
 import { AuthService } from './auth.service';
 import { AuthSessionAuditService } from './auth-session-audit.service';
 import { GoogleLinkDto, GoogleLoginDto } from './dto/google-login.dto';
@@ -20,6 +19,10 @@ import { GoogleAuthenticationService } from './google-authentication.service';
 import type { FacilitySelectionState, LoginResult } from './auth.types';
 import { MfaService } from './mfa/mfa.service';
 import { refreshRefused } from './refresh-refusal';
+import { clearSessionCookies, setSessionCookies } from './session-cookies';
+import { SsoRouteGuard } from './sso/sso-route.guard';
+import { SsoSessionEndFilter } from './sso/sso-session-end.filter';
+import { SsoService } from './sso/sso.service';
 import { TokenService } from './token.service';
 import { WorkloadAuthService } from './workload-auth.service';
 import { TurnstileService } from './turnstile.service';
@@ -46,6 +49,17 @@ interface SessionReport {
   facilitySelection?: FacilitySelectionState;
 }
 
+/** The sign-in today's sign-out ended: its account and kind (product sign-out ends the account's others). */
+interface SignedOut {
+  readonly accountId: string;
+  readonly kind: 'staff' | 'patient';
+}
+
+/** A staff actor carries no kind; a platform actor never gets here (endSignIn refuses it). */
+function signedOutAs(actor: ActorContext): SignedOut {
+  return { accountId: actor.accountId, kind: actor.kind === 'patient' ? 'patient' : 'staff' };
+}
+
 @Controller('auth')
 @AuditFailuresOnly()
 export class AuthController {
@@ -62,6 +76,9 @@ export class AuthController {
     private readonly turnstile: TurnstileService,
     private readonly google: GoogleAuthenticationService,
     private readonly mfa: MfaService,
+    // Single sign-on (ADR-070): optional so a controller built without it
+    // (older test harnesses) is today's controller; its only route is dark.
+    @Optional() private readonly sso?: SsoService,
   ) {}
 
   /**
@@ -457,8 +474,13 @@ export class AuthController {
    * no longer one of the actor's active facilities it is the default and the
    * user must choose again ('reselect'). A valid X-Facility-ID on this request
    * still binds the facility it names. The selection authorizes nothing.
+   *
+   * On a single sign-on host, a refused check of a sign-in that has nothing
+   * left to renew (ended by back-channel logout, for one) also clears this
+   * host's session cookies (SsoSessionEndFilter, ADR-070).
    */
   @Get('session')
+  @UseFilters(SsoSessionEndFilter)
   @AuditSessionEvent('auth.session.read')
   @FacilityOptional()
   @PatientAllowed()
@@ -531,6 +553,16 @@ export class AuthController {
   @Public()
   @HttpCode(204)
   async logout(@Req() request: HidRequest, @Res({ passthrough: true }) response: Response): Promise<void> {
+    await this.signOut(request, response);
+  }
+
+  /**
+   * Today's sign-out (`logout`, above), unchanged. Answers the account and
+   * kind of the sign-in the request proved it holds and that sign-out ended
+   * (a verified access token, or the refresh cookie with the CSRF token
+   * derived from it), or nothing; only product sign-out reads the answer.
+   */
+  private async signOut(request: HidRequest, response: Response): Promise<SignedOut | undefined> {
     const authorization = request.header('authorization');
     const bearer = authorization?.startsWith('Bearer ') ? authorization.slice('Bearer '.length).trim() : '';
     // A cookie sign-out from an unapproved origin changes nothing, cookies included.
@@ -544,7 +576,7 @@ export class AuthController {
         if (!verified) throw new DomainProblem(401, 'AUTHENTICATION_REQUIRED', 'Valid authentication is required');
         request.actor = verified.actor;
         await this.endSignIn(verified.actor, request);
-        return;
+        return signedOutAs(verified.actor);
       }
       const cookies = this.cookies(request);
       const csrfCookie = cookies[`${this.environment.AUTH_COOKIE_NAME}_csrf`];
@@ -564,11 +596,11 @@ export class AuthController {
           throw this.clientMismatch(kind, request);
         }
         await this.endSignIn(verified.actor, request);
-        return;
+        return signedOutAs(verified.actor);
       }
       const refreshToken = cookies[`${this.environment.AUTH_COOKIE_NAME}_refresh`];
       // No sign-in left to end: the cookies are cleared all the same.
-      if (!refreshToken) return;
+      if (!refreshToken) return undefined;
       if (!this.tokens.verifyRefreshCsrf(refreshToken, csrfCookie, csrfHeader)) {
         throw new DomainProblem(403, 'CSRF_VALIDATION_FAILED', 'CSRF validation failed');
       }
@@ -590,10 +622,45 @@ export class AuthController {
           sourceIp: request.ip,
           userAgent: request.header('user-agent'),
         });
+        return { accountId: ended.accountId, kind: ended.kind };
       }
+      return undefined;
     } finally {
       if (!keepCookies) this.clearCookies(response);
     }
+  }
+
+  /**
+   * Product sign-out while single sign-on is on for this host (ADR-070).
+   * Today's sign-out (`logout`, above) ends this sign-in and clears its
+   * cookies, with the same Origin and CSRF checks, refusals and audit; then
+   * the answer is the provider's end-session address for the frontend to
+   * navigate to. The provider ends its own session there and sends
+   * back-channel logout to every product, so signing out of one product signs
+   * out of all of them. Before that, every other sign-in of the same account
+   * and kind ends here too (SsoService.endAccountSignIns): the provider's
+   * back-channel logout reaches only the sign-ins its session opened, not one
+   * made on a product's own sign-in page, which single sign-on keeps as the
+   * fallback. The address names only the client and the product's root: no
+   * token reaches page JavaScript or an address (no `id_token_hint`). While
+   * single sign-on is off, or on a host that is not one of its clients, this
+   * is no route at all (SsoRouteGuard).
+   */
+  @Post('sso/logout')
+  @UseGuards(SsoRouteGuard)
+  @AuditSessionEvent('auth.logout')
+  @Public()
+  @HttpCode(200)
+  async ssoLogout(@Req() request: HidRequest,
+    @Res({ passthrough: true }) response: Response): Promise<{ endSessionUrl: string }> {
+    const sso = this.sso;
+    const client = sso?.clientFor(request);
+    if (!sso || !client) throw new ServiceUnavailableException('Single sign-on is unavailable');
+    const signedOut = await this.signOut(request, response);
+    if (signedOut) await sso.endAccountSignIns(client, signedOut, this.event(request));
+    response.setHeader('Cache-Control', 'no-store');
+    response.setHeader('Referrer-Policy', 'no-referrer');
+    return { endSessionUrl: await sso.endSessionUrl(client) };
   }
 
   @Post('facility')
@@ -781,38 +848,14 @@ export class AuthController {
     };
   }
 
-  /**
-   * Sets the session cookies of a sign-in or refresh, and expires the public
-   * patient enrollment cookie: once a sign-in exists on this device, its HID
-   * comes from the session, not from whichever enrollment the device last made.
-   */
+  /** The session cookies of a sign-in or refresh (session-cookies.ts). */
   private setCookies(response: Response, result: LoginResult): void {
-    const common = {
-      secure: this.environment.AUTH_COOKIE_SECURE,
-      sameSite: 'strict' as const,
-    };
-    response.cookie(this.environment.AUTH_COOKIE_NAME, result.accessToken, {
-      ...common, httpOnly: true, path: '/', expires: result.expiresAt,
-    });
-    response.cookie(`${this.environment.AUTH_COOKIE_NAME}_refresh`, result.refreshToken, {
-      ...common, httpOnly: true, path: '/api/v1/auth', expires: result.refreshExpiresAt,
-    });
-    response.cookie(`${this.environment.AUTH_COOKIE_NAME}_csrf`, result.csrfToken, {
-      ...common, httpOnly: false, path: '/', expires: result.refreshExpiresAt,
-    });
-    clearEnrollmentCookie(response, this.environment.AUTH_COOKIE_SECURE);
+    setSessionCookies(response, result, this.environment);
   }
 
-  /** Clears the session cookies and the public patient enrollment cookie. */
+  /** Clears the session cookies and the public patient enrollment cookie (session-cookies.ts). */
   private clearCookies(response: Response): void {
-    const common = {
-      secure: this.environment.AUTH_COOKIE_SECURE,
-      sameSite: 'strict' as const,
-    };
-    response.clearCookie(this.environment.AUTH_COOKIE_NAME, { ...common, httpOnly: true, path: '/' });
-    response.clearCookie(`${this.environment.AUTH_COOKIE_NAME}_refresh`, { ...common, httpOnly: true, path: '/api/v1/auth' });
-    response.clearCookie(`${this.environment.AUTH_COOKIE_NAME}_csrf`, { ...common, httpOnly: false, path: '/' });
-    clearEnrollmentCookie(response, this.environment.AUTH_COOKIE_SECURE);
+    clearSessionCookies(response, this.environment);
   }
 
   private googleNonceCookieName(): string {

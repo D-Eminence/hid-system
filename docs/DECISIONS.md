@@ -6409,3 +6409,140 @@ Residual risks:
 Related: ADR-018; ADR-058; ADR-065; ADR-067; ADR-068; `INTERFACE_CONTRACT.md`
 §11, "Staff record chat"; `DATABASE.md`, "Staff record chat"; release
 checklist P40 and S4ac.
+
+# ADR-070: Single sign-on on auth.: each product is a relying party with its own session
+
+Status: Proposed, product side; the provider side is the coordinator's. In
+source (migration 0102), not merged, not deployed. Off: nothing runs while
+`AUTH_SSO_ISSUER` is unset.
+
+Date: 2026-11-01
+
+Context:
+
+- Each product host (ehr, lab, pharmacy, migrate, outreach and the patient
+  portal `app.`) has its own sign-in and its own host-only session cookies
+  (ADR-033, ADR-044). A person who works on two products signs in twice, and
+  signing out of one leaves the other signed in.
+- The coordinator's contract v2 (1 November 2026) chose design B: a sign-in
+  site `auth.<root>` runs an OpenID Connect provider (panva's `oidc-provider`,
+  in Identity, built by the coordinator), and every product hands off to it
+  and keeps its own session. No cookie is shared across the root domain.
+  `admin.` never takes part. The owner approved panva's certified
+  `openid-client` as the relying-party library.
+
+Decision:
+
+- **Each product host is a relying party.** `GET /auth/sso/start`,
+  `GET /auth/sso/callback`, `POST /auth/sso/backchannel-logout` and
+  `POST /auth/sso/logout` on each product host (`INTERFACE_CONTRACT.md`,
+  "Single sign-on hand-off on product hosts"). The client is the host the edge
+  names in `X-HID-Edge-Origin`; every target comes from configuration and
+  discovery, never from the request, except the checked return path.
+- **openid-client does the protocol.** Discovery, the authorization URL, PKCE
+  (S256), state and nonce, the code exchange with `private_key_jwt` (preferred)
+  or `client_secret_basic`, the ID token's checks with its signature against
+  the provider's key set (`enableNonRepudiationChecks`), and the end-session
+  URL. The product adds: `azp` whenever present, `iat` within five minutes,
+  `sub` an account id, `sid`, `auth_time` not in the future, the kind claim
+  `hid_kind` matching the client, and for staff `amr` with `pwd` and `otp`.
+  `jose` checks only the back-channel logout token, for which openid-client
+  has no helper.
+- **The session is today's.** The callback issues the product's session
+  through `TokenService.issueStaffSession` (with the account's enrolment-proven
+  authenticator as MFA evidence) or `TokenService.issue`, sets today's
+  cookies, and stores the provider `sid` and `auth_time` on the family (0102),
+  not the ID token. The absolute end and a patient's
+  recent-sign-in check count from `auth_time`. A provider sign-in older than
+  the account's password change or, for staff, its authenticator's activation
+  opens no session.
+- **Sign-out on a product signs out everywhere.** Product sign-out runs
+  today's sign-out and ends every other sign-in of the account of the same
+  kind, which covers sign-ins the provider never saw (a product's own sign-in
+  page, the fallback) or an earlier provider session opened. It then answers
+  the provider's end-session address (only `client_id` and
+  `post_logout_redirect_uri`) for the frontend to navigate to; the provider
+  ends its session and sends back-channel logout to every product, which ends
+  every sign-in of that `sid` (or of `sub`). The first refused session check
+  or refresh on another host then clears that host's cookies, so the edge
+  shows its landing page.
+- **Fail closed, and never loop.** Discovery and key sets are cached five
+  minutes at most and never used stale; a provider that cannot be reached
+  sends the browser to the product's own sign-in page. For two minutes after
+  such a fallback, start asks the person (`prompt=login`) instead of handing
+  off silently, or sends the browser to the product's root while the provider
+  is still unreachable.
+- **Dark.** All four settings unset: no route, no new cookie, no read of 0102,
+  and sign-in, refresh, session check and sign-out exactly as before. Start-up
+  refuses an HTTP issuer in production, a wildcard or unknown host, `admin` as
+  a client, a client whose kind is not its site's, and a client on another
+  site's host: a staff client must be on its own `<client_id>.` host, never the
+  patients' site (`app.` or `www.`, or the bare `staging.` or `development.`),
+  which has no staff sign-in (the owner's decision of 2 November 2026), and the
+  patient portal's host must start with a patients' site label. Outside
+  production, an IP address is not checked for its site, and a one-label host
+  only when it is one of those labels or a staff product's name. A client host
+  never names the default port 443, or a name a URL reads differently. So the launch
+  layout's provider workspace on `www.` and `staging.` (ADR-052) gets no
+  single sign-on: staff there keep that host's own sign-in until they move to
+  their product's `<client_id>.` host.
+
+Options considered:
+
+- A shared `Domain` cookie across hosts (design A): rejected by the
+  coordinator (ADR-033; one cookie theft or refresh race would reach every
+  product).
+- Hand-written OpenID Connect checks with `jose` alone (the first draft):
+  replaced by the owner's approval of `openid-client`, a certified library, so
+  the protocol checks are not ours to get right.
+- Sending `id_token_hint` at sign-out (contract v2 named it): the browser
+  opens the end-session address, so the ID token, which names the account,
+  the provider session and how the person signed in, would reach page
+  JavaScript, the address bar and the history. `client_id` stands in for it
+  (RP-Initiated Logout 1.0), and the ID token is not kept at all.
+- Changing `POST /auth/logout` to answer the end-session address: its `204`
+  is relied on by every app, and Nest cannot answer `200` with a body from a
+  `204` route; a separate route that runs it keeps it unchanged.
+
+Consequences:
+
+- Identity gains `openid-client` 6.8.8 (exact) and its dependency
+  `oauth4webapi`; `jose` moves from 6.2.7 to 6.2.14 in the lock, as
+  openid-client requires. Both load on first use, so nothing loads
+  `openid-client` while single sign-on is off.
+- Migration 0102 adds `auth.session_single_sign_on` and
+  `auth.sso_spent_tokens`; the Identity runtime reads and inserts the first,
+  and reads, inserts and deletes the second.
+- Turning it on needs, in order: the coordinator's provider on `auth.` with
+  the claims and registrations the interface contract lists, 0102 and the
+  bootstrap, the client credentials in the secret store, the four settings,
+  the edge's `X-HID-Edge-Origin` on every product host, and the health
+  frontend's hand-off (`VITE_HID_SSO=1`).
+
+Residual risks:
+
+- Back-channel logout reaches a product's sign-ins only through Identity's
+  database; a browser keeps its cookies until its next request reaches
+  Identity, which then clears them. Until that request, the edge shows the
+  workspace, which then finds the sign-in ended.
+- Product sign-out ends the account's sign-ins of that kind on other devices
+  too: Identity cannot tell browsers apart. Where the provider session on that
+  device lives, its next page hands off again without asking.
+- The back-channel route is reachable through the edge like every API; only a
+  fresh logout token signed by the provider for that client ends anything, and
+  each is accepted once.
+- The claim names (`hid_kind`, `amr` values, `sid`) and the provider's
+  behaviour are assumptions until the coordinator's provider confirms them.
+- Suspension, reactivation and deletion end every session of an account
+  today, but the product cannot date them: a provider session from before
+  them is stopped only if the provider ends its sessions whenever the
+  account's `token_version` changes. The product checks only the password
+  change and the authenticator's activation. A legacy password rehash on a
+  product's own sign-in page also sets `password_changed_at`, which then
+  refuses that account's next hand-off once.
+
+Related: ADR-033; ADR-038; ADR-044; ADR-059; MFA-1 (0088);
+`INTERFACE_CONTRACT.md`, "Single sign-on hand-off on product hosts";
+`SECURITY.md`, "Single sign-on on auth., the product side";
+`MIGRATION_RUNBOOK.md`, 0102; `DATABASE.md`, "Single sign-on relying party
+(0102)"; `PHASE_4_STAGE_5_RELEASE_READINESS.md` §5 step 30e.

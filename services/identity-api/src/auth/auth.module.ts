@@ -19,12 +19,17 @@ import { IntegrationModule } from '../integrations/integration.module';
 import { MfaSecretProtector } from './mfa/mfa-secret-protector';
 import { MfaService } from './mfa/mfa.service';
 import { PlatformAuthController } from './platform-auth.controller';
+import { SsoController } from './sso/sso.controller';
+import { SsoProviderClient } from './sso/sso-provider.client';
+import { SsoService } from './sso/sso.service';
 
 @Global()
 @Module({
   imports: [TurnstileModule, IntegrationModule],
-  controllers: [AuthController, PlatformAuthController, OtpController, PatientSelfController],
-  providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, OtpService, NotificationOtpClient, GoogleAuthenticationService, MfaSecretProtector, MfaService],
+  // SsoController's routes, and AuthController's POST /auth/sso/logout, exist
+  // only while single sign-on is configured (SsoRouteGuard, ADR-070).
+  controllers: [AuthController, PlatformAuthController, OtpController, PatientSelfController, SsoController],
+  providers: [AuthService, AuthSessionAuditService, CurrentStaffContextService, CurrentPatientContextService, PatientSelfService, LocalAuthProvider, TokenService, SecurityGuard, WorkloadAuthService, OtpService, NotificationOtpClient, GoogleAuthenticationService, MfaSecretProtector, MfaService, SsoProviderClient, SsoService],
   exports: [AuthService, TokenService, MfaService, SecurityGuard, WorkloadAuthService, TurnstileModule, GoogleAuthenticationService, NotificationOtpClient],
 })
 export class AuthModule {}

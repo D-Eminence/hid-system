@@ -100,11 +100,11 @@ const endCode = (kind: Kind, reason: string | null) => kind !== 'platform' ? 'AU
   : reason === 'expired' ? 'PLATFORM_SESSION_EXPIRED' : 'PLATFORM_SESSION_REVOKED';
 
 // Every reason written to auth.sessions that keeps the account's token version
-// (token.service.ts, platform-security.service.ts, 0027 and 0069 revocations),
-// plus a missing reason. Account actions that change the token version
+// (token.service.ts, platform-security.service.ts, 0027 and 0069 revocations,
+// and sso.service.ts's back-channel logout, ADR-070), plus a missing reason. Account actions that change the token version
 // (suspension, MFA reset, password recovery, deletion) are covered separately.
 const ENDED = ['logout', 'expired', 'refresh_token_reuse', 'platform_admin_revocation',
-  'platform_admin_compromised_session', 'self_revoked', null];
+  'platform_admin_compromised_session', 'self_revoked', 'sso_logout', null];
 
 describe('refresh token revocation reasons (Stage 5)', () => {
   beforeEach(() => {
