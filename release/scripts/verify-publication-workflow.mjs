@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { parseDocument } from 'yaml'
+import { isScalar, parseDocument, visit } from 'yaml'
 
 export function parseWorkflow(source) {
   assert.ok(source.length < 100000, 'workflow exceeds source bound')
@@ -18,6 +18,25 @@ export function parseWorkflow(source) {
   const doc = parseDocument(source, { uniqueKeys: true, strict: true, version: '1.2', stringKeys: true })
   assert.deepEqual(doc.errors, [], 'ambiguous or invalid workflow YAML')
   assert.deepEqual(doc.warnings, [], 'unsupported workflow YAML')
+  // Only the block-style subset that this parser and libyaml-family parsers
+  // read the same way: no flow collection but an empty one ({...} or [...],
+  // where '?if' is a key named "?if" here but the key "if" to libyaml; an empty
+  // {} has no key to differ on), no anchor (libyaml ends
+  // its name at ':' or '?'), no explicit tag, no '<<' key (YAML 1.1 loaders
+  // merge it), and no quoted value over several lines (an escaped line break
+  // folds differently).
+  const plain = node => assert.ok(!node.anchor && !node.tag, 'workflow cannot use an anchor or a tag')
+  visit(doc, {
+    Map(_, node) { assert.ok(!node.flow || node.items.length === 0, 'workflow must use block style, not a flow collection'); plain(node) },
+    Seq(_, node) { assert.ok(!node.flow || node.items.length === 0, 'workflow must use block style, not a flow collection'); plain(node) },
+    Scalar(_, node) {
+      plain(node)
+      if (node.type === 'QUOTE_DOUBLE' || node.type === 'QUOTE_SINGLE') {
+        assert.ok(!source.slice(node.range[0], node.range[1]).includes('\n'), 'workflow cannot quote a value over several lines')
+      }
+    },
+    Pair(_, pair) { assert.ok(!(isScalar(pair.key) && pair.key.value === '<<'), 'workflow cannot use a merge key') },
+  })
   return doc.toJS({ maxAliasCount: 0 })
 }
 
@@ -156,9 +175,11 @@ export function verifyAuditSteps(workflow, expected, { checkoutRef } = {}) {
     assert.equal(step.shell, AUDIT_SHELL, `audit step in ${name} must run in ${AUDIT_SHELL}`)
     assert.equal(step.run, expected[name], `audit commands in ${name} must be exactly the reviewed ones`)
   }
-  // Every env in the workflow, audit jobs or not (the publish job included):
-  // a plain map, and never npm_config_*, NODE_OPTIONS, PATH, BASH_ENV or ENV.
-  const environments = [workflow.env, ...Object.values(workflow.jobs).flatMap(job => [job.env, ...(job.steps ?? []).map(step => step.env)])]
+  // Every env in the workflow, audit jobs or not (the publish job included),
+  // with each job's container and services: a plain map, and never
+  // npm_config_*, NODE_OPTIONS, PATH, BASH_ENV or ENV (in any case).
+  const environments = [workflow.env, ...Object.values(workflow.jobs).flatMap(job => [job.env, job.container?.env,
+    ...Object.values(isMap(job.services) ? job.services : {}).map(service => service?.env), ...(job.steps ?? []).map(step => step.env)])]
   for (const env of environments) {
     assert.ok(env === undefined || isMap(env), 'every env must be a plain map, not an expression')
     for (const key of Object.keys(env ?? {})) assert.ok(!/^(?:npm_config_|node_options$|path$|bash_env$|env$)/i.test(key), `workflow cannot set ${key}`)
