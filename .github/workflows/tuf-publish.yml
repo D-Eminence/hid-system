@@ -34,11 +34,6 @@ jobs:
         with:
           node-version: 22.23.2
           package-manager-cache: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version: 1.26.10
-          check-latest: false
-          cache: false
       - name: Audit all publication tooling dependencies
         shell: /usr/bin/bash -p -e {0}
         id: audit
@@ -48,6 +43,11 @@ jobs:
           npm --prefix release audit --audit-level=moderate
           npm --prefix infra/cloudflare audit --audit-level=moderate
           node release/scripts/npm-audit-with-exceptions.mjs infra/aws
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: 1.26.10
+          check-latest: false
+          cache: false
       - name: Install locked tooling without cloud authority
         run: |
           npm --prefix release ci --ignore-scripts

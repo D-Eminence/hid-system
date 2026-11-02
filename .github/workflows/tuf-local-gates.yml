@@ -257,13 +257,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           package-manager-cache: false
-      - name: Set up Go for the repository cross-validator
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
-        with:
-          go-version: ${{ env.GO_VERSION }}
-          check-latest: false
-          cache: true
-          cache-dependency-path: tools/tuf-release/go.sum
       - name: Audit Cloudflare toolchain dependencies
         shell: /usr/bin/bash -p -e {0}
         run: |
@@ -271,6 +264,13 @@ jobs:
           test "$(node --version)" = v22.23.2
           npm --prefix infra/cloudflare audit --audit-level=moderate
         id: gate_3
+      - name: Set up Go for the repository cross-validator
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          check-latest: false
+          cache: true
+          cache-dependency-path: tools/tuf-release/go.sum
       - name: Install the audited Cloudflare toolchain from the lockfile
         run: npm --prefix infra/cloudflare ci
         id: gate_1
