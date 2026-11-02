@@ -385,14 +385,84 @@ the release tests try each one: dropping an audit, sending another directory
 through the exception gate, a different exceptions file, `|| true`, a condition or
 `continue-on-error` on an audit step or its job, a `needs` on an audit job (it
 would be skipped whenever the job it waits on is), a container, service or
-matrix on an audit job, a workflow or job default shell, `npm_config_*`,
-`NODE_OPTIONS` or `PATH` in any `env` map, a step in an audit job that writes
-`GITHUB_ENV` or `GITHUB_PATH`, a registry override, or another step touching
-`security/`. These are static checks on the workflow text, not a sandbox, and
-the list is not complete. Shell written to hide what it does (a file path built
-from pieces, an `.npmrc` written by a script) can still get past them, and so
-can settings they do not look at, such as an HTTPS proxy plus an extra CA in the
-environment. The owner's review of every workflow change (CODEOWNERS) is still
+matrix on an audit job, a workflow or job default shell, a step in an audit job
+that writes `GITHUB_ENV` or `GITHUB_PATH`, a registry override, or another step
+touching `security/`.
+
+Since the audit pin hardening (2 November 2026, owner's request) it also checks:
+
+- **The audit runs first, in a shell that reads no BASH_ENV.** In every audit job
+  only `actions/checkout` and `actions/setup-node` come before the audit step:
+  no `npm ci`, install script, build or test, and no cache restore. `npm audit`
+  reads only the lockfile, and the exception gate uses only Node built-ins.
+  setup-node must say `package-manager-cache: false` (it takes a missing or
+  empty value as true), and setup-go comes after the audit, because a cache
+  restored before it could bring back whatever an earlier run's dependency code
+  saved, a replaced `npm` in the tool cache included. The publisher tooling
+  job's setup-go must also say `cache: false`. Each audit job has exactly one
+  checkout step, before its audit: the local gates at the event's own commit
+  (no `ref`), the publisher at `inputs.tooling_sha`, so no checkout step can
+  point the audit at another commit. A later `run` step that rewrites the tree
+  or a lockfile is not checked: like any step after the audit, it is left to
+  owner review. The step runs in
+  `shell: /usr/bin/bash -p -e {0}`: an absolute path, so no `bash` found on PATH
+  runs it, and privileged mode, so bash reads no `BASH_ENV` or `ENV` file and
+  imports no shell function from the environment, even one written to
+  `GITHUB_ENV` at run time. A release test runs both shells to show the
+  difference.
+- **The environment, by allowlist.** The workflow env, every audit job's env
+  and the env of every step in an audit job may set only the variables these
+  workflows use today
+  (`AUDIT_ENV_ALLOWLIST`: `CI`, `NODE_VERSION`, `GO_VERSION`, the two broker
+  images, `GOTOOLCHAIN`, `TOOLING_SHA`, `PLAN_JSON`, `WRANGLER_SEND_METRICS`,
+  `HID_REQUIRE_CLOUDFLARE_VALIDATOR`, `HID_PUBLIC_BASE` and `GATE_STEPS_JSON`;
+  `NODE_VERSION` only in the workflow env). `BASH_ENV`, `ENV`, `NODE_OPTIONS`,
+  `npm_config_*`, `PATH`, a proxy, an extra CA and anything else are refused
+  there. In every other job, the publish job included, `npm_config_*`,
+  `NODE_OPTIONS`, `PATH`, `BASH_ENV` and `ENV` (matched in any case) are refused
+  in any env: the job's and its steps'. Every env anywhere in the workflow
+  must be a plain map, not an expression whose keys a reviewer cannot see. No
+  job may run in a container or with services. A job container's env, image,
+  Docker options, ports and volumes can each set an environment variable for
+  every step, in more spellings than a static check can list; a service
+  container runs beside the steps and, through its image, options or volumes,
+  can change what they reach. None of these workflows uses one.
+- **The actions and the runner, by allowlist.** An audit job may use only
+  `actions/checkout`, `actions/setup-node`, `actions/setup-go` and
+  `actions/upload-artifact`, each at its reviewed commit and with only the inputs
+  it takes today (`AUDIT_JOB_ACTIONS`); any other action, a local action or a
+  container action is refused. setup-node must install the reviewed Node
+  (22.23.2), and every audit job runs on `ubuntu-24.04`.
+- **One reading of the YAML.** The verifier's YAML parser ends a line only at
+  LF. YAML 1.2 also ends one at a lone CR, and libyaml-family parsers (the
+  family of GitHub's) also at NEL, LS and PS. Such a character in a comment
+  would hide every key and step after it from the verifier while GitHub runs
+  them. So every workflow read through the verifier's parser (these two, and
+  the protected readiness workflow) must be printable ASCII with LF line breaks
+  (tab allowed), end with a line break, and carry no `%YAML` directive. Release tests hide a checkout `ref`, a step before
+  the audit, `continue-on-error` and an npm cache behind each of the four. Those
+  workflows must also keep to a block-style subset that a differential test
+  against libyaml (about 150,000 generated documents) found both parsers read
+  the same way: no flow collection except an empty one (in `{?ref: …}` the key is "?ref"
+  to the verifier and "ref" to libyaml), no anchor (libyaml ends its name at
+  `:` or `?`), no explicit tag, no `<<` merge key, no quoted or plain value over
+  several lines (an escaped line break folds differently, and after a bare `-`
+  and a comment the verifier joins the following items into one value), no
+  block scalar indentation indicator (trailing whitespace lines differ), and no
+  block scalar header on a line of its own (after a comment line, it swallows
+  the keys below it in the verifier's parser, `continue-on-error` included).
+- **PATH, pinned in the audit step.** Every audit command starts with
+  `export PATH="$RUNNER_TOOL_CACHE/node/22.23.2/x64/bin:/usr/bin:/bin"` and
+  `test "$(node --version)" = v22.23.2`, where setup-node installs that Node.
+  Whatever a reviewed action added to PATH does not reach npm or the gate, and a
+  workflow cannot redirect `RUNNER_TOOL_CACHE`: the runner sets `RUNNER_*`
+  itself after `GITHUB_ENV` and env maps.
+
+These are still static checks on the workflow text, not a sandbox, and the list
+is not complete. One of the four reviewed actions itself turned hostile (it runs
+as the runner user and could replace files in the tool cache or write
+`~/.npmrc`), or a self-hosted runner set up to answer `ubuntu-24.04`, can still
+get past them. The owner's review of every workflow change (CODEOWNERS) is still
 the real control. The local gate evidence records
 the exceptions file's SHA-256. The gate compares real paths when it decides
 whether it was run directly, so running it through a symlink still runs the
