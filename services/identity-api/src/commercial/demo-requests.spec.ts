@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { REQUIRED_PERMISSIONS, PUBLIC_ROUTE } from '../common/decorators';
-import type { HidRequest } from '../common/request-context';
+import type { HidRequest, PlatformAdminContext } from '../common/request-context';
 import * as environment from '../config/environment';
 import { AdminDemoRequestsController, PublicDemoRequestsController } from './demo-requests.controller';
 import type { CreateDemoRequestDto } from './demo-request.dto';
@@ -67,5 +69,44 @@ describe('commercial demo intake boundary', () => {
     const event = audit.recordWithClient.mock.calls[0]?.[1];
     expect(JSON.stringify(event)).not.toContain('Ada@Example.Invalid');
     expect(JSON.stringify(event)).not.toContain('Example Clinic');
+  });
+
+  // Migration 0064 (audit_platform_scope_ck) accepts a platform actor's audit row only when its action starts with
+  // 'admin.' or 'api.admin.' and it names no facility, membership or organization. A row outside that shape fails the
+  // insert, which rolled back the whole list and answered the Overview with a 500.
+  it('writes platform administrators\' demo-request audit rows in the shape the platform audit constraint accepts', async () => {
+    const migration = readFileSync(join(__dirname, '../../../ehr-api/database/migrations/0064_standalone_platform_administration.sql'), 'utf8');
+    const constraint = migration.slice(migration.indexOf('audit_platform_scope_ck'));
+    expect(constraint).toMatch(/action like 'admin\.%' or action like 'api\.admin\.%'/);
+    const accepted = (event: Record<string, unknown>) => event.actorType !== 'platform' || (
+      typeof event.action === 'string' && (event.action.startsWith('admin.') || event.action.startsWith('api.admin.'))
+      && event.facilityId == null && event.actorMembershipId == null && event.organizationId == null
+      && event.patientId == null && event.purposeOfUse === 'healthcare-operations'
+      && Boolean(event.actorAccountId) && Boolean(event.actorSubject));
+
+    const row = { id: '7f1c2c1e-6a43-4c8e-9a8f-1d0f7a3b9c11', contactName: 'Ada Example', contactEmail: 'ada@example.invalid',
+      contactPhone: null, contactRole: null, organizationName: null, organizationType: null, productCode: 'ehr',
+      message: null, sourcePage: null, sourceSection: null, ctaLabel: null, status: 'new', version: '1',
+      createdAt: new Date('2026-11-02T08:00:00Z'), updatedAt: new Date('2026-11-02T08:00:00Z') };
+    const query = jest.fn(async (sql: string) => ({ rows: [sql.trimStart().startsWith('update')
+      ? { ...row, status: 'contacted', version: '2' } : row], rowCount: 1 }));
+    const database = { withPlatformTransaction: jest.fn(async (_context, operation) => operation({ query })) };
+    const audit = { recordWithClient: jest.fn() };
+    const service = new DemoRequestsService(database as never, audit as never);
+    const context: PlatformAdminContext = {
+      actor: { kind: 'staff', subject: 'admin-subject', accountId: '0b1f6c9e-2d4a-4c1b-8e7f-3a2b1c0d9e8f',
+        platformPermissions: ['platform.admin.access', 'platform.demo.read', 'platform.demo.manage'] },
+      correlationId: 'admin-demo-correlation', purposeOfUse: 'healthcare-operations',
+    } as unknown as PlatformAdminContext;
+
+    await expect(service.list(context, { status: 'new', limit: 100 })).resolves.toMatchObject({ items: [{ id: row.id }] });
+    await expect(service.transition(context, row.id, 1, { status: 'contacted', reason: 'Called the clinic back' }))
+      .resolves.toMatchObject({ status: 'contacted', replayed: false });
+    const events = audit.recordWithClient.mock.calls.map(([, event]) => event as Record<string, unknown>);
+    expect(events.map((event) => event.action)).toEqual(['admin.demo-requests.list', 'admin.demo-request.status']);
+    for (const event of events) {
+      expect(event.actorType).toBe('platform');
+      expect(accepted(event)).toBe(true);
+    }
   });
 });
