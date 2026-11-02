@@ -4,8 +4,8 @@ import { readFile, mkdtemp, rm } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { stringify } from 'yaml'
-import { AWS_AUDIT_GATE, LOCAL_GATE_AUDITS, parseWorkflow, verifyLocalGateWorkflow, verifyPublicationWorkflow } from '../scripts/verify-publication-workflow.mjs'
+import { parseDocument, stringify } from 'yaml'
+import { AUDIT_PATH, AUDIT_SHELL, AWS_AUDIT_GATE, LOCAL_GATE_AUDITS, NODE_RUNTIME, parseWorkflow, verifyLocalGateWorkflow, verifyPublicationWorkflow } from '../scripts/verify-publication-workflow.mjs'
 
 const source = await readFile(new URL('../../.github/workflows/tuf-publish.yml', import.meta.url), 'utf8')
 const localGates = await readFile(new URL('../../.github/workflows/tuf-local-gates.yml', import.meta.url), 'utf8')
@@ -16,10 +16,37 @@ const LATER_STEPS = /cannot change the environment or PATH of later steps/
 const DEFAULT_SHELL = /workflow cannot change the default shell or directory/
 const preload = { name: 'Preload code into later node processes', run: 'echo "NODE_OPTIONS=--import=/tmp/p.mjs" >> "$GITHUB_ENV"' }
 const fakeNpm = { name: 'Put a fake npm first on PATH', run: 'echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"' }
+// Reasons for the environment and action allowlists and the pinned PATH.
+const UNLISTED = (key) => new RegExp(`workflow cannot set ${key}: not in AUDIT_ENV_ALLOWLIST$`)
+const DENIED = (key) => new RegExp(`: workflow cannot set ${key}$`)
+const ANY_ENV_MAP = /: every env must be a plain map, not an expression$/
+const NOT_A_MAP = /plain map/
+const ACTION = /only the reviewed actions at their reviewed commits/
+const ACTION_INPUT = /cannot give actions\/[a-z-]+@[0-9a-f]+ the input/
+const NODE = /must set up the reviewed Node/
+const proxyAction = { name: 'Prepare', uses: 'example/prepare@0123456789abcdef0123456789abcdef01234567' }
+const localAction = { name: 'Prepare', uses: './.github/actions/prepare' }
+const dockerAction = { name: 'Prepare', uses: 'docker://alpine:3' }
+const SHELL = /must run in \/usr\/bin\/bash -p -e/
+const STEP_KEYS = /cannot be conditional, configured or allowed to fail/
+const CODE_FIRST = /runs code before its audit/
+const CONTAINER = /cannot run in a container or with services/
+const GATE_ONLY = /only the reviewed audit step may use the audit gate or the exception file/
+const BEFORE_AUDIT = /before its audit: only checkout and setup-node come first/
+const NPM_CACHE = /cannot restore a package-manager cache/
+const ONE_CHECKOUT = /must check out its source exactly once/
+const OTHER_TREE = /cannot check out another tree for its audit/
+const setupGo = (steps) => steps.find(s => s.uses?.startsWith('actions/setup-go@'))
+const setupNode = (steps) => steps.find(s => s.uses?.startsWith('actions/setup-node@'))
+const checkout = (steps) => steps.find(s => s.uses?.startsWith('actions/checkout@'))
+const move = (steps, step, id, after = false) => { steps.splice(steps.indexOf(step), 1); steps.splice(steps.findIndex(s => s.id === id) + (after ? 1 : 0), 0, step) }
+const runFirst = (steps, id) => { const i = steps.findIndex(s => s.id === id); const [step] = steps.splice(i, 1); steps.splice(steps.findIndex(s => s.run !== undefined), 0, step) }
 const before = (steps, id, step) => steps.splice(steps.findIndex(s => s.id === id), 0, step)
 test('protected publisher workflow pins code, permissions, ordering and retained evidence', () => assert.equal(verifyPublicationWorkflow(source), true))
 test('publisher audits release and Cloudflare as before and only infra/aws through the exception gate', () => {
   assert.equal(auditStep(parseWorkflow(source)).run, [
+    `export PATH="$RUNNER_TOOL_CACHE/node/${NODE_RUNTIME}/x64/bin:/usr/bin:/bin"`,
+    `test "$(node --version)" = v${NODE_RUNTIME}`,
     'npm --prefix release audit --audit-level=moderate',
     'npm --prefix infra/cloudflare audit --audit-level=moderate',
     'node release/scripts/npm-audit-with-exceptions.mjs infra/aws', ''].join('\n'))
@@ -33,20 +60,21 @@ test('local gates keep every npm audit and run only infra/aws through the except
     'infra/aws audit failure ignored': (w) => { step(w, 'aws-release-trust').run += ' || true' },
     'substitute exception file': (w) => { step(w, 'aws-release-trust').run += ' --exceptions /tmp/empty.json' },
     'unreviewed infra/aws audit command': (w) => { step(w, 'aws-release-trust').run = 'npm --prefix infra/aws audit --audit-level=critical' },
-    'infra/aws audit removed': (w) => { w.jobs['aws-release-trust'].steps = w.jobs['aws-release-trust'].steps.filter(s => s.run !== AWS_AUDIT_GATE) },
+    'infra/aws audit removed': (w) => { w.jobs['aws-release-trust'].steps = w.jobs['aws-release-trust'].steps.filter(s => s.run !== LOCAL_GATE_AUDITS['aws-release-trust']) },
     'conditional infra/aws audit': (w) => { step(w, 'aws-release-trust').if = '${{ false }}' },
     'infra/aws audit may fail': (w) => { step(w, 'aws-release-trust')['continue-on-error'] = true },
     'exception gate for release audit': (w) => { step(w, 'release-contracts').run = 'node release/scripts/npm-audit-with-exceptions.mjs release' },
     'Cloudflare audit removed': (w) => { w.jobs['cloudflare-tuf'].steps = w.jobs['cloudflare-tuf'].steps.filter(s => s.run !== LOCAL_GATE_AUDITS['cloudflare-tuf']) },
     'EHR audit narrowed': (w) => { step(w, 'ehr-release-cache').run = step(w, 'ehr-release-cache').run.replace(' apps/ehr;', ';') },
     'audit added to another job': (w) => { w.jobs['tuf-client'].steps.push({ name: 'Audit', run: AWS_AUDIT_GATE, id: 'gate_99' }) },
-    'workflow npm configuration': (w) => { w.env.npm_config_audit_level = 'none' },
+    'workflow npm configuration': [(w) => { w.env.npm_config_audit_level = 'none' }, UNLISTED('npm_config_audit_level')],
     'exception file rewritten before audit': (w) => { w.jobs['aws-release-trust'].steps.splice(2, 0, { run: 'cp /tmp/empty.json security/npm-audit-exceptions.json' }) },
     'security file replaced by glob': (w) => { w.jobs['aws-release-trust'].steps.splice(2, 0, { run: 'cp /tmp/empty.json security/*.json' }) },
+    'security file replaced after the infra/aws audit': [(w) => { const steps = w.jobs['aws-release-trust'].steps; steps.splice(steps.findIndex(s => s.id === 'gate_2') + 1, 0, { run: 'cp /tmp/empty.json security/*.json' }) }, GATE_ONLY],
     'npm registry redirected': (w) => { w.jobs['aws-release-trust'].steps.find(s => s.uses?.startsWith('actions/setup-node@')).with['registry-url'] = 'https://registry.invalid/' },
     'default shell replaced': (w) => { w.jobs['aws-release-trust'].defaults = { run: { shell: 'true {0}' } } },
     'workflow default shell replaced': [(w) => { w.defaults = { run: { shell: 'true {0}' } } }, DEFAULT_SHELL],
-    'install step npm configuration': [(w) => { w.jobs['aws-release-trust'].steps.find(s => s.id === 'gate_1').env = { npm_config_registry: 'https://registry.invalid/' } }, /workflow cannot set npm_config_registry/],
+    'install step npm configuration': [(w) => { w.jobs['aws-release-trust'].steps.find(s => s.id === 'gate_1').env = { npm_config_registry: 'https://registry.invalid/' } }, UNLISTED('npm_config_registry')],
     'infra/aws audit job skipped': [(w) => { w.jobs['aws-release-trust'].if = '${{ false }}' }, JOB_RUNTIME],
     'release audit job skipped': [(w) => { w.jobs['release-contracts'].if = '${{ false }}' }, JOB_RUNTIME],
     'infra/aws audit job may fail': [(w) => { w.jobs['aws-release-trust']['continue-on-error'] = true }, JOB_RUNTIME],
@@ -56,13 +84,69 @@ test('local gates keep every npm audit and run only infra/aws through the except
     'infra/aws audit job waits on a skipped job': [(w) => { w.jobs['tuf-client'].if = '${{ false }}'; w.jobs['aws-release-trust'].needs = 'tuf-client' }, JOB_RUNTIME],
     'node preload written to GITHUB_ENV': [(w) => { before(w.jobs['aws-release-trust'].steps, 'gate_2', preload) }, LATER_STEPS],
     'fake npm added through GITHUB_PATH': [(w) => { before(w.jobs['aws-release-trust'].steps, 'gate_2', fakeNpm) }, LATER_STEPS],
-    'fake npm added through job PATH': [(w) => { w.jobs['aws-release-trust'].env = { PATH: '/tmp/bin:/usr/bin:/bin' } }, /workflow cannot set PATH/],
+    'fake npm added through job PATH': [(w) => { w.jobs['aws-release-trust'].env = { PATH: '/tmp/bin:/usr/bin:/bin' } }, UNLISTED('PATH')],
+    'BASH_ENV in the workflow env': [(w) => { w.env.BASH_ENV = '/tmp/skip.sh' }, UNLISTED('BASH_ENV')],
+    'BASH_ENV in an audit job env': [(w) => { w.jobs['aws-release-trust'].env = { BASH_ENV: '/tmp/skip.sh' } }, UNLISTED('BASH_ENV')],
+    'BASH_ENV in an audit job step env': [(w) => { w.jobs['release-contracts'].steps.find(s => s.id === 'gate_1').env = { BASH_ENV: '/tmp/skip.sh' } }, UNLISTED('BASH_ENV')],
+    'proxy and extra CA in an audit job env': [(w) => { w.jobs['cloudflare-tuf'].env.HTTPS_PROXY = 'http://127.0.0.1:8080'; w.jobs['cloudflare-tuf'].env.NODE_EXTRA_CA_CERTS = '/tmp/ca.pem' }, UNLISTED('HTTPS_PROXY')],
+    'proxy in an audit job step env': [(w) => { w.jobs['ehr-release-cache'].steps.find(s => s.id === 'gate_1').env = { HTTPS_PROXY: 'http://127.0.0.1:8080' } }, UNLISTED('HTTPS_PROXY')],
+    'audit job step env given as an expression': [(w) => { w.jobs['aws-release-trust'].steps.find(s => s.id === 'gate_1').env = '${{ fromJSON(vars.AUDIT_ENV) }}' }, NOT_A_MAP],
+    'unlisted variable in the workflow env': [(w) => { w.env.NPM_TOKEN = 'x' }, UNLISTED('NPM_TOKEN')],
+    'audit job env given as an expression': [(w) => { w.jobs['aws-release-trust'].env = "${{ fromJSON('{\"BASH_ENV\":\"/tmp/skip.sh\"}') }}" }, NOT_A_MAP],
+    'workflow env given as an expression': [(w) => { w.env = "${{ fromJSON('{\"BASH_ENV\":\"/tmp/skip.sh\"}') }}" }, NOT_A_MAP],
+    'unreviewed action before the infra/aws audit': [(w) => { before(w.jobs['aws-release-trust'].steps, 'gate_2', proxyAction) }, ACTION],
+    'local action before the release audit': [(w) => { before(w.jobs['release-contracts'].steps, 'gate_2', localAction) }, ACTION],
+    'container action before the EHR audit': [(w) => { before(w.jobs['ehr-release-cache'].steps, 'gate_2', dockerAction) }, ACTION],
+    'reviewed action at another commit': [(w) => { w.jobs['cloudflare-tuf'].steps.find(s => s.uses?.startsWith('actions/setup-go@')).uses = 'actions/setup-go@main' }, ACTION],
+    'reviewed action given a new input': [(w) => { w.jobs['cloudflare-tuf'].steps.find(s => s.uses?.startsWith('actions/setup-go@')).with['go-version-file'] = 'go.mod' }, ACTION_INPUT],
+    'another Node set up for the audits': [(w) => { w.env.NODE_VERSION = '22.0.0' }, NODE],
+    'pinned PATH dropped from the infra/aws audit': (w) => { const s = w.jobs['aws-release-trust'].steps.find(x => x.id === 'gate_2'); s.run = s.run.replace(AUDIT_PATH, '') },
+    'pinned PATH widened for the release audit': (w) => { const s = w.jobs['release-contracts'].steps.find(x => x.id === 'gate_2'); s.run = s.run.replace(':/usr/bin:/bin"', ':$PATH"') },
+    'Node check dropped from the Cloudflare audit': (w) => { const s = w.jobs['cloudflare-tuf'].steps.find(x => x.id === 'gate_3'); s.run = s.run.replace(`test "$(node --version)" = v${NODE_RUNTIME}\n`, '') },
+    'infra/aws audit in the default shell': [(w) => { delete w.jobs['aws-release-trust'].steps.find(x => x.id === 'gate_2').shell }, STEP_KEYS],
+    'release audit in a bash found on PATH': [(w) => { w.jobs['release-contracts'].steps.find(x => x.id === 'gate_2').shell = 'bash -p -e {0}' }, SHELL],
+    'EHR audit without privileged mode': [(w) => { w.jobs['ehr-release-cache'].steps.find(x => x.id === 'gate_2').shell = '/usr/bin/bash -e {0}' }, SHELL],
+    'install scripts run before the infra/aws audit': [(w) => { runFirst(w.jobs['aws-release-trust'].steps, 'gate_1') }, CODE_FIRST],
+    'install scripts run before the Cloudflare audit': [(w) => { runFirst(w.jobs['cloudflare-tuf'].steps, 'gate_1') }, CODE_FIRST],
+    'NODE_VERSION in an audit job env': [(w) => { w.jobs['release-contracts'].env = { NODE_VERSION: '20.0.0' } }, UNLISTED('NODE_VERSION')],
+    'NODE_VERSION in an audit step env': [(w) => { w.jobs['aws-release-trust'].steps.find(x => x.id === 'gate_1').env = { NODE_VERSION: '20.0.0' } }, UNLISTED('NODE_VERSION')],
+    'infra/aws audit job on another runner': [(w) => { w.jobs['aws-release-trust']['runs-on'] = 'self-hosted' }, JOB_RUNTIME],
+    // Jobs without an audit get only the whole-workflow rules: no npm_config_*, NODE_OPTIONS, PATH, BASH_ENV or ENV in any env,
+    // and every env a plain map.
+    'NODE_OPTIONS in a job without an audit': [(w) => { w.jobs['tuf-client'].env.NODE_OPTIONS = '--import=/tmp/p.mjs' }, DENIED('NODE_OPTIONS')],
+    'BASH_ENV in a step of a job without an audit': [(w) => { w.jobs.workspace.steps.find(s => s.run !== undefined).env = { BASH_ENV: '/tmp/skip.sh' } }, DENIED('BASH_ENV')],
+    'PATH in a job without an audit': [(w) => { w.jobs['tuf-client'].env.PATH = '/tmp/bin:/usr/bin:/bin' }, DENIED('PATH')],
+    'ENV in a step of a job without an audit': [(w) => { w.jobs.workspace.steps.find(s => s.run !== undefined).env = { ENV: '/tmp/skip.sh' } }, DENIED('ENV')],
+    // No job may run in a container or with services, in any form.
+    'a job without an audit in a container': [(w) => { w.jobs.workspace.container = 'node:22' }, CONTAINER],
+    'a container with env': [(w) => { w.jobs.workspace.container = { image: 'node:22', env: { NODE_OPTIONS: '--import=/tmp/p.mjs' } } }, CONTAINER],
+    'a container from a matrix': [(w) => { w.jobs.workspace.strategy = { matrix: { c: [{ image: 'node:22' }] } }; w.jobs.workspace.container = '${{ matrix.c }}' }, CONTAINER],
+    'a container with Docker options': [(w) => { w.jobs.workspace.container = { image: 'node:22', options: '--cpus 1 -eNODE_OPTIONS=--import=/tmp/p.mjs' } }, CONTAINER],
+    'a container with ports': [(w) => { w.jobs.workspace.container = { image: 'node:22', ports: ['8080:80 -e NODE_OPTIONS=x'] } }, CONTAINER],
+    'services given as an expression': [(w) => { w.jobs.workspace.services = '${{ fromJSON(vars.SERVICES) }}' }, CONTAINER],
+    'a service with env': [(w) => { w.jobs['tuf-client'].services = { db: { image: 'postgres:16', env: { PATH: '/tmp/bin' } } } }, CONTAINER],
+    'npm registry in upper case in a step of a job without an audit': [(w) => { w.jobs['tuf-client'].steps.find(s => s.run !== undefined).env = { NPM_CONFIG_REGISTRY: 'https://registry.invalid/' } }, DENIED('NPM_CONFIG_REGISTRY')],
+    'npm registry in a step of a job without an audit': [(w) => { w.jobs['tuf-client'].steps.find(s => s.run !== undefined).env = { npm_config_registry: 'https://registry.invalid/' } }, DENIED('npm_config_registry')],
+    'step env of a job without an audit given as an expression': [(w) => { w.jobs.workspace.steps.find(s => s.run !== undefined).env = '${{ fromJSON(vars.WORKSPACE_ENV) }}' }, ANY_ENV_MAP],
+    'action given as a number': [(w) => { w.jobs['release-contracts'].steps.find(s => s.uses?.startsWith('actions/checkout@')).uses = 7 }, /uses an unreviewed action/],
+    'action inputs given as an expression': [(w) => { w.jobs['release-contracts'].steps.find(s => s.uses?.startsWith('actions/checkout@')).with = '${{ fromJSON(vars.CHECKOUT) }}' }, /inputs that are not a plain map/],
+    // A cache restored before an audit can bring back what an earlier run's dependency code saved, a replaced npm included.
+    'Go cache restored before the Cloudflare audit': [(w) => { const steps = w.jobs['cloudflare-tuf'].steps; move(steps, setupGo(steps), 'gate_3') }, BEFORE_AUDIT],
+    'Go set up without a cache before the EHR audit': [(w) => { before(w.jobs['ehr-release-cache'].steps, 'gate_2', { ...setupGo(w.jobs['cloudflare-tuf'].steps), with: { 'go-version': '${{ env.GO_VERSION }}', cache: false } }) }, BEFORE_AUDIT],
+    'artifact step before the release audit': [(w) => { const steps = w.jobs['release-contracts'].steps; move(steps, steps.find(s => s.uses?.startsWith('actions/upload-artifact@')), 'gate_2') }, BEFORE_AUDIT],
+    'npm cache restored before the release audit': [(w) => { setupNode(w.jobs['release-contracts'].steps).with['package-manager-cache'] = true }, NPM_CACHE],
+    'npm cache input left empty for the infra/aws audit': [(w) => { setupNode(w.jobs['aws-release-trust'].steps).with['package-manager-cache'] = '' }, NPM_CACHE],
+    'npm cache input dropped for the EHR audit': [(w) => { delete setupNode(w.jobs['ehr-release-cache'].steps).with['package-manager-cache'] }, NPM_CACHE],
+    // The audit must read the tree the later steps test, not another commit.
+    'Cloudflare audit reads another commit': [(w) => { checkout(w.jobs['cloudflare-tuf'].steps).with.ref = '${{ github.event.pull_request.base.sha }}' }, OTHER_TREE],
+    'head checked out again after the release audit': [(w) => { const steps = w.jobs['release-contracts'].steps; steps.splice(steps.findIndex(s => s.id === 'gate_2') + 1, 0, { ...checkout(steps), with: { 'persist-credentials': false } }) }, ONE_CHECKOUT],
+    'source checked out only after the infra/aws audit': [(w) => { const steps = w.jobs['aws-release-trust'].steps; move(steps, checkout(steps), 'gate_2', true) }, /must check out its source before its audit/],
   }
   for (const [name, attack] of Object.entries(attacks)) {
     const [edit, reason] = [attack].flat()
     const workflow = parseWorkflow(localGates)
     edit(workflow)
-    assert.throws(() => verifyLocalGateWorkflow(stringify(workflow)), reason, name)
+    assert.throws(() => verifyLocalGateWorkflow(stringify(workflow, { lineWidth: 0 })), reason, name)
   }
 })
 test('forbidden workflow paths are rejected statically', () => {
@@ -101,12 +185,13 @@ test('forbidden workflow paths are rejected statically', () => {
     'weaker release audit level': (w) => { auditStep(w).run = auditStep(w).run.replace('release audit --audit-level=moderate', 'release audit --audit-level=critical') },
     'unreviewed infra/aws audit command': (w) => { auditStep(w).run = auditStep(w).run.replace(AWS_AUDIT_GATE, 'npm --prefix infra/aws audit --audit-level=high') },
     'conditional audit': (w) => { auditStep(w).if = '${{ false }}' },
-    'audit step environment': (w) => { auditStep(w).env = { npm_config_registry: 'https://registry.invalid/' } },
-    'tooling npm configuration': (w) => { w.jobs.tooling.env.NPM_CONFIG_OMIT = 'dev' },
-    'tooling node preload': (w) => { w.jobs.tooling.env.NODE_OPTIONS = '--import ./preload.mjs' },
+    'audit step environment': [(w) => { auditStep(w).env = { npm_config_registry: 'https://registry.invalid/' } }, UNLISTED('npm_config_registry')],
+    'tooling npm configuration': [(w) => { w.jobs.tooling.env.NPM_CONFIG_OMIT = 'dev' }, UNLISTED('NPM_CONFIG_OMIT')],
+    'tooling node preload': [(w) => { w.jobs.tooling.env.NODE_OPTIONS = '--import ./preload.mjs' }, UNLISTED('NODE_OPTIONS')],
     'second audit step': (w) => { w.jobs.tooling.steps.push({ name: 'Audit again', run: 'npm --prefix infra/aws audit || true', id: 'audit_2' }) },
-    'exception file rewritten before audit': (w) => { w.jobs.tooling.steps.splice(3, 0, { run: "echo '{}' > security/npm-audit-exceptions.json" }) },
-    'security file replaced by glob': (w) => { w.jobs.tooling.steps.splice(3, 0, { run: 'cp /tmp/empty.json security/*.json' }) },
+    'exception file rewritten before audit': (w) => { before(w.jobs.tooling.steps, 'audit', { run: "echo '{}' > security/npm-audit-exceptions.json" }) },
+    'security file replaced by glob': (w) => { before(w.jobs.tooling.steps, 'audit', { run: 'cp /tmp/empty.json security/*.json' }) },
+    'security file replaced after the audit': [(w) => { const steps = w.jobs.tooling.steps; steps.splice(steps.findIndex(s => s.id === 'audit') + 1, 0, { run: 'cp /tmp/empty.json security/*.json' }) }, GATE_ONLY],
     'npm registry redirected': (w) => { w.jobs.tooling.steps.find(s => s.uses?.startsWith('actions/setup-node@')).with['registry-url'] = 'https://registry.invalid/' },
     'default shell replaced': (w) => { w.jobs.tooling.defaults = { run: { shell: 'true {0}' } } },
     'workflow default shell replaced': [(w) => { w.defaults = { run: { shell: 'true {0}' } } }, DEFAULT_SHELL],
@@ -114,17 +199,143 @@ test('forbidden workflow paths are rejected statically', () => {
     'tooling job skipped': [(w) => { w.jobs.tooling.if = '${{ false }}' }, JOB_RUNTIME],
     'tooling job may fail': [(w) => { w.jobs.tooling['continue-on-error'] = true }, JOB_RUNTIME],
     'tooling job moved into a container': [(w) => { w.jobs.tooling.container = 'node:22' }, JOB_RUNTIME],
+    'publish job in a container': [(w) => { w.jobs.publish.container = 'node:22' }, CONTAINER],
+    'publish job with services': [(w) => { w.jobs.publish.services = { db: { image: 'postgres:16' } } }, CONTAINER],
     'node preload written to GITHUB_ENV': [(w) => { before(w.jobs.tooling.steps, 'audit', preload) }, LATER_STEPS],
     'fake npm added through GITHUB_PATH': [(w) => { before(w.jobs.tooling.steps, 'audit', fakeNpm) }, LATER_STEPS],
-    'fake npm added through tooling PATH': [(w) => { w.jobs.tooling.env.PATH = '/tmp/bin:/usr/bin:/bin' }, /workflow cannot set PATH/],
+    'fake npm added through tooling PATH': [(w) => { w.jobs.tooling.env.PATH = '/tmp/bin:/usr/bin:/bin' }, UNLISTED('PATH')],
+    'BASH_ENV in the tooling env': [(w) => { w.jobs.tooling.env.BASH_ENV = '/tmp/skip.sh' }, UNLISTED('BASH_ENV')],
+    'BASH_ENV in the workflow env': [(w) => { w.env = { BASH_ENV: '/tmp/skip.sh' } }, UNLISTED('BASH_ENV')],
+    'proxy in the tooling env': [(w) => { w.jobs.tooling.env.HTTPS_PROXY = 'http://127.0.0.1:8080' }, UNLISTED('HTTPS_PROXY')],
+    'tooling env given as an expression': [(w) => { w.jobs.tooling.env = "${{ fromJSON(inputs.plan_json).env }}" }, NOT_A_MAP],
+    'unreviewed action before the audit': [(w) => { before(w.jobs.tooling.steps, 'audit', proxyAction) }, ACTION],
+    'local action before the audit': [(w) => { before(w.jobs.tooling.steps, 'audit', localAction) }, ACTION],
+    'pinned PATH dropped from the audit': (w) => { auditStep(w).run = auditStep(w).run.replace(AUDIT_PATH, '') },
+    'another Node for the tooling': [(w) => { w.jobs.tooling.steps.find(s => s.uses?.startsWith('actions/setup-node@')).with['node-version'] = '20.0.0' }, NODE],
+    'audit in the default shell': [(w) => { delete auditStep(w).shell }, STEP_KEYS],
+    'audit in a bash found on PATH': [(w) => { auditStep(w).shell = 'bash -p -e {0}' }, SHELL],
+    'policy tests run before the audit': [(w) => { runFirst(w.jobs.tooling.steps, 'policy') }, CODE_FIRST],
+    'tooling install runs before the audit': [(w) => { const steps = w.jobs.tooling.steps; const i = steps.findIndex(s => s.name === 'Install locked tooling without cloud authority'); const [step] = steps.splice(i, 1); steps.splice(steps.findIndex(s => s.id === 'audit'), 0, step) }, CODE_FIRST],
+    'NODE_VERSION in the tooling env': [(w) => { w.jobs.tooling.env.NODE_VERSION = '20.0.0' }, UNLISTED('NODE_VERSION')],
+    'Go set up before the audit': [(w) => { const steps = w.jobs.tooling.steps; move(steps, setupGo(steps), 'audit') }, BEFORE_AUDIT],
+    'publisher Go cache turned on': [(w) => { setupGo(w.jobs.tooling.steps).with.cache = true }, /the publisher tooling job restores no Go cache/],
+    'publisher Go cache input dropped': [(w) => { delete setupGo(w.jobs.tooling.steps).with.cache }, /the publisher tooling job restores no Go cache/],
+    'second publisher Go setup with a cache': [(w) => { const steps = w.jobs.tooling.steps; steps.splice(steps.indexOf(setupGo(steps)) + 1, 0, { uses: setupGo(steps).uses, with: { 'go-version': '1.26.10', cache: true } }) }, /the publisher tooling job restores no Go cache/],
+    'npm cache restored for the tooling': [(w) => { setupNode(w.jobs.tooling.steps).with['package-manager-cache'] = true }, NPM_CACHE],
+    'tooling checked out again after the audit': [(w) => { const steps = w.jobs.tooling.steps; steps.splice(steps.findIndex(s => s.id === 'audit') + 1, 0, structuredClone(checkout(steps))) }, ONE_CHECKOUT],
   }
+  Object.assign(attacks, {
+    'NODE_OPTIONS in the publish job env': [(w) => { w.jobs.publish.env.NODE_OPTIONS = '--import=/tmp/p.mjs' }, DENIED('NODE_OPTIONS')],
+    'BASH_ENV in a publish step env': [(w) => { w.jobs.publish.steps.filter(s => s.run !== undefined)[1].env = { BASH_ENV: '/tmp/skip.sh' } }, DENIED('BASH_ENV')],
+    'publish step env given as an expression': [(w) => { w.jobs.publish.steps.filter(s => s.run !== undefined)[1].env = '${{ fromJSON(inputs.plan_json).env }}' }, ANY_ENV_MAP],
+  })
   for (const [name, attack] of Object.entries(attacks)) {
     const [edit, reason] = [attack].flat()
     const workflow = parseWorkflow(source)
     edit(workflow)
-    assert.throws(() => verifyPublicationWorkflow(stringify(workflow)), reason, name)
+    assert.throws(() => verifyPublicationWorkflow(stringify(workflow, { lineWidth: 0 })), reason, name)
   }
 })
+test('the audit shell reads no BASH_ENV and imports no shell function, as plain bash would', { skip: process.platform !== 'linux' }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'audit-shell-'))
+  try {
+    const rc = join(dir, 'rc.sh')
+    const { writeFile } = await import('node:fs/promises')
+    await writeFile(rc, 'npm() { echo fake; }\ntouch "$MARKER"\n')
+    const script = join(dir, 'audit.sh')
+    await writeFile(script, 'echo "npm is $(type -t npm || echo absent)"\n')
+    const env = { PATH: '/usr/bin:/bin', BASH_ENV: rc, MARKER: join(dir, 'sourced'), 'BASH_FUNC_npm%%': '() { echo fake; }' }
+    const run = (shell) => spawnSync(shell.split(' ')[0], [...shell.split(' ').slice(1, -1), script], { env, encoding: 'utf8' })
+    const plain = run('/usr/bin/bash -e {0}')
+    assert.match(plain.stdout, /npm is function/, 'control: plain bash takes the injected function')
+    const audit = run(AUDIT_SHELL)
+    assert.equal(audit.status, 0)
+    assert.match(audit.stdout, /npm is (file|absent)/)
+    await rm(join(dir, 'sourced'), { force: true })
+    run(AUDIT_SHELL)
+    await assert.rejects(readFile(join(dir, 'sourced')), 'the audit shell must not source BASH_ENV')
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
+})
+
+test('a line break the yaml parser does not see cannot hide workflow content', () => {
+  // yaml ends a line only at LF. YAML 1.2 also ends one at CR, and libyaml-family parsers such as GitHub's at NEL, LS and
+  // PS. Each would hide what follows it in a comment.
+  const breaks = { CR: '\r', NEL: '\u0085', LS: '\u2028', PS: '\u2029' }
+  const hidden = {
+    'a checkout ref': ['persist-credentials: false', 'persist-credentials: false # reviewed{BREAK}          ref: ${{ github.event.pull_request.base.sha }}'],
+    'a step before the audit': ['package-manager-cache: false', 'package-manager-cache: false # reviewed{BREAK}      - run: npm --prefix release ci'],
+    'continue-on-error on the audit': ['id: gate_2', 'id: gate_2 # audit{BREAK}        continue-on-error: true'],
+  }
+  for (const [name, character] of Object.entries(breaks)) {
+    for (const [what, [line, replacement]] of Object.entries(hidden)) {
+      const edited = localGates.replace(line, replacement.replace('{BREAK}', character))
+      assert.notEqual(edited, localGates)
+      assert.throws(() => verifyLocalGateWorkflow(edited), /printable ASCII with LF line breaks/, `${what} behind ${name}`)
+    }
+    const publisher = source.replace('package-manager-cache: false', `package-manager-cache: false # reviewed${character}          cache: npm`)
+    assert.notEqual(publisher, source)
+    assert.throws(() => verifyPublicationWorkflow(publisher), /printable ASCII with LF line breaks/, `the publisher's npm cache behind ${name}`)
+  }
+  assert.throws(() => verifyLocalGateWorkflow(localGates.replace(/\n/g, '\r\n')), /printable ASCII with LF line breaks/, 'CRLF line breaks')
+  assert.throws(() => verifyLocalGateWorkflow(`%YAML 1.1\n---\n${localGates}`), /YAML directive/, 'a YAML 1.1 directive')
+  assert.throws(() => verifyPublicationWorkflow(`%YAML 1.2\n---\n${source}`), /YAML directive/, 'a YAML 1.2 directive')
+})
+
+test('only block-style YAML that this parser and libyaml read the same way is accepted', () => {
+  const refused = {
+    // In flow context '?ref' is a key named "?ref" to this parser but the key "ref" to libyaml.
+    'a flow mapping with a ?-key': [['with:\n          persist-credentials: false', 'with: {persist-credentials: false, ?ref: 0000000000000000000000000000000000000000}'], /block style, not a flow collection/],
+    'a flow sequence': [['id: gate_2', 'id: gate_2\n        x: [a, ?b]'], /block style, not a flow collection/],
+    // libyaml ends an anchor's name at ':' or '?', so the value after it differs.
+    'an anchor': [['id: gate_2', 'id: &a:b gate_2'], /an anchor or a tag/],
+    'an explicit tag': [['id: gate_2', 'id: !!str gate_2'], /an anchor or a tag/],
+    // An escaped line break followed by an empty line folds to a space here and to a newline in libyaml.
+    'a double-quoted value over several lines': [['id: gate_2', 'id: "gate_\\\n\n          2"'], /quote a value over several lines/],
+    'a merge key': [['    runs-on: ubuntu-24.04\n', '    runs-on: ubuntu-24.04\n    <<:\n      if: false\n'], /merge key/],
+    'an anchor on a block sequence': [['    steps:\n', '    steps: &a:b\n'], /an anchor or a tag/],
+    'a tag on a block mapping': [['        with:\n          persist-credentials: false', '        with: !!map\n          persist-credentials: false'], /an anchor or a tag/],
+    'a single-quoted value over several lines': [['id: gate_2', "id: 'gate_\n          2'"], /quote a value over several lines/],
+    'a one-item flow sequence': [['id: gate_2', 'id: gate_2\n        x: [a]'], /block style, not a flow collection/],
+    // After a bare '-' and a comment, this parser joins the following items into one value; libyaml reads them apart.
+    'a plain value over several lines': [['    runs-on: ubuntu-24.04\n', '    runs-on: ubuntu-24.04\n    x:\n      -\n      #c\n        a\n      - b\n'], /plain value over several lines/],
+    'a block scalar indentation indicator': [['run: npm --prefix release ci --ignore-scripts', 'run: |1\n           npm --prefix release ci --ignore-scripts'], /indentation indicator/],
+    'a chomped literal with an indentation indicator': [['run: npm --prefix release ci --ignore-scripts', 'run: |-1\n           npm --prefix release ci --ignore-scripts'], /indentation indicator/],
+    'a folded scalar with an indentation indicator': [['run: npm --prefix release ci --ignore-scripts', 'run: >1\n           npm --prefix release ci --ignore-scripts'], /indentation indicator/],
+  }
+  for (const [name, [[line, replacement], reason]] of Object.entries(refused)) {
+    const edited = localGates.replace(line, replacement)
+    assert.notEqual(edited, localGates, name)
+    assert.throws(() => verifyLocalGateWorkflow(edited), reason, name)
+  }
+  assert.throws(() => verifyPublicationWorkflow(source.replace('    runs-on: ubuntu-24.04\n', '    runs-on: ubuntu-24.04\n    <<:\n      if: false\n')), /merge key/, 'a merge key in the publisher')
+  // The real attack: move an audit step's name to its end, as a block scalar after a '#x' comment line. This parser then
+  // reads continue-on-error as the name's text, so the step keeps exactly id, name, run and shell; libyaml reads it as a key.
+  const hideUnderName = (text, nameLine, nextStep, header) => {
+    const start = text.indexOf(`${nameLine}\n        shell:`)
+    assert.ok(start >= 0, nameLine)
+    const moved = text.slice(0, start) + '      - shell:' + text.slice(start + nameLine.length + '\n        shell:'.length)
+    const at = moved.indexOf(nextStep, start)
+    assert.ok(at > start, nextStep)
+    return moved.slice(0, at) + `        name:\n        #c\n          ${header}\n        continue-on-error: true\n` + moved.slice(at)
+  }
+  const hiddenLocal = hideUnderName(localGates, '      - name: Audit release verifier dependencies', '      - name: Install release and shared validator dependencies', '>-')
+  const hiddenPublisher = hideUnderName(source, '      - name: Audit all publication tooling dependencies', '      - uses: actions/setup-go@', '|')
+  const auditOf = (text, job, id) => parseDocument(text).toJS().jobs[job].steps.find(step => step.id === id)
+  for (const [text, job, id] of [[hiddenLocal, 'release-contracts', 'gate_2'], [hiddenPublisher, 'tooling', 'audit']]) {
+    const step = auditOf(text, job, id)
+    assert.deepEqual(Object.keys(step).sort(), ['id', 'name', 'run', 'shell'], `${job}: without the rule the audit step keeps its four keys`)
+    assert.match(step.name, /^continue-on-error: true\n?$/)
+  }
+  assert.throws(() => verifyLocalGateWorkflow(hiddenLocal), /block scalar on the line of its key/, 'continue-on-error hidden in the local gates')
+  assert.throws(() => verifyPublicationWorkflow(hiddenPublisher), /block scalar on the line of its key/, 'continue-on-error hidden in the publisher')
+  assert.throws(() => verifyLocalGateWorkflow(localGates.trimEnd()), /end with a line break/, 'no final line break')
+  // An empty flow collection has no key or item to read differently, as in the readiness workflow's `permissions: {}`.
+  assert.deepEqual(parseWorkflow('permissions: {}\nitems: []\n'), { permissions: {}, items: [] })
+  assert.throws(() => parseWorkflow('permissions: {contents: read}\n'), /block style, not a flow collection/)
+})
+
 test('duplicate YAML fields and aliases cannot hide workflow permissions', () => {
   assert.throws(() => parseWorkflow('permissions: read-all\npermissions: write-all\n'))
   assert.throws(() => parseWorkflow('a: &unsafe {permissions: write-all}\nb: *unsafe\n'))
