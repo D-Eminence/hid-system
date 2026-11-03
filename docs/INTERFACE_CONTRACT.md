@@ -1397,6 +1397,16 @@ work item, kept by the database), which is a separate owner decision.
 `test-patient-evidence-runtime.mjs`) checks 1,050 work items within the
 limit and counts the checks.
 
+### Lab results: check, release and correction
+
+Checking a result (`POST /api/v1/lab/results/{resultId}/verify`) needs
+someone other than the person who entered that version; the database keeps
+the rule. When the person who entered it tries, Lab answers
+`409 LAB_RESULT_VERIFIER_NOT_INDEPENDENT` with the detail "You entered this
+result, so someone else at your lab must check it." Earlier backends
+answered `500`. A check of a version marked entered in error is refused by
+the same database rule and still answers `500`.
+
 ### Record chat: where each source came from
 
 Each source in a record chat answer (`POST /api/v1/ehr/me/chat`,

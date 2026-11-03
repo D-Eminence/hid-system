@@ -37,6 +37,25 @@ function releaseRefusal(error:unknown):DomainProblem|undefined{
  return new DomainProblem(409,'ORDER_ROUTE_CLOSED','This order from another facility is closed: its result cannot be released',undefined,{cause:error});
 }
 
+/** lab.validate_result_governance's refusal of a check (0021, 0077); the database words both of its cases alike. */
+const VERIFIER_REFUSAL='Result verifier must be independent and result must be eligible';
+
+/**
+ * The check (verify) insert's refusal when the member checking a result version entered it themselves (0077: the
+ * verifier must not be the version's author): 23514 with VERIFIER_REFUSAL, answered 409
+ * LAB_RESULT_VERIFIER_NOT_INDEPENDENT (handoff A12) in words the website can show. The database gives the same refusal
+ * for a version marked entered in error, so the member's own authorship, read before the insert, tells the two apart;
+ * that refusal, and every other error of the insert, is passed on unchanged.
+ */
+function verifierRefusal(error:unknown,enteredByYou:boolean):DomainProblem|undefined{
+ const {code,message}=(typeof error==='object'&&error!==null?error:{}) as {code?:unknown;message?:unknown};
+ if(code!=='23514'||message!==VERIFIER_REFUSAL||!enteredByYou)return undefined;
+ return new DomainProblem(409,'LAB_RESULT_VERIFIER_NOT_INDEPENDENT','You entered this result, so someone else at your lab must check it.',undefined,{cause:error});
+}
+
+/** Whether two account ids name the same account (uuid text, whatever its case). */
+const sameAccount=(a:string|null|undefined,b:string)=>typeof a==='string'&&a.toLowerCase()===b.toLowerCase();
+
 @Injectable()
 export class LabExecutionsService {
  constructor(private readonly database:DatabaseService,private readonly audit:AuditService,private readonly routeAccess:LabOrderRouteAccess) {}
@@ -138,7 +157,12 @@ export class LabExecutionsService {
    const table=operation==='verify'?'lab.result_verifications':'lab.result_releases';
    const replay=await client.query<{request_sha256:string}>(`select request_sha256 from ${table} where facility_id=$1 and ${operation==='verify'?'verified_by':'released_by'}=$2 and idempotency_key=$3`,[context.facilityId,context.actor.accountId,key]);
    if(replay.rows[0]){if(replay.rows[0].request_sha256!==digest)throw new DomainProblem(409,'IDEMPOTENCY_CONFLICT','Governance command conflicts with existing request');return this.resultAggregate(client,resultId);}
-   if(operation==='verify')await client.query(`insert into lab.result_verifications(result_id,execution_id,patient_id,facility_id,result_version,verified_by,verified_by_membership_id,verified_at,reason,idempotency_key,request_sha256,correlation_id) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,[resultId,row.execution_id,row.patient_id,row.facility_id,input.expectedResultVersion,context.actor.accountId,context.membershipId,input.occurredAt,input.reason.trim(),key,digest,context.correlationId]);
+   if(operation==='verify'){
+    // Who entered this version, only to word the database's refusal of a check by its author (verifierRefusal).
+    const author=await client.query<{entered_by:string}>(`select entered_by::text from lab.result_revisions where result_id=$1 and version=$2`,[resultId,input.expectedResultVersion]);
+    const enteredByYou=sameAccount(author.rows[0]?.entered_by,context.actor.accountId);
+    await client.query(`insert into lab.result_verifications(result_id,execution_id,patient_id,facility_id,result_version,verified_by,verified_by_membership_id,verified_at,reason,idempotency_key,request_sha256,correlation_id) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,[resultId,row.execution_id,row.patient_id,row.facility_id,input.expectedResultVersion,context.actor.accountId,context.membershipId,input.occurredAt,input.reason.trim(),key,digest,context.correlationId]).catch((error:unknown)=>{throw verifierRefusal(error,enteredByYou)??error;});
+   }
    else {const verification=await client.query<{id:string}>(`select id::text from lab.result_verifications where result_id=$1 and result_version=$2`,[resultId,input.expectedResultVersion]);if(!verification.rows[0])throw new DomainProblem(409,'RESULT_NOT_VERIFIED','Exact result version is not verified');await client.query(`insert into lab.result_releases(verification_id,result_id,execution_id,patient_id,facility_id,result_version,released_by,released_by_membership_id,released_at,reason,idempotency_key,request_sha256,correlation_id) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,[verification.rows[0].id,resultId,row.execution_id,row.patient_id,row.facility_id,input.expectedResultVersion,context.actor.accountId,context.membershipId,input.occurredAt,input.reason.trim(),key,digest,context.correlationId]).catch((error:unknown)=>{throw releaseRefusal(error)??error;});}
    const execution=await this.find(client,row.execution_id);const event=operation==='verify'?'LabResultVerified':'LabResultReleased';await this.outbox(client,event,resultId,input.expectedResultVersion,execution,context,{resultId,resultVersion:input.expectedResultVersion,status:operation==='verify'?'verified_not_released':'released'});await this.audit.recordWithClient(client,this.auditEvent(context,execution,`lab.result.${operation}`,{resultId,resultVersion:input.expectedResultVersion,reason:input.reason.trim(),...basisDetails(basis)}));return this.resultAggregate(client,resultId);
   },{isolationLevel:'SERIALIZABLE'});
