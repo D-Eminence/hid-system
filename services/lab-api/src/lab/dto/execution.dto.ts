@@ -1,4 +1,4 @@
-import { IsDateString, IsIn, IsInt, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
+import { IsBoolean, IsDateString, IsIn, IsInt, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 
 export class StartExecutionDto {
  @IsInt() @Min(1) expectedSpecimenVersion!:number;
@@ -29,4 +29,11 @@ export class GovernResultDto {
  @IsInt() @Min(1) expectedResultVersion!:number;
  @IsDateString() occurredAt!:string;
  @IsString() @MaxLength(500) reason!:string;
+}
+/**
+ * Verification (owner decision 33.3): selfCheck true asks the One-person lab self-check of a version the caller
+ * entered; the reason is then the typed reason (10-500 characters after trimming). Absent or false is today's check.
+ */
+export class VerifyResultDto extends GovernResultDto {
+ @IsOptional() @IsBoolean() selfCheck?:boolean;
 }
