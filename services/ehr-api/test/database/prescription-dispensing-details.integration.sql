@@ -29,9 +29,11 @@
 --      changes the prescription (a new version, a changed priority) the work
 --      item still answers the accepted version's values, while 0101 still
 --      refuses its dispensing;
---   5. no row: a route-backed work item; another facility's own work; a
+--   5. no row: a route-backed work item (also one naming this facility's own
+--      prescription, as a forged row would); another facility's own work; a
 --      patient without a grant for the member; a work item whose snapshot
---      names another patient, another encounter, or a version that has none;
+--      names another patient, another facility, another encounter, or a
+--      version that has none;
 --      a member with consent but without pharmacy.work-item.read; a session
 --      at another facility, without a membership, with an unknown subject or
 --      without a purpose of use; a revoked or an expired grant; an active
@@ -420,9 +422,9 @@ select pg_temp.expect('the CHECK outcomes',
     ('quantity 99999999.9999', 'ok')) expected(name, got)));
 
 -- The prescriptions (e1140007...XX): a1 Ngozi, every value; b1 Ngozi, today's
--- INSERT (none); c1 Femi, every value; d1 Kemi; e1, e2, e3 Ngozi (named by
--- the mismatched work items); f1 Ngozi (its snapshot is made pre-0114
--- below); at F2 by D2: a2 and a3 Ngozi.
+-- INSERT (none); c1 Femi, every value; d1 Kemi; e1, e2, e3, e4 Ngozi (named
+-- by the mismatched work items); f1 Ngozi (its snapshot is made pre-0114
+-- below); at F2 by D2: a2, a3 and a4 Ngozi.
 select pg_temp.expect('the EHR prescriptions at F1', (select string_agg(pg_temp.run(pg_temp.prescribe_sql(
     ('e1140007-0000-4000-8000-0000000000' || p.code)::uuid, ('e1140009-0000-4000-8000-00000000000' || p.encounter)::uuid,
     ('e1140006-0000-4000-8000-00000000000' || p.patient)::uuid, 1, 1, p.display, p.priority, p.strength, p.dose_form,
@@ -434,9 +436,10 @@ select pg_temp.expect('the EHR prescriptions at F1', (select string_agg(pg_temp.
     ('e1', 1, 1, 'Ceftriaxone 1 g', 'routine', '1 g', 'injection', 3, 'day', 3, 'vial'),
     ('e2', 1, 1, 'Salbutamol inhaler', 'routine', '100 mcg/dose', 'inhaler', 1, 'month', 1, 'inhaler'),
     ('e3', 1, 1, 'Hydrocortisone cream', 'routine', '1%', 'cream', 2, 'week', 1, 'tube'),
+    ('e4', 1, 1, 'Doxycycline 100 mg', 'urgent', '100 mg', 'capsule', 7, 'day', 14, 'capsule'),
     ('f1', 1, 1, 'Chloramphenicol eye drops', 'urgent', '0.5%', 'drops', 5, 'day', 1, 'bottle'))
        p(code, encounter, patient, display, priority, strength, dose_form, duration_value, duration_unit, quantity,
-         quantity_unit)), 'ok ok ok ok ok ok ok');
+         quantity_unit)), 'ok ok ok ok ok ok ok ok');
 -- b1, through today's INSERT (no new column named; its id from the column
 -- default, so it is found by its medicine).
 select pg_temp.expect('today''s INSERT', pg_temp.run(pg_temp.prescribe_today_sql('e1140009-0000-4000-8000-000000000001',
@@ -460,8 +463,9 @@ select pg_temp.expect('the EHR prescriptions at F2', (select string_agg(pg_temp.
     ('e1140007-0000-4000-8000-0000000000' || p.code)::uuid, 'e1140009-0000-4000-8000-000000000004',
     'e1140006-0000-4000-8000-000000000001', 6, 2, p.display, 'routine', p.strength, 'tablet', 5, 'day', 10, 'tablet')),
     ' ' order by p.code)
-  from (values ('a2', 'Metronidazole 400 mg', '400 mg'), ('a3', 'Ibuprofen 400 mg', '400 mg')) p(code, display, strength)),
-  'ok ok');
+  from (values ('a2', 'Metronidazole 400 mg', '400 mg'), ('a3', 'Ibuprofen 400 mg', '400 mg'),
+               ('a4', 'Ciprofloxacin 500 mg', '500 mg')) p(code, display, strength)),
+  'ok ok ok');
 reset role;
 
 -- 3. The snapshot carries the values (a1 at version 1, as the owner).
@@ -539,7 +543,9 @@ reset role;
 -- The work items that stand for rows accepted before 0100 or from another
 -- facility (as the owner, replica): 04 Kemi's d1 accepted by DR; 06 routed
 -- to F1 from F2, a3; 07 Femi's naming Ngozi's e1; 08 Ngozi's e2 with another
--- encounter; 09 Ngozi's e3 at a version it never had.
+-- encounter; 09 Ngozi's e3 at a version it never had; 12 a route-backed row
+-- naming this facility's own e4, and 13 an own row at F1 naming F2's a4 (no
+-- guard makes either; they stand for forged rows).
 set local session_replication_role = replica;
 insert into pharmacy.work_items (id, patient_id, facility_id, ordering_facility_id, source_ehr_prescription_id,
   source_ehr_prescription_version, source_encounter_id, source_status, status, medication_display, frequency,
@@ -554,13 +560,15 @@ select ('e114000b-0000-4000-8000-0000000000' || item.n)::uuid, ('e1140006-0000-4
        ('e1140004-0000-4000-8000-00000000000' || item.member)::uuid, 'Accepted for the details suite',
        'details-legacy-item-' || item.n || '-key', md5('details-legacy-' || item.n) || md5('details-legacy-' || item.n),
        'details-suite-legacy-' || item.n,
-       case when item.routed then 'e114000c-0000-4000-8000-000000000001'::uuid end
-  from (values ('04', 3, 1, 1, 'd1', 1, 'e1140009-0000-4000-8000-000000000003', 1, false),
-               ('06', 1, 1, 2, 'a3', 1, 'e1140009-0000-4000-8000-000000000004', 2, true),
-               ('07', 2, 1, 1, 'e1', 1, 'e1140009-0000-4000-8000-000000000001', 2, false),
-               ('08', 1, 1, 1, 'e2', 1, 'e1140009-0000-4000-8000-000000000002', 2, false),
-               ('09', 1, 1, 1, 'e3', 5, 'e1140009-0000-4000-8000-000000000001', 2, false))
-       item(n, patient, site, ordering, code, version, encounter, member, routed);
+       item.route::uuid
+  from (values ('04', 3, 1, 1, 'd1', 1, 'e1140009-0000-4000-8000-000000000003', 1, null),
+               ('06', 1, 1, 2, 'a3', 1, 'e1140009-0000-4000-8000-000000000004', 2, 'e114000c-0000-4000-8000-000000000001'),
+               ('07', 2, 1, 1, 'e1', 1, 'e1140009-0000-4000-8000-000000000001', 2, null),
+               ('08', 1, 1, 1, 'e2', 1, 'e1140009-0000-4000-8000-000000000002', 2, null),
+               ('09', 1, 1, 1, 'e3', 5, 'e1140009-0000-4000-8000-000000000001', 2, null),
+               ('12', 1, 1, 2, 'e4', 1, 'e1140009-0000-4000-8000-000000000001', 2, 'e114000c-0000-4000-8000-000000000002'),
+               ('13', 1, 1, 1, 'a4', 1, 'e1140009-0000-4000-8000-000000000004', 2, null))
+       item(n, patient, site, ordering, code, version, encounter, member, route);
 -- f1 as if prescribed before 0114: its snapshot without the seven keys.
 update ehr.record_versions set resulting_state = resulting_state - array['priority', 'medication_strength',
     'medication_dose_form', 'duration_value', 'duration_unit', 'quantity_to_dispense', 'quantity_unit']
@@ -578,6 +586,14 @@ select pg_temp.expect('PH reads its own rows'' details', pg_temp.details(pg_temp
 select pg_temp.expect('PH: row-level security shows its own rows 01-03 and 07-10', pg_temp.visible_own(),
   '01 02 03 07 08 09 10');
 select pg_temp.expect('PH: one routed row alone', pg_temp.details(array['e114000b-0000-4000-8000-000000000006'::uuid]), '');
+select pg_temp.expect('PH: row-level security shows the route-backed row naming e4',
+  (select count(*)::text from pharmacy.work_items where id = 'e114000b-0000-4000-8000-000000000012'), '1');
+select pg_temp.expect('PH: a route-backed row naming this facility''s own prescription',
+  pg_temp.details(array['e114000b-0000-4000-8000-000000000012'::uuid]), '');
+select pg_temp.expect('PH: row-level security shows the own row naming F2''s a4',
+  (select count(*)::text from pharmacy.work_items where id = 'e114000b-0000-4000-8000-000000000013'), '1');
+select pg_temp.expect('PH: an own row naming another facility''s prescription',
+  pg_temp.details(array['e114000b-0000-4000-8000-000000000013'::uuid]), '');
 select pg_temp.expect('PH: Kemi''s, without a grant', pg_temp.details(array['e114000b-0000-4000-8000-000000000004'::uuid]), '');
 select pg_temp.expect('PH: F2''s own row', pg_temp.details(array['e114000b-0000-4000-8000-000000000005'::uuid]), '');
 select pg_temp.expect('PH: a snapshot of another patient, another encounter, or no snapshot at that version',

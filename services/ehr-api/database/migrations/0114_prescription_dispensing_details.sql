@@ -87,9 +87,10 @@
 -- fields of POST .../prescriptions (pairs enforced), echoes them when set
 -- and says so on its prescription list (dispensingDetails: true);
 -- pharmacy-api reads D4 in a savepoint for the own rows it answers and adds
--- priority, medication.strength, medication.doseForm, duration,
--- quantityToDispense and quantityUnit to them. Neither writes a new audit
--- row: no new person is shown.
+-- priority, medication.strength, medication.doseForm, duration (else the
+-- whole days from the work item's own start date to its end date, when both
+-- are set), quantityToDispense and quantityUnit to them. Neither writes a new
+-- audit row: no new person is shown.
 --
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
 --    and nothing is applied): 0001-0103 applied (0103's
