@@ -107,7 +107,7 @@ accepts one to eight callers. When its document scanning switch is on, a
 seventh caller joins the same six: the document scan bridge Lambda's role,
 subject `hid:staging:document-scanner`, audience `hid-identity-api` only
 (owner decision D1 of 2026-10-31; [INTERFACE_CONTRACT.md section
-32](INTERFACE_CONTRACT.md)). That issuer's limit is raised in its own apply
+33](INTERFACE_CONTRACT.md)). That issuer's limit is raised in its own apply
 before the seventh caller is added. Only API Gateway's
 IAM request context identifies the caller; the token request contains an
 audience and cannot select a subject or role. The issuer rejects unmapped IAM
