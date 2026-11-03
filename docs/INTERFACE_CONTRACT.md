@@ -1416,6 +1416,13 @@ version's author and the session, and never answers anyone's account id. A
 client can use it to offer no check to the person who entered the version.
 Earlier backends do not send it, so clients treat it as optional.
 
+The `reason` of a check, a release (`POST .../results/{resultId}/release`)
+and a correction (`POST .../executions/{executionId}/results/{resultId}/corrections`)
+needs at least 3 characters, not counting spaces at either end, and at most
+500: what Lab keeps. A shorter one is refused `400 VALIDATION_FAILED` with
+the field error `reason must be at least 3 characters`; earlier backends
+passed it to the database and answered `500`.
+
 ### Record chat: where each source came from
 
 Each source in a record chat answer (`POST /api/v1/ehr/me/chat`,
