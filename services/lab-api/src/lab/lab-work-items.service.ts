@@ -86,7 +86,7 @@ export const WORK_LIST_QUERY = `with released_tests as materialized (
 select w.id::text,w.patient_id::text,w.facility_id::text,w.ordering_facility_id::text,
   w.source_ehr_order_id::text,w.source_ehr_order_version::text,w.source_encounter_id::text,w.status,w.priority,
   w.accepted_by::text,w.accepted_at,w.row_version::text,w.created_at,w.order_route_id::text,w.test_name,a.id::text as accession_id,
-  a.accession_number,array_remove(array_agg(s.status order by s.created_at),null) as specimen_statuses from shown w
+  a.accession_number,w.open_work,array_remove(array_agg(s.status order by s.created_at),null) as specimen_statuses from shown w
   left join lab.accessions a on a.work_item_id=w.id left join lab.specimens s on s.accession_id=a.id
   group by ${WORK_ITEM_COLUMNS},w.open_work,a.id,a.accession_number
   order by ${workOrder('w')}`;
@@ -204,8 +204,10 @@ export class LabWorkItemsService {
    * The work list. Row-level security shows this facility's rows the member
    * may read: under a consent grant, or bound to an order route that allows
    * a read now (P4c, strict policy). Open work comes first, oldest first, then
-   * done work, newest first, 200 rows in all (WORK_LIST_QUERY); the answer's
-   * shape is unchanged. A route-backed row carries its route
+   * done work, newest first, 200 rows in all (WORK_LIST_QUERY). Each item
+   * says whether it still has work to do (`openWork`, the open_work the list
+   * is ordered by: false once every test it asks for has a released result,
+   * so the website can show it as done). A route-backed row carries its route
    * card and, while the route allows a read, its patient (C12). To a member
    * who may receive lab requests from other facilities, the answer says
    * whether this facility receives them now and whether any wait or are held
@@ -222,13 +224,14 @@ export class LabWorkItemsService {
     }
     const page = await this.database.withTransaction(context, async (client) => {
       const result = await client.query<WorkItemRow & { test_name:string; accession_id:string|null; accession_number:string|null;
-        specimen_statuses:string[]|null }>(WORK_LIST_QUERY, [context.facilityId]);
+        open_work:boolean; specimen_statuses:string[]|null }>(WORK_LIST_QUERY, [context.facilityId]);
       const routed = result.rows.filter((row) => row.order_route_id).map((row) => row.id);
       const cards = await this.routeCards.cards(client, routed, context.correlationId);
       await this.auditShownPatients(client, context, result.rows, cards);
       const receiving = await this.routeCards.receiving(client, context);
       return { items: result.rows.map((row) => ({ ...this.project(row, cards.get(row.id)),testName:row.test_name,
-        accessionId:row.accession_id,accessionNumber:row.accession_number,specimenStatuses:row.specimen_statuses ?? [] })),
+        accessionId:row.accession_id,accessionNumber:row.accession_number,specimenStatuses:row.specimen_statuses ?? [],
+        openWork:row.open_work })),
       ...receiving, ...this.routeCards.lateCorrection(context), ...this.routeCards.cannotComplete(context) };
     });
     return { ...page, ...(await this.routeCards.flags()) };

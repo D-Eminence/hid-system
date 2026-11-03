@@ -1373,6 +1373,14 @@ only and cannot be dispensed again. Earlier backends answered the 200 oldest ite
 the member could read whatever their state, so a busy facility stopped seeing
 new work. The answer's shape and audit rows are unchanged.
 
+Each Lab work-list item also carries `openWork` (boolean): true while the work
+item is open by the rule above, false once every test it asks for has a
+released, current result not marked entered in error. It is the value the
+list is ordered by, so a client can show finished work as done. Earlier
+backends do not send it, so clients treat it as optional. Pharmacy sends no
+such field: its items already carry `dispensing` (null while open; a reversed
+dispensing counts as done), which is the same rule.
+
 Known limit of the Lab list (no schema change in this step). Every row the
 list reads from a Lab table pays its own row-level security check, mostly the
 member's consent check, over a millisecond each. The list reads each Lab
