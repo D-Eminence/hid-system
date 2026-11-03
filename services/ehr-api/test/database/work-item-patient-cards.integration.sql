@@ -26,13 +26,18 @@
 --      and a laboratory scientist through the Pharmacy one); a session whose
 --      facility is not its membership's, without a membership, with an
 --      unknown subject or with no purpose of use; a revoked or an expired
---      grant; a disabled account; another facility's member sees only its
---      own facility's own work;
+--      grant; an active deny directive (emergency still sees the row, so
+--      still gets the card); a held membership; an unverified staff record;
+--      a disabled account; a second membership of the same account, or
+--      another member's membership, in the session; another facility's
+--      member sees only its own facility's own work; a malformed facility
+--      setting is refused 22023;
 --   4. emergency (D8): a member with an active reasoned break-glass grant and
 --      purpose 'emergency' gets the card of exactly the rows it can read,
 --      and nothing under direct-care;
---   5. limits: 200 ids are read; 201 ids and a null list raise 22023
---      WORK_ITEM_PATIENT_CARDS_INVALID; an empty list answers nothing;
+--   5. limits: 200 ids are read; 201 ids (also as a 2 x 101 array) and a
+--      null list raise 22023 WORK_ITEM_PATIENT_CARDS_INVALID; an empty list
+--      answers nothing;
 --   6. the functions write nothing (no audit row);
 --   7. the audit rows lab-api and pharmacy-api write per patient shown
 --      (lab|pharmacy.work-item.list, basis 'consent', work item ids) show in
@@ -424,6 +429,92 @@ select pg_temp.as_member(2, 1);
 select pg_temp.expect('PH disabled', pg_temp.cards('pharmacy', pg_temp.items('pharmacy')), '');
 reset role;
 rollback to savepoint account_change;
+
+-- 3. An active deny directive for everyone on Amaka (identity's own rule in
+-- has_active_consent_grant): no card for her own rows, the others stay, and
+-- the cards are still exactly the own rows row-level security shows; an
+-- emergency break-glass session still sees her row, so it gets her card (D8).
+savepoint deny_directive;
+set local session_replication_role = replica;
+insert into identity.consent_directives (id, patient_id, current_version) values
+  ('e1130009-0000-4000-8000-000000000001', 'e1130006-0000-4000-8000-000000000001', 1);
+insert into identity.consent_directive_versions (id, directive_id, patient_id, version_no, status, provision_type,
+  grantee_type, grantee_id, facility_id, purposes, actions, starts_at, source_reference, reason, content_sha256)
+values ('e1130009-0000-4000-8000-000000000011', 'e1130009-0000-4000-8000-000000000001',
+  'e1130006-0000-4000-8000-000000000001', 1, 'active', 'deny', 'all', null, null, '{}', '{}',
+  clock_timestamp() - interval '1 hour', 'cards-suite', 'Synthetic deny for the cards suite', md5('d') || md5('d'));
+set local session_replication_role = origin;
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(1, 1);
+select pg_temp.expect('LS with a deny directive on Amaka', pg_temp.cards('lab', pg_temp.items('lab')),
+  '2:Bode Card/male/1979-12-30/XYZ7 6:Dupe Card/-/-/DDD5');
+select pg_temp.expect('LS deny: still exactly its own rows', pg_temp.card_ids('lab'), pg_temp.visible('lab', true));
+select pg_temp.as_member(6, 1, 'emergency');
+select pg_temp.expect('LE under emergency with a deny directive', pg_temp.cards('lab', pg_temp.items('lab')),
+  '1:Amaka Card/female/1991-02-03/AAA2');
+select pg_temp.expect('LE deny: still exactly its own rows', pg_temp.card_ids('lab'), pg_temp.visible('lab', true));
+reset role;
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_member(2, 1);
+select pg_temp.expect('PH with a deny directive on Amaka', pg_temp.cards('pharmacy', pg_temp.items('pharmacy')),
+  '2:Bode Card/male/1979-12-30/XYZ7 6:Dupe Card/-/-/DDD5');
+select pg_temp.expect('PH deny: still exactly its own rows', pg_temp.card_ids('pharmacy'),
+  pg_temp.visible('pharmacy', true));
+reset role;
+rollback to savepoint deny_directive;
+
+-- 3. A held membership and an unverified staff record give nothing.
+savepoint membership_hold;
+update identity.staff_facility_memberships set migration_hold_reason = 'Synthetic hold for the cards suite'
+ where id = 'e1130004-0000-4000-8000-000000000001';
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(1, 1);
+select pg_temp.expect('LS with its membership held', pg_temp.cards('lab', pg_temp.items('lab')), '');
+reset role;
+rollback to savepoint membership_hold;
+savepoint staff_unverified;
+update identity.staff set verification_status = 'pending' where id = 'e1130003-0000-4000-8000-000000000002';
+set local role hid_pharmacy_api_runtime;
+select pg_temp.as_member(2, 1);
+select pg_temp.expect('PH with its staff record unverified', pg_temp.cards('pharmacy', pg_temp.items('pharmacy')), '');
+reset role;
+rollback to savepoint staff_unverified;
+
+-- 3. The session's membership must be the one its grants name, at the
+-- session's facility: LS's second membership (at F2, no grants) used at F1
+-- and at F2, and another member's membership with LS's subject, give
+-- nothing; a malformed facility setting is refused 22023.
+savepoint other_memberships;
+set local session_replication_role = replica;
+insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+  membership_role, app_role, is_primary, active)
+values ('e1130004-0000-4000-8000-000000000009', 'e1130003-0000-4000-8000-000000000001',
+  'e1130002-0000-4000-8000-000000000001', 'e1130000-0000-4000-8000-000000000001',
+  'e1130001-0000-4000-8000-000000000002', 'lab', 'lab', false, true);
+insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+values ('e1130005-0000-4000-8000-000000000009', 'e1130002-0000-4000-8000-000000000001', 'lab', 'facility',
+  'e1130004-0000-4000-8000-000000000009', 'e1130001-0000-4000-8000-000000000002', 'Cards suite second role');
+set local session_replication_role = origin;
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(1, 1), set_config('app.membership_id', 'e1130004-0000-4000-8000-000000000009', true);
+select pg_temp.expect('LS''s F2 membership at F1', pg_temp.cards('lab', pg_temp.items('lab')), '');
+select pg_temp.as_member(1, 2), set_config('app.membership_id', 'e1130004-0000-4000-8000-000000000009', true);
+select pg_temp.expect('LS''s F2 membership at F2 (its grants name its F1 membership)',
+  pg_temp.cards('lab', pg_temp.items('lab')), '');
+select pg_temp.as_member(1, 1), set_config('app.membership_id', 'e1130004-0000-4000-8000-000000000002', true);
+select pg_temp.expect('LS''s subject with PH''s membership', pg_temp.cards('lab', pg_temp.items('lab')), '');
+select pg_temp.as_member(1, 1), set_config('app.facility_id', 'not-a-uuid', true);
+select pg_temp.expect('a malformed facility setting', left(pg_temp.refusal('lab', pg_temp.items('lab')), 5), '22023');
+reset role;
+rollback to savepoint other_memberships;
+
+-- 5. The limit counts every element: a 2 x 101 array is refused.
+set local role hid_lab_api_runtime;
+select pg_temp.as_member(1, 1);
+select pg_temp.expect('a 2 x 101 array', pg_temp.refusal('lab', (select array_agg(pair.ids) from (
+    select array[gen_random_uuid(), gen_random_uuid()] ids from generate_series(1, 101)) pair)),
+  '22023: WORK_ITEM_PATIENT_CARDS_INVALID');
+reset role;
 
 -- 6. Nothing was written.
 select pg_temp.expect('no audit row from the reads', (select count(*)::text from audit.events),
