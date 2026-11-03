@@ -1399,6 +1399,18 @@ revoke all on function identity.demo_story_context(text,uuid,uuid,text),
 -- commands, which keep the Identity grants above. No grant changes.
 revoke all on function identity.organization_application_admin_account(text) from public;
 
+-- Records patients add themselves (0116), as that migration grants it (its
+-- section 4): SELECT on ehr.patient_entries (forced RLS: active entries in a
+-- patient-self or consented clinician read) and the patient's add and
+-- withdraw commands to the EHR runtime and the schema test runtime; no write
+-- grant on the table. The one-way guard is granted to no role (a trigger
+-- needs no EXECUTE to fire). The chunk tables keep their grants below.
+grant select on ehr.patient_entries to hid_ehr_runtime, hid_schema_test_runtime;
+grant execute on function ehr.create_my_patient_entry(text,text,text,date,text,text,text),
+  ehr.withdraw_my_patient_entry(uuid) to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function ehr.create_my_patient_entry(text,text,text,date,text,text,text),
+  ehr.withdraw_my_patient_entry(uuid), ehr.patient_entries_guard() from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),
