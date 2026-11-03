@@ -451,6 +451,17 @@ locals {
       name == "identity-api" && var.qoreid_enabled && var.qoreid_secret_kms_key_arn != "" ? [var.qoreid_secret_kms_key_arn] : [],
     )
   }
+
+  # Error reporting is off unless a workload has a Sentry DSN. The services
+  # start Sentry only when SENTRY_DSN is set and scrub every event down to the
+  # error type, stack and route template.
+  container_environment = {
+    for name, environment in local.workload_environment : name => merge(environment,
+      lookup(var.sentry_dsns, name, "") == "" ? {} : {
+        SENTRY_DSN         = var.sentry_dsns[name]
+        SENTRY_ENVIRONMENT = var.deployment_release_environment
+    })
+  }
 }
 
 data "aws_iam_policy_document" "execution_secrets" {
@@ -531,7 +542,7 @@ resource "aws_ecs_task_definition" "workload" {
       essential              = true
       readonlyRootFilesystem = each.key != "gateway"
       environment = [
-        for key, value in local.workload_environment[each.key] : {
+        for key, value in local.container_environment[each.key] : {
           name  = key
           value = value
         }

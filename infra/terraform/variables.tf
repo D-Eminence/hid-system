@@ -606,3 +606,14 @@ variable "database_multi_az" {
   type        = bool
   default     = null
 }
+
+variable "sentry_dsns" {
+  description = "Sentry DSN per backend workload name. A workload listed here gets SENTRY_DSN and SENTRY_ENVIRONMENT and reports scrubbed errors; an empty map (the default) keeps error reporting off everywhere."
+  type        = map(string)
+  default     = {}
+
+  validation {
+    condition     = alltrue([for dsn in values(var.sentry_dsns) : can(regex("^https://[A-Za-z0-9]+@([a-z0-9-]+\\.)+sentry\\.io/[0-9]+$", dsn))])
+    error_message = "Each Sentry DSN must look like https://<public key>@<org>.ingest.<region>.sentry.io/<project id>, with no secret part, path or port."
+  }
+}

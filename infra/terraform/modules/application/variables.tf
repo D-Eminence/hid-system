@@ -406,3 +406,9 @@ variable "deployment_release_environment" {
     error_message = "Release environment must be staging or production."
   }
 }
+
+variable "sentry_dsns" {
+  description = "Sentry DSN per workload name; empty keeps error reporting off."
+  type        = map(string)
+  default     = {}
+}

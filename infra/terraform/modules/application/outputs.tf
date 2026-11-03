@@ -157,3 +157,20 @@ output "runtime_environment_configuration" {
     repositories = { for name, repository in aws_ecr_repository.workload : name => repository.name }
   }
 }
+
+output "error_reporting_settings_match" {
+  description = "Per workload: true when its container gets exactly the configured DSN and the release environment name (no values exposed)."
+  value = {
+    for name, environment in local.container_environment : name => (
+      lookup(environment, "SENTRY_DSN", "") == lookup(var.sentry_dsns, name, "") &&
+      lookup(environment, "SENTRY_ENVIRONMENT", "") == (lookup(var.sentry_dsns, name, "") == "" ? "" : var.deployment_release_environment)
+    )
+  }
+}
+
+output "error_reporting_environment_names" {
+  description = "Sentry environment variable names per workload container; names only, never the DSN."
+  value = {
+    for name, environment in local.container_environment : name => sort([for key in keys(environment) : key if startswith(key, "SENTRY_")])
+  }
+}
