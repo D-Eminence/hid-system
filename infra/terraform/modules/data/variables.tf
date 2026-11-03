@@ -57,7 +57,7 @@ variable "use_existing_secrets" {
 }
 
 variable "document_upload_origins" {
-  description = "Browser origins whose pages upload documents straight to the documents bucket with presigned PUT links. Empty adds no CORS rule."
+  description = "Browser origins whose pages upload documents to the documents bucket with presigned PUT links and read them back with presigned GET links. Empty adds no CORS rule."
   type        = list(string)
   default     = []
   validation {

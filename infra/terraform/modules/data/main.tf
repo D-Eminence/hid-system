@@ -141,8 +141,10 @@ resource "aws_s3_bucket_policy" "documents" {
 # ehr-api (services/ehr-api/src/storage/s3-storage.provider.ts createUpload).
 # The browser asks S3 first, so without this rule every upload is refused.
 # Only the approved upload hosts, only PUT, and only the headers createUpload
-# tells the browser to send. Downloads open the signed link as a page and need
-# no rule.
+# tells the browser to send. Opening a signed link as a page needs no rule, but
+# the Migrate check screen reads page images and PDFs from script with a
+# presigned GET link, so the same hosts may also GET (with Range, so a PDF
+# viewer can load one part at a time). Nothing else is allowed.
 resource "aws_s3_bucket_cors_configuration" "documents" {
   count  = length(var.document_upload_origins) > 0 ? 1 : 0
   bucket = aws_s3_bucket.documents.id
@@ -158,6 +160,15 @@ resource "aws_s3_bucket_cors_configuration" "documents" {
       "x-amz-server-side-encryption",
       "x-amz-server-side-encryption-aws-kms-key-id",
     ]
+    max_age_seconds = 600
+  }
+
+  cors_rule {
+    id              = "presigned-document-view"
+    allowed_methods = ["GET"]
+    allowed_origins = var.document_upload_origins
+    allowed_headers = ["range"]
+    expose_headers  = ["accept-ranges", "content-length", "content-range"]
     max_age_seconds = 600
   }
 }
