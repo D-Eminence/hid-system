@@ -1,4 +1,7 @@
-import { ambiguousDate, compact, has, partlyCovered, routes, segment, suspiciousUncited, together } from './grounding';
+import {
+  ambiguousDate, combinedStrengths, compact, has, partlyCovered, routes, sameCombined, segment, suspiciousUncited, together,
+  unitAfter, withoutNumberedUnit,
+} from './grounding';
 import { createMasker } from './masking';
 
 describe('has: whole words and whole numbers', () => {
@@ -122,5 +125,97 @@ describe('partlyCovered with characters outside the BMP', () => {
   it('blanks the covered part by code unit, so an astral character does not shift it', () => {
     const lines = [{ id: 'p1-l1', text: '\u{1D7CE}\u{1D7CE}\u{1D7CE}\u{1D7CE} 1g Paracetamol' }];
     expect(partlyCovered(lines, [{ lineIds: ['p1-l1'], asWritten: '1g Paracetamol' }])).toEqual([]);
+  });
+});
+
+describe('units written straight after a number', () => {
+  it.each([
+    ['SpO2: 97%', '97%', true],
+    ['SpO2: 97 %', '97%', true],
+    ['SpO2: 97%', '97 %', true],
+    ['T 36.1°C', '36.1°C', true],
+    ['T 36.1 °C', '36.1°C', true],
+    ['SpO2: 197%', '97%', false],
+    ['SpO2: 9.7%', '97%', false],
+    ['T 36.1°F', '36.1°C', false],
+  ])('%s contains %s: %s', (text, part, expected) => {
+    expect(has(text, part)).toBe(expected);
+  });
+
+  it.each([
+    ['SpO2: 97%', '97', '%', true],
+    ['SpO2: 97 %', '97', '%', true],
+    ['PCV: 32%', '32', '%', true],
+    ['T 36.1°C', '36.1', '°C', true],
+    ['T 36.1°C', '36.1', 'C', true],
+    ['T 36.1C', '36.1', '°C', true],
+    ['T 36.1 C', '36.1', 'C', true],
+    ['SpO2: 197%', '97', '%', false],
+    ['SpO2: 9.7%', '97', '%', false],
+    ['SpO2: 9.7%', '7', '%', false],
+    ['SpO2 97 PCV 32%', '97', '%', false],
+    ['T 36.1°F', '36.1', '°C', false],
+    ['T 36.1°C', '36.1', 'F', false],
+    ['Hb 12.5 g/dL', '12.5', 'g', false],
+    ['BP 120/80 mmHg', '80', 'mmHg', false],
+    ['BP 120/80 mmHg', '120/80', 'mmHg', true],
+    ['SpO2 97%', '97', '%', true],
+    ['SpO2: 1 97%', '97', '%', false],
+    ['T 3 6.1°C', '6.1', '°C', false],
+    ['PCV: 3 2%', '2', '%', false],
+    ['SpO2 9. 7%', '7', '%', false],
+    ['T 36. 1°C', '1', '°C', false],
+    ['SpO2 92–97%', '97', '%', false],
+    ['SpO2 92 - 97%', '97', '%', false],
+    ['PCV 30 – 32%', '32', '%', false],
+    ['T 36·1°C', '1', '°C', false],
+    ['T 36·1°C', '36', '°C', false],
+    ['SpO2 97% HR 97', '97', '%', false],
+    ['SpO2 97% (97%)', '97', '%', true],
+  ])('in %s, %s is followed by %s: %s', (text, value, unit, expected) => {
+    expect(unitAfter(text, value, unit)).toBe(expected);
+  });
+
+  it('takes out a unit written after a number, and keeps one written on its own', () => {
+    expect(has(withoutNumberedUnit('SpO2 97 PCV 32%', '%'), '%')).toBe(false);
+    expect(has(withoutNumberedUnit('SpO2 (%): 97', '%'), '%')).toBe(true);
+    expect(has(withoutNumberedUnit('Temp (°C) 36.1°C', '°C'), '°C')).toBe(true);
+  });
+});
+
+describe('combined strengths', () => {
+  it('reads "a/b unit" as one strength, however it is spaced', () => {
+    for (const text of ['80/480mg', '80/480 mg', '80 / 480 mg', '80 mg/480 mg', '80mg/480mg']) {
+      expect(combinedStrengths(`Artemether/Lumefantrine ${text} bd`).map((found) => found.canonical))
+        .toEqual(['80mg/480mg']);
+    }
+    expect(combinedStrengths('Coartem 20/120mg').map((found) => found.canonical)).toEqual(['20mg/120mg']);
+    expect(combinedStrengths('1.80/480mg').map((found) => found.canonical)).toEqual(['1.80mg/480mg']);
+    expect(combinedStrengths('BP 120/80 mmHg')).toEqual([]);
+    expect(combinedStrengths('Ibuprofen 15mg/kg')).toEqual([]);
+  });
+
+  it('matches the same combined strength only', () => {
+    expect(sameCombined('Artemether/Lumefantrine 80/480mg', '80 mg/480 mg')).toBe(true);
+    expect(sameCombined('Artemether/Lumefantrine 80/480mg', '80/480 mg')).toBe(true);
+    expect(sameCombined('Artemether/Lumefantrine 80/480mg', '20/120mg')).toBe(false);
+    expect(sameCombined('Artemether/Lumefantrine 80/480mg', '480 mg')).toBe(false);
+    expect(sameCombined('Artemether/Lumefantrine 180/480mg', '80/480mg')).toBe(false);
+  });
+
+  it('keeps refusing a part of a longer number', () => {
+    expect(has('Artemether/Lumefantrine 80/480mg', '480mg')).toBe(false);
+    expect(has('Drug 1480 mg', '480 mg')).toBe(false);
+    expect(has('Drug 2.5 mg', '5 mg')).toBe(false);
+  });
+
+  it('refuses one part of a combined strength written with a unit on each part', () => {
+    for (const text of ['Artemether/Lumefantrine 80 mg/480 mg', 'Artemether/Lumefantrine 80mg/480mg',
+      'Artemether/Lumefantrine 80 mg / 480 mg']) {
+      for (const part of ['80 mg', '80mg', '480 mg', '480mg']) expect(has(text, part)).toBe(false);
+      expect(sameCombined(text, '80/480mg')).toBe(true);
+    }
+    expect(has('Ibuprofen 15mg/kg', '15mg')).toBe(false);
+    expect(has('Paracetamol 500mg, Ibuprofen 400mg', '400mg')).toBe(true);
   });
 });

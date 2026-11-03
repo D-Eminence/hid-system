@@ -70,16 +70,23 @@ function escapeRegExp(text: string): string {
  * A pattern that finds part in normalised text as whole words and whole numbers.
  *
  * "Warfarin 5" is not in "Warfarin 50 mg" or "Morphine 5-10mg", "5 mg" is not in "2.5 mg", "15mg" is not in
- * "15mg/kg" and "Amoxicillin" is not in "Amoxicillin-clavulanate"; but "HTN" is in "HTN/T2DM": the rule
- * against a neighbouring "." "," "/" or "-" applies only next to a digit.
+ * "15mg/kg", "80 mg" and "480 mg" are not in "80 mg/480 mg" (one part of a combined strength is not the dose)
+ * and "Amoxicillin" is not in "Amoxicillin-clavulanate"; but "HTN" is in "HTN/T2DM": the rule against a
+ * neighbouring "." "," "/" or "-" applies only next to a digit.
  */
 export function pattern(part: string): string {
   const p = norm(part);
   const first = p.slice(0, 1);
   const last = p.slice(-1);
-  return `(?<!${W})` + (/\d/.test(first) ? '(?<!\\d[.,/-])' : '') + escapeRegExp(p)
+  return `(?<!${W})` + (/\d/.test(first) ? `(?<!\\d[.,/-])(?<!\\d ?${MEASURE} ?/ ?)` : '')
+    + symbolSpacing(escapeRegExp(p))
     + `(?!${W})` + (/\d/.test(last) ? '(?![.,/-]\\d)' : `(?!-${LETTER})`)
-    + (new RegExp(`\\d\\s*${MEASURE}$`, 'u').test(p) ? `(?!/${LETTER})` : '');
+    + (new RegExp(`\\d\\s*${MEASURE}$`, 'u').test(p) ? `(?!/${LETTER})(?! ?/ ?\\d)` : '');
+}
+
+/** A "%" or "°" straight after a number may be written with or without a space: "97%" and "97 %" read the same. */
+function symbolSpacing(escaped: string): string {
+  return escaped.replace(/(\d) ?([%°])/gu, '$1 ?$2');
 }
 
 /** Whether part appears in text as whole words and whole numbers (see pattern). An empty part is never present. */
@@ -226,4 +233,77 @@ export function ambiguousDate(text: string): boolean {
     if (first >= 1 && first <= 12 && second >= 1 && second <= 12 && first !== second) return true;
   }
   return false;
+}
+
+/** A unit as a pattern body: spaces optional, and a temperature's "°" optional ("°C", "° C" and "C" read the same). */
+function unitBody(unit: string): string {
+  const u = norm(unit);
+  if (/^° ?[cf]$|^[cf]$/u.test(u)) return `(?:° ?)?${u.slice(-1)}`;
+  return escapeRegExp(u).replace(/ /g, ' ?');
+}
+
+/** Where a unit ends: not inside a word, not "mg" of "mg/kg", not "g" of "g-dl". */
+const UNIT_END = '(?![\\p{L}\\p{N}_])(?!/[\\p{L}\\p{N}])(?!-\\p{L})';
+
+/** What may join two pieces of one number or range: a decimal point (also "·"), a slash, a hyphen or a dash. */
+const JOIN = '[.,/·\\-–—]';
+
+/**
+ * Before a whole number: not a letter, digit or joiner glued to it, nor another standalone number with only a
+ * space or a joiner between ("1 97%", "9. 7%", "36·1", "92–97%", "92 - 97%" are not "97%" or "1°C"). A digit
+ * ending a word is fine: "SpO2 97%".
+ */
+const WHOLE_START = `(?<!${W})(?<!${JOIN})(?<!(?<![\\p{L}\\p{N}_])\\d+(?:${JOIN}\\d+)* ?(?:${JOIN} ?)?)`;
+/** After a whole number: no joiner and digit, glued or spaced ("97" is not the start of "97.5" nor "97 - 99"). */
+const WHOLE_END = `(?!\\d)(?! ?${JOIN} ?\\d)`;
+
+/**
+ * Whether the unit is written straight after the value, with or without a space: "%" after "97" in "SpO2: 97%"
+ * or "97 %", "°C" or "C" after "36.1" in "T 36.1°C". The value is a whole number ("97" is not the end of "197",
+ * "9.7", "1 97" or "92–97"), and the unit a whole unit ("°C" is not "°F", "g" is not "g/dL"). Every place the
+ * value is written on the line must carry the unit: in "SpO2 97% HR 97" the "%" is not known to be the one read.
+ */
+export function unitAfter(text: string, value: string, unit: string): boolean {
+  const v = norm(value);
+  if (!/\d$/.test(v) || !norm(unit)) return false;
+  const start = /^\d/.test(v) ? WHOLE_START : '';
+  const found = [...norm(text).matchAll(new RegExp(`${start}${escapeRegExp(v)}${WHOLE_END}`, 'gu'))];
+  const withUnit = new RegExp(`^ ?${unitBody(unit)}${UNIT_END}`, 'u');
+  return found.length > 0
+    && found.every((match) => withUnit.test(norm(text).slice(match.index + match[0].length)));
+}
+
+/**
+ * The text with every unit written straight after a number taken out: what is left is the unit written on its
+ * own ("SpO2 (%): 97"), which may stand for any reading on the line; one after a number is that number's only.
+ */
+export function withoutNumberedUnit(text: string, unit: string): string {
+  if (!norm(unit)) return norm(text);
+  return norm(text).replace(new RegExp(`(?<!${W})\\d+(?:[.,/]\\d+)* ?${unitBody(unit)}${UNIT_END}`, 'gu'), ' ');
+}
+
+const STRENGTH_PART = `(\\d+(?:[.,]\\d+)?) ?(${MEASURE})?`;
+const COMBINED = new RegExp(`(?<![\\p{L}\\p{N}_.,/-])${STRENGTH_PART} ?/ ?(\\d+(?:[.,]\\d+)?) ?(${MEASURE})`
+  + `(?![\\p{L}\\p{N}_])(?!/[\\p{L}\\p{N}])(?!-\\p{L})`, 'gu');
+
+export interface CombinedStrength { canonical: string; start: number; end: number }
+
+/**
+ * Combined strengths written as "a/b unit" ("80/480mg", "80/480 mg", "80 mg/480 mg"), each as a whole: its
+ * canonical form ("80mg/480mg") and where it is in the normalised text. A first part without its own unit takes
+ * the second's. Neither number may be part of a longer one ("1.80/480mg" is "1.80mg/480mg", not "80mg/480mg").
+ */
+export function combinedStrengths(text: string): CombinedStrength[] {
+  return [...norm(text).matchAll(COMBINED)].map((match) => {
+    const unit = match[4]!;
+    return { canonical: `${match[1]}${match[2] ?? unit}/${match[3]}${unit}`, start: match.index,
+      end: match.index + match[0].length };
+  });
+}
+
+/** Whether part is one combined strength and text writes the same one ("80 mg/480 mg" for "80/480mg"). */
+export function sameCombined(text: string, part: string): boolean {
+  const own = combinedStrengths(part);
+  if (own.length !== 1 || own[0]!.start !== 0 || own[0]!.end !== norm(part).length) return false;
+  return combinedStrengths(text).some((found) => found.canonical === own[0]!.canonical);
 }
