@@ -20,3 +20,13 @@ test('release rejects omission, checksum substitution and duplicate retained fil
     await assert.rejects(verifyMachineConfiguration(configuration));
   }
 });
+test('TEMPORARY: the 0104-0118 allowance is narrow: only those numbers, only while 0119 is the newest', async () => {
+  for (const mutation of [
+    c => { c.migration.files.splice(c.migration.files.findIndex(f => f.name === '0103_platform_organization_applications.sql'), 1); c.migration.count--; },
+    c => { c.migration.files.splice(c.migration.files.findIndex(f => f.name === '0101_pharmacy_dispensing_source_check.sql'), 1); c.migration.count--; },
+    c => { const last = c.migration.files.at(-1); c.migration.files[c.migration.files.length - 1] = { ...last, name: last.name.replace(/^0119/, '0120') }; c.migration.last = '0120'; },
+  ]) {
+    const configuration = await loadConfiguration(); mutation(configuration.components);
+    await assert.rejects(verifyMachineConfiguration(configuration), /missing migration prefix/);
+  }
+});
