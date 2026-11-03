@@ -22,7 +22,8 @@
 --      recorded HMAC that is not the change's, a value recorded for the
 --      other patient; the check answers 42501 without a session; a real
 --      patient's phone change is unaffected (no check needed, and the check
---      answers true);
+--      answers true), except that the two demo numbers are refused to a real
+--      patient (false, nothing recorded or written);
 --   4. the NIN seed: one resolved registration case and one nin identifier
 --      per patient, with no NIN in either; the audit; patient_self_profile
 --      answers ninVerified true and assuranceState CONTACT_VERIFIED; no
@@ -33,7 +34,8 @@
 --      another row is refused;
 --   5. the completion card: with a photo and an email emergency contact
 --      added as Identity adds them, all twelve items for Adaeze and for
---      Chinedu.
+--      Chinedu, and the owner's post-deploy query in the header answers true
+--      in every column for both.
 -- Synthetic values only: the real fixture uses uuid prefix 98b119 and an
 -- @example.invalid address.
 set plpgsql.variable_conflict = error;
@@ -386,7 +388,31 @@ select pg_temp.assert('a real patient: the check is true and records nothing; th
   and pg_temp.value_of($q$select outcome from identity.change_my_phone('synthetic:sealed-profile:patient',
     '98b1190b-0000-4000-8000-000000000009', gen_random_uuid(), repeat('5', 64), array[]::char(64)[],
     decode(repeat('ab', 40), 'hex'), 'sealed-profile-v1', true)$q$) = 'changed');
+-- The two demo numbers are the demo's alone: a real patient asking for one
+-- gets false and nothing is recorded; Identity then changes nothing (its
+-- phone and change rows, read as the owner, are as before).
 reset role;
+create function pg_temp.real_phone_state()
+returns text language sql as $f$
+  select concat_ws(',', patient.phone_lookup_hmac,
+    (select count(*) from identity.patient_contact_changes change_row where change_row.patient_id = patient.id))
+    from identity.patients patient where patient.id = '98b11909-0000-4000-8000-000000000001';
+$f$;
+select set_config('hid.test.real_before', pg_temp.real_phone_state(), true);
+set local role hid_identity_api_runtime;
+select pg_temp.as_real_patient();
+select pg_temp.assert('a real patient may not take a demo number: false, and nothing recorded',
+  not identity.demo_profile_phone_allowed('synthetic:sealed-profile:patient', '98b1190b-0000-4000-8000-000000000009',
+    '+447700900102', repeat('7', 64))
+  and coalesce(current_setting('hid.sealed_demo_phone_hmac', true), '') = ''
+  and not identity.demo_profile_phone_allowed('synthetic:sealed-profile:patient',
+    '98b1190b-0000-4000-8000-000000000009', '+447700900103', repeat('7', 64))
+  and coalesce(current_setting('hid.sealed_demo_phone_hmac', true), '') = ''
+  and identity.demo_profile_phone_allowed('synthetic:sealed-profile:patient', '98b1190b-0000-4000-8000-000000000009',
+    '+447700900104', repeat('7', 64)));
+reset role;
+select pg_temp.assert('a real patient refused a demo number: no phone or change row written',
+  pg_temp.real_phone_state() = current_setting('hid.test.real_before'));
 select pg_temp.clear_context();
 select pg_temp.assert('the phone rows: one completed change each, no SMS due (no enrollment), phone not verified',
   (select count(*) from identity.patient_contact_changes change_row
@@ -620,5 +646,32 @@ $f$;
 select pg_temp.assert('the completion card: 12 of 12 for Adaeze and for Chinedu',
   pg_temp.completion(1) = 12 and pg_temp.completion(2) = 12,
   pg_temp.completion(1)::text || ' and ' || pg_temp.completion(2)::text);
+-- The owner's post-deploy query in the migration's header, verbatim: true in
+-- every column for both patients now.
+create temporary table post_deploy on commit drop as
+  select patient.hid_code,
+         patient.phone_lookup_hmac is not null and exists (select 1 from identity.patient_contact_changes change_row
+           where change_row.patient_id = patient.id and change_row.channel = 'phone'
+             and change_row.state = 'completed' and change_row.new_lookup_hmac = patient.phone_lookup_hmac) as phone,
+         exists (select 1 from identity.patient_profile_photos photo where photo.patient_id = patient.id) as photo,
+         exists (select 1 from identity.patient_emergency_contacts contact where contact.patient_id = patient.id
+           and contact.status <> 'deactivated') as emergency_contact,
+         exists (select 1 from identity.patient_identifiers identifier where identifier.patient_id = patient.id
+           and identifier.identifier_type = 'nin' and identifier.verified and identifier.revoked_at is null
+           and identifier.source_system = 'hid-sealed-demo') as nin,
+         patient.gender is not null and patient.dob is not null
+           and nullif(btrim(patient.state), '') is not null as gender_dob_state,
+         exists (select 1 from identity.patient_profile_details detail where detail.patient_id = patient.id
+           and nullif(btrim(detail.hospital_currently_using), '') is not null
+           and nullif(btrim(detail.hmo_name), '') is not null) as hospital_hmo,
+         exists (select 1 from ehr.patient_reported_health_profiles health where health.patient_id = patient.id
+           and health.blood_group is not null and health.genotype is not null) as blood_genotype
+    from identity.patients patient
+   where patient.id in ('98d00009-0000-4000-8000-000000000001', '98d00009-0000-4000-8000-000000000002')
+   order by patient.hid_code;
+select pg_temp.assert('the post-deploy query: both patients true in every column',
+  (select count(*) from post_deploy where phone and photo and emergency_contact and nin and gender_dob_state
+     and hospital_hmo and blood_genotype) = 2,
+  (select string_agg(to_jsonb(post_deploy)::text, '; ') from post_deploy));
 
 rollback;

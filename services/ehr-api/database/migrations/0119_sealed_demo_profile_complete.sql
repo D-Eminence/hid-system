@@ -28,7 +28,11 @@
 --    New identity.demo_profile_phone_allowed(subject, session, phone,
 --    lookup HMAC), Identity's check before change_my_phone (42501 without a
 --    live patient session): true for every patient who is not a demo
---    patient; for a demo patient, true only for its own number with a
+--    patient, except for the two demo numbers themselves (false, so that
+--    they stay the demo's: 0094's patients_phone_hmac_uq would otherwise let
+--    a real patient who typed one first leave the demo patient no number it
+--    may hold, and a real patient asking for one later would meet 409);
+--    for a demo patient, true only for its own number with a
 --    well-formed HMAC (64 lowercase hex characters), and then it records
 --    "<patient id>:<HMAC>" in hid.sealed_demo_phone_hmac for the rest of the
 --    transaction; false otherwise (and the recorded value is cleared). Its
@@ -104,7 +108,12 @@
 --    98d00119-0000-4000-8000-00000000001n). Assurance, evidence,
 --    authoritative profiles and quota are left alone. Platform overview
 --    counts are unchanged (0098 excludes demo facilities, and the case is
---    resolved).
+--    resolved). The two cases are seed bookkeeping, not review work: from
+--    the Identity image of this release, the platform admin's Identity
+--    review list and its count (GET /api/v1/admin/identity/reviews) leave
+--    out a case at a sealed demo facility whose provider is hid-sealed-demo;
+--    an older image lists them, marked demo: true. No other screen shows a
+--    registration case to a patient or the demo login.
 -- D7 It refuses (55000, nothing written): SEALED_DEMO_PROFILE_NOT_DEMO (a
 --    row it would touch is not the sealed demo tenant's as 0098 left it:
 --    Demo Hospital, the staff login and its doctor membership there, the two
@@ -180,6 +189,34 @@
 --             '98d00005-0000-4000-8000-000000000001', '98d00002-0000-4000-8000-000000000001',
 --             'identity.registration.write')) as doctor_ok,
 --          (select count(*) from audit.events where correlation_id = '0119-sealed-demo-profile') as audit;
+--
+-- 0119 alone does not bring the card to 100%: after the release the owner
+-- types the two numbers (country United Kingdom, 07700 900102 for Adaeze and
+-- 07700 900103 for Chinedu) and, where 0102 left them out, adds a photo and an
+-- email emergency contact on each profile. Then the owner runs this
+-- read-only query on production; both rows must answer true in every column
+-- (a false column names the step still missing):
+--   select patient.hid_code,
+--          patient.phone_lookup_hmac is not null and exists (select 1 from identity.patient_contact_changes change_row
+--            where change_row.patient_id = patient.id and change_row.channel = 'phone'
+--              and change_row.state = 'completed' and change_row.new_lookup_hmac = patient.phone_lookup_hmac) as phone,
+--          exists (select 1 from identity.patient_profile_photos photo where photo.patient_id = patient.id) as photo,
+--          exists (select 1 from identity.patient_emergency_contacts contact where contact.patient_id = patient.id
+--            and contact.status <> 'deactivated') as emergency_contact,
+--          exists (select 1 from identity.patient_identifiers identifier where identifier.patient_id = patient.id
+--            and identifier.identifier_type = 'nin' and identifier.verified and identifier.revoked_at is null
+--            and identifier.source_system = 'hid-sealed-demo') as nin,
+--          patient.gender is not null and patient.dob is not null
+--            and nullif(btrim(patient.state), '') is not null as gender_dob_state,
+--          exists (select 1 from identity.patient_profile_details detail where detail.patient_id = patient.id
+--            and nullif(btrim(detail.hospital_currently_using), '') is not null
+--            and nullif(btrim(detail.hmo_name), '') is not null) as hospital_hmo,
+--          exists (select 1 from ehr.patient_reported_health_profiles health where health.patient_id = patient.id
+--            and health.blood_group is not null and health.genotype is not null) as blood_genotype
+--     from identity.patients patient
+--    where patient.id in ('98d00009-0000-4000-8000-000000000001', '98d00009-0000-4000-8000-000000000002')
+--    order by patient.hid_code;
+-- (The verified email, the twelfth item, is the demo login's own, 0098.)
 
 -- 0. Preconditions.
 do $$
@@ -310,6 +347,13 @@ begin
     raise exception using errcode = '42501', message = 'Patient self session is required';
   end if;
   if not identity.sealed_demo_patient(patient_id_value) then
+    -- The two demo numbers are the demo's alone: a real patient who holds
+    -- one would leave the demo patient no number it may hold (0094's
+    -- patients_phone_hmac_uq), so it is refused here.
+    if requested_phone in ('+447700900102', '+447700900103') then
+      perform set_config('hid.sealed_demo_phone_hmac', '', true);
+      return false;
+    end if;
     return true;
   end if;
   -- Adaeze (Patient One) and Chinedu (Patient Two), UK drama range; the

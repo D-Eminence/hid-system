@@ -2413,7 +2413,10 @@ boolean` (true for the demo tenant's rows, false otherwise; an Identity before
 - `GET /api/v1/admin/principals` and `POST /api/v1/admin/principals/search`
   items (the three demo accounts), and a last `demo` column (`true` or `false`)
   in `GET /api/v1/admin/principals/export`;
-- `GET /api/v1/admin/identity/reviews` items (a review at a demo facility);
+- `GET /api/v1/admin/identity/reviews` items (a review at a demo facility;
+  from 0119's Identity image the sealed demo profile seed's two resolved
+  cases, provider `hid-sealed-demo`, are left out of the list and its total,
+  section 32);
 - `GET /api/v1/admin/audit/events` items (an event at a demo facility or by a
   demo login);
 - `GET /api/v1/admin/order-routes` and `POST /api/v1/admin/order-routes/search`
@@ -2867,7 +2870,11 @@ The phone (a reviewed change to the seal):
 - New `identity.demo_profile_phone_allowed(subject, session, phone,
   lookup_hmac)`, SECURITY DEFINER, EXECUTE for the Identity runtime and the
   schema test runtime only. It answers 42501 without a live patient session.
-  It is true for every patient who is not a sealed demo patient. For a demo
+  It is true for every patient who is not a sealed demo patient, except
+  that it is false for the two demo numbers below: they are the demo's
+  alone, because 0094's `patients_phone_hmac_uq` would otherwise let a real
+  patient who took one first leave the demo patient no number it may hold
+  (and a real patient asking for one later would meet 409). For a demo
   patient it is true only for that patient's own number with a well-formed
   HMAC (64 lowercase hex characters): Adaeze `+447700900102`, Chinedu
   `+447700900103`. These are in the UK range Ofcom reserves for drama, which
@@ -2884,7 +2891,10 @@ The phone (a reviewed change to the seal):
   the change transaction, before `identity.change_my_phone`, with the
   normalized number and its canonical contact HMAC. If it answers anything
   other than true, the answer is the existing 400 `CONTACT_INVALID` for the
-  phone field, and nothing is changed or sent. The database cannot tell that
+  phone field, and nothing is changed or sent. Its detail (and the phone
+  field's message) is "This phone number cannot be used on this account. A
+  demo account can use only its own demo number.", not the format message,
+  because the number is well formed. The database cannot tell that
   the HMAC is the checked number's, and any session can set the setting
   itself. As for G7, it rests on Identity that the number is the fictional one.
 - Release order: 0119 before the Identity image that asks the check. An image
@@ -2932,11 +2942,37 @@ The NIN (a seed, Amazon RDS only, as 0098 and 0102):
   action `identity.sealed-demo.seed-record`, ids only) and one summary row
   (`identity.sealed-demo.seed-profile`, counts only). No row names a patient or
   clinician as actor. The admin overview's counts are unchanged.
+- Where the two cases appear: nowhere a patient or the demo login sees them.
+  The platform admin's Identity review (`GET /api/v1/admin/identity/reviews`)
+  leaves out, in the list and its `total`, a case at a sealed demo facility
+  whose provider is `hid-sealed-demo`; any other case at a demo facility is
+  still listed with `demo: true`. Between 0119 and the Identity image of this
+  release the older image lists the two, marked `demo: true`.
 
 The photo and the emergency contact remain the owner's to add in the app
 (section 30). With them, the card counts 12 of 12 for both patients. 0119
 does not require them. The owner's read-only pre-signing query in the file's
 header reports them.
+
+The release alone does not bring the card to 100%. After 0119 and the
+Identity image are out, the owner (1) types the number on each profile, (2)
+adds a photo and (3) an email emergency contact where 0102 left none. Then
+the owner runs the read-only post-deploy query in the file's header. It
+returns one row per patient, and every column must be true: `phone` (a
+`phone_lookup_hmac` with the completed phone change row that matches it),
+`photo`, `emergency_contact` (not deactivated), `nin` (verified, unrevoked,
+source `hid-sealed-demo`), `gender_dob_state`, `hospital_hmo` and
+`blood_genotype` (0102's rows). A false column names the step still
+missing. The suite runs the same query and expects true in every column.
+
+Release blocker until 0104-0118 land: `release/config/components.json`
+lists 105 files ending at 0119, and the release contract's contiguous-prefix
+check (`release/scripts/verify-release-contract.mjs`, run by
+`release/test/staging-migration-ledger.test.mjs`) fails on this branch with
+"components config.migration.files: missing migration prefix". CI and the
+release pipeline stay red until then, and components.json, the ledger map and
+that test are re-based when they land. If 0119 has to ship first, the
+coordinator gives it the next free number (0104).
 
 The suite is `services/ehr-api/test/database/sealed-demo-profile.integration.sql`.
 0119 has no down migration. 0098's off switch still applies, and applying

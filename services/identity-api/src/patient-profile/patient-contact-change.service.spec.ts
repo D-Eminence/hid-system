@@ -8,7 +8,8 @@ import type { HidRequest } from '../common/request-context';
 import { resetEnvironmentForTests } from '../config/environment';
 import type { DatabaseService } from '../database/database.service';
 import { createContactLookupHmac } from '../identity/contact-lookup';
-import { contactChangeHint, PASSWORD_FAILURES_ALLOWED, PatientContactChangeService } from './patient-contact-change.service';
+import { contactChangeHint, PASSWORD_FAILURES_ALLOWED, PatientContactChangeService, PHONE_RESERVED_MESSAGE }
+  from './patient-contact-change.service';
 import { PatientContactReader } from './patient-contact-reader';
 import { PatientProfileCrypto } from './patient-profile-crypto';
 
@@ -340,6 +341,11 @@ describe('PatientContactChangeService (0094)', () => {
       const refused = await problem(s.service.start(request, { channel: 'phone', phone: '08031234567',
         currentPassword: 'correct horse battery' }));
       expect([refused.getStatus(), refused.code]).toEqual([400, 'CONTACT_INVALID']);
+      // Not the format message: the number is well formed, the demo seal reserves it.
+      expect(refused.message).toBe(PHONE_RESERVED_MESSAGE);
+      expect(refused.errors).toEqual([{ field: 'phone', messages: [PHONE_RESERVED_MESSAGE] }]);
+      expect(refused.message).toBe('This phone number cannot be used on this account. '
+        + 'A demo account can use only its own demo number.');
       expect(s.calls.some((call) => call.sql.includes('change_my_phone'))).toBe(false);
       // Thrown inside the change transaction: it never committed.
       expect(s.commits.some((sqls) => sqls.some((sql) => sql.includes('demo_profile_phone_allowed')))).toBe(false);
