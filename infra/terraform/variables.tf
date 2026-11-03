@@ -600,3 +600,9 @@ variable "cost_anomaly_threshold_usd" {
   type    = number
   default = 10
 }
+
+variable "database_multi_az" {
+  description = "Keep a standby copy of the database in a second availability zone (RDS Multi-AZ). Null keeps the capacity profile's choice."
+  type        = bool
+  default     = null
+}

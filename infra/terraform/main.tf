@@ -24,7 +24,7 @@ module "data" {
   database_instance_class      = local.profile.database_instance_class
   database_allocated_storage   = local.profile.database_allocated_storage
   database_max_storage         = local.profile.database_max_storage
-  database_multi_az            = local.profile.database_multi_az
+  database_multi_az            = local.database_multi_az
   database_deletion_protection = local.profile.database_deletion_protection
   database_backup_retention    = var.backup_retention_days
   security_log_retention_days  = var.security_log_retention_days

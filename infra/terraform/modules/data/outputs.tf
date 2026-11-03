@@ -55,3 +55,8 @@ output "database_secret_arns" {
 output "migration_database_secret_arn" {
   value = var.use_existing_secrets ? data.aws_secretsmanager_secret.existing_migration_database[0].arn : aws_secretsmanager_secret.migration_database[0].arn
 }
+
+output "database_multi_az_requested" {
+  description = "Whether the database is configured with a standby copy in a second zone."
+  value       = var.enable_database ? aws_db_instance.main[0].multi_az : false
+}
