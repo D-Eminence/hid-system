@@ -124,7 +124,7 @@ function withoutCursor<Row extends { cursorAt: string }>(row: Row): WithoutCurso
  * arithmetic, since JavaScript dates neither reach year 294276 nor reject
  * 30 February.
  */
-function isCalendarTimestamp(value: string): boolean {
+export function isCalendarTimestamp(value: string): boolean {
   const fields = CURSOR_TIMESTAMP.exec(value)?.slice(1).map(Number);
   if (!fields) return false;
   const [year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0] = fields;

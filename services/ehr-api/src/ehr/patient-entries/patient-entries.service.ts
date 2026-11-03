@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import type { PoolClient } from 'pg';
+import { AuditService } from '../../audit/audit.service';
 import { requestDigest, requireIdempotencyKey } from '../../common/idempotency';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext, HidRequest } from '../../common/request-context';
@@ -7,7 +8,8 @@ import { DatabaseService } from '../../database/database.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { PATIENT_ENTRY_KINDS, PATIENT_ENTRY_MESSAGES, type CreatePatientEntryDto, type PatientEntryKind } from './patient-entries.dto';
-import { patientEntryItem, readPatientEntries, type PatientEntryItem, type PatientEntryPage } from './patient-entries.query';
+import { decodePatientEntryCursor, patientEntryItem, readPatientEntries, realDate, type PatientEntryItem,
+  type PatientEntryPage } from './patient-entries.query';
 
 /** A record as it is saved: trimmed, a blank place or note none, the date as entered. */
 export interface NormalizedPatientEntry {
@@ -23,6 +25,12 @@ export interface CreatedPatientEntry {
   replayed: boolean;
 }
 
+/** The patient's own list, one page: GET ehr/me/patient-entries. */
+export interface PatientEntryList {
+  items: PatientEntryItem[];
+  nextBefore: string | null;
+}
+
 export interface WithdrawnPatientEntry {
   entry: { id: string; status: 'withdrawn'; withdrawnAt: string };
   replayed: boolean;
@@ -32,7 +40,6 @@ export interface WithdrawnPatientEntry {
 const ONE_LINE = /[\u0000-\u001f\u007f-\u009f]/u;
 /** Control characters other than the newline (notes). */
 const PLAIN_TEXT = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u;
-const CALENDAR_DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
 const FIRST_DATE = '1900-01-01';
 const LAGOS_DATE = new Intl.DateTimeFormat('en-CA', { timeZone: 'Africa/Lagos', year: 'numeric', month: '2-digit', day: '2-digit' });
 
@@ -41,23 +48,22 @@ export function lagosToday(now: Date = new Date()): string {
   return LAGOS_DATE.format(now);
 }
 
-const characters = (text: string) => Array.from(text).length;
-
-function realDate(text: string): boolean {
-  const parts = CALENDAR_DATE.exec(text);
-  if (!parts) return false;
-  const [, year, month, day] = parts;
-  const value = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
-  value.setUTCFullYear(Number(year));
-  return value.toISOString().slice(0, 10) === text;
-}
+/** Characters as the database's CHECKs count them (code points). */
+const codePoints = (text: string) => Array.from(text).length;
+/** The upper limits, in UTF-16 units as the website's form (maxLength) and its reader count them. */
+const TITLE_MAX = 160;
+const PLACE_MAX = 160;
+const NOTES_MAX = 1000;
 
 /**
  * The fields of a record the patient adds, as they are saved, or 400
  * VALIDATION_FAILED listing every field that is not acceptable, in the words
  * the patient sees. Titles and places are trimmed and on one line; notes keep
- * their line breaks (CRLF and CR read as a newline). Lengths are counted in
- * characters, as the database counts them.
+ * their line breaks (CRLF and CR read as a newline). The upper limits (title
+ * and place 160, notes 1000) count UTF-16 units, as the website's form and
+ * reader do, so that every record accepted is also shown (an emoji counts
+ * two); a title needs at least two characters as the database counts them.
+ * The database's CHECKs count code points, so they hold whatever passes here.
  */
 export function normalizePatientEntry(input: CreatePatientEntryDto, now: Date = new Date()): NormalizedPatientEntry {
   const errors: { field: string; messages: string[] }[] = [];
@@ -67,12 +73,12 @@ export function normalizePatientEntry(input: CreatePatientEntryDto, now: Date = 
   const kind = (PATIENT_ENTRY_KINDS as readonly unknown[]).includes(input.kind) ? input.kind : undefined;
   if (!kind) refuse('kind');
   const title = typeof input.title === 'string' ? input.title.trim() : '';
-  if (characters(title) < 2 || characters(title) > 160 || ONE_LINE.test(title)) refuse('title');
+  if (codePoints(title) < 2 || title.length > TITLE_MAX || ONE_LINE.test(title)) refuse('title');
   let facilityName: string | null = null;
   if (input.facilityName !== undefined && input.facilityName !== null) {
     facilityName = typeof input.facilityName === 'string' ? input.facilityName.trim() : '\u0000';
     if (facilityName === '') facilityName = null;
-    else if (characters(facilityName) > 160 || ONE_LINE.test(facilityName)) refuse('facilityName');
+    else if (facilityName.length > PLACE_MAX || ONE_LINE.test(facilityName)) refuse('facilityName');
   }
   const occurredOn = typeof input.occurredOn === 'string' ? input.occurredOn : '';
   if (!realDate(occurredOn) || occurredOn < FIRST_DATE || occurredOn > lagosToday(now)) refuse('occurredOn');
@@ -80,7 +86,7 @@ export function normalizePatientEntry(input: CreatePatientEntryDto, now: Date = 
   if (input.notes !== undefined && input.notes !== null) {
     notes = typeof input.notes === 'string' ? input.notes.replace(/\r\n?/g, '\n').trim() : '\u0000';
     if (notes === '') notes = null;
-    else if (characters(notes) > 2000 || PLAIN_TEXT.test(notes)) refuse('notes');
+    else if (notes.length > NOTES_MAX || PLAIN_TEXT.test(notes)) refuse('notes');
   }
   if (errors.length > 0 || !kind) {
     throw new DomainProblem(400, 'VALIDATION_FAILED', 'One or more request fields are invalid.', errors);
@@ -137,13 +143,14 @@ function databaseProblem(error: unknown): unknown {
  * session-bound commands, which audit each write. A clinician reads them as
  * the chart's other reads are authorized and audited (ClinicalRepository.run,
  * read_records), as "ehr.record.read" on resource type patient-entries, which
- * the patient's access log (0093) shows as a view. A withdrawn record is read
- * by nobody and kept (D7).
+ * the patient's access log (0093) shows as a view. Both lists come 50 at a
+ * time with a cursor for the next page. A withdrawn record is read by nobody
+ * and kept (D7).
  */
 @Injectable()
 export class PatientEntriesService {
   constructor(private readonly database: DatabaseService, private readonly identity: IdentityApiService,
-    private readonly clinical: ClinicalRepository) {}
+    private readonly clinical: ClinicalRepository, private readonly audit: AuditService) {}
 
   async create(request: HidRequest, input: CreatePatientEntryDto, idempotencyKeyHeader: string | undefined):
     Promise<CreatedPatientEntry> {
@@ -201,12 +208,33 @@ export class PatientEntriesService {
       replayed: row.outcome === 'already_withdrawn' };
   }
 
-  /** A clinician's read, with the patient's access currently granted (403 CONSENT_REQUIRED otherwise). */
-  staffList(patientId: string, context: DataAccessContext): Promise<PatientEntryPage> {
+  /**
+   * The patient's own list, 50 at a time from `before` (GET ehr/me/patient-entries),
+   * in a fresh patient-self transaction, audited as their own read of their records.
+   */
+  async list(request: HidRequest, before: string | undefined): Promise<PatientEntryList> {
+    const authorization = await this.authorizeSelf(request);
+    const position = decodePatientEntryCursor(before, authorization.patientId);
+    const actor = request.actor!;
+    return this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
+      const page = await readPatientEntries(client, authorization.patientId, position);
+      await this.audit.recordWithClient(client, {
+        correlationId: request.correlationId, actorType: 'patient', actorSubject: actor.subject,
+        actorAccountId: actor.accountId, patientId: authorization.patientId, action: 'ehr.patient.self.records.read',
+        resourceType: 'patient-entries', outcome: 'success', purposeOfUse: 'patient-self',
+        details: { entryCount: page.items.length, more: page.more, continued: position !== undefined },
+      });
+      return { items: page.items, nextBefore: page.nextBefore };
+    });
+  }
+
+  /** A clinician's read, 50 at a time from `before`, with the patient's access currently granted (403 CONSENT_REQUIRED otherwise). */
+  async staffList(patientId: string, context: DataAccessContext, before: string | undefined): Promise<PatientEntryPage> {
+    const position = decodePatientEntryCursor(before, patientId);
     return this.clinical.run(context, patientId, 'read_records', {
       action: 'ehr.record.read', resourceType: 'patient-entries', resourceId: patientId,
     }, async (client: PoolClient) => {
-      const page = await readPatientEntries(client, patientId);
+      const page = await readPatientEntries(client, patientId, position);
       return { value: page, details: { entryCount: page.items.length, more: page.more } };
     });
   }

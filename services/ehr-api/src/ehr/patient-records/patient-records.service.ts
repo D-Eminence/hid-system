@@ -45,7 +45,9 @@ export class PatientRecordsService {
         purposeOfUse: 'patient-self', details: { encounterCount: value.encounters.length, noteCount: value.notes.length,
           importedRecordCount: value.importedRecords.length, ...(entries ? { patientEntryCount: entries.items.length } : {}) },
       });
-      return entries ? { ...value, patientEntries: entries.items, patientEntriesMore: entries.more } : value;
+      // The rest of the list pages on with GET ehr/me/patient-entries?before=patientEntriesNextBefore.
+      return entries ? { ...value, patientEntries: entries.items, patientEntriesMore: entries.more,
+        patientEntriesNextBefore: entries.nextBefore } : value;
     });
   }
 

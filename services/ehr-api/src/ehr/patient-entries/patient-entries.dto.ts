@@ -9,14 +9,14 @@ export const PATIENT_ENTRY_MESSAGES = {
   title: 'Use 2 to 160 characters, on one line.',
   facilityName: 'Use at most 160 characters, on one line.',
   occurredOn: 'Use a real date from 1 January 1900 to today.',
-  notes: 'Use at most 2000 characters of plain text.',
+  notes: 'Use at most 1000 characters of plain text.',
   files: 'Photos can\'t be added yet. Save the record without them.',
 } as const;
 
 /**
  * POST ehr/me/patient-entries (0116). The shapes are checked here; the exact
- * limits after trimming (PatientEntriesService, normalizePatientEntry), as
- * the health profile does. attachments and fileIds are declared so that a
+ * limits after trimming (PatientEntriesService, normalizePatientEntry: title
+ * and place at most 160, notes at most 1000), as the health profile does. attachments and fileIds are declared so that a
  * non-empty list answers 422 PATIENT_ENTRY_FILES_NOT_READY, not the
  * ValidationPipe's 400, until photos and files are served.
  */
@@ -46,4 +46,17 @@ export class CreatePatientEntryDto {
 
   @IsOptional() @IsArray({ message: PATIENT_ENTRY_MESSAGES.files })
   fileIds?: unknown[];
+}
+
+/**
+ * GET ehr/me/patient-entries and GET ehr/patients/:patientId/patient-entries:
+ * `before`, the cursor a page answered (nextBefore), for the page after it.
+ * Its shape is checked here; whether it is one issued for this list, by
+ * decodePatientEntryCursor (400 INVALID_CURSOR).
+ */
+export class PatientEntriesPageDto {
+  @IsOptional()
+  @IsString({ message: 'Load the list again from the start.' })
+  @Matches(/^[A-Za-z0-9_-]{16,512}$/, { message: 'Load the list again from the start.' })
+  before?: string;
 }

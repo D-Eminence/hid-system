@@ -23,10 +23,10 @@
 --    the bodies the new commands, the read policy and the no-delete trigger
 --    rely on are byte for byte the ones measured on 0103 (md5 of
 --    pg_proc.prosrc): ehr.patient_self_context, ehr.imported_record_read_
---    context, ehr.context_allows and identity.has_active_consent_grant
---    behind it, the platform.current_* readers, platform.reject_mutation and
---    audit.authorize_platform_event, with the security attributes of the
---    first four; the source-kind CHECK this file writes through, on both
+--    context, ehr.context_allows, identity.has_active_consent_grant and
+--    identity.has_active_membership behind it, the platform.current_*
+--    readers, platform.reject_mutation and audit.authorize_platform_event,
+--    with the security attributes of the first five; the source-kind CHECK this file writes through, on both
 --    chunk tables (0069's 13 kinds; 0070 copied it to the staff table under
 --    the same name), and the audit.events CHECKs the new rows must pass,
 --    with 0064's authority trigger; the applying role, which will own the
@@ -41,7 +41,7 @@
 --    medicine, diagnosis, vaccination, other), a title (2-160 characters on
 --    one line), the place (1-160 on one line, or none), the date (from
 --    1 January 1900; not after today in Lagos, which the command checks),
---    notes (1-2000 characters, newlines the only control characters, or
+--    notes (1-1000 characters, newlines the only control characters, or
 --    none), active or withdrawn (with when), who added it, the request's
 --    idempotency key (or none) and digest, a row_version. Unique per
 --    patient and key. Rows are never deleted or truncated (platform.reject_
@@ -69,9 +69,14 @@
 --    b. ehr.withdraw_my_patient_entry: 'withdrawn', or 'already_withdrawn'
 --       with the first time, or 'not_found' for an entry that is not the
 --       patient's; the first withdrawal also deletes the patient's own chat
---       vectors of that entry (the staff chat's go at its next refresh;
---       neither is ever used for a withdrawn entry, since retrieval joins the
---       current sources).
+--       vectors of that entry. It cannot delete the staff chat's: their
+--       forced row-level security admits only the clinician's own chat
+--       transaction. ehr-api deletes a withdrawn entry's vectors from either
+--       chunk table at that chat's next search, in the chat's own
+--       transaction (the staff chat's, and the patient's should a search
+--       that checked its sources before the withdrawal write them after it).
+--       None is ever ranked meanwhile, since retrieval joins the current
+--       sources.
 --    Every write records its audit.events row in the same transaction:
 --    ehr.patient-entry.create and ehr.patient-entry.withdraw, actor the
 --    patient, resource patient-entry, with codes and booleans only (never a
@@ -159,9 +164,9 @@ begin
     raise exception using errcode = '55000', message = '0116: already applied';
   end if;
   -- c. The bodies the commands, the read policy and the triggers rely on:
-  -- the patient-self and clinician read contexts and the consent check
-  -- behind them, the request-context readers they use, the no-delete
-  -- trigger and the audit table's authority trigger.
+  -- the patient-self and clinician read contexts, the consent check and the
+  -- membership check behind them, the request-context readers they use, the
+  -- no-delete trigger and the audit table's authority trigger.
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
     into mismatch
     from (values
@@ -169,6 +174,7 @@ begin
       ('ehr.imported_record_read_context(uuid)', 'eabd4af535ecf91508eae6003836e427'),
       ('ehr.context_allows(uuid,uuid,text)', '75016690184a80bd246c365b4d108082'),
       ('identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamptz)', '8b12ce866ee75cce411a2721795ffb92'),
+      ('identity.has_active_membership(text,uuid,uuid)', 'bb52953ef1cd08527db61230a671859e'),
       ('platform.current_correlation_id()', '48d3bf187101d33bfda51dac829aa223'),
       ('platform.current_actor_subject()', 'cf14c2d4a16d44a79ea9dbef9dc79c2b'),
       ('platform.current_facility_id()', 'c4a7c2989e83d9cedbf1f7b785a5aaed'),
@@ -179,8 +185,8 @@ begin
          expected(proc, digest)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc)
    where md5(proc.prosrc) is distinct from expected.digest;
-  -- Their security attributes: the patient-self context and the consent
-  -- checks run as their owner, the read context as its caller.
+  -- Their security attributes: the patient-self context, the consent and
+  -- membership checks run as their owner, the read context as its caller.
   if mismatch is null then
     select string_agg(expected.proc, '; ') into mismatch
       from (values
@@ -188,7 +194,8 @@ begin
         ('ehr.imported_record_read_context(uuid)', false, '{"search_path=ehr, platform, pg_temp"}'),
         ('ehr.context_allows(uuid,uuid,text)', true, '{"search_path=ehr, identity, platform, pg_temp"}'),
         ('identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamptz)', true,
-         '{"search_path=identity, auth, pg_temp"}'))
+         '{"search_path=identity, auth, pg_temp"}'),
+        ('identity.has_active_membership(text,uuid,uuid)', true, '{"search_path=identity, auth, pg_temp"}'))
            expected(proc, definer, config)
      where not exists (select 1 from pg_proc proc
                         where proc.oid = to_regprocedure(expected.proc)
@@ -313,7 +320,7 @@ create table ehr.patient_entries (
     or (length(facility_name) between 1 and 160 and facility_name !~ '[\u0001-\u001f\u007f-\u009f]')),
   occurred_on date not null check (occurred_on >= date '1900-01-01'),
   notes text check (notes is null
-    or (length(notes) between 1 and 2000 and notes !~ '[\u0001-\u0009\u000b-\u001f\u007f-\u009f]')),
+    or (length(notes) between 1 and 1000 and notes !~ '[\u0001-\u0009\u000b-\u001f\u007f-\u009f]')),
   status text not null default 'active' check (status in ('active', 'withdrawn')),
   withdrawn_at timestamptz,
   created_by_account_id uuid not null,
@@ -406,7 +413,7 @@ begin
      or requested_occurred_on is null or requested_occurred_on < date '1900-01-01'
      or requested_occurred_on > (clock_timestamp() at time zone 'Africa/Lagos')::date
      or (requested_notes is not null
-       and (length(requested_notes) not between 1 and 2000 or requested_notes ~ with_newlines))
+       and (length(requested_notes) not between 1 and 1000 or requested_notes ~ with_newlines))
      or (requested_idempotency_key is not null
        and requested_idempotency_key !~ '^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$')
      or requested_request_sha256 is null or requested_request_sha256 !~ '^[a-f0-9]{64}$' then
@@ -560,7 +567,7 @@ begin
     select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
       into mismatch
       from (values
-        ('ehr.create_my_patient_entry(text,text,text,date,text,text,text)', true, '8dc691f3ad60c634cd83907b782e8c16'),
+        ('ehr.create_my_patient_entry(text,text,text,date,text,text,text)', true, '280b73ca5151f73ffac6256bf81110af'),
         ('ehr.withdraw_my_patient_entry(uuid)', true, '172d17d8abb9d237ba4fa6fd06ddeb21'),
         ('ehr.patient_entries_guard()', false, 'f04a4337f2d2be151d2483af0ba0207c'))
            expected(proc, definer, digest)
@@ -576,6 +583,8 @@ begin
         ('ehr.patient_self_context(uuid)', '9878cfbd3dec68263d2e4bffc7cd9975'),
         ('ehr.imported_record_read_context(uuid)', 'eabd4af535ecf91508eae6003836e427'),
         ('ehr.context_allows(uuid,uuid,text)', '75016690184a80bd246c365b4d108082'),
+        ('identity.has_active_consent_grant(uuid,text,uuid,uuid,text,text,timestamptz)', '8b12ce866ee75cce411a2721795ffb92'),
+        ('identity.has_active_membership(text,uuid,uuid)', 'bb52953ef1cd08527db61230a671859e'),
         ('platform.reject_mutation()', '398738f39f6eebed2c54da5009495def'))
            expected(proc, digest)
       left join pg_proc proc on proc.oid = to_regprocedure(expected.proc)

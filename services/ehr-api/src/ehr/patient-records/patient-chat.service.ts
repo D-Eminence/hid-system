@@ -12,6 +12,8 @@ import { PatientEvidenceService } from './patient-evidence.service';
 import { binding,chunks,evidenceKey,originLabel,type Evidence,type OriginAudience } from './patient-evidence.types';
 import { selectEvidence,answerCoverage,boundEvidence } from './patient-evidence.selection';
 import { PatientChatHistoryService, type ChatReply } from './patient-chat-history.service';
+import { patientEntriesEnabled } from '../patient-entries/patient-entries.flag';
+import { withdrawnPatientEntryChunksSql } from '../patient-entries/patient-entries.query';
 
 const NO_GROUNDED_ANSWER = 'I could not verify an answer from the available records.';
 
@@ -120,11 +122,16 @@ export class PatientChatService {
     env:ReturnType<typeof getEnvironment>,signal:AbortSignal,access:ChatAccess=this.selfAccess()) {
     const auth=await access.authorize(request);
     const currentKeys=records.map(r=>`${evidenceKey(r)}:${r.version}:${r.hash}`);
-    const existing=await access.transaction(auth,request.correlationId,async client=>(await client.query(
+    const existing=await access.transaction(auth,request.correlationId,async client=>{
+      // Vectors of a record the patient removed (0116) go at this chat's next search, whatever else is
+      // refreshed: the staff chat's, which the removal cannot reach, and any a search that overlapped
+      // the removal wrote. Only while the setting is on: off, nothing names ehr.patient_entries.
+      if(patientEntriesEnabled())await client.query(withdrawnPatientEntryChunksSql(access.chunksTable),[auth.patientId]);
+      return (await client.query(
       `select source_kind,source_id,source_version,source_hash,chunk_no from ${access.chunksTable}
        where patient_id=$1 and model_id=$2 and normalizer_version=1
        and source_kind||':'||source_id::text||':'||source_version||':'||source_hash=any($3::text[])`,
-      [auth.patientId,env.AI_EMBEDDING_MODEL_ID,currentKeys])).rows);
+      [auth.patientId,env.AI_EMBEDDING_MODEL_ID,currentKeys])).rows;});
     const keys=new Set(existing.map(r=>`${r.source_kind}:${r.source_id}:${r.source_version}:${String(r.source_hash).trim()}:${r.chunk_no}`));
     const missing=records.flatMap(source=>chunks(source).slice(0,1000).map((text,no)=>({source,text,no})))
       .filter(c=>!keys.has(`${evidenceKey(c.source)}:${c.source.version}:${c.source.hash}:${c.no}`));
