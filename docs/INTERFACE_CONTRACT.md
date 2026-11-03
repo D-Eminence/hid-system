@@ -2849,3 +2849,84 @@ Responses, request bodies, `If-Match` versions and error mapping are
 unchanged. 0103 has no down migration; applying the previous bodies (0046,
 0056) restores the old behaviour. The suite is
 `services/ehr-api/test/database/platform-organization-applications.integration.sql`.
+
+## 32. Patient details on this facility's own lab and pharmacy work (0113)
+
+Owner decision 25 of 2026-11-01 (D-Eminence, "all recommended except D5", on
+the Akos handover backend plan, item 3a; D8: emergency sessions see the
+patient details with the work). Laboratories and pharmacies run as
+stand-alone products for the whole facility, so their staff need the
+patient's name, sex, date of birth and Health ID ending on their own work,
+not only on work sent from another facility. 0113 is unsigned until the
+owner signs its declaration. Sessions working on 0104-0112 add sections
+too, so this section's number is the coordinator's to fix at merge.
+
+Routes (paths, permissions, requests unchanged):
+`GET /api/v1/lab/work-items` and `GET /api/v1/lab/work-items/:workItemId`
+(`lab.work-item.read`), `GET /api/v1/pharmacy/work-items` and
+`GET /api/v1/pharmacy/work-items/:workItemId` (`pharmacy.work-item.read`).
+
+While `OWN_WORK_PATIENT_CARD_ENABLED` is `true` in lab-api or pharmacy-api, a
+work item that is this facility's own work (it has `sourceEhrOrderId` or
+`sourceEhrPrescriptionId`, and no `orderRoute`) carries the existing
+optional `patient` that route-backed work items already carry:
+
+| Field | Value |
+| --- | --- |
+| `patient.fullName` | the patient's full name |
+| `patient.sex` | as recorded, or `null` |
+| `patient.dateOfBirth` | `YYYY-MM-DD`, or `null` |
+| `patient.healthIdLast4` | the last 4 characters of the Health ID |
+
+It is left out when the member may not read the work now (no read grant at
+this facility for this purpose, a revoked or expired grant, a deny
+directive, no work-list read permission, a disabled account), when the
+database read fails (it runs in a savepoint and never fails the answer), and
+whenever the setting is off. Off is the default and answers exactly as
+before. An emergency session with an active break-glass grant gets it,
+because its work rows are shown too. Route-backed work items are unchanged:
+their patient still comes from the route card, only while the route allows a
+read.
+
+Database (0113, functions only): `lab.work_item_patient_cards(uuid[])` and
+`pharmacy.work_item_patient_cards(uuid[])`, SECURITY DEFINER, owned by
+`identity.patients`' owner, at most 200 ids (else 22023
+`WORK_ITEM_PATIENT_CARDS_INVALID`). A row is answered only for own work at
+the session's facility whose member holds the work-list read permission
+there and passes the read consent test of the work items' read policy.
+EXECUTE: the Lab one to `hid_lab_runtime`, the Pharmacy one to
+`hid_pharmacy_runtime`, both to `hid_schema_test_runtime`; nobody else. No
+table, column, policy or existing function changes.
+
+Audit rows, in the request's transaction, ids only:
+
+| Route | Rows added while the setting is on |
+| --- | --- |
+| `GET /lab/work-items` | one `lab.work-item.list` per patient shown on own work: `patient_id` that patient, `resource_id` the first of their work items, `details` `{ "basis": "consent", "workItemIds": [...] }` |
+| `GET /pharmacy/work-items` | the collection row as before, then one `pharmacy.work-item.list` per patient shown on own work, the same shape |
+| `GET .../work-items/:workItemId` | none: the existing `lab.work-item.read` or `pharmacy.work-item.read` row already names the patient |
+
+The patient's access log (`identity.patient_self_access_log`, 0093) shows
+these names as views by the member at the facility (entries less than 10
+minutes apart collapse into one). Responses are otherwise unchanged;
+request bodies and error mapping are unchanged. `PharmacyWorkItem` in
+`@hid/api-client` gains the optional `patient`.
+
+Cost while the setting is on: each list load calls the reader once for its
+own rows (at most 200), as a statement of its own, so it does not count
+toward the list query's 15-second limit and does not grow with the size of
+the laboratory or pharmacy. Under a NOBYPASSRLS owner, as in production, each
+of those rows pays the work items' read policy and then the same consent
+test again (0113's header, D5). Measured on PostgreSQL 16 on a shared 4-CPU
+2.8 GHz Xeon with 200 own rows: the Lab reader 0.7-1.1 s against 0.8-1.2 s
+for the Lab list query, the Pharmacy reader 0.6-1.0 s against about 0.6 s
+for the Pharmacy list query. So the setting roughly doubles a list's
+database time. The Lab list's known limit (about 2,000 work items) is
+unchanged.
+
+0113 has no down migration. To withdraw the feature, set
+`OWN_WORK_PATIENT_CARD_ENABLED=false` in lab-api and pharmacy-api; the two
+functions stay and nothing calls them. Do not drop them: 0113 stays
+recorded, so the runner does not re-create them, and runtime-grants.sql's
+0113 block would then stop `db:bootstrap` with 42883. The suite is
+`services/ehr-api/test/database/work-item-patient-cards.integration.sql`.

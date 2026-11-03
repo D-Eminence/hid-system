@@ -29,6 +29,19 @@ export interface PharmacyMedicationReference {
   display: string;
 }
 
+/**
+ * The patient on a work item: name, sex, date of birth and the last 4
+ * characters of the Health ID. On this facility's own work it is sent while
+ * pharmacy-api's OWN_WORK_PATIENT_CARD_ENABLED is on and the member may read
+ * the work (0113); absent otherwise.
+ */
+export interface PharmacyWorkItemPatient {
+  fullName: string;
+  sex: string | null;
+  dateOfBirth: string | null;
+  healthIdLast4: string | null;
+}
+
 export interface PharmacyWorkItem {
   id: string;
   patientId: string;
@@ -46,6 +59,8 @@ export interface PharmacyWorkItem {
   acceptedAt: string;
   version: number;
   dispensing: { id: string; status: 'dispensed'; reversed: boolean } | null;
+  /** Present only when pharmacy-api sent it (see PharmacyWorkItemPatient). */
+  patient?: PharmacyWorkItemPatient;
 }
 
 export interface PharmacyDispensing {
@@ -307,6 +322,14 @@ function parseMedication(value: unknown): PharmacyMedicationReference {
   return { codeSystem: nullableText(item, 'codeSystem'), code: nullableText(item, 'code'), display: text(item, 'display') };
 }
 
+/** The optional patient: left out when absent; a malformed one is refused like any other field. */
+function parseWorkItemPatient(value: unknown): { patient?: PharmacyWorkItemPatient } {
+  if (value === undefined) return {};
+  const patient = record(value, 'Pharmacy work item patient');
+  return { patient: { fullName: text(patient, 'fullName'), sex: nullableText(patient, 'sex'),
+    dateOfBirth: nullableText(patient, 'dateOfBirth'), healthIdLast4: nullableText(patient, 'healthIdLast4') } };
+}
+
 function parseWorkItem(payload: unknown): PharmacyWorkItem {
   const value = record(payload, 'Pharmacy work item');
   const dispensing = value.dispensing === null ? null : record(value.dispensing, 'Pharmacy dispensing summary');
@@ -323,6 +346,7 @@ function parseWorkItem(payload: unknown): PharmacyWorkItem {
     dispensing: dispensing ? {
       id: text(dispensing, 'id'), status: 'dispensed', reversed: dispensing.reversed === true,
     } : null,
+    ...parseWorkItemPatient(value.patient),
   };
 }
 

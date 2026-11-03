@@ -44,7 +44,11 @@ export interface WorkItemOrderRoute {
   ordererLicence?: { body: string; number: string | null };
 }
 
-/** The patient of a route-backed work row, only while the route allows a read (P10.5). */
+/**
+ * The patient of a work row: on a route-backed row only while the route allows
+ * a read (P10.5); on this facility's own row only while
+ * OWN_WORK_PATIENT_CARD_ENABLED is on and the member may read it (0113).
+ */
 export interface WorkItemRoutePatient {
   fullName: string;
   sex: string | null;
@@ -78,7 +82,7 @@ const RECEIVE_PERMISSION = 'lab.order-route.receive';
 const ACCESS = new Set(['work', 'read', 'none']);
 
 /** A `date` as yyyy-mm-dd (C12 casts it to text; a Date is read by its local calendar fields, as node-postgres makes it). */
-function day(value: string | Date | null): string | null {
+export function day(value: string | Date | null): string | null {
   if (value instanceof Date) {
     if (!Number.isFinite(value.getTime())) return null;
     const pad = (part: number) => String(part).padStart(2, '0');
