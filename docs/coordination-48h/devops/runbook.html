@@ -1,0 +1,181 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Health ID DevOps runbook</title>
+<style>
+@page{size:A4;margin:16mm 15mm 16mm 15mm}
+*{box-sizing:border-box}
+body{font-family:Inter,system-ui,sans-serif;color:#101828;font-size:9.6pt;line-height:1.45;margin:0}
+h1{font-size:18pt;margin:0 0 2mm;letter-spacing:-.2px}
+.sub{color:#475467;font-size:9.5pt;margin-bottom:5mm}
+h2{font-size:12pt;margin:6mm 0 2mm;padding-top:2mm;border-top:1px solid #EAECF0}
+h3{font-size:10.2pt;margin:3.5mm 0 1.5mm}
+p{margin:1.2mm 0}
+ul,ol{margin:1mm 0 1.5mm;padding-left:5mm}
+li{margin:.6mm 0}
+code,pre{font-family:"JetBrains Mono",ui-monospace,Menlo,Consolas,monospace;font-size:8.2pt}
+code{background:#F2F4F7;padding:0 1mm;border-radius:1mm}
+pre{background:#F8F9FB;border:1px solid #EAECF0;border-radius:2mm;padding:2mm 3mm;white-space:pre-wrap;word-break:break-word;margin:1.5mm 0}
+.box{border:1px solid #EAECF0;border-radius:2.5mm;padding:2.5mm 3.5mm;margin:2mm 0}
+.warn{background:#FFFAEB;border-color:#FEDF89}
+.stop{background:#FEF3F2;border-color:#FECDCA}
+.ok{background:#ECFDF3;border-color:#ABEFC6}
+.tag{display:inline-block;font-size:7.6pt;font-weight:600;padding:.3mm 1.6mm;border-radius:2mm;margin-right:1.5mm;vertical-align:1px}
+.now{background:#D1E9FF;color:#175CD3}.ro{background:#ECFDF3;color:#067647}.owner{background:#F4EBFF;color:#6941C6}.later{background:#F2F4F7;color:#475467}
+table{border-collapse:collapse;width:100%;margin:1.5mm 0;font-size:8.6pt}
+th,td{border:1px solid #EAECF0;padding:1.2mm 1.8mm;text-align:left;vertical-align:top}
+th{background:#F9FAFB;font-weight:600}
+.small{font-size:8.4pt;color:#475467}
+.toc{columns:2;font-size:9pt}
+.pb{page-break-before:always}
+</style></head><body>
+
+<h1>Health ID: DevOps runbook (AWS)</h1>
+<div class="sub">Prepared 2 November 2026 for the DevOps engineer. Owner: D-Eminence. AWS account <code>659225405023</code>, region <code>eu-west-1</code>.<br>
+The full detail is in <code>infra/DEVOPS_HANDOVER.md</code> on the <code>dev</code> branch of <b>D-Eminence/hid-system</b>. Section numbers below refer to that file.</div>
+
+<div class="toc">
+<b>Contents</b>
+<ol>
+<li>Rules for every change</li>
+<li>Do now, apply 1: document upload (CORS)</li>
+<li>Do now, apply 2: phone and computer notifications (web push)</li>
+<li>Read-only checks to send back now</li>
+<li>AWS settings for document reading (OCR)</li>
+<li>Secrets only the owner creates</li>
+<li>Coming next: don't apply yet</li>
+<li>Release reminders</li>
+<li>What to send back after each step</li>
+</ol>
+</div>
+
+<h2>1. Rules for every change</h2>
+<ul>
+<li>Use the guarded helper from section 4 every time: <b>plan</b>, review the private manifest, then <b>apply</b> with <code>--accepted-review-sha256 "&lt;sha256&gt;"</code>.</li>
+<li>Don't start a backend release between a plan and its apply. Never run a website release and a backend release at the same time. Check with the owner that nothing is releasing before you plan.</li>
+<li>Keep plans and review manifests private and out of Git. Remove <code>TF_VAR_cloudflare_origin_secret</code> from your shell after each session.</li>
+<li>Don't rename or delete anything with "staging" in its name. Those are <b>live production resources</b>: <code>hid-staging-*</code> buckets, <code>/hid/staging/*</code> secrets and log groups.</li>
+<li>Never put a private key or password in Git, tfvars, a ticket, chat or a command line.</li>
+<li>Confirm the account first: <code>aws sts get-caller-identity</code> must show <code>659225405023</code>. The state backend and lineage are in section 4. Stop if they differ.</li>
+<li>If a plan shows anything different from what's described here, <b>stop</b> and send the owner the plan summary before you apply.</li>
+</ul>
+<div class="box">Helper commands (section 4, from <code>infra/terraform</code> after <code>terraform init</code> as written there):
+<pre>python scripts/production_release_infrastructure.py plan  --var-file environments/production.tfvars --manifest private-release-review.json
+python scripts/production_release_infrastructure.py apply --var-file environments/production.tfvars --manifest private-release-review.json --accepted-review-sha256 "&lt;reviewed manifest SHA256&gt;"</pre></div>
+
+<h2><span class="tag now">DO NOW</span>2. Apply 1: document upload (CORS)</h2>
+<p>Section 4, "Document upload (CORS)". Without this, every document upload from the clinic pages fails. It's already merged into <code>dev</code>. Do it as an apply of its own, before web push.</p>
+<ol>
+<li><b>Read the live rule (read-only):</b>
+<pre>aws s3api get-bucket-cors --bucket &lt;documents bucket name&gt; --region eu-west-1</pre>
+The bucket is the retained <code>hid-staging-documents-*</code> bucket (<code>module.data.aws_s3_bucket.documents</code>). If you get anything other than <code>NoSuchCORSConfiguration</code>, send it to the owner first, because Terraform will replace it.</li>
+<li><b>Plan from <code>dev</code>.</b> The new resource is <code>module.data.aws_s3_bucket_cors_configuration.documents[0]</code> (1 to add). It allows PUT only, from app., ehr., lab., pharmacy. and migrate.</li>
+<li><b>Expect other dev changes in the same plan.</b> If the cost changes the owner approved on 1 November (section 4, "Monitoring cost" and "AWS cost") aren't applied yet, they appear here too:
+<table><tr><th>Change</th><th>Resources</th><th>Action</th></tr>
+<tr><td>Monitoring cost</td><td>ECS cluster + 12 running-task alarms</td><td>13 updated in place</td></tr>
+<tr><td>Bedrock endpoint in one zone</td><td><code>module.ai[0].aws_vpc_endpoint.bedrock_runtime</code></td><td>1 updated in place</td></tr>
+<tr><td>ECR clean-up</td><td>12 ECR lifecycle policies</td><td>12 replaced (provider can't edit them)</td></tr>
+<tr><td>Worker scaling on dead metrics</td><td>2 autoscaling policies</td><td>2 destroyed</td></tr>
+<tr><td>Alerts from production alarms</td><td>alerts KMS key + SNS topic policy</td><td>2 updated in place</td></tr></table>
+With all of these plus CORS, expect <b>Plan: 13 to add, 16 to change, 14 to destroy</b>. Before applying the alarm change, do the read-only dry run of the new alarms that section 4 describes. New task-definition revisions with the <b>same images</b> may also appear: they restart those services. Anything else, especially a database, bucket, key, network or image replacement: <b>stop</b> and send the summary.</li>
+<li><b>Apply</b> with the reviewed SHA256.</li>
+<li><b>Check:</b> at Demo Hospital, upload a fictional document (Consultation → Documents → Upload document). It should succeed.</li>
+</ol>
+
+<h2><span class="tag now">DO NOW</span>3. Apply 2: phone and computer notifications (web push)</h2>
+<p>Section 4, "Web push (B6)". Do this after apply 1, as a separate apply.</p>
+<ol>
+<li value="0"><span class="tag owner">OWNER</span><b>Steps 0–1, the owner only.</b> The owner generates the key pair on their own computer (the command is in section 4). They add the 43-character private key as <code>webPushVapidPrivateKey</code> in <code>/hid/staging/notification-provider</code> (Secrets Manager, eu-west-1), changing nothing else. Then they send DevOps the <b>public</b> key only.</li>
+<li><b>Step 2:</b> in a reviewed commit on <code>dev</code>, replace the commented web push block in <code>environments/production.tfvars</code> with:
+<pre>web_push_enabled          = true
+web_push_vapid_public_key = "&lt;the 87-character public key the owner sends&gt;"
+web_push_subject          = "mailto:support@healthidentitydirectory.com"</pre></li>
+<li><b>Step 3:</b> plan, then apply. The plan should only replace the task definitions of <code>identity-api</code> and <code>notification-api</code> and update those two services in place, with <b>no image change</b>.</li>
+<li><b>Step 4, check names only</b> (the loop is in section 4):
+<ul><li><code>notification-api</code> shows <code>WEB_PUSH_VAPID_PUBLIC_KEY</code>, <code>WEB_PUSH_SUBJECT</code> and the secret <code>WEB_PUSH_VAPID_PRIVATE_KEY</code>.</li>
+<li><code>identity-api</code> shows the two environment names only.</li>
+<li>CloudWatch <code>/hid/staging/notification-api</code> and <code>/hid/staging/identity-api</code> both log <code>Web push is on (keyId=...)</code> with the same key id.</li></ul></li>
+</ol>
+<p class="small">To switch it off: commit <code>web_push_enabled = false</code>, plan and apply. Remove the private key from the secret only after that apply. Rotate the keys only if the private key is ever exposed.</p>
+
+<h2 class="pb"><span class="tag ro">READ-ONLY</span>4. Checks to run now and send back</h2>
+<h3>a) Before the virus scanner</h3>
+<pre>aws guardduty list-malware-protection-plans --region eu-west-1
+aws s3api get-bucket-notification-configuration --bucket &lt;documents bucket name&gt; --region eu-west-1
+aws events list-rules --name-prefix DO-NOT-DELETE-AmazonGuardDutyMalwareProtectionS3 --region eu-west-1
+aws lambda get-account-settings --region eu-west-1 --query AccountLimit</pre>
+<p><b>Expected:</b> no protection plan, an empty notification configuration, no rule, and <code>UnreservedConcurrentExecutions</code> of <b>102 or more</b>. If that number is lower, open an AWS quota increase request now, because it can take days.</p>
+<h3>b) Account safety (added)</h3>
+<pre>aws rds describe-db-instances --region eu-west-1 --query "DBInstances[].{id:DBInstanceIdentifier,deletionProtection:DeletionProtection,backupDays:BackupRetentionPeriod,encrypted:StorageEncrypted,multiAZ:MultiAZ}"
+aws s3api get-bucket-versioning     --bucket &lt;documents bucket name&gt;
+aws s3api get-bucket-encryption     --bucket &lt;documents bucket name&gt;
+aws s3api get-public-access-block   --bucket &lt;documents bucket name&gt;
+aws cloudtrail describe-trails --query "trailList[].{name:Name,multiRegion:IsMultiRegionTrail}"
+aws guardduty list-detectors --region eu-west-1
+aws iam get-account-summary --query "SummaryMap.AccountMFAEnabled"
+aws budgets describe-budgets --account-id 659225405023 --query "Budgets[].{name:BudgetName,limit:BudgetLimit.Amount}"</pre>
+<p><b>Expected:</b></p>
+<ul>
+<li>The database has deletion protection on, backups kept 7 days or more, and encrypted storage.</li>
+<li>The documents bucket has versioning on, default encryption, and all four public-access blocks set to true.</li>
+<li>A CloudTrail trail exists.</li>
+<li>Root MFA is on (the summary shows 1).</li>
+<li>A monthly budget of USD 400 exists with alerts. If it doesn't, say so in your reply. Once the owner confirms, create it with email alerts to the owner at 80% and 100%, actual and forecast.</li>
+</ul>
+<p>Send back anything that differs. Change nothing in this step; the budget, if it's missing, comes after the owner confirms.</p>
+
+<h2>5. AWS settings for document reading (OCR)</h2>
+<p>The AI step of document reading <b>no longer runs on AWS</b>, so skip everything about Bedrock for it. Don't turn on Bedrock model access or add Bedrock permissions for OCR, and don't check Bedrock calls in CloudTrail for it.</p>
+<ol>
+<li><b>Textract permission:</b> give the role that will run document reading only <code>textract:DetectDocumentText</code>, in eu-west-1.</li>
+<li><b>AI opt-out:</b> set an AWS Organizations AI services opt-out policy (opt out of all services), so AWS doesn't keep document content to improve Textract or its other AI services. This is done in the management account: Organizations → Policies → AI services opt-out policies. Attach it to the root and confirm it shows as effective on account <code>659225405023</code>. If the account isn't in an AWS Organization, tell the owner first: opt-out policies need one.</li>
+<li><b>Test documents only:</b> use fictional test documents until the owner says otherwise.</li>
+</ol>
+<div class="box warn"><b>Leave the patient chat's Bedrock setup exactly as it is.</b> That means the private Bedrock connection, the EHR service's Bedrock permissions and the Titan embedding model. The chat uses them today.</div>
+
+<h2><span class="tag owner">OWNER ONLY</span>6. Secrets the owner creates (never through DevOps chat or tickets)</h2>
+<ul>
+<li><b>Web push keys:</b> section 3, steps 0–1.</li>
+<li><b>Offline backup key</b>, needed before the offline-mode escrow (hid-system#133). On the owner's own computer, with Node 22:
+<pre>node -e "console.log(JSON.stringify({'1':require('node:crypto').randomBytes(32).toString('base64url')}))"</pre>
+In Secrets Manager, eu-west-1, create the secret <code>/hid/staging/offline-escrow</code>:
+<ul><li>type "Other type of secret", with the key <code>offlineEscrowKeys</code> and the printed JSON as its value;</li>
+<li>encryption key <code>aws/secretsmanager</code>;</li>
+<li>no automatic rotation.</li></ul>
+The owner sends DevOps the secret's <b>ARN</b> only. Offline backup stays off until the offline EHR version is released.</li>
+<li><b>Cloudflare origin secret:</b> read it from <code>/hid/staging/cloudflare-origin</code> only for a plan or apply, and unset it afterwards (section 4).</li>
+</ul>
+
+<h2 class="pb"><span class="tag later">NEXT</span>7. Coming next: don't apply until the owner sends the PR link</h2>
+<p>These aren't merged yet. <b>The order matters.</b></p>
+<ol>
+<li><b>Raise the service-to-service caller limit from 6 to 8</b>, in an apply of its own. If more callers are configured than the limit allows, every service-to-service token stops. So the limit always goes up first, in a separate apply, before any new caller arrives.</li>
+<li><b>Virus scanner</b> (GuardDuty Malware Protection for S3), in five stages, each its own reviewed commit and apply:
+<ol><li>backend release;</li><li>the caller limit above;</li><li>GuardDuty and the bridge in observe mode;</li><li>backfill, then reconcile;</li><li>tag enforcement, only after the stage 4 check passes.</li></ol>
+It costs about USD 2.5–3.5 a month, plus about USD 0.40 once for the backfill.</li>
+<li><b>Support chat Health ID check:</b> <code>support-api</code> becomes the 8th caller. Apply it only after item 1.</li>
+<li><b>Offline mode key escrow</b> (D-Eminence/hid-system#133): apply it only after the new <code>ehr-api</code> image is live and the owner has created <code>/hid/staging/offline-escrow</code> (section 6).</li>
+</ol>
+
+<h2>8. Release reminders</h2>
+<ul>
+<li>Merging to <b>health <code>main</code></b> releases the website to production. Merging to <b>hid-system <code>staging-novu-ci-20261005</code></b> releases the backend. Only one runs at a time, and none runs between a Terraform plan and its apply.</li>
+<li>A re-run of a failed website release can build but can't deploy. Start a fresh run of the <code>production-frontends</code> workflow on <code>main</code> instead.</li>
+<li>If the public site build fails while fetching Google Fonts, it's a network blip. Start a fresh run.</li>
+<li>Every backend release is followed by the website's backend pins being updated (owner-approved). DevOps doesn't need to act on it, but shouldn't apply Terraform while it runs.</li>
+</ul>
+
+<h2>9. What to send back after each step</h2>
+<ul>
+<li>The plan summary: resource names and counts, no secret values.</li>
+<li>The SHA256 you applied.</li>
+<li>The result of the check.</li>
+</ul>
+<div class="box ok"><b>Order for this week:</b>
+<ol>
+<li>Section 4 read-only checks (send them back).</li>
+<li>Apply 1 (CORS, plus any pending cost changes).</li>
+<li>The owner creates the web push keys.</li>
+<li>Apply 2 (web push).</li>
+<li>OCR account settings (section 5).</li>
+<li>Wait for the PR links for section 7.</li>
+</ol></div>
+</body></html>
