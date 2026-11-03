@@ -3,6 +3,7 @@ import {
   StartDocumentAnalysisCommand, StartDocumentTextDetectionCommand, type Block,
 } from '@aws-sdk/client-textract';
 import type { OcrWorkerConfig } from './config';
+import { Semaphore } from './semaphore';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure } from './types';
 import { blocksToPages, TEXTRACT_PROCESSING_CONTRACT, TextractOcrProvider, type TextractFeatures,
   textractAsyncClientRequestToken, textractPdfClientRequestToken } from './textract.provider';
@@ -273,3 +274,47 @@ describe('Textract v2 line mapping', () => {
     expect(pages[2]!.lines[0]!.confidence).toBe(0.99);
   });
 });
+
+describe('Textract call limit (OCR_TEXTRACT_MAX_CONCURRENT)', () => {
+  const image = { ...document, bytes: new Uint8Array([1]), mediaType: 'image/png' };
+  const blocks = { $metadata: { requestId: 'request-1' }, Blocks: [word('w1', 'Paracetamol', 99), line('l1', 'Paracetamol', ['w1'])] };
+
+  it('builds its limit from OCR_TEXTRACT_MAX_CONCURRENT, 2 by default', () => {
+    expect(new TextractOcrProvider(config).limiter.limit).toBe(2);
+    expect(new TextractOcrProvider({ ...config, OCR_TEXTRACT_MAX_CONCURRENT: 5 }).limiter.limit).toBe(5);
+  });
+
+  it('never has more calls in flight than the shared limit, across documents', async () => {
+    const limiter = new Semaphore(2);
+    let inFlight = 0;
+    let peak = 0;
+    const send = jest.fn(async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setImmediate(resolve));
+      inFlight -= 1;
+      return blocks;
+    });
+    const instance = new TextractOcrProvider(config, { limiter });
+    (instance as unknown as { client: { send: jest.Mock } }).client = { send };
+    const readings = await Promise.all(Array.from({ length: 5 }, () => instance.extract(image, new AbortController().signal)));
+    expect(readings).toHaveLength(5);
+    expect(send).toHaveBeenCalledTimes(5);
+    expect(peak).toBe(2);
+    expect(limiter.inFlight).toBe(0);
+  });
+
+  it('frees the permit during a throttling backoff', async () => {
+    const limiter = new Semaphore(1);
+    const throttled = Object.assign(new Error('slow down'), { name: 'ThrottlingException' });
+    const send = jest.fn().mockRejectedValueOnce(throttled).mockResolvedValue(blocks);
+    const held: number[] = [];
+    const sleep = jest.fn(async () => { held.push(limiter.inFlight); });
+    const instance = new TextractOcrProvider(config, { limiter, sleep, random: () => 0.5 });
+    (instance as unknown as { client: { send: jest.Mock } }).client = { send };
+    await instance.extract(image, new AbortController().signal);
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(held).toEqual([0]);
+  });
+});
+

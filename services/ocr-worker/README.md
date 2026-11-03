@@ -118,6 +118,39 @@ by hand. A rejected request (key, permission, model) also completes as
 `ai_failed` and logs only the code. With AI off the job completes as `ai_off`;
 a document with no text as `no_text`.
 
+## Fair claiming and call limits
+
+- **Fair claim** (migration 0110). Claim loops call `ocr.claim_worker_job_fair`
+  (same authorization, validation, lease recovery and eligibility as
+  `ocr.claim_worker_job`, which stays as it was) with
+  `OCR_WORKER_MAX_INFLIGHT_PER_FACILITY` (default 2, 1-16): a facility that
+  already has that many jobs processing under a live lease is skipped, and the
+  facility with the fewest processing goes first, so one facility's large
+  upload cannot hold every claim loop while other facilities wait.
+- **Claude API limit.** `OCR_AI_MAX_CONCURRENT_REQUESTS` (default 4, 1-32)
+  requests in flight for the whole process, shared by every claim loop and every
+  page. Inside it, `OCR_AI_PAGE_CONCURRENCY` (default 2, 1-8) pages of one
+  document are read at once; after a page fails no further page starts.
+- **Textract limit.** `OCR_TEXTRACT_MAX_CONCURRENT` (default 2, 1-16) Textract
+  calls in flight for the whole process.
+- A permit is held for one API call only: never across a backoff sleep, a
+  `retry-after` wait or a Textract poll delay. Waiting for one does not stop
+  the lease renewal (every third of `OCR_WORKER_LEASE_SECONDS`), and shutdown
+  ends the wait without a call. Keep `OCR_WORKER_LEASE_SECONDS` long enough for
+  a document's pages to wait their turn.
+- **AI use recorded.** After the AI step and before completion the worker calls
+  `ocr.record_worker_ai_usage` once per model used (requests, input, output,
+  cache-read and cache-write tokens; counts only, no text), idempotent per job,
+  attempt and model. Every HTTP request counts, including those of a call that
+  ended in an error (overloads, timeouts, rejections, a failed re-read), with
+  any tokens the API had already reported on a cut-off stream. An attempt
+  retried with `AI_UNAVAILABLE` records what it used first, and so does a job
+  stopped mid-reading by shutdown or an unexpected error (before it is failed,
+  while the claim is still held). A failure to record is logged as
+  `ocr.reading.usage_record_failed` (job id, correlation id, model, code) and
+  never fails the job. Platform administrators read the month's use per
+  facility in the Identity API (`GET /admin/facilities/:facilityId/ocr-usage`).
+
 Logs carry only ids, counts, codes, model names, token usage and durations:
 never line text, items, SDK error messages or SDK error objects.
 

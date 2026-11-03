@@ -1,10 +1,11 @@
 import type { OcrWorkerConfig } from './config';
-import { AiTransientError, type PageModelClient } from './reading/claude.client';
+import { AiInterruptedError, AiTransientError, type PageModelClient } from './reading/claude.client';
 import { paperReadingPayloadSchema, type PaperReadingPayload } from './reading/contract';
 import { PaperReadingService, type ReadingConfig } from './reading/reader';
 import { modelItem, modelPage, readPage } from './reading/test-fixtures';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure, type ClaimedOcrJob, type CompletedExtraction,
   type DocumentReader, type TextReading, type WorkerOcrProvider, type WorkerRepository } from './types';
+import { Semaphore } from './semaphore';
 import { OcrWorker } from './worker';
 
 const config = {
@@ -43,7 +44,8 @@ function mocks(client?: PageModelClient) {
     renew: jest.fn(), complete: jest.fn().mockResolvedValue('extraction'), fail: jest.fn(), close: jest.fn(),
     pageAllowance: jest.fn().mockResolvedValue(allowance),
     recordPages: jest.fn().mockResolvedValue({ ...allowance, pagesUsed: 11 }),
-    pauseForAllowance: jest.fn().mockResolvedValue(new Date('2026-11-30T23:00:00.000Z')) };
+    pauseForAllowance: jest.fn().mockResolvedValue(new Date('2026-11-30T23:00:00.000Z')),
+    recordAiUsage: jest.fn().mockResolvedValue(undefined) };
   const reader: jest.Mocked<DocumentReader> = { readExact: jest.fn().mockResolvedValue(document) };
   const provider: jest.Mocked<WorkerOcrProvider> = { name: 'test', checkReadiness: jest.fn(),
     extract: jest.fn().mockResolvedValue(textReading) };
@@ -237,5 +239,135 @@ describe('OcrWorker processing', () => {
     const text = logs().join(' ');
     expect(text).not.toContain('patient secret clinical text');
     expect(text).not.toContain('clinical text');
+  });
+
+  describe('AI use and caps', () => {
+    const sonnet = { model: 'claude-sonnet-5-5', requests: 1, inputTokens: 1200, outputTokens: 400, cacheReadTokens: 3000,
+      cacheWriteTokens: 0 };
+
+    it('records the AI use per model after reading and before completion', async () => {
+      const { repository, reader, provider, reading } = mocks();
+      const order: string[] = [];
+      repository.recordAiUsage.mockImplementation(async (_held, usage) => { order.push(`usage:${usage.model}`); });
+      repository.complete.mockImplementation(async () => { order.push('complete'); return 'id'; });
+      await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+      expect(order).toEqual(['usage:claude-sonnet-5-5', 'usage:claude-opus-5-5', 'complete']);
+      expect(repository.recordAiUsage).toHaveBeenCalledWith(job, sonnet);
+      expect(repository.recordAiUsage).toHaveBeenCalledWith(job, { ...sonnet, model: 'claude-opus-5-5' });
+    });
+
+    it('completes the job when recording the use fails, logging only a safe code', async () => {
+      const { repository, reader, provider, reading } = mocks();
+      repository.recordAiUsage.mockRejectedValue(Object.assign(new Error(`${SECRET_NAME} database detail`), { code: '42883' }));
+      await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+      expect(repository.complete).toHaveBeenCalledTimes(1);
+      expect(repository.fail).not.toHaveBeenCalled();
+      const failed = logs().map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((entry) => entry.event === 'ocr.reading.usage_record_failed');
+      expect(failed).toEqual([
+        { timestamp: expect.any(String), level: 'error', event: 'ocr.reading.usage_record_failed', jobId: 'job-id',
+          correlationId: 'correlation-id', model: 'claude-sonnet-5-5', code: '42883' },
+        expect.objectContaining({ model: 'claude-opus-5-5', code: '42883' })]);
+      expect(logs().join('\n')).not.toContain('database detail');
+    });
+
+    it('records what an attempt used before retrying it with AI_UNAVAILABLE, and nothing with AI off', async () => {
+      const pageClient = { readPage: jest.fn()
+        .mockResolvedValueOnce({ kind: 'answer', answer, attempts: 1, servedInferenceGeo: 'global',
+          usage: { inputTokens: 1200, outputTokens: 400, cacheReadInputTokens: 3000, cacheCreationInputTokens: 0 } })
+        .mockRejectedValue(new AiTransientError('AI_HTTP_529')) };
+      const { repository, reader, provider, reading } = mocks(pageClient);
+      provider.extract.mockResolvedValue({ ...textReading, pageCount: 2,
+        pages: [page, readPage(2, ['Second page line'])] });
+      await new OcrWorker(config, repository, reader, provider, reading).processOne({ ...job, attemptNo: 1 });
+      expect(repository.recordAiUsage).toHaveBeenCalledWith(expect.objectContaining({ attemptNo: 1 }), sonnet);
+      expect(repository.fail).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ code: 'AI_UNAVAILABLE' }));
+
+      const off = mocks();
+      await new OcrWorker(config, off.repository, off.reader, off.provider,
+        new PaperReadingService({ ...readingConfig, OCR_AI_MODE: 'off' }, null)).processOne(job);
+      expect(off.repository.recordAiUsage).not.toHaveBeenCalled();
+    });
+
+    it('records the requests of a final attempt whose every AI request failed, then completes with ai_failed', async () => {
+      const pageClient = { readPage: jest.fn().mockRejectedValue(new AiTransientError('AI_HTTP_529', 5)) };
+      const { repository, reader, provider, reading } = mocks(pageClient);
+      await new OcrWorker(config, repository, reader, provider, reading).processOne({ ...job, attemptNo: 3 });
+      expect(repository.recordAiUsage).toHaveBeenCalledWith(expect.objectContaining({ attemptNo: 3 }),
+        { model: 'claude-sonnet-5-5', requests: 5, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+          cacheWriteTokens: 0 });
+      expect(completed(repository).structuredPayload).toMatchObject({ reading: { status: 'ai_failed' } });
+    });
+
+    it('records what the pages already read used when the worker shuts down mid-reading, then fails the job', async () => {
+      const usage = { inputTokens: 1200, outputTokens: 400, cacheReadInputTokens: 3000, cacheCreationInputTokens: 0 };
+      let worker: OcrWorker | undefined;
+      const pageClient: PageModelClient = { readPage: jest.fn(async (request, signal) => {
+        if (request.page === 1) return { kind: 'answer' as const, answer, attempts: 1, servedInferenceGeo: 'global', usage };
+        worker!.stop(); // SIGTERM while page 2 is being read
+        throw new AiInterruptedError(signal.reason, 1, { inputTokens: 50, outputTokens: 0, cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0 });
+      }) };
+      const { repository, reader, provider, reading } = mocks(pageClient);
+      provider.extract.mockResolvedValue({ ...textReading, pageCount: 3,
+        pages: [page, readPage(2, ['Second page line']), readPage(3, ['Third page line'])] });
+      const order: string[] = [];
+      repository.recordAiUsage.mockImplementation(async (_held, entry) => { order.push(`usage:${entry.model}`); });
+      repository.fail.mockImplementation(async () => { order.push('fail'); });
+      worker = new OcrWorker(config, repository, reader, provider, reading);
+      await worker.processOne(job);
+      expect(order).toEqual(['usage:claude-sonnet-5-5', 'fail']);
+      expect(repository.recordAiUsage).toHaveBeenCalledWith(job, { model: 'claude-sonnet-5-5', requests: 2,
+        inputTokens: 1250, outputTokens: 400, cacheReadTokens: 3000, cacheWriteTokens: 0 });
+      expect(repository.fail).toHaveBeenCalledWith(job, expect.objectContaining({ code: 'WORKER_SHUTDOWN' }));
+      expect(repository.complete).not.toHaveBeenCalled();
+    });
+
+    it('records the use and keeps the safe failure when reading throws an unexpected error after asking the AI', async () => {
+      const pageClient: PageModelClient = { readPage: jest.fn()
+        .mockResolvedValueOnce({ kind: 'answer', answer, attempts: 1, servedInferenceGeo: 'global',
+          usage: { inputTokens: 1200, outputTokens: 400, cacheReadInputTokens: 3000, cacheCreationInputTokens: 0 } })
+        .mockRejectedValue(new Error(`${SECRET_NAME} unexpected`)) };
+      const { repository, reader, provider, reading } = mocks(pageClient);
+      provider.extract.mockResolvedValue({ ...textReading, pageCount: 2, pages: [page, readPage(2, ['Second page line'])] });
+      await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+      expect(repository.recordAiUsage).toHaveBeenCalledWith(job, sonnet);
+      expect(repository.fail).toHaveBeenCalledWith(job, expect.objectContaining({ code: 'WORKER_INTERNAL_ERROR' }));
+      expect(logs().join('\n')).not.toContain(SECRET_NAME);
+    });
+
+    it('claims fairly with OCR_WORKER_MAX_INFLIGHT_PER_FACILITY', async () => {
+      const { repository, reader, provider, reading } = mocks();
+      const worker = new OcrWorker({ ...config, OCR_WORKER_MAX_INFLIGHT_PER_FACILITY: 3 }, repository, reader, provider,
+        reading);
+      repository.claim.mockImplementation(async () => { worker.stop(); return null; });
+      await worker.run();
+      expect(repository.claim).toHaveBeenCalledWith('test', 60, 3, expect.stringMatching(/^ocr-worker-/));
+    });
+
+    it('keeps renewing the lease while the job waits for a Claude API permit', async () => {
+      jest.useFakeTimers();
+      try {
+        const limiter = new Semaphore(1);
+        const pageClient: PageModelClient = { readPage: jest.fn((_request, signal) => limiter.run(async () => ({
+          kind: 'answer' as const, answer, attempts: 1, servedInferenceGeo: 'global',
+          usage: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } }), signal)) };
+        const { repository, reader, provider, reading } = mocks(pageClient);
+        repository.renew.mockResolvedValue(undefined);
+        const held = await limiter.acquire(); // another job's request holds the only permit
+        const processing = new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+        // The lease of 60 s is renewed every 20 s.
+        await jest.advanceTimersByTimeAsync(61_000);
+        expect(limiter.waiting).toBe(1);
+        expect(repository.renew).toHaveBeenCalledTimes(3);
+        expect(repository.complete).not.toHaveBeenCalled();
+        held();
+        await processing;
+        expect(repository.complete).toHaveBeenCalledTimes(1);
+        const renewals = repository.renew.mock.calls.length;
+        await jest.advanceTimersByTimeAsync(60_000);
+        expect(repository.renew).toHaveBeenCalledTimes(renewals);
+      } finally { jest.useRealTimers(); }
+    });
   });
 });

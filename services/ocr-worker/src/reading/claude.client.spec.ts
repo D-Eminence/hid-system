@@ -1,4 +1,5 @@
-import { AiRejectedError, AiTransientError, ClaudePageClient, retryAfterMs } from './claude.client';
+import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient, retryAfterMs } from './claude.client';
+import { Semaphore } from '../semaphore';
 import { SYSTEM_PROMPT } from './prompt';
 import { modelItem, modelPage } from './test-fixtures';
 
@@ -33,6 +34,16 @@ function sse(text: string, stopReason = 'end_turn'): Response {
 function failure(status: number, type: string, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify({ type: 'error', error: { type, message: 'secret detail from the API' } }),
     { status, headers: { 'content-type': 'application/json', ...headers } });
+}
+
+/** A stream that reported 10 input tokens and 1 output token, then an overloaded error event. */
+function brokenStream(): Response {
+  return new Response('event: message_start\ndata: ' + JSON.stringify({ type: 'message_start', message: {
+    id: 'msg_test', type: 'message', role: 'assistant', model: 'claude-sonnet-5-5', content: [], stop_reason: null,
+    stop_sequence: null, stop_details: null, usage: { input_tokens: 10, output_tokens: 1 } } })
+    + '\n\nevent: error\ndata: ' + JSON.stringify({ type: 'error', error: { type: 'overloaded_error',
+      message: 'secret detail from the API' } }) + '\n\n',
+  { status: 200, headers: { 'content-type': 'text/event-stream' } });
 }
 
 function client(responses: Array<Response | Error>) {
@@ -107,6 +118,9 @@ describe('ClaudePageClient', () => {
     const error = await instance.readPage(request, new AbortController().signal).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(AiTransientError);
     expect((error as AiTransientError).code).toBe('AI_HTTP_529');
+    // Every request it made is carried, so the usage record counts them; no tokens were reported.
+    expect(error).toMatchObject({ attempts: 4, usage: { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0,
+      cacheCreationInputTokens: 0 } });
     expect(fetch).toHaveBeenCalledTimes(4);
     expect(String(error)).not.toContain('secret detail');
   });
@@ -118,6 +132,7 @@ describe('ClaudePageClient', () => {
       const error = await instance.readPage(request, new AbortController().signal).catch((caught: unknown) => caught);
       expect(error).toBeInstanceOf(AiRejectedError);
       expect((error as AiRejectedError).code).toBe(code);
+      expect((error as AiRejectedError).attempts).toBe(1);
       expect(fetch).toHaveBeenCalledTimes(1);
     });
 
@@ -129,16 +144,45 @@ describe('ClaudePageClient', () => {
         message: 'secret detail from the API' } }) + '\n\n',
     { status: 200, headers: { 'content-type': 'text/event-stream' } });
     const { instance, fetch } = client([broken, sse(JSON.stringify(answer))]);
-    await expect(instance.readPage(request, new AbortController().signal)).resolves.toMatchObject({ kind: 'answer', attempts: 2 });
+    // The tokens the broken stream had already reported are added to the answer's usage.
+    await expect(instance.readPage(request, new AbortController().signal)).resolves.toMatchObject({ kind: 'answer',
+      attempts: 2, usage: { inputTokens: 121, outputTokens: 301, cacheReadInputTokens: 900 } });
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it('carries the attempts and the tokens already reported when broken streams outlast the attempts', async () => {
+    const { instance, fetch } = client([1, 2, 3, 4].map(() => brokenStream()));
+    const error = await instance.readPage(request, new AbortController().signal).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AiTransientError);
+    expect(error).toMatchObject({ code: 'AI_STREAM_ERROR', attempts: 4,
+      usage: { inputTokens: 40, outputTokens: 4, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } });
+    expect(fetch).toHaveBeenCalledTimes(4);
+    expect(String(error)).not.toContain('secret detail');
+  });
+
+  it('carries the attempts already made when the worker shuts down during a backoff', async () => {
+    const controller = new AbortController();
+    const reason = new Error('worker shutdown');
+    const fetch = jest.fn(async () => failure(529, 'overloaded_error'));
+    const sleep = jest.fn(async (_ms: number, signal?: AbortSignal) => { controller.abort(reason); throw signal!.reason; });
+    const instance = new ClaudePageClient(config, { fetch: fetch as unknown as typeof globalThis.fetch, sleep,
+      random: () => 0.5 });
+    const error = await instance.readPage(request, controller.signal).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AiInterruptedError);
+    expect(error).toMatchObject({ reason, attempts: 1, message: 'AI_INTERRUPTED' });
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 
   it('stops at once when the worker shuts down', async () => {
     const controller = new AbortController();
     const { instance, fetch } = client([failure(529, 'overloaded_error'), sse(JSON.stringify(answer))]);
-    controller.abort(new Error('worker shutdown'));
-    await expect(instance.readPage(request, controller.signal)).rejects.toThrow('worker shutdown');
+    const reason = new Error('worker shutdown');
+    controller.abort(reason);
+    const error = await instance.readPage(request, controller.signal).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AiInterruptedError);
+    expect((error as AiInterruptedError).reason).toBe(reason);
     expect(fetch.mock.calls.length).toBeLessThanOrEqual(1);
+    expect((error as AiInterruptedError).attempts).toBe(fetch.mock.calls.length);
   });
 
   it('reads retry-after in seconds, milliseconds or as a date, bounded', () => {
@@ -150,5 +194,51 @@ describe('ClaudePageClient', () => {
 
   it('refuses to start without a key', () => {
     expect(() => new ClaudePageClient({ ...config, ANTHROPIC_API_KEY: undefined })).toThrow(/API key/);
+  });
+
+  it('holds the shared request limit for one HTTP attempt only, never across a backoff sleep', async () => {
+    const limiter = new Semaphore(1);
+    let inFlight = 0;
+    let peak = 0;
+    const queue: Array<Response> = [failure(529, 'overloaded_error'), sse(JSON.stringify(answer)), sse(JSON.stringify(answer))];
+    const fetch = jest.fn(async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise((resolve) => setImmediate(resolve));
+      inFlight -= 1;
+      return queue.shift()!;
+    });
+    const held: number[] = [];
+    const sleep = jest.fn(async () => { held.push(limiter.inFlight); });
+    const instance = new ClaudePageClient(config, { fetch: fetch as unknown as typeof globalThis.fetch, sleep,
+      random: () => 0.5, limiter });
+    const answers = await Promise.all([instance.readPage(request, new AbortController().signal),
+      instance.readPage(request, new AbortController().signal)]);
+    expect(answers.map((entry) => entry.kind)).toEqual(['answer', 'answer']);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(peak).toBe(1);
+    expect(sleep).toHaveBeenCalledTimes(1);
+    // While the first request backed off, its permit was free (the other request may have held it).
+    expect(limiter.inFlight).toBe(0);
+    expect(held.every((count) => count <= 1)).toBe(true);
+  });
+
+  it('builds its limit from OCR_AI_MAX_CONCURRENT_REQUESTS, 4 by default', () => {
+    expect(new ClaudePageClient(config).limiter.limit).toBe(4);
+    expect(new ClaudePageClient({ ...config, OCR_AI_MAX_CONCURRENT_REQUESTS: 7 }).limiter.limit).toBe(7);
+  });
+
+  it('stops waiting for a permit on shutdown without calling the API', async () => {
+    const limiter = new Semaphore(1);
+    const release = await limiter.acquire();
+    const { fetch } = client([]);
+    const instance = new ClaudePageClient(config, { fetch: fetch as unknown as typeof globalThis.fetch, limiter });
+    const controller = new AbortController();
+    const pending = instance.readPage(request, controller.signal);
+    const reason = new Error('worker shutdown');
+    controller.abort(reason);
+    await expect(pending).rejects.toMatchObject({ reason, attempts: 0 });
+    expect(fetch).not.toHaveBeenCalled();
+    release();
   });
 });

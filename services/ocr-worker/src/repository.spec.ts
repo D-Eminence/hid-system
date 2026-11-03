@@ -92,3 +92,44 @@ describe('PostgresWorkerRepository page allowance (migration 0110)', () => {
     expect(calls().some(([sql]) => sql === 'rollback')).toBe(true);
   });
 });
+
+describe('PostgresWorkerRepository fair claim and AI use (migration 0110)', () => {
+  const job = { jobId: '00000000-0000-4000-8000-000000000001', claimToken: '00000000-0000-4000-8000-000000000002',
+    correlationId: 'ocr-worker-correlation' } as ClaimedOcrJob;
+  beforeEach(() => {
+    mockClientQuery.mockReset();
+    mockClientQuery.mockResolvedValue({ rows: [] });
+  });
+  function calls() { return mockClientQuery.mock.calls.map(([sql, params]) => [String(sql), params]); }
+
+  it('claims through ocr.claim_worker_job_fair with the per-facility cap, never the unfair claim', async () => {
+    const repository = new PostgresWorkerRepository(config);
+    await expect(repository.claim('textract', 300, 2, 'ocr-worker-claim')).resolves.toBeNull();
+    const [begin, setConfig, call, commit] = calls();
+    expect(begin![0]).toBe('begin');
+    expect(setConfig![1]).toEqual(['workload:ocr-worker', 'ocr-worker-claim']);
+    expect(call![0]).toBe('select * from ocr.claim_worker_job_fair($1, $2, $3)');
+    expect(call![1]).toEqual(['textract', 300, 2]);
+    expect(commit![0]).toBe('commit');
+  });
+
+  it('maps a fairly claimed job', async () => {
+    mockClientQuery.mockImplementation(async (sql: string) => ({ rows: /claim_worker_job_fair/.test(sql) ? [{
+      job_id: job.jobId, facility_id: 'f', document_id: 'd', patient_id: null, storage_bucket: 'b', storage_key: 'k',
+      object_version_id: 'v', source_sha256_hex: 'a'.repeat(64), size_bytes: '42', media_type: 'image/png',
+      provider: 'textract', attempt_no: 1, max_attempts: 3, claim_token: job.claimToken,
+      claim_expires_at: new Date('2026-11-03T10:05:00Z'), correlation_id: 'ocr-worker-claim' }] : [] }));
+    const claimed = await new PostgresWorkerRepository(config).claim('textract', 300, 2, 'ocr-worker-claim');
+    expect(claimed).toMatchObject({ jobId: job.jobId, sizeBytes: 42, claimToken: job.claimToken });
+  });
+
+  it('records one model\'s use for the held claim with counts only and the correlation id', async () => {
+    await new PostgresWorkerRepository(config).recordAiUsage(job, { model: 'claude-sonnet-5-5', requests: 2,
+      inputTokens: 1200, outputTokens: 400, cacheReadTokens: 3000, cacheWriteTokens: 15 });
+    const call = calls()[2]!;
+    expect(call[0]).toBe('select ocr.record_worker_ai_usage($1,$2,$3,$4,$5,$6,$7,$8,$9)');
+    expect(call[1]).toEqual([job.jobId, job.claimToken, 'claude-sonnet-5-5', 2, 1200, 400, 3000, 15, job.correlationId]);
+    expect(calls()[3]![0]).toBe('commit');
+  });
+});
+

@@ -1,7 +1,8 @@
 import type { OcrWorkerConfig } from '../config';
-import type { ReadLine, ReadPage } from '../types';
-import { AiRejectedError, AiTransientError, INFERENCE_GEO, type Effort, type PageAnswer,
-  type PageModelClient, type TokenUsage } from './claude.client';
+import { forEachBounded } from '../semaphore';
+import type { AiUsageRecord, ReadLine, ReadPage } from '../types';
+import { AiInterruptedError, AiRejectedError, AiTransientError, INFERENCE_GEO, type AiCallUse, type Effort,
+  type PageAnswer, type PageModelClient, type TokenUsage } from './claude.client';
 import {
   PAPER_READING_CONTRACT, PAPER_READING_SCHEMA_VERSION, type FlagReason, type PaperIdentity, type PaperItem,
   type PaperPage, type PaperReadingPayload, type ReadingStatus,
@@ -11,7 +12,9 @@ import { createMasker, type Masker } from './masking';
 import { MODEL_SCHEMA_VERSION, PROMPT_VERSION } from './prompt';
 
 export type ReadingConfig = Pick<OcrWorkerConfig, 'OCR_AI_MODE' | 'OCR_AI_FACILITY_IDS' | 'OCR_AI_FIRST_PASS_MODEL'
-  | 'OCR_AI_FIRST_PASS_EFFORT' | 'OCR_AI_REREAD_MODEL' | 'OCR_AI_REREAD_EFFORT' | 'OCR_AI_MAX_REREAD_PAGES'>;
+  | 'OCR_AI_FIRST_PASS_EFFORT' | 'OCR_AI_REREAD_MODEL' | 'OCR_AI_REREAD_EFFORT' | 'OCR_AI_MAX_REREAD_PAGES'>
+  // Pages of one document read at once; one at a time when not given.
+  & Partial<Pick<OcrWorkerConfig, 'OCR_AI_PAGE_CONCURRENCY'>>;
 
 export interface ReadingInput {
   facilityId: string;
@@ -38,13 +41,44 @@ export interface ReadingSummary {
   maskedNumbers: number;
   failureCode: string | null;
   usage: TokenUsage;
+  /** The same use per model (requests and tokens), for ocr.record_worker_ai_usage; not stored in provenance. */
+  modelUsage: AiUsageRecord[];
 }
 
 export interface ReadingOutcome { payload: PaperReadingPayload; summary: ReadingSummary }
 
 /** The AI step's transient failure, after its own retries; the worker decides whether the job retries. */
 export class ReadingUnavailableError extends Error {
-  constructor(readonly code: string, readonly usage: TokenUsage) { super(code); this.name = 'ReadingUnavailableError'; }
+  constructor(readonly code: string, readonly usage: TokenUsage, readonly modelUsage: AiUsageRecord[] = []) {
+    super(code); this.name = 'ReadingUnavailableError';
+  }
+}
+
+/**
+ * Reading stopped for another reason (the worker shutting down, or an unexpected error) after the AI step had
+ * started. It carries what was used until then so the worker can still record it while the job is held;
+ * `cause` is the original error (for a shutdown, the abort signal's reason), which the worker handles as before.
+ */
+export class ReadingInterruptedError extends Error {
+  constructor(override readonly cause: unknown, readonly usage: TokenUsage, readonly modelUsage: AiUsageRecord[]) {
+    super('READING_INTERRUPTED'); this.name = 'ReadingInterruptedError';
+  }
+}
+
+/** Per-model totals of what the AI step used, in the order the models were first asked. */
+class ModelUsageTally {
+  private readonly byModel = new Map<string, AiUsageRecord>();
+  add(model: string, attempts: number, usage: TokenUsage): void {
+    const entry = this.byModel.get(model) ?? { model, requests: 0, inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0 };
+    entry.requests += attempts;
+    entry.inputTokens += usage.inputTokens;
+    entry.outputTokens += usage.outputTokens;
+    entry.cacheReadTokens += usage.cacheReadInputTokens;
+    entry.cacheWriteTokens += usage.cacheCreationInputTokens;
+    this.byModel.set(model, entry);
+  }
+  list(): AiUsageRecord[] { return [...this.byModel.values()].map((entry) => ({ ...entry })); }
 }
 
 interface PageState {
@@ -80,10 +114,12 @@ export class PaperReadingService {
 
   /** A payload with no AI items (AI off, no text, or AI failed on the last attempt). */
   withoutItems(input: ReadingInput, status: Exclude<ReadingStatus, 'read' | 'ai_declined'>,
-    usage: TokenUsage = zeroUsage(), failureCode: string | null = null): ReadingOutcome {
+    usage: TokenUsage = zeroUsage(), failureCode: string | null = null,
+    modelUsage: readonly AiUsageRecord[] = []): ReadingOutcome {
     const pages = input.pages.map((page) => lineOnlyPage(page));
     const aiUsed = status === 'ai_failed';
-    const summary = this.summary(status, pages, [], 0, 0, [], 0, aiUsed, usage, 0, 0, 0, 0, null, failureCode);
+    const summary = this.summary(status, pages, [], 0, 0, [], 0, aiUsed, usage, 0, 0, 0, 0, null, failureCode,
+      false, modelUsage.map((entry) => ({ ...entry })));
     return { payload: this.payload(pages, blankIdentity(), [], summary), summary };
   }
 
@@ -93,6 +129,11 @@ export class PaperReadingService {
     if (!this.enabledFor(input.facilityId)) return this.withoutItems(input, 'ai_off');
     const client = this.client!;
     const usage = zeroUsage();
+    const tally = new ModelUsageTally();
+    const pageConcurrency = this.config.OCR_AI_PAGE_CONCURRENCY ?? 1;
+    // Any other way out after the AI step started keeps what was used, so the worker can record it.
+    const interrupted = (error: unknown) => new ReadingInterruptedError(
+      error instanceof AiInterruptedError ? error.reason : error, { ...usage }, tally.list());
     let requests = 0;
     let refusals = 0;
     let servedGeo: string | null = null;
@@ -102,28 +143,47 @@ export class PaperReadingService {
         first: null, firstCheck: null, final: null, declined: false, failed: false, reread: 'none' };
     });
     const ask = async (state: PageState, model: string, effort: Effort) => {
-      const answer = await client.readPage({ model, effort, page: state.page, lines: state.lines }, signal);
+      let answer: PageAnswer;
+      try {
+        answer = await client.readPage({ model, effort, page: state.page, lines: state.lines }, signal);
+      } catch (error) {
+        // A call that ended without an answer still made requests (and may have used tokens): count them.
+        // A call stopped before its first request (waiting for a permit) made none and adds nothing.
+        if ((error instanceof AiTransientError || error instanceof AiRejectedError || error instanceof AiInterruptedError)
+          && error.attempts > 0) {
+          const spent: AiCallUse = error;
+          requests += spent.attempts;
+          addUsage(usage, spent.usage);
+          tally.add(model, spent.attempts, spent.usage);
+        }
+        throw error;
+      }
       requests += answer.attempts;
       addUsage(usage, answer.usage);
+      tally.add(model, answer.attempts, answer.usage);
       if (answer.kind === 'refused') refusals += 1;
       if (answer.kind === 'answer' && answer.servedInferenceGeo) servedGeo = answer.servedInferenceGeo;
       return answer;
     };
 
-    // First pass: every page with text, one request each, so a flagged page can be re-read alone.
+    // First pass: every page with text, one request each, so a flagged page can be re-read alone. Up to
+    // OCR_AI_PAGE_CONCURRENCY pages at once (each request also waits for the process-wide request limit);
+    // after a failure no further page starts, and the pages already asked are awaited so their use counts.
     try {
-      for (const state of states) {
+      await forEachBounded(states, pageConcurrency, async (state) => {
         state.first = await ask(state, this.config.OCR_AI_FIRST_PASS_MODEL, this.config.OCR_AI_FIRST_PASS_EFFORT);
         if (state.first.kind === 'answer') {
           state.firstCheck = checkPage({ page: state.page, lines: state.lines, answer: state.first.answer,
             sourceSha256Hex: input.sourceSha256Hex, readBy: 'first_pass', masker: state.masker });
           state.final = state.firstCheck;
         }
-      }
+      });
     } catch (error) {
-      if (error instanceof AiTransientError) throw new ReadingUnavailableError(error.code, usage);
-      if (error instanceof AiRejectedError) return this.withoutItems(input, 'ai_failed', usage, error.code);
-      throw error;
+      if (error instanceof AiTransientError) throw new ReadingUnavailableError(error.code, usage, tally.list());
+      if (error instanceof AiRejectedError) {
+        return this.withoutItems(input, 'ai_failed', usage, error.code, tally.list());
+      }
+      throw interrupted(error);
     }
 
     // Re-read: refused or failed pages first, then flagged pages in page order, up to the cap.
@@ -131,9 +191,8 @@ export class PaperReadingService {
       ...states.filter((state) => state.first?.kind !== 'answer'),
       ...states.filter((state) => state.firstCheck !== null && state.firstCheck.rereadReasons.length > 0),
     ].slice(0, this.config.OCR_AI_MAX_REREAD_PAGES);
-    let rereadAttempted = false;
-    for (const state of candidates) {
-      rereadAttempted = true;
+    const rereadAttempted = candidates.length > 0;
+    await forEachBounded(candidates, pageConcurrency, async (state) => {
       let answer: PageAnswer | null = null;
       try {
         answer = await ask(state, this.config.OCR_AI_REREAD_MODEL, this.config.OCR_AI_REREAD_EFFORT);
@@ -145,13 +204,13 @@ export class PaperReadingService {
         state.final = checkPage({ page: state.page, lines: state.lines, answer: answer.answer,
           sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker });
         state.reread = 'done';
-        continue;
+        return;
       }
       state.reread = 'failed';
       if (state.first?.kind === 'refused') state.declined = answer?.kind === 'refused' || answer === null;
       else if (state.first?.kind === 'failed') state.failed = true;
       else if (state.firstCheck) state.final = markRereadFailed(state.firstCheck);
-    }
+    }).catch((error: unknown) => { throw interrupted(error); });
     for (const state of states) {
       if (state.first?.kind === 'refused' && state.final === null) state.declined = true;
       if (state.first?.kind === 'failed' && state.final === null) state.failed = true;
@@ -183,14 +242,14 @@ export class PaperReadingService {
     const rereadPages = states.filter((state) => state.reread === 'done').map((state) => state.page);
     const summary = this.summary(status, pages, kept, dropped, droppedFirst, rereadPages,
       states.filter((state) => state.reread === 'failed').length, true, usage, requests, refusals, states.length,
-      states.reduce((sum, state) => sum + state.masker.count, 0), servedGeo, null, rereadAttempted);
+      states.reduce((sum, state) => sum + state.masker.count, 0), servedGeo, null, rereadAttempted, tally.list());
     return { payload: this.payload(pages, status === 'read' ? identity : blankIdentity(), kept, summary), summary };
   }
 
   private summary(status: ReadingStatus, pages: readonly PaperPage[], items: readonly PaperItem[], dropped: number,
     droppedFirst: number, rereadPages: number[], rereadFailed: number, aiUsed: boolean, usage: TokenUsage,
     requests: number, refusals: number, pagesSent: number, masked: number, servedGeo: string | null,
-    failureCode: string | null, rereadAttempted = false): ReadingSummary {
+    failureCode: string | null, rereadAttempted = false, modelUsage: AiUsageRecord[] = []): ReadingSummary {
     return {
       status,
       firstPassModel: aiUsed ? this.config.OCR_AI_FIRST_PASS_MODEL : null,
@@ -200,6 +259,7 @@ export class PaperReadingService {
       requests, refusals, pagesSent, rereadPages, rereadFailedPages: rereadFailed,
       droppedUngrounded: dropped, droppedUngroundedFirstPass: droppedFirst, itemCount: items.length,
       flaggedPages: pages.filter((page) => page.flagged).length, maskedNumbers: masked, failureCode, usage,
+      modelUsage,
     };
   }
 

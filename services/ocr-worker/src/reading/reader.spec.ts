@@ -1,6 +1,6 @@
-import { AiRejectedError, AiTransientError, type PageAnswer, type PageModelClient } from './claude.client';
+import { AiInterruptedError, AiRejectedError, AiTransientError, type PageAnswer, type PageModelClient } from './claude.client';
 import { paperReadingPayloadSchema } from './contract';
-import { PaperReadingService, ReadingUnavailableError, type ReadingConfig } from './reader';
+import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type ReadingConfig } from './reader';
 import { CLINIC_PAGE, modelItem, modelPage, readPage, SOURCE_SHA } from './test-fixtures';
 import type { ModelPage } from './prompt';
 
@@ -170,5 +170,117 @@ describe('PaperReadingService', () => {
     const { payload } = await new PaperReadingService(config, client).read(input(), signal());
     expect(payload.reading.status).toBe('ai_failed');
     expect(payload.pages[0]!.flagReasons).toContain('ai_unsure');
+  });
+
+  describe('page concurrency and per-model use', () => {
+    const page2 = readPage(2, ['Dx: Hypertension', 'BP 140/90']);
+    const page3 = readPage(3, ['Dx: Hypertension']);
+    const onPage = (page: number) => modelPage([modelItem({ kind: 'diagnosis', asWritten: 'Hypertension',
+      lineIds: [`p${page}-l${page === 1 ? 2 : 1}`], name: 'Hypertension', status: 'confirmed', plain: 'High blood pressure' })]);
+
+    it('reads at most OCR_AI_PAGE_CONCURRENCY pages of one document at once, with the same result', async () => {
+      let running = 0;
+      let peak = 0;
+      const client: PageModelClient = { readPage: jest.fn(async (request) => {
+        running += 1;
+        peak = Math.max(peak, running);
+        await new Promise((resolve) => setImmediate(resolve));
+        running -= 1;
+        return ok(onPage(request.page));
+      }) };
+      const pages = [CLINIC_PAGE, page2, page3];
+      const parallel = await new PaperReadingService({ ...config, OCR_AI_PAGE_CONCURRENCY: 2 }, client)
+        .read(input(pages), signal());
+      expect(peak).toBe(2);
+      peak = 0;
+      const serial = await new PaperReadingService(config, client).read(input(pages), signal());
+      expect(peak).toBe(1);
+      expect(parallel.payload).toEqual(serial.payload);
+      expect(parallel.payload.items.map((item) => item.lineIds[0])).toEqual(['p1-l2', 'p2-l1', 'p3-l1']);
+    });
+
+    it('totals requests and tokens per model, first pass and re-read apart', async () => {
+      const { client } = fakeClient((request) => request.model === 'claude-sonnet-5-5'
+        ? ok(modelPage([modelItem({ kind: 'diagnosis', asWritten: 'Not on this page', lineIds: ['p1-l2'] })]))
+        : { kind: 'answer', answer: clearPage, attempts: 2, servedInferenceGeo: 'global',
+          usage: { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 7, cacheCreationInputTokens: 3 } });
+      const { summary } = await new PaperReadingService(config, client).read(input(), signal());
+      expect(summary.modelUsage).toEqual([
+        { model: 'claude-sonnet-5-5', requests: 1, inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        { model: 'claude-opus-5-5', requests: 2, inputTokens: 10, outputTokens: 5, cacheReadTokens: 7, cacheWriteTokens: 3 },
+      ]);
+      expect(summary.requests).toBe(3);
+    });
+
+    it('carries the use of the pages already read on a transient failure and on a rejection', async () => {
+      const transient = fakeClient((request) => request.page === 1 ? ok(clearPage) : new AiTransientError('AI_HTTP_529'));
+      const error = await new PaperReadingService(config, transient.client).read(input([CLINIC_PAGE, page2]), signal())
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ReadingUnavailableError);
+      expect((error as ReadingUnavailableError).modelUsage).toEqual([{ model: 'claude-sonnet-5-5', requests: 1,
+        inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 }]);
+      const rejected = fakeClient((request) => request.page === 1 ? ok(clearPage) : new AiRejectedError('AI_BAD_REQUEST'));
+      const outcome = await new PaperReadingService(config, rejected.client).read(input([CLINIC_PAGE, page2]), signal());
+      expect(outcome.summary.status).toBe('ai_failed');
+      expect(outcome.summary.modelUsage).toHaveLength(1);
+    });
+
+    it('counts the requests and tokens of calls that end in an error, not only of answers', async () => {
+      const spent = { inputTokens: 30, outputTokens: 2, cacheReadInputTokens: 900, cacheCreationInputTokens: 0 };
+      // Every attempt overloaded: 5 requests, no answer.
+      const down = fakeClient(() => new AiTransientError('AI_HTTP_529', 5));
+      const error = await new PaperReadingService(config, down.client).read(input(), signal())
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ReadingUnavailableError);
+      expect((error as ReadingUnavailableError).modelUsage).toEqual([{ model: 'claude-sonnet-5-5', requests: 5,
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }]);
+      // A rejection after a cut-off stream: its request and reported tokens count.
+      const rejected = fakeClient(() => new AiRejectedError('AI_STREAM_ERROR', 1, spent));
+      const outcome = await new PaperReadingService(config, rejected.client).read(input(), signal());
+      expect(outcome.summary).toMatchObject({ status: 'ai_failed', modelUsage: [{ model: 'claude-sonnet-5-5',
+        requests: 1, inputTokens: 30, outputTokens: 2, cacheReadTokens: 900, cacheWriteTokens: 0 }] });
+      // A re-read that fails is swallowed, but its requests still count.
+      const reread = fakeClient((request) => request.model === 'claude-sonnet-5-5' ? refused
+        : new AiTransientError('AI_TIMEOUT', 3, spent));
+      const { summary } = await new PaperReadingService(config, reread.client).read(input(), signal());
+      expect(summary.requests).toBe(4);
+      expect(summary.modelUsage).toEqual([
+        { model: 'claude-sonnet-5-5', requests: 1, inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 },
+        { model: 'claude-opus-5-5', requests: 3, inputTokens: 30, outputTokens: 2, cacheReadTokens: 900, cacheWriteTokens: 0 },
+      ]);
+      expect(summary.usage).toEqual({ inputTokens: 130, outputTokens: 52, cacheReadInputTokens: 900,
+        cacheCreationInputTokens: 0 });
+    });
+
+    it('keeps what was used when reading is interrupted by shutdown, and rethrows the shutdown reason as cause', async () => {
+      const reason = new Error('worker shutdown');
+      const page3 = readPage(3, ['Third page line']);
+      const { client, calls } = fakeClient((request) => request.page === 1 ? ok(clearPage)
+        : new AiInterruptedError(reason, 1, { inputTokens: 7, outputTokens: 0, cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0 }));
+      const error = await new PaperReadingService(config, client).read(input([CLINIC_PAGE, page2, page3]), signal())
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(ReadingInterruptedError);
+      expect((error as ReadingInterruptedError).cause).toBe(reason);
+      expect((error as ReadingInterruptedError).modelUsage).toEqual([{ model: 'claude-sonnet-5-5', requests: 2,
+        inputTokens: 107, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 }]);
+      // No page starts after the interruption.
+      expect(calls.map((call) => call.page)).toEqual([1, 2]);
+      // The same during the re-read pass.
+      const during = fakeClient((request) => request.model === 'claude-sonnet-5-5' ? refused
+        : new AiInterruptedError(reason, 0, { inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0,
+          cacheCreationInputTokens: 0 }));
+      const rereadError = await new PaperReadingService(config, during.client).read(input(), signal())
+        .catch((caught: unknown) => caught);
+      expect(rereadError).toBeInstanceOf(ReadingInterruptedError);
+      expect((rereadError as ReadingInterruptedError).modelUsage).toEqual([{ model: 'claude-sonnet-5-5', requests: 1,
+        inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 }]);
+    });
+
+    it('reports no model use when AI reading is off', async () => {
+      const { client } = fakeClient(() => ok(clearPage));
+      const { summary } = await new PaperReadingService({ ...config, OCR_AI_MODE: 'off' }, client).read(input(), signal());
+      expect(summary.modelUsage).toEqual([]);
+    });
   });
 });

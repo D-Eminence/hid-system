@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import type { OcrWorkerConfig } from './config';
 import { paperReadingPayloadSchema } from './reading/contract';
-import { PaperReadingService, ReadingUnavailableError, type ReadingOutcome } from './reading/reader';
-import { DocumentTooManyPagesFailure, SafeWorkerFailure, type ClaimedOcrJob, type CompletedExtraction,
+import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type ReadingOutcome } from './reading/reader';
+import { DocumentTooManyPagesFailure, SafeWorkerFailure, type AiUsageRecord, type ClaimedOcrJob, type CompletedExtraction,
   type DocumentReader, type TextReading, type WorkerOcrProvider, type WorkerRepository } from './types';
 
 const MAX_RECORDED_PAGES = 200;
@@ -20,7 +20,9 @@ export class OcrWorker {
     this.acceptingClaims = true;
     this.log('info', 'ocr.worker.ready', { provider: this.provider.name,
       acceptingClaims: true, concurrency: this.config.OCR_WORKER_CONCURRENCY,
-      remoteProviderCheck: false });
+      maxInFlightPerFacility: this.config.OCR_WORKER_MAX_INFLIGHT_PER_FACILITY,
+      aiMaxConcurrentRequests: this.config.OCR_AI_MAX_CONCURRENT_REQUESTS,
+      textractMaxConcurrent: this.config.OCR_TEXTRACT_MAX_CONCURRENT, remoteProviderCheck: false });
     await Promise.all(Array.from({ length: this.config.OCR_WORKER_CONCURRENCY }, (_, index) => this.claimLoop(index)));
     await this.repository.close();
     this.log('info', 'ocr.worker.stopped', { acceptingClaims: false });
@@ -60,6 +62,8 @@ export class OcrWorker {
       // Every read is counted, even with AI reading off; a document reads as at least one page.
       const after = await this.repository.recordPages(job, Math.max(1, text.pageCount));
       const outcome = await this.readItems(job, text);
+      // Before completion, so the job is still held; a failure to record never fails the job.
+      await this.recordAiUsage(job, outcome.summary.modelUsage);
       const completion = buildCompletion(text, outcome);
       const checked = paperReadingPayloadSchema.safeParse(completion.structuredPayload);
       if (!checked.success) {
@@ -118,13 +122,21 @@ export class OcrWorker {
     try {
       outcome = await this.reading.read(input, this.shutdown.signal);
     } catch (error) {
+      if (error instanceof ReadingInterruptedError) {
+        // A shutdown (or an unexpected error) mid-reading: the claim is still held, so what the pages already
+        // asked used is recorded before the job is failed; the original error is then handled as before.
+        await this.recordAiUsage(job, error.modelUsage);
+        throw error.cause;
+      }
       if (!(error instanceof ReadingUnavailableError)) throw error;
       this.log('warn', 'ocr.reading.unavailable', { jobId: job.jobId, correlationId: job.correlationId,
         code: error.code, attempt: job.attemptNo, maxAttempts: job.maxAttempts, finalAttempt: job.attemptNo >= job.maxAttempts });
       if (job.attemptNo < job.maxAttempts) {
+        // What this attempt used is still counted (per attempt, so the retry adds its own).
+        await this.recordAiUsage(job, error.modelUsage);
         throw new SafeWorkerFailure('AI_UNAVAILABLE', 'AI reading is temporarily unavailable', true, 60);
       }
-      outcome = this.reading.withoutItems(input, 'ai_failed', error.usage, error.code);
+      outcome = this.reading.withoutItems(input, 'ai_failed', error.usage, error.code, error.modelUsage);
     }
     if (outcome.summary.status === 'ai_failed' && outcome.summary.failureCode) {
       this.log('warn', 'ocr.reading.ai_failed', { jobId: job.jobId, correlationId: job.correlationId,
@@ -133,12 +145,25 @@ export class OcrWorker {
     return outcome;
   }
 
+  /** One ocr.record_worker_ai_usage per model used; counts only. A failure is logged with a safe code. */
+  private async recordAiUsage(job: ClaimedOcrJob, usage: readonly AiUsageRecord[]): Promise<void> {
+    for (const entry of usage) {
+      if (entry.requests <= 0) continue;
+      try {
+        await this.repository.recordAiUsage(job, entry);
+      } catch (error) {
+        this.log('error', 'ocr.reading.usage_record_failed', { jobId: job.jobId, correlationId: job.correlationId,
+          model: entry.model, code: safeErrorCode(error) });
+      }
+    }
+  }
+
   private async claimLoop(workerIndex: number): Promise<void> {
     let consecutiveErrors = 0;
     while (!this.shutdown.signal.aborted) {
       try {
         const job = await this.repository.claim(this.provider.name, this.config.OCR_WORKER_LEASE_SECONDS,
-          `ocr-worker-${randomUUID()}`);
+          this.config.OCR_WORKER_MAX_INFLIGHT_PER_FACILITY, `ocr-worker-${randomUUID()}`);
         consecutiveErrors = 0;
         if (job) {
           const metrics = await this.repository.metrics().catch((error) => {
