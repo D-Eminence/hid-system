@@ -5,6 +5,7 @@ import type { DatabaseService } from '../../database/database.service';
 import type { IdentityApiService } from '../../integrations/identity-api.service';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { PatientRecordsService } from './patient-records.service';
+import { decodePatientEntryCursor } from '../patient-entries/patient-entries.query';
 
 // PATIENT_ENTRIES_ENABLED (0116), off unless a test turns it on.
 let mockEntriesEnabled = false;
@@ -87,18 +88,21 @@ describe('Owning EHR patient and emergency read boundary', () => {
     const { service, query, recordWithClient } = setup();
     const stored = (n: number) => ({ id: `33333333-3333-4333-8333-${String(n).padStart(12, '0')}`, kind: 'medicine',
       title: `Synthetic medicine ${n}`, facility_name: null, occurred_on: '2026-10-01', notes: 'Twice a day',
-      created_at: new Date('2026-10-01T08:00:00.000Z') });
+      created_at: new Date('2026-10-01T08:00:00.000Z'), cursor_at: `2026-10-01T08:00:00.${String(n).padStart(6, '0')}Z` });
     query.mockImplementation(async (sql: string) => ({ rows: sql.includes('from ehr.patient_entries')
       ? Array.from({ length: 51 }, (_, i) => stored(i)) : [] }));
     const value = await service.self(request) as Record<string, unknown>;
     expect(value).toMatchObject({ encounters: [], notes: [], importedRecords: [], importedHealthProfile: null, limit: 50,
-      patientEntriesMore: true });
+      patientEntriesMore: true, patientEntriesNextBefore: expect.stringMatching(/^[A-Za-z0-9_-]{16,512}$/) });
+    // The cursor continues the list on GET ehr/me/patient-entries?before=, after the 50th entry.
+    expect(decodePatientEntryCursor(value.patientEntriesNextBefore as string, 'patient-id'))
+      .toEqual({ occurredOn: '2026-10-01', createdAt: '2026-10-01T08:00:00.000049Z', id: stored(49).id });
     expect(value.patientEntries).toHaveLength(50);
     expect((value.patientEntries as unknown[])[0]).toEqual({ id: stored(0).id, source: 'patient', kind: 'medicine',
       title: 'Synthetic medicine 0', facilityName: null, occurredOn: '2026-10-01', notes: 'Twice a day',
       createdAt: '2026-10-01T08:00:00.000Z', documents: [] });
     const entriesQuery = query.mock.calls.find(([sql]) => String(sql).includes('from ehr.patient_entries'))!;
-    expect(entriesQuery[1]).toEqual(['patient-id']);
+    expect(entriesQuery[1]).toEqual(['patient-id', null, null, null]);
     expect(entriesQuery[0]).toContain("status = 'active'");
     expect(recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       action: 'ehr.patient.self.records.read', details: expect.objectContaining({ patientEntryCount: 50 }) }));

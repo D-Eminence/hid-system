@@ -17,8 +17,9 @@
 --   5. 30 a day: withdrawn rows count, a row 25 hours old does not; the
 --      31st is limited, writes no row and is audited as denied.
 --   6. Invalid input refused (22023): kind, title length and line breaks,
---      control characters, notes length and tab, a facility name too long,
---      dates before 1900 or after today in Lagos, a malformed key or digest.
+--      control characters, notes length (at most 1000) and tab, a facility
+--      name too long, dates before 1900 or after today in Lagos, a malformed
+--      key or digest; the table's own CHECK refuses 1001 characters of notes.
 --   7. Withdraw: withdrawn, then replayed with the first time; another
 --      patient's entry and an unknown one are not found; hidden from the
 --      patient and the doctor and kept; withdrawn to active, any other change,
@@ -32,7 +33,11 @@
 --  10. Chat evidence: patient_entry is a source kind of both chunk tables
 --      (any other new kind still refused), the CHECKs are validated with the
 --      expected definition, and a withdrawal removes the patient's own
---      chunks of that entry only.
+--      chunks of that entry only. The statement ehr-api runs at each chat
+--      search (withdrawnPatientEntryChunksSql) deletes a removed entry's
+--      vectors from either chunk table under that chat's row-level security
+--      (vectors written again by a search that overlapped the removal, and
+--      the staff chat's), and keeps an active entry's.
 set plpgsql.variable_conflict = error;
 begin;
 set constraints all deferred;
@@ -135,6 +140,13 @@ returns void language sql as $$
     set_config('app.account_id', '', true), set_config('app.session_id', '', true),
     set_config('app.self_authorized_until', '', true);
 $$;
+-- The staff chat's transaction (StaffChatScopeService): the clinician's context plus the chat's own settings.
+create function pg_temp.as_staff_chat(subject text, membership text, facility text, patient text, account text,
+  correlation text) returns void language sql as $$
+  select pg_temp.as_staff(subject, membership, facility, 'direct-care', correlation),
+    set_config('app.chat_patient_id', patient, true), set_config('app.chat_account_id', account, true),
+    set_config('app.chat_authorized_until', (clock_timestamp() + interval '30 seconds')::text, true);
+$$;
 create function pg_temp.sqlstate_of(statement text) returns text language plpgsql as $$
 begin
   execute statement;
@@ -172,7 +184,8 @@ $$;
 create temporary table e6_ids (name text primary key, id uuid not null);
 grant all on e6_ids to public;
 grant execute on function pg_temp.as_patient(text, text), pg_temp.as_ehr_patient(text, text, text, text, text),
-  pg_temp.as_staff(text, text, text, text, text), pg_temp.sqlstate_of(text), pg_temp.as_s(text),
+  pg_temp.as_staff(text, text, text, text, text), pg_temp.as_staff_chat(text, text, text, text, text, text),
+  pg_temp.sqlstate_of(text), pg_temp.as_s(text),
   pg_temp.add(text, text, text, date, text, text, text), pg_temp.withdraw(uuid), pg_temp.vector() to public;
 
 -- Fixtures. Accounts e6a1...: 1 patient S, 2 patient N (the daily limit),
@@ -323,7 +336,7 @@ begin
       pg_temp.add('test', 'Chest film', repeat('h', 161), date '2026-10-01', null, null, repeat('f', 64)),
       pg_temp.add('test', 'Chest film', '', date '2026-10-01', null, null, repeat('f', 64)),
       pg_temp.add('test', 'Chest film', 'Line' || chr(10) || 'break', date '2026-10-01', null, null, repeat('f', 64)),
-      pg_temp.add('test', 'Chest film', null, date '2026-10-01', repeat('n', 2001), null, repeat('f', 64)),
+      pg_temp.add('test', 'Chest film', null, date '2026-10-01', repeat('n', 1001), null, repeat('f', 64)),
       pg_temp.add('test', 'Chest film', null, date '2026-10-01', 'tab' || chr(9) || 'here', null, repeat('f', 64)),
       pg_temp.add('test', 'Chest film', null, date '2026-10-01', '', null, repeat('f', 64)),
       pg_temp.add('test', 'Chest film', null, date '1899-12-31', null, null, repeat('f', 64)),
@@ -334,12 +347,12 @@ begin
       pg_temp.add('test', 'Chest film', null, date '2026-10-01', null, null, null)] loop
     if answer not like '22023 PATIENT_ENTRY_INVALID%' then raise exception 'An invalid entry: %', answer; end if;
   end loop;
-  -- The limits themselves are accepted: 2 and 160 characters, 2000 of notes, 1 January 1900.
+  -- The limits themselves are accepted: 2 and 160 characters, 1000 of notes, 1 January 1900.
   perform pg_temp.as_s('e6-limits-0001');
-  answer := pg_temp.add('other', 'Ok', repeat('h', 160), date '1900-01-01', repeat('n', 1999) || chr(10), null,
+  answer := pg_temp.add('other', 'Ok', repeat('h', 160), date '1900-01-01', repeat('n', 999) || chr(10), null,
     repeat('0', 64));
   if answer !~ '^created\|' then raise exception 'The limits: %', answer; end if;
-  answer := pg_temp.add('diagnosis', repeat('t', 160), 'H', date '2026-10-02', repeat('n', 2000), null, repeat('1', 64));
+  answer := pg_temp.add('diagnosis', repeat('t', 160), 'H', date '2026-10-02', repeat('n', 1000), null, repeat('1', 64));
   if answer !~ '^created\|' then raise exception 'The upper limits: %', answer; end if;
 
   -- 7. Withdraw: first, then again (the first time is kept).
@@ -403,6 +416,13 @@ begin
      or pg_temp.sqlstate_of(format($q$delete from ehr.patient_entries where id = %L$q$, first_id)) not like '55000%'
      or pg_temp.sqlstate_of($q$truncate ehr.patient_entries$q$) not like '55000%' then
     raise exception 'A withdrawn entry came back, an entry was rewritten, or one was deleted';
+  end if;
+  -- 6 (cont.) The table's own CHECK holds notes to 1000 characters, even for its owner.
+  if pg_temp.sqlstate_of($q$insert into ehr.patient_entries (patient_id, kind, title, occurred_on, notes,
+       created_by_account_id, request_sha256) values ('e6b10000-0000-4000-8000-000000000001', 'visit', 'Long notes',
+       date '2026-10-03', repeat('n', 1001), 'e6a10000-0000-4000-8000-000000000001', repeat('6', 64))$q$)
+     not like '23514%' then
+    raise exception 'The table takes notes over 1000 characters';
   end if;
 end $$;
 set local role hid_ehr_api_runtime;
@@ -592,6 +612,57 @@ begin
        'e6a10000-0000-4000-8000-000000000006', 'e6d30000-0000-4000-8000-000000000001', 'direct-care')$q$)
      not like '23514%' then
     raise exception 'The staff chunks take a kind that is not a source kind';
+  end if;
+end $$;
+
+-- 10 (cont.) A removed entry's vectors go at the chat's next search. A search
+-- that checked its sources before the removal may write the patient's vectors
+-- again after it; the staff chat's vectors are never touched by the removal.
+-- ehr-api's statement, as each chat's transaction runs it, deletes both and
+-- keeps the active entry's.
+set local role hid_ehr_api_runtime;
+do $$
+declare
+  medicine_id uuid := (select id from e6_ids where name = 'medicine');
+  older_id uuid;
+begin
+  perform pg_temp.as_s('e6-chunks-0004');
+  select id into older_id from ehr.patient_entries where title = 'Older twin' order by created_at desc limit 1;
+  if older_id is null then raise exception 'The active entry for the vector cleanup is missing'; end if;
+  insert into ehr.patient_evidence_chunks (patient_id, source_kind, source_id, source_version, source_hash, chunk_no,
+    model_id, embedding)
+  values ('e6b10000-0000-4000-8000-000000000001', 'patient_entry', medicine_id, '1', repeat('b', 64), 0, 'e6-model',
+    pg_temp.vector());
+  execute $q$delete from ehr.patient_evidence_chunks chunk where chunk.patient_id = $1 and chunk.source_kind = 'patient_entry' and not exists (select 1 from ehr.patient_entries entry where entry.id = chunk.source_id and entry.patient_id = chunk.patient_id)$q$
+    using 'e6b10000-0000-4000-8000-000000000001'::uuid;
+  if exists (select 1 from ehr.patient_evidence_chunks where source_id = medicine_id)
+     or (select count(*) from ehr.patient_evidence_chunks where source_id = older_id) <> 2 then
+    raise exception 'The patient chat''s search did not delete exactly the removed entry''s vectors';
+  end if;
+  perform pg_temp.as_staff_chat('staff:e6-doctor', 'e6d30000-0000-4000-8000-000000000001',
+    'e6d10000-0000-4000-8000-000000000002', 'e6b10000-0000-4000-8000-000000000001',
+    'e6a10000-0000-4000-8000-000000000006', 'e6-staff-chat-0001');
+  insert into ehr.staff_evidence_chunks (patient_id, source_kind, source_id, source_version, source_hash, chunk_no,
+    model_id, embedding, facility_id, account_id, membership_id, purpose_of_use)
+  select 'e6b10000-0000-4000-8000-000000000001', 'patient_entry', entry, '1', repeat('a', 64), 0, 'e6-model',
+    pg_temp.vector(), 'e6d10000-0000-4000-8000-000000000002', 'e6a10000-0000-4000-8000-000000000006',
+    'e6d30000-0000-4000-8000-000000000001', 'direct-care'
+    from unnest(array[medicine_id, older_id]) entry;
+  if (select count(*) from ehr.staff_evidence_chunks) <> 3 then
+    raise exception 'The doctor''s chat does not see its three vectors before the search';
+  end if;
+  execute $q$delete from ehr.staff_evidence_chunks chunk where chunk.patient_id = $1 and chunk.source_kind = 'patient_entry' and not exists (select 1 from ehr.patient_entries entry where entry.id = chunk.source_id and entry.patient_id = chunk.patient_id)$q$
+    using 'e6b10000-0000-4000-8000-000000000001'::uuid;
+  if (select string_agg(source_id::text, ',') from ehr.staff_evidence_chunks) is distinct from older_id::text then
+    raise exception 'The staff chat''s search did not delete exactly the removed entries'' vectors';
+  end if;
+end $$;
+reset role;
+do $$
+begin
+  if (select count(*) from ehr.staff_evidence_chunks where patient_id = 'e6b10000-0000-4000-8000-000000000001') <> 1
+     or (select count(*) from ehr.patient_evidence_chunks where patient_id = 'e6b10000-0000-4000-8000-000000000001') <> 2 then
+    raise exception 'The vectors left after the searches are not the active entry''s';
   end if;
 end $$;
 

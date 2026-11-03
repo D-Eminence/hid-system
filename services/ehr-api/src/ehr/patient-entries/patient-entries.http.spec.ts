@@ -127,6 +127,8 @@ describe('Records patients add while the setting is off (the default)', () => {
     ['POST', 'me/patient-entries', { kind: 'xray', unexpected: true, attachments: ['x'] }],
     ['POST', `me/patient-entries/${ENTRY_ID}/withdraw`, undefined],
     ['POST', 'me/patient-entries/not-a-uuid/withdraw', undefined],
+    ['GET', 'me/patient-entries', undefined],
+    ['GET', 'me/patient-entries?before=not-a-cursor', undefined],
     ['GET', `patients/${PATIENT_ID}/patient-entries`, undefined],
   ] as const)('answers %s %s with the plain 404, before authentication, validation or audit', async (method, path, body) => {
     await start(undefined);
@@ -161,6 +163,20 @@ describe('Records patients add while the setting is on', () => {
     expect(authorizeSelf).toHaveBeenCalled();
   });
 
+  it('answers a replayed save (the same key and values, or a double tap) 200, not 201, with the same entry', async () => {
+    await start('true');
+    transactionRows = [{ ...(transactionRows[0] as Record<string, unknown>), outcome: 'replayed' }];
+    const replays: Record<string, string>[] = [{ 'idempotency-key': 'web-0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d' }, {}];
+    for (const headers of replays) {
+      const answer = await call('POST', 'me/patient-entries', entry, headers);
+      expect(answer.status).toBe(200);
+      expect(answer.headers['cache-control']).toBe('no-store');
+      expect(answer.body).toMatchObject({ entry: { id: ENTRY_ID }, replayed: true });
+    }
+    transactionRows = [{ ...(transactionRows[0] as Record<string, unknown>), outcome: 'created' }];
+    expect((await call('POST', 'me/patient-entries', entry)).status).toBe(201);
+  });
+
   it('refuses a field it does not know with 400, and photos or files with 422, before Identity and the database', async () => {
     await start('true');
     const unknown = await call('POST', 'me/patient-entries', { ...entry, colour: 'blue' });
@@ -189,10 +205,34 @@ describe('Records patients add while the setting is on', () => {
       withdrawnAt: '2026-11-02T10:00:00.000Z' }, replayed: false }]);
   });
 
-  it('serves no list route of its own, and keeps the staff read from a patient session', async () => {
+  it('lists the patient\'s own records 50 at a time, from a cursor, never cached', async () => {
     await start('true');
+    transactionRows = [{ id: ENTRY_ID, kind: 'visit', title: 'Malaria check-up', facility_name: null,
+      occurred_on: '2026-10-30', notes: null, created_at: new Date('2026-11-02T09:15:00.000Z'),
+      cursor_at: '2026-11-02T09:15:00.000123Z' }];
     const list = await call('GET', 'me/patient-entries');
-    expect([list.status, list.body.code]).toEqual([404, 'NOT_FOUND']);
+    expect(list.status).toBe(200);
+    expect(list.headers['cache-control']).toBe('no-store');
+    expect(list.body).toEqual({ items: [{ id: ENTRY_ID, source: 'patient', kind: 'visit', title: 'Malaria check-up',
+      facilityName: null, occurredOn: '2026-10-30', notes: null, createdAt: '2026-11-02T09:15:00.000Z', documents: [] }],
+      nextBefore: null });
+    expect(authorizeSelf).toHaveBeenCalled();
+    // A cursor of the wrong shape, or a parameter it does not know, is refused before Identity and the database.
+    authorizeSelf.mockClear();
+    const before = transactions;
+    for (const path of ['me/patient-entries?before=short', 'me/patient-entries?limit=100']) {
+      const refused = await call('GET', path);
+      expect([refused.status, refused.body.code]).toEqual([400, 'VALIDATION_FAILED']);
+    }
+    expect(authorizeSelf).not.toHaveBeenCalled();
+    // A well-formed cursor it did not issue is its own 400.
+    const forged = await call('GET', `me/patient-entries?before=${'A'.repeat(40)}`);
+    expect([forged.status, forged.body.code]).toEqual([400, 'INVALID_CURSOR']);
+    expect(transactions).toBe(before);
+  });
+
+  it('keeps the staff read from a patient session', async () => {
+    await start('true');
     const staff = await call('GET', `patients/${PATIENT_ID}/patient-entries`, undefined,
       { 'x-facility-id': '30000000-0000-4000-8000-000000000001', 'x-purpose-of-use': 'direct-care' });
     expect([staff.status, staff.body.code]).toEqual([403, 'PATIENT_SCOPE_DENIED']);

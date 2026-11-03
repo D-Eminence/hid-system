@@ -7,13 +7,14 @@ import { AUDIT_FAILURES_ONLY, FACILITY_OPTIONAL, PATIENT_ALLOWED, REQUIRED_PERMI
 import { requestDigest } from '../../common/idempotency';
 import { DomainProblem } from '../../common/problem';
 import type { DataAccessContext, HidRequest } from '../../common/request-context';
+import type { AuditService } from '../../audit/audit.service';
 import type { DatabaseService } from '../../database/database.service';
 import type { ClinicalRepository } from '../shared/clinical.repository';
 import type { IdentityApiService } from '../../integrations/identity-api.service';
 import { PatientEntriesController } from './patient-entries.controller';
 import { PATIENT_ENTRY_KINDS, type CreatePatientEntryDto } from './patient-entries.dto';
 import { PatientEntriesEnabledGuard } from './patient-entries-enabled.guard';
-import { readPatientEntries } from './patient-entries.query';
+import { decodePatientEntryCursor, readPatientEntries } from './patient-entries.query';
 import { PatientEntriesService, lagosToday, normalizePatientEntry } from './patient-entries.service';
 
 // Records patients add themselves, text only (0116; Akos handover step 6).
@@ -39,9 +40,11 @@ function setup(rows: unknown[] = [row('created')]) {
   const transaction = jest.fn(async (_auth: unknown, _correlation: string, work: (c: PoolClient) => Promise<unknown>) => work(client));
   const run = jest.fn(async (_context: unknown, _patient: string, _access: string, _event: unknown,
     operation: (c: PoolClient) => Promise<{ value: unknown; details?: unknown }>) => (await operation(client)).value);
+  const recordWithClient = jest.fn().mockResolvedValue(undefined);
   const service = new PatientEntriesService({ withPatientTransaction: transaction } as unknown as DatabaseService,
-    { authorizeSelf } as unknown as IdentityApiService, { run } as unknown as ClinicalRepository);
-  return { service, authorizeSelf, query, transaction, run, client };
+    { authorizeSelf } as unknown as IdentityApiService, { run } as unknown as ClinicalRepository,
+    { recordWithClient } as unknown as AuditService);
+  return { service, authorizeSelf, query, transaction, run, client, recordWithClient };
 }
 
 async function problem(promise: Promise<unknown>): Promise<DomainProblem> {
@@ -65,7 +68,7 @@ function invalid(fields: Partial<CreatePatientEntryDto>, now = new Date('2026-11
 }
 
 describe('Records patients add: routes', () => {
-  it('serves the contract\'s three routes with their decorators, behind the setting', () => {
+  it('serves the contract\'s four routes with their decorators, behind the setting', () => {
     const prototype = PatientEntriesController.prototype as unknown as Record<string, () => unknown>;
     const routes = Object.getOwnPropertyNames(PatientEntriesController.prototype).filter((name) => name !== 'constructor')
       .map((name) => {
@@ -81,10 +84,11 @@ describe('Records patients add: routes', () => {
     expect(routes).toEqual([
       ['create', RequestMethod.POST, 'me/patient-entries', 201, true, true, null],
       ['withdraw', RequestMethod.POST, 'me/patient-entries/:entryId/withdraw', 200, true, true, null],
+      ['list', RequestMethod.GET, 'me/patient-entries', null, true, true, null],
       ['staffList', RequestMethod.GET, 'patients/:patientId/patient-entries', null, false, false, ['ehr.note.read']],
     ]);
     // Every answer is private and never cached.
-    for (const name of ['create', 'withdraw', 'staffList']) {
+    for (const name of ['create', 'withdraw', 'list', 'staffList']) {
       expect(Reflect.getMetadata(HEADERS_METADATA, prototype[name]!)).toEqual([{ name: 'Cache-Control', value: 'no-store' }]);
     }
     // The create handler reads the Idempotency-Key header.
@@ -98,7 +102,7 @@ describe('Records patients add: routes', () => {
     const controller = new PatientEntriesController({ staffList: list } as unknown as PatientEntriesService);
     const staffRequest = { actor: { kind: 'staff', facility: { membershipId: 'membership-id' } }, facilityId: 'facility-id',
       correlationId: 'patient-entries-staff', header: (name: string) => (name === 'x-purpose-of-use' ? 'healthcare-operations' : undefined) } as unknown as HidRequest;
-    expect(() => controller.staffList('patient-id', staffRequest)).toThrow('X-Purpose-Of-Use must be direct-care for clinical access');
+    expect(() => controller.staffList('patient-id', {}, staffRequest)).toThrow('X-Purpose-Of-Use must be direct-care for clinical access');
     expect(list).not.toHaveBeenCalled();
   });
 });
@@ -112,28 +116,33 @@ describe('Records patients add: what is accepted', () => {
       .toMatchObject({ facilityName: null, notes: null });
     expect(normalizePatientEntry(body({ title: 'Ok' })).title).toBe('Ok');
     expect(normalizePatientEntry(body({ title: 'é'.repeat(160) })).title).toHaveLength(160);
-    // Counted in characters as the database counts them, not in UTF-16 units.
-    expect(normalizePatientEntry(body({ title: '\u{1F48A}'.repeat(160) })).title).toBe('\u{1F48A}'.repeat(160));
-    for (const title of ['X', ' X ', 'x'.repeat(161), 'Two\nlines', 'Tab\there', 'Bell\u0007', 'C1\u0085x', '', '   ']) {
+    // At most 160 UTF-16 units, as the website's form and reader count them (an emoji is two), and at least two
+    // characters as the database counts them (code points), so that whatever is accepted is also shown.
+    expect(normalizePatientEntry(body({ title: '\u{1F48A}'.repeat(80) })).title).toBe('\u{1F48A}'.repeat(80));
+    expect(normalizePatientEntry(body({ title: '\u{1F48A}\u{1F48A}' })).title).toBe('\u{1F48A}\u{1F48A}');
+    for (const title of ['X', ' X ', 'x'.repeat(161), 'Two\nlines', 'Tab\there', 'Bell\u0007', 'C1\u0085x', '', '   ',
+      '\u{1F48A}', '\u{1F48A}'.repeat(81), '\u{1F48A}'.repeat(160)]) {
       const refused = invalid({ title });
       expect([refused.getStatus(), refused.code, refused.errors]).toEqual([400, 'VALIDATION_FAILED',
         [{ field: 'title', messages: ['Use 2 to 160 characters, on one line.'] }]]);
     }
   });
 
-  it('keeps line breaks in notes (CRLF as a newline) up to 2000 characters, and nothing else unusual', () => {
+  it('keeps line breaks in notes (CRLF as a newline) up to 1000 characters, and nothing else unusual', () => {
     expect(normalizePatientEntry(body({ notes: 'Line one\r\nLine two\rLine three\n' })).notes)
       .toBe('Line one\nLine two\nLine three');
-    expect(normalizePatientEntry(body({ notes: 'n'.repeat(2000) })).notes).toHaveLength(2000);
-    for (const notes of ['n'.repeat(2001), 'tab\there', 'nul\u0000x', 'del\u007fx']) {
-      expect(invalid({ notes }).errors).toEqual([{ field: 'notes', messages: ['Use at most 2000 characters of plain text.'] }]);
+    expect(normalizePatientEntry(body({ notes: 'n'.repeat(1000) })).notes).toHaveLength(1000);
+    expect(normalizePatientEntry(body({ notes: '\u{1F600}'.repeat(500) })).notes).toBe('\u{1F600}'.repeat(500));
+    for (const notes of ['n'.repeat(1001), 'n'.repeat(2000), '\u{1F600}'.repeat(501), 'tab\there', 'nul\u0000x', 'del\u007fx']) {
+      expect(invalid({ notes }).errors).toEqual([{ field: 'notes', messages: ['Use at most 1000 characters of plain text.'] }]);
     }
   });
 
   it('takes a place of at most 160 characters on one line', () => {
     expect(normalizePatientEntry(body({ facilityName: ' H ' })).facilityName).toBe('H');
     expect(normalizePatientEntry(body({ facilityName: 'h'.repeat(160) })).facilityName).toHaveLength(160);
-    for (const facilityName of ['h'.repeat(161), 'Line\nbreak', 'Tab\there']) {
+    expect(normalizePatientEntry(body({ facilityName: '\u{1F3E5}'.repeat(80) })).facilityName).toHaveLength(160);
+    for (const facilityName of ['h'.repeat(161), 'Line\nbreak', 'Tab\there', '\u{1F3E5}'.repeat(81)]) {
       expect(invalid({ facilityName }).errors).toEqual([{ field: 'facilityName',
         messages: ['Use at most 160 characters, on one line.'] }]);
     }
@@ -311,24 +320,79 @@ describe('Records patients add: removing', () => {
 });
 
 describe('Records patients add: reading', () => {
+  const PATIENT = '60000000-0000-4000-8000-000000000001';
   const stored = (n: number) => ({ id: `33333333-3333-4333-8333-${String(n).padStart(12, '0')}`, kind: 'test',
     title: `Synthetic test ${n}`, facility_name: null, occurred_on: '2026-10-01', notes: null,
-    created_at: new Date('2026-10-01T08:00:00.000Z') });
+    created_at: new Date('2026-10-01T08:00:00.123Z'), cursor_at: `2026-10-01T08:00:00.${String(123000 + n).padStart(6, '0')}Z` });
+  const item = (n: number) => ({ id: stored(n).id, source: 'patient', kind: 'test', title: `Synthetic test ${n}`,
+    facilityName: null, occurredOn: '2026-10-01', notes: null, createdAt: '2026-10-01T08:00:00.123Z', documents: [] });
 
-  it('lists active entries newest first, at most 50, with the date as text and no documents yet', async () => {
+  it('lists active entries newest first, 50 a page, with the date as text, no documents yet, and the next page\'s cursor', async () => {
     const query = jest.fn().mockResolvedValue({ rows: Array.from({ length: 51 }, (_, i) => stored(i)) });
-    const page = await readPatientEntries({ query } as unknown as PoolClient, 'patient-id');
+    const page = await readPatientEntries({ query } as unknown as PoolClient, PATIENT);
     expect(page.more).toBe(true);
     expect(page.items).toHaveLength(50);
-    expect(page.items[0]).toEqual({ id: stored(0).id, source: 'patient', kind: 'test', title: 'Synthetic test 0',
-      facilityName: null, occurredOn: '2026-10-01', notes: null, createdAt: '2026-10-01T08:00:00.000Z', documents: [] });
+    expect(page.items[0]).toEqual(item(0));
+    expect(page.items[49]).toEqual(item(49));
     const [sql, values] = query.mock.calls[0]!;
-    expect(values).toEqual(['patient-id']);
+    expect(values).toEqual([PATIENT, null, null, null]);
     expect(sql).toMatch(/from ehr\.patient_entries\s+where patient_id = \$1 and status = 'active'/);
+    expect(sql).toContain('($2::date is null or (occurred_on, created_at, id) < ($2::date, $3::timestamptz, $4::uuid))');
     expect(sql).toMatch(/order by occurred_on desc, created_at desc, id desc\s+limit 51/);
     expect(sql).toContain('occurred_on::text');
-    query.mockResolvedValue({ rows: [stored(1)] });
-    expect((await readPatientEntries({ query } as unknown as PoolClient, 'patient-id')).more).toBe(false);
+    // The cursor names the last item at the microsecond, as Postgres stores it, never from the JavaScript date.
+    expect(sql).toContain('to_char(created_at at time zone \'UTC\', \'YYYY-MM-DD"T"HH24:MI:SS.US"Z"\') as cursor_at');
+    expect(page.nextBefore).toMatch(/^[A-Za-z0-9_-]{16,512}$/);
+    expect(decodePatientEntryCursor(page.nextBefore!, PATIENT)).toEqual({ occurredOn: '2026-10-01',
+      createdAt: '2026-10-01T08:00:00.123049Z', id: stored(49).id });
+    // The next page starts after that item.
+    query.mockResolvedValue({ rows: [stored(50)] });
+    const next = await readPatientEntries({ query } as unknown as PoolClient, PATIENT,
+      decodePatientEntryCursor(page.nextBefore!, PATIENT));
+    expect(query.mock.calls[1]![1]).toEqual([PATIENT, '2026-10-01', '2026-10-01T08:00:00.123049Z', stored(49).id]);
+    expect(next).toEqual({ items: [item(50)], more: false, nextBefore: null });
+  });
+
+  it('refuses a cursor that is not exactly one it issued for this patient\'s list (400 INVALID_CURSOR)', () => {
+    const query = { occurredOn: '2026-10-01', createdAt: '2026-10-01T08:00:00.123049Z', id: stored(49).id };
+    const issued = Buffer.from(JSON.stringify({ v: 1, l: 'ehr.patient-entries', f: 'x', d: query.occurredOn,
+      t: query.createdAt, i: query.id })).toString('base64url');
+    const refusals = [issued, 'not-a-cursor-at-all-0000', '%%%%', 'x'.repeat(600)];
+    for (const value of refusals) {
+      let refused: unknown;
+      try { decodePatientEntryCursor(value, PATIENT); } catch (error) { refused = error; }
+      expect(refused).toBeInstanceOf(DomainProblem);
+      expect([(refused as DomainProblem).getStatus(), (refused as DomainProblem).code]).toEqual([400, 'INVALID_CURSOR']);
+      expect((refused as DomainProblem).message).toBe('This list changed. Load it again from the start.');
+    }
+    expect(decodePatientEntryCursor(undefined, PATIENT)).toBeUndefined();
+  });
+
+  it('gives the patient their list page by page, audited as their own read', async () => {
+    const s = setup(Array.from({ length: 51 }, (_, i) => stored(i)));
+    const self = { ...request, actor: { ...actor, patientId: PATIENT } } as unknown as HidRequest;
+    s.authorizeSelf.mockResolvedValue({ ...actor, patientId: PATIENT, expiresAt: new Date(Date.now() + 30_000).toISOString() });
+    const first = await s.service.list(self, undefined);
+    expect(first.items).toHaveLength(50);
+    expect(first).not.toHaveProperty('more');
+    expect(s.authorizeSelf).toHaveBeenCalledWith(self);
+    expect(s.query.mock.calls[0]![1]).toEqual([PATIENT, null, null, null]);
+    expect(s.recordWithClient).toHaveBeenCalledWith(s.client, { correlationId: 'patient-entries-test', actorType: 'patient',
+      actorSubject: 'subject', actorAccountId: 'account-id', patientId: PATIENT, action: 'ehr.patient.self.records.read',
+      resourceType: 'patient-entries', outcome: 'success', purposeOfUse: 'patient-self',
+      details: { entryCount: 50, more: true, continued: false } });
+    s.query.mockResolvedValue({ rows: [stored(50)] });
+    const second = await s.service.list(self, first.nextBefore!);
+    expect(second).toEqual({ items: [item(50)], nextBefore: null });
+    expect(s.query.mock.calls[1]![1]).toEqual([PATIENT, '2026-10-01', '2026-10-01T08:00:00.123049Z', stored(49).id]);
+    expect(s.recordWithClient.mock.calls[1]![1].details).toEqual({ entryCount: 1, more: false, continued: true });
+    // A cursor of another patient's list is refused before the database.
+    const other = await problem(s.service.list(self, (await readPatientEntries({ query: jest.fn().mockResolvedValue({
+      rows: Array.from({ length: 51 }, (_, i) => stored(i)) }) } as unknown as PoolClient, 'patient-id')).nextBefore!));
+    expect([other.getStatus(), other.code]).toEqual([400, 'INVALID_CURSOR']);
+    expect(s.transaction).toHaveBeenCalledTimes(2);
+    const staff = { ...request, actor: { kind: 'staff', accountId: 'account-id', subject: 'staff' } } as unknown as HidRequest;
+    expect((await problem(s.service.list(staff, undefined))).code).toBe('PATIENT_SESSION_REQUIRED');
   });
 
   it('gives a clinician the same list through the chart\'s read authorization, audited as a record view', async () => {
@@ -340,10 +404,19 @@ describe('Records patients add: reading', () => {
       details = result.details;
       return result.value;
     });
-    await expect(s.service.staffList('patient-id', context)).resolves.toEqual({
-      items: [expect.objectContaining({ id: stored(1).id, source: 'patient' })], more: false });
-    expect(s.run).toHaveBeenCalledWith(context, 'patient-id', 'read_records', { action: 'ehr.record.read',
-      resourceType: 'patient-entries', resourceId: 'patient-id' }, expect.any(Function));
+    await expect(s.service.staffList(PATIENT, context, undefined)).resolves.toEqual({
+      items: [expect.objectContaining({ id: stored(1).id, source: 'patient' })], more: false, nextBefore: null });
+    expect(s.run).toHaveBeenCalledWith(context, PATIENT, 'read_records', { action: 'ehr.record.read',
+      resourceType: 'patient-entries', resourceId: PATIENT }, expect.any(Function));
     expect(details).toEqual({ entryCount: 1, more: false });
+    // And pages on with the same cursor.
+    s.query.mockResolvedValue({ rows: Array.from({ length: 51 }, (_, i) => stored(i)) });
+    const first = await s.service.staffList(PATIENT, context, undefined);
+    expect(first).toMatchObject({ more: true, nextBefore: expect.any(String) });
+    s.query.mockResolvedValue({ rows: [] });
+    await s.service.staffList(PATIENT, context, first.nextBefore!);
+    expect(s.query.mock.calls.at(-1)![1]).toEqual([PATIENT, '2026-10-01', '2026-10-01T08:00:00.123049Z', stored(49).id]);
+    const tampered = await problem(s.service.staffList(PATIENT, context, `${first.nextBefore!}x`));
+    expect(tampered.code).toBe('INVALID_CURSOR');
   });
 });
