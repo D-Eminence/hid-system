@@ -42,6 +42,17 @@ export interface PharmacyWorkItemPatient {
   healthIdLast4: string | null;
 }
 
+/**
+ * A work item's medicine, and on this facility's own work, while
+ * pharmacy-api's PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on and the
+ * prescriber gave them (0114), its strength as written ("500 mg") and its
+ * form (tablet, capsule, liquid, injection, cream, inhaler, drops, other).
+ */
+export interface PharmacyWorkItemMedication extends PharmacyMedicationReference {
+  strength?: string;
+  doseForm?: string;
+}
+
 export interface PharmacyWorkItem {
   id: string;
   patientId: string;
@@ -50,7 +61,7 @@ export interface PharmacyWorkItem {
   sourceEhrPrescriptionVersion: number;
   sourceEncounterId: string;
   status: 'accepted';
-  medication: PharmacyMedicationReference;
+  medication: PharmacyWorkItemMedication;
   doseQuantity: number | null;
   doseUnit: string | null;
   routeCode: string | null;
@@ -61,6 +72,17 @@ export interface PharmacyWorkItem {
   dispensing: { id: string; status: 'dispensed'; reversed: boolean } | null;
   /** Present only when pharmacy-api sent it (see PharmacyWorkItemPatient). */
   patient?: PharmacyWorkItemPatient;
+  /**
+   * The prescription details on own work (0114), each present only when
+   * pharmacy-api sent it (see PharmacyWorkItemMedication): the priority
+   * (routine, urgent, asap, stat); how long it is for (a whole number of
+   * days, weeks or months; from the prescription's dates when it gave none);
+   * and how much to hand over with its unit, which the pharmacist confirms.
+   */
+  priority?: string;
+  duration?: { value: number; unit: string };
+  quantityToDispense?: number;
+  quantityUnit?: string;
 }
 
 export interface PharmacyDispensing {
@@ -322,6 +344,28 @@ function parseMedication(value: unknown): PharmacyMedicationReference {
   return { codeSystem: nullableText(item, 'codeSystem'), code: nullableText(item, 'code'), display: text(item, 'display') };
 }
 
+/**
+ * The optional prescription details (0114): each left out when absent; a
+ * malformed one is refused like any other field.
+ */
+function parseWorkItemDetails(value: Record<string, unknown>): Pick<PharmacyWorkItem,
+  'priority' | 'duration' | 'quantityToDispense' | 'quantityUnit'> {
+  const duration = value.duration === undefined ? undefined : record(value.duration, 'Pharmacy work item duration');
+  return {
+    ...(value.priority === undefined ? {} : { priority: text(value, 'priority') }),
+    ...(duration === undefined ? {} : { duration: { value: integer(duration, 'value'), unit: text(duration, 'unit') } }),
+    ...(value.quantityToDispense === undefined ? {} : { quantityToDispense: finiteNumber(value, 'quantityToDispense') }),
+    ...(value.quantityUnit === undefined ? {} : { quantityUnit: text(value, 'quantityUnit') }),
+  };
+}
+
+function parseWorkItemMedication(value: unknown): PharmacyWorkItemMedication {
+  const medication = parseMedication(value);
+  const item = record(value, 'Pharmacy medication');
+  return { ...medication, ...(item.strength === undefined ? {} : { strength: text(item, 'strength') }),
+    ...(item.doseForm === undefined ? {} : { doseForm: text(item, 'doseForm') }) };
+}
+
 /** The optional patient: left out when absent; a malformed one is refused like any other field. */
 function parseWorkItemPatient(value: unknown): { patient?: PharmacyWorkItemPatient } {
   if (value === undefined) return {};
@@ -338,7 +382,7 @@ function parseWorkItem(payload: unknown): PharmacyWorkItem {
     sourceEhrPrescriptionId: text(value, 'sourceEhrPrescriptionId'),
     sourceEhrPrescriptionVersion: integer(value, 'sourceEhrPrescriptionVersion'),
     sourceEncounterId: text(value, 'sourceEncounterId'), status: 'accepted',
-    medication: parseMedication(value.medication),
+    medication: parseWorkItemMedication(value.medication),
     doseQuantity: typeof value.doseQuantity === 'number' ? value.doseQuantity : null,
     doseUnit: nullableText(value, 'doseUnit'), routeCode: nullableText(value, 'routeCode'),
     frequency: text(value, 'frequency'), instructions: text(value, 'instructions'),
@@ -347,6 +391,7 @@ function parseWorkItem(payload: unknown): PharmacyWorkItem {
       id: text(dispensing, 'id'), status: 'dispensed', reversed: dispensing.reversed === true,
     } : null,
     ...parseWorkItemPatient(value.patient),
+    ...parseWorkItemDetails(value),
   };
 }
 
