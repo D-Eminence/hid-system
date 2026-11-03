@@ -35,6 +35,8 @@ interface PrincipalRow extends QueryResultRow {
 
 /** 0098: whether each listed account belongs to the sealed demo tenant (one read of the member ids a query). */
 const PRINCIPAL_DEMO_COLUMN = `(account.id = any((select identity.sealed_demo_ids('account'))::uuid[])) as demo`;
+/** 0119: the provider the sealed demo profile seed writes on its two resolved registration cases. */
+const SEALED_DEMO_SEED_PROVIDER = 'hid-sealed-demo';
 
 interface ReviewRow extends QueryResultRow {
   id: string; facilityId: string; facilityName: string; status: string;
@@ -370,6 +372,11 @@ export class AdminService {
 
   async listIdentityReviews(context: PlatformAdminContext, query: ListIdentityReviewsDto) {
     const offset = (query.page - 1) * query.pageSize;
+    // 0119: the sealed demo profile seed's resolved cases (provider hid-sealed-demo at a demo facility) are seed
+    // bookkeeping, not cases that need identity oversight: left out of the list and its count. Any other case at a
+    // demo facility is listed, marked demo (0098).
+    const notDemoSeed = `not (registration.verification_provider = '${SEALED_DEMO_SEED_PROVIDER}'
+          and identity.sealed_demo_facility(registration.facility_id))`;
     return this.database.withPlatformTransaction(context, async (client) => {
       const [items, total] = await Promise.all([
         client.query<ReviewRow>(`select registration.id::text, registration.facility_id::text as "facilityId",
@@ -382,11 +389,11 @@ export class AdminService {
           registration.updated_at as "updatedAt", identity.sealed_demo_facility(registration.facility_id) as demo
         from identity.registration_cases registration
         join identity.facilities facility on facility.id = registration.facility_id
-        where ($1::text is null or registration.status = $1)
+        where ($1::text is null or registration.status = $1) and ${notDemoSeed}
         order by registration.updated_at desc, registration.id limit $2 offset $3`,
         [query.status ?? null, query.pageSize, offset]),
-        client.query<{ count: string }>(`select count(*)::text from identity.registration_cases
-          where ($1::text is null or status = $1)`, [query.status ?? null]),
+        client.query<{ count: string }>(`select count(*)::text from identity.registration_cases registration
+          where ($1::text is null or registration.status = $1) and ${notDemoSeed}`, [query.status ?? null]),
       ]);
       return { items: items.rows.map((row) => ({ ...row, candidateCount: Number(row.candidateCount), version: Number(row.version),
           demo: row.demo === true })),

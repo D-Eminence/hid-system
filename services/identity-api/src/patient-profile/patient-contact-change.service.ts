@@ -35,6 +35,9 @@ const RECOVERY_HOLD_WHAT = 'email and phone number changes';
 
 const PHONE_MESSAGE = 'Enter your phone number with its country code, like +44 7700 900123, '
   + 'or a Nigerian number like 08012345678.';
+/** 0119: the number is well formed, but the sealed demo reserves it (a demo account's own, or another's). */
+export const PHONE_RESERVED_MESSAGE = 'This phone number cannot be used on this account. '
+  + 'A demo account can use only its own demo number.';
 
 interface CredentialsRow {
   account_id: string;
@@ -290,6 +293,15 @@ export class PatientContactChangeService implements BeforeApplicationShutdown {
     let row: PhoneChangeRow | undefined;
     try {
       row = await this.asPatient(request, actor, async (client) => {
+        // 0119: a sealed demo patient may hold only its own fictional number (the UK drama range). The database holds
+        // only ciphertext and an HMAC of the number, so Identity asks with the normalized number and its canonical
+        // HMAC; true for every real patient but for the two demo numbers. For a demo patient the database records
+        // that HMAC for this transaction and G5 refuses the change below without it. Thrown inside the transaction:
+        // nothing is changed or sent.
+        const sealed = await client.query<{ allowed: boolean | null }>(
+          'select identity.demo_profile_phone_allowed($1, $2, $3, $4) as allowed',
+          [actor.subject, actor.sessionId, phone, canonical]);
+        if (sealed.rows[0]?.allowed !== true) throw this.invalid('phone', PHONE_RESERVED_MESSAGE);
         // The number the profile shows now. A stored number Identity cannot
         // read (hid-1.0's, under the migration's key) shows as none: the same
         // number entered again is then written again under Identity's key, as
@@ -356,8 +368,8 @@ export class PatientContactChangeService implements BeforeApplicationShutdown {
     });
   }
 
-  private invalid(field: 'email' | 'phone'): DomainProblem {
-    const message = field === 'email' ? 'Enter a valid email address.' : PHONE_MESSAGE;
+  private invalid(field: 'email' | 'phone', detail?: string): DomainProblem {
+    const message = detail ?? (field === 'email' ? 'Enter a valid email address.' : PHONE_MESSAGE);
     return new DomainProblem(400, 'CONTACT_INVALID', message, [{ field, messages: [message] }]);
   }
 

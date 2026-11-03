@@ -2413,7 +2413,10 @@ boolean` (true for the demo tenant's rows, false otherwise; an Identity before
 - `GET /api/v1/admin/principals` and `POST /api/v1/admin/principals/search`
   items (the three demo accounts), and a last `demo` column (`true` or `false`)
   in `GET /api/v1/admin/principals/export`;
-- `GET /api/v1/admin/identity/reviews` items (a review at a demo facility);
+- `GET /api/v1/admin/identity/reviews` items (a review at a demo facility;
+  from 0119's Identity image the sealed demo profile seed's two resolved
+  cases, provider `hid-sealed-demo`, are left out of the list and its total,
+  section 32);
 - `GET /api/v1/admin/audit/events` items (an event at a demo facility or by a
   demo login);
 - `GET /api/v1/admin/order-routes` and `POST /api/v1/admin/order-routes/search`
@@ -2849,3 +2852,135 @@ Responses, request bodies, `If-Match` versions and error mapping are
 unchanged. 0103 has no down migration; applying the previous bodies (0046,
 0056) restores the old behaviour. The suite is
 `services/ehr-api/test/database/platform-organization-applications.integration.sql`.
+
+## 32. The sealed demo profiles complete (0119)
+
+Owner decision of 2026-11-03: the demo patients' profiles must reach 100%.
+Migration 0119 (`0119_sealed_demo_profile_complete.sql`, unsigned until the
+owner signs its declaration) lets Adaeze Okafor (HID-ZDEMAAA2, Patient One)
+and Chinedu Okafor (HID-ZDEMAAA3, Patient Two) fill the two completion-card
+items the seal kept open: a phone number and a verified NIN. Both values are
+fictional. It amends section 26 (G5, "a demo patient never holds a phone") and
+section 30 ("a phone and a verified NIN cannot be held by a demo patient").
+No table, column, index, constraint, policy or trigger changes, and no API
+field changes.
+
+The phone (a reviewed change to the seal):
+
+- New `identity.demo_profile_phone_allowed(subject, session, phone,
+  lookup_hmac)`, SECURITY DEFINER, EXECUTE for the Identity runtime and the
+  schema test runtime only. It answers 42501 without a live patient session.
+  It is true for every patient who is not a sealed demo patient, except
+  that it is false for the two demo numbers below: they are the demo's
+  alone, because 0094's `patients_phone_hmac_uq` would otherwise let a real
+  patient who took one first leave the demo patient no number it may hold
+  (and a real patient asking for one later would meet 409). For a demo
+  patient it is true only for that patient's own number with a well-formed
+  HMAC (64 lowercase hex characters): Adaeze `+447700900102`, Chinedu
+  `+447700900103`. These are in the UK range Ofcom reserves for drama, which
+  no subscriber holds; Nigeria publishes no such range. When it is true for a
+  demo patient it records `<patient id>:<HMAC>` in `hid.sealed_demo_phone_hmac`
+  for the rest of the transaction.
+- G5 (`identity.patient_contact_changes_sealed_demo`, body replaced; trigger,
+  owner, ACL and error kept) still refuses a demo patient's phone change with
+  22023 `PATIENT_CONTACT_CHANGE_INVALID` (400 `PROFILE_REQUEST_INVALID`) unless
+  the recorded value is exactly that patient's id and the change's HMAC. An
+  Identity image that never asks the check keeps every demo phone refused. The
+  eight fictional patients without a login get no number.
+- Identity (`PatientContactChangeService.changePhone`) asks the check inside
+  the change transaction, before `identity.change_my_phone`, with the
+  normalized number and its canonical contact HMAC. If it answers anything
+  other than true, the answer is the existing 400 `CONTACT_INVALID` for the
+  phone field, and nothing is changed or sent. Its detail (and the phone
+  field's message) is "This phone number cannot be used on this account. A
+  demo account can use only its own demo number.", not the format message,
+  because the number is well formed. The database cannot tell that
+  the HMAC is the checked number's, and any session can set the setting
+  itself. As for G7, it rests on Identity that the number is the fictional one.
+- Only the exact E.164 form is admitted. The swapped pair (Adaeze with
+  `+447700900103`, Chinedu with `+447700900102`), nearby numbers, other
+  forms (`+2347700900102`, which a raw `07700 900102` with country Nigeria
+  becomes, `+4407700900102`, a number without "+") and a malformed HMAC are
+  refused for both demo patients. A real patient is refused only the two demo
+  numbers. The suite and Identity's tests cover each of these.
+- Release order: 0119 before the Identity image that asks the check. An image
+  that asks it before 0119 exists fails every patient's phone change. After
+  both are out, the owner types the number on each demo patient's profile
+  page (country United Kingdom, `07700 900102` or `07700 900103`). No SMS
+  follows: the demo patients have no public enrollment (OTP recovery texts
+  only an enrollment's verified phone), the change notice goes to the
+  verified email (a demo mailbox), and `phoneVerified` stays false.
+
+The NIN (a seed, Amazon RDS only, as 0098 and 0102):
+
+- `identity.demo_profile_install()`, the applier's, granted to no role. For
+  each of the two patients without a NIN identifier, it writes one resolved
+  `identity.registration_cases` row at Demo Hospital (status
+  `resolved_existing_identity`, created as the demo login's doctor membership,
+  ids `98d00119-0000-4000-8000-00000000000{1,2}`) and one `nin`
+  `identity.patient_identifiers` row naming it (verified,
+  ids `98d00119-0000-4000-8000-00000000001{1,2}`).
+- No NIN is stored. The lookup value is sha256 of
+  `hid-sealed-demo:0119:nin:<patient id>`, not an HMAC under Identity's key, so
+  no typed NIN can match it: not sign-up's
+  `public_patient_nin_already_bound`, not the self-check's eligibility, not
+  staff registration. The ciphertext column holds a plain-text marker that
+  is not Identity's envelope. The last four are `0000` and the hint is
+  `****0000`.
+- It says that NIMC did not check it: the provider and source system are
+  `hid-sealed-demo`, the reference is `0119-sealed-demo-profile`, and the
+  assurance stays `CONTACT_VERIFIED`. There is no `verification_evidence` row
+  (that table is QoreID's), no authoritative profile, no `patients.nin_hash`
+  and no QoreID quota row. `identity/me` answers `ninVerified: true`, so the
+  card, the Health ID card and the shared card show the NIN item as done.
+- The NIN self-check cannot reach QoreID for a demo patient:
+  `identity.patient_self_nin_eligibility` answers `denied` before any quota
+  or QoreID call, and G6 still refuses QoreID quota to demo accounts. The
+  portal hides "Verify your NIN" once `ninVerified` is true.
+- Refusals (55000, nothing written): `SEALED_DEMO_PROFILE_NOT_DEMO`,
+  `SEALED_DEMO_PROFILE_PATIENT_NOT_READY` (a patient or their login is not
+  active), `SEALED_DEMO_PROFILE_ROLE_MISSING` (the doctor membership is inactive
+  or lacks `identity.registration.write`, or the staff record has no name)
+  and `SEALED_DEMO_PROFILE_ID_TAKEN`. A patient who already has a NIN
+  identifier is skipped, so a second call writes nothing.
+- Audit: one migration row per row written (actor system, provenance
+  `migration`, source `hid-sealed-demo`, correlation `0119-sealed-demo-profile`,
+  action `identity.sealed-demo.seed-record`, ids only) and one summary row
+  (`identity.sealed-demo.seed-profile`, counts only). No row names a patient or
+  clinician as actor. The admin overview's counts are unchanged.
+- Where the two cases appear: nowhere a patient or the demo login sees them.
+  The platform admin's Identity review (`GET /api/v1/admin/identity/reviews`)
+  leaves out, in the list and its `total`, a case at a sealed demo facility
+  whose provider is `hid-sealed-demo`; any other case at a demo facility is
+  still listed with `demo: true`. Between 0119 and the Identity image of this
+  release the older image lists the two, marked `demo: true`.
+
+The photo and the emergency contact remain the owner's to add in the app
+(section 30). With them, the card counts 12 of 12 for both patients. 0119
+does not require them. The owner's read-only pre-signing query in the file's
+header reports them.
+
+The release alone does not bring the card to 100%. After 0119 and the
+Identity image are out, the owner (1) types the number on each profile, (2)
+adds a photo and (3) an email emergency contact where 0102 left none. Then
+the owner runs the read-only post-deploy query in the file's header. It
+returns one row per patient, and every column must be true: `phone` (a
+`phone_lookup_hmac` with the completed phone change row that matches it),
+`photo`, `emergency_contact` (not deactivated), `nin` (verified, unrevoked,
+source `hid-sealed-demo`), `gender_dob_state`, `hospital_hmo` and
+`blood_genotype` (0102's rows). A false column names the step still
+missing. The suite runs the same query and expects true in every column.
+
+Release blocker until 0104-0118 land: `release/config/components.json`
+lists 105 files ending at 0119, and the release contract's contiguous-prefix
+check (`release/scripts/verify-release-contract.mjs`, run by
+`release/test/staging-migration-ledger.test.mjs`) fails on this branch with
+"components config.migration.files: missing migration prefix". CI and the
+release pipeline stay red until then, and components.json, the ledger map and
+that test are re-based when they land. If 0119 has to ship first, the
+coordinator gives it the next free number (0104).
+
+The suite is `services/ehr-api/test/database/sealed-demo-profile.integration.sql`.
+0119 has no down migration. 0098's off switch still applies, and applying
+0098's G5 body again restores "a demo patient never holds a phone" for new
+changes.

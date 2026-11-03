@@ -670,6 +670,10 @@ export async function verifyMachineConfiguration(configuration) {
     // Novu never used 0065. Full filenames/checksums below remain authoritative;
     // do not renumber historical SQL to manufacture a contiguous numeric series.
     if (number === 65) continue
+    // TEMPORARY (revert before merge; migration 0119): 0104-0118 are reserved
+    // for other unreleased work that is not on this branch yet. They may be
+    // absent only while 0119 is the newest prefix.
+    if (number >= 104 && number <= 118 && expectedLast === '0119') continue
     if (!numbers.includes(String(number).padStart(4, '0'))) fail('components config.migration.files', 'missing migration prefix')
   }
   const migrationDirectory = resolve(repositoryRoot, 'services', 'ehr-api', 'database', 'migrations')

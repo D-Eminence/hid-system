@@ -315,7 +315,19 @@ describe('AdminService sealed demo facilities (0098)', () => {
     const listed = await service.listIdentityReviews(platformAdmin, { page: 1, pageSize: 20 } as never);
     expect(listed.items.map((item) => item.demo)).toEqual([true]);
     expect(String(client.query.mock.calls[0]?.[0])).toContain('identity.sealed_demo_facility(registration.facility_id) as demo');
-    expect(String(client.query.mock.calls[1]?.[0])).not.toContain('sealed_demo');
+  });
+
+  it('leaves the 0119 sealed demo seed cases out of the Identity review list and its count, and nothing else', async () => {
+    const { service, client } = harness({ id: 'review', facilityId: '10000000-0000-4000-8000-000000000002',
+      facilityName: 'Real Hospital', status: 'review_required', maskedNin: 'NIN-****1234', provider: 'qoreid',
+      candidateCount: '0', version: '1', createdAt: new Date(), updatedAt: new Date(), demo: false, count: '1' });
+    const listed = await service.listIdentityReviews(platformAdmin, { page: 1, pageSize: 20, status: 'resolved_existing_identity' } as never);
+    expect(listed.total).toBe(1);
+    const exclusion = /and not \(registration\.verification_provider = 'hid-sealed-demo'\s+and identity\.sealed_demo_facility\(registration\.facility_id\)\)/;
+    for (const call of client.query.mock.calls.slice(0, 2)) {
+      expect(String(call[0])).toMatch(exclusion);
+      expect(call[1]?.[0]).toBe('resolved_existing_identity');
+    }
   });
 
   it('marks platform audit events at a demo facility or by a demo login, from one read per page', async () => {
