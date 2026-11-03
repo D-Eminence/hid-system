@@ -1402,7 +1402,13 @@ revoke all on function identity.organization_application_admin_account(text) fro
 -- Records processing (0104): the patient's request list, recreated with its
 -- purpose column, keeps the same signature and its grant to the Identity
 -- runtime above. The access-request trigger function is granted to no role.
+-- has_active_consent_grant keeps its grants above (0104 replaces its body);
+-- the cover it calls (owner decision 34(1)) is read by Identity alone, to name
+-- the direct-care grant that covered a records-processing check.
 revoke all on function identity.access_requests_records_processing() from public;
+revoke all on function identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz) from public;
+grant execute on function identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz)
+  to hid_identity_runtime;
 
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.

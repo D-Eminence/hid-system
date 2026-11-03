@@ -20,8 +20,12 @@
 // OCR creates and reads a job on the patient's document and EHR shows it the
 // document; a direct-care grant does not; the chart (imported records, an
 // imported attachment, the reported health profile, the encounters), Lab and
-// Pharmacy refuse the purpose. The kill switch refuses new requests and every
-// grant until it is on again; the patient's revocation ends access.
+// Pharmacy refuse the purpose. Since owner decision 34(1) the second patient's
+// approval of the doctor's direct-care request, and then that patient's Access
+// PIN, each cover OCR for the doctor (not another staff member) until the
+// patient revokes the grant or turns the PIN off. The kill switch refuses new
+// requests and every grant until it is on again; the patient's revocation
+// ends access.
 //
 // HID_RECORDS_PROCESSING_STAGE proves the release order on the same flow:
 // "after-0104" (the default) is this branch on a database with 0104;
@@ -29,7 +33,8 @@
 // request 400 INVALID_CONSENT_COMMAND, no purpose on the patient's list, OCR
 // 404, the fences already on), and stops after those answers; "old-identity"
 // is the database with 0104 and an Identity from before 0104, which answers
-// both refusals 403 CONSENT_COMMAND_DENIED and lists no purpose.
+// both refusals 403 CONSENT_COMMAND_DENIED, lists no purpose and answers the
+// care approval's cover as not allowed (OCR 403 ACCESS_DENIED).
 // HID_RECORDS_PROCESSING_IDENTITY_DIR boots Identity from that source instead
 // of this branch's (required for "old-identity"); with "before-0104" it is
 // today's Identity on today's database, as the website meets it.
@@ -571,15 +576,68 @@ try {
     evidence.withGrant = { consentStatus: { recordsProcessing: 'read and write', directCare: 'none' },
       ocrCreate: 201, ocrRead: 200, documentDownload: `${downloadAnswer} (past the read and the authorization; storage is off here)`,
       fence: chartFence };
-    // A care grant never opens OCR: the second patient approves the doctor's direct-care request.
+    step('with the grant OCR created and read the job and EHR passed the document; the chart, Lab and Pharmacy refused it');
+
+    // ── Decision 34(1): the patient's approval of a direct-care request, or the Access PIN, also covers
+    // records processing for that staff member at that facility, for up to 24 hours from the grant's start
+    // and never past its end; the patient ends it by revoking the grant or turning the PIN off ──
     const careAsked = expectStatus(await call(identity, doctor, 'POST', '/identity/access-requests',
-      { hid: carePatient.hid, scope: 'write_records', reason: 'Synthetic consultation for the verifier', durationMinutes: 60 }),
+      { hid: carePatient.hid, scope: 'read_records', reason: 'Synthetic consultation for the verifier', durationMinutes: 60 }),
     201, 'a direct-care request');
-    expectStatus(await careCall('POST', `/identity/access-requests/${careAsked.accessRequestId}/approve`), 200, 'care approval');
+    const careApproved = expectStatus(await careCall('POST', `/identity/access-requests/${careAsked.accessRequestId}/approve`),
+      200, 'care approval');
     assert.equal((await listed(careCall)).find(item => item.accessRequestId === careAsked.accessRequestId).purpose,
       stage === 'old-identity' ? undefined : 'direct-care');
-    evidence.careGrant = { ocrCreate: expectProblem(await createJob(doctor, careDocument), 404, null, 'OCR with a care grant') };
-    step('with the grant OCR created and read the job and EHR passed the document; the chart, Lab and Pharmacy refused it');
+    const coverEnd = async grantId => (await one(`select least(expires_at, starts_at + interval '24 hours') as until
+      from identity.consent_grants where id = $1`, [grantId])).until.toISOString();
+    if (stage === 'old-identity') {
+      // An Identity from before 0104 looks for a records-processing grant of its own, so it answers the cover as not
+      // allowed: the database already shows OCR the document, and OCR refuses on Identity's answer (fail closed).
+      evidence.careGrant = { ocrCreate: expectProblem(await createJob(doctor, careDocument), 403, 'ACCESS_DENIED',
+        'OCR with a care grant, an earlier Identity'),
+        consentStatus: (await statusOf(doctor, carePatient, RECORDS)).readAllowed ? 'allowed' : 'none' };
+      assert.equal(evidence.careGrant.consentStatus, 'none');
+    } else {
+      const covered = await statusOf(doctor, carePatient, RECORDS);
+      assert.deepEqual([covered.readAllowed, covered.writeAllowed, covered.expiresAt],
+        [true, true, await coverEnd(careApproved.consentGrantId)], `the care approval covers records processing: ${JSON.stringify(covered)}`);
+      const careCare = await statusOf(doctor, carePatient, 'direct-care');
+      assert.deepEqual([careCare.readAllowed, careCare.writeAllowed], [true, false], 'direct care stays read only');
+      const careJob = expectStatus(await createJob(doctor, careDocument), 201, 'OCR create under the care approval');
+      const readCareJob = () => call(ocr, doctor, 'GET', `/ocr/jobs/${careJob.id}`, undefined, { purpose: RECORDS });
+      expectStatus(await readCareJob(), 200, 'OCR read under the care approval');
+      const otherStaff = await statusOf(labStaff, carePatient, RECORDS);
+      assert.deepEqual([otherStaff.readAllowed, otherStaff.writeAllowed], [false, false], 'another staff member is not covered');
+      // Identity's check is recorded as today: success, this purpose, naming the grant that covered it.
+      const named = await one(`select count(*)::int as n from audit.events where action = 'identity.authorization.check'
+        and outcome = 'success' and purpose_of_use = $1 and details->>'consentGrantId' = $2`,
+      [RECORDS, careApproved.consentGrantId]);
+      assert(named.n > 0, 'no authorization audit row names the covering care grant');
+      expectStatus(await careCall('POST', `/identity/me/consent-grants/${careApproved.consentGrantId}/revoke`,
+        { reason: 'Not my paper records today' }), 200, 'revoke the care grant');
+      const afterRevoke = { ocrRead: expectProblem(await readCareJob(), 404, 'OCR_JOB_NOT_FOUND', 'OCR read after the care revocation'),
+        ocrCreate: expectProblem(await createJob(doctor, careDocument), 404, null, 'OCR create after the care revocation'),
+        consentStatus: (await statusOf(doctor, carePatient, RECORDS)).readAllowed ? 'allowed' : 'none' };
+      assert.equal(afterRevoke.consentStatus, 'none');
+      // The Access PIN: the patient sets one, the doctor opens the record with it (direct care, read only).
+      expectStatus(await careCall('POST', '/identity/me/access-pin', { pin: '246813' }), 200, 'the patient sets an Access PIN');
+      const pinned = expectStatus(await call(identity, doctor, 'POST', '/identity/standard-access/pin',
+        { hid: carePatient.hid, pin: '246813', durationMinutes: 30 }, { purpose: 'direct-care' }), 200, 'the doctor uses the PIN');
+      const pinCovered = await statusOf(doctor, carePatient, RECORDS);
+      assert.deepEqual([pinCovered.readAllowed, pinCovered.writeAllowed, pinCovered.expiresAt],
+        [true, true, await coverEnd(pinned.consentGrantId)], `the PIN covers records processing: ${JSON.stringify(pinCovered)}`);
+      const pinJob = expectStatus(await createJob(doctor, careDocument), 201, 'OCR create under the PIN');
+      const readPinJob = () => call(ocr, doctor, 'GET', `/ocr/jobs/${pinJob.id}`, undefined, { purpose: RECORDS });
+      expectStatus(await readPinJob(), 200, 'OCR read under the PIN');
+      expectStatus(await careCall('DELETE', '/identity/me/access-pin'), 200, 'the patient turns the PIN off');
+      const afterPinOff = { ocrRead: expectProblem(await readPinJob(), 404, 'OCR_JOB_NOT_FOUND', 'OCR read after the PIN is off'),
+        consentStatus: (await statusOf(doctor, carePatient, RECORDS)).readAllowed ? 'allowed' : 'none' };
+      assert.equal(afterPinOff.consentStatus, 'none');
+      evidence.careGrant = { consentStatus: { recordsProcessing: 'read and write until the cover ends', directCare: 'read' },
+        ocrCreate: 201, ocrRead: 200, otherStaff: 'none', audit: 'the authorization check names the care grant',
+        afterRevoke, pin: { ocrCreate: 201, ocrRead: 200, afterPinOff } };
+      step('the care approval and the Access PIN each covered OCR for the doctor; the patient\'s revocation and turning the PIN off ended it');
+    }
 
     // ── The laboratory may ask (it holds ocr.job.write), and Lab still refuses the purpose ──
     const labAsked = expectStatus(await ask(labStaff, patient), 201, 'the laboratory asks');

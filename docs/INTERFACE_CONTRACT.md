@@ -2865,9 +2865,13 @@ patients as "Records processing". The OCR API's create, validate, confirm and
 retry already require it, and Identity's access-request route already admits
 it. Migration 0104 (`0104_records_processing_purpose.sql`) seeds it active,
 refuses requests the facility could not use, and lists each patient request's
-purpose. It seeds no grant and changes no row-level security policy; ocr-api
-and the role map are unchanged (a records officer role is Stage 2). Publishing
-into the chart stays direct care.
+purpose. Since the owner's decision 34(1) of 2026-11-03 ("the first access
+request or the Access PIN also covers bringing in paper records for 24 hours,
+said clearly to the patient; under-18s still refused; the patient can still say
+no") the patient's approval of a direct-care request, or the Access PIN, also
+covers records processing for 24 hours (below). It seeds no grant and changes
+no row-level security policy; ocr-api and the role map are unchanged (a
+records officer role is Stage 2). Publishing into the chart stays direct care.
 
 - The code: `('healthcare-operations', 'Records processing', active, 'hid')`,
   inserted ON CONFLICT DO NOTHING, as 0085 seeds `emergency` (a row already
@@ -2876,8 +2880,9 @@ into the chart stays direct care.
   (below), the patient approves it (approval needs no change: 0072 copies the
   purpose onto the grant), and the grant is honoured for that purpose only, for
   that one membership, facility and patient, for at most 24 hours. No grant is
-  seeded, and a direct-care grant, share or PIN never satisfies it (nor it
-  direct care).
+  seeded, and a records-processing grant never satisfies direct care. The other
+  way is the cover of decision 34(1), below: a direct-care grant from the
+  patient's approval or the Access PIN. A patient share never covers it.
 
 The request is today's staff access request with the purpose header:
 
@@ -2941,10 +2946,96 @@ What the grant opens, by step (permissions unchanged, 0013 and 0016):
 | EHR documents (`/ehr/documents` upload intent, list, complete, download) and OCR's source read (`/ehr/internal/ocr/documents/:documentId/source`) | `ehr.document.*`, `ocr.job.read` | any purpose, the grant of that purpose |
 | Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own |
 
-Without a records-processing grant, OCR's create answers 404 (EHR's source read
-does not find the document under that purpose, so nobody learns whether it
-exists) and the other job routes 404 `OCR_JOB_NOT_FOUND`; the website explains
-that the patient has not given records-processing access yet.
+Without a records-processing grant or a cover, OCR's create answers 404 (EHR's
+source read does not find the document under that purpose, so nobody learns
+whether it exists) and the other job routes 404 `OCR_JOB_NOT_FOUND`; the website
+explains that the patient has not given records-processing access yet.
+
+### 32.1 The patient's approval or Access PIN covers records processing for 24 hours (decision 34(1))
+
+A records-processing check (`healthcare-operations`, `read_records` or
+`write_records`) for a patient, staff member (membership) and facility is also
+allowed while that membership holds a covering direct-care grant. A grant
+covers when all of these hold, and only then:
+
+- It is that membership's, at that facility, for that patient, on that live
+  account: the grant every check already names (0012). Another staff member,
+  another facility, or the same staff member's membership at another facility,
+  is not covered.
+- It is direct care (`purpose_of_use = 'direct-care'`), `read_records` or
+  `write_records`, not break-glass, active, not held by the cutover, written by
+  this branch (`source_system = 'hid'`).
+- It came in one of exactly two ways: the patient approved the facility's
+  direct-care access request (the request is approved by the patient,
+  `approved_by_patient_id`, and neither row carries an authorization method:
+  0072's approval), or the patient's Access PIN was used (grant and request
+  both `authorization_method = 'patient_access_pin'`: 0075's and 0098's PIN
+  command). A patient share (0095), a seeded or imported grant, an emergency
+  grant and break-glass never cover it.
+- The check's time is from the grant's `starts_at`, before `least(expires_at,
+  starts_at + 24 hours)`: never past the grant's end, and never more than 24
+  hours from its start (requests last at most 24 hours and PIN grants at most
+  60 minutes today, so today the grant's end comes first).
+- The patient is 18 or over on that day's Africa/Lagos date and has a date of
+  birth on record (the request trigger's rule, at each check, since no request
+  is made). The membership's roles hold `ocr.job.write` at the facility, at
+  each check (pharmacists and receptionists, who may hold a direct-care grant,
+  are not covered).
+- Both codes, `healthcare-operations` and `direct-care`, are active (the kill
+  switch ends the cover), and no active deny directive of the patient names
+  records processing or direct care (or no purpose) for this facility,
+  organization, staff member or all, for this action (0012's reading).
+
+Within the cover both `read_records` and `write_records` are allowed for
+records processing, also under a PIN grant, which is read only for direct care:
+bringing in paper records means creating, validating, confirming and retrying
+OCR jobs. Direct care itself is unchanged: the PIN still opens the chart for
+reading only, and publishing into the chart still needs the publisher's own
+direct-care write grant.
+
+The patient can still say no: denying the request (no grant), revoking the
+grant from the access history (`POST /identity/me/consent-grants/:id/revoke`),
+turning the Access PIN off (`DELETE /identity/me/access-pin`, which ends its
+grants) or a deny directive each end the cover at the next check; ending the
+direct-care grant ends this too. A separate records-processing request (above)
+still works as before and is the way past 24 hours.
+
+Where it lives: `identity.records_processing_direct_care_cover(patient,
+subject, membership, facility, action, at_time)` returns `(consent_grant_id,
+covered_until)` or no row (sql, STABLE, SECURITY DEFINER, search_path
+`pg_catalog, pg_temp`, owned by the table owner, EXECUTE for
+`hid_identity_runtime` only). `identity.has_active_consent_grant` keeps 0012's
+body and gains one last alternative: the purpose is `healthcare-operations` and
+the cover returns a row (its md5 is now `732d11892dd4e27e1ff9093ae3b7de5a`;
+later migrations pin that). Every row-level security policy that calls it
+(OCR's jobs, EHR's documents and their scans) therefore honours the cover with
+no policy change.
+
+What staff and services see: Identity's `POST /identity/authorization/check` and
+`POST /identity/consent-status` answer a covered check allowed, with
+`consentGrantId` the covering direct-care grant and `expiresAt` the cover's end
+(`covered_until`); a records-processing grant of the staff member's own, when
+there is one, is named first. Audit is as today: Identity records
+`identity.authorization.check` (`success`, purpose `healthcare-operations`,
+details naming the covering `consentGrantId`) and OCR records its own job
+events; the "Your records were opened" notice (0095) fires as for any grant. An
+Identity image from before 0104 answers a covered check as not allowed (its own
+lookup wants a records-processing grant), so OCR then answers 403
+`ACCESS_DENIED` until the new Identity image serves.
+
+What the patient must be told (website lane, health; this branch does not edit
+the website): the owner's words are "said clearly to the patient". Each place
+the patient approves a facility's direct-care request or gives the Access PIN
+must say, before they agree, that this also lets that staff member bring in
+(scan and read) the patient's paper records at that facility for up to 24 hours
+(never longer than the access itself), and that they can stop it at any time by
+ending the access; and the patient's access history should show the same
+grant as also covering records processing until `covered_until`. Exact places
+are listed in the release notes for the website lane (approval screen, PIN
+screens, access history, the request inbox item and the PIN explainer). Under
+18: the patient's approval or PIN still grants direct care as today, but the
+words about paper records must not be shown for a patient under 18, who is not
+covered.
 
 The grant never opens the chart. The services refuse the purpose everywhere
 else:
@@ -2975,14 +3066,16 @@ Kill switch: `update identity.purpose_of_use_codes set active = false where
 code = 'healthcare-operations';`. New requests (and replays of pending ones)
 then answer 400 `INVALID_CONSENT_COMMAND` and every records-processing
 authorization is refused (`identity.has_active_consent_grant` requires an
-active code), so OCR answers 404 again. A grant approved while the code is off
-is written but authorizes nothing; unexpired grants work again if the code is
-reactivated. Who may set it and how it is recorded is an owner decision.
+active code, and the cover of 32.1 both active codes), so OCR answers 404
+again. A grant approved while the code is off is written but authorizes
+nothing; unexpired grants (and covers) work again if the code is reactivated. Who may set it and how it is recorded is an owner decision.
 
-Unchanged: `create_access_request`, `approve_access_request`,
-`has_active_consent_grant` and every other function body (their md5 pins stay
+Unchanged: `create_access_request`, `approve_access_request` and every other
+function body but `has_active_consent_grant`'s (32.1; their md5 pins stay
 true), policy, role, permission and grant; break-glass (emergency only), the
-PIN (direct care only) and patient shares (direct care). A pending request is
+PIN command (direct care, read only; its grant covers records processing as
+32.1 says) and patient shares (direct care, never covering records
+processing). A pending request is
 not checked again on approval, so a requester whose role changes afterwards
 keeps a request the patient may still approve.
 
@@ -3006,7 +3099,11 @@ Identity's `consent.service.spec.ts`, ehr-api's
 EHR, Lab, Pharmacy and OCR booted from their own code as their runtime roles,
 run by the TUF migration rehearsal): the request and its refusals, the
 patient's approval, OCR's job and EHR's document under the grant, the fences,
-the kill switch and the revocation. With `HID_RECORDS_PROCESSING_STAGE` it also
+the cover of a second patient's direct-care approval and then of the Access PIN
+(OCR creates and reads a job; another staff member is not covered; revoking the
+grant or turning the PIN off ends it), the kill switch and the revocation.
+Identity's `postgres-identity.provider.spec.ts` covers naming the covering
+grant. With `HID_RECORDS_PROCESSING_STAGE` it also
 runs this branch's services on a database without 0104 (`before-0104`), and an
 Identity from before 0104 (`HID_RECORDS_PROCESSING_IDENTITY_DIR`) on a database
 with it (`old-identity`) or without it (today's Identity on today's database).
