@@ -1398,7 +1398,7 @@ The server sets them from the record itself, never the model:
 
 | `origin` | Source kinds | `originLabel` (patient / staff) |
 |---|---|---|
-| `patient` | imported history recorded as patient provided, imported health profile | "You added this" / "Added by the patient" |
+| `patient` | imported history recorded as patient provided, imported health profile, records the patient added (`patient_entry`, 0116, while `PATIENT_ENTRIES_ENABLED` is on) | "You added this" / "Added by the patient" |
 | `health_worker` | notes, encounters, diagnoses, prescriptions, investigations, vitals, released lab results, imported history recorded as provider authored | "Recorded by a health worker" |
 | `scanned_paper` | readable documents and imported files, and a clinical note imported from a scanned record | "From a scanned paper record" |
 | `health_id_profile` | the Health ID profile | "Your Health ID profile" / "The patient's Health ID profile" |
@@ -2849,3 +2849,137 @@ Responses, request bodies, `If-Match` versions and error mapping are
 unchanged. 0103 has no down migration; applying the previous bodies (0046,
 0056) restores the old behaviour. The suite is
 `services/ehr-api/test/database/platform-organization-applications.integration.sql`.
+
+## 32. Records patients add themselves (0116)
+
+Akos handover step 6 (owner decision 25 of 2026-11-01; D7: a record the
+patient removes is hidden everywhere and kept). Text only: photos and files
+come with a later migration. 0116 is unsigned until the owner signs its
+declaration.
+
+Switch: `PATIENT_ENTRIES_ENABLED` (ehr-api, default `false`). While it is off:
+
+- every route below answers a plain 404 (`application/problem+json`, code
+  `NOT_FOUND`) before authentication, CSRF, validation or audit, which the
+  website reads as "not served";
+- `GET /api/v1/ehr/me/records` answers exactly its existing keys;
+- neither chat reads `ehr.patient_entries`, so the image may run before 0116
+  is applied.
+
+Turn it on only after 0116 is applied and the website reads the new chat
+source kind (see "Before turning it on").
+
+### Add a record
+
+`POST /api/v1/ehr/me/patient-entries` (patient session, CSRF for a cookie
+session, `Cache-Control: no-store`). Optional `Idempotency-Key` (16 to 128 of
+`A-Z a-z 0-9 . _ : -`, starting with a letter or digit), checked when sent.
+
+| Field | Rule |
+|---|---|
+| `kind` | `visit`, `test`, `medicine`, `diagnosis`, `vaccination` or `other` |
+| `title` | trimmed, 2 to 160 characters, one line |
+| `facilityName` | trimmed; blank or `null` is none; else at most 160 characters, one line |
+| `occurredOn` | `YYYY-MM-DD`, a real date from 1900-01-01 to today in Africa/Lagos |
+| `notes` | CRLF and CR read as a newline; trimmed; blank or `null` is none; at most 2000 characters, the newline the only control character |
+| `attachments`, `fileIds` | absent or `[]`; a non-empty list answers 422 `PATIENT_ENTRY_FILES_NOT_READY` |
+
+Characters are counted as the database counts them (code points).
+
+Answers:
+
+- 201 `{ entry, replayed: false }` for a new record.
+- 201 `{ entry, replayed: true }` for the same key and the same saved values,
+  or, without a key, the same saved values as an active record added in the
+  last 60 seconds (a double tap). A replay is never limited. A replayed key
+  whose record has since been removed still answers that record.
+- `entry` is `{ id, source: 'patient', kind, title, facilityName, occurredOn,
+  notes, createdAt, documents: [] }` (`occurredOn` as entered, `createdAt`
+  ISO 8601).
+
+| Status | Code | Message |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | "One or more request fields are invalid.", with `errors[{field, messages}]`: title "Use 2 to 160 characters, on one line."; facilityName "Use at most 160 characters, on one line."; occurredOn "Use a real date from 1 January 1900 to today."; notes "Use at most 2000 characters of plain text."; kind "Choose visit, test, medicine, diagnosis, vaccination or other." |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | a malformed key |
+| 400 | `PATIENT_ENTRY_INVALID` | "Check the record's details and try again." (the database refused a value) |
+| 403 | `PATIENT_SESSION_REQUIRED`, `PATIENT_ACCESS_DENIED` | as the other patient routes |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | "This request was already used for a different record. Please try again." |
+| 422 | `PATIENT_ENTRY_FILES_NOT_READY` | "Photos can't be added yet. Save the record without them." |
+| 429 | `PATIENT_ENTRY_LIMITED` | "You've added a lot of records today. Try again tomorrow." (30 added in the last 24 hours, removed ones included) |
+
+### Remove a record
+
+`POST /api/v1/ehr/me/patient-entries/:entryId/withdraw` (patient session, no
+body, `no-store`): 200 `{ entry: { id, status: 'withdrawn', withdrawnAt },
+replayed }`; a repeat answers the first `withdrawnAt` with `replayed: true`.
+An entry that is not the patient's, or does not exist, answers 404
+`PATIENT_ENTRY_NOT_FOUND` ("This record could not be found."), never the
+plain 404. The row is kept and hidden from the records answer, the staff
+read, both chats and saved chat answers that cite it (D7). The patient's own
+chat vectors of it are deleted; the staff chat never ranks it again.
+
+### Reads
+
+- `GET /api/v1/ehr/me/records` adds, while the switch is on,
+  `patientEntries` (active records, newest `occurredOn` first, then newest
+  added, at most 50, each as `entry` above) and `patientEntriesMore`
+  (whether there are more). Its audit row gains `patientEntryCount`. The
+  emergency read and the imported history read are unchanged. There is no
+  list route of its own.
+- `GET /api/v1/ehr/patients/:patientId/patient-entries` (staff;
+  `ehr.note.read`, `X-Facility-ID`, `X-Purpose-Of-Use: direct-care`, the
+  patient's read access at that facility): 200 `{ items, more }`, the same
+  items. 400 `PURPOSE_OF_USE_REQUIRED`, 403 `CONSENT_REQUIRED`,
+  `PERMISSION_DENIED`, `FACILITY_ACCESS_DENIED`, `PATIENT_SCOPE_DENIED`.
+  Audited `ehr.record.read` on resource type `patient-entries` (details
+  `entryCount`, `more`), which the patient's access log shows as a view.
+- Chat: `patient_entry` is a source kind for the patient's and the staff
+  chat (staff need `ehr.note.read`): origin `patient`, "You added this" /
+  "Added by the patient"; provenance "Record added by the patient, not
+  checked by a health worker"; fields `type` (the kind), `place`, `date`,
+  `notes`. A `medicine` record answers medicine questions and a `test`
+  record result questions.
+
+### Audit
+
+Written by the database commands in the same transaction, actor `patient`,
+resource type `patient-entry`, purpose `patient-self`, source `ehr-api`, never
+a title, place or note:
+
+| Action | Outcome | Details |
+|---|---|---|
+| `ehr.patient-entry.create` | `success` | `kind`, `hasFacilityName`, `hasNotes` |
+| `ehr.patient-entry.create` | `denied` (30 a day) | `reason: daily_limit`, `limit`, `windowHours` |
+| `ehr.patient-entry.withdraw` | `success` (first time only) | `kind` |
+
+A replay, a reused key and a removal of an entry that is not the patient's
+write nothing.
+
+### Database (0116)
+
+`ehr.patient_entries`, forced row-level security: the applier's own policy
+(the two commands) and a read policy of active entries in
+`ehr.imported_record_read_context` (the patient's fresh patient-self
+transaction or a clinician with granted read access at the current
+facility). Rows are never deleted or truncated and change only from active
+to withdrawn. `ehr.create_my_patient_entry` and
+`ehr.withdraw_my_patient_entry` are SECURITY DEFINER and work only in a fresh
+patient-self transaction (else 42501). The EHR runtime has SELECT on the
+table and EXECUTE on the commands, nothing else. The source-kind CHECK of
+`ehr.patient_evidence_chunks` and `ehr.staff_evidence_chunks` gains
+`patient_entry`. The suite is
+`services/ehr-api/test/database/patient-entries.integration.sql`. 0116 has no
+down migration.
+
+### Before turning it on
+
+1. The owner signs the 0116 declaration and it is applied.
+2. The website's chat parser (`packages/contracts/src/stagingChat.ts`)
+   accepts the kind `patient_entry`; without it one such source makes the
+   chat answer and every saved conversation that cites it unreadable, for
+   the patient and for staff.
+3. The website hides the photo step until photos and files are served (it
+   reads `patientEntries` as "records and uploads served"; a picked photo
+   would fail at its upload link).
+4. The owner sets `PATIENT_ENTRIES_ENABLED=true` for ehr-api. Turning it off
+   again hides the records everywhere and keeps them.
