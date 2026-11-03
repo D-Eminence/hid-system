@@ -1,3 +1,4 @@
+import { IsOptionalButNotNull } from '../../common/validation';
 import { IsBoolean, IsDateString, IsIn, IsInt, IsNumber, IsOptional, IsString, MaxLength, Min } from 'class-validator';
 
 export class StartExecutionDto {
@@ -32,8 +33,9 @@ export class GovernResultDto {
 }
 /**
  * Verification (owner decision 33.3): selfCheck true asks the One-person lab self-check of a version the caller
- * entered; the reason is then the typed reason (10-500 characters after trimming). Absent or false is today's check.
+ * entered; the reason is then the typed reason (10-500 characters after trimming). Absent or false is today's check; null
+ * and non-boolean values are refused (400 VALIDATION_FAILED).
  */
 export class VerifyResultDto extends GovernResultDto {
- @IsOptional() @IsBoolean() selfCheck?:boolean;
+ @IsOptionalButNotNull() @IsBoolean() selfCheck?:boolean;
 }

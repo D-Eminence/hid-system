@@ -200,6 +200,13 @@ describe('LabExecutionsService.verifyResult one-person lab (owner decision 33.3)
    await expect(service.verifyResult(verifier,resultId,{...base,reason,selfCheck:true},'verify-key-000000001')).rejects.toMatchObject({status:400,code:'LAB_RESULT_SELF_CHECK_REASON_INVALID'});
    expect(client.query).not.toHaveBeenCalled();
   }
+  // Characters, not UTF-16 units, as the DTO and the database count: 260 non-BMP characters pass, 501 do not.
+  const wide=verifyHarness();
+  await expect(wide.service.verifyResult(verifier,resultId,{...base,reason:'\u{1F9EA}'.repeat(260),selfCheck:true},'verify-key-000000001')).resolves.toBeDefined();
+  expect(insertCall(wide.client)?.[1]?.[8]).toBe('\u{1F9EA}'.repeat(260));
+  const tooWide=verifyHarness();
+  await expect(tooWide.service.verifyResult(verifier,resultId,{...base,reason:'\u{1F9EA}'.repeat(501),selfCheck:true},'verify-key-000000001')).rejects.toMatchObject({status:400,code:'LAB_RESULT_SELF_CHECK_REASON_INVALID'});
+  expect(tooWide.client.query).not.toHaveBeenCalled();
   // An ordinary check keeps today's rule (the database's 3-500).
   const {service}=verifyHarness();
   await expect(service.verifyResult(verifier,resultId,{...base,reason:'Checked'},'verify-key-000000001')).resolves.toBeDefined();
@@ -218,7 +225,7 @@ describe('LabExecutionsService.verifyResult one-person lab (owner decision 33.3)
   await ordinary.service.verifyResult(verifier,resultId,{...base,reason:'Manual result verified',selfCheck:false},'verify-key-000000002');
   const plain=insertCall(ordinary.client);
   expect(plain?.[1]?.[12]).toBe(false);
-  // Exactly the digest an ordinary check had before 0110, so its replays still match.
+  // Exactly the digest an ordinary check had before 0111, so its replays still match.
   expect(plain?.[1]?.[10]).toBe(requestDigest('lab.result.verify',{resultId,...base,reason:'Manual result verified'}));
   const details=(ordinary.audit.recordWithClient as jest.Mock).mock.calls.at(-1)?.[1]?.details as Record<string,unknown>;
   expect(details.selfCheck).toBe(false);expect(details).not.toHaveProperty('onePersonSettingId');

@@ -25,7 +25,7 @@ function iso(value: Timestamp | undefined): string | null {
 }
 
 /**
- * The answers to the facility settings commands (migration 0110). The database
+ * The answers to the facility settings commands (migration 0111). The database
  * raises each refusal with a bare code as the message: 42501 for authority,
  * 22023 for invalid input, P0001 for a business refusal. Anything else is not
  * an answer about the request and is 503.

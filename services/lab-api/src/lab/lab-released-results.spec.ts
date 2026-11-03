@@ -288,6 +288,12 @@ describe('One-person lab marks (owner decision 33.3)',()=>{
   expect(body).not.toContain(SELF_CHECK_REASON);
   expect(body).not.toMatch(/selfCheckReason|enteredByYou|onePersonLab/);
  });
+ it('the released-only reads never read the switch (they do not show it)',async()=>{
+  const {service,statements}=oneLab({[resultId]:selfChecked});
+  await service.getResultHistory(doctor,resultId);
+  await byOrder(service).listReleasedForEhrOrder(doctor,workItem.source_ehr_order_id);
+  expect(statements().some(sql=>sql.includes('lab.one_person_lab_enabled()'))).toBe(false);
+ });
  it('Lab staff get the switch, who entered each revision, the same-person mark and its reason',async()=>{
   const {service,statements}=oneLab({[resultId]:selfChecked});
   const history=await service.getResultHistory(labStaff,resultId) as unknown as {onePersonLab:boolean;revisions:{version:number;enteredByYou:boolean;checkedBySamePerson:boolean|null;selfCheckReason:string|null}[]};

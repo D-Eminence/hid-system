@@ -135,7 +135,7 @@ describe('ProblemDetailsFilter database errors', () => {
     expect(logged).not.toContain(secret);
   });
 
-  it('answers a one-person lab refusal of a verification (0110) as its code and logs only the SQLSTATE', () => {
+  it('answers a one-person lab refusal of a verification (0111) as its code and logs only the SQLSTATE', () => {
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const typedReason = 'Only scientist on duty, patient Ada Obi';
     const error = Object.assign(new Error('LAB_RESULT_SECOND_CHECK_REQUIRED'), { code: '23514',
