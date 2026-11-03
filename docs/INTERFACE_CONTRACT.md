@@ -2849,3 +2849,101 @@ Responses, request bodies, `If-Match` versions and error mapping are
 unchanged. 0103 has no down migration; applying the previous bodies (0046,
 0056) restores the old behaviour. The suite is
 `services/ehr-api/test/database/platform-organization-applications.integration.sql`.
+
+## 32. One-person lab check (0110)
+
+Owner decision 33.3: "two-person lab check default; a single-person facility
+may release with a typed, logged reason". 0110 is unsigned until the owner
+signs its declaration. Before 0110 the person who entered a Lab result
+version could never verify it (the Lab API answered 500), so a laboratory
+with one scientist could never release a result.
+
+Rules:
+
+- Every facility is two-person (One-person lab off) until its administrator
+  switches it on. Who may switch: a staff session at the facility holding
+  `organization.manage` (roles `admin` and `org_admin`); not an administrator
+  awaiting support's review (`org_admin_awaiting_review`), not lab staff.
+  Each switch needs a typed reason of 10 to 500 characters (after trimming)
+  and is recorded with who, when, which way and why; the database writes an
+  audit row `identity.facility.one-person-lab.on` or `.off` (`actor_type
+  staff`, the facility, the reason, `details {settingId, onePersonLab,
+  previous}`).
+- While it is on, the person who entered a version may verify it only by
+  asking for a self-check: `selfCheck: true` with a typed reason of 10 to 500
+  characters (after trimming). The verification records `self_check` and the
+  setting in force. Release is unchanged: it needs the exact valid
+  verification, and in a one-person lab the same person may release.
+- While it is off, a same-person check is refused whatever the client sends.
+  A different person's check is as before and must not ask for a
+  self-check.
+- A switch-off and a self-check exclude each other: a switch-off waits for an
+  open self-check to commit, and a self-check that started before a
+  committed switch-off is retried by the Lab API and then refused.
+
+Identity API (`X-Facility-ID`, CSRF for a cookie session, purpose
+`healthcare-operations`):
+
+- `GET /api/v1/identity/facility-settings` (`organization.manage`) answers
+  200 `{ "onePersonLab": { "enabled": boolean, "changedAt": string|null,
+  "changedByName": string|null, "reason": string|null } }`. A 404 (an image
+  without this route) means the setting is not available yet: hide the
+  switch.
+- `POST /api/v1/identity/facility-settings/one-person-lab`
+  (`organization.manage`), body `{ "enabled": boolean, "reason": string }`,
+  answers 200 `{ "enabled": boolean, "changedAt": string, "settingId":
+  string }`.
+
+| HTTP | `code` | Plain words |
+| --- | --- | --- |
+| 400 | `VALIDATION_FAILED` | Check the reason (10 to 500 characters) and try again. |
+| 400 | `FACILITY_SETTING_REASON_INVALID` | Enter a reason of 10 to 500 characters. |
+| 400 | `FACILITY_SETTING_INVALID` | The setting could not be read; try again. |
+| 403 | `PERMISSION_DENIED` or `FACILITY_SETTING_PERMISSION_DENIED` | Only the facility administrator can change this. |
+| 409 | `FACILITY_SETTING_UNCHANGED` | One-person lab is already set that way. |
+| 503 | `FACILITY_SETTINGS_UNAVAILABLE` | Facility settings are unavailable; try again later. |
+
+Lab API:
+
+- `POST /api/v1/lab/results/:resultId/verify` takes `{ "expectedResultVersion":
+  number, "occurredAt": string, "reason": string (at most 500),
+  "selfCheck"?: boolean }`. Send `selfCheck: true` only for a self-check, with
+  exactly the reason the person typed (never an automatic default reason).
+  An image before 0110 refuses the field with 400 `VALIDATION_FAILED`; send
+  it only when the result read carries `onePersonLab: true`.
+- Result reads (GET execution, enter, correct, verify, release, and the full
+  history for Lab staff) carry `onePersonLab: boolean` (the caller's own
+  facility) and, per revision, `enteredByYou: boolean`,
+  `checkedBySamePerson: boolean|null` (null until checked) and
+  `selfCheckReason: string|null` (a self-check's reason). Released-only
+  readers (`GET .../history` without `lab.execution.read`, and
+  `GET .../ehr-orders/:id/released-results`) get `checkedBySamePerson` only.
+  A missing key (an older image) means off / not known: show today's screen.
+
+| HTTP | `code` | Plain words |
+| --- | --- | --- |
+| 409 | `LAB_RESULT_SECOND_CHECK_REQUIRED` | A second person must check this result. |
+| 409 | `LAB_RESULT_SELF_CHECK_REASON_REQUIRED` | You entered this result. Type why you are checking it yourself. |
+| 400 | `LAB_RESULT_SELF_CHECK_REASON_INVALID` | The reason must be 10 to 500 characters. |
+| 409 | `LAB_RESULT_SELF_CHECK_NOT_YOURS` | Someone else entered this result; check it normally. |
+
+Screens: Admin Settings shows One-person lab on or off with who, when and why,
+and changes it with a typed reason. On the Lab screen, when
+`result.status === 'entered_unverified'` and the current revision has
+`enteredByYou`: with `onePersonLab`, a required reason box (10 to 500) and
+`selfCheck: true`; without it, "A second person must check this result." and
+no check button. Result history shows "Checked by the same person" (and the
+reason for Lab staff) where `checkedBySamePerson`.
+
+Audit: `identity.facility.one-person-lab.on` / `.off` (database),
+`api.identity.facility-settings.read` and
+`api.identity.facility.one-person-lab.change` (Identity API request rows),
+and `lab.result.verify` with `details.selfCheck` and, for a self-check,
+`details.onePersonSettingId`. No log carries the reason or patient data; the
+Lab API logs only the SQLSTATE of a mapped refusal. The outbox event
+`LabResultVerified` is unchanged.
+
+Order: 0110 before the new Lab API image (its result reads call
+`lab.one_person_lab_enabled()`); today's images run unchanged on 0110. 0110
+has no down migration. The suite is
+`services/ehr-api/test/database/lab-one-person-check.integration.sql`.
