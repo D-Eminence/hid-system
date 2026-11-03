@@ -12,7 +12,8 @@ import { LabOrderRouteAccess } from './order-route-access';
 // Checking (verifying) a Lab result, by the person who entered it and by someone else. The database keeps the rule
 // that the checker of a result version is not the person who entered it (lab.validate_result_governance, 0021, 0077).
 const facilityId = '10000000-0000-4000-8000-000000000001';
-const accountId = '20000000-0000-4000-8000-000000000001';
+// Hex letters, so the upper-case spelling the case tests use is a different string.
+const accountId = 'abcdef00-0000-4000-8000-00000000000a';
 const colleagueId = '20000000-0000-4000-8000-000000000002';
 const membershipId = '40000000-0000-4000-8000-000000000001';
 const patientId = '50000000-0000-4000-8000-000000000001';
