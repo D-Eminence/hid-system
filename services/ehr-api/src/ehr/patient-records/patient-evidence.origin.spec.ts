@@ -1,5 +1,5 @@
-import { LOCAL_EVIDENCE_QUERY } from './patient-evidence.query';
-import { STAFF_EVIDENCE_QUERY } from './staff-evidence.service';
+import { LOCAL_EVIDENCE_QUERY, localEvidenceQuery } from './patient-evidence.query';
+import { STAFF_EVIDENCE_QUERY, staffEvidenceQuery } from './staff-evidence.service';
 import { ORIGINS, SOURCE_KINDS, evidence, evidenceOrigin, originLabel, type EvidenceOrigin, type SourceKind } from './patient-evidence.types';
 
 // Owner decision 25: the chat says where each fact came from. The origin is
@@ -9,6 +9,8 @@ const EXPECTED: Record<SourceKind, EvidenceOrigin> = {
   investigation: 'health_worker', vital: 'health_worker', lab_result: 'health_worker',
   import: 'patient', import_version: 'patient', health_profile: 'patient',
   attachment: 'scanned_paper', document: 'scanned_paper', profile: 'health_id_profile',
+  // Records the patient added themselves (0116): "You added this".
+  patient_entry: 'patient',
 };
 const source = (kind: SourceKind, originHint?: string | null) => evidence({ kind, id: '22222222-2222-4222-8222-222222222222',
   version: '1', title: `Synthetic ${kind}`, recordedAt: '2026-10-01T00:00:00.000Z', effectiveAt: null,
@@ -38,6 +40,9 @@ describe('Where a chat source came from', () => {
     expect(evidenceOrigin('document', 'provider-authored')).toBe('scanned_paper');
     expect(evidenceOrigin('attachment', 'provider-authored')).toBe('scanned_paper');
     expect(evidenceOrigin('prescription', 'scanned_paper')).toBe('health_worker');
+    for (const hint of ['provider-authored', 'scanned_paper', 'patient-provided', null, undefined]) {
+      expect(evidenceOrigin('patient_entry', hint)).toBe('patient');
+    }
   });
 
   it('labels each origin in plain words for the patient and for staff', () => {
@@ -83,7 +88,27 @@ describe('The evidence query reads each row\'s origin', () => {
     expect(branches[0]).toContain("r.revision_no=1 and r.change_reason='OCR import from human-validated source evidence'");
   });
 
+  it('reads the records patients add only while the setting is on, as the patient\'s, active ones only', () => {
+    expect(localEvidenceQuery(false)).toBe(LOCAL_EVIDENCE_QUERY);
+    const withEntries = localEvidenceQuery(true).split('union all');
+    expect(withEntries).toHaveLength(10);
+    expect(withEntries.slice(0, 9).join('union all')).toBe(branches.join('union all').replace(/\n\)\nselect kind[\s\S]*$/, ''));
+    const entries = withEntries[9]!;
+    expect(entries).toContain("select 'patient_entry',pe.id,pe.patient_id,pe.row_version::text,pe.title,pe.created_at");
+    expect(entries).toMatch(/,null\s+from ehr\.patient_entries pe where pe\.status='active'\n\)\nselect kind,id,version/);
+    expect(entries).toContain("'Record added by the patient, not checked by a health worker'");
+    expect(localEvidenceQuery(true)).toContain(
+      'select kind,id,version,title,recorded_at,effective_at,provenance,quality,fields,origin_hint from sources');
+  });
+
   it('gives staff chat the same origin, with its own filters still applied', () => {
+    expect(staffEvidenceQuery(false)).toBe(STAFF_EVIDENCE_QUERY);
+    for (const query of [STAFF_EVIDENCE_QUERY, staffEvidenceQuery(true)]) {
+      expect(query).toContain('where patient_id=$1 and kind=any($4::text[]) and (kind');
+      expect(query).toContain('from ehr.vitals v join ehr.encounters e');
+    }
+    expect(STAFF_EVIDENCE_QUERY).not.toContain('patient_entries');
+    expect(staffEvidenceQuery(true)).toContain("from ehr.patient_entries pe where pe.status='active'");
     expect(STAFF_EVIDENCE_QUERY).toContain('origin_hint from sources');
     expect(STAFF_EVIDENCE_QUERY).toContain('where patient_id=$1 and kind=any($4::text[]) and (kind');
     expect(STAFF_EVIDENCE_QUERY).toContain("e.id=d.encounter_id and e.patient_id=d.patient_id and e.facility_id=d.facility_id and e.status='completed'");

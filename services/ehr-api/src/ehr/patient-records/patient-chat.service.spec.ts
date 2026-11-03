@@ -106,6 +106,14 @@ describe('Patient evidence chat',()=>{
   // The saved reply keeps the labels for history; it still carries no hash.
   expect(s.save.mock.calls[0][3].sources[0]).toHaveProperty('originLabel');
  });
+ it('labels a record the patient added as theirs: "You added this" to the patient',async()=>{
+  const records=[item('patient_entry',5,{type:'medicine',place:null,date:'2026-10-01',notes:'Twice a day'}),item('prescription',6)];
+  const s=setup(records);s.plan.mockResolvedValue({intent:'records',recordIntent:'summary',query:'history'});
+  s.answer.mockResolvedValue('Recorded facts [1] [2].');
+  const reply=await s.service.answer(request,'Summarise my history');
+  const added=reply.sources.find(source=>(source as {kind:string}).kind==='patient_entry');
+  expect(added).toMatchObject({id:records[0]!.id,origin:'patient',originLabel:'You added this'});
+ });
 });
 
 describe('Shared engine with explicit staff access',()=>{
@@ -123,6 +131,20 @@ describe('Shared engine with explicit staff access',()=>{
   // Staff read the patient's own entries as the patient's, not as "you".
   expect(s.answer.mock.calls[0][5]).toBe('staff');
   expect(s.authorizeSelf).not.toHaveBeenCalled();expect(s.snapshot).not.toHaveBeenCalled();expect(transaction).toHaveBeenCalled();
+ });
+ it('labels a record the patient added "Added by the patient" to staff',async()=>{
+  const s=setup([]);
+  const added=item('patient_entry',7,{type:'test',place:'Lagoon Lab',date:'2026-10-01',notes:null});
+  const staffSnapshot=jest.fn().mockResolvedValue({records:[added],coverage:{complete:true,recordCount:1,selectedCount:0,pendingDocuments:0,unavailable:[]}});
+  const access={authorize:jest.fn().mockResolvedValue({...auth,subject:'staff-a',accountId:'staff-account'}),
+    transaction:jest.fn(async(_auth:unknown,_correlation:string,work:(client:unknown)=>Promise<unknown>)=>work({query:jest.fn()})),
+    admissionKey:'staff:staff-account:facility-b',chunksTable:'ehr.staff_evidence_chunks',
+    audit:{actorType:'staff',facilityId:'facility-a',actorMembershipId:'member-a',purposeOfUse:'direct-care'},
+    evidence:{snapshot:staffSnapshot,assertCurrent:jest.fn(),prepareDocuments:jest.fn().mockResolvedValue([])},
+    history:{start:jest.fn().mockResolvedValue('staff-generation'),context:s.context,save:s.save}} as never;
+  s.plan.mockResolvedValue({intent:'records',recordIntent:'summary',query:'history'});s.answer.mockResolvedValue('Recorded fact [1].');
+  const reply=await s.service.answer(request,'Summarise this patient',access);
+  expect(reply.sources[0]).toMatchObject({id:added.id,kind:'patient_entry',origin:'patient',originLabel:'Added by the patient'});
  });
  it('shares the per-clinician admission key across different selected patients',async()=>{
   const s=setup();let finish!:(value:unknown)=>void;s.plan.mockImplementation(()=>new Promise(resolve=>{finish=resolve}));
