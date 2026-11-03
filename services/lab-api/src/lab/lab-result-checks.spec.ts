@@ -37,13 +37,14 @@ const refusal = (message = 'Result verifier must be independent and result must 
  */
 function harness(author: string, refused?: Error) {
   const statements: string[] = [];
-  const client = { query: jest.fn(async (sql: string) => {
+  const client = { query: jest.fn(async (sql: string, params?: unknown[]) => {
     statements.push(sql);
     if (sql.includes('lab.order_route_access_for')) return { rows: [{ outcome: 'none', route_id: null, work_item_id: workItemId }] };
     if (sql.includes('from lab.results where id=$1 for update')) return { rows: [{ id: resultId, execution_id: executionId,
       patient_id: patientId, facility_id: facilityId, current_version: '1' }] };
+    // The author of the exact version being checked, and of no other.
     if (/\bfrom lab\.result_revisions\b/.test(sql) && /\bentered_by\b/.test(sql) && !/\brr\b/.test(sql)) {
-      return { rows: [{ entered_by: author }] };
+      return { rows: JSON.stringify(params) === JSON.stringify([resultId, check.expectedResultVersion]) ? [{ entered_by: author }] : [] };
     }
     if (sql.includes('insert into lab.result_verifications') && refused) throw refused;
     if (sql.includes('from lab.test_executions e')) return { rows: [{ id: executionId, accession_id: workItemId,
@@ -118,6 +119,7 @@ describe('LabExecutionsService.verifyResult by the person who entered the result
   it.each([
     ['another 23514 of the check', refusal('Governance command must bind the exact current result version')],
     ['a 42501 of the check', Object.assign(new Error('Verifier must match authenticated database context'), { code: '42501' })],
+    ['another code in the same words', Object.assign(new Error('Result verifier must be independent and result must be eligible'), { code: '42501' })],
   ])('passes %s on unchanged, even for the member who entered it', async (_label, refused) => {
     const { service } = harness(accountId, refused);
     await expect(service.verifyResult(context, resultId, check, key)).rejects.toBe(refused);
