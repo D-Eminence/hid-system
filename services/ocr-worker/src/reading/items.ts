@@ -1,8 +1,8 @@
 import { createHash } from 'node:crypto';
 import type { Box, FlagReason, ItemKind, PaperIdentity, PaperItem } from './contract';
 import {
-  ambiguousDate, compact, DOSE, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes, segment,
-  STATUS_CUES, suspiciousUncited, together, wordsIn,
+  ambiguousDate, combinedStrengths, compact, DOSE, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes,
+  sameCombined, segment, STATUS_CUES, suspiciousUncited, together, unitAfter, withoutNumberedUnit, wordsIn,
 } from './grounding';
 import { withoutPlaceholders, type Masker } from './masking';
 import type { ModelItem, ModelPage } from './prompt';
@@ -325,7 +325,7 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       // The value and range are the item's own, as written: not "+ve" for "-ve", nor the next test's number.
       if ((norm(raw.value) && !asWrittenIn(raw.asWritten, raw.value))
         || (norm(raw.referenceRange) && !asWrittenIn(raw.asWritten, raw.referenceRange))) add('value_mismatch');
-      if (fieldWordsMissing(raw.unit) || (norm(raw.unit) && !asWrittenIn(raw.asWritten, raw.unit))) add('unit_mismatch');
+      if (fieldWordsMissing(raw.unit) || !unitWritten(raw.asWritten, raw.value, raw.unit)) add('unit_mismatch');
       if (norm(raw.flag) && !has(source, raw.flag)) add('field_not_on_paper');
       fields = { test: restore(raw.test), value: restore(raw.value), unit: restore(raw.unit),
         referenceRange: restore(raw.referenceRange), flag: restore(raw.flag) };
@@ -342,7 +342,7 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       if (!norm(raw.value)) add('name_missing');
       if (fieldNumbersMissing(raw.value, sourceNumbers)) add('value_mismatch');
       if (norm(raw.value) && !asWrittenIn(raw.asWritten, raw.value)) add('value_mismatch');
-      if (fieldWordsMissing(raw.unit) || (norm(raw.unit) && !asWrittenIn(raw.asWritten, raw.unit))) add('unit_mismatch');
+      if (fieldWordsMissing(raw.unit) || !unitWritten(raw.asWritten, raw.value, raw.unit)) add('unit_mismatch');
       fields = { measure: raw.measure, value: restore(raw.value), unit: restore(raw.unit) };
       break;
     }
@@ -429,7 +429,17 @@ function allergySegment(text: string, substance: string, others: readonly string
 /** Whether part is in text as written: as is, with "5 mg" read as "5mg", or with "5.4mmol/L" read as "5.4 mmol/L". */
 function asWrittenIn(text: string, part: string): boolean {
   const spaced = (value: string) => norm(value).replace(/(\d)(?=\p{L})/gu, '$1 ');
-  return has(text, part) || has(compact(text), compact(part)) || has(spaced(text), spaced(part));
+  return has(text, part) || has(compact(text), compact(part)) || has(spaced(text), spaced(part))
+    || sameCombined(text, part);
+}
+
+/**
+ * Whether a reading's unit is the one written for it: straight after its value ("97%", "97 %", "36.1°C"), or on
+ * its own ("SpO2 (%): 97"), but never one written after another number ("%" of "PCV 32%" is not 97's).
+ */
+function unitWritten(asWritten: string, value: string, unit: string): boolean {
+  if (!norm(unit)) return true;
+  return unitAfter(asWritten, value, unit) || asWrittenIn(withoutNumberedUnit(asWritten, unit), unit);
 }
 
 const FREQUENCY_CODES: ReadonlyArray<readonly [string, RegExp]> = [
@@ -451,7 +461,13 @@ const DOSES = new RegExp(DOSE.source, 'gu');
  * phrase for another code, or a duration number the duration doesn't have.
  */
 function plainDisagrees(plain: string, own: string, strength: string, frequency: string, duration: string): boolean {
-  const text = norm(withoutPlaceholders(plain));
+  let text = norm(withoutPlaceholders(plain));
+  // A combined strength ("80/480 mg", "80 mg/480 mg") is held to the item as a whole, then its parts are taken out
+  // so that "480 mg" is not read as a dose of its own; a different one ("20/120 mg") disagrees.
+  const combined = combinedStrengths(text);
+  const known = new Set([...combinedStrengths(own), ...combinedStrengths(strength)].map((found) => found.canonical));
+  if (combined.some((found) => !known.has(found.canonical))) return true;
+  for (const found of [...combined].reverse()) text = `${text.slice(0, found.start)} ${text.slice(found.end)}`;
   for (const dose of text.matchAll(DOSES)) {
     if (compact(dose[0]) !== compact(strength) && !asWrittenIn(own, dose[0])) return true;
   }

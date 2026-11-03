@@ -401,4 +401,121 @@ describe('checkPage review fixes: fields held to the paper', () => {
       expect(allergy('Penicillin allergy, severity unknown', 'unknown').checkReasons).toEqual([]);
     });
   });
+
+  describe('units written straight after a number, and combined strengths', () => {
+    const vital = (line: string, measure: 'oxygen_saturation' | 'temperature', value: string, unit: string) =>
+      reasons(readPage(1, [line]), { kind: 'vital', asWritten: line, lineIds: ['p1-l1'], measure, value, unit })[0]!;
+    const lab = (line: string, value: string, unit: string) =>
+      reasons(readPage(1, [line]), { kind: 'lab_result', asWritten: line, lineIds: ['p1-l1'], test: 'PCV', value,
+        unit })[0]!;
+
+    it('finds "%" and "°C" written straight after the reading', () => {
+      expect(vital('SpO2: 97%', 'oxygen_saturation', '97', '%')).toEqual([]);
+      expect(vital('SpO2: 97 %', 'oxygen_saturation', '97', '%')).toEqual([]);
+      expect(vital('SpO2 (%): 97', 'oxygen_saturation', '97', '%')).toEqual([]);
+      expect(vital('T 36.1°C', 'temperature', '36.1', '°C')).toEqual([]);
+      expect(vital('T 36.1°C', 'temperature', '36.1', 'C')).toEqual([]);
+      expect(vital('T 36.1C', 'temperature', '36.1', '°C')).toEqual([]);
+      expect(lab('PCV: 32%', '32', '%')).toEqual([]);
+    });
+
+    it('still refuses another number, a part of one, or another unit', () => {
+      expect(vital('SpO2: 197%', 'oxygen_saturation', '97', '%')).toContain('value_mismatch');
+      expect(vital('SpO2: 197%', 'oxygen_saturation', '97', '%')).toContain('unit_mismatch');
+      expect(vital('SpO2: 9.7%', 'oxygen_saturation', '97', '%')).toContain('value_mismatch');
+      expect(vital('T 36.1°F', 'temperature', '36.1', '°C')).toContain('unit_mismatch');
+      expect(vital('T 36.1°C', 'temperature', '36.1', '°F')).toContain('unit_mismatch');
+      // The "%" is 32's, not 97's.
+      expect(reasons(readPage(1, ['SpO2 97 PCV 32%']), { kind: 'vital', asWritten: 'SpO2 97 PCV 32%',
+        lineIds: ['p1-l1'], measure: 'oxygen_saturation', value: '97', unit: '%' })[0]).toContain('unit_mismatch');
+    });
+
+    it('refuses a fragment of a number OCR split or joined, and one end of a range', () => {
+      // A number split by a space, or broken after its decimal point: "97" of "1 97%" is not the reading.
+      expect(vital('SpO2: 1 97%', 'oxygen_saturation', '97', '%')).toContain('unit_mismatch');
+      expect(vital('T 3 6.1°C', 'temperature', '6.1', '°C')).toContain('unit_mismatch');
+      expect(lab('PCV: 3 2%', '2', '%')).toContain('unit_mismatch');
+      expect(vital('SpO2 9. 7%', 'oxygen_saturation', '7', '%')).toContain('unit_mismatch');
+      expect(vital('T 36. 1°C', 'temperature', '1', '°C')).toContain('unit_mismatch');
+      // A range with a dash or a spaced hyphen, and a decimal written with a middle dot.
+      expect(vital('SpO2 92–97%', 'oxygen_saturation', '97', '%')).toContain('unit_mismatch');
+      expect(vital('SpO2 92 - 97%', 'oxygen_saturation', '97', '%')).toContain('unit_mismatch');
+      expect(lab('PCV 30 – 32%', '32', '%')).toContain('unit_mismatch');
+      expect(vital('T 36·1°C', 'temperature', '1', '°C')).toContain('unit_mismatch');
+      expect(vital('T 36·1°C', 'temperature', '36', '°C')).toContain('unit_mismatch');
+      // A digit ending a word is not a number of its own.
+      expect(vital('SpO2 97%', 'oxygen_saturation', '97', '%')).toEqual([]);
+    });
+
+    it('does not credit one reading\'s unit to the same number written again for another', () => {
+      expect(reasons(readPage(1, ['SpO2 97% HR 97']), { kind: 'vital', asWritten: 'SpO2 97% HR 97',
+        lineIds: ['p1-l1'], measure: 'pulse', value: '97', unit: '%' })[0]).toContain('unit_mismatch');
+      expect(vital('SpO2 97% (97%)', 'oxygen_saturation', '97', '%')).toEqual([]);
+    });
+
+    const artemether = (line: string, overrides: Parameters<typeof modelItem>[0]) =>
+      reasons(readPage(1, [line]), { kind: 'medicine', asWritten: line, lineIds: ['p1-l1'],
+        name: 'Artemether/Lumefantrine', strength: '80/480mg', frequency: 'bd', status: 'current', ...overrides })[0]!;
+
+    it('accepts a combined strength restated whole in the plain reading or the fields', () => {
+      const line = 'Artemether/Lumefantrine 80/480mg bd';
+      expect(artemether(line, { plain: 'Artemether/Lumefantrine 80/480 mg twice a day' })).toEqual([]);
+      expect(artemether(line, { plain: 'Artemether/Lumefantrine 80 mg/480 mg twice a day' })).toEqual([]);
+      expect(artemether(line, { plain: 'Artemether/Lumefantrine 80/480mg twice a day', strength: '80 mg/480 mg' }))
+        .toEqual([]);
+      expect(artemether('Artemether/Lumefantrine 80/480 mg bd',
+        { plain: 'Artemether/Lumefantrine 80 mg/480 mg twice a day', strength: '80/480 mg' })).toEqual([]);
+    });
+
+    it('refuses a different combined strength, or a part of a longer number', () => {
+      const line = 'Artemether/Lumefantrine 80/480mg bd';
+      expect(artemether(line, { plain: 'Artemether/Lumefantrine 20/120 mg twice a day' })).toContain('plain_mismatch');
+      expect(artemether(line, { plain: 'Artemether/Lumefantrine 80/480 mg twice a day', strength: '20/120mg' }))
+        .toEqual(expect.arrayContaining(['strength_mismatch', 'strength_not_as_written']));
+      expect(artemether('Artemether/Lumefantrine 1480 mg bd', { strength: '1480 mg',
+        plain: 'Artemether/Lumefantrine 480 mg twice a day' })).toContain('plain_mismatch');
+      expect(reasons(readPage(1, ['Bisoprolol 2.5 mg od']), { kind: 'medicine', asWritten: 'Bisoprolol 2.5 mg od',
+        lineIds: ['p1-l1'], name: 'Bisoprolol', strength: '2.5 mg', frequency: 'od', status: 'current',
+        plain: 'Bisoprolol 5 mg once a day' })[0]).toContain('plain_mismatch');
+    });
+
+    it('refuses one part of a combined strength written with a unit on each part', () => {
+      const spaced = 'Artemether/Lumefantrine 80 mg/480 mg bd';
+      const glued = 'Artemether/Lumefantrine 80mg/480mg bd';
+      // A plain reading that gives one part as the dose.
+      expect(artemether(spaced, { strength: '80/480 mg', plain: 'Artemether/Lumefantrine 480 mg twice a day' }))
+        .toContain('plain_mismatch');
+      expect(artemether(spaced, { plain: 'Artemether/Lumefantrine 80 mg twice a day' })).toContain('plain_mismatch');
+      expect(artemether(glued, { plain: 'Artemether/Lumefantrine 480mg twice a day' })).toContain('plain_mismatch');
+      // A strength field that takes one part for the whole.
+      for (const strength of ['80mg', '80 mg', '480mg', '480 mg']) {
+        expect(artemether(spaced, { strength, plain: `Artemether/Lumefantrine ${strength} twice a day` }))
+          .toContain('strength_not_as_written');
+        expect(artemether(glued, { strength, plain: `Artemether/Lumefantrine ${strength} twice a day` }))
+          .toContain('strength_not_as_written');
+      }
+      // The whole combined strength still reads clear on either paper.
+      expect(artemether(spaced, { strength: '80/480 mg', plain: 'Artemether/Lumefantrine 80/480 mg twice a day' }))
+        .toEqual([]);
+      expect(artemether(glued, { plain: 'Artemether/Lumefantrine 80 mg/480 mg twice a day' })).toEqual([]);
+    });
+
+    it('does not re-read a page whose readings are only written this way', () => {
+      const page = readPage(1, ['SpO2: 97%', 'T 36.1°C', 'PCV: 32%', 'Artemether/Lumefantrine 80/480mg bd']);
+      const result = check(page, modelPage([
+        modelItem({ kind: 'vital', asWritten: 'SpO2: 97%', lineIds: ['p1-l1'], measure: 'oxygen_saturation',
+          value: '97', unit: '%' }),
+        modelItem({ kind: 'vital', asWritten: 'T 36.1°C', lineIds: ['p1-l2'], measure: 'temperature', value: '36.1',
+          unit: '°C' }),
+        modelItem({ kind: 'lab_result', asWritten: 'PCV: 32%', lineIds: ['p1-l3'], test: 'PCV', value: '32',
+          unit: '%' }),
+        modelItem({ kind: 'medicine', asWritten: 'Artemether/Lumefantrine 80/480mg bd', lineIds: ['p1-l4'],
+          name: 'Artemether/Lumefantrine', strength: '80/480mg', frequency: 'bd', status: 'current',
+          plain: 'Artemether/Lumefantrine 80/480 mg twice a day' }),
+      ]));
+      expect(result.items.map((item) => item.checkReasons)).toEqual([[], [], [], []]);
+      expect(result.rereadReasons).toEqual([]);
+      expect(result.flagReasons).not.toContain('low_confidence');
+    });
+  });
 });
