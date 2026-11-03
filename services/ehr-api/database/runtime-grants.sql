@@ -1399,6 +1399,16 @@ revoke all on function identity.demo_story_context(text,uuid,uuid,text),
 -- commands, which keep the Identity grants above. No grant changes.
 revoke all on function identity.organization_application_admin_account(text) from public;
 
+-- Patient details on this facility's own lab and pharmacy work (0113), as
+-- that migration grants them (its section 2): the Lab reader to the Lab
+-- runtime and the Pharmacy reader to the Pharmacy runtime, each also to the
+-- schema test runtime; nothing to the EHR, Identity, OCR, Outreach or
+-- Notification runtimes, and no table privilege to anyone (both read
+-- identity.patients as its owner).
+grant execute on function lab.work_item_patient_cards(uuid[]) to hid_lab_runtime, hid_schema_test_runtime;
+grant execute on function pharmacy.work_item_patient_cards(uuid[]) to hid_pharmacy_runtime, hid_schema_test_runtime;
+revoke all on function lab.work_item_patient_cards(uuid[]), pharmacy.work_item_patient_cards(uuid[]) from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),
