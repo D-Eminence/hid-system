@@ -33,8 +33,9 @@ describe('LabExecutionsService.listForSpecimen patient authorization',()=>{
  const unreleased={id:'d0000000-0000-4000-8000-000000000001',result_id:resultId,execution_id:executionId,patient_id:patientId,facility_id:context.facilityId,version:'1',result_type:'numeric',numeric_value:'7.1',text_value:null,unit:'g/dL',reference_range:'12.0-16.0',abnormal_flag:'low',entry_source:'manual',verification_status:'unverified',entered_at:new Date('2026-08-10T10:30:00Z'),correction_reason:null,request_sha256:'c'.repeat(64),verified_at:null,released_at:null,invalidated_at:null};
  const RESULT_READS=/\blab\.(test_executions|results|result_revisions)\b/;
  const decision=(overrides:Partial<AuthorizationDecision>={}):AuthorizationDecision=>({allowed:true,patientId,facilityId:context.facilityId,membershipId:context.membershipId,scope:'read_records',purpose:'direct-care',consentGrantId:grantId,breakGlass:false,...overrides});
- const listHarness=(authorize:(request:AuthorizationRequest)=>Promise<AuthorizationDecision>,specimenRow:typeof specimen|null=specimen,executions=[execution])=>{
+ const listHarness=(authorize:(request:AuthorizationRequest)=>Promise<AuthorizationDecision>,specimenRow:typeof specimen|null=specimen,executions=[execution],onePersonLab:boolean|null=null)=>{
   const client={query:jest.fn(async(sql:string,_values?:readonly unknown[])=>{
+   if(onePersonLab!==null&&sql.includes('lab.one_person_lab_enabled()'))return {rows:[{enabled:onePersonLab}]};
    if(/\bfrom lab\.specimens\b/.test(sql))return {rows:specimenRow?[specimenRow]:[]};
    if(sql.includes('from lab.test_executions e'))return {rows:executions};
    if(sql.includes('select id::text from lab.results where execution_id'))return {rows:[{id:resultId}]};
@@ -139,6 +140,15 @@ describe('LabExecutionsService.listForSpecimen patient authorization',()=>{
   }
  });
 
+ it('puts the facility\'s One-person lab switch on each execution as well as its result, read once per request (0111)',async()=>{
+  const on=listHarness(async()=>decision(),specimen,[execution,{...execution,id:'70000000-0000-4000-8000-000000000002'}],true);
+  const listed=await on.service.listForSpecimen(context,specimenId) as unknown as {items:{onePersonLab:boolean;result:{onePersonLab:boolean}|null}[]};
+  expect(listed.items.map(item=>[item.onePersonLab,item.result?.onePersonLab])).toEqual([[true,true],[true,true]]);
+  expect(on.client.query.mock.calls.filter(([sql])=>String(sql).includes('lab.one_person_lab_enabled()'))).toHaveLength(1);
+  const off=listHarness(async()=>decision(),specimen,[execution],false);
+  const offList=await off.service.listForSpecimen(context,specimenId) as unknown as {items:{onePersonLab:boolean}[]};
+  expect(offList.items.map(item=>item.onePersonLab)).toEqual([false]);
+ });
  it('allows an emergency read under an active break-glass grant, as get() does',async()=>{
   const emergency={...context,purposeOfUse:'emergency'} satisfies DataAccessContext;
   const harness=listHarness(async()=>decision({purpose:'emergency',breakGlass:true}));

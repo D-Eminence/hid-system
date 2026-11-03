@@ -2933,6 +2933,10 @@ Lab API:
   `selfCheckReason: string|null` (a self-check's reason). Released-only
   readers (`GET .../history` without `lab.execution.read`, and
   `GET .../ehr-orders/:id/released-results`) get `checkedBySamePerson` only.
+  Execution reads (GET execution, start, complete and the execution list for
+  Lab staff) also carry `onePersonLab: boolean` on the execution itself, so a
+  first entry can say before the result exists whether a second person must
+  check it.
   A missing key (an older image) means off / not known: show today's screen.
 
 | HTTP | `code` | Plain words |

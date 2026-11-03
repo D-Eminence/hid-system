@@ -217,7 +217,7 @@ export class LabExecutionsService {
  private async find(client:PoolClient,id:string,lock=false) {const result=await client.query<ExecutionRow>(`select ${EXEC} from lab.test_executions e join lab.work_item_requested_tests t on t.id=e.requested_test_id where e.id=$1${lock?' for update of e':''}`,[id]);const row=result.rows[0];if(!row)throw new DomainProblem(404,'LAB_EXECUTION_NOT_FOUND','Lab execution was not found');return row;}
  private async aggregate(client:PoolClient,row:ExecutionRow,context:DataAccessContext,onePerson:OnePersonRead) {const results=await client.query<{id:string}>(`select id::text from lab.results where execution_id=$1`,[row.id]);return {id:row.id,accessionId:row.accession_id,specimenId:row.specimen_id,requestedTestId:row.requested_test_id,
   test:{codeSystem:row.test_code_system,code:row.test_code,name:row.test_name},patientId:row.patient_id,facilityId:row.facility_id,status:row.status,
-  method:row.method,startedAt:row.started_at,completedAt:row.completed_at,version:Number(row.row_version),result:results.rows[0]?await this.resultAggregate(client,results.rows[0].id,context,onePerson):null};}
+  method:row.method,startedAt:row.started_at,completedAt:row.completed_at,version:Number(row.row_version),onePersonLab:await onePerson(),result:results.rows[0]?await this.resultAggregate(client,results.rows[0].id,context,onePerson):null};}
  /** The caller's facility's One-person lab switch, read at most once for the request that holds this reader. */
  private onePersonReader(client:PoolClient):OnePersonRead {let read:Promise<boolean>|undefined;
   return ()=>read??=client.query<{enabled:boolean|null}>(`select lab.one_person_lab_enabled() as enabled`).then(result=>result.rows[0]?.enabled===true);}
