@@ -2,6 +2,7 @@ import { Logger } from '@nestjs/common';
 import type { ArgumentsHost } from '@nestjs/common';
 import type { Response } from 'express';
 import type { HidRequest } from './request-context';
+import { verifyRefusal } from '../lab/lab-executions.service';
 import { DomainProblem, ProblemDetailsFilter } from './problem';
 
 describe('ProblemDetailsFilter PHI safety', () => {
@@ -132,6 +133,24 @@ describe('ProblemDetailsFilter database errors', () => {
     expect(logged).toContain('LAB_ORDER_NOT_CURRENT');
     expect(logged).toContain('/lab/work-items/accept-ehr-order');
     expect(logged).not.toContain(secret);
+  });
+
+  it('answers a one-person lab refusal of a verification (0111) as its code and logs only the SQLSTATE', () => {
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const typedReason = 'Only scientist on duty, patient Ada Obi';
+    const error = Object.assign(new Error('LAB_RESULT_SECOND_CHECK_REQUIRED'), { code: '23514',
+      where: `PL/pgSQL function lab.validate_result_governance() reason ${typedReason}`, detail: secret });
+    const refusal = verifyRefusal(error);
+    expect(refusal).toBeDefined();
+    const problem = respond(refusal ?? error, '/lab/results/:resultId/verify');
+    expect(problem).toMatchObject({ status: 409, code: 'LAB_RESULT_SECOND_CHECK_REQUIRED' });
+    const logged = JSON.stringify(warn.mock.calls);
+    expect(logged).toContain('"sqlState":"23514"');
+    expect(logged).toContain('LAB_RESULT_SECOND_CHECK_REQUIRED');
+    for (const leaked of [typedReason, secret, 'validate_result_governance']) {
+      expect(logged).not.toContain(leaked);
+      expect(JSON.stringify(problem)).not.toContain(leaked);
+    }
   });
 
   it('logs no database refusal for a domain problem without a database cause', () => {

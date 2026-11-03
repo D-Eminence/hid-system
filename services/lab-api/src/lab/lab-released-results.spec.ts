@@ -31,17 +31,19 @@ const enteredAt=new Date('2026-10-02T10:30:00.000Z'),verifiedAt=new Date('2026-1
 const releasedAt=new Date('2026-10-02T13:00:00.000Z'),invalidatedAt=new Date('2026-10-02T15:00:00.000Z');
 const acceptedAt=new Date('2026-10-01T09:05:00.000Z');
 const CORRECTION_REASON='Synthetic transcription correction';
-interface Revision {version:number;value:number;verified?:boolean;released?:boolean;invalidated?:boolean}
+const SELF_CHECK_REASON='Only scientist on duty, rechecked the sample';
+interface Revision {version:number;value:number;verified?:boolean;released?:boolean;invalidated?:boolean;selfCheck?:boolean}
 interface StoredResult {executionId:string;currentVersion:number;revisions:Revision[]}
 const revisionRow=(id:string,result:StoredResult,r:Revision)=>({id:`revision-${id}-${r.version}`,result_id:id,execution_id:result.executionId,
  patient_id:patientId,facility_id:facilityId,version:String(r.version),result_type:'numeric',numeric_value:String(r.value),text_value:null,
  unit:'g/dL',reference_range:'12.0-16.0',abnormal_flag:'normal',entry_source:'manual',verification_status:'unverified',entered_at:enteredAt,
  correction_reason:r.version===1?null:CORRECTION_REASON,request_sha256:'a'.repeat(64),verified_at:r.verified?verifiedAt:null,
- released_at:r.released?releasedAt:null,invalidated_at:r.invalidated?invalidatedAt:null});
+ released_at:r.released?releasedAt:null,invalidated_at:r.invalidated?invalidatedAt:null,entered_by:accountId,
+ self_check:r.verified?r.selfCheck===true:null,verification_reason:r.verified?(r.selfCheck?SELF_CHECK_REASON:'Manual result verified'):null});
 /** The revision as a released-only reader receives it. */
-const released=(version:number,value:number,verificationStatus:'verified'|'entered_in_error'='verified')=>({version,resultType:'numeric',
+const released=(version:number,value:number,verificationStatus:'verified'|'entered_in_error'='verified',checkedBySamePerson=false)=>({version,resultType:'numeric',
  numericValue:value,textValue:null,unit:'g/dL',referenceRange:'12.0-16.0',abnormalFlag:'normal',entrySource:'manual',verificationStatus,
- releaseStatus:'released',enteredAt,releasedAt,correctionReason:version===1?null:CORRECTION_REASON});
+ releaseStatus:'released',enteredAt,releasedAt,correctionReason:version===1?null:CORRECTION_REASON,checkedBySamePerson});
 
 // Version 1 (12.5) released; version 2 (7.1), a correction, entered and not verified.
 const correctedAfterRelease:StoredResult={executionId,currentVersion:2,revisions:[{version:1,value:12.5,verified:true,released:true},{version:2,value:7.1}]};
@@ -60,10 +62,11 @@ const byOrder=(service:LabExecutionsService)=>service as unknown as {
  listReleasedForEhrOrder(context:DataAccessContext,sourceEhrOrderId:string):Promise<ReleasedOrderResults>};
 
 const harness=({results={[resultId]:correctedAfterRelease} as Record<string,StoredResult>,listed=undefined as string[]|undefined,
- item=workItem as typeof workItem|null}={},authorize:(request:AuthorizationRequest)=>Promise<AuthorizationDecision>=async()=>decision())=>{
+ item=workItem as typeof workItem|null,onePersonLab=false}={},authorize:(request:AuthorizationRequest)=>Promise<AuthorizationDecision>=async()=>decision())=>{
  const order=listed??Object.keys(results);
  const client={query:jest.fn(async(sql:string,values:readonly unknown[]=[])=>{
   if(/\bfrom lab\.work_items\b/.test(sql))return {rows:item?[item]:[]};
+  if(sql.includes('lab.one_person_lab_enabled()'))return {rows:[{enabled:onePersonLab}]};
   if(/\bjoin lab\.test_executions\b/.test(sql))return {rows:order.map(id=>({id,execution_id:results[id]?.executionId}))};
   const stored=results[String(values[0])];
   if(sql.includes('select patient_id::text from lab.results'))return {rows:stored?[{patient_id:patientId}]:[]};
@@ -270,5 +273,39 @@ describe('LabExecutionsService.listReleasedForEhrOrder',()=>{
   const {service,provider}=harness({},async()=>decision({purpose:'emergency',breakGlass:true}));
   await expect(byOrder(service).listReleasedForEhrOrder(emergency,sourceEhrOrderId)).resolves.toMatchObject({workItemId,results:[{id:resultId}]});
   expect(provider.authorize).toHaveBeenCalledWith({patientId,scope:'read_records',purpose:'emergency',context:emergency});
+ });
+});
+
+describe('One-person lab marks (owner decision 33.3)',()=>{
+ const selfChecked:StoredResult={executionId,currentVersion:2,revisions:[{version:1,value:12.5,verified:true,released:true,selfCheck:true},{version:2,value:7.1}]};
+ const oneLab=(results:Record<string,StoredResult>)=>harness({results,onePersonLab:true});
+ it('released readers see that a revision was checked by the person who entered it, never the reason or who is reading',async()=>{
+  const {service}=oneLab({[resultId]:selfChecked});
+  const history=await service.getResultHistory(doctor,resultId);
+  expect(history).toEqual({id:resultId,executionId,status:'released',verificationStatus:'verified',currentVersion:1,currentReleasedVersion:1,
+   revisions:[released(1,12.5,'verified',true)]});
+  const body=JSON.stringify(history);
+  expect(body).not.toContain(SELF_CHECK_REASON);
+  expect(body).not.toMatch(/selfCheckReason|enteredByYou|onePersonLab/);
+ });
+ it('the released-only reads never read the switch (they do not show it)',async()=>{
+  const {service,statements}=oneLab({[resultId]:selfChecked});
+  await service.getResultHistory(doctor,resultId);
+  await byOrder(service).listReleasedForEhrOrder(doctor,workItem.source_ehr_order_id);
+  expect(statements().some(sql=>sql.includes('lab.one_person_lab_enabled()'))).toBe(false);
+ });
+ it('Lab staff get the switch, who entered each revision, the same-person mark and its reason',async()=>{
+  const {service,statements}=oneLab({[resultId]:selfChecked});
+  const history=await service.getResultHistory(labStaff,resultId) as unknown as {onePersonLab:boolean;revisions:{version:number;enteredByYou:boolean;checkedBySamePerson:boolean|null;selfCheckReason:string|null}[]};
+  expect(history.onePersonLab).toBe(true);
+  expect(history.revisions.map(r=>[r.version,r.enteredByYou,r.checkedBySamePerson,r.selfCheckReason])).toEqual([[1,true,true,SELF_CHECK_REASON],[2,true,null,null]]);
+  expect(statements().some(sql=>sql.includes('select lab.one_person_lab_enabled()'))).toBe(true);
+ });
+ it('an ordinary check is not marked and carries no reason; another reader did not enter it',async()=>{
+  const {service}=harness({results:{[resultId]:correctedAfterRelease}});
+  const other={...labStaff,actor:{...labStaff.actor,accountId:'20000000-0000-4000-8000-000000000099'}};
+  const history=await service.getResultHistory(other,resultId) as unknown as {onePersonLab:boolean;revisions:{enteredByYou:boolean;checkedBySamePerson:boolean|null;selfCheckReason:string|null}[]};
+  expect(history.onePersonLab).toBe(false);
+  expect(history.revisions.map(r=>[r.enteredByYou,r.checkedBySamePerson,r.selfCheckReason])).toEqual([[false,false,null],[false,null,null]]);
  });
 });

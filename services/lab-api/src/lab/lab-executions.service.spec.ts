@@ -7,6 +7,7 @@ import { IdentityService } from '../identity/identity.service';
 import type { AuthorizationDecision,AuthorizationRequest,IdentityProvider } from '../identity/identity.types';
 import { LabExecutionsService } from './lab-executions.service';
 import { LabOrderRouteAccess } from './order-route-access';
+import { requestDigest } from '../common/idempotency';
 
 const context={correlationId:'execution-correlation',facilityId:'10000000-0000-4000-8000-000000000001',membershipId:'40000000-0000-4000-8000-000000000001',purposeOfUse:'direct-care',actor:{id:'actor',subject:'staff:lab',accountId:'20000000-0000-4000-8000-000000000001',roles:['lab'],permissions:['lab.execution.start','lab.execution.complete','lab.execution.read','lab.result.enter','lab.result.correct'],facilityIds:[],facilities:[],authenticationMethod:'local'}} satisfies DataAccessContext;
 const specimenId='50000000-0000-4000-8000-000000000001',patientId='60000000-0000-4000-8000-000000000001',executionId='70000000-0000-4000-8000-000000000001';
@@ -32,8 +33,9 @@ describe('LabExecutionsService.listForSpecimen patient authorization',()=>{
  const unreleased={id:'d0000000-0000-4000-8000-000000000001',result_id:resultId,execution_id:executionId,patient_id:patientId,facility_id:context.facilityId,version:'1',result_type:'numeric',numeric_value:'7.1',text_value:null,unit:'g/dL',reference_range:'12.0-16.0',abnormal_flag:'low',entry_source:'manual',verification_status:'unverified',entered_at:new Date('2026-08-10T10:30:00Z'),correction_reason:null,request_sha256:'c'.repeat(64),verified_at:null,released_at:null,invalidated_at:null};
  const RESULT_READS=/\blab\.(test_executions|results|result_revisions)\b/;
  const decision=(overrides:Partial<AuthorizationDecision>={}):AuthorizationDecision=>({allowed:true,patientId,facilityId:context.facilityId,membershipId:context.membershipId,scope:'read_records',purpose:'direct-care',consentGrantId:grantId,breakGlass:false,...overrides});
- const listHarness=(authorize:(request:AuthorizationRequest)=>Promise<AuthorizationDecision>,specimenRow:typeof specimen|null=specimen,executions=[execution])=>{
+ const listHarness=(authorize:(request:AuthorizationRequest)=>Promise<AuthorizationDecision>,specimenRow:typeof specimen|null=specimen,executions=[execution],onePersonLab:boolean|null=null)=>{
   const client={query:jest.fn(async(sql:string,_values?:readonly unknown[])=>{
+   if(onePersonLab!==null&&sql.includes('lab.one_person_lab_enabled()'))return {rows:[{enabled:onePersonLab}]};
    if(/\bfrom lab\.specimens\b/.test(sql))return {rows:specimenRow?[specimenRow]:[]};
    if(sql.includes('from lab.test_executions e'))return {rows:executions};
    if(sql.includes('select id::text from lab.results where execution_id'))return {rows:[{id:resultId}]};
@@ -138,6 +140,15 @@ describe('LabExecutionsService.listForSpecimen patient authorization',()=>{
   }
  });
 
+ it('puts the facility\'s One-person lab switch on each execution as well as its result, read once per request (0111)',async()=>{
+  const on=listHarness(async()=>decision(),specimen,[execution,{...execution,id:'70000000-0000-4000-8000-000000000002'}],true);
+  const listed=await on.service.listForSpecimen(context,specimenId) as unknown as {items:{onePersonLab:boolean;result:{onePersonLab:boolean}|null}[]};
+  expect(listed.items.map(item=>[item.onePersonLab,item.result?.onePersonLab])).toEqual([[true,true],[true,true]]);
+  expect(on.client.query.mock.calls.filter(([sql])=>String(sql).includes('lab.one_person_lab_enabled()'))).toHaveLength(1);
+  const off=listHarness(async()=>decision(),specimen,[execution],false);
+  const offList=await off.service.listForSpecimen(context,specimenId) as unknown as {items:{onePersonLab:boolean}[]};
+  expect(offList.items.map(item=>item.onePersonLab)).toEqual([false]);
+ });
  it('allows an emergency read under an active break-glass grant, as get() does',async()=>{
   const emergency={...context,purposeOfUse:'emergency'} satisfies DataAccessContext;
   const harness=listHarness(async()=>decision({purpose:'emergency',breakGlass:true}));
@@ -176,5 +187,98 @@ describe('LabExecutionsService.listForSpecimen patient authorization',()=>{
   expect(error).toMatchObject({status:403,code:'LAB_EXECUTION_ACCESS_DENIED'});
   expect(harness.client.query).not.toHaveBeenCalled();
   expect(harness.provider.authorize).not.toHaveBeenCalled();
+ });
+});
+
+describe('LabExecutionsService.verifyResult one-person lab (owner decision 33.3)',()=>{
+ const resultId='b0000000-0000-4000-8000-000000000001';
+ const verifier={...context,actor:{...context.actor,permissions:[...context.actor.permissions,'lab.result.verify']}};
+ const execution={id:executionId,accession_id:'80000000-0000-4000-8000-000000000001',specimen_id:specimenId,requested_test_id:'90000000-0000-4000-8000-000000000001',patient_id:patientId,facility_id:context.facilityId,status:'completed',method:null,started_at:new Date(),completed_at:new Date(),row_version:'2',idempotency_key:'execution-test-key-0001',request_sha256:'a'.repeat(64),completed_idempotency_key:null,completed_request_sha256:null,test_name:'Haemoglobin',test_code:'718-7',test_code_system:'http://loinc.org'};
+ const base={expectedResultVersion:1,occurredAt:'2026-11-03T10:00:00Z'};
+ const verifyHarness=(insert:()=>Promise<unknown>=async()=>({rows:[]}))=>harness(async sql=>{
+  if(sql.includes('from lab.results where id=$1 for update'))return {rows:[{id:resultId,execution_id:executionId,patient_id:patientId,facility_id:context.facilityId,current_version:'1'}]};
+  if(sql.includes('insert into lab.result_verifications'))return insert();
+  if(sql.includes('select one_person_setting_id::text'))return {rows:[{one_person_setting_id:'e0000000-0000-4000-8000-000000000001'}]};
+  if(sql.includes('where e.id='))return {rows:[execution]};
+  return {rows:[]};
+ });
+ const insertCall=(client:PoolClient)=>(client.query as unknown as jest.Mock).mock.calls.find(([sql])=>String(sql).includes('insert into lab.result_verifications')) as [string,unknown[]]|undefined;
+
+ it('refuses a self-check whose trimmed reason is not 10 to 500 characters before the database',async()=>{
+  for(const reason of ['too short','   nine ch   ',' '.repeat(12)]){
+   const {service,client}=verifyHarness();
+   await expect(service.verifyResult(verifier,resultId,{...base,reason,selfCheck:true},'verify-key-000000001')).rejects.toMatchObject({status:400,code:'LAB_RESULT_SELF_CHECK_REASON_INVALID'});
+   expect(client.query).not.toHaveBeenCalled();
+  }
+  // Characters, not UTF-16 units, as the DTO and the database count: 260 non-BMP characters pass, 501 do not.
+  const wide=verifyHarness();
+  await expect(wide.service.verifyResult(verifier,resultId,{...base,reason:'\u{1F9EA}'.repeat(260),selfCheck:true},'verify-key-000000001')).resolves.toBeDefined();
+  expect(insertCall(wide.client)?.[1]?.[8]).toBe('\u{1F9EA}'.repeat(260));
+  const tooWide=verifyHarness();
+  await expect(tooWide.service.verifyResult(verifier,resultId,{...base,reason:'\u{1F9EA}'.repeat(501),selfCheck:true},'verify-key-000000001')).rejects.toMatchObject({status:400,code:'LAB_RESULT_SELF_CHECK_REASON_INVALID'});
+  expect(tooWide.client.query).not.toHaveBeenCalled();
+  // An ordinary check keeps today's rule (the database's 3-500).
+  const {service}=verifyHarness();
+  await expect(service.verifyResult(verifier,resultId,{...base,reason:'Checked'},'verify-key-000000001')).resolves.toBeDefined();
+ });
+
+ it('sends self_check, digests a self-check apart from an ordinary check, and audits the setting in force',async()=>{
+  const {service,client,audit}=verifyHarness();
+  await service.verifyResult(verifier,resultId,{...base,reason:'  Only scientist on duty today  ',selfCheck:true},'verify-key-000000001');
+  const call=insertCall(client);
+  expect(call?.[1]?.[8]).toBe('Only scientist on duty today');
+  expect(call?.[1]?.[12]).toBe(true);
+  expect(call?.[1]?.[10]).toBe(requestDigest('lab.result.verify',{resultId,...base,reason:'  Only scientist on duty today  ',selfCheck:true}));
+  expect(audit.recordWithClient).toHaveBeenCalledWith(client,expect.objectContaining({action:'lab.result.verify',
+   details:expect.objectContaining({selfCheck:true,onePersonSettingId:'e0000000-0000-4000-8000-000000000001',reason:'Only scientist on duty today'})}));
+  const ordinary=verifyHarness();
+  await ordinary.service.verifyResult(verifier,resultId,{...base,reason:'Manual result verified',selfCheck:false},'verify-key-000000002');
+  const plain=insertCall(ordinary.client);
+  expect(plain?.[1]?.[12]).toBe(false);
+  // Exactly the digest an ordinary check had before 0111, so its replays still match.
+  expect(plain?.[1]?.[10]).toBe(requestDigest('lab.result.verify',{resultId,...base,reason:'Manual result verified'}));
+  const details=(ordinary.audit.recordWithClient as jest.Mock).mock.calls.at(-1)?.[1]?.details as Record<string,unknown>;
+  expect(details.selfCheck).toBe(false);expect(details).not.toHaveProperty('onePersonSettingId');
+  expect((ordinary.client.query as unknown as jest.Mock).mock.calls.some(([sql])=>String(sql).includes('select one_person_setting_id'))).toBe(false);
+ });
+
+ it.each([
+  ['23514','LAB_RESULT_SECOND_CHECK_REQUIRED',409],
+  ['23514','LAB_RESULT_SELF_CHECK_REASON_REQUIRED',409],
+  ['22023','LAB_RESULT_SELF_CHECK_REASON_INVALID',400],
+  ['23514','LAB_RESULT_SELF_CHECK_NOT_YOURS',409],
+ ])('maps the database refusal %s %s to %d with the error kept as its cause',async(code,message,status)=>{
+  const error=Object.assign(new Error(message),{code});
+  const {service,audit}=verifyHarness(async()=>{throw error;});
+  const refused=await service.verifyResult(verifier,resultId,{...base,reason:'Only scientist on duty today',selfCheck:true},'verify-key-000000001').catch((e:unknown)=>e);
+  expect(refused).toBeInstanceOf(DomainProblem);
+  expect(refused).toMatchObject({status,code:message});
+  expect((refused as DomainProblem).cause).toBe(error);
+  expect(JSON.stringify((refused as DomainProblem).getResponse())).not.toContain('Only scientist');
+  expect(audit.recordWithClient).not.toHaveBeenCalled();
+ });
+
+ it('passes every other error of the insert on unchanged',async()=>{
+  for(const error of [Object.assign(new Error('Result verifier must be independent and result must be eligible'),{code:'23514'}),
+   Object.assign(new Error('LAB_RESULT_SECOND_CHECK_REQUIRED'),{code:'22023'}),
+   Object.assign(new Error('could not serialize access due to concurrent update'),{code:'40001'}),
+   Object.assign(new Error('toString'),{code:'23514'})]){
+   const {service}=verifyHarness(async()=>{throw error;});
+   await expect(service.verifyResult(verifier,resultId,{...base,reason:'Manual result verified'},'verify-key-000000001')).rejects.toBe(error);
+  }
+ });
+
+ it('release keeps its request and sends no self-check',async()=>{
+  const releaser={...context,actor:{...context.actor,permissions:[...context.actor.permissions,'lab.result.release']}};
+  const queries:string[]=[];
+  const {service,audit}=harness(async sql=>{queries.push(sql);
+   if(sql.includes('from lab.results where id=$1 for update'))return {rows:[{id:resultId,execution_id:executionId,patient_id:patientId,facility_id:context.facilityId,current_version:'1'}]};
+   if(sql.includes('select id::text from lab.result_verifications'))return {rows:[{id:'f0000000-0000-4000-8000-000000000001'}]};
+   if(sql.includes('where e.id='))return {rows:[execution]};return {rows:[]};});
+  await service.releaseResult(releaser,resultId,{...base,reason:'Released after review'},'release-key-00000001');
+  expect(queries.some(sql=>sql.includes('insert into lab.result_releases'))).toBe(true);
+  expect(queries.some(sql=>sql.startsWith('insert')&&sql.includes('self_check'))).toBe(false);
+  const details=(audit.recordWithClient as jest.Mock).mock.calls.at(-1)?.[1]?.details as Record<string,unknown>;
+  expect(details).not.toHaveProperty('selfCheck');
  });
 });
