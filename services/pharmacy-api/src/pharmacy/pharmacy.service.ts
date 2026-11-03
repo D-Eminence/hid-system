@@ -81,9 +81,10 @@ const WORK_ITEM_SELECT = `select w.*,d.id::text as dispensing_id,d.status as dis
  * PRESCRIPTION_DISPENSING_DETAILS_ENABLED on, it also calls
  * pharmacy.work_item_prescription_details (0114) once for the same own rows,
  * a statement of its own; under a NOBYPASSRLS owner each row then pays the
- * work items' and the snapshot table's read policies and the consent test
- * again: 0.9-1.1 s for 200 rows, against 0.4-0.5 s for reading the same rows
- * under row-level security (INTERFACE_CONTRACT.md §33).
+ * work items' read policy, the consent test and the snapshot table's read
+ * policy once (the reader joins the snapshot by its key, so the prescription
+ * history does not add to it): 1.0-1.7 s for 200 rows, against 0.4-0.7 s for
+ * reading the same rows under row-level security (INTERFACE_CONTRACT.md §33).
  */
 export const WORK_LIST_QUERY = `${WORK_ITEM_SELECT}
   cross join lateral (select d.id is null as open_work) o

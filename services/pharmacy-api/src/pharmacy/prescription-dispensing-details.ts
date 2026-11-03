@@ -52,10 +52,10 @@ export function inclusiveDays(start: string | null, end: string | null): number 
  * (the values of the prescription version Pharmacy accepted, from its
  * snapshot, for the session's own rows the member may read) in the caller's
  * transaction, in a savepoint, at most 200 ids a statement: a failure (a
- * schema without 0114, a refusal) leaves the rows without them and never fails
- * the answer. An own row's duration falls back to the whole days from its
- * start date to its end date when the prescription gave none and both are
- * set. Route-backed work gets nothing (item 4b, later). No audit row: no new
+ * schema without 0114, a refusal) leaves out the prescriber's values (the
+ * date fallback below still applies) and never fails the answer. An own row's
+ * duration falls back to the whole days from its start date to its end date
+ * when the prescription gave none and both are set. Route-backed work gets nothing (item 4b, later). No audit row: no new
  * person is shown.
  */
 export class PharmacyPrescriptionDetails {
