@@ -214,7 +214,9 @@ begin
        or exists (select 1 from pg_policy policy_row
                    where policy_row.polrelid in ('lab.work_items'::regclass, 'pharmacy.work_items'::regclass)
                      and policy_row.polcmd in ('r', '*')
-                     and policy_row.polname not in ('lab_work_items_read', 'pharmacy_work_items_read'))) then
+                     and (policy_row.polrelid, policy_row.polname) not in
+                           (('lab.work_items'::regclass, 'lab_work_items_read'::name),
+                            ('pharmacy.work_items'::regclass, 'pharmacy_work_items_read'::name)))) then
     mismatch := 'the lab.work_items and pharmacy.work_items read policies';
   end if;
   if mismatch is null
