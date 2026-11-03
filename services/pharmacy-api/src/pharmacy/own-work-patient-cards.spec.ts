@@ -1,10 +1,11 @@
 import { Logger } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
 import type { PoolClient } from 'pg';
-import type { AuditService } from '../audit/audit.service';
+import { AuditService } from '../audit/audit.service';
 import type { DataAccessContext } from '../common/request-context';
 import { getEnvironment, resetEnvironmentForTests } from '../config/environment';
-import type { DatabaseService } from '../database/database.service';
-import type { IdentityService } from '../identity/identity.service';
+import { DatabaseService } from '../database/database.service';
+import { IdentityService } from '../identity/identity.service';
 import { PharmacyModule } from './pharmacy.module';
 import { PharmacyService, WORK_LIST_QUERY } from './pharmacy.service';
 import { PharmacyOrderRouteAccess } from './order-route-access';
@@ -238,6 +239,15 @@ describe('OWN_WORK_PATIENT_CARD_ENABLED', () => {
     expect(getEnvironment().OWN_WORK_PATIENT_CARD_ENABLED).toBe(true);
     expect(provider().useFactory().enabled).toBe(true);
     expect((Reflect.getMetadata('design:paramtypes', PharmacyService) as unknown[])[5]).toBe(PharmacyOwnWorkPatientCards);
+  });
+
+  it('is what Nest injects into the service', async () => {
+    const reader = new PharmacyOwnWorkPatientCards(true);
+    const moduleRef = await Test.createTestingModule({ providers: [PharmacyService,
+      { provide: DatabaseService, useValue: {} }, { provide: IdentityService, useValue: {} },
+      { provide: AuditService, useValue: {} }, { provide: PharmacyOrderRouteAccess, useValue: {} },
+      { provide: PharmacyOrderRouteCards, useValue: {} }, { provide: PharmacyOwnWorkPatientCards, useValue: reader }] }).compile();
+    expect((moduleRef.get(PharmacyService) as unknown as { ownPatients: unknown }).ownPatients).toBe(reader);
   });
 
   it('refuses any value but true or false', () => {
