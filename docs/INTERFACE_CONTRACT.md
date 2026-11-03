@@ -2993,9 +2993,11 @@ is a value:
 The values are those of the prescription version Pharmacy accepted, so they
 do not change when the prescription later changes (the work item is then not
 dispensable, as before). A prescription written before 0114, or without
-them, gives none (only the duration from the dates). They are left out when
-the member may not read the work now, when the database read fails (it runs
-in a savepoint and never fails the answer), and whenever the setting is off.
+them, gives none (only the duration from the dates). The prescriber's values
+are left out when the member may not read the work now and when the database
+read fails (it runs in a savepoint and never fails the answer); the duration
+from the work item's own dates is still given then. Nothing is added while
+the setting is off.
 Route-backed work items and the acceptance answer are unchanged (the same
 details on work from another facility need the route to carry them, item 4b,
 later). An emergency session with an active break-glass grant gets them,
@@ -3005,8 +3007,9 @@ shown. `PharmacyWorkItem` in `@hid/api-client` gains the optional fields.
 Database (0114): seven nullable columns on `ehr.prescriptions` (`priority`,
 `medication_strength`, `medication_dose_form`, `duration_value`,
 `duration_unit`, `quantity_to_dispense` numeric(12,4), `quantity_unit`), no
-default, and nine CHECKs for the value sets, the lengths, the ranges and the
-two pairs, added NOT VALID and then validated. Nothing is copied into
+default, and one CHECK, `prescriptions_dispensing_details_ck`, for the value
+sets, the lengths, the ranges and the two pairs, added NOT VALID and then
+validated (one CHECK, so the table is scanned once). Nothing is copied into
 `pharmacy.work_items`, so the 0100 and 0101 guards are unchanged.
 `pharmacy.work_item_prescription_details(uuid[])`, SECURITY DEFINER, owned by
 `pharmacy.work_items`' owner, at most 200 ids (else 22023
@@ -3015,7 +3018,10 @@ snapshot (`ehr.record_versions`, resource type `prescriptions`, the work
 item's prescription id and version, its patient, facility and encounter) for
 own work at the session's facility whose member holds
 `pharmacy.work-item.read` there and passes the read consent test of the work
-items' read policy. EXECUTE: `hid_pharmacy_runtime` and
+items' read policy. It joins the snapshot by its key (the work item's ids
+are turned into text first, so the join can use the key under the snapshot
+table's forced read policy), so that policy runs once per work item whatever
+the prescription history. EXECUTE: `hid_pharmacy_runtime` and
 `hid_schema_test_runtime`; nobody else. The EHR runtime's privileges on
 `ehr.prescriptions` are table-wide, so they cover the new columns.
 
@@ -3023,17 +3029,24 @@ Locks: 0114 takes ACCESS EXCLUSIVE on `ehr.prescriptions` NOWAIT, retrying
 for at most 5 seconds (an open Pharmacy acceptance or any open read of the
 table makes it wait and then stop the release with nothing applied; it never
 blocks them), and holds it to commit. Once taken, EHR prescription reads and
-writes and Pharmacy acceptances and dispensings wait while the nine
-validations scan the table: about 0.7 s for 200,000 prescriptions and 3 s for
-1,000,000, measured on synthetic tables.
+writes and Pharmacy acceptances and dispensings wait while the one
+validation scans the table: about 0.07 s for 200,000 prescriptions and 0.5 s
+for 1,000,000, measured on synthetic tables (nine separate CHECKs took 0.43 s
+and 3.05 s there, one scan each).
 
 Cost while the pharmacy-api setting is on: each list load calls the reader
 once for its own rows (at most 200), as a statement of its own. Under a
 NOBYPASSRLS owner, as in production, each row pays the work items' read
-policy, the snapshot table's read policy and the same consent test again:
-0.9-1.1 s for 200 own rows (0.2-0.3 s with a superuser owner), against
-0.4-0.5 s for reading the same 200 rows under row-level security, on
-PostgreSQL 16 on a shared 4-CPU machine.
+policy, the same consent test again and the snapshot table's read policy,
+once each: 1.0-1.7 s for 200 own rows, against 0.4-0.7 s for reading the same
+200 rows under row-level security, with 1, 5, 20 or 50 prescription
+snapshots per patient and with 300,000 other snapshots at the facility
+(fictional data, PostgreSQL 16 on a shared 4-CPU machine). The reader is
+called under pharmacy-api's 15 s statement limit, so its cost must not grow
+with the history: the first draft joined on the prescription id cast to text
+inside the join, which the planner cannot use under the read policy; it took
+8.8 s with 20 snapshots per patient and passed the 15 s limit with 100,000
+other prescription snapshots at the facility.
 
 0114 has no down migration. To withdraw the feature, set
 `PRESCRIPTION_DISPENSING_DETAILS_ENABLED=false` in ehr-api and pharmacy-api:
@@ -3041,5 +3054,17 @@ the EHR API then refuses the fields again and pharmacy-api stops reading
 them; the columns, the values already written and the function stay, and
 nothing reads them. Do not drop the function: 0114 stays recorded, so the
 runner does not re-create it, and runtime-grants.sql's 0114 block would then
-stop `db:bootstrap` with 42883. The suite is
+stop `db:bootstrap` with 42883.
+
+The ehr-api setting needs the schema. Switch
+`PRESCRIPTION_DISPENSING_DETAILS_ENABLED` on in ehr-api only after 0114 is
+applied, and switch it off before restoring ehr-api's database to a point
+before 0114 or pointing ehr-api at a database without it. While it is on
+without the seven columns, every statement of the prescription routes names
+them and fails (42703), so every prescription list, read, create, update and
+Pharmacy acceptance hand-off from the EHR answers 500. pharmacy-api is safe
+either way: without 0114 its read fails inside the savepoint and only the
+prescriber's values are left out.
+
+The suite is
 `services/ehr-api/test/database/prescription-dispensing-details.integration.sql`.
