@@ -22,14 +22,17 @@
 --    quantity_to_dispense numeric(12,4) and quantity_unit. The EHR API sets
 --    them only when it creates a prescription (its update and every other
 --    writer leave them as they are).
--- D2 Nine CHECKs, each added NOT VALID and then validated: priority one of
---    routine, urgent, asap, stat (the Lab priorities); medication_strength
---    and quantity_unit not blank and at most 80 characters;
---    medication_dose_form one of tablet, capsule, liquid, injection, cream,
---    inhaler, drops, other; duration_value 1-3650 and duration_unit one of
---    day, week, month, given together or not at all; quantity_to_dispense
---    above 0 and quantity_unit given together or not at all. Every existing
---    row is null in all seven, so the validation cannot fail.
+-- D2 One CHECK, prescriptions_dispensing_details_ck, added NOT VALID and then
+--    validated: priority one of routine, urgent, asap, stat (the Lab
+--    priorities); medication_strength and quantity_unit not blank and at
+--    most 80 characters; medication_dose_form one of tablet, capsule,
+--    liquid, injection, cream, inhaler, drops, other; duration_value 1-3650
+--    and duration_unit one of day, week, month, given together or not at
+--    all; quantity_to_dispense above 0 and quantity_unit given together or
+--    not at all. One CHECK rather than one per rule, because each VALIDATE
+--    CONSTRAINT scans the whole table under the lock (see Locks); the EHR API
+--    checks each rule by name before it writes. Every existing row is null in
+--    all seven, so the validation cannot fail.
 -- D3 Nothing is copied into pharmacy.work_items, which stays insert-only and
 --    unchanged: pharmacy.validate_work_item (0100) and
 --    pharmacy.validate_dispensing (0101) keep their bodies and their field
@@ -67,6 +70,15 @@
 --    row-level security (production) sees the snapshot exactly when D5
 --    admits the row (proved by the suite on such an owner); an owner that
 --    bypasses it is held to D5's predicate alone, which is the same rule.
+--    The work item's keys are turned into text inside a materialized CTE
+--    before the join, so the join compares text with text (texteq is
+--    leakproof) and uses the snapshot key (resource_type, resource_id,
+--    version_no) under the forced read policy: the policy then runs once per
+--    work item. A join on source_ehr_prescription_id::text (uuid_out is not
+--    leakproof) cannot be an index condition below the policy, which then
+--    ran on every prescription snapshot of the item's patient or facility
+--    (measured: 4,000 policy calls for 200 items whose patients had 20
+--    snapshots each, against 200; see Cost).
 -- D7 At most 200 ids (the work list answers 200 rows): a null list or more
 --    than 200 elements raises 22023 WORK_ITEM_PRESCRIPTION_DETAILS_INVALID.
 --    An empty list answers nothing. SECURITY DEFINER, STABLE, plpgsql, not
@@ -96,7 +108,7 @@
 --    and nothing is applied): 0001-0103 applied (0103's
 --    identity.organization_application_admin_account body the marker, and
 --    the tables used); not applied yet (the function does not exist); none of
---    the seven columns or nine CHECK names exists on ehr.prescriptions; the
+--    the seven columns or the CHECK name exists on ehr.prescriptions; the
 --    bodies relied on are the ones 0001-0103 left (md5 of pg_proc.prosrc):
 --    the snapshot writer and its trigger, the consent test and the
 --    membership and permission checks the body calls, the four session
@@ -127,10 +139,10 @@
 --    search_path, one uuid[] argument and the eight result columns; its ACL
 --    holds only its owner and section 2's grantees.
 -- 4. Last, under one ACCESS EXCLUSIVE lock on ehr.prescriptions taken NOWAIT
---    (see Locks): the seven columns and their comments, the nine CHECKs NOT
---    VALID, then validated.
+--    (see Locks): the seven columns and their comments, the CHECK NOT VALID,
+--    then validated.
 -- 5. Post-checks of the table: the seven columns with their types, nullable
---    and without default; the nine CHECKs validated with these definitions;
+--    and without default; the CHECK validated with this definition;
 --    the three triggers, row-level security and the 0100, 0101, 0098 and
 --    0086 bodies as before.
 --
@@ -162,13 +174,27 @@
 -- Once taken, the lock lasts to commit: every pending migration runs in one
 -- transaction (the runner's dry run, all files, then rollback; its apply,
 -- one transaction per file), so ADD COLUMN's ACCESS EXCLUSIVE is still held
--- while each VALIDATE CONSTRAINT scans the table. NOT VALID then VALIDATE
+-- while VALIDATE CONSTRAINT scans the table. NOT VALID then VALIDATE
 -- therefore does not shorten the lock here; it is kept because it is the
--- rule for CHECKs on existing tables. ADD COLUMN with the nine NOT VALID
--- CHECKs took 6-8 ms; the nine scans took 0.7 s for 200,000 rows and 3.0 s
--- for 1,000,000 (synthetic tables of those sizes, a shared 4-CPU machine),
--- linear in the table's size. EHR prescription reads and writes and Pharmacy
--- acceptances and dispensings wait for that long only.
+-- rule for CHECKs on existing tables, and the rules are one CHECK so that
+-- the table is scanned once (each VALIDATE scans it on its own). ADD COLUMN
+-- with the NOT VALID CHECK took 2-8 ms; the one scan took 73 ms for 200,000
+-- rows and 0.48 s for 1,000,000 (nine CHECKs, one scan each, took 0.43 s and
+-- 3.05 s on the same synthetic tables; a shared 4-CPU machine), linear in the
+-- table's size. EHR prescription reads and writes and Pharmacy acceptances
+-- and dispensings wait for that long only.
+--
+-- Cost (pharmacy-api calls D4 once per work-list load for its own rows, at
+-- most 200, while PRESCRIPTION_DISPENSING_DETAILS_ENABLED is on): under a
+-- NOSUPERUSER NOBYPASSRLS owner, as in production, each item pays the work
+-- items' read policy, the consent test and the snapshot read policy once:
+-- 1.0-1.7 s for 200 items, against 0.4-0.7 s for reading the same rows
+-- under row-level security, whatever the prescription history (measured
+-- with 1, 5, 20 and 50 snapshots per patient, and with 300,000 other
+-- snapshots at the facility; fictional data, a shared 4-CPU machine). The
+-- join on uuid::text it replaced took 3.5 s with 5 and 8.8 s with 20
+-- snapshots per patient, and more than pharmacy-api's 15 s statement
+-- timeout with 1 per patient beside 100,000 other prescription snapshots.
 --
 -- Old services on this schema: every writer and reader of ehr.prescriptions
 -- names its columns (the EHR API, the chat evidence query, the demo story),
@@ -231,10 +257,7 @@ begin
       union all
       select constraint_row.conname::text from pg_constraint constraint_row
        where constraint_row.conrelid = 'ehr.prescriptions'::regclass
-         and constraint_row.conname in ('prescriptions_priority_ck', 'prescriptions_medication_strength_ck',
-               'prescriptions_medication_dose_form_ck', 'prescriptions_duration_pair_ck',
-               'prescriptions_duration_value_ck', 'prescriptions_duration_unit_ck', 'prescriptions_quantity_pair_ck',
-               'prescriptions_quantity_to_dispense_ck', 'prescriptions_quantity_unit_ck')) existing;
+         and constraint_row.conname = 'prescriptions_dispensing_details_ck') existing;
   if mismatch is not null then
     raise exception using errcode = '55000',
       message = format('0114: ehr.prescriptions already has a column or CHECK this migration adds: %s', mismatch);
@@ -465,8 +488,25 @@ begin
           platform.current_membership_id(), session_facility, 'pharmacy.work-item.read'), false) then
     return;
   end if;
+  -- The work item's keys are turned into text inside a materialized CTE, so
+  -- the snapshot join compares text with text (texteq is leakproof) and can
+  -- use record_versions' snapshot key under its forced read policy; a join on
+  -- item.source_ehr_prescription_id::text (uuid_out, not leakproof) could
+  -- not, and made the policy run on every prescription snapshot of the
+  -- facility or of the item's patient.
   return query
-    select item.id,
+    with own as materialized (
+      select item.id, item.patient_id, item.facility_id,
+             item.source_ehr_prescription_id::text as prescription_key,
+             item.source_ehr_prescription_version as prescription_version,
+             item.source_encounter_id::text as encounter_key
+        from pharmacy.work_items item
+       where item.id = any(requested_work_item_ids)
+         and item.order_route_id is null
+         and item.facility_id = session_facility
+         and identity.has_active_consent_grant(item.patient_id, platform.current_actor_subject(),
+               platform.current_membership_id(), item.facility_id, 'read_records', platform.current_purpose_of_use()))
+    select own.id,
            snapshot.resulting_state ->> 'priority',
            snapshot.resulting_state ->> 'medication_strength',
            snapshot.resulting_state ->> 'medication_dose_form',
@@ -474,20 +514,15 @@ begin
            snapshot.resulting_state ->> 'duration_unit',
            (snapshot.resulting_state ->> 'quantity_to_dispense')::numeric,
            snapshot.resulting_state ->> 'quantity_unit'
-      from pharmacy.work_items item
+      from own
       join ehr.record_versions snapshot
         on snapshot.resource_type = 'prescriptions'
-       and snapshot.resource_id = item.source_ehr_prescription_id::text
-       and snapshot.version_no = item.source_ehr_prescription_version
-       and snapshot.patient_id = item.patient_id
-       and snapshot.facility_id = item.facility_id
-       and snapshot.resulting_state ->> 'encounter_id' = item.source_encounter_id::text
-     where item.id = any(requested_work_item_ids)
-       and item.order_route_id is null
-       and item.facility_id = session_facility
-       and identity.has_active_consent_grant(item.patient_id, platform.current_actor_subject(),
-             platform.current_membership_id(), item.facility_id, 'read_records', platform.current_purpose_of_use())
-     order by item.id;
+       and snapshot.resource_id = own.prescription_key
+       and snapshot.version_no = own.prescription_version
+       and snapshot.patient_id = own.patient_id
+       and snapshot.facility_id = own.facility_id
+       and snapshot.resulting_state ->> 'encounter_id' = own.encounter_key
+     order by own.id;
 end;
 $$;
 
@@ -536,7 +571,7 @@ begin
     from pg_proc proc
     join pg_language language_row on language_row.oid = proc.prolang
    where proc.oid = 'pharmacy.work_item_prescription_details(uuid[])'::regprocedure
-     and (md5(proc.prosrc) <> 'ca84139c067b11b47e2c6de702824ca2'
+     and (md5(proc.prosrc) <> 'e6013d732354a56794ad8ec7f2bbaf0c'
       or proc.proowner <> (select relation.relowner from pg_class relation where relation.oid = 'pharmacy.work_items'::regclass)
       or not proc.prosecdef or proc.provolatile <> 's' or language_row.lanname <> 'plpgsql' or proc.proisstrict
       or proc.proconfig is distinct from '{"search_path=pg_catalog, pg_temp"}'::text[]
@@ -578,7 +613,7 @@ end
 $$;
 
 -- 4. Last, under one ACCESS EXCLUSIVE lock on ehr.prescriptions taken NOWAIT
--- (see Locks): the columns (D1) and the CHECKs (D2), NOT VALID, then
+-- (see Locks): the columns (D1) and the CHECK (D2), NOT VALID, then
 -- validated.
 do $$
 declare
@@ -608,35 +643,22 @@ alter table ehr.prescriptions
   add column duration_unit text,
   add column quantity_to_dispense numeric(12,4),
   add column quantity_unit text,
-  add constraint prescriptions_priority_ck
-    check (priority is null or priority in ('routine', 'urgent', 'asap', 'stat')) not valid,
-  add constraint prescriptions_medication_strength_ck
-    check (medication_strength is null
-      or (length(medication_strength) <= 80 and length(btrim(medication_strength)) >= 1)) not valid,
-  add constraint prescriptions_medication_dose_form_ck
-    check (medication_dose_form is null or medication_dose_form in ('tablet', 'capsule', 'liquid', 'injection', 'cream',
-      'inhaler', 'drops', 'other')) not valid,
-  add constraint prescriptions_duration_pair_ck check ((duration_value is null) = (duration_unit is null)) not valid,
-  add constraint prescriptions_duration_value_ck
-    check (duration_value is null or duration_value between 1 and 3650) not valid,
-  add constraint prescriptions_duration_unit_ck
-    check (duration_unit is null or duration_unit in ('day', 'week', 'month')) not valid,
-  add constraint prescriptions_quantity_pair_ck
-    check ((quantity_to_dispense is null) = (quantity_unit is null)) not valid,
-  add constraint prescriptions_quantity_to_dispense_ck
-    check (quantity_to_dispense is null or quantity_to_dispense > 0) not valid,
-  add constraint prescriptions_quantity_unit_ck
-    check (quantity_unit is null or (length(quantity_unit) <= 80 and length(btrim(quantity_unit)) >= 1)) not valid;
+  add constraint prescriptions_dispensing_details_ck check (
+    (priority is null or priority in ('routine', 'urgent', 'asap', 'stat'))
+    and (medication_strength is null
+      or (length(medication_strength) <= 80 and length(btrim(medication_strength)) >= 1))
+    and (medication_dose_form is null or medication_dose_form in ('tablet', 'capsule', 'liquid', 'injection', 'cream',
+      'inhaler', 'drops', 'other'))
+    and ((duration_value is null) = (duration_unit is null))
+    and (duration_value is null or duration_value between 1 and 3650)
+    and (duration_unit is null or duration_unit in ('day', 'week', 'month'))
+    and ((quantity_to_dispense is null) = (quantity_unit is null))
+    and (quantity_to_dispense is null or quantity_to_dispense > 0)
+    and (quantity_unit is null or (length(quantity_unit) <= 80 and length(btrim(quantity_unit)) >= 1))) not valid;
 
-alter table ehr.prescriptions validate constraint prescriptions_priority_ck;
-alter table ehr.prescriptions validate constraint prescriptions_medication_strength_ck;
-alter table ehr.prescriptions validate constraint prescriptions_medication_dose_form_ck;
-alter table ehr.prescriptions validate constraint prescriptions_duration_pair_ck;
-alter table ehr.prescriptions validate constraint prescriptions_duration_value_ck;
-alter table ehr.prescriptions validate constraint prescriptions_duration_unit_ck;
-alter table ehr.prescriptions validate constraint prescriptions_quantity_pair_ck;
-alter table ehr.prescriptions validate constraint prescriptions_quantity_to_dispense_ck;
-alter table ehr.prescriptions validate constraint prescriptions_quantity_unit_ck;
+-- One CHECK, so one validation scan of the table (each VALIDATE CONSTRAINT
+-- scans it on its own, under the lock taken above).
+alter table ehr.prescriptions validate constraint prescriptions_dispensing_details_ck;
 
 comment on column ehr.prescriptions.priority is
   'How urgent the prescriber says it is: routine, urgent, asap or stat. Set at creation only; null when not given.';
@@ -671,33 +693,26 @@ begin
   if mismatch is not null then
     raise exception using errcode = '55000', message = format('0114: the columns are not as this file makes them: %s', mismatch);
   end if;
-  select string_agg(expected.constraint_name, '; ') into mismatch
-    from (values
-      ('prescriptions_priority_ck',
-       'CHECK (((priority IS NULL) OR (priority = ANY (ARRAY[''routine''::text, ''urgent''::text, ''asap''::text, ''stat''::text]))))'),
-      ('prescriptions_medication_strength_ck',
-       'CHECK (((medication_strength IS NULL) OR ((length(medication_strength) <= 80) AND (length(btrim(medication_strength)) >= 1))))'),
-      ('prescriptions_medication_dose_form_ck',
-       'CHECK (((medication_dose_form IS NULL) OR (medication_dose_form = ANY (ARRAY[''tablet''::text, ''capsule''::text, '
-       || '''liquid''::text, ''injection''::text, ''cream''::text, ''inhaler''::text, ''drops''::text, ''other''::text]))))'),
-      ('prescriptions_duration_pair_ck', 'CHECK (((duration_value IS NULL) = (duration_unit IS NULL)))'),
-      ('prescriptions_duration_value_ck',
-       'CHECK (((duration_value IS NULL) OR ((duration_value >= 1) AND (duration_value <= 3650))))'),
-      ('prescriptions_duration_unit_ck',
-       'CHECK (((duration_unit IS NULL) OR (duration_unit = ANY (ARRAY[''day''::text, ''week''::text, ''month''::text]))))'),
-      ('prescriptions_quantity_pair_ck', 'CHECK (((quantity_to_dispense IS NULL) = (quantity_unit IS NULL)))'),
-      ('prescriptions_quantity_to_dispense_ck',
-       'CHECK (((quantity_to_dispense IS NULL) OR (quantity_to_dispense > (0)::numeric)))'),
-      ('prescriptions_quantity_unit_ck',
-       'CHECK (((quantity_unit IS NULL) OR ((length(quantity_unit) <= 80) AND (length(btrim(quantity_unit)) >= 1))))'))
-         expected(constraint_name, definition)
-   where not exists (select 1 from pg_constraint constraint_row
-                      where constraint_row.conrelid = 'ehr.prescriptions'::regclass
-                        and constraint_row.conname = expected.constraint_name and constraint_row.contype = 'c'
-                        and constraint_row.convalidated and not constraint_row.connoinherit
-                        and pg_get_constraintdef(constraint_row.oid) = expected.definition);
-  if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0114: the CHECKs are not as this file makes them: %s', mismatch);
+  -- The CHECK, validated, with this definition (one CHECK for the seven
+  -- columns: the value sets, the lengths, the ranges and the two pairs).
+  if not exists (select 1 from pg_constraint constraint_row
+                  where constraint_row.conrelid = 'ehr.prescriptions'::regclass
+                    and constraint_row.conname = 'prescriptions_dispensing_details_ck' and constraint_row.contype = 'c'
+                    and constraint_row.convalidated and not constraint_row.connoinherit
+                    and pg_get_constraintdef(constraint_row.oid) =
+                      'CHECK ((((priority IS NULL) OR (priority = ANY (ARRAY[''routine''::text, ''urgent''::text, '
+                      || '''asap''::text, ''stat''::text]))) AND ((medication_strength IS NULL) OR '
+                      || '((length(medication_strength) <= 80) AND (length(btrim(medication_strength)) >= 1))) AND '
+                      || '((medication_dose_form IS NULL) OR (medication_dose_form = ANY (ARRAY[''tablet''::text, '
+                      || '''capsule''::text, ''liquid''::text, ''injection''::text, ''cream''::text, ''inhaler''::text, '
+                      || '''drops''::text, ''other''::text]))) AND ((duration_value IS NULL) = (duration_unit IS NULL)) AND '
+                      || '((duration_value IS NULL) OR ((duration_value >= 1) AND (duration_value <= 3650))) AND '
+                      || '((duration_unit IS NULL) OR (duration_unit = ANY (ARRAY[''day''::text, ''week''::text, '
+                      || '''month''::text]))) AND ((quantity_to_dispense IS NULL) = (quantity_unit IS NULL)) AND '
+                      || '((quantity_to_dispense IS NULL) OR (quantity_to_dispense > (0)::numeric)) AND '
+                      || '((quantity_unit IS NULL) OR ((length(quantity_unit) <= 80) AND (length(btrim(quantity_unit)) >= 1)))))') then
+    raise exception using errcode = '55000',
+      message = '0114: the CHECK is not as this file makes it: prescriptions_dispensing_details_ck';
   end if;
   -- Untouched: the triggers, row-level security, and the bodies that read
   -- the row type or fire on the table.

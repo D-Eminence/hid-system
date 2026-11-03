@@ -4,7 +4,7 @@
 -- recommended except D5"; the Akos handover backend plan, items 3b and 4).
 -- Rollback-only.
 --
--- 0114 adds seven nullable columns to ehr.prescriptions with nine CHECKs,
+-- 0114 adds seven nullable columns to ehr.prescriptions with one CHECK,
 -- and pharmacy.work_item_prescription_details(ids), which answers them for
 -- each given work item that is this facility's own work and that the
 -- session's member may read, from the snapshot of the prescription version
@@ -14,9 +14,9 @@
 --      plpgsql, not STRICT, search_path pg_catalog, pg_temp, owned by
 --      pharmacy.work_items' owner, EXECUTE for the Pharmacy runtime, its API
 --      login and the schema test runtime only; the seven columns nullable
---      without default and the nine CHECKs validated; the 0100, 0101, 0098
+--      without default and their one CHECK validated; the 0100, 0101, 0098
 --      and 0086 bodies untouched;
---   2. the CHECKs, through the EHR API's INSERT: every value set and range,
+--   2. the CHECK, through the EHR API's INSERT: every value set and range,
 --      both pairs, blank and long texts; all seven given, and none (today's
 --      INSERT, so a row written before 0114 reads null in each); the EHR
 --      runtime reads the new columns;
@@ -82,7 +82,7 @@ begin
     from (values ('pharmacy.work_item_prescription_details(uuid[])')) expected(proc_name)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc_name)
     left join pg_language language_row on language_row.oid = proc.prolang
-   where proc.oid is null or md5(proc.prosrc) <> 'ca84139c067b11b47e2c6de702824ca2'
+   where proc.oid is null or md5(proc.prosrc) <> 'e6013d732354a56794ad8ec7f2bbaf0c'
       or proc.proowner <> (select relation.relowner from pg_class relation where relation.oid = 'pharmacy.work_items'::regclass)
       or not proc.prosecdef or proc.provolatile <> 's' or language_row.lanname <> 'plpgsql' or proc.proisstrict
       or proc.proconfig is distinct from '{"search_path=pg_catalog, pg_temp"}'::text[];
@@ -128,12 +128,8 @@ begin
   end if;
   if (select count(*) from pg_constraint constraint_row
        where constraint_row.conrelid = 'ehr.prescriptions'::regclass and constraint_row.contype = 'c'
-         and constraint_row.convalidated
-         and constraint_row.conname in ('prescriptions_priority_ck', 'prescriptions_medication_strength_ck',
-               'prescriptions_medication_dose_form_ck', 'prescriptions_duration_pair_ck',
-               'prescriptions_duration_value_ck', 'prescriptions_duration_unit_ck', 'prescriptions_quantity_pair_ck',
-               'prescriptions_quantity_to_dispense_ck', 'prescriptions_quantity_unit_ck')) <> 9 then
-    raise exception 'prescription dispensing details: the nine CHECKs are not all there and validated';
+         and constraint_row.convalidated and constraint_row.conname = 'prescriptions_dispensing_details_ck') <> 1 then
+    raise exception 'prescription dispensing details: the CHECK is not there and validated';
   end if;
   if (select count(*) from pg_proc proc
        where (proc.oid::regprocedure::text, md5(proc.prosrc)) in (
@@ -340,7 +336,7 @@ select ('e1140009-0000-4000-8000-00000000000' || n)::uuid, ('e1140006-0000-4000-
        'e1140004-0000-4000-8000-000000000001', 'ambulatory', 'in_progress', clock_timestamp()
   from (values (1, 1), (2, 2), (3, 3)) encounter(n, patient);
 
--- 2. The CHECKs, each through the EHR API's INSERT (undone).
+-- 2. The CHECK, case by case, through the EHR API's INSERT (undone).
 create temporary table check_cases (name text primary key, got text not null) on commit drop;
 grant select, insert on check_cases to public;
 insert into check_cases
@@ -390,33 +386,33 @@ select pg_temp.expect('the CHECK outcomes',
   (select string_agg(name || '=' || regexp_replace(got, '^23514 new row for relation "prescriptions" violates check constraint ', ''), '; '
             order by name) from check_cases),
   (select string_agg(name || '=' || got, '; ' order by name) from (values
-    ('a blank quantity unit', '"prescriptions_quantity_unit_ck"'),
-    ('a blank strength', '"prescriptions_medication_strength_ck"'),
-    ('a capitalised priority', '"prescriptions_priority_ck"'),
-    ('a duration unit without its value', '"prescriptions_duration_pair_ck"'),
-    ('a duration without its unit', '"prescriptions_duration_pair_ck"'),
-    ('a negative quantity', '"prescriptions_quantity_to_dispense_ck"'),
-    ('a quantity unit of 81', '"prescriptions_quantity_unit_ck"'),
-    ('a quantity unit without its quantity', '"prescriptions_quantity_pair_ck"'),
-    ('a quantity without its unit', '"prescriptions_quantity_pair_ck"'),
+    ('a blank quantity unit', '"prescriptions_dispensing_details_ck"'),
+    ('a blank strength', '"prescriptions_dispensing_details_ck"'),
+    ('a capitalised priority', '"prescriptions_dispensing_details_ck"'),
+    ('a duration unit without its value', '"prescriptions_dispensing_details_ck"'),
+    ('a duration without its unit', '"prescriptions_dispensing_details_ck"'),
+    ('a negative quantity', '"prescriptions_dispensing_details_ck"'),
+    ('a quantity unit of 81', '"prescriptions_dispensing_details_ck"'),
+    ('a quantity unit without its quantity', '"prescriptions_dispensing_details_ck"'),
+    ('a quantity without its unit', '"prescriptions_dispensing_details_ck"'),
     ('a strength of 80', 'ok'),
-    ('a strength of 81', '"prescriptions_medication_strength_ck"'),
+    ('a strength of 81', '"prescriptions_dispensing_details_ck"'),
     ('all seven', 'ok'),
-    ('an empty strength', '"prescriptions_medication_strength_ck"'),
-    ('another form', '"prescriptions_medication_dose_form_ck"'),
-    ('another priority', '"prescriptions_priority_ck"'),
-    ('duration 0', '"prescriptions_duration_value_ck"'),
+    ('an empty strength', '"prescriptions_dispensing_details_ck"'),
+    ('another form', '"prescriptions_dispensing_details_ck"'),
+    ('another priority', '"prescriptions_dispensing_details_ck"'),
+    ('duration 0', '"prescriptions_dispensing_details_ck"'),
     ('duration 1 week', 'ok'),
     ('duration 12 months', 'ok'),
     ('duration 3650 days', 'ok'),
-    ('duration 3651', '"prescriptions_duration_value_ck"'),
-    ('duration in years', '"prescriptions_duration_unit_ck"'),
+    ('duration 3651', '"prescriptions_dispensing_details_ck"'),
+    ('duration in years', '"prescriptions_dispensing_details_ck"'),
     ('each form: cream', 'ok'), ('each form: drops', 'ok'), ('each form: inhaler', 'ok'),
     ('each form: injection', 'ok'), ('each form: liquid', 'ok'), ('each form: other', 'ok'),
     ('each form: tablet', 'ok'),
     ('each priority: asap', 'ok'), ('each priority: routine', 'ok'), ('each priority: urgent', 'ok'),
     ('none', 'ok'),
-    ('quantity 0', '"prescriptions_quantity_to_dispense_ck"'),
+    ('quantity 0', '"prescriptions_dispensing_details_ck"'),
     ('quantity 0.0001', 'ok'),
     ('quantity 100000000', '22003 numeric field overflow'),
     ('quantity 99999999.9999', 'ok')) expected(name, got)));
