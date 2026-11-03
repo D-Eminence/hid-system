@@ -1399,6 +1399,21 @@ revoke all on function identity.demo_story_context(text,uuid,uuid,text),
 -- commands, which keep the Identity grants above. No grant changes.
 revoke all on function identity.organization_application_admin_account(text) from public;
 
+-- One-person lab check (0110, owner decision 33.3): the facility
+-- administrator's switch and its read run as the Identity runtime, the Lab
+-- API's one-boolean read as the Lab runtime. The two new tables
+-- (identity.facility_lab_check_settings, identity.facility_lab_check_current)
+-- are granted to no role: only these owner functions and the governance
+-- trigger read or write them. lab.validate_result_governance keeps its ACL;
+-- hid_lab_runtime's INSERT on lab.result_verifications covers the new
+-- self_check column.
+revoke all on identity.facility_lab_check_settings, identity.facility_lab_check_current from public;
+revoke all on function identity.set_facility_one_person_lab(boolean,text),
+  identity.facility_one_person_lab_state(), lab.one_person_lab_enabled() from public;
+grant execute on function identity.set_facility_one_person_lab(boolean,text),
+  identity.facility_one_person_lab_state() to hid_identity_runtime;
+grant execute on function lab.one_person_lab_enabled() to hid_lab_runtime;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),
