@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Box, FlagReason, ItemKind, PaperIdentity, PaperItem } from './contract';
 import {
-  ambiguousDate, compact, DOSE, FREQUENCY, has, norm, numbersIn, partlyCovered, routes, segment,
+  ambiguousDate, compact, DOSE, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes, segment,
   STATUS_CUES, suspiciousUncited, together, wordsIn,
 } from './grounding';
 import { withoutPlaceholders, type Masker } from './masking';
@@ -102,6 +102,9 @@ export function checkPage(input: PageCheckInput): PageCheck {
   const pageText = input.lines.map((line) => line.text).join('\n');
   const medicineNames = input.answer.items.filter((item) => item.kind === 'medicine' && norm(item.name))
     .map((item) => item.name);
+  const allergySubstances = input.answer.items
+    .filter((item) => item.kind === 'allergy' && !item.noKnownAllergies && norm(item.substance))
+    .map((item) => item.substance);
   const items: PaperItem[] = [];
   /** Kept items by base id: the same kind, cited lines and asWritten. */
   const seen = new Map<string, PaperItem[]>();
@@ -117,7 +120,7 @@ export function checkPage(input: PageCheckInput): PageCheck {
       continue;
     }
     const lines = cited as ReadLine[];
-    const item = checkItem(raw, lines, lineIds, source, pageText, order, medicineNames, input);
+    const item = checkItem(raw, lines, lineIds, source, pageText, order, medicineNames, allergySubstances, input);
     const group = seen.get(item.id) ?? [];
     // An exact repeat (same kind, lines, asWritten and fields) collapses to one.
     if (group.some((kept) => JSON.stringify(kept.fields) === JSON.stringify(item.fields))) continue;
@@ -192,7 +195,8 @@ export function uniqueItemIds(items: readonly PaperItem[]): PaperItem[] {
 }
 
 function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly string[], source: string,
-  pageText: string, order: ReadonlyMap<string, number>, medicineNames: readonly string[], input: PageCheckInput): PaperItem {
+  pageText: string, order: ReadonlyMap<string, number>, medicineNames: readonly string[],
+  allergySubstances: readonly string[], input: PageCheckInput): PaperItem {
   const reasons: string[] = [];
   const add = (code: string) => { if (!reasons.includes(code)) reasons.push(code); };
   const restore = (text: string) => value(text, input.masker);
@@ -292,10 +296,20 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
         else if (norm(raw.substance) || norm(raw.reaction) || raw.severity !== 'none'
           || nkaLeftover(source).length > 0) add('nkda_conflicts');
       }
-      if (notOnPaper(raw.reaction)) add('field_not_on_paper');
-      // A severity only where the paper says how bad: its own word, or anaphylaxis for severe, on the cited lines.
+      // Reaction and severity are held to the allergy's own part of the text, not another allergy's on the line.
+      const others = allergySubstances.filter((other) => !has(other, raw.substance) && !has(raw.substance, other));
+      const own = raw.noKnownAllergies ? norm(source) : allergySegment(source, raw.substance, others);
+      const ownWords = new Set(words(own));
+      const ownNumbers = new Set(numbers(own));
+      if (notOnPaper(raw.reaction) || (norm(raw.reaction) && !has(own, raw.reaction)
+        && (words(raw.reaction).some((word) => !ownWords.has(word)) || fieldNumbersMissing(raw.reaction, ownNumbers)))) {
+        add('field_not_on_paper');
+      }
+      // A severity only where the paper says how bad: its own word, or anaphylaxis for severe, on the item's own
+      // text; 'unknown' only where the paper says it is not known.
       const severity = raw.severity === 'none' ? null : raw.severity;
-      if (severity !== null && severity !== 'unknown' && !severityOnPaper(source, severity)) add('field_not_on_paper');
+      if (severity === 'unknown' ? !SEVERITY_UNKNOWN.test(norm(withoutPlaceholders(own)))
+        : severity !== null && !severityOnPaper(own, severity)) add('field_not_on_paper');
       fields = { substance: raw.noKnownAllergies ? null : restore(raw.substance),
         reaction: restore(raw.reaction), severity: raw.noKnownAllergies ? null : severity,
         noKnownAllergies: raw.noKnownAllergies };
@@ -373,10 +387,43 @@ function nkaLeftover(source: string): string[] {
   return wordsIn(rest).filter((word) => !NKA_FILLER.has(word));
 }
 
-/** Whether the cited text writes this severity: the word itself, or anaphylaxis (any form) for severe. */
-function severityOnPaper(source: string, severity: 'mild' | 'moderate' | 'severe'): boolean {
-  const text = withoutPlaceholders(source);
-  return has(text, severity) || (severity === 'severe' && norm(text).includes('anaphyla'));
+/** A negation just before a word ("not severe", "non-severe", "no anaphylaxis"), or a word joined by a hyphen. */
+const NOT_BEFORE = '(?<!(?<!\\p{L})(?:not|non|no|without)[\\s-]*)(?<!\\p{L}-)';
+/** The paper saying the severity (or the reaction) is not known. */
+const SEVERITY_UNKNOWN = /(?<![\p{L}\p{N}_])(?:unknown|not known|unk|uncertain|unclear|unsure)(?![\p{L}\p{N}_])/u;
+
+/**
+ * Whether the item's own text writes this severity: the word itself, or anaphylaxis (any form) for severe,
+ * neither negated nor joined to another word by a hyphen.
+ */
+function severityOnPaper(own: string, severity: 'mild' | 'moderate' | 'severe'): boolean {
+  const text = norm(withoutPlaceholders(own));
+  return new RegExp(NOT_BEFORE + pattern(severity), 'u').test(text)
+    || (severity === 'severe' && new RegExp(`${NOT_BEFORE}(?<!\\p{L})anaphyla`, 'u').test(text));
+}
+
+/**
+ * The allergy's own part of its text, normalised: from its substance up to where another listed allergy's
+ * substance starts, so that one allergy's reaction or severity doesn't count for another. With no substance,
+ * or the substance written more than once, the whole text is kept.
+ */
+function allergySegment(text: string, substance: string, others: readonly string[]): string {
+  const whole = norm(text);
+  if (!norm(substance)) return whole;
+  const found = [...whole.matchAll(new RegExp(pattern(substance), 'gu'))];
+  if (found.length !== 1) return whole;
+  const atStart = found[0]!.index;
+  const atEnd = atStart + found[0]![0].length;
+  let start = 0;
+  let end = whole.length;
+  for (const other of others) {
+    if (!norm(other)) continue;
+    for (const match of whole.matchAll(new RegExp(pattern(other), 'gu'))) {
+      if (match.index + match[0].length <= atStart) start = Math.max(start, atStart);
+      else if (match.index >= atEnd) end = Math.min(end, match.index);
+    }
+  }
+  return whole.slice(start, end).replace(/^[ ,;]+|[ ,;]+$/g, '');
 }
 
 /** Whether part is in text as written: as is, with "5 mg" read as "5mg", or with "5.4mmol/L" read as "5.4 mmol/L". */
