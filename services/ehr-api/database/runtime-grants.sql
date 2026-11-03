@@ -1399,6 +1399,16 @@ revoke all on function identity.demo_story_context(text,uuid,uuid,text),
 -- commands, which keep the Identity grants above. No grant changes.
 revoke all on function identity.organization_application_admin_account(text) from public;
 
+-- Sealed demo profiles complete (0119): Identity asks the demo phone check
+-- before a patient's phone change, so it goes to the Identity runtime and the
+-- schema test runtime only. The NIN seed is the applier's alone and granted
+-- to no role. 0119 replaces G5's body (identity.patient_contact_changes_sealed_demo,
+-- revoked from PUBLIC above with the other 0098 functions); no other grant changes.
+grant execute on function identity.demo_profile_phone_allowed(text,uuid,text,character)
+  to hid_identity_runtime, hid_schema_test_runtime;
+revoke all on function identity.demo_profile_phone_allowed(text,uuid,text,character),
+  identity.demo_profile_install() from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),

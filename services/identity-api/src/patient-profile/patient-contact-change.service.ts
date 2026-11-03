@@ -290,6 +290,14 @@ export class PatientContactChangeService implements BeforeApplicationShutdown {
     let row: PhoneChangeRow | undefined;
     try {
       row = await this.asPatient(request, actor, async (client) => {
+        // 0119: a sealed demo patient may hold only its own fictional number (the UK drama range). The database holds
+        // only ciphertext and an HMAC of the number, so Identity asks with the normalized number and its canonical
+        // HMAC; true for every real patient. For a demo patient the database records that HMAC for this transaction
+        // and G5 refuses the change below without it. Thrown inside the transaction: nothing is changed or sent.
+        const sealed = await client.query<{ allowed: boolean | null }>(
+          'select identity.demo_profile_phone_allowed($1, $2, $3, $4) as allowed',
+          [actor.subject, actor.sessionId, phone, canonical]);
+        if (sealed.rows[0]?.allowed !== true) throw this.invalid('phone');
         // The number the profile shows now. A stored number Identity cannot
         // read (hid-1.0's, under the migration's key) shows as none: the same
         // number entered again is then written again under Identity's key, as

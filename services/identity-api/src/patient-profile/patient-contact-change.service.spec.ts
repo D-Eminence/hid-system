@@ -75,6 +75,8 @@ function setup(handlers: Record<string, Handler> = {}, credentials: Record<strin
         return { rows: [] };
       }
       for (const [needle, handler] of Object.entries(handlers)) if (sql.includes(needle)) return handler(values);
+      // 0119: not a sealed demo patient (or its own demo number).
+      if (sql.includes('demo_profile_phone_allowed')) return { rows: [{ allowed: true }] };
       if (sql.includes('my_contact_change_credentials')) {
         return { rows: [{ account_id: 'account-id', email: 'old@example.invalid', email_verified: true,
           password_hash: passwordHash, password_algorithm: 'argon2id', patient_first_name: 'Ada',
@@ -315,6 +317,44 @@ describe('PatientContactChangeService (0094)', () => {
     expect(s.notification.deliverContactChanged).toHaveBeenCalledWith(expect.objectContaining({
       recipient: 'old@example.invalid', kind: 'phone', newContactHint: '+234•••••567', firstName: 'Ada',
       healthId: 'HID-ADAAAA', changeId: change.values[2] }));
+  });
+
+  it('asks the 0119 demo phone check first, in the change transaction, with the number and its canonical HMAC', async () => {
+    const s = setup({ 'change_my_phone': () => ({ rows: [{ outcome: 'changed', notice_email: null,
+      patient_first_name: null, patient_hid_code: null }] }) });
+    await expect(s.service.start(request, { channel: 'phone', phone: '+44 7700 900102', currentPassword: 'correct horse battery' }))
+      .resolves.toEqual({ phone: '+447700900102', phoneVerified: false });
+    const change = s.commits.find((sqls) => sqls.some((sql) => sql.includes('change_my_phone')))!;
+    const check = change.findIndex((sql) => sql.includes('demo_profile_phone_allowed'));
+    expect(check).toBeGreaterThanOrEqual(0);
+    expect(check).toBeLessThan(change.findIndex((sql) => sql.includes('change_my_phone')));
+    expect(s.calls.find((call) => call.sql.includes('demo_profile_phone_allowed'))?.values)
+      .toEqual(['patient-subject', 'session-id', '+447700900102', createContactLookupHmac('phone', '+447700900102')]);
+    expect(s.calls.find((call) => call.sql.includes('change_my_phone'))?.values[3])
+      .toBe(createContactLookupHmac('phone', '+447700900102'));
+  });
+
+  it.each([[{ allowed: false }], [{ allowed: null }], [undefined]])(
+    'refuses a demo patient\'s number other than its own with 400 and changes or sends nothing (%o)', async (answer) => {
+      const s = setup({ 'demo_profile_phone_allowed': () => ({ rows: answer ? [answer] : [] }) });
+      const refused = await problem(s.service.start(request, { channel: 'phone', phone: '08031234567',
+        currentPassword: 'correct horse battery' }));
+      expect([refused.getStatus(), refused.code]).toEqual([400, 'CONTACT_INVALID']);
+      expect(s.calls.some((call) => call.sql.includes('change_my_phone'))).toBe(false);
+      // Thrown inside the change transaction: it never committed.
+      expect(s.commits.some((sqls) => sqls.some((sql) => sql.includes('demo_profile_phone_allowed')))).toBe(false);
+      await s.service.settleNotices();
+      expect(s.notification.deliverContactChanged).not.toHaveBeenCalled();
+    });
+
+  it('lets the database refuse the demo phone check without a live patient session (403)', async () => {
+    const s = setup({ 'demo_profile_phone_allowed': () => {
+      throw Object.assign(new Error('Patient self session is required'), { code: '42501' });
+    } });
+    const refused = await problem(s.service.start(request, { channel: 'phone', phone: '08031234567',
+      currentPassword: 'correct horse battery' }));
+    expect([refused.getStatus(), refused.code]).toEqual([403, 'PATIENT_ACCESS_DENIED']);
+    expect(s.calls.some((call) => call.sql.includes('change_my_phone'))).toBe(false);
   });
 
   it('refuses the number the profile shows (400, nothing sent), rewrites one it could not show, refuses another patient\'s', async () => {
