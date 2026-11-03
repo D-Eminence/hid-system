@@ -49,9 +49,10 @@ async function start(enabled: string | undefined): Promise<void> {
   authorizeSelf = jest.fn(async () => ({ patientId: PATIENT_ID, accountId: patientActor.accountId,
     subject: patientActor.subject, sessionId: patientActor.sessionId, expiresAt: new Date(Date.now() + 30_000).toISOString() }));
   const database = {
-    query: jest.fn(async (sql: string) => {
+    query: jest.fn(async (sql: string, values: unknown[] = []) => {
       poolQueries.push(sql);
-      if (sql.includes('platform.control_enabled')) return { rows: [{ enabled: true }], rowCount: 1 };
+      // Maintenance off, the patient portal on.
+      if (sql.includes('platform.control_enabled')) return { rows: [{ enabled: values[0] !== 'maintenance_mode' }], rowCount: 1 };
       if (sql.includes('insert into audit.events')) return { rows: [], rowCount: 1 };
       throw new Error(`unexpected pool query: ${sql}`);
     }),

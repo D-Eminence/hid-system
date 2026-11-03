@@ -92,7 +92,9 @@ describe('The evidence query reads each row\'s origin', () => {
     expect(localEvidenceQuery(false)).toBe(LOCAL_EVIDENCE_QUERY);
     const withEntries = localEvidenceQuery(true).split('union all');
     expect(withEntries).toHaveLength(10);
-    expect(withEntries.slice(0, 9).join('union all')).toBe(branches.join('union all').replace(/\n\)\nselect kind[\s\S]*$/, ''));
+    // The only difference is the one branch, before the sources block ends.
+    expect(localEvidenceQuery(true).replace(/\n union all select 'patient_entry'[\s\S]*?where pe\.status='active'(?=\n\)\nselect)/, ''))
+      .toBe(LOCAL_EVIDENCE_QUERY);
     const entries = withEntries[9]!;
     expect(entries).toContain("select 'patient_entry',pe.id,pe.patient_id,pe.row_version::text,pe.title,pe.created_at");
     expect(entries).toMatch(/,null\s+from ehr\.patient_entries pe where pe\.status='active'\n\)\nselect kind,id,version/);

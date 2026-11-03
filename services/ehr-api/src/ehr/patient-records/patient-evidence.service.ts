@@ -6,7 +6,8 @@ import type { HidRequest } from '../../common/request-context';
 import { PatientRecordsService } from './patient-records.service';
 import { LabApiService } from '../../integrations/lab-api.service';
 import { AuditService } from '../../audit/audit.service';
-import { LOCAL_EVIDENCE_QUERY } from './patient-evidence.query';
+import { localEvidenceQuery } from './patient-evidence.query';
+import { patientEntriesEnabled } from '../patient-entries/patient-entries.flag';
 import { PatientAttachmentTextService } from './patient-attachment-text.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 import { evidence,evidenceKey,originLabel,type Evidence,type EvidenceSnapshot,type EvidenceBinding,type SourceKind } from './patient-evidence.types';
@@ -28,8 +29,9 @@ export class PatientEvidenceService {
 
   async local(client:PoolClient,patientId:string):Promise<{records:Evidence[];complete:boolean}> {
     const records:Evidence[]=[];let kind='',id='';let complete=false;
+    const query=localEvidenceQuery(patientEntriesEnabled());
     for(let page=0;page<10;page++) {
-      const rows=(await client.query(LOCAL_EVIDENCE_QUERY,[patientId,kind,id])).rows;
+      const rows=(await client.query(query,[patientId,kind,id])).rows;
       for(const r of rows.slice(0,200)) records.push(evidence({kind:r.kind as SourceKind,id:r.id,version:r.version,
         title:r.title,recordedAt:iso(r.recorded_at),effectiveAt:iso(r.effective_at),provenance:r.provenance,quality:r.quality,fields:r.fields,
         originHint:r.origin_hint}));

@@ -52,3 +52,21 @@ export const LOCAL_EVIDENCE_QUERY = `with sources as (
 )
 select kind,id,version,title,recorded_at,effective_at,provenance,quality,fields,origin_hint from sources
 where patient_id=$1 and (kind,id::text)>($2::text,$3::text) order by kind,id::text limit 201`;
+
+// The records the patient added themselves (0116), as one more branch, only
+// while PATIENT_ENTRIES_ENABLED is on: while off the query is exactly
+// LOCAL_EVIDENCE_QUERY and never names ehr.patient_entries, so this image
+// also runs before 0116. Active entries only (0116's read policy says the
+// same); a withdrawn one leaves the evidence, so saved answers citing it stop
+// showing and its vectors are never ranked.
+const PATIENT_ENTRY_SOURCES = `
+ union all select 'patient_entry',pe.id,pe.patient_id,pe.row_version::text,pe.title,pe.created_at,(pe.occurred_on::timestamp at time zone 'UTC'),
+ 'Record added by the patient, not checked by a health worker','patient reported',
+ jsonb_build_object('type',pe.kind,'place',pe.facility_name,'date',pe.occurred_on,'notes',pe.notes),null
+ from ehr.patient_entries pe where pe.status='active'`;
+const SOURCES_END = '\n)\nselect kind,id,version,title,recorded_at,effective_at,provenance,quality,fields,origin_hint from sources';
+export function localEvidenceQuery(includePatientEntries: boolean): string {
+  if (!includePatientEntries) return LOCAL_EVIDENCE_QUERY;
+  if (LOCAL_EVIDENCE_QUERY.split(SOURCES_END).length !== 2) throw new Error('The evidence query lost its sources block');
+  return LOCAL_EVIDENCE_QUERY.replace(SOURCES_END, () => PATIENT_ENTRY_SOURCES + SOURCES_END);
+}

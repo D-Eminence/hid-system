@@ -4,18 +4,21 @@ import type { HidRequest } from '../../common/request-context';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 import { LabApiService } from '../../integrations/lab-api.service';
 import { AuditService } from '../../audit/audit.service';
-import { LOCAL_EVIDENCE_QUERY } from './patient-evidence.query';
+import { localEvidenceQuery } from './patient-evidence.query';
+import { patientEntriesEnabled } from '../patient-entries/patient-entries.flag';
 import { PatientAttachmentTextService, ATTACHMENT_TEXT_QUERY } from './patient-attachment-text.service';
 import { evidence, evidenceKey, originLabel, type Evidence, type EvidenceBinding, type EvidenceSnapshot, type SourceKind } from './patient-evidence.types';
 import type { AttachmentAccess } from './chat-access';
 import { STAFF_SOURCE_PERMISSIONS, type StaffChatScope } from './staff-chat-scope.service';
 
 // RLS retains facility/consent filtering; the source permission filter is applied
-// inside SQL before any evidence content can leave the database operation.
-export const STAFF_EVIDENCE_QUERY = LOCAL_EVIDENCE_QUERY
+// inside SQL before any evidence content can leave the database operation. The
+// records the patient added (0116) are read only while PATIENT_ENTRIES_ENABLED is on.
+export const staffEvidenceQuery = (includePatientEntries: boolean) => localEvidenceQuery(includePatientEntries)
   .replace('where patient_id=$1 and (kind', 'where patient_id=$1 and kind=any($4::text[]) and (kind')
   .replace("from ehr.diagnoses d where d.verification_status<>'entered_in_error'", "from ehr.diagnoses d where d.verification_status<>'entered_in_error' and exists(select 1 from ehr.encounters e where e.id=d.encounter_id and e.patient_id=d.patient_id and e.facility_id=d.facility_id and e.status='completed')")
   .replace('from ehr.vitals v left join', "from ehr.vitals v join ehr.encounters e on e.id=v.encounter_id and e.patient_id=v.patient_id and e.facility_id=v.facility_id and e.status='completed' left join");
+export const STAFF_EVIDENCE_QUERY = staffEvidenceQuery(false);
 
 @Injectable()
 export class StaffEvidenceService {
@@ -69,12 +72,17 @@ export class StaffEvidenceService {
   }
   private async snapshot(scope: StaffChatScope, request: HidRequest, signal?: AbortSignal, ids?: readonly string[]): Promise<EvidenceSnapshot> {
     const auth = await scope.authorize(request);
-    const allowed = (Object.keys(STAFF_SOURCE_PERMISSIONS) as SourceKind[]).filter(kind => scope.allows(kind));
+    // While the setting is off the records the patient added are not a kind
+    // at all, so they never make the coverage incomplete.
+    const withEntries = patientEntriesEnabled();
+    const kinds = (Object.keys(STAFF_SOURCE_PERMISSIONS) as SourceKind[]).filter(kind => withEntries || kind !== 'patient_entry');
+    const allowed = kinds.filter(kind => scope.allows(kind));
+    const query = staffEvidenceQuery(withEntries);
     const local = await scope.transaction(auth, request.correlationId, async client => {
       const records: Evidence[] = []; let kind = '', id = '', complete = false;
       for (let page = 0; page < 10; page++) {
         signal?.throwIfAborted();
-        const rows = (await client.query(STAFF_EVIDENCE_QUERY, [scope.patientId, kind, id, allowed])).rows;
+        const rows = (await client.query(query, [scope.patientId, kind, id, allowed])).rows;
         for (const r of rows.slice(0, 200)) records.push(evidence({ kind: r.kind, id: r.id, version: r.version,
           title: r.title, recordedAt: r.recorded_at ? new Date(r.recorded_at).toISOString() : null,
           effectiveAt: r.effective_at ? new Date(r.effective_at).toISOString() : null,
@@ -88,7 +96,7 @@ export class StaffEvidenceService {
       return { records, complete };
     });
     const unavailable: string[] = [];
-    if (allowed.length < Object.keys(STAFF_SOURCE_PERMISSIONS).length) unavailable.push('Some record categories are outside your current read permissions.');
+    if (allowed.length < kinds.length) unavailable.push('Some record categories are outside your current read permissions.');
     if(scope.allows('profile')) {
       const profile=await this.identity.staffPatientProfile(scope.patientId,scope.context);
       if(profile.patientId!==scope.patientId)throw new DomainProblem(403,'CHAT_ACCESS_DENIED','Patient profile authorization changed');

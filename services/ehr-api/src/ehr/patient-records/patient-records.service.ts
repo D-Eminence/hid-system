@@ -7,6 +7,8 @@ import { DatabaseService } from '../../database/database.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { readImportedRecords, readImportedHealthProfile } from './imported-records.query';
+import { patientEntriesEnabled } from '../patient-entries/patient-entries.flag';
+import { readPatientEntries } from '../patient-entries/patient-entries.query';
 
 @Injectable()
 export class PatientRecordsService {
@@ -29,15 +31,21 @@ export class PatientRecordsService {
   async self(request: HidRequest) {
     const authorization = await this.authorizeSelf(request);
     const actor = request.actor!;
+    // The records the patient added (0116) only while PATIENT_ENTRIES_ENABLED
+    // is on: while off, nothing reads ehr.patient_entries and the answer keeps
+    // exactly today's keys (the website reads the key as "served").
+    const withEntries = patientEntriesEnabled();
     return this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
       const value = await this.read(client, authorization.patientId);
+      const entries = withEntries ? await readPatientEntries(client, authorization.patientId) : undefined;
       await this.audit.recordWithClient(client, {
         correlationId: request.correlationId, actorType: 'patient', actorSubject: actor.subject,
         actorAccountId: actor.accountId, patientId: authorization.patientId,
         action: 'ehr.patient.self.records.read', resourceType: 'patient-record-summary', outcome: 'success',
-        purposeOfUse: 'patient-self', details: { encounterCount: value.encounters.length, noteCount: value.notes.length, importedRecordCount: value.importedRecords.length },
+        purposeOfUse: 'patient-self', details: { encounterCount: value.encounters.length, noteCount: value.notes.length,
+          importedRecordCount: value.importedRecords.length, ...(entries ? { patientEntryCount: entries.items.length } : {}) },
       });
-      return value;
+      return entries ? { ...value, patientEntries: entries.items, patientEntriesMore: entries.more } : value;
     });
   }
 

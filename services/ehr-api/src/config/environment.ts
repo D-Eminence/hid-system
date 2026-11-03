@@ -109,6 +109,9 @@ const environmentSchema = z
     S3_KMS_KEY_ID: optionalString,
     OFFLINE_ESCROW_ENABLED: booleanString,
     OFFLINE_ESCROW_KEYS: optionalString,
+    // Records patients add themselves (0116): off (the default) answers a plain 404 on their routes and leaves them out
+    // of the records answer and both chats; turned on only after 0116 is applied and the website reads them.
+    PATIENT_ENTRIES_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {
