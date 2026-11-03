@@ -3107,3 +3107,176 @@ grant. With `HID_RECORDS_PROCESSING_STAGE` it also
 runs this branch's services on a database without 0104 (`before-0104`), and an
 Identity from before 0104 (`HID_RECORDS_PROCESSING_IDENTITY_DIR`) on a database
 with it (`old-identity`) or without it (today's Identity on today's database).
+## 33. Document virus scanning: the scanner's account, routes and refusals (0105)
+
+Migration 0105 (`0105_document_scanner.sql`, owner decisions of 2026-10-31,
+D-Eminence: D1 GuardDuty, D2 a file it cannot scan is refused, D3 a type
+mismatch is accepted under the real type, D4 enforcement only after the
+backfill; numbered 0105 by the owner's decision 33 of 2026-11-03; unsigned
+until the owner signs) and the EHR API changes beside it are the backend half
+of the GuardDuty Malware Protection for S3 scanner (D1). It was built as 0101
+on the scan-be branch and is written on 0103: it uses nothing 0104 (records
+processing) adds. A bridge Lambda turns each GuardDuty result into a scan
+event; Terraform, the bridge and the issuer cap are separate and are not part
+of this release. Nothing here turns enforcement on: until the bridge holds a
+token, nothing here is reachable, every document stays scan-pending (the
+website's "checking for viruses" state) and uploads behave exactly as
+today.
+
+### The scanner's identity
+
+- The workload issuer mints `sub` `hid:staging:document-scanner` for the
+  bridge's Lambda role in production (the promoted staging stack; the
+  application module's environment is `staging`), `aud` `hid-identity-api`,
+  ES256, 300 seconds. identity-api's `authenticateScanner` accepts it only while
+  that subject is an active `auth.accounts` row holding the platform
+  `document_scanner` role.
+- 0105 seeds that account (`d0c5ca40-0105-4000-8000-000000000001`, no email,
+  no password, `source_system` `hid-workload`) and its role row
+  (`d0c5ca40-0105-4000-8000-000000000002`, `document_scanner` grants only
+  `ehr.document.scan`). `auth.admin_change_platform_role` refuses this role, so
+  the seed bypasses the governed admin command; the owner signs that in the
+  declaration. A different row already holding the subject or the ID stops the
+  migration with nothing applied.
+- Kill switch, no release: revoke the role row (`revoked_at`, `revoked_by`,
+  an 8-500 character `revocation_reason`) or set the account's status to
+  `disabled`. Every scanner route then answers 401 from Identity.
+
+### Routes (ehr-api, internal load balancer only)
+
+All three are `@Public` to the session guard and authorized exactly alike:
+`Authorization: Bearer <workload JWT>` is sent to Identity
+(`/api/v1/identity/service/workloads/document-scanner/authorize`) before any
+database call; an optional `X-Correlation-Id` matching
+`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$` is kept (otherwise a UUID is generated)
+and is passed to the database command, which checks it against the
+transaction's. Bodies are JSON; unknown fields are refused (400
+`VALIDATION_FAILED`). Errors are Problem Details with a `code`.
+
+The public gateway answers 404 for `/api/v1/ehr/documents/scan-events`,
+`/scan-targets` and `/scan-targets/resolve` (any case, trailing slash, encoded
+or doubled-slash forms) before its EHR proxy.
+
+`POST /api/v1/ehr/documents/scan-targets/resolve` (200)
+
+```json
+{ "storageBucket": "hid-staging-documents-...", "storageKey": "clinical/objects/<uuid>", "objectVersionId": "<S3 VersionId>" }
+```
+
+`storageBucket` must be the EHR API's own bucket (another answers 404
+`DOCUMENT_NOT_FOUND`); `storageKey` must match
+`^clinical/objects/<lower-case UUID>$`; `objectVersionId` 1-1024 characters.
+Answer:
+
+```json
+{ "documentId": "<uuid>", "objectVersionId": "<bound VersionId>", "sha256Hex": "<64 hex>",
+  "status": "uploaded", "declaredMediaType": "image/png", "latestEventType": null,
+  "sniffResult": "supported", "sniffedMediaType": "image/jpeg" }
+```
+
+`latestEventType` is the latest event on the bound version (`scan_started`,
+`failed` or null; a terminal one is a refusal). After the database answer the
+EHR API reads bytes 0-1023 of exactly that VersionId (a ranged GetObject with
+its own S3 and KMS rights) and sets `sniffResult`: `supported` with
+`sniffedMediaType` one of `application/pdf` (`%PDF-`), `image/jpeg`
+(`FF D8 FF`), `image/png` (`89 50 4E 47 0D 0A 1A 0A`), `image/tiff`
+(`49 49 2A 00` or `4D 4D 00 2A`), each at byte 0; `unsupported` (null type)
+when the bytes were read and match none (a PDF with anything before `%PDF-` is
+unsupported); `unavailable` (null type) when they could not be read (access
+denied, version gone, timeout). No patient or facility ID is returned. Audited
+as `ehr.document.scan-target.resolve` (and the request as
+`api.ehr.document.scan-target.resolve.request`).
+
+`GET /api/v1/ehr/documents/scan-targets?olderThanSeconds=<0-31536000>&limit=<1-100>` (200; both required, decimal digits)
+
+```json
+{ "items": [ { "documentId": "<uuid>", "storageBucket": "...", "storageKey": "clinical/objects/<uuid>",
+  "objectVersionId": "...", "sha256Hex": "<64 hex>", "declaredMediaType": "application/pdf",
+  "updatedAt": "2026-10-31T09:00:00.000Z", "latestEventType": "scan_started", "scanStartedCount": 1,
+  "lastScanStartedAt": "2026-10-31T10:00:00.000Z" } ] }
+```
+
+Uploaded documents whose row last changed (the upload completion sets it) at
+least `olderThanSeconds` ago, with no clean or rejected event on their bound
+version and SHA-256, oldest first. Every status other than `uploaded` is left
+out (an upload never completed cannot be scanned). Keys outside
+`clinical/objects/` are listed as they are; the bridge does not scan them.
+Audited as `ehr.document.scan-target.list` naming the documents.
+
+`POST /api/v1/ehr/documents/scan-events` (202 `{ "eventId": "<uuid>" }`) is
+unchanged in shape (`documentId`, `objectVersionId`, `objectSha256Hex`,
+`eventType` `scan_started|clean|rejected|failed`, `detectedMediaType` required
+for clean and one of the four types, `scannerEngine`, `scannerVersion`,
+`reasonCode` required for rejected and failed,
+`^[A-Za-z0-9][A-Za-z0-9._:-]*$` up to 120, `idempotencyKey`
+`^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$`). An identical replay of an
+idempotency key answers 202 with the first event's ID.
+
+### Status codes
+
+| Status | `code` | Routes | Meaning |
+| --- | --- | --- | --- |
+| 401 | `WORKLOAD_AUTHENTICATION_REQUIRED` or Identity's code | all | no bearer token, or Identity refused it (bad signature, issuer or audience, no active scanner account: the kill switch) |
+| 403 | Identity's code / `DOCUMENT_SCANNER_FORBIDDEN` | all | Identity refused; or the database found no active scanner for the actor or a mismatched correlation ID (42501) |
+| 503 | `IDENTITY_SERVICE_UNAVAILABLE` and others | all | Identity, storage or the scanner database pool unavailable; retry |
+| 400 | `VALIDATION_FAILED` / `INVALID_SCAN_REQUEST` | all | the request failed validation, or a database argument check (22023) |
+| 404 | `DOCUMENT_NOT_FOUND` | resolve, scan-events | no document holds the object, or no such document (P0002 `Document not found`) |
+| 409 | `DOCUMENT_NOT_UPLOADED` | resolve, scan-events | the upload is not completed (55000 `Only an uploaded document can be scanned`); retry later |
+| 409 | `DOCUMENT_NOT_SCANNABLE` | resolve | the document is rejected or entered in error (55000 `Document is no longer awaiting a scan`) |
+| 409 | `OBJECT_VERSION_MISMATCH` | resolve, scan-events | another version or SHA-256 is bound (55000 `Scan result does not match the current immutable document object`) |
+| 409 | `SCAN_ALREADY_TERMINAL` | resolve, scan-events | clean or rejected already recorded for that object (55000 `Document object scan has already reached a terminal result`) |
+| 409 | `SCAN_IDEMPOTENCY_CONFLICT` | scan-events | the key was used for another payload (23505 `Scanner idempotency key payload mismatch`) |
+
+Any other database error stays a 500 `INTERNAL_ERROR`.
+`services/ehr-api/src/documents/scan-errors.ts` holds the table;
+`scan-errors.spec.ts` pins every message against the migration files and
+`test/database/document-scanner.integration.sql` against the database.
+
+### What a clean scan under the detected type changes (D3)
+
+When the bridge sends `clean` with `detectedMediaType` the sniffed type, the
+document is available under that type everywhere: the list
+(`GET /api/v1/ehr/documents`, now read from `ehr.documents_effective`, so only
+scans bound to the document's version and SHA-256 count, as for download and
+OCR) and every document view show it as `mediaType`; the signed download is
+served with `response-content-type` the detected type, `inline` under the
+uploaded name with an extension that matches it (a JPEG uploaded as
+`scan.png` opens as `scan.jpg`) and `Cache-Control: private, no-store`; the
+internal OCR source (`GET /api/v1/ehr/internal/ocr/documents/:id/source`)
+gains `mediaType`, the detected type or null; and `ocr.claim_worker_job`
+returns the detected type as `media_type`, which the OCR worker uses to pick
+its Textract path. The declared type stays on the row and in
+`declaredMediaType`.
+
+### The database (0105)
+
+- `ehr.resolve_document_scan_target(text, text, text, text)` and
+  `ehr.list_documents_awaiting_scan(integer, integer, text)`: SECURITY DEFINER,
+  `search_path pg_catalog, pg_temp`, owned by `ehr.documents`' owner, EXECUTE
+  for `hid_document_scanner` only. Each rechecks, as 0009 does, the scanner
+  role and that the correlation ID passed is the transaction's
+  (`app.correlation_id`). The comparison is IS DISTINCT FROM, so a transaction
+  that carries no correlation ID (unset or empty) is refused as well (42501).
+- `documents_scanner_function_lock`, a permissive UPDATE policy on
+  `ehr.documents` (USING the scanner-role test of 0005's read policy, WITH
+  CHECK false): `append_document_scan_event`'s row lock must pass the table's
+  UPDATE policies under forced row-level security, so under an owner that does
+  not bypass row-level security every append answered `Document not found`
+  before 0105. It admits no written row.
+- `ocr.claim_worker_job` in the RDS form, its `media_type` the clean scan's
+  detected type.
+
+Applying 0105 holds ACCESS EXCLUSIVE on `ehr.documents` from its CREATE POLICY
+to commit (milliseconds); a long-running document read makes the apply stop
+after its 5 s lock timeout with nothing applied. It holds no lock on
+`ocr.jobs` at commit, but compiling the replaced claim briefly needs one, so a
+session holding ACCESS EXCLUSIVE on `ocr.jobs` stops it the same way. 0105 has
+no down migration. Today's EHR API, OCR worker and Identity keep working on it.
+
+Release order: 0104 (records processing) ships first, in its own release with
+its own signed declaration. 0105's declaration names only 0105 and
+`runtime-grants.sql`, which is exact for a release whose base already has 0104
+(once this branch is rebased onto it, `runtime-grants.sql` carries both blocks
+and its hash in the declaration is measured again). 0105's prerequisite is
+0103's admin gate body and it reads nothing 0104 adds, so it applies the same
+way after 0104 as on 0103 alone.
