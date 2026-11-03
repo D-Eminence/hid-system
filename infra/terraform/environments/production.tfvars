@@ -252,3 +252,8 @@ ecs_container_insights = "disabled"
 # DEVOPS_HANDOVER.md "AWS cost".
 ecr_untagged_image_expiry_days = 14
 ecr_tagged_image_expiry_days   = 90
+
+# Standby database copy in a second zone for launch (owner, 3 Nov 2026). The
+# switch is online; without apply_immediately RDS makes it in the next
+# maintenance window.
+database_multi_az = true
