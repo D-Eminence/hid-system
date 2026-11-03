@@ -19,6 +19,8 @@ const executionId='70000000-0000-4000-8000-000000000001',pendingExecutionId='700
 const resultId='a0000000-0000-4000-8000-000000000001',pendingResultId='a0000000-0000-4000-8000-000000000002';
 const workItemId='b0000000-0000-4000-8000-000000000001',sourceEhrOrderId='c0000000-0000-4000-8000-000000000001';
 const grantId='e0000000-0000-4000-8000-000000000001';
+// The lab scientist who entered every revision here: never the reader, and never named in an answer.
+const scientistId='20000000-0000-4000-8000-000000000009';
 // The doctor role's Lab permissions (0017, 0018, 0021): no execution or accession read.
 const DOCTOR=['lab.import.read','lab.import.write','lab.work-item.read','lab.work-item.accept','lab.result.released.read'];
 const LAB_STAFF=['lab.execution.read','lab.result.released.read','lab.result.enter','lab.result.correct'];
@@ -36,12 +38,12 @@ interface StoredResult {executionId:string;currentVersion:number;revisions:Revis
 const revisionRow=(id:string,result:StoredResult,r:Revision)=>({id:`revision-${id}-${r.version}`,result_id:id,execution_id:result.executionId,
  patient_id:patientId,facility_id:facilityId,version:String(r.version),result_type:'numeric',numeric_value:String(r.value),text_value:null,
  unit:'g/dL',reference_range:'12.0-16.0',abnormal_flag:'normal',entry_source:'manual',verification_status:'unverified',entered_at:enteredAt,
- correction_reason:r.version===1?null:CORRECTION_REASON,request_sha256:'a'.repeat(64),verified_at:r.verified?verifiedAt:null,
+ entered_by:scientistId,correction_reason:r.version===1?null:CORRECTION_REASON,request_sha256:'a'.repeat(64),verified_at:r.verified?verifiedAt:null,
  released_at:r.released?releasedAt:null,invalidated_at:r.invalidated?invalidatedAt:null});
 /** The revision as a released-only reader receives it. */
 const released=(version:number,value:number,verificationStatus:'verified'|'entered_in_error'='verified')=>({version,resultType:'numeric',
  numericValue:value,textValue:null,unit:'g/dL',referenceRange:'12.0-16.0',abnormalFlag:'normal',entrySource:'manual',verificationStatus,
- releaseStatus:'released',enteredAt,releasedAt,correctionReason:version===1?null:CORRECTION_REASON});
+ releaseStatus:'released',enteredAt,enteredByYou:false,releasedAt,correctionReason:version===1?null:CORRECTION_REASON});
 
 // Version 1 (12.5) released; version 2 (7.1), a correction, entered and not verified.
 const correctedAfterRelease:StoredResult={executionId,currentVersion:2,revisions:[{version:1,value:12.5,verified:true,released:true},{version:2,value:7.1}]};

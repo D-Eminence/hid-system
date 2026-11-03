@@ -1407,6 +1407,15 @@ result, so someone else at your lab must check it." Earlier backends
 answered `500`. A check of a version marked entered in error is refused by
 the same database rule and still answers `500`.
 
+Each result revision Lab answers also carries `enteredByYou` (boolean): true
+when the member asking entered that version. That is every revision in the
+execution reads (`GET .../executions/{id}`, `GET .../specimens/{id}/executions`),
+a result's history, the answers to entering, correcting, checking and
+releasing a result, and the released views. Lab works it out from the
+version's author and the session, and never answers anyone's account id. A
+client can use it to offer no check to the person who entered the version.
+Earlier backends do not send it, so clients treat it as optional.
+
 ### Record chat: where each source came from
 
 Each source in a record chat answer (`POST /api/v1/ehr/me/chat`,

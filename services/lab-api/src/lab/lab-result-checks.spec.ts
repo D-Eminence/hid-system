@@ -21,7 +21,7 @@ const executionId = '70000000-0000-4000-8000-000000000001';
 const resultId = 'a0000000-0000-4000-8000-000000000001';
 const context = { correlationId: 'result-check-correlation', facilityId, membershipId, purposeOfUse: 'direct-care',
   actor: { id: 'actor', subject: 'staff:lab', accountId, roles: ['lab'], facilityIds: [facilityId], facilities: [],
-    permissions: ['lab.execution.read', 'lab.result.enter', 'lab.result.verify', 'lab.result.release'],
+    permissions: ['lab.execution.read', 'lab.result.enter', 'lab.result.verify', 'lab.result.release', 'lab.result.released.read'],
     authenticationMethod: 'local' } } satisfies DataAccessContext;
 const check = { expectedResultVersion: 1, occurredAt: '2026-11-03T10:00:00Z', reason: 'Checked against the analyser print' };
 const key = 'result-check-key-0001';
@@ -133,5 +133,63 @@ describe('LabExecutionsService.verifyResult by the person who entered the result
     const { service, statements } = harness(accountId);
     await service.releaseResult(context, resultId, check, key).catch(() => undefined);
     expect(statements.filter((sql) => /\bentered_by\b/.test(sql) && !/\brr\b/.test(sql))).toEqual([]);
+  });
+});
+
+/**
+ * Lab never said who entered a result version, so the website offered Check to the person who entered it, which the
+ * database refuses (lab-release step 3). Each revision now says whether the member asking entered it, worked out from
+ * the revision's author and the session; no one's id is answered.
+ */
+describe('Each result revision says whether the member asking entered it', () => {
+  /** A result whose versions were entered by the given accounts (version 1 first); the member reads its full history. */
+  function stored(authors: string[]) {
+    const client = { query: jest.fn(async (sql: string) => {
+      if (sql.includes('lab.order_route_access_for')) return { rows: [{ outcome: 'none', route_id: null, work_item_id: workItemId }] };
+      if (sql.includes('select patient_id::text from lab.results')) return { rows: [{ patient_id: patientId }] };
+      if (sql.includes('select id::text from lab.results where execution_id=$1')) return { rows: [{ id: resultId }] };
+      if (sql.includes('from lab.results where id=$1')) return { rows: [{ id: resultId, execution_id: executionId,
+        status: 'entered_unverified', current_version: String(authors.length) }] };
+      if (/\bfrom lab\.result_revisions rr\b/.test(sql)) return { rows: authors.map((author, index) => ({
+        id: `b0000000-0000-4000-8000-00000000000${index + 1}`, result_id: resultId, execution_id: executionId, patient_id: patientId,
+        facility_id: facilityId, version: String(index + 1), result_type: 'numeric', numeric_value: String(12 + index), text_value: null,
+        unit: 'g/dL', reference_range: '12.0-16.0', abnormal_flag: 'normal', entry_source: 'manual', verification_status: 'unverified',
+        entered_at: new Date('2026-11-03T09:00:00Z'), entered_by: author, correction_reason: index === 0 ? null : 'Transcription error',
+        request_sha256: 'a'.repeat(64), verified_at: null, released_at: null, invalidated_at: null })) };
+      if (sql.includes('from lab.test_executions e')) return { rows: [{ id: executionId, accession_id: workItemId,
+        specimen_id: workItemId, requested_test_id: workItemId, patient_id: patientId, facility_id: facilityId,
+        status: 'completed', method: null, started_at: new Date(), completed_at: new Date(), row_version: '2',
+        idempotency_key: 'k', request_sha256: 'x', completed_idempotency_key: null, completed_request_sha256: null,
+        test_name: 'Haemoglobin', test_code: '718-7', test_code_system: 'http://loinc.org' }] };
+      return { rows: [] };
+    }) };
+    const database = { withTransaction: async <T>(_c: DataAccessContext, fn: (c: PoolClient) => Promise<T>) =>
+      fn(client as unknown as PoolClient) } as unknown as DatabaseService;
+    const identity = { authorize: jest.fn().mockResolvedValue({ allowed: true, breakGlass: false }) } as unknown as IdentityService;
+    const audit = { recordWithClient: jest.fn().mockResolvedValue(undefined) } as unknown as AuditService;
+    return new LabExecutionsService(database, audit, new LabOrderRouteAccess(identity));
+  }
+
+  it('answers enteredByYou on every revision of the history, and no author id', async () => {
+    // Version 1 entered by the member; version 2, a correction, by a colleague.
+    const history = await stored([accountId, colleagueId]).getResultHistory(context, resultId);
+    expect(history.revisions.map((revision) => [revision.version, (revision as { enteredByYou?: unknown }).enteredByYou]))
+      .toEqual([[1, true], [2, false]]);
+    const body = JSON.stringify(history);
+    for (const id of [accountId, colleagueId]) expect(body).not.toContain(id);
+    expect(body).not.toMatch(/"entered_?by"/i);
+  });
+
+  it('says false for every revision a colleague entered, and knows the member whatever the case of the id', async () => {
+    const theirs = await stored([colleagueId]).getResultHistory(context, resultId);
+    expect(theirs.revisions.map((revision) => (revision as { enteredByYou?: unknown }).enteredByYou)).toEqual([false]);
+    const mine = await stored([accountId.toUpperCase()]).getResultHistory(context, resultId);
+    expect(mine.revisions.map((revision) => (revision as { enteredByYou?: unknown }).enteredByYou)).toEqual([true]);
+  });
+
+  it('answers it on the result an execution read carries', async () => {
+    const execution = await stored([accountId]).get(context, executionId);
+    expect(execution.result?.revisions.map((revision) => (revision as { enteredByYou?: unknown }).enteredByYou)).toEqual([true]);
+    expect(JSON.stringify(execution)).not.toContain(accountId);
   });
 });
