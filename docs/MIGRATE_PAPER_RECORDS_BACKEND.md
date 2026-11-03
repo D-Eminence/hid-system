@@ -162,3 +162,28 @@ ehr-api (`/api/v1`):
   duplicated.
 - The check window is 24 hours from reading. After that, the found items are cleared and the
   paper shows `couldnt_read` with `check_time_passed` and `canRetry`.
+
+## Agreed with Session B and the coordinator (3 Nov, 12:18 UTC)
+
+- 0110's read function is exactly
+  `ocr.facility_page_allowance(requested_facility_id uuid) returns table(pages_used integer,
+  pages_limit integer, resets_on date, paused boolean)`. It is granted to the ocr-api runtime and
+  authorized for facility staff holding `ocr.job.read`. Look it up with
+  `to_regprocedure('ocr.facility_page_allowance(uuid)')` and return `allowance: null` when it's
+  absent.
+- Lines live only in `ocr.extractions.structured_payload.pages[].lines`, so 0109's clear-out of
+  that column removes the line positions.
+- The coordinator will check these in review. Each needs a DB-suite test:
+  - 0109's exception covers working data only (extractions, found items, drafts, the details of
+    rejected or removed suggestions). It never covers published items, decisions, identity checks
+    or audit rows. It applies only to rows older than 24 hours, only through the one clear-out
+    function, and logs counts, never content. The same update or delete is still refused for every
+    runtime role, the table owner path outside the function, and rows younger than 24 hours.
+  - A failed reading start (forced error inside `ocr.start_paper_record_reading`) leaves the
+    `ehr.document_scan_events` row and the document's `clean` status intact.
+  - Under-18 refusal is checked on the server at upload, at reading start and at publish. The
+    24-hour cover's grant objects come from 0104, so until then a write grant is accepted.
+  - The server refuses a publish unless every item, including every medicine, allergy and lab
+    result, has its own decision.
+  - Every short-list row is `needs_clinical_check = true` until Ola and the pilot clinician sign
+    them off.
