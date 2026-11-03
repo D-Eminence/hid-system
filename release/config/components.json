@@ -95,7 +95,7 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0110",
+    "last": "0111",
     "count": 105,
     "files": [
       {
@@ -515,8 +515,8 @@
         "sha256": "24d9ccd4dfa18aad5cf1c3d9268ff043bd001c4d5b41660b00af01c4aadfca8f"
       },
       {
-        "name": "0110_lab_one_person_check.sql",
-        "sha256": "c8ca38f7eb48737c4fa2e6681000de2914446b2ff39063c75d32289a6b9d7e3e"
+        "name": "0111_lab_one_person_check.sql",
+        "sha256": "360ac620bc24dd1aa59cf098bc5b3910f1a652ff9c19ea12e4cb6b41682301b4"
       }
     ]
   },

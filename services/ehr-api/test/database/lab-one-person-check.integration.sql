@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- 0110, owner decision 33.3 ("two-person lab check default; a single-person
+-- 0111, owner decision 33.3 ("two-person lab check default; a single-person
 -- facility may release with a typed, logged reason"). Rollback-only.
 --
 -- A facility is two-person until its administrator (organization.manage at
@@ -268,6 +268,22 @@ begin
      or has_function_privilege('hid_ehr_api_runtime', 'lab.one_person_lab_enabled()', 'execute') then
     raise exception 'onepl: EXECUTE on the one-person lab functions is not exactly the runtimes''';
   end if;
+  -- The exclusion of a switch-off and a self-check rests on this row lock
+  -- (see the migration header and services/ehr-api/scripts/lab-one-person-race-checks.mjs).
+  if (select proc.prosrc from pg_proc proc where proc.oid = 'lab.validate_result_governance()'::regprocedure)
+       not like '%from identity.facility_lab_check_current current_state%for share of current_state;%' then
+    raise exception 'onepl: the governance trigger no longer holds the current setting FOR SHARE';
+  end if;
+  -- Every reason rule trims the whole whitespace set, not only spaces.
+  if exists (select 1 from pg_constraint constraint_row
+              where constraint_row.conname in ('facility_lab_check_settings_reason_check', 'result_verifications_self_check_ck')
+                and not (pg_get_constraintdef(constraint_row.oid) like '%' || chr(9) || '%'
+                         and pg_get_constraintdef(constraint_row.oid) like '%' || chr(12288) || '%'
+                         and pg_get_constraintdef(constraint_row.oid) like '%' || chr(65279) || '%'))
+     or (select count(*) from pg_constraint constraint_row
+          where constraint_row.conname in ('facility_lab_check_settings_reason_check', 'result_verifications_self_check_ck')) <> 2 then
+    raise exception 'onepl: a reason check does not trim the whole whitespace set';
+  end if;
 end $$;
 
 -- 1. Default off (no setting row).
@@ -318,6 +334,14 @@ begin
      '22023 FACILITY_SETTING_REASON_INVALID', 'a reason of 501 characters'),
     ('ADM', 'healthcare-operations', null, null, 'onepl-suite-correlation-0001', '   too short    ',
      '22023 FACILITY_SETTING_REASON_INVALID', 'a padded reason of 9 characters'),
+    ('ADM', 'healthcare-operations', null, null, 'onepl-suite-correlation-0001', repeat(E'\t', 12),
+     '22023 FACILITY_SETTING_REASON_INVALID', 'a reason of 12 tabs'),
+    ('ADM', 'healthcare-operations', null, null, 'onepl-suite-correlation-0001', repeat(E'\n', 12),
+     '22023 FACILITY_SETTING_REASON_INVALID', 'a reason of 12 line breaks'),
+    ('ADM', 'healthcare-operations', null, null, 'onepl-suite-correlation-0001', repeat(U&'\00A0\3000\FEFF\2028', 4),
+     '22023 FACILITY_SETTING_REASON_INVALID', 'a reason of 16 Unicode spaces'),
+    ('ADM', 'healthcare-operations', null, null, 'onepl-suite-correlation-0001', E'\t\r\n too short \f' || chr(11),
+     '22023 FACILITY_SETTING_REASON_INVALID', 'a reason of 9 characters padded with tabs and line breaks'),
     ('ADM', 'healthcare-operations', null, null, 'onepl-suite-correlation-0001', null,
      '22023 FACILITY_SETTING_REASON_INVALID', 'no reason'),
     ('ADM', 'healthcare-operations', null, null, 'onepl-suite-correlation-0001', 'Only one scientist works here',
@@ -426,6 +450,12 @@ select pg_temp.onepl_expect('3 A with a 7-character reason', pg_temp.onepl_try(p
   'checked')), '22023 LAB_RESULT_SELF_CHECK_REASON_INVALID');
 select pg_temp.onepl_expect('3 A with a padded reason', pg_temp.onepl_try(pg_temp.onepl_verify(2, 1, 'A', true,
   '    checked     ')), '22023 LAB_RESULT_SELF_CHECK_REASON_INVALID');
+select pg_temp.onepl_expect('3 A with 12 tabs', pg_temp.onepl_try(pg_temp.onepl_verify(2, 1, 'A', true,
+  repeat(E'\t', 12))), '22023 LAB_RESULT_SELF_CHECK_REASON_INVALID');
+select pg_temp.onepl_expect('3 A with 12 line breaks', pg_temp.onepl_try(pg_temp.onepl_verify(2, 1, 'A', true,
+  repeat(E'\n', 12))), '22023 LAB_RESULT_SELF_CHECK_REASON_INVALID');
+select pg_temp.onepl_expect('3 A with 16 Unicode spaces', pg_temp.onepl_try(pg_temp.onepl_verify(2, 1, 'A', true,
+  repeat(U&'\00A0\3000\FEFF\2028', 4))), '22023 LAB_RESULT_SELF_CHECK_REASON_INVALID');
 select pg_temp.onepl_expect('3 A with a 501-character reason', pg_temp.onepl_try(pg_temp.onepl_verify(2, 1, 'A', true,
   repeat('y', 501))), '22023 LAB_RESULT_SELF_CHECK_REASON_INVALID');
 -- B (not the enterer) may not ask a self-check.

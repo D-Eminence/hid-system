@@ -1,8 +1,10 @@
--- 0110 One-person lab check (owner decision 33.3: "two-person lab check
+-- 0111 One-person lab check (owner decision 33.3: "two-person lab check
 -- default; a single-person facility may release with a typed, logged
--- reason"; unsigned until the owner signs). Written on 0103 (34d6955). The
--- numbers 0104-0109 belong to other unreleased work and are not on this
--- branch; this file needs nothing they add.
+-- reason"; and owner decision of 3 Nov 2026 13:00: "switch One-person lab
+-- ON at Demo Laboratory only"; unsigned until the owner signs). Written on
+-- 0103 (34d6955). The numbers 0104-0110 belong to other unreleased work and
+-- are not on this branch; they may be applied before this file, which reads
+-- or needs nothing they add (its preconditions pin only 0001-0103 objects).
 --
 -- The gap: lab.validate_result_governance() (0021, rewritten by 0077) refuses
 -- every verification whose verifier entered the result version
@@ -40,6 +42,11 @@
 --    answers P0001 FACILITY_SETTING_UNCHANGED, writing nothing, when the
 --    facility is already that way; a reason outside 10-500 characters after
 --    trimming is 22023 FACILITY_SETTING_REASON_INVALID.
+--    "Trimming" here and below removes every whitespace character that
+--    JavaScript's String.prototype.trim removes (spaces, tabs, line breaks,
+--    form feeds, no-break and other Unicode spaces, U+FEFF), not only the
+--    spaces of one-argument btrim(), so a reason of only whitespace is
+--    refused by the database itself, not only by the services.
 -- 5. lab.one_person_lab_enabled() for the Lab API: the caller's own
 --    facility's switch (false without an active membership there).
 -- 6. lab.validate_result_governance(): a new body. The binding checks, the
@@ -54,6 +61,35 @@
 --    as before; asking self_check for it is LAB_RESULT_SELF_CHECK_NOT_YOURS.
 --    Release is unchanged (it never had an independence rule). Messages are
 --    bare codes; the typed reason is never in an error, notice or log.
+-- 7. The sealed demo (owner decision of 3 Nov 2026 13:00): One-person lab is
+--    ON at Demo Laboratory (0098's facility 98d00002-...-000000000002) and
+--    at no other facility, demo or real. identity.demo_one_person_lab_install()
+--    (owner-only, SECURITY DEFINER, granted to no role) writes the one
+--    setting row the setter would write (fixed id
+--    98d0000b-0000-4000-8000-000000000001, one_person true, the reason
+--    'Demo Laboratory works as a one-person lab for the demo (owner
+--    decision, 3 Nov 2026).', correlation id
+--    0111-sealed-demo-one-person-lab), its current row, and one audit row of
+--    the migration's own (actor system, provenance migration, source system
+--    hid-sealed-demo, action identity.facility.one-person-lab.on, resource
+--    the facility, details settingId, onePersonLab true, previous false;
+--    never a person as actor). The setting names the demo login's Demo
+--    Laboratory membership as set_by (the columns are not null and must name
+--    a member of the facility), as 0102 D4 names the patient's account; the
+--    audit row says the migration wrote it. Every id it touches must be the
+--    sealed demo's as 0098 left it (the facility, its organization, the demo
+--    staff account and its lab membership there, each in
+--    identity.sealed_demo_members where 0098 marks it); else 55000
+--    0111: SEALED_DEMO_LAB_CHECK_NOT_DEMO and nothing is written. Once: when
+--    Demo Laboratory already has any setting row (a tester or the owner
+--    switched it since), it writes nothing and answers {"settings": 0}. As
+--    0098 D3 and 0102 D1, it runs only on Amazon RDS (the role rds_superuser
+--    exists), where 0098 seeded the demo; CI, acceptance, the rehearsals and
+--    throwaway clusters get the function only, and the suite
+--    lab-one-person-demo calls 0098's install and this one itself. It adds no
+--    member to the demo and changes no seal trigger or policy, so the seal
+--    is unchanged; the demo login can still switch it off at Demo Laboratory
+--    (org_admin there), as any facility administrator can.
 --
 -- Services: today's images need nothing and give the same answers, except
 -- that a same-person check now fails with a coded 23514 message (still 500 in
@@ -64,21 +100,24 @@
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501
 --    and nothing is applied): 0001-0103 applied (0103's
 --    identity.organization_application_admin_account body the marker); not
---    applied yet (neither new table, no self_check column); the bodies
---    replaced or relied on are byte for byte 0001-0103's (md5 of
---    pg_proc.prosrc); the governance function's attributes and its three
+--    applied yet (neither new table, no self_check column, no demo seed
+--    function); the bodies replaced or relied on are byte for byte 0001-0103's (md5 of
+--    pg_proc.prosrc; 0098's sealed_demo_facility and sealed_demo_account
+--    among them); the governance function's attributes and its three
 --    triggers; organization.manage exists and the lab role does not hold it;
 --    lab.result_verifications has exactly 0021's columns and constraints; one
 --    owner for the governance function, the tables read or referenced and
 --    schemas identity and lab; and, checked first, the applier is the owner
 --    of schema identity or a member that inherits it and may SET ROLE to it
 --    (else 42501).
--- 1. The two tables, the column change, the three functions and the new
+-- 1. The two tables, the column change, the four functions and the new
 --    body. New objects are given to that owner. The grants runtime-grants.sql
 --    makes are repeated here (only when the role exists).
 -- 2. Post-checks: the new body, the governance function's attributes, owner
 --    and ACL, its triggers, the new objects' owners and ACLs, and no
 --    row-level security, FORCE or policy change on any existing table.
+-- 3. The demo seed (7), on Amazon RDS only. A refusal raises 55000 and the
+--    release stops with nothing applied.
 --
 -- Locks (measured with pg_locks before commit on a 0103 copy), all held to
 -- commit: ACCESS EXCLUSIVE on lab.result_verifications (ADD COLUMN with a
@@ -89,7 +128,8 @@
 -- their writers wait only for the commit); ACCESS SHARE on auth.permissions
 -- and auth.role_permissions (section 0 reads them), on the pg_proc row
 -- replaced, the schemas and the language; ACCESS EXCLUSIVE on the two new
--- tables. No other application table is locked (the post-check compares
+-- tables. On Amazon RDS the demo seed (3) also takes ROW EXCLUSIVE on the
+-- two new tables and audit.events. No other application table is locked (the post-check compares
 -- policies without deparsing them, so it opens no table). The file takes
 -- milliseconds on production's row counts. Behind an open transaction holding
 -- any lock on lab.result_verifications (one that read or wrote it), or ROW
@@ -110,12 +150,12 @@ begin
   -- superuser's bypass alone). Section d checks that one owner holds
   -- everything this file changes or references.
   if schema_owner is null then
-    raise exception using errcode = '55000', message = '0110: 0001-0103 must be applied first';
+    raise exception using errcode = '55000', message = '0111: 0001-0103 must be applied first';
   end if;
   if applier <> schema_owner
      and not (pg_has_role(applier, schema_owner, 'USAGE') and pg_has_role(applier, schema_owner, 'SET')) then
     raise exception using errcode = '42501',
-      message = format('0110: %s is not %s and may not act as it (INHERIT and SET)', current_user,
+      message = format('0111: %s is not %s and may not act as it (INHERIT and SET)', current_user,
         pg_get_userbyid(schema_owner));
   end if;
   -- a. Prerequisites: 0001-0103 (0103's gate body is the marker).
@@ -126,16 +166,18 @@ begin
      or to_regclass('lab.result_verifications') is null
      or to_regclass('lab.result_revisions') is null
      or to_regclass('identity.staff_facility_memberships') is null
-     or to_regclass('audit.events') is null then
-    raise exception using errcode = '55000', message = '0110: 0001-0103 must be applied first';
+     or to_regclass('audit.events') is null
+     or to_regclass('identity.sealed_demo_members') is null then
+    raise exception using errcode = '55000', message = '0111: 0001-0103 must be applied first';
   end if;
   -- b. Not applied yet.
   if to_regclass('identity.facility_lab_check_settings') is not null
      or to_regclass('identity.facility_lab_check_current') is not null
+     or to_regprocedure('identity.demo_one_person_lab_install()') is not null
      or exists (select 1 from pg_attribute attribute
                  where attribute.attrelid = 'lab.result_verifications'::regclass
                    and attribute.attname in ('self_check', 'one_person_setting_id') and not attribute.attisdropped) then
-    raise exception using errcode = '55000', message = '0110: already applied';
+    raise exception using errcode = '55000', message = '0111: already applied';
   end if;
   -- c. The bodies replaced and relied on, as 0001-0103 left them.
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
@@ -151,7 +193,9 @@ begin
       ('auth.account_id_for_subject(text)', '4678770cf6a210034740f09422fdfbaa'),
       ('identity.has_active_membership(text,uuid,uuid)', 'bb52953ef1cd08527db61230a671859e'),
       ('auth.membership_has_permission(text,uuid,uuid,text)', '65e3eaff93fe729fd5c5b986b80c9dd6'),
-      ('platform.reject_mutation()', '398738f39f6eebed2c54da5009495def'))
+      ('platform.reject_mutation()', '398738f39f6eebed2c54da5009495def'),
+      ('identity.sealed_demo_facility(uuid)', 'd91d91c1d3e1a455e49c5960f313a6e7'),
+      ('identity.sealed_demo_account(uuid)', '16eae1d6c33b3bef793796cf66f1cdf6'))
          expected(proc, digest)
     left join pg_proc proc on proc.oid = to_regprocedure(expected.proc)
    where md5(proc.prosrc) is distinct from expected.digest;
@@ -221,7 +265,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0110: an object this migration relies on differs from 0001-0103: %s', mismatch);
+      message = format('0111: an object this migration relies on differs from 0001-0103: %s', mismatch);
   end if;
   -- d. One owner for the function replaced, the tables altered, read or
   -- referenced, and the two schemas the new objects go into (the applier was
@@ -238,15 +282,15 @@ begin
              'identity.staff'::regclass, 'auth.accounts'::regclass, 'audit.events'::regclass)) owner_row;
   if mismatch is distinct from pg_get_userbyid(schema_owner) then
     raise exception using errcode = '55000',
-      message = format('0110: the objects this migration changes or references must share one owner (found %s)', mismatch);
+      message = format('0111: the objects this migration changes or references must share one owner (found %s)', mismatch);
   end if;
-  raise notice '0110: owners checked: identity=%, applier=%', pg_get_userbyid(schema_owner), current_user;
+  raise notice '0111: owners checked: identity=%, applier=%', pg_get_userbyid(schema_owner), current_user;
 end;
 $$;
 
 -- The state before, for the post-checks: the governance function's owner and
 -- ACL, and every existing table's row-level security, FORCE and policies.
-create temporary table lab_one_person_0110_before on commit drop as
+create temporary table lab_one_person_0111_before on commit drop as
   select 'function'::text as kind, proc.oid::regprocedure::text as name,
          proc.proowner::text || ' ' || coalesce(proc.proacl::text, '') as state
     from pg_proc proc where proc.oid = 'lab.validate_result_governance()'::regprocedure
@@ -271,7 +315,8 @@ create table identity.facility_lab_check_settings (
   facility_id uuid not null,
   organization_id uuid not null,
   one_person boolean not null,
-  reason text not null check (reason = btrim(reason) and length(reason) between 10 and 500),
+  reason text not null check (reason = btrim(reason, U&' \0009\000A\000B\000C\000D\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF')
+    and length(reason) between 10 and 500),
   set_by_account_id uuid not null references auth.accounts(id) on delete restrict,
   set_by_membership_id uuid not null,
   set_at timestamptz not null default clock_timestamp(),
@@ -353,7 +398,7 @@ alter table lab.result_verifications
     references identity.facility_lab_check_settings(id, facility_id),
   add constraint result_verifications_self_check_ck check (
     self_check = (one_person_setting_id is not null)
-    and (not self_check or length(btrim(reason)) between 10 and 500));
+    and (not self_check or length(btrim(reason, U&' \0009\000A\000B\000C\000D\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF')) between 10 and 500));
 comment on column lab.result_verifications.self_check is
   'Owner decision 33.3: the person who entered this version checked it themselves, in a One-person lab, with the typed reason in reason.';
 comment on column lab.result_verifications.one_person_setting_id is
@@ -371,7 +416,7 @@ declare
   actor_account uuid := auth.account_id_for_subject(platform.current_actor_subject());
   actor_membership uuid := platform.current_membership_id();
   actor_facility uuid := platform.current_facility_id();
-  reason text := btrim(coalesce(requested_reason, ''));
+  reason text := btrim(coalesce(requested_reason, ''), U&' \0009\000A\000B\000C\000D\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF');
   facility_row identity.facilities%rowtype;
   current_row identity.facility_lab_check_current%rowtype;
   previous boolean := false;
@@ -550,7 +595,8 @@ begin
       if not coalesce(one_person_on, false) then
         raise exception using errcode='23514',message='LAB_RESULT_SECOND_CHECK_REQUIRED';
       end if;
-      if new.reason is null or pg_catalog.length(pg_catalog.btrim(new.reason)) not between 10 and 500 then
+      if new.reason is null
+         or pg_catalog.length(pg_catalog.btrim(new.reason, U&' \0009\000A\000B\000C\000D\00A0\1680\2000\2001\2002\2003\2004\2005\2006\2007\2008\2009\200A\2028\2029\202F\205F\3000\FEFF')) not between 10 and 500 then
         raise exception using errcode='22023',message='LAB_RESULT_SELF_CHECK_REASON_INVALID';
       end if;
       new.one_person_setting_id := one_person_setting;
@@ -598,6 +644,73 @@ begin
 end
 $$;
 
+-- 1i. The sealed demo's switch (header 7): One-person lab ON at Demo
+-- Laboratory only. Owner-only, granted to no role; called below on Amazon RDS
+-- and by the suite lab-one-person-demo.
+create function identity.demo_one_person_lab_install()
+returns jsonb
+language plpgsql volatile security definer
+set search_path = pg_catalog, pg_temp
+as $$
+declare
+  laboratory constant uuid := '98d00002-0000-4000-8000-000000000002';
+  laboratory_organization constant uuid := '98d00001-0000-4000-8000-000000000002';
+  staff_account constant uuid := '98d00003-0000-4000-8000-000000000001';
+  lab_membership constant uuid := '98d00005-0000-4000-8000-000000000002';
+  setting constant uuid := '98d0000b-0000-4000-8000-000000000001';
+  demo_reason constant text := 'Demo Laboratory works as a one-person lab for the demo (owner decision, 3 Nov 2026).';
+  demo_correlation constant text := '0111-sealed-demo-one-person-lab';
+begin
+  -- The setter's lock family: one switch of this facility at a time.
+  perform pg_advisory_xact_lock(hashtextextended('one-person-lab:' || laboratory::text, 0));
+  -- Every id is the sealed demo's as 0098 left it; else nothing is written.
+  if not identity.sealed_demo_facility(laboratory)
+     or not identity.sealed_demo_account(staff_account)
+     or not exists (select 1 from identity.sealed_demo_members member
+                     where member.member_kind = 'organization' and member.member_id = laboratory_organization)
+     or not exists (select 1 from identity.facilities facility
+                     where facility.id = laboratory and facility.organization_id = laboratory_organization
+                       and upper(facility.code) = 'DEMO-LABORATORY')
+     or not exists (select 1 from identity.staff_facility_memberships membership
+                     where membership.id = lab_membership and membership.account_id = staff_account
+                       and membership.facility_id = laboratory
+                       and membership.organization_id = laboratory_organization) then
+    raise exception using errcode = '55000', message = '0111: SEALED_DEMO_LAB_CHECK_NOT_DEMO';
+  end if;
+  -- Once: any setting of Demo Laboratory (this one, or a later switch by a
+  -- tester or the owner) is kept.
+  if exists (select 1 from identity.facility_lab_check_settings existing where existing.facility_id = laboratory)
+     or exists (select 1 from identity.facility_lab_check_current existing where existing.facility_id = laboratory) then
+    return jsonb_build_object('settings', 0);
+  end if;
+  insert into identity.facility_lab_check_settings (id, facility_id, organization_id, one_person, reason,
+    set_by_account_id, set_by_membership_id, correlation_id)
+  values (setting, laboratory, laboratory_organization, true, demo_reason, staff_account, lab_membership,
+    demo_correlation);
+  insert into identity.facility_lab_check_current (facility_id, setting_id) values (laboratory, setting);
+  insert into audit.events (correlation_id, actor_type, organization_id, facility_id, action, outcome,
+    resource_type, resource_id, reason, provenance, source_system, details)
+  values (demo_correlation, 'system', laboratory_organization, laboratory, 'identity.facility.one-person-lab.on',
+    'success', 'facility', laboratory::text, demo_reason, 'migration', 'hid-sealed-demo',
+    jsonb_build_object('settingId', setting, 'onePersonLab', true, 'previous', false));
+  return jsonb_build_object('settings', 1);
+end;
+$$;
+do $$
+declare
+  owner_name text := (select pg_get_userbyid(namespace.nspowner) from pg_namespace namespace
+                       where namespace.nspname = 'identity');
+begin
+  if (select pg_get_userbyid(proc.proowner) from pg_proc proc
+       where proc.oid = 'identity.demo_one_person_lab_install()'::regprocedure) <> owner_name then
+    execute format('alter function identity.demo_one_person_lab_install() owner to %I', owner_name);
+  end if;
+end
+$$;
+revoke all on function identity.demo_one_person_lab_install() from public;
+comment on function identity.demo_one_person_lab_install() is
+  '0111: switches One-person lab ON at the sealed demo''s Demo Laboratory only (owner decision, 3 Nov 2026): one setting row, its current row and one migration audit row (actor system, provenance migration, hid-sealed-demo, 0111-sealed-demo-one-person-lab). Demo ids only (55000 otherwise); a second call, or any existing setting of Demo Laboratory, writes nothing.';
+
 -- 2. Post-checks.
 do $$
 declare
@@ -605,7 +718,7 @@ declare
   owner_oid oid := (select namespace.nspowner from pg_namespace namespace where namespace.nspname = 'identity');
 begin
   if (select md5(proc.prosrc) from pg_proc proc where proc.oid = 'lab.validate_result_governance()'::regprocedure)
-       is distinct from '9b232143925e6c7d14c48dc119596ad3' then
+       is distinct from '998df11ada9a2260109850e776520946' then
     mismatch := 'the body of lab.validate_result_governance()';
   end if;
   if mismatch is null and not exists (
@@ -624,7 +737,7 @@ begin
   -- before: row-level security, FORCE and policies unchanged.
   if mismatch is null then
     select string_agg(before_row.kind || ' ' || before_row.name, ', ') into mismatch
-      from lab_one_person_0110_before before_row
+      from lab_one_person_0111_before before_row
      where before_row.state is distinct from (
        case before_row.kind
          when 'function' then (select proc.proowner::text || ' ' || coalesce(proc.proacl::text, '') from pg_proc proc
@@ -666,8 +779,31 @@ begin
                                 then 'hid_lab_runtime' else 'hid_identity_runtime' end))) <> 3 then
     mismatch := 'the owner, attributes or EXECUTE of a new function';
   end if;
+  if mismatch is null and not exists (
+       select 1 from pg_proc proc
+        where proc.oid = 'identity.demo_one_person_lab_install()'::regprocedure
+          and proc.proowner = owner_oid and proc.prosecdef and proc.provolatile = 'v'
+          and proc.proconfig = '{"search_path=pg_catalog, pg_temp"}'::text[]
+          and not exists (select 1 from aclexplode(proc.proacl) acl where acl.grantee <> proc.proowner)) then
+    mismatch := 'the owner, attributes or EXECUTE of identity.demo_one_person_lab_install()';
+  end if;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0110: post-check failed: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0111: post-check failed: %s', mismatch);
   end if;
 end;
+$$;
+
+-- 3. The demo seed (header 7), on Amazon RDS only, where 0098 seeded the
+-- sealed demo. A refusal raises 55000 and the release stops with nothing
+-- applied.
+do $$
+declare summary jsonb;
+begin
+  if exists (select 1 from pg_catalog.pg_roles where rolname = 'rds_superuser') then
+    summary := identity.demo_one_person_lab_install();
+    raise notice '0111: One-person lab at Demo Laboratory: %', summary::text;
+  else
+    raise notice '0111: not an Amazon RDS database; One-person lab is not switched on at Demo Laboratory (the function is installed)';
+  end if;
+end
 $$;

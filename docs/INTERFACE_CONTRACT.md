@@ -2850,11 +2850,11 @@ unchanged. 0103 has no down migration; applying the previous bodies (0046,
 0056) restores the old behaviour. The suite is
 `services/ehr-api/test/database/platform-organization-applications.integration.sql`.
 
-## 32. One-person lab check (0110)
+## 32. One-person lab check (0111)
 
 Owner decision 33.3: "two-person lab check default; a single-person facility
-may release with a typed, logged reason". 0110 is unsigned until the owner
-signs its declaration. Before 0110 the person who entered a Lab result
+may release with a typed, logged reason". 0111 is unsigned until the owner
+signs its declaration. Before 0111 the person who entered a Lab result
 version could never verify it (the Lab API answered 500), so a laboratory
 with one scientist could never release a result.
 
@@ -2880,6 +2880,17 @@ Rules:
 - A switch-off and a self-check exclude each other: a switch-off waits for an
   open self-check to commit, and a self-check that started before a
   committed switch-off is retried by the Lab API and then refused.
+- The sealed demo (owner decision of 3 Nov 2026 13:00): 0111 switches
+  One-person lab ON at Demo Laboratory only, on production (Amazon RDS),
+  with the reason "Demo Laboratory works as a one-person lab for the demo
+  (owner decision, 3 Nov 2026)." and an audit row of the migration's own
+  (`actor_type system`, `source_system hid-sealed-demo`). Demo Hospital, Demo
+  Pharmacy, Demo Outreach and every real facility stay off. So the demo
+  login, at Demo Laboratory, sees `onePersonLab: true` and checks its own
+  results with a typed reason; the administrator's read there shows the
+  setting with the demo login's name as `changedByName` (its Demo
+  Laboratory membership is recorded as the setter). The demo login may
+  switch it off there like any facility administrator.
 
 Identity API (`X-Facility-ID`, CSRF for a cookie session, purpose
 `healthcare-operations`):
@@ -2909,7 +2920,11 @@ Lab API:
   number, "occurredAt": string, "reason": string (at most 500),
   "selfCheck"?: boolean }`. Send `selfCheck: true` only for a self-check, with
   exactly the reason the person typed (never an automatic default reason).
-  An image before 0110 refuses the field with 400 `VALIDATION_FAILED`; send
+  `selfCheck` must be `true`, `false` or absent; `null`, a string or a number
+  is 400 `VALIDATION_FAILED`, and so is `selfCheck` on the release route. A
+  reason is counted in characters, and a reason of only spaces, tabs or line
+  breaks is refused. Both routes answer 201, as before.
+  An image before 0111 refuses the field with 400 `VALIDATION_FAILED`; send
   it only when the result read carries `onePersonLab: true`.
 - Result reads (GET execution, enter, correct, verify, release, and the full
   history for Lab staff) carry `onePersonLab: boolean` (the caller's own
@@ -2943,7 +2958,10 @@ and `lab.result.verify` with `details.selfCheck` and, for a self-check,
 Lab API logs only the SQLSTATE of a mapped refusal. The outbox event
 `LabResultVerified` is unchanged.
 
-Order: 0110 before the new Lab API image (its result reads call
-`lab.one_person_lab_enabled()`); today's images run unchanged on 0110. 0110
-has no down migration. The suite is
-`services/ehr-api/test/database/lab-one-person-check.integration.sql`.
+Order: 0111 before the new Lab API image (its Lab-staff result reads call
+`lab.one_person_lab_enabled()` once per request; the released-only reads do
+not call it); today's images run unchanged on 0111. 0111
+has no down migration. The suites are
+`services/ehr-api/test/database/lab-one-person-check.integration.sql` and
+`services/ehr-api/test/database/lab-one-person-demo.integration.sql`; the
+two-session checks are `services/ehr-api/scripts/lab-one-person-race-checks.mjs`.

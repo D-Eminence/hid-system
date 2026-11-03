@@ -1399,7 +1399,7 @@ revoke all on function identity.demo_story_context(text,uuid,uuid,text),
 -- commands, which keep the Identity grants above. No grant changes.
 revoke all on function identity.organization_application_admin_account(text) from public;
 
--- One-person lab check (0110, owner decision 33.3): the facility
+-- One-person lab check (0111, owner decision 33.3): the facility
 -- administrator's switch and its read run as the Identity runtime, the Lab
 -- API's one-boolean read as the Lab runtime. The two new tables
 -- (identity.facility_lab_check_settings, identity.facility_lab_check_current)
@@ -1413,6 +1413,8 @@ revoke all on function identity.set_facility_one_person_lab(boolean,text),
 grant execute on function identity.set_facility_one_person_lab(boolean,text),
   identity.facility_one_person_lab_state() to hid_identity_runtime;
 grant execute on function lab.one_person_lab_enabled() to hid_lab_runtime;
+-- The sealed demo's switch at Demo Laboratory (0111) is the owner's alone.
+revoke all on function identity.demo_one_person_lab_install() from public;
 
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
