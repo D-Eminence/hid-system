@@ -1,5 +1,8 @@
 import { LexRuntimeV2Client, RecognizeTextCommand } from '@aws-sdk/client-lex-runtime-v2';
+import { captureServerError, initErrorReporting } from '@hid/server-telemetry';
 import { supportServer } from './server.mjs';
+
+initErrorReporting({ service: 'support-api' });
 
 const { LEX_BOT_ID, LEX_BOT_ALIAS_ID, LEX_LOCALE_ID = 'en_GB', PORT = '3011' } = process.env;
 if (!/^[A-Za-z0-9]{10}$/.test(LEX_BOT_ID ?? '') || !/^[A-Za-z0-9]{10}$/.test(LEX_BOT_ALIAS_ID ?? '')
@@ -22,7 +25,7 @@ const server = supportServer(async (text, sessionId) => {
   return (result.messages ?? [])
     .filter((message) => message.contentType === 'PlainText' && message.content)
     .map((message) => message.content);
-}, { supportContact });
+}, { supportContact, onError: (error) => captureServerError(error, '/api/v1/support/chat') });
 
 server.listen(Number(PORT), '0.0.0.0');
 process.on('SIGTERM', () => { server.close(() => lex.destroy()); server.closeIdleConnections(); });

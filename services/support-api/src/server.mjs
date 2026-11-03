@@ -13,7 +13,7 @@ function respond(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
-export function supportServer(recognize, { timeoutMs = 5500, supportContact = '' } = {}) {
+export function supportServer(recognize, { timeoutMs = 5500, supportContact = '', onError = () => {} } = {}) {
   const sessions = new Map();
   let inFlight = 0;
   const server = createServer(async (request, response) => {
@@ -75,7 +75,8 @@ export function supportServer(recognize, { timeoutMs = 5500, supportContact = ''
         sessionId,
         messages: messages.length ? messages : [`I could not answer that. Contact Health ID support${supportContact ? ': ' + supportContact : '.'}`],
       });
-    } catch {
+    } catch (error) {
+      try { onError(error); } catch { /* reporting must never change the response */ }
       respond(response, 503, { code: 'SUPPORT_BOT_UNAVAILABLE' });
     }
   });

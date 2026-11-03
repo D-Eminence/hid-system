@@ -1,4 +1,5 @@
 import 'reflect-metadata';
+import { ErrorReportingInterceptor, initErrorReporting } from '@hid/server-telemetry';
 import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
@@ -12,6 +13,7 @@ import { getEnvironment } from './config/environment';
 import { PROFILE_PHOTO_BODY_LIMIT_BYTES } from './patient-profile/profile-photo';
 
 async function bootstrap(): Promise<void> {
+  initErrorReporting({ service: 'identity-api' });
   const environment = getEnvironment();
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { bufferLogs: true, bodyParser: false });
   app.useLogger(new Logger('HidIdentityApi'));
@@ -56,6 +58,7 @@ async function bootstrap(): Promise<void> {
       errors.map((error) => ({ field: error.property, messages: Object.values(error.constraints ?? {}) }))),
   }));
   app.useGlobalFilters(new ProblemDetailsFilter());
+  app.useGlobalInterceptors(new ErrorReportingInterceptor());
   app.enableShutdownHooks();
   await app.listen(environment.PORT, '0.0.0.0');
   Logger.log(`Listening at ${await app.getUrl()}`, 'Bootstrap');
