@@ -8,7 +8,8 @@
 --   1. structure: the install is the owner's, SECURITY DEFINER, granted to
 --      no role, and the migration switched nothing on here;
 --   2. refusals, each writing nothing: before 0098's install (no demo), and
---      with a demo id no longer as 0098 left it;
+--      with a demo id no longer as 0098 left it; the owner's pre-sign check
+--      (0111 header 7) answers false in both and true after 0098's install;
 --   3. the install: one setting row (fixed id, one_person true, the plain
 --      reason, the demo login's Demo Laboratory membership, the correlation
 --      id), its current row, one migration audit row naming no person; a
@@ -57,6 +58,26 @@ returns text language sql as $f$
     (select count(*) from identity.facility_lab_check_current), (select count(*) from audit.events),
     (select count(*) from identity.sealed_demo_members))
 $f$;
+-- The owner's pre-sign check, the text of 0111's header 7 (keep the two in
+-- step): true exactly when the install's refusal test passes.
+create function pg_temp.demo_laboratory_ready()
+returns boolean language sql as $f$
+  select identity.sealed_demo_facility('98d00002-0000-4000-8000-000000000002')
+     and identity.sealed_demo_account('98d00003-0000-4000-8000-000000000001')
+     and exists (select 1 from identity.sealed_demo_members m
+                  where m.member_kind = 'organization'
+                    and m.member_id = '98d00001-0000-4000-8000-000000000002')
+     and exists (select 1 from identity.facilities f
+                  where f.id = '98d00002-0000-4000-8000-000000000002'
+                    and f.organization_id = '98d00001-0000-4000-8000-000000000002'
+                    and upper(f.code) = 'DEMO-LABORATORY')
+     and exists (select 1 from identity.staff_facility_memberships s
+                  where s.id = '98d00005-0000-4000-8000-000000000002'
+                    and s.account_id = '98d00003-0000-4000-8000-000000000001'
+                    and s.facility_id = '98d00002-0000-4000-8000-000000000002'
+                    and s.organization_id = '98d00001-0000-4000-8000-000000000002')
+         as demo_laboratory_ready
+$f$;
 -- The demo login's session at demo facility n (1 Hospital, 2 Laboratory,
 -- 3 Pharmacy, 4 Outreach), as the services' DatabaseService sets it.
 create function pg_temp.as_demo(site integer, purpose text)
@@ -92,12 +113,16 @@ end $$;
 -- 2a. Before 0098's install there is no demo: refused, nothing written.
 savepoint no_demo;
 create temporary table demo_before_install on commit drop as select pg_temp.demo_counts() as counts;
+select pg_temp.demo_assert('without the sealed demo the owner''s pre-sign check answers false',
+  pg_temp.demo_laboratory_ready() is false);
 select pg_temp.demo_assert('without the sealed demo the install is refused',
   pg_temp.demo_try('select identity.demo_one_person_lab_install()') = '55000 0111: SEALED_DEMO_LAB_CHECK_NOT_DEMO');
 select pg_temp.demo_assert('the refusal wrote nothing', pg_temp.demo_counts() = (select counts from demo_before_install));
 rollback to savepoint no_demo;
 
 select identity.sealed_demo_install() is not null as sealed_demo_installed;
+select pg_temp.demo_assert('after 0098''s install the owner''s pre-sign check answers true',
+  pg_temp.demo_laboratory_ready());
 create temporary table demo_seal_before on commit drop as
   select (select md5(string_agg(member.member_kind || ':' || member.member_id::text, ',' order by member.member_kind,
                                 member.member_id)) from identity.sealed_demo_members member) as members,
@@ -112,6 +137,8 @@ create temporary table demo_seal_before on commit drop as
 savepoint not_demo;
 create temporary table demo_before_refusal on commit drop as select pg_temp.demo_counts() as counts;
 update identity.facilities set code = 'DEMO-LAB-RENAMED' where id = '98d00002-0000-4000-8000-000000000002';
+select pg_temp.demo_assert('with another Demo Laboratory code the owner''s pre-sign check answers false',
+  pg_temp.demo_laboratory_ready() is false);
 select pg_temp.demo_assert('Demo Laboratory with another code is refused',
   pg_temp.demo_try('select identity.demo_one_person_lab_install()') = '55000 0111: SEALED_DEMO_LAB_CHECK_NOT_DEMO');
 select pg_temp.demo_assert('that refusal wrote nothing', pg_temp.demo_counts() = (select counts from demo_before_refusal));

@@ -90,6 +90,27 @@
 --    member to the demo and changes no seal trigger or policy, so the seal
 --    is unchanged; the demo login can still switch it off at Demo Laboratory
 --    (org_admin there), as any facility administrator can.
+--    Before signing, the owner may run on production, as the owner of schema
+--    identity, the install's own refusal test; it must answer true (false:
+--    0111 stops with SEALED_DEMO_LAB_CHECK_NOT_DEMO and holds back the
+--    release). The suite lab-one-person-demo runs this text and expects
+--    false without the demo, true after 0098's install and false with
+--    another Demo Laboratory code:
+--      select identity.sealed_demo_facility('98d00002-0000-4000-8000-000000000002')
+--         and identity.sealed_demo_account('98d00003-0000-4000-8000-000000000001')
+--         and exists (select 1 from identity.sealed_demo_members m
+--                      where m.member_kind = 'organization'
+--                        and m.member_id = '98d00001-0000-4000-8000-000000000002')
+--         and exists (select 1 from identity.facilities f
+--                      where f.id = '98d00002-0000-4000-8000-000000000002'
+--                        and f.organization_id = '98d00001-0000-4000-8000-000000000002'
+--                        and upper(f.code) = 'DEMO-LABORATORY')
+--         and exists (select 1 from identity.staff_facility_memberships s
+--                      where s.id = '98d00005-0000-4000-8000-000000000002'
+--                        and s.account_id = '98d00003-0000-4000-8000-000000000001'
+--                        and s.facility_id = '98d00002-0000-4000-8000-000000000002'
+--                        and s.organization_id = '98d00001-0000-4000-8000-000000000002')
+--             as demo_laboratory_ready;
 --
 -- Services: today's images need nothing and give the same answers, except
 -- that a same-person check now fails with a coded 23514 message (still 500 in
@@ -755,7 +776,8 @@ begin
   end if;
   -- The new objects: the identity owner's; tables granted to no one;
   -- functions SECURITY DEFINER with their search paths and EXECUTE only for
-  -- their runtime (and the owner).
+  -- their runtime (and the owner). A function's NULL ACL is the default one
+  -- (PUBLIC EXECUTE), so it is read as acldefault and fails.
   if mismatch is null and exists (
        select 1 from pg_class class_row
         where class_row.oid in ('identity.facility_lab_check_settings'::regclass,
@@ -772,7 +794,7 @@ begin
                and proc.proconfig = '{"search_path=pg_catalog, identity, auth, audit, platform, pg_temp"}'::text[])
            or (proc.oid = 'lab.one_person_lab_enabled()'::regprocedure and proc.provolatile = 's'
                and proc.proconfig = '{"search_path=pg_catalog, identity, platform, pg_temp"}'::text[]))
-         and not exists (select 1 from aclexplode(proc.proacl) acl
+         and not exists (select 1 from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
                           where acl.grantee <> proc.proowner
                             and acl.grantee not in (select role_row.oid from pg_roles role_row
                               where role_row.rolname = case when proc.proname = 'one_person_lab_enabled'
@@ -784,7 +806,8 @@ begin
         where proc.oid = 'identity.demo_one_person_lab_install()'::regprocedure
           and proc.proowner = owner_oid and proc.prosecdef and proc.provolatile = 'v'
           and proc.proconfig = '{"search_path=pg_catalog, pg_temp"}'::text[]
-          and not exists (select 1 from aclexplode(proc.proacl) acl where acl.grantee <> proc.proowner)) then
+          and not exists (select 1 from aclexplode(coalesce(proc.proacl, acldefault('f', proc.proowner))) acl
+                           where acl.grantee <> proc.proowner)) then
     mismatch := 'the owner, attributes or EXECUTE of identity.demo_one_person_lab_install()';
   end if;
   if mismatch is not null then
