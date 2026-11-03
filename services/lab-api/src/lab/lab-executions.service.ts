@@ -219,11 +219,17 @@ export class LabExecutionsService {
   * marked), with the head, status and verification of the latest of them. Nothing of a revision newer than the latest
   * released one. Versions keep their stored numbers, so a gap shows that an intermediate revision was never released;
   * its value and reason are never returned. Null when no revision is released.
+  *
+  * `correctionPending` says, with nothing of it, that a newer version waits to be checked and released: true while the
+  * result's current version is newer than the latest released one and not marked entered in error (a correction or
+  * amendment entered after the release, checked or not), so the clinician knows the result shown is being corrected.
   */
- private releasedView<R extends {version:number;verificationStatus:string;releaseStatus:string}>(result:{id:string|undefined;executionId:string|undefined;revisions:R[]}) {
+ private releasedView<R extends {version:number;verificationStatus:string;releaseStatus:string}>(result:{id:string|undefined;executionId:string|undefined;currentVersion:number;revisions:R[]}) {
   const revisions=result.revisions.filter(r=>r.releaseStatus==='released');const latest=revisions.at(-1);if(!latest)return null;
+  const current=result.revisions.find(r=>r.version===result.currentVersion);
+  const correctionPending=current!==undefined&&current.version>latest.version&&current.verificationStatus!=='entered_in_error';
   return {id:result.id,executionId:result.executionId,status:latest.verificationStatus==='entered_in_error'?'entered_in_error':'released',
-   verificationStatus:latest.verificationStatus,currentVersion:latest.version,currentReleasedVersion:latest.version,revisions};
+   verificationStatus:latest.verificationStatus,currentVersion:latest.version,currentReleasedVersion:latest.version,correctionPending,revisions};
  }
  private validateValue(input:EnterResultDto) {if((input.resultType==='numeric'&&(input.numericValue===undefined||input.textValue!==undefined))||(input.resultType==='text'&&(!input.textValue?.trim()||input.numericValue!==undefined)))throw new DomainProblem(400,'INVALID_RESULT_VALUE','Result value must match its declared type');}
  private permission(c:DataAccessContext,p:string){if(!c.actor.permissions.includes(p))throw new DomainProblem(403,'LAB_EXECUTION_ACCESS_DENIED','Required Lab permission is absent');}

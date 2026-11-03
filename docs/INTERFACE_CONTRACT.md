@@ -1423,6 +1423,17 @@ needs at least 3 characters, not counting spaces at either end, and at most
 the field error `reason must be at least 3 characters`; earlier backends
 passed it to the database and answered `500`.
 
+The released view of a result also carries `correctionPending` (boolean).
+That is each result of
+`GET /api/v1/lab/ehr-orders/{sourceEhrOrderId}/released-results`, which the
+clinician who placed the order reads, and `GET .../results/{resultId}/history`
+for a reader without `lab.execution.read`. It is true while a newer version
+of that released result waits to be checked and released: a correction or
+amendment entered after the release, checked or not, and not marked entered
+in error. Lab answers nothing else of that version (no value, reason or
+version number), and the read's audit row still names only the versions
+returned. Earlier backends do not send it, so clients treat it as optional.
+
 ### Record chat: where each source came from
 
 Each source in a record chat answer (`POST /api/v1/ehr/me/chat`,
