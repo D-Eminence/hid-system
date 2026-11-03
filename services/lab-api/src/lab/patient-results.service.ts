@@ -8,7 +8,8 @@ import { DomainProblem } from '../common/problem';
 import { requireRequestContext } from '../common/request-context';
 import type { HidRequest } from '../common/request-context';
 
-export const PATIENT_LAB_QUERY = `select r.id, r.current_version::text||':'||rel.id::text version,t.name title,
+// Staff chat: every released current version, with the correction reason.
+export const STAFF_LAB_QUERY = `select r.id, r.current_version::text||':'||rel.id::text version,t.name title,
  rel.released_at as "recordedAt",s.collected_at as "effectiveAt",
  jsonb_build_object('test',t.name,'codeSystem',t.code_system,'code',t.code,
  'specimen',s.specimen_type,'resultType',v.result_type,'numericValue',v.numeric_value::text,
@@ -26,6 +27,63 @@ export const PATIENT_LAB_QUERY = `select r.id, r.current_version::text||':'||rel
  join lab.specimens s on s.id=e.specimen_id and s.patient_id=r.patient_id and s.facility_id=r.facility_id
  where r.patient_id=$1 and r.id::text>$2 and not exists(select 1 from lab.result_invalidations i
  where i.result_id=r.id and i.result_version=r.current_version and i.patient_id=r.patient_id)
+ order by r.id::text limit 201`;
+
+/*
+ * Sensitive tests (S4), left out of the patient's own chat until a clinician
+ * has discussed them. A constant default list for Ola to approve; it matches
+ * SENSITIVE_TEST_FRAGMENTS in ehr-api's patient-evidence.policy.ts, which
+ * filters the same names again. No value from a request is interpolated.
+ */
+export const SENSITIVE_TEST_SQL_PATTERN = '(^|[^a-z0-9])(?:'+[
+  'hiv[a-z0-9]*','aids','rvs','retrovir[a-z]*','cd4[a-z0-9]*','viral[ -]?loads?',
+  'hepatitis','hbsag','hbeag','anti[ -]?hbc','hbc[ -]?ab','hbv[a-z]*','hcv[a-z]*',
+  'syphili[a-z]*','vdrl','rpr','tpha','treponem[a-z]*','chlamydi[a-z]*','gonorr[a-z]*','gonococc[a-z]*',
+  'herpes','hsv[a-z0-9]*','trichomon[a-z]*','sti','std',
+  'b?hcg','pregnan[a-z]*','upt',
+  'psa','afp','cea','ca[ -]?125','ca[ -]?19[ -]?9','ca[ -]?15[ -]?3','tumou?r[ -]?markers?',
+  'biops[a-z]*','histolog[a-z]*','histopath[a-z]*','cytolog[a-z]*','pap','pap[ -]?smears?',
+  'karyotyp[a-z]*','brca[0-9]*','genetic[a-z]*','genotyp[a-z]*',
+  'phq[ -]?[0-9]*','gad[ -]?[0-9]+','psych[a-z]*',
+  'vl','hb[ -]?electrophoresis','ha?emoglobin[ -]?electrophoresis',
+].join('|')+')($|[^a-z0-9])';
+
+/*
+ * The patient's own released results. The latest release of each result is
+ * found first. When it is the current version, the row is as staff see it,
+ * less the lab's correction reason. When a correction is pending (the current
+ * version is not released yet), the patient gets a placeholder that says the
+ * lab is correcting the result and carries no value. A result whose current or
+ * last released version was entered in error is left out, and so is a
+ * sensitive test.
+ */
+export const PATIENT_SELF_LAB_QUERY = `select r.id,
+ case when rel.result_version=r.current_version then r.current_version::text||':'||rel.id::text
+ else r.current_version::text||':pending:'||rel.id::text end version,t.name title,
+ rel.released_at as "recordedAt",s.collected_at as "effectiveAt",
+ case when rel.result_version=r.current_version then jsonb_build_object('test',t.name,'codeSystem',t.code_system,'code',t.code,
+ 'specimen',s.specimen_type,'resultType',v.result_type,'numericValue',v.numeric_value::text,
+ 'textValue',v.text_value,'unit',v.unit,'referenceRange',v.reference_range,'recordedFlag',v.abnormal_flag,
+ 'revisionKind',v.revision_kind,
+ 'collectedAt',s.collected_at,'releasedAt',rel.released_at,'verification','exact-version manually verified and released')
+ else jsonb_build_object('test',t.name,'codeSystem',t.code_system,'code',t.code,'specimen',s.specimen_type,
+ 'collectedAt',s.collected_at,'correctionPending',true,'status','The lab is correcting this result.') end fields
+ from lab.results r
+ join lateral(select x.id,x.result_version,x.released_at,x.verification_id from lab.result_releases x
+ where x.result_id=r.id and x.patient_id=r.patient_id and x.facility_id=r.facility_id
+ order by x.result_version desc limit 1) rel on true
+ join lab.result_revisions v on v.result_id=r.id and v.version=rel.result_version
+ and v.patient_id=r.patient_id and v.facility_id=r.facility_id
+ join lab.result_verifications ver on ver.id=rel.verification_id and ver.result_id=r.id and ver.result_version=rel.result_version
+ and ver.patient_id=r.patient_id and ver.facility_id=r.facility_id
+ join lab.test_executions e on e.id=r.execution_id and e.patient_id=r.patient_id and e.facility_id=r.facility_id
+ join lab.work_item_requested_tests t on t.id=e.requested_test_id and t.patient_id=r.patient_id and t.facility_id=r.facility_id
+ join lab.specimens s on s.id=e.specimen_id and s.patient_id=r.patient_id and s.facility_id=r.facility_id
+ where r.patient_id=$1 and r.id::text>$2 and not exists(select 1 from lab.result_invalidations i
+ where i.result_id=r.id and i.result_version=r.current_version and i.patient_id=r.patient_id)
+ and not exists(select 1 from lab.result_invalidations i
+ where i.result_id=r.id and i.result_version=rel.result_version and i.patient_id=r.patient_id)
+ and coalesce(t.name,'') !~* '${SENSITIVE_TEST_SQL_PATTERN}'
  order by r.id::text limit 201`;
 
 @Injectable()
@@ -49,7 +107,7 @@ export class PatientResultsService {
     if(!decision.allowed||decision.breakGlass||decision.patientId!==patientId||decision.facilityId!==context.facilityId
       ||decision.membershipId!==context.membershipId) throw new DomainProblem(403,'PATIENT_ACCESS_DENIED','Patient access is not authorized');
     return this.database.withTransaction(context,async client=>{
-      const rows=(await client.query(PATIENT_LAB_QUERY,[patientId,cursor])).rows;
+      const rows=(await client.query(STAFF_LAB_QUERY,[patientId,cursor])).rows;
       const records=rows.slice(0,200);
       await this.audit.recordWithClient(client,{correlationId:request.correlationId,actorType:'staff',actorSubject:context.actor.subject,
         actorAccountId:context.actor.accountId,actorMembershipId:context.membershipId,facilityId:context.facilityId,
@@ -69,7 +127,7 @@ export class PatientResultsService {
     if(auth.patientId!==actor.patientId||auth.accountId!==actor.accountId||auth.subject!==actor.subject||auth.sessionId!==actor.sessionId)
       throw new DomainProblem(403,'PATIENT_ACCESS_DENIED','Patient authorization changed');
     return this.database.withPatientTransaction(auth,request.correlationId,async client=>{
-      const rows=(await client.query(PATIENT_LAB_QUERY,[auth.patientId,cursor])).rows;
+      const rows=(await client.query(PATIENT_SELF_LAB_QUERY,[auth.patientId,cursor])).rows;
       const records=rows.slice(0,200);
       await this.audit.recordWithClient(client,{correlationId:request.correlationId,actorType:'patient',actorSubject:auth.subject,
         actorAccountId:auth.accountId,patientId:auth.patientId,action:'lab.patient.released-results.read',resourceType:'released-result-collection',
