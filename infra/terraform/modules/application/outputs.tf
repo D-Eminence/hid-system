@@ -19,12 +19,30 @@ output "ecr_repository_urls" {
   }
 }
 output "ai_generation_configuration" {
-  description = "Generation transport and EHR secret binding names only; no credential values."
+  description = "Generation transport and EHR and OCR worker secret binding names only; no credential values."
   value = {
     provider            = var.ai_generation_provider
     model_id            = local.workload_environment["ehr-api"].AI_GENERATION_MODEL_ID
     ehr_secret_fields   = [for spec in local.fixed_secret_specs["ehr-api"] : spec.name]
-    other_secret_fields = flatten([for name, specs in local.fixed_secret_specs : [for spec in specs : spec.name] if name != "ehr-api"])
+    ocr_secret_fields   = [for spec in local.fixed_secret_specs["ocr-worker"] : spec.name]
+    other_secret_fields = flatten([for name, specs in local.fixed_secret_specs : [for spec in specs : spec.name] if !contains(local.anthropic_key_workloads, name)])
+  }
+}
+
+output "anthropic_runtime_access" {
+  description = "Which workloads can reach and unlock the Claude key at runtime; names and key ARNs only, no credential values."
+  value = {
+    https_egress_workloads  = sort(keys(aws_vpc_security_group_egress_rule.ocr_worker_anthropic_https))
+    general_https_workloads = sort(keys(aws_vpc_security_group_egress_rule.provider_https))
+    execution_kms_keys = {
+      for name, document in data.aws_iam_policy_document.execution_secrets : name => sort(flatten([
+        for statement in document.statement : statement.resources if contains(statement.actions, "kms:Decrypt")
+      ])) if contains(["ehr-api", "ocr-worker"], name)
+    }
+    ocr_worker_ai_environment = {
+      for key, value in local.workload_environment["ocr-worker"] : key => value
+      if contains(["OCR_AI_MODE", "OCR_AI_GLOBAL_PROCESSING_APPROVED", "OCR_TEXTRACT_FEATURES"], key)
+    }
   }
 }
 

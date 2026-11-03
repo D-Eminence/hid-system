@@ -197,6 +197,24 @@ resource "aws_vpc_security_group_egress_rule" "provider_https" {
   to_port           = 443
 }
 
+# ocr-worker calls the Claude API (api.anthropic.com) over HTTPS through the
+# NAT gateway. Security groups cannot name a host, so this is 443 to any
+# address, the same rule the API callers above have. A workload that receives
+# the Claude key and has no such rule yet (today only ocr-worker) gets it.
+resource "aws_vpc_security_group_egress_rule" "ocr_worker_anthropic_https" {
+  for_each = local.anthropic_enabled ? {
+    for name, workload in local.runtime_workloads : name => workload
+    if contains(local.anthropic_key_workloads, name) && !contains(keys(local.internal_lb_callers), name)
+  } : {}
+
+  security_group_id = aws_security_group.workload[each.key].id
+  description       = "${each.key} to the Claude API (api.anthropic.com)"
+  cidr_ipv4         = "0.0.0.0/0"
+  ip_protocol       = "tcp"
+  from_port         = 443
+  to_port           = 443
+}
+
 # Workload access to PostgreSQL
 resource "aws_vpc_security_group_egress_rule" "workload_to_database" {
   for_each = var.database_enabled ? local.database_workloads : {}

@@ -75,10 +75,18 @@ locals {
     event-dispatcher    = "EVENT_DISPATCHER_DATABASE_URL"
   }
 
+  # The direct Claude API key. ehr-api uses it for patient chat; ocr-worker uses
+  # it, once ocr_ai_global_processing_approved is set, to turn the text read
+  # from paper records into typed items. No other workload receives it.
+  anthropic_enabled       = var.enable_ai && var.ai_generation_provider == "anthropic"
+  anthropic_key_workloads = toset(concat(["ehr-api"], var.ocr_ai_global_processing_approved ? ["ocr-worker"] : []))
+  anthropic_secret_specs = local.anthropic_enabled ? [
+    { name = "ANTHROPIC_API_KEY", arn = var.anthropic_secret_arn, key = var.anthropic_secret_json_key }
+  ] : []
+
   fixed_secret_specs = {
-    ehr-api = var.enable_ai && var.ai_generation_provider == "anthropic" ? [
-      { name = "ANTHROPIC_API_KEY", arn = var.anthropic_secret_arn, key = var.anthropic_secret_json_key }
-    ] : []
+    ehr-api    = local.anthropic_secret_specs
+    ocr-worker = contains(local.anthropic_key_workloads, "ocr-worker") ? local.anthropic_secret_specs : []
     identity-api = concat([
       {
         name = "AUTH_SIGNING_SECRET"
@@ -368,6 +376,9 @@ locals {
       OCR_WORKER_CONCURRENCY                   = "2"
       AWS_REGION                               = var.aws_region
       S3_FORCE_PATH_STYLE                      = "false"
+      OCR_TEXTRACT_FEATURES                    = "text"
+      OCR_AI_MODE                              = local.anthropic_enabled && contains(local.anthropic_key_workloads, "ocr-worker") ? "claude" : "off"
+      OCR_AI_GLOBAL_PROCESSING_APPROVED        = tostring(local.anthropic_enabled && contains(local.anthropic_key_workloads, "ocr-worker"))
     }
 
     event-dispatcher = {
@@ -430,6 +441,18 @@ resource "aws_iam_role_policy_attachment" "execution" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
+locals {
+  # Keys each execution role may decrypt to fetch its secrets at task start.
+  execution_secret_kms_keys = {
+    for name, specs in local.workload_secret_specs : name => concat(
+      [var.database_kms_key_arn, var.document_kms_key_arn],
+      contains(local.anthropic_key_workloads, name) && local.anthropic_enabled && var.anthropic_secret_kms_key_arn != "" ?
+      [var.anthropic_secret_kms_key_arn] : [],
+      name == "identity-api" && var.qoreid_enabled && var.qoreid_secret_kms_key_arn != "" ? [var.qoreid_secret_kms_key_arn] : [],
+    )
+  }
+}
+
 data "aws_iam_policy_document" "execution_secrets" {
   for_each = {
     for name, specs in local.workload_secret_specs : name => specs
@@ -441,11 +464,8 @@ data "aws_iam_policy_document" "execution_secrets" {
     resources = distinct([for spec in each.value : spec.arn])
   }
   statement {
-    actions = ["kms:Decrypt"]
-    resources = concat([var.database_kms_key_arn, var.document_kms_key_arn],
-      each.key == "ehr-api" && var.enable_ai && var.ai_generation_provider == "anthropic" && var.anthropic_secret_kms_key_arn != "" ?
-      [var.anthropic_secret_kms_key_arn] : [],
-    each.key == "identity-api" && var.qoreid_enabled && var.qoreid_secret_kms_key_arn != "" ? [var.qoreid_secret_kms_key_arn] : [])
+    actions   = ["kms:Decrypt"]
+    resources = local.execution_secret_kms_keys[each.key]
   }
 }
 
