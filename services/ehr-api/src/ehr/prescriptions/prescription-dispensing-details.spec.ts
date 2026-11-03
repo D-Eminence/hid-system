@@ -87,7 +87,7 @@ const harness = (enabled: boolean | undefined, values: Partial<Record<string, un
     ? new PrescriptionsService(repository as never, {} as never, routes as never)
     : new PrescriptionsService(repository as never, {} as never, routes as never, new PrescriptionDispensingDetails(enabled));
   const digest = () => (repository.executeCreate.mock.calls.at(-1) as unknown[] | undefined)?.[5];
-  return { service, statements, digest };
+  return { service, statements, digest, repository };
 };
 const create = async (service: PrescriptionsService, input: object) => service.create(context, patientId, encounterId,
   input as CreatePrescriptionDto, 'create-key-0000001');
@@ -230,6 +230,21 @@ describe('prescription dispensing details: on', () => {
       changeReason: 'Clarified', instructions: 'Take with water' });
     expect(updated).toMatchObject({ durationValue: 2, durationUnit: 'week' });
     expect(updated).not.toHaveProperty('priority');
+  });
+
+  it('answers an idempotent replay exactly as the create it replays', async () => {
+    const { service, repository } = harness(true, { priority: 'urgent', strength: '500 mg', doseForm: 'capsule',
+      durationValue: 7, durationUnit: 'day', quantityToDispense: '21.0000', quantityUnit: 'capsule' });
+    const input = await pipe(true).transform({ ...body, ...details });
+    const created: object = await create(service, input);
+    // The replay: the key is already used with this digest, so the repository
+    // loads the stored prescription with the service's own reader.
+    (repository.executeCreate as jest.Mock).mockImplementationOnce(async (...args: unknown[]) =>
+      ({ value: await (args[8] as (id: string) => Promise<unknown>)(prescriptionId) }));
+    const replayed: object = await create(service, input);
+    expect(replayed).toEqual(created);
+    expect(Object.keys(replayed)).toEqual(Object.keys(created));
+    expect(replayed).toMatchObject({ quantityToDispense: 21 });
   });
 });
 
