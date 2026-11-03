@@ -4,6 +4,10 @@ resource "terraform_data" "deployment_guard" {
 
   lifecycle {
     precondition {
+      condition     = alltrue([for name in keys(var.sentry_dsns) : contains(keys(local.workloads), name) && name != "gateway"])
+      error_message = "sentry_dsns may only name backend services that exist in this environment (not the nginx gateway)."
+    }
+    precondition {
       condition     = !var.staging_prelaunch_sizing || (var.environment == "staging" && var.staging_mode == "economy")
       error_message = "Pre-launch sizing is permitted only for staging economy."
     }

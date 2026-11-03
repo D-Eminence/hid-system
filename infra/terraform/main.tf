@@ -78,6 +78,7 @@ module "application" {
   root_domain_name                    = var.root_domain_name
   browser_subdomains                  = local.browser_subdomains
   workloads                           = local.workloads
+  sentry_dsns                         = var.sentry_dsns
   desired_counts                      = local.desired_counts
   scaling_ceilings                    = local.scaling_ceilings
   enable_runtime                      = var.enable_runtime
