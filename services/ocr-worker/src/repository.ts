@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from 'pg';
 import type { OcrWorkerConfig } from './config';
-import type { ClaimedOcrJob, CompletedExtraction, PageAllowance, SafeWorkerFailure, WorkerRepository } from './types';
+import type { AiUsageRecord, ClaimedOcrJob, CompletedExtraction, PageAllowance, SafeWorkerFailure, WorkerRepository } from './types';
 
 interface ClaimRow extends QueryResultRow {
   job_id: string; facility_id: string; document_id: string; patient_id: string | null;
@@ -37,9 +37,13 @@ export class PostgresWorkerRepository implements WorkerRepository {
 
   async checkReadiness(): Promise<void> { await this.pool.query('select 1'); }
 
-  async claim(provider: string, leaseSeconds: number, correlationId: string): Promise<ClaimedOcrJob | null> {
+  // Fair claim (migration 0110): the same rules as ocr.claim_worker_job, but a facility already holding
+  // maxInFlightPerFacility live claims is skipped and the facility with the fewest goes first.
+  async claim(provider: string, leaseSeconds: number, maxInFlightPerFacility: number,
+    correlationId: string): Promise<ClaimedOcrJob | null> {
     return this.transaction(correlationId, async (client) => {
-      const result = await client.query<ClaimRow>('select * from ocr.claim_worker_job($1, $2)', [provider, leaseSeconds]);
+      const result = await client.query<ClaimRow>('select * from ocr.claim_worker_job_fair($1, $2, $3)',
+        [provider, leaseSeconds, maxInFlightPerFacility]);
       const row = result.rows[0];
       return row ? this.mapClaim(row) : null;
     });
@@ -108,6 +112,15 @@ export class PostgresWorkerRepository implements WorkerRepository {
       const resumeAt = result.rows[0]!.resume_at;
       if (resumeAt === null || resumeAt === undefined) return null;
       return resumeAt instanceof Date ? resumeAt : new Date(resumeAt);
+    });
+  }
+
+  /** Counts only (migration 0110); idempotent per job, attempt and model (a replay replaces the totals). */
+  async recordAiUsage(job: ClaimedOcrJob, usage: AiUsageRecord): Promise<void> {
+    await this.transaction(job.correlationId, async (client) => {
+      await client.query('select ocr.record_worker_ai_usage($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+        [job.jobId, job.claimToken, usage.model, usage.requests, usage.inputTokens, usage.outputTokens,
+          usage.cacheReadTokens, usage.cacheWriteTokens, job.correlationId]);
     });
   }
 

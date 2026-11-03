@@ -104,4 +104,19 @@ describe('OCR worker configuration', () => {
     expect(() => readOcrWorkerConfig({ ...base, OCR_AI_MAX_TOKENS: '500' })).toThrow(/OCR_AI_MAX_TOKENS/);
     expect(() => readOcrWorkerConfig({ ...base, OCR_AI_MAX_REREAD_PAGES: '21' })).toThrow(/OCR_AI_MAX_REREAD_PAGES/);
   });
+
+  it('caps claims per facility and calls in flight with the agreed defaults and bounds', () => {
+    expect(readOcrWorkerConfig(base)).toMatchObject({ OCR_WORKER_MAX_INFLIGHT_PER_FACILITY: 2,
+      OCR_AI_MAX_CONCURRENT_REQUESTS: 4, OCR_AI_PAGE_CONCURRENCY: 2, OCR_TEXTRACT_MAX_CONCURRENT: 2 });
+    expect(readOcrWorkerConfig({ ...base, OCR_WORKER_MAX_INFLIGHT_PER_FACILITY: '16', OCR_AI_MAX_CONCURRENT_REQUESTS: '32',
+      OCR_TEXTRACT_MAX_CONCURRENT: '16', OCR_AI_PAGE_CONCURRENCY: '8' })).toMatchObject({
+      OCR_WORKER_MAX_INFLIGHT_PER_FACILITY: 16, OCR_AI_MAX_CONCURRENT_REQUESTS: 32, OCR_TEXTRACT_MAX_CONCURRENT: 16,
+      OCR_AI_PAGE_CONCURRENCY: 8 });
+    for (const [name, value] of [['OCR_WORKER_MAX_INFLIGHT_PER_FACILITY', '0'], ['OCR_WORKER_MAX_INFLIGHT_PER_FACILITY', '17'],
+      ['OCR_AI_MAX_CONCURRENT_REQUESTS', '0'], ['OCR_AI_MAX_CONCURRENT_REQUESTS', '33'],
+      ['OCR_TEXTRACT_MAX_CONCURRENT', '0'], ['OCR_TEXTRACT_MAX_CONCURRENT', '17'],
+      ['OCR_AI_PAGE_CONCURRENCY', '0'], ['OCR_AI_PAGE_CONCURRENCY', '9'], ['OCR_AI_MAX_CONCURRENT_REQUESTS', '2.5']]) {
+      expect(() => readOcrWorkerConfig({ ...base, [name!]: value })).toThrow(new RegExp(name!));
+    }
+  });
 });

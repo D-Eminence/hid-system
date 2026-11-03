@@ -371,5 +371,34 @@ describe('checkPage review fixes: fields held to the paper', () => {
       expect(item.fields).toMatchObject({ severity: null, noKnownAllergies: true });
       expect(item.checkReasons).toContain('nkda_conflicts');
     });
+
+    it("holds each allergy's severity and reaction to its own part of a shared line", () => {
+      const text = 'Allergies: Sulfa - mild rash, Penicillin - anaphylaxis';
+      const read = (penicillin: object, sulfa: object) => check(readPage(1, [text]), modelPage([
+        modelItem({ kind: 'allergy', asWritten: 'Penicillin - anaphylaxis', lineIds: ['p1-l1'], substance: 'Penicillin',
+          plain: 'Penicillin allergy', ...penicillin }),
+        modelItem({ kind: 'allergy', asWritten: 'Sulfa - mild rash', lineIds: ['p1-l1'], substance: 'Sulfa',
+          plain: 'Sulfa allergy', ...sulfa }),
+      ])).items;
+      const swapped = read({ severity: 'mild', reaction: 'rash' }, { severity: 'severe', reaction: 'anaphylaxis' });
+      expect(swapped.map((item) => item.confidence)).toEqual(['check_carefully', 'check_carefully']);
+      for (const item of swapped) expect(item.checkReasons).toContain('field_not_on_paper');
+      const right = read({ severity: 'severe', reaction: 'anaphylaxis' }, { severity: 'mild', reaction: 'rash' });
+      expect(right.map((item) => [item.confidence, item.checkReasons])).toEqual([['clear', []], ['clear', []]]);
+    });
+
+    it('does not take a negated or hyphen-joined severity word as the severity', () => {
+      expect(allergy('Penicillin - non-severe rash', 'severe').checkReasons).toContain('field_not_on_paper');
+      expect(allergy('Penicillin - non severe rash', 'severe').checkReasons).toContain('field_not_on_paper');
+      expect(allergy('Penicillin - not severe', 'severe').checkReasons).toContain('field_not_on_paper');
+      expect(allergy('Penicillin - rash, no anaphylaxis', 'severe').checkReasons).toContain('field_not_on_paper');
+      expect(allergy('Penicillin - rash - severe', 'severe').checkReasons).toEqual([]);
+    });
+
+    it("keeps 'unknown' only where the paper says the severity is not known", () => {
+      expect(allergy('Penicillin allergy', 'unknown').checkReasons).toContain('field_not_on_paper');
+      expect(allergy('Penicillin allergy, severity not known', 'unknown').checkReasons).toEqual([]);
+      expect(allergy('Penicillin allergy, severity unknown', 'unknown').checkReasons).toEqual([]);
+    });
   });
 });

@@ -5,6 +5,7 @@ import {
 import { createHash } from 'node:crypto';
 import { abortableDelay, fullJitterDelayMs, type Sleep } from './backoff';
 import type { OcrWorkerConfig } from './config';
+import { Semaphore } from './semaphore';
 import {
   DocumentTooManyPagesFailure, SafeWorkerFailure, type LineBox, type ReadLine, type ReadPage, type TextReading,
   type VerifiedDocument, type WorkerOcrProvider,
@@ -70,10 +71,16 @@ export function textractAsyncClientRequestToken(document: Pick<VerifiedDocument,
 /** @deprecated kept for existing callers; PDF and TIFF share the async token. */
 export const textractPdfClientRequestToken = textractAsyncClientRequestToken;
 
-export interface TextractProviderOptions { sleep?: Sleep; random?: () => number }
+export interface TextractProviderOptions {
+  sleep?: Sleep;
+  random?: () => number;
+  /** The process-wide Textract call limit; by default one built from OCR_TEXTRACT_MAX_CONCURRENT (2). */
+  limiter?: Semaphore;
+}
 type TextractConfig = Pick<OcrWorkerConfig, 'AWS_REGION' | 'AWS_ENDPOINT_URL' | 'AWS_ACCESS_KEY_ID'
   | 'AWS_SECRET_ACCESS_KEY' | 'OCR_TEXTRACT_POLL_MS' | 'OCR_TEXTRACT_MAX_POLL_SECONDS' | 'OCR_WORKER_API_TIMEOUT_MS'
-  | 'OCR_TEXTRACT_MAX_RETRIES' | 'OCR_TEXTRACT_MAX_PAGES' | 'OCR_TEXTRACT_FEATURES'>;
+  | 'OCR_TEXTRACT_MAX_RETRIES' | 'OCR_TEXTRACT_MAX_PAGES' | 'OCR_TEXTRACT_FEATURES'>
+  & Partial<Pick<OcrWorkerConfig, 'OCR_TEXTRACT_MAX_CONCURRENT'>>;
 
 interface AsyncResult {
   JobStatus?: string;
@@ -89,6 +96,11 @@ export class TextractOcrProvider implements WorkerOcrProvider {
   private readonly random: () => number;
   private readonly features: TextractFeatures;
   private readonly mode: TextractMode;
+  /**
+   * Textract calls in flight for the whole process (main.ts builds one provider, shared by every claim loop).
+   * A permit is held for one API call only: never across a throttling backoff or an async poll delay.
+   */
+  readonly limiter: Semaphore;
   constructor(private readonly config: TextractConfig, options: TextractProviderOptions = {}) {
     this.client = new TextractClient({ region: config.AWS_REGION, maxAttempts: 1,
       ...(config.AWS_ENDPOINT_URL ? { endpoint: config.AWS_ENDPOINT_URL } : {}),
@@ -99,6 +111,7 @@ export class TextractOcrProvider implements WorkerOcrProvider {
     this.random = options.random ?? Math.random;
     this.features = config.OCR_TEXTRACT_FEATURES;
     this.mode = TEXTRACT_MODES[this.features];
+    this.limiter = options.limiter ?? new Semaphore(config.OCR_TEXTRACT_MAX_CONCURRENT ?? 2);
   }
 
   async checkReadiness(_signal: AbortSignal): Promise<void> {
@@ -210,7 +223,8 @@ export class TextractOcrProvider implements WorkerOcrProvider {
   private async send<Output>(call: (abortSignal: AbortSignal) => Promise<Output>, signal: AbortSignal): Promise<Output> {
     for (let attempt = 0; ; attempt += 1) {
       try {
-        return await call(this.requestSignal(signal));
+        // The request deadline starts once a permit is held; the wait itself ends only on shutdown.
+        return await this.limiter.run(() => call(this.requestSignal(signal)), signal);
       } catch (error) {
         const name = error instanceof Error ? error.name : 'unknown';
         if (signal.aborted || !THROTTLING.has(name) || attempt >= this.config.OCR_TEXTRACT_MAX_RETRIES) throw error;

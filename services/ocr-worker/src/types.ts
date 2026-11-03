@@ -74,9 +74,21 @@ export interface PageAllowance {
   paused: boolean;
 }
 
+/** One model's Claude API use for one attempt of one job (counts only; ocr.record_worker_ai_usage, 0110). */
+export interface AiUsageRecord {
+  model: string;
+  requests: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+}
+
 export interface WorkerRepository {
   checkReadiness(): Promise<void>;
-  claim(provider: string, leaseSeconds: number, correlationId: string): Promise<ClaimedOcrJob | null>;
+  /** ocr.claim_worker_job_fair: no facility gets more than maxInFlightPerFacility jobs processing at once. */
+  claim(provider: string, leaseSeconds: number, maxInFlightPerFacility: number,
+    correlationId: string): Promise<ClaimedOcrJob | null>;
   metrics(): Promise<Readonly<{ queueDepth: number; oldestQueueAgeSeconds: number }>>;
   renew(job: ClaimedOcrJob, leaseSeconds: number): Promise<void>;
   complete(job: ClaimedOcrJob, extraction: CompletedExtraction): Promise<string>;
@@ -85,6 +97,8 @@ export interface WorkerRepository {
   recordPages(job: ClaimedOcrJob, pageCount: number): Promise<PageAllowance>;
   /** Requeues the job until the allowance resets without using an attempt; returns when it resumes. */
   pauseForAllowance(job: ClaimedOcrJob): Promise<Date | null>;
+  /** Stores one model's totals for the job's current attempt; a replay replaces them. */
+  recordAiUsage(job: ClaimedOcrJob, usage: AiUsageRecord): Promise<void>;
   close(): Promise<void>;
 }
 

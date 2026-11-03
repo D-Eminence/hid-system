@@ -15,6 +15,8 @@ async function bootstrap(): Promise<void> {
   }
   const provider: WorkerOcrProvider = config.OCR_PROVIDER === 'textract'
     ? new TextractOcrProvider(config) : new TestOcrProvider();
+  // One provider and one Claude client for the whole process: their call limits (OCR_TEXTRACT_MAX_CONCURRENT,
+  // OCR_AI_MAX_CONCURRENT_REQUESTS) are shared by every claim loop.
   const reading = new PaperReadingService(config,
     config.OCR_AI_MODE === 'claude' ? new ClaudePageClient(config) : null);
   const worker = new OcrWorker(config, new PostgresWorkerRepository(config),

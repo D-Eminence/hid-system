@@ -71,8 +71,8 @@ function workerSource() {
  * without a definition here; as soon as a 0110 migration exists, they are held
  * to the same defined-and-granted rule as every other worker command.
  */
-const ALLOWANCE_COMMANDS = ['ocr.pause_worker_job_for_allowance', 'ocr.record_worker_pages',
-  'ocr.worker_page_allowance'];
+const ALLOWANCE_COMMANDS = ['ocr.claim_worker_job_fair', 'ocr.pause_worker_job_for_allowance',
+  'ocr.record_worker_ai_usage', 'ocr.record_worker_pages', 'ocr.worker_page_allowance'];
 const allowanceMigrationPresent = readdirSync(join(database, 'migrations')).some((name) => /^0110_.*\.sql$/.test(name));
 
 describe('OCR worker database privileges', () => {
@@ -90,11 +90,19 @@ describe('OCR worker database privileges', () => {
     const called = new Set(source.flatMap(({ text }) => [...text.matchAll(
       new RegExp(`\\b(${SCHEMAS})\\.([a-z_][a-z0-9_]*)\\s*\\(`, 'g'))]
       .map(([, schema, name]) => `${schema}.${name}`)));
-    expect([...called].sort()).toEqual(['ocr.claim_worker_job', 'ocr.complete_worker_job',
-      'ocr.fail_worker_job', 'ocr.pause_worker_job_for_allowance', 'ocr.record_worker_pages',
-      'ocr.renew_worker_claim', 'ocr.worker_page_allowance', 'ocr.worker_queue_metrics']);
+    // Claims go only through the fair claim (0110); the unfair ocr.claim_worker_job stays granted but unused.
+    expect([...called].sort()).toEqual(['ocr.claim_worker_job_fair', 'ocr.complete_worker_job',
+      'ocr.fail_worker_job', 'ocr.pause_worker_job_for_allowance', 'ocr.record_worker_ai_usage',
+      'ocr.record_worker_pages', 'ocr.renew_worker_claim', 'ocr.worker_page_allowance', 'ocr.worker_queue_metrics']);
     const held = [...called].filter((name) => allowanceMigrationPresent || !ALLOWANCE_COMMANDS.includes(name));
     expect(held.filter((name) => !defined.has(name))).toEqual([]);
     expect(held.filter((name) => !executable.has(name))).toEqual([]);
   });
+
+  it('may not execute the facility usage reads or the page-limit command (Identity and ocr-api only)', () => {
+    for (const name of ['ocr.facility_ocr_usage', 'ocr.facility_page_allowance', 'ocr.set_facility_page_limit']) {
+      expect(executable.has(name)).toBe(false);
+    }
+  });
 });
+

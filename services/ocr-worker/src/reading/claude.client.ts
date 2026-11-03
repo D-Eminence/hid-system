@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { abortableDelay, fullJitterDelayMs, type Sleep } from '../backoff';
 import type { OcrWorkerConfig } from '../config';
+import { Semaphore } from '../semaphore';
 import { MODEL_OUTPUT_JSON_SCHEMA, modelPageSchema, pageMessage, SYSTEM_PROMPT, type ModelPage } from './prompt';
 
 /** The Claude API, always at its own endpoint: ANTHROPIC_BASE_URL is never read. */
@@ -23,13 +24,34 @@ export type PageAnswer =
   | { kind: 'refused'; usage: TokenUsage; attempts: number }
   | { kind: 'failed'; reason: 'max_tokens' | 'malformed' | 'incomplete'; usage: TokenUsage; attempts: number };
 
+const noUsage = (): TokenUsage => ({ inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 });
+
+/**
+ * What a call that ended without an answer still used: every HTTP attempt it made (each one is a request that
+ * may be billed) and the tokens the API had already reported on any of them (a stream cut off mid-answer).
+ */
+export interface AiCallUse { readonly attempts: number; readonly usage: TokenUsage }
+
 /** The AI step could not be reached after its retries: try the job again later. */
-export class AiTransientError extends Error {
-  constructor(readonly code: string) { super(code); this.name = 'AiTransientError'; }
+export class AiTransientError extends Error implements AiCallUse {
+  constructor(readonly code: string, readonly attempts = 0, readonly usage: TokenUsage = noUsage()) {
+    super(code); this.name = 'AiTransientError';
+  }
 }
 /** The API refused the request itself (bad request, key, permission, model): retrying will not help. */
-export class AiRejectedError extends Error {
-  constructor(readonly code: string) { super(code); this.name = 'AiRejectedError'; }
+export class AiRejectedError extends Error implements AiCallUse {
+  constructor(readonly code: string, readonly attempts = 0, readonly usage: TokenUsage = noUsage()) {
+    super(code); this.name = 'AiRejectedError';
+  }
+}
+/**
+ * The worker shut down during a call. `reason` is the abort signal's reason, which the reader rethrows once it
+ * has counted the attempts already made; the message carries no request or response detail.
+ */
+export class AiInterruptedError extends Error implements AiCallUse {
+  constructor(readonly reason: unknown, readonly attempts: number, readonly usage: TokenUsage) {
+    super('AI_INTERRUPTED'); this.name = 'AiInterruptedError';
+  }
 }
 
 export interface PageModelClient {
@@ -47,6 +69,8 @@ export interface ClaudeClientOptions {
   fetch?: typeof fetch;
   sleep?: Sleep;
   random?: () => number;
+  /** The process-wide request limit; by default one built from OCR_AI_MAX_CONCURRENT_REQUESTS (4). */
+  limiter?: Semaphore;
 }
 
 const silentLogger = { error: () => undefined, warn: () => undefined, info: () => undefined, debug: () => undefined };
@@ -55,9 +79,16 @@ export class ClaudePageClient implements PageModelClient {
   private readonly client: Anthropic;
   private readonly sleep: Sleep;
   private readonly random: () => number;
+  /**
+   * Claude API requests in flight for the whole process. main.ts builds one client, so every claim loop and
+   * every page of every document shares this limit. A permit is held for one HTTP attempt only, never across
+   * a backoff sleep, and waiting for one does not stop the job's lease renewal.
+   */
+  readonly limiter: Semaphore;
 
   constructor(private readonly config: Pick<OcrWorkerConfig, 'ANTHROPIC_API_KEY' | 'OCR_AI_MAX_TOKENS'
-    | 'OCR_AI_TIMEOUT_MS' | 'OCR_AI_MAX_RETRIES'>, options: ClaudeClientOptions = {}) {
+    | 'OCR_AI_TIMEOUT_MS' | 'OCR_AI_MAX_RETRIES'> & Partial<Pick<OcrWorkerConfig, 'OCR_AI_MAX_CONCURRENT_REQUESTS'>>,
+    options: ClaudeClientOptions = {}) {
     if (!config.ANTHROPIC_API_KEY) throw new Error('AI reading requires an API key');
     // apiKey given in code: the SDK reads no other credential from the environment. baseURL is fixed so an
     // inherited ANTHROPIC_BASE_URL cannot send pages elsewhere. Retries are ours (maxRetries 0), and the SDK
@@ -67,6 +98,7 @@ export class ClaudePageClient implements PageModelClient {
       ...(options.fetch ? { fetch: options.fetch } : {}) });
     this.sleep = options.sleep ?? abortableDelay;
     this.random = options.random ?? Math.random;
+    this.limiter = options.limiter ?? new Semaphore(config.OCR_AI_MAX_CONCURRENT_REQUESTS ?? 4);
   }
 
   async readPage(request: { model: string; effort: Effort; page: number; lines: readonly PageLinesForModel[] },
@@ -82,20 +114,41 @@ export class ClaudePageClient implements PageModelClient {
       messages: [{ role: 'user', content: pageMessage(request.page, request.lines) }],
     };
     const maxAttempts = this.config.OCR_AI_MAX_RETRIES + 1;
+    // Attempts that reached the API without an answer, and the tokens they were reported to use: counted in
+    // every error this call throws, so a failed or interrupted call's requests still count towards the usage totals.
+    let sent = 0;
+    const spent = noUsage();
     for (let attempt = 1; ; attempt += 1) {
+      // The wait for a permit is not part of the request timeout; only shutdown ends it.
+      let release: () => void;
+      try {
+        release = await this.limiter.acquire(signal);
+      } catch (error) {
+        throw signal.aborted ? new AiInterruptedError(signal.reason, sent, spent) : error;
+      }
       const timeout = AbortSignal.timeout(this.config.OCR_AI_TIMEOUT_MS);
+      let stream: { readonly currentMessage: Anthropic.Message | undefined } | undefined;
       try {
         // Streaming, so a long adaptive-thinking answer is never cut by an idle HTTP connection.
-        const message = await this.client.messages.stream(params, { signal: AbortSignal.any([signal, timeout]) })
-          .finalMessage();
-        return interpret(message, attempt);
+        const started = this.client.messages.stream(params, { signal: AbortSignal.any([signal, timeout]) });
+        stream = started;
+        const message = await started.finalMessage();
+        release();
+        return interpret(message, attempt, spent);
       } catch (error) {
-        if (signal.aborted) throw signal.reason;
+        release();
+        sent = attempt;
+        addTokens(spent, partialUsage(stream));
+        if (signal.aborted) throw new AiInterruptedError(signal.reason, sent, spent);
         const decision = classify(error, timeout.aborted);
-        if (decision.kind === 'rejected') throw new AiRejectedError(decision.code);
-        if (attempt >= maxAttempts) throw new AiTransientError(decision.code);
+        if (decision.kind === 'rejected') throw new AiRejectedError(decision.code, sent, spent);
+        if (attempt >= maxAttempts) throw new AiTransientError(decision.code, sent, spent);
         const jitter = fullJitterDelayMs(attempt - 1, { ...BACKOFF, random: this.random });
-        await this.sleep(decision.retryAfterMs === null ? jitter : Math.max(decision.retryAfterMs, jitter), signal);
+        try {
+          await this.sleep(decision.retryAfterMs === null ? jitter : Math.max(decision.retryAfterMs, jitter), signal);
+        } catch (sleepError) {
+          throw signal.aborted ? new AiInterruptedError(signal.reason, sent, spent) : sleepError;
+        }
       }
     }
   }
@@ -107,9 +160,28 @@ function usageOf(message: Anthropic.Message): TokenUsage {
     cacheCreationInputTokens: message.usage.cache_creation_input_tokens ?? 0 };
 }
 
-/** stop_reason first, content after: a refusal or a cut-off answer is never parsed as one. */
-export function interpret(message: Anthropic.Message, attempts: number): PageAnswer {
+function addTokens(total: TokenUsage, more: TokenUsage): void {
+  total.inputTokens += more.inputTokens;
+  total.outputTokens += more.outputTokens;
+  total.cacheReadInputTokens += more.cacheReadInputTokens;
+  total.cacheCreationInputTokens += more.cacheCreationInputTokens;
+}
+
+/** The usage a stream had reported before it failed (message_start, then message_delta); none before it began. */
+function partialUsage(stream: { readonly currentMessage: Anthropic.Message | undefined } | undefined): TokenUsage {
+  try {
+    const message = stream?.currentMessage;
+    return message?.usage ? usageOf(message) : noUsage();
+  } catch { return noUsage(); }
+}
+
+/**
+ * stop_reason first, content after: a refusal or a cut-off answer is never parsed as one. `earlier` is what the
+ * call's failed attempts before this one already used; it is added to the answer's usage.
+ */
+export function interpret(message: Anthropic.Message, attempts: number, earlier: TokenUsage = noUsage()): PageAnswer {
   const usage = usageOf(message);
+  addTokens(usage, earlier);
   if (message.stop_reason === 'refusal') return { kind: 'refused', usage, attempts };
   if (message.stop_reason === 'max_tokens' || message.stop_reason === 'model_context_window_exceeded') {
     return { kind: 'failed', reason: 'max_tokens', usage, attempts };
