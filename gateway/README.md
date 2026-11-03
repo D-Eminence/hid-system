@@ -19,7 +19,7 @@ Cookie, Origin, CSRF, and correlation evidence, and returns bounded Problem
 Details for unavailable or unknown routes. Every non-API path returns
 `API_ONLY_ORIGIN` with `Cache-Control: no-store`. The document scanner's EHR
 routes (`/api/v1/ehr/documents/scan-events` and `/scan-targets`) answer 404
-here; only the internal load balancer serves them (INTERFACE_CONTRACT.md §29).
+here; only the internal load balancer serves them (INTERFACE_CONTRACT.md §32).
 
 The image accepts no frontend configuration, workload tokens, database
 credentials, provider secrets, or AWS credentials as build inputs.
