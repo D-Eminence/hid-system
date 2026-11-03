@@ -6,6 +6,26 @@ const optionalString = z.preprocess(
   z.string().trim().min(1).optional(),
 );
 
+const emptyToUndefined = (value: unknown) => typeof value === 'string' && value.trim() === '' ? undefined : value;
+const claudeModel = z.string().trim().regex(/^claude-[a-z0-9-]+$/, 'must be a first-party Claude model ID');
+const effort = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/**
+ * OCR_AI_FACILITY_IDS, the AI reading emergency off-switch (ocr-api reads the same variable, so both services
+ * must get the same value): comma-separated facility UUIDs, whitespace trimmed, case-insensitive (kept lower
+ * case); blank entries from stray commas are ignored. Unset or empty (or only whitespace) means every facility.
+ * Anything else that is not a list of at least one UUID (",", "demo-hospital") fails startup.
+ */
+const facilityIds = z.preprocess(emptyToUndefined, z.string().optional()).transform((value, context) => {
+  if (value === undefined) return undefined;
+  const ids = value.split(',').map((id) => id.trim().toLowerCase()).filter((id) => id.length > 0);
+  if (ids.length === 0 || ids.some((id) => !UUID.test(id))) {
+    context.addIssue({ code: 'custom', message: 'must be a comma-separated list of facility UUIDs' });
+    return z.NEVER;
+  }
+  return [...new Set(ids)];
+});
+
 function databaseUrlOverridesTls(connectionString: string): boolean {
   const url = new URL(connectionString);
   return ['ssl', 'sslmode', 'sslcert', 'sslkey', 'sslrootcert', 'sslnegotiation']
@@ -33,6 +53,24 @@ const schema = z.object({
   AWS_ACCESS_KEY_ID: optionalString,
   AWS_SECRET_ACCESS_KEY: optionalString,
   S3_FORCE_PATH_STYLE: booleanString,
+  OCR_TEXTRACT_MAX_RETRIES: z.coerce.number().int().min(0).max(8).default(3),
+  OCR_TEXTRACT_MAX_PAGES: z.coerce.number().int().min(1).max(20).default(20),
+  // 'text' (default): text detection only. 'layout': document analysis with LAYOUT only (reading order, higher cost).
+  OCR_TEXTRACT_FEATURES: z.preprocess(emptyToUndefined, z.enum(['text', 'layout']).default('text')),
+  // AI reading (Anthropic Claude API, global processing; owner decision 6/29/33).
+  OCR_AI_MODE: z.enum(['off', 'claude']).default('off'),
+  // Same validation as ehr-api's ANTHROPIC_API_KEY. Never logged.
+  ANTHROPIC_API_KEY: z.preprocess(emptyToUndefined, z.string().min(20).regex(/^\S+$/).optional()),
+  OCR_AI_GLOBAL_PROCESSING_APPROVED: booleanString,
+  OCR_AI_FIRST_PASS_MODEL: claudeModel.default('claude-sonnet-5-5'),
+  OCR_AI_FIRST_PASS_EFFORT: effort.default('medium'),
+  OCR_AI_REREAD_MODEL: claudeModel.default('claude-opus-5-5'),
+  OCR_AI_REREAD_EFFORT: effort.default('high'),
+  OCR_AI_MAX_TOKENS: z.coerce.number().int().min(1_024).max(128_000).default(16_000),
+  OCR_AI_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(600_000).default(180_000),
+  OCR_AI_MAX_RETRIES: z.coerce.number().int().min(0).max(8).default(4),
+  OCR_AI_MAX_REREAD_PAGES: z.coerce.number().int().min(0).max(20).default(20),
+  OCR_AI_FACILITY_IDS: facilityIds,
 }).superRefine((env, context) => {
   if (env.OCR_PROVIDER === 'test' && env.NODE_ENV !== 'test') {
     context.addIssue({ code: 'custom', path: ['OCR_PROVIDER'], message: 'The test OCR provider is restricted to NODE_ENV=test' });
@@ -57,6 +95,15 @@ const schema = z.object({
   }
   if (env.NODE_ENV === 'production' && env.AWS_ENDPOINT_URL && new URL(env.AWS_ENDPOINT_URL).protocol !== 'https:') {
     context.addIssue({ code: 'custom', path: ['AWS_ENDPOINT_URL'], message: 'Production AWS endpoint must use HTTPS' });
+  }
+  if (env.OCR_AI_MODE === 'claude') {
+    if (!env.ANTHROPIC_API_KEY) {
+      context.addIssue({ code: 'custom', path: ['ANTHROPIC_API_KEY'], message: 'AI reading requires a server-side Anthropic API key' });
+    }
+    if (!env.OCR_AI_GLOBAL_PROCESSING_APPROVED) {
+      context.addIssue({ code: 'custom', path: ['OCR_AI_GLOBAL_PROCESSING_APPROVED'],
+        message: 'AI reading requires approved global processing on the Claude API' });
+    }
   }
 });
 

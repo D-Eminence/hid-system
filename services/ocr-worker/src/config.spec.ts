@@ -33,4 +33,75 @@ describe('OCR worker configuration', () => {
     expect(() => readOcrWorkerConfig({ ...production, NODE_TLS_REJECT_UNAUTHORIZED: '0' }))
       .toThrow(/cannot be disabled globally/);
   });
+
+  it('keeps AI reading off by default with the agreed models and efforts', () => {
+    const config = readOcrWorkerConfig(base);
+    expect(config).toMatchObject({ OCR_AI_MODE: 'off', OCR_AI_FIRST_PASS_MODEL: 'claude-sonnet-5-5',
+      OCR_AI_FIRST_PASS_EFFORT: 'medium', OCR_AI_REREAD_MODEL: 'claude-opus-5-5', OCR_AI_REREAD_EFFORT: 'high',
+      OCR_AI_MAX_TOKENS: 16_000, OCR_AI_MAX_REREAD_PAGES: 20, OCR_TEXTRACT_MAX_RETRIES: 3, OCR_TEXTRACT_MAX_PAGES: 20 });
+    expect(config.OCR_AI_FACILITY_IDS).toBeUndefined();
+  });
+
+  it('requires a key and approved global processing for Claude reading', () => {
+    expect(() => readOcrWorkerConfig({ ...base, OCR_AI_MODE: 'claude' })).toThrow(/ANTHROPIC_API_KEY/);
+    expect(() => readOcrWorkerConfig({ ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-fake-key-000000000' }))
+      .toThrow(/OCR_AI_GLOBAL_PROCESSING_APPROVED/);
+    expect(() => readOcrWorkerConfig({ ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'short',
+      OCR_AI_GLOBAL_PROCESSING_APPROVED: 'true' })).toThrow(/ANTHROPIC_API_KEY/);
+    expect(readOcrWorkerConfig({ ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-fake-key-000000000',
+      OCR_AI_GLOBAL_PROCESSING_APPROVED: 'true' }).OCR_AI_MODE).toBe('claude');
+  });
+
+  it('never echoes the key in a configuration error', () => {
+    const key = 'sk-ant-fake key with spaces 0000';
+    expect(() => readOcrWorkerConfig({ ...base, ANTHROPIC_API_KEY: key })).toThrow(/ANTHROPIC_API_KEY/);
+    try { readOcrWorkerConfig({ ...base, ANTHROPIC_API_KEY: key }); } catch (error) {
+      expect(String(error)).not.toContain(key);
+    }
+  });
+
+  it('accepts only first-party Claude model ids and the five effort levels', () => {
+    expect(() => readOcrWorkerConfig({ ...base, OCR_AI_FIRST_PASS_MODEL: 'anthropic.claude-sonnet-5-5' }))
+      .toThrow(/OCR_AI_FIRST_PASS_MODEL/);
+    expect(() => readOcrWorkerConfig({ ...base, OCR_AI_REREAD_MODEL: 'gpt-x' })).toThrow(/OCR_AI_REREAD_MODEL/);
+    expect(() => readOcrWorkerConfig({ ...base, OCR_AI_REREAD_EFFORT: 'extreme' })).toThrow(/OCR_AI_REREAD_EFFORT/);
+    expect(readOcrWorkerConfig({ ...base, OCR_AI_REREAD_EFFORT: 'xhigh' }).OCR_AI_REREAD_EFFORT).toBe('xhigh');
+  });
+
+  it('reads text only from Textract by default, with layout analysis as the one alternative', () => {
+    expect(readOcrWorkerConfig(base).OCR_TEXTRACT_FEATURES).toBe('text');
+    expect(readOcrWorkerConfig({ ...base, OCR_TEXTRACT_FEATURES: '' }).OCR_TEXTRACT_FEATURES).toBe('text');
+    expect(readOcrWorkerConfig({ ...base, OCR_TEXTRACT_FEATURES: 'layout' }).OCR_TEXTRACT_FEATURES).toBe('layout');
+    for (const value of ['tables', 'forms', 'LAYOUT', 'layout,tables']) {
+      expect(() => readOcrWorkerConfig({ ...base, OCR_TEXTRACT_FEATURES: value })).toThrow(/OCR_TEXTRACT_FEATURES/);
+    }
+  });
+
+  it('treats an unset, empty or blank facility list as every facility', () => {
+    for (const value of [undefined, '', '   ']) {
+      expect(readOcrWorkerConfig({ ...base, OCR_AI_FACILITY_IDS: value }).OCR_AI_FACILITY_IDS).toBeUndefined();
+    }
+  });
+
+  it('rejects a facility list with no UUID or with anything that is not one', () => {
+    for (const value of [',', ' , ', 'demo-hospital', '11111111-2222-4333-8444-555555555555,demo-hospital',
+      '11111111-2222-4333-8444-55555555555']) {
+      expect(() => readOcrWorkerConfig({ ...base, OCR_AI_FACILITY_IDS: value })).toThrow(/OCR_AI_FACILITY_IDS/);
+    }
+  });
+
+  it('parses the facility allowlist as UUIDs', () => {
+    expect(readOcrWorkerConfig({ ...base,
+      OCR_AI_FACILITY_IDS: ' 11111111-2222-4333-8444-555555555555, 11111111-2222-4333-8444-555555555555 ,AAAAAAAA-2222-4333-8444-555555555555' })
+      .OCR_AI_FACILITY_IDS).toEqual(['11111111-2222-4333-8444-555555555555', 'aaaaaaaa-2222-4333-8444-555555555555']);
+    expect(readOcrWorkerConfig({ ...base, OCR_AI_FACILITY_IDS: '\t11111111-2222-4333-8444-555555555555 ,' })
+      .OCR_AI_FACILITY_IDS).toEqual(['11111111-2222-4333-8444-555555555555']);
+  });
+
+  it('bounds retries, tokens and re-reads', () => {
+    expect(() => readOcrWorkerConfig({ ...base, OCR_AI_MAX_RETRIES: '50' })).toThrow(/OCR_AI_MAX_RETRIES/);
+    expect(() => readOcrWorkerConfig({ ...base, OCR_TEXTRACT_MAX_RETRIES: '-1' })).toThrow(/OCR_TEXTRACT_MAX_RETRIES/);
+    expect(() => readOcrWorkerConfig({ ...base, OCR_AI_MAX_TOKENS: '500' })).toThrow(/OCR_AI_MAX_TOKENS/);
+    expect(() => readOcrWorkerConfig({ ...base, OCR_AI_MAX_REREAD_PAGES: '21' })).toThrow(/OCR_AI_MAX_REREAD_PAGES/);
+  });
 });

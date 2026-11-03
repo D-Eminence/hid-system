@@ -1,4 +1,6 @@
 import { readOcrWorkerConfig } from './config';
+import { ClaudePageClient } from './reading/claude.client';
+import { PaperReadingService } from './reading/reader';
 import { PostgresWorkerRepository } from './repository';
 import { S3ExactDocumentReader } from './s3-document-reader';
 import { TestOcrProvider } from './test.provider';
@@ -13,8 +15,10 @@ async function bootstrap(): Promise<void> {
   }
   const provider: WorkerOcrProvider = config.OCR_PROVIDER === 'textract'
     ? new TextractOcrProvider(config) : new TestOcrProvider();
+  const reading = new PaperReadingService(config,
+    config.OCR_AI_MODE === 'claude' ? new ClaudePageClient(config) : null);
   const worker = new OcrWorker(config, new PostgresWorkerRepository(config),
-    new S3ExactDocumentReader(config), provider);
+    new S3ExactDocumentReader(config), provider, reading);
   process.once('SIGTERM', () => worker.stop());
   process.once('SIGINT', () => worker.stop());
   await worker.run();

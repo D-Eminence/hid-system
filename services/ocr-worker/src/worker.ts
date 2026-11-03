@@ -1,13 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import type { OcrWorkerConfig } from './config';
-import { SafeWorkerFailure, type ClaimedOcrJob, type DocumentReader,
-  type WorkerOcrProvider, type WorkerRepository } from './types';
+import { paperReadingPayloadSchema } from './reading/contract';
+import { PaperReadingService, ReadingUnavailableError, type ReadingOutcome } from './reading/reader';
+import { DocumentTooManyPagesFailure, SafeWorkerFailure, type ClaimedOcrJob, type CompletedExtraction,
+  type DocumentReader, type TextReading, type WorkerOcrProvider, type WorkerRepository } from './types';
+
+const MAX_RECORDED_PAGES = 200;
 
 export class OcrWorker {
   private readonly shutdown = new AbortController();
   private acceptingClaims = false;
   constructor(private readonly config: OcrWorkerConfig, private readonly repository: WorkerRepository,
-    private readonly reader: DocumentReader, private readonly provider: WorkerOcrProvider) {}
+    private readonly reader: DocumentReader, private readonly provider: WorkerOcrProvider,
+    private readonly reading: PaperReadingService) {}
 
   async run(): Promise<void> {
     await this.repository.checkReadiness();
@@ -34,13 +39,48 @@ export class OcrWorker {
 
   async processOne(job: ClaimedOcrJob): Promise<void> {
     const renewal = this.startLeaseRenewal(job);
+    const started = Date.now();
     try {
       const document = await this.reader.readExact(job, this.shutdown.signal);
-      const extraction = await this.provider.extract(document, this.shutdown.signal);
-      await this.repository.complete(job, extraction);
+      // The page allowance is checked before anything is charged. At 100% reading pauses until the
+      // allowance resets; the job keeps its attempts, and review and manual entry are unaffected.
+      // A retry whose pages are already counted is never paused (the database answers paused=false),
+      // and a pause that finds the allowance no longer used up changes nothing: the job is read.
+      const allowance = await this.repository.pageAllowance(job);
+      if (allowance.paused) {
+        const resumeAt = await this.repository.pauseForAllowance(job);
+        if (resumeAt !== null) {
+          this.log('info', 'ocr.job.paused_for_allowance', { jobId: job.jobId, correlationId: job.correlationId,
+            resumeAt: resumeAt.toISOString() });
+          return;
+        }
+        this.log('info', 'ocr.job.allowance_available', { jobId: job.jobId, correlationId: job.correlationId });
+      }
+      const text = await this.extractText(job, document);
+      // Every read is counted, even with AI reading off; a document reads as at least one page.
+      const after = await this.repository.recordPages(job, Math.max(1, text.pageCount));
+      const outcome = await this.readItems(job, text);
+      const completion = buildCompletion(text, outcome);
+      const checked = paperReadingPayloadSchema.safeParse(completion.structuredPayload);
+      if (!checked.success) {
+        this.log('error', 'ocr.reading.contract_violation', { jobId: job.jobId, correlationId: job.correlationId,
+          issues: checked.error.issues.length });
+        throw new SafeWorkerFailure('READING_CONTRACT_VIOLATION', 'OCR reading result was not in the expected shape', true, 60);
+      }
+      await this.repository.complete(job, completion);
+      const summary = outcome.summary;
       this.log('info', 'ocr.job.completed', { jobId: job.jobId, correlationId: job.correlationId,
-        provider: this.provider.name, attempt: job.attemptNo, pagesProcessed: extraction.pages.length,
-        retryCount: Math.max(0, job.attemptNo - 1) });
+        provider: this.provider.name, attempt: job.attemptNo, pagesProcessed: text.pageCount,
+        retryCount: Math.max(0, job.attemptNo - 1), readingStatus: summary.status,
+        firstPassModel: summary.firstPassModel, rereadModel: summary.rereadModel, aiRequests: summary.requests,
+        aiRefusals: summary.refusals, rereadPages: summary.rereadPages.length,
+        rereadFailedPages: summary.rereadFailedPages, itemCount: summary.itemCount,
+        droppedUngrounded: summary.droppedUngrounded, flaggedPages: summary.flaggedPages,
+        inputTokens: summary.usage.inputTokens, outputTokens: summary.usage.outputTokens,
+        cacheReadInputTokens: summary.usage.cacheReadInputTokens,
+        cacheCreationInputTokens: summary.usage.cacheCreationInputTokens,
+        allowancePagesUsed: after.pagesUsed, allowancePagesLimit: after.pagesLimit,
+        durationMs: Date.now() - started });
     } catch (error) {
       const failure = this.toSafeFailure(error);
       try {
@@ -53,6 +93,44 @@ export class OcrWorker {
           correlationId: job.correlationId, code: safeErrorCode(persistenceError) });
       }
     } finally { clearInterval(renewal); }
+  }
+
+  /** Text reading; a document over the page limit was still read (and charged), so its pages count. */
+  private async extractText(job: ClaimedOcrJob, document: Parameters<WorkerOcrProvider['extract']>[0]): Promise<TextReading> {
+    try {
+      return await this.provider.extract(document, this.shutdown.signal);
+    } catch (error) {
+      if (error instanceof DocumentTooManyPagesFailure) {
+        // ocr.record_worker_pages takes 1-200 pages; beyond that the count is capped, never skipped.
+        await this.repository.recordPages(job, Math.min(MAX_RECORDED_PAGES, error.pageCount)).catch((recordError: unknown) => {
+          this.log('error', 'ocr.allowance.record_failed', { jobId: job.jobId, correlationId: job.correlationId,
+            code: safeErrorCode(recordError) });
+        });
+      }
+      throw error;
+    }
+  }
+
+  /** The AI step. A transient failure retries the job, except on its last attempt, which completes without items. */
+  private async readItems(job: ClaimedOcrJob, text: TextReading): Promise<ReadingOutcome> {
+    const input = { facilityId: job.facilityId, sourceSha256Hex: job.sourceSha256Hex, pages: text.pages };
+    let outcome: ReadingOutcome;
+    try {
+      outcome = await this.reading.read(input, this.shutdown.signal);
+    } catch (error) {
+      if (!(error instanceof ReadingUnavailableError)) throw error;
+      this.log('warn', 'ocr.reading.unavailable', { jobId: job.jobId, correlationId: job.correlationId,
+        code: error.code, attempt: job.attemptNo, maxAttempts: job.maxAttempts, finalAttempt: job.attemptNo >= job.maxAttempts });
+      if (job.attemptNo < job.maxAttempts) {
+        throw new SafeWorkerFailure('AI_UNAVAILABLE', 'AI reading is temporarily unavailable', true, 60);
+      }
+      outcome = this.reading.withoutItems(input, 'ai_failed', error.usage, error.code);
+    }
+    if (outcome.summary.status === 'ai_failed' && outcome.summary.failureCode) {
+      this.log('warn', 'ocr.reading.ai_failed', { jobId: job.jobId, correlationId: job.correlationId,
+        code: outcome.summary.failureCode });
+    }
+    return outcome;
   }
 
   private async claimLoop(workerIndex: number): Promise<void> {
@@ -125,4 +203,44 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
     const timer = setTimeout(resolve, milliseconds);
     signal.addEventListener('abort', () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
   });
+}
+
+/** raw_text is every line in reading order; provenance carries ids, counts, codes and models, never text. */
+export function buildCompletion(text: TextReading, outcome: ReadingOutcome): CompletedExtraction {
+  const lines = text.pages.flatMap((page) => page.lines);
+  const summary = outcome.summary;
+  return {
+    providerModel: text.providerModel,
+    providerRequestReference: text.providerRequestReference,
+    rawText: lines.map((line) => line.text).join('\n'),
+    structuredPayload: outcome.payload,
+    confidence: lines.length === 0 ? 0 : lines.reduce((sum, line) => sum + line.confidence, 0) / lines.length,
+    provenance: {
+      ...text.provenance,
+      pageCount: text.pageCount,
+      lineCount: lines.length,
+      reading: {
+        contract: outcome.payload.contract,
+        status: summary.status,
+        firstPassModel: summary.firstPassModel,
+        rereadModel: summary.rereadModel,
+        promptVersion: outcome.payload.reading.promptVersion,
+        schemaVersion: outcome.payload.reading.schemaVersion,
+        inferenceGeo: summary.inferenceGeo,
+        servedInferenceGeo: summary.servedInferenceGeo,
+        requests: summary.requests,
+        refusals: summary.refusals,
+        pagesSent: summary.pagesSent,
+        rereadPages: summary.rereadPages,
+        rereadFailedPages: summary.rereadFailedPages,
+        droppedUngrounded: summary.droppedUngrounded,
+        droppedUngroundedFirstPass: summary.droppedUngroundedFirstPass,
+        itemCount: summary.itemCount,
+        flaggedPages: summary.flaggedPages,
+        maskedNumbers: summary.maskedNumbers,
+        failureCode: summary.failureCode,
+        usage: summary.usage,
+      },
+    },
+  };
 }

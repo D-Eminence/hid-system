@@ -26,18 +26,52 @@ export interface VerifiedDocument {
   sha256Hex: string;
 }
 
-export interface ProviderPage { page: number; text: string; confidence: number }
-export interface ProviderExtraction {
+export interface LineBox { left: number; top: number; width: number; height: number }
+
+/** One Textract LINE, kept as working data. Confidence is 0-1 (the least legible word). */
+export interface ReadLine {
+  id: string;
+  page: number;
+  text: string;
+  box: LineBox | null;
+  confidence: number;
+  handwritten: boolean;
+}
+export interface ReadPage { page: number; lines: readonly ReadLine[] }
+
+/** Text reading v2: every page of the document with its lines in reading order. */
+export interface TextReading {
   providerModel: string;
   providerRequestReference: string | null;
-  pages: readonly ProviderPage[];
+  /** Pages the provider read (and charged for); also the page-allowance count. */
+  pageCount: number;
+  pages: readonly ReadPage[];
   provenance: Readonly<Record<string, unknown>>;
 }
 
 export interface WorkerOcrProvider {
   readonly name: string;
   checkReadiness(signal: AbortSignal): Promise<void>;
-  extract(document: VerifiedDocument, signal: AbortSignal): Promise<ProviderExtraction>;
+  extract(document: VerifiedDocument, signal: AbortSignal): Promise<TextReading>;
+}
+
+/** What ocr.complete_worker_job stores. Provenance never carries document text. */
+export interface CompletedExtraction {
+  providerModel: string;
+  providerRequestReference: string | null;
+  rawText: string;
+  structuredPayload: Readonly<Record<string, unknown>>;
+  confidence: number;
+  provenance: Readonly<Record<string, unknown>>;
+}
+
+/** A facility's page allowance for the current Africa/Lagos calendar month (migration 0110). */
+export interface PageAllowance {
+  pagesUsed: number;
+  pagesLimit: number;
+  /** ISO date (YYYY-MM-DD) the allowance resets, at 00:00 Africa/Lagos. */
+  resetsOn: string;
+  paused: boolean;
 }
 
 export interface WorkerRepository {
@@ -45,8 +79,12 @@ export interface WorkerRepository {
   claim(provider: string, leaseSeconds: number, correlationId: string): Promise<ClaimedOcrJob | null>;
   metrics(): Promise<Readonly<{ queueDepth: number; oldestQueueAgeSeconds: number }>>;
   renew(job: ClaimedOcrJob, leaseSeconds: number): Promise<void>;
-  complete(job: ClaimedOcrJob, extraction: ProviderExtraction): Promise<string>;
+  complete(job: ClaimedOcrJob, extraction: CompletedExtraction): Promise<string>;
   fail(job: ClaimedOcrJob, failure: SafeWorkerFailure): Promise<void>;
+  pageAllowance(job: ClaimedOcrJob): Promise<PageAllowance>;
+  recordPages(job: ClaimedOcrJob, pageCount: number): Promise<PageAllowance>;
+  /** Requeues the job until the allowance resets without using an attempt; returns when it resumes. */
+  pauseForAllowance(job: ClaimedOcrJob): Promise<Date | null>;
   close(): Promise<void>;
 }
 
@@ -59,4 +97,11 @@ export class SafeWorkerFailure extends Error {
     readonly retryable: boolean,
     readonly retryDelaySeconds: number,
   ) { super(safeSummary); }
+}
+
+/** Terminal: the document has more pages than one paper record may have. Carries the billed page count. */
+export class DocumentTooManyPagesFailure extends SafeWorkerFailure {
+  constructor(readonly pageCount: number, maxPages: number) {
+    super('DOCUMENT_TOO_MANY_PAGES', `Document has more than ${maxPages} pages`, false, 0);
+  }
 }

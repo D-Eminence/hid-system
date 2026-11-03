@@ -2849,3 +2849,39 @@ Responses, request bodies, `If-Match` versions and error mapping are
 unchanged. 0103 has no down migration; applying the previous bodies (0046,
 0056) restores the old behaviour. The suite is
 `services/ehr-api/test/database/platform-organization-applications.integration.sql`.
+
+## 32. OCR page allowance (0110)
+
+Owner decision (D-Eminence, 2026-11-02/03, Migrate item 7): 500 pages per
+facility per month, Textract and the AI reading counted together; only a
+super admin raises it; at 100% reading pauses but review and manual entry keep
+working. 0110 is unsigned until the owner signs its declaration. It is written
+on 0103 and uses nothing 0104-0109 add; in the release it is applied after
+them.
+
+Month: the Africa/Lagos calendar month. `resets_on` is the first day of the
+next month; a parked job becomes due at 00:00 Africa/Lagos that day.
+`paused` is `pages_used >= pages_limit`; `pages_used` is the sum of the
+facility's job counts first recorded this month; `pages_limit` is 500 unless
+a super admin set another (1-100000).
+
+Database commands (every one returns `(pages_used integer, pages_limit
+integer, resets_on date, paused boolean)` unless noted):
+
+| Command | Caller (role) | Notes |
+| --- | --- | --- |
+| `ocr.worker_page_allowance(job_id, claim_token)` | OCR worker (`hid_ocr_worker`) | The facility of the job it holds; the same claim checks as `ocr.fail_worker_job` (42501 not a worker, 55000 claim not active). `paused` is false for a job whose pages are already recorded, so a retry is never parked by its own pages. |
+| `ocr.record_worker_pages(job_id, claim_token, page_count, correlation_id)` | OCR worker | 1-200 pages (22023 otherwise). Once per job: a replay or a smaller count changes nothing; a larger count is kept. Audit `ocr.worker.pages_recorded` (`details.pages` only) when stored or raised. |
+| `ocr.pause_worker_job_for_allowance(job_id, claim_token, correlation_id)` returns `timestamptz` | OCR worker | NULL, changing nothing, unless the allowance is used up and the job's pages are not yet recorded (a limit raised since the read, or a retry); the worker then reads the job. Otherwise the job goes processing -> failed -> queued, `attempt_count` back by one (a pause never uses an attempt), `last_error_code = OCR_PAGE_ALLOWANCE_USED_UP`, `last_error_summary = Reading is paused because this facility has used this month's page allowance`, `next_attempt_at` = the returned resume time. Job events `OcrFailed` and `OcrJobQueued` carry the reason code. Audit `ocr.worker.paused_for_allowance`. |
+| `ocr.facility_page_allowance(facility_id)` | OCR API (`hid_ocr_runtime`) and Identity API (`hid_identity_runtime`) | A session naming that facility and an active membership there with `ocr.job.read`, or a platform session (no facility, no membership) whose account has `platform.admin.access`; 42501 otherwise; P0002 for an unknown facility. |
+| `ocr.set_facility_page_limit(facility_id, pages_limit, reason)` returns `void` | Identity API (`hid_identity_runtime`) | Platform session, `platform.admin.access` and an active platform `platform_super_admin` or `platform_admin` role, a correlation id and purpose `healthcare-operations` (42501 otherwise); limit 1-100000 and reason 1-240 characters (22023); P0002 unknown facility. Audit `admin.ocr.page-limit.set` (`actor_type = 'platform'`, resource the facility, details: new and previous limit, use, resumed and skipped jobs). When the new limit is above this month's use, the facility's queued jobs parked with `OCR_PAGE_ALLOWANCE_USED_UP` become due now (same attempt count, next version). |
+
+Nothing else changes: job, extraction, validation, publication and manual
+entry paths do not read the allowance. Tables `ocr.facility_page_limits` and
+`ocr.page_usage` hold ids, counts, dates and the limit's reason only, have no
+runtime grant and are read only through these commands. The only change to an
+existing function is one more allowed transition in `ocr.validate_job_write`:
+a queued job parked by the allowance may move `next_attempt_at` earlier (with
+the next version and a correlation id), nothing else. 0110 has no down
+migration. The suite is
+`services/ehr-api/test/database/ocr-page-allowance.integration.sql`.
