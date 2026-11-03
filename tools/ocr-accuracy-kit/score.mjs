@@ -5,7 +5,9 @@
 //
 // Every document in the keys is scored; one with no result counts as missed. --partial scores only the
 // documents the run has a record for (for trying a few documents; never for the launch decision).
-// Exit code 0 when both launch thresholds pass, 1 when either fails, 2 for a usage problem.
+// Exit code 0 when both launch thresholds pass on a full real run, 1 when either fails, 2 for a usage problem
+// (including a results directory that mixes fake and real records), 3 when the thresholds are met but the
+// result is not a launch result (a --partial run, or a --fake run).
 // Reports name documents by id only: no document text is printed or written.
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -57,6 +59,17 @@ export function medicineExact(produced, expected) {
     && normName(expected.fields.name) !== ''
     && normStrength(produced.fields.strength) === normStrength(expected.fields.strength)
     && normFrequency(produced.fields.frequency) === normFrequency(expected.fields.frequency);
+}
+
+/**
+ * Whether a medicine's status says the same thing as the key's: taking it (new or current), not taking it
+ * (stopped or past), or unknown. A stopped medicine read as current is wrong even when the name, strength
+ * and frequency are exact.
+ */
+const STATUS_GROUP = { new: 'taking', current: 'taking', stopped: 'not_taking', past: 'not_taking' };
+export function medicineStatusAgrees(produced, expected) {
+  const group = (status) => STATUS_GROUP[status] ?? 'unknown';
+  return group(produced.fields.status) === group(expected.fields.status);
 }
 
 /** How alike a produced item is to a key item of the same kind (0-1). */
@@ -149,15 +162,21 @@ function statedValues(item) {
   return values;
 }
 
+/** Frequency spellings that are also everyday words ("seen on 3 Nov"): found only right after the medicine. */
+const EVERYDAY_WORD_SPELLINGS = new Set(['on', 'now']);
+
 /**
  * Whether a stated value is on the paper. How often counts as on the paper when any spelling of the same code
- * is ("daily" for a written "od"): that is a reading of the paper, not something added to it.
+ * is ("daily" for a written "od"): that is a reading of the paper, not something added to it. A spelling that
+ * is also an everyday word ("on" for nocte) counts only on the same line as, and after, the medicine's name.
  */
-export function supported(name, value, lines) {
-  if (onPage(value, lines)) return true;
-  if (name !== 'frequency') return false;
-  const code = normFrequency(value);
-  return (FREQUENCY_TABLE[code] ?? []).some((spelling) => onPage(spelling, lines));
+export function supported(name, value, lines, medicineName = '') {
+  if (name !== 'frequency') return onPage(value, lines);
+  const spellings = [value, ...(FREQUENCY_TABLE[normFrequency(value)] ?? [])];
+  return spellings.some((spelling) => {
+    if (!EVERYDAY_WORD_SPELLINGS.has(normText(spelling).replace(/\./g, ''))) return onPage(spelling, lines);
+    return tokens(medicineName).length > 0 && onPage(`${medicineName} ${spelling}`, lines, 1);
+  });
 }
 
 function sameName(a, b) {
@@ -181,19 +200,24 @@ export function scoreDocument(key, payload) {
   // 1. Medicines read exactly (name + strength + how often) are paired first.
   const exactPairs = pairUp(produced.flatMap((p, pi) => expected.flatMap((k, ki) =>
     p.kind === 'medicine' && k.kind === 'medicine' && p.page === k.page && medicineExact(p, k)
-      ? [{ p: pi, k: ki, score: 1 }] : [])));
+      ? [{ p: pi, k: ki, score: medicineStatusAgrees(p, k) ? 1 : 0.9 }] : [])));
   const pairedP = new Set(exactPairs.map((pair) => pair.p));
   const pairedK = new Set(exactPairs.map((pair) => pair.k));
   // 2. Everything else is paired by kind, page and how alike the item is, or (for a misread medicine) by
-  //    being read from the same place on the page.
+  //    being read from the same place on the page. A produced medicine whose name matches another key
+  //    medicine on the page is a reading of that one (for example a duplicate), never of a skipped neighbour.
   const rest = [];
   produced.forEach((p, pi) => {
     if (pairedP.has(pi)) return;
+    const namesAnother = (ki) => expected.some((other, oi) => oi !== ki && other.kind === 'medicine'
+      && other.page === p.page && pairScore(p, other) >= MATCH_AT.medicine);
     expected.forEach((k, ki) => {
       if (pairedK.has(ki) || p.kind !== k.kind || p.page !== k.page) return;
       const score = pairScore(p, k);
       if (score >= MATCH_AT[k.kind]) rest.push({ p: pi, k: ki, score });
-      else if (k.kind === 'medicine' && boxOverlap(p.box, keyBox(key, k)) >= 0.5) rest.push({ p: pi, k: ki, score: 0.5 });
+      else if (k.kind === 'medicine' && boxOverlap(p.box, keyBox(key, k)) >= 0.5 && !namesAnother(ki)) {
+        rest.push({ p: pi, k: ki, score: 0.5 });
+      }
     });
   });
   const pairs = [...exactPairs.map((pair) => ({ ...pair, exact: true })), ...pairUp(rest).map((pair) => ({ ...pair, exact: false }))];
@@ -210,10 +234,11 @@ export function scoreDocument(key, payload) {
     if (k.kind !== 'medicine') return;
     medicines.expected += 1;
     let credited = false;
-    if (pair?.exact) {
+    const statusAgrees = Boolean(pair?.exact) && medicineStatusAgrees(produced[pair.p], k);
+    if (pair?.exact && !statusAgrees) medicines.statusDisagreements += 1;
+    if (statusAgrees) {
       medicines.exact += 1;
       credited = true;
-      if (produced[pair.p].fields.status !== k.fields.status) medicines.statusDisagreements += 1;
     } else if (pair && produced[pair.p].confidence === 'check_carefully') {
       medicines.caughtByCheck += 1;
       medicines.caughtIds.push(k.id);
@@ -227,7 +252,7 @@ export function scoreDocument(key, payload) {
       const counts = (medicines.traps[trap] ??= { expected: 0, credited: 0, exact: 0 });
       counts.expected += 1;
       if (credited) counts.credited += 1;
-      if (pair?.exact) counts.exact += 1;
+      if (statusAgrees) counts.exact += 1;
     }
   });
 
@@ -236,13 +261,15 @@ export function scoreDocument(key, payload) {
   for (const item of produced) {
     const paper = key.text[item.page - 1]?.lines.map((line) => line.text) ?? [];
     const ocr = payload?.pages?.find((page) => page.page === item.page)?.lines.map((line) => line.text) ?? [];
-    const missing = statedValues(item).filter(([name, value]) => !supported(name, value, paper)).map(([name]) => name);
+    const medicineName = item.kind === 'medicine' ? item.fields?.name ?? '' : '';
+    const missing = statedValues(item).filter(([name, value]) => !supported(name, value, paper, medicineName))
+      .map(([name]) => name);
     if (missing.length > 0) {
       unsupported.unsupported += 1;
       unsupported.ids.push(item.id);
       for (const name of missing) unsupported.byValue[name] = (unsupported.byValue[name] ?? 0) + 1;
     }
-    if (statedValues(item).some(([name, value]) => !supported(name, value, ocr))) unsupported.unsupportedVsOcr += 1;
+    if (statedValues(item).some(([name, value]) => !supported(name, value, ocr, medicineName))) unsupported.unsupportedVsOcr += 1;
   }
 
   const want = key.identity;
@@ -344,27 +371,33 @@ export function scoreRun(keys, payloads) {
   };
 }
 
+const thresholdsMet = (report) => report.thresholdsMet ?? report.pass;
+const verdict = (report) => (report.pass ? 'PASS' : thresholdsMet(report) ? 'NOT A LAUNCH RESULT' : 'FAIL');
+
 const pct = (value) => (value === null || value === undefined ? 'n/a' : `${(value * 100).toFixed(1)}%`);
 
 export function renderMarkdown(report, { resultsDir = '' } = {}) {
   const m = report.launchMetrics;
   const lines = [];
   lines.push('# Paper reading launch check: result', '');
-  lines.push(`**${report.pass ? 'PASS' : 'FAIL'}**${resultsDir ? ` (results: \`${resultsDir}\`)` : ''}`, '');
+  lines.push(`**${verdict(report)}**${resultsDir ? ` (results: \`${resultsDir}\`)` : ''}`, '');
   lines.push('All documents in this check are fictional. This summary names documents by number only.', '');
   if (report.partial) {
-    lines.push(`**Partial run: only ${report.documents.total} documents were scored. A launch decision needs the full set.**`, '');
+    lines.push(`**Partial run: only ${report.documents.total} documents were scored. This is not a launch result; a launch decision needs the full set.**`, '');
+  }
+  if (report.mode && report.mode !== 'real') {
+    lines.push(`**${report.mode === 'fake' ? 'Fake mode: these results come from the offline stand-ins, not from Textract and Claude' : 'These results have no real run records'}. This is not a launch result.**`, '');
   }
   lines.push('## The two launch measures', '');
   lines.push('| Measure | Result | Needed | Pass? |', '|---|---|---|---|');
   lines.push(`| Medicines right after checking | ${pct(m.medicineAccuracyAfterChecking.value)} (${m.medicineAccuracyAfterChecking.exact + m.medicineAccuracyAfterChecking.caughtByCheck} of ${m.medicineAccuracyAfterChecking.expected}) | at least 99% | ${m.medicineAccuracyAfterChecking.pass ? 'yes' : 'no'} |`);
   lines.push(`| Items not on the paper (unsupported) | ${pct(m.unsupportedItems.value)} (${m.unsupportedItems.unsupported} of ${m.unsupportedItems.produced}) | under 1% | ${m.unsupportedItems.pass ? 'yes' : 'no'} |`);
   lines.push('');
-  lines.push(`- ${m.medicineAccuracyAfterChecking.exact} medicines were read exactly (name, strength and how often).`);
+  lines.push(`- ${m.medicineAccuracyAfterChecking.exact} medicines were read exactly (name, strength, how often and whether it is still taken).`);
   lines.push(`- ${m.medicineAccuracyAfterChecking.caughtByCheck} more were read wrongly but marked "check carefully", so the person checking would catch them.`);
   lines.push(`- ${m.medicineAccuracyAfterChecking.missed} medicines were missed or read wrongly without a warning. These are the ones that matter most.`);
   lines.push(`- Strict score (exactly right, no credit for warnings): ${pct(m.medicineAccuracyStrict.value)}.`);
-  lines.push(`- Medicines read exactly but with a different status (for example "stopped" read as current): ${report.medicineStatusDisagreements}.`);
+  lines.push(`- Medicines with the right name, strength and how often but a different status (for example "stopped" read as current): ${report.medicineStatusDisagreements}. These are not counted as exact; unless marked "check carefully" they are missed.`);
   lines.push(`- Unsupported items compared with the text-reading step alone (the AI adding things the scan did not say): ${m.unsupportedItems.unsupportedVsOcrText}.`);
   lines.push('');
   if (Object.keys(report.traps).length > 0) {
@@ -410,7 +443,9 @@ export function renderMarkdown(report, { resultsDir = '' } = {}) {
   lines.push('## What this means', '');
   lines.push(report.pass
     ? 'Both launch measures are met on this set of fictional documents.'
-    : 'At least one launch measure is not met. Paper reading should not be switched on for patients until a re-run passes.');
+    : thresholdsMet(report)
+      ? 'Both launch measures are met on the documents scored here, but this is not a launch result: a launch decision needs a full real run of every document.'
+      : 'At least one launch measure is not met. Paper reading should not be switched on for patients until a re-run passes.');
   lines.push('');
   return lines.join('\n');
 }
@@ -422,6 +457,21 @@ export function loadPayloads(resultsDir, keys) {
     if (existsSync(file)) payloads.set(key.docId, JSON.parse(readFileSync(file, 'utf8')));
   }
   return payloads;
+}
+
+/** How many scored payloads come from each run mode: 'real', 'fake', or 'none' (no done run record). */
+export function runModes(resultsDir, keys) {
+  const modes = {};
+  for (const key of keys) {
+    if (!existsSync(path.join(resultsDir, `${key.docId}.json`))) continue;
+    let mode = 'none';
+    try {
+      const record = JSON.parse(readFileSync(path.join(resultsDir, `${key.docId}.run.json`), 'utf8'));
+      if (record.status === 'done' && ['real', 'fake'].includes(record.mode)) mode = record.mode;
+    } catch { mode = 'none'; }
+    modes[mode] = (modes[mode] ?? 0) + 1;
+  }
+  return modes;
 }
 
 export function main(argv = process.argv.slice(2), log = (line) => process.stdout.write(line + '\n')) {
@@ -442,20 +492,33 @@ export function main(argv = process.argv.slice(2), log = (line) => process.stdou
   const keys = args.partial
     ? kit.keys.filter((key) => existsSync(path.join(resultsDir, `${key.docId}.run.json`))) : kit.keys;
   if (keys.length === 0) { log('cannot score: no run records in the results directory'); return 2; }
+  const modes = runModes(resultsDir, keys);
+  if (Object.keys(modes).length > 1) {
+    log(`cannot score: the results directory mixes run modes (${Object.entries(modes).map(([mode, count]) =>
+      `${mode} ${count}`).join(', ')}); score fake and real runs from separate directories`);
+    return 2;
+  }
   const report = scoreRun(keys, loadPayloads(resultsDir, keys));
   report.seed = kit.manifest.seed;
   report.partial = Boolean(args.partial);
+  report.mode = Object.keys(modes)[0] ?? 'none';
+  report.thresholdsMet = report.pass;
+  report.launchResult = !report.partial && report.mode === 'real';
+  report.pass = report.thresholdsMet && report.launchResult;
   const jsonFile = path.resolve(args['out-json'] ?? path.join(resultsDir, 'score-report.json'));
   const mdFile = path.resolve(args['out-md'] ?? path.join(resultsDir, 'score-summary.md'));
   writeFileSync(jsonFile, JSON.stringify(report, null, 2) + '\n');
   writeFileSync(mdFile, renderMarkdown(report, { resultsDir: path.relative(process.cwd(), resultsDir) || '.' }));
   const m = report.launchMetrics;
-  log(`${report.pass ? 'PASS' : 'FAIL'}: medicines right after checking ${pct(m.medicineAccuracyAfterChecking.value)}`
+  const why = [report.partial ? `partial run, ${keys.length} of ${kit.keys.length} documents` : null,
+    report.mode === 'real' ? null : report.mode === 'fake' ? 'fake mode' : 'no real run records'].filter(Boolean);
+  log(`${verdict(report)}${!report.pass && report.thresholdsMet ? ` (${why.join('; ')}; thresholds met on what was scored)` : ''}`
+    + `: medicines right after checking ${pct(m.medicineAccuracyAfterChecking.value)}`
     + ` (needs >= 99%), strict ${pct(m.medicineAccuracyStrict.value)}, unsupported items ${pct(m.unsupportedItems.value)}`
     + ` (needs < 1%).`);
   log(`report: ${jsonFile}`);
   log(`summary: ${mdFile}`);
-  return report.pass ? 0 : 1;
+  return report.pass ? 0 : report.thresholdsMet ? 3 : 1;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {

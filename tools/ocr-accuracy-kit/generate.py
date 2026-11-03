@@ -468,6 +468,7 @@ def negations(doc: Doc, page: Page, cond: str):
     past = r.choice(['PUD', 'TB', 'Asthma'])
     if r.random() < 0.2 and past.lower() not in cond:
         write_diagnosis(doc, page, past, 'history', trap='negation')
+        doc.traps.append('negation')
 
 
 def clinic_visit(doc: Doc, page: Page, visit: int):
@@ -666,6 +667,7 @@ def referral_letter(doc: Doc, page: Page):
         else:
             page.add('Additional history:', 'heading')
             write_diagnosis(doc, page, r.choice(['HTN', 'Asthma', 'PUD', 'SCD']), 'history', trap='negation')
+            doc.traps.append('negation')
             if r.random() < 0.5:
                 write_diagnosis(doc, page, r.choice(['DM', 'HTN']), 'family_history', trap='negation')
             if r.random() < 0.5:

@@ -1,7 +1,7 @@
 // Scorer correctness on small hand-made cases (fictional text only).
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { renderMarkdown, scoreDocument, scoreRun } from '../score.mjs';
+import { renderMarkdown, scoreDocument, scoreRun, supported } from '../score.mjs';
 import { normFrequency, normName, normStrength, onPage } from '../lib/normalise.mjs';
 
 const box = { left: 0.1, top: 0.2, width: 0.5, height: 0.02 };
@@ -161,4 +161,54 @@ test('99% passes and just under fails; the markdown names no document text', () 
   assert.match(markdown, /FAIL/);
   assert.match(markdown, /T001/);
   for (const line of LINES) assert.equal(markdown.includes(line), false, 'no document text in the summary');
+});
+
+test('a stopped medicine read as current is not exact: missed when clear, caught only when flagged', () => {
+  const stopped = med('T001-i01', 'Tab Amlodipine 5 mg od', 'Amlodipine', '5 mg', 'od', 3,
+    { trap: 'negation', fields: { name: 'Amlodipine', strength: '5 mg', form: 'Tab', route: null, frequency: 'od',
+      duration: null, status: 'stopped' } });
+  const items = KEY_ITEMS.slice(1);
+  const asCurrent = (confidence) => out('medicine', 'Tab Amlodipine 5 mg od', { name: 'Amlodipine', strength: '5mg',
+    form: 'Tab', route: null, frequency: 'od', duration: null, status: 'current' }, { confidence });
+  const clear = scoreDocument(key([stopped, ...items]), payload([asCurrent('clear'), ...perfect().slice(1)]));
+  assert.equal(clear.medicines.exact, 2);
+  assert.equal(clear.medicines.statusDisagreements, 1);
+  assert.deepEqual(clear.medicines.missedIds, ['T001-i01']);
+  assert.deepEqual(clear.medicines.traps.negation, { expected: 1, credited: 0, exact: 0 });
+  const flagged = scoreDocument(key([stopped, ...items]), payload([asCurrent('check_carefully'), ...perfect().slice(1)]));
+  assert.deepEqual(flagged.medicines.caughtIds, ['T001-i01']);
+  assert.deepEqual(flagged.medicines.traps.negation, { expected: 1, credited: 1, exact: 0 });
+  // "new" and "current" both mean the medicine is taken: not a disagreement.
+  const items2 = perfect();
+  items2[0].fields.status = 'current';
+  assert.equal(scoreDocument(key(KEY_ITEMS), payload(items2)).medicines.exact, 3);
+});
+
+test('a leading-dot strength is a different dose: ".5 mg" is never "5 mg"', () => {
+  assert.notEqual(normStrength('.5 mg'), normStrength('5 mg'));
+  assert.equal(normStrength('.5 mg'), normStrength('0.5mg'));
+  assert.equal(onPage('Amlodipine .5 mg', LINES), false);
+  const items = perfect();
+  items[0] = outMed('Tab Amlodipine 5 mg od', 'Amlodipine', '.5 mg', 'od');
+  const doc = scoreDocument(key(KEY_ITEMS), payload(items));
+  assert.deepEqual(doc.medicines.missedIds, ['T001-i01']);
+  assert.equal(doc.unsupported.byValue.strength, 1);
+});
+
+test('a flagged duplicate of one medicine does not cover a skipped neighbour on the same line', () => {
+  const items = perfect();
+  items[0] = outMed('Losartan 999mg od', 'Losartan', '999mg', 'od', { confidence: 'check_carefully' });
+  const doc = scoreDocument(key(KEY_ITEMS), payload(items));
+  assert.deepEqual(doc.medicines.caughtIds, []);
+  assert.deepEqual(doc.medicines.missedIds, ['T001-i01']);
+});
+
+test('an invented "nocte" is not supported by the everyday word "on" elsewhere on the page', () => {
+  const lines = ['Seen on 3 Nov', 'Tab Amlodipine 5 mg od', 'Amitriptyline 25mg ON'];
+  assert.equal(supported('frequency', 'nocte', lines, 'Amlodipine'), false);
+  assert.equal(supported('frequency', 'at night', lines, 'Amlodipine'), false);
+  assert.equal(supported('frequency', 'on', lines, 'Amlodipine'), false);
+  assert.equal(supported('frequency', 'nocte', lines, ''), false);
+  assert.equal(supported('frequency', 'nocte', lines, 'Amitriptyline'), true, 'written ON after the medicine');
+  assert.equal(supported('frequency', 'daily', lines, 'Amlodipine'), true, 'daily for a written od');
 });

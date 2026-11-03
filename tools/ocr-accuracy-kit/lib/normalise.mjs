@@ -1,11 +1,17 @@
 // Normalisation used by the scorer. Documented in README.md ("How the score is worked out").
 
-/** Lower case, Unicode-compatible forms (µ -> μ etc.), one space between words, no surrounding punctuation. */
+/**
+ * Lower case, Unicode-compatible forms (µ -> μ etc.), one space between words, no surrounding punctuation.
+ * A leading dot before a digit is kept: ".5 mg" is half a milligram, not "5 mg".
+ */
 export function normText(value) {
   if (value === null || value === undefined) return '';
   return String(value).normalize('NFKC').toLowerCase().replace(/[µμ]/g, 'u')
-    .replace(/\s+/g, ' ').trim().replace(/^[\s.,;:()\-]+|[\s.,;:()\-]+$/g, '');
+    .replace(/\s+/g, ' ').trim().replace(/^(?:[\s,;:()\-]|\.(?!\d))+|[\s.,;:()\-]+$/g, '');
 }
+
+/** A number written with no digit before its decimal point (".5") as the same number with one ("0.5"). */
+const leadingZero = (text) => text.replace(/(?<![\da-zÀ-ɏ.])\.(?=\d)/g, '0.');
 
 const FORM_WORDS = new Set(['tab', 'tabs', 'tablet', 'tablets', 'cap', 'caps', 'capsule', 'capsules', 'inj', 'injection',
   'syr', 'syrup', 'susp', 'suspension', 'mist', 'inh', 'inhaler', 'iv', 'im', 'po', 'sc', 'cream', 'oint', 'supp']);
@@ -29,7 +35,7 @@ const UNIT_ALIASES = [
 
 /** A strength: normText, unit spellings unified, no space between a number and its unit ("5 mg" == "5mg"). */
 export function normStrength(value) {
-  let text = normText(value);
+  let text = leadingZero(normText(value));
   for (const [pattern, unit] of UNIT_ALIASES) text = text.replace(pattern, unit);
   return text.replace(/(\d)\s+(?=[a-z])/g, '$1').replace(/\s*\/\s*/g, '/').replace(/\s+/g, ' ');
 }
@@ -99,9 +105,12 @@ export function similarity(a, b) {
   return 1 - levenshtein(a, b) / Math.max(a.length, b.length);
 }
 
-/** Words and numbers: letters runs and number runs ("2.5", "80/480" -> "80", "480"), lower case. */
+/**
+ * Words and numbers: letters runs and number runs ("2.5", "80/480" -> "80", "480"), lower case. A number
+ * written ".5" is the token "0.5", never "5".
+ */
 export function tokens(value) {
-  return normText(value).match(/\d+(?:\.\d+)?|[a-zÀ-ɏ]+/g) ?? [];
+  return leadingZero(normText(value)).match(/\d+(?:\.\d+)?|[a-zÀ-ɏ]+/g) ?? [];
 }
 
 /** A word token from a value matches a token on the paper: numbers exactly, words allowing small OCR slips. */

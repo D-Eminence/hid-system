@@ -98,8 +98,9 @@ node run.mjs --i-confirm-fictional-documents --fake --docs generated/documents -
 node score.mjs --results results/fake
 ```
 
-`--fake` uses stand-ins for Textract and Claude built from the answer keys, so it must score 100% and print
-`PASS`. It proves the kit and the pipeline are wired up; it says nothing about real accuracy.
+`--fake` uses stand-ins for Textract and Claude built from the answer keys, so it must score 100% on both
+measures. It prints `NOT A LAUNCH RESULT (fake mode; thresholds met ...)` and exits with code 3, never 0: it
+proves the kit and the pipeline are wired up and says nothing about real accuracy.
 
 ### 4. Run it for real, in Demo Hospital's test setup
 
@@ -107,7 +108,10 @@ Use the test AWS account and a test Anthropic API key, never production ones. Yo
 
 - AWS credentials for the test account (the normal AWS credentials chain: environment, profile or role)
   with `textract:DetectDocumentText`, `textract:StartDocumentTextDetection`,
-  `textract:GetDocumentTextDetection`, and `s3:PutObject` / `s3:GetObjectVersion` on the test bucket;
+  `textract:GetDocumentTextDetection`, and `s3:PutObject` / `s3:GetObjectVersion` / `s3:DeleteObjectVersion`
+  on the test bucket (each uploaded PDF version is deleted again as soon as Textract has read it, also when
+  reading fails or the run is stopped; a version that could not be deleted shows as `s3-cleanup=failed:...`
+  on the document's line and in its `.run.json`);
 - an S3 test bucket **with versioning on** (the PDFs are read by Textract from S3 by exact version, as the
   worker does; PNGs are sent as bytes);
 - a test Anthropic API key, injected at run time and never written to a file in the repository.
@@ -135,7 +139,10 @@ status, item counts and token usage (never any text from the document). Each doc
 `results/real-1/D001.json` (the contract payload) and `D001.run.json` (pages, tokens, models, timing).
 
 If it stops (network, Ctrl-C, a failure), run the same command again: finished documents are skipped and only
-the rest are read. A document that failed is retried. `--limit 10` or `--only D001,D007` runs a few
+the rest are read. A document that failed is retried (it is uploaded and read by Textract again, which is
+paid for again). A finished result is only reused by a run with the same mode (fake or real), models, text
+reading features and facility; if the output directory holds results from any other run, the runner refuses
+and asks for a new `--out` directory, so fake or differently made results are never mixed into a real run. `--limit 10` or `--only D001,D007` runs a few
 documents first; `--facility-id` sets the facility used for the AI switch (default: the first id in
 `OCR_AI_FACILITY_IDS`, otherwise a fixed test id).
 
@@ -148,7 +155,10 @@ node score.mjs --results results/real-1
 This writes `results/real-1/score-summary.md` (plain English: read this one) and
 `results/real-1/score-report.json` (every number), prints `PASS` or `FAIL`, and exits with code 0 on pass
 and 1 on fail. Documents without a result count as missed, so a launch decision always needs all 200; use
-`--partial` only to look at a few documents.
+`--partial` only to look at a few documents. Only a full, real run can `PASS`: a `--partial` run or a fake
+run whose numbers meet both thresholds prints `NOT A LAUNCH RESULT` and exits with code 3 (the report has
+`pass: false`, `thresholdsMet: true`). A results directory that mixes fake and real records is refused
+(code 2).
 
 ## What pass means
 
@@ -171,11 +181,14 @@ without a warning, and that the reading almost never adds anything that is not o
 For each medicine in the answer key, the scorer looks for one the pipeline produced **on the same page**:
 
 1. **Exact:** the same name, strength and frequency after normalisation (below). Exact pairs are made first,
-   one to one.
+   one to one. The pair only counts as exact when the status also says the same thing: taking it (`new`
+   or `current`), not taking it (`stopped` or `past`), or `unknown`. A stopped medicine read as current is
+   therefore not exact; it is caught only if it is marked `check_carefully`, otherwise it is missed.
 2. Otherwise it pairs the key medicine with a remaining produced medicine on the same page whose name is
    at least 80% alike (1 minus the edit distance divided by the longer name), or, for a misread name, one
-   read from the same place on the page (its box covers at least half of the key line's box). Pairs are made
-   best first, one to one.
+   read from the same place on the page (its box covers at least half of the key line's box). A produced
+   medicine whose name matches another key medicine on the page (for example a duplicate of it) is never
+   paired by place with a medicine that was skipped. Pairs are made best first, one to one.
 
 ### Normalisation
 
@@ -184,7 +197,7 @@ For each medicine in the answer key, the scorer looks for one the pipeline produ
   `Artemether/Lumefantrine`).
 - A strength ignores the space between number and unit (`5mg` = `5 mg`) and unit spellings (`mcg` = `ug` =
   `µg`, `mg` = `mgs`, `g` = `gm`, `ml` = `mls`, `tab` = `tabs`). Units are not converted (`1g` is not
-  `1000mg`), and `5mg` is never `50mg`.
+  `1000mg`), and `5mg` is never `50mg`. A leading decimal point is kept: `.5 mg` is `0.5 mg`, never `5 mg`.
 - A frequency is mapped to one code; dots and spaces inside an abbreviation are ignored (`b.d.` = `bd`):
 
 | Code | Counts as the same |
@@ -203,8 +216,8 @@ For each medicine in the answer key, the scorer looks for one the pipeline produ
 ### (a) Medicines right after checking
 
 > The share of medicines in the answer keys for which the pipeline produced **either** an exact match
-> (name + strength + frequency, normalised) **or** a paired medicine marked `check_carefully`, so that the
-> person checking is warned and would catch the mistake.
+> (name + strength + frequency, normalised, with the same status) **or** a paired medicine marked
+> `check_carefully`, so that the person checking is warned and would catch the mistake.
 
 A medicine counts as **missed** when nothing was paired with it, or the paired medicine is wrong and marked
 `clear`. A page flag alone (for example `possible_missed_item`) does not count. A document with no result
@@ -212,8 +225,8 @@ counts every one of its medicines as missed.
 
 **Strict** variant (reported, not a launch threshold): the share read exactly, with no credit for a warning.
 
-Also reported: medicines read exactly but with another status (for example "stopped" read as current),
-and the score on each trap.
+Also reported: medicines with the right name, strength and frequency but another status (for example
+"stopped" read as current; these are not counted as exact), and the score on each trap.
 
 ### (b) Unsupported items
 
@@ -226,7 +239,9 @@ and unit; note text), its date and its prescriber. A value is **on the paper** w
 are found, in order, within three consecutive lines of that page. Numbers must match exactly; words may
 differ by one letter (two for words of 8 letters or more), so a small reading slip such as `Amlodipme` is
 not counted, while `Hydralazine` for a written `Hydroxyzine`, or `50` for a written `5`, is. A frequency
-also counts as on the paper when another spelling of the same code is (`daily` for a written `od`). Choices
+also counts as on the paper when another spelling of the same code is (`daily` for a written `od`); a spelling
+that is also an everyday word (`on`, `now`) only counts on the same line as the medicine's name, after it,
+so an invented `nocte` is not supported by "seen on 3 Nov". Choices
 such as status, vital measure and allergy severity are not text and are not checked here.
 
 The report also gives the same count against the text-reading step's own lines, which separates "the AI

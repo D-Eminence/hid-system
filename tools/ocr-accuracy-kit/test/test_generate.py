@@ -104,6 +104,11 @@ class GeneratorTest(unittest.TestCase):
             self.assertIn(key['identity']['nameAsWritten'].split(',')[0].split()[-1].title(),
                           [s.title() for s in generate.SURNAMES] + [s.upper().title() for s in generate.SURNAMES])
 
+    def test_document_traps_list_every_trap_its_items_carry(self):
+        for key in self.committed_keys:
+            item_traps = {item['trap'].split(':')[0] for item in key['items'] if item.get('trap')}
+            self.assertTrue(item_traps <= set(key['traps']), f"{key['docId']}: {sorted(item_traps)} vs {key['traps']}")
+
     def test_every_document_is_independent_of_the_count(self):
         key_a, name_a, data_a = generate.build_document(20261103, 5)
         key_b, name_b, data_b = generate.build_document(20261103, 5)

@@ -89,17 +89,36 @@ function safeCode(error) {
   return 'UNEXPECTED';
 }
 
-/** Uploads a PDF/TIFF to the versioned test bucket and reads it back by exact version, as the worker does. */
-async function exactS3Document(context, key, document, signal) {
+/**
+ * Uploads a PDF/TIFF to the versioned test bucket, reads it back by exact version (as the worker does), runs
+ * use(verified), and then always deletes that object version again, whether use succeeded or not, so no
+ * upload is left behind in the bucket. Returns use's result, the version id and how the clean-up went.
+ */
+export async function withUploadedDocument(context, key, document, signal, use) {
   const { worker, config, s3, bucket, prefix } = context;
   const objectKey = `${prefix}${key.file}`;
   const put = await s3.send(new worker.s3Sdk.PutObjectCommand({ Bucket: bucket, Key: objectKey,
     Body: document.bytes, ContentType: key.mediaType, ChecksumAlgorithm: 'SHA256' }), { abortSignal: signal });
-  if (!put.VersionId) throw new KitError('S3_BUCKET_NOT_VERSIONED', 'the test bucket must have versioning on');
-  const reader = new worker.s3reader.S3ExactDocumentReader(config, s3);
-  const verified = await reader.readExact({ storageBucket: bucket, storageKey: objectKey, objectVersionId: put.VersionId,
-    sizeBytes: document.bytes.byteLength, sourceSha256Hex: document.sha256Hex, mediaType: key.mediaType }, signal);
-  return { verified, versionId: put.VersionId };
+  let cleanup = 'deleted';
+  const remove = async () => {
+    // Not tied to the run's abort signal: a stopped run still removes what it uploaded.
+    try {
+      await s3.send(new worker.s3Sdk.DeleteObjectCommand({ Bucket: bucket, Key: objectKey,
+        ...(put.VersionId ? { VersionId: put.VersionId } : {}) }));
+    } catch (error) { cleanup = `failed:${safeCode(error)}`; }
+  };
+  let result;
+  try {
+    if (!put.VersionId) throw new KitError('S3_BUCKET_NOT_VERSIONED', 'the test bucket must have versioning on');
+    const reader = new worker.s3reader.S3ExactDocumentReader(config, s3);
+    const verified = await reader.readExact({ storageBucket: bucket, storageKey: objectKey,
+      objectVersionId: put.VersionId, sizeBytes: document.bytes.byteLength, sourceSha256Hex: document.sha256Hex,
+      mediaType: key.mediaType }, signal);
+    result = await use(verified);
+  } finally {
+    await remove();
+  }
+  return { result, versionId: put.VersionId, cleanup };
 }
 
 /** One document through text reading and the AI step. Returns the payload and a text-free run record. */
@@ -109,25 +128,28 @@ export async function processDocument(context, key, signal) {
   const document = readKitDocument(docsDir, key, manifest);
   const provider = new worker.textract.TextractOcrProvider(config);
   let pageClient;
-  let verified;
+  let text;
   let s3VersionId = null;
+  let s3Cleanup = null;
   if (fake) {
     provider.client = new FakeTextractClient(key, worker.textractSdk);
     pageClient = new CountingPageClient(new FakePageModelClient(key));
-    verified = { bytes: document.bytes, bucket: 'fake-kit-bucket', key: key.file, versionId: 'fake-version',
-      mediaType: key.mediaType, sha256Hex: document.sha256Hex };
+    text = await provider.extract({ bytes: document.bytes, bucket: 'fake-kit-bucket', key: key.file,
+      versionId: 'fake-version', mediaType: key.mediaType, sha256Hex: document.sha256Hex }, signal);
   } else {
     pageClient = new CountingPageClient(context.claudeClient);
     if (key.mediaType === 'application/pdf' || key.mediaType === 'image/tiff') {
-      const exact = await exactS3Document(context, key, document, signal);
-      verified = exact.verified;
-      s3VersionId = exact.versionId;
+      // Textract reads the S3 object by version, so it is deleted only once text reading has finished.
+      const uploaded = await withUploadedDocument(context, key, document, signal,
+        (verified) => provider.extract(verified, signal));
+      text = uploaded.result;
+      s3VersionId = uploaded.versionId;
+      s3Cleanup = uploaded.cleanup;
     } else {
-      verified = { bytes: document.bytes, bucket: 'local-bytes', key: key.file, versionId: 'local-bytes',
-        mediaType: key.mediaType, sha256Hex: document.sha256Hex };
+      text = await provider.extract({ bytes: document.bytes, bucket: 'local-bytes', key: key.file,
+        versionId: 'local-bytes', mediaType: key.mediaType, sha256Hex: document.sha256Hex }, signal);
     }
   }
-  const text = await provider.extract(verified, signal);
   const reading = new worker.reader.PaperReadingService(config, pageClient);
   const outcome = await reading.read({ facilityId, sourceSha256Hex: document.sha256Hex, pages: text.pages }, signal);
   const checked = worker.contract.paperReadingPayloadSchema.safeParse(outcome.payload);
@@ -138,11 +160,12 @@ export async function processDocument(context, key, signal) {
   return {
     payload: outcome.payload,
     record: {
-      docId: key.docId, file: key.file, status: 'done', mode: fake ? 'fake' : 'real',
+      docId: key.docId, file: key.file, status: 'done', mode: fake ? 'fake' : 'real', settings: context.settings,
       pages: text.pageCount, lines: text.pages.reduce((sum, page) => sum + page.lines.length, 0),
       textract: { providerModel: text.providerModel, operation: text.provenance.operation,
         features: text.provenance.textractFeatures },
       s3VersionId,
+      s3Cleanup,
       reading: { status: summary.status, firstPassModel: summary.firstPassModel, rereadModel: summary.rereadModel,
         requests: summary.requests, refusals: summary.refusals, rereadPages: summary.rereadPages,
         rereadFailedPages: summary.rereadFailedPages, itemCount: summary.itemCount,
@@ -161,10 +184,33 @@ function writeJson(file, value) {
   renameSync(temporary, file);
 }
 
-export function isDone(outDir, docId) {
-  const recordFile = path.join(outDir, `${docId}.run.json`);
-  if (!existsSync(recordFile) || !existsSync(path.join(outDir, `${docId}.json`))) return false;
-  try { return JSON.parse(readFileSync(recordFile, 'utf8')).status === 'done'; } catch { return false; }
+/** What a result depends on besides the document: a finished result is reused only under the same settings. */
+export function runSettings(config, { fake, facilityId }) {
+  return { mode: fake ? 'fake' : 'real', textractFeatures: config.OCR_TEXTRACT_FEATURES ?? 'text',
+    firstPassModel: config.OCR_AI_FIRST_PASS_MODEL ?? null, rereadModel: config.OCR_AI_REREAD_MODEL ?? null,
+    facilityId };
+}
+
+const sameSettings = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+function readRecord(outDir, docId) {
+  try { return JSON.parse(readFileSync(path.join(outDir, `${docId}.run.json`), 'utf8')); } catch { return null; }
+}
+
+/** Finished, with a payload, and made in the same mode with the same settings as this run. */
+export function isDone(outDir, docId, settings) {
+  if (!existsSync(path.join(outDir, `${docId}.json`))) return false;
+  const record = readRecord(outDir, docId);
+  return record?.status === 'done' && record.mode === settings.mode && sameSettings(record.settings, settings);
+}
+
+/** Documents whose finished result in outDir was made in another mode or with other settings. */
+export function conflictingResults(outDir, keys, settings) {
+  return keys.filter((key) => {
+    if (!existsSync(path.join(outDir, `${key.docId}.json`))) return false;
+    const record = readRecord(outDir, key.docId);
+    return !(record && record.mode === settings.mode && sameSettings(record.settings, settings));
+  }).map((key) => key.docId);
 }
 
 async function pool(items, concurrency, task) {
@@ -236,8 +282,15 @@ export async function main(argv = process.argv.slice(2), log = (line) => process
   }
   const docsDir = path.resolve(args.docs ?? path.join(KIT_DIR, 'generated', 'documents'));
   const outDir = path.resolve(args.out ?? path.join(KIT_DIR, 'results', fake ? 'fake' : 'real'));
+  const settings = runSettings(config, { fake, facilityId });
+  const conflicts = conflictingResults(outDir, kit.keys, settings);
+  if (conflicts.length > 0) {
+    log(`refused: ${outDir} already holds ${conflicts.length} results from a different run (another mode, models,`
+      + ` text reading features or facility, e.g. ${conflicts.slice(0, 3).join(', ')}). Use a new --out directory.`);
+    return 2;
+  }
   mkdirSync(outDir, { recursive: true });
-  const context = { worker, config, fake, docsDir, manifest: kit.manifest, facilityId,
+  const context = { worker, config, fake, docsDir, manifest: kit.manifest, facilityId, settings,
     bucket: args['s3-bucket'], prefix: args['s3-prefix'] ?? `ocr-accuracy-kit/seed-${kit.manifest.seed}/` };
   if (!fake) {
     context.claudeClient = new worker.claude.ClaudePageClient(config);
@@ -250,7 +303,7 @@ export async function main(argv = process.argv.slice(2), log = (line) => process
     }
   }
   const concurrency = Math.max(1, Math.min(16, Number(args.concurrency ?? (fake ? 4 : 2))));
-  const todo = keys.filter((key) => !isDone(outDir, key.docId));
+  const todo = keys.filter((key) => !isDone(outDir, key.docId, settings));
   log(`${keys.length - todo.length} already done (skipped); ${todo.length} to read, ${concurrency} at a time.`);
   const controller = new AbortController();
   const stop = () => { log('stopping: finishing nothing new; re-run to resume.'); controller.abort(new Error('stopped')); };
@@ -268,12 +321,13 @@ export async function main(argv = process.argv.slice(2), log = (line) => process
         `${model} in=${u.inputTokens} out=${u.outputTokens} cacheRead=${u.cacheReadInputTokens}`).join('; ');
       log(`[${finished + failed}/${todo.length}] ${key.docId} pages=${record.pages} status=${record.reading.status}`
         + ` items=${record.reading.itemCount} dropped=${record.reading.droppedUngrounded}`
-        + ` reread=${record.reading.rereadPages.length}${tokens ? ` ${tokens}` : ''}`);
+        + ` reread=${record.reading.rereadPages.length}${tokens ? ` ${tokens}` : ''}`
+        + (record.s3Cleanup && record.s3Cleanup !== 'deleted' ? ` s3-cleanup=${record.s3Cleanup}` : ''));
     } catch (error) {
       failed += 1;
       const code = safeCode(error);
       writeJson(path.join(outDir, `${key.docId}.run.json`), { docId: key.docId, file: key.file, status: 'failed',
-        mode: fake ? 'fake' : 'real', code, retryable: error?.retryable ?? null });
+        mode: fake ? 'fake' : 'real', settings, code, retryable: error?.retryable ?? null });
       log(`[${finished + failed}/${todo.length}] ${key.docId} FAILED code=${code} (re-run to retry)`);
     }
   });

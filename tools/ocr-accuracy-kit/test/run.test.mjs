@@ -4,11 +4,12 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { after, before, test } from 'node:test';
 import { DEFAULT_WORKER_DIR, KIT_DIR, loadKeys, sha256Hex } from '../lib/kit.mjs';
-import { main as run } from '../run.mjs';
+import { conflictingResults, isDone, main as run, withUploadedDocument } from '../run.mjs';
 import { main as score } from '../score.mjs';
 
 const work = mkdtempSync(path.join(tmpdir(), 'ocr-kit-e2e-'));
@@ -89,10 +90,16 @@ test('--fake end to end on 10 documents scores 100% and passes; the run is resum
     second.log), 0);
   assert.match(second.lines.join('\n'), /10 already done \(skipped\); 0 to read/);
 
+  // Thresholds are met, but a partial (and fake) run is never a launch pass: exit 3, not 0.
   const scored = capture();
-  assert.equal(score(['--results', out, '--partial'], scored.log), 0);
+  assert.equal(score(['--results', out, '--partial'], scored.log), 3);
+  assert.match(scored.lines[0], /^NOT A LAUNCH RESULT \(partial run, 10 of 200 documents; fake mode;/);
+  assert.equal(scored.lines.some((line) => /^PASS/.test(line)), false);
   const report = JSON.parse(readFileSync(path.join(out, 'score-report.json'), 'utf8'));
-  assert.equal(report.pass, true);
+  assert.equal(report.pass, false);
+  assert.equal(report.thresholdsMet, true);
+  assert.equal(report.partial, true);
+  assert.equal(report.mode, 'fake');
   assert.equal(report.launchMetrics.medicineAccuracyAfterChecking.value, 1);
   assert.equal(report.launchMetrics.medicineAccuracyStrict.value, 1);
   assert.equal(report.launchMetrics.unsupportedItems.value, 0);
@@ -102,6 +109,9 @@ test('--fake end to end on 10 documents scores 100% and passes; the run is resum
   noDocumentText(scored.lines);
   const summary = readFileSync(path.join(out, 'score-summary.md'), 'utf8');
   noDocumentText([summary]);
+  assert.match(summary, /\*\*NOT A LAUNCH RESULT\*\*/);
+  assert.match(summary, /Partial run/);
+  assert.match(summary, /Fake mode/);
 
   // Without --partial the other 190 documents count as missed, so the launch check fails.
   assert.equal(score(['--results', out], capture().log), 1);
@@ -134,4 +144,64 @@ test('a file that is not the kit\'s generated document is refused (sha256 not in
   assert.equal(record.code, 'DOCUMENT_NOT_IN_MANIFEST');
   assert.equal(existsSync(path.join(out, `${first10[0].docId}.json`)), false);
   assert.match(lines.join('\n'), /FAILED code=DOCUMENT_NOT_IN_MANIFEST/);
+});
+
+test('a resumed run never reuses results made in another mode or with other settings', async () => {
+  const out = path.join(work, 'fake');
+  const fakeSettings = JSON.parse(readFileSync(path.join(out, `${first10[0].docId}.run.json`), 'utf8')).settings;
+  assert.equal(fakeSettings.mode, 'fake');
+  const realSettings = { ...fakeSettings, mode: 'real' };
+  assert.equal(isDone(out, first10[0].docId, fakeSettings), true);
+  assert.equal(isDone(out, first10[0].docId, realSettings), false);
+  assert.equal(conflictingResults(out, first10, realSettings).length, 10);
+  assert.equal(isDone(out, first10[0].docId, { ...fakeSettings, firstPassModel: 'claude-other' }), false);
+
+  // The same fake run with other text reading features is refused rather than mixed into this directory.
+  const before = process.env.OCR_TEXTRACT_FEATURES;
+  process.env.OCR_TEXTRACT_FEATURES = 'layout';
+  try {
+    const { lines, log } = capture();
+    assert.equal(await run(['--i-confirm-fictional-documents', '--fake', '--docs', docs, '--out', out, '--limit', '10'],
+      log), 2);
+    assert.match(lines.at(-1), /refused: .* already holds 10 results from a different run/);
+  } finally {
+    if (before === undefined) delete process.env.OCR_TEXTRACT_FEATURES; else process.env.OCR_TEXTRACT_FEATURES = before;
+  }
+});
+
+test('the scorer refuses a results directory that mixes fake and real records', () => {
+  const mixed = path.join(work, 'mixed');
+  mkdirSync(mixed, { recursive: true });
+  for (const key of first10.slice(0, 2)) {
+    copyFileSync(path.join(work, 'fake', `${key.docId}.json`), path.join(mixed, `${key.docId}.json`));
+    copyFileSync(path.join(work, 'fake', `${key.docId}.run.json`), path.join(mixed, `${key.docId}.run.json`));
+  }
+  const recordFile = path.join(mixed, `${first10[1].docId}.run.json`);
+  writeFileSync(recordFile, JSON.stringify({ ...JSON.parse(readFileSync(recordFile, 'utf8')), mode: 'real' }));
+  const { lines, log } = capture();
+  assert.equal(score(['--results', mixed, '--partial'], log), 2);
+  assert.match(lines.at(-1), /mixes run modes/);
+});
+
+test('an uploaded PDF version is deleted from the test bucket after reading, and after a failure', async () => {
+  const sdk = createRequire(path.join(DEFAULT_WORKER_DIR, 'package.json'))('@aws-sdk/client-s3');
+  const sent = [];
+  const s3 = { send: async (command) => { sent.push([command.constructor.name, command.input]);
+    return command instanceof sdk.PutObjectCommand ? { VersionId: 'v-1' } : {}; } };
+  class Reader { async readExact(job) { return { bucket: job.storageBucket, key: job.storageKey, versionId: job.objectVersionId }; } }
+  const context = { worker: { s3Sdk: sdk, s3reader: { S3ExactDocumentReader: Reader } }, config: {}, s3,
+    bucket: 'test-bucket', prefix: 'kit/' };
+  const key = { file: 'D999-test.pdf', mediaType: 'application/pdf' };
+  const document = { bytes: Buffer.from('%PDF fictional'), sha256Hex: 'x' };
+  const done = await withUploadedDocument(context, key, document, new AbortController().signal, async (verified) => {
+    assert.equal(sent.some(([name]) => name === 'DeleteObjectCommand'), false, 'not deleted before reading');
+    return verified.versionId;
+  });
+  assert.deepEqual(done, { result: 'v-1', versionId: 'v-1', cleanup: 'deleted' });
+  assert.deepEqual(sent.at(-1), ['DeleteObjectCommand', { Bucket: 'test-bucket', Key: 'kit/D999-test.pdf', VersionId: 'v-1' }]);
+  sent.length = 0;
+  await assert.rejects(withUploadedDocument(context, key, document, new AbortController().signal, async () => {
+    throw new Error('textract failed');
+  }), /textract failed/);
+  assert.deepEqual(sent.map(([name]) => name), ['PutObjectCommand', 'DeleteObjectCommand']);
 });
