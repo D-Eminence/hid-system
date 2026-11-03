@@ -40,6 +40,25 @@ resource "aws_iam_role_policy" "ehr_documents" {
 }
 
 # OCR document read and Textract permissions
+locals {
+  # Paper records are read with text detection: DetectDocumentText for single
+  # images, and the asynchronous text detection pair for multi-page PDFs.
+  ocr_textract_actions = [
+    "textract:AnalyzeDocument",
+    "textract:DetectDocumentText",
+    "textract:StartDocumentTextDetection",
+    "textract:GetDocumentTextDetection",
+  ]
+}
+
+output "ocr_textract_actions" {
+  description = "Textract actions in the ocr-worker task role policy (action names only)."
+  value = sort(flatten([
+    for statement in data.aws_iam_policy_document.ocr_documents.statement :
+    [for action in statement.actions : action if startswith(action, "textract:")]
+  ]))
+}
+
 data "aws_iam_policy_document" "ocr_documents" {
   statement {
     actions   = ["s3:ListBucket"]
@@ -59,7 +78,7 @@ data "aws_iam_policy_document" "ocr_documents" {
     }
   }
   statement {
-    actions   = ["textract:AnalyzeDocument", "textract:StartDocumentTextDetection", "textract:GetDocumentTextDetection"]
+    actions   = local.ocr_textract_actions
     resources = ["*"]
     condition {
       test     = "StringEquals"

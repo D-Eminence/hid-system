@@ -24,7 +24,7 @@ module "data" {
   database_instance_class      = local.profile.database_instance_class
   database_allocated_storage   = local.profile.database_allocated_storage
   database_max_storage         = local.profile.database_max_storage
-  database_multi_az            = local.profile.database_multi_az
+  database_multi_az            = local.database_multi_az
   database_deletion_protection = local.profile.database_deletion_protection
   database_backup_retention    = var.backup_retention_days
   security_log_retention_days  = var.security_log_retention_days
@@ -131,6 +131,7 @@ module "application" {
   anthropic_secret_json_key           = var.anthropic_secret_json_key
   anthropic_secret_kms_key_arn        = var.anthropic_secret_kms_key_arn
   ai_allow_anthropic_us_processing    = var.ai_allow_anthropic_us_processing
+  ocr_ai_global_processing_approved   = var.ocr_ai_global_processing_approved
   enable_support_bot                  = var.enable_support_bot
   support_bot_id                      = var.enable_support_bot ? module.support_bot[0].bot_id : ""
   support_bot_alias_id                = var.enable_support_bot ? module.support_bot[0].alias_id : ""

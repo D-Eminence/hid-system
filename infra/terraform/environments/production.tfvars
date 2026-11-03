@@ -221,6 +221,9 @@ anthropic_model_id = "claude-sonnet-4-6"
 ai_generation_provider = "anthropic"
 
 ai_allow_anthropic_us_processing = true
+# Paper records: Textract text, then the direct Claude API (global, not
+# Bedrock), as the owner decided for Migrate on 3 Nov 2026.
+ocr_ai_global_processing_approved = true
 
 # Existing owner-confirmed operations subscription.
 alert_email = "operations@healthidentitydirectory.com"
@@ -252,3 +255,8 @@ ecs_container_insights = "disabled"
 # DEVOPS_HANDOVER.md "AWS cost".
 ecr_untagged_image_expiry_days = 14
 ecr_tagged_image_expiry_days   = 90
+
+# Standby database copy in a second zone for launch (owner, 3 Nov 2026). The
+# switch is online; without apply_immediately RDS makes it in the next
+# maintenance window.
+database_multi_az = true

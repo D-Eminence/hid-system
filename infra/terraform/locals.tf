@@ -89,6 +89,10 @@ locals {
 
   profile = local.profiles[local.deployment_profile]
 
+  # An explicit setting wins over the capacity profile, so production can keep
+  # the adopted economy stack and still run a standby database copy.
+  database_multi_az = var.database_multi_az == null ? local.profile.database_multi_az : var.database_multi_az
+
   browser_subdomains = local.runtime_environment == "production" ? [
     "www",
     "ehr",

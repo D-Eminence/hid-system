@@ -55,15 +55,17 @@ run "reject_secret_selector_injection" {
 run "accept_direct_generation_keep_titan_only" {
   command = plan
   variables {
-    anthropic_secret_arn             = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:/hid/staging/anthropic-ABCDEF"
-    ai_allow_anthropic_us_processing = true
+    anthropic_secret_arn              = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:/hid/staging/anthropic-ABCDEF"
+    ai_allow_anthropic_us_processing  = true
+    ocr_ai_global_processing_approved = true
   }
   assert {
     condition = (module.application.ai_generation_configuration.provider == "anthropic" &&
       module.application.ai_generation_configuration.model_id == "claude-sonnet-4-6" &&
       module.application.ai_generation_configuration.ehr_secret_fields == ["ANTHROPIC_API_KEY"] &&
+      module.application.ai_generation_configuration.ocr_secret_fields == ["ANTHROPIC_API_KEY"] &&
     !contains(module.application.ai_generation_configuration.other_secret_fields, "ANTHROPIC_API_KEY"))
-    error_message = "Only EHR may receive the direct Claude key, with the selected first-party model."
+    error_message = "Only EHR and the OCR worker may receive the direct Claude key, with the selected first-party model."
   }
   assert {
     condition = (length(module.ai[0].bedrock_inference_policy.Statement) == 1 &&
@@ -85,7 +87,8 @@ run "preserve_existing_bedrock_until_cutover" {
   assert {
     condition = (length(module.ai[0].bedrock_inference_policy.Statement) == 3 &&
       module.application.ai_generation_configuration.model_id == "eu.anthropic.claude-sonnet-4-6" &&
-    length(module.application.ai_generation_configuration.ehr_secret_fields) == 0)
+      length(module.application.ai_generation_configuration.ehr_secret_fields) == 0 &&
+    length(module.application.ai_generation_configuration.ocr_secret_fields) == 0)
     error_message = "Existing live Bedrock configuration must stay usable until the explicit provider/image cutover."
   }
 }

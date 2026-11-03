@@ -221,6 +221,12 @@ variable "anthropic_secret_kms_key_arn" {
   default = ""
 }
 
+variable "ocr_ai_global_processing_approved" {
+  description = "Explicit HID approval for ocr-worker to send text read from paper records to the direct Claude API (global processing). Needs the direct Claude API to be on."
+  type        = bool
+  default     = false
+}
+
 variable "ai_allow_anthropic_us_processing" {
   description = "Explicit HID approval for US processing/storage of staging chat through the direct Claude API."
   type        = bool
@@ -593,6 +599,12 @@ variable "monthly_gross_budget_usd" {
 variable "cost_anomaly_threshold_usd" {
   type    = number
   default = 10
+}
+
+variable "database_multi_az" {
+  description = "Keep a standby copy of the database in a second availability zone (RDS Multi-AZ). Null keeps the capacity profile's choice."
+  type        = bool
+  default     = null
 }
 
 variable "sentry_dsns" {
