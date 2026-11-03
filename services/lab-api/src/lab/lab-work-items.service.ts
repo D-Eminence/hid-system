@@ -67,6 +67,14 @@ const WORK_ITEM_COLUMNS = ['id', 'patient_id', 'facility_id', 'ordering_facility
  * keeps every read within the facility, before any row's check. Known limit
  * (no schema change in this step, docs/INTERFACE_CONTRACT.md): past roughly
  * 2,000 work items at a laboratory the list exceeds lab-api's 15-second limit.
+ * With OWN_WORK_PATIENT_CARD_ENABLED on, each list load also calls
+ * lab.work_item_patient_cards (0113) once for its own rows, at most 200. That
+ * is a statement of its own, so it does not count toward this query's
+ * 15-second limit and does not grow with the laboratory. Under a NOBYPASSRLS
+ * owner, as in production, each of those rows pays the work items' read
+ * policy and then the same consent test again (0113's header, D5): 0.7-1.1 s
+ * for 200 rows, against 0.8-1.2 s for this query (PostgreSQL 16, a shared
+ * 4-CPU 2.8 GHz Xeon). So the setting roughly doubles the list's database time.
  */
 export const WORK_LIST_QUERY = `with released_tests as materialized (
     select e.requested_test_id from lab.result_releases rel

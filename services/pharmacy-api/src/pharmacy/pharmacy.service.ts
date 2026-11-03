@@ -68,6 +68,14 @@ const WORK_ITEM_SELECT = `select w.*,d.id::text as dispensing_id,d.status as dis
  * member could read were answered whatever their state, so a busy pharmacy
  * stopped seeing new work. One dispensing per work item and one reversal per
  * dispensing (0023), so the joins add no rows. Exported for the tests.
+ *
+ * Cost. With OWN_WORK_PATIENT_CARD_ENABLED on, each list load also calls
+ * pharmacy.work_item_patient_cards (0113) once for its own rows, at most 200,
+ * as a statement of its own. Under a NOBYPASSRLS owner, as in production,
+ * each of those rows pays the work items' read policy and then the same
+ * consent test again (0113's header, D5): 0.6-1.0 s for 200 rows, against
+ * about 0.6 s for this query (PostgreSQL 16, a shared 4-CPU 2.8 GHz Xeon). So
+ * the setting roughly doubles the list's database time.
  */
 export const WORK_LIST_QUERY = `${WORK_ITEM_SELECT}
   cross join lateral (select d.id is null as open_work) o

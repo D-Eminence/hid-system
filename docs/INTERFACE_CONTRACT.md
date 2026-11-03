@@ -2912,6 +2912,21 @@ minutes apart collapse into one). Responses are otherwise unchanged;
 request bodies and error mapping are unchanged. `PharmacyWorkItem` in
 `@hid/api-client` gains the optional `patient`.
 
-0113 has no down migration: dropping the two functions restores the old
-schema, and turning the setting off restores the old answers. The suite is
+Cost while the setting is on: each list load calls the reader once for its
+own rows (at most 200), as a statement of its own, so it does not count
+toward the list query's 15-second limit and does not grow with the size of
+the laboratory or pharmacy. Under a NOBYPASSRLS owner, as in production, each
+of those rows pays the work items' read policy and then the same consent
+test again (0113's header, D5). Measured on PostgreSQL 16 on a shared 4-CPU
+2.8 GHz Xeon with 200 own rows: the Lab reader 0.7-1.1 s against 0.8-1.2 s
+for the Lab list query, the Pharmacy reader 0.6-1.0 s against about 0.6 s
+for the Pharmacy list query. So the setting roughly doubles a list's
+database time. The Lab list's known limit (about 2,000 work items) is
+unchanged.
+
+0113 has no down migration. To withdraw the feature, set
+`OWN_WORK_PATIENT_CARD_ENABLED=false` in lab-api and pharmacy-api; the two
+functions stay and nothing calls them. Do not drop them: 0113 stays
+recorded, so the runner does not re-create them, and runtime-grants.sql's
+0113 block would then stop `db:bootstrap` with 42883. The suite is
 `services/ehr-api/test/database/work-item-patient-cards.integration.sql`.
