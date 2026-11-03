@@ -11,7 +11,7 @@ const claudeModel = z.string().trim().regex(/^claude-[a-z0-9-]+$/, 'must be a fi
 const effort = z.enum(['low', 'medium', 'high', 'xhigh', 'max']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /**
- * OCR_AI_FACILITY_IDS, the AI reading emergency off-switch (ocr-api reads the same variable, so both services
+ * OCR_AI_FACILITY_IDS, the AI reading emergency off-switch (the OCR HTTP service reads the same variable, so both services
  * must get the same value): comma-separated facility UUIDs, whitespace trimmed, case-insensitive (kept lower
  * case); blank entries from stray commas are ignored. Unset or empty (or only whitespace) means every facility.
  * Anything else that is not a list of at least one UUID (",", "demo-hospital") fails startup.
@@ -59,7 +59,7 @@ const schema = z.object({
   OCR_TEXTRACT_FEATURES: z.preprocess(emptyToUndefined, z.enum(['text', 'layout']).default('text')),
   // AI reading (Anthropic Claude API, global processing; owner decision 6/29/33).
   OCR_AI_MODE: z.enum(['off', 'claude']).default('off'),
-  // Same validation as ehr-api's ANTHROPIC_API_KEY. Never logged.
+  // Same validation as the EHR service's ANTHROPIC_API_KEY. Never logged.
   ANTHROPIC_API_KEY: z.preprocess(emptyToUndefined, z.string().min(20).regex(/^\S+$/).optional()),
   OCR_AI_GLOBAL_PROCESSING_APPROVED: booleanString,
   OCR_AI_FIRST_PASS_MODEL: claudeModel.default('claude-sonnet-5-5'),

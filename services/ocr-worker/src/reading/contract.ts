@@ -2,7 +2,7 @@ import { z } from 'zod';
 
 /**
  * The shared contract for ocr.extractions.structured_payload written by the
- * OCR worker for processing contract 'hid-textract-v2'. Session C (ocr-api)
+ * OCR worker for processing contract 'hid-textract-v2'. Session C (the OCR HTTP service)
  * reads exactly this shape; copy this file rather than re-deriving it.
  *
  * No raw model output and no text of dropped items is ever stored in it.
