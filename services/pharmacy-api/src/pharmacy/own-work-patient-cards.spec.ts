@@ -11,6 +11,7 @@ import { PharmacyService, WORK_LIST_QUERY } from './pharmacy.service';
 import { PharmacyOrderRouteAccess } from './order-route-access';
 import { PharmacyOrderRouteCards } from './order-route-cards';
 import { OWN_WORK_PATIENT_CARDS_OFF, PharmacyOwnWorkPatientCards } from './own-work-patient-cards';
+import { PharmacyPrescriptionDetails, PRESCRIPTION_DETAILS_OFF } from './prescription-dispensing-details';
 
 /*
  * The patient on this facility's own work (0113, owner decision 25 of
@@ -246,7 +247,9 @@ describe('OWN_WORK_PATIENT_CARD_ENABLED', () => {
     const moduleRef = await Test.createTestingModule({ providers: [PharmacyService,
       { provide: DatabaseService, useValue: {} }, { provide: IdentityService, useValue: {} },
       { provide: AuditService, useValue: {} }, { provide: PharmacyOrderRouteAccess, useValue: {} },
-      { provide: PharmacyOrderRouteCards, useValue: {} }, { provide: PharmacyOwnWorkPatientCards, useValue: reader }] }).compile();
+      { provide: PharmacyOrderRouteCards, useValue: {} }, { provide: PharmacyOwnWorkPatientCards, useValue: reader },
+      // 0114's reader, which the service takes after this one.
+      { provide: PharmacyPrescriptionDetails, useValue: PRESCRIPTION_DETAILS_OFF }] }).compile();
     expect((moduleRef.get(PharmacyService) as unknown as { ownPatients: unknown }).ownPatients).toBe(reader);
   });
 
