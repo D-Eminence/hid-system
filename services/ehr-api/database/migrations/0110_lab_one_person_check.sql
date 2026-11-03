@@ -70,8 +70,9 @@
 --    triggers; organization.manage exists and the lab role does not hold it;
 --    lab.result_verifications has exactly 0021's columns and constraints; one
 --    owner for the governance function, the tables read or referenced and
---    schemas identity and lab, and the applier is that owner or a member
---    that inherits it and may SET ROLE to it.
+--    schemas identity and lab; and, checked first, the applier is the owner
+--    of schema identity or a member that inherits it and may SET ROLE to it
+--    (else 42501).
 -- 1. The two tables, the column change, the three functions and the new
 --    body. New objects are given to that owner. The grants runtime-grants.sql
 --    makes are repeated here (only when the role exists).
@@ -102,8 +103,21 @@ do $$
 declare
   mismatch text;
   applier oid := (select oid from pg_roles where rolname = current_user);
-  schema_owner oid;
+  schema_owner oid := (select namespace.nspowner from pg_namespace namespace where namespace.nspname = 'identity');
 begin
+  -- The applier first, from catalogs any role may read: the owner of schema
+  -- identity, or a member that inherits it and may SET ROLE to it (never a
+  -- superuser's bypass alone). Section d checks that one owner holds
+  -- everything this file changes or references.
+  if schema_owner is null then
+    raise exception using errcode = '55000', message = '0110: 0001-0103 must be applied first';
+  end if;
+  if applier <> schema_owner
+     and not (pg_has_role(applier, schema_owner, 'USAGE') and pg_has_role(applier, schema_owner, 'SET')) then
+    raise exception using errcode = '42501',
+      message = format('0110: %s is not %s and may not act as it (INHERIT and SET)', current_user,
+        pg_get_userbyid(schema_owner));
+  end if;
   -- a. Prerequisites: 0001-0103 (0103's gate body is the marker).
   if to_regprocedure('identity.organization_application_admin_account(text)') is null
      or (select md5(proc.prosrc) from pg_proc proc
@@ -210,10 +224,8 @@ begin
       message = format('0110: an object this migration relies on differs from 0001-0103: %s', mismatch);
   end if;
   -- d. One owner for the function replaced, the tables altered, read or
-  -- referenced, and the two schemas the new objects go into; the applier is
-  -- it, or a member that inherits it and may SET ROLE to it (never a
-  -- superuser's bypass alone).
-  schema_owner := (select namespace.nspowner from pg_namespace namespace where namespace.nspname = 'identity');
+  -- referenced, and the two schemas the new objects go into (the applier was
+  -- checked against it first).
   select string_agg(distinct pg_get_userbyid(owner_row.owner), ', ') into mismatch
     from (select proc.proowner as owner from pg_proc proc
            where proc.oid = 'lab.validate_result_governance()'::regprocedure
@@ -227,12 +239,6 @@ begin
   if mismatch is distinct from pg_get_userbyid(schema_owner) then
     raise exception using errcode = '55000',
       message = format('0110: the objects this migration changes or references must share one owner (found %s)', mismatch);
-  end if;
-  if applier <> schema_owner
-     and not (pg_has_role(applier, schema_owner, 'USAGE') and pg_has_role(applier, schema_owner, 'SET')) then
-    raise exception using errcode = '42501',
-      message = format('0110: %s is not %s and may not act as it (INHERIT and SET)', current_user,
-        pg_get_userbyid(schema_owner));
   end if;
   raise notice '0110: owners checked: identity=%, applier=%', pg_get_userbyid(schema_owner), current_user;
 end;
