@@ -221,6 +221,9 @@ anthropic_model_id = "claude-sonnet-4-6"
 ai_generation_provider = "anthropic"
 
 ai_allow_anthropic_us_processing = true
+# Paper records: Textract text, then the direct Claude API (global, not
+# Bedrock), as the owner decided for Migrate on 3 Nov 2026.
+ocr_ai_global_processing_approved = true
 
 # Existing owner-confirmed operations subscription.
 alert_email = "operations@healthidentitydirectory.com"
