@@ -1399,6 +1399,11 @@ revoke all on function identity.demo_story_context(text,uuid,uuid,text),
 -- commands, which keep the Identity grants above. No grant changes.
 revoke all on function identity.organization_application_admin_account(text) from public;
 
+-- Records processing (0104): the patient's request list, recreated with its
+-- purpose column, keeps the same signature and its grant to the Identity
+-- runtime above. The access-request trigger function is granted to no role.
+revoke all on function identity.access_requests_records_processing() from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),

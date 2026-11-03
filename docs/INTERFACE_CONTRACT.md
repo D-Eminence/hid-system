@@ -2338,10 +2338,13 @@ accepts it at Demo Hospital or Demo Outreach; an invitation to
 `patient1@healthidentitydirectory.com` or `patient2@healthidentitydirectory.com`
 is delivered to that mailbox but can never be accepted (acceptance needs a staff
 login whose own verified address it is). Migrate's OCR
-job creation is not available to testers, nor to any tenant: `POST
-/api/v1/ocr/jobs` needs a `healthcare-operations` grant, which no portal path
-issues (a platform-wide limitation tracked separately; 0098 widens nothing).
-The owner can check production's purposes with `select code, active from
+job creation (`POST /api/v1/ocr/jobs`) needs a records-processing
+(`healthcare-operations`) grant for the patient. 0098 seeds none and widens
+nothing; once 0104 is applied the demo login asks for one at Demo Hospital and
+Patient One or Patient Two approves it in the portal, as any patient does
+(section 32). Upload and publication run under the seeded direct-care shares.
+The fictional patients born in 2012 and 2020 are refused as under 18. The
+owner can check production's purposes with `select code, active from
 identity.purpose_of_use_codes order by 1;`.
 
 Answers across the boundary (a demo actor and a real patient or facility, or a
@@ -2849,3 +2852,161 @@ Responses, request bodies, `If-Match` versions and error mapping are
 unchanged. 0103 has no down migration; applying the previous bodies (0046,
 0056) restores the old behaviour. The suite is
 `services/ehr-api/test/database/platform-organization-applications.integration.sql`.
+
+## 32. Records processing: the purpose OCR runs under (0104)
+
+Stage 1 of records processing (owner decisions of D-Eminence in chat,
+2026-10-31, numbered 0104 by the owner's decision 33(6) of 2026-11-03; 0104's
+declaration is unsigned until the owner signs): a staff
+member asks the patient for access to turn the patient's paper records into the
+digital record at the facility with OCR, and the patient approves or denies it
+as any access request. The purpose of use is `healthcare-operations`, shown to
+patients as "Records processing". The OCR API's create, validate, confirm and
+retry already require it, and Identity's access-request route already admits
+it. Migration 0104 (`0104_records_processing_purpose.sql`) seeds it active,
+refuses requests the facility could not use, and lists each patient request's
+purpose. It seeds no grant and changes no row-level security policy; ocr-api
+and the role map are unchanged (a records officer role is Stage 2). Publishing
+into the chart stays direct care.
+
+- The code: `('healthcare-operations', 'Records processing', active, 'hid')`,
+  inserted ON CONFLICT DO NOTHING, as 0085 seeds `emergency` (a row already
+  there, active or not, is kept). Its `active` flag is the kill switch (below).
+- How a grant comes to exist: the staff member asks with the existing request
+  (below), the patient approves it (approval needs no change: 0072 copies the
+  purpose onto the grant), and the grant is honoured for that purpose only, for
+  that one membership, facility and patient, for at most 24 hours. No grant is
+  seeded, and a direct-care grant, share or PIN never satisfies it (nor it
+  direct care).
+
+The request is today's staff access request with the purpose header:
+
+```
+POST /api/v1/identity/access-requests
+X-Purpose-Of-Use: healthcare-operations
+{ "hid": "HID-...", "scope": "write_records", "durationMinutes": 1440,
+  "reason": "Turn paper records into the digital record at <facility> (OCR)" }
+```
+
+`write_records` is what OCR's validate, confirm and retry need (and it covers
+create's read); 1440 minutes (24 hours) is the most a request may last (the DTO
+and the table's CHECK). The answer is today's 201, `purpose:
+"healthcare-operations"`; a pending request of the same scope and purpose is
+answered again with `existingRequest: true` and is not checked again.
+
+The trigger `access_requests_records_processing` (BEFORE INSERT on
+`identity.access_requests`, rows with this purpose that are not break-glass)
+refuses, in this order:
+
+| Status | Code | When | Database |
+|---|---|---|---|
+| 403 | `RECORDS_PROCESSING_NOT_ALLOWED` | the actor (`app.actor_subject`) does not hold the requesting membership live and active, or that membership's roles lack `ocr.job.write` at the facility (doctors, clinicians, nurses and laboratory staff hold it; pharmacists and receptionists, who may ask for direct care, do not) | 42501 `RECORDS_PROCESSING_NOT_ALLOWED` |
+| 400 | `INVALID_CONSENT_COMMAND` | a scope other than `read_records` or `write_records`, or a duration outside 5 to 1440 minutes; `create_access_request` and the DTO refuse both first, so only a direct insert reaches the trigger's | 22023 `RECORDS_PROCESSING_REQUEST_INVALID` |
+| 422 | `RECORDS_PROCESSING_MINOR` | the patient is under 18 on today's date in Africa/Lagos (18 from the 18th birthday; born 29 February, from 1 March in a year without one), has a date of birth in the future, or has no date of birth on record (`identity.patients.dob` null); refused until a guardian approval exists | 42501 `RECORDS_PROCESSING_MINOR` |
+
+The permission is checked first, so a caller who may not ask learns nothing
+about the patient's age. Each refusal reaches Identity as the error of
+`identity.create_access_request` with that SQLSTATE and message (the message
+is the code, as `EMERGENCY_PROBATION_LIMIT` is). Identity matches the two 42501
+refusals by SQLSTATE and exact message, so any other 42501 stays 403
+`CONSENT_COMMAND_DENIED`; an Identity image from before 0104 answers both 403
+`CONSENT_COMMAND_DENIED`. While the purpose is not active (a database before
+0104, or the kill switch), `create_access_request` answers 22023 `Invalid
+purpose for a standard access request`, Identity's 400
+`INVALID_CONSENT_COMMAND`. Every other answer is today's (404
+`CONSENT_RESOURCE_NOT_FOUND` for an unknown Health ID, 400 for the DTO).
+Direct-care, emergency and break-glass requests never fire the trigger.
+
+The patient sees the request in `GET /api/v1/identity/me/access-requests`, whose
+items now carry `purpose` (`direct-care` or `healthcare-operations`), from the
+twelfth, last column `purpose_of_use` of `identity.list_my_access_requests()`
+(never null for a listed row). The function was dropped and recreated with the
+same owner and EXECUTE for `hid_identity_runtime` only. Identity selects every
+column, so on a database before 0104 `purpose` is left out and the list still
+answers; an earlier Identity image names its eleven columns and keeps working
+on 0104, without `purpose`. Approval is today's (a sign-in within 10 minutes,
+no recovery hold): the grant carries the request's purpose, ends with the
+request's duration, and the patient can revoke it from the access history.
+Staff read where they stand with today's `POST /api/v1/identity/consent-status`
+and `purpose: "healthcare-operations"`.
+
+What the grant opens, by step (permissions unchanged, 0013 and 0016):
+
+| Step | Permission | Purpose and grant |
+|---|---|---|
+| Ask the patient | `identity.consent.write` and `ocr.job.write` | `healthcare-operations`; no grant |
+| Create, read and retry OCR jobs; read extractions and validations | `ocr.job.write`, `ocr.job.read` | `healthcare-operations` grant (read for reads, write for retry) |
+| Validate or reject | `ocr.validation.write` | `healthcare-operations` write |
+| Confirm the source patient | `ocr.patient.confirm` (doctor, clinician, nurse) | `healthcare-operations` write |
+| EHR documents (`/ehr/documents` upload intent, list, complete, download) and OCR's source read (`/ehr/internal/ocr/documents/:documentId/source`) | `ehr.document.*`, `ocr.job.read` | any purpose, the grant of that purpose |
+| Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own |
+
+Without a records-processing grant, OCR's create answers 404 (EHR's source read
+does not find the document under that purpose, so nobody learns whether it
+exists) and the other job routes 404 `OCR_JOB_NOT_FOUND`; the website explains
+that the patient has not given records-processing access yet.
+
+The grant never opens the chart. The services refuse the purpose everywhere
+else:
+
+- ehr-api: the encounter routes (encounters, notes, diagnoses, vitals,
+  prescriptions, lab requests), the offline routes and the staff chat take
+  `direct-care` only, the order routes answer anything else 403
+  `PERMISSION_DENIED` and the emergency summary takes `emergency` only, all
+  as before. Imported records (`GET /ehr/patients/:patientId/imported-records`),
+  an imported attachment (`GET
+  /ehr/patients/:patientId/imported-attachments/:fileId/download`), the
+  reported health profile (`GET
+  /ehr/patients/:patientId/reported-health-profile`) and OCR's clinical-note
+  import (`POST /ehr/internal/ocr/patients/:patientId/clinical-notes`) now answer
+  `healthcare-operations` 400 `PURPOSE_OF_USE_REQUIRED` ("X-Purpose-Of-Use must
+  be direct-care or emergency for the patient record") before any work; direct
+  care and emergency answer as before.
+- lab-api and pharmacy-api: every route takes `direct-care` or `emergency`; a
+  `healthcare-operations` purpose answers 400 `PURPOSE_OF_USE_REQUIRED`
+  ("X-Purpose-Of-Use must be direct-care or emergency"). No Lab or Pharmacy
+  route used it, and OCR's lab and medication imports run at publication under
+  direct care.
+- The database fence (records-processing rules in `ehr.context_allows` and
+  Lab's and Pharmacy's twins) is Stage 2; those functions' bodies are pinned
+  by later migrations.
+
+Kill switch: `update identity.purpose_of_use_codes set active = false where
+code = 'healthcare-operations';`. New requests (and replays of pending ones)
+then answer 400 `INVALID_CONSENT_COMMAND` and every records-processing
+authorization is refused (`identity.has_active_consent_grant` requires an
+active code), so OCR answers 404 again. A grant approved while the code is off
+is written but authorizes nothing; unexpired grants work again if the code is
+reactivated. Who may set it and how it is recorded is an owner decision.
+
+Unchanged: `create_access_request`, `approve_access_request`,
+`has_active_consent_grant` and every other function body (their md5 pins stay
+true), policy, role, permission and grant; break-glass (emergency only), the
+PIN (direct care only) and patient shares (direct care). A pending request is
+not checked again on approval, so a requester whose role changes afterwards
+keeps a request the patient may still approve.
+
+Applying 0104 takes SHARE ROW EXCLUSIVE on `identity.access_requests` until
+commit (CREATE TRIGGER), so an access request being written waits a few
+milliseconds; reads are not blocked. 0104 has no down migration. Rolling the
+service images back leaves the code, the trigger and the twelfth column in
+place; earlier images keep working (they read the list by column name), and
+the kill switch turns records processing off without a release.
+
+Release order: the website first, which words today's answers (400
+`INVALID_CONSENT_COMMAND`: records processing is not switched on yet; no
+`purpose` on the patient's requests: no label); then the backend with 0104,
+whose release applies 0104 before the images roll out. The service fences do
+not depend on 0104. Tests: 0104's database suite
+`services/ehr-api/test/database/records-processing.integration.sql`,
+Identity's `consent.service.spec.ts`, ehr-api's
+`ehr/shared/patient-record-context.spec.ts`, Lab's and Pharmacy's
+`common/request-context.spec.ts`, and the runtime verifier
+`services/ehr-api/scripts/verify-records-processing-runtime.mjs` (Identity,
+EHR, Lab, Pharmacy and OCR booted from their own code as their runtime roles,
+run by the TUF migration rehearsal): the request and its refusals, the
+patient's approval, OCR's job and EHR's document under the grant, the fences,
+the kill switch and the revocation. With `HID_RECORDS_PROCESSING_STAGE` it also
+runs this branch's services on a database without 0104 (`before-0104`), and an
+Identity from before 0104 (`HID_RECORDS_PROCESSING_IDENTITY_DIR`) on a database
+with it (`old-identity`) or without it (today's Identity on today's database).

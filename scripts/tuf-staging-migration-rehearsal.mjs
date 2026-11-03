@@ -241,7 +241,7 @@ try {
     values ('synthetic-history','Historical synthetic purpose',false,'synthetic')`));
   const upgradePurposesBefore = await withClient('hid_upgrade', async client =>
     (await client.query('select to_jsonb(p) as value from identity.purpose_of_use_codes p order by code')).rows);
-  assert(!upgradePurposesBefore.some(row => ['direct-care', 'emergency'].includes(row.value.code)));
+  assert(!upgradePurposesBefore.some(row => ['direct-care', 'emergency', 'healthcare-operations'].includes(row.value.code)));
   const upgradeBefore = await snapshot('hid_upgrade');
   const upgradeBackup = join(evidenceDirectory, 'pre-schema-upgrade.dump');
   command('backup synthetic schema 0028 before upgrade', join(pgBindir, 'pg_dump'),
@@ -282,7 +282,7 @@ try {
   const upgradeAfter = await snapshot('hid_upgrade');
   await withClient('hid_upgrade', async client => {
     assert.deepEqual((await client.query(`select to_jsonb(p) as value from identity.purpose_of_use_codes p
-      where code not in ('direct-care','emergency') order by code`)).rows, upgradePurposesBefore,
+      where code not in ('direct-care','emergency','healthcare-operations') order by code`)).rows, upgradePurposesBefore,
     'Upgrade must preserve every historical purpose registry row');
     assert.deepEqual((await client.query(`select code,display,active,source_system
       from identity.purpose_of_use_codes where code='direct-care'`)).rows,
@@ -292,6 +292,10 @@ try {
       from identity.purpose_of_use_codes where code='emergency'`)).rows,
     [{code:'emergency',display:'Emergency treatment',active:true,source_system:'hid'}],
     'Migration 0085 must add exactly its declared emergency purpose');
+    assert.deepEqual((await client.query(`select code,display,active,source_system
+      from identity.purpose_of_use_codes where code='healthcare-operations'`)).rows,
+    [{code:'healthcare-operations',display:'Records processing',active:true,source_system:'hid'}],
+    'Migration 0104 must add exactly its declared records-processing purpose');
   });
   // Migration 0086 (P4b) adds exactly one role, org_admin_awaiting_review (a
   // self-signed-up facility's administrator until support reviews it); every
@@ -318,7 +322,7 @@ try {
   assert.deepEqual(await snapshot('hid_upgrade_restored'), upgradeBefore, 'Pre-schema backup must restore the exact 0028 state');
   evidence.checks.existing_schema_upgrade = {from:'0028',to:latestSchema,dry_run_unchanged:true,
     historical_tables_preserved:true,historical_purposes_preserved:true,direct_care_seed_verified:true,
-    emergency_seed_verified:true,declared_roles_added:declaredRoles,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
+    emergency_seed_verified:true,records_processing_seed_verified:true,declared_roles_added:declaredRoles,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
   command('create synthetic database', join(pgBindir, 'createdb'), [database]);
@@ -355,6 +359,9 @@ try {
   // P4c: Identity, EHR, Lab and Pharmacy booted from their own code, each as its exact runtime role.
   evidence.checks.order_routes_runtime = JSON.parse(command('exact-role cross-facility lab requests and prescriptions',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-order-routes-runtime.mjs')], workflowEnvironment));
+  // 0104: records processing asked for, approved, used by OCR, fenced from the chart, Lab and Pharmacy, and revoked.
+  evidence.checks.records_processing_runtime = JSON.parse(command('exact-role records processing for OCR',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-records-processing-runtime.mjs')], workflowEnvironment));
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
   const before = await snapshot(database);
