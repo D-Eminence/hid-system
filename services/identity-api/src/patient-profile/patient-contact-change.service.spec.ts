@@ -320,19 +320,58 @@ describe('PatientContactChangeService (0094)', () => {
       healthId: 'HID-ADAAAA', changeId: change.values[2] }));
   });
 
-  it('asks the 0119 demo phone check first, in the change transaction, with the number and its canonical HMAC', async () => {
-    const s = setup({ 'change_my_phone': () => ({ rows: [{ outcome: 'changed', notice_email: null,
-      patient_first_name: null, patient_hid_code: null }] }) });
-    await expect(s.service.start(request, { channel: 'phone', phone: '+44 7700 900102', currentPassword: 'correct horse battery' }))
-      .resolves.toEqual({ phone: '+447700900102', phoneVerified: false });
-    const change = s.commits.find((sqls) => sqls.some((sql) => sql.includes('change_my_phone')))!;
-    const check = change.findIndex((sql) => sql.includes('demo_profile_phone_allowed'));
-    expect(check).toBeGreaterThanOrEqual(0);
-    expect(check).toBeLessThan(change.findIndex((sql) => sql.includes('change_my_phone')));
+  it.each([['Adaeze', '+44 7700 900102', '+447700900102'], ['Chinedu', '+44 7700 900103', '+447700900103']])(
+    'asks the 0119 demo phone check first, in the change transaction, with the number and its canonical HMAC (%s)',
+    async (_patient, typed, e164) => {
+      const s = setup({ 'change_my_phone': () => ({ rows: [{ outcome: 'changed', notice_email: null,
+        patient_first_name: null, patient_hid_code: null }] }) });
+      await expect(s.service.start(request, { channel: 'phone', phone: typed, currentPassword: 'correct horse battery' }))
+        .resolves.toEqual({ phone: e164, phoneVerified: false });
+      const change = s.commits.find((sqls) => sqls.some((sql) => sql.includes('change_my_phone')))!;
+      const check = change.findIndex((sql) => sql.includes('demo_profile_phone_allowed'));
+      expect(check).toBeGreaterThanOrEqual(0);
+      expect(check).toBeLessThan(change.findIndex((sql) => sql.includes('change_my_phone')));
+      expect(s.calls.find((call) => call.sql.includes('demo_profile_phone_allowed'))?.values)
+        .toEqual(['patient-subject', 'session-id', e164, createContactLookupHmac('phone', e164)]);
+      expect(s.calls.find((call) => call.sql.includes('change_my_phone'))?.values[3])
+        .toBe(createContactLookupHmac('phone', e164));
+      // No code and no verification step: the number is written at once, nothing is texted and no OTP is made.
+      expect(s.calls.some((call) => /otp_challenges|start_my_|verify_my_|sms/i.test(call.sql)
+        && !call.sql.includes('from auth.otp_challenges'))).toBe(false);
+      await s.service.settleNotices();
+      expect(s.notification.deliverEmailChangeCode).not.toHaveBeenCalled();
+      expect(s.notification.deliverContactChanged).not.toHaveBeenCalled();
+    });
+
+  it('tells only the verified email that a demo phone changed: no code, nothing to the new number', async () => {
+    const s = setup({ 'change_my_phone': () => ({ rows: [{ outcome: 'changed',
+      notice_email: 'patient2@healthidentitydirectory.com', patient_first_name: 'Chinedu',
+      patient_hid_code: 'HID-ZDEMAAA3' }] }) });
+    await expect(s.service.start(request, { channel: 'phone', phone: '+44 7700 900103',
+      currentPassword: 'correct horse battery' })).resolves.toEqual({ phone: '+447700900103', phoneVerified: false });
+    await s.service.settleNotices();
+    expect(s.notification.deliverEmailChangeCode).not.toHaveBeenCalled();
+    expect(s.notification.deliverContactChanged).toHaveBeenCalledTimes(1);
+    const notice = s.notification.deliverContactChanged.mock.calls[0]?.[0] as Record<string, unknown>;
+    // The notice's only recipient is the verified mailbox; the client sends it on the email channel alone
+    // (notification-otp.client.spec.ts). The new number appears only masked, never as a recipient.
+    expect(notice.recipient).toBe('patient2@healthidentitydirectory.com');
+    expect(notice).not.toHaveProperty('code');
+    expect(JSON.stringify(notice)).not.toContain('7700900103');
+  });
+
+  it('sends a raw local 07700 900102 to the 0119 check as the Nigerian +2347700900102 (refused for a demo patient)', async () => {
+    const s = setup({ 'demo_profile_phone_allowed': (values) => ({ rows: [{
+      allowed: values[2] === '+447700900102' }] }) });
+    const refused = await problem(s.service.start(request, { channel: 'phone', phone: '07700 900102',
+      currentPassword: 'correct horse battery' }));
+    expect([refused.getStatus(), refused.code, refused.message]).toEqual([400, 'CONTACT_INVALID', PHONE_RESERVED_MESSAGE]);
     expect(s.calls.find((call) => call.sql.includes('demo_profile_phone_allowed'))?.values)
-      .toEqual(['patient-subject', 'session-id', '+447700900102', createContactLookupHmac('phone', '+447700900102')]);
-    expect(s.calls.find((call) => call.sql.includes('change_my_phone'))?.values[3])
-      .toBe(createContactLookupHmac('phone', '+447700900102'));
+      .toEqual(['patient-subject', 'session-id', '+2347700900102', createContactLookupHmac('phone', '+2347700900102')]);
+    expect(s.calls.some((call) => call.sql.includes('change_my_phone'))).toBe(false);
+    await s.service.settleNotices();
+    expect(s.notification.deliverEmailChangeCode).not.toHaveBeenCalled();
+    expect(s.notification.deliverContactChanged).not.toHaveBeenCalled();
   });
 
   it.each([[{ allowed: false }], [{ allowed: null }], [undefined]])(

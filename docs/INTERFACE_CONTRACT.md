@@ -2897,6 +2897,12 @@ The phone (a reviewed change to the seal):
   because the number is well formed. The database cannot tell that
   the HMAC is the checked number's, and any session can set the setting
   itself. As for G7, it rests on Identity that the number is the fictional one.
+- Only the exact E.164 form is admitted. The swapped pair (Adaeze with
+  `+447700900103`, Chinedu with `+447700900102`), nearby numbers, other
+  forms (`+2347700900102`, which a raw `07700 900102` with country Nigeria
+  becomes, `+4407700900102`, a number without "+") and a malformed HMAC are
+  refused for both demo patients. A real patient is refused only the two demo
+  numbers. The suite and Identity's tests cover each of these.
 - Release order: 0119 before the Identity image that asks the check. An image
   that asks it before 0119 exists fails every patient's phone change. After
   both are out, the owner types the number on each demo patient's profile

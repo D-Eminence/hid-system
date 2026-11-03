@@ -18,7 +18,8 @@
 --      check and change_my_phone answers changed, and patient_self_contact
 --      then returns the number Identity wrote; refused with 22023 and
 --      nothing written: no check asked (an Identity image before 0119), a
---      wrong number, the other patient's number, a malformed HMAC, a
+--      wrong number (nearby numbers and other forms of the same digits, for
+--      each patient), the other patient's number, a malformed HMAC, a
 --      recorded HMAC that is not the change's, a value recorded for the
 --      other patient; the check answers 42501 without a session; a real
 --      patient's phone change is unaffected (no check needed, and the check
@@ -298,6 +299,11 @@ select pg_temp.assert('the check answers true for Adaeze''s own number only, and
   and current_setting('hid.sealed_demo_phone_hmac') = ''
   and not identity.demo_profile_phone_allowed('patient:98d00008-0000-4000-8000-000000000001',
     '98b1190b-0000-4000-8000-000000000001', '+2348031234567', repeat('a', 64))
+  and (select bool_and(not identity.demo_profile_phone_allowed('patient:98d00008-0000-4000-8000-000000000001',
+         '98b1190b-0000-4000-8000-000000000001', other, repeat('a', 64)))
+         from unnest(array['+447700900101', '+447700900104', '+447700900112', '+447700900120',
+           '+2347700900102', '+4407700900102', '+44770090010', '+4477009001020', '447700900102', '07700900102']) other)
+  and current_setting('hid.sealed_demo_phone_hmac') = ''
   and not identity.demo_profile_phone_allowed('patient:98d00008-0000-4000-8000-000000000001',
     '98b1190b-0000-4000-8000-000000000001', '+447700900102', repeat('A', 64))
   and not identity.demo_profile_phone_allowed('patient:98d00008-0000-4000-8000-000000000001',
@@ -340,6 +346,31 @@ select pg_temp.assert('a value recorded for Adaeze does not admit Chinedu''s cha
 select pg_temp.as_demo_patient(2);
 select pg_temp.assert('... (Chinedu''s change refused)',
   pg_temp.change_phone(2, '+447700900102', repeat('c', 64), false) = '22023 PATIENT_CONTACT_CHANGE_INVALID');
+select pg_temp.as_demo_patient(2);
+select pg_temp.assert('the check answers false for Chinedu with any number but his own (the swap, nearby, other forms)',
+  (select bool_and(not identity.demo_profile_phone_allowed('patient:98d00008-0000-4000-8000-000000000002',
+     '98b1190b-0000-4000-8000-000000000002', other, repeat('a', 64))
+     and current_setting('hid.sealed_demo_phone_hmac') = '')
+     from unnest(array['+447700900102', '+447700900101', '+447700900104', '+447700900113', '+447700900130',
+       '+2347700900103', '+4407700900103', '+44770090010', '+4477009001030', '+2348031234567', ' +447700900103',
+       '447700900103', '07700900103']) other)
+  and not identity.demo_profile_phone_allowed('patient:98d00008-0000-4000-8000-000000000002',
+    '98b1190b-0000-4000-8000-000000000002', '+447700900103', repeat('A', 64))
+  and not identity.demo_profile_phone_allowed('patient:98d00008-0000-4000-8000-000000000002',
+    '98b1190b-0000-4000-8000-000000000002', '+447700900103', null)
+  and current_setting('hid.sealed_demo_phone_hmac') = '');
+select pg_temp.as_demo_patient(2);
+select pg_temp.assert('Chinedu: Adaeze''s number (the swap) and nearby numbers are not allowed and cannot be written',
+  pg_temp.change_phone(2, '+447700900102', repeat('b', 64), true) = 'not allowed'
+  and pg_temp.change_phone(2, '+447700900101', repeat('b', 64), true) = 'not allowed'
+  and pg_temp.change_phone(2, '+447700900104', repeat('b', 64), true) = 'not allowed'
+  and pg_temp.change_phone(2, '+2347700900103', repeat('b', 64), true) = 'not allowed'
+  and pg_temp.change_phone(2, '+447700900104', repeat('b', 64), false) = '22023 PATIENT_CONTACT_CHANGE_INVALID');
+select pg_temp.as_demo_patient(2);
+select pg_temp.assert('Chinedu''s session cannot ask the check for Adaeze (42501)',
+  pg_temp.try($q$select identity.demo_profile_phone_allowed('patient:98d00008-0000-4000-8000-000000000001',
+    '98b1190b-0000-4000-8000-000000000002', '+447700900102', repeat('a', 64))$q$)
+    = '42501 Patient self session is required');
 reset role;
 select pg_temp.assert('nothing written by the refused phone changes',
   pg_temp.profile_counts() = current_setting('hid.test.before'));
@@ -409,7 +440,11 @@ select pg_temp.assert('a real patient may not take a demo number: false, and not
     '98b1190b-0000-4000-8000-000000000009', '+447700900103', repeat('7', 64))
   and coalesce(current_setting('hid.sealed_demo_phone_hmac', true), '') = ''
   and identity.demo_profile_phone_allowed('synthetic:sealed-profile:patient', '98b1190b-0000-4000-8000-000000000009',
-    '+447700900104', repeat('7', 64)));
+    '+447700900104', repeat('7', 64))
+  and (select bool_and(identity.demo_profile_phone_allowed('synthetic:sealed-profile:patient',
+         '98b1190b-0000-4000-8000-000000000009', other, repeat('7', 64)))
+         from unnest(array['+447700900101', '+2347700900102', '+2347700900103']) other)
+  and coalesce(current_setting('hid.sealed_demo_phone_hmac', true), '') = '');
 reset role;
 select pg_temp.assert('a real patient refused a demo number: no phone or change row written',
   pg_temp.real_phone_state() = current_setting('hid.test.real_before'));
