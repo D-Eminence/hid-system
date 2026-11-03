@@ -180,6 +180,14 @@ describe('LabExecutionsService.listReleasedForEhrOrder',()=>{
   expect(body).not.toMatch(/hasUnreleased|unreleased/i);
  });
 
+ it('says enteredByYou to a reader who entered the released version, and never names them',async()=>{
+  const {service}=harness();
+  const scientist={...doctor,actor:{...doctor.actor,accountId:scientistId}};
+  const found=await byOrder(service).listReleasedForEhrOrder(scientist,sourceEhrOrderId);
+  expect((found.results as {revisions:{enteredByYou:unknown}[]}[]).map(r=>r.revisions.map(v=>v.enteredByYou))).toEqual([[true]]);
+  expect(JSON.stringify(found)).not.toContain(scientistId);
+ });
+
  it('answers with no results while nothing of the order is released',async()=>{
   const {service}=harness({results:{[pendingResultId]:neverReleased}});
   await expect(byOrder(service).listReleasedForEhrOrder(doctor,sourceEhrOrderId)).resolves.toEqual({workItemId,sourceEhrOrderId,

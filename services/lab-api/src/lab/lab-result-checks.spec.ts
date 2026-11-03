@@ -143,12 +143,23 @@ describe('LabExecutionsService.verifyResult by the person who entered the result
  * the revision's author and the session; no one's id is answered.
  */
 describe('Each result revision says whether the member asking entered it', () => {
-  /** A result whose versions were entered by the given accounts (version 1 first); the member reads its full history. */
+  /**
+   * A result whose versions were entered by the given accounts (version 1 first); the member reads its full history.
+   * Entering, checking and releasing it succeed, and their answers read the same versions back.
+   */
   function stored(authors: string[]) {
     const client = { query: jest.fn(async (sql: string) => {
       if (sql.includes('lab.order_route_access_for')) return { rows: [{ outcome: 'none', route_id: null, work_item_id: workItemId }] };
+      if (sql.includes('select patient_id::text from lab.specimens')) return { rows: [{ patient_id: patientId }] };
       if (sql.includes('select patient_id::text from lab.results')) return { rows: [{ patient_id: patientId }] };
       if (sql.includes('select id::text from lab.results where execution_id=$1')) return { rows: [{ id: resultId }] };
+      // No earlier command with this key.
+      if (sql.includes('rr.idempotency_key=$3')) return { rows: [] };
+      if (sql.includes('insert into lab.results(')) return { rows: [{ id: resultId }] };
+      if (sql.includes('insert into lab.result_revisions(')) return { rows: [{ id: 'b0000000-0000-4000-8000-000000000001', result_id: resultId }] };
+      if (sql.includes('from lab.results where id=$1 for update')) return { rows: [{ id: resultId, execution_id: executionId,
+        patient_id: patientId, facility_id: facilityId, current_version: String(authors.length) }] };
+      if (sql.includes('select id::text from lab.result_verifications')) return { rows: [{ id: 'c0000000-0000-4000-8000-000000000001' }] };
       if (sql.includes('from lab.results where id=$1')) return { rows: [{ id: resultId, execution_id: executionId,
         status: 'entered_unverified', current_version: String(authors.length) }] };
       if (/\bfrom lab\.result_revisions rr\b/.test(sql)) return { rows: authors.map((author, index) => ({
@@ -192,5 +203,33 @@ describe('Each result revision says whether the member asking entered it', () =>
     const execution = await stored([accountId]).get(context, executionId);
     expect(execution.result?.revisions.map((revision) => (revision as { enteredByYou?: unknown }).enteredByYou)).toEqual([true]);
     expect(JSON.stringify(execution)).not.toContain(accountId);
+  });
+
+  // The read the website loads a specimen's results from, and so decides whether to offer Check.
+  it('answers it on each execution of a specimen', async () => {
+    const listed = await stored([accountId, colleagueId]).listForSpecimen(context, '80000000-0000-4000-8000-000000000001');
+    expect(listed.items.map((item) => item.result?.revisions.map((revision) => (revision as { enteredByYou?: unknown }).enteredByYou)))
+      .toEqual([[true, false]]);
+    const body = JSON.stringify(listed);
+    for (const id of [accountId, colleagueId]) expect(body).not.toContain(id);
+  });
+
+  it('answers it on the result the member just entered', async () => {
+    const entered = await stored([accountId]).enterResult(context, executionId,
+      { expectedExecutionVersion: 2, resultType: 'numeric', numericValue: 12.4 }, key);
+    expect(entered.revisions.map((revision) => (revision as { enteredByYou?: unknown }).enteredByYou)).toEqual([true]);
+    expect(JSON.stringify(entered)).not.toContain(accountId);
+  });
+
+  it('answers it on a check of a colleague\'s correction', async () => {
+    // Version 1 entered by the member; version 2, the correction being checked, by a colleague.
+    const checked = await stored([accountId, colleagueId]).verifyResult(context, resultId, { ...check, expectedResultVersion: 2 }, key);
+    expect(checked.revisions.map((revision) => (revision as { enteredByYou?: unknown }).enteredByYou)).toEqual([true, false]);
+  });
+
+  it('answers it on a release by the member who entered the version', async () => {
+    const releasedResult = await stored([accountId]).releaseResult(context, resultId, check, key);
+    expect(releasedResult.revisions.map((revision) => (revision as { enteredByYou?: unknown }).enteredByYou)).toEqual([true]);
+    expect(JSON.stringify(releasedResult)).not.toContain(accountId);
   });
 });
