@@ -36,6 +36,8 @@ import { AdminSelfServiceApplicationsController,
   AdminSelfServiceFacilitiesController } from './self-service-facilities.controller';
 import { SelfServiceFacilitiesService } from './self-service-facilities.service';
 import { AdminFacilityStaffController } from './admin-facility-staff.controller';
+import { FacilitySettingsController } from './facility-settings.controller';
+import { FacilitySettingsService } from './facility-settings.service';
 import { FacilityStaffController } from './facility-staff.controller';
 import { FacilityStaffService } from './facility-staff.service';
 import { StaffInvitationsPublicController } from './staff-invitations-public.controller';
@@ -57,6 +59,7 @@ import { OrderDestinationsService } from './order-destinations.service';
     // signed-in/preview, signed-in/accept) never match :invitationId/resend or
     // :invitationId/revoke.
     StaffInvitationsSignedInController, StaffInvitationsPublicController, FacilityStaffController,
+    FacilitySettingsController,
     AdminFacilityStaffController,
     // The directory of laboratories and pharmacies an order can go to (P4c).
     OrderDestinationsController],
@@ -87,6 +90,7 @@ import { OrderDestinationsService } from './order-destinations.service';
     SelfServiceFacilitiesService,
     StaffInvitationsService,
     FacilityStaffService,
+    FacilitySettingsService,
     StaffReauthenticationService,
     OrderDestinationsService,
     QoreIdPublicPatientIdentityProvider,
