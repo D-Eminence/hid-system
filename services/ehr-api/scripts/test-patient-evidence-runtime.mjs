@@ -207,7 +207,7 @@ try {
   const labRuntime=await connect('lab_evidence_test');
   const labPatientSession=await liveSession('20000000-0000-4000-8000-000000000002','50000000-0000-4000-8000-000000000001');
   try {
-    const {PATIENT_LAB_QUERY}=require('../../lab-api/dist/lab/patient-results.service.js');
+    const {STAFF_LAB_QUERY,PATIENT_SELF_LAB_QUERY}=require('../../lab-api/dist/lab/patient-results.service.js');
     const staffLabRead=async(patient,facility='10000000-0000-4000-8000-000000000002')=>{
       await labRuntime.query('begin');
       try {
@@ -215,7 +215,7 @@ try {
           set_config('app.facility_id',$1,true),set_config('app.membership_id','40000000-0000-4000-8000-000000000001',true),
           set_config('app.purpose_of_use','direct-care',true),set_config('app.correlation_id','synthetic-staff-lab-evidence',true),
           set_config('app.patient_id','',true),set_config('app.self_authorized_until','',true)`,[facility]);
-        return (await labRuntime.query(PATIENT_LAB_QUERY,[patient,''])).rows;
+        return (await labRuntime.query(STAFF_LAB_QUERY,[patient,''])).rows;
       } finally {await labRuntime.query('rollback');}
     };
     assert.equal((await staffLabRead('50000000-0000-4000-8000-000000000001')).length,1,'Restricted Lab role reads authorized staff released results');
@@ -226,9 +226,9 @@ try {
       set_config('app.patient_id','50000000-0000-4000-8000-000000000001',true),set_config('app.session_id',$1,true),
       set_config('app.self_authorized_until',$2,true),set_config('app.correlation_id','synthetic-lab-evidence-read',true),
       set_config('app.purpose_of_use','patient-self',true),set_config('app.facility_id','',true),set_config('app.membership_id','',true)`,[labPatientSession,new Date(Date.now()+30000).toISOString()]);
-    const result=(await labRuntime.query(PATIENT_LAB_QUERY,['50000000-0000-4000-8000-000000000001',''])).rows;
+    const result=(await labRuntime.query(PATIENT_SELF_LAB_QUERY,['50000000-0000-4000-8000-000000000001',''])).rows;
     assert.equal(result.length,1);assert.equal(result[0].fields.numericValue,'12.7');assert.equal(result[0].fields.unit,'g/dL');
-    assert.equal((await labRuntime.query(PATIENT_LAB_QUERY,[a,''])).rows.length,0,'Other patient cannot be selected by changing SQL parameter');
+    assert.equal((await labRuntime.query(PATIENT_SELF_LAB_QUERY,[a,''])).rows.length,0,'Other patient cannot be selected by changing SQL parameter');
     assert.equal((await labRuntime.query("select has_table_privilege(current_user,'ehr.clinical_notes','SELECT') allowed")).rows[0].allowed,false);
     await labRuntime.query('rollback');
     await preparedBatch(admin,`begin;select set_config('app.actor_subject','staff:synthetic-evidence-verifier',true),
@@ -243,7 +243,7 @@ try {
       set_config('app.patient_id','50000000-0000-4000-8000-000000000001',true),set_config('app.session_id',$1,true),
       set_config('app.self_authorized_until',$2,true),set_config('app.correlation_id','synthetic-lab-invalidation-read',true),
       set_config('app.purpose_of_use','patient-self',true)`,[labPatientSession,new Date(Date.now()+30000).toISOString()]);
-    assert.equal((await labRuntime.query(PATIENT_LAB_QUERY,['50000000-0000-4000-8000-000000000001',''])).rows.length,0,'Invalidated current version withheld');
+    assert.equal((await labRuntime.query(PATIENT_SELF_LAB_QUERY,['50000000-0000-4000-8000-000000000001',''])).rows.length,0,'Invalidated current version withheld');
     await labRuntime.query('rollback');
     assert.equal((await staffLabRead('50000000-0000-4000-8000-000000000001')).length,0,'Invalidated current version withheld from staff');
   } finally {await labRuntime.end();}

@@ -13,6 +13,23 @@ export function clinicalContext(request: HidRequest): DataAccessContext {
 }
 
 /**
+ * The patient record outside the encounter routes: imported records and
+ * attachments, the reported health profile and the OCR note import. Any
+ * purpose but healthcare-operations, so emergency reads stay as they are. A
+ * records-processing grant (healthcare-operations, 0104) lets OCR read the
+ * documents it turns into the digital record (the document routes and the
+ * OCR source route keep taking it); it never opens the chart, and OCR
+ * publishes into the chart under direct care only.
+ */
+export function patientRecordContext(request: HidRequest): DataAccessContext {
+  if (request.header('x-purpose-of-use') === 'healthcare-operations') {
+    throw new DomainProblem(400, 'PURPOSE_OF_USE_REQUIRED',
+      'X-Purpose-Of-Use must be direct-care or emergency for the patient record');
+  }
+  return requireRequestContext(request);
+}
+
+/**
  * Opaque keyset cursors for the clinical record's newest-first lists.
  *
  * A cursor names the last row of a page: its sort key at microsecond

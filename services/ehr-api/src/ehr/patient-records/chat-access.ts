@@ -3,6 +3,7 @@ import type { AuditEventInput } from '../../audit/audit.service';
 import type { HidRequest } from '../../common/request-context';
 import type { PatientEvidenceService } from './patient-evidence.service';
 import type { PatientChatHistoryService } from './patient-chat-history.service';
+import type { PatientProfileInput } from './patient-evidence.policy';
 
 /** Server-created access strategies; never deserialize one from a browser. */
 export interface ChatAuthorization {
@@ -18,11 +19,25 @@ export interface AttachmentAccess extends EvidenceAccess {
   query: string;
   table(kind: unknown): string;
 }
+/**
+ * Who reads this chat. 'patient': the patient about their own record, with the
+ * patient-only safeguards (cleaned evidence, cited-only sources, server-added
+ * lines). 'staff': a clinician about the one patient whose record is open, with
+ * full access and no patient safeguards. Always set by the server.
+ */
+export type ChatAudience = 'patient' | 'staff';
 export interface ChatAccess extends EvidenceAccess {
+  audience: ChatAudience;
   admissionKey: string;
   chunksTable: 'ehr.patient_evidence_chunks' | 'ehr.staff_evidence_chunks';
   audit: Pick<AuditEventInput, 'actorType' | 'actorMembershipId' | 'facilityId' | 'organizationId' | 'purposeOfUse'>;
   evidence: Pick<PatientEvidenceService, 'snapshot' | 'assertCurrent' | 'prepareDocuments'>;
+  /**
+   * Patient chat only: the name and date of birth that are removed from the
+   * patient's own question before it is planned, answered, embedded or saved.
+   * Staff strategies leave it out; their questions are kept as typed.
+   */
+  redactionProfile?(request: HidRequest): Promise<PatientProfileInput>;
   history: Pick<PatientChatHistoryService, 'context' | 'save'> & {
     start(request: HidRequest, authorization: ChatAuthorization): Promise<string>;
   };

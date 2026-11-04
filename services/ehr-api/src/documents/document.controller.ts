@@ -6,6 +6,8 @@ import { CreateDocumentUploadDto } from './dto/create-document-upload.dto';
 import { DocumentScanEventDto } from './dto/document-scan-event.dto';
 import { IdentityApiService } from '../integrations/identity-api.service';
 import { ListDocumentsDto } from './dto/list-documents.dto';
+import { ListScanTargetsDto } from './dto/list-scan-targets.dto';
+import { ResolveScanTargetDto } from './dto/resolve-scan-target.dto';
 
 @Controller('ehr/documents')
 export class DocumentController {
@@ -63,5 +65,32 @@ export class DocumentController {
       request.correlationId,
     );
     return this.documents.recordScan(input, actor, request.correlationId);
+  }
+
+  // The document scanner's two read commands (0105), authorized exactly as
+  // scan-events: a workload JWT checked by Identity before any database call.
+  // The public gateway answers 404 for /api/v1/ehr/documents/scan-*; only the
+  // internal load balancer serves them.
+  @Post('scan-targets/resolve')
+  @Public()
+  @AuditAction('ehr.document.scan-target.resolve.request')
+  @HttpCode(200)
+  async resolveScanTarget(@Body() input: ResolveScanTargetDto, @Req() request: HidRequest) {
+    const actor = await this.identity.authorizeDocumentScanner(
+      request.header('authorization'),
+      request.correlationId,
+    );
+    return this.documents.resolveScanTarget(input, actor, request.correlationId);
+  }
+
+  @Get('scan-targets')
+  @Public()
+  @AuditAction('ehr.document.scan-target.list.request')
+  async listScanTargets(@Query() query: ListScanTargetsDto, @Req() request: HidRequest) {
+    const actor = await this.identity.authorizeDocumentScanner(
+      request.header('authorization'),
+      request.correlationId,
+    );
+    return this.documents.listScanTargets(query, actor, request.correlationId);
   }
 }

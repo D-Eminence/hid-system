@@ -38,7 +38,8 @@ export function PatientRecordChat() {
         <p><strong>You:</strong> {exchange.question}</p>
         <p><strong>Answer:</strong> {exchange.reply.answer}</p>
         {exchange.reply.sources.length > 0 && <details><summary>Source records</summary><ol>
-          {exchange.reply.sources.map(source => <li key={source.noteId}>
+          {/* Only cited sources are listed, so each keeps its citation number: "[5]" in the answer is item 5. */}
+          {exchange.reply.sources.map(source => <li key={source.number} value={source.number}>
             {source.title} · revision {source.revisionNo} · {new Date(source.signedAt).toLocaleDateString()} · record {source.noteId}
           </li>)}
         </ol></details>}

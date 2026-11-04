@@ -2338,10 +2338,13 @@ accepts it at Demo Hospital or Demo Outreach; an invitation to
 `patient1@healthidentitydirectory.com` or `patient2@healthidentitydirectory.com`
 is delivered to that mailbox but can never be accepted (acceptance needs a staff
 login whose own verified address it is). Migrate's OCR
-job creation is not available to testers, nor to any tenant: `POST
-/api/v1/ocr/jobs` needs a `healthcare-operations` grant, which no portal path
-issues (a platform-wide limitation tracked separately; 0098 widens nothing).
-The owner can check production's purposes with `select code, active from
+job creation (`POST /api/v1/ocr/jobs`) needs a records-processing
+(`healthcare-operations`) grant for the patient. 0098 seeds none and widens
+nothing; once 0104 is applied the demo login asks for one at Demo Hospital and
+Patient One or Patient Two approves it in the portal, as any patient does
+(section 32). Upload and publication run under the seeded direct-care shares.
+The fictional patients born in 2012 and 2020 are refused as under 18. The
+owner can check production's purposes with `select code, active from
 identity.purpose_of_use_codes order by 1;`.
 
 Answers across the boundary (a demo actor and a real patient or facility, or a
@@ -2850,7 +2853,434 @@ unchanged. 0103 has no down migration; applying the previous bodies (0046,
 0056) restores the old behaviour. The suite is
 `services/ehr-api/test/database/platform-organization-applications.integration.sql`.
 
-## 32. Records patients add themselves (0116)
+## 32. Records processing: the purpose OCR runs under (0104)
+
+Stage 1 of records processing (owner decisions of D-Eminence in chat,
+2026-10-31, numbered 0104 by the owner's decision 33(6) of 2026-11-03; 0104's
+declaration is unsigned until the owner signs): a staff
+member asks the patient for access to turn the patient's paper records into the
+digital record at the facility with OCR, and the patient approves or denies it
+as any access request. The purpose of use is `healthcare-operations`, shown to
+patients as "Records processing". The OCR API's create, validate, confirm and
+retry already require it, and Identity's access-request route already admits
+it. Migration 0104 (`0104_records_processing_purpose.sql`) seeds it active,
+refuses requests the facility could not use, and lists each patient request's
+purpose. Since the owner's decision 34(1) of 2026-11-03 ("the first access
+request or the Access PIN also covers bringing in paper records for 24 hours,
+said clearly to the patient; under-18s still refused; the patient can still say
+no") the patient's approval of a direct-care request, or the Access PIN, also
+covers records processing for 24 hours (below). It seeds no grant and changes
+no row-level security policy; ocr-api and the role map are unchanged (a
+records officer role is Stage 2). Publishing into the chart stays direct care.
+
+- The code: `('healthcare-operations', 'Records processing', active, 'hid')`,
+  inserted ON CONFLICT DO NOTHING, as 0085 seeds `emergency` (a row already
+  there, active or not, is kept). Its `active` flag is the kill switch (below).
+- How a grant comes to exist: the staff member asks with the existing request
+  (below), the patient approves it (approval needs no change: 0072 copies the
+  purpose onto the grant), and the grant is honoured for that purpose only, for
+  that one membership, facility and patient, for at most 24 hours. No grant is
+  seeded, and a records-processing grant never satisfies direct care. The other
+  way is the cover of decision 34(1), below: a direct-care grant from the
+  patient's approval or the Access PIN. A patient share never covers it.
+
+The request is today's staff access request with the purpose header:
+
+```
+POST /api/v1/identity/access-requests
+X-Purpose-Of-Use: healthcare-operations
+{ "hid": "HID-...", "scope": "write_records", "durationMinutes": 1440,
+  "reason": "Turn paper records into the digital record at <facility> (OCR)" }
+```
+
+`write_records` is what OCR's validate, confirm and retry need (and it covers
+create's read); 1440 minutes (24 hours) is the most a request may last (the DTO
+and the table's CHECK). The answer is today's 201, `purpose:
+"healthcare-operations"`; a pending request of the same scope and purpose is
+answered again with `existingRequest: true` and is not checked again.
+
+The trigger `access_requests_records_processing` (BEFORE INSERT on
+`identity.access_requests`, rows with this purpose that are not break-glass)
+refuses, in this order:
+
+| Status | Code | When | Database |
+|---|---|---|---|
+| 403 | `RECORDS_PROCESSING_NOT_ALLOWED` | the actor (`app.actor_subject`) does not hold the requesting membership live and active, or that membership's roles lack `ocr.job.write` at the facility (doctors, clinicians, nurses and laboratory staff hold it; pharmacists and receptionists, who may ask for direct care, do not) | 42501 `RECORDS_PROCESSING_NOT_ALLOWED` |
+| 400 | `INVALID_CONSENT_COMMAND` | a scope other than `read_records` or `write_records`, or a duration outside 5 to 1440 minutes; `create_access_request` and the DTO refuse both first, so only a direct insert reaches the trigger's | 22023 `RECORDS_PROCESSING_REQUEST_INVALID` |
+| 422 | `RECORDS_PROCESSING_MINOR` | the patient is under 18 on today's date in Africa/Lagos (18 from the 18th birthday; born 29 February, from 1 March in a year without one), has a date of birth in the future, or has no date of birth on record (`identity.patients.dob` null); refused until a guardian approval exists | 42501 `RECORDS_PROCESSING_MINOR` |
+
+The permission is checked first, so a caller who may not ask learns nothing
+about the patient's age. Each refusal reaches Identity as the error of
+`identity.create_access_request` with that SQLSTATE and message (the message
+is the code, as `EMERGENCY_PROBATION_LIMIT` is). Identity matches the two 42501
+refusals by SQLSTATE and exact message, so any other 42501 stays 403
+`CONSENT_COMMAND_DENIED`; an Identity image from before 0104 answers both 403
+`CONSENT_COMMAND_DENIED`. While the purpose is not active (a database before
+0104, or the kill switch), `create_access_request` answers 22023 `Invalid
+purpose for a standard access request`, Identity's 400
+`INVALID_CONSENT_COMMAND`. Every other answer is today's (404
+`CONSENT_RESOURCE_NOT_FOUND` for an unknown Health ID, 400 for the DTO).
+Direct-care, emergency and break-glass requests never fire the trigger.
+
+The patient sees the request in `GET /api/v1/identity/me/access-requests`, whose
+items now carry `purpose` (`direct-care` or `healthcare-operations`), from the
+twelfth, last column `purpose_of_use` of `identity.list_my_access_requests()`
+(never null for a listed row). The function was dropped and recreated with the
+same owner and EXECUTE for `hid_identity_runtime` only. Identity selects every
+column, so on a database before 0104 `purpose` is left out and the list still
+answers; an earlier Identity image names its eleven columns and keeps working
+on 0104, without `purpose`. Approval is today's (a sign-in within 10 minutes,
+no recovery hold): the grant carries the request's purpose, ends with the
+request's duration, and the patient can revoke it from the access history.
+Staff read where they stand with today's `POST /api/v1/identity/consent-status`
+and `purpose: "healthcare-operations"`.
+
+What the grant opens, by step (permissions unchanged, 0013 and 0016):
+
+| Step | Permission | Purpose and grant |
+|---|---|---|
+| Ask the patient | `identity.consent.write` and `ocr.job.write` | `healthcare-operations`; no grant |
+| Create, read and retry OCR jobs; read extractions and validations | `ocr.job.write`, `ocr.job.read` | `healthcare-operations` grant (read for reads, write for retry) |
+| Validate or reject | `ocr.validation.write` | `healthcare-operations` write |
+| Confirm the source patient | `ocr.patient.confirm` (doctor, clinician, nurse) | `healthcare-operations` write |
+| EHR documents (`/ehr/documents` upload intent, list, complete, download) and OCR's source read (`/ehr/internal/ocr/documents/:documentId/source`) | `ehr.document.*`, `ocr.job.read` | any purpose, the grant of that purpose |
+| Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own |
+
+Without a records-processing grant or a cover, OCR's create answers 404 (EHR's
+source read does not find the document under that purpose, so nobody learns
+whether it exists) and the other job routes 404 `OCR_JOB_NOT_FOUND`; the website
+explains that the patient has not given records-processing access yet.
+
+### 32.1 The patient's approval or Access PIN covers records processing for 24 hours (decision 34(1))
+
+A records-processing check (`healthcare-operations`, `read_records` or
+`write_records`) for a patient, staff member (membership) and facility is also
+allowed while that membership holds a covering direct-care grant. A grant
+covers when all of these hold, and only then:
+
+- It is that membership's, at that facility, for that patient, on that live
+  account: the grant every check already names (0012). Another staff member,
+  another facility, or the same staff member's membership at another facility,
+  is not covered.
+- It is direct care (`purpose_of_use = 'direct-care'`), `read_records` or
+  `write_records`, not break-glass, active, not held by the cutover, written by
+  this branch (`source_system = 'hid'`).
+- It came in one of exactly two ways: the patient approved the facility's
+  direct-care access request (the request is approved by the patient,
+  `approved_by_patient_id`, and neither row carries an authorization method:
+  0072's approval), or the patient's Access PIN was used (grant and request
+  both `authorization_method = 'patient_access_pin'`: 0075's and 0098's PIN
+  command). A patient share (0095), a seeded or imported grant, an emergency
+  grant and break-glass never cover it.
+- The check's time is from the grant's `starts_at`, before `least(expires_at,
+  starts_at + 24 hours)`: never past the grant's end, and never more than 24
+  hours from its start (requests last at most 24 hours and PIN grants at most
+  60 minutes today, so today the grant's end comes first).
+- The patient is 18 or over on that day's Africa/Lagos date and has a date of
+  birth on record (the request trigger's rule, at each check, since no request
+  is made). The membership's roles hold `ocr.job.write` at the facility, at
+  each check (pharmacists and receptionists, who may hold a direct-care grant,
+  are not covered).
+- Both codes, `healthcare-operations` and `direct-care`, are active (the kill
+  switch ends the cover), and no active deny directive of the patient names
+  records processing or direct care (or no purpose) for this facility,
+  organization, staff member or all, for this action (0012's reading).
+
+Within the cover both `read_records` and `write_records` are allowed for
+records processing, also under a PIN grant, which is read only for direct care:
+bringing in paper records means creating, validating, confirming and retrying
+OCR jobs. Direct care itself is unchanged: the PIN still opens the chart for
+reading only, and publishing into the chart still needs the publisher's own
+direct-care write grant.
+
+The patient can still say no: denying the request (no grant), revoking the
+grant from the access history (`POST /identity/me/consent-grants/:id/revoke`),
+turning the Access PIN off (`DELETE /identity/me/access-pin`, which ends its
+grants) or a deny directive each end the cover at the next check; ending the
+direct-care grant ends this too. A separate records-processing request (above)
+still works as before and is the way past 24 hours.
+
+Where it lives: `identity.records_processing_direct_care_cover(patient,
+subject, membership, facility, action, at_time)` returns `(consent_grant_id,
+covered_until)` or no row (sql, STABLE, SECURITY DEFINER, search_path
+`pg_catalog, pg_temp`, owned by the table owner, EXECUTE for
+`hid_identity_runtime` only). `identity.has_active_consent_grant` keeps 0012's
+body and gains one last alternative: the purpose is `healthcare-operations` and
+the cover returns a row (its md5 is now `732d11892dd4e27e1ff9093ae3b7de5a`;
+later migrations pin that). Every row-level security policy that calls it
+(OCR's jobs, EHR's documents and their scans) therefore honours the cover with
+no policy change.
+
+What staff and services see: Identity's `POST /identity/authorization/check` and
+`POST /identity/consent-status` answer a covered check allowed, with
+`consentGrantId` the covering direct-care grant and `expiresAt` the cover's end
+(`covered_until`); a records-processing grant of the staff member's own, when
+there is one, is named first. Audit is as today: Identity records
+`identity.authorization.check` (`success`, purpose `healthcare-operations`,
+details naming the covering `consentGrantId`) and OCR records its own job
+events; the "Your records were opened" notice (0095) fires as for any grant. An
+Identity image from before 0104 answers a covered check as not allowed (its own
+lookup wants a records-processing grant), so OCR then answers 403
+`ACCESS_DENIED` until the new Identity image serves.
+
+What the patient must be told (website lane, health; this branch does not edit
+the website): the owner's words are "said clearly to the patient". Each place
+the patient approves a facility's direct-care request or gives the Access PIN
+must say, before they agree, that this also lets that staff member bring in
+(scan and read) the patient's paper records at that facility for up to 24 hours
+(never longer than the access itself), and that they can stop it at any time by
+ending the access; and the patient's access history should show the same
+grant as also covering records processing until `covered_until`. Exact places
+are listed in the release notes for the website lane (approval screen, PIN
+screens, access history, the request inbox item and the PIN explainer). Under
+18: the patient's approval or PIN still grants direct care as today, but the
+words about paper records must not be shown for a patient under 18, who is not
+covered.
+
+The grant never opens the chart. The services refuse the purpose everywhere
+else:
+
+- ehr-api: the encounter routes (encounters, notes, diagnoses, vitals,
+  prescriptions, lab requests), the offline routes and the staff chat take
+  `direct-care` only, the order routes answer anything else 403
+  `PERMISSION_DENIED` and the emergency summary takes `emergency` only, all
+  as before. Imported records (`GET /ehr/patients/:patientId/imported-records`),
+  an imported attachment (`GET
+  /ehr/patients/:patientId/imported-attachments/:fileId/download`), the
+  reported health profile (`GET
+  /ehr/patients/:patientId/reported-health-profile`) and OCR's clinical-note
+  import (`POST /ehr/internal/ocr/patients/:patientId/clinical-notes`) now answer
+  `healthcare-operations` 400 `PURPOSE_OF_USE_REQUIRED` ("X-Purpose-Of-Use must
+  be direct-care or emergency for the patient record") before any work; direct
+  care and emergency answer as before.
+- lab-api and pharmacy-api: every route takes `direct-care` or `emergency`; a
+  `healthcare-operations` purpose answers 400 `PURPOSE_OF_USE_REQUIRED`
+  ("X-Purpose-Of-Use must be direct-care or emergency"). No Lab or Pharmacy
+  route used it, and OCR's lab and medication imports run at publication under
+  direct care.
+- The database fence (records-processing rules in `ehr.context_allows` and
+  Lab's and Pharmacy's twins) is Stage 2; those functions' bodies are pinned
+  by later migrations.
+
+Kill switch: `update identity.purpose_of_use_codes set active = false where
+code = 'healthcare-operations';`. New requests (and replays of pending ones)
+then answer 400 `INVALID_CONSENT_COMMAND` and every records-processing
+authorization is refused (`identity.has_active_consent_grant` requires an
+active code, and the cover of 32.1 both active codes), so OCR answers 404
+again. A grant approved while the code is off is written but authorizes
+nothing; unexpired grants (and covers) work again if the code is reactivated. Who may set it and how it is recorded is an owner decision.
+
+Unchanged: `create_access_request`, `approve_access_request` and every other
+function body but `has_active_consent_grant`'s (32.1; their md5 pins stay
+true), policy, role, permission and grant; break-glass (emergency only), the
+PIN command (direct care, read only; its grant covers records processing as
+32.1 says) and patient shares (direct care, never covering records
+processing). A pending request is
+not checked again on approval, so a requester whose role changes afterwards
+keeps a request the patient may still approve.
+
+Applying 0104 takes SHARE ROW EXCLUSIVE on `identity.access_requests` until
+commit (CREATE TRIGGER), so an access request being written waits a few
+milliseconds; reads are not blocked. 0104 has no down migration. Rolling the
+service images back leaves the code, the trigger and the twelfth column in
+place; earlier images keep working (they read the list by column name), and
+the kill switch turns records processing off without a release.
+
+Release order: the website first, which words today's answers (400
+`INVALID_CONSENT_COMMAND`: records processing is not switched on yet; no
+`purpose` on the patient's requests: no label); then the backend with 0104,
+whose release applies 0104 before the images roll out. The service fences do
+not depend on 0104. Tests: 0104's database suite
+`services/ehr-api/test/database/records-processing.integration.sql`,
+Identity's `consent.service.spec.ts`, ehr-api's
+`ehr/shared/patient-record-context.spec.ts`, Lab's and Pharmacy's
+`common/request-context.spec.ts`, and the runtime verifier
+`services/ehr-api/scripts/verify-records-processing-runtime.mjs` (Identity,
+EHR, Lab, Pharmacy and OCR booted from their own code as their runtime roles,
+run by the TUF migration rehearsal): the request and its refusals, the
+patient's approval, OCR's job and EHR's document under the grant, the fences,
+the cover of a second patient's direct-care approval and then of the Access PIN
+(OCR creates and reads a job; another staff member is not covered; revoking the
+grant or turning the PIN off ends it), the kill switch and the revocation.
+Identity's `postgres-identity.provider.spec.ts` covers naming the covering
+grant. With `HID_RECORDS_PROCESSING_STAGE` it also
+runs this branch's services on a database without 0104 (`before-0104`), and an
+Identity from before 0104 (`HID_RECORDS_PROCESSING_IDENTITY_DIR`) on a database
+with it (`old-identity`) or without it (today's Identity on today's database).
+## 33. Document virus scanning: the scanner's account, routes and refusals (0105)
+
+Migration 0105 (`0105_document_scanner.sql`, owner decisions of 2026-10-31,
+D-Eminence: D1 GuardDuty, D2 a file it cannot scan is refused, D3 a type
+mismatch is accepted under the real type, D4 enforcement only after the
+backfill; numbered 0105 by the owner's decision 33 of 2026-11-03; unsigned
+until the owner signs) and the EHR API changes beside it are the backend half
+of the GuardDuty Malware Protection for S3 scanner (D1). It was built as 0101
+on the scan-be branch and is written on 0103: it uses nothing 0104 (records
+processing) adds. A bridge Lambda turns each GuardDuty result into a scan
+event; Terraform, the bridge and the issuer cap are separate and are not part
+of this release. Nothing here turns enforcement on: until the bridge holds a
+token, nothing here is reachable, every document stays scan-pending (the
+website's "checking for viruses" state) and uploads behave exactly as
+today.
+
+### The scanner's identity
+
+- The workload issuer mints `sub` `hid:staging:document-scanner` for the
+  bridge's Lambda role in production (the promoted staging stack; the
+  application module's environment is `staging`), `aud` `hid-identity-api`,
+  ES256, 300 seconds. identity-api's `authenticateScanner` accepts it only while
+  that subject is an active `auth.accounts` row holding the platform
+  `document_scanner` role.
+- 0105 seeds that account (`d0c5ca40-0105-4000-8000-000000000001`, no email,
+  no password, `source_system` `hid-workload`) and its role row
+  (`d0c5ca40-0105-4000-8000-000000000002`, `document_scanner` grants only
+  `ehr.document.scan`). `auth.admin_change_platform_role` refuses this role, so
+  the seed bypasses the governed admin command; the owner signs that in the
+  declaration. A different row already holding the subject or the ID stops the
+  migration with nothing applied.
+- Kill switch, no release: revoke the role row (`revoked_at`, `revoked_by`,
+  an 8-500 character `revocation_reason`) or set the account's status to
+  `disabled`. Every scanner route then answers 401 from Identity.
+
+### Routes (ehr-api, internal load balancer only)
+
+All three are `@Public` to the session guard and authorized exactly alike:
+`Authorization: Bearer <workload JWT>` is sent to Identity
+(`/api/v1/identity/service/workloads/document-scanner/authorize`) before any
+database call; an optional `X-Correlation-Id` matching
+`^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$` is kept (otherwise a UUID is generated)
+and is passed to the database command, which checks it against the
+transaction's. Bodies are JSON; unknown fields are refused (400
+`VALIDATION_FAILED`). Errors are Problem Details with a `code`.
+
+The public gateway answers 404 for `/api/v1/ehr/documents/scan-events`,
+`/scan-targets` and `/scan-targets/resolve` (any case, trailing slash, encoded
+or doubled-slash forms) before its EHR proxy.
+
+`POST /api/v1/ehr/documents/scan-targets/resolve` (200)
+
+```json
+{ "storageBucket": "hid-staging-documents-...", "storageKey": "clinical/objects/<uuid>", "objectVersionId": "<S3 VersionId>" }
+```
+
+`storageBucket` must be the EHR API's own bucket (another answers 404
+`DOCUMENT_NOT_FOUND`); `storageKey` must match
+`^clinical/objects/<lower-case UUID>$`; `objectVersionId` 1-1024 characters.
+Answer:
+
+```json
+{ "documentId": "<uuid>", "objectVersionId": "<bound VersionId>", "sha256Hex": "<64 hex>",
+  "status": "uploaded", "declaredMediaType": "image/png", "latestEventType": null,
+  "sniffResult": "supported", "sniffedMediaType": "image/jpeg" }
+```
+
+`latestEventType` is the latest event on the bound version (`scan_started`,
+`failed` or null; a terminal one is a refusal). After the database answer the
+EHR API reads bytes 0-1023 of exactly that VersionId (a ranged GetObject with
+its own S3 and KMS rights) and sets `sniffResult`: `supported` with
+`sniffedMediaType` one of `application/pdf` (`%PDF-`), `image/jpeg`
+(`FF D8 FF`), `image/png` (`89 50 4E 47 0D 0A 1A 0A`), `image/tiff`
+(`49 49 2A 00` or `4D 4D 00 2A`), each at byte 0; `unsupported` (null type)
+when the bytes were read and match none (a PDF with anything before `%PDF-` is
+unsupported); `unavailable` (null type) when they could not be read (access
+denied, version gone, timeout). No patient or facility ID is returned. Audited
+as `ehr.document.scan-target.resolve` (and the request as
+`api.ehr.document.scan-target.resolve.request`).
+
+`GET /api/v1/ehr/documents/scan-targets?olderThanSeconds=<0-31536000>&limit=<1-100>` (200; both required, decimal digits)
+
+```json
+{ "items": [ { "documentId": "<uuid>", "storageBucket": "...", "storageKey": "clinical/objects/<uuid>",
+  "objectVersionId": "...", "sha256Hex": "<64 hex>", "declaredMediaType": "application/pdf",
+  "updatedAt": "2026-10-31T09:00:00.000Z", "latestEventType": "scan_started", "scanStartedCount": 1,
+  "lastScanStartedAt": "2026-10-31T10:00:00.000Z" } ] }
+```
+
+Uploaded documents whose row last changed (the upload completion sets it) at
+least `olderThanSeconds` ago, with no clean or rejected event on their bound
+version and SHA-256, oldest first. Every status other than `uploaded` is left
+out (an upload never completed cannot be scanned). Keys outside
+`clinical/objects/` are listed as they are; the bridge does not scan them.
+Audited as `ehr.document.scan-target.list` naming the documents.
+
+`POST /api/v1/ehr/documents/scan-events` (202 `{ "eventId": "<uuid>" }`) is
+unchanged in shape (`documentId`, `objectVersionId`, `objectSha256Hex`,
+`eventType` `scan_started|clean|rejected|failed`, `detectedMediaType` required
+for clean and one of the four types, `scannerEngine`, `scannerVersion`,
+`reasonCode` required for rejected and failed,
+`^[A-Za-z0-9][A-Za-z0-9._:-]*$` up to 120, `idempotencyKey`
+`^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$`). An identical replay of an
+idempotency key answers 202 with the first event's ID.
+
+### Status codes
+
+| Status | `code` | Routes | Meaning |
+| --- | --- | --- | --- |
+| 401 | `WORKLOAD_AUTHENTICATION_REQUIRED` or Identity's code | all | no bearer token, or Identity refused it (bad signature, issuer or audience, no active scanner account: the kill switch) |
+| 403 | Identity's code / `DOCUMENT_SCANNER_FORBIDDEN` | all | Identity refused; or the database found no active scanner for the actor or a mismatched correlation ID (42501) |
+| 503 | `IDENTITY_SERVICE_UNAVAILABLE` and others | all | Identity, storage or the scanner database pool unavailable; retry |
+| 400 | `VALIDATION_FAILED` / `INVALID_SCAN_REQUEST` | all | the request failed validation, or a database argument check (22023) |
+| 404 | `DOCUMENT_NOT_FOUND` | resolve, scan-events | no document holds the object, or no such document (P0002 `Document not found`) |
+| 409 | `DOCUMENT_NOT_UPLOADED` | resolve, scan-events | the upload is not completed (55000 `Only an uploaded document can be scanned`); retry later |
+| 409 | `DOCUMENT_NOT_SCANNABLE` | resolve | the document is rejected or entered in error (55000 `Document is no longer awaiting a scan`) |
+| 409 | `OBJECT_VERSION_MISMATCH` | resolve, scan-events | another version or SHA-256 is bound (55000 `Scan result does not match the current immutable document object`) |
+| 409 | `SCAN_ALREADY_TERMINAL` | resolve, scan-events | clean or rejected already recorded for that object (55000 `Document object scan has already reached a terminal result`) |
+| 409 | `SCAN_IDEMPOTENCY_CONFLICT` | scan-events | the key was used for another payload (23505 `Scanner idempotency key payload mismatch`) |
+
+Any other database error stays a 500 `INTERNAL_ERROR`.
+`services/ehr-api/src/documents/scan-errors.ts` holds the table;
+`scan-errors.spec.ts` pins every message against the migration files and
+`test/database/document-scanner.integration.sql` against the database.
+
+### What a clean scan under the detected type changes (D3)
+
+When the bridge sends `clean` with `detectedMediaType` the sniffed type, the
+document is available under that type everywhere: the list
+(`GET /api/v1/ehr/documents`, now read from `ehr.documents_effective`, so only
+scans bound to the document's version and SHA-256 count, as for download and
+OCR) and every document view show it as `mediaType`; the signed download is
+served with `response-content-type` the detected type, `inline` under the
+uploaded name with an extension that matches it (a JPEG uploaded as
+`scan.png` opens as `scan.jpg`) and `Cache-Control: private, no-store`; the
+internal OCR source (`GET /api/v1/ehr/internal/ocr/documents/:id/source`)
+gains `mediaType`, the detected type or null; and `ocr.claim_worker_job`
+returns the detected type as `media_type`, which the OCR worker uses to pick
+its Textract path. The declared type stays on the row and in
+`declaredMediaType`.
+
+### The database (0105)
+
+- `ehr.resolve_document_scan_target(text, text, text, text)` and
+  `ehr.list_documents_awaiting_scan(integer, integer, text)`: SECURITY DEFINER,
+  `search_path pg_catalog, pg_temp`, owned by `ehr.documents`' owner, EXECUTE
+  for `hid_document_scanner` only. Each rechecks, as 0009 does, the scanner
+  role and that the correlation ID passed is the transaction's
+  (`app.correlation_id`). The comparison is IS DISTINCT FROM, so a transaction
+  that carries no correlation ID (unset or empty) is refused as well (42501).
+- `documents_scanner_function_lock`, a permissive UPDATE policy on
+  `ehr.documents` (USING the scanner-role test of 0005's read policy, WITH
+  CHECK false): `append_document_scan_event`'s row lock must pass the table's
+  UPDATE policies under forced row-level security, so under an owner that does
+  not bypass row-level security every append answered `Document not found`
+  before 0105. It admits no written row.
+- `ocr.claim_worker_job` in the RDS form, its `media_type` the clean scan's
+  detected type.
+
+Applying 0105 holds ACCESS EXCLUSIVE on `ehr.documents` from its CREATE POLICY
+to commit (milliseconds); a long-running document read makes the apply stop
+after its 5 s lock timeout with nothing applied. It holds no lock on
+`ocr.jobs` at commit, but compiling the replaced claim briefly needs one, so a
+session holding ACCESS EXCLUSIVE on `ocr.jobs` stops it the same way. 0105 has
+no down migration. Today's EHR API, OCR worker and Identity keep working on it.
+
+Release order: 0104 (records processing) ships first, in its own release with
+its own signed declaration. 0105's declaration names only 0105 and
+`runtime-grants.sql`, which is exact for a release whose base already has 0104
+(once this branch is rebased onto it, `runtime-grants.sql` carries both blocks
+and its hash in the declaration is measured again). 0105's prerequisite is
+0103's admin gate body and it reads nothing 0104 adds, so it applies the same
+way after 0104 as on 0103 alone.
+## 34. Records patients add themselves (0116)
 
 Akos handover step 6 (owner decision 25 of 2026-11-01; D7: a record the
 patient removes is hidden everywhere and kept). Text only: photos and files
@@ -2961,7 +3391,17 @@ that chat's next search.
   "Added by the patient"; provenance "Record added by the patient, not
   checked by a health worker"; fields `type` (the kind), `place`, `date`,
   `notes`. A `medicine` record answers medicine questions and a `test`
-  record result questions.
+  record result questions. The patient chat's safety rules (#167, patient
+  chat safety PR 1, `patient-evidence.policy.ts`) apply to it as to every
+  kind: only those four fields reach the chat; the patient's identifiers are removed
+  from its title, place and notes before anything reaches a model, the index
+  or saved history; a record whose title names a sensitive test, condition
+  or medicine (the same lists as the clinician's records) stays out of the
+  patient chat; a cited `diagnosis` record, or one stating a result, gets
+  the server's follow-up line; the source viewer shows it as "Record you
+  added" with "Not checked by a clinician."; its vectors are purged with the
+  other local kinds. The staff chat reads it unchanged, and its one-patient
+  rule covers it: a row for any other patient refuses the whole read.
 
 ### Audit
 
@@ -2996,7 +3436,13 @@ removed record's vectors (ehr-api's `withdrawnPatientEntryChunksSql`) relies
 on row-level security showing only active entries; the suite runs it in both
 chats' transactions. The suite is
 `services/ehr-api/test/database/patient-entries.integration.sql`. 0116 has no
-down migration.
+down migration. It is released on 0105: its preconditions pin the bodies it
+relies on as measured there, all as on 0103 except
+`identity.has_active_consent_grant`, which is 0104's body (md5
+`732d11892dd4e27e1ff9093ae3b7de5a`), so 0104 must be applied first. 0104's
+records-processing cover answers only for `healthcare-operations`; the
+staff read and the staff chat take `direct-care` only, so it never opens
+these records.
 
 ### Before turning it on
 

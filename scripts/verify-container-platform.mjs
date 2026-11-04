@@ -208,6 +208,10 @@ for (const [route, upstream] of [
     `production gateway ownership mismatch for ${route}`)
 }
 assert.doesNotMatch(gatewayConfig, /3010|EVENT_DISPATCHER/, 'dispatcher must not be browser-routed')
+// The document scanner's routes are served by the internal load balancer only.
+const ehrGateway = /location \^~ \/api\/v1\/ehr\/ \{([\s\S]*?)\n  \}/.exec(gatewayConfig)?.[1] ?? ''
+assert.match(ehrGateway, /if \(\$uri ~\* "\^\/api\/v1\/ehr\/documents\/scan-\(events\|targets\)"\) \{ return 404; \}\n(?:\s*#.*\n)*\s*include \/etc\/nginx\/hid-proxy-headers\.conf;\n\s*proxy_pass \$hid_ehr_upstream;/,
+  'the public gateway must refuse the document scanner routes before the EHR proxy')
 for (const [app, base] of Object.entries(bases).filter(([name]) => name !== 'web')) {
   const route = base.slice(0, -1).replaceAll('/', '\\/')
   assert.doesNotMatch(gatewayConfig, new RegExp(`location ${route}\\/`),
