@@ -10,6 +10,8 @@ import { LabExecutionsController } from './lab-executions.controller';
 import { LabExecutionsService } from './lab-executions.service';
 import { PatientResultsController,StaffResultsController } from './patient-results.controller';
 import { PatientResultsService } from './patient-results.service';
+import { ResultDiscussionsController } from './result-discussions.controller';
+import { ResultDiscussionsService } from './result-discussions.service';
 import { LabOrderRoutesController } from './lab-order-routes.controller';
 import { LabOrderRoutesService } from './lab-order-routes.service';
 import { LabOrderRouteAccess } from './order-route-access';
@@ -22,8 +24,9 @@ import { HealthIdInUrlRefusalModule } from './health-id-in-url';
  * Imported external evidence is Lab-owned and deliberately separate from
  * native accession/specimen/execution workflows, which remain future work.
  */
-@Module({ imports: [LabIdentityAuthorizationModule, HealthIdInUrlRefusalModule], controllers: [StaffResultsController,LabImportsController, LabWorkItemsController, LabAccessionsController, LabExecutionsController, PatientResultsController, LabOrderRoutesController],
+@Module({ imports: [LabIdentityAuthorizationModule, HealthIdInUrlRefusalModule], controllers: [StaffResultsController,LabImportsController, LabWorkItemsController, LabAccessionsController, LabExecutionsController, PatientResultsController, LabOrderRoutesController,
+    ResultDiscussionsController],
   providers: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService, PatientResultsService,
-    LabOrderRoutesService, LabOrderRouteAccess, LabOrderRouteCards],
+    LabOrderRoutesService, LabOrderRouteAccess, LabOrderRouteCards, ResultDiscussionsService],
   exports: [LabImportsService, LabWorkItemsService, LabAccessionsService, LabExecutionsService] })
 export class LabModule {}

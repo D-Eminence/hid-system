@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { LOINC_SYSTEM_SQL_PATTERN, PATIENT_SELF_LAB_QUERY, SENSITIVE_LOINC_SQL_LIST, SENSITIVE_TEST_SQL_PATTERN, STAFF_LAB_QUERY } from './patient-results.service';
+import { isGatedLabResult, LOINC_SYSTEM_SQL_PATTERN, PATIENT_SELF_LAB_QUERY, SENSITIVE_LOINC_SQL_LIST, SENSITIVE_TEST_SQL_PATTERN, STAFF_LAB_QUERY } from './patient-results.service';
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 // The text of PATIENT_LAB_QUERY at 34d69557, which the staff chat keeps unchanged.
@@ -27,7 +27,7 @@ describe('Lab result queries for the patient and the staff chat (A6)', () => {
     expect(normal).toContain("case when rel.result_version=r.current_version then jsonb_build_object('test'");
     expect(normal).toContain("'numericValue',v.numeric_value::text");
     // The placeholder carries the test, never a value, flag, range or release.
-    const fields = placeholder!.slice(0, placeholder!.indexOf(' end fields'));
+    const fields = placeholder!.slice(0, placeholder!.indexOf(' end\n'));
     expect(fields).toContain("'correctionPending',true,'status','The lab is correcting this result.'");
     for (const forbidden of ['numericValue', 'textValue', 'numeric_value', 'text_value', 'unit', 'referenceRange', 'recordedFlag', 'releasedAt', 'revisionKind']) {
       expect(fields).not.toContain(forbidden);
@@ -42,7 +42,7 @@ describe('Lab result queries for the patient and the staff chat (A6)', () => {
   });
 
   it('leaves out sensitive tests by name, and keeps ordinary ones', () => {
-    expect(PATIENT_SELF_LAB_QUERY).toContain(`coalesce(t.name,'') !~* '${SENSITIVE_TEST_SQL_PATTERN}'`);
+    expect(PATIENT_SELF_LAB_QUERY).toContain(`(g.discussed or not (coalesce(t.name,'') ~* '${SENSITIVE_TEST_SQL_PATTERN}'`);
     expect(SENSITIVE_TEST_SQL_PATTERN).not.toContain("'");
     // The ARE pattern is also valid JavaScript with the same meaning for these names.
     const re = new RegExp(SENSITIVE_TEST_SQL_PATTERN, 'i');
@@ -69,7 +69,7 @@ describe('Review fixes: sensitive tests written out in full or coded in LOINC (S
   });
 
   it('leaves out the listed LOINC codes when the code system is LOINC, with the same list as ehr-api', () => {
-    expect(PATIENT_SELF_LAB_QUERY).toContain(`and not (btrim(coalesce(t.code_system,'')) ~* '${LOINC_SYSTEM_SQL_PATTERN}' and btrim(coalesce(t.code,'')) in (${SENSITIVE_LOINC_SQL_LIST}))`);
+    expect(PATIENT_SELF_LAB_QUERY).toContain(`or (btrim(coalesce(t.code_system,'')) ~* '${LOINC_SYSTEM_SQL_PATTERN}' and btrim(coalesce(t.code,'')) in (${SENSITIVE_LOINC_SQL_LIST}))`);
     expect(SENSITIVE_LOINC_SQL_LIST).toContain("'75622-1'");
     expect(SENSITIVE_LOINC_SQL_LIST).toMatch(/^'[0-9]{1,6}-[0-9]'(?:,'[0-9]{1,6}-[0-9]')*$/);
     // patient-evidence.query.spec.ts pins the same hash.
@@ -95,5 +95,47 @@ describe('Second review: more spellings and codes, and LOINC by its OID (S4)', (
     expect(LOINC_SYSTEM_SQL_PATTERN).not.toContain("'");
     // patient-evidence.query.spec.ts in ehr-api pins the same hash.
     expect(sha(LOINC_SYSTEM_SQL_PATTERN)).toBe('c2d253608793eec2a8437e3b718d2498e40feab386ad6e7163338b33bcf9f9ef');
+  });
+});
+
+describe('Patient chat part 2: finished visits only, and the "Discussed with the patient" mark (0121)', () => {
+  const where = PATIENT_SELF_LAB_QUERY.slice(PATIENT_SELF_LAB_QUERY.indexOf(' where r.patient_id=$1'));
+
+  it('joins the gate on the last released version and reads only results from a finished visit', () => {
+    expect(PATIENT_SELF_LAB_QUERY).toContain(
+      'order by x.result_version desc limit 1) rel on true\n join lab.patient_self_result_gates($1) g on g.result_id=r.id and g.released_version=rel.result_version');
+    expect(where).toContain(' and g.finished_visit\n');
+    // Inner join: a result the gate function does not return (no finished visit data, another patient) is not read.
+    expect(PATIENT_SELF_LAB_QUERY).not.toMatch(/left join lab\.patient_self_result_gates/);
+  });
+
+  it('holds back a sensitive or critical result, judged on the released revision v, unless that version is marked', () => {
+    expect(where).toContain(`and (g.discussed or not (coalesce(t.name,'') ~* '${SENSITIVE_TEST_SQL_PATTERN}'\n`
+      + ` or (btrim(coalesce(t.code_system,'')) ~* '${LOINC_SYSTEM_SQL_PATTERN}' and btrim(coalesce(t.code,'')) in (${SENSITIVE_LOINC_SQL_LIST}))\n`
+      + ` or v.abnormal_flag='critical_candidate'))`);
+    // v is the revision at the last released version, not the current (possibly unreleased) one.
+    expect(PATIENT_SELF_LAB_QUERY).toContain('join lab.result_revisions v on v.result_id=r.id and v.version=rel.result_version');
+    // The old unconditional sensitive filter is gone (it would hide a discussed result).
+    expect(PATIENT_SELF_LAB_QUERY).not.toContain("!~*");
+  });
+
+  it('tells ehr-api whether the result is discussed, on the value row and on the correction placeholder', () => {
+    const [, placeholder] = PATIENT_SELF_LAB_QUERY.split(' else jsonb_build_object(');
+    expect(placeholder).toMatch(/^[\s\S]*'The lab is correcting this result\.'\) end\n \|\|jsonb_build_object\('_discussed',g\.discussed\) fields\n/);
+    expect(PATIENT_SELF_LAB_QUERY.match(/_discussed/g)).toHaveLength(1);
+  });
+
+  it('keeps the staff query byte-identical, with no gate or mark', () => {
+    expect(sha(STAFF_LAB_QUERY)).toBe(STAFF_LAB_QUERY_SHA256);
+    expect(STAFF_LAB_QUERY).not.toMatch(/patient_self_result_gates|_discussed|finished_visit|critical_candidate/);
+  });
+
+  it('isGatedLabResult names sensitive and critical results as the patient query does', () => {
+    expect(isGatedLabResult('HIV 1/2 rapid test', null, null, 'normal')).toEqual({ sensitive: true, critical: false });
+    expect(isGatedLabResult('Screen', '75622-1', 'http://loinc.org', null)).toEqual({ sensitive: true, critical: false });
+    expect(isGatedLabResult('Screen', '75622-1', 'LOCAL', null)).toEqual({ sensitive: false, critical: false });
+    expect(isGatedLabResult('Potassium', '2823-3', 'http://loinc.org', 'critical_candidate')).toEqual({ sensitive: false, critical: true });
+    expect(isGatedLabResult('Haemoglobin', '718-7', 'http://loinc.org', 'low')).toEqual({ sensitive: false, critical: false });
+    expect(isGatedLabResult(undefined, undefined, undefined, undefined)).toEqual({ sensitive: false, critical: false });
   });
 });

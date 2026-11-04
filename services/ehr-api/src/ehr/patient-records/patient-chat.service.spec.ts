@@ -509,3 +509,47 @@ describe('Second review: a server line is found as a sentence of its own, with a
    .toBe(`${HB} Eat well.\n\n${RESULT_LINE}`);
  });
 });
+
+describe('Records answers after a result answer keep its line (PR #167 "Not in this PR")',()=>{
+ const VITAL=item('vital',40,{recorded_at:'2026-10-02T10:00:00Z',pulse_bpm:80,systolic_mmhg:120,diastolic_mmhg:80});
+ const afterResult=(answer:string,exchangeAnswer=`Haemoglobin 12.5 g/dL [1].\n\n${RESULT_LINE}`,cited=[binding(LAB)])=>{
+  const s=setup([VITAL]);s.plan.mockResolvedValue({intent:'records',recordIntent:'summary',query:'vitals'});s.answer.mockResolvedValue(answer);
+  s.context.mockResolvedValue({exchanges:[{question:'Blood test?',answer:exchangeAnswer}],bindings:[binding(LAB)],cited});
+  return s;
+ };
+ it('adds the result line to a vitals answer that follows a lab answer, once, at the end',async()=>{
+  const reply=await afterResult('Your pulse was 80 and blood pressure 120/80 [1].').service.answer(request,'And my vitals?');
+  expect(reply.answer).toBe(`Your pulse was 80 and blood pressure 120/80 [1].\n\n${RESULT_LINE}`);
+  expect(reply.sources.map(source=>source.kind)).toEqual(['vital']);
+ });
+ it('adds it from the cited binding when the earlier answer was saved without the line',async()=>{
+  const reply=await afterResult('Your pulse was 80 [1].','Haemoglobin 12.5 g/dL [1].').service.answer(request,'And my pulse?');
+  expect(reply.answer).toBe(`Your pulse was 80 [1].\n\n${RESULT_LINE}`);
+ });
+ it('never duplicates a line the model or the cited sources also bring',async()=>{
+  const s=setup([LAB,VITAL]);s.plan.mockResolvedValue({intent:'records',recordIntent:'summary',query:'history'});
+  s.context.mockResolvedValue({exchanges:[{question:'Blood test?',answer:`Haemoglobin 12.5 g/dL [1].\n\n${RESULT_LINE}`}],bindings:[binding(LAB)],cited:[binding(LAB)]});
+  s.answer.mockImplementation(async()=>`Hb [${numberOf(s,LAB)}] and pulse [${numberOf(s,VITAL)}].\n\n${RESULT_LINE}\n\n${RESULT_LINE}`);
+  const reply=await s.service.answer(request,'Both again?');
+  expect(count(reply.answer,RESULT_LINE)).toBe(1);expect(reply.answer.endsWith('\n\n'+RESULT_LINE)).toBe(true);
+ });
+ it('keeps the fixed order when the earlier answer owes a diagnosis line and this one a result line',async()=>{
+  const s=setup([LAB]);s.plan.mockResolvedValue({intent:'records',recordIntent:'summary',query:'history'});s.answer.mockResolvedValue('Hb 12.5 g/dL [1].');
+  s.context.mockResolvedValue({exchanges:[{question:'Conditions?',answer:'Hypertension [1].'}],bindings:[binding(DIAGNOSIS)],cited:[binding(DIAGNOSIS)]});
+  expect((await s.service.answer(request,'Blood test?')).answer).toBe(`Hb 12.5 g/dL [1].\n\n${RESULT_LINE}\n\n${DIAGNOSIS_LINE}`);
+ });
+ it('adds no line when the earlier answer cited no result', async()=>{
+  const reply=await afterResult('Your pulse was 80 [1].','A prescription is recorded [1].',[binding(RX)]).service.answer(request,'And my pulse?');
+  expect(reply.answer).toBe('Your pulse was 80 [1].');
+ });
+ it('adds no line to an answer whose citations are invalid',async()=>{
+  const reply=await afterResult('Your pulse was 80 [7].').service.answer(request,'And my pulse?');
+  expect(reply.answer).toBe('I could not verify an answer from the available records.');
+ });
+ it('adds no line to a staff answer after a staff result answer',async()=>{
+  const s=setup();s.plan.mockResolvedValue({intent:'records',recordIntent:'summary',query:'vitals'});s.answer.mockResolvedValue('Pulse 80 [1].');
+  s.context.mockResolvedValue({exchanges:[{question:'Hb?',answer:`Hb 12.5 g/dL [1].\n\n${RESULT_LINE}`}],bindings:[binding(LAB)],cited:[binding(LAB)]});
+  const reply=await s.service.answer(request,'Pulse?',staffAccess(s,[VITAL]));
+  expect(reply.answer).toBe('Pulse 80 [1].');
+ });
+});

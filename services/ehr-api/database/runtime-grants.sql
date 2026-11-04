@@ -1418,6 +1418,24 @@ grant execute on function identity.records_processing_direct_care_cover(uuid,tex
 -- granted to hid_document_scanner above and to no other role.
 revoke all on function ehr.resolve_document_scan_target(text, text, text, text),
   ehr.list_documents_awaiting_scan(integer, integer, text) from public;
+-- Lab result discussions (0121, patient chat part 2): the patient gate the
+-- Lab API's patient query joins, and the clinician's "Discussed with the
+-- patient" record, withdraw and list commands, as 0121 grants them: the Lab
+-- runtime and the schema test runtime only, never PUBLIC. Each command checks
+-- lab.result.discuss (or lab.result.released.read to list) and the patient's
+-- direct-care grant itself. The visit check and the target helper are the
+-- owner's alone; the event table is granted to no role (the commands write it
+-- as its owner).
+grant execute on function lab.patient_self_result_gates(uuid),
+  lab.record_result_discussion(uuid, uuid, bigint, text, text),
+  lab.withdraw_result_discussion(uuid, uuid, bigint, text, text, text, text),
+  lab.list_result_discussions(uuid) to hid_lab_runtime, hid_schema_test_runtime;
+revoke all on function lab.patient_self_result_gates(uuid),
+  lab.record_result_discussion(uuid, uuid, bigint, text, text),
+  lab.withdraw_result_discussion(uuid, uuid, bigint, text, text, text, text),
+  lab.list_result_discussions(uuid), lab.result_visit_finished(uuid, uuid, uuid),
+  lab.result_discussion_target(uuid, uuid) from public;
+revoke all on lab.result_discussion_events from public;
 
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.

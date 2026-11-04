@@ -69,8 +69,18 @@ export const SENSITIVE_LOINC_SQL_LIST=SENSITIVE_LOINC_CODES.map(code=>`'${code}'
  * less the lab's correction reason. When a correction is pending (the current
  * version is not released yet), the patient gets a placeholder that says the
  * lab is correcting the result and carries no value. A result whose current or
- * last released version was entered in error is left out, and so is a
- * sensitive test.
+ * last released version was entered in error is left out.
+ *
+ * Patient chat part 2 (0121, owner Q24): lab.patient_self_result_gates gives,
+ * for each of the patient's results, its last released version, whether its
+ * visit is finished and whether a clinician's "Discussed with the patient"
+ * mark is active on that version. Only results from a finished visit are read
+ * (a completed encounter, a request that is active, on hold or completed, and
+ * a route that did not end wrong_patient or entered_in_error). A gated result
+ * (a sensitive test by the list above, or a critical result, both judged on
+ * the last released version `v`) is read only while that version is marked
+ * discussed; `_discussed` tells ehr-api's policy so. The staff query is
+ * unchanged and keeps full access.
  */
 export const PATIENT_SELF_LAB_QUERY = `select r.id,
  case when rel.result_version=r.current_version then r.current_version::text||':'||rel.id::text
@@ -82,11 +92,13 @@ export const PATIENT_SELF_LAB_QUERY = `select r.id,
  'revisionKind',v.revision_kind,
  'collectedAt',s.collected_at,'releasedAt',rel.released_at,'verification','exact-version manually verified and released')
  else jsonb_build_object('test',t.name,'codeSystem',t.code_system,'code',t.code,'specimen',s.specimen_type,
- 'collectedAt',s.collected_at,'correctionPending',true,'status','The lab is correcting this result.') end fields
+ 'collectedAt',s.collected_at,'correctionPending',true,'status','The lab is correcting this result.') end
+ ||jsonb_build_object('_discussed',g.discussed) fields
  from lab.results r
  join lateral(select x.id,x.result_version,x.released_at,x.verification_id from lab.result_releases x
  where x.result_id=r.id and x.patient_id=r.patient_id and x.facility_id=r.facility_id
  order by x.result_version desc limit 1) rel on true
+ join lab.patient_self_result_gates($1) g on g.result_id=r.id and g.released_version=rel.result_version
  join lab.result_revisions v on v.result_id=r.id and v.version=rel.result_version
  and v.patient_id=r.patient_id and v.facility_id=r.facility_id
  join lab.result_verifications ver on ver.id=rel.verification_id and ver.result_id=r.id and ver.result_version=rel.result_version
@@ -98,9 +110,28 @@ export const PATIENT_SELF_LAB_QUERY = `select r.id,
  where i.result_id=r.id and i.result_version=r.current_version and i.patient_id=r.patient_id)
  and not exists(select 1 from lab.result_invalidations i
  where i.result_id=r.id and i.result_version=rel.result_version and i.patient_id=r.patient_id)
- and coalesce(t.name,'') !~* '${SENSITIVE_TEST_SQL_PATTERN}'
- and not (btrim(coalesce(t.code_system,'')) ~* '${LOINC_SYSTEM_SQL_PATTERN}' and btrim(coalesce(t.code,'')) in (${SENSITIVE_LOINC_SQL_LIST}))
+ and g.finished_visit
+ and (g.discussed or not (coalesce(t.name,'') ~* '${SENSITIVE_TEST_SQL_PATTERN}'
+ or (btrim(coalesce(t.code_system,'')) ~* '${LOINC_SYSTEM_SQL_PATTERN}' and btrim(coalesce(t.code,'')) in (${SENSITIVE_LOINC_SQL_LIST}))
+ or v.abnormal_flag='critical_candidate'))
  order by r.id::text limit 201`;
+
+const SENSITIVE_TEST=new RegExp(SENSITIVE_TEST_SQL_PATTERN,'i');
+const LOINC_SYSTEM=new RegExp(LOINC_SYSTEM_SQL_PATTERN,'i');
+const LOINC_CODES=new Set<string>(SENSITIVE_LOINC_CODES);
+const text=(value:unknown)=>typeof value==='string'?value:'';
+/**
+ * Whether a result is held back from the patient chat until a clinician marks
+ * it "Discussed with the patient": a sensitive test (the same list as the
+ * patient query; the code is also matched, as ehr-api's isSensitiveTest does,
+ * so every result either service holds back can be marked) or a critical
+ * result. Judged on the last released version.
+ */
+export function isGatedLabResult(name:unknown,code:unknown,codeSystem:unknown,abnormalFlag:unknown):{sensitive:boolean;critical:boolean} {
+  const sensitive=SENSITIVE_TEST.test(text(name))||SENSITIVE_TEST.test(text(code))
+    ||(LOINC_SYSTEM.test(text(codeSystem).trim())&&LOINC_CODES.has(text(code).trim()));
+  return {sensitive,critical:abnormalFlag==='critical_candidate'};
+}
 
 @Injectable()
 export class PatientResultsService {

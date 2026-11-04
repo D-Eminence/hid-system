@@ -74,6 +74,10 @@ export function conversationLines(answers: readonly string[], bindings: readonly
   }
   return PATIENT_LINES.filter(line => lines.has(line));
 }
+/** Every line owed by any of the sets, each once, in the fixed order of PATIENT_LINES. */
+export function combineLines(...sets: ReadonlyArray<readonly string[]>): string[] {
+  return PATIENT_LINES.filter(line => sets.some(set => set.includes(line)));
+}
 const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const CITES = String.raw`(?:[ \t]*\[\d+\])*`;
 /**

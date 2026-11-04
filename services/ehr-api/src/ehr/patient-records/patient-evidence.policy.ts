@@ -52,9 +52,10 @@ const FREE_TEXT_FIELDS: Partial<Record<SourceKind, readonly string[]>> = {
 const FREE_TEXT_TITLES = new Set<SourceKind>(['note', 'import', 'import_version']);
 
 /*
- * Sensitive tests, conditions and medicines (S4). Until the clinician
- * "Discussed with the patient" mark exists, these are left out of the patient
- * chat outright: hiding is the safe direction. The list is a default for Ola
+ * Sensitive tests, conditions and medicines (S4). A sensitive Lab result (and
+ * a critical one) reaches the patient chat only once a clinician has marked it
+ * "Discussed with the patient" (0121); sensitive test requests, diagnoses and
+ * medicines are still left out outright: hiding is the safe direction. The list is a default for Ola
  * to approve (D7, D10). Fragments use only syntax that means the same in a
  * JavaScript RegExp and a PostgreSQL ARE (letters, digits, [], ?, *, |, (?:)),
  * so the SQL filter and this policy agree. They never contain a quote.
@@ -150,7 +151,7 @@ export function isSensitiveTest(name: unknown, code?: unknown, codeSystem?: unkn
 function sensitive(record: Evidence): boolean {
   const f = record.fields;
   switch (record.kind) {
-    case 'lab_result': case 'investigation': return isSensitiveTest(f.test, f.code, f.codeSystem) || isSensitiveTest(record.title);
+    case 'investigation': return isSensitiveTest(f.test, f.code, f.codeSystem) || isSensitiveTest(record.title);
     // The display text is checked whatever the code system (ICD-10, SNOMED CT, local); ICD-10 codes as well.
     case 'diagnosis': return SENSITIVE_CONDITION.test(text(f.condition)) || SENSITIVE_CONDITION.test(record.title)
       || (/icd/i.test(text(f.codeSystem)) && SENSITIVE_ICD10.test(text(f.code)));
@@ -284,9 +285,18 @@ function excluded(record: Evidence): boolean {
       if (!ALLOWED_ORDER_STATUSES.has(text(f.status)) || f._encounterStatus !== 'completed') return true; break;
     case 'note': if (f._encounterStatus !== 'completed') return true; break;
     case 'encounter': if (f.status !== 'completed') return true; break;
+    // A sensitive test or a critical result is shown only while a clinician's "Discussed with the patient"
+    // mark is active on its last released version (0121): lab-api says so in `_discussed`, which internal()
+    // then strips. lab-api reads only results from a finished visit.
+    case 'lab_result': return gatedLabResult(record) && f._discussed !== true;
     default: break;
   }
   return sensitive(record);
+}
+/** A sensitive test (PR 1's list, unchanged) or a critical result. */
+function gatedLabResult(record: Evidence): boolean {
+  const f = record.fields;
+  return isSensitiveTest(f.test, f.code, f.codeSystem) || isSensitiveTest(record.title) || f.recordedFlag === 'critical_candidate';
 }
 
 /** The patient's Health ID profile as the chat may see it: age and sex only. */
