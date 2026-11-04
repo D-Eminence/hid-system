@@ -91,3 +91,13 @@ test('limits repeated requests in one opaque support session', async () => {
   const response = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body });
   assert.equal(response.status, 429); assert.equal(calls, 10);
 });
+
+test('provider failures are passed to the error reporter without changing the 503 response', async () => {
+  const reported = [];
+  const failure = new Error('Lex unavailable');
+  const response = await request(async () => { throw failure; }, { text: 'help' },
+    { onError: (error) => { reported.push(error); throw new Error('reporter failure is contained'); } });
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { code: 'SUPPORT_BOT_UNAVAILABLE' });
+  assert.deepEqual(reported, [failure]);
+});

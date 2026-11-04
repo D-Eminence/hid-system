@@ -1,3 +1,4 @@
+import { captureServerError, flushErrorReporting, initErrorReporting } from '@hid/server-telemetry';
 import { readOcrWorkerConfig } from './config';
 import { PostgresWorkerRepository } from './repository';
 import { S3ExactDocumentReader } from './s3-document-reader';
@@ -7,6 +8,7 @@ import type { WorkerOcrProvider } from './types';
 import { OcrWorker } from './worker';
 
 async function bootstrap(): Promise<void> {
+  initErrorReporting({ service: 'ocr-worker' });
   const config = readOcrWorkerConfig();
   if (config.OCR_PROVIDER === 'disabled') {
     throw new Error('OCR worker is explicitly disabled and will not accept claims');
@@ -26,4 +28,6 @@ void bootstrap().catch((error: unknown) => {
   process.stderr.write(JSON.stringify({ timestamp: new Date().toISOString(), level: 'error',
     event: 'ocr.worker.startup_failed', code, acceptingClaims: false }) + '\n');
   process.exitCode = 1;
+  captureServerError(error);
+  void flushErrorReporting();
 });
