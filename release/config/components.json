@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0116",
-    "count": 105,
+    "last": "0118",
+    "count": 106,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -517,6 +517,10 @@
       {
         "name": "0116_patient_entries.sql",
         "sha256": "57bf41f60b64fb51a807916fbec68af64aec189bfa476d704892d0bc4a76884d"
+      },
+      {
+        "name": "0118_card_links.sql",
+        "sha256": "f24e458b0a32c68d42535dea68e65c4fd0f9ccb821353e151d16fdb4f3c99eb6"
       }
     ]
   },

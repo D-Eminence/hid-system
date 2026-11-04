@@ -1411,6 +1411,43 @@ grant execute on function ehr.create_my_patient_entry(text,text,text,date,text,t
 revoke all on function ehr.create_my_patient_entry(text,text,text,date,text,text,text),
   ehr.withdraw_my_patient_entry(uuid), ehr.patient_entries_guard() from public;
 
+-- Card links (0118), as that migration grants them (its section 6): the
+-- patient's, the receiver's and the sweeper's commands to the Identity
+-- runtime and the schema test runtime; the card-share read context (the
+-- eleven read policies' test, which the reader must be able to run) and the
+-- receiver's records context to the EHR runtime and the schema test runtime.
+-- No grant on the five tables; the helpers, guards and the deletion trigger's
+-- function are granted to no role.
+grant execute on function
+  identity.create_my_card_share(text,uuid,uuid,text,text,bytea,text,text,text,text,text,text,text),
+  identity.list_my_card_shares(text,uuid), identity.end_my_card_share(text,uuid,uuid),
+  identity.record_my_card_share_delivery(text,uuid,uuid,text,text,text),
+  identity.issue_card_share_code(text,uuid,text,text,text,text), identity.record_card_share_code_delivery(uuid,text),
+  identity.verify_card_share_code(text,text,text,uuid,text,text), identity.card_share_view(uuid,text),
+  identity.end_card_share_view(uuid,text), identity.stop_card_share_emails(uuid),
+  identity.close_expired_card_shares(integer), identity.claim_card_share_emails(text,integer,integer),
+  identity.record_card_share_email_outcome(uuid,text,text,text,text)
+  to hid_identity_runtime, hid_schema_test_runtime;
+grant execute on function ehr.card_share_read_context(uuid,text), ehr.card_share_view_context()
+  to hid_ehr_runtime, hid_schema_test_runtime;
+revoke all on function
+  identity.guard_card_share_mutation(), identity.guard_card_share_code_mutation(),
+  identity.guard_card_share_view_mutation(), identity.guard_card_share_block_mutation(),
+  identity.card_share_audit(text,text,uuid,uuid,text,text,uuid,jsonb), identity.card_share_patient_state(uuid),
+  identity.end_card_share_row(uuid,text), identity.close_card_share_if_due(identity.card_shares),
+  identity.card_share_item(identity.card_shares), identity.card_share_card(identity.card_shares,identity.card_share_views),
+  identity.queue_card_share_patient_email(identity.card_shares,text), identity.require_card_share_system(),
+  identity.create_my_card_share(text,uuid,uuid,text,text,bytea,text,text,text,text,text,text,text),
+  identity.list_my_card_shares(text,uuid), identity.end_my_card_share(text,uuid,uuid),
+  identity.record_my_card_share_delivery(text,uuid,uuid,text,text,text),
+  identity.issue_card_share_code(text,uuid,text,text,text,text), identity.record_card_share_code_delivery(uuid,text),
+  identity.verify_card_share_code(text,text,text,uuid,text,text), identity.card_share_view(uuid,text),
+  identity.end_card_share_view(uuid,text), identity.stop_card_share_emails(uuid),
+  identity.close_expired_card_shares(integer), identity.claim_card_share_emails(text,integer,integer),
+  identity.record_card_share_email_outcome(uuid,text,text,text,text),
+  ehr.card_share_read_context(uuid,text), ehr.card_share_view_context(),
+  identity.close_card_shares_for_deleted_account() from public;
+
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
 grant execute on function auth.create_google_onboarding_capability(uuid,char,text),
