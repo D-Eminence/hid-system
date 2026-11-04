@@ -1418,6 +1418,12 @@ grant execute on function identity.records_processing_direct_care_cover(uuid,tex
 -- granted to hid_document_scanner above and to no other role.
 revoke all on function ehr.resolve_document_scan_target(text, text, text, text),
   ehr.list_documents_awaiting_scan(integer, integer, text) from public;
+-- Outreach campaign registration (0120): outreach.validate_registration_
+-- campaign_write, the SECURITY DEFINER trigger function 0120 replaces (owner
+-- and ACL kept), is granted to no role; a trigger needs no EXECUTE to fire.
+-- No grant changes: the Outreach runtime still has no UPDATE on
+-- outreach.campaign_members, so it can neither update nor lock a membership.
+revoke all on function outreach.validate_registration_campaign_write() from public;
 
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
