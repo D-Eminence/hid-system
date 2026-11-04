@@ -46,6 +46,11 @@ output "anthropic_runtime_access" {
   }
 }
 
+output "ocr_worker_subject" {
+  description = "The workload subject ocr-worker sets as its database actor; for tests."
+  value       = lookup(lookup(local.workload_environment, "ocr-worker", {}), "OCR_WORKER_SUBJECT", "")
+}
+
 output "notification_delivery_configuration" {
   description = "Selected delivery profile and secret binding names only; no credential values."
   value = var.enable_runtime ? {

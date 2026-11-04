@@ -367,9 +367,12 @@ locals {
     } : {})
 
     ocr-worker = {
-      NODE_ENV                                 = "production"
-      OCR_PROVIDER                             = "textract"
-      OCR_WORKER_SUBJECT                       = lookup(local.identity_subjects, "ocr", "")
+      NODE_ENV     = "production"
+      OCR_PROVIDER = "textract"
+      # The worker acts in the database as its own workload principal, which
+      # holds only the ocr_worker role (ehr-api migration 0106); ocr-api's
+      # subject stays the one Lab and EHR accept for OCR calls.
+      OCR_WORKER_SUBJECT                       = local.managed_identity_enabled ? "hid:${local.workload_identity_environment}:ocr-worker" : lookup(local.identity_subjects, "ocr", "")
       OCR_WORKER_DATABASE_SSL                  = "true"
       OCR_WORKER_DATABASE_SSL_ROOT_CERT_BASE64 = var.rds_ca_bundle_base64
       OCR_WORKER_POOL_MAX                      = "4"
