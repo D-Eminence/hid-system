@@ -20,6 +20,22 @@ export interface AccessRequestRow extends QueryResultRow {
   existingRequest: boolean;
 }
 
+/** A row of identity.list_my_access_requests (0072); purpose_of_use from 0104. */
+interface PatientAccessRequestRow extends QueryResultRow {
+  access_request_id: string;
+  facility_id: string;
+  facility_name: string;
+  scope: string;
+  reason: string;
+  status: string;
+  requested_duration_minutes: number;
+  requested_at: Date;
+  approved_at: Date | null;
+  denied_at: Date | null;
+  denied_reason: string | null;
+  purpose_of_use?: string;
+}
+
 export interface BreakGlassRow extends QueryResultRow {
   accessRequestId: string;
   consentGrantId: string;
@@ -77,6 +93,16 @@ export interface VerifiedPatientPinAccess {
   existingGrant: boolean;
 }
 
+/**
+ * The exact messages of 0104's records-processing trigger on
+ * identity.access_requests, both raised as 42501 (the message is the code, as
+ * EMERGENCY_PROBATION_LIMIT is).
+ */
+export const RECORDS_PROCESSING_REFUSAL = {
+  permission: 'RECORDS_PROCESSING_NOT_ALLOWED',
+  patient: 'RECORDS_PROCESSING_MINOR',
+} as const;
+
 /** main's answer to an approval from a session not freshly signed in (eb9b1ca consent.service.ts). */
 export const RECENT_APPROVAL_AUTH_DETAIL = 'For your security, sign out, sign in again, and approve within 10 minutes.';
 
@@ -109,8 +135,35 @@ export class ConsentService {
         };
       });
     } catch (error) {
-      throw this.translate(error);
+      throw this.translateAccessRequest(error);
     }
+  }
+
+  /**
+   * A records-processing request (healthcare-operations) meets 0104's trigger
+   * on identity.access_requests, which refuses it as 42501 with one of two
+   * exact messages: RECORDS_PROCESSING_NOT_ALLOWED when the requester's
+   * membership lacks ocr.job.write here (pharmacists and receptionists hold
+   * identity.consent.write but cannot run OCR), RECORDS_PROCESSING_MINOR when
+   * the patient is under 18 or has no date of birth on record (refused until a
+   * guardian approval exists). Every other refusal keeps its code: any other
+   * 42501 stays 403 CONSENT_COMMAND_DENIED, and before 0104 seeds the purpose
+   * create_access_request answers 22023 'Invalid purpose for a standard access
+   * request', still 400 INVALID_CONSENT_COMMAND.
+   */
+  private translateAccessRequest(error: unknown): unknown {
+    if (isDatabaseError(error)) {
+      const message = (error as unknown as { message?: unknown }).message;
+      if (error.code === '42501' && message === RECORDS_PROCESSING_REFUSAL.permission) {
+        return new DomainProblem(403, 'RECORDS_PROCESSING_NOT_ALLOWED',
+          'Your role cannot ask for records processing: it needs permission to run OCR jobs (ocr.job.write) at this facility');
+      }
+      if (error.code === '42501' && message === RECORDS_PROCESSING_REFUSAL.patient) {
+        return new DomainProblem(422, 'RECORDS_PROCESSING_MINOR',
+          'Records processing is not available for patients under 18, or without a date of birth on record');
+      }
+    }
+    return this.translate(error);
   }
 
 
@@ -134,17 +187,22 @@ export class ConsentService {
     }
   }
 
+  /**
+   * The patient's access requests. Each one answers `purpose` (direct-care or
+   * healthcare-operations, "Records processing") once 0104 adds purpose_of_use
+   * to the list. The query selects every column, so on a schema without 0104
+   * the field is left out, never guessed, and the list still answers.
+   */
   async listMyAccessRequests(context: DataAccessContext) {
     return this.database.withTransaction(context, async (client) => {
-      const result = await client.query<Record<string, unknown> & QueryResultRow>(
-        `select access_request_id as "accessRequestId", facility_id as "facilityId",
-           facility_name as "facilityName", scope, reason, status,
-           requested_duration_minutes as "requestedDurationMinutes",
-           requested_at as "requestedAt", approved_at as "approvedAt",
-           denied_at as "deniedAt", denied_reason as "deniedReason"
-         from identity.list_my_access_requests()`,
-      );
-      return result.rows;
+      const result = await client.query<PatientAccessRequestRow>('select * from identity.list_my_access_requests()');
+      return result.rows.map((row) => ({
+        accessRequestId: row.access_request_id, facilityId: row.facility_id, facilityName: row.facility_name,
+        scope: row.scope, reason: row.reason, status: row.status,
+        requestedDurationMinutes: row.requested_duration_minutes, requestedAt: row.requested_at,
+        approvedAt: row.approved_at, deniedAt: row.denied_at, deniedReason: row.denied_reason,
+        ...('purpose_of_use' in row ? { purpose: row.purpose_of_use } : {}),
+      }));
     }, { readOnly: true });
   }
 

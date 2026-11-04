@@ -1,8 +1,10 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { PoolClient } from 'pg';
 import { DomainProblem } from '../common/problem';
 import type { DataAccessContext, HidRequest } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
-import { ConsentService, REVOCATION_DETAIL } from './consent.service';
+import { ConsentService, RECORDS_PROCESSING_REFUSAL, REVOCATION_DETAIL } from './consent.service';
 
 const context: DataAccessContext = {
   correlationId: 'consent-service-test-correlation',
@@ -244,24 +246,100 @@ describe('ConsentService', () => {
     );
   });
 
+  // identity.list_my_access_requests as 0072 defines it; 0104 adds purpose_of_use.
+  const listedRequest = {
+    access_request_id: '40000000-0000-4000-8000-000000000006',
+    facility_id: '10000000-0000-4000-8000-000000000006',
+    facility_name: 'Example Facility',
+    scope: 'read_records',
+    reason: 'Continuity of care',
+    status: 'pending',
+    requested_duration_minutes: 60,
+    requested_at: new Date('2026-09-29T12:00:00.000Z'),
+    approved_at: null,
+    denied_at: null,
+    denied_reason: null,
+  };
+  const listedAnswer = {
+    accessRequestId: '40000000-0000-4000-8000-000000000006',
+    facilityId: '10000000-0000-4000-8000-000000000006',
+    facilityName: 'Example Facility',
+    scope: 'read_records',
+    reason: 'Continuity of care',
+    status: 'pending',
+    requestedDurationMinutes: 60,
+    requestedAt: new Date('2026-09-29T12:00:00.000Z'),
+    approvedAt: null,
+    deniedAt: null,
+    deniedReason: null,
+  };
+
   it('lists the authenticated patient access request inbox without unrelated identity data', async () => {
-    query.mockResolvedValueOnce({
-      rows: [{
-        accessRequestId: '40000000-0000-4000-8000-000000000006',
-        facilityId: '10000000-0000-4000-8000-000000000006',
-        facilityName: 'Example Facility',
-        scope: 'read_records',
-        reason: 'Continuity of care',
-        status: 'pending',
-        requestedDurationMinutes: 60,
-        requestedAt: new Date('2026-09-29T12:00:00.000Z'),
-        approvedAt: null,
-        deniedAt: null,
-        deniedReason: null,
-      }],
+    query.mockResolvedValueOnce({ rows: [{ ...listedRequest, patient_id: '50000000-0000-4000-8000-000000000006' }] });
+    // A schema before 0104 has no purpose_of_use: the field is left out, not guessed.
+    await expect(service.listMyAccessRequests(context)).resolves.toStrictEqual([listedAnswer]);
+    expect(query).toHaveBeenCalledWith('select * from identity.list_my_access_requests()');
+  });
+
+  it.each(['healthcare-operations', 'direct-care'])('answers each request\'s purpose %s once 0104 lists it', async (purpose) => {
+    query.mockResolvedValueOnce({ rows: [{ ...listedRequest, purpose_of_use: purpose }] });
+    await expect(service.listMyAccessRequests(context)).resolves.toStrictEqual([{ ...listedAnswer, purpose }]);
+  });
+
+  // Records processing (0104): the trigger on identity.access_requests refuses
+  // a healthcare-operations request as 42501 with exact messages (the code).
+  // These are the strings 0104_records_processing_purpose.sql raises.
+  const recordsProcessing: DataAccessContext = { ...context, purposeOfUse: 'healthcare-operations' };
+  const recordsRequest = {
+    hid: 'HID-ABCDEFGH', scope: 'write_records' as const, durationMinutes: 1440,
+    reason: 'Turn paper records into the digital record at Example Facility (OCR)',
+  };
+
+  it('answers 403 RECORDS_PROCESSING_NOT_ALLOWED when the membership cannot run OCR jobs', async () => {
+    query.mockRejectedValueOnce(Object.assign(new Error('RECORDS_PROCESSING_NOT_ALLOWED'), { code: '42501' }));
+    await expect(service.createAccessRequest(recordsProcessing, recordsRequest)).rejects.toMatchObject({
+      status: 403, code: 'RECORDS_PROCESSING_NOT_ALLOWED',
+      message: 'Your role cannot ask for records processing: it needs permission to run OCR jobs (ocr.job.write) at this facility',
     });
-    await expect(service.listMyAccessRequests(context)).resolves.toHaveLength(1);
-    expect(query).toHaveBeenCalledWith(expect.stringContaining('identity.list_my_access_requests()'));
+  });
+
+  it('answers 422 RECORDS_PROCESSING_MINOR for a patient under 18 or without a date of birth', async () => {
+    query.mockRejectedValueOnce(Object.assign(new Error('RECORDS_PROCESSING_MINOR'), { code: '42501' }));
+    await expect(service.createAccessRequest(recordsProcessing, recordsRequest)).rejects.toMatchObject({
+      status: 422, code: 'RECORDS_PROCESSING_MINOR',
+      message: 'Records processing is not available for patients under 18, or without a date of birth on record',
+    });
+  });
+
+  it.each([
+    ['42501', 'Authorized consent command context is required', 403, 'CONSENT_COMMAND_DENIED'],
+    ['42501', 'records_processing_minor', 403, 'CONSENT_COMMAND_DENIED'],
+    // Before 0104 seeds the code, or after an operator deactivates it.
+    ['22023', 'Invalid purpose for a standard access request', 400, 'INVALID_CONSENT_COMMAND'],
+    ['22023', 'RECORDS_PROCESSING_NOT_ALLOWED', 400, 'INVALID_CONSENT_COMMAND'],
+    ['22023', 'RECORDS_PROCESSING_MINOR', 400, 'INVALID_CONSENT_COMMAND'],
+    // A scope or duration only a direct insert could send (the DTO refuses both first).
+    ['22023', 'RECORDS_PROCESSING_REQUEST_INVALID', 400, 'INVALID_CONSENT_COMMAND'],
+    ['22023', undefined, 400, 'INVALID_CONSENT_COMMAND'],
+  ])('keeps every other access-request refusal as it was: %s %s', async (code, message, status, problem) => {
+    query.mockRejectedValueOnce({ code, message });
+    await expect(service.createAccessRequest(recordsProcessing, recordsRequest)).rejects.toMatchObject({ status, code: problem });
+  });
+
+  it('maps exactly the refusals 0104\'s trigger raises', () => {
+    const migration = readFileSync(join(__dirname,
+      '../../../ehr-api/database/migrations/0104_records_processing_purpose.sql'), 'utf8');
+    const body = migration.slice(migration.indexOf('create function identity.access_requests_records_processing()'));
+    const raised = [...body.slice(0, body.indexOf('$$;')).matchAll(/errcode = '(\w+)', message = '(\w+)'/g)]
+      .map(([, code, message]) => `${code} ${message}`);
+    expect(raised).toEqual([`42501 ${RECORDS_PROCESSING_REFUSAL.permission}`, '22023 RECORDS_PROCESSING_REQUEST_INVALID',
+      `42501 ${RECORDS_PROCESSING_REFUSAL.patient}`]);
+  });
+
+  it('keeps the records-processing messages out of other consent commands', async () => {
+    query.mockRejectedValueOnce({ code: '42501', message: 'RECORDS_PROCESSING_NOT_ALLOWED' });
+    await expect(service.closeOwnGrant(context, '60000000-0000-4000-8000-000000000001', 'Treatment relationship ended'))
+      .rejects.toMatchObject({ status: 403, code: 'CONSENT_COMMAND_DENIED' });
   });
 
   // The patient's own decision (patientConsentContext): no facility, the patient session.

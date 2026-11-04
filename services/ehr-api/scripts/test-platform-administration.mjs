@@ -39,8 +39,13 @@ try {
   await denied({sourceChecksum:'b'.repeat(64)},'VERIFIED_EXACT_SOURCE_REQUIRED');
   await denied({profileChecksum:'b'.repeat(64)},'ACTIVE_APPROVED_SOURCE_PROFILE_REQUIRED');
   await denied({emailChecksum:sha('different@example.test')},'EXACT_ACTIVE_DESIGNATED_ACCOUNT_REQUIRED');
+  // Migrations may seed role rows of their own (0105 seeds the document scanner's), so compare with before the dry run.
+  const roleRows=async()=>(await admin.query(
+    'select count(*)::int total,(count(*) filter (where account_id=$1::uuid))::int designated from auth.account_roles',[account])).rows[0];
+  const rolesBeforeDryRun=await roleRows();
+  assert.equal(rolesBeforeDryRun.designated,0);
   assert.equal((await restoreLegacyPlatformAdmin(admin,{...options,mode:'DryRun'})).changes_rolled_back,true);checks++;
-  assert.equal((await admin.query('select count(*)::int count from auth.account_roles')).rows[0].count,0);checks++;
+  assert.deepEqual(await roleRows(),rolesBeforeDryRun);checks++;
   assert.equal((await restoreLegacyPlatformAdmin(admin,{...options,mode:'Apply'})).role_created,true);checks++;
   assert.equal((await restoreLegacyPlatformAdmin(admin,{...options,mode:'Verify'})).idempotent_replay,true);checks++;
   await denied({reason:'Different restoration reason for existing administrator'},'EXISTING_RESTORATION_DIFFERS');
