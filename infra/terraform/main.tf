@@ -166,10 +166,11 @@ module "application" {
   web_push_subject          = var.web_push_subject
 
   # Document virus scanning: the GuardDuty result bridge. Off adds nothing.
-  enable_document_scanning        = var.enable_document_scanning
-  document_scan_bridge_mode       = var.document_scan_bridge_mode
-  document_scan_reconcile_enabled = var.document_scan_reconcile_enabled
-  malware_protection_plan_arn     = module.data.malware_protection_plan_arn
+  enable_document_scanning                  = var.enable_document_scanning
+  document_scan_bridge_mode                 = var.document_scan_bridge_mode
+  document_scan_bridge_reserved_concurrency = var.document_scan_bridge_reserved_concurrency
+  document_scan_reconcile_enabled           = var.document_scan_reconcile_enabled
+  malware_protection_plan_arn               = module.data.malware_protection_plan_arn
 }
 
 # 5. Private Bedrock access for the EHR patient-record chat. Production sets

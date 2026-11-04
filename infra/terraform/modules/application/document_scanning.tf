@@ -291,7 +291,7 @@ resource "aws_lambda_function" "document_scan_bridge" {
   source_code_hash               = data.archive_file.document_scan_bridge[0].output_base64sha256
   timeout                        = 30
   memory_size                    = 256
-  reserved_concurrent_executions = 2
+  reserved_concurrent_executions = var.document_scan_bridge_reserved_concurrency
 
   vpc_config {
     subnet_ids         = var.application_subnet_ids
@@ -414,7 +414,7 @@ resource "aws_lambda_permission" "malware_plan_status" {
 # only alarms named "${var.name_prefix}-*".
 resource "aws_cloudwatch_metric_alarm" "document_scan_dlq" {
   count               = local.document_scanner_enabled ? 1 : 0
-  alarm_name          = "${local.document_scan_alarm_prefix}-dead-letters"
+  alarm_name          = "${var.name_prefix}-document-scan-dead-letters"
   alarm_description   = "A scan result could not be delivered or processed after ${local.document_scan_max_receive_count} attempts; the document stays blocked."
   namespace           = "AWS/SQS"
   metric_name         = "ApproximateNumberOfMessagesVisible"
@@ -431,7 +431,7 @@ resource "aws_cloudwatch_metric_alarm" "document_scan_dlq" {
 
 resource "aws_cloudwatch_metric_alarm" "document_scan_errors" {
   count               = local.document_scanner_enabled ? 1 : 0
-  alarm_name          = "${local.document_scan_alarm_prefix}-errors"
+  alarm_name          = "${var.name_prefix}-document-scan-errors"
   alarm_description   = "The document scan bridge Lambda failed (configuration, reconcile listing or a crash)."
   namespace           = "AWS/Lambda"
   metric_name         = "Errors"
@@ -448,7 +448,7 @@ resource "aws_cloudwatch_metric_alarm" "document_scan_errors" {
 
 resource "aws_cloudwatch_metric_alarm" "document_scan_metric" {
   for_each            = local.document_scan_metric_alarms
-  alarm_name          = "${local.document_scan_alarm_prefix}-${each.key}"
+  alarm_name          = "${var.name_prefix}-document-scan-${each.key}"
   alarm_description   = each.value.description
   namespace           = "HID/DocumentScanning"
   metric_name         = each.value.metric
