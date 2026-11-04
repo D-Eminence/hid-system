@@ -221,7 +221,7 @@ try {
     assert.equal((await staffLabRead('50000000-0000-4000-8000-000000000001')).length,1,'Restricted Lab role reads authorized staff released results');
     assert.equal((await staffLabRead(a)).length,0,'Staff Lab collection excludes another patient without consent');
     assert.equal((await staffLabRead('50000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000003')).length,0,'Staff Lab collection retains facility isolation');
-    // Patient chat part 2 (0121): the patient reads a result only from a finished visit. The fixture's
+    // Patient chat part 2 (0107): the patient reads a result only from a finished visit. The fixture's
     // encounter is still in progress, so the result is withheld until the clinician completes the visit.
     const labPatient='50000000-0000-4000-8000-000000000001',labResult='f2000000-0000-4000-8000-000000000002';
     const patientLabRead=async(patient=labPatient)=>{

@@ -39,7 +39,7 @@ const withdrawn = { event_id: 'e2', event_no: '2', state: 'withdrawn', occurred_
   finished_visit: true, replayed: false };
 
 describe('Marking a result as discussed with the patient', () => {
-  it('calls the 0121 command with the patient, result, version, key and a stable digest, and audits ids only', async () => {
+  it('calls the 0107 command with the patient, result, version, key and a stable digest, and audits ids only', async () => {
     const s = setup([recorded]);
     const answer = await s.service.record(staffRequest(), PATIENT, RESULT, { resultVersion: 2 }, KEY);
     expect(answer).toEqual({ resultId: RESULT, resultVersion: 2, state: 'discussed', eventNo: 1,
@@ -205,6 +205,32 @@ describe('Listing the results a clinician may mark', () => {
     const s = setup([{ ...base, result_id: 'r-cd4', test_code: '24467-3', test_name: 'CD4 count', abnormal_flag: null }]);
     const { results } = await s.service.list(staffRequest({}, {}), PATIENT);
     expect(results).toEqual([expect.objectContaining({ discussion: null, visibleToPatient: false })]);
+  });
+
+  it('lists the Q28 sensitive tests (HPV DNA, HCV RNA, drug screen, NIPT, bone marrow, flow cytometry, AUDIT, MMSE) so they can be marked', async () => {
+    const names = ['HPV DNA', 'Mycoplasma genitalium PCR', 'HBV DNA viral load', 'HCV RNA', 'Urine drug screen', 'Blood alcohol', 'NIPT',
+      'Bone marrow aspirate', 'Flow cytometry', 'AUDIT-C', 'CAGE questionnaire', 'MMSE', 'Full blood count', 'GeneXpert MTB/RIF'];
+    const s = setup(names.map((test_name, n) => ({ ...base, result_id: `r-q28-${n}`, test_code: 'x', test_code_system: 'LOCAL', test_name, abnormal_flag: 'normal' })));
+    const { results } = await s.service.list(staffRequest(), PATIENT);
+    expect(results.map(r => r.test.name)).toEqual(names.slice(0, -2));
+    expect(results.every(r => r.gate.sensitive && !r.gate.critical)).toBe(true);
+  });
+
+  it('lists the Q28 review lab menu spellings (drug test, antenatal profile, BMA, Papanicolaou, R.V.S) so they can be marked', async () => {
+    const names = ['Urine drug test', 'Alcohol, blood', 'ETOH', 'Antenatal profile', 'Quadruple test', 'BMA', 'Papanicolaou smear', 'R.V.S',
+      'ANC', 'Drug level'];
+    const s = setup(names.map((test_name, n) => ({ ...base, result_id: `r-q28r-${n}`, test_code: 'x', test_code_system: 'LOCAL', test_name, abnormal_flag: 'normal' })));
+    const { results } = await s.service.list(staffRequest(), PATIENT);
+    expect(results.map(r => r.test.name)).toEqual(names.slice(0, -2));
+    expect(results.every(r => r.gate.sensitive && !r.gate.critical)).toBe(true);
+  });
+
+  it('keeps TB results visible (owner Q31): TB tests are not gated, so the list does not offer them for a mark', async () => {
+    const names = ['GeneXpert MTB/RIF', 'AFB smear', 'Mantoux test', 'TST', 'IGRA', 'QuantiFERON-TB Gold Plus', 'Sputum culture for TB',
+      'HIV 1/2 rapid test'];
+    const s = setup(names.map((test_name, n) => ({ ...base, result_id: `r-q31-${n}`, test_code: 'x', test_code_system: 'LOCAL', test_name, abnormal_flag: 'normal' })));
+    const { results } = await s.service.list(staffRequest(), PATIENT);
+    expect(results.map(r => r.test.name)).toEqual(['HIV 1/2 rapid test']);
   });
 
   it('maps a missing consent to 403 PATIENT_ACCESS_DENIED', async () => {

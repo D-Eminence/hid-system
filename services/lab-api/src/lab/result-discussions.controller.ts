@@ -8,7 +8,7 @@ import { ResultDiscussionsService } from './result-discussions.service';
 const uuid = () => new ParseUUIDPipe({ version: '4' });
 
 /**
- * The EHR's "Discussed with the patient" button (patient chat part 2, 0121).
+ * The EHR's "Discussed with the patient" button (patient chat part 2, 0107).
  * Browser routes through the gateway (/api/v1/lab/...), facility required,
  * direct care only; never an internal caller. Listing needs
  * lab.result.released.read; marking and withdrawing need lab.result.discuss

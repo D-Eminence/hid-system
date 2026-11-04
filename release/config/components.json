@@ -95,7 +95,7 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0121",
+    "last": "0107",
     "count": 107,
     "files": [
       {
@@ -523,8 +523,8 @@
         "sha256": "bf68aaaca9e773fce6022a5241f32f35a9937cd9b496e04445b75022a43788c8"
       },
       {
-        "name": "0121_lab_result_discussions.sql",
-        "sha256": "cde3d2e76169a652b9b8aee84ac3e4faacac0aca9f4ebeb27f50540076756e10"
+        "name": "0107_lab_result_discussions.sql",
+        "sha256": "50deb1c9b07dee844453a1fc8f40f55924da6660c2bfcb5fe92da2f4ee903709"
       }
     ]
   },

@@ -775,7 +775,7 @@ select pg_temp.assert('the work lists'' strict policies', (select array_agg(p.po
     from pg_policy p where p.polrelid in ('lab.work_items'::regclass, 'pharmacy.work_items'::regclass))
   = array[
     'lab.work_items:lab_work_items_insert:a::lab.work_item_allows(patient_id, facility_id, order_route_id, ''write_records''::text)',
-    -- 0121: the owner-only patient gate policy (its TO role is checked in
+    -- 0107: the owner-only patient gate policy (its TO role is checked in
     -- lab-result-discussions.integration.sql).
     'lab.work_items:lab_work_items_patient_result_gate:r:lab.patient_self_context(patient_id):',
     'lab.work_items:lab_work_items_read:r:lab.work_item_allows(patient_id, facility_id, order_route_id, ''read_records''::text):',

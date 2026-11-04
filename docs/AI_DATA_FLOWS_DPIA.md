@@ -46,7 +46,7 @@ The code contains no other calls to Anthropic, Bedrock or Textract in `ehr-api` 
   - `authorizedRecords`: up to 12 sources (`patient-chat.service.ts:226`, hard cap 60 sources and 90,000 characters at `claude-ai.service.ts:80`). Each source carries `title`, `content`, `kind`, `provenance`, `quality`, `recordedAt`, `effectiveAt` and an `origin` label (`claude-ai.service.ts:83-89`);
   - `currentDate`, encounter links, `coverage` and `labComparisons`.
 - **`content`** is the canonical JSON of the record's title, dates, provenance, quality and fields (`patient-evidence.types.ts:72-81`).
-- **Which records:** they come from `PATIENT_EVIDENCE_QUERY` (`patient-evidence.query.ts:15-57,90-118`), the Lab service and documents. They are then filtered by `patientEvidence()` (`patient-evidence.policy.ts:297-321`):
+- **Which records:** they come from `PATIENT_EVIDENCE_QUERY` (`patient-evidence.query.ts:15-57,90-118`), the Lab service and documents. They are then filtered by `patientEvidence()` (`patient-evidence.policy.ts:440-464`):
   - **Notes:** `noteType`, `text`, `signedAt`, only from completed visits.
   - **Encounters:** completed ones only.
   - **Diagnoses:** confirmed only, with no clinician notes.
@@ -54,10 +54,10 @@ The code contains no other calls to Anthropic, Bedrock or Textract in `ehr-api` 
   - **Investigations:** sent without the clinical reason or priority.
   - **Vitals:** an explicit list of measures.
   - **Lab results:** an allow-list of fields that leaves out `correctionReason` (`patient-evidence.policy.ts:30-40`).
-  - **Imported records, prior import versions and imported health profile:** fields are not allow-listed; only `_`-prefixed keys are removed (`patient-evidence.policy.ts:301`, `patient-evidence.query.ts:41-54`).
-  - **Profile:** only `ageYears` and `sex` (`patient-evidence.policy.ts:292-295,304`).
-  - **Documents and attachments:** the OCR text (from path E), with the title replaced by "Clinical document" or "Imported document" (`patient-evidence.policy.ts:310-311`).
-  - **Sensitive items:** tests, conditions and medicines on the sensitive lists are dropped (`patient-evidence.policy.ts:150-160,279-290`).
+  - **Imported records, prior import versions and imported health profile:** fields are not allow-listed; only `_`-prefixed keys are removed (`patient-evidence.policy.ts:410,444`, `patient-evidence.query.ts:41-54`).
+  - **Profile:** only `ageYears` and `sex` (`patient-evidence.policy.ts:436-439,447`).
+  - **Documents and attachments:** the OCR text (from path E), with the title replaced by "Clinical document" or "Imported document" (`patient-evidence.policy.ts:454-455`).
+  - **Sensitive items:** tests, conditions and medicines on the sensitive lists are dropped (`patient-evidence.policy.ts:69-272,280-295,413-434`).
 
 **Which patient**
 - Only the signed-in patient. Row-level security limits rows to that patient, and any other patient's row stops the request (`patient-evidence.service.ts:34-35`).
@@ -65,24 +65,24 @@ The code contains no other calls to Anthropic, Bedrock or Textract in `ehr-api` 
 - Other people's data can still go out inside free text: clinicians' or relatives' names in notes, imported records and OCR text.
 
 **Identifiers and redaction**
-- The function is `redactIdentifiers()` (`patient-evidence.policy.ts:224-267`). It removes:
+- The function is `redactIdentifiers()` (`patient-evidence.policy.ts:358-401`). It removes:
   - emails;
   - any `HID-…` Health ID or `HID xxxx` code;
   - MRN, hospital, folder, card or file numbers after a keyword;
   - NIN or BVN after a keyword;
   - Nigerian phone numbers and `+…` international numbers;
   - any bare 11-digit number, or 4-4-3 digit groups;
-  - the patient's date of birth in many formats (`patient-evidence.policy.ts:193-217`);
+  - the patient's date of birth in many formats (`patient-evidence.policy.ts:327-351`);
   - the patient's own full, first and last names, in capitalised or upper-case forms only.
 - It is applied to:
   - the question and replayed history (`patient-chat.service.ts:66-69,100-106`);
-  - free-text record fields: note `text`, document and attachment `text`, import `record`, `notes`, `structuredData` and `transcriptionText`, and health profile `medical_notes` (`patient-evidence.policy.ts:46-52`);
-  - titles of notes and imports (`patient-evidence.policy.ts:312-313`).
+  - free-text record fields: note `text`, document and attachment `text`, import `record`, `notes`, `structuredData` and `transcriptionText`, and health profile `medical_notes` (`patient-evidence.policy.ts:46-51`);
+  - titles of notes and imports (`patient-evidence.policy.ts:52,457`).
 - Name and date of birth are fetched only to drive this redaction (`patient-evidence.service.ts:44-61`).
 
 **Free text that can still carry identifiers**
 - Other people's names. Only the patient's own name is removed.
-- The patient's name written in lower case (`patient-evidence.policy.ts:190-191`), or names that are common words ("Sunday", "Will") when they appear alone (`patient-evidence.policy.ts:188`).
+- The patient's name written in lower case (`patient-evidence.policy.ts:324-325`), or names that are common words ("Sunday", "Will") when they appear alone (`patient-evidence.policy.ts:322`).
 - Addresses. There is no address pattern.
 - Record numbers without a keyword, and phone formats that are neither Nigerian nor start with `+`.
 - Fields outside the redaction list:
@@ -296,7 +296,7 @@ The code contains no other calls to Anthropic, Bedrock or Textract in `ehr-api` 
 
 | Path | Provider and call | Region setting (where set) | Model (config key) | Data sent | Redaction | Images | Stored in HID | Retention |
 |---|---|---|---|---|---|---|---|---|
-| A. Patient chat | Anthropic `api.anthropic.com/v1/messages` (`claude-ai.service.ts:138`) | `inference_geo:'us'`, hard-coded (`:143`); gate `ANTHROPIC_PROCESSING_APPROVED` | `AI_GENERATION_MODEL_ID`, default `claude-sonnet-4-6` | Fixed prompt, question, ≤4 past exchanges, ≤12 filtered records, age and sex | `redactIdentifiers` on question, history and free text (`patient-evidence.policy.ts:224`); others' names and some fields not covered | No | `ehr.patient_chat_messages` | 30 days or last 10, pruned only on next use; clear deletes; no job |
+| A. Patient chat | Anthropic `api.anthropic.com/v1/messages` (`claude-ai.service.ts:138`) | `inference_geo:'us'`, hard-coded (`:143`); gate `ANTHROPIC_PROCESSING_APPROVED` | `AI_GENERATION_MODEL_ID`, default `claude-sonnet-4-6` | Fixed prompt, question, ≤4 past exchanges, ≤12 filtered records, age and sex | `redactIdentifiers` on question, history and free text (`patient-evidence.policy.ts:358`); others' names and some fields not covered | No | `ehr.patient_chat_messages` | 30 days or last 10, pruned only on next use; clear deletes; no job |
 | B. Staff chat | Same as A | Same as A | Same as A | Question as typed, history, ≤12 full records including name, date of birth, clinician notes, file names | None | No | `ehr.staff_chat_messages` | Same as A, per staff user's scope |
 | C. Patient embeddings | Bedrock `InvokeModel` (`bedrock-ai.service.ts:13`) | Not in code; AWS SDK default chain | `AI_EMBEDDING_MODEL_ID`, default `amazon.titan-embed-text-v2:0` | ≤4 chunks (≤2800 characters) of cleaned records, plus question; no profile | As A | No | `ehr.patient_evidence_chunks` (vectors only) | Purged when stale; otherwise until patient deleted |
 | D. Staff embeddings | Same as C | Same as C | Same as C | ≤4 unredacted chunks including profile (name, date of birth), plus question | None | No | `ehr.staff_evidence_chunks` (vectors only) | Old versions deleted; otherwise until patient deleted |

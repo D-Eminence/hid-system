@@ -32,7 +32,7 @@ describe('Staff chat queries stay exactly as they were (golden)', () => {
   });
 
   it('uses the same sensitive test list as lab-api (patient-results.query.spec.ts pins the same hash)', () => {
-    expect(sha(SENSITIVE_TEST_SQL_PATTERN)).toBe('6d9bc65c5b2d11d8bbdf72e66417e710e5e445423a2a89347edd205469988571');
+    expect(sha(SENSITIVE_TEST_SQL_PATTERN)).toBe('7231c39cd3acd66e8ee7af7154e311e5352af625832171aabe025526eef9e8df');
   });
 
   it('refuses an unknown audience', () => {
@@ -98,7 +98,7 @@ describe('Review fixes: test requests coded in LOINC (S4)', () => {
     expect(l).toContain(`and not (btrim(coalesce(l.test_code_system,'')) ~* '${LOINC_SYSTEM_SQL_PATTERN}' and btrim(coalesce(l.test_code,'')) in (${SENSITIVE_LOINC_SQL_LIST}))`);
     expect(SENSITIVE_LOINC_SQL_LIST).toBe(SENSITIVE_LOINC_CODES.map(code => `'${code}'`).join(','));
     // patient-results.query.spec.ts in lab-api pins the same hash.
-    expect(sha(SENSITIVE_LOINC_SQL_LIST)).toBe('a775ca2c7186606ab7a30fded571d975c4ac9d3c060a92a1953c9d3aa53c677d');
+    expect(sha(SENSITIVE_LOINC_SQL_LIST)).toBe('cd437f3ce0885e4427789ceddbfbe4b209c9cd94829d6ddb31a8c3d8e39d066e');
     // LOINC by name, URL or OID; patient-results.query.spec.ts in lab-api pins the same hash.
     expect(sha(LOINC_SYSTEM_SQL_PATTERN)).toBe('c2d253608793eec2a8437e3b718d2498e40feab386ad6e7163338b33bcf9f9ef');
     expect(STAFF_EVIDENCE_QUERY).not.toContain('loinc');

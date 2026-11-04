@@ -1,7 +1,7 @@
 import { Transform } from 'class-transformer';
 import { IsIn, IsInt, IsString, Length, Min } from 'class-validator';
 
-/** Why a "Discussed with the patient" mark is withdrawn (0121 D-D). */
+/** Why a "Discussed with the patient" mark is withdrawn (0107 D-D). */
 export const WITHDRAWAL_REASON_CODES = ['marked_in_error', 'not_yet_discussed', 'wrong_patient', 'other'] as const;
 export type WithdrawalReasonCode = (typeof WITHDRAWAL_REASON_CODES)[number];
 

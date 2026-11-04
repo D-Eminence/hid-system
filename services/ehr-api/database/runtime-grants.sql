@@ -1418,9 +1418,9 @@ grant execute on function identity.records_processing_direct_care_cover(uuid,tex
 -- granted to hid_document_scanner above and to no other role.
 revoke all on function ehr.resolve_document_scan_target(text, text, text, text),
   ehr.list_documents_awaiting_scan(integer, integer, text) from public;
--- Lab result discussions (0121, patient chat part 2): the patient gate the
+-- Lab result discussions (0107, patient chat part 2): the patient gate the
 -- Lab API's patient query joins, and the clinician's "Discussed with the
--- patient" record, withdraw and list commands, as 0121 grants them: the Lab
+-- patient" record, withdraw and list commands, as 0107 grants them: the Lab
 -- runtime and the schema test runtime only, never PUBLIC. Each command checks
 -- lab.result.discuss (or lab.result.released.read to list) and the patient's
 -- direct-care grant itself. The visit check and the target helper are the

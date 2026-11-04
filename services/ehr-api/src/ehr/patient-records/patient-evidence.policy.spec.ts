@@ -457,7 +457,7 @@ describe('Second review: the date of birth, without catching clinical numbers (A
   });
 });
 
-describe('Patient chat part 2: the "Discussed with the patient" mark on Lab results (0121)', () => {
+describe('Patient chat part 2: the "Discussed with the patient" mark on Lab results (0107)', () => {
   const lab = (test: string, more: Record<string, unknown> = {}, codeSystem = 'LOCAL', code = 'X1') => record('lab_result', { test, codeSystem,
     code, specimen: 'Blood', resultType: 'text', textValue: 'Synthetic value', recordedFlag: 'normal', releasedAt: '2026-10-01T10:00:00.000Z',
     verification: 'released', ...more }, { title: test });

@@ -139,7 +139,7 @@ describe('The patient chat still answers normally with what the policy leaves', 
   });
 });
 
-describe('Patient chat part 2: Lab results marked "Discussed with the patient" (0121)', () => {
+describe('Patient chat part 2: Lab results marked "Discussed with the patient" (0107)', () => {
   const result = (n: number, test: string, fields: Record<string, unknown>): { id: string; version: string; title: string; recordedAt: string; effectiveAt: string; fields: Record<string, unknown> } => ({ id: `33333333-3333-4333-8333-0000000001${String(n).padStart(2, '0')}`,
     version: `1:release-${n}`, title: test, recordedAt: '2026-09-06T12:00:00.000Z', effectiveAt: '2026-09-06T09:00:00.000Z',
     fields: { test, codeSystem: 'LOCAL', code: `T${n}`, specimen: 'blood', resultType: 'text', recordedFlag: 'normal', ...fields } });

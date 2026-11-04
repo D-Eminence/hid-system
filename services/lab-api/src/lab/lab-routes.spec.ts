@@ -26,7 +26,7 @@ function routes(){
   }).filter(route=>route.method!==undefined);
  });
 }
-// The doctor role's Lab permissions (0017, 0018, 0021, 0121). Clinician and nurse hold fewer.
+// The doctor role's Lab permissions (0017, 0018, 0021, 0107). Clinician and nurse hold fewer.
 const DOCTOR=['lab.import.read','lab.import.write','lab.work-item.read','lab.work-item.accept','lab.result.released.read','lab.result.discuss'];
 
 describe('Lab route permission inventory',()=>{
@@ -45,7 +45,7 @@ describe('Lab route permission inventory',()=>{
  });
 });
 
-describe('"Discussed with the patient" routes (0121)',()=>{
+describe('"Discussed with the patient" routes (0107)',()=>{
  it('serves the list, the mark and the withdrawal as browser routes with their permissions and audit actions',()=>{
   const discussion=routes().filter(route=>route.path?.startsWith('lab/patients/:patientId/'));
   expect(discussion.map(({name:_name,...route})=>route).sort((a,b)=>a.path!.localeCompare(b.path!))).toEqual([

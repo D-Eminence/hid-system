@@ -9,7 +9,7 @@ import type { RecordResultDiscussionDto, WithdrawResultDiscussionDto } from './d
 import { isGatedLabResult } from './patient-results.service';
 
 /**
- * "Discussed with the patient" (patient chat part 2, migration 0121, owner
+ * "Discussed with the patient" (patient chat part 2, migration 0107, owner
  * Q24 b). A clinician with care access to the patient marks a released
  * sensitive or critical result as discussed; while the mark on the result's
  * last released version is active (and its visit is finished), the result may
@@ -58,7 +58,7 @@ const CONFLICTS: Readonly<Record<string, string>> = {
   IDEMPOTENCY_KEY_REUSED: 'The Idempotency-Key was used for another request',
 };
 
-/** The problem for an error of a result-discussion command (0121). Never the database's text. */
+/** The problem for an error of a result-discussion command (0107). Never the database's text. */
 export function resultDiscussionProblem(error: unknown): DomainProblem {
   if (error instanceof DomainProblem) return error;
   const code = typeof error === 'object' && error !== null ? (error as { code?: unknown }).code : undefined;

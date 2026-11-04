@@ -1,4 +1,4 @@
--- 0121 Lab results in the patient chat only from finished visits, and the
+-- 0107 Lab results in the patient chat only from finished visits, and the
 -- clinician's "Discussed with the patient" mark for sensitive and critical
 -- results (patient chat part 2). Owner decisions in chat (D-Eminence):
 -- Q24, 2026-11-04, "yes": build patient chat part 2 now, (a) lab results in
@@ -40,12 +40,13 @@
 --       every mark; lab-api also writes an ids-only audit.events row for every
 --       call, success or refusal, in the same transaction.
 --
--- Numbering: 0121 is applied after 0106-0120 in the release, but it uses and
--- requires none of their objects and applies on 0105 alone. Its preconditions
--- pin the bodies it relies on as 0001-0105 left them: if one of 0106-0120
--- replaces one of those bodies, this file refuses with 55000 and nothing is
--- applied; the bodies are then measured again and the pins updated in a new
--- file. Nothing else from 0106-0120 is read.
+-- Numbering (release order): 0107 is applied after 0106 (the OCR worker
+-- account) in the release, but it needs only 0105: it uses and requires none
+-- of 0106's objects and applies on 0105 alone. Its preconditions pin the
+-- bodies it relies on as 0001-0105 left them: if a later file replaces one of
+-- those bodies, this file refuses with 55000 and nothing is applied; the
+-- bodies are then measured again and the pins updated in a new file. Nothing
+-- from 0106 is read.
 --
 -- S1 lab.result_discussion_events: append-only, one row per mark or
 --    withdrawal of one released result version, strictly alternating
@@ -131,8 +132,8 @@
 -- 0. Preconditions (catalog reads only; each failure raises 55000 or 42501 and
 --    nothing is applied): 0001-0105 applied (the existence of 0105's
 --    ehr.resolve_document_scan_target is the marker, never its body, which
---    0121 does not use and 0106-0120 may replace; else "0121: 0001-0105 must
---    be applied first"); not applied yet (else "0121: already
+--    0107 does not use and a later file may replace; else "0107: 0001-0105 must
+--    be applied first"); not applied yet (else "0107: already
 --    applied"); the bodies relied on are 0001-0105's (md5 of pg_proc.prosrc,
 --    measured on a throwaway PostgreSQL 16 database migrated 0001-0105 from
 --    f11c9ec9): lab.patient_self_context 39aeca12d2c59b69877800a9a3a7c50b,
@@ -177,14 +178,14 @@
 -- its staff and patient Lab queries read exactly as before (the S2 policy
 -- applies to the owner only). Today's ehr-api is unaffected. Rollout order:
 -- this migration, then lab-api (its patient query joins
--- lab.patient_self_result_gates; before 0121 that query fails and the patient
+-- lab.patient_self_result_gates; before 0107 that query fails and the patient
 -- chat treats Lab as unavailable), then ehr-api. Applied migrations 0001
 -- through 0105 are immutable.
 
 -- 0. Preconditions. Whether holder holds a privilege on an object by
 -- ownership, membership (direct or through other roles) or grant (also to
 -- PUBLIC), ignoring a superuser's bypass.
-create function pg_temp.result_discussions_0121_holds(holder oid, object_owner oid, object_acl aclitem[],
+create function pg_temp.result_discussions_0107_holds(holder oid, object_owner oid, object_acl aclitem[],
   object_type "char", wanted text)
 returns boolean
 language sql stable
@@ -208,7 +209,7 @@ declare
   table_owner oid;
 begin
   -- a. Prerequisites: 0001-0105 (0105's scan-target function is the marker; its
-  -- body is not pinned, as 0121 neither calls nor reads it).
+  -- body is not pinned, as 0107 neither calls nor reads it).
   if to_regclass('lab.results') is null
      or to_regclass('lab.result_revisions') is null
      or to_regclass('lab.result_releases') is null
@@ -225,7 +226,7 @@ begin
      or to_regclass('auth.role_permissions') is null
      or to_regclass('auth.roles') is null
      or to_regprocedure('ehr.resolve_document_scan_target(text,text,text,text)') is null then
-    raise exception using errcode = '55000', message = '0121: 0001-0105 must be applied first';
+    raise exception using errcode = '55000', message = '0107: 0001-0105 must be applied first';
   end if;
   -- b. Not applied yet.
   if to_regclass('lab.result_discussion_events') is not null
@@ -234,7 +235,7 @@ begin
      or exists (select 1 from pg_policy policy_row
                  where policy_row.polrelid = 'lab.work_items'::regclass
                    and policy_row.polname = 'lab_work_items_patient_result_gate') then
-    raise exception using errcode = '55000', message = '0121: already applied';
+    raise exception using errcode = '55000', message = '0107: already applied';
   end if;
   -- c. The bodies relied on, as 0001-0105 left them.
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
@@ -256,7 +257,7 @@ begin
    where proc.oid is null or md5(proc.prosrc) <> expected.digest;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0121: a function this migration relies on differs from 0001-0105: %s', mismatch);
+      message = format('0107: a function this migration relies on differs from 0001-0105: %s', mismatch);
   end if;
   -- d. The columns read, the release key the new foreign key uses, and the
   -- patient-self policies of 0030 and 0067 (the gate reads through them).
@@ -372,7 +373,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0121: an object this migration relies on differs from 0001-0105: %s', mismatch);
+      message = format('0107: an object this migration relies on differs from 0001-0105: %s', mismatch);
   end if;
   -- e. One owner, an applier that may act as it, no runtime role a member of
   -- it, and that owner's privileges, never through a superuser's bypass
@@ -405,7 +406,7 @@ begin
         from (values ('lab', 'CREATE'), ('lab', 'USAGE'), ('ehr', 'USAGE'), ('identity', 'USAGE'),
                      ('auth', 'USAGE'), ('platform', 'USAGE')) wanted(schema_name, privilege)
         join pg_namespace namespace on namespace.nspname = wanted.schema_name
-       where not pg_temp.result_discussions_0121_holds(table_owner, namespace.nspowner, namespace.nspacl, 'n',
+       where not pg_temp.result_discussions_0107_holds(table_owner, namespace.nspowner, namespace.nspacl, 'n',
                wanted.privilege)
       union all
       select format('%s lacks %s on %s', pg_get_userbyid(table_owner), wanted.privilege, relation.oid::regclass)
@@ -415,7 +416,7 @@ begin
                      ('identity.facilities', 'REFERENCES'), ('identity.staff_facility_memberships', 'REFERENCES'),
                      ('identity.staff_facility_memberships', 'SELECT')) wanted(relation_name, privilege)
         join pg_class relation on relation.oid = wanted.relation_name::regclass
-       where not pg_temp.result_discussions_0121_holds(table_owner, relation.relowner, relation.relacl, 'r',
+       where not pg_temp.result_discussions_0107_holds(table_owner, relation.relowner, relation.relacl, 'r',
                wanted.privilege)
       union all
       select format('%s lacks EXECUTE on %s', pg_get_userbyid(table_owner), proc.oid::regprocedure)
@@ -426,15 +427,15 @@ begin
                      ('platform.current_purpose_of_use()'), ('platform.current_correlation_id()'),
                      ('platform.reject_mutation()')) wanted(proc_name)
         join pg_proc proc on proc.oid = wanted.proc_name::regprocedure
-       where not pg_temp.result_discussions_0121_holds(table_owner, proc.proowner, proc.proacl, 'f', 'EXECUTE')) missing;
+       where not pg_temp.result_discussions_0107_holds(table_owner, proc.proowner, proc.proacl, 'f', 'EXECUTE')) missing;
   if mismatch is not null then
-    raise exception using errcode = '42501', message = format('0121: missing privileges: %s', mismatch);
+    raise exception using errcode = '42501', message = format('0107: missing privileges: %s', mismatch);
   end if;
   -- f. The roles S4 grants the permission to.
   if (select count(*) from auth.roles role_row where role_row.code in ('doctor', 'clinician')) <> 2 then
-    raise exception using errcode = '55000', message = '0121: the doctor and clinician roles must exist';
+    raise exception using errcode = '55000', message = '0107: the doctor and clinician roles must exist';
   end if;
-  raise notice '0121: owners checked: lab.results=%, applier=%', pg_get_userbyid(table_owner), current_user;
+  raise notice '0107: owners checked: lab.results=%, applier=%', pg_get_userbyid(table_owner), current_user;
 end
 $$;
 
@@ -480,7 +481,7 @@ create trigger result_discussion_events_no_mutation
   before update or delete on lab.result_discussion_events
   for each row execute function platform.reject_mutation();
 comment on table lab.result_discussion_events is
-  '0121: clinicians'' "Discussed with the patient" marks and their withdrawals, one released result version each, append-only and strictly alternating (odd event_no discussed, even withdrawn); the current state is the kind of the highest event_no. Written only by lab.record_result_discussion and lab.withdraw_result_discussion. The withdrawal reason text stays here: it never goes to audit.events, a log or a response.';
+  '0107: clinicians'' "Discussed with the patient" marks and their withdrawals, one released result version each, append-only and strictly alternating (odd event_no discussed, even withdrawn); the current state is the kind of the highest event_no. Written only by lab.record_result_discussion and lab.withdraw_result_discussion. The withdrawal reason text stays here: it never goes to audit.events, a log or a response.';
 
 -- 2. The functions (S3).
 create function lab.result_visit_finished(p_encounter_id uuid, p_lab_request_id uuid, p_route_id uuid)
@@ -502,7 +503,7 @@ as $$
     false)
 $$;
 comment on function lab.result_visit_finished(uuid, uuid, uuid) is
-  '0121 (D-F): whether a Lab result''s visit is finished: its encounter completed, its lab request active, on hold or completed, and its route (if any) seen and not ended wrong_patient or entered_in_error. Read under the caller''s row-level security; a row it cannot see (the route included) reads as not finished. Owner only.';
+  '0107 (D-F): whether a Lab result''s visit is finished: its encounter completed, its lab request active, on hold or completed, and its route (if any) seen and not ended wrong_patient or entered_in_error. Read under the caller''s row-level security; a row it cannot see (the route included) reads as not finished. Owner only.';
 
 create function lab.result_discussion_target(p_patient_id uuid, p_result_id uuid)
 returns table (
@@ -554,7 +555,7 @@ begin
 end
 $$;
 comment on function lab.result_discussion_target(uuid, uuid) is
-  '0121: the result as the session facility sees it (its own result, else one reported back through a route it ordered for this patient): current or last reported version, performing facility and visit. Called by the discussion commands as their owner; no EXECUTE for any role.';
+  '0107: the result as the session facility sees it (its own result, else one reported back through a route it ordered for this patient): current or last reported version, performing facility and visit. Called by the discussion commands as their owner; no EXECUTE for any role.';
 
 create function lab.patient_self_result_gates(p_patient_id uuid)
 returns table (result_id uuid, released_version bigint, finished_visit boolean, discussed boolean)
@@ -586,7 +587,7 @@ as $$
    where lab.patient_self_context(p_patient_id) and result_row.patient_id = p_patient_id
 $$;
 comment on function lab.patient_self_result_gates(uuid) is
-  '0121: in a patient-self session for this patient only (else no row), one row per released Lab result: its last released version, whether its visit is finished (D-F) and whether a clinician''s mark on that version is active (D-B, D-E). IDs and booleans only.';
+  '0107: in a patient-self session for this patient only (else no row), one row per released Lab result: its last released version, whether its visit is finished (D-F) and whether a clinician''s mark on that version is active (D-B, D-E). IDs and booleans only.';
 
 create function lab.record_result_discussion(p_patient_id uuid, p_result_id uuid, p_result_version bigint,
   p_idempotency_key text, p_request_sha256 text)
@@ -742,7 +743,7 @@ begin
 end
 $$;
 comment on function lab.record_result_discussion(uuid, uuid, bigint, text, text) is
-  '0121: marks one released Lab result version (the last released one) as discussed with the patient (D-A to D-F). 42501 LAB_CONTEXT_REQUIRED, PURPOSE_OF_USE_REQUIRED, PERMISSION_DENIED (lab.result.discuss), PATIENT_ACCESS_DENIED (direct-care write_records); 22023 RESULT_DISCUSSION_INVALID; P0001 IDEMPOTENCY_KEY_REUSED, RESULT_VERSION_CHANGED, RESULT_NOT_RELEASED, RESULT_ENTERED_IN_ERROR, RESULT_DISCUSSION_CHANGED (a repeated request whose mark was withdrawn since); P0002 RESULT_NOT_FOUND. A repeated request or a version already discussed answers the existing mark with replayed true.';
+  '0107: marks one released Lab result version (the last released one) as discussed with the patient (D-A to D-F). 42501 LAB_CONTEXT_REQUIRED, PURPOSE_OF_USE_REQUIRED, PERMISSION_DENIED (lab.result.discuss), PATIENT_ACCESS_DENIED (direct-care write_records); 22023 RESULT_DISCUSSION_INVALID; P0001 IDEMPOTENCY_KEY_REUSED, RESULT_VERSION_CHANGED, RESULT_NOT_RELEASED, RESULT_ENTERED_IN_ERROR, RESULT_DISCUSSION_CHANGED (a repeated request whose mark was withdrawn since); P0002 RESULT_NOT_FOUND. A repeated request or a version already discussed answers the existing mark with replayed true.';
 
 create function lab.withdraw_result_discussion(p_patient_id uuid, p_result_id uuid, p_result_version bigint,
   p_reason_code text, p_reason text, p_idempotency_key text, p_request_sha256 text)
@@ -883,7 +884,7 @@ begin
 end
 $$;
 comment on function lab.withdraw_result_discussion(uuid, uuid, bigint, text, text, text, text) is
-  '0121: withdraws the active "Discussed with the patient" mark of one released Lab result version, with a reason code and a reason of 8-500 characters (D-D; the reason is stored only in lab.result_discussion_events). Refusals as lab.record_result_discussion (RESULT_DISCUSSION_CHANGED: a repeated request whose result was marked again since), and P0001 RESULT_NOT_DISCUSSED; no currency check.';
+  '0107: withdraws the active "Discussed with the patient" mark of one released Lab result version, with a reason code and a reason of 8-500 characters (D-D; the reason is stored only in lab.result_discussion_events). Refusals as lab.record_result_discussion (RESULT_DISCUSSION_CHANGED: a repeated request whose result was marked again since), and P0001 RESULT_NOT_DISCUSSED; no currency check.';
 
 create function lab.list_result_discussions(p_patient_id uuid)
 returns table (
@@ -991,7 +992,7 @@ begin
 end
 $$;
 comment on function lab.list_result_discussions(uuid) is
-  '0121: with lab.result.released.read and a direct-care read_records grant, every result of the patient this facility can see (its own, and those reported back through routes it ordered) at its last released, not invalidated version: test, flag, release time, finished visit (D-F) and the latest discussion event on that version (state, number, time, membership, withdrawal reason code; never the reason text). Newest first, every row: lab-api applies the sensitive and critical gate (D-G) and keeps at most 500 gated rows.';
+  '0107: with lab.result.released.read and a direct-care read_records grant, every result of the patient this facility can see (its own, and those reported back through routes it ordered) at its last released, not invalidated version: test, flag, release time, finished visit (D-F) and the latest discussion event on that version (state, number, time, membership, withdrawal reason code; never the reason text). Newest first, every row: lab-api applies the sensitive and critical gate (D-G) and keeps at most 500 gated rows.';
 
 -- 3. The permission (S4, D-A).
 insert into auth.permissions (code, description) values
@@ -1060,7 +1061,7 @@ begin
 end
 $$;
 comment on policy lab_work_items_patient_result_gate on lab.work_items is
-  '0121: lets the table owner (only) see a patient''s work items in that patient''s own patient-self session, so lab.patient_self_result_gates can reach the visit under FORCE row-level security. No runtime role is the owner or a member of it.';
+  '0107: lets the table owner (only) see a patient''s work items in that patient''s own patient-self session, so lab.patient_self_result_gates can reach the visit under FORCE row-level security. No runtime role is the owner or a member of it.';
 
 -- 6. Post-checks (S5), after the grants, so the ACLs are the final ones.
 do $$
@@ -1149,7 +1150,7 @@ begin
     mismatch := 'the permission lab.result.discuss and its two role rows';
   end if;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0121: not as this file makes it: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0107: not as this file makes it: %s', mismatch);
   end if;
   -- EXECUTE: the four runtime commands to hid_lab_runtime and
   -- hid_schema_test_runtime (where they exist) only; the two helpers to none.
@@ -1175,7 +1176,7 @@ begin
          and not exists (select 1 from aclexplode(proc.proacl) acl
                           where acl.grantee = role_row.oid and acl.privilege_type = 'EXECUTE')) granted;
   if mismatch is not null then
-    raise exception using errcode = '55000', message = format('0121: an ACL is not this file''s: %s', mismatch);
+    raise exception using errcode = '55000', message = format('0107: an ACL is not this file''s: %s', mismatch);
   end if;
 end
 $$;

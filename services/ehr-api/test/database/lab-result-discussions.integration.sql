@@ -1,5 +1,5 @@
 \set ON_ERROR_STOP on
--- Lab result discussions (0121, patient chat part 2): the patient gate the Lab
+-- Lab result discussions (0107, patient chat part 2): the patient gate the Lab
 -- API's patient query joins (lab.patient_self_result_gates: finished visits
 -- only, and whether a clinician's "Discussed with the patient" mark is active on
 -- the last released version), the record, withdraw and list commands, the
@@ -19,7 +19,7 @@
 -- (services/lab-api/src/lab/result-discussions.service.ts).
 --
 -- When the functions' owner bypasses row-level security (a superuser, as on a
--- local cluster), section 9 moves the tables involved, the 0121 functions and
+-- local cluster), section 9 moves the tables involved, the 0107 functions and
 -- the owner-only policy to a fresh NOSUPERUSER NOBYPASSRLS role inside the
 -- transaction and runs the gate, mark, withdraw, routed and list cases again,
 -- then drops the policy to show it is needed (the patient gate then loses the
@@ -77,7 +77,7 @@ begin
      or has_function_privilege('hid_lab_runtime', 'lab.result_visit_finished(uuid,uuid,uuid)', 'EXECUTE')
      or has_function_privilege('hid_lab_runtime', 'lab.result_discussion_target(uuid,uuid)', 'EXECUTE')
      or has_function_privilege('hid_ehr_runtime', 'lab.patient_self_result_gates(uuid)', 'EXECUTE') then
-    raise exception 'the Lab runtime EXECUTE set is not 0121''s';
+    raise exception 'the Lab runtime EXECUTE set is not 0107''s';
   end if;
   -- The event table: FORCE row-level security, no grant to anyone, two policies
   -- (read and insert, true), the append-only trigger.
@@ -745,7 +745,7 @@ select 'S4 the commands write no audit row (lab-api does)', current_setting('lrd
        (select count(*)::text from audit.events);
 
 -- 9. A non-bypass owner. With a superuser owner, the tables involved, the
--- 0121 functions and the owner-only policy move to a fresh NOSUPERUSER
+-- 0107 functions and the owner-only policy move to a fresh NOSUPERUSER
 -- NOBYPASSRLS role for these cases (rolled back after); the owner then sees
 -- only what the policies admit, as production's owner does.
 savepoint non_bypass_owner;
