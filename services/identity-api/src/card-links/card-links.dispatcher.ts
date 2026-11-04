@@ -22,6 +22,8 @@ interface ClaimedEmail {
   occurred_at: Date;
   link_expires_at: Date;
   attempt_count: number;
+  /** Whether the link itself was emailed (sent or still pending); false for a blocked or capped address or a failed send. */
+  link_emailed: boolean;
 }
 
 export interface CardLinkEmailSummary { claimed: number; delivered: number; retried: number; failed: number }
@@ -51,7 +53,8 @@ export class CardLinksEmailDispatcher {
     for (let batch = 0; batch < CARD_LINK_EMAIL_CLAIM_BATCHES; batch += 1) {
       if (this.stopped) break;
       const claimed = await this.database.withSystemTransaction(correlationId, async (client) => (await client.query<ClaimedEmail>(
-        `select email_id::text, kind, recipient, reference, recipient_hint, occurred_at, link_expires_at, attempt_count
+        `select email_id::text, kind, recipient, reference, recipient_hint, occurred_at, link_expires_at, attempt_count,
+           link_emailed
            from identity.claim_card_share_emails($1, $2, $3)`,
         [this.workerId, CARD_LINK_EMAIL_CLAIM_LIMIT, CARD_LINK_EMAIL_CLAIM_LEASE_SECONDS])).rows);
       summary.claimed += claimed.length;
@@ -85,7 +88,7 @@ export class CardLinksEmailDispatcher {
     if (!email.recipient_hint) return Promise.resolve({ outcome: 'definitive_failure' as const, safeCode: 'no_hint' });
     return this.notification.deliverCardShareCreated({ emailId: email.email_id, recipient: email.recipient,
       reference: email.reference, recipientHint: email.recipient_hint, expiresAt: new Date(email.link_expires_at),
-      correlationId });
+      linkEmailed: email.link_emailed === true, correlationId });
   }
 }
 

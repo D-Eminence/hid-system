@@ -259,7 +259,7 @@ export class NotificationController {
     await this.authenticateEmailRequest(request, idempotencyKey, input);
     const result = await this.notifications.deliverCardShareCreated({ recipient: input.recipient,
       reference: input.reference, recipientHint: input.recipientHint, expiresAt: new Date(input.expiresAt),
-      idempotencyKey: idempotencyKey! }, input.plan);
+      linkEmailed: input.linkEmailed, idempotencyKey: idempotencyKey! }, input.plan);
     return this.response(result);
   }
 

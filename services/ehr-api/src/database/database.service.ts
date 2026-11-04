@@ -25,6 +25,14 @@ export function isSerializationConflict(error: unknown): boolean {
   return code === '40001' || code === '40P01';
 }
 
+/** The live card-link view of a card-share transaction (ehr.card_share_view_context, 0118). */
+export interface CardShareViewContext {
+  patient_id: string;
+  share_id: string;
+  view_id: string;
+  scope: 'card' | 'card_and_records';
+}
+
 @Injectable()
 export class DatabaseService implements OnApplicationShutdown {
   private readonly pool: Pool;
@@ -175,29 +183,37 @@ export class DatabaseService implements OnApplicationShutdown {
   }
 
   /**
-   * The read of a card-link view (0118): read only; sets the view's digest
-   * (the SHA-256 of its cookie secret), the correlation id and purpose
-   * card-share, transaction-local, and blanks every subject, patient,
-   * account, session, facility and membership setting, so
-   * ehr.card_share_read_context never combines with another context.
+   * The read of a card-link view (0118). Sets the view's digest (the SHA-256
+   * of its cookie secret), the correlation id and purpose card-share,
+   * transaction-local, and blanks every subject, patient, account, session,
+   * facility and membership setting, so ehr.card_share_read_context never
+   * combines with another context. Then ehr.card_share_view_context names the
+   * live view and writes its audit row (ehr.card-share.records.read), and only
+   * after that write does the transaction turn read only, for the reads
+   * (PostgreSQL lets a transaction turn read only at any point, never back).
+   * A view that is not live raises 55000 before any read.
    */
   async withCardShareTransaction<Result>(
     digest: string,
     correlationId: string,
-    operation: (client: PoolClient) => Promise<Result>,
+    operation: (client: PoolClient, view: CardShareViewContext) => Promise<Result>,
   ): Promise<Result> {
     if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error('A card view digest is required');
     const client = await this.pool.connect();
     try {
       await client.query('BEGIN');
-      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ ONLY');
+      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED');
       await client.query(`select set_config('app.card_view_digest',$1,true), set_config('app.correlation_id',$2,true),
         set_config('app.purpose_of_use','card-share',true), set_config('app.actor_subject','',true),
         set_config('app.patient_id','',true), set_config('app.account_id','',true),
         set_config('app.session_id','',true), set_config('app.facility_id','',true),
         set_config('app.membership_id','',true), set_config('app.self_authorized_until','',true)`,
       [digest, correlationId]);
-      const result = await operation(client);
+      const view = (await client.query<CardShareViewContext>(
+        'select patient_id::text, share_id::text, view_id::text, scope from ehr.card_share_view_context()')).rows[0];
+      if (!view) throw Object.assign(new Error('CARD_SHARE_VIEW_ENDED'), { code: '55000' });
+      await client.query('SET TRANSACTION READ ONLY');
+      const result = await operation(client, view);
       await client.query('COMMIT');
       return result;
     } catch (error) {

@@ -13,10 +13,10 @@
 --   2. Create: created, replayed (same key and body), IDEMPOTENCY_KEY_REUSED;
 --      a second link to the same address ends the first (replaced, address
 --      erased, view and code ended); invalid input; 2 a day per address, 5 a
---      day, 20 live; a blocked address and an address past 50 emails a day
---      across patients are made but not emailed, read by the patient as
---      not_sent; the new-link email to the patient queued; another patient's
---      session cannot end it; ending is idempotent.
+--      day, 20 live; a link to a blocked address or an address past 50
+--      emails a day across patients is not emailed, recorded ended as
+--      not_sent and replaces no live link; the new-link email to the patient
+--      queued; another patient's session cannot end it; ending is idempotent.
 --   3. Codes: unknown, ended and expired tokens answer the same 'ended'; a
 --      code a minute, 3 an hour, 6 a Lagos day; a new code ends the old one.
 --   4. Verify: wrong tries, a right code from another browser is wrong, 5
@@ -24,7 +24,8 @@
 --      issue and verify refuse while locked, a second lock ends the link
 --      (patient told once); an expired code; a right code opens one view
 --      (open count, audit, inbox, one email row per Lagos day); a second open
---      ends the first view (one view per link).
+--      ends the first view (one view per link); opens of one link within 30
+--      minutes share one notice (unread again), a later one makes another.
 --   5. EHR context: a live view reads its own patient's completed visits,
 --      signed notes and their current revision, the imported history and
 --      profile, the reported health information and active entries only;
@@ -34,18 +35,23 @@
 --      session, facility or membership set; SELECT only (no FOR UPDATE rows,
 --      no UPDATE); the runtimes cannot read the identity tables or call each
 --      other's functions; the patient's own read and a clinician's read are
---      unchanged; the view context audits ehr.card-share.records.read.
+--      unchanged; the view context audits ehr.card-share.records.read, and the
+--      reads still work once the transaction turns read only after it.
 --   6. View, close and stop: the card again for a live view; Close; "Stop
 --      these emails" blocks the address and ends every live link to it.
 --   7. Lifecycle: the sweeper ends links past their end, ends views and codes,
 --      erases network data after 30 days and the hint and address HMAC 12
---      months after the end; patient emails claim, lease, retry and record;
---      account deletion ends and anonymises at once and suppresses emails;
+--      months after the end, the hint also from the patient's notices;
+--      patient emails claim (saying whether the link was emailed), lease,
+--      retry and record; account deletion ends and anonymises at once (the
+--      notices too) and suppresses emails;
 --      guards (identity fields, ended stays ended, counters, DELETE, TRUNCATE).
 --   8. Audit and Activity: no address, hint, code or token in any audit row;
---      Activity shows card_opened by card_recipient with the hint, and
---      card_shared and card_ended; opens of two links stay two entries; the
---      EHR records read is not an entry.
+--      Activity shows card_opened by card_recipient with the hint,
+--      card_shared (not_sent when not emailed) and card_ended for every
+--      ending with its reason, the patient's and the system's (expiry, a
+--      second lock, a block); opens of two links stay two entries; the EHR
+--      records read is not an entry.
 set plpgsql.variable_conflict = error;
 begin;
 set constraints all deferred;
@@ -883,7 +889,7 @@ begin
   if (select string_agg(format('%s/%s/%s', metadata->>'opens', read_at is null, created_at < clock_timestamp()), ',')
         from notification.inbox_items
        where notification_code = 'SHARED_CARD_OPENED' and resource_id = 'e8510000-0000-4000-8000-000000000006')
-     is distinct from '2/true/true' then
+     is distinct from '2/t/t' then
     raise exception 'A second open within 30 minutes was a new notice';
   end if;
   -- After 30 minutes, an open of link 7 is a new notice (and a new push).
@@ -1068,8 +1074,8 @@ begin
         from e8_claims claim join identity.card_shares share on share.reference = claim.reference
        where claim.kind = 'created' and share.id in ('e8510000-0000-4000-8000-000000000002',
          'e8510000-0000-4000-8000-000000000004', 'e8510000-0000-4000-8000-000000000005'))
-     is distinct from 'e8510000-0000-4000-8000-000000000002=true,e8510000-0000-4000-8000-000000000004=false,'
-       || 'e8510000-0000-4000-8000-000000000005=false' then
+     is distinct from 'e8510000-0000-4000-8000-000000000002=t,e8510000-0000-4000-8000-000000000004=f,'
+       || 'e8510000-0000-4000-8000-000000000005=f' then
     raise exception 'E8 does not say whether the link was emailed: %', (select string_agg(format('%s', claim), ',') from e8_claims claim);
   end if;
   -- Retention reaches the inbox (F4): an anonymised link's notices keep no hint; a kept one keeps it.
@@ -1122,7 +1128,7 @@ begin
     'update identity.card_shares set ended_at = null, ended_reason = null where id = ''e8510000-0000-4000-8000-000000000007''',
     'update identity.card_shares set open_count = 0 where id = ''e8510000-0000-4000-8000-000000000006''',
     'update identity.card_shares set recipient_hint = ''x•••@example.org'' where id = ''e8510000-0000-4000-8000-000000000008''',
-    'update identity.card_shares set recipient_hmac = null where id = ''e8510000-0000-4000-8000-000000000008''',
+    'update identity.card_shares set recipient_hmac = null where id = ''e8520000-0000-4000-8000-000000000002''',
     'update identity.card_share_codes set failed_attempts = 0 where id = ''e8620000-0000-4000-8000-000000000002''',
     'update identity.card_share_views set ended_at = null, ended_reason = null where id = ''e8730000-0000-4000-8000-000000000001''',
     'delete from identity.card_shares where id = ''e8510000-0000-4000-8000-000000000007''',
@@ -1155,10 +1161,9 @@ begin
   logged := identity.patient_self_access_log('patient:e8a10000-0000-4000-8000-000000000001',
     'e8f10000-0000-4000-8000-000000000001', 100, null, null);
   if (select count(*) from jsonb_array_elements(logged->'events') entry
-       where entry->>'action' = 'card_opened' and entry->>'actorKind' = 'card_recipient') <> 4
+       where entry->>'action' = 'card_opened' and entry->>'actorKind' = 'card_recipient') <> 5
      or (select string_agg(distinct entry->>'actorName', ',') from jsonb_array_elements(logged->'events') entry
           where entry->>'action' = 'card_opened') is distinct from 'd•••@example.com,e•••@example.com'
-     or (select count(*) from jsonb_array_elements(logged->'events') entry where entry->>'action' = 'card_opened') <> 5
      or not exists (select 1 from jsonb_array_elements(logged->'events') entry
                      where entry->>'action' = 'card_shared' and entry->>'actorKind' = 'patient')
      or not exists (select 1 from jsonb_array_elements(logged->'events') entry

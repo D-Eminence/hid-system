@@ -257,12 +257,12 @@ export class NotificationService {
 
   /** E8 (0118): to the patient, every new link. */
   deliverCardShareCreated(input: { recipient: string; reference: string; recipientHint: string; expiresAt: Date;
-    idempotencyKey: string }, rawPlan?: unknown): Promise<DeliveryResult> {
+    linkEmailed: boolean; idempotencyKey: string }, rawPlan?: unknown): Promise<DeliveryResult> {
     return this.deliver({
       channel: 'email', recipient: input.recipient, code: '', purpose: 'CARD_SHARE_CREATED',
       idempotencyKey: input.idempotencyKey,
       content: cardCreatedContent({ reference: input.reference, recipientHint: input.recipientHint,
-        expiresAt: input.expiresAt }),
+        expiresAt: input.expiresAt, linkEmailed: input.linkEmailed }),
     }, rawPlan);
   }
 

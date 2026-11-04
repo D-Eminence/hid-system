@@ -14,16 +14,15 @@ const VIEW_SECRET = /^[A-Za-z0-9_-]{43}$/;
 
 export type CardShareScope = 'card' | 'card_and_records';
 
-interface ViewContext { patient_id: string; share_id: string; view_id: string; scope: CardShareScope }
-
 /** 410 CARD_SHARE_VIEW_ENDED: the view is gone, timed out, closed, replaced or its link ended. Never 401. */
 export function cardShareViewEnded(): DomainProblem {
   return new DomainProblem(410, 'CARD_SHARE_VIEW_ENDED', 'This card is no longer shared with you.');
 }
 
 /**
- * The records a live card-link view shows (0118), read in a read-only
- * card-share transaction (DatabaseService.withCardShareTransaction) where
+ * The records a live card-link view shows (0118), read in a card-share
+ * transaction (DatabaseService.withCardShareTransaction: the view context
+ * audits the read, then the transaction turns read only) where
  * only ehr.card_share_read_context's policies admit rows: "Card only" the
  * blood group, genotype and allergies the patient entered; "Card and records"
  * also completed visits, signed notes (current revision), the imported
@@ -45,10 +44,8 @@ export class CardShareRecordsService {
     if (typeof secret !== 'string' || !VIEW_SECRET.test(secret)) throw cardShareViewEnded();
     const digest = createHash('sha256').update(secret).digest('hex');
     try {
-      return await this.database.withCardShareTransaction(digest, request.correlationId, async (client) => {
-        const context = (await client.query<ViewContext>(
-          'select patient_id::text, share_id::text, view_id::text, scope from ehr.card_share_view_context()')).rows[0];
-        if (!context || context.view_id !== viewId) throw cardShareViewEnded();
+      return await this.database.withCardShareTransaction(digest, request.correlationId, async (client, context) => {
+        if (context.view_id !== viewId) throw cardShareViewEnded();
         return context.scope === 'card_and_records'
           ? this.records(client, context.patient_id)
           : this.cardOnly(client, context.patient_id);

@@ -3041,7 +3041,7 @@ CardShare = { id, reference ('K7P2-QX9M'), scope: 'card' | 'card_and_records',
   duration: '24h' | '7d', createdAt, expiresAt,
   status: 'active' | 'locked' | 'ended' | 'expired', endedAt | null,
   endedReason: null | 'patient_ended' | 'replaced' | 'expired' | 'account_deleted' | 'patient_inactive'
-    | 'address_blocked' | 'too_many_wrong_codes',
+    | 'address_blocked' | 'too_many_wrong_codes' | 'not_sent',
   lockedUntil | null, delivery: 'sent' | 'not_sent' | 'pending', openCount, lastOpenedAt | null }
 ```
 
@@ -3051,7 +3051,10 @@ erased); `recipientHint` (`k•••@gmail.com`; a domain that is not a common
 provider is masked too, `a•••@l•••.ng`) is null 12 months after the end.
 `delivery` reads `not_sent` alike for a blocked address, an address past its
 daily limit across patients and a failed send (the reason is in the audit
-only).
+only). A link that is not emailed because the address is blocked or past its
+daily limit is recorded already ended (`status: 'ended'`, `endedReason:
+'not_sent'`, its address erased): nobody holds its token, so it never
+replaces a live link and never counts as live.
 
 `POST /api/v1/identity/me/card-shares`, header `Idempotency-Key` (16 to 128
 of `A-Z a-z 0-9 . _ : -`), body (unknown fields refused):
@@ -3068,8 +3071,11 @@ hours. Answers 201 `{ share: CardShare, delivery: 'sent' | 'not_sent',
 replacedId: string | null, replayed: false }` (the link email E5 is sent
 before answering); 200 with `replayed: true` for the same key and body. A
 live link to the same address is ended (`replaced`) and named in
-`replacedId`. The patient is also emailed E8 ("You sent your Health ID card
-to k•••@…").
+`replacedId`, only when the new link is emailed (a link that is not emailed
+replaces nothing: `replacedId: null`). The patient is also emailed E8 ("You
+sent your Health ID card to k•••@…", or, when the link was not emailed,
+"Someone signed in to your Health ID tried to send your card to k•••@…. We
+couldn't email it, so nobody can open it.").
 
 | Status | Code | `detail` |
 |---|---|---|
@@ -3099,14 +3105,19 @@ The page is `<patient site>/card#<token>` (production
 characters) travels only in POST bodies. Every POST checks `Origin` (403
 `ORIGIN_DENIED`). Cookies are `HttpOnly; Secure; SameSite=Strict;
 Path=/api/v1/card-share`; the routes never read a patient or staff session.
+The page and the API are on different origins, so identity-api and ehr-api
+allow the request header `X-Card-View` in their CORS answer (with
+credentials).
 
 `GET /api/v1/card-share/availability` → 204 while on.
 
 `POST /api/v1/card-share/code` `{ token, turnstileToken }` (Turnstile action
 `card-share-code`, on the patient site) → 202 `{ sentTo: 'k•••@gmail.com',
 expiresInSeconds: 600, resendAfterSeconds: 60 }` and the cookie
-`hid_card_code` (Max-Age 600): the code works only in this browser. The code
-email E6 goes after the answer.
+`hid_card_code_<first 16 hex of the link's keyed token HMAC>` (Max-Age 600):
+the code works only in this browser. One cookie per link, so codes asked for
+two links in one browser never overwrite or clear each other. The code email
+E6 goes after the answer.
 
 | Status | Code | `detail` |
 |---|---|---|
@@ -3117,8 +3128,9 @@ email E6 goes after the answer.
 | 429 | `CARD_SHARE_CODE_LIMITED` + `retryAfterSeconds` | Too many codes asked for. Try again later. (1 a minute, 3 an hour, 6 a Lagos day per link) |
 | 429 | (gateway) | 10 a minute per connection on `code` and `verify` |
 
-`POST /api/v1/card-share/verify` `{ token, code }` (with the `hid_card_code`
-cookie) → 200
+`POST /api/v1/card-share/verify` `{ token, code }` (with that link's
+`hid_card_code_…` cookie, cleared on success; other links' cookies are left)
+→ 200
 
 ```
 { viewId, viewExpiresAt, card: { fullName, healthId, ninVerified }, sharedByFirstName,
@@ -3166,7 +3178,9 @@ amended notes (current revision), the imported history (files carry `id`,
 `fileName` and `mediaType` only: nothing opens in v1), the imported profile,
 all six health-information fields, and the records the patient added
 (`[]` while `PATIENT_ENTRIES_ENABLED` is off). 410 `CARD_SHARE_VIEW_ENDED`
-otherwise.
+otherwise. The read names the live view first (`ehr.card_share_view_context`,
+which writes the audit row `ehr.card-share.records.read`); only then does the
+transaction turn read only for the reads.
 
 ### Emails (notification-api, from identity-api only)
 
@@ -3178,19 +3192,30 @@ emails" link `<patient site>/card/stop#<stopToken>` and the privacy notice
 `<patient site>/card/privacy`. To the patient's verified address: E7
 `POST notifications/card-share-opened` (the first open of each link each
 Lagos day: reference and time) and E8 `POST notifications/card-share-created`
-(every new link: masked address, reference and end). All four answer 404
-while notification-api's `CARD_LINKS_ENABLED` is off.
+(every new link: masked address, reference, end, and `linkEmailed`, false
+when the link itself was not emailed). All four answer 404 while
+notification-api's `CARD_LINKS_ENABLED` is off.
 
 ### Inbox and Activity
 
 Inbox codes, resource type `card-share`, metadata `{ recipientHint,
-reference }`: `SHARED_CARD_OPENED` (every open), `SHARED_CARD_LOCKED` (the
-first lock), `SHARED_CARD_ENDED` (`reason: 'too_many_wrong_codes'`, the second
-lock), `SHARED_CARD_STOPPED` (the address asked to stop). Activity
-(`identity.patient_self_access_log`, 0093's, replaced): `card_opened` by
-actor kind `card_recipient` with `actorName` the hint ("Someone opened your
-card using the link sent to a•••"), `card_shared` and `card_ended` by the
-patient. Older images and websites drop unknown kinds.
+reference }`: `SHARED_CARD_OPENED` (opens, metadata also `opens`),
+`SHARED_CARD_LOCKED` (the first lock), `SHARED_CARD_ENDED` (`reason:
+'too_many_wrong_codes'`, the second lock), `SHARED_CARD_STOPPED` (the address
+asked to stop). Opens of one link within 30 minutes of its notice count into
+that notice (`opens` grows, and it is unread again) instead of making a new
+one, so a link causes at most one push per 30 minutes (0097 pushes for new
+items only). `recipientHint` is removed from a link's notices when the link
+is anonymised (12 months after it ends) and from all card-link notices when
+the login is deleted. Activity (`identity.patient_self_access_log`, 0093's,
+replaced): `card_opened` (every open) by actor kind `card_recipient`;
+`card_shared` by the patient, with `reason: 'not_sent'` when the link was not
+emailed; `card_ended` for every ending with its `reason`: by the patient
+(`patient_ended`, `replaced`) or by the system (`expired`,
+`too_many_wrong_codes`, `address_blocked`, `patient_inactive`,
+`account_deleted`). Each has `actorName` the hint while it is kept ("Someone
+opened your card using the link sent to a•••"); other kinds carry no
+`reason`. Older images and websites drop unknown kinds and fields.
 
 ### Database (0118)
 
@@ -3204,7 +3229,8 @@ which the EHR runtime may execute) whose digest names a live view; it is
 false whenever a patient, account, session, facility or membership is set.
 Retention: the address is erased when a link ends; network data after 30
 days; the hint and address hash 12 months after the end, or at once when the
-login is deleted. The suite is
+login is deleted (the hint also from the patient's card-link notices). The
+suite is
 `services/ehr-api/test/database/card-links.integration.sql`. 0118 has no down
 migration.
 

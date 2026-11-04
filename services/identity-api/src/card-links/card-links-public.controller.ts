@@ -9,8 +9,14 @@ import { CardLinksService } from './card-links.service';
 
 /** Every receiver cookie is scoped to the receiver's routes only (critique 2). */
 export const CARD_SHARE_COOKIE_PATH = '/api/v1/card-share';
-/** The browser that asked for a code: verify needs this cookie too (critique 6). */
-export const CARD_CODE_COOKIE = 'hid_card_code';
+/**
+ * The browser that asked for a code: verify needs this cookie too (critique
+ * 6). One per link, named for it (the first 16 hex of the link's keyed token
+ * HMAC, which reveals nothing of the token), so codes for two links in one
+ * browser never overwrite or clear each other's (F3).
+ */
+export const CARD_CODE_COOKIE_PREFIX = 'hid_card_code_';
+export const cardCodeCookie = (tokenHmac: string): string => `${CARD_CODE_COOKIE_PREFIX}${tokenHmac.slice(0, 16)}`;
 /** One cookie per view, named for it: two links in one browser never mix (critique 1). */
 export const cardViewCookie = (viewId: string): string => `hid_cv_${viewId.replace(/-/g, '')}`;
 
@@ -48,7 +54,7 @@ export class CardLinksPublicController {
   async code(@Body() input: RequestCardCodeDto, @Req() request: HidRequest, @Res({ passthrough: true }) response: Response) {
     assertAllowedOrigin(request, this.allowedOrigins);
     const issued = await this.links.requestCode(request, input);
-    response.cookie(CARD_CODE_COOKIE, issued.pendingSecret, { ...this.cookieOptions(), maxAge: 600_000 });
+    response.cookie(cardCodeCookie(issued.tokenHmac), issued.pendingSecret, { ...this.cookieOptions(), maxAge: 600_000 });
     return issued.body;
   }
 
@@ -59,9 +65,11 @@ export class CardLinksPublicController {
   @AuditAction('card-share.verify')
   async verify(@Body() input: VerifyCardCodeDto, @Req() request: HidRequest, @Res({ passthrough: true }) response: Response) {
     assertAllowedOrigin(request, this.allowedOrigins);
-    const opened = await this.links.verify(request, input, singleCookie(request, CARD_CODE_COOKIE));
+    const tokenHmac = this.links.linkTokenHmac(input.token);
+    const pending = tokenHmac ? singleCookie(request, cardCodeCookie(tokenHmac)) : undefined;
+    const opened = await this.links.verify(request, input, pending);
     response.cookie(cardViewCookie(opened.viewId), opened.viewSecret, this.cookieOptions());
-    response.clearCookie(CARD_CODE_COOKIE, this.cookieOptions());
+    if (tokenHmac) response.clearCookie(cardCodeCookie(tokenHmac), this.cookieOptions());
     return opened.body;
   }
 

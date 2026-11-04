@@ -1,4 +1,4 @@
-import { IsDateString, IsIn, IsObject, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
+import { IsBoolean, IsDateString, IsIn, IsObject, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 
 /**
  * The card-link emails (0118): fixed fields only, email only. Unknown fields
@@ -45,12 +45,13 @@ export class DeliverCardOpenedDto {
   @IsOptional() @IsObject() plan?: Record<string, unknown>;
 }
 
-/** E8: to the patient, on every new link. */
+/** E8: to the patient, on every new link; linkEmailed false when the link itself was not emailed. */
 export class DeliverCardCreatedDto {
   @IsIn(['email']) channel!: 'email';
   @IsString() @MaxLength(320) recipient!: string;
   @IsString() @Matches(CARD_LINK_REFERENCE) reference!: string;
   @IsString() @MaxLength(120) @Matches(CARD_LINK_HINT) recipientHint!: string;
   @IsDateString({ strict: true }) expiresAt!: string;
+  @IsBoolean() linkEmailed!: boolean;
   @IsOptional() @IsObject() plan?: Record<string, unknown>;
 }

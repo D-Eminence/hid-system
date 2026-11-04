@@ -456,15 +456,19 @@ export class NotificationOtpClient {
     }, OTP_TIMEOUT_MS);
   }
 
-  /** E8 (0118): to the patient, every new link: the masked address, reference and end. Keyed card-share-email:<row>. */
+  /**
+   * E8 (0118): to the patient, every new link: the masked address, reference and end, and whether the link
+   * was emailed. Keyed card-share-email:<row>.
+   */
   async deliverCardShareCreated(input: {
-    emailId: string; recipient: string; reference: string; recipientHint: string; expiresAt: Date; correlationId: string;
+    emailId: string; recipient: string; reference: string; recipientHint: string; expiresAt: Date; linkEmailed: boolean;
+    correlationId: string;
   }): Promise<{ outcome: OtpDeliveryOutcome; provider?: string; safeCode?: string }> {
     const plan = await this.integrations.deliveryPlan('email').catch(() => null);
     if (!plan) return { outcome: 'unknown', safeCode: 'delivery_policy_unavailable' };
     return this.post('card-share-created', `card-share-email:${input.emailId}`, input.correlationId, {
       channel: 'email', recipient: input.recipient, reference: input.reference, recipientHint: input.recipientHint,
-      expiresAt: input.expiresAt.toISOString(), plan,
+      expiresAt: input.expiresAt.toISOString(), linkEmailed: input.linkEmailed, plan,
     }, OTP_TIMEOUT_MS);
   }
 

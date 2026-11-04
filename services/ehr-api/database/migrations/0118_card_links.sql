@@ -45,7 +45,9 @@
 --    will own every new table and function, owns identity.patients,
 --    identity.patient_identifiers, auth.accounts (the trigger), the eleven
 --    EHR tables (CREATE POLICY) and the replaced function, holds INSERT on
---    audit.events and CREATE on schemas identity and ehr, and may run every
+--    audit.events, SELECT and UPDATE on notification.inbox_items (the open
+--    notices' grouping and the hint's erasure) and CREATE on schemas identity
+--    and ehr, and may run every
 --    function the new bodies call, never through a superuser's bypass.
 -- 1. Locks (see Locks).
 -- 2. Tables, each with row-level security forced, one policy for its owner
@@ -61,7 +63,9 @@
 --       256-bit link token (the token itself is never stored), the end and
 --       its reason, the link that replaced it, the lock, dead codes, the
 --       email's outcome, opens, the Idempotency-Key and request digest. One
---       live link per patient and address. A guard trigger keeps the
+--       live link per patient and address. A link that is not emailed (a
+--       blocked or capped address) is recorded already ended (not_sent), so
+--       it replaces nothing. A guard trigger keeps the
 --       identity fields, lets an ended link only lose its address data, and
 --       never brings it back.
 --    b. identity.card_share_codes: one 6-digit code (only its keyed HMAC),
@@ -87,17 +91,25 @@
 --       verify_card_share_code, card_share_view, end_card_share_view,
 --       stop_card_share_emails;
 --    c. the sweeper's (system:auth): close_expired_card_shares (ends,
---       erases, and applies retention), claim_card_share_emails,
---       record_card_share_email_outcome;
+--       erases, and applies retention, the hint also in the patient's
+--       notices), claim_card_share_emails (with whether the link itself was
+--       emailed, for E8's wording), record_card_share_email_outcome;
 --    d. EHR: ehr.card_share_read_context (the read policies' test) and
---       ehr.card_share_view_context (the receiver's records read, audited).
+--       ehr.card_share_view_context (the receiver's records read, audited;
+--       ehr-api calls it first, then turns the transaction read only).
+--    Opens of one link within 30 minutes share one inbox notice (opens
+--    counted, unread again), so one push per link per 30 minutes.
 -- 4. auth.accounts trigger accounts_deleted_card_shares (0097's clause):
 --    when a login is deleted, every link of its patient ends
 --    (account_deleted) and is anonymised at once (hint, address HMAC and
---    network data erased), and pending emails are suppressed.
+--    network data erased, the hint also from the patient's card-link
+--    notices), and pending emails are suppressed.
 -- 5. identity.patient_self_access_log (0093), replaced: 0093's body plus
---    three kinds, card_opened (actorKind card_recipient), card_shared and
---    card_ended, each with the link's hint as actorName while it is kept.
+--    three kinds, card_opened (actorKind card_recipient), card_shared (with
+--    reason not_sent when the link was not emailed) and card_ended (every
+--    ending with its reason: the patient's, patient_ended or replaced, and
+--    the system's, actorKind system), each with the link's hint as actorName
+--    while it is kept.
 -- 6. Grants, here and in runtime-grants.sql: the 13 identity commands to
 --    hid_identity_runtime and hid_schema_test_runtime; the two EHR functions
 --    to hid_ehr_runtime and hid_schema_test_runtime (a read policy's
@@ -317,7 +329,8 @@ begin
     from (
       select format('%s lacks %s on %s', holder.rolname, wanted.privilege, relation.oid::regclass) as what
         from (values ('identity.patients', 'OWNER'), ('identity.patient_identifiers', 'OWNER'),
-                     ('auth.accounts', 'OWNER'), ('audit.events', 'INSERT')) wanted(relation_name, privilege)
+                     ('auth.accounts', 'OWNER'), ('audit.events', 'INSERT'), ('notification.inbox_items', 'SELECT'),
+                     ('notification.inbox_items', 'UPDATE')) wanted(relation_name, privilege)
         join pg_class relation on relation.oid = wanted.relation_name::regclass
         join pg_roles holder on holder.oid = applier
        where case when wanted.privilege = 'OWNER'
@@ -405,7 +418,7 @@ create table identity.card_shares (
   expires_at timestamptz not null,
   ended_at timestamptz,
   ended_reason text check (ended_reason in ('patient_ended', 'replaced', 'expired', 'account_deleted',
-    'patient_inactive', 'address_blocked', 'too_many_wrong_codes')),
+    'patient_inactive', 'address_blocked', 'too_many_wrong_codes', 'not_sent')),
   replaced_by uuid references identity.card_shares(id) on delete restrict,
   locked_until timestamptz,
   lock_count integer not null default 0 check (lock_count between 0 and 2),
@@ -937,21 +950,28 @@ begin
     end loop;
     exit when not exists (select 1 from identity.card_shares share where share.reference = reference_value);
   end loop;
-  -- Sending again to the same address ends the earlier link (owner, 2).
-  select * into previous from identity.card_shares share
-   where share.patient_id = patient_id_value and share.recipient_hmac = requested_recipient_hmac
-     and share.ended_at is null
-   for update;
-  if found then
-    perform identity.end_card_share_row(previous.id, 'replaced');
+  -- Sending again to the same address ends the earlier link (owner, 2), when this one is emailed. A link that
+  -- is not emailed (a blocked or capped address) is recorded already ended, as not_sent, its address erased:
+  -- nobody holds its token, so it replaces nothing and never counts as live (review F6).
+  previous := null;
+  if send then
+    select * into previous from identity.card_shares share
+     where share.patient_id = patient_id_value and share.recipient_hmac = requested_recipient_hmac
+       and share.ended_at is null
+     for update;
+    if found then
+      perform identity.end_card_share_row(previous.id, 'replaced');
+    end if;
   end if;
   insert into identity.card_shares (id, patient_id, reference, scope, duration_preset, consent_version,
     recipient_ciphertext, recipient_key_version, recipient_hmac, recipient_hint, token_hmac, created_at, expires_at,
-    delivery_outcome, delivery_recorded_at, idempotency_key, request_sha256)
+    ended_at, ended_reason, delivery_outcome, delivery_recorded_at, idempotency_key, request_sha256)
   values (requested_share_id, patient_id_value, reference_value, requested_scope, requested_duration,
-    requested_consent_version, requested_recipient_ciphertext, requested_key_version, requested_recipient_hmac,
+    requested_consent_version, case when send then requested_recipient_ciphertext end,
+    case when send then requested_key_version end, requested_recipient_hmac,
     requested_recipient_hint, requested_token_hmac, created_value,
     created_value + case requested_duration when '24h' then interval '24 hours' else interval '7 days' end,
+    case when send then null else created_value end, case when send then null else 'not_sent' end,
     case when send then 'pending' else 'not_sent' end, case when send then null else created_value end,
     requested_idempotency_key, requested_request_sha256)
   returning * into created;
@@ -1192,6 +1212,7 @@ declare
   dead integer;
   locks integer;
   answer text;
+  notice_id uuid;
 begin
   perform identity.require_card_share_system();
   if coalesce(requested_token_hmac !~ hex, true) or coalesce(requested_verifier_hmac !~ hex, true)
@@ -1289,8 +1310,25 @@ begin
   returning * into share;
   perform identity.card_share_audit('system', null, null, share.patient_id, 'identity.card-share.open', 'success',
     share.id, jsonb_build_object('scope', share.scope, 'openCount', share.open_count));
-  perform notification.enqueue_patient_inbox_item(share.patient_id, 'SHARED_CARD_OPENED', 'card-share', share.id,
-    jsonb_build_object('recipientHint', share.recipient_hint, 'reference', share.reference));
+  -- One notice, so one push, per link per 30 minutes (critique 12): an open within 30 minutes of the notice's
+  -- first counts into it (opens) and makes it unread again; 0097 pushes only for an item newer than the last push.
+  -- Activity still lists every open.
+  select item.id into notice_id from notification.inbox_items item
+    join identity.patients patient on patient.account_id = item.account_id
+   where patient.id = share.patient_id and item.created_at > now_value - interval '30 minutes'
+     and item.notification_code = 'SHARED_CARD_OPENED' and item.resource_type = 'card-share'
+     and item.resource_id = share.id
+   order by item.created_at desc
+   limit 1
+   for update of item;
+  if notice_id is not null then
+    update notification.inbox_items
+       set read_at = null, metadata = metadata || jsonb_build_object('opens', coalesce((metadata->>'opens')::integer, 1) + 1)
+     where id = notice_id;
+  else
+    perform notification.enqueue_patient_inbox_item(share.patient_id, 'SHARED_CARD_OPENED', 'card-share', share.id,
+      jsonb_build_object('recipientHint', share.recipient_hint, 'reference', share.reference, 'opens', 1));
+  end if;
   perform identity.queue_card_share_patient_email(share, 'opened');
   return query select 'opened'::text, null::integer, null::integer, identity.card_share_card(share, view_row),
     (select count(distinct view_seen.network_hmac)::integer from identity.card_share_views view_seen
@@ -1382,7 +1420,7 @@ $$;
 
 -- 3c. The sweeper: links past their end close; views and codes past theirs
 -- end; network data older than 30 days and the hint and address HMAC of links
--- ended over 12 months ago are erased.
+-- ended over 12 months ago are erased, the hint also from the patient's notices.
 create function identity.close_expired_card_shares(requested_limit integer)
 returns jsonb
 language plpgsql security definer
@@ -1418,14 +1456,26 @@ begin
    where network_hmac is not null and created_at <= clock_timestamp() - interval '30 days';
   get diagnostics anonymised = row_count;
   networks_erased := networks_erased + anonymised;
-  update identity.card_shares
-     set recipient_hmac = null, recipient_hint = null, anonymised_at = clock_timestamp(), updated_at = clock_timestamp(),
-         row_version = row_version + 1
-   where id in (select candidate.id from identity.card_shares candidate
-                 where candidate.anonymised_at is null and candidate.ended_at is not null
-                   and candidate.ended_at <= clock_timestamp() - interval '12 months'
-                 order by candidate.ended_at limit limit_value);
-  get diagnostics anonymised = row_count;
+  -- The hint goes from the link and from the patient's notices about it (review F4).
+  with anonymised_rows as (
+    update identity.card_shares
+       set recipient_hmac = null, recipient_hint = null, anonymised_at = clock_timestamp(), updated_at = clock_timestamp(),
+           row_version = row_version + 1
+     where id in (select candidate.id from identity.card_shares candidate
+                   where candidate.anonymised_at is null and candidate.ended_at is not null
+                     and candidate.ended_at <= clock_timestamp() - interval '12 months'
+                   order by candidate.ended_at limit limit_value)
+    returning id, patient_id
+  ), stripped as (
+    update notification.inbox_items item
+       set metadata = item.metadata - 'recipientHint'
+      from anonymised_rows done
+      join identity.patients patient on patient.id = done.patient_id
+     where item.account_id = patient.account_id and item.resource_type = 'card-share' and item.resource_id = done.id
+       and item.metadata ? 'recipientHint'
+    returning item.id
+  )
+  select count(*) into anonymised from anonymised_rows;
   if anonymised > 0 or networks_erased > 0 then
     perform identity.card_share_audit('system', null, null, null, 'identity.card-share.retention', 'success', null,
       jsonb_build_object('anonymised', anonymised, 'networksErased', networks_erased));
@@ -1436,11 +1486,11 @@ end
 $$;
 
 -- 3c. The patient emails due: the recipient is checked again by 0063's
--- rule; at most 5 attempts within 24 hours.
+-- rule; at most 5 attempts within 24 hours. Each says whether the link itself was emailed.
 create function identity.claim_card_share_emails(requested_worker text, requested_limit integer,
   requested_lease_seconds integer)
 returns table (email_id uuid, kind text, recipient text, reference text, recipient_hint text, occurred_at timestamptz,
-  link_expires_at timestamptz, attempt_count integer)
+  link_expires_at timestamptz, attempt_count integer, link_emailed boolean)
 language plpgsql security definer
 set search_path = pg_catalog, pg_temp
 as $$
@@ -1487,8 +1537,9 @@ begin
            lease_expires_at = clock_timestamp() + make_interval(secs => requested_lease_seconds),
            attempt_count = attempt_count + 1, updated_at = clock_timestamp(), row_version = row_version + 1
      where id = email.id;
+    -- link_emailed: whether the link itself went out (sent, or not yet known); E8 is worded by it (review F6).
     return query select email.id, email.kind, recipient_value, share.reference::text, share.recipient_hint,
-      email.occurred_at, share.expires_at, email.attempt_count + 1;
+      email.occurred_at, share.expires_at, email.attempt_count + 1, share.delivery_outcome in ('pending', 'sent');
     leased := leased + 1;
     exit when leased >= limit_value;
   end loop;
@@ -1618,7 +1669,7 @@ end
 $$;
 
 -- 4. When a login is deleted (0096's completion), its patient's links end
--- and are anonymised at once; pending emails are suppressed.
+-- and are anonymised at once (also the hint in their notices); pending emails are suppressed.
 create function identity.close_card_shares_for_deleted_account()
 returns trigger
 language plpgsql security definer
@@ -1646,6 +1697,10 @@ begin
            row_version = row_version + 1
      where share_id = share.id and email_status = 'pending';
   end loop;
+  -- Nothing links the deleted patient to a receiver's address, in the notices either (review F4).
+  update notification.inbox_items item
+     set metadata = item.metadata - 'recipientHint'
+   where item.account_id = new.id and item.resource_type = 'card-share' and item.metadata ? 'recipientHint';
   if patient_value is not null then
     insert into audit.events (correlation_id, actor_type, patient_id, action, outcome, resource_type, provenance,
       source_system, details)
@@ -1688,7 +1743,13 @@ begin
   with raw as materialized (
     select event.sequence_id, event.event_id, event.occurred_at, event.action, event.outcome,
            event.provenance, event.actor_type, event.actor_account_id, event.actor_membership_id,
-           event.facility_id, event.resource_id
+           event.facility_id, event.resource_id,
+           -- Card links only: why a link ended, or that it was not emailed.
+           case when event.action = 'identity.card-share.replace' then 'replaced'
+                when event.action = 'identity.card-share.expire' then 'expired'
+                when event.action = 'identity.card-share.end' then event.details->>'reason'
+                when event.action = 'identity.card-share.create' and event.details->>'emailSent' = 'false'
+                  then 'not_sent' end as card_reason
       from audit.events event
      where event.patient_id = patient_id_value
        and (before_occurred_at is null
@@ -1705,11 +1766,16 @@ begin
         -- chart's rows, without a regular expression.
         when raw.action like 'api.%' or raw.action like '%.request'
           or raw.action = 'identity.authorization.check' then null
-        -- Card links (0118): opens by the person the link went to, and the
-        -- patient's own sends and ends.
+        -- Card links (0118): opens by the person the link went to, the
+        -- patient's sends, and every ending, the patient's (ended, replaced by
+        -- a new link to the same address) and the system's (expired, a second
+        -- lock, the address asked to stop, the patient can no longer share).
         when raw.actor_type = 'system' and raw.action = 'identity.card-share.open' then 'card_opened'
         when raw.actor_type = 'patient' and raw.action = 'identity.card-share.create' then 'card_shared'
-        when raw.actor_type = 'patient' and raw.action = 'identity.card-share.end' then 'card_ended'
+        when raw.actor_type = 'patient' and raw.action in ('identity.card-share.end', 'identity.card-share.replace')
+          then 'card_ended'
+        when raw.actor_type = 'system' and raw.action in ('identity.card-share.end', 'identity.card-share.expire')
+          then 'card_ended'
         when raw.actor_type = 'staff' and raw.action = 'identity.break-glass.activate' then 'emergency_access'
         when raw.actor_type = 'patient' and raw.action = 'identity.access-request.approve' then 'access_granted'
         when raw.actor_type = 'staff' and raw.action = 'identity.patient-access-pin.verify' then 'access_granted'
@@ -1765,7 +1831,8 @@ begin
       (array_agg(numbered.actor_membership_id order by numbered.occurred_at desc, numbered.sequence_id desc))[1]
         as actor_membership_id,
       (array_agg(numbered.facility_id order by numbered.occurred_at desc, numbered.sequence_id desc))[1] as facility_id,
-      (array_agg(numbered.resource_id order by numbered.occurred_at desc, numbered.sequence_id desc))[1] as resource_id
+      (array_agg(numbered.resource_id order by numbered.occurred_at desc, numbered.sequence_id desc))[1] as resource_id,
+      (array_agg(numbered.card_reason order by numbered.occurred_at desc, numbered.sequence_id desc))[1] as card_reason
       from numbered
      group by numbered.island
   )
@@ -1786,6 +1853,7 @@ begin
               'membership', case when islands.actor_type = 'staff' then islands.actor_membership_id end,
               'facility', islands.facility_id,
               'share', case when islands.kind in ('card_opened', 'card_shared', 'card_ended') then islands.resource_id end,
+              'reason', case when islands.kind in ('card_shared', 'card_ended') then islands.card_reason end,
               'cursor', to_char(islands.oldest_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
                 || '|' || islands.oldest_sequence)
             order by islands.island) from islands), '[]'::jsonb)
@@ -1820,6 +1888,9 @@ begin
          where share.id::text = element.value->>'share' and share.patient_id = patient_id_value) end,
       'facilityName', (select facility.name from identity.facilities facility
                         where facility.id = (element.value->>'facility')::uuid))
+      -- A card link's ending carries its reason, and a send that was not emailed says so (review F5, F6).
+      || case when element.value->>'reason' is not null
+           then jsonb_build_object('reason', element.value->>'reason') else '{}'::jsonb end
       order by element.ordinality), '[]'::jsonb) into entries
     from jsonb_array_elements(all_islands) with ordinality element(value, ordinality)
    where element.ordinality <= take_count;
@@ -1874,7 +1945,7 @@ end
 $$;
 
 comment on function identity.create_my_card_share(text,uuid,uuid,text,text,bytea,text,text,text,text,text,text,text) is
-  '0118: the patient sends a card link: created or replayed; ends the live link to the same address (replaced); 2 a day per address, 5 a day, 20 live; a blocked or capped address is not emailed.';
+  '0118: the patient sends a card link: created or replayed; ends the live link to the same address (replaced) when the new one is emailed; 2 a day per address, 5 a day, 20 live; a link to a blocked or capped address is not emailed and is recorded ended (not_sent).';
 comment on function identity.issue_card_share_code(text,uuid,text,text,text,text) is
   '0118: "Email me a code": issued, ended (unknown, ended or expired alike), locked or limited (1 a minute, 3 an hour, 6 a Lagos day).';
 comment on function identity.verify_card_share_code(text,text,text,uuid,text,text) is
@@ -1925,7 +1996,7 @@ begin
            (replaced.proowner, replaced.proacl::text, replaced.prolang, replaced.provolatile, replaced.prosecdef,
             replaced.proconfig::text, replaced.prorettype, replaced.proretset, replaced.proargnames::text,
             replaced.proallargtypes::text)
-        or md5(proc.prosrc) <> '2208f546018c91331cf89739517e7a25';
+        or md5(proc.prosrc) <> 'd88bbd9bb0a231d655f7f8a34f2a0f9c';
   end if;
   if mismatch is null
      and (select pg_get_triggerdef(trigger_row.oid) from pg_trigger trigger_row

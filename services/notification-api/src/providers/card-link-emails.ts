@@ -79,8 +79,25 @@ export function cardOpenedContent(input: { reference: string; openedAt: Date }):
   });
 }
 
-/** E8: a new link was sent, to the patient (a hijacked session or pressure is noticed). No health data. */
-export function cardCreatedContent(input: { reference: string; recipientHint: string; expiresAt: Date }): MessageContent {
+/**
+ * E8: a new link, to the patient (a hijacked session or pressure is noticed). No health data. When the link
+ * itself was not emailed (the address asked to stop, had too many card emails today, or the send failed), it
+ * says so: nobody can open that link.
+ */
+export function cardCreatedContent(input: { reference: string; recipientHint: string; expiresAt: Date;
+  linkEmailed: boolean }): MessageContent {
+  if (!input.linkEmailed) {
+    return patientContent('Someone tried to send your Health ID card', {
+      accent: '#1a6fd4',
+      heading: 'Your Card Was Not Sent',
+      paragraphs: [
+        `Someone signed in to your Health ID tried to send your card to ${input.recipientHint} `
+          + `(reference ${input.reference}). We couldn't email it, so nobody can open it.`,
+        'If this was you, you don\'t need to do anything. Your shared links in Access and sharing show what happened.',
+        'If this wasn\'t you, sign in to Health ID and change your password.',
+      ],
+    });
+  }
   return patientContent('You sent your Health ID card', {
     accent: '#1a6fd4',
     heading: 'You Sent Your Card',

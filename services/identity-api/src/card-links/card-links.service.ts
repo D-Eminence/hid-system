@@ -269,7 +269,12 @@ export class CardLinksService implements BeforeApplicationShutdown {
           + `outcome ${sent.outcome})`);
       }
     });
-    return { body: { sentTo: row.recipient_hint, expiresInSeconds: 600, resendAfterSeconds: 60 }, pendingSecret };
+    return { body: { sentTo: row.recipient_hint, expiresInSeconds: 600, resendAfterSeconds: 60 }, pendingSecret, tokenHmac };
+  }
+
+  /** The link token's keyed HMAC (names the link's code cookie), or null for a malformed token. */
+  linkTokenHmac(token: unknown): string | null {
+    return isLinkToken(token) ? this.protector.tokenHmac(token) : null;
   }
 
   /** "Open the card": the code typed in the browser that asked for it (its pending cookie). */
@@ -362,9 +367,14 @@ export class CardLinksService implements BeforeApplicationShutdown {
 
   private fresh(row: CreatedRow, body: { email: string; label: string | null; scope: CardShareScope;
     duration: CardShareDuration }, hint: string, delivery: CardShareView['delivery']): CardShareView {
-    return { id: row.share_id, reference: row.reference, scope: body.scope, recipientEmail: body.email, label: body.label,
+    // A link that was not emailed (a blocked or capped address) is ended at once as not_sent, its address
+    // erased, and replaces nothing (0118, F6): nobody holds its token.
+    const notSent = row.outcome === 'created' && !row.send_email;
+    return { id: row.share_id, reference: row.reference, scope: body.scope,
+      recipientEmail: notSent ? null : body.email, label: notSent ? null : body.label,
       recipientHint: hint, duration: body.duration, createdAt: new Date(row.created_at),
-      expiresAt: new Date(row.expires_at), status: 'active', endedAt: null, endedReason: null, lockedUntil: null,
+      expiresAt: new Date(row.expires_at), status: notSent ? 'ended' : 'active',
+      endedAt: notSent ? new Date(row.created_at) : null, endedReason: notSent ? 'not_sent' : null, lockedUntil: null,
       delivery, openCount: 0, lastOpenedAt: null };
   }
 
