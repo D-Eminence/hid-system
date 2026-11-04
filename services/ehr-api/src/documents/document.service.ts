@@ -10,6 +10,10 @@ import type { StorageProvider } from '../storage/storage.types';
 import { STORAGE_PROVIDER } from '../storage/storage.types';
 import type { CreateDocumentUploadDto } from './dto/create-document-upload.dto';
 import type { DocumentScanEventDto } from './dto/document-scan-event.dto';
+import type { ListScanTargetsDto } from './dto/list-scan-targets.dto';
+import type { ResolveScanTargetDto } from './dto/resolve-scan-target.dto';
+import { downloadFileName, isSupportedDocumentMediaType, SNIFF_PREFIX_BYTES, sniffMediaType } from './media-sniff';
+import { scanRefusalProblem } from './scan-errors';
 
 interface WorkloadActor {
   subject: string;
@@ -31,7 +35,40 @@ interface DocumentRow {
   row_version: string;
   scan_status: string | null;
   detected_media_type: string | null;
+  original_file_name?: string;
 }
+
+/** A row of ehr.resolve_document_scan_target (0105): no patient or facility ID. */
+interface ScanTargetRow {
+  document_id: string;
+  object_version_id: string;
+  sha256_hex: string;
+  status: string;
+  declared_media_type: string;
+  latest_event_type: string | null;
+}
+
+/** A row of ehr.list_documents_awaiting_scan (0105): no patient or facility ID. */
+interface AwaitingScanRow {
+  document_id: string;
+  storage_bucket: string;
+  storage_key: string;
+  object_version_id: string;
+  sha256_hex: string;
+  declared_media_type: string;
+  updated_at: Date;
+  latest_event_type: string | null;
+  scan_started_count: number;
+  last_scan_started_at: Date | null;
+}
+
+/**
+ * The bytes check behind a resolve: 'supported' when the first bytes are one of
+ * the four allowed types (sniffedMediaType names it), 'unsupported' when they
+ * were read and are none of them, 'unavailable' when they could not be read
+ * (the bridge retries; it never refuses a document on this one).
+ */
+export type SniffResult = 'supported' | 'unsupported' | 'unavailable';
 
 interface IdempotencyRow {
   state: 'processing' | 'completed' | 'failed';
@@ -135,19 +172,17 @@ export class DocumentService {
     const authorization = await this.identity.authorize(patientId, 'read_records', context.purposeOfUse, context);
     if (!authorization.allowed) throw new ForbiddenException('Patient read access is not authorized');
     return this.database.withTransaction(context, async (client) => {
+      // ehr.documents_effective counts only scans bound to the document's
+      // version and SHA-256, as download and OCR do; the media type is the one
+      // the scan detected (owner decision D3) once there is one.
       const result = await client.query(
         `select document.id::text as "id", document.patient_id::text as "patientId",
                 document.encounter_id::text as "encounterId", document.original_file_name as "fileName",
-                coalesce(scan.detected_media_type, document.declared_media_type) as "mediaType",
-                document.size_bytes::text as "sizeBytes",
-                case when document.status='uploaded' and scan.event_type='clean' then 'available'
-                     when scan.event_type='rejected' then 'rejected' else document.status end as status,
-                coalesce(scan.event_type, 'pending') as "scanStatus", document.row_version::text as "version",
+                coalesce(document.detected_media_type, document.declared_media_type) as "mediaType",
+                document.size_bytes::text as "sizeBytes", document.status,
+                document.scan_status as "scanStatus", document.row_version::text as "version",
                 document.created_at as "createdAt"
-           from ehr.documents document
-           left join lateral (select event_type, detected_media_type
-             from ehr.document_scan_events where document_id=document.id
-             order by created_at desc,id desc limit 1) scan on true
+           from ehr.documents_effective document
           where document.patient_id=$1 and document.encounter_id=$2 and document.facility_id=$3
           order by document.created_at desc,document.id desc`,
         [patientId, encounterId, context.facilityId],
@@ -180,6 +215,9 @@ export class DocumentService {
       sha256Hex: document.sha256_hex,
       status: document.status,
       scanStatus: document.scan_status ?? 'pending',
+      // The type the scan detected (D3), never the declared one; null until a
+      // scan has detected one.
+      mediaType: document.detected_media_type,
     };
   }
 
@@ -243,10 +281,17 @@ export class DocumentService {
     );
     const authorization = await this.identity.authorize(document.patient_id, 'read_records', context.purposeOfUse, context);
     if (!authorization.allowed) throw new ForbiddenException('Patient read access is not authorized');
-    if (document.status !== 'available' || document.scan_status !== 'clean' || !document.object_version_id) {
+    if (document.status !== 'available' || document.scan_status !== 'clean' || !document.object_version_id
+      || !isSupportedDocumentMediaType(document.detected_media_type)) {
       throw new ConflictException('Document is not available for download');
     }
-    const download = await this.storage.createDownload(document.storage_key, document.object_version_id);
+    // Served as the type the scan detected (D3), not the declared one, shown in
+    // the browser tab under a name whose extension matches it.
+    const download = await this.storage.createDownload(document.storage_key, document.object_version_id, {
+      fileName: downloadFileName(document.original_file_name ?? 'document', document.detected_media_type),
+      mediaType: document.detected_media_type,
+      disposition: 'inline',
+    });
     await this.audit.record(this.auditEvent(
       context, 'ehr.document.download', 'success', document.patient_id, document.id,
     ));
@@ -254,7 +299,7 @@ export class DocumentService {
   }
 
   async recordScan(input: DocumentScanEventDto, actor: WorkloadActor, correlationId: string) {
-    return this.database.withWorkloadTransaction(actor.subject, correlationId, async (client) => {
+    return this.scannerTransaction(actor, correlationId, async (client) => {
       const result = await client.query<{ event_id: string }>(
         `select ehr.append_document_scan_event(
            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
@@ -276,6 +321,88 @@ export class DocumentService {
       if (!event) throw new Error('Document scan event insert did not return a row');
       return { eventId: event.event_id };
     });
+  }
+
+  /**
+   * From the S3 object a GuardDuty result names to its document (0105), then,
+   * outside the database transaction, the first 1 KB of that exact version to
+   * learn its real type. Refusals answer 404 or 409 (scan-errors.ts); the
+   * bucket must be this service's own.
+   */
+  async resolveScanTarget(input: ResolveScanTargetDto, actor: WorkloadActor, correlationId: string) {
+    if (input.storageBucket !== this.storage.bucket()) {
+      throw new DomainProblem(404, 'DOCUMENT_NOT_FOUND', 'No document holds this object');
+    }
+    const target = await this.scannerTransaction(actor, correlationId, async (client) => {
+      const result = await client.query<ScanTargetRow>(
+        `select document_id::text as document_id, object_version_id, sha256_hex, status, declared_media_type,
+                latest_event_type
+           from ehr.resolve_document_scan_target($1, $2, $3, $4)`,
+        [input.storageBucket, input.storageKey, input.objectVersionId, correlationId],
+      );
+      const row = result.rows[0];
+      if (!row) throw new Error('Document scan target resolution did not return a row');
+      return row;
+    });
+    let sniffedMediaType: string | null = null;
+    let sniffResult: SniffResult;
+    try {
+      sniffedMediaType = sniffMediaType(
+        await this.storage.readPrefix(input.storageKey, target.object_version_id, SNIFF_PREFIX_BYTES),
+      );
+      sniffResult = sniffedMediaType ? 'supported' : 'unsupported';
+    } catch {
+      sniffResult = 'unavailable';
+    }
+    return {
+      documentId: target.document_id,
+      objectVersionId: target.object_version_id,
+      sha256Hex: target.sha256_hex,
+      status: target.status,
+      declaredMediaType: target.declared_media_type,
+      latestEventType: target.latest_event_type,
+      sniffResult,
+      sniffedMediaType,
+    };
+  }
+
+  /** The reconcile and backfill work list (0105), oldest first. */
+  async listScanTargets(query: ListScanTargetsDto, actor: WorkloadActor, correlationId: string) {
+    return this.scannerTransaction(actor, correlationId, async (client) => {
+      const result = await client.query<AwaitingScanRow>(
+        `select document_id::text as document_id, storage_bucket, storage_key, object_version_id, sha256_hex,
+                declared_media_type, updated_at, latest_event_type, scan_started_count, last_scan_started_at
+           from ehr.list_documents_awaiting_scan($1, $2, $3)`,
+        [query.olderThanSeconds, query.limit, correlationId],
+      );
+      return {
+        items: result.rows.map(row => ({
+          documentId: row.document_id,
+          storageBucket: row.storage_bucket,
+          storageKey: row.storage_key,
+          objectVersionId: row.object_version_id,
+          sha256Hex: row.sha256_hex,
+          declaredMediaType: row.declared_media_type,
+          updatedAt: new Date(row.updated_at).toISOString(),
+          latestEventType: row.latest_event_type,
+          scanStartedCount: Number(row.scan_started_count),
+          lastScanStartedAt: row.last_scan_started_at ? new Date(row.last_scan_started_at).toISOString() : null,
+        })),
+      };
+    });
+  }
+
+  /** The isolated scanner pool, with the scanner commands' refusals mapped to 4xx. */
+  private async scannerTransaction<Result>(
+    actor: WorkloadActor,
+    correlationId: string,
+    operation: (client: PoolClient) => Promise<Result>,
+  ): Promise<Result> {
+    try {
+      return await this.database.withWorkloadTransaction(actor.subject, correlationId, operation);
+    } catch (error) {
+      throw scanRefusalProblem(error);
+    }
   }
 
   private async requirePlatformControl(controlKey: string): Promise<void> {
@@ -326,7 +453,7 @@ export class DocumentService {
   private async findById(client: PoolClient, documentId: string, facilityId: string): Promise<DocumentRow> {
     const result = await client.query<DocumentRow>(
       `select id::text, patient_id::text, facility_id::text, created_by::text, storage_bucket, storage_key,
-              object_version_id, declared_media_type, detected_media_type,
+              object_version_id, declared_media_type, detected_media_type, original_file_name,
               size_bytes::text, sha256_hex, scan_status, status, row_version::text
          from ehr.documents_effective where id = $1 and facility_id = $2`,
       [documentId, facilityId],
