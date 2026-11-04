@@ -32,6 +32,8 @@ for (const required of [
   "const HID_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'",
   'randomBytes(6)',
   'byte & 31',
+  // Owner decision 2026-10-31: no Health ID of letters only or digits only.
+  'HAS_LETTER.test(code) && HAS_DIGIT.test(code)',
   'maxAttempts = 8',
   'if (outcome.reserved) return outcome.result',
 ]) {

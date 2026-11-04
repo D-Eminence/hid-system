@@ -27,6 +27,8 @@ export interface EhrOcrDocumentSource {
   sha256Hex: string | null;
   status: string;
   scanStatus: string;
+  /** The media type the virus scan detected (owner decision D3); null until a scan detected one. */
+  mediaType?: string | null;
 }
 
 export interface EhrOcrClinicalNoteImport {

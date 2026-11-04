@@ -33,6 +33,8 @@ describe('Lab request context purpose of use', () => {
     { name: 'no X-Purpose-Of-Use header', headers: {} },
     { name: 'an unknown purpose', headers: { 'x-purpose-of-use': 'treatment' } },
     { name: 'a purpose in another case', headers: { 'x-purpose-of-use': 'Direct-Care' } },
+    // Records processing (0104) prepares paper documents for OCR; it never opens Lab data.
+    { name: 'records processing', headers: { 'x-purpose-of-use': 'healthcare-operations' } },
     { name: 'a cookie session without a purpose', headers: { authorization: undefined, cookie: 'hid_access=synthetic' } },
   ])('answers 400 PURPOSE_OF_USE_REQUIRED for $name', ({ headers }) => {
     const request = guardedRequest(headers);
@@ -42,7 +44,7 @@ describe('Lab request context purpose of use', () => {
     expect(request.purposeOfUse).toBeUndefined();
   });
 
-  it.each(['direct-care', 'emergency', 'healthcare-operations'])('accepts the header purpose %s', (purpose) => {
+  it.each(['direct-care', 'emergency'])('accepts the header purpose %s', (purpose) => {
     const request = guardedRequest({ 'x-purpose-of-use': purpose });
     expect(requireRequestContext(request)).toMatchObject({ purposeOfUse: purpose, facilityId,
       authorization: 'Bearer synthetic', correlationId: 'correlation-lab-purpose-0001' });
@@ -52,6 +54,13 @@ describe('Lab request context purpose of use', () => {
   it('takes a validated body purpose over the header', () => {
     expect(requireRequestContext(guardedRequest({ 'x-purpose-of-use': 'treatment' }), 'direct-care').purposeOfUse)
       .toBe('direct-care');
+  });
+
+  it('refuses records processing as a supplied purpose too', () => {
+    const request = guardedRequest({ 'x-purpose-of-use': 'direct-care' });
+    const problem = thrown(() => requireRequestContext(request, 'healthcare-operations'));
+    expect([(problem as DomainProblem).getStatus(), (problem as DomainProblem).code]).toEqual([400, 'PURPOSE_OF_USE_REQUIRED']);
+    expect(request.purposeOfUse).toBeUndefined();
   });
 
   it.each([
@@ -76,7 +85,7 @@ describe('Lab request context purpose of use', () => {
       new ProblemDetailsFilter().catch(problem, host);
       expect(status).toHaveBeenCalledWith(400);
       expect(json).toHaveBeenCalledWith(expect.objectContaining({ status: 400, code: 'PURPOSE_OF_USE_REQUIRED',
-        detail: 'X-Purpose-Of-Use must be direct-care, emergency or healthcare-operations' }));
+        detail: 'X-Purpose-Of-Use must be direct-care or emergency' }));
       expect(logged).not.toHaveBeenCalled();
     } finally {
       logged.mockRestore();
