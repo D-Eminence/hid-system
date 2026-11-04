@@ -3010,3 +3010,211 @@ down migration.
    would fail at its upload link).
 4. The owner sets `PATIENT_ENTRIES_ENABLED=true` for ehr-api. Turning it off
    again hides the records everywhere and keeps them.
+
+## 33. Card links: a patient sends their card by email, opened with a one-time code (0118)
+
+Akos handover step 8 (the design and critique of 2026-11-04; the owner's
+answers of 2026-11-04, "all recommended"). Built but switched off: turning it
+on in production needs legal sign-off (NDPA, D13). 0118 is unsigned until the
+owner signs its declaration.
+
+Switch: `CARD_LINKS_ENABLED` in identity-api, ehr-api and notification-api,
+default `false`. While it is off every route below answers a plain 404
+(`application/problem+json`, code `NOT_FOUND`) before authentication, CSRF,
+Turnstile, validation or audit; nothing is written or sent and the sweeper
+is idle, so the images may run before 0118 is applied.
+
+Every answer is `Cache-Control: no-store`. Every refusal is
+`application/problem+json` with `code` and a plain-English `detail` (the
+website shows `detail`); a refusal never repeats an address, token or code
+that was sent. No receiver route ever answers 401.
+
+### The patient (identity-api; patient cookie session, Origin and CSRF on POST)
+
+`GET /api/v1/identity/me/card-shares` (also the website's "is it served"
+check) → 200
+
+```
+{ items: CardShare[], createdToday, dailyLimit: 5, liveCount, liveLimit: 20 }
+CardShare = { id, reference ('K7P2-QX9M'), scope: 'card' | 'card_and_records',
+  recipientEmail: string | null, label: string | null, recipientHint: string | null,
+  duration: '24h' | '7d', createdAt, expiresAt,
+  status: 'active' | 'locked' | 'ended' | 'expired', endedAt | null,
+  endedReason: null | 'patient_ended' | 'replaced' | 'expired' | 'account_deleted' | 'patient_inactive'
+    | 'address_blocked' | 'too_many_wrong_codes',
+  lockedUntil | null, delivery: 'sent' | 'not_sent' | 'pending', openCount, lastOpenedAt | null }
+```
+
+Live links and links ended in the last 30 days, newest first, at most 50.
+`recipientEmail` and `label` are null once a link ends (the address is
+erased); `recipientHint` (`k•••@gmail.com`; a domain that is not a common
+provider is masked too, `a•••@l•••.ng`) is null 12 months after the end.
+`delivery` reads `not_sent` alike for a blocked address, an address past its
+daily limit across patients and a failed send (the reason is in the audit
+only).
+
+`POST /api/v1/identity/me/card-shares`, header `Idempotency-Key` (16 to 128
+of `A-Z a-z 0-9 . _ : -`), body (unknown fields refused):
+
+| Field | Rule |
+|---|---|
+| `email` | at most 254 characters; trimmed and lower-cased; one `@` and a dot in the domain |
+| `label` | optional, at most 80 characters, a person's name ("Who is this? (only you see this)"); encrypted with the address, never emailed |
+| `scope` | `card` (card face, blood group, genotype, allergies) or `card_and_records` (also visits, signed notes, older records, all the health information they entered, the records they added; anything added while the link is open is included) |
+| `duration` | `24h` (the website's default) or `7d` |
+
+Needs a sign-in within 10 minutes and no account recovery in the last 24
+hours. Answers 201 `{ share: CardShare, delivery: 'sent' | 'not_sent',
+replacedId: string | null, replayed: false }` (the link email E5 is sent
+before answering); 200 with `replayed: true` for the same key and body. A
+live link to the same address is ended (`replaced`) and named in
+`replacedId`. The patient is also emailed E8 ("You sent your Health ID card
+to k•••@…").
+
+| Status | Code | `detail` |
+|---|---|---|
+| 400 | `CARD_SHARE_EMAIL_INVALID` | Enter an email address like name@example.com. |
+| 400 | `CARD_SHARE_OWN_EMAIL` | That's your own email address. To see your card, open it in Health ID. |
+| 400 | `VALIDATION_FAILED` | a bad `scope`, `duration` or `label`, or an unknown field (with `errors[{field, messages}]`) |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | (missing or malformed key) |
+| 403 | `PATIENT_RECENT_AUTH_REQUIRED` | For your security, sign out, sign in again, and send it within 10 minutes. |
+| 403 | `PATIENT_RECENT_RECOVERY_HOLD`, `PATIENT_SESSION_REQUIRED` | as the other patient routes |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | Something changed while sending. Check your shared links before trying again. |
+| 409 | `CARD_SHARE_LIVE_LIMIT` | You have 20 card links open. End one to send another. |
+| 429 | `CARD_SHARE_CREATE_LIMITED` | You've sent 5 card links today. Try again tomorrow. |
+| 429 | `CARD_SHARE_ADDRESS_LIMITED` | You've sent your card to this address twice today. Try again tomorrow. |
+| 503 | `CARD_SHARE_UNAVAILABLE` | Card links are not available right now. Try again later. |
+
+`POST /api/v1/identity/me/card-shares/:shareId/end` (no body) → 200
+`{ share: CardShare }`, also for a link already ended. 404
+`CARD_SHARE_NOT_FOUND` ("We couldn't find that link. It may have ended
+already.") for another patient's or an unknown id; 400 for a malformed id.
+Ending tells the receiver nothing; an open view stops at its next request.
+
+### The person the link went to (public, `/api/v1/card-share/*`)
+
+The page is `<patient site>/card#<token>` (production
+`https://app.healthidentitydirectory.com`, staging
+`https://staging.healthidentitydirectory.com`). The token (43 base64url
+characters) travels only in POST bodies. Every POST checks `Origin` (403
+`ORIGIN_DENIED`). Cookies are `HttpOnly; Secure; SameSite=Strict;
+Path=/api/v1/card-share`; the routes never read a patient or staff session.
+
+`GET /api/v1/card-share/availability` → 204 while on.
+
+`POST /api/v1/card-share/code` `{ token, turnstileToken }` (Turnstile action
+`card-share-code`, on the patient site) → 202 `{ sentTo: 'k•••@gmail.com',
+expiresInSeconds: 600, resendAfterSeconds: 60 }` and the cookie
+`hid_card_code` (Max-Age 600): the code works only in this browser. The code
+email E6 goes after the answer.
+
+| Status | Code | `detail` |
+|---|---|---|
+| 400 | `CARD_SHARE_LINK_INVALID` | This link isn't complete. Open it again from your email. |
+| 400/403/503 | `TURNSTILE_*` | as the other Turnstile checks |
+| 410 | `CARD_SHARE_ENDED` | This card is no longer shared. (unknown, ended and expired links alike) |
+| 429 | `CARD_SHARE_LOCKED` + `retryAfterSeconds` | Too many wrong codes. Try again in {n} minutes. |
+| 429 | `CARD_SHARE_CODE_LIMITED` + `retryAfterSeconds` | Too many codes asked for. Try again later. (1 a minute, 3 an hour, 6 a Lagos day per link) |
+| 429 | (gateway) | 10 a minute per connection on `code` and `verify` |
+
+`POST /api/v1/card-share/verify` `{ token, code }` (with the `hid_card_code`
+cookie) → 200
+
+```
+{ viewId, viewExpiresAt, card: { fullName, healthId, ninVerified }, sharedByFirstName,
+  recipientHint, reference, scope: 'card' | 'card_and_records', expiresAt }
+```
+
+and the cookie `hid_cv_<viewId without dashes>` (a session cookie; the server
+ends the view after 30 minutes). One live view per link: opening again ends
+the earlier view.
+
+| Status | Code | `detail` |
+|---|---|---|
+| 400 | `CARD_SHARE_CODE_FORMAT` | Enter the 6-digit code from the email. (no try used) |
+| 400 | `CARD_SHARE_CODE_WRONG` + `attemptsLeft` | That code isn't right. Check the email and try again. {n} tries left. (also the right code from another browser) |
+| 410 | `CARD_SHARE_CODE_EXPIRED` | That code has stopped working. Ask for a new one. (expired, used, or 5 wrong tries) |
+| 429 | `CARD_SHARE_LOCKED` + `retryAfterSeconds` | Too many wrong codes. Try again in {n} minutes. (3 dead codes: 1 hour; the patient is told) |
+| 410 | `CARD_SHARE_ENDED` | This card is no longer shared. (also when a second lock ends the link; the patient is told once) |
+
+`GET /api/v1/card-share/view`, header `X-Card-View: <viewId>` → 200 the same
+body as verify, or 410 `CARD_SHARE_VIEW_ENDED` ("This card is no longer
+shared with you.") when the view is gone, timed out, closed, replaced or its
+link ended. The page calls it every 30 seconds while the card is shown.
+
+`POST /api/v1/card-share/end-view`, header `X-Card-View` → 204 and the
+view's cookie cleared ("Close"); an unknown or ended view answers the same.
+
+`POST /api/v1/card-share/stop` `{ stopToken }` (from `/card/stop#<stopToken>`
+in E5 and E6) → 204 for any well-formed token; a genuine one blocks the
+address for every patient and ends every live link to it (each patient is
+told). 400 `CARD_SHARE_LINK_INVALID` for a malformed token.
+
+`GET /api/v1/card-share/records` (ehr-api), header `X-Card-View` and the
+view's cookie → 200, every key always present:
+
+```
+{ scope, encounters, notes, importedRecords, importedHealthProfile,
+  healthProfile: { bloodGroup, genotype, allergies[, chronicConditions, medications, notes] } | null,
+  patientEntries, patientEntriesMore, diagnoses: [], prescriptions: [], labRequests: [],
+  vitals: [], documents: [], limit: 50 }
+```
+
+"Card only": `healthProfile` has the blood group, genotype and allergies and
+every other list is empty. "Card and records": completed visits, signed or
+amended notes (current revision), the imported history (files carry `id`,
+`fileName` and `mediaType` only: nothing opens in v1), the imported profile,
+all six health-information fields, and the records the patient added
+(`[]` while `PATIENT_ENTRIES_ENABLED` is off). 410 `CARD_SHARE_VIEW_ENDED`
+otherwise.
+
+### Emails (notification-api, from identity-api only)
+
+Plain text, never naming the patient, never a Health ID or health data:
+E5 `POST notifications/card-share` (the link `<patient site>/card#<token>`
+and the reference; never a code), E6 `POST notifications/card-share-code`
+(the code and the reference; never the link), each with the "Stop these
+emails" link `<patient site>/card/stop#<stopToken>` and the privacy notice
+`<patient site>/card/privacy`. To the patient's verified address: E7
+`POST notifications/card-share-opened` (the first open of each link each
+Lagos day: reference and time) and E8 `POST notifications/card-share-created`
+(every new link: masked address, reference and end). All four answer 404
+while notification-api's `CARD_LINKS_ENABLED` is off.
+
+### Inbox and Activity
+
+Inbox codes, resource type `card-share`, metadata `{ recipientHint,
+reference }`: `SHARED_CARD_OPENED` (every open), `SHARED_CARD_LOCKED` (the
+first lock), `SHARED_CARD_ENDED` (`reason: 'too_many_wrong_codes'`, the second
+lock), `SHARED_CARD_STOPPED` (the address asked to stop). Activity
+(`identity.patient_self_access_log`, 0093's, replaced): `card_opened` by
+actor kind `card_recipient` with `actorName` the hint ("Someone opened your
+card using the link sent to a•••"), `card_shared` and `card_ended` by the
+patient. Older images and websites drop unknown kinds.
+
+### Database (0118)
+
+`identity.card_shares`, `identity.card_share_codes`, `identity.card_share_views`,
+`identity.card_share_patient_emails` and `identity.card_share_address_blocks`,
+forced row-level security, no grants, never deleted; the commands are
+SECURITY DEFINER (`identity.*card_share*`, 13 to the Identity runtime). The
+read policies `<table>_card_share_read` on eleven EHR tables are SELECT only
+and true only in a card-share transaction (`ehr.card_share_read_context`,
+which the EHR runtime may execute) whose digest names a live view; it is
+false whenever a patient, account, session, facility or membership is set.
+Retention: the address is erased when a link ends; network data after 30
+days; the hint and address hash 12 months after the end, or at once when the
+login is deleted. The suite is
+`services/ehr-api/test/database/card-links.integration.sql`. 0118 has no down
+migration.
+
+### Before turning it on
+
+1. Legal signs off (D13): the receiver privacy notice at `/card/privacy`, the
+   processors (Amazon SES, Brevo, Cloudflare Turnstile, Sentry), and click
+   and open tracking confirmed off on the SES configuration set and the
+   Brevo account (the emails are plain text, so no link is rewritten).
+2. The owner signs the 0118 declaration and it is applied.
+3. The website's receiver page, the patient's pages and its flag ship.
+4. `CARD_LINKS_ENABLED=true` for notification-api, then ehr-api, then
+   identity-api.

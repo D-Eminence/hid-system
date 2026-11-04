@@ -284,11 +284,13 @@ begin
   -- 0062, 0094 and 0116 left them).
   if mismatch is null
      and (select md5(string_agg(format('%s|%s|%s|%s|%s|%s', policy.polrelid::regclass, policy.polname, policy.polcmd,
-            policy.polpermissive, pg_get_expr(policy.polqual, policy.polrelid),
-            coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '')), E'\n'
+            policy.polpermissive,
+            regexp_replace(pg_get_expr(policy.polqual, policy.polrelid), '^\(CURRENT_USER = ''[^'']*''::name\)$', 'owner'),
+            regexp_replace(coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), ''),
+              '^\(CURRENT_USER = ''[^'']*''::name\)$', 'owner')), E'\n'
             order by policy.polrelid::regclass::text, policy.polname))
            from pg_policy policy where policy.polrelid = any (pg_temp.card_links_tables()))
-        is distinct from 'ded949f3f519039c54da6464d956c20f' then
+        is distinct from 'e7a425cab84af02c5d288224cdd65111' then
     mismatch := 'the read policies of the eleven EHR tables';
   end if;
   -- f. The two triggers on auth.accounts (0096's terminal guard, 0097's
@@ -1997,12 +1999,14 @@ begin
        where policy.polrelid = any (pg_temp.card_links_tables()) and policy.polname like '%\_card\_share\_read'
          and policy.polcmd = 'r' and policy.polpermissive) <> 11
      or (select md5(string_agg(format('%s|%s|%s|%s|%s|%s', policy.polrelid::regclass, policy.polname, policy.polcmd,
-            policy.polpermissive, pg_get_expr(policy.polqual, policy.polrelid),
-            coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), '')), E'\n'
+            policy.polpermissive,
+            regexp_replace(pg_get_expr(policy.polqual, policy.polrelid), '^\(CURRENT_USER = ''[^'']*''::name\)$', 'owner'),
+            regexp_replace(coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), ''),
+              '^\(CURRENT_USER = ''[^'']*''::name\)$', 'owner')), E'\n'
             order by policy.polrelid::regclass::text, policy.polname))
            from pg_policy policy
           where policy.polrelid = any (pg_temp.card_links_tables()) and policy.polname not like '%\_card\_share\_read')
-        is distinct from 'ded949f3f519039c54da6464d956c20f' then
+        is distinct from 'e7a425cab84af02c5d288224cdd65111' then
     raise exception using errcode = '55000', message = '0118: post-check failed: the read policies of the eleven EHR tables';
   end if;
 end
