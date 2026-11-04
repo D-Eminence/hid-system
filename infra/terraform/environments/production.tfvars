@@ -256,7 +256,7 @@ ecs_container_insights = "disabled"
 ecr_untagged_image_expiry_days = 14
 ecr_tagged_image_expiry_days   = 90
 
-# Standby database copy in a second zone for launch (owner, 3 Nov 2026). The
-# switch is online; without apply_immediately RDS makes it in the next
-# maintenance window.
-database_multi_az = true
+# Standby database copy (Multi-AZ): held back until the release helper can
+# apply a database change (its review fingerprint includes the database's
+# self-moving latest_restorable_time). Turn it on again after that fix with:
+# database_multi_az = true
