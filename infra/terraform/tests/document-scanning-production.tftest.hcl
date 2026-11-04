@@ -213,6 +213,14 @@ run "production_stage_3_uses_the_retained_staging_names" {
   }
 
   assert {
+    condition = (
+      module.application.ocr_worker_subject == "hid:staging:ocr-worker" &&
+      output.deployment_environment_configuration.application.subjects["ocr"] == "hid:staging:ocr-api"
+    )
+    error_message = "ocr-worker acts in the database as its own subject; ocr-api keeps its subject for Lab and EHR."
+  }
+
+  assert {
     condition     = alltrue([for name in module.application.document_scan_review.alarm_names : startswith(name, "hid-staging-document-scan-")])
     error_message = "Alarm names start with hid-staging-, which the operations topic and its key admit."
   }
