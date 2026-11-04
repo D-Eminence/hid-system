@@ -96,7 +96,10 @@ def settled_backend(aws,lease):
 
 
 def terraform(*args, output=False):
-    result = subprocess.run(['terraform',*args],cwd=ROOT,capture_output=output,text=True,timeout=3600)
+    try:
+        result = subprocess.run(['terraform',*args],cwd=ROOT,capture_output=output,text=True,timeout=3600)
+    except OSError as error:
+        raise ReleaseError('TERRAFORM_UNAVAILABLE') from error
     require(result.returncode == 0,'TERRAFORM_FAILED')
     return json.loads(result.stdout) if output else None
 
@@ -176,10 +179,16 @@ def live_migration(aws, task_definition):
 
 
 def reconcile(aws, store, expected_drift, accepted_drift_sha=None, migration_task_definition=None, make_lease=None):
-    """Record live service rows an apply changed but did not record. Never deploys."""
+    """Record live service rows an apply changed but did not record. Never deploys.
+
+    The migration task definition has no service to read it from, so it is named
+    explicitly (--migration-task-definition) only when `migration` is expected to
+    have moved; otherwise the recorded one is only checked to still hold the image.
+    """
     expected = set(expected_drift or [])
     require(expected and expected <= set(COMPONENTS) | {'migration'}, 'INDEX_RECONCILE_EXPECTED_DRIFT_REQUIRED')
-    require(migration_task_definition, 'INDEX_RECONCILE_MIGRATION_OUTPUT_REQUIRED')
+    require(bool(migration_task_definition) == ('migration' in expected),
+            'INDEX_RECONCILE_MIGRATION_TASK_DEFINITION_REQUIRED')
     lease = (make_lease or (lambda: Lease(aws,'terraform-'+uuid.uuid4().hex)))().acquire()
     reconciled = True
     try:
@@ -193,8 +202,8 @@ def reconcile(aws, store, expected_drift, accepted_drift_sha=None, migration_tas
             if physical(index['backend'][name]) != live[name]:
                 newer(index['backend'][name]['task_definition'], live[name]['task_definition'])
                 before[name], after[name] = physical(index['backend'][name]), live[name]
-        migration = live_migration(aws, migration_task_definition)
         recorded = {k:index[k] for k in ('migration_task_definition','migration_image_uri')}
+        migration = live_migration(aws, migration_task_definition or recorded['migration_task_definition'])
         if migration != recorded:
             require(migration['migration_image_uri'] == recorded['migration_image_uri'],
                     'INFRASTRUCTURE_CHANGED_APPLICATION_IMAGE')
@@ -213,8 +222,9 @@ def reconcile(aws, store, expected_drift, accepted_drift_sha=None, migration_tas
             else: next_index['backend'][name] = {**index['backend'][name], **after[name]}
         validate_index(next_index)
         require(settled_backend(aws, lease) == live, 'LIVE_STATE_CHANGED_DURING_RECONCILE')
-        lease.assert_owned()
+        # From here a lost lease or an uncertain write keeps the lease for operator recovery.
         reconciled = False
+        lease.assert_owned()
         result = store.put(INDEX_KEY, next_index, etag=meta['ETag'])
         saved, _ = store.read(INDEX_KEY, result['VersionId'])
         require(saved == next_index, 'INDEX_RECONCILE_READBACK_DIFFERS')
@@ -222,7 +232,6 @@ def reconcile(aws, store, expected_drift, accepted_drift_sha=None, migration_tas
         return {'status':'reconciled','index_written':True,'version_id':result['VersionId'],
                 'recorded':sorted(after),'drift_sha256':digest}
     finally:
-        # A write that may have landed keeps the lease for operator recovery, as apply does.
         lease.release(reconciled=reconciled)
 
 
@@ -235,12 +244,14 @@ if __name__ == '__main__':
     parser.add_argument('--expect-drift', action='append', default=[],
                         help='reconcile: a component (or "migration") the stopped apply changed; repeat for each')
     parser.add_argument('--accepted-drift-sha256', help='reconcile: the drift_sha256 a dry run printed')
+    parser.add_argument('--migration-task-definition',
+                        help='reconcile: the new migration task definition ARN, only with --expect-drift migration')
     args = parser.parse_args()
     try:
         if args.mode == 'reconcile':
             aws = AWS(); aws.account()
-            migration = terraform('output','-json','migration_task_definition_arn',output=True)
-            print(json.dumps(reconcile(aws, Store(aws), args.expect_drift, args.accepted_drift_sha256, migration), sort_keys=True))
+            print(json.dumps(reconcile(aws, Store(aws), args.expect_drift, args.accepted_drift_sha256,
+                                       args.migration_task_definition), sort_keys=True))
         else:
             require(args.var_file and args.manifest, 'ENVIRONMENT_INPUT_REQUIRED')
             run(args.mode,args.var_file,args.manifest,args.accepted_review_sha256)

@@ -10,21 +10,24 @@ MIGRATION = ARN + 'hid-staging-database-migration:1'
 
 
 class FakeLease:
-    def __init__(self, lose_before_put=False):
-        self.lose_before_put, self.released, self.owned_checks = lose_before_put, None, 0
+    def __init__(self, lose_at=None):
+        self.lose_at, self.released, self.owned_checks = lose_at, None, 0
     def acquire(self): return self
     def assert_owned(self):
         self.owned_checks += 1
-        if self.lose_before_put: raise c.ReleaseError('LEASE_LOST')
+        if self.owned_checks == self.lose_at: raise c.ReleaseError('LEASE_LOST')
     def release(self, reconciled=True): self.released = reconciled
 
 
 class FakeStore:
-    def __init__(self, value, fail_put=False):
-        self.value, self.fail_put, self.puts = value, fail_put, []
+    def __init__(self, value, fail_put=False, readback_differs=False):
+        self.value, self.fail_put, self.readback_differs, self.puts = value, fail_put, readback_differs, []
     def read(self, key, version=None):
         assert key == c.INDEX_KEY
-        if version: return copy.deepcopy(self.puts[-1][1]), {'VersionId': version}
+        if version:
+            saved = copy.deepcopy(self.puts[-1][1])
+            if self.readback_differs: saved['backend']['ocr-worker']['config_sha256'] = '0' * 64
+            return saved, {'VersionId': version}
         return copy.deepcopy(self.value), {'VersionId': 'v1', 'ETag': '"etag-1"'}
     def put(self, key, value, etag=None):
         if self.fail_put: raise c.ReleaseError('S3_FAILED')
@@ -33,11 +36,12 @@ class FakeStore:
 
 
 class FakeAWS:
-    def __init__(self, migration_arn=MIGRATION, migration_image=None):
-        self.migration_arn, self.migration_image = migration_arn, migration_image or image('database-migration')
+    def __init__(self, migration_image=None):
+        self.migration_image, self.described = migration_image or image('database-migration'), []
     def call(self, service, operation, args, **kwargs):
         assert (service, operation) == ('ecs', 'describe-task-definition'), (service, operation)
-        return {'taskDefinition': {'taskDefinitionArn': self.migration_arn,
+        self.described.append(args['taskDefinition'])
+        return {'taskDefinition': {'taskDefinitionArn': args['taskDefinition'],
                 'containerDefinitions': [{'name': 'database-migration', 'image': self.migration_image}]}}
 
 
@@ -52,10 +56,10 @@ OCR = {'task_definition': ARN + 'hid-production-ocr-worker:2', 'config_sha256': 
 
 class ReconcileTests(unittest.TestCase):
     def run_reconcile(self, live, expected=('ocr-worker',), sha=None, store=None, aws=None, lease=None,
-                      migration=MIGRATION):
-        self.store = store or FakeStore(index()); self.lease = lease or FakeLease()
+                      migration=None):
+        self.store = store or FakeStore(index()); self.lease = lease or FakeLease(); self.aws = aws or FakeAWS()
         with patch.object(r, 'live_backend', return_value=live):
-            return r.reconcile(aws or FakeAWS(migration), self.store, list(expected), sha, migration,
+            return r.reconcile(self.aws, self.store, list(expected), sha, migration,
                                make_lease=lambda: self.lease)
 
     def dry_sha(self, live, **kwargs):
@@ -129,13 +133,44 @@ class ReconcileTests(unittest.TestCase):
         with self.assertRaisesRegex(c.ReleaseError, 'INDEX_RECONCILE_NOTHING_TO_RECORD'):
             self.run_reconcile(live_rows(index()))
 
-    def test_lease_loss_before_the_put_writes_nothing(self):
+    def test_lease_loss_at_the_check_before_the_put_writes_nothing_and_keeps_the_lease(self):
         live = live_rows(index(), **{'ocr-worker': OCR})
         digest = self.dry_sha(live)
-        lost = FakeLease(lose_before_put=True)
+        self.run_reconcile(live, sha=digest)
+        checks = self.lease.owned_checks
+        lost = FakeLease(lose_at=checks)
         with self.assertRaisesRegex(c.ReleaseError, 'LEASE_LOST'):
             self.run_reconcile(live, sha=digest, lease=lost)
+        self.assertEqual(lost.owned_checks, checks)
+        self.assertEqual(self.store.puts, []); self.assertFalse(lost.released)
+
+    def test_read_back_mismatch_keeps_the_lease(self):
+        live = live_rows(index(), **{'ocr-worker': OCR})
+        digest = self.dry_sha(live)
+        with self.assertRaisesRegex(c.ReleaseError, 'INDEX_RECONCILE_READBACK_DIFFERS'):
+            self.run_reconcile(live, sha=digest, store=FakeStore(index(), readback_differs=True))
+        self.assertEqual(len(self.store.puts), 1); self.assertFalse(self.lease.released)
+
+    def test_refuses_to_write_an_invalid_index(self):
+        live = live_rows(index(), **{'ocr-worker': dict(OCR, config_sha256='not-a-hash')})
+        digest = self.dry_sha(live)
+        with self.assertRaisesRegex(c.ReleaseError, 'INDEX_CONFIGURATION_HASH_REQUIRED'):
+            self.run_reconcile(live, sha=digest)
         self.assertEqual(self.store.puts, [])
+
+    def test_migration_task_definition_is_named_exactly_when_migration_is_expected(self):
+        live = live_rows(index(), **{'ocr-worker': OCR})
+        with self.assertRaisesRegex(c.ReleaseError, 'INDEX_RECONCILE_MIGRATION_TASK_DEFINITION_REQUIRED'):
+            self.run_reconcile(live, expected=('ocr-worker', 'migration'), migration=None)
+        with self.assertRaisesRegex(c.ReleaseError, 'INDEX_RECONCILE_MIGRATION_TASK_DEFINITION_REQUIRED'):
+            self.run_reconcile(live, migration=ARN + 'hid-staging-database-migration:2')
+        self.run_reconcile(live)
+        self.assertEqual(self.aws.described, [MIGRATION])
+
+    def test_recorded_migration_must_still_hold_the_recorded_image(self):
+        live = live_rows(index(), **{'ocr-worker': OCR})
+        with self.assertRaisesRegex(c.ReleaseError, 'INFRASTRUCTURE_CHANGED_APPLICATION_IMAGE'):
+            self.run_reconcile(live, aws=FakeAWS(image('database-migration', 'e')))
 
     def test_failed_put_keeps_the_lease_for_recovery(self):
         live = live_rows(index(), **{'ocr-worker': OCR})
@@ -151,17 +186,19 @@ class ReconcileTests(unittest.TestCase):
         self.store = FakeStore(index()); self.lease = FakeLease()
         with patch.object(r, 'live_backend', side_effect=[live, moved]):
             with self.assertRaisesRegex(c.ReleaseError, 'LIVE_STATE_CHANGED_DURING_RECONCILE'):
-                r.reconcile(FakeAWS(), self.store, ['ocr-worker'], digest, MIGRATION, make_lease=lambda: self.lease)
+                r.reconcile(FakeAWS(), self.store, ['ocr-worker'], digest, None, make_lease=lambda: self.lease)
         self.assertEqual(self.store.puts, [])
 
     def test_migration_drift_must_be_expected_and_keep_its_image(self):
         newer = ARN + 'hid-staging-database-migration:2'
         live = live_rows(index(), **{'ocr-worker': OCR})
         with self.assertRaisesRegex(c.ReleaseError, 'INDEX_RECONCILE_UNEXPECTED_DRIFT'):
-            self.run_reconcile(live, migration=newer)
+            self.run_reconcile(live, expected=('ocr-worker', 'migration'), migration=MIGRATION)
+        with self.assertRaisesRegex(c.ReleaseError, 'INDEX_RECONCILE_REVISION_NOT_NEWER'):
+            self.run_reconcile(live, expected=('ocr-worker', 'migration'), migration=ARN + 'hid-staging-database-migration:0')
         with self.assertRaisesRegex(c.ReleaseError, 'INFRASTRUCTURE_CHANGED_APPLICATION_IMAGE'):
             self.run_reconcile(live, expected=('ocr-worker', 'migration'), migration=newer,
-                               aws=FakeAWS(newer, image('database-migration', 'e')))
+                               aws=FakeAWS(image('database-migration', 'e')))
         digest = self.dry_sha(live, expected=('ocr-worker', 'migration'), migration=newer)
         self.run_reconcile(live, expected=('ocr-worker', 'migration'), sha=digest, migration=newer)
         self.assertEqual(self.store.puts[0][1]['migration_task_definition'], newer)
