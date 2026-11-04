@@ -150,7 +150,6 @@ resource "aws_cloudwatch_event_rule" "document_scan_results" {
   event_pattern = jsonencode({
     source        = ["aws.guardduty"]
     "detail-type" = ["GuardDuty Malware Protection Object Scan Result"]
-    resources     = [var.malware_protection_plan_arn]
     detail = {
       s3ObjectDetails = {
         bucketName = [local.document_bucket_name]

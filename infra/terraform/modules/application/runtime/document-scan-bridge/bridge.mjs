@@ -85,7 +85,10 @@ export function validateEnvelope(event, configuration) {
   if (event['detail-type'] !== SCAN_RESULT_DETAIL_TYPE) return refuse('detail-type');
   if (event.account !== configuration.accountId) return refuse('account');
   if (event.region !== configuration.region) return refuse('region');
-  if (!Array.isArray(event.resources) || !event.resources.includes(configuration.planArn)) return refuse('plan');
+  // The plan ARN is not required: AWS does not document it in the resources of
+  // on-demand (SendObjectMalwareScan) results. Only AWS can publish aws.guardduty
+  // events to the default bus, a bucket has one plan, and account, region,
+  // bucket and key prefix still bind the event.
   if (typeof event.id !== 'string' || !/^[A-Za-z0-9-]{8,100}$/.test(event.id)) return refuse('event-id');
   const detail = event.detail;
   if (typeof detail !== 'object' || detail === null) return refuse('detail');
@@ -387,6 +390,16 @@ const THREAT_AFTER_TERMINAL_MESSAGE =
   'GuardDuty found a threat in a version that already has a terminal scan result; check its scan events, and withdraw the document if that result was clean';
 const isThreat = scan => scan.scanResultStatus === 'THREATS_FOUND';
 
+// A threat in an object no scan event can be written for (an orphaned version,
+// an upload never completed, a document no longer awaiting a scan) still
+// raises the threat alarm, so someone looks at the object.
+const UNWRITTEN_THREAT_MESSAGE =
+  'GuardDuty found a threat in an object no scan event could be written for; check the object and its document';
+function noteUnwrittenThreat({ metrics, logger }, fields, scan) {
+  metrics.count('ThreatsFound');
+  log(logger, 'error', UNWRITTEN_THREAT_MESSAGE, { ...fields, threatName: scan.threatName });
+}
+
 function resolveRefusal({ status, code }) {
   if (status === 200) return undefined;
   if (status === 404) return code === 'DOCUMENT_NOT_FOUND' ? RESOLVE_REFUSALS.DOCUMENT_NOT_FOUND : UNEXPLAINED_NOT_FOUND;
@@ -426,6 +439,7 @@ export async function processRecord(record, context) {
   if (refusal) {
     metrics.count(refusal.metric);
     log(logger, refusal.level, refusal.message, { ...fields, status: resolved.status, code: resolved.code });
+    if (refusal.outcome === 'ack' && isThreat(scan)) noteUnwrittenThreat(context, fields, scan);
     return refusal.outcome;
   }
   const target = readResolvedTarget(resolved.body);
@@ -435,6 +449,7 @@ export async function processRecord(record, context) {
   if (target.status !== 'uploaded' || target.objectVersionId !== scan.versionId) {
     metrics.count('NotScannable');
     log(logger, 'warn', 'Resolve answered for another state or version; acknowledged', { ...documentFields, documentStatus: target.status });
+    if (isThreat(scan)) noteUnwrittenThreat(context, documentFields, scan);
     return 'ack';
   }
 

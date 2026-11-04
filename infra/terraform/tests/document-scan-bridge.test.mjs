@@ -154,7 +154,10 @@ test('envelope validation accepts only our plan, account, Region, bucket and cli
   refused({ ...scanEvent(), 'detail-type': 'Object Created' }, 'detail-type');
   refused({ ...scanEvent(), account: '999999999999' }, 'account');
   refused({ ...scanEvent(), region: 'us-east-1' }, 'region');
-  refused({ ...scanEvent(), resources: [PLAN.replace('b4c7', 'ffff')] }, 'plan');
+  // On-demand (SendObjectMalwareScan) results may not list the plan ARN; the
+  // source, account, region, bucket and key prefix still bind the event.
+  assert.equal(validateEnvelope({ ...scanEvent(), resources: [PLAN.replace('b4c7', 'ffff')] }, configuration).ok, true);
+  assert.equal(validateEnvelope({ ...scanEvent(), resources: [] }, configuration).ok, true);
   refused({ ...scanEvent(), id: 'x' }, 'event-id');
   refused(scanEvent({ bucket: 'hid-staging-releases-example' }), 'bucket');
   // GuardDuty's own permission check object, and other prefixes of the bucket.
@@ -792,4 +795,21 @@ test('metrics are written as one embedded-metric-format line per invocation', as
   assert.equal(line.Environment, 'staging');
   assert.equal(line.EventsWritten, 1);
   assert.ok(line._aws.CloudWatchMetrics[0].Metrics.some(metric => metric.Name === 'EventsWritten' && metric.Unit === 'Count'));
+});
+
+test('a threat in an object no scan event can be written for still raises the threat alarm', async () => {
+  const threat = scanEvent({ scanResultStatus: 'THREATS_FOUND', threats: [{ name: 'EICAR-Test-File' }] });
+  for (const [status, code] of [[404, 'DOCUMENT_NOT_FOUND'], [409, 'DOCUMENT_NOT_SCANNABLE'], [409, 'OBJECT_VERSION_MISMATCH']]) {
+    const h = harness({ resolve: () => problem(status, code) });
+    assert.deepEqual(await handleSqsBatch({ Records: [record(threat)] }, h.context), { batchItemFailures: [] }, code);
+    assert.equal(posted(h.net).length, 0, code);
+    assert.equal(h.metric('ThreatsFound'), 1, code);
+    const line = h.logs.find(item => item.level === 'error' && /no scan event could be written/.test(item.message));
+    assert.ok(line, `${code}: logged at error level`);
+    assert.deepEqual([line.key, line.versionId, line.threatName], [KEY, VERSION, 'EICAR-Test-File']);
+  }
+  // A clean result for an orphaned object raises no threat alarm.
+  const h = harness({ resolve: () => problem(404, 'DOCUMENT_NOT_FOUND') });
+  await handleSqsBatch({ Records: [record(scanEvent())] }, h.context);
+  assert.equal(h.metric('ThreatsFound'), 0);
 });
