@@ -121,7 +121,7 @@ function call(method: 'GET' | 'POST', path: string, body?: unknown, headers: Rec
 
 const entry = { kind: 'visit', title: 'Malaria check-up', facilityName: null, occurredOn: '2026-10-30', notes: null };
 
-describe('Records patients add while the setting is off (the default)', () => {
+describe('Records patients add while the setting is switched off (PATIENT_ENTRIES_ENABLED=false)', () => {
   it.each([
     ['POST', 'me/patient-entries', entry],
     ['POST', 'me/patient-entries', { kind: 'xray', unexpected: true, attachments: ['x'] }],
@@ -131,7 +131,7 @@ describe('Records patients add while the setting is off (the default)', () => {
     ['GET', 'me/patient-entries?before=not-a-cursor', undefined],
     ['GET', `patients/${PATIENT_ID}/patient-entries`, undefined],
   ] as const)('answers %s %s with the plain 404, before authentication, validation or audit', async (method, path, body) => {
-    await start(undefined);
+    await start('false');
     const answer = await call(method, path, body);
     expect(answer.status).toBe(404);
     expect(String(answer.headers['content-type'])).toMatch(/^application\/problem\+json/);

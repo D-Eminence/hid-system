@@ -2857,7 +2857,7 @@ patient removes is hidden everywhere and kept). Text only: photos and files
 come with a later migration. 0116 is unsigned until the owner signs its
 declaration.
 
-Switch: `PATIENT_ENTRIES_ENABLED` (ehr-api, default `false`). While it is off:
+Switch: `PATIENT_ENTRIES_ENABLED` (ehr-api, default `true` since the owner's decision of 4 Nov 2026 after legal approval; production sets no key; `false` switches it off). While it is off:
 
 - every route below answers a plain 404 (`application/problem+json`, code
   `NOT_FOUND`) before authentication, CSRF, validation or audit, which the
@@ -3008,5 +3008,6 @@ down migration.
 3. The website hides the photo step until photos and files are served (it
    reads `patientEntries` as "records and uploads served"; a picked photo
    would fail at its upload link).
-4. The owner sets `PATIENT_ENTRIES_ENABLED=true` for ehr-api. Turning it off
-   again hides the records everywhere and keeps them.
+4. On by default (the owner's decision of 4 Nov 2026, after legal approval).
+   `PATIENT_ENTRIES_ENABLED=false` for ehr-api switches it off again, which
+   hides the records everywhere and keeps them.
