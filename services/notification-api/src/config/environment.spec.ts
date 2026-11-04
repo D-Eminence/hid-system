@@ -159,6 +159,20 @@ describe('Notification API emergency-contact settings', () => {
     expect(() => getEnvironment()).toThrow('EMERGENCY_CONTACT_DELIVERY_ENABLED');
   });
 
+  it('serves card links by default (the owner\'s decision of 4 Nov 2026, after legal approval); false switches them off', () => {
+    delete process.env.CARD_LINKS_ENABLED; resetEnvironmentForTests();
+    expect(getEnvironment().CARD_LINKS_ENABLED).toBe(true);
+    process.env.CARD_LINKS_ENABLED = 'true'; resetEnvironmentForTests();
+    expect(getEnvironment().CARD_LINKS_ENABLED).toBe(true);
+    process.env.CARD_LINKS_ENABLED = 'false'; resetEnvironmentForTests();
+    expect(getEnvironment().CARD_LINKS_ENABLED).toBe(false);
+  });
+
+  it.each(['yes', '1', 'TRUE'])('refuses CARD_LINKS_ENABLED=%s', value => {
+    process.env.CARD_LINKS_ENABLED = value;
+    expect(() => getEnvironment()).toThrow('CARD_LINKS_ENABLED');
+  });
+
   it('accepts a configured support phone and email, and treats empty values as unset', () => {
     Object.assign(process.env, { EMERGENCY_CONTACT_SUPPORT_PHONE: '+447700900123', EMERGENCY_CONTACT_SUPPORT_EMAIL: 'help@example.test' });
     expect(getEnvironment()).toMatchObject({ EMERGENCY_CONTACT_SUPPORT_PHONE: '+447700900123', EMERGENCY_CONTACT_SUPPORT_EMAIL: 'help@example.test' });

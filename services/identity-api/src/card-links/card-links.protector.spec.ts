@@ -20,14 +20,14 @@ describe('Card links (0118): protector and flag', () => {
     resetEnvironmentForTests();
   });
 
-  it('is off unless CARD_LINKS_ENABLED is exactly true, read without the rest of the configuration', () => {
+  it('is on unless CARD_LINKS_ENABLED is exactly false, read without the rest of the configuration', () => {
     delete process.env.DATABASE_URL;
-    for (const value of [undefined, 'false', 'TRUE', '1', 'yes', '']) {
+    for (const value of [undefined, 'true', 'TRUE', '1', 'yes', '']) {
       if (value === undefined) delete process.env.CARD_LINKS_ENABLED; else process.env.CARD_LINKS_ENABLED = value;
-      expect(cardLinksEnabled()).toBe(false);
+      expect(cardLinksEnabled()).toBe(true);
     }
-    process.env.CARD_LINKS_ENABLED = 'true';
-    expect(cardLinksEnabled()).toBe(true);
+    process.env.CARD_LINKS_ENABLED = 'false';
+    expect(cardLinksEnabled()).toBe(false);
   });
 
   it('round-trips the address and private label, bound to the link id', () => {

@@ -151,7 +151,7 @@ describe('Card link emails (0118, E5-E8)', () => {
       .toContain(`https://staging.healthidentitydirectory.com/card#${token}`);
   });
 
-  it('answers 404 on all four routes while CARD_LINKS_ENABLED is off, and sends nothing', async () => {
+  it('answers 404 on all four routes while CARD_LINKS_ENABLED is false, and sends nothing', async () => {
     process.env.CARD_LINKS_ENABLED = 'false';
     resetEnvironmentForTests();
     const email = provider('ses');
@@ -164,11 +164,15 @@ describe('Card link emails (0118, E5-E8)', () => {
       .rejects.toBeInstanceOf(NotFoundException);
     await expect(routes.cardShareCreated(created, request, 'card-share-email:7e0e0000-0000-4000-8000-000000000002'))
       .rejects.toBeInstanceOf(NotFoundException);
+    expect(email.send).not.toHaveBeenCalled();
+  });
+
+  it('sends while CARD_LINKS_ENABLED is unset (on by default since the owner\'s decision of 4 Nov 2026)', async () => {
     delete process.env.CARD_LINKS_ENABLED;
     resetEnvironmentForTests();
-    await expect(routes.cardShareLink(link, request, 'card-share:5e1a0000-0000-4000-8000-000000000001'))
-      .rejects.toBeInstanceOf(NotFoundException);
-    expect(email.send).not.toHaveBeenCalled();
+    const email = provider('ses');
+    await controller(email).cardShareLink(link, request, 'card-share:5e1a0000-0000-4000-8000-000000000001');
+    expect(email.send).toHaveBeenCalledTimes(1);
   });
 
   it('the DTOs take fixed fields only: unknown fields, a name, a malformed token, code or reference are refused', async () => {

@@ -134,19 +134,27 @@ describe('Card links (0118): routes', () => {
     resetEnvironmentForTests();
   });
 
-  describe('while CARD_LINKS_ENABLED is off (the default)', () => {
+  describe('while CARD_LINKS_ENABLED is false (switched off)', () => {
     it.each([
       ['get', 'patient', ''], ['post', 'patient', ''], ['post', 'patient', `/${SHARE_ID}/end`],
       ['get', 'public', 'availability'], ['post', 'public', 'code'], ['post', 'public', 'verify'],
       ['get', 'public', 'view'], ['post', 'public', 'end-view'], ['post', 'public', 'stop'],
     ] as const)('%s %s %s answers the plain 404 before any guard, token, Turnstile or database', async (method, kind, path) => {
-      await start(undefined);
+      await start('false');
       const answer = await (kind === 'patient' ? patientCall(method, path) : publicCall(method, path)).send({});
       expect(answer.status).toBe(404);
       expect(answer.body).toMatchObject({ status: 404, code: 'NOT_FOUND' });
       expect(tokens.verify).not.toHaveBeenCalled();
       expect(turnstile.verify).not.toHaveBeenCalled();
       expect(calls).toEqual([]);
+    });
+  });
+
+  describe('while CARD_LINKS_ENABLED is unset (on by default since the owner\'s decision of 4 Nov 2026)', () => {
+    it('serves the card-link routes: availability answers 204', async () => {
+      await start(undefined);
+      const answer = await publicCall('get', 'availability');
+      expect(answer.status).toBe(204);
     });
   });
 

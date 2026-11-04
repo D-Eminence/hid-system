@@ -66,4 +66,19 @@ describe('EHR production database transport', () => {
       expect(() => getEnvironment()).toThrow();
     }
   });
+
+  it('serves card links by default (the owner\'s decision of 4 Nov 2026, after legal approval); false switches them off', () => {
+    Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://synthetic:test@localhost/hid',
+      CORS_ORIGINS: 'https://app.example', STORAGE_MODE: 'disabled' });
+    delete process.env.CARD_LINKS_ENABLED; resetEnvironmentForTests();
+    expect(getEnvironment().CARD_LINKS_ENABLED).toBe(true);
+    process.env.CARD_LINKS_ENABLED = 'true'; resetEnvironmentForTests();
+    expect(getEnvironment().CARD_LINKS_ENABLED).toBe(true);
+    process.env.CARD_LINKS_ENABLED = 'false'; resetEnvironmentForTests();
+    expect(getEnvironment().CARD_LINKS_ENABLED).toBe(false);
+    for (const value of ['yes', '1', 'TRUE']) {
+      process.env.CARD_LINKS_ENABLED = value; resetEnvironmentForTests();
+      expect(() => getEnvironment()).toThrow();
+    }
+  });
 });

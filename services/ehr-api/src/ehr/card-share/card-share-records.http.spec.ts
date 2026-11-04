@@ -138,13 +138,23 @@ function get(headers: Record<string, string>): Promise<Answer> {
 const RECORD_KEYS = ['diagnoses', 'documents', 'encounters', 'healthProfile', 'importedHealthProfile', 'importedRecords',
   'labRequests', 'limit', 'notes', 'patientEntries', 'patientEntriesMore', 'prescriptions', 'scope', 'vitals'];
 
-describe('The card-link records read (0118) while CARD_LINKS_ENABLED is off (the default)', () => {
-  it.each([undefined, 'false', 'TRUE', '1'])('answers the plain 404 for %s, before any guard or database', async (value) => {
-    await start(value);
+describe('The card-link records read (0118) while CARD_LINKS_ENABLED is false (switched off)', () => {
+  it('answers the plain 404, before any guard or database', async () => {
+    await start('false');
     const answer = await get({ cookie: COOKIE, 'x-card-view': VIEW_ID });
     expect(answer.status).toBe(404);
     expect(answer.body).toMatchObject({ status: 404, code: 'NOT_FOUND' });
     expect(transactions).toBe(0);
+    expect(authenticate).not.toHaveBeenCalled();
+  });
+});
+
+describe('The card-link records read (0118) while CARD_LINKS_ENABLED is unset (on by default since 4 Nov 2026)', () => {
+  it('reads in a card-share transaction', async () => {
+    await start(undefined);
+    const answer = await get({ cookie: COOKIE, 'x-card-view': VIEW_ID });
+    expect(answer.status).toBe(200);
+    expect(transactions).toBe(1);
     expect(authenticate).not.toHaveBeenCalled();
   });
 });
