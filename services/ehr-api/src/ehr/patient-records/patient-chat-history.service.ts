@@ -8,6 +8,7 @@ import type { HidRequest } from '../../common/request-context';
 import { PatientRecordsService } from './patient-records.service';
 
 import { PatientEvidenceService } from './patient-evidence.service';
+import { citedFromExchanges } from './patient-chat-safety';
 import { binding,evidenceKey,type Evidence,type EvidenceBinding,type EvidenceReference,type Coverage } from './patient-evidence.types';
 
 type Authorization = Awaited<ReturnType<PatientRecordsService['authorizeSelf']>>;
@@ -103,6 +104,25 @@ export class PatientChatHistoryService {
       return { exchanges: exchanges.map(({ sourceBindings: _bindings, ...exchange }) => exchange), retentionDays: 30, limit: 10 };
     });
   }
+  /**
+   * The sources the patient may open in the source viewer: for each current
+   * saved exchange, the sources its answer cites, with their current bindings
+   * (taken from the stored bindings, since the stored reply carries no hash).
+   * Documents named in saved history, and `documentIds`, are read, so a cited
+   * document beyond the default document limit still resolves. The snapshot
+   * is returned too, so the viewer needs no second one. A service that is
+   * unavailable (Lab) only hides the exchanges bound to its records; it does
+   * not stop a cited note from opening (`unavailable` says why one is missing).
+   */
+  async citedBindings(request:HidRequest,documentIds:readonly string[]=[]):Promise<{cited:Map<string,EvidenceBinding>;records:Evidence[];unavailable:string[]}> {
+    await this.records.authorizeSelf(request);
+    const snapshot=await this.evidence.snapshot(request,undefined,[...new Set([...await this.documentBindings(request),...documentIds])]);
+    const auth=await this.records.authorizeSelf(request);
+    const cited=await this.database.withPatientTransaction(auth,request.correlationId,async client=>
+      citedFromExchanges((await this.readCurrent(client,auth.patientId,snapshot.records,[]))
+        .map(row=>({reply:row.reply,sourceBindings:row.sourceBindings as EvidenceBinding[]}))));
+    return {cited,records:snapshot.records,unavailable:[...snapshot.coverage.unavailable]};
+  }
   private resolve(raw:ContextBinding,current:Map<string,Evidence>):EvidenceBinding|null {
     const kind='noteId' in raw?'note':raw.kind,id='noteId' in raw?raw.noteId:raw.id;
     const version='noteId' in raw?String(raw.revisionNo):raw.version;
@@ -121,7 +141,13 @@ export class PatientChatHistoryService {
     return result.rows.filter(row=>Array.isArray(row.sourceBindings)&&row.sourceBindings.every(b=>this.resolve(b,current)))
       .map(row=>({...row,sourceBindings:row.sourceBindings.map(b=>this.resolve(b,current)!)})).reverse();
   }
-  async context(request: HidRequest, generation: string) {
+  /**
+   * The last four ready exchanges, and the bindings of every source they
+   * selected (saved again with the next exchange). `cited` holds only the
+   * sources those answers cite, which decide the patient's follow-up lines.
+   */
+  async context(request: HidRequest, generation: string): Promise<{ exchanges: Array<{ question: string; answer: string }>;
+    bindings: ContextBinding[]; cited?: EvidenceBinding[] }> {
     await this.records.authorizeSelf(request);
     const snapshot=await this.evidence.snapshot(request,undefined,await this.documentBindings(request));
     const auth=await this.records.authorizeSelf(request);
@@ -137,8 +163,9 @@ export class PatientChatHistoryService {
         actorSubject: auth.subject, actorAccountId: auth.accountId, patientId: auth.patientId,
         action: 'ehr.patient.chat.context.read', resourceType: 'patient-chat-history', outcome: 'success',
         purposeOfUse: 'patient-self', details: { exchangeCount: exchanges.length } });
+      const cited = citedFromExchanges(exchanges.map(row => ({ reply: row.reply, sourceBindings: row.sourceBindings as EvidenceBinding[] })));
       return { exchanges: exchanges.map(exchange => ({ question: exchange.question, answer: exchange.reply.answer })),
-        bindings: [...bindings.values()] };
+        bindings: [...bindings.values()], cited: [...cited.values()] };
     });
   }
   async clear(request: HidRequest) {

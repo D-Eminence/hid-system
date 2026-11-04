@@ -6,10 +6,11 @@ import type { HidRequest } from '../../common/request-context';
 import { PatientRecordsService } from './patient-records.service';
 import { LabApiService } from '../../integrations/lab-api.service';
 import { AuditService } from '../../audit/audit.service';
-import { LOCAL_EVIDENCE_QUERY } from './patient-evidence.query';
+import { PATIENT_EVIDENCE_QUERY } from './patient-evidence.query';
+import { patientEvidence,type PatientProfileInput } from './patient-evidence.policy';
 import { PatientAttachmentTextService } from './patient-attachment-text.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
-import { evidence,evidenceKey,originLabel,type Evidence,type EvidenceSnapshot,type EvidenceBinding,type SourceKind } from './patient-evidence.types';
+import { evidence,evidenceKey,type Evidence,type EvidenceSnapshot,type EvidenceBinding,type SourceKind } from './patient-evidence.types';
 
 const iso=(value:unknown):string|null=>value instanceof Date?value.toISOString():typeof value==='string'&&Number.isFinite(Date.parse(value))?new Date(value).toISOString():null;
 @Injectable()
@@ -29,7 +30,9 @@ export class PatientEvidenceService {
   async local(client:PoolClient,patientId:string):Promise<{records:Evidence[];complete:boolean}> {
     const records:Evidence[]=[];let kind='',id='';let complete=false;
     for(let page=0;page<10;page++) {
-      const rows=(await client.query(LOCAL_EVIDENCE_QUERY,[patientId,kind,id])).rows;
+      const rows=(await client.query(PATIENT_EVIDENCE_QUERY,[patientId,kind,id])).rows;
+      // Patient-self RLS already limits rows to this patient; a row of anyone else is refused, never shown.
+      if(rows.some(r=>r.patient_id!==patientId))throw new DomainProblem(403,'PATIENT_ACCESS_DENIED','Patient evidence authorization changed');
       for(const r of rows.slice(0,200)) records.push(evidence({kind:r.kind as SourceKind,id:r.id,version:r.version,
         title:r.title,recordedAt:iso(r.recorded_at),effectiveAt:iso(r.effective_at),provenance:r.provenance,quality:r.quality,fields:r.fields,
         originHint:r.origin_hint}));
@@ -37,6 +40,24 @@ export class PatientEvidenceService {
       const last=rows[199];kind=last.kind;id=last.id;
     }
     return {records,complete};
+  }
+  /**
+   * The patient's name and date of birth, used only to clean free text (the
+   * records, and the patient's own question) before it reaches a model, the
+   * index or saved history. Never sent anywhere itself.
+   */
+  async redactionProfile(request:HidRequest):Promise<PatientProfileInput> {
+    const auth=await this.records.authorizeSelf(request);
+    return (await this.profile(request,auth.patientId)).identity;
+  }
+  private async profile(request:HidRequest,patientId:string) {
+    const profile=await this.identity.patientProfile(request);
+    if(profile.patientId!==patientId)throw new DomainProblem(403,'PATIENT_ACCESS_DENIED','Patient profile authorization changed');
+    // Name and date of birth are used only to clean the records and the question; the
+    // chat itself sees the patient's age and sex (patient-evidence.policy.ts).
+    const identity:PatientProfileInput={firstName:profile.firstName,lastName:profile.lastName,fullName:profile.fullName,
+      dateOfBirth:profile.dateOfBirth,gender:profile.gender};
+    return {identity,profile};
   }
   async snapshot(request:HidRequest,signal?:AbortSignal,documentIds?:readonly string[]):Promise<EvidenceSnapshot> {
     const auth=await this.records.authorizeSelf(request);
@@ -48,12 +69,9 @@ export class PatientEvidenceService {
       return value;
     });
     const unavailable:string[]=[];let cursor:string|undefined;let labComplete=false;
-    const profile=await this.identity.patientProfile(request);
-    if(profile.patientId!==auth.patientId)throw new DomainProblem(403,'PATIENT_ACCESS_DENIED','Patient profile authorization changed');
-    local.records.push(evidence({kind:'profile',id:auth.patientId,version:String(profile.version),title:'Patient profile',recordedAt:null,effectiveAt:null,
-      provenance:'Health ID patient profile',quality:'recorded',fields:{dateOfBirth:profile.dateOfBirth??null,gender:profile.gender??null,
-        firstName:profile.firstName??null,lastName:profile.lastName??null,fullName:profile.fullName??null,
-        country:profile.country??null,state:profile.state??null}}));
+    const {identity,profile}=await this.profile(request,auth.patientId);
+    local.records.push(evidence({kind:'profile',id:auth.patientId,version:String(profile.version),title:'Age and sex',recordedAt:null,effectiveAt:null,
+      provenance:'Health ID patient profile',quality:'recorded',fields:{}}));
     try {
       const cursors=new Set<string>();
       for(let page=0;page<10;page++) {
@@ -74,8 +92,9 @@ export class PatientEvidenceService {
     }
     const documents=await this.attachments.read(request,signal,documentIds);
     local.records.push(...documents.records);
-    return {records:local.records,coverage:{complete:local.complete&&labComplete&&documents.complete&&documents.pending===0,
-      unavailable,pendingDocuments:documents.pending,recordCount:local.records.length,selectedCount:0}};
+    const records=patientEvidence(local.records,identity,new Date());
+    return {records,coverage:{complete:local.complete&&labComplete&&documents.complete&&documents.pending===0,
+      unavailable,pendingDocuments:documents.pending,recordCount:records.length,selectedCount:0}};
   }
   async assertCurrent(request:HidRequest,bindings:readonly EvidenceBinding[]) {
     if(!bindings.length){await this.records.authorizeSelf(request);return;}
@@ -85,12 +104,5 @@ export class PatientEvidenceService {
       const value=current.get(evidenceKey(b));
       if(!value||value.version!==b.version||value.hash!==b.hash)throw new DomainProblem(409,'CHAT_SOURCES_CHANGED','The source records changed or became unavailable. Please ask again.');
     }
-  }
-  async source(request:HidRequest,kind:string,id:string) {
-    const snapshot=await this.snapshot(request,undefined,['document','attachment'].includes(kind)?[id]:[]);
-    const source=snapshot.records.find(r=>r.kind===kind&&r.id===id);
-    if(!source)throw new DomainProblem(404,'CHAT_SOURCE_UNAVAILABLE','This source is unavailable');
-    await this.records.authorizeSelf(request);
-    return {...source,originLabel:originLabel(source.origin,'patient')};
   }
 }
