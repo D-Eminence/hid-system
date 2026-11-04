@@ -3281,20 +3281,20 @@ and its hash in the declaration is measured again). 0105's prerequisite is
 0103's admin gate body and it reads nothing 0104 adds, so it applies the same
 way after 0104 as on 0103 alone.
 
-## 34. The OCR worker's account (0122)
+## 34. The OCR worker's account (0106)
 
-Migration 0122 (`0122_ocr_worker_account.sql`, unsigned until the owner signs)
+Migration 0106 (`0106_ocr_worker_account.sql`, unsigned until the owner signs)
 gives the OCR worker the database identity its commands have always required.
 `ocr.claim_worker_job` and the worker's other commands (0014, 0077, 0105) refuse
 with 42501 `Authorized OCR workload context is required` unless
 `app.actor_subject` is the subject of an active `auth.accounts` row holding the
-platform `ocr_worker` role. Before 0122 no such row existed, so every claim in
+platform `ocr_worker` role. Before 0106 no such row existed, so every claim in
 production was refused and no OCR job was ever claimed.
 
-- 0122 seeds the account `0c4e0122-0122-4000-8000-000000000001` (subject
+- 0106 seeds the account `0c4e0106-0106-4000-8000-000000000001` (subject
   `hid:staging:ocr-worker`, display name `OCR worker`, no email, no password,
   `source_system` `hid-workload`) and its role row
-  `0c4e0122-0122-4000-8000-000000000002` (platform `ocr_worker`, which grants
+  `0c4e0106-0106-4000-8000-000000000002` (platform `ocr_worker`, which grants
   only `ocr.job.process`). `auth.admin_change_platform_role` refuses this role,
   so the seed bypasses the governed admin command, as 0105 does for the
   scanner; the owner signs that in the declaration. A different row already
@@ -3306,7 +3306,7 @@ production was refused and no OCR job was ever claimed.
   worker authority and tells the two apart in audit rows. Terraform on `dev`
   must set `OCR_WORKER_SUBJECT = "hid:${local.workload_identity_environment}:ocr-worker"`
   (`infra/terraform/modules/application/workloads.tf`); until then the worker
-  keeps answering 42501 exactly as before 0122.
+  keeps answering 42501 exactly as before 0106.
 - A claim still takes only a job whose document's latest scan event is clean
   (0105), so claims return no job until the document scanner is live.
 - Kill switch, no release: revoke the role row (`revoked_at`, `revoked_by`, an

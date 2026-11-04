@@ -161,7 +161,7 @@ moved or redesigned during this backend cutover.
 The worker-only `42501` is expected in this checkout: no registered
 `ocr_worker` principal or environment-specific worker LOGIN exists. No job was
 claimable or changed. Provisioning that deployment identity remains external.
-Migration 0122 later seeds the production worker principal
+Migration 0106 later seeds the production worker principal
 (`hid:staging:ocr-worker` with the platform `ocr_worker` role); the worker LOGIN
 remains deployment-owned.
 

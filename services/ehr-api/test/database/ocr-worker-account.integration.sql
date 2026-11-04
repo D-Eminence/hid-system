@@ -1,7 +1,7 @@
 \set ON_ERROR_STOP on
--- The OCR worker's workload account (0122). Rollback-only.
+-- The OCR worker's workload account (0106). Rollback-only.
 --
--- 0122 seeds the account hid:staging:ocr-worker and its platform ocr_worker
+-- 0106 seeds the account hid:staging:ocr-worker and its platform ocr_worker
 -- role, so the worker's commands stop answering 42501 Authorized OCR workload
 -- context is required for that subject (and only for it). Fixtures are
 -- inserted with session_replication_role = replica (no triggers or foreign-key
@@ -16,10 +16,10 @@
 -- passes the account check but claims nothing, which the last block accepts.
 begin;
 
--- 1. The seed, as 0122 makes it.
+-- 1. The seed, as 0106 makes it.
 do $$
 declare
-  worker_account constant uuid := '0c4e0122-0122-4000-8000-000000000001';
+  worker_account constant uuid := '0c4e0106-0106-4000-8000-000000000001';
 begin
   if (select count(*) from auth.accounts account_row
        where (account_row.id = worker_account or account_row.subject = 'hid:staging:ocr-worker')
@@ -29,16 +29,16 @@ begin
          and account_row.display_name = 'OCR worker' and account_row.source_system = 'hid-workload') <> 1
      or (select count(*) from auth.accounts account_row
           where account_row.id = worker_account or account_row.subject = 'hid:staging:ocr-worker') <> 1 then
-    raise exception 'the OCR worker account is not as 0122 seeds it';
+    raise exception 'the OCR worker account is not as 0106 seeds it';
   end if;
   if (select count(*) from auth.account_roles assignment
        where assignment.account_id = worker_account and assignment.revoked_at is null) <> 1
      or (select count(*) from auth.account_roles assignment
-          where assignment.id = '0c4e0122-0122-4000-8000-000000000002' and assignment.account_id = worker_account
+          where assignment.id = '0c4e0106-0106-4000-8000-000000000002' and assignment.account_id = worker_account
             and assignment.role_code = 'ocr_worker' and assignment.scope_type = 'platform'
             and assignment.membership_id is null and assignment.facility_id is null and assignment.granted_by is null
-            and assignment.revoked_at is null and assignment.grant_reason like '%migration 0122%') <> 1 then
-    raise exception 'the OCR worker account must hold exactly the platform ocr_worker role 0122 seeds';
+            and assignment.revoked_at is null and assignment.grant_reason like '%migration 0106%') <> 1 then
+    raise exception 'the OCR worker account must hold exactly the platform ocr_worker role 0106 seeds';
   end if;
   if (select array_agg(grant_row.permission_code order by grant_row.permission_code)
         from auth.role_permissions grant_row where grant_row.role_code = 'ocr_worker')
@@ -47,7 +47,7 @@ begin
   end if;
   -- The OCR API's subject (today's OCR_WORKER_SUBJECT) gets nothing.
   if exists (select 1 from auth.accounts where subject = 'hid:staging:ocr-api') then
-    raise exception '0122 must not create an account for hid:staging:ocr-api';
+    raise exception '0106 must not create an account for hid:staging:ocr-api';
   end if;
 end $$;
 
@@ -166,9 +166,9 @@ end $$;
 select pg_temp.account_kill_case('the seeded subject with its role revoked is refused',
   $sql$update auth.account_roles set revoked_at = clock_timestamp(),
          revoked_by = '0c4e1000-0000-4000-8000-000000000001', revocation_reason = 'ocr-account suite kill switch'
-   where id = '0c4e0122-0122-4000-8000-000000000002'$sql$);
+   where id = '0c4e0106-0106-4000-8000-000000000002'$sql$);
 select pg_temp.account_kill_case('the seeded subject with its account disabled is refused',
-  $sql$update auth.accounts set status = 'disabled' where id = '0c4e0122-0122-4000-8000-000000000001'$sql$);
+  $sql$update auth.accounts set status = 'disabled' where id = '0c4e0106-0106-4000-8000-000000000001'$sql$);
 do $$
 begin
   if not auth.account_has_active_role(auth.account_id_for_subject('hid:staging:ocr-worker'), 'ocr_worker') then
@@ -202,7 +202,7 @@ begin
     if (select count(*) from audit.events
          where action = 'ocr.worker.claim' and resource_id = job.id::text and outcome = 'success'
            and actor_type = 'workload' and actor_subject = 'hid:staging:ocr-worker'
-           and actor_account_id = '0c4e0122-0122-4000-8000-000000000001') <> 1 then
+           and actor_account_id = '0c4e0106-0106-4000-8000-000000000001') <> 1 then
       raise exception 'the authorized claim must write one audit row naming the worker account';
     end if;
   elsif job.status <> 'queued' or job.claim_token is not null then

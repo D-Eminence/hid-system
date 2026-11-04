@@ -95,7 +95,7 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0122",
+    "last": "0106",
     "count": 107,
     "files": [
       {
@@ -523,8 +523,8 @@
         "sha256": "bf68aaaca9e773fce6022a5241f32f35a9937cd9b496e04445b75022a43788c8"
       },
       {
-        "name": "0122_ocr_worker_account.sql",
-        "sha256": "9db9b1ff927caf108aba516afbf19a3d8af1697b86c978adc77c630b7e0df3e6"
+        "name": "0106_ocr_worker_account.sql",
+        "sha256": "a78f979774aed619c656990d0f0bc531c5eb00fd4998c5b7f00337ba156414d2"
       }
     ]
   },

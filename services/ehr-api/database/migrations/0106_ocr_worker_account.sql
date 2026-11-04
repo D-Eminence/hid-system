@@ -1,7 +1,6 @@
--- 0122 The OCR worker's workload account. Written on production's backend
--- (staging-novu-ci-20261005 at f11c9ec9, migrations 0001-0105 applied); 0106
--- through 0121 are claimed by other work, and this file uses and needs nothing
--- they add.
+-- 0106 The OCR worker's workload account. Written on production's backend
+-- (staging-novu-ci-20261005 at f11c9ec9, migrations 0001-0105 applied). It is
+-- the next migration after 0105 and uses and needs nothing added later.
 --
 -- Why. ocr.claim_worker_job (0014, last replaced by 0105) and the worker's
 -- other commands (0014, 0077) first check that app.actor_subject is the
@@ -42,7 +41,7 @@
 --    status to disabled), and the worker's next claim answers 42501 again:
 --      update auth.account_roles set revoked_at = clock_timestamp(),
 --             revoked_by = <an admin account id>, revocation_reason = '<8-500 characters>'
---       where id = '0c4e0122-0122-4000-8000-000000000002' and revoked_at is null;
+--       where id = '0c4e0106-0106-4000-8000-000000000002' and revoked_at is null;
 --
 -- What it does not do. A claim still only takes a job whose document's latest
 -- scan event is clean (0105), and production runs no scanner yet (0105's
@@ -50,9 +49,9 @@
 --
 -- 0. Preconditions (catalog reads and the role; each failure raises 55000 or
 --    42501 and nothing is applied): 0001-0105 applied (0105's
---    ehr.resolve_document_scan_target is the marker, else "0122: 0001-0105
+--    ehr.resolve_document_scan_target is the marker, else "0106: 0001-0105
 --    must be applied first"); not applied yet (neither seeded ID present, else
---    "0122: already applied"); the two helpers the worker's check relies on
+--    "0106: already applied"); the two helpers the worker's check relies on
 --    have the bodies 0002/0005 gave them (md5 of pg_proc.prosrc, the same pins
 --    as 0105), and ocr.claim_worker_job still checks the ocr_worker role
 --    through them; the columns written have their types and NOT NULLs;
@@ -73,14 +72,14 @@
 -- Old services on this schema: nothing reads the new rows except the
 -- worker's commands through the two helpers; today's worker image with
 -- today's OCR_WORKER_SUBJECT (hid:staging:ocr-api) still answers 42501.
--- Applied migrations 0001 through 0121 are immutable.
+-- Applied migrations 0001 through 0105 are immutable.
 
 -- 0. Preconditions.
 do $$
 declare
   mismatch text;
-  worker_account constant uuid := '0c4e0122-0122-4000-8000-000000000001';
-  worker_role_row constant uuid := '0c4e0122-0122-4000-8000-000000000002';
+  worker_account constant uuid := '0c4e0106-0106-4000-8000-000000000001';
+  worker_role_row constant uuid := '0c4e0106-0106-4000-8000-000000000002';
 begin
   -- a. Prerequisites: 0001-0105 (0105's scanner command is the marker).
   if to_regclass('auth.accounts') is null
@@ -91,12 +90,12 @@ begin
      or to_regprocedure('auth.account_has_active_role(uuid,text)') is null
      or to_regprocedure('ocr.claim_worker_job(text,integer)') is null
      or to_regprocedure('ehr.resolve_document_scan_target(text,text,text,text)') is null then
-    raise exception using errcode = '55000', message = '0122: 0001-0105 must be applied first';
+    raise exception using errcode = '55000', message = '0106: 0001-0105 must be applied first';
   end if;
   -- b. Not applied yet.
   if exists (select 1 from auth.accounts account_row where account_row.id = worker_account)
      or exists (select 1 from auth.account_roles assignment where assignment.id = worker_role_row) then
-    raise exception using errcode = '55000', message = '0122: already applied';
+    raise exception using errcode = '55000', message = '0106: already applied';
   end if;
   -- c. The bodies the worker's check relies on, as 0002 and 0005 left them
   -- (the pins 0105 uses), and the claim still checking ocr_worker through them.
@@ -116,7 +115,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0122: a function this migration relies on differs from 0001-0105: %s', mismatch);
+      message = format('0106: a function this migration relies on differs from 0001-0105: %s', mismatch);
   end if;
   -- d. The columns written or checked.
   select string_agg(format('%s.%s', expected.relation_name, expected.column_name), '; ') into mismatch
@@ -147,7 +146,7 @@ begin
                         and attribute_row.attnotnull = expected.not_null);
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0122: a column this migration relies on differs from 0001-0105: %s', mismatch);
+      message = format('0106: a column this migration relies on differs from 0001-0105: %s', mismatch);
   end if;
   -- e. The applier writes the two rows itself and runs the post-check.
   select string_agg(format('%s on %s', wanted.privilege, wanted.relation_name), '; ') into mismatch
@@ -160,7 +159,7 @@ begin
     mismatch := 'EXECUTE on auth.account_id_for_subject or auth.account_has_active_role (the post-check)';
   end if;
   if mismatch is not null then
-    raise exception using errcode = '42501', message = format('0122: %s lacks %s', current_user, mismatch);
+    raise exception using errcode = '42501', message = format('0106: %s lacks %s', current_user, mismatch);
   end if;
   -- f. The role the seed grants: active and granting exactly ocr.job.process
   -- (0013), so the worker gets nothing more.
@@ -169,7 +168,7 @@ begin
            from auth.role_permissions grant_row where grant_row.role_code = 'ocr_worker')
         is distinct from array['ocr.job.process'] then
     raise exception using errcode = '55000',
-      message = '0122: the ocr_worker role must exist, be active and grant exactly ocr.job.process';
+      message = '0106: the ocr_worker role must exist, be active and grant exactly ocr.job.process';
   end if;
 end
 $$;
@@ -177,11 +176,11 @@ $$;
 -- 1. The seed (S1): the worker's account and its platform role.
 do $$
 declare
-  worker_account constant uuid := '0c4e0122-0122-4000-8000-000000000001';
-  worker_role_row constant uuid := '0c4e0122-0122-4000-8000-000000000002';
+  worker_account constant uuid := '0c4e0106-0106-4000-8000-000000000001';
+  worker_role_row constant uuid := '0c4e0106-0106-4000-8000-000000000002';
   worker_subject constant text := 'hid:staging:ocr-worker';
-  grant_text constant text := 'Owner approval in the 0122 release declaration: the OCR worker workload '
-    || '(services/ocr-worker, OCR_WORKER_SUBJECT). Seeded by migration 0122 outside '
+  grant_text constant text := 'Owner approval in the 0106 release declaration: the OCR worker workload '
+    || '(services/ocr-worker, OCR_WORKER_SUBJECT). Seeded by migration 0106 outside '
     || 'auth.admin_change_platform_role, which refuses this role.';
   others integer;
 begin
@@ -197,7 +196,7 @@ begin
                        and account_row.password_hash is null and account_row.password_algorithm is null
                        and account_row.disabled_until is null and account_row.source_system = 'hid-workload') then
     raise exception using errcode = '55000',
-      message = format('0122: auth.accounts already holds %s or %s, not as this file seeds it', worker_account,
+      message = format('0106: auth.accounts already holds %s or %s, not as this file seeds it', worker_account,
         worker_subject);
   end if;
 
@@ -213,12 +212,12 @@ begin
                        and assignment.membership_id is null and assignment.facility_id is null
                        and assignment.granted_by is null and assignment.revoked_at is null) then
     raise exception using errcode = '55000',
-      message = '0122: the OCR worker account must hold exactly one active role, the platform ocr_worker row this file seeds';
+      message = '0106: the OCR worker account must hold exactly one active role, the platform ocr_worker row this file seeds';
   end if;
   others := (select count(distinct assignment.account_id) from auth.account_roles assignment
               where assignment.role_code = 'ocr_worker' and assignment.revoked_at is null
                 and assignment.account_id <> worker_account);
-  raise notice '0122: OCR worker account %, subject %; other accounts holding ocr_worker: %',
+  raise notice '0106: OCR worker account %, subject %; other accounts holding ocr_worker: %',
     worker_account, worker_subject, others;
 end
 $$;
@@ -229,7 +228,7 @@ do $$
 begin
   if not coalesce(auth.account_has_active_role(auth.account_id_for_subject('hid:staging:ocr-worker'), 'ocr_worker'),
                   false) then
-    raise exception using errcode = '55000', message = '0122: not as this file makes it: the worker check fails';
+    raise exception using errcode = '55000', message = '0106: not as this file makes it: the worker check fails';
   end if;
 end
 $$;
