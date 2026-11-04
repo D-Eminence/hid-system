@@ -174,3 +174,8 @@ output "error_reporting_environment_names" {
     for name, environment in local.container_environment : name => sort([for key in keys(environment) : key if startswith(key, "SENTRY_")])
   }
 }
+
+output "workload_caller_policy" {
+  description = "Issuer caller rules as subject => audiences, for tests; no role ARNs, not exported by the root module. The issuer refuses more than eight rules at load."
+  value       = { for name, caller in local.managed_callers : caller.subject => caller.audiences }
+}
