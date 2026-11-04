@@ -278,3 +278,9 @@ sentry_dsns = {
   pharmacy-api        = "https://275126d38e2c03a57cb709129a6ea86c@o4512373598519296.ingest.de.sentry.io/4512373635219536"
   support-api         = "https://275126d38e2c03a57cb709129a6ea86c@o4512373598519296.ingest.de.sentry.io/4512373635219536"
 }
+
+# Document virus scanning: this account's Lambda limit is 10 until AWS raises
+# it, and AWS refuses any reservation below its minimum unreserved, so the
+# scan bridge reserves nothing for now (its queue trigger still caps it at 2).
+# Set back to 2 once lambda get-account-settings shows 102 or more.
+document_scan_bridge_reserved_concurrency = -1
