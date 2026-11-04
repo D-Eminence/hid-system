@@ -104,3 +104,25 @@ test('production issuer binds the stage, role and subject to production', async 
     WORKLOAD_API_ID: 'abc123', WORKLOAD_SIGNING_KEY_ID: keyId,
     WORKLOAD_CALLER_POLICY_JSON: JSON.stringify([]) }));
 });
+
+test('caller policy holds up to eight callers and refuses a ninth at load', () => {
+  const keyId = 'arn:aws:kms:eu-west-1:123456789012:key/12345678-1234-4234-8234-123456789abc';
+  const names = ['identity-api', 'ehr-api', 'lab-api', 'pharmacy-api', 'ocr-api', 'outreach-api', 'document-scanner', 'spare-caller', 'ninth-caller'];
+  const environment = count => ({
+    HID_DEPLOYMENT_ENV: 'staging',
+    WORKLOAD_ISSUER_URL: 'https://abc123.execute-api.eu-west-1.amazonaws.com/staging',
+    WORKLOAD_API_ID: 'abc123',
+    WORKLOAD_SIGNING_KEY_ID: keyId,
+    WORKLOAD_CALLER_POLICY_JSON: JSON.stringify(names.slice(0, count).map(name => ({
+      role_arn: `arn:aws:iam::123456789012:role/hid-staging-${name}-role`,
+      subject: `hid:staging:${name}`,
+      audiences: ['hid-identity-api'],
+    }))),
+  });
+  // Six callers are configured today; the seventh is the document scanner.
+  assert.equal(issuerConfiguration(environment(6)).rules.length, 6);
+  assert.equal(issuerConfiguration(environment(7)).rules.length, 7);
+  assert.equal(issuerConfiguration(environment(8)).rules.length, 8);
+  assert.throws(() => issuerConfiguration(environment(9)), /Invalid workload caller policy/);
+  assert.throws(() => issuerConfiguration(environment(0)), /Invalid workload caller policy/);
+});
