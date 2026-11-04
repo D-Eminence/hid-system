@@ -49,11 +49,25 @@ def resolved_inputs(index, meta, lease):
         'release_lease_holder':lease.holder,'release_lease_generation':lease.generation}
 
 
+# Read-only values that AWS moves forward by itself between two plans. Terraform
+# never sets them, so they cannot change what an apply does, but they appear in
+# both `before` and (for an in-place update) `after`. Keep this list explicit.
+SELF_MOVING_ATTRIBUTES = {'aws_db_instance': ('latest_restorable_time',)}
+
+
 def fingerprint(plan):
     # Data-source refreshes and lease identities are reads, not infrastructure changes.
-    changes = [{k:r[k] for k in ('address','mode','type','change') if k in r}
-        for r in plan.get('resource_changes',[]) if r.get('mode') == 'managed'
-        and r['change']['actions'] != ['no-op']]
+    changes = []
+    for r in plan.get('resource_changes',[]):
+        if r.get('mode') != 'managed' or r['change']['actions'] == ['no-op']:
+            continue
+        row = copy.deepcopy({k:r[k] for k in ('address','mode','type','change') if k in r})
+        for side in ('before','after'):
+            values = row['change'].get(side)
+            if isinstance(values,dict):
+                for key in SELF_MOVING_ATTRIBUTES.get(row.get('type'),()):
+                    values.pop(key,None)
+        changes.append(row)
     return sha(canonical(sorted(changes,key=lambda r:r['address'])))
 
 
