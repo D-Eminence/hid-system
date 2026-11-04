@@ -60,3 +60,38 @@ output "database_multi_az_requested" {
   description = "Whether the database is configured with a standby copy in a second zone."
   value       = var.enable_database ? aws_db_instance.main[0].multi_az : false
 }
+
+output "malware_protection_plan_arn" {
+  description = "GuardDuty Malware Protection plan on clinical/objects/; empty while enable_document_malware_protection is off."
+  value       = try(aws_guardduty_malware_protection_plan.documents[0].arn, "")
+}
+
+output "guardduty_malware_role_arn" {
+  description = "Role the GuardDuty plan uses to read and tag clinical/objects/; empty while off."
+  value       = local.guardduty_malware_role_arn
+}
+
+output "document_scan_review" {
+  description = "Rendered plan, plan-role and bucket-policy statements for tests; no secrets, not exported by the root module."
+  value = {
+    plan = {
+      count           = length(aws_guardduty_malware_protection_plan.documents)
+      object_prefixes = try(aws_guardduty_malware_protection_plan.documents[0].protected_resource[0].s3_bucket[0].object_prefixes, [])
+      tagging         = try(aws_guardduty_malware_protection_plan.documents[0].actions[0].tagging[0].status, null)
+    }
+    notification_eventbridge = try(aws_s3_bucket_notification.documents[0].eventbridge, null)
+    plan_role_statements = [for statement in try(data.aws_iam_policy_document.guardduty_malware_protection[0].statement, []) : {
+      sid        = statement.sid
+      actions    = sort(statement.actions)
+      resources  = sort(statement.resources)
+      conditions = [for condition in coalesce(statement.condition, []) : "${condition.test}:${condition.variable}"]
+    }]
+    bucket_policy_statements = [for statement in data.aws_iam_policy_document.documents.statement : {
+      sid        = statement.sid
+      effect     = statement.effect
+      actions    = sort(statement.actions)
+      resources  = sort(statement.resources)
+      conditions = { for condition in coalesce(statement.condition, []) : "${condition.test}:${condition.variable}" => sort(condition.values) }
+    }]
+  }
+}

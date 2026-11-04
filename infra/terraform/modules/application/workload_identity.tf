@@ -3,13 +3,21 @@ locals {
   # browser/runtime configuration must not invalidate tokens for rolling tasks.
   workload_identity_environment = var.environment
   managed_identity_enabled      = var.enable_runtime && contains(["staging", "production"], var.environment)
-  managed_callers = {
+  # The six ECS callers, plus the document scan bridge Lambda while document
+  # scanning is on (document_scanning.tf). The issuer accepts at most eight.
+  managed_callers = merge({
     for name, requests in(local.managed_identity_enabled ? local.workload_token_requests : {}) : name => {
       role_arn  = aws_iam_role.task[name].arn
       subject   = "hid:${local.workload_identity_environment}:${name}"
       audiences = distinct([for request in requests : request.audience])
     }
-  }
+    }, local.document_scanner_enabled ? {
+    document-scanner = {
+      role_arn  = aws_iam_role.document_scan_bridge[0].arn
+      subject   = local.document_scan_subject
+      audiences = ["hid-identity-api"]
+    }
+  } : {})
 }
 
 # Environment-specific asymmetric signing key.
@@ -128,6 +136,15 @@ resource "aws_lambda_function" "workload_issuer" {
       WORKLOAD_ISSUER_URL         = local.managed_issuer_url
       WORKLOAD_API_ID             = aws_api_gateway_rest_api.workload_issuer[0].id
       WORKLOAD_CALLER_POLICY_JSON = jsonencode(values(local.managed_callers))
+    }
+  }
+
+  lifecycle {
+    precondition {
+      # issuer.mjs refuses a policy of more than eight callers at load, which
+      # would stop every service token; refuse to plan one instead.
+      condition     = length(local.managed_callers) >= 1 && length(local.managed_callers) <= 8
+      error_message = "The workload issuer accepts one to eight callers."
     }
   }
 

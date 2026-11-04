@@ -29,7 +29,7 @@ export function issuerConfiguration(environment) {
   const key = /^arn:aws:kms:([a-z0-9-]+):(\d{12}):key\/([a-f0-9-]{36})$/.exec(keyId ?? '');
   if (!key || parsed.hostname.split('.')[2] !== key[1]) throw new Error('Issuer KMS binding is invalid');
   const policy = JSON.parse(environment.WORKLOAD_CALLER_POLICY_JSON ?? 'null');
-  if (!Array.isArray(policy) || policy.length < 1 || policy.length > 6) throw new Error('Invalid workload caller policy');
+  if (!Array.isArray(policy) || policy.length < 1 || policy.length > 8) throw new Error('Invalid workload caller policy');
   const seen = new Set();
   const subjects = new Set();
   const rules = policy.map(rule => {

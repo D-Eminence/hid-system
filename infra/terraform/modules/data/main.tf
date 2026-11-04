@@ -130,11 +130,86 @@ data "aws_iam_policy_document" "documents" {
       values   = ["false"]
     }
   }
+
+  # Stage 5 tag enforcement (document_scan_enforce_tags, off by default), on
+  # clinical/objects/ only; see malware_protection.tf. Off adds nothing, so the
+  # policy stays DenyInsecureTransport alone.
+  dynamic "statement" {
+    for_each = local.scan_tag_statements
+    content {
+      sid       = statement.value.sid
+      effect    = "Deny"
+      actions   = statement.value.actions
+      resources = [local.scanned_object_arns]
+      principals {
+        type        = "*"
+        identifiers = ["*"]
+      }
+      # StringNotEquals also matches an object with no scan tag at all.
+      condition {
+        test     = statement.value.tag_test
+        variable = "s3:ExistingObjectTag/GuardDutyMalwareScanStatus"
+        values   = [statement.value.tag_value]
+      }
+      condition {
+        test     = "ArnNotEquals"
+        variable = "aws:PrincipalArn"
+        values   = statement.value.exempt
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.document_scan_enforce_tags ? [1] : []
+    content {
+      sid       = "DenyScanTagWrites"
+      effect    = "Deny"
+      actions   = ["s3:PutObjectTagging", "s3:PutObjectVersionTagging", "s3:DeleteObjectTagging", "s3:DeleteObjectVersionTagging"]
+      resources = [local.scanned_object_arns]
+      principals {
+        type        = "*"
+        identifiers = ["*"]
+      }
+      condition {
+        test     = "ArnNotEquals"
+        variable = "aws:PrincipalArn"
+        values   = compact([local.guardduty_malware_role_arn])
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.document_scan_enforce_tags ? [1] : []
+    content {
+      sid       = "DenyTaggingOnUpload"
+      effect    = "Deny"
+      actions   = ["s3:PutObject"]
+      resources = [local.scanned_object_arns]
+      principals {
+        type        = "*"
+        identifiers = ["*"]
+      }
+      condition {
+        test     = "Null"
+        variable = "s3:RequestObjectTagKeys"
+        values   = ["false"]
+      }
+    }
+  }
 }
 
 resource "aws_s3_bucket_policy" "documents" {
   bucket = aws_s3_bucket.documents.id
   policy = data.aws_iam_policy_document.documents.json
+
+  lifecycle {
+    precondition {
+      # Enforcing without GuardDuty tagging, or without the ehr-api exemption,
+      # would refuse every clinical read and every upload completion.
+      condition     = !var.document_scan_enforce_tags || (var.enable_document_malware_protection && length(var.document_scan_read_exempt_role_arns) > 0)
+      error_message = "document_scan_enforce_tags needs enable_document_malware_protection and the ehr-api task role in document_scan_read_exempt_role_arns."
+    }
+  }
 }
 
 # Pages upload documents straight to S3 with the presigned PUT link from

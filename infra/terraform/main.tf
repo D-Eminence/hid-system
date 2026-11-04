@@ -32,6 +32,12 @@ module "data" {
   database_workload_names      = local.database_workload_names
   use_existing_secrets         = var.use_existing_secrets
   document_upload_origins      = local.document_upload_origins
+
+  # Document virus scanning. The exemption is a value from module.application,
+  # with no resource cycle: the bucket policy waits for the ehr-api task role.
+  enable_document_malware_protection  = var.enable_document_malware_protection
+  document_scan_enforce_tags          = var.document_scan_enforce_tags
+  document_scan_read_exempt_role_arns = compact([module.application.ehr_task_role_arn])
 }
 
 # 3. Asynchronous domain events and notification delivery.
@@ -158,6 +164,12 @@ module "application" {
   web_push_enabled          = var.web_push_enabled
   web_push_vapid_public_key = var.web_push_vapid_public_key
   web_push_subject          = var.web_push_subject
+
+  # Document virus scanning: the GuardDuty result bridge. Off adds nothing.
+  enable_document_scanning        = var.enable_document_scanning
+  document_scan_bridge_mode       = var.document_scan_bridge_mode
+  document_scan_reconcile_enabled = var.document_scan_reconcile_enabled
+  malware_protection_plan_arn     = module.data.malware_protection_plan_arn
 }
 
 # 5. Private Bedrock access for the EHR patient-record chat. Production sets

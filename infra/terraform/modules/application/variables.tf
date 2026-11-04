@@ -412,3 +412,38 @@ variable "sentry_dsns" {
   type        = map(string)
   default     = {}
 }
+
+# Document virus scanning (GuardDuty result bridge). Off by default.
+variable "enable_document_scanning" {
+  description = "Create the GuardDuty result bridge: results rule, queue and DLQ, the bridge Lambda, the seventh workload caller, the reconcile schedule and the alarms. Needs malware_protection_plan_arn."
+  type        = bool
+  default     = false
+}
+
+variable "document_scan_bridge_mode" {
+  description = "observe: resolve and log each mapped result, write nothing and start no scan. write: append scan events and run reconcile scans."
+  type        = string
+  default     = "observe"
+  validation {
+    condition     = contains(["observe", "write"], var.document_scan_bridge_mode)
+    error_message = "document_scan_bridge_mode must be observe or write."
+  }
+}
+
+variable "document_scan_reconcile_enabled" {
+  description = "Enable the 15-minute reconcile schedule (created disabled)."
+  type        = bool
+  default     = false
+}
+
+variable "malware_protection_plan_arn" {
+  description = "GuardDuty Malware Protection plan on the documents bucket; empty while protection is off."
+  type        = string
+  default     = ""
+}
+
+variable "document_scan_bridge_reserved_concurrency" {
+  description = "Concurrent executions reserved for the scan bridge: 2, or -1 for none while the account's Lambda limit is too low to reserve any. The queue trigger caps the bridge at 2 either way."
+  type        = number
+  default     = 2
+}

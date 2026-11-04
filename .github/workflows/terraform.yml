@@ -41,7 +41,7 @@ jobs:
         working-directory: infra/terraform
       - run: python -m unittest discover -s tests -p 'test_production*.py'
         working-directory: infra/terraform
-      - run: node --test tests/workload-issuer.test.mjs
+      - run: node --test tests/workload-issuer.test.mjs tests/document-scan-bridge.test.mjs
         working-directory: infra/terraform
       - run: terraform fmt -check -recursive
         working-directory: infra/terraform
