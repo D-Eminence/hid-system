@@ -260,3 +260,21 @@ ecr_tagged_image_expiry_days   = 90
 # switch is online; without apply_immediately RDS makes it in the next
 # maintenance window.
 database_multi_az = true
+
+# Backend error reporting (Sentry, EU project hid-backend; owner, 4 Nov 2026).
+# A DSN is a public client key, not a secret. Every backend service reports
+# scrubbed errors only (error type, stack, route template). The nginx gateway
+# runs no Sentry code.
+sentry_dsns = {
+  ehr-api             = "https://275126d38e2c03a57cb709129a6ea86c@o4512373598519296.ingest.de.sentry.io/4512373635219536"
+  event-dispatcher    = "https://275126d38e2c03a57cb709129a6ea86c@o4512373598519296.ingest.de.sentry.io/4512373635219536"
+  identity-api        = "https://275126d38e2c03a57cb709129a6ea86c@o4512373598519296.ingest.de.sentry.io/4512373635219536"
+  lab-api             = "https://275126d38e2c03a57cb709129a6ea86c@o4512373598519296.ingest.de.sentry.io/4512373635219536"
+  notification-api    = "https://275126d38e2c03a57cb709129a6ea86c@o4512373598519296.ingest.de.sentry.io/4512373635219536"
+  notification-worker = "https://275126d38e2c03a57cb709129a6ea86c@o4512373598519296.ingest.de.sentry.io/4512373635219536"
+  ocr-api             = "https://275126d38e2c03a57cb709129a6ea86c@o4512373598519296.ingest.de.sentry.io/4512373635219536"
+  ocr-worker          = "https://275126d38e2c03a57cb709129a6ea86c@o4512373598519296.ingest.de.sentry.io/4512373635219536"
+  outreach-api        = "https://275126d38e2c03a57cb709129a6ea86c@o4512373598519296.ingest.de.sentry.io/4512373635219536"
+  pharmacy-api        = "https://275126d38e2c03a57cb709129a6ea86c@o4512373598519296.ingest.de.sentry.io/4512373635219536"
+  support-api         = "https://275126d38e2c03a57cb709129a6ea86c@o4512373598519296.ingest.de.sentry.io/4512373635219536"
+}
