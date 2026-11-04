@@ -3296,8 +3296,14 @@ Switch: `PATIENT_ENTRIES_ENABLED` (ehr-api, default `true` since the owner's dec
 - neither chat reads `ehr.patient_entries`, so the image may run before 0116
   is applied.
 
-Turn it on only after 0116 is applied and the website reads the new chat
-source kind (see "Before turning it on").
+Release order (required, because the switch is on by default and production
+sets no key, so it goes live the moment this ehr-api image ships): 0116 is
+applied first, then the health website release whose chat parser accepts the
+kind `patient_entry` (branch `claude/patient-entries-website`) is live in
+production, and only then is this ehr-api image released. If this image has
+to ship before that website release, production sets
+`PATIENT_ENTRIES_ENABLED=false` for ehr-api until the website is live, then
+removes the key. See "Release order checks".
 
 ### Add a record
 
@@ -3444,13 +3450,22 @@ records-processing cover answers only for `healthcare-operations`; the
 staff read and the staff chat take `direct-care` only, so it never opens
 these records.
 
-### Before turning it on
+### Release order checks
+
+With the switch on by default there is no separate switch-on step: releasing
+this ehr-api image is what turns it on. Each check below must hold before the
+image is released to production.
 
 1. The owner signs the 0116 declaration and it is applied.
-2. The website's chat parser (`packages/contracts/src/stagingChat.ts`)
-   accepts the kind `patient_entry`; without it one such source makes the
-   chat answer and every saved conversation that cites it unreadable, for
-   the patient and for staff.
+2. Deploy order: the health website release whose chat parser
+   (`packages/contracts/src/stagingChat.ts`) accepts the kind
+   `patient_entry` (branch `claude/patient-entries-website`) is live in
+   production before this ehr-api image. The parser on the website's main
+   today rejects that kind ("Record chat returned invalid sources."), so
+   releasing this image first makes every chat answer, and every saved
+   conversation, that cites a record a patient added unreadable, for the
+   patient and for staff. If the image must ship first, production sets
+   `PATIENT_ENTRIES_ENABLED=false` for ehr-api until the website is live.
 3. The website hides the photo step until photos and files are served (it
    reads `patientEntries` as "records and uploads served"; a picked photo
    would fail at its upload link).
