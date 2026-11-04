@@ -103,7 +103,9 @@ export function evidenceQuery(audience: EvidenceAudience): string {
   q = replaceOnce(q, ",'onsetAt',d.onset_at,'abatementAt',d.abatement_at,'notes',d.notes)", ",'onsetAt',d.onset_at,'abatementAt',d.abatement_at)");
   q = replaceOnce(q, "from ehr.diagnoses d where d.verification_status<>'entered_in_error'", "from ehr.diagnoses d where d.verification_status='confirmed'");
   // Prescriptions: current or finished ones from a completed visit, without free-text instructions.
-  q = replaceOnce(q, "jsonb_build_object('_encounterId',p.encounter_id,", "jsonb_build_object('_encounterId',p.encounter_id,'_encounterStatus',e.status,");
+  // The medicine's code goes to the policy (an ATC L01/L02 code is sensitive) as internal keys, which it strips.
+  q = replaceOnce(q, "jsonb_build_object('_encounterId',p.encounter_id,", "jsonb_build_object('_encounterId',p.encounter_id,'_encounterStatus',e.status,"
+    + "'_medicationCodeSystem',p.medication_code_system,'_medicationCode',p.medication_code,");
   q = replaceOnce(q, ",'frequency',p.frequency,'instructions',p.instructions,", ",'frequency',p.frequency,");
   q = replaceOnce(q, "from ehr.prescriptions p where p.status not in ('draft','entered_in_error')", `from ehr.prescriptions p ${completedEncounter('p')} where p.status in ('active','on_hold','completed')`);
   // Test requests: current or finished ones from a completed visit, without the reason or priority; no sensitive test.

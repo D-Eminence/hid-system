@@ -221,6 +221,29 @@ try {
     assert.equal((await staffLabRead('50000000-0000-4000-8000-000000000001')).length,1,'Restricted Lab role reads authorized staff released results');
     assert.equal((await staffLabRead(a)).length,0,'Staff Lab collection excludes another patient without consent');
     assert.equal((await staffLabRead('50000000-0000-4000-8000-000000000001','10000000-0000-4000-8000-000000000003')).length,0,'Staff Lab collection retains facility isolation');
+    // Patient chat part 2 (0107): the patient reads a result only from a finished visit. The fixture's
+    // encounter is still in progress, so the result is withheld until the clinician completes the visit.
+    const labPatient='50000000-0000-4000-8000-000000000001',labResult='f2000000-0000-4000-8000-000000000002';
+    const patientLabRead=async(patient=labPatient)=>{
+      await labRuntime.query('begin');
+      try {
+        await labRuntime.query(`select set_config('app.actor_subject','patient:test-person',true),set_config('app.account_id','20000000-0000-4000-8000-000000000002',true),
+          set_config('app.patient_id','50000000-0000-4000-8000-000000000001',true),set_config('app.session_id',$1,true),
+          set_config('app.self_authorized_until',$2,true),set_config('app.correlation_id','synthetic-lab-evidence-read',true),
+          set_config('app.purpose_of_use','patient-self',true),set_config('app.facility_id','',true),set_config('app.membership_id','',true)`,[labPatientSession,new Date(Date.now()+30000).toISOString()]);
+        return (await labRuntime.query(PATIENT_SELF_LAB_QUERY,[patient,''])).rows;
+      } finally {await labRuntime.query('rollback');}
+    };
+    // Test-only edits of the fixture (as the disposable cluster's superuser, triggers off), each undone after its case.
+    const fixtureEdit=sql=>admin.query(`begin;set local session_replication_role=replica;${sql};commit;`);
+    assert.equal((await patientLabRead()).length,0,'A result from a visit still in progress is withheld from the patient');
+    assert.equal((await staffLabRead(labPatient)).length,1,'Staff keep the result of an open visit');
+    await preparedBatch(admin,`begin;select set_config('app.actor_subject','staff:test-clinician',true),
+      set_config('app.membership_id','40000000-0000-4000-8000-000000000001',true),
+      set_config('app.facility_id','10000000-0000-4000-8000-000000000002',true),
+      set_config('app.correlation_id','synthetic-lab-visit-completion',true),set_config('app.purpose_of_use','direct-care',true),
+      set_config('app.change_reason','Synthetic encounter completion',true);
+      update ehr.encounters set status='completed',ended_at=clock_timestamp() where id='80000000-0000-4000-8000-000000000001';commit;`);
     await labRuntime.query('begin');
     await labRuntime.query(`select set_config('app.actor_subject','patient:test-person',true),set_config('app.account_id','20000000-0000-4000-8000-000000000002',true),
       set_config('app.patient_id','50000000-0000-4000-8000-000000000001',true),set_config('app.session_id',$1,true),
@@ -228,9 +251,59 @@ try {
       set_config('app.purpose_of_use','patient-self',true),set_config('app.facility_id','',true),set_config('app.membership_id','',true)`,[labPatientSession,new Date(Date.now()+30000).toISOString()]);
     const result=(await labRuntime.query(PATIENT_SELF_LAB_QUERY,['50000000-0000-4000-8000-000000000001',''])).rows;
     assert.equal(result.length,1);assert.equal(result[0].fields.numericValue,'12.7');assert.equal(result[0].fields.unit,'g/dL');
+    assert.equal(result[0].fields._discussed,false,'lab-api tells ehr-api the result is not marked discussed');
     assert.equal((await labRuntime.query(PATIENT_SELF_LAB_QUERY,[a,''])).rows.length,0,'Other patient cannot be selected by changing SQL parameter');
     assert.equal((await labRuntime.query("select has_table_privilege(current_user,'ehr.clinical_notes','SELECT') allowed")).rows[0].allowed,false);
+    assert.equal((await labRuntime.query("select count(*)::int n from lab.work_items")).rows[0].n,0,'The patient session reads no work item itself');
+    for(const sql of ['select 1 from lab.result_discussion_events',
+      `insert into lab.result_discussion_events(result_id) values('${labResult}')`])
+      await assert.rejects(labRuntime.query(`savepoint s;${sql}`).finally(()=>labRuntime.query('rollback to savepoint s')),e=>e.code==='42501',
+        'The Lab runtime role cannot touch the discussion events directly');
     await labRuntime.query('rollback');
+    // A cancelled visit (encounter or request) keeps the result out of the patient chat; staff keep it.
+    for(const [edit,undo,why] of [
+      [`update ehr.encounters set status='cancelled' where id='80000000-0000-4000-8000-000000000001'`,
+       `update ehr.encounters set status='completed' where id='80000000-0000-4000-8000-000000000001'`,'cancelled encounter'],
+      [`update ehr.lab_requests set status='cancelled' where id='f1000000-0000-4000-8000-000000000001'`,
+       `update ehr.lab_requests set status='active' where id='f1000000-0000-4000-8000-000000000001'`,'cancelled request'],
+      [`update ehr.lab_requests set status='entered_in_error' where id='f1000000-0000-4000-8000-000000000001'`,
+       `update ehr.lab_requests set status='active' where id='f1000000-0000-4000-8000-000000000001'`,'request entered in error'],
+    ]) {
+      await fixtureEdit(edit);
+      try {
+        assert.equal((await patientLabRead()).length,0,'Result withheld after a '+why);
+        assert.equal((await staffLabRead(labPatient)).length,1,'Staff keep the result after a '+why);
+      } finally {await fixtureEdit(undo);}
+    }
+    assert.equal((await patientLabRead()).length,1,'The result is back once the visit is finished again');
+    // A sensitive test, or a critical result, reaches the patient only while its released version is marked discussed.
+    const discussionEvent=(eventNo,kind)=>admin.query(`insert into lab.result_discussion_events(result_id,result_version,patient_id,
+      result_facility_id,event_no,kind,reason_code,reason,actor_account_id,actor_membership_id,actor_facility_id,idempotency_key,request_sha256,correlation_id)
+      select rel.result_id,rel.result_version,rel.patient_id,rel.facility_id,$1::integer,$2::text,
+        case when $2::text='withdrawn' then 'not_yet_discussed' end,case when $2::text='withdrawn' then 'Synthetic withdrawal reason' end,
+        $3::uuid,$4::uuid,rel.facility_id,'synthetic-discussion-key-'||$1::integer::text||'-'||$5::text,repeat('a',64),'synthetic-discussion-runtime'
+      from lab.result_releases rel where rel.result_id=$6::uuid order by rel.result_version desc limit 1`,[eventNo,kind,verifier,verifierMembership,randomUUID(),labResult]);
+    let eventNo=0;
+    for(const [edit,undo,why] of [
+      [`update lab.work_item_requested_tests set name='HIV 1/2 antibody' where id='f1000000-0000-4000-8000-000000000006'`,
+       `update lab.work_item_requested_tests set name='Haemoglobin' where id='f1000000-0000-4000-8000-000000000006'`,'sensitive test'],
+      // The released version (2) is the one judged; it was recorded 'normal'.
+      [`update lab.result_revisions set abnormal_flag='critical_candidate' where result_id='${labResult}' and version=2`,
+       `update lab.result_revisions set abnormal_flag='normal' where result_id='${labResult}' and version=2`,'critical result'],
+    ]) {
+      await fixtureEdit(edit);
+      try {
+        assert.equal((await patientLabRead()).length,0,'An unmarked '+why+' is withheld from the patient');
+        assert.equal((await staffLabRead(labPatient)).length,1,'Staff keep an unmarked '+why);
+        await discussionEvent(++eventNo,'discussed');
+        const marked=await patientLabRead();
+        assert.equal(marked.length,1,'A '+why+' marked discussed reaches the patient');
+        assert.equal(marked[0].fields._discussed,true);
+        await discussionEvent(++eventNo,'withdrawn');
+        assert.equal((await patientLabRead()).length,0,'A withdrawn mark withholds the '+why+' again');
+      } finally {await fixtureEdit(undo);}
+    }
+    assert.equal((await patientLabRead())[0]?.fields._discussed,false,'An ordinary result stays visible with the mark withdrawn');
     await preparedBatch(admin,`begin;select set_config('app.actor_subject','staff:synthetic-evidence-verifier',true),
       set_config('app.membership_id',$1::text,true),set_config('app.facility_id','10000000-0000-4000-8000-000000000002',true),
       set_config('app.correlation_id','synthetic-result-invalidation',true),set_config('app.purpose_of_use','direct-care',true);`,[verifierMembership]);
@@ -305,7 +378,8 @@ try {
   const {labWorkListRuntimeChecks}=await import('./lab-work-list-runtime-checks.mjs');
   const labWorkList=await labWorkListRuntimeChecks({admin,connect,password});
   console.log(JSON.stringify({passed:true,restricted_login:true,legacy_checks:15,labWorkList,
-    evidence_checks:['typed imports','patient-reported provenance','draft exclusion','cross-patient vectors','restricted Lab released results','staff Lab patient and facility isolation','exact result invalidation','server-set record origin'],
+    evidence_checks:['typed imports','patient-reported provenance','draft exclusion','cross-patient vectors','restricted Lab released results',
+      'Lab results from finished visits only','discussed mark on sensitive and critical results','staff Lab patient and facility isolation','exact result invalidation','server-set record origin'],
     conversation_checks:['bounded context','patient isolation','clear generation','current source bindings','stale inherited reply withheld'],customer_data:false}));
 } finally {
   await runtime?.end().catch(()=>{}); await admin?.end().catch(()=>{});

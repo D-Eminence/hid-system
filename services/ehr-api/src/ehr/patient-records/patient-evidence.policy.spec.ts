@@ -1,6 +1,7 @@
 import { LAB_CORRECTING, PATIENT_FIELDS, LOINC_SYSTEM_SQL_PATTERN, SENSITIVE_LOINC_CODES, SENSITIVE_TEST_SQL_PATTERN, VITAL_FIELDS, ageYears, isSensitiveTest, patientEvidence, redactIdentifiers,
   type PatientProfileInput } from './patient-evidence.policy';
 import { evidence, type Evidence, type SourceKind } from './patient-evidence.types';
+import { RESULT_LINE, sourceView } from './patient-chat-safety';
 
 // Fictional patient and records only.
 const profile: PatientProfileInput = { firstName: 'Adaeze', lastName: 'Okafor', fullName: 'Adaeze Okafor',
@@ -453,5 +454,56 @@ describe('Second review: the date of birth, without catching clinical numbers (A
       expect([text, r(text)]).toEqual([text, text.replace(/(born on |born |DOB: |Date of birth is |dob ).*/, '$1[date of birth removed]')]);
     expect(r('seen 1990-03-12T08:30:00Z, and 12/03/1990 noted')).toBe('seen [date of birth removed], and [date of birth removed] noted');
     expect(r('BP 120/80 on 12/03/2024')).toBe('BP 120/80 on 12/03/2024');
+  });
+});
+
+describe('Patient chat part 2: the "Discussed with the patient" mark on Lab results (0107)', () => {
+  const lab = (test: string, more: Record<string, unknown> = {}, codeSystem = 'LOCAL', code = 'X1') => record('lab_result', { test, codeSystem,
+    code, specimen: 'Blood', resultType: 'text', textValue: 'Synthetic value', recordedFlag: 'normal', releasedAt: '2026-10-01T10:00:00.000Z',
+    verification: 'released', ...more }, { title: test });
+
+  it('keeps a sensitive result once lab-api says it is discussed, without the internal mark', () => {
+    const out = one(lab('HIV 1/2 antibody', { _discussed: true }));
+    expect(out.fields).toMatchObject({ test: 'HIV 1/2 antibody', textValue: 'Synthetic value' });
+    expect('_discussed' in out.fields).toBe(false);
+    expect(out.content).not.toContain('_discussed');
+    expect(out.content).not.toContain('discussed');
+    const view = sourceView(out);
+    expect(JSON.stringify(view)).not.toMatch(/discussed/i);
+    expect(view.notices).toEqual([RESULT_LINE]);
+    // The same by LOINC code, whatever the display text.
+    expect(clean([lab('Synthetic screen', { _discussed: true }, 'http://loinc.org', '75622-1')])).toHaveLength(1);
+  });
+
+  it('drops a sensitive result without the mark, or with any value other than true', () => {
+    for (const mark of [undefined, false, 'true', 1, null]) {
+      const fields = mark === undefined ? {} : { _discussed: mark };
+      expect([mark, clean([lab('HIV 1/2 antibody', fields), lab('Synthetic screen', fields, 'http://loinc.org', '75622-1')])]).toEqual([mark, []]);
+    }
+  });
+
+  it('holds back a critical result until discussed, and keeps an ordinary one either way', () => {
+    expect(clean([lab('Potassium', { recordedFlag: 'critical_candidate' })])).toEqual([]);
+    expect(clean([lab('Potassium', { recordedFlag: 'critical_candidate', _discussed: false })])).toEqual([]);
+    const kept = one(lab('Potassium', { recordedFlag: 'critical_candidate', _discussed: true }));
+    expect(kept.fields.recordedFlag).toBe('critical_candidate');
+    expect(clean([lab('Haemoglobin', { recordedFlag: 'low' }), lab('Haemoglobin', { recordedFlag: 'high', _discussed: false })])).toHaveLength(2);
+  });
+
+  it('keeps a discussed sensitive result whose correction is pending as the placeholder only', () => {
+    const out = one(record('lab_result', { test: 'HIV 1/2 antibody', codeSystem: 'LOCAL', code: 'X1', specimen: 'Blood',
+      correctionPending: true, status: LAB_CORRECTING, numericValue: '99.9', _discussed: true }, { title: 'HIV 1/2 antibody', version: '2:pending:r' }));
+    expect(out.fields).toEqual({ test: 'HIV 1/2 antibody', codeSystem: 'LOCAL', code: 'X1', specimen: 'Blood', correctionPending: true, status: LAB_CORRECTING });
+  });
+
+  it('still drops sensitive test requests, diagnoses and medicines, even if a mark were sent with them', () => {
+    expect(clean([
+      record('investigation', { ...completed, test: 'HIV 1/2 antibody', codeSystem: 'LOCAL', code: 'X1', status: 'completed', _discussed: true },
+        { title: 'HIV 1/2 antibody' }),
+      record('diagnosis', { _encounterId: encounterId, codeSystem: 'ICD-10', code: 'B20', condition: 'HIV disease', clinicalStatus: 'active',
+        verificationStatus: 'confirmed', _discussed: true }, { title: 'HIV disease' }),
+      record('prescription', { ...completed, medication: 'Tenofovir/lamivudine/dolutegravir', status: 'active', _discussed: true },
+        { title: 'Tenofovir/lamivudine/dolutegravir' }),
+    ])).toEqual([]);
   });
 });

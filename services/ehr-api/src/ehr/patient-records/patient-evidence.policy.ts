@@ -52,13 +52,40 @@ const FREE_TEXT_FIELDS: Partial<Record<SourceKind, readonly string[]>> = {
 const FREE_TEXT_TITLES = new Set<SourceKind>(['note', 'import', 'import_version']);
 
 /*
- * Sensitive tests, conditions and medicines (S4). Until the clinician
- * "Discussed with the patient" mark exists, these are left out of the patient
- * chat outright: hiding is the safe direction. The list is a default for Ola
+ * Sensitive tests, conditions and medicines (S4). A sensitive Lab result (and
+ * a critical one) reaches the patient chat only once a clinician has marked it
+ * "Discussed with the patient" (0107); sensitive test requests, diagnoses and
+ * medicines are still left out outright: hiding is the safe direction. The list is a default for Ola
  * to approve (D7, D10). Fragments use only syntax that means the same in a
- * JavaScript RegExp and a PostgreSQL ARE (letters, digits, [], ?, *, |, (?:)),
+ * JavaScript RegExp and a PostgreSQL ARE (letters, digits, [], [^], ?, *, |, (?:)),
  * so the SQL filter and this policy agree. They never contain a quote.
  */
+/**
+ * Q28 test-name fragments that are matched only for tests and results, never in diagnosis display text: a drug screen,
+ * an alcohol level, a prenatal screen, a bone marrow test or a questionnaire score is sensitive as a result, but the same
+ * words in a diagnosis ("Allergy to opioids", "Bone marrow suppression", "Trisomy 21", "rib cage contusion") are not, and
+ * the diagnoses that are sensitive (dependence, substance use, cancers, pregnancy) are named in SENSITIVE_CONDITION_FRAGMENTS.
+ */
+const TEST_NAME_ONLY_FRAGMENTS = [
+  // Urine drug screens and blood alcohol, as lab menus write them:
+  'drugs?[ -]+(?:of[ -]+abuse[ -]*)?screen[a-z]*', 'drugs?[ -]+of[ -]+abuse', 'toxicolog[a-z]*', 'tox[ -]?screen[a-z]*', 'uds',
+  'benzodiazepines?', 'opiates?', 'opioids?', 'cannabi[a-z]*', 'thc', '(?:meth)?amphetamines?', 'cocaine', 'benzoylecgonine',
+  'ethanol', '(?:blood|serum|plasma|breath|urine)[ -]+alcohol', 'alcohol[ -]+(?:level|screen[a-z]*|test)',
+  'drugs?[ -]+(?:tests?|testing|panel[a-z]*)', 'urine[ -]+for[ -]+drugs?', 'codeine', 'tramadol', 'morphine', 'methadone', 'buprenorphine',
+  'fentanyl', 'barbiturates?', 'marijuana', 'indian[ -]+hemp', 'mdma', 'ecstasy', 'ketamine', 'alcohol[ ,-]+(?:blood|serum|plasma|breath|urine)',
+  'bac', 'etoh',
+  // Prenatal screening (NIPT, cell-free DNA, trisomy and other aneuploidy screens, antenatal profiles):
+  'nipt', 'non[ -]?invasive[ -]+pre[ -]?natal', 'cell[ -]?free[ -]+(?:fetal[ -]+|foetal[ -]+)?dna', 'cf[ -]?dna', 'trisom[a-z]*',
+  'aneuploid[a-z]*', 'pre[ -]?natal[ -]+screen[a-z]*', 'pre[ -]?natal', 'ante[ -]?natal[a-z]*',
+  'anc[ -]+(?:profile|panel|screen[a-z]*|bloods?|booking|tests?)', 'down(?:[^a-z0-9 ]?s)?[ -]+syndrome[ -]+(?:screen[a-z]*|risk|tests?)',
+  'quad(?:ruple)?[ -]+(?:tests?|screen[a-z]*|markers?)', 'triple[ -]+(?:tests?|screen[a-z]*|markers?)',
+  'harmony[ -]+(?:tests?|prenatal|screen[a-z]*)', 'trimester', 'nuchal[a-z]*',
+  // Bone marrow (and its abbreviations) and flow cytometry:
+  'bone[ -]?marrow', 'marrow', 'bma', 'bmat', 'bmb', 'bm[ -]+(?:aspirat[a-z]*|biops[a-z]*|trephine|exam[a-z]*)', 'trephine',
+  'flow[ -]?cytometr[a-z]*', 'immunophenotyp[a-z]*',
+  // Questionnaire scores, wherever a test name is matched (Lab results, test requests); also liquid-based cytology:
+  'audit(?:[ -]?c)?', 'cage', 'mmse', 'mini[ -]?mental[a-z]*', 'lbc',
+] as const;
 export const SENSITIVE_TEST_FRAGMENTS = [
   'hiv[a-z0-9]*', 'aids', 'rvs', 'retrovir[a-z]*', 'cd[ -]?4[a-z0-9]*', 'viral[ -]?loads?',
   'hepatitis', 'hbsag', 'hbeag', 'anti[ -]?hbc', 'hbc[ -]?ab', 'hbv[a-z]*', 'hcv[a-z]*',
@@ -74,7 +101,14 @@ export const SENSITIVE_TEST_FRAGMENTS = [
   // The same tests written out in full, as LOINC display names and lab menus write them.
   'prostate[ -]specific', '[a-z]*fetoprotein', 'carcinoembryonic', 'cancer[ -]?(?:ag|antigen)', 'chorionic', 'choriogonadotrop[a-z]*',
   'human[ -]*immuno[ -]*deficiency', 'hep[ .-]*[bc](?:[ .-]*[sec])?(?:[ .-]*a[gb])?', 'hbs[ -]?ag', 'h[ .]+i[ .]+v',
+  // Ola's answer on Q28. HBV DNA and HCV RNA are already caught by hbv/hcv/hepatitis/hep b|c; Hb genotype stays; TB tests stay off.
+  // HPV DNA and Mycoplasma genitalium:
+  'hpv[a-z0-9]*', '(?:human[ -]?)?papilloma[ -]?virus[a-z]*', 'genitalium', 'mgen',
+  // The same written out or dotted: Papanicolaou, "H.P.V", "M. gen", "R.V.S" (retroviral screening):
+  'papanicolaou', 'h[ .]*p[ .]*v', 'm[ .]+gen', 'r[ .]+v[ .]+s',
+  ...TEST_NAME_ONLY_FRAGMENTS,
 ] as const;
+const TEST_NAME_ONLY = new Set<string>(TEST_NAME_ONLY_FRAGMENTS);
 /*
  * LOINC codes of the same tests, matched when the code system is LOINC
  * (http://loinc.org), whatever the display text. Only codes whose meaning is
@@ -84,13 +118,17 @@ export const SENSITIVE_TEST_FRAGMENTS = [
  * PSA (2857-1, 35741-8), AFP (1834-1, 19176-1), CEA (2039-6), CA-125 (10334-1);
  * HIV 1+2 Ab and HIV 1 Ab by other methods (7918-6, 29893-5, 31201-7, 5221-7),
  * HIV 1 RNA viral load by other methods (10351-5, 25836-8), hCG in serum
- * (2118-8, 19080-2). Identical to SENSITIVE_LOINC_CODES in lab-api's
- * patient-results.service.ts.
+ * (2118-8, 19080-2); Q28: HPV DNA in the cervix (21440-3, 30167-1), HCV RNA
+ * (11259-9) and HCV RNA viral load (11011-4), ethanol in serum or plasma and
+ * in blood (5640-8, 5643-2), MMSE total score (72107-6), AUDIT and AUDIT-C
+ * total scores (75624-7, 75626-2). Identical to SENSITIVE_LOINC_CODES in
+ * lab-api's patient-results.service.ts.
  */
 export const SENSITIVE_LOINC_CODES = [
   '75622-1', '56888-1', '7917-8', '68961-2', '20447-9', '24467-3', '5196-1', '5195-3', '16128-1', '13955-0',
   '2106-3', '21198-7', '2119-6', '2857-1', '35741-8', '1834-1', '19176-1', '2039-6', '10334-1',
   '7918-6', '29893-5', '31201-7', '5221-7', '10351-5', '25836-8', '2118-8', '19080-2',
+  '21440-3', '30167-1', '11259-9', '11011-4', '5640-8', '5643-2', '72107-6', '75624-7', '75626-2',
 ] as const;
 /** LOINC as a code system: its name or URL ("http://loinc.org"), or its OID (2.16.840.1.113883.6.1, also as "urn:oid:..."). Same in SQL and JS. */
 export const LOINC_SYSTEM_SQL_PATTERN = '(loinc|(^|[^0-9.])2[.]16[.]840[.]1[.]113883[.]6[.]1($|[^0-9.]))';
@@ -122,6 +160,27 @@ const SENSITIVE_CONDITION_FRAGMENTS = [
   'rvd', 'rvi', 'plwha', 'plhiv', 'pmtct',
   // "Ca breast", "Ca. of the cervix", "breast Ca": cancer of a named site.
   `ca\\.?(?:[ -]+of(?:[ -]+the)?)?[ -]+(?:${CANCER_SITES})`, `(?:${CANCER_SITES})[ -]+ca`,
+  // Ola's answer on Q28 (each also hidden by its ICD-10 code in SENSITIVE_ICD10).
+  // Neoplasms of uncertain behaviour (D37-D48), beyond neoplas*/myelodysplas*:
+  'polycyth[a-z]*[ -]+(?:rubra[ -]+)?vera', 'myeloproliferat[a-z]*', 'essential[ -]+(?:\\(?ha?emorrhagic\\)?[ -]+)?thrombocyth[a-z]*',
+  '[a-z]*myelofibros[a-z]*', 'myeloscleros[a-z]*', 'monoclonal[ -]+gammopath[a-z]*', 'mgus', '[a-z]*mastocyt[a-z]*',
+  // Self-harm and suicide attempts (X60-X84, Z91.5), beyond suicid*/self harm; the X60-X69 titles say "intentional self-poisoning":
+  'deliberate[ -]+self', 'intentional[ -]+self', 'self[ -]*poison[a-z]*', 'self[ -]*inflict[a-z]*', 'self[ -]*injur[a-z]*',
+  'parasuicid[a-z]*', 'overdos[a-z]*',
+  // Abuse, sexual abuse, neglect and maltreatment (T74, Y05-Y07):
+  '(?:sexual|physical|emotional|psychological|child|elder|domestic|spousal)[ -]+abuse', 'maltreat[a-z]*', 'domestic[ -]+violence',
+  'intimate[ -]+partner[ -]+violence', 'gender[ -]+based[ -]+violence', 'gbv', 'sexual[ -]+(?:assault|violence)', 'rape[ds]?',
+  'defilement', '(?:child|elder)[ -]+neglect', 'batter(?:ed|ing)', 'neglect[ -]+(?:or|and)[ -]+abandonment', 'abandonment',
+  'abandoned[ -]+(?:child|baby|infant|neonate|newborn)', 'molest[a-z]*', 'tortur[a-z]*',
+  // HIV and STI exposure, screening and counselling, hepatitis carrier (Z20.2, Z20.6, Z11.4, Z71.7, Z22.5), beyond hiv/hepatitis;
+  // the Z20.2 title says "a predominantly sexual mode of transmission":
+  'sexually[ -]+transmitted', 'sexual[ -]+mode[ -]+of[ -]+transmission', 'carrier[ -]+of[ -]+(?:viral[ -]+)?hepatitis',
+  // Contraception, outcome of delivery, postnatal care (Z30, Z37, Z39), beyond post-natal/post-partum/puerper*; the titles
+  // ("Twins, both liveborn", "lactating mother", "sterilization") and family-planning methods as Nigerian clinics write them:
+  'contracept[a-z]*', 'family[ -]+planning', 'delivery[ -]+outcome', 'outcome[ -]+of[ -]+delivery', 'live[ -]?births?', 'live[ -]?born',
+  'still[ -]?births?', 'still[ -]?born', 'lactating', 'lactation', 'sterili[sz]ation', 'tubal[ -]+(?:ligation|occlusion)', 'vasectom[a-z]*',
+  'iucds?', 'iuds?', 'intra[ -]?uterine[ -]+(?:contracept[a-z]*|devices?)', 'implanon', 'nexplanon', 'jadelle', 'depo[ -]?provera',
+  'sayana[ -]?press', 'dmpa', 'noristerat',
 ] as const;
 const SENSITIVE_MEDICINE_FRAGMENTS = [
   'tenofovir', 'lamivudine', 'emtricitabine', 'dolutegravir', 'efavirenz', 'nevirapine', 'zidovudine', 'abacavir',
@@ -130,15 +189,86 @@ const SENSITIVE_MEDICINE_FRAGMENTS = [
   // Component abbreviations as regimens are written ("TDF/3TC/DTG", "AZT/3TC/NVP"), and brand names.
   'tdf', 'taf', '3tc', 'ftc', 'dtg', 'efv', 'nvp', 'azt', 'zdv', 'abc', 'lpv', 'atv', 'drv', 'ral', 'rpv',
   'truvada', 'atripla', 'kaletra', 'aluvia', 'combivir', 'triomune', 'duovir[a-z]*',
+  // Ola's answer on Q28. Hepatitis B and C antivirals (tenofovir is above):
+  'entecavir', 'telbivudine', 'adefovir', 'sofosbuvir', 'daclatasvir', 'velpatasvir', 'ledipasvir', 'glecaprevir', 'pibrentasvir',
+  'voxilaprevir', 'ribavirin', 'epclusa', 'harvoni', 'sovaldi', 'mavi?ret',
+  // Interferon alfa and peginterferon (hepatitis B and C), but not interferon beta (multiple sclerosis) or gamma:
+  '(?:peg[ -]?|pegylated[ -]+)?interferons?(?![ -]*(?:beta|gamma))', 'ifn[ -]*alf?a', 'pegasys', 'peg[ -]?intron',
+  // Brands, Indian generics sold in Nigeria, regimen abbreviations, and the other hepatitis C antivirals:
+  'baraclude', 'viread', 'vemlidy', 'hepsera', 'sebivo', 'tyzeka', 'myhep[a-z]*', 'hepcinat[a-z]*', 'velpanat', 'natdac', 'sofovir',
+  'hepcvir[a-z]*', 'ledifos', 'daklinza', 'sof[ ]*[/+][ ]*(?:vel|dcv|ldv|dac)', 'zepatier', 'elbasvir', 'grazoprevir', 'vosevi', 'simeprevir',
+  'olysio', 'boceprevir', 'telaprevir', 'dasabuvir', 'ombitasvir', 'paritaprevir', 'viekira[a-z]*',
+  // Hormonal cancer treatment:
+  'tamoxifen', 'letrozole', 'anastrozole', 'exemestane', 'fulvestrant', 'goserelin', 'zoladex', 'leuprorelin', 'leuprolide',
+  'triptorelin', 'degarelix', 'bicalutamide', 'flutamide', 'abiraterone', 'enzalutamide',
+  'nolvadex', 'femara', 'arimidex', 'aromasin', 'faslodex', 'casodex', 'zytiga', 'xtandi', 'lupron[a-z]*', 'eligard', 'decapeptyl',
+  'firmagon', 'trelstar',
+  // Cancer chemotherapy. Not methotrexate by name: it is also given for rheumatoid arthritis and ectopic pregnancy;
+  // as an antineoplastic it is left out by its ATC code (L01BA01), as is every L01/L02 medicine (SENSITIVE_ATC).
+  'cyclophosphamide', 'ifosfamide', 'chlorambucil', 'melphalan', 'doxorubicin', 'epirubicin', 'daunorubicin', 'adriamycin',
+  'cisplatin', 'carboplatin', 'oxaliplatin', 'paclitaxel', 'docetaxel', 'fluorouracil', '5[ -]?fu', 'capecitabine', 'gemcitabine',
+  'cytarabine', 'vincristine', 'vinblastine', 'vinorelbine', 'etoposide', 'bleomycin', 'dacarbazine', 'irinotecan', 'imatinib',
+  'chemotherap[a-z]*', 'cytotoxic',
+  // Brands, and the monoclonal and targeted antineoplastics (L01, also left out by ATC when it is recorded):
+  'glivec', 'gleevec', 'xeloda', 'taxol', 'taxotere', 'endoxan', 'cytoxan', 'gemzar', 'navelbine', 'oncovin', 'eloxatin', 'campto',
+  'camptosar', 'alimta', 'pemetrexed', 'temozolomide', 'temodal', 'bortezomib', 'velcade', 'lenalidomide', 'revlimid',
+  'nilotinib', 'tasigna', 'dasatinib', 'sprycel', 'erlotinib', 'tarceva', 'gefitinib', 'iressa', 'sunitinib', 'sorafenib', 'lapatinib',
+  'herceptin', 'trastuzumab', 'pertuzumab', 'perjeta', 'kadcyla', 'rituximab', 'mabthera', 'rituxan', 'bevacizumab', 'avastin',
+  'cetuximab', 'erbitux', 'panitumumab', 'pembrolizumab', 'keytruda', 'nivolumab', 'opdivo', 'ipilimumab', 'atezolizumab', 'durvalumab',
+  'daratumumab', 'obinutuzumab', 'brentuximab',
+  // Opioid and alcohol dependence treatment:
+  'methadone', 'buprenorphine', 'suboxone', 'subutex', 'naltrexone', 'disulfiram', 'antabuse', 'acamprosate', 'campral', 'nalmefene', 'selincro',
+  // Misoprostol and mifepristone, and their brands and combination packs:
+  'misoprostol', 'cytotec', 'mifepristone', 'mifeprin', 'mifegest[a-z]*', 'medabon', 'misoclear', 'mtp[ -]?kit',
+  // Emergency contraception (levonorgestrel 1.5 mg or 0.75 mg is emergencyLevonorgestrel below), by name and brand:
+  'ulipristal', 'ella[ -]?one', 'postinor[ -]?[0-9]*', 'emergency[ -]+contracept[a-z]*', 'levonelle', 'norlevo', 'plan[ -]?b', 'pregnon',
+  'escapelle', 'next[ -]?choice',
 ] as const;
-/** ICD-10: HIV (B20-B24, Z21, R75), viral hepatitis (B15-B19), STIs (A50-A64), neoplasms (C, D00-D09), mental health (F), pregnancy (O, Z32-Z36). */
-const SENSITIVE_ICD10 = /^(?:B2[0-4]|Z21|R75|B1[5-9]|A5\d|A6[0-4]|C\d\d|D0\d|F\d\d|O\d\d|Z3[2-6])/i;
+/**
+ * ICD-10: HIV (B20-B24, Z21, R75), viral hepatitis (B15-B19), STIs (A50-A64), neoplasms (C, D00-D09), mental health (F), pregnancy (O, Z32-Z36);
+ * Q28: neoplasms of uncertain behaviour (D37-D48), intentional self-harm (X60-X84, Z91.5), maltreatment and abuse (T74, Y05-Y07),
+ * HIV and STI exposure, screening and counselling and hepatitis carrier (Z20.2, Z20.6, Z11.4, Z71.7, Z22.5), contraception (Z30),
+ * outcome of delivery (Z37) and postnatal care (Z39). A code is matched with or without its dot, and with spaces around it trimmed,
+ * when the code system is ICD-10 by name or URL ("icd"), or by its OID (2.16.840.1.113883.6.3, ICD-10-CM 2.16.840.1.113883.6.90).
+ */
+const SENSITIVE_ICD10 = new RegExp('^(?:B2[0-4]|Z21|R75|B1[5-9]|A5\\d|A6[0-4]|C\\d\\d|D0\\d|F\\d\\d|O\\d\\d|Z3[02-79]'
+  + '|D3[7-9]|D4[0-8]|X[67]\\d|X8[0-4]|Z91\\.?5|T74|Y0[5-7]|Z20\\.?[26]|Z11\\.?4|Z71\\.?7|Z22\\.?5)', 'i');
+const ICD10_SYSTEM = /icd|(?:^|[^0-9.])2[.]16[.]840[.]1[.]113883[.]6[.](?:3|90)(?:$|[^0-9.])/i;
+/**
+ * ATC (Q28): antineoplastic agents (L01) and endocrine cancer therapy (L02); and the ATC groups of the other medicines
+ * named above: hepatitis C antivirals (J05AP); the HIV and hepatitis B antivirals: protease inhibitors (J05AE), nucleoside and
+ * nucleotide reverse transcriptase inhibitors such as tenofovir and entecavir (J05AF), non-nucleoside ones (J05AG), integrase
+ * inhibitors (J05AJ) and HIV combinations (J05AR); ribavirin (J05AB04); the alfa interferons and peginterferons (L03AB01, 04, 05,
+ * 06, 09, 10, 11, 12, 14, 15, 60, 61; not interferon beta or gamma, L03AB02, 03, 07, 08, 13); misoprostol as a gynaecological
+ * medicine (G02AD06); alcohol and opioid dependence treatment (N07BB, N07BC, and the older V03AA codes); emergency
+ * contraceptives (G03AD) and antiprogestogens (G03XB, mifepristone and ulipristal). Matched only when the code system is
+ * ATC by name, the WHO URL (whocc.no) or its OID (2.16.840.1.113883.6.73).
+ */
+const SENSITIVE_ATC = /^(?:L0[12]|J05AP|J05A[EFGJR]|J05AB04|L03AB(?:0[14569]|1[0-245]|6[01])|G02AD06|N07B[BC]|V03AA|G03AD|G03XB)/i;
+const ATC_SYSTEM = /(?<![a-z])atc(?![a-z])|whocc|(?:^|[^0-9.])2[.]16[.]840[.]1[.]113883[.]6[.]73(?:$|[^0-9.])/i;
+/**
+ * Levonorgestrel (or LNG) as emergency contraception: the 1.5 mg single dose or the 0.75 mg tablet of the two-tablet pack
+ * (1500 or 750 micrograms; no other levonorgestrel medicine has these strengths), or named "emergency", in the name or
+ * the dose fields. Units as written: mg, milligram(s), mcg, µg, micrograms, also per tablet ("mg/tab").
+ */
+const LEVONORGESTREL = /(?<![a-z0-9])(?:levonorgestrel|lng)(?![a-z0-9])/i;
+const EMERGENCY_DOSE = new RegExp('(?<![0-9.,])(?:(?:1[.,]50*|0?[.,]750*)\\s*(?:mg|milligrams?)|(?:1500|750)\\s*(?:mcg|µg|ug|micrograms?))(?![a-z])'
+  + '|(?<![a-z])emergency(?![a-z])', 'i');
+const MG_UNIT = /^(?:mg|milligrams?)$/, MCG_UNIT = /^(?:mcg|µg|ug|micrograms?)$/;
+function emergencyLevonorgestrel(f: Record<string, unknown>, title: string): boolean {
+  const name = `${text(f.medication)} ${title}`;
+  if (!LEVONORGESTREL.test(name)) return false;
+  const quantity = Number(f.doseQuantity);
+  const unit = text(f.doseUnit).toLowerCase().replace(/\s+/g, '').replace(/\/(?:tabs?|tablets?)$/, '');
+  return EMERGENCY_DOSE.test(name) || ((quantity === 1.5 || quantity === 0.75) && MG_UNIT.test(unit))
+    || ((quantity === 1500 || quantity === 750) && MCG_UNIT.test(unit));
+}
 
 const jsPattern = (fragments: readonly string[]) => new RegExp(`(?<![a-z0-9])(?:${fragments.join('|')})(?![a-z0-9])`, 'i');
 /** The PostgreSQL ARE form of the sensitive test list, for `!~*` in patient-only SQL. */
 export const SENSITIVE_TEST_SQL_PATTERN = `(^|[^a-z0-9])(?:${SENSITIVE_TEST_FRAGMENTS.join('|')})($|[^a-z0-9])`;
 const SENSITIVE_TEST = jsPattern(SENSITIVE_TEST_FRAGMENTS);
-const SENSITIVE_CONDITION = jsPattern([...SENSITIVE_TEST_FRAGMENTS, ...SENSITIVE_CONDITION_FRAGMENTS]);
+const SENSITIVE_CONDITION = jsPattern([...SENSITIVE_TEST_FRAGMENTS.filter(f => !TEST_NAME_ONLY.has(f)), ...SENSITIVE_CONDITION_FRAGMENTS]);
 const SENSITIVE_MEDICINE = jsPattern(SENSITIVE_MEDICINE_FRAGMENTS);
 const text = (value: unknown) => typeof value === 'string' ? value : '';
 const LOINC_CODES = new Set<string>(SENSITIVE_LOINC_CODES);
@@ -150,11 +280,15 @@ export function isSensitiveTest(name: unknown, code?: unknown, codeSystem?: unkn
 function sensitive(record: Evidence): boolean {
   const f = record.fields;
   switch (record.kind) {
-    case 'lab_result': case 'investigation': return isSensitiveTest(f.test, f.code, f.codeSystem) || isSensitiveTest(record.title);
+    case 'investigation': return isSensitiveTest(f.test, f.code, f.codeSystem) || isSensitiveTest(record.title);
     // The display text is checked whatever the code system (ICD-10, SNOMED CT, local); ICD-10 codes as well.
     case 'diagnosis': return SENSITIVE_CONDITION.test(text(f.condition)) || SENSITIVE_CONDITION.test(record.title)
-      || (/icd/i.test(text(f.codeSystem)) && SENSITIVE_ICD10.test(text(f.code)));
-    case 'prescription': return SENSITIVE_MEDICINE.test(text(f.medication)) || SENSITIVE_MEDICINE.test(record.title);
+      || (ICD10_SYSTEM.test(text(f.codeSystem).trim()) && SENSITIVE_ICD10.test(text(f.code).trim()));
+    // A prescription has no link to a diagnosis in ehr.prescriptions (only its encounter), so a medicine is judged by itself:
+    // its name, its ATC code (internal _medication* keys from the patient query) and, for levonorgestrel, its dose.
+    case 'prescription': return SENSITIVE_MEDICINE.test(text(f.medication)) || SENSITIVE_MEDICINE.test(record.title)
+      || (ATC_SYSTEM.test(text(f._medicationCodeSystem)) && SENSITIVE_ATC.test(text(f._medicationCode).trim()))
+      || emergencyLevonorgestrel(f, record.title);
     default: return false;
   }
 }
@@ -284,9 +418,18 @@ function excluded(record: Evidence): boolean {
       if (!ALLOWED_ORDER_STATUSES.has(text(f.status)) || f._encounterStatus !== 'completed') return true; break;
     case 'note': if (f._encounterStatus !== 'completed') return true; break;
     case 'encounter': if (f.status !== 'completed') return true; break;
+    // A sensitive test or a critical result is shown only while a clinician's "Discussed with the patient"
+    // mark is active on its last released version (0107): lab-api says so in `_discussed`, which internal()
+    // then strips. lab-api reads only results from a finished visit.
+    case 'lab_result': return gatedLabResult(record) && f._discussed !== true;
     default: break;
   }
   return sensitive(record);
+}
+/** A sensitive test (PR 1's list, unchanged) or a critical result. */
+function gatedLabResult(record: Evidence): boolean {
+  const f = record.fields;
+  return isSensitiveTest(f.test, f.code, f.codeSystem) || isSensitiveTest(record.title) || f.recordedFlag === 'critical_candidate';
 }
 
 /** The patient's Health ID profile as the chat may see it: age and sex only. */

@@ -2,7 +2,10 @@ import type { PoolClient } from 'pg';
 import { PatientChatService } from './patient-chat.service';
 import { PatientEvidenceService } from './patient-evidence.service';
 import { PATIENT_EVIDENCE_QUERY } from './patient-evidence.query';
-import { evidence, type Evidence } from './patient-evidence.types';
+import { evidence, type Evidence, type SourceKind } from './patient-evidence.types';
+import { RESULT_LINE } from './patient-chat-safety';
+import { StaffEvidenceService } from './staff-evidence.service';
+import { STAFF_SOURCE_PERMISSIONS, type StaffChatScope } from './staff-chat-scope.service';
 jest.mock('../../config/environment', () => ({ getEnvironment: () => ({ AI_ENABLED: true, AI_EMBEDDING_MODEL_ID: 'amazon.titan-embed-text-v2:0' }) }));
 
 /*
@@ -66,11 +69,11 @@ const DOCUMENT = evidence({ kind: 'document', id: '44444444-4444-4444-8444-00000
   quality: 'machine extracted, unverified', fields: { text: 'Page 1: Referral for blood pressure follow-up. Contact adaeze.synthetic@example.test.' } });
 const FORBIDDEN = /Adaeze|Okafor|Chinedu|1994|0803|example\.test|referral_letter|Synthetic (refuted|differential|provisional|unconfirmed|confirmed|sensitive) note|Synthetic request reason|Synthetic instruction text|Synthetic open-visit note|Synthetic correction reason|Synthetic sensitive result|99\.9|HIV|Hepatitis|Tenofovir|Lipid profile|Urinalysis|Ciprofloxacin|Metformin|Lisinopril|Artemether|diabetes|kidney|Asthma|Gout|created_by|Lagos/i;
 
-function setup() {
+function setup(labRecords: unknown[] = LAB) {
   const query = jest.fn(async (sql: string) => ({ rows: sql === PATIENT_EVIDENCE_QUERY ? ROWS : [] }));
   const database = { withPatientTransaction: async (_a: unknown, _c: string, work: (c: PoolClient) => Promise<unknown>) => work({ query } as unknown as PoolClient) };
   const records = { authorizeSelf: jest.fn().mockResolvedValue(auth) };
-  const lab = { patientReleasedResults: jest.fn().mockResolvedValue({ records: LAB, nextCursor: null }) };
+  const lab = { patientReleasedResults: jest.fn().mockResolvedValue({ records: labRecords, nextCursor: null }) };
   const attachments = { read: jest.fn().mockResolvedValue({ records: [DOCUMENT], pending: 0, complete: true }), prepare: jest.fn().mockResolvedValue(undefined) };
   const identity = { patientProfile: jest.fn().mockResolvedValue(PROFILE) };
   const audit = { recordWithClient: jest.fn() };
@@ -133,5 +136,79 @@ describe('The patient chat still answers normally with what the policy leaves', 
     expect(reply.status).toBe('ready');
     expect(reply.sources.length).toBeGreaterThan(0);
     expect(JSON.stringify(s.answer.mock.calls[0][1])).not.toMatch(FORBIDDEN);
+  });
+});
+
+describe('Patient chat part 2: Lab results marked "Discussed with the patient" (0107)', () => {
+  const result = (n: number, test: string, fields: Record<string, unknown>): { id: string; version: string; title: string; recordedAt: string; effectiveAt: string; fields: Record<string, unknown> } => ({ id: `33333333-3333-4333-8333-0000000001${String(n).padStart(2, '0')}`,
+    version: `1:release-${n}`, title: test, recordedAt: '2026-09-06T12:00:00.000Z', effectiveAt: '2026-09-06T09:00:00.000Z',
+    fields: { test, codeSystem: 'LOCAL', code: `T${n}`, specimen: 'blood', resultType: 'text', recordedFlag: 'normal', ...fields } });
+  const discussedHiv = result(1, 'HIV 1/2 antibody', { textValue: 'Synthetic discussed result', _discussed: true });
+  const undiscussedHiv = result(2, 'HIV 1/2 antibody', { textValue: 'Synthetic undiscussed result', _discussed: false });
+  const criticalPotassium = result(3, 'Potassium', { resultType: 'numeric', numericValue: '6.9', unit: 'mmol/L', recordedFlag: 'critical_candidate', _discussed: false });
+  const discussedCritical = result(4, 'Sodium', { resultType: 'numeric', numericValue: '118', unit: 'mmol/L', recordedFlag: 'critical_candidate', _discussed: true });
+  const ordinary = result(5, 'Haemoglobin', { resultType: 'numeric', numericValue: '12.5', unit: 'g/dL', _discussed: false });
+  const labSources = (s: ReturnType<typeof setup>) => (s.answer.mock.calls[0][1] as Evidence[]).filter(source => source.kind === 'lab_result');
+
+  it('gives Claude a discussed sensitive result, and the answer citing it ends with the talk-to-your-doctor line once', async () => {
+    const s = setup([discussedHiv]);
+    s.plan.mockResolvedValue({ intent: 'records', recordIntent: 'labs', query: 'lab results' });
+    // The model cites the result and writes the line itself; the server keeps exactly one copy, at the end.
+    s.answer.mockImplementation(async (_q: string, sources: Evidence[]) =>
+      `Your HIV 1/2 antibody result is recorded [${sources.findIndex(source => source.kind === 'lab_result') + 1}].\n\n${RESULT_LINE}`);
+    const reply = await s.chat.answer(request, 'What were my lab results?');
+    const sent = labSources(s);
+    expect(sent.map(source => source.title)).toEqual(['HIV 1/2 antibody']);
+    expect(JSON.stringify(s.answer.mock.calls[0])).not.toMatch(/_discussed/);
+    expect(reply.answer.endsWith(RESULT_LINE)).toBe(true);
+    expect(reply.answer.split(RESULT_LINE)).toHaveLength(2);
+    expect(reply.sources.map(source => source.title)).toContain('HIV 1/2 antibody');
+    expect(JSON.stringify(reply)).not.toMatch(/_discussed/);
+    expect(JSON.stringify(s.history.save.mock.calls)).not.toMatch(/_discussed/);
+  });
+
+  it('drops an undiscussed sensitive result and an undiscussed critical one, and still answers from the rest', async () => {
+    const s = setup([undiscussedHiv, criticalPotassium, ordinary]);
+    s.plan.mockResolvedValue({ intent: 'records', recordIntent: 'labs', query: 'lab results' });
+    const reply = await s.chat.answer(request, 'What were my lab results?');
+    expect(labSources(s).map(source => source.title)).toEqual(['Haemoglobin']);
+    const forbidden = /HIV|Synthetic undiscussed result|Potassium|6\.9/;
+    expect(JSON.stringify(s.answer.mock.calls[0])).not.toMatch(forbidden);
+    expect(JSON.stringify(s.embed.mock.calls)).not.toMatch(forbidden);
+    expect(reply.status).toBe('ready');
+    expect(reply.answer.startsWith('Your record lists this [1].')).toBe(true);
+    expect(reply.sources.length).toBeGreaterThan(0);
+    expect(JSON.stringify(reply)).not.toMatch(forbidden);
+  });
+
+  it('keeps a discussed critical result', async () => {
+    const s = setup([discussedCritical, criticalPotassium]);
+    s.plan.mockResolvedValue({ intent: 'records', recordIntent: 'labs', query: 'lab results' });
+    await s.chat.answer(request, 'What were my lab results?');
+    expect(labSources(s).map(source => [source.title, source.fields.recordedFlag])).toEqual([['Sodium', 'critical_candidate']]);
+  });
+
+  it('still drops sensitive requests, diagnoses and medicines alongside a discussed result', async () => {
+    const s = setup([discussedHiv]);
+    s.plan.mockResolvedValue({ intent: 'records', recordIntent: 'summary', query: 'summary' });
+    await s.chat.answer(request, 'Summarise my record');
+    const sources = s.answer.mock.calls[0][1] as Evidence[];
+    expect(sources.some(source => source.kind === 'lab_result' && source.title === 'HIV 1/2 antibody')).toBe(true);
+    expect(sources.some(source => source.kind !== 'lab_result' && /HIV|Hepatitis|Tenofovir/i.test(source.title))).toBe(false);
+  });
+
+  it('leaves the staff chat unchanged: staff evidence keeps undiscussed sensitive and critical results', async () => {
+    const query = jest.fn().mockResolvedValue({ rows: [] });
+    const permissions = ['lab.result.released.read'];
+    const scope = { patientId, context: { actor: { accountId: 'staff-a' }, membershipId: 'member-a', facilityId: 'facility-a' }, permissions,
+      authorize: jest.fn().mockResolvedValue({ patientId }),
+      transaction: async (_a: unknown, _c: string, work: (client: unknown) => Promise<unknown>) => work({ query }),
+      allows: (kind: SourceKind) => STAFF_SOURCE_PERMISSIONS[kind].every(p => permissions.includes(p)) } as unknown as StaffChatScope;
+    const staffLab = [undiscussedHiv, criticalPotassium].map(r => { const { _discussed: _d, ...fields } = r.fields; return { ...r, fields }; });
+    const service = new StaffEvidenceService({ prepare: jest.fn(), read: jest.fn().mockResolvedValue({ records: [], pending: 0, complete: true }) } as never,
+      { staffReleasedResults: jest.fn().mockResolvedValue({ records: staffLab, nextCursor: null }) } as never, { recordWithClient: jest.fn() } as never,
+      { staffPatientProfile: jest.fn() } as never);
+    const snapshot = await service.bind(scope).snapshot({ correlationId: 'synthetic-staff-discussion' } as never);
+    expect(snapshot.records.filter(r => r.kind === 'lab_result').map(r => r.title).sort()).toEqual(['HIV 1/2 antibody', 'Potassium']);
   });
 });

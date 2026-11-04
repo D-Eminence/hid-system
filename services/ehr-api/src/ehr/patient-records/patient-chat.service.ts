@@ -12,7 +12,7 @@ import { PatientEvidenceService } from './patient-evidence.service';
 import { binding,chunks,evidenceKey,originLabel,type Coverage,type Evidence,type EvidenceBinding } from './patient-evidence.types';
 import { selectEvidence,answerCoverage,boundEvidence } from './patient-evidence.selection';
 import { PatientChatHistoryService, type ChatReply } from './patient-chat-history.service';
-import { citedNumbers,conversationLines,patientLines,withPatientLines } from './patient-chat-safety';
+import { citedNumbers,combineLines,conversationLines,patientLines,withPatientLines } from './patient-chat-safety';
 import { redactIdentifiers } from './patient-evidence.policy';
 
 const NO_GROUNDED_ANSWER = 'I could not verify an answer from the available records.';
@@ -76,7 +76,8 @@ export class PatientChatService {
         const lines = audience === 'patient' ? conversationLines(context.exchanges.map(e => e.answer), context.cited ?? []) : [];
         reply = { status: 'ready', answer: withPatientLines(plan.answer, lines), sources: [] };
       } else {
-        ({ reply, selected } = await this.answerAuthorized(request, question, plan.query, context.exchanges, environment, signal,plan.recordIntent,turn));
+        ({ reply, selected } = await this.answerAuthorized(request, question, plan.query, context.exchanges, environment, signal,plan.recordIntent,turn,
+          { answers: context.exchanges.map(e => e.answer), cited: context.cited ?? [] }));
       }
       // Patients see only cited sources, but saved history stays bound to every selected one,
       // so the exchange is hidden once any of them changes or is withdrawn.
@@ -137,7 +138,8 @@ export class PatientChatService {
 
   private async answerAuthorized(request:HidRequest,question:string,searchQuestion:string,
     history:readonly ConversationExchange[],
-    environment:ReturnType<typeof getEnvironment>,signal:AbortSignal,recordIntent:import('./patient-evidence.types').RecordIntent='search',access:ChatAccess=this.selfAccess()):Promise<{reply:ChatReply;selected:EvidenceBinding[]}> {
+    environment:ReturnType<typeof getEnvironment>,signal:AbortSignal,recordIntent:import('./patient-evidence.types').RecordIntent='search',access:ChatAccess=this.selfAccess(),
+    prior:{answers:readonly string[];cited:readonly EvidenceBinding[]}={answers:[],cited:[]}):Promise<{reply:ChatReply;selected:EvidenceBinding[]}> {
     const audience=this.audienceOf(access);
     const extractionWarnings=await access.evidence.prepareDocuments(request,signal);
     const snapshot=await access.evidence.snapshot(request,signal);
@@ -164,10 +166,12 @@ export class PatientChatService {
         origin:source.origin,originLabel:originLabel(source.origin,audience)})):[];
     if(audience==='staff'||!valid)return {reply:{status:'ready',answer:valid?generated:NO_GROUNDED_ANSWER,coverage,sources},selected:[]};
     const selected=selection.sources.map(binding);
-    // Patient: the server, not the model, adds the follow-up lines for what the answer cites,
-    // and the reply lists only the cited sources, keeping their numbers.
+    // Patient: the server, not the model, adds the follow-up lines for what the answer cites, and for
+    // what earlier answers in this conversation carried or cite (a vitals answer after a result answer
+    // may still speak about that result), and the reply lists only the cited sources, keeping their numbers.
     const cited=citedNumbers(generated);
-    const answer=withPatientLines(generated,patientLines(selection.sources.filter((_,index)=>cited.has(index+1))));
+    const answer=withPatientLines(generated,combineLines(patientLines(selection.sources.filter((_,index)=>cited.has(index+1))),
+      conversationLines(prior.answers,prior.cited)));
     return {reply:{status:'ready',answer,coverage,sources:sources.filter(source=>cited.has(source.number))},selected};
   }
 
