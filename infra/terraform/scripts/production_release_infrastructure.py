@@ -3,6 +3,11 @@
 Plan releases the lease for human review. Apply acquires a fresh lease, checks the
 same index and regenerates a saved plan; managed changes must exactly match the
 reviewed fingerprint before that saved plan is applied. No automatic approval.
+
+Reconcile is only the apply's own post-apply step, run on its own after an apply
+stopped before recording what it changed (LIVE_INDEX_DIFFERS). It changes no
+infrastructure: a dry run prints the exact index rows it would replace and their
+SHA-256 and writes nothing; a second run with that SHA-256 writes them.
 """
 import argparse
 import copy
@@ -150,13 +155,94 @@ def run(mode, var_file, manifest, accepted_hash=None):
         lease.release(reconciled=safe)
 
 
+def revision(arn):
+    family, _, number = arn.rpartition(':')
+    require(family.startswith('arn:aws:ecs:') and ':task-definition/' in family and number.isdigit(),
+            'INDEX_RECONCILE_TASK_DEFINITION_INVALID')
+    return family, int(number)
+
+
+def newer(before, after):
+    old_family, old_number = revision(before)
+    new_family, new_number = revision(after)
+    require(new_family == old_family and new_number > old_number, 'INDEX_RECONCILE_REVISION_NOT_NEWER')
+
+
+def live_migration(aws, task_definition):
+    task = aws.call('ecs','describe-task-definition',{'taskDefinition':task_definition})['taskDefinition']
+    containers = [c for c in task['containerDefinitions'] if c['name'] == 'database-migration']
+    require(len(containers) == 1, 'LIVE_CONTAINER_DIFFERS')
+    return {'migration_task_definition':task['taskDefinitionArn'],'migration_image_uri':containers[0]['image']}
+
+
+def reconcile(aws, store, expected_drift, accepted_drift_sha=None, migration_task_definition=None, make_lease=None):
+    """Record live service rows an apply changed but did not record. Never deploys."""
+    expected = set(expected_drift or [])
+    require(expected and expected <= set(COMPONENTS) | {'migration'}, 'INDEX_RECONCILE_EXPECTED_DRIFT_REQUIRED')
+    require(migration_task_definition, 'INDEX_RECONCILE_MIGRATION_OUTPUT_REQUIRED')
+    lease = (make_lease or (lambda: Lease(aws,'terraform-'+uuid.uuid4().hex)))().acquire()
+    reconciled = True
+    try:
+        index, meta = store.read(INDEX_KEY); validate_index(index)
+        live = settled_backend(aws, lease)
+        require(set(live) == set(index['backend']), 'COMPLETE_BACKEND_INDEX_REQUIRED')
+        require(all(live[n]['image_uri'] == index['backend'][n]['image_uri'] for n in live),
+                'INFRASTRUCTURE_CHANGED_APPLICATION_IMAGE')
+        before, after = {}, {}
+        for name in sorted(live):
+            if physical(index['backend'][name]) != live[name]:
+                newer(index['backend'][name]['task_definition'], live[name]['task_definition'])
+                before[name], after[name] = physical(index['backend'][name]), live[name]
+        migration = live_migration(aws, migration_task_definition)
+        recorded = {k:index[k] for k in ('migration_task_definition','migration_image_uri')}
+        if migration != recorded:
+            require(migration['migration_image_uri'] == recorded['migration_image_uri'],
+                    'INFRASTRUCTURE_CHANGED_APPLICATION_IMAGE')
+            newer(recorded['migration_task_definition'], migration['migration_task_definition'])
+            before['migration'], after['migration'] = recorded, migration
+        require(after, 'INDEX_RECONCILE_NOTHING_TO_RECORD')
+        require(set(after) == expected, 'INDEX_RECONCILE_UNEXPECTED_DRIFT')
+        drift = {'index_version_id':meta['VersionId'],'before':before,'after':after}
+        digest = sha(canonical(drift))
+        if accepted_drift_sha is None:
+            return {'status':'dry-run','index_written':False,'drift':drift,'drift_sha256':digest}
+        require(accepted_drift_sha == digest, 'INDEX_RECONCILE_REVIEW_REQUIRED')
+        next_index = copy.deepcopy(index)
+        for name in after:
+            if name == 'migration': next_index.update(after['migration'])
+            else: next_index['backend'][name] = {**index['backend'][name], **after[name]}
+        validate_index(next_index)
+        require(settled_backend(aws, lease) == live, 'LIVE_STATE_CHANGED_DURING_RECONCILE')
+        lease.assert_owned()
+        reconciled = False
+        result = store.put(INDEX_KEY, next_index, etag=meta['ETag'])
+        saved, _ = store.read(INDEX_KEY, result['VersionId'])
+        require(saved == next_index, 'INDEX_RECONCILE_READBACK_DIFFERS')
+        reconciled = True
+        return {'status':'reconciled','index_written':True,'version_id':result['VersionId'],
+                'recorded':sorted(after),'drift_sha256':digest}
+    finally:
+        # A write that may have landed keeps the lease for operator recovery, as apply does.
+        lease.release(reconciled=reconciled)
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('mode',choices=['plan','apply'])
-    parser.add_argument('--var-file',required=True)
-    parser.add_argument('--manifest',required=True)
+    parser.add_argument('mode',choices=['plan','apply','reconcile'])
+    parser.add_argument('--var-file')
+    parser.add_argument('--manifest')
     parser.add_argument('--accepted-review-sha256')
+    parser.add_argument('--expect-drift', action='append', default=[],
+                        help='reconcile: a component (or "migration") the stopped apply changed; repeat for each')
+    parser.add_argument('--accepted-drift-sha256', help='reconcile: the drift_sha256 a dry run printed')
     args = parser.parse_args()
-    try: run(args.mode,args.var_file,args.manifest,args.accepted_review_sha256)
+    try:
+        if args.mode == 'reconcile':
+            aws = AWS(); aws.account()
+            migration = terraform('output','-json','migration_task_definition_arn',output=True)
+            print(json.dumps(reconcile(aws, Store(aws), args.expect_drift, args.accepted_drift_sha256, migration), sort_keys=True))
+        else:
+            require(args.var_file and args.manifest, 'ENVIRONMENT_INPUT_REQUIRED')
+            run(args.mode,args.var_file,args.manifest,args.accepted_review_sha256)
     except ReleaseError as error:
         print(json.dumps({'status':'failed','code':str(error)})); raise SystemExit(1)

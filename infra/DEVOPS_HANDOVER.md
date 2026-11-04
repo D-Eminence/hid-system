@@ -205,6 +205,29 @@ session, from `infra/terraform`:
    the stopped apply changed a running service: report it, and do not edit the
    release index by hand. Otherwise apply the new review manifest's SHA256 as
    usual.
+5. `LIVE_INDEX_DIFFERS` after a stopped apply has one reviewed recovery, the
+   helper's `reconcile` mode. It is the apply's own last step run on its own:
+   it changes no infrastructure and records only rows the stopped apply moved
+   forward. It refuses unless the lease is free, every service has settled,
+   no application image changed, each differing service (and the migration
+   task definition, named `migration`) is a newer revision of the same family,
+   and the differing set is exactly the `--expect-drift` list. Run it twice
+   from `infra/terraform`, with the three `RELEASE_` variables set and no
+   origin secret needed:
+
+   ```powershell
+   python scripts/production_release_infrastructure.py reconcile --expect-drift ocr-worker
+   ```
+
+   The first run is a dry run: it prints `"status": "dry-run"`, the exact
+   `before` and `after` rows and a `drift_sha256`, and writes nothing. Review
+   those rows (task definition and configuration hash only; the image must be
+   unchanged), then run the same command with
+   `--accepted-drift-sha256 <drift_sha256>`. It writes the index only if
+   nothing moved since the dry run, with the index's ETag, reads it back and
+   releases the lease. Then plan again: the plan should pass the index check
+   and show no change from the stopped apply. The owner approves each use.
+   Still never edit `production/current.json` by hand.
 
 ### Emergency contacts
 
