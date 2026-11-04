@@ -175,6 +175,13 @@ output "error_reporting_environment_names" {
   }
 }
 
+output "production_task_error_reporting_names" {
+  description = "Sentry environment variable names in each production task definition's service container; names only, never the DSN."
+  value = {
+    for name, environment in local.production_task_environment : name => sort([for key in keys(environment) : key if startswith(key, "SENTRY_")])
+  }
+}
+
 output "workload_caller_policy" {
   description = "Issuer caller rules as subject => audiences, for tests; no role ARNs, not exported by the root module. The issuer refuses more than eight rules at load."
   value       = { for name, caller in local.managed_callers : caller.subject => caller.audiences }

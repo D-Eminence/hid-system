@@ -26,13 +26,16 @@ locals {
   background_workers        = toset(["notification-worker", "ocr-worker", "event-dispatcher"])
   legacy_ecs_workloads      = local.legacy_ecs_retired ? {} : local.runtime_workloads
   production_ecs_workloads  = local.production_ecs_enabled ? local.runtime_workloads : {}
-  active_ecs_cluster        = local.production_scaling_active ? aws_ecs_cluster.production[0] : aws_ecs_cluster.main[0]
-  active_ecs_services       = local.production_scaling_active ? aws_ecs_service.production : aws_ecs_service.workload
-  active_ecs_prefix         = local.production_scaling_active ? "hid-production" : var.name_prefix
-  active_internal_groups    = local.production_ecs_active ? aws_lb_target_group.production_internal : aws_lb_target_group.internal
-  active_gateway_group      = var.enable_ingress ? (local.production_ecs_active ? aws_lb_target_group.production_gateway[0] : aws_lb_target_group.gateway[0]) : null
-  scaling_internal_groups   = local.production_scaling_active ? aws_lb_target_group.production_internal : aws_lb_target_group.internal
-  scaling_gateway_group     = var.enable_ingress ? (local.production_scaling_active ? aws_lb_target_group.production_gateway[0] : aws_lb_target_group.gateway[0]) : null
+  # The environment each production task definition's service container gets,
+  # including SENTRY_ settings, so tests can read exactly what is registered.
+  production_task_environment = { for name in keys(local.production_ecs_workloads) : name => local.container_environment[name] }
+  active_ecs_cluster          = local.production_scaling_active ? aws_ecs_cluster.production[0] : aws_ecs_cluster.main[0]
+  active_ecs_services         = local.production_scaling_active ? aws_ecs_service.production : aws_ecs_service.workload
+  active_ecs_prefix           = local.production_scaling_active ? "hid-production" : var.name_prefix
+  active_internal_groups      = local.production_ecs_active ? aws_lb_target_group.production_internal : aws_lb_target_group.internal
+  active_gateway_group        = var.enable_ingress ? (local.production_ecs_active ? aws_lb_target_group.production_gateway[0] : aws_lb_target_group.gateway[0]) : null
+  scaling_internal_groups     = local.production_scaling_active ? aws_lb_target_group.production_internal : aws_lb_target_group.internal
+  scaling_gateway_group       = var.enable_ingress ? (local.production_scaling_active ? aws_lb_target_group.production_gateway[0] : aws_lb_target_group.gateway[0]) : null
 }
 
 moved {
@@ -105,7 +108,7 @@ resource "aws_ecs_task_definition" "production" {
       essential              = true
       readonlyRootFilesystem = each.key != "gateway"
       environment = [
-        for key, value in local.workload_environment[each.key] : {
+        for key, value in local.production_task_environment[each.key] : {
           name  = key
           value = value
         }
