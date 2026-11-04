@@ -174,6 +174,40 @@ export class DatabaseService implements OnApplicationShutdown {
     } finally { client.release(); }
   }
 
+  /**
+   * The read of a card-link view (0118): read only; sets the view's digest
+   * (the SHA-256 of its cookie secret), the correlation id and purpose
+   * card-share, transaction-local, and blanks every subject, patient,
+   * account, session, facility and membership setting, so
+   * ehr.card_share_read_context never combines with another context.
+   */
+  async withCardShareTransaction<Result>(
+    digest: string,
+    correlationId: string,
+    operation: (client: PoolClient) => Promise<Result>,
+  ): Promise<Result> {
+    if (!/^[0-9a-f]{64}$/.test(digest)) throw new Error('A card view digest is required');
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET TRANSACTION ISOLATION LEVEL READ COMMITTED, READ ONLY');
+      await client.query(`select set_config('app.card_view_digest',$1,true), set_config('app.correlation_id',$2,true),
+        set_config('app.purpose_of_use','card-share',true), set_config('app.actor_subject','',true),
+        set_config('app.patient_id','',true), set_config('app.account_id','',true),
+        set_config('app.session_id','',true), set_config('app.facility_id','',true),
+        set_config('app.membership_id','',true), set_config('app.self_authorized_until','',true)`,
+      [digest, correlationId]);
+      const result = await operation(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async withWorkloadTransaction<Result>(
     actorSubject: string,
     correlationId: string,

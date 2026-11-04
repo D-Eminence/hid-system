@@ -188,11 +188,12 @@ describe('Card links (0118): routes', () => {
       expect(answer.status).toBe(201);
       expect(answer.body).toMatchObject({ delivery: 'sent', replacedId: null, replayed: false, share: {
         reference: 'K7P2-QX9M', scope: 'card_and_records', recipientEmail: 'kemi.doctor@example.com', label: 'Dr Kemi',
-        recipientHint: 'k•••@example.com', duration: '24h', status: 'active', delivery: 'sent', openCount: 0 } });
+        recipientHint: 'k•••@e•••.com', duration: '24h', status: 'active', delivery: 'sent', openCount: 0 } });
       const [values] = commandCalls('identity.create_my_card_share').map((call) => call.values);
       const shareId = values![2] as string;
       expect(values![3]).toBe(protector.recipientHmac('kemi.doctor@example.com'));
-      expect(values![4]).toBe('k•••@example.com');
+      // example.com is not a common provider, so its name is masked too.
+      expect(values![4]).toBe('k•••@e•••.com');
       expect(protector.decrypt(shareId, 'test-v1', values![5] as Buffer)).toEqual({ email: 'kemi.doctor@example.com',
         label: 'Dr Kemi' });
       expect(values!.slice(8, 11)).toEqual(['card_and_records', '24h', 'card-share-v1']);
@@ -248,7 +249,8 @@ describe('Card links (0118): routes', () => {
       const answer = await patientCall('post', '').set('Idempotency-Key', 'card-share-key-000004').send(body);
       expect(answer.status).toBe(status);
       expect(answer.body.code).toBe(code);
-      expect(JSON.stringify(answer.body)).not.toContain('example.com');
+      // The refusal never repeats what was typed.
+      expect(JSON.stringify(answer.body)).not.toContain(String((body as { email: string }).email).trim());
       expect(commandCalls('identity.create_my_card_share')).toEqual([]);
     });
 

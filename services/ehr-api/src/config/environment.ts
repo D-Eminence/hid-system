@@ -112,6 +112,9 @@ const environmentSchema = z
     // Records patients add themselves (0116): off (the default) answers a plain 404 on their routes and leaves them out
     // of the records answer and both chats; turned on only after 0116 is applied and the website reads them.
     PATIENT_ENTRIES_ENABLED: booleanString,
+    // Card links (0118): off (the default) answers a plain 404 on GET card-share/records; turned on only after
+    // 0118 is applied and legal signs off (NDPA, D13).
+    CARD_LINKS_ENABLED: booleanString,
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {

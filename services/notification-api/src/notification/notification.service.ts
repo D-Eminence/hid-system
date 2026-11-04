@@ -9,6 +9,8 @@ import { contactChangedContent, emailChangeCodeContent, passwordResetCodeContent
 import { accountDeletionContent, type AccountDeletionNoticeKind } from '../providers/account-deletion-emails';
 import { patientShareInvitationContent, recordAccessAlertContent, shareReceivedContent, type ShareDuration,
   type ShareLevel } from '../providers/sharing-emails';
+import { cardCodeContent, cardCreatedContent, cardLinkContent, cardOpenedContent, patientSiteOrigin }
+  from '../providers/card-link-emails';
 import { SesEmailProvider } from '../providers/ses.provider';
 import { TermiiSmsProvider } from '../providers/termii.provider';
 
@@ -218,6 +220,49 @@ export class NotificationService {
       idempotencyKey: input.idempotencyKey,
       content: accountDeletionContent({ kind: input.kind, ...(input.scheduledFor ? { scheduledFor: input.scheduledFor } : {}),
         supportEmail: this.environment.EMERGENCY_CONTACT_SUPPORT_EMAIL }),
+    }, rawPlan);
+  }
+
+  /** E5 (0118): the card link, built here on this deployment's patient site; plain text, the link only. */
+  deliverCardShareLink(input: { recipient: string; token: string; reference: string; expiresAt: Date; stopToken: string;
+    idempotencyKey: string }, rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'CARD_SHARE_LINK',
+      idempotencyKey: input.idempotencyKey,
+      content: cardLinkContent({ token: input.token, reference: input.reference, expiresAt: input.expiresAt,
+        stopToken: input.stopToken, origin: patientSiteOrigin(this.environment.HID_DEPLOYMENT_ENV) }),
+    }, rawPlan);
+  }
+
+  /** E6 (0118): the one-time code; plain text, never the card link. */
+  deliverCardShareCode(input: { recipient: string; code: string; reference: string; stopToken: string;
+    idempotencyKey: string }, rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'CARD_SHARE_CODE',
+      idempotencyKey: input.idempotencyKey,
+      content: cardCodeContent({ code: input.code, reference: input.reference, stopToken: input.stopToken,
+        origin: patientSiteOrigin(this.environment.HID_DEPLOYMENT_ENV) }),
+    }, rawPlan);
+  }
+
+  /** E7 (0118): to the patient, the first open of a link each Lagos day. */
+  deliverCardShareOpened(input: { recipient: string; reference: string; openedAt: Date; idempotencyKey: string },
+    rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'CARD_SHARE_OPENED',
+      idempotencyKey: input.idempotencyKey,
+      content: cardOpenedContent({ reference: input.reference, openedAt: input.openedAt }),
+    }, rawPlan);
+  }
+
+  /** E8 (0118): to the patient, every new link. */
+  deliverCardShareCreated(input: { recipient: string; reference: string; recipientHint: string; expiresAt: Date;
+    idempotencyKey: string }, rawPlan?: unknown): Promise<DeliveryResult> {
+    return this.deliver({
+      channel: 'email', recipient: input.recipient, code: '', purpose: 'CARD_SHARE_CREATED',
+      idempotencyKey: input.idempotencyKey,
+      content: cardCreatedContent({ reference: input.reference, recipientHint: input.recipientHint,
+        expiresAt: input.expiresAt }),
     }, rawPlan);
   }
 

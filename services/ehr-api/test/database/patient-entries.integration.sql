@@ -55,8 +55,10 @@ begin
                   and relrowsecurity and relforcerowsecurity) then
     raise exception 'ehr.patient_entries is not under forced row-level security';
   end if;
+  -- 0118's card-link read policy is card-links.integration.sql's to check.
   select string_agg(policyname || ':' || cmd, ', ' order by policyname) into mismatch
-    from pg_policies where schemaname = 'ehr' and tablename = 'patient_entries';
+    from pg_policies where schemaname = 'ehr' and tablename = 'patient_entries'
+     and policyname <> 'patient_entries_card_share_read';
   if mismatch is distinct from 'patient_entries_owner:ALL, patient_entries_read:SELECT' then
     raise exception 'ehr.patient_entries policies: %', mismatch;
   end if;
