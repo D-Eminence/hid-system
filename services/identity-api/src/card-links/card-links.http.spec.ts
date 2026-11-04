@@ -33,6 +33,7 @@ const patient: ActorContext = { kind: 'patient', id: 'patient:ada', subject: 'pa
 const SHARE_ID = '5e100000-0000-4000-8000-000000000001';
 const VIEW_COOKIE = /^hid_cv_[0-9a-f]{32}=/;
 const TOKEN = 'Q2FyZExpbmtUb2tlbjAxMjM0NTY3ODlBQkNERUZHSEk';
+const TOKEN_Y = 'U2Vjb25kTGlua1Rva2VuMDEyMzQ1Njc4OUFCQ0RFRkc';
 const card = { viewId: '7e300000-0000-4000-8000-000000000001', viewExpiresAt: '2026-11-04T10:30:00.000Z',
   fullName: 'Ada Cardlink', healthId: 'HID-E8ADAA', ninVerified: true, sharedByFirstName: 'Ada',
   recipientHint: 'k•••@example.com', reference: 'K7P2-QX9M', scope: 'card_and_records', expiresAt: '2026-11-05T10:00:00.000Z' };
@@ -221,7 +222,10 @@ describe('Card links (0118): routes', () => {
         address_cap_reached: true }] });
       answer = await patientCall('post', '').set('Idempotency-Key', 'card-share-key-000002').send(create);
       expect(answer.status).toBe(201);
-      expect(answer.body).toMatchObject({ delivery: 'not_sent', share: { delivery: 'not_sent' } });
+      // Not emailed, so nobody holds its token: the database ends it at once as not_sent (F6), and so does the answer.
+      expect(answer.body).toMatchObject({ delivery: 'not_sent', replacedId: null,
+        share: { delivery: 'not_sent', status: 'ended', endedReason: 'not_sent' } });
+      expect(answer.body.share.endedAt).toEqual(expect.any(String));
       expect(notification.deliverCardShareLink).not.toHaveBeenCalled();
     });
 
@@ -325,7 +329,8 @@ describe('Card links (0118): routes', () => {
       const [values] = commandCalls('identity.issue_card_share_code').map((call) => call.values);
       expect(values![0]).toBe(protector.tokenHmac(TOKEN));
       const cookies = ([] as string[]).concat(answer.headers['set-cookie'] ?? []);
-      const pending = cookies.find((cookie) => cookie.startsWith('hid_card_code='))!;
+      // Named for the link (the first 16 hex of its keyed token HMAC), so two links in one browser never mix (F3).
+      const pending = cookies.find((cookie) => cookie.startsWith(`hid_card_code_${protector.tokenHmac(TOKEN).slice(0, 16)}=`))!;
       expect(pending).toMatch(/; Max-Age=600; Path=\/api\/v1\/card-share; Expires=.*; HttpOnly; Secure; SameSite=Strict$/);
       const secret = pending.split(';')[0]!.split('=')[1]!;
       expect(values![4]).toBe(createHash('sha256').update(secret).digest('hex'));
@@ -391,7 +396,8 @@ describe('Card links (0118): routes', () => {
       await start('true');
       answers['identity.verify_card_share_code'] = () => ({ rows: [{ outcome: 'opened', attempts_left: null,
         retry_after_seconds: null, card, networks_today: 1 }] });
-      const answer = await publicCall('post', 'verify').set('Cookie', 'hid_card_code=pending-secret; hid_access=session')
+      const answer = await publicCall('post', 'verify')
+        .set('Cookie', `hid_card_code_${protector.tokenHmac(TOKEN).slice(0, 16)}=pending-secret; hid_access=session`)
         .send({ token: TOKEN, code: '482913' });
       expect(answer.status).toBe(200);
       expect(answer.body).toEqual({ viewId: card.viewId, viewExpiresAt: card.viewExpiresAt,
@@ -406,7 +412,7 @@ describe('Card links (0118): routes', () => {
       // A session cookie: no Max-Age or Expires; the server ends the view after 30 minutes.
       expect(view).toMatch(/^hid_cv_[0-9a-f]{32}=[A-Za-z0-9_-]{43}; Path=\/api\/v1\/card-share; HttpOnly; Secure; SameSite=Strict$/);
       expect(createHash('sha256').update(view.split(';')[0]!.split('=')[1]!).digest('hex')).toBe(values![4]);
-      expect(cookies.some((cookie) => cookie.startsWith('hid_card_code=;'))).toBe(true);
+      expect(cookies.some((cookie) => cookie.startsWith(`hid_card_code_${protector.tokenHmac(TOKEN).slice(0, 16)}=;`))).toBe(true);
       expect(tokens.verify).not.toHaveBeenCalled();
     });
 
@@ -424,6 +430,38 @@ describe('Card links (0118): routes', () => {
       expect(answer.status).toBe(status);
       expect(answer.body).toMatchObject(body);
       expect(answer.headers['set-cookie'] ?? []).not.toEqual(expect.arrayContaining([expect.stringMatching(VIEW_COOKIE)]));
+    });
+
+    it('two links in one browser: each code is bound to its own link\'s cookie, and opening one leaves the other (F3)', async () => {
+      await start('true');
+      answers['identity.issue_card_share_code'] = issued;
+      const nameOf = (token: string) => `hid_card_code_${protector.tokenHmac(token).slice(0, 16)}`;
+      const pendingOf = (answer: request.Response, token: string) => ([] as string[]).concat(answer.headers['set-cookie'] ?? [])
+        .find((cookie) => cookie.startsWith(`${nameOf(token)}=`))?.split(';')[0]!.split('=')[1];
+      // Tab A asks a code for link X, then tab B for link Y.
+      const x = await publicCall('post', 'code').send({ token: TOKEN, turnstileToken: 'turnstile-proof' });
+      const y = await publicCall('post', 'code').send({ token: TOKEN_Y, turnstileToken: 'turnstile-proof' });
+      const secretX = pendingOf(x, TOKEN);
+      const secretY = pendingOf(y, TOKEN_Y);
+      expect(nameOf(TOKEN)).not.toBe(nameOf(TOKEN_Y));
+      expect(secretX).toBeTruthy();
+      expect(secretY).toBeTruthy();
+      expect(pendingOf(y, TOKEN)).toBeUndefined();
+      // Tab A types X's code with both cookies in the browser: X's own pending secret is sent.
+      answers['identity.verify_card_share_code'] = () => ({ rows: [{ outcome: 'opened', attempts_left: null,
+        retry_after_seconds: null, card, networks_today: 1 }] });
+      const opened = await publicCall('post', 'verify').set('Cookie', `${nameOf(TOKEN)}=${secretX}; ${nameOf(TOKEN_Y)}=${secretY}`)
+        .send({ token: TOKEN, code: '482913' });
+      expect(opened.status).toBe(200);
+      const verified = commandCalls('identity.verify_card_share_code').map((call) => call.values);
+      expect(verified[0]![2]).toBe(createHash('sha256').update(secretX!).digest('hex'));
+      const cleared = ([] as string[]).concat(opened.headers['set-cookie'] ?? []);
+      expect(cleared.some((cookie) => cookie.startsWith(`${nameOf(TOKEN)}=;`))).toBe(true);
+      expect(cleared.some((cookie) => cookie.startsWith(`${nameOf(TOKEN_Y)}=`))).toBe(false);
+      // Then Y's code with Y's cookie, still there.
+      await publicCall('post', 'verify').set('Cookie', `${nameOf(TOKEN_Y)}=${secretY}`).send({ token: TOKEN_Y, code: '123456' });
+      expect(commandCalls('identity.verify_card_share_code').map((call) => call.values)[1]![2])
+        .toBe(createHash('sha256').update(secretY!).digest('hex'));
     });
 
     it('a code that is not 6 digits answers 400 and uses no try', async () => {

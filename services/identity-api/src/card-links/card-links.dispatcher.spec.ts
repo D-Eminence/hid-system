@@ -26,7 +26,8 @@ describe('Card links (0118): the patient emails and the sweeper', () => {
       { email_id: 'e1', kind: 'opened', recipient: 'ada@example.com', reference: 'K7P2-QX9M', recipient_hint: 'k•••@x.com',
         occurred_at: new Date('2026-11-04T09:42:00Z'), link_expires_at: new Date('2026-11-05T09:00:00Z'), attempt_count: 1 },
       { email_id: 'e2', kind: 'created', recipient: 'ada@example.com', reference: 'K7P2-QX9M', recipient_hint: 'k•••@x.com',
-        occurred_at: new Date('2026-11-04T09:00:00Z'), link_expires_at: new Date('2026-11-05T09:00:00Z'), attempt_count: 1 },
+        occurred_at: new Date('2026-11-04T09:00:00Z'), link_expires_at: new Date('2026-11-05T09:00:00Z'), attempt_count: 1,
+        link_emailed: true },
     ];
     notification.deliverCardShareOpened.mockResolvedValue({ outcome: 'accepted', provider: 'ses' });
     notification.deliverCardShareCreated.mockResolvedValue({ outcome: 'unknown', safeCode: 'timeout' });
@@ -47,9 +48,17 @@ describe('Card links (0118): the patient emails and the sweeper', () => {
       reference: 'K7P2-QX9M', openedAt: new Date('2026-11-04T09:42:00Z'), correlationId: 'sweep-0001' });
     expect(notification.deliverCardShareCreated).toHaveBeenCalledWith({ emailId: 'e2', recipient: 'ada@example.com',
       reference: 'K7P2-QX9M', recipientHint: 'k•••@x.com', expiresAt: new Date('2026-11-05T09:00:00Z'),
-      correlationId: 'sweep-0001' });
+      linkEmailed: true, correlationId: 'sweep-0001' });
     expect(queries.filter((query) => query.sql.includes('record_card_share_email_outcome')).map((query) => query.values[2]))
       .toEqual(['accepted', 'unknown']);
+  });
+
+  it('E8 says when the link was not emailed (a blocked or capped address, or a failed send) (F6)', async () => {
+    claimed = [{ ...claimed[1]!, link_emailed: false }];
+    await dispatcher().dispatch('sweep-0003');
+    expect(notification.deliverCardShareCreated).toHaveBeenCalledWith(expect.objectContaining({ emailId: 'e2',
+      linkEmailed: false }));
+    expect(queries.find((query) => query.sql.includes('claim_card_share_emails'))?.sql).toContain('link_emailed');
   });
 
   it('does nothing while CARD_LINKS_ENABLED is off: no claim, no sweep', async () => {

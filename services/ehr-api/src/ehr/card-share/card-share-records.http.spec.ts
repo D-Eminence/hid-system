@@ -69,10 +69,14 @@ async function start(enabled: string | undefined, entries?: string): Promise<voi
       if (sql.includes('platform.control_enabled')) return { rows: [{ enabled: values[0] !== 'maintenance_mode' }], rowCount: 1 };
       throw new Error(`unexpected pool query: ${sql}`);
     }),
-    withCardShareTransaction: jest.fn(async (digest: string, correlation: string, work: (c: unknown) => Promise<unknown>) => {
+    // As DatabaseService.withCardShareTransaction: the view context first, then the reads with it.
+    withCardShareTransaction: jest.fn(async (digest: string, correlation: string,
+      work: (c: unknown, view: unknown) => Promise<unknown>) => {
       transactions += 1;
       settings.push(['card', [digest, correlation]]);
-      return work(client);
+      const view = (await client.query('select patient_id::text, share_id::text, view_id::text, scope from ehr.card_share_view_context()') as { rows: unknown[] }).rows[0];
+      if (!view) throw Object.assign(new Error('CARD_SHARE_VIEW_ENDED'), { code: '55000' });
+      return work(client, view);
     }),
     withPatientTransaction: jest.fn(async () => { throw new Error('no patient transaction expected'); }),
     withTransaction: jest.fn(async () => { throw new Error('no staff transaction expected'); }),

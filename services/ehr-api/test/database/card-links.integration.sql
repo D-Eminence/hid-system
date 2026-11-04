@@ -236,12 +236,31 @@ begin
     (select count(*) from ehr.imported_patient_health_profiles),
     (select count(*) from ehr.patient_reported_health_profiles), (select count(*) from ehr.patient_entries));
 end $$;
+-- The view context, then read only, then the reads (rolled back with its subtransaction, so the transaction
+-- stays read-write): 'encounters,notes,reported|sqlstate of the view context while read only'.
+create function pg_temp.read_only_reads(secret text) returns text language plpgsql as $$
+declare answer text;
+begin
+  begin
+    perform pg_temp.as_card(pg_temp.h('secret:' || secret), 'e8-read-ro01');
+    perform * from ehr.card_share_view_context();
+    perform set_config('transaction_read_only', 'on', true);
+    answer := format('%s,%s,%s|%s', (select count(*) from ehr.encounters), (select count(*) from ehr.clinical_notes),
+      (select count(*) from ehr.patient_reported_health_profiles),
+      left(pg_temp.sqlstate_of('select * from ehr.card_share_view_context()'), 5));
+    raise exception using errcode = 'P0003', message = answer;
+  exception when sqlstate 'P0003' then
+    return sqlerrm;
+  end;
+end $$;
 create temporary table e8_ids (name text primary key, id uuid not null);
+create temporary table e8_claims (kind text, reference text, link_emailed boolean);
+grant all on e8_claims to public;
 grant all on e8_ids to public;
 grant execute on function pg_temp.as_patient(text, text), pg_temp.as_system(text), pg_temp.as_card(text, text),
   pg_temp.as_staff(text), pg_temp.h(text), pg_temp.sqlstate_of(text),
   pg_temp.send(integer, uuid, text, text, text, text, text), pg_temp.ask(text, uuid, text, text),
-  pg_temp.open(text, text, text, uuid, text), pg_temp.reads(text) to public;
+  pg_temp.open(text, text, text, uuid, text), pg_temp.reads(text), pg_temp.read_only_reads(text) to public;
 
 -- Fixtures. Accounts e8a1...: 1 patient A, 2 patient B, 3 patient C (deleted
 -- later), 6 the doctor. A has visits, notes, history, health information and
@@ -487,6 +506,17 @@ select gen_random_uuid(), 'e8b10000-0000-4000-8000-000000000002',
   clock_timestamp() - interval '1 hour', 'patient_ended', 'sent', 'e8-idem-d000000' || lpad(n::text, 3, '0'),
   pg_temp.h('d' || n)
   from generate_series(1, 50) n;
+-- 50 emails to c3@example.com today from patient B (ended links), while C's link to it is live (F6).
+insert into identity.card_shares (id, patient_id, reference, scope, duration_preset, consent_version, recipient_hmac,
+  recipient_hint, token_hmac, created_at, expires_at, ended_at, ended_reason, delivery_outcome, idempotency_key,
+  request_sha256)
+select gen_random_uuid(), 'e8b10000-0000-4000-8000-000000000002',
+  'EEEE-' || substr('ABCDEFGH', 1 + n / 8, 1) || substr('ABCDEFGH', 1 + n % 8, 1) || 'ZZ', 'card', '24h',
+  'card-share-v1', pg_temp.h('address:c3@example.com'), 'c•••@example.com', pg_temp.h('token:e' || n),
+  now() - interval '2 hours', now() - interval '2 hours' + interval '24 hours',
+  clock_timestamp() - interval '1 hour', 'patient_ended', 'sent', 'e8-idem-e000000' || lpad(n::text, 3, '0'),
+  pg_temp.h('e' || n)
+  from generate_series(1, 50) n;
 insert into identity.card_share_address_blocks (id, recipient_hmac, source)
 values (gen_random_uuid(), pg_temp.h('address:blocked@example.com'), 'recipient');
 set local session_replication_role = origin;
@@ -523,11 +553,37 @@ begin
           where item->>'id' = 'e8510000-0000-4000-8000-000000000001') is not null
      or (select item->>'recipientHint' from jsonb_array_elements(listed->'items') item
           where item->>'id' = 'e8510000-0000-4000-8000-000000000002') is distinct from 'k•••@example.com'
-     or (listed->>'createdToday')::integer <> 4 or (listed->>'liveCount')::integer <> 3 then
+     or (listed->>'createdToday')::integer <> 4 or (listed->>'liveCount')::integer <> 1 then
     raise exception 'The patient''s list: %', listed;
+  end if;
+  -- A link that is not emailed (blocked or capped) is recorded ended at once, as not_sent: nobody holds its
+  -- token, and it replaces nothing (F6).
+  if (select string_agg(format('%s/%s', item->>'status', item->>'endedReason'), ',' order by item->>'id')
+        from jsonb_array_elements(listed->'items') item
+       where item->>'id' in ('e8510000-0000-4000-8000-000000000004', 'e8510000-0000-4000-8000-000000000005'))
+     is distinct from 'ended/not_sent,ended/not_sent' then
+    raise exception 'A link not emailed is not ended as not_sent: %', listed;
+  end if;
+  -- C's live link to c3@example.com (an address past its daily emails): sending again is not emailed, so the
+  -- live link is kept, not replaced.
+  answer := pg_temp.send(3, 'e8530000-0000-4000-8000-000000000023', 'c3@example.com', 'c3-again', 'card',
+    'e8-idem-c000000023', 'c23');
+  if answer <> 'created|e8530000-0000-4000-8000-000000000023||false|true' then
+    raise exception 'A capped resend: %', answer;
   end if;
 end $$;
 reset role;
+do $$
+begin
+  if (select ended_at is null from identity.card_shares where id = 'e8530000-0000-4000-8000-000000000003')
+     is distinct from true
+     or (select (ended_reason, recipient_ciphertext is null, replaced_by) from identity.card_shares
+          where id = 'e8530000-0000-4000-8000-000000000023') is distinct from ('not_sent'::text, true, null::uuid)
+     or exists (select 1 from audit.events where action = 'identity.card-share.replace'
+                 and resource_id = 'e8530000-0000-4000-8000-000000000003') then
+    raise exception 'A link that was not emailed replaced a live one';
+  end if;
+end $$;
 do $$
 begin
   if (select details->>'notSentReason' from audit.events where action = 'identity.card-share.create'
@@ -716,7 +772,8 @@ begin
      or (select metadata from notification.inbox_items where notification_code = 'SHARED_CARD_OPENED'
            and resource_id = 'e8510000-0000-4000-8000-000000000006')
         is distinct from jsonb_build_object('recipientHint', 'd•••@example.com',
-          'reference', (select reference from identity.card_shares where id = 'e8510000-0000-4000-8000-000000000006'))
+          'reference', (select reference from identity.card_shares where id = 'e8510000-0000-4000-8000-000000000006'),
+          'opens', 1)
      or (select count(*) from identity.card_share_patient_emails where share_id = 'e8510000-0000-4000-8000-000000000006'
            and kind = 'opened') <> 1 then
     raise exception 'The open was not counted, audited, put in the inbox and emailed';
@@ -771,6 +828,10 @@ begin
   if (select scope from ehr.card_share_view_context()) <> 'card_and_records' then
     raise exception 'The view context';
   end if;
+  -- withCardShareTransaction's order (F1): the view context first (it writes its audit row), then the
+  -- transaction turns read only, then the reads; the view context itself cannot run read only.
+  answer := pg_temp.read_only_reads('s6');
+  if answer <> '1,1,1|25006' then raise exception 'The read-only order: %', answer; end if;
   if pg_temp.sqlstate_of('select 1 from identity.card_shares') not like '42501%'
      or pg_temp.sqlstate_of('select identity.list_my_card_shares(''x'', null)') not like '42501%' then
     raise exception 'The EHR runtime reached an identity table or command';
@@ -808,6 +869,9 @@ begin
          expires_at = expires_at - interval '2 minutes'
    where share_id = 'e8510000-0000-4000-8000-000000000006';
   set local session_replication_role = origin;
+  -- The patient read the first open's notice.
+  update notification.inbox_items set read_at = clock_timestamp()
+   where notification_code = 'SHARED_CARD_OPENED' and resource_id = 'e8510000-0000-4000-8000-000000000006';
   set local role hid_identity_api_runtime;
   if pg_temp.ask('t6', 'e8630000-0000-4000-8000-000000000003', '777777', 'browser-6b') <> 'issued|'
      or pg_temp.open('t6', '777777', 'browser-6b', 'e8730000-0000-4000-8000-000000000003', 's6b')
@@ -815,6 +879,34 @@ begin
     raise exception 'A second open of link 6';
   end if;
   reset role;
+  -- Opens of one link within 30 minutes share one notice (one push, critique 12): unread again, opens 2.
+  if (select string_agg(format('%s/%s/%s', metadata->>'opens', read_at is null, created_at < clock_timestamp()), ',')
+        from notification.inbox_items
+       where notification_code = 'SHARED_CARD_OPENED' and resource_id = 'e8510000-0000-4000-8000-000000000006')
+     is distinct from '2/true/true' then
+    raise exception 'A second open within 30 minutes was a new notice';
+  end if;
+  -- After 30 minutes, an open of link 7 is a new notice (and a new push).
+  update notification.inbox_items set created_at = created_at - interval '31 minutes'
+   where notification_code = 'SHARED_CARD_OPENED' and resource_id = 'e8510000-0000-4000-8000-000000000007';
+  perform pg_temp.age_codes('e8510000-0000-4000-8000-000000000007');
+  set local session_replication_role = replica;
+  update identity.card_share_codes set created_at = created_at - interval '2 minutes',
+         expires_at = expires_at - interval '2 minutes'
+   where share_id = 'e8510000-0000-4000-8000-000000000007';
+  set local session_replication_role = origin;
+  set local role hid_identity_api_runtime;
+  if pg_temp.ask('t7', 'e8630000-0000-4000-8000-000000000004', '787878', 'browser-7') <> 'issued|'
+     or pg_temp.open('t7', '787878', 'browser-7', 'e8730000-0000-4000-8000-000000000004', 's7b')
+        <> 'opened|||e8730000-0000-4000-8000-000000000004' then
+    raise exception 'A second open of link 7';
+  end if;
+  reset role;
+  if (select string_agg(metadata->>'opens', ',' order by created_at) from notification.inbox_items
+       where notification_code = 'SHARED_CARD_OPENED' and resource_id = 'e8510000-0000-4000-8000-000000000007')
+     is distinct from '1,1' then
+    raise exception 'An open after 30 minutes did not make a new notice';
+  end if;
   set local role hid_ehr_api_runtime;
   if pg_temp.reads('s6') <> '0,0,0,0,0,0,0' or pg_temp.reads('s6b') <> '1,1,1,0,0,1,1' then
     raise exception 'The first view was not ended by the second';
@@ -828,10 +920,10 @@ begin
   set local session_replication_role = replica;
   update identity.card_share_views set created_at = created_at - interval '31 minutes',
          expires_at = expires_at - interval '31 minutes'
-   where id = 'e8730000-0000-4000-8000-000000000002';
+   where id = 'e8730000-0000-4000-8000-000000000004';
   set local session_replication_role = origin;
   set local role hid_ehr_api_runtime;
-  if pg_temp.reads('s7') <> '0,0,0,0,0,0,0' then raise exception 'An expired view read'; end if;
+  if pg_temp.reads('s7b') <> '0,0,0,0,0,0,0' then raise exception 'An expired view read'; end if;
   reset role;
   -- An inactive patient: the view reads nothing, and the next code ends the link.
   update identity.patients set status = 'inactive' where id = 'e8b10000-0000-4000-8000-000000000001';
@@ -917,7 +1009,7 @@ reset role;
 -- 7. Lifecycle: expiry, retention, emails, account deletion, guards.
 set local session_replication_role = replica;
 update identity.card_shares set created_at = created_at - interval '25 hours', expires_at = expires_at - interval '25 hours'
- where id = 'e8510000-0000-4000-8000-000000000004';
+ where id = 'e8520000-0000-4000-8000-000000000001';
 update identity.card_shares set ended_at = clock_timestamp() - interval '13 months'
  where id = 'e8510000-0000-4000-8000-000000000001';
 update identity.card_share_views set created_at = created_at - interval '31 days', expires_at = expires_at - interval '31 days'
@@ -930,8 +1022,11 @@ declare
   claimed record;
   claimed_count integer := 0;
 begin
-  if pg_temp.ask('blocked', 'e8640000-0000-4000-8000-000000000001', '000000', 'b') <> 'ended|' then
+  if pg_temp.ask('b1', 'e8640000-0000-4000-8000-000000000001', '000000', 'b') <> 'ended|' then
     raise exception 'An expired link issued a code';
+  end if;
+  if pg_temp.ask('blocked', 'e8640000-0000-4000-8000-000000000002', '000000', 'b') <> 'ended|' then
+    raise exception 'A link that was not emailed issued a code';
   end if;
   perform pg_temp.as_system('e8-sweep-0001');
   swept := identity.close_expired_card_shares(100);
@@ -940,6 +1035,7 @@ begin
   end if;
   for claimed in select * from identity.claim_card_share_emails('e8-worker-1', 50, 60) loop
     claimed_count := claimed_count + 1;
+    insert into e8_claims values (claimed.kind, claimed.reference, claimed.link_emailed);
     if claimed.recipient <> 'e8.ada@example.invalid' and claimed.recipient <> 'e8.bola@example.invalid'
        and claimed.recipient <> 'e8.chi@example.invalid' then
       raise exception 'An email went to %', claimed.recipient;
@@ -961,11 +1057,29 @@ begin
   if (select (recipient_hmac, recipient_hint, anonymised_at is not null) from identity.card_shares
         where id = 'e8510000-0000-4000-8000-000000000001') is distinct from (null::char(64), null::text, true)
      or (select network_hmac from identity.card_share_views where id = 'e8730000-0000-4000-8000-000000000001') is not null
-     or (select ended_reason from identity.card_shares where id = 'e8510000-0000-4000-8000-000000000004') <> 'expired'
+     or (select ended_reason from identity.card_shares where id = 'e8520000-0000-4000-8000-000000000001') <> 'expired'
      or exists (select 1 from identity.card_share_patient_emails where kind = 'opened' and email_status <> 'delivered')
      or not exists (select 1 from identity.card_share_patient_emails where kind = 'created' and email_status = 'pending'
                      and attempt_count = 1 and next_attempt_at > clock_timestamp()) then
     raise exception 'The sweeper or the email outcomes';
+  end if;
+  -- E8 says whether the link was emailed (F6): links 4 and 5 were not, link 2 was.
+  if (select string_agg(format('%s=%s', share.id, claim.link_emailed), ',' order by share.id)
+        from e8_claims claim join identity.card_shares share on share.reference = claim.reference
+       where claim.kind = 'created' and share.id in ('e8510000-0000-4000-8000-000000000002',
+         'e8510000-0000-4000-8000-000000000004', 'e8510000-0000-4000-8000-000000000005'))
+     is distinct from 'e8510000-0000-4000-8000-000000000002=true,e8510000-0000-4000-8000-000000000004=false,'
+       || 'e8510000-0000-4000-8000-000000000005=false' then
+    raise exception 'E8 does not say whether the link was emailed: %', (select string_agg(format('%s', claim), ',') from e8_claims claim);
+  end if;
+  -- Retention reaches the inbox (F4): an anonymised link's notices keep no hint; a kept one keeps it.
+  if exists (select 1 from notification.inbox_items item join identity.card_shares share on share.id = item.resource_id
+              where item.resource_type = 'card-share' and share.anonymised_at is not null and item.metadata ? 'recipientHint')
+     or not exists (select 1 from notification.inbox_items item
+                     where item.resource_id = 'e8510000-0000-4000-8000-000000000001' and item.resource_type = 'card-share')
+     or (select string_agg(distinct metadata->>'recipientHint', ',') from notification.inbox_items
+          where resource_id = 'e8510000-0000-4000-8000-000000000006') is distinct from 'd•••@example.com' then
+    raise exception 'A notice of an anonymised link kept its hint';
   end if;
 end $$;
 
@@ -983,6 +1097,13 @@ begin
      or (select count(*) from audit.events where action = 'identity.card-share.anonymise'
            and patient_id = 'e8b10000-0000-4000-8000-000000000003') <> 1 then
     raise exception 'Account deletion left a link or an address behind';
+  end if;
+  -- Nothing links the deleted patient to a receiver's address, in the inbox either (F4).
+  if exists (select 1 from notification.inbox_items where patient_id = 'e8b10000-0000-4000-8000-000000000003'
+              and resource_type = 'card-share' and metadata ? 'recipientHint')
+     or not exists (select 1 from notification.inbox_items where patient_id = 'e8b10000-0000-4000-8000-000000000003'
+                     and notification_code = 'SHARED_CARD_STOPPED') then
+    raise exception 'The deleted patient''s notices kept a hint';
   end if;
   if identity.card_share_patient_state('e8b10000-0000-4000-8000-000000000003') <> 'account_deleted'
      or identity.card_share_patient_state('e8b10000-0000-4000-8000-000000000001') <> 'active' then
@@ -1037,6 +1158,7 @@ begin
        where entry->>'action' = 'card_opened' and entry->>'actorKind' = 'card_recipient') <> 4
      or (select string_agg(distinct entry->>'actorName', ',') from jsonb_array_elements(logged->'events') entry
           where entry->>'action' = 'card_opened') is distinct from 'd•••@example.com,e•••@example.com'
+     or (select count(*) from jsonb_array_elements(logged->'events') entry where entry->>'action' = 'card_opened') <> 5
      or not exists (select 1 from jsonb_array_elements(logged->'events') entry
                      where entry->>'action' = 'card_shared' and entry->>'actorKind' = 'patient')
      or not exists (select 1 from jsonb_array_elements(logged->'events') entry
@@ -1044,6 +1166,30 @@ begin
                        and entry->>'actorName' = 'e•••@example.com')
      or exists (select 1 from jsonb_array_elements(logged->'events') entry where entry ? 'share') then
     raise exception 'Activity: %', logged;
+  end if;
+  -- Every ending, with its reason (F5): the patient's own (ended, replaced) and the system's (a second lock,
+  -- the address asked to stop); a link that was not emailed reads card_shared with reason not_sent.
+  if (select string_agg(format('%s/%s/%s', entry->>'reason', entry->>'actorKind', entry->>'actorName'), ','
+            order by entry->>'reason')
+        from jsonb_array_elements(logged->'events') entry where entry->>'action' = 'card_ended')
+     is distinct from 'address_blocked/system/d•••@example.com,patient_ended/patient/e•••@example.com,'
+       || 'replaced/patient/,too_many_wrong_codes/system/k•••@example.com' then
+    raise exception 'Activity endings: %', logged;
+  end if;
+  if (select count(*) from jsonb_array_elements(logged->'events') entry
+       where entry->>'action' = 'card_shared' and entry->>'reason' = 'not_sent') <> 3
+     or exists (select 1 from jsonb_array_elements(logged->'events') entry
+                 where entry->>'action' not in ('card_ended', 'card_shared') and entry ? 'reason') then
+    raise exception 'Activity reasons: %', logged;
+  end if;
+  -- An expiry is the system's ending (B's link b1).
+  perform pg_temp.as_patient('patient:e8a10000-0000-4000-8000-000000000002', 'e8-log-0002');
+  logged := identity.patient_self_access_log('patient:e8a10000-0000-4000-8000-000000000002',
+    'e8f10000-0000-4000-8000-000000000002', 100, null, null);
+  if (select string_agg(format('%s/%s/%s', entry->>'reason', entry->>'actorKind', entry->>'actorName'), ',')
+        from jsonb_array_elements(logged->'events') entry where entry->>'action' = 'card_ended')
+     is distinct from 'expired/system/b•••@example.com' then
+    raise exception 'Activity of an expiry: %', logged;
   end if;
 end $$;
 

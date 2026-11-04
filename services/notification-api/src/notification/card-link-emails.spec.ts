@@ -23,7 +23,7 @@ const code = { channel: 'email' as const, recipient: 'kemi.doctor@example.test',
 const opened = { channel: 'email' as const, recipient: 'ada@example.test', reference: 'K7P2-QX9M',
   openedAt: '2026-11-04T09:42:00.000Z' };
 const created = { channel: 'email' as const, recipient: 'ada@example.test', reference: 'K7P2-QX9M',
-  recipientHint: 'k•••@example.test', expiresAt: '2026-11-05T09:04:00.000Z' };
+  recipientHint: 'k•••@example.test', expiresAt: '2026-11-05T09:04:00.000Z', linkEmailed: true };
 
 describe('Card link emails (0118, E5-E8)', () => {
   const original = { ...process.env };
@@ -101,13 +101,22 @@ describe('Card link emails (0118, E5-E8)', () => {
     expect(openedContent.text).toContain('If you didn\'t expect this, sign in to Health ID and end the link in Access '
       + 'and sharing.');
     const createdContent = cardCreatedContent({ reference: 'K7P2-QX9M', recipientHint: 'k•••@example.test',
-      expiresAt: new Date(created.expiresAt) });
+      expiresAt: new Date(created.expiresAt), linkEmailed: true });
     expect(createdContent.subject).toBe('You sent your Health ID card');
     expect(createdContent.text).toContain('You sent your Health ID card to k•••@example.test (reference K7P2-QX9M). '
       + 'The link works until 5 Nov 2026, 10:04 (Lagos time), or until you end it.');
     expect(createdContent.text).toContain('If this wasn\'t you, sign in to Health ID, end the link in Access and '
       + 'sharing, and change your password.');
-    for (const content of [openedContent, createdContent]) {
+    // A link that was not emailed (a blocked or capped address, or a failed send) is still a security notice,
+    // worded as what happened (F6).
+    const notSent = cardCreatedContent({ reference: 'K7P2-QX9M', recipientHint: 'k•••@example.test',
+      expiresAt: new Date(created.expiresAt), linkEmailed: false });
+    expect(notSent.subject).toBe('Someone tried to send your Health ID card');
+    expect(notSent.text).toContain('Someone signed in to your Health ID tried to send your card to k•••@example.test '
+      + '(reference K7P2-QX9M). We couldn\'t email it, so nobody can open it.');
+    expect(notSent.text).toContain('If this wasn\'t you, sign in to Health ID and change your password.');
+    expect(notSent.text).not.toMatch(/You sent your Health ID card|The link works until/);
+    for (const content of [openedContent, createdContent, notSent]) {
       expect(`${content.text}${content.html ?? ''}`).not.toMatch(/https?:\/\/|\/card#|HID-|blood|genotype|allerg/i);
     }
   });
@@ -128,6 +137,10 @@ describe('Card link emails (0118, E5-E8)', () => {
       ['CARD_SHARE_CREATED', 'email', 'card-share-email:7e0e0000-0000-4000-8000-000000000002'],
     ]);
     expect(sent[0]?.content.text).toContain(`${origin}/card#${token}\n`);
+    expect(sent[3]?.content.subject).toBe('You sent your Health ID card');
+    await routes.cardShareCreated({ ...created, linkEmailed: false }, request,
+      'card-share-email:7e0e0000-0000-4000-8000-000000000003');
+    expect((email.send as jest.Mock).mock.calls[4][0].content.subject).toBe('Someone tried to send your Health ID card');
     // The OTP slot stays empty: nothing but the rendered content is sent.
     expect(sent.every((message) => message.code === '')).toBe(true);
     process.env.HID_DEPLOYMENT_ENV = 'staging';
@@ -180,6 +193,8 @@ describe('Card link emails (0118, E5-E8)', () => {
       [{ ...opened, openedAt: 'today' }, DeliverCardOpenedDto],
       [{ ...created, recipientHint: 'kemi.doctor@example.test' }, DeliverCardCreatedDto],
       [{ ...created, recipient: 42 }, DeliverCardCreatedDto],
+      [{ ...created, linkEmailed: undefined }, DeliverCardCreatedDto],
+      [{ ...created, linkEmailed: 'yes' }, DeliverCardCreatedDto],
     ] as Array<[object, new () => object]>) {
       await expect(check(value, metatype)).rejects.toBeInstanceOf(BadRequestException);
     }
