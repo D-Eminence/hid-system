@@ -6,4 +6,6 @@ export interface OutreachCampaign {
 }
 export interface CampaignMember {
   id: string; campaignId: string; membershipId: string; role: CampaignRole; createdAt: string;
+  /** Only while OUTREACH_VISITS_ENABLED is on (0115): the staff name, or null when not shared. */
+  displayName?: string | null;
 }

@@ -82,6 +82,33 @@ export interface IdentityAuthorizationDecision {
   breakGlass: boolean;
 }
 
+/**
+ * Identity's answer to POST /api/v1/identity/patient-lookup: an active patient
+ * with this Health ID that the caller may read (read_records) at the facility.
+ */
+export interface IdentityPatientLookup {
+  patient: {
+    patientId: string;
+    hid: string;
+    firstName: string | null;
+    lastName: string | null;
+    fullName: string;
+    dateOfBirth: string | null;
+    gender: string | null;
+    version: number;
+  };
+  authorization: {
+    decision: 'allow';
+    facilityId: string;
+    membershipId: string;
+    scope: 'read_records' | 'write_records';
+    purpose: 'direct-care' | 'emergency' | 'healthcare-operations';
+    consentGrantId?: string;
+    expiresAt?: string;
+    breakGlass: boolean;
+  };
+}
+
 export interface IdentityClientOptions {
   baseUrl: string;
   caller: IdentityInternalCaller;
@@ -172,6 +199,22 @@ export class IdentityApiClient {
     if (!validDecision(payload, patientId, scope, purpose, context.facilityId)) {
       throw new IdentityApiProblem(502, payload);
     }
+    return payload;
+  }
+
+  /**
+   * Looks up an active patient by exact Health ID with the caller's own
+   * authorization (Identity checks read_records and audits the lookup). The
+   * Health ID travels in the body only, never in a path or query.
+   */
+  async lookupPatient(
+    hid: string,
+    purpose: 'direct-care' | 'emergency' | 'healthcare-operations',
+    context: IdentityDelegatedContext,
+  ): Promise<IdentityPatientLookup> {
+    const payload = await this.request('/api/v1/identity/patient-lookup', 'POST',
+      { hid, purpose }, { ...context, purposeOfUse: purpose });
+    if (!validPatientLookup(payload, purpose, context.facilityId)) throw new IdentityApiProblem(502, payload);
     return payload;
   }
 
@@ -330,4 +373,24 @@ function validDecision(
     && (!facilityId || decision.facilityId === facilityId)
     && typeof decision.membershipId === 'string'
     && typeof decision.breakGlass === 'boolean';
+}
+
+function validPatientLookup(
+  value: unknown,
+  purpose: IdentityPatientLookup['authorization']['purpose'],
+  facilityId: string | undefined,
+): value is IdentityPatientLookup {
+  if (typeof value !== 'object' || value === null) return false;
+  const { patient, authorization } = value as Partial<IdentityPatientLookup>;
+  if (typeof patient !== 'object' || patient === null
+    || typeof authorization !== 'object' || authorization === null) return false;
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  return uuid.test(patient.patientId ?? '') && typeof patient.hid === 'string'
+    && typeof patient.fullName === 'string' && patient.fullName.length > 0
+    && (patient.dateOfBirth === null || patient.dateOfBirth === undefined
+      || (typeof patient.dateOfBirth === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(patient.dateOfBirth)))
+    && authorization.decision === 'allow' && authorization.purpose === purpose
+    && typeof authorization.facilityId === 'string'
+    && (!facilityId || authorization.facilityId === facilityId)
+    && typeof authorization.breakGlass === 'boolean';
 }

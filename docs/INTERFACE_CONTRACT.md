@@ -1035,6 +1035,9 @@ GET  /api/v1/outreach/registration-cases
 GET  /api/v1/outreach/registration-cases/:caseId
 POST /api/v1/outreach/registration-cases
 POST /api/v1/outreach/registration-cases/:caseId/link-existing
+GET  /api/v1/outreach/registration-cases/:caseId/visits         (0115, OUTREACH_VISITS_ENABLED)
+POST /api/v1/outreach/registration-cases/:caseId/visits         (0115, OUTREACH_VISITS_ENABLED)
+POST /api/v1/outreach/registration-cases/:caseId/link-preview   (0115, OUTREACH_VISITS_ENABLED)
 ```
 
 All requests require authenticated Identity user context, an authorized exact
@@ -1049,8 +1052,12 @@ exact expected Outreach row version. Outreach calls the Identity authorization
 boundary with separate `outreach-api` workload evidence before opening the
 mutation transaction. Stale versions return 412; a reused idempotency key with
 different content returns 409; Identity/dependency failure never returns
-success. There is no Outreach create-patient, HID, NIN, campaign, encounter,
-screening, document, OCR, or EHR-ingestion endpoint in this slice.
+success. There is no Outreach create-patient, NIN, encounter, screening,
+document, OCR, or EHR-ingestion endpoint in this slice. The campaign routes
+live under `/api/v1/outreach/registration-cases/campaigns`. While
+`OUTREACH_VISITS_ENABLED` is on, `link-existing` also accepts a Health ID in
+place of the canonical patient UUID, and visits, a Health ID link preview and
+staff names are available; see section 35 (0115).
 
 ## 9. Patient Identifier Contract
 
@@ -3280,3 +3287,154 @@ its own signed declaration. 0105's declaration names only 0105 and
 and its hash in the declaration is measured again). 0105's prerequisite is
 0103's admin gate body and it reads nothing 0104 adds, so it applies the same
 way after 0104 as on 0103 alone.
+
+## 35. Outreach visits, Health ID link preview and staff names (0115)
+
+Backend plan Part 3 "Item 5" (written as 0108), owner decisions D10 (send the
+campaign name now; a site field waits for campaign governance) and D11 (link
+by Health ID only with access the worker already has). Numbered 0115 by the
+coordinator; unsigned until the owner signs. Everything below is behind
+outreach-api's `OUTREACH_VISITS_ENABLED` (default off). While off, the three
+new routes answer a plain `404 NOT_FOUND` (after the security checks, before
+the body is read), `healthId` on `link-existing` is refused as an unknown field
+(`400 VALIDATION_FAILED`), and every answer keeps its 0105 shape.
+
+All routes need what every Outreach route needs (section "Outreach registration
+boundary"): Identity user context, an authorized `X-Facility-ID`, and Origin and
+CSRF for a cookie write. The Health ID travels only in request bodies, never in
+a path, query or log; Outreach keeps only its last four characters in an answer.
+
+### Visits
+
+```text
+GET  /api/v1/outreach/registration-cases/:caseId/visits    outreach.registration.read
+POST /api/v1/outreach/registration-cases/:caseId/visits    outreach.registration.write, Idempotency-Key
+```
+
+POST body:
+
+| Field | Rule |
+|---|---|
+| `kind` | `visit`, `referral` or `follow_up` |
+| `occurredOn` | `YYYY-MM-DD`, a real date from 2020-01-01, not after today in Africa/Lagos |
+| `followUpOn` | absent, null, or a `YYYY-MM-DD` date after `occurredOn` |
+| `referredTo` | absent, null or blank (none), or 2-160 characters without control characters (trimmed) |
+| `notes` | absent, null or blank (none), or at most 1000 characters; line breaks are kept (CRLF and CR become LF), no other control character (trimmed) |
+
+Answers: `201 {visit}` and `200 {items}` (newest first by `occurredOn`, then
+recording time; at most 100). A visit is
+`{id, registrationCaseId, kind, occurredOn, followUpOn, referredTo, notes, recordedByMembershipId, createdAt}`;
+dates are `YYYY-MM-DD` strings.
+
+Refusals: `404 OUTREACH_REGISTRATION_NOT_FOUND` (a case the member cannot see:
+another facility, or a campaign case of a campaign they are not in);
+`400 VALIDATION_FAILED` (a database CHECK failure is reported against the field
+whose constraint failed; the Lagos-date trigger against `occurredOn`); `400 IDEMPOTENCY_KEY_REQUIRED`; `409
+IDEMPOTENCY_CONFLICT` (the key was used for a different visit; the same request
+again answers the first visit); `409 OUTREACH_VISIT_CONFLICT`. The visit digest
+is computed from the named fields `{caseId, kind, occurredOn, followUpOn,
+referredTo, notes}`.
+
+Audit (ids only): `outreach.registration-case.visit.create` and
+`outreach.registration-case.visit.list`, resource the case id, patient the
+case's resolved patient when it has one.
+
+### Health ID link preview
+
+```text
+POST /api/v1/outreach/registration-cases/:caseId/link-preview   outreach.registration.write
+{ "healthId": "HID-7KQ2M9XA" }
+```
+
+`healthId` is trimmed, upper-cased, at most 36 characters, and must match
+`^HID-[A-HJ-NP-Z2-9]{6,32}$` (Identity's own rule). The case must be visible and
+pending. Each preview is counted first, in one SERIALIZABLE transaction with
+the budget check (`outreach.link_preview_attempts`, ids and a time only), so
+parallel requests cannot exceed it; the 21st Health ID check in an hour by the
+same member at the facility (previews and links by Health ID together) answers
+`429 OUTREACH_HEALTH_ID_LIMIT` before Identity is asked. Then outreach-api calls
+Identity `POST /api/v1/identity/patient-lookup {hid, purpose:"direct-care"}`
+with the caller's own credentials (Identity checks `read_records`, audits
+`identity.patient.lookup`, and the patient sees a view), and then Identity's
+`write_records` authorization check, the one `link-existing` makes, to answer
+`canLink`. Identity's answer must be for this Health ID, this member and this
+facility, or the preview answers `502 IDENTITY_BAD_RESPONSE`; `healthIdLast4`
+is taken from Identity's answer.
+
+`200 {patient:{fullName, dateOfBirth, healthIdLast4}, canLink}`. `dateOfBirth`
+may be null. `canLink` is false when the caller may read but not write the
+record: an Access PIN gives `read_records` only, as does a share below
+clinical collaboration, and a link with that access is refused (`403
+IDENTITY_AUTHORIZATION_DENIED`). Nothing else about the patient is returned.
+
+Refusals: `404 OUTREACH_REGISTRATION_NOT_FOUND`; `409
+OUTREACH_REGISTRATION_ALREADY_RESOLVED`; `429 OUTREACH_HEALTH_ID_LIMIT`; `404
+OUTREACH_HEALTH_ID_NOT_FOUND` ("No one has this Health ID. Check it and try
+again."; Identity's `404 NOT_FOUND`, also for an inactive or merged patient);
+`403 OUTREACH_PATIENT_ACCESS_REQUIRED` ("Ask the person to share their record
+with you, or use their PIN."; only Identity's `403 ACCESS_DENIED`, and a
+break-glass answer). Every other Identity refusal keeps Identity's status and
+code: `403 PERMISSION_DENIED` (a role that may not look patients up: admin,
+org_admin, org_admin_awaiting_review), `403 FACILITY_ACCESS_DENIED`, `403
+ORIGIN_DENIED`, `403 CSRF_VALIDATION_FAILED`, `423` a disabled portal. Identity
+unavailable is `503 IDENTITY_SERVICE_UNAVAILABLE` (the gateway shows `503
+UPSTREAM_UNAVAILABLE`).
+
+Audit (ids only): `outreach.registration-case.link-preview`, resource the case
+id: after a successful preview with the resolved patient and outcome `success`;
+after `404 OUTREACH_HEALTH_ID_NOT_FOUND` (outcome `failure`) or `403
+OUTREACH_PATIENT_ACCESS_REQUIRED` (outcome `denied`) with no patient.
+
+### Linking by Health ID
+
+`POST …/:caseId/link-existing` takes exactly one of `canonicalPatientId` (as
+before) or `healthId` (only while the switch is on), with `expectedVersion` and
+`reason`. With `healthId`, a retry of a link already made (same key, same
+digest) replays without asking Identity. Otherwise, before Identity is asked
+and in one SERIALIZABLE transaction, the case must be visible (`404
+OUTREACH_REGISTRATION_NOT_FOUND`), pending (`409
+OUTREACH_REGISTRATION_ALREADY_RESOLVED`) and at `expectedVersion` (`412
+VERSION_CONFLICT`), and the member within the hourly Health ID budget (`429
+OUTREACH_HEALTH_ID_LIMIT`); the check is then counted, found or not. Identity
+resolves the Health ID again (nothing from a preview is trusted; its refusals
+map as for the preview), then the same `write_records` authorization runs, then
+the same transaction. The idempotency digest of the `canonicalPatientId`
+form is exactly 0105's (`{id, canonicalPatientId, expectedVersion, reason}`), so
+a retry across the deploy replays; the `healthId` form digests `{id, healthId,
+expectedVersion, reason}`.
+
+### New optional fields
+
+While the switch is on, every case answer (`GET` list and one, create, link,
+and their replays) also has `createdBy: {name} | null` (the registering staff
+member's staff record name), `campaignName: string | null` (null without a
+campaign or when the caller may not read campaigns), `nextFollowUpOn: string |
+null` (the follow-up date of the latest visit) and `visitCount`. Campaign member
+answers (`GET …/campaigns/:campaignId/members`) gain `displayName: string |
+null`: a name only for members of a campaign the caller is also in.
+
+### The database (0115)
+
+- `outreach.registration_case_visits`: insert-only (`platform.reject_mutation`),
+  row-level security enabled and forced. Read: `outreach.registration.read` at
+  the session facility and the case visible to the caller at the same facility
+  (so the case's restrictive campaign membership policy applies). Insert: the
+  same with `outreach.registration.write`, and the recorder is the session's
+  account and membership. A BEFORE INSERT trigger refuses a date after today
+  in Africa/Lagos (23514) and stamps `created_at`. Unique `(recorded_by_account_id,
+  facility_id, idempotency_key)`.
+- `outreach.link_preview_attempts`: ids and a time, one row per Health ID
+  check (preview or link); insert-only, forced
+  row-level security; a member reads only their own rows.
+- `outreach.member_display_names(uuid[])` and `outreach.case_registrar_names(uuid[])`:
+  STABLE SECURITY DEFINER, `search_path pg_catalog, platform, auth, identity,
+  outreach`, at most 200 ids (22023), answering `(id, display_name)` from
+  `identity.staff.full_name` only, for the session facility; member names only
+  for memberships that share a campaign with the caller (who needs
+  `outreach.campaign.read`); registrar names only for cases the caller may read.
+  They lock no row.
+- Grants (in 0115 for existing roles, and the same in runtime-grants.sql):
+  SELECT and INSERT on both tables and EXECUTE on both readers to
+  `hid_outreach_runtime` and `hid_schema_test_runtime`; nothing to PUBLIC.
+- Suite: `services/ehr-api/test/database/outreach-visits.integration.sql`, run
+  with the readers under an owner that does not bypass row-level security.

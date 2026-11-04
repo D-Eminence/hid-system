@@ -1,4 +1,4 @@
-import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, ParseUUIDPipe, Post, Req, UseGuards } from '@nestjs/common';
 import { RequirePermissions } from '../common/decorators';
 import { requireIdempotencyKey } from '../common/idempotency';
 import { DomainProblem } from '../common/problem';
@@ -8,11 +8,15 @@ import { CreateCampaignDto } from './dto/create-campaign.dto';
 import { UpdateCampaignStatusDto } from './dto/update-campaign-status.dto';
 import { AddCampaignMemberDto } from './dto/add-campaign-member.dto';
 import { LinkExistingPatientDto } from './dto/link-existing-patient.dto';
+import { CreateVisitDto } from './dto/create-visit.dto';
+import { LinkPreviewDto } from './dto/link-preview.dto';
+import { VisitsEnabledGuard } from './outreach-features';
 import { OutreachService } from './outreach.service';
+import { OutreachVisitsService } from './outreach-visits.service';
 
 @Controller('outreach/registration-cases')
 export class OutreachController {
-  constructor(private readonly outreach: OutreachService) {}
+  constructor(private readonly outreach: OutreachService, private readonly visits: OutreachVisitsService) {}
 
 
   @Get('/campaigns')
@@ -80,5 +84,33 @@ export class OutreachController {
     @Body() input: LinkExistingPatientDto, @Req() request: HidRequest) {
     return this.outreach.linkExisting(caseId, input,
       requireIdempotencyKey(request.header('idempotency-key')), requireRequestContext(request));
+  }
+
+  // 0115, behind OUTREACH_VISITS_ENABLED (a plain 404 while off). The Health
+  // ID travels only in request bodies, never in a path.
+  @Get(':caseId/visits')
+  @UseGuards(VisitsEnabledGuard)
+  @RequirePermissions('outreach.registration.read')
+  listVisits(@Param('caseId', new ParseUUIDPipe()) caseId: string, @Req() request: HidRequest) {
+    return this.visits.list(caseId, requireRequestContext(request));
+  }
+
+  @Post(':caseId/visits')
+  @HttpCode(201)
+  @UseGuards(VisitsEnabledGuard)
+  @RequirePermissions('outreach.registration.write')
+  createVisit(@Param('caseId', new ParseUUIDPipe()) caseId: string,
+    @Body() input: CreateVisitDto, @Req() request: HidRequest) {
+    return this.visits.create(caseId, input, requireIdempotencyKey(request.header('idempotency-key')),
+      requireRequestContext(request));
+  }
+
+  @Post(':caseId/link-preview')
+  @HttpCode(200)
+  @UseGuards(VisitsEnabledGuard)
+  @RequirePermissions('outreach.registration.write')
+  linkPreview(@Param('caseId', new ParseUUIDPipe()) caseId: string,
+    @Body() input: LinkPreviewDto, @Req() request: HidRequest) {
+    return this.visits.linkPreview(caseId, input, requireRequestContext(request));
   }
 }

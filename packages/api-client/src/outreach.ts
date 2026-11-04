@@ -31,6 +31,17 @@ export interface OutreachRegistrationCase {
   rowVersion: number;
   createdAt: string;
   updatedAt: string;
+  /**
+   * Present only while the server's OUTREACH_VISITS_ENABLED is on (0115).
+   * createdBy: the registering staff member's name, or null when the caller
+   * may not see it. campaignName: null without a campaign or when the caller
+   * may not read campaigns. nextFollowUpOn: the follow-up date of the latest
+   * visit (YYYY-MM-DD), or null.
+   */
+  createdBy?: { name: string } | null;
+  campaignName?: string | null;
+  nextFollowUpOn?: string | null;
+  visitCount?: number;
 }
 
 export interface CreateOutreachRegistrationCase {
@@ -44,10 +55,52 @@ export interface CreateOutreachRegistrationCase {
   operationalNotes?: string | null;
 }
 
-export interface LinkOutreachExistingPatient {
-  canonicalPatientId: string;
-  expectedVersion: number;
-  reason: string;
+/**
+ * Exactly one of canonicalPatientId or healthId. The healthId form needs the
+ * server's OUTREACH_VISITS_ENABLED; Identity resolves the Health ID again at
+ * link time and nothing from a preview is trusted. Each healthId link counts
+ * against the member's 20 Health ID checks an hour (with previews), found or
+ * not, except a replay of a link already made (429 OUTREACH_HEALTH_ID_LIMIT).
+ */
+export type LinkOutreachExistingPatient =
+  | { canonicalPatientId: string; healthId?: never; expectedVersion: number; reason: string }
+  | { healthId: string; canonicalPatientId?: never; expectedVersion: number; reason: string };
+
+export type OutreachCaseVisitKind = 'visit' | 'referral' | 'follow_up';
+
+export interface CreateOutreachCaseVisit {
+  kind: OutreachCaseVisitKind;
+  /** YYYY-MM-DD in Africa/Lagos, not after today there. */
+  occurredOn: string;
+  /** YYYY-MM-DD after occurredOn, or null. */
+  followUpOn?: string | null;
+  /** 2-160 characters, or null. */
+  referredTo?: string | null;
+  /** At most 1000 characters; newlines are the only control characters allowed. */
+  notes?: string | null;
+}
+
+export interface OutreachCaseVisit {
+  id: string;
+  registrationCaseId: string;
+  kind: OutreachCaseVisitKind;
+  occurredOn: string;
+  followUpOn: string | null;
+  referredTo: string | null;
+  notes: string | null;
+  recordedByMembershipId: string;
+  createdAt: string;
+}
+
+/**
+ * The person a Health ID belongs to, as far as the caller may read them.
+ * canLink is false when the caller may read but not write this record (an
+ * Access PIN, or a share below clinical collaboration): linking would be
+ * refused.
+ */
+export interface OutreachLinkPreview {
+  patient: { fullName: string; dateOfBirth: string | null; healthIdLast4: string };
+  canLink: boolean;
 }
 
 export class OutreachApiProblem extends Error {
@@ -91,6 +144,31 @@ export class OutreachApiClient {
     return this.request<OutreachRegistrationCase>(
       `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/link-existing`,
       'POST', input, context, idempotencyKey, signal);
+  }
+
+  /** Needs the server's OUTREACH_VISITS_ENABLED (otherwise 404 NOT_FOUND). */
+  listCaseVisits(caseId: string, context: OutreachRequestContext, signal?: AbortSignal) {
+    return this.request<{ items: readonly OutreachCaseVisit[] }>(
+      `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/visits`,
+      'GET', undefined, context, undefined, signal);
+  }
+
+  /** Needs the server's OUTREACH_VISITS_ENABLED (otherwise 404 NOT_FOUND). */
+  createCaseVisit(caseId: string, input: CreateOutreachCaseVisit, context: OutreachRequestContext,
+    idempotencyKey: string, signal?: AbortSignal) {
+    return this.request<{ visit: OutreachCaseVisit }>(
+      `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/visits`,
+      'POST', input, context, idempotencyKey, signal);
+  }
+
+  /**
+   * Needs the server's OUTREACH_VISITS_ENABLED (otherwise 404 NOT_FOUND). The
+   * Health ID goes in the body, never the path. Not retried.
+   */
+  previewLink(caseId: string, healthId: string, context: OutreachRequestContext, signal?: AbortSignal) {
+    return this.request<OutreachLinkPreview>(
+      `/api/v1/outreach/registration-cases/${encodeURIComponent(caseId)}/link-preview`,
+      'POST', { healthId }, context, undefined, signal);
   }
 
   private async request<Result>(path: string, method: 'GET' | 'POST', body: unknown,

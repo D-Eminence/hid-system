@@ -132,9 +132,13 @@ export type {
 } from './ocr';
 export { OutreachApiClient, OutreachApiProblem } from './outreach';
 export type {
+  CreateOutreachCaseVisit,
   CreateOutreachRegistrationCase,
   LinkOutreachExistingPatient,
+  OutreachCaseVisit,
+  OutreachCaseVisitKind,
   OutreachClientOptions,
+  OutreachLinkPreview,
   OutreachRegistrationCase,
   OutreachRequestContext,
 } from './outreach';
@@ -146,6 +150,7 @@ export type {
   IdentityDelegatedContext,
   IdentityFacilityAssignment,
   IdentityInternalCaller,
+  IdentityPatientLookup,
   IdentityRegistrationCase,
   PatientSelfAuthorization,
   ResolveNinRegistration,

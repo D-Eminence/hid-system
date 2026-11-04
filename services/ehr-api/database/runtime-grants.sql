@@ -1418,6 +1418,22 @@ grant execute on function identity.records_processing_direct_care_cover(uuid,tex
 -- granted to hid_document_scanner above and to no other role.
 revoke all on function ehr.resolve_document_scan_target(text, text, text, text),
   ehr.list_documents_awaiting_scan(integer, integer, text) from public;
+-- Outreach visits and names (0115): the visits table and the Health ID
+-- preview attempt log are insert-only for the Outreach runtime (row-level
+-- security forced; no UPDATE or DELETE grant); the two name readers return
+-- staff full_name only. 0115 makes the same grants for roles that already
+-- exist. The visit trigger function is granted to no role.
+revoke all on outreach.registration_case_visits, outreach.link_preview_attempts from public;
+revoke all on function outreach.validate_registration_case_visit(),
+  outreach.member_display_names(uuid[]), outreach.case_registrar_names(uuid[]) from public;
+grant select, insert on outreach.registration_case_visits, outreach.link_preview_attempts
+  to hid_outreach_runtime;
+grant execute on function outreach.member_display_names(uuid[]), outreach.case_registrar_names(uuid[])
+  to hid_outreach_runtime;
+grant select, insert on outreach.registration_case_visits, outreach.link_preview_attempts
+  to hid_schema_test_runtime;
+grant execute on function outreach.member_display_names(uuid[]), outreach.case_registrar_names(uuid[])
+  to hid_schema_test_runtime;
 
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.
