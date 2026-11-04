@@ -284,3 +284,11 @@ sentry_dsns = {
 # scan bridge reserves nothing for now (its queue trigger still caps it at 2).
 # Set back to 2 once lambda get-account-settings shows 102 or more.
 document_scan_bridge_reserved_concurrency = -1
+
+# Document virus scanning, stage 3 (DEVOPS_HANDOVER "Document virus scanning";
+# owner decisions D1-D5, 31 Oct 2026): GuardDuty Malware Protection on
+# clinical/objects/ and the result bridge, in observe mode (it writes nothing
+# and starts no scans). Stage 2, the issuer limit of eight, is applied first.
+enable_document_malware_protection = true
+enable_document_scanning           = true
+document_scan_bridge_mode          = "observe"
