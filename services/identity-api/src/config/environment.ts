@@ -136,10 +136,12 @@ const environmentSchema = z.object({
   // 404 as an older Identity does and the website hides the card; deletions
   // already scheduled still complete and their emails are still sent.
   ACCOUNT_DELETION_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
-  // Card links (0118): off by default and until legal signs off (NDPA, D13).
-  // While off every card-link route answers 404 and the sweeper is idle.
-  // card-links.flag.ts reads the same variable without the whole schema.
-  CARD_LINKS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  // Card links (0118): a code default, on since the owner's decision of 4 Nov
+  // 2026 after legal approval (NDPA, D13); production's task definitions set
+  // no key. false switches it off: every card-link route answers 404 and the
+  // sweeper is idle. card-links.flag.ts reads the same variable without the
+  // whole schema.
+  CARD_LINKS_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
   // Phone and computer notifications (B6, migration 0097): the VAPID public
   // key (87 base64url characters) and contact (mailto: or https:). Both plain
   // optional strings, never refused at boot: web-push.config.ts decides

@@ -54,9 +54,10 @@ const schema = z.object({
   // anything missing, invalid or mismatched is off (N1 answers 404). The
   // private key is an ECS secret (webPushVapidPrivateKey in the
   // notification-provider secret) and never appears in a log or answer.
-  // Card links (0118): off by default and until legal signs off (NDPA, D13).
-  // While off, the four card-link email routes answer 404 and send nothing.
-  CARD_LINKS_ENABLED: z.enum(['true', 'false']).default('false').transform((value) => value === 'true'),
+  // Card links (0118): a code default, on since the owner's decision of 4 Nov
+  // 2026 after legal approval (NDPA, D13). false switches it off: the four
+  // card-link email routes answer 404 and send nothing.
+  CARD_LINKS_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
   WEB_PUSH_VAPID_PUBLIC_KEY: optional,
   WEB_PUSH_VAPID_PRIVATE_KEY: optional,
   WEB_PUSH_SUBJECT: optional,

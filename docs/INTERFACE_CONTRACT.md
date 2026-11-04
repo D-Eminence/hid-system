@@ -3014,15 +3014,18 @@ down migration.
 ## 33. Card links: a patient sends their card by email, opened with a one-time code (0118)
 
 Akos handover step 8 (the design and critique of 2026-11-04; the owner's
-answers of 2026-11-04, "all recommended"). Built but switched off: turning it
-on in production needs legal sign-off (NDPA, D13). 0118 is unsigned until the
+answers of 2026-11-04, "all recommended"). On since the owner's decision of
+4 Nov 2026 after legal approval (NDPA, D13). 0118 is unsigned until the
 owner signs its declaration.
 
 Switch: `CARD_LINKS_ENABLED` in identity-api, ehr-api and notification-api,
-default `false`. While it is off every route below answers a plain 404
+a code default, `true` (on), as `PATIENT_SHARES_ENABLED`; production sets no
+key. `false` switches it off, and anything but exactly `false` reads as on.
+While it is `false` every route below answers a plain 404
 (`application/problem+json`, code `NOT_FOUND`) before authentication, CSRF,
 Turnstile, validation or audit; nothing is written or sent and the sweeper
-is idle, so the images may run before 0118 is applied.
+is idle, so an image may run on a database without 0118 only with
+`CARD_LINKS_ENABLED=false`.
 
 Every answer is `Cache-Control: no-store`. Every refusal is
 `application/problem+json` with `code` and a plain-English `detail` (the
@@ -3194,7 +3197,7 @@ emails" link `<patient site>/card/stop#<stopToken>` and the privacy notice
 Lagos day: reference and time) and E8 `POST notifications/card-share-created`
 (every new link: masked address, reference, end, and `linkEmailed`, false
 when the link itself was not emailed). All four answer 404 while
-notification-api's `CARD_LINKS_ENABLED` is off.
+notification-api's `CARD_LINKS_ENABLED` is `false`.
 
 ### Inbox and Activity
 
@@ -3234,13 +3237,16 @@ suite is
 `services/ehr-api/test/database/card-links.integration.sql`. 0118 has no down
 migration.
 
-### Before turning it on
+### Switched on (the owner's decision of 4 Nov 2026, after legal approval)
 
-1. Legal signs off (D13): the receiver privacy notice at `/card/privacy`, the
-   processors (Amazon SES, Brevo, Cloudflare Turnstile, Sentry), and click
-   and open tracking confirmed off on the SES configuration set and the
+1. Legal approved it (D13): the receiver privacy notice at `/card/privacy`,
+   the processors (Amazon SES, Brevo, Cloudflare Turnstile, Sentry), and
+   click and open tracking kept off on the SES configuration set and the
    Brevo account (the emails are plain text, so no link is rewritten).
-2. The owner signs the 0118 declaration and it is applied.
+2. The owner signs the 0118 declaration and it is applied before these
+   images run; an image on a database without 0118 needs
+   `CARD_LINKS_ENABLED=false` until it is.
 3. The website's receiver page, the patient's pages and its flag ship.
-4. `CARD_LINKS_ENABLED=true` for notification-api, then ehr-api, then
-   identity-api.
+4. No key is set: `CARD_LINKS_ENABLED` is on by default in notification-api,
+   ehr-api and identity-api. `CARD_LINKS_ENABLED=false` switches a service
+   off (identity-api first, then ehr-api, then notification-api).

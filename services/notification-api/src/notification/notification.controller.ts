@@ -217,7 +217,7 @@ export class NotificationController {
   /**
    * E5 to E8 (0118, card links): workload authentication, the idempotency
    * key and an email recipient as every email route; 404 while
-   * CARD_LINKS_ENABLED is off (the default), before anything is sent.
+   * CARD_LINKS_ENABLED is false (on by default), before anything is sent.
    * Identity keys E5 card-share:<link>, E6 card-share-code:<code> and E7/E8
    * card-share-email:<row>. Nothing here logs a recipient, token or code.
    */

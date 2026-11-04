@@ -86,7 +86,7 @@ interface CardRow {
  * the same address, in the browser that asked for it, for one 30-minute view.
  * The patient's commands run bound to their session (identity.*_my_card_*);
  * the receiver's in the system context (identity.issue_card_share_code and
- * the rest). Off (404) unless CARD_LINKS_ENABLED. Nothing here logs or audits
+ * the rest). Off (404) while CARD_LINKS_ENABLED=false. Nothing here logs or audits
  * an address, label, token or code; the database audits every step with ids
  * and counts.
  */
