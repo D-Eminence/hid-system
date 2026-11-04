@@ -285,10 +285,14 @@ sentry_dsns = {
 # Set back to 2 once lambda get-account-settings shows 102 or more.
 document_scan_bridge_reserved_concurrency = -1
 
-# Document virus scanning, stage 3 (DEVOPS_HANDOVER "Document virus scanning";
-# owner decisions D1-D5, 31 Oct 2026): GuardDuty Malware Protection on
-# clinical/objects/ and the result bridge, in observe mode (it writes nothing
-# and starts no scans). Stage 2, the issuer limit of eight, is applied first.
+# Document virus scanning (DEVOPS_HANDOVER "Document virus scanning"; owner
+# decisions D1-D5, 31 Oct 2026). GuardDuty Malware Protection on
+# clinical/objects/ and the result bridge. Write mode after the demo uploads
+# showed the right results: the bridge appends scan events and runs reconcile
+# scans. Reconcile runs every 15 minutes as the safety net for missed results
+# (owner chose to combine it with write mode, 4 Nov 2026). The backfill is a
+# manual reconcile run after this apply.
 enable_document_malware_protection = true
 enable_document_scanning           = true
-document_scan_bridge_mode          = "observe"
+document_scan_bridge_mode          = "write"
+document_scan_reconcile_enabled    = true
