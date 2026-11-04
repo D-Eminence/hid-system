@@ -41,6 +41,24 @@ export class PatientEvidenceService {
     }
     return {records,complete};
   }
+  /**
+   * The patient's name and date of birth, used only to clean free text (the
+   * records, and the patient's own question) before it reaches a model, the
+   * index or saved history. Never sent anywhere itself.
+   */
+  async redactionProfile(request:HidRequest):Promise<PatientProfileInput> {
+    const auth=await this.records.authorizeSelf(request);
+    return (await this.profile(request,auth.patientId)).identity;
+  }
+  private async profile(request:HidRequest,patientId:string) {
+    const profile=await this.identity.patientProfile(request);
+    if(profile.patientId!==patientId)throw new DomainProblem(403,'PATIENT_ACCESS_DENIED','Patient profile authorization changed');
+    // Name and date of birth are used only to clean the records and the question; the
+    // chat itself sees the patient's age and sex (patient-evidence.policy.ts).
+    const identity:PatientProfileInput={firstName:profile.firstName,lastName:profile.lastName,fullName:profile.fullName,
+      dateOfBirth:profile.dateOfBirth,gender:profile.gender};
+    return {identity,profile};
+  }
   async snapshot(request:HidRequest,signal?:AbortSignal,documentIds?:readonly string[]):Promise<EvidenceSnapshot> {
     const auth=await this.records.authorizeSelf(request);
     const local=await this.database.withPatientTransaction(auth,request.correlationId,async client=>{
@@ -51,12 +69,7 @@ export class PatientEvidenceService {
       return value;
     });
     const unavailable:string[]=[];let cursor:string|undefined;let labComplete=false;
-    const profile=await this.identity.patientProfile(request);
-    if(profile.patientId!==auth.patientId)throw new DomainProblem(403,'PATIENT_ACCESS_DENIED','Patient profile authorization changed');
-    // Name and date of birth are used only to clean the records below; the
-    // chat itself sees the patient's age and sex (patient-evidence.policy.ts).
-    const identity:PatientProfileInput={firstName:profile.firstName,lastName:profile.lastName,fullName:profile.fullName,
-      dateOfBirth:profile.dateOfBirth,gender:profile.gender};
+    const {identity,profile}=await this.profile(request,auth.patientId);
     local.records.push(evidence({kind:'profile',id:auth.patientId,version:String(profile.version),title:'Age and sex',recordedAt:null,effectiveAt:null,
       provenance:'Health ID patient profile',quality:'recorded',fields:{}}));
     try {

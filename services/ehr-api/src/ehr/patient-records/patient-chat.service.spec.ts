@@ -1,4 +1,5 @@
 import type {PoolClient} from 'pg';
+import {withPatientLines} from './patient-chat-safety';
 import {PatientChatService} from './patient-chat.service';
 import {evidence,binding,type Evidence} from './patient-evidence.types';
 import {patientEvidence} from './patient-evidence.policy';
@@ -18,10 +19,12 @@ function setup(records:Evidence[]=[item('prescription',1)]) {
  const save=jest.fn().mockResolvedValue(undefined),context=jest.fn().mockResolvedValue({exchanges:[],bindings:[]});
  const snapshot=jest.fn().mockResolvedValue({records,coverage:{complete:true,recordCount:records.length,selectedCount:0,pendingDocuments:0,unavailable:[]}});
  const assertCurrent=jest.fn().mockResolvedValue(undefined),prepareDocuments=jest.fn().mockResolvedValue([]);
+ // Fictional identity, used by the server only to clean the patient's own question.
+ const redactionProfile=jest.fn().mockResolvedValue({patientId,firstName:'Adaeze',lastName:'Okafor',fullName:'Adaeze Okafor',dateOfBirth:'1990-03-12',gender:'female'});
  const service=new PatientChatService({withPatientTransaction:transaction} as never,{authorizeSelf} as never,{embed} as never,
   {plan,answer} as never,{recordWithClient:jest.fn()} as never,{start:jest.fn().mockResolvedValue('generation'),context,save} as never,
-  {snapshot,assertCurrent,prepareDocuments} as never);
- return {service,query,transaction,authorizeSelf,embed,plan,answer,save,context,snapshot,assertCurrent,prepareDocuments};
+  {snapshot,assertCurrent,prepareDocuments,redactionProfile} as never);
+ return {service,query,transaction,authorizeSelf,embed,plan,answer,save,context,snapshot,assertCurrent,prepareDocuments,redactionProfile};
 }
 describe('Patient evidence chat',()=>{
  it('bounds ranked chunks plus long literal matches and declares excerpted context',async()=>{
@@ -411,5 +414,98 @@ describe('Age and sex in a search question',()=>{
   s.answer.mockResolvedValue('A review is recorded [1].');
   await s.service.answer(request,'When was my blood pressure review?');
   expect((s.answer.mock.calls[0][1] as Evidence[]).map(r=>r.kind)).toEqual(['note']);
+ });
+});
+
+describe('Review fixes: the patient\'s own question is cleaned before any model sees it',()=>{
+ const RAW='I am Adaeze Okafor, DOB 12/03/1990, phone 08031234567, HID-AB2CD3EF. What does my note say?';
+ const secrets=['Adaeze','Okafor','12/03/1990','08031234567','HID-AB2CD3EF'];
+ const note=item('note',2,{text:'Synthetic review of blood pressure.'});
+ const searchSetup=()=>{const s=setup([note]);s.plan.mockResolvedValue({intent:'records',recordIntent:'search',query:'note review'});
+  s.query.mockImplementation(async(sql:string)=>({rows:sql.includes('order by embedding<=>')?[{source_kind:'note',source_id:note.id,chunk_no:0}]:[]}));
+  s.answer.mockResolvedValue('A review is recorded [1].');return s;};
+ it('sends the cleaned question to plan, answer and embed, and saves only the cleaned question, and still answers',async()=>{
+  const s=searchSetup();
+  s.context.mockResolvedValue({exchanges:[{question:'Earlier question from Adaeze Okafor, 08031234567',answer:'Earlier answer.'}],bindings:[]});
+  const reply=await s.service.answer(request,RAW);
+  const sent=JSON.stringify([s.plan.mock.calls,s.answer.mock.calls.map(c=>[c[0],c[2]]),s.embed.mock.calls,s.save.mock.calls.map(c=>c[2])]);
+  for(const secret of secrets)expect([secret,sent.includes(secret)]).toEqual([secret,false]);
+  expect(s.plan.mock.calls[0][0]).toContain('What does my note say?');
+  expect(s.save.mock.calls[0][2]).toContain('[date of birth removed]');
+  expect(s.embed).toHaveBeenCalled();expect(reply).toMatchObject({status:'ready'});expect(reply.sources).toHaveLength(1);
+ });
+ it('cleans a conversation question too',async()=>{
+  const s=setup();s.plan.mockResolvedValue({intent:'conversation',answer:'Hello.'});
+  await s.service.answer(request,RAW);
+  const sent=JSON.stringify([s.plan.mock.calls,s.save.mock.calls.map(c=>c[2])]);
+  for(const secret of secrets)expect([secret,sent.includes(secret)]).toEqual([secret,false]);
+ });
+ it('leaves the staff question exactly as typed',async()=>{
+  const s=setup();s.plan.mockResolvedValue({intent:'conversation',answer:'Hello.'});
+  await s.service.answer(request,RAW,staffAccess(s,[RX]));
+  expect(s.plan.mock.calls[0][0]).toBe(RAW);expect(s.save.mock.calls[0][2]).toBe(RAW);expect(s.redactionProfile).not.toHaveBeenCalled();
+ });
+});
+
+describe('Review fixes: each server line appears once',()=>{
+ it('removes a copy with a citation or inside a paragraph before adding the line once',async()=>{
+  const s=summary([LAB],`Haemoglobin 12.5 g/dL [1]. ${RESULT_LINE} [1]\n\n${RESULT_LINE}\n\nMore detail. ${RESULT_LINE}`);
+  const reply=await s.service.answer(request,'Blood test?');
+  expect(count(reply.answer,RESULT_LINE)).toBe(1);expect(reply.answer.endsWith('\n\n'+RESULT_LINE)).toBe(true);
+  expect(reply.answer).toBe(`Haemoglobin 12.5 g/dL [1].\n\nMore detail.\n\n${RESULT_LINE}`);
+ });
+ it('does the same for the diagnosis line, and keeps a citation that only the removed copy carried',async()=>{
+  const s=summary([DIAGNOSIS,RX],`Hypertension is recorded. ${DIAGNOSIS_LINE} [1] You take a medicine [2].`);
+  const reply=await s.service.answer(request,'Do I have hypertension?');
+  expect(count(reply.answer,DIAGNOSIS_LINE)).toBe(1);expect(reply.answer.endsWith('\n\n'+DIAGNOSIS_LINE)).toBe(true);
+  expect(reply.answer).toMatch(/\[1\]/);expect(reply.sources).toHaveLength(2);
+ });
+});
+
+describe('Second review: earlier answers replayed from history are cleaned too',()=>{
+ const OLD={question:'I am Adaeze Okafor born 12/03/1990, what is my Hb?',answer:'Adaeze, your Hb is 12 g/dL [1]. Okafor family noted.'};
+ it('sends neither the earlier question nor the earlier answer with the name or date of birth to plan or answer',async()=>{
+  const note=item('note',2,{text:'Synthetic review of blood pressure.'});
+  const s=setup([note]);s.plan.mockResolvedValue({intent:'records',recordIntent:'search',query:'note review'});
+  s.query.mockImplementation(async(sql:string)=>({rows:sql.includes('order by embedding<=>')?[{source_kind:'note',source_id:note.id,chunk_no:0}]:[]}));
+  s.answer.mockResolvedValue('A review is recorded [1].');
+  s.context.mockResolvedValue({exchanges:[OLD],bindings:[]});
+  const reply=await s.service.answer(request,'And my blood pressure?');
+  const sent=JSON.stringify([s.plan.mock.calls,s.answer.mock.calls]);
+  for(const secret of ['Adaeze','Okafor','12/03/1990'])expect([secret,sent.includes(secret)]).toEqual([secret,false]);
+  expect(s.plan.mock.calls[0][1]).toEqual([{question:'I am the patient born [date of birth removed], what is my Hb?',
+   answer:'the patient, your Hb is 12 g/dL [1]. [name removed] family noted.'}]);
+  expect(reply).toMatchObject({status:'ready'});
+ });
+ it('keeps the earlier lines so a conversation reply still owes them',async()=>{
+  const s=setup();s.plan.mockResolvedValue({intent:'conversation',answer:'You are welcome, Adaeze.'});
+  s.context.mockResolvedValue({exchanges:[{question:OLD.question,answer:`Adaeze, your Hb is 12 g/dL [1].\n\n${RESULT_LINE}`}],bindings:[]});
+  const reply=await s.service.answer(request,'Thanks');
+  expect(reply.answer.endsWith('\n\n'+RESULT_LINE)).toBe(true);
+ });
+ it('leaves the staff history exactly as saved',async()=>{
+  const s=setup();s.plan.mockResolvedValue({intent:'conversation',answer:'Hello.'});
+  s.context.mockResolvedValue({exchanges:[OLD],bindings:[]});
+  await s.service.answer(request,'Hello',staffAccess(s,[RX]));
+  expect(s.plan.mock.calls[0][1]).toEqual([OLD]);
+ });
+});
+
+describe('Second review: a server line is found as a sentence of its own, with any spacing or markup',()=>{
+ const HB='Your Hb is 12 g/dL [1].';
+ it('leaves the line\'s words inside a longer sentence as written, and adds the line once',()=>{
+  const answer=`${HB} Please talk to your doctor about what this result means for your treatment [1].`;
+  expect(withPatientLines(answer,[RESULT_LINE])).toBe(`${answer}\n\n${RESULT_LINE}`);
+ });
+ it('removes a bold, list-item or exclaimed copy without leaving markup or punctuation behind',()=>{
+  for(const copy of [`**${RESULT_LINE}**`,`- ${RESULT_LINE}`,`${RESULT_LINE.replace(/\.$/,'')}!`,`_${RESULT_LINE}_ [1]`,`1. ${RESULT_LINE}`])
+   expect([copy,withPatientLines(`${HB}\n\n${copy}`,[RESULT_LINE])]).toEqual([copy,`${HB}\n\n${RESULT_LINE}`]);
+  expect(withPatientLines(`${HB}\n- ${RESULT_LINE}\n- Eat well.`,[RESULT_LINE])).toBe(`${HB}\n- Eat well.\n\n${RESULT_LINE}`);
+ });
+ it('removes a copy split by a line break or a double space',()=>{
+  for(const copy of ['Talk to your doctor about\nwhat this result means.','Talk to your  doctor about what this result means.'])
+   expect([copy,withPatientLines(`${HB}\n\n${copy}`,[RESULT_LINE])]).toEqual([copy,`${HB}\n\n${RESULT_LINE}`]);
+  expect(withPatientLines(`${HB} Talk to your doctor\nabout what this result means. Eat well.`,[RESULT_LINE]))
+   .toBe(`${HB} Eat well.\n\n${RESULT_LINE}`);
  });
 });

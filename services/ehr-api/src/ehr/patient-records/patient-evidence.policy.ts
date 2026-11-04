@@ -60,25 +60,64 @@ const FREE_TEXT_TITLES = new Set<SourceKind>(['note', 'import', 'import_version'
  * so the SQL filter and this policy agree. They never contain a quote.
  */
 export const SENSITIVE_TEST_FRAGMENTS = [
-  'hiv[a-z0-9]*', 'aids', 'rvs', 'retrovir[a-z]*', 'cd4[a-z0-9]*', 'viral[ -]?loads?',
+  'hiv[a-z0-9]*', 'aids', 'rvs', 'retrovir[a-z]*', 'cd[ -]?4[a-z0-9]*', 'viral[ -]?loads?',
   'hepatitis', 'hbsag', 'hbeag', 'anti[ -]?hbc', 'hbc[ -]?ab', 'hbv[a-z]*', 'hcv[a-z]*',
   'syphili[a-z]*', 'vdrl', 'rpr', 'tpha', 'treponem[a-z]*', 'chlamydi[a-z]*', 'gonorr[a-z]*', 'gonococc[a-z]*',
   'herpes', 'hsv[a-z0-9]*', 'trichomon[a-z]*', 'sti', 'std',
   'b?hcg', 'pregnan[a-z]*', 'upt',
-  'psa', 'afp', 'cea', 'ca[ -]?125', 'ca[ -]?19[ -]?9', 'ca[ -]?15[ -]?3', 'tumou?r[ -]?markers?',
+  'psa', 'afp', 'cea', 'ca[ .-]?125', 'ca[ .-]?19[ .-]?9', 'ca[ .-]?15[ .-]?3', 'tumou?r[ -]?markers?',
   'biops[a-z]*', 'histolog[a-z]*', 'histopath[a-z]*', 'cytolog[a-z]*', 'pap', 'pap[ -]?smears?',
   'karyotyp[a-z]*', 'brca[0-9]*', 'genetic[a-z]*', 'genotyp[a-z]*',
   'phq[ -]?[0-9]*', 'gad[ -]?[0-9]+', 'psych[a-z]*',
   // Shorthand as clinicians write it: VL (viral load); Hb electrophoresis is the genotype test.
   'vl', 'hb[ -]?electrophoresis', 'ha?emoglobin[ -]?electrophoresis',
+  // The same tests written out in full, as LOINC display names and lab menus write them.
+  'prostate[ -]specific', '[a-z]*fetoprotein', 'carcinoembryonic', 'cancer[ -]?(?:ag|antigen)', 'chorionic', 'choriogonadotrop[a-z]*',
+  'human[ -]*immuno[ -]*deficiency', 'hep[ .-]*[bc](?:[ .-]*[sec])?(?:[ .-]*a[gb])?', 'hbs[ -]?ag', 'h[ .]+i[ .]+v',
 ] as const;
+/*
+ * LOINC codes of the same tests, matched when the code system is LOINC
+ * (http://loinc.org), whatever the display text. Only codes whose meaning is
+ * certain are listed: HIV 1+2 Ab/Ag and HIV 1 Ab (75622-1, 56888-1, 7917-8,
+ * 68961-2), HIV 1 RNA viral load (20447-9), CD4 count (24467-3), HBsAg
+ * (5196-1, 5195-3), HCV Ab (16128-1, 13955-0), hCG (2106-3, 21198-7, 2119-6),
+ * PSA (2857-1, 35741-8), AFP (1834-1, 19176-1), CEA (2039-6), CA-125 (10334-1);
+ * HIV 1+2 Ab and HIV 1 Ab by other methods (7918-6, 29893-5, 31201-7, 5221-7),
+ * HIV 1 RNA viral load by other methods (10351-5, 25836-8), hCG in serum
+ * (2118-8, 19080-2). Identical to SENSITIVE_LOINC_CODES in lab-api's
+ * patient-results.service.ts.
+ */
+export const SENSITIVE_LOINC_CODES = [
+  '75622-1', '56888-1', '7917-8', '68961-2', '20447-9', '24467-3', '5196-1', '5195-3', '16128-1', '13955-0',
+  '2106-3', '21198-7', '2119-6', '2857-1', '35741-8', '1834-1', '19176-1', '2039-6', '10334-1',
+  '7918-6', '29893-5', '31201-7', '5221-7', '10351-5', '25836-8', '2118-8', '19080-2',
+] as const;
+/** LOINC as a code system: its name or URL ("http://loinc.org"), or its OID (2.16.840.1.113883.6.1, also as "urn:oid:..."). Same in SQL and JS. */
+export const LOINC_SYSTEM_SQL_PATTERN = '(loinc|(^|[^0-9.])2[.]16[.]840[.]1[.]113883[.]6[.]1($|[^0-9.]))';
+/** The SQL list form of SENSITIVE_LOINC_CODES, for `in (...)` in patient-only SQL. Codes hold only digits and a hyphen. */
+export const SENSITIVE_LOINC_SQL_LIST = SENSITIVE_LOINC_CODES.map(code => `'${code}'`).join(',');
 const CANCER_SITES = 'breast|prostate|cervix|cervical|cx|colon|rectum|rectal|colorectal|lung|liver|stomach|gastric|ovary|ovarian'
   + '|uterus|uterine|endometrium|endometrial|bladder|pancreas|pancreatic|oesophagus|esophagus|thyroid|kidney|renal|skin|bone|brain'
   + '|testis|testicular|penis|penile|vulva|vulval|oral|tongue|larynx|nasopharynx|head and neck';
 const SENSITIVE_CONDITION_FRAGMENTS = [
-  'cancers?', 'carcinoma[a-z]*', 'malignan[a-z]*', 'neoplas[a-z]*', 'lymphoma[a-z]*', 'leuka?emia[a-z]*', 'sarcoma[a-z]*',
+  'cancers?', '[a-z]*carcinoma[a-z]*', 'malignan[a-z]*', 'neoplas[a-z]*', '[a-z]*lymphoma[a-z]*', 'leuka?emia[a-z]*', '[a-z]*sarcoma[a-z]*',
   'metasta[a-z]*', 'tumou?rs?', 'depress[a-z]*', 'schizo[a-z]*', 'bipolar', 'psychos[a-z]*', 'psychotic', 'suicid[a-z]*',
   'self[ -]?harm', 'anxiety', 'substance', 'addict[a-z]*',
+  // The display text is checked whatever the code system, so each group SENSITIVE_ICD10 hides by code
+  // is named here too. Pregnancy and its care (O, Z32-Z36):
+  'gestation[a-z]*', 'ante[ -]?natal', 'anc', 'post[ -]?natal', 'post[ -]?partum', 'puerper[a-z]*', 'obstetric[a-z]*',
+  '[a-z]*gravid[a-z]*', '[a-z]*para', 'miscarri[a-z]*', 'abortion[a-z]*', '(?:pre[ -]?)?eclamp[a-z]*',
+  'hyperemesis', 'placenta[a-z]*', 'hydatidiform', 'trimester', 'labou?r', 'ca?esarean', 'c[ -]?section',
+  // Neoplasms (C, D00-D09) named without "cancer" or "carcinoma":
+  'hepatoma', 'melanoma[a-z]*', 'myeloma[a-z]*', '[a-z]*blastoma[a-z]*', 'glioma[a-z]*', 'astrocytoma[a-z]*', 'seminoma[a-z]*',
+  'mesothelioma[a-z]*', 'hodgkin[a-z]*', 'myelodysplas[a-z]*', 'kaposi[a-z]*', 'in[ -]situ',
+  // Mental and behavioural disorders (F):
+  'mental', 'ptsd', 'post[ -]?traumatic', 'obsessive', 'ocd', 'compulsive', 'panic', 'phobi[a-z]*', 'mania', 'manic',
+  'adhd', 'autis[a-z]*', 'dementia', 'personality', 'anorexia[ -]nervosa', 'bulimi[a-z]*', 'eating[ -]disorders?',
+  'alcoholi[a-z]*', 'dependence', 'withdrawal', 'intoxication', 'delirium', 'neurosis', 'neurotic', 'catatoni[a-z]*',
+  '(?:alcohol|drug|opioid|opiate|heroin|cannabis|cocaine|amphetamine|benzodiazepine)[ -]+(?:use|abuse|misuse)',
+  // Sexually transmitted infections (A50-A64) named without the infection's own word:
+  'genital[ -]?warts?', 'condylom[a-z]*', 'anogenital', 'chancroid', 'lymphogranuloma', 'donovanosis', 'granuloma[ -]inguinale',
   // Shorthand: retroviral disease or infection, people living with HIV, PMTCT.
   'rvd', 'rvi', 'plwha', 'plhiv', 'pmtct',
   // "Ca breast", "Ca. of the cervix", "breast Ca": cancer of a named site.
@@ -102,13 +141,17 @@ const SENSITIVE_TEST = jsPattern(SENSITIVE_TEST_FRAGMENTS);
 const SENSITIVE_CONDITION = jsPattern([...SENSITIVE_TEST_FRAGMENTS, ...SENSITIVE_CONDITION_FRAGMENTS]);
 const SENSITIVE_MEDICINE = jsPattern(SENSITIVE_MEDICINE_FRAGMENTS);
 const text = (value: unknown) => typeof value === 'string' ? value : '';
-export function isSensitiveTest(name: unknown, code?: unknown): boolean {
-  return SENSITIVE_TEST.test(text(name)) || SENSITIVE_TEST.test(text(code));
+const LOINC_CODES = new Set<string>(SENSITIVE_LOINC_CODES);
+const LOINC_SYSTEM = new RegExp(LOINC_SYSTEM_SQL_PATTERN, 'i');
+export function isSensitiveTest(name: unknown, code?: unknown, codeSystem?: unknown): boolean {
+  return SENSITIVE_TEST.test(text(name)) || SENSITIVE_TEST.test(text(code))
+    || (LOINC_SYSTEM.test(text(codeSystem).trim()) && LOINC_CODES.has(text(code).trim()));
 }
 function sensitive(record: Evidence): boolean {
   const f = record.fields;
   switch (record.kind) {
-    case 'lab_result': case 'investigation': return isSensitiveTest(f.test, f.code) || isSensitiveTest(record.title);
+    case 'lab_result': case 'investigation': return isSensitiveTest(f.test, f.code, f.codeSystem) || isSensitiveTest(record.title);
+    // The display text is checked whatever the code system (ICD-10, SNOMED CT, local); ICD-10 codes as well.
     case 'diagnosis': return SENSITIVE_CONDITION.test(text(f.condition)) || SENSITIVE_CONDITION.test(record.title)
       || (/icd/i.test(text(f.codeSystem)) && SENSITIVE_ICD10.test(text(f.code)));
     case 'prescription': return SENSITIVE_MEDICINE.test(text(f.medication)) || SENSITIVE_MEDICINE.test(record.title);
@@ -155,12 +198,21 @@ function dateOfBirthPatterns(dateOfBirth: unknown): RegExp[] {
   const month = MONTHS[Number(m) - 1];
   if (!month) return [];
   const name = `${month.slice(0, 3)}(?:${month.slice(3)})?\\.?`;
-  // Day, month and year may be split by spaces, dots, slashes or hyphens ("12-Mar-1990", "1990-3-12").
+  const sep = '\\s*[/.-]\\s*', yy = y!.slice(2), year = `(?:${y}|${yy})`;
+  const d2 = d!, m2 = m!;
+  // Only right after "born", "DOB", "date of birth" or "birthday": forms that clinical numbers can share
+  // ("dose 12.3.90", "RR 12 03 1990", "BP 1/12/12"), so they are removed only when they are said to be the birth date.
+  const cue = '(?<=(?:born|dob|d\\.o\\.b\\.?|date\\s+of\\s+birth|birth\\s*date|birth\\s*day)[\\s:,.-]*(?:(?:on|is|was)\\s+)?)';
   return [
-    word(`${y}[-/.]${mm}[-/.]${dd}`),
-    word(`${dd}[/.-]${mm}[/.-]${y}`),
-    word(`${dd}(?:st|nd|rd|th)?(?:\\s*of)?[\\s./-]+${name}[\\s.,/-]+${y}`),
-    word(`${name}[\\s./-]*${dd}(?:st|nd|rd|th)?[\\s.,/-]+${y}`),
+    // A full date with a four-digit year, a month name, or as stored ("1990-03-12T00:00"): wherever it appears.
+    word(`${y}${sep}${mm}${sep}${dd}(?:T[\\d:.]+(?:Z|[+-]\\d{2}:?\\d{2})?)?`),
+    word(`${dd}${sep}${mm}${sep}${y}`),
+    word(`${d2}${m2}${y}|${y}${m2}${d2}`),
+    word(`${dd}(?:st|nd|rd|th)?(?:\\s*of)?[\\s./-]+${name}[\\s.,/-]+${year}`),
+    word(`${name}[\\s./-]*${dd}(?:st|nd|rd|th)?[\\s.,/-]+${year}`),
+    // After a birth cue: a two-digit year, plain spaces, month first, or digits run together.
+    word(`${cue}(?:${dd}(?:${sep}|\\s+)${mm}(?:${sep}|\\s+)${year}|${mm}(?:${sep}|\\s+)${dd}(?:${sep}|\\s+)${year}`
+      + `|${y}\\s+${mm}\\s+${dd}|${d2}${m2}${yy})`),
   ];
 }
 /**

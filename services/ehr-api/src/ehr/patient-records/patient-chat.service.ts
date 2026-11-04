@@ -13,6 +13,7 @@ import { binding,chunks,evidenceKey,originLabel,type Coverage,type Evidence,type
 import { selectEvidence,answerCoverage,boundEvidence } from './patient-evidence.selection';
 import { PatientChatHistoryService, type ChatReply } from './patient-chat-history.service';
 import { citedNumbers,conversationLines,patientLines,withPatientLines } from './patient-chat-safety';
+import { redactIdentifiers } from './patient-evidence.policy';
 
 const NO_GROUNDED_ANSWER = 'I could not verify an answer from the available records.';
 const unavailable = () => new DomainProblem(503, 'PATIENT_CHAT_UNAVAILABLE', 'Patient chat is temporarily unavailable');
@@ -41,8 +42,8 @@ export class PatientChatService {
   async answer(request: HidRequest, rawQuestion: string, access: ChatAccess = this.selfAccess()) {
     const environment = getEnvironment();
     if (!environment.AI_ENABLED) throw new DomainProblem(503, 'PATIENT_CHAT_DISABLED', 'Patient chat is not enabled');
-    const question = rawQuestion.trim();
-    if (!question || question.length > 500) {
+    const typed = rawQuestion.trim();
+    if (!typed || typed.length > 500) {
       throw new DomainProblem(400, 'INVALID_QUESTION', 'A question of 1 to 500 characters is required');
     }
     const audience = this.audienceOf(access);
@@ -58,7 +59,14 @@ export class PatientChatService {
     const release = this.admit(access.admissionKey || authorization.patientId);
     try {
       const generation = await turn.history.start(request, authorization);
-      const context = await turn.history.context(request, generation);
+      const saved = await turn.history.context(request, generation);
+      // Patient chat: the question goes to Claude and Bedrock, and into history, without the
+      // patient's identifiers; so do the earlier questions and answers replayed from history (an
+      // answer saved before questions were cleaned may repeat the name). Staff keep theirs as typed.
+      const clean = await this.identifierCleaner(request, turn, audience);
+      // A removed identifier can be longer than what it replaces; the question stays within its 500-character limit.
+      const question = clean(typed).slice(0, 500);
+      const context = { ...saved, exchanges: saved.exchanges.map(e => ({ ...e, question: clean(e.question), answer: clean(e.answer) })) };
       const signal = AbortSignal.timeout(60_000);
       const plan = await this.claude.plan(question, context.exchanges, signal, audience);
       let reply: ChatReply; let selected: EvidenceBinding[] = [];
@@ -88,6 +96,15 @@ export class PatientChatService {
     return audience;
   }
 
+  /** The profile is read for the authorized patient; the turn's authorize() then refuses a changed patient. */
+  private async identifierCleaner(request: HidRequest, access: ChatAccess, audience: ChatAudience): Promise<(q: string) => string> {
+    if (audience === 'staff') return q => q;
+    if (!access.redactionProfile) throw unavailable();
+    const profile = await access.redactionProfile(request);
+    await access.authorize(request);
+    return q => redactIdentifiers(q, profile);
+  }
+
   private selfAccess(): ChatAccess {
     return {
       audience: 'patient', admissionKey: '', chunksTable: 'ehr.patient_evidence_chunks',
@@ -96,6 +113,7 @@ export class PatientChatService {
       transaction: (auth, correlationId, operation) => this.database.withPatientTransaction(
         auth as Awaited<ReturnType<PatientRecordsService['authorizeSelf']>>, correlationId, operation),
       evidence: this.evidence,
+      redactionProfile: request => this.evidence.redactionProfile(request),
       history: { context: this.history.context.bind(this.history), save: this.history.save.bind(this.history),
         start: (request, auth) => this.history.start(request, auth as Awaited<ReturnType<PatientRecordsService['authorizeSelf']>>) },
     };

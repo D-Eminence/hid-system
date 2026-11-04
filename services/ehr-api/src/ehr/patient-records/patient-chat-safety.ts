@@ -74,13 +74,39 @@ export function conversationLines(answers: readonly string[], bindings: readonly
   }
   return PATIENT_LINES.filter(line => lines.has(line));
 }
+const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const CITES = String.raw`(?:[ \t]*\[\d+\])*`;
 /**
- * Appends each line once as a final paragraph. A paragraph the model wrote
- * that is exactly one of these lines is removed first, so no line repeats.
+ * A copy of a line written as a sentence of its own: at the start of the text or of a line, or after
+ * another sentence's end; with any spacing or line break between its words, with or without its full stop
+ * (or an exclamation mark), in bold or italics, as a list item, and with the citations written after it.
+ * The same words inside a longer sentence ("Please talk to your doctor about ... means for you") are not a copy.
+ */
+const lineCopy = (line: string) => {
+  const words = line.replace(/[.!]$/, '').trim().split(/\s+/).map(escapeRegExp).join(String.raw`\s+`);
+  const start = String.raw`(?<=^|\n|[.!?:\])][ \t]*)[ \t]*(?:(?:[-*+•]|\d+[.)])[ \t]+)?(\*\*|__|\*|_)?`;
+  // Ends with its stop (then a space or the end), or, without one, at the end of the text or of a line.
+  const end = String.raw`(?:${CITES}(?:[.!]\1|\1[.!])${CITES}(?=\s|$)|${CITES}\1${CITES}[ \t]*(?=\n|$))`;
+  return new RegExp(`${start}${words}${end}`, 'gi');
+};
+/**
+ * Appends each line once as a final paragraph. Every copy the model wrote of
+ * any of these lines (its own paragraph or sentence, in bold, as a list item,
+ * or followed by a citation) is removed first, so no line repeats. A citation
+ * that only a removed copy carried is kept at the end of the body.
  */
 export function withPatientLines(answer: string, lines: readonly string[]): string {
   if (!lines.length) return answer;
-  const body = answer.split(/\n{2,}/).filter(paragraph => !lines.includes(paragraph.trim())).join('\n\n').trim();
+  const paragraphs = answer.split(/\n{2,}/).map(paragraph => {
+    let next = paragraph;
+    for (const line of lines) next = next.replace(lineCopy(line), '');
+    if (next === paragraph) return paragraph;
+    return next.split('\n').map(row => row.replace(/[ \t]{2,}/g, ' ').trim()).filter(Boolean).join('\n');
+  });
+  let body = paragraphs.filter(paragraph => paragraph.trim()).join('\n\n').trim();
+  const kept = citedNumbers(body);
+  const lost = [...citedNumbers(answer)].filter(n => !kept.has(n));
+  if (lost.length) body = `${body}${body ? ' ' : ''}${lost.map(n => `[${n}]`).join(' ')}`;
   return [body, ...lines].filter(Boolean).join('\n\n');
 }
 /** Keeps only sources whose number the answer cites, with their original numbers. */

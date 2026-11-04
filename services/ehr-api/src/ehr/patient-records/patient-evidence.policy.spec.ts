@@ -1,4 +1,4 @@
-import { LAB_CORRECTING, PATIENT_FIELDS, VITAL_FIELDS, ageYears, isSensitiveTest, patientEvidence, redactIdentifiers,
+import { LAB_CORRECTING, PATIENT_FIELDS, LOINC_SYSTEM_SQL_PATTERN, SENSITIVE_LOINC_CODES, SENSITIVE_TEST_SQL_PATTERN, VITAL_FIELDS, ageYears, isSensitiveTest, patientEvidence, redactIdentifiers,
   type PatientProfileInput } from './patient-evidence.policy';
 import { evidence, type Evidence, type SourceKind } from './patient-evidence.types';
 
@@ -315,5 +315,143 @@ describe('Names that are also ordinary words are not rewritten (A8)', () => {
   it('still removes an ordinary surname in any capitalised form', () => {
     expect(redactIdentifiers('Okafor family history; OKAFOR, A. signed; okafor lower-case stays.', profile))
       .toBe('[name removed] family history; [name removed], A. signed; okafor lower-case stays.');
+  });
+});
+
+describe('Review fixes: sensitive tests written out in full or coded in LOINC (S4)', () => {
+  const lab = (test: string, codeSystem = 'LOCAL', code = 'X1') => record('lab_result', { test, codeSystem, code, specimen: 'Blood',
+    resultType: 'text', textValue: 'Synthetic value', releasedAt: '2026-10-01T10:00:00.000Z', verification: 'released' }, { title: test });
+  const request = (test: string, codeSystem = 'LOCAL', code = 'X1') =>
+    record('investigation', { ...completed, test, codeSystem, code, status: 'completed' }, { title: test });
+  const LONG_NAMES = ['Prostate specific Ag [Mass/volume] in Serum or Plasma', 'Alpha-1-Fetoprotein [Mass/volume] in Serum or Plasma',
+    'Carcinoembryonic Ag [Mass/volume] in Serum or Plasma', 'Cancer Ag 125 [Units/volume] in Serum or Plasma',
+    'Choriogonadotropin [Units/volume] in Serum or Plasma', 'Human chorionic gonadotropin', 'Human immunodeficiency virus 1+2 antibody',
+    'Hep B surface antigen', 'HBs Ag', 'Hep C antibody'];
+
+  it('treats the spelled-out names as sensitive, in the policy and in the SQL pattern', () => {
+    const sql = new RegExp(SENSITIVE_TEST_SQL_PATTERN, 'i');
+    for (const name of LONG_NAMES) {
+      expect([name, isSensitiveTest(name)]).toEqual([name, true]);
+      expect([name, sql.test(name)]).toEqual([name, true]);
+    }
+    expect(clean([...LONG_NAMES.map(name => lab(name)), ...LONG_NAMES.map(name => request(name))])).toEqual([]);
+  });
+
+  it('treats the listed LOINC codes as sensitive whatever the display text, only under LOINC', () => {
+    for (const code of ['75622-1', '56888-1', '7917-8', '68961-2', '5196-1', '5195-3', '16128-1', '13955-0', '2106-3', '21198-7',
+      '2119-6', '2857-1', '35741-8', '1834-1', '19176-1', '2039-6', '10334-1', '24467-3', '20447-9']) {
+      expect([code, isSensitiveTest('Synthetic screen', code, 'http://loinc.org')]).toEqual([code, true]);
+      expect(clean([lab('Synthetic screen', 'http://loinc.org', code), request('Synthetic screen', 'http://loinc.org', code)])).toEqual([]);
+    }
+    expect(SENSITIVE_LOINC_CODES).toContain('2857-1');
+    // The same code in another system, and an ordinary LOINC test, stay.
+    expect(isSensitiveTest('Synthetic screen', '2857-1', 'LOCAL')).toBe(false);
+    expect(clean([lab('Hemoglobin [Mass/volume] in Blood', 'http://loinc.org', '718-7')])).toHaveLength(1);
+  });
+
+  it('keeps ordinary tests whose names are near the new words', () => {
+    for (const name of ['Full blood count', 'Heparin level', 'Haemoglobin', 'Hepatic function panel', 'Specific gravity of urine',
+      'Prostate examination note', 'Fasting blood sugar', 'Thyroid uptake']) expect([name, isSensitiveTest(name)]).toEqual([name, false]);
+  });
+});
+
+describe('Review fixes: sensitive diagnoses in SNOMED or local codes (S4)', () => {
+  const diagnosis = (codeSystem: string, code: string, condition: string) => record('diagnosis', { _encounterId: encounterId, codeSystem,
+    code, condition, clinicalStatus: 'active', verificationStatus: 'confirmed', onsetAt: null, abatementAt: null }, { title: condition });
+
+  it('leaves out an HIV, gestational or antenatal diagnosis by its display text whatever the code system', () => {
+    expect(clean([diagnosis('http://snomed.info/sct', '86406008', 'Human immunodeficiency virus infection'),
+      diagnosis('LOCAL', 'HIV1', 'Human immunodeficiency virus infection'),
+      diagnosis('http://snomed.info/sct', '11687002', 'Gestational diabetes mellitus'),
+      diagnosis('LOCAL', 'ANC', 'Antenatal care, first visit')])).toEqual([]);
+    // ICD-10 codes are still checked.
+    expect(clean([diagnosis('ICD-10', 'B20', 'Synthetic code-only condition')])).toEqual([]);
+    expect(clean([diagnosis('http://snomed.info/sct', '38341003', 'Hypertensive disorder'),
+      diagnosis('LOCAL', 'MAL', 'Malaria (uncomplicated)')])).toHaveLength(2);
+  });
+});
+
+describe('Review fixes: the date of birth with a two-digit year or spaces (A8)', () => {
+  const adaeze: PatientProfileInput = { firstName: 'Adaeze', lastName: 'Okafor', fullName: 'Adaeze Okafor', dateOfBirth: '1990-03-12' };
+  const r = (text: string) => redactIdentifiers(text, adaeze);
+
+  it('removes "12/03/90", "12 03 1990", "12-3-90" and similar', () => {
+    for (const dob of ['12/03/90', '12 03 1990', '12-3-90', '12 / 03 / 1990', '12.03.90', '12 - 3 - 90', '1990 03 12'])
+      expect([dob, r(`DOB ${dob} noted`)]).toEqual([dob, 'DOB [date of birth removed] noted']);
+  });
+
+  it('keeps blood pressure, other numbers and visit dates', () => {
+    const text = 'BP 120/80 on 12/03/26 and 12 03 2026; seen 13/03/90; Hb 12.3 g/dL; 12-3-1991; ratio 12/3.';
+    expect(r(text)).toBe(text);
+  });
+});
+
+describe('Second review: more spellings, codes and diagnoses (S4)', () => {
+  const lab = (test: string, codeSystem = 'LOCAL', code = 'X1') => record('lab_result', { test, codeSystem, code, specimen: 'Blood',
+    resultType: 'text', textValue: 'Synthetic value', releasedAt: '2026-10-01T10:00:00.000Z', verification: 'released' }, { title: test });
+  const diagnosis = (condition: string, codeSystem = 'http://snomed.info/sct') => record('diagnosis', { _encounterId: encounterId,
+    codeSystem, code: '1', condition, clinicalStatus: 'active', verificationStatus: 'confirmed', onsetAt: null, abatementAt: null },
+  { title: condition });
+  const SPELLINGS = ['HepBsAg', 'Hep Bs Ag', 'Hep-Bc', 'Hep. B surface antigen', 'Hep. C antibody', 'Hep B', 'Hep.B', 'HBsAg',
+    'H.I.V screen', 'H. I. V. test', 'Human immuno-deficiency virus', 'CD 4 count', 'CD-4 count', 'CA.125', 'CA.19.9'];
+
+  it('treats hepatitis, HIV, CD4 and CA-125 written with dots, spaces or hyphens as sensitive, in the policy and the SQL pattern', () => {
+    const sql = new RegExp(SENSITIVE_TEST_SQL_PATTERN, 'i');
+    for (const name of SPELLINGS) {
+      expect([name, isSensitiveTest(name)]).toEqual([name, true]);
+      expect([name, sql.test(name)]).toEqual([name, true]);
+    }
+    expect(clean(SPELLINGS.map(name => lab(name)))).toEqual([]);
+    for (const name of ['Hepcidin', 'Heparin anti-Xa', 'Hepatic function panel', 'Hep A IgM', 'CD8 count', 'Absolute neutrophil count (ANC)'])
+      expect([name, isSensitiveTest(name), sql.test(name)]).toEqual([name, false, false]);
+  });
+
+  it('treats the further LOINC codes as sensitive, and LOINC by its OID', () => {
+    for (const code of ['7918-6', '29893-5', '31201-7', '5221-7', '10351-5', '25836-8', '2118-8', '19080-2'])
+      expect([code, isSensitiveTest('Lab test', code, 'http://loinc.org')]).toEqual([code, true]);
+    for (const system of ['urn:oid:2.16.840.1.113883.6.1', '2.16.840.1.113883.6.1', ' LOINC '])
+      expect([system, isSensitiveTest('Lab test', '2857-1', system)]).toEqual([system, true]);
+    // Another OID that only starts the same way is not LOINC.
+    for (const system of ['urn:oid:2.16.840.1.113883.6.10', 'urn:oid:2.16.840.1.113883.6.96', '12.16.840.1.113883.6.1'])
+      expect([system, isSensitiveTest('Lab test', '2857-1', system)]).toEqual([system, false]);
+    const sql = new RegExp(LOINC_SYSTEM_SQL_PATTERN, 'i');
+    expect(['urn:oid:2.16.840.1.113883.6.1', 'http://loinc.org'].every(s => sql.test(s))).toBe(true);
+    expect(sql.test('urn:oid:2.16.840.1.113883.6.96')).toBe(false);
+  });
+
+  it('leaves out a diagnosis whose display text names a group SENSITIVE_ICD10 hides by code, whatever the code system', () => {
+    const SENSITIVE = ['Hep. B infection', 'H.I.V. infection', 'Human immuno-deficiency virus infection', 'Ante-natal care',
+      'Ante natal visit', 'ANC booking', 'Primigravida', 'Miscarriage', 'Threatened abortion', 'Incomplete abortion', 'Pre-eclampsia',
+      'Eclampsia', 'Hyperemesis gravidarum', 'Placenta praevia', 'Hydatidiform mole', 'Hepatoma', 'Melanoma', 'Multiple myeloma',
+      'Glioblastoma', 'Seminoma', 'Mesothelioma', 'Hodgkin disease', 'Adenocarcinoma of colon', 'Osteosarcoma', 'Alcohol use disorder',
+      'Opioid dependence', 'PTSD', 'Obsessive compulsive disorder', 'Mental disorder', 'Genital warts'];
+    for (const condition of SENSITIVE) {
+      expect([condition, clean([diagnosis(condition)])]).toEqual([condition, []]);
+      expect([condition, clean([diagnosis(condition, 'LOCAL')])]).toEqual([condition, []]);
+    }
+  });
+
+  it('keeps ordinary diagnoses whose names are near the new words', () => {
+    for (const condition of ['Malaria', 'Typhoid fever', 'Hypertension', 'Diabetes mellitus', 'Asthma', 'Haematoma', 'Glaucoma',
+      'Trachoma', 'Paraplegia', 'Peptic ulcer disease', 'Sickle cell anaemia', 'Ectopic beats'])
+      expect([condition, clean([diagnosis(condition)]).length]).toEqual([condition, 1]);
+  });
+});
+
+describe('Second review: the date of birth, without catching clinical numbers (A8)', () => {
+  const r = (text: string, dateOfBirth = '1990-03-12') => redactIdentifiers(text, { firstName: 'Adaeze', lastName: 'Okafor', dateOfBirth });
+
+  it('keeps a dose, a rate or a blood pressure whose digits line up with the date of birth', () => {
+    expect(r('dose 12.3.90 mg?')).toBe('dose 12.3.90 mg?');
+    expect(r('RR 12 03 1990?')).toBe('RR 12 03 1990?');
+    expect(r('BP 1/12/12?', '2012-12-01')).toBe('BP 1/12/12?');
+  });
+
+  it('removes the forms written after "born", "DOB" or "date of birth", and full dates anywhere', () => {
+    for (const text of ['born 3/12/1990', 'born 12031990', 'born 19900312', 'born 1990-03-12T00:00', 'DOB: 12/3/90', 'born on 3 12 1990',
+      'Date of birth is 12 03 1990', 'dob 120390'])
+      expect([text, r(text)]).toEqual([text, text.replace(/(born on |born |DOB: |Date of birth is |dob ).*/, '$1[date of birth removed]')]);
+    expect(r('seen 1990-03-12T08:30:00Z, and 12/03/1990 noted')).toBe('seen [date of birth removed], and [date of birth removed] noted');
+    expect(r('BP 120/80 on 12/03/2024')).toBe('BP 120/80 on 12/03/2024');
   });
 });

@@ -1,9 +1,10 @@
 import { createHash } from 'node:crypto';
-import { PATIENT_SELF_LAB_QUERY, SENSITIVE_TEST_SQL_PATTERN, STAFF_LAB_QUERY } from './patient-results.service';
+import { LOINC_SYSTEM_SQL_PATTERN, PATIENT_SELF_LAB_QUERY, SENSITIVE_LOINC_SQL_LIST, SENSITIVE_TEST_SQL_PATTERN, STAFF_LAB_QUERY } from './patient-results.service';
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 // The text of PATIENT_LAB_QUERY at 34d69557, which the staff chat keeps unchanged.
 const STAFF_LAB_QUERY_SHA256 = 'b58a3981dd83affda7f7a685bc86fba05adb0a3374ff9f85cc2835c6be2b2039';
+const LOINC_SHA256 = 'a775ca2c7186606ab7a30fded571d975c4ac9d3c060a92a1953c9d3aa53c677d';
 
 describe('Lab result queries for the patient and the staff chat (A6)', () => {
   it('keeps the staff query exactly as it was, with the correction reason', () => {
@@ -13,7 +14,7 @@ describe('Lab result queries for the patient and the staff chat (A6)', () => {
   });
 
   it('uses the same sensitive test list as ehr-api (patient-evidence.query.spec.ts pins the same hash)', () => {
-    expect(sha(SENSITIVE_TEST_SQL_PATTERN)).toBe('e843599f33c5dc156e662348acdc517d3f5138ea7f99f07b28f5c414ddccbad7');
+    expect(sha(SENSITIVE_TEST_SQL_PATTERN)).toBe('6d9bc65c5b2d11d8bbdf72e66417e710e5e445423a2a89347edd205469988571');
   });
 
   it('never gives the patient the correction reason', () => {
@@ -54,5 +55,45 @@ describe('Lab result queries for the patient and the staff chat (A6)', () => {
       'Widal', 'Lipid profile', 'Thyroid uptake', 'Electrolytes, urea and creatinine', 'Packed cell volume']) {
       expect(re.test(name)).toBe(false);
     }
+  });
+});
+
+describe('Review fixes: sensitive tests written out in full or coded in LOINC (S4)', () => {
+  it('leaves out the spelled-out names', () => {
+    const re = new RegExp(SENSITIVE_TEST_SQL_PATTERN, 'i');
+    for (const name of ['Prostate specific Ag [Mass/volume] in Serum or Plasma', 'Alpha-1-Fetoprotein [Mass/volume] in Serum or Plasma',
+      'Carcinoembryonic Ag [Mass/volume] in Serum or Plasma', 'Cancer Ag 125 [Units/volume] in Serum or Plasma',
+      'Choriogonadotropin [Units/volume] in Serum or Plasma', 'Human chorionic gonadotropin', 'Human immunodeficiency virus 1+2 antibody',
+      'Hep B surface antigen', 'HBs Ag', 'Hep C antibody']) expect([name, re.test(name)]).toEqual([name, true]);
+    for (const name of ['Heparin level', 'Hepatic function panel', 'Specific gravity of urine']) expect([name, re.test(name)]).toEqual([name, false]);
+  });
+
+  it('leaves out the listed LOINC codes when the code system is LOINC, with the same list as ehr-api', () => {
+    expect(PATIENT_SELF_LAB_QUERY).toContain(`and not (btrim(coalesce(t.code_system,'')) ~* '${LOINC_SYSTEM_SQL_PATTERN}' and btrim(coalesce(t.code,'')) in (${SENSITIVE_LOINC_SQL_LIST}))`);
+    expect(SENSITIVE_LOINC_SQL_LIST).toContain("'75622-1'");
+    expect(SENSITIVE_LOINC_SQL_LIST).toMatch(/^'[0-9]{1,6}-[0-9]'(?:,'[0-9]{1,6}-[0-9]')*$/);
+    // patient-evidence.query.spec.ts pins the same hash.
+    expect(sha(SENSITIVE_LOINC_SQL_LIST)).toBe(LOINC_SHA256);
+    expect(STAFF_LAB_QUERY).not.toContain('loinc');
+  });
+});
+
+describe('Second review: more spellings and codes, and LOINC by its OID (S4)', () => {
+  it('leaves out hepatitis, HIV, CD4 and CA-125 written with dots, spaces or hyphens, and keeps near names', () => {
+    const re = new RegExp(SENSITIVE_TEST_SQL_PATTERN, 'i');
+    for (const name of ['HepBsAg', 'Hep Bs Ag', 'Hep-Bc', 'Hep. B surface antigen', 'Hep. C antibody', 'H.I.V screen',
+      'Human immuno-deficiency virus', 'CD 4 count', 'CA.125']) expect([name, re.test(name)]).toEqual([name, true]);
+    for (const name of ['Hepcidin', 'Heparin anti-Xa', 'Hep A IgM', 'CD8 count']) expect([name, re.test(name)]).toEqual([name, false]);
+  });
+
+  it('lists the further LOINC codes and recognises LOINC by name, URL or OID, with the same pattern as ehr-api', () => {
+    for (const code of ['7918-6', '29893-5', '31201-7', '5221-7', '10351-5', '25836-8', '2118-8', '19080-2'])
+      expect(SENSITIVE_LOINC_SQL_LIST).toContain(`'${code}'`);
+    const system = new RegExp(LOINC_SYSTEM_SQL_PATTERN, 'i');
+    for (const s of ['http://loinc.org', 'LOINC', 'urn:oid:2.16.840.1.113883.6.1', '2.16.840.1.113883.6.1']) expect([s, system.test(s)]).toEqual([s, true]);
+    for (const s of ['urn:oid:2.16.840.1.113883.6.96', 'urn:oid:2.16.840.1.113883.6.10', 'LOCAL']) expect([s, system.test(s)]).toEqual([s, false]);
+    expect(LOINC_SYSTEM_SQL_PATTERN).not.toContain("'");
+    // patient-evidence.query.spec.ts in ehr-api pins the same hash.
+    expect(sha(LOINC_SYSTEM_SQL_PATTERN)).toBe('c2d253608793eec2a8437e3b718d2498e40feab386ad6e7163338b33bcf9f9ef');
   });
 });

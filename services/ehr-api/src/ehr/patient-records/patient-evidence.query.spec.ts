@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { PATIENT_EVIDENCE_QUERY, STAFF_EVIDENCE_QUERY, evidenceQuery } from './patient-evidence.query';
 import { attachmentTextQuery } from './patient-attachment-text.service';
-import { SENSITIVE_TEST_SQL_PATTERN } from './patient-evidence.policy';
+import { LOINC_SYSTEM_SQL_PATTERN, SENSITIVE_LOINC_CODES, SENSITIVE_LOINC_SQL_LIST, SENSITIVE_TEST_SQL_PATTERN } from './patient-evidence.policy';
 
 const sha = (value: string) => createHash('sha256').update(value).digest('hex');
 // The staff chat's two queries as they were at 34d69557 (staff-evidence.service.ts:15-18, :26-29).
@@ -32,7 +32,7 @@ describe('Staff chat queries stay exactly as they were (golden)', () => {
   });
 
   it('uses the same sensitive test list as lab-api (patient-results.query.spec.ts pins the same hash)', () => {
-    expect(sha(SENSITIVE_TEST_SQL_PATTERN)).toBe('e843599f33c5dc156e662348acdc517d3f5138ea7f99f07b28f5c414ddccbad7');
+    expect(sha(SENSITIVE_TEST_SQL_PATTERN)).toBe('6d9bc65c5b2d11d8bbdf72e66417e710e5e445423a2a89347edd205469988571');
   });
 
   it('refuses an unknown audience', () => {
@@ -89,5 +89,18 @@ describe('The patient evidence query', () => {
     expect(q).toContain("where d.patient_id=$1 and d.status='available' and d.classification='phi'");
     expect(q).toContain('ehr.patient_document_extractions');
     expect(q).not.toContain('ehr.staff_');
+  });
+});
+
+describe('Review fixes: test requests coded in LOINC (S4)', () => {
+  it('leaves out a request with a listed LOINC code, with the same list and hash as lab-api, and keeps the staff query', () => {
+    const l = branch(PATIENT_EVIDENCE_QUERY, 'investigation');
+    expect(l).toContain(`and not (btrim(coalesce(l.test_code_system,'')) ~* '${LOINC_SYSTEM_SQL_PATTERN}' and btrim(coalesce(l.test_code,'')) in (${SENSITIVE_LOINC_SQL_LIST}))`);
+    expect(SENSITIVE_LOINC_SQL_LIST).toBe(SENSITIVE_LOINC_CODES.map(code => `'${code}'`).join(','));
+    // patient-results.query.spec.ts in lab-api pins the same hash.
+    expect(sha(SENSITIVE_LOINC_SQL_LIST)).toBe('a775ca2c7186606ab7a30fded571d975c4ac9d3c060a92a1953c9d3aa53c677d');
+    // LOINC by name, URL or OID; patient-results.query.spec.ts in lab-api pins the same hash.
+    expect(sha(LOINC_SYSTEM_SQL_PATTERN)).toBe('c2d253608793eec2a8437e3b718d2498e40feab386ad6e7163338b33bcf9f9ef');
+    expect(STAFF_EVIDENCE_QUERY).not.toContain('loinc');
   });
 });

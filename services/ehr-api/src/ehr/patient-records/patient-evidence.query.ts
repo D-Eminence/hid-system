@@ -1,4 +1,4 @@
-import { SENSITIVE_TEST_SQL_PATTERN } from './patient-evidence.policy';
+import { LOINC_SYSTEM_SQL_PATTERN, SENSITIVE_LOINC_SQL_LIST, SENSITIVE_TEST_SQL_PATTERN } from './patient-evidence.policy';
 
 // Every relation is protected by patient-self RLS (patient chat) or facility and
 // consent RLS (staff chat). No source payload or clinical identifiers are
@@ -110,7 +110,8 @@ export function evidenceQuery(audience: EvidenceAudience): string {
   q = replaceOnce(q, "jsonb_build_object('_encounterId',l.encounter_id,", "jsonb_build_object('_encounterId',l.encounter_id,'_encounterStatus',e.status,");
   q = replaceOnce(q, ",'status',l.status,'priority',l.priority,'information',l.clinical_information)", ",'status',l.status)");
   q = replaceOnce(q, "from ehr.lab_requests l where l.status not in ('draft','entered_in_error')",
-    `from ehr.lab_requests l ${completedEncounter('l')} where l.status in ('active','on_hold','completed') and coalesce(l.test_display,'') !~* '${SENSITIVE_TEST_SQL_PATTERN}'`);
+    `from ehr.lab_requests l ${completedEncounter('l')} where l.status in ('active','on_hold','completed') and coalesce(l.test_display,'') !~* '${SENSITIVE_TEST_SQL_PATTERN}'`
+    + ` and not (btrim(coalesce(l.test_code_system,'')) ~* '${LOINC_SYSTEM_SQL_PATTERN}' and btrim(coalesce(l.test_code,'')) in (${SENSITIVE_LOINC_SQL_LIST}))`);
   // Vitals: an explicit list of measures, so a future column cannot leak.
   q = replaceOnce(q, "(to_jsonb(v)-array['id','encounter_id','patient_id','facility_id','created_by','created_by_membership_id','created_at','updated_at','row_version','current_correction_no'])", VITAL_FIELDS_SQL);
   return replaceOnce(q, SELECT, SELECT_WITH_PATIENT);
