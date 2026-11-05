@@ -15,7 +15,7 @@ import { ALLERGY_SEVERITIES, DIAGNOSIS_STATUSES, ITEM_KINDS, MEDICINE_STATUSES, 
  * and as a fallback). The prompt text, the answer schema and every request
  * body are byte for byte as under version 2; the label is not sent.
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-3';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-4';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 /**
  * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).

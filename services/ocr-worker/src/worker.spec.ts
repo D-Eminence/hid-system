@@ -99,7 +99,7 @@ describe('OcrWorker processing', () => {
     expect(result.providerModel).toBe('amazon-textract-detect-document-text');
     expect(result.provenance).toMatchObject({ processingContract: 'hid-textract-v2', pageCount: 1,
       reading: { contract: 'hid-paper-reading-v2', firstPassModel: 'claude-sonnet-5-5', inferenceGeo: 'us',
-        promptVersion: 'hid-paper-reading-prompt-3', usage: { inputTokens: 2400, outputTokens: 800 } } });
+        promptVersion: 'hid-paper-reading-prompt-4', usage: { inputTokens: 2400, outputTokens: 800 } } });
     const provenance = JSON.stringify(result.provenance);
     for (const secret of [SECRET_NAME, SECRET_DRUG, SECRET_NOTE, 'Inventedcillin']) expect(provenance).not.toContain(secret);
     expect(JSON.stringify(result.structuredPayload)).not.toContain('Inventedcillin');

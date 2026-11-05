@@ -74,7 +74,7 @@ Each claimed job runs, in order:
    even with AI reading off (idempotent per job).
 5. **AI step** (`src/reading/`, only when `OCR_AI_MODE=claude` and the facility
    is in `OCR_AI_FACILITY_IDS` when that is set). One Claude API request per
-   page with the frozen, cached system prompt (`hid-paper-reading-prompt-3`,
+   page with the frozen, cached system prompt (`hid-paper-reading-prompt-4`,
    model schema `hid-paper-reading-model-schema-2`),
    structured JSON output, adaptive thinking, `inference_geo: "us"`, the
    page's lines without boxes, and 11-digit NIN-like numbers and Nigerian phone
@@ -165,9 +165,10 @@ Each claimed job runs, in order:
    count of the re-read's dropped items, including any whose content a kept
    first-pass item still carries. A page whose first pass failed or was
    declined has nothing to merge: its re-read stands. `PROMPT_VERSION`
-   is `hid-paper-reading-prompt-3` for this routing (the prompt text and
-   request bodies are unchanged from version 2; the label is only recorded),
-   so `ocr-api` never reuses a reading made under the older routing.
+   is `hid-paper-reading-prompt-4` (version 3 for this routing, 4 since picture
+   items on hard lines whose scanned text is nonsense are kept; the text prompt
+   and request bodies are unchanged from version 2, and the label is only
+   recorded), so `ocr-api` never reuses a reading made under older rules.
 
    Reuse keys on `PROMPT_VERSION` only (with the processing and payload
    contracts and the reading status): `OCR_AI_IMAGE_REREAD` and
