@@ -924,6 +924,14 @@ describe('PaperReadingService', () => {
           [false, false]]);
         expect(summary).toMatchObject({ imageRereadSkipped: [{ page: 1, reason }], rereadPages: [1] });
       }
+      // One declined and the other refused as an invalid request: the picture is still the likely cause, so the
+      // page goes to the text re-read (image_refused, since one read declined), not to a failed image re-read.
+      const mixed = hardClient((call) => call === 0 ? refused : new AiRejectedError('AI_BAD_REQUEST', 1, undefined, true));
+      const fallback = await read(hardConfig, mixed.client);
+      expect(mixed.calls.map((call) => [call.image, call.hardPage])).toEqual([[false, false], [true, true], [true, true],
+        [false, false]]);
+      expect(fallback.summary).toMatchObject({ imageRereadSkipped: [{ page: 1, reason: 'image_refused' }],
+        imageRereadFailedPages: [], rereadPages: [1] });
     });
 
     it('keeps the text masked, and the picture out of the payload and summary', async () => {

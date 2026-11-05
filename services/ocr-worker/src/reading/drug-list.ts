@@ -25,11 +25,12 @@
  *
  * Other names for the same medicine (SYNONYMS) are the ones the list itself gives in brackets (adrenaline,
  * chlorphenamine, trihexyphenidyl, hydroxyurea, aspirin, co-trimoxazole, valproic acid, cyclosporin, busulphan),
- * plus a few British names still written on Nigerian charts, marked as added here.
+ * plus a few British, US and older names still written on Nigerian charts, marked as added here.
  *
  * BRAND NAMES (BRAND_NAMES, below and kept apart): curated, not exhaustive; review before relying on it. A small
- * conservative list of brand names commonly written on Nigerian prescriptions, each mapped to its generic name(s)
- * on the list above. A brand is shown as "Brand? (generic)". Only true brand names; a manufacturer's name alone
+ * conservative list of brand names commonly written on Nigerian prescriptions, each mapped to its generic name on
+ * the list above or, for a combination brand the list does not have as a combination (Ampiclox: ampicillin +
+ * cloxacillin), to the generics it combines, each of which is on the list. A brand is shown as "Brand? (generic)". Only true brand names; a manufacturer's name alone
  * (such as a company that makes paracetamol) is never a brand here.
  */
 
@@ -183,12 +184,15 @@ export const SYNONYMS: Readonly<Record<string, string>> = {
   'frusemide': 'furosemide',
   'co-amoxiclav': 'amoxicillin + clavulanic acid',
   'lignocaine': 'lidocaine',
-  'glyburide': 'glibenclamide',
+  'phenobarbitone': 'phenobarbital',
   'salbutamol sulphate': 'salbutamol',
   'ferrous sulphate': 'ferrous sulfate',
   'magnesium sulphate': 'magnesium sulfate',
   'hyoscine n-butylbromide': 'hyoscine butylbromide',
   'ors': 'oral rehydration salts',
+  // Added (not in the list's brackets): US names.
+  'glyburide': 'glibenclamide',
+  'acyclovir': 'aciclovir',
 };
 
 /**
@@ -223,14 +227,33 @@ export const BRAND_NAMES: Readonly<Record<string, string>> = {
 };
 
 /**
- * Fuzzy match thresholds (tested in drug-list.spec.ts). A name of MIN_FUZZY_LETTERS letters or more matches a
- * listed name at an edit distance of at most MAX_EDIT_DISTANCE and a similarity ratio (1 - distance / longer
- * length) of at least MIN_SIMILARITY; a shorter name must match exactly. Two different medicines matching
- * equally well is no match (ambiguous): the screen never picks one of two lookalikes.
+ * Fuzzy match thresholds (tested in drug-list.spec.ts). A fuzzy match corrects one slip of the pen or of the
+ * reading, never a different medicine: a name of MIN_FUZZY_LETTERS letters or more matches a listed name at an edit
+ * distance of at most MAX_EDIT_DISTANCE (one letter added, dropped or changed), a similarity ratio (1 - distance /
+ * longer length) of at least MIN_SIMILARITY, and the same first letter (most look-alike medicines differ at the
+ * start: pefloxacin / ofloxacin, esomeprazole / omeprazole); a shorter name must match exactly. Two different
+ * medicines matching equally well is no match (ambiguous): the screen never picks one of two lookalikes. A name
+ * within LOOKALIKE_DISTANCE of a real medicine that is not on the list (UNLISTED_LOOKALIKES) is no match either,
+ * since the proposal may well be that medicine.
  */
 export const MIN_FUZZY_LETTERS = 6;
-export const MAX_EDIT_DISTANCE = 2;
-export const MIN_SIMILARITY = 0.8;
+export const MAX_EDIT_DISTANCE = 1;
+export const MIN_SIMILARITY = 0.85;
+export const LOOKALIKE_DISTANCE = 2;
+
+/**
+ * Real medicines that are not on the list but are spelled within a letter or two of one that is (curated, not
+ * exhaustive). A proposed name near one of these is never respelled into the listed medicine: it is shown as
+ * "[unreadable]". Each is within LOOKALIKE_DISTANCE of a listed name. The edit-distance and first-letter rules above
+ * already keep most of them apart; this keeps apart a misreading of one of them as well (arteether is one letter
+ * from artemether, which the distance rule alone would let through).
+ */
+export const UNLISTED_LOOKALIKES: readonly string[] = [
+  'arteether', 'clobetasone', 'pefloxacin', 'norfloxacin', 'gemifloxacin', 'esomeprazole', 'ganciclovir',
+  'famciclovir', 'lorazepam', 'oxazepam', 'felodipine', 'nisoldipine', 'prednisone', 'dicloxacillin', 'ornidazole',
+  'econazole', 'bifonazole', 'tioconazole', 'methsuximide', 'dihydralazine', 'quinidine', 'rocuronium',
+  'ropivacaine', 'mepivacaine', 'digitoxin', 'fosinopril', 'folinic acid', 'pentobarbital', 'saxagliptin',
+];
 
 /** Salt and form words written after a name that do not change which medicine it is. */
 const SALT_WORDS = new Set(['hydrochloride', 'hcl', 'sodium', 'potassium', 'sulfate', 'sulphate', 'maleate',
@@ -266,6 +289,8 @@ export interface DrugMatch {
   brand: string | null;
   /** What the drug name field shows: "Generic?" or "Brand? (generic)". Always marked "?" (a best guess). */
   display: string;
+  /** Whether the proposed name was a listed name as written (not respelled by the fuzzy match). */
+  exact: boolean;
 }
 
 interface Entry { key: string; generic: string; brand: string | null }
@@ -278,23 +303,25 @@ const ENTRIES: readonly Entry[] = [
 const capitalise = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 const letters = (text: string) => text.replace(/[^a-z]/g, '').length;
 
+const LOOKALIKE_KEYS = UNLISTED_LOOKALIKES.map(normaliseDrugName);
+
 /**
  * The listed medicine a proposed drug name stands for, or null. Exact (normalised, salt and form words taken off)
- * first; then the closest by edit distance within the thresholds, only when one medicine is closest. "[unreadable]"
- * or a name with no letters never matches.
+ * first; then the closest by edit distance within the thresholds, only when one medicine is closest, it starts with
+ * the same letter, and no unlisted look-alike is as near. "[unreadable]" or a name with no letters never matches.
  */
 export function matchDrugName(proposed: string): DrugMatch | null {
   if (/\[unreadable\]/i.test(proposed)) return null;
   const whole = normaliseDrugName(proposed);
   if (letters(whole) === 0) return null;
   const candidates = [...new Set([whole, withoutSalts(whole)].filter((name) => name.length > 0))];
-  const found = (entry: Entry): DrugMatch => ({ generic: entry.generic, brand: entry.brand,
+  const found = (entry: Entry, exact: boolean): DrugMatch => ({ generic: entry.generic, brand: entry.brand, exact,
     display: entry.brand === null ? `${capitalise(entry.generic)}?` : `${capitalise(entry.brand)}? (${entry.generic})` });
   for (const name of candidates) {
     const exact = ENTRIES.find((entry) => entry.key === name);
-    if (exact) return found(exact);
+    if (exact) return found(exact, true);
   }
-  let best: { entry: Entry; distance: number } | null = null;
+  let best: { entry: Entry; distance: number; name: string } | null = null;
   let ambiguous = false;
   for (const name of candidates) {
     if (letters(name) < MIN_FUZZY_LETTERS) continue;
@@ -303,9 +330,12 @@ export function matchDrugName(proposed: string): DrugMatch | null {
       const distance = editDistance(name, entry.key);
       const similarity = 1 - distance / Math.max(name.length, entry.key.length);
       if (distance > MAX_EDIT_DISTANCE || similarity < MIN_SIMILARITY) continue;
-      if (best === null || distance < best.distance) { best = { entry, distance }; ambiguous = false; }
+      if (best === null || distance < best.distance) { best = { entry, distance, name }; ambiguous = false; }
       else if (distance === best.distance && entry.generic !== best.entry.generic) ambiguous = true;
     }
   }
-  return best === null || ambiguous ? null : found(best.entry);
+  if (best === null || ambiguous || best.name.charAt(0) !== best.entry.key.charAt(0)) return null;
+  const nearUnlisted = candidates.some((name) =>
+    LOOKALIKE_KEYS.some((key) => editDistance(name, key) <= LOOKALIKE_DISTANCE));
+  return nearUnlisted ? null : found(best.entry, false);
 }

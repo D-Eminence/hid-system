@@ -1,7 +1,7 @@
 import type { Box, FlagReason, PaperItem } from './contract';
-import { matchDrugName } from './drug-list';
+import { matchDrugName, normaliseDrugName } from './drug-list';
 import { checkReasonSentence, itemId, mergeIdentity, unionBox, uniqueItemIds, type PageCheck } from './items';
-import { HARD_PAGE_FREQUENCIES, UNREADABLE, type BasisField, type HardItemExtras, type ModelItem,
+import { HARD_PAGE_FREQUENCIES, UNREADABLE, type BasisField, type FieldBasis, type HardItemExtras, type ModelItem,
   type ModelPage } from './prompt';
 
 /**
@@ -14,7 +14,8 @@ import { HARD_PAGE_FREQUENCIES, UNREADABLE, type BasisField, type HardItemExtras
  *    name checked against the drug list (drug-list.ts): a listed name is shown in its list spelling with "?" (a brand
  *    as "Brand? (generic)"); an unlisted one becomes "[unreadable]". asWritten keeps what the model read, "?" marks
  *    and all: it is the transcription the clinician compares with the paper, while the drug name field is what may
- *    be taken into the record, so only the field is held to the list.
+ *    be taken into the record, so only the field is held to the list. A filled field whose basis is "context" gets
+ *    "?" in the field itself (markGuess).
  * 2. Each answer is held to the page by checkPage (items.ts), unchanged: #194's placement rules apply to every item.
  * 3. mergeHardReadings pairs the kept items of the two readings and keeps what they agree on (see there).
  * The result is then merged with the first pass by mergeReread, unchanged, so no first-pass item is lost.
@@ -57,19 +58,32 @@ export function strengthOf(dose: string, unit: string): string {
   return unitText ? `${doseText} ${unitText}` : doseText;
 }
 
+/**
+ * A filled field whose basis is "context" (filled from what is usual, not read) carries "?" in the field itself, so
+ * the guess shows where it is shown, whichever reason sentence the item gets.
+ */
+export function markGuess(value: string, basis: FieldBasis | undefined): string {
+  if (basis !== 'context' || isBlank(value) || value === UNREADABLE || unsure(value)) return value;
+  return `${value.trimEnd()}?`;
+}
+
 /** Step 1 (see the header). Items without hard-page extras are left as they are. */
 export function prepareHardAnswer(answer: ModelPage): ModelPage {
   return { ...answer, items: answer.items.map((item): ModelItem => {
     if (!item.hard) return item;
-    const frequency = normaliseFrequency(item.frequency);
-    if (item.kind !== 'medicine') return { ...item, frequency };
-    const dose = normaliseDose(item.hard.dose);
-    const doseUnit = item.hard.doseUnit.trim();
+    const { basis } = item.hard;
+    const frequency = markGuess(normaliseFrequency(item.frequency), basis.frequency);
+    const guessed = { frequency, route: markGuess(item.route, basis.route),
+      duration: markGuess(item.duration, basis.duration), value: markGuess(item.value, basis.value) };
+    if (item.kind !== 'medicine') return { ...item, ...guessed };
+    const dose = markGuess(normaliseDose(item.hard.dose), basis.dose);
+    const doseUnit = markGuess(item.hard.doseUnit.trim(), basis.unit);
     const proposed = item.name.trim();
     const match = proposed ? matchDrugName(proposed) : null;
-    return { ...item, frequency, strength: strengthOf(dose, doseUnit),
+    return { ...item, ...guessed, strength: strengthOf(dose, doseUnit),
       name: proposed ? match?.display ?? UNREADABLE : '',
-      hard: { ...item.hard, dose, doseUnit, generic: match?.generic ?? null } };
+      hard: { ...item.hard, dose, doseUnit, generic: match?.generic ?? null, nameExact: match?.exact ?? false,
+        proposedName: normaliseDrugName(proposed) } };
   }) };
 }
 
@@ -159,7 +173,10 @@ function fromContext(side: Side, field: string, value: unknown): boolean {
 
 function anyFromContext(side: Side): boolean {
   const fields = side.item.fields as Record<string, unknown>;
-  return Object.entries(fields).some(([field, value]) => fromContext(side, field, value));
+  if (Object.entries(fields).some(([field, value]) => fromContext(side, field, value))) return true;
+  // A medicine's dose and unit are kept apart in the extras; the unit's basis is "unit" (as in pair).
+  return side.item.kind === 'medicine' && (fromContext(side, 'strength', side.extras?.dose)
+    || fromContext(side, 'unit', side.extras?.doseUnit));
 }
 
 /** The plain reading of a hard-page medicine, built only from its final fields (never the model's own guesses). */
@@ -214,10 +231,18 @@ function pair(a: Side, b: Side, sourceSha256Hex: string, tally: HardPageAgreemen
     const y = fieldsB[field];
     if (a.item.kind === 'medicine' && field === 'strength') continue;
     if (a.item.kind === 'medicine' && field === 'name') {
-      // The same listed medicine under two spellings (a brand and its generic) is agreement.
+      // The same listed medicine under two spellings (a brand and its generic) is agreement when each reading wrote
+      // a listed name as such, or both proposed the same spelling. Two different spellings of which one was respelled
+      // by the fuzzy match may be two different medicines (one unlisted): that is disagreement, and unreadable.
       const listedA = a.extras?.generic ?? null;
       const listedB = b.extras?.generic ?? null;
-      if (listedA !== null && listedA === listedB) {
+      const sameWriting = (a.extras?.nameExact === true && b.extras?.nameExact === true)
+        || (a.extras?.proposedName !== undefined && a.extras.proposedName === b.extras?.proposedName);
+      if (listedA !== null && listedA === listedB && !sameWriting) {
+        compare(false);
+        if (fromContext(a, field, x) || fromContext(b, field, y)) context = true;
+        fields[field] = UNREADABLE;
+      } else if (listedA !== null && listedA === listedB) {
         compare(true);
         if (fromContext(a, field, x) || fromContext(b, field, y)) context = true;
         fields[field] = keepUnsure(x as string | null, y as string | null);
@@ -272,9 +297,26 @@ function pairScore(a: PaperItem, b: PaperItem): number | null {
 }
 
 /**
+ * Two medicines left unpaired by place that are the same listed medicine on neighbouring rows: their cited lines are
+ * at most one line apart, or their boxes share part of their height. The smaller the gap the better; null when not.
+ */
+function neighbourGap(a: Side, b: Side): number | null {
+  if (a.item.kind !== 'medicine' || b.item.kind !== 'medicine') return null;
+  const generic = a.extras?.generic ?? null;
+  if (generic === null || generic !== (b.extras?.generic ?? null)) return null;
+  const linesA = a.item.lineIds.map(lineNumber);
+  const linesB = b.item.lineIds.map(lineNumber);
+  const lineGap = Math.min(...linesA.flatMap((x) => linesB.map((y) => Math.abs(x - y))));
+  const vertical = span(a.item.box.top, a.item.box.height, b.item.box.top, b.item.box.height) > 0;
+  if (lineGap > 1 && !vertical) return null;
+  return vertical ? 0 : lineGap;
+}
+
+/**
  * The hard page's reading from its two readings (or from one, when the other failed or was declined: every item
  * then single_reading_only). Items are paired one to one by kind and place (a shared cited line, or boxes
- * overlapping by PAIR_BOX_OVERLAP of the smaller), best pairs first; each pair is merged by `pair`, and an item only
+ * overlapping by PAIR_BOX_OVERLAP of the smaller), best pairs first, then the same listed medicine on neighbouring
+ * rows (neighbourGap); each pair is merged by `pair`, and an item only
  * one reading found is kept with single_reading_only. Every item: check_carefully, readBy 'reread', read_from_image
  * and best_guess_from_picture, plus field_from_context where any field's basis was context. Identity is merged as in
  * mergeIdentity (a conflict flags the page ai_unsure); the page flags are both readings' flags; the dropped counts are
@@ -301,6 +343,20 @@ export function mergeHardReadings(readings: readonly HardReading[], sourceSha256
   const usedLeft = new Map<number, number>();
   const usedRight = new Set<number>();
   for (const { i, j } of candidates) {
+    if (usedLeft.has(i) || usedRight.has(j)) continue;
+    usedLeft.set(i, j);
+    usedRight.add(j);
+  }
+  // Then the same listed medicine read on neighbouring lines (the two readings cited different fragments of one
+  // handwritten line): paired, so one medicine is never shown twice with two doses.
+  const neighbours: Array<{ i: number; j: number; gap: number }> = [];
+  left.forEach((a, i) => right.forEach((b, j) => {
+    if (usedLeft.has(i) || usedRight.has(j)) return;
+    const gap = neighbourGap(a, b);
+    if (gap !== null) neighbours.push({ i, j, gap });
+  }));
+  neighbours.sort((x, y) => x.gap - y.gap || x.i - y.i || x.j - y.j);
+  for (const { i, j } of neighbours) {
     if (usedLeft.has(i) || usedRight.has(j)) continue;
     usedLeft.set(i, j);
     usedRight.add(j);

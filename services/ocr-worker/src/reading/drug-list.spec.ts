@@ -1,9 +1,10 @@
-import { BRAND_NAMES, editDistance, matchDrugName, MAX_EDIT_DISTANCE, MIN_FUZZY_LETTERS, MIN_SIMILARITY, NEML_GENERICS,
-  normaliseDrugName, SYNONYMS } from './drug-list';
+import { BRAND_NAMES, editDistance, LOOKALIKE_DISTANCE, matchDrugName, MAX_EDIT_DISTANCE, MIN_FUZZY_LETTERS,
+  MIN_SIMILARITY, NEML_GENERICS, normaliseDrugName, SYNONYMS, UNLISTED_LOOKALIKES } from './drug-list';
 
 describe('drug list (hard pages only)', () => {
   it('shows a listed generic in its list spelling, marked as a guess', () => {
-    expect(matchDrugName('metronidazole')).toEqual({ generic: 'metronidazole', brand: null, display: 'Metronidazole?' });
+    expect(matchDrugName('metronidazole')).toEqual({ generic: 'metronidazole', brand: null, display: 'Metronidazole?',
+      exact: true });
     expect(matchDrugName('PARACETAMOL?')?.display).toBe('Paracetamol?');
     expect(matchDrugName('Pyrimethamine')?.display).toBe('Pyrimethamine?');
     // Salt and form words do not change the medicine.
@@ -12,7 +13,8 @@ describe('drug list (hard pages only)', () => {
   });
 
   it('shows a brand as "Brand? (generic)"', () => {
-    expect(matchDrugName('Plasil')).toEqual({ generic: 'metoclopramide', brand: 'plasil', display: 'Plasil? (metoclopramide)' });
+    expect(matchDrugName('Plasil')).toEqual({ generic: 'metoclopramide', brand: 'plasil', display: 'Plasil? (metoclopramide)',
+      exact: true });
     expect(matchDrugName('flagyl?')?.display).toBe('Flagyl? (metronidazole)');
     expect(matchDrugName('Augmentin')?.display).toBe('Augmentin? (amoxicillin + clavulanic acid)');
     expect(matchDrugName('Rocephin')?.generic).toBe('ceftriaxone');
@@ -23,24 +25,56 @@ describe('drug list (hard pages only)', () => {
     expect(matchDrugName('Adrenaline')?.display).toBe('Epinephrine?');
     expect(matchDrugName('Frusemide')?.display).toBe('Furosemide?');
     expect(matchDrugName('Co-trimoxazole')?.generic).toBe('sulfamethoxazole + trimethoprim');
+    expect(matchDrugName('Phenobarbitone')?.display).toBe('Phenobarbital?');
+    expect(matchDrugName('Glyburide')?.generic).toBe('glibenclamide');
   });
 
-  it('corrects a misspelling within the thresholds, and no further', () => {
-    // Distance 1 and 2 on names of six letters or more.
-    expect(matchDrugName('Metronidazol')?.display).toBe('Metronidazole?');
-    expect(matchDrugName('Metrondazol')?.display).toBe('Metronidazole?');
+  it('corrects one slip within the thresholds, and no further', () => {
+    // Distance 1 on names of six letters or more, same first letter.
+    expect(matchDrugName('Metronidazol')).toMatchObject({ display: 'Metronidazole?', exact: false });
     expect(matchDrugName('Ceftriaxon')?.generic).toBe('ceftriaxone');
     expect(matchDrugName('Plasill')?.display).toBe('Plasil? (metoclopramide)');
-    // Distance 3: no match.
+    expect(matchDrugName('Gentamycin')?.generic).toBe('gentamicin');
+    // Distance 2 or 3: no match.
+    expect(matchDrugName('Metrondazol')).toBeNull();
     expect(matchDrugName('Metrnidzol')).toBeNull();
+    // A slip at the first letter: no match.
+    expect(matchDrugName('Netronidazole')).toBeNull();
     // Under MIN_FUZZY_LETTERS letters: exact only ("zinc", "urea" are listed).
     expect(matchDrugName('Zinc')?.generic).toBe('zinc');
     expect(matchDrugName('Zink')).toBeNull();
-    // Ratio: a 6-letter name 2 edits away is 0.67 similar, below MIN_SIMILARITY.
+    // Ratio: a 6-letter name one letter changed is 0.83 similar, below MIN_SIMILARITY; one letter short of 7 passes.
     expect(matchDrugName('Quinin')?.generic).toBe('quinine');
-    expect(matchDrugName('Qunnin')).toBeNull();
-    expect([MIN_FUZZY_LETTERS, MAX_EDIT_DISTANCE, MIN_SIMILARITY]).toEqual([6, 2, 0.8]);
+    expect(matchDrugName('Flagyi')).toBeNull();
+    expect([MIN_FUZZY_LETTERS, MAX_EDIT_DISTANCE, MIN_SIMILARITY, LOOKALIKE_DISTANCE]).toEqual([6, 1, 0.85, 2]);
     expect(editDistance('kitten', 'sitting')).toBe(3);
+  });
+
+  it('never respells a real medicine that is not on the list into a listed one', () => {
+    // Each of these is a different real medicine, one or two letters from a listed one.
+    for (const name of ['Ganciclovir', 'Lorazepam', 'Esomeprazole', 'Felodipine', 'Prednisone', 'Norfloxacin',
+      'Pefloxacin', 'Gemifloxacin', 'Dicloxacillin', 'Arteether', 'Dihydralazine', 'Ornidazole', 'Econazole',
+      'Bifonazole', 'Tioconazole', 'Methsuximide', 'Clobetasone', 'Valaciclovir', 'Oxazepam', 'Quinidine']) {
+      expect([name, matchDrugName(name)]).toEqual([name, null]);
+    }
+    // The listed ones themselves still match exactly.
+    for (const name of ['Aciclovir', 'Clonazepam', 'Omeprazole', 'Amlodipine', 'Prednisolone', 'Ofloxacin',
+      'Gatifloxacin', 'Cloxacillin', 'Artemether', 'Hydralazine', 'Tinidazole', 'Miconazole', 'Ethosuximide',
+      'Clobetasol']) {
+      expect(matchDrugName(name)?.exact).toBe(true);
+    }
+    // The look-alike pairs on the list stay apart.
+    expect(matchDrugName('Carbimazole')?.generic).toBe('carbimazole');
+    expect(matchDrugName('Carbamazepine')?.generic).toBe('carbamazepine');
+    expect(matchDrugName('Cefuroxime')?.generic).toBe('cefuroxime');
+    expect(matchDrugName('Metformin')?.generic).toBe('metformin');
+    expect(matchDrugName('Chlorpropamide')).toBeNull();
+    // Every unlisted look-alike is really off the list and within LOOKALIKE_DISTANCE of a listed name.
+    const keys = [...NEML_GENERICS, ...Object.keys(SYNONYMS), ...Object.keys(BRAND_NAMES)].map(normaliseDrugName);
+    for (const name of UNLISTED_LOOKALIKES) {
+      expect(keys).not.toContain(name);
+      expect([name, Math.min(...keys.map((key) => editDistance(name, key))) <= LOOKALIKE_DISTANCE]).toEqual([name, true]);
+    }
   });
 
   it('never shows an unlisted name, an unreadable one, or one of two lookalikes', () => {

@@ -1,5 +1,5 @@
 import { paperReadingPayloadSchema, type PaperItem } from './contract';
-import { mergeAsWritten, mergeHardReadings, normaliseDose, normaliseFrequency, prepareHardAnswer, strengthOf,
+import { markGuess, mergeAsWritten, mergeHardReadings, normaliseDose, normaliseFrequency, prepareHardAnswer, strengthOf,
   type HardReading } from './hard-page';
 import { checkPage, checkReasonSentence } from './items';
 import { createMasker } from './masking';
@@ -51,6 +51,17 @@ describe('hard-page answers, before they are held to the page', () => {
       ['[unreadable]', '[unreadable]', null]]);
     // asWritten keeps what the model read: the transcription the clinician compares with the paper.
     expect(prepared.items[2]!.asWritten).toBe('Fictionalmab 400 mg three times daily');
+  });
+
+  it('puts "?" on every filled field whose basis is context, so a guess shows in the field itself', () => {
+    const [guessed] = prepareHardAnswer(modelPage([{ ...medicine(1, 'Metronidazole', '1', 'g', 'tds',
+      { basis: { dose: 'context', unit: 'context', frequency: 'context', route: 'context', duration: 'context' } }),
+    route: 'oral', duration: '5 days' }])).items;
+    expect(guessed).toMatchObject({ strength: '1? g?', frequency: 'tds?', route: 'oral?', duration: '5 days?',
+      hard: { dose: '1?', doseUnit: 'g?' } });
+    // Read from the letters, empty, already unsure or unreadable: left as it is.
+    expect([markGuess('tds', 'letters'), markGuess('', 'context'), markGuess('tds?', 'context'),
+      markGuess('[unreadable]', 'context')]).toEqual(['tds', '', 'tds?', '[unreadable]']);
   });
 });
 
@@ -120,6 +131,48 @@ describe('two readings of a hard page', () => {
     expect(only.checkReasons).toEqual(expect.arrayContaining(['single_reading_only', 'best_guess_from_picture']));
     expect(only.checkReason).toBe('Only one of two readings of the picture found this; check it against the paper.');
     expect(agreement).toMatchObject({ itemsPaired: 1, itemsSingle: 1 });
+  });
+
+  it('marks a single-reading medicine whose dose or unit came from context', () => {
+    for (const basis of [{ unit: 'context' as const }, { dose: 'context' as const }]) {
+      const { check } = mergeHardReadings([reading(modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds',
+        { basis })]))], SOURCE_SHA);
+      expect(check.items[0]!.checkReasons).toEqual(expect.arrayContaining(['field_from_context', 'single_reading_only']));
+    }
+  });
+
+  it('treats two different spellings respelled to one listed medicine as disagreement', () => {
+    const { check } = merge(modelPage([medicine(1, 'Metronidazol', '400', 'mg', 'tds')]),
+      modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds')]));
+    expect(fieldsOf(check.items[0]!).name).toBe('[unreadable]');
+    expect(check.items[0]!.checkReasons).toContain('readings_disagree');
+    // The same spelling in both readings is agreement.
+    const same = merge(modelPage([medicine(1, 'Metronidazol', '400', 'mg', 'tds')]),
+      modelPage([medicine(1, 'Metronidazol', '400', 'mg', 'tds')]));
+    expect(fieldsOf(same.check.items[0]!).name).toBe('Metronidazole?');
+    expect(same.check.items[0]!.checkReasons).not.toContain('readings_disagree');
+  });
+
+  it('pairs the same listed medicine read on neighbouring lines, so it is never shown twice with two doses', () => {
+    const page = readPage(1, [['Metrnidazle 200', { handwritten: true, confidence: 0.45 }],
+      ['Metro 400 rng tds', { handwritten: true, confidence: 0.45 }], 'Dx: Toxoplasmosis']);
+    const held = (answer: ModelPage): HardReading => {
+      const prepared = prepareHardAnswer(answer);
+      return { answer: prepared, check: checkPage({ page: 1, lines: page.lines, answer: prepared,
+        sourceSha256Hex: SOURCE_SHA, readBy: 'reread', masker: createMasker(), fromImage: true }) };
+    };
+    const { check, agreement } = mergeHardReadings([
+      held(modelPage([medicine(1, 'Metronidazole', '200', 'mg', 'tds', { asWritten: 'Metrnidazle 200',
+        box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 } })])),
+      held(modelPage([medicine(2, 'Metronidazole', '400', 'mg', 'tds', { asWritten: 'Metro 400 rng tds',
+        box: { left: 0.2, top: 0.1, width: 0.3, height: 0.02 } })]))], SOURCE_SHA);
+    expect(check.items.filter((item) => item.kind === 'medicine')).toHaveLength(1);
+    const item = check.items[0]!;
+    expect(fieldsOf(item)).toMatchObject({ name: 'Metronidazole?', strength: '[unreadable] mg' });
+    expect(item.checkReasons).toContain('readings_disagree');
+    expect(item.lineIds).toEqual(['p1-l1', 'p1-l2']);
+    expect(agreement).toMatchObject({ itemsPaired: 1, itemsSingle: 0 });
+    expect(JSON.stringify(fieldsOf(item))).not.toMatch(/200|400/);
   });
 
   it('marks every item single_reading_only when only one reading came back', () => {

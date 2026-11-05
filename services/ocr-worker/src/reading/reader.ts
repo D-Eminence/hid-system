@@ -280,8 +280,8 @@ export class PaperReadingService {
      * A hard page (owner decision 2026-11-05, about 18:40 UTC): the same best-guess request with the picture sent
      * twice, at the hard-page effort, then the two readings compared (hard-page.ts). One reading failing or declining
      * leaves the other alone (single_reading_only on every item). Both failing: as a failed image re-read, except
-     * that, as for the image re-read, both refused as an invalid request ('image_rejected') or both declined
-     * ('image_refused') sends the page to a text re-read instead.
+     * that, as for the image re-read, each read refused as an invalid request or declined sends the page to a text
+     * re-read instead ('image_refused' when either declined, else 'image_rejected').
      * Zoom (deferred): a later step could ask for a crop here, between the two reads and the merge (zoom.ts).
      */
     const readHard = async (state: PageState, picture: PageImage): Promise<{ kind: 'read'; check: PageCheck }
@@ -300,8 +300,10 @@ export class PaperReadingService {
         const kinds = settled.map((result) => result.status === 'fulfilled' ? result.value.kind
           : result.reason instanceof AiRejectedError && result.reason.code === 'AI_BAD_REQUEST' && result.reason.invalidRequest
             ? 'invalid' : 'error');
-        if (kinds.every((kind) => kind === 'invalid')) return { kind: 'fallback', reason: 'image_rejected' };
-        if (kinds.every((kind) => kind === 'refused')) return { kind: 'fallback', reason: 'image_refused' };
+        // Each read either refused as an invalid request or declined: the picture is the likely cause either way.
+        if (kinds.every((kind) => kind === 'invalid' || kind === 'refused')) {
+          return { kind: 'fallback', reason: kinds.includes('refused') ? 'image_refused' : 'image_rejected' };
+        }
         return { kind: 'failed' };
       }
       if (answers.length === 1) hardSingle.push(state.page);

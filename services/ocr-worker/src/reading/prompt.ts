@@ -329,6 +329,10 @@ export interface HardItemExtras {
   dose: string; doseUnit: string; basis: Record<BasisField, FieldBasis>;
   /** For a medicine, after the drug list (hard-page.ts): the listed generic its name matched, or null. */
   generic?: string | null;
+  /** For a medicine matched to the list: whether the name was a listed name as written (not respelled). */
+  nameExact?: boolean;
+  /** For a medicine: the name the model proposed, normalised (drug-list.ts normaliseDrugName), for comparing readings. */
+  proposedName?: string;
 }
 
 /**
