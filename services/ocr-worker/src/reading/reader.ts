@@ -54,6 +54,12 @@ export interface ReadingSummary {
   imageRereadFailedPages: number[];
   droppedUngrounded: number;
   droppedUngroundedFirstPass: number;
+  /**
+   * droppedUngrounded by reason code (items.ts DROP_REASONS), from the reading each page ended with; and the same
+   * for the first pass. Codes and counts only, for the completion log: never in the payload or provenance.
+   */
+  droppedByReason: Record<string, number>;
+  droppedByReasonFirstPass: Record<string, number>;
   itemCount: number;
   flaggedPages: number;
   maskedNumbers: number;
@@ -356,6 +362,8 @@ export class PaperReadingService {
       states.reduce((sum, state) => sum + state.masker.count, 0), servedGeo, null, rereadAttempted, tally.list(),
       tally.listByPass(),
       imageRereadPages, [...skipped].sort((a, b) => a.page - b.page), [...imageFailed].sort((a, b) => a - b));
+    summary.droppedByReason = sumReasons(states.map((state) => state.final?.droppedByReason));
+    summary.droppedByReasonFirstPass = sumReasons(states.map((state) => state.firstCheck?.droppedByReason));
     return { payload: this.payload(pages, status === 'read' ? identity : blankIdentity(), kept, summary), summary };
   }
 
@@ -390,7 +398,8 @@ export class PaperReadingService {
       servedInferenceGeo: servedGeo,
       requests, refusals, pagesSent, rereadPages, rereadFailedPages: rereadFailed, imageRereadPages, imageRereadSkipped,
       imageRereadFailedPages,
-      droppedUngrounded: dropped, droppedUngroundedFirstPass: droppedFirst, itemCount: items.length,
+      droppedUngrounded: dropped, droppedUngroundedFirstPass: droppedFirst, droppedByReason: {},
+      droppedByReasonFirstPass: {}, itemCount: items.length,
       flaggedPages: pages.filter((page) => page.flagged).length, maskedNumbers: masked, failureCode, usage,
       modelUsage, passUsage,
     };
@@ -417,6 +426,13 @@ export class PaperReadingService {
       },
     };
   }
+}
+
+/** Drop counts by reason summed over pages, with the codes in a stable (sorted) order. */
+function sumReasons(maps: readonly (Readonly<Record<string, number>> | undefined)[]): Record<string, number> {
+  const total = new Map<string, number>();
+  for (const map of maps) for (const [code, count] of Object.entries(map ?? {})) total.set(code, (total.get(code) ?? 0) + count);
+  return Object.fromEntries([...total.entries()].sort(([a], [b]) => a.localeCompare(b)));
 }
 
 /** First-pass items kept when the re-read did not work: each one goes to a person. */

@@ -88,10 +88,24 @@ Each claimed job runs, in order:
 6. **Grounding** (`src/reading/grounding.ts`, `items.ts`, pure functions). An
    item citing no line, a line not on its page, or whose `asWritten` is not in
    its cited lines (whole words and whole numbers) is dropped and only
-   counted. Every kept item gets check reasons (dose, frequency, route, value
-   or unit not as written, corrected wording, lines not together, inactive
-   status or status words, date not on the page or ambiguous, low OCR
-   confidence, handwriting) and one plain sentence for the check screen. An
+   counted, by a reason code (`DROP_REASONS` in `items.ts`: `no_line_cited`,
+   `line_not_on_page`, `empty_as_written`, `text_not_on_line`, and for a
+   picture item `no_box`, `box_too_small`, `too_many_lines`,
+   `too_many_lines_on_row`, `too_many_rows`, `rows_not_together`,
+   `cited_lines_no_box`, `not_on_cited_line`, `area_too_large`,
+   `side_overflow`, `covers_uncited_line`, `uncited_share`, `not_anchored`).
+   The counts per code (`droppedByReason`, summing to `droppedUngrounded`, for
+   the reading each page ended with) go in the `ocr.job.completed` log only,
+   never in the payload or provenance. Every kept item gets check reasons
+   (dose, frequency, route, value or unit not as written, corrected wording,
+   lines not together, inactive status (`status_not_active`: past, stopped,
+   suspected, ruled out, history, family history), a medicine whose status
+   the paper doesn't give (`status_not_written`: "The paper doesn't say
+   whether this is current.", only where the line has no status words such
+   as "stopped" or "d/c", which give `status_cue_on_line` instead), status
+   words, date not on the page or
+   ambiguous, low OCR confidence, handwriting) and one plain sentence for the
+   check screen. An
    allergy's `severity` (`mild`, `moderate`, `severe`, `unknown` or `null`)
    is filled only when the paper says how bad; a `mild`, `moderate` or
    `severe` whose word is not on the cited lines (`anaphyla...` also counts

@@ -105,6 +105,19 @@ describe('OcrWorker processing', () => {
     expect(JSON.stringify(result.structuredPayload)).not.toContain('Inventedcillin');
   });
 
+  it('logs the dropped items by reason code on completion, and keeps the map out of the payload and provenance', async () => {
+    const { repository, reader, provider, reading } = mocks();
+    await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+    const line = logs().find((entry) => entry.includes('ocr.job.completed'))!;
+    const logged = JSON.parse(line) as { droppedUngrounded: number; droppedByReason: Record<string, number> };
+    expect(logged.droppedByReason).toEqual({ text_not_on_line: 1 });
+    expect(Object.values(logged.droppedByReason).reduce((sum, count) => sum + count, 0)).toBe(logged.droppedUngrounded);
+    expect(line).not.toContain('Inventedcillin');
+    const result = completed(repository);
+    expect(JSON.stringify(result.structuredPayload)).not.toContain('droppedByReason');
+    expect(JSON.stringify(result.provenance)).not.toContain('droppedByReason');
+  });
+
   it('never logs line text, items, names or SDK error details across a full job', async () => {
     const { repository, reader, provider, reading } = mocks();
     await new OcrWorker(config, repository, reader, provider, reading).processOne(job);

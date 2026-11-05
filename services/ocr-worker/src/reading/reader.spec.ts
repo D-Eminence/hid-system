@@ -184,6 +184,17 @@ describe('PaperReadingService', () => {
     expect(summary.droppedUngroundedFirstPass).toBe(1);
     expect(payload.reading.rereadPages).toEqual([1]);
     expect(JSON.stringify(payload)).not.toContain('Invented Drugname');
+    // By reason, codes only: the first pass's drop; the final (re-read) reading dropped nothing. Not in the payload.
+    expect(summary.droppedByReasonFirstPass).toEqual({ text_not_on_line: 1 });
+    expect(summary.droppedByReason).toEqual({});
+    expect(summary.droppedUngrounded).toBe(0);
+    expect(JSON.stringify(payload)).not.toContain('droppedByReason');
+    // Where the re-read drops too, the final count is the re-read's, summed over pages.
+    const both = fakeClient(() => ok(invented));
+    const twice = await new PaperReadingService(config, both.client).read(input(), signal());
+    expect(twice.summary.droppedByReason).toEqual({ text_not_on_line: 1 });
+    expect(Object.values(twice.summary.droppedByReason).reduce((sum, count) => sum + count, 0))
+      .toBe(twice.summary.droppedUngrounded);
   });
 
   it('masks NIN-like and phone numbers before sending, and restores them in what is stored', async () => {
