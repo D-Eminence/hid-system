@@ -3319,7 +3319,55 @@ random subject, an empty subject, the scanner's subject, a near-miss subject and
 the seeded subject with its role revoked or its account disabled are refused
 with 42501.
 
-## 35. Records patients add themselves (0116)
+## 35. OCR page allowance (0107)
+
+Owner decision (D-Eminence, 2026-11-02/03, Migrate item 7): 500 pages per
+facility per month, Textract and the AI reading counted together; only a
+super admin raises it; at 100% reading pauses but review and manual entry keep
+working. 0107 is unsigned until the owner signs its declaration. Drafted as
+0110 on 0103 and renumbered 0107, the next free number after 0106 (numbers
+follow release order). It applies after 0106; it needs `ocr.claim_worker_job`
+exactly as 0105 left it (the fair claim copies that body, md5 pinned) and uses
+nothing 0104 or 0106 add.
+
+Month: the Africa/Lagos calendar month. `resets_on` is the first day of the
+next month; a parked job becomes due at 00:00 Africa/Lagos that day.
+`paused` is `pages_used >= pages_limit`; `pages_used` is the sum of the
+facility's job counts first recorded this month; `pages_limit` is 500 unless
+a super admin set another (1-100000).
+
+Database commands (every one returns `(pages_used integer, pages_limit
+integer, resets_on date, paused boolean)` unless noted):
+
+| Command | Caller (role) | Notes |
+| --- | --- | --- |
+| `ocr.worker_page_allowance(job_id, claim_token)` | OCR worker (`hid_ocr_worker`) | The facility of the job it holds; the same claim checks as `ocr.fail_worker_job` (42501 not a worker, 55000 claim not active). `paused` is false for a job whose pages are already recorded, so a retry is never parked by its own pages. |
+| `ocr.record_worker_pages(job_id, claim_token, page_count, correlation_id)` | OCR worker | 1-200 pages (22023 otherwise). Once per job: a replay or a smaller count changes nothing; a larger count is kept. Audit `ocr.worker.pages_recorded` (`details.pages` only) when stored or raised. |
+| `ocr.pause_worker_job_for_allowance(job_id, claim_token, correlation_id)` returns `timestamptz` | OCR worker | NULL, changing nothing, unless the allowance is used up and the job's pages are not yet recorded (a limit raised since the read, or a retry); the worker then reads the job. Otherwise the job goes processing -> failed -> queued, `attempt_count` back by one (a pause never uses an attempt), `last_error_code = OCR_PAGE_ALLOWANCE_USED_UP`, `last_error_summary = Reading is paused because this facility has used this month's page allowance`, `next_attempt_at` = the returned resume time. Job events `OcrFailed` and `OcrJobQueued` carry the reason code. Audit `ocr.worker.paused_for_allowance`. Takes the facility's page-limit lock (the transaction advisory lock `ocr.set_facility_page_limit` takes) before it reads the allowance, so a raise above use racing a pause never leaves the job parked: either the pause sees the new limit and answers NULL, or the raise waits and then resumes the job. |
+| `ocr.facility_page_allowance(facility_id)` | OCR API (`hid_ocr_runtime`) and Identity API (`hid_identity_runtime`) | A session naming that facility and an active membership there with `ocr.job.read`, or a platform session (no facility, no membership) whose account has `platform.admin.access`; 42501 otherwise; P0002 for an unknown facility. |
+| `ocr.set_facility_page_limit(facility_id, pages_limit, reason)` returns `void` | Identity API (`hid_identity_runtime`) | Platform session, `platform.admin.access` and an active platform `platform_super_admin` role (only: a limit is a cost decision; `platform_admin`, support admins and facility staff read the allowance and usage but cannot set it), a correlation id and purpose `healthcare-operations` (42501 otherwise); limit 1-100000 and reason 1-240 characters (22023); P0002 unknown facility. Audit `admin.ocr.page-limit.set` (`actor_type = 'platform'`, resource the facility, details: new and previous limit, use, resumed and skipped jobs). When the new limit is above this month's use, the facility's queued jobs parked with `OCR_PAGE_ALLOWANCE_USED_UP` become due now (same attempt count, next version). |
+| `ocr.claim_worker_job_fair(provider, lease_seconds, max_in_flight_per_facility)` returns the row of `ocr.claim_worker_job` (`job_id, facility_id, document_id, patient_id, storage_bucket, storage_key, object_version_id, source_sha256_hex, size_bytes, media_type, provider, attempt_no, max_attempts, claim_token, claim_expires_at, correlation_id`; no row when nothing is claimable) | OCR worker (`hid_ocr_worker`) | The authorization (42501), validation (22023: provider 1-120 characters, lease 30-3600 seconds, cap 1-16), lease recovery, eligibility and result of `ocr.claim_worker_job` as 0105 left it (`media_type` is the detected type of the clean scan bound to the job's source, not the declared type), plus: a facility that already has `max_in_flight_per_facility` jobs `processing` under an unexpired lease (any provider) is skipped, and among the rest the job of the facility with the fewest such jobs is taken first, then `next_attempt_at`, `queued_at`, `id`. `FOR UPDATE SKIP LOCKED`; the candidate's facility is taken with `pg_try_advisory_xact_lock` (never waits) and counted again, so the cap is exact among fair claimers; claims through the unchanged `ocr.claim_worker_job` (an old worker image) are counted but not bounded. Audit `ocr.worker.claim` adds `maxInFlightPerFacility` and `inFlightBefore`. |
+| `ocr.record_worker_ai_usage(job_id, claim_token, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, correlation_id)` returns `void` | OCR worker | The claim checks of `ocr.fail_worker_job` (42501, 55000). `model` matches `^claude-[a-z0-9-]+$` (at most 100 characters) and every count is a non-NULL number >= 0 (22023). One row per (job, the job's current attempt, model): the totals given replace the stored ones, so a replay changes nothing. Audit `ocr.worker.ai_usage_recorded` (attempt, model and the counts only) when something changed. |
+| `ocr.facility_ocr_usage(facility_id, month date)` returns `(model text, requests bigint, input_tokens bigint, output_tokens bigint, cache_read_tokens bigint, cache_write_tokens bigint, pages bigint)` | OCR API (`hid_ocr_runtime`) and Identity API (`hid_identity_runtime`) | The callers and errors of `ocr.facility_page_allowance`. The Africa/Lagos month containing `month` (NULL: this month). One row per Claude model with its summed requests and tokens (`pages` 0), then one row `model = 'textract'` with the month's pages from the page count (requests and tokens 0; present even when 0), ordered by model. |
+
+Nothing else changes: job, extraction, validation, publication and manual
+entry paths do not read the allowance. Tables `ocr.facility_page_limits`,
+`ocr.page_usage` and `ocr.ai_usage` (key `(job_id, attempt_no, model)`;
+facility, Lagos month, requests and the four token counts) hold ids, counts,
+dates, the model name and the limit's reason only, have no runtime grant, no
+foreign key to `ocr.jobs` (the 24-hour deletion of a job's working data never
+waits on them or removes them) and are read only through these commands.
+`ocr.claim_worker_job` keeps the body 0105 gave it. The only change to an existing function
+is one more allowed transition in `ocr.validate_job_write`: a queued job whose
+`last_error_code` is exactly `OCR_PAGE_ALLOWANCE_USED_UP` may move
+`next_attempt_at` earlier, not before now minus one minute (with the next
+version and optionally a new correlation id), nothing else; a queued job with
+no or another error code, the same or a later time, or any other column
+change is refused (23514). 0107 has no down
+migration. The suite is
+`services/ehr-api/test/database/ocr-page-allowance.integration.sql`.
+
+## 36. Records patients add themselves (0116)
 
 Akos handover step 6 (owner decision 25 of 2026-11-01; D7: a record the
 patient removes is hidden everywhere and kept). Text only: photos and files
@@ -3481,9 +3529,10 @@ removed record's vectors (ehr-api's `withdrawnPatientEntryChunksSql`) relies
 on row-level security showing only active entries; the suite runs it in both
 chats' transactions. The suite is
 `services/ehr-api/test/database/patient-entries.integration.sql`. 0116 has no
-down migration. It is released on 0106 (0106, section 34, only seeds the OCR
-worker's account and changes none of these bodies): its preconditions pin the
-bodies it relies on as measured there, all as on 0103 except
+down migration. It is released on 0107 (0106, section 34, only seeds the OCR
+worker's account; 0107, section 35, changes only objects in schema `ocr`;
+neither changes these bodies): its preconditions pin the bodies it relies on
+as measured there, all as on 0103 except
 `identity.has_active_consent_grant`, which is 0104's body (md5
 `732d11892dd4e27e1ff9093ae3b7de5a`), so 0104 must be applied first. 0104's
 records-processing cover answers only for `healthcare-operations`; the
@@ -3513,7 +3562,7 @@ image is released to production.
    `PATIENT_ENTRIES_ENABLED=false` for ehr-api switches it off again, which
    hides the records everywhere and keeps them.
 
-## 36. Card links: a patient sends their card by email, opened with a one-time code (0118)
+## 37. Card links: a patient sends their card by email, opened with a one-time code (0118)
 
 Akos handover step 8 (the design and critique of 2026-11-04; the owner's
 answers of 2026-11-04, "all recommended"). On since the owner's decision of
@@ -3682,7 +3731,7 @@ every other list is empty. "Card and records": completed visits, signed or
 amended notes (current revision), the imported history (files carry `id`,
 `fileName` and `mediaType` only: nothing opens in v1), the imported profile,
 all six health-information fields, and the records the patient added
-(`[]` while `PATIENT_ENTRIES_ENABLED` is off; on by default, §35), active
+(`[]` while `PATIENT_ENTRIES_ENABLED` is off; on by default, §36), active
 ones only (the read policy and the query both take `status = 'active'`, so a
 record the patient removed is never shown). The view has no chat: nothing it
 reads reaches the AI, the search index, either chat's history or the chat

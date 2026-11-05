@@ -11,6 +11,7 @@ import type { PharmacyApiService } from '../integrations/pharmacy-api.service';
 import type { CreateOcrPublicationDto } from './dto/create-ocr-publication.dto';
 import type { ValidateOcrJobDto } from './dto/validate-ocr-job.dto';
 import type { OcrPublicationSwitch } from './ocr-publication-switch';
+import type { OcrReadingSwitch } from './ocr-reading-switch';
 import { OcrService } from './ocr.service';
 
 const context = {
@@ -156,7 +157,7 @@ function harness(options: Options = {}) {
   }) } as unknown as AuditService;
   const service = new OcrService(database, identity, audit, ehrApi,
     (options.labApi ?? {}) as LabApiService, {} as PharmacyApiService,
-    { enabled: options.publicationPaused !== true } as OcrPublicationSwitch);
+    { enabled: options.publicationPaused !== true } as OcrPublicationSwitch, { aiReadingOn: false } as OcrReadingSwitch);
   return { service, clients, database, audit, identity, ehrApi, order };
 }
 

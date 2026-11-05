@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from 'pg';
 import type { OcrWorkerConfig } from './config';
-import type { ClaimedOcrJob, ProviderExtraction, SafeWorkerFailure, WorkerRepository } from './types';
+import type { AiUsageRecord, ClaimedOcrJob, CompletedExtraction, PageAllowance, SafeWorkerFailure, WorkerRepository } from './types';
 
 interface ClaimRow extends QueryResultRow {
   job_id: string; facility_id: string; document_id: string; patient_id: string | null;
@@ -9,6 +9,10 @@ interface ClaimRow extends QueryResultRow {
   source_sha256_hex: string; size_bytes: string; media_type: string; provider: string;
   attempt_no: number; max_attempts: number; claim_token: string;
   claim_expires_at: Date; correlation_id: string;
+}
+
+interface AllowanceRow extends QueryResultRow {
+  pages_used: number; pages_limit: number; resets_on: string; paused: boolean;
 }
 
 interface QueueMetricsRow extends QueryResultRow {
@@ -33,9 +37,13 @@ export class PostgresWorkerRepository implements WorkerRepository {
 
   async checkReadiness(): Promise<void> { await this.pool.query('select 1'); }
 
-  async claim(provider: string, leaseSeconds: number, correlationId: string): Promise<ClaimedOcrJob | null> {
+  // Fair claim (migration 0107): the same rules as ocr.claim_worker_job, but a facility already holding
+  // maxInFlightPerFacility live claims is skipped and the facility with the fewest goes first.
+  async claim(provider: string, leaseSeconds: number, maxInFlightPerFacility: number,
+    correlationId: string): Promise<ClaimedOcrJob | null> {
     return this.transaction(correlationId, async (client) => {
-      const result = await client.query<ClaimRow>('select * from ocr.claim_worker_job($1, $2)', [provider, leaseSeconds]);
+      const result = await client.query<ClaimRow>('select * from ocr.claim_worker_job_fair($1, $2, $3)',
+        [provider, leaseSeconds, maxInFlightPerFacility]);
       const row = result.rows[0];
       return row ? this.mapClaim(row) : null;
     });
@@ -61,24 +69,58 @@ export class PostgresWorkerRepository implements WorkerRepository {
       oldestQueueAgeSeconds: Number(row.oldest_queue_age_seconds) };
   }
 
-  async complete(job: ClaimedOcrJob, extraction: ProviderExtraction): Promise<string> {
-    const rawText = extraction.pages.map((page) => page.text).join('\n');
-    const structured = { pages: extraction.pages };
-    const canonical = JSON.stringify({ rawText, structured });
+  async complete(job: ClaimedOcrJob, extraction: CompletedExtraction): Promise<string> {
+    const canonical = JSON.stringify({ rawText: extraction.rawText, structured: extraction.structuredPayload });
     const contentHash = createHash('sha256').update(canonical).digest('hex');
-    const confidence = extraction.pages.length === 0 ? 0
-      : extraction.pages.reduce((sum, page) => sum + page.confidence, 0) / extraction.pages.length;
+    const confidence = Math.max(0, Math.min(1, Math.round(extraction.confidence * 100_000) / 100_000));
     const resultKey = `${extraction.providerRequestReference ?? 'local'}:${contentHash}`.slice(0, 255);
     return this.transaction(job.correlationId, async (client) => {
       const result = await client.query<{ extraction_id: string }>(
         `select ocr.complete_worker_job($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10::jsonb,$11) as extraction_id`,
         [job.jobId, job.claimToken, resultKey, contentHash, extraction.providerModel,
-          extraction.providerRequestReference, rawText, JSON.stringify(structured), confidence,
-          JSON.stringify(extraction.provenance), job.correlationId],
+          extraction.providerRequestReference, extraction.rawText, JSON.stringify(extraction.structuredPayload),
+          confidence, JSON.stringify(extraction.provenance), job.correlationId],
       );
       const id = result.rows[0]?.extraction_id;
       if (!id) throw new Error('OCR completion did not return an extraction identifier');
       return id;
+    });
+  }
+
+  // Page allowance (migration 0107): each command runs as the worker subject in
+  // the claim's correlation, like every other worker command.
+  async pageAllowance(job: ClaimedOcrJob): Promise<PageAllowance> {
+    return this.transaction(job.correlationId, async (client) => mapAllowance((await client.query<AllowanceRow>(
+      `select pages_used, pages_limit, resets_on::text as resets_on, paused
+         from ocr.worker_page_allowance($1, $2)`, [job.jobId, job.claimToken])).rows[0]));
+  }
+
+  async recordPages(job: ClaimedOcrJob, pageCount: number): Promise<PageAllowance> {
+    return this.transaction(job.correlationId, async (client) => mapAllowance((await client.query<AllowanceRow>(
+      `select pages_used, pages_limit, resets_on::text as resets_on, paused
+         from ocr.record_worker_pages($1, $2, $3, $4)`,
+      [job.jobId, job.claimToken, pageCount, job.correlationId])).rows[0]));
+  }
+
+  /** The resume time, or null when nothing was parked (a limit raised since the read, or pages already counted). */
+  async pauseForAllowance(job: ClaimedOcrJob): Promise<Date | null> {
+    return this.transaction(job.correlationId, async (client) => {
+      const result = await client.query<{ resume_at: Date | string }>(
+        'select ocr.pause_worker_job_for_allowance($1, $2, $3) as resume_at',
+        [job.jobId, job.claimToken, job.correlationId]);
+      if (result.rows.length !== 1) throw new Error('OCR allowance pause returned no row');
+      const resumeAt = result.rows[0]!.resume_at;
+      if (resumeAt === null || resumeAt === undefined) return null;
+      return resumeAt instanceof Date ? resumeAt : new Date(resumeAt);
+    });
+  }
+
+  /** Counts only (migration 0107); idempotent per job, attempt and model (a replay replaces the totals). */
+  async recordAiUsage(job: ClaimedOcrJob, usage: AiUsageRecord): Promise<void> {
+    await this.transaction(job.correlationId, async (client) => {
+      await client.query('select ocr.record_worker_ai_usage($1,$2,$3,$4,$5,$6,$7,$8,$9)',
+        [job.jobId, job.claimToken, usage.model, usage.requests, usage.inputTokens, usage.outputTokens,
+          usage.cacheReadTokens, usage.cacheWriteTokens, job.correlationId]);
     });
   }
 
@@ -121,4 +163,15 @@ export class PostgresWorkerRepository implements WorkerRepository {
       ? (error as Error & { code: string }).code : 'unknown';
     process.stderr.write(JSON.stringify({ level: 'error', event: 'ocr.db.pool_error', code }) + '\n');
   }
+}
+
+function mapAllowance(row: AllowanceRow | undefined): PageAllowance {
+  if (!row) throw new Error('OCR page allowance returned no row');
+  const pagesUsed = Number(row.pages_used);
+  const pagesLimit = Number(row.pages_limit);
+  if (!Number.isSafeInteger(pagesUsed) || !Number.isSafeInteger(pagesLimit) || typeof row.paused !== 'boolean'
+      || !/^\d{4}-\d{2}-\d{2}$/.test(String(row.resets_on))) {
+    throw new Error('OCR page allowance returned an invalid row');
+  }
+  return { pagesUsed, pagesLimit, resetsOn: String(row.resets_on), paused: row.paused };
 }
