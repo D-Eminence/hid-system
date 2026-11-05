@@ -32,6 +32,7 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['unit_mismatch'], "The unit read isn't the one on the paper."],
   [['lines_not_together'], 'This was put together from separate parts of the page.'],
   [['status_not_active', 'status_unclear'], 'This may not be current (for example past, stopped or suspected).'],
+  [['status_not_written'], "The paper doesn't say whether this is current."],
   [['status_cue_on_line'], 'The paper has words that may change whether this is current.'],
   [['date_ambiguous'], 'The date could be read two ways (day/month or month/day).'],
   [['duplicate_source_span'], 'Another item was read from the same words; check nothing was missed.'],
@@ -226,6 +227,33 @@ function rowsTogether(rows: readonly ReadLine[][], all: readonly ReadLine[], ord
 interface ImagePlace { box: Box; cited: ReadLine[]; matched: boolean }
 
 /**
+ * Why an item was dropped (codes only, never text; counted per code in PageCheck.droppedByReason):
+ * - no_line_cited: the item cites no line;
+ * - line_not_on_page: it cites a line id that is not on this page;
+ * - empty_as_written: its asWritten is empty;
+ * - text_not_on_line: (text reading) its asWritten is not in the cited lines' text;
+ * and, for an item read from the picture (imagePlace):
+ * - no_box: it has no box;
+ * - box_too_small: its box, clipped to the page, is empty or under IMAGE_MIN_BOX on a side;
+ * - too_many_lines: more than IMAGE_MAX_LINES_PER_ITEM lines, cited and added;
+ * - too_many_lines_on_row: more than IMAGE_MAX_LINES_PER_ROW lines on one written row;
+ * - too_many_rows: more than IMAGE_MAX_CITED_LINES written rows;
+ * - rows_not_together: its rows are not one row or one wrapped block (the lines_not_together test on rows);
+ * - cited_lines_no_box: none of its cited lines has a box to hold it to;
+ * - not_on_cited_line: its box does not lie on every cited line;
+ * - area_too_large: its box is too large for its lines;
+ * - side_overflow: its box runs too far past its lines' left and right edges;
+ * - covers_uncited_line: its box lies on a line it does not cite;
+ * - uncited_share: too much of the line area under its box is on lines it does not cite;
+ * - not_anchored: it shares no word or number with legible cited lines.
+ */
+export const DROP_REASONS = ['no_line_cited', 'line_not_on_page', 'empty_as_written', 'text_not_on_line', 'no_box',
+  'box_too_small', 'too_many_lines', 'too_many_lines_on_row', 'too_many_rows', 'rows_not_together',
+  'cited_lines_no_box', 'not_on_cited_line', 'area_too_large', 'side_overflow', 'covers_uncited_line',
+  'uncited_share', 'not_anchored'] as const;
+export type DropReason = (typeof DROP_REASONS)[number];
+
+/**
  * Where an image-read item sits, or null where it is not held to its lines (it is then dropped).
  *
  * Row fragments first: an uncited hard line (below REVIEW_BELOW) the item's box lies on (onLine) that is on the
@@ -247,10 +275,12 @@ interface ImagePlace { box: Box; cited: ReadLine[]; matched: boolean }
  * `matched` is then false when it fails, and the item gets not_matched_to_scanned_text.
  */
 function imagePlace(raw: ModelItem, citedAsGiven: readonly ReadLine[], all: readonly ReadLine[],
-  order: ReadonlyMap<string, number>): ImagePlace | null {
-  if (!raw.box) return null;
+  order: ReadonlyMap<string, number>): ImagePlace | { drop: DropReason } {
+  if (!raw.box) return { drop: 'no_box' };
   const box = clipBox(raw.box);
-  if (box === null || box.width < IMAGE_MIN_BOX || box.height < IMAGE_MIN_BOX) return null;
+  if (box === null || box.width < IMAGE_MIN_BOX || box.height < IMAGE_MIN_BOX || !(area(box) > 0)) {
+    return { drop: 'box_too_small' };
+  }
   const givenIds = new Set(citedAsGiven.map((line) => line.id));
   // Only a hard line (below REVIEW_BELOW) is taken for a fragment: a legible line on the row is its own writing,
   // and a box over it still drops the item below.
@@ -259,35 +289,43 @@ function imagePlace(raw: ModelItem, citedAsGiven: readonly ReadLine[], all: read
     && citedAsGiven.some((other) => other.box !== null && sameRow(other.box, line.box!)));
   const cited = [...citedAsGiven, ...fragments].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
   const rows = rowsOf(cited);
-  if (cited.length > IMAGE_MAX_LINES_PER_ITEM || rows.some((row) => row.length > IMAGE_MAX_LINES_PER_ROW)) return null;
-  if (rows.length > IMAGE_MAX_CITED_LINES || !rowsTogether(rows, all, order)) return null;
+  if (cited.length > IMAGE_MAX_LINES_PER_ITEM) return { drop: 'too_many_lines' };
+  if (rows.some((row) => row.length > IMAGE_MAX_LINES_PER_ROW)) return { drop: 'too_many_lines_on_row' };
+  if (rows.length > IMAGE_MAX_CITED_LINES) return { drop: 'too_many_rows' };
+  if (!rowsTogether(rows, all, order)) return { drop: 'rows_not_together' };
   const citedBoxes = cited.map((line) => line.box).filter((line): line is Box => line !== null);
-  if (citedBoxes.length === 0 || !citedBoxes.every((line) => onLine(box, line))) return null;
+  if (citedBoxes.length === 0) return { drop: 'cited_lines_no_box' };
+  if (!citedBoxes.every((line) => onLine(box, line))) return { drop: 'not_on_cited_line' };
   const around = unionBox(citedBoxes)!;
   const padded = (around.width + 2 * IMAGE_MIN_PADDING) * (around.height + 2 * IMAGE_MIN_PADDING);
-  if (area(box) > Math.max(IMAGE_MAX_AREA_RATIO * area(around) + IMAGE_AREA_ALLOWANCE, padded) + 1e-9) return null;
+  if (area(box) > Math.max(IMAGE_MAX_AREA_RATIO * area(around) + IMAGE_AREA_ALLOWANCE, padded) + 1e-9) {
+    return { drop: 'area_too_large' };
+  }
   const leftOver = Math.max(0, around.left - box.left);
   const rightOver = Math.max(0, box.left + box.width - (around.left + around.width));
   const withinQuarter = leftOver + rightOver <= IMAGE_MAX_SIDE_OVERFLOW * around.width + 1e-9;
   const withinFloor = leftOver <= IMAGE_MIN_SIDE_OVERFLOW + 1e-9 && rightOver <= IMAGE_MIN_SIDE_OVERFLOW + 1e-9;
-  if (!withinQuarter && !withinFloor) return null;
+  if (!withinQuarter && !withinFloor) return { drop: 'side_overflow' };
   const citedIds = new Set(cited.map((line) => line.id));
   // A box that also lies on a line it does not cite (by the same test as for its cited lines) is not this item's.
-  if (all.some((line) => !citedIds.has(line.id) && line.box !== null && onLine(box, line.box))) return null;
+  if (all.some((line) => !citedIds.has(line.id) && line.box !== null && onLine(box, line.box))) {
+    return { drop: 'covers_uncited_line' };
+  }
   const coveredBy = (lines: readonly ReadLine[]) => lines.reduce((sum, line) => sum + (line.box ? intersection(box, line.box) : 0), 0);
   const onCited = coveredBy(cited);
   const onUncited = coveredBy(all.filter((line) => !citedIds.has(line.id)));
-  if (onUncited > IMAGE_UNCITED_SHARE * (onCited + onUncited)) return null;
-  if (!(area(box) > 0)) return null;
+  if (onUncited > IMAGE_UNCITED_SHARE * (onCited + onUncited)) return { drop: 'uncited_share' };
   const matched = anchored(raw.asWritten, cited.map((line) => line.text).join(' '));
   const trustworthy = cited.some((line) => line.confidence >= REVIEW_BELOW);
-  if (!matched && trustworthy) return null;
+  if (!matched && trustworthy) return { drop: 'not_anchored' };
   return { box, cited, matched };
 }
 
 export interface PageCheck {
   items: PaperItem[];
   droppedUngrounded: number;
+  /** The same drops by reason code (DROP_REASONS); the counts sum to droppedUngrounded. Codes only, never text. */
+  droppedByReason: Record<string, number>;
   identity: PaperIdentity;
   pageUnsure: boolean;
   /**
@@ -324,24 +362,30 @@ export function checkPage(input: PageCheckInput): PageCheck {
   const seen = new Map<string, PaperItem[]>();
   let duplicateSpan = false;
   let dropped = 0;
+  const droppedByReason: Record<string, number> = {};
+  const drop = (reason: DropReason) => { dropped += 1; droppedByReason[reason] = (droppedByReason[reason] ?? 0) + 1; };
   for (const raw of input.answer.items) {
     const lineIds = [...new Set(raw.lineIds)].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
     const cited = lineIds.map((id) => byId.get(id));
     const source = cited.map((line) => line?.text ?? '').join(' ');
-    if (lineIds.length === 0 || cited.some((line) => line === undefined) || !norm(raw.asWritten)
-        || (!input.fromImage && !has(source, raw.asWritten))) {
-      dropped += 1;
+    const textDrop: DropReason | null = lineIds.length === 0 ? 'no_line_cited'
+      : cited.some((line) => line === undefined) ? 'line_not_on_page'
+        : !norm(raw.asWritten) ? 'empty_as_written'
+          : !input.fromImage && !has(source, raw.asWritten) ? 'text_not_on_line' : null;
+    if (textDrop !== null) {
+      drop(textDrop);
       continue;
     }
     let lines = cited as ReadLine[];
     let itemLineIds = lineIds;
     let itemSource = source;
     // Read from the picture: held to the page by place. Dropped items are only counted, as above.
-    const place = input.fromImage ? imagePlace(raw, lines, input.lines, order) : null;
-    if (input.fromImage && place === null) {
-      dropped += 1;
+    const placed = input.fromImage ? imagePlace(raw, lines, input.lines, order) : null;
+    if (placed !== null && 'drop' in placed) {
+      drop(placed.drop);
       continue;
     }
+    const place = placed;
     if (place !== null) {
       // Row fragments the item's box covers are cited with it.
       lines = place.cited;
@@ -401,7 +445,8 @@ export function checkPage(input: PageCheckInput): PageCheck {
   ];
   // Stored text is the original: placeholders the model copied go back to the numbers on the paper.
   for (const item of items) item.asWritten = input.masker.restore(item.asWritten);
-  return { items: uniqueItemIds(items), droppedUngrounded: dropped, identity, pageUnsure: input.answer.pageUnsure,
+  return { items: uniqueItemIds(items), droppedUngrounded: dropped, droppedByReason, identity,
+    pageUnsure: input.answer.pageUnsure,
     rereadReasons, flagReasons };
 }
 
@@ -797,7 +842,9 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
   }
   if (kind === 'medicine' || kind === 'diagnosis') {
     const status = (fields as { status: string }).status;
-    if (!ACTIVE_STATUSES.has(status)) add('status_not_active');
+    // A medicine whose status the paper doesn't give ('unknown') is not "not current": say the paper doesn't say.
+    if (kind === 'medicine' && status === 'unknown') add('status_not_written');
+    else if (!ACTIVE_STATUSES.has(status)) add('status_not_active');
     else if ([...norm(source).matchAll(STATUS_CUES)].length > 0) add('status_cue_on_line');
   }
   let box = unionBox(lines.map((line) => line.box));

@@ -1,4 +1,4 @@
-import { checkPage, checkReasonSentence, itemId, mergeIdentity, mergeReread, uniqueItemIds } from './items';
+import { checkPage, checkReasonSentence, DROP_REASONS, itemId, mergeIdentity, mergeReread, uniqueItemIds } from './items';
 import { createMasker } from './masking';
 import { CLINIC_PAGE, modelItem, modelPage, readPage, SOURCE_SHA } from './test-fixtures';
 import type { ModelPage } from './prompt';
@@ -1313,5 +1313,104 @@ describe('picture reading on a page whose scanned handwriting is nonsense', () =
       .toBe("A dose on the paper doesn't match what was read.");
     expect(checkReasonSentence(['not_matched_to_scanned_text', 'number_not_in_text_read']))
       .toBe("A number read from the picture isn't in the text read from the page; check it against the paper.");
+  });
+});
+
+describe('drop reasons (codes only)', () => {
+  type Line = Parameters<typeof checkPage>[0]['lines'][number];
+  type Box = { left: number; top: number; width: number; height: number };
+  const line = (n: number, text: string, box: Box | null, confidence = 0.3, handwritten = true): Line =>
+    ({ id: `p1-l${n}`, page: 1, text, confidence, handwritten, box });
+  const at = (top: number, left = 0.1, width = 0.5, height = 0.02): Box => ({ left, top, width, height });
+  // Hard handwritten lines one under the other, a legible printed line, a short line lower down and one with no box.
+  const page = [line(1, 'Amlodipne 5rng od', at(0.1)), line(2, 'Metformin 500mg bd', at(0.125)),
+    line(3, 'Paracetamol 1g tds', at(0.15)), line(4, 'Dx: Hypertension', at(0.175), 0.99, false),
+    line(5, 'BP 140/90', at(0.5, 0.1, 0.1)), line(6, 'Weight 70kg', null)];
+  const note = (lineIds: string[], box?: Box, asWritten = 'Review in clinic') =>
+    modelItem({ kind: 'note', asWritten, noteText: asWritten, lineIds, ...(box ? { box } : {}) });
+  const fromText = (items: ReturnType<typeof modelItem>[], lines = page) => checkPage({ page: 1, lines,
+    sourceSha256Hex: SOURCE_SHA, readBy: 'first_pass', masker: createMasker(), answer: modelPage(items) });
+  const fromPicture = (items: ReturnType<typeof modelItem>[], lines = page) => checkPage({ page: 1, lines,
+    sourceSha256Hex: SOURCE_SHA, readBy: 'reread', masker: createMasker(), fromImage: true, answer: modelPage(items) });
+  const seven = [0, 1, 2, 3, 4, 5, 6].map((n) => line(n + 1, 'Lis day', at(0.1 + 0.025 * n)));
+  const cells = [0, 1, 2, 3, 4].map((n) => line(n + 1, 'n', at(0.4, 0.1 + 0.1 * n, 0.08, 0.03)));
+  // A short hard line between two taller legible ones that the box reaches into without lying on them.
+  const squeezed = [line(1, 'Lis', at(0.3, 0.1, 0.1, 0.02)), line(2, 'Review next week', at(0.259, 0.1, 0.1, 0.04), 0.99, false),
+    line(3, 'Seen today', at(0.301 + 0.02, 0.1, 0.1, 0.04), 0.99, false)];
+
+  const cases: Array<[string, () => ReturnType<typeof checkPage>]> = [
+    ['no_line_cited', () => fromText([note([])])],
+    ['line_not_on_page', () => fromText([note(['p2-l1'])])],
+    ['empty_as_written', () => fromText([note(['p1-l1'], undefined, '  ')])],
+    ['text_not_on_line', () => fromText([note(['p1-l1'], undefined, 'Invented words')])],
+    ['no_box', () => fromPicture([note(['p1-l1'])])],
+    ['box_too_small', () => fromPicture([note(['p1-l1'], at(0.1, 0.2, 0.001, 0.02))])],
+    ['too_many_lines', () => fromPicture([note(seven.map((entry) => entry.id), at(0.1, 0.1, 0.5, 0.17))], seven)],
+    ['too_many_lines_on_row', () => fromPicture([note(cells.map((entry) => entry.id), at(0.4, 0.1, 0.48, 0.03))], cells)],
+    ['too_many_rows', () => fromPicture([note(['p1-l1', 'p1-l2', 'p1-l3', 'p1-l4'], at(0.1, 0.1, 0.5, 0.095))])],
+    ['rows_not_together', () => fromPicture([note(['p1-l1', 'p1-l5'], at(0.1, 0.1, 0.5, 0.42))])],
+    ['cited_lines_no_box', () => fromPicture([note(['p1-l6'], at(0.8))])],
+    ['not_on_cited_line', () => fromPicture([note(['p1-l1'], at(0.8))])],
+    ['area_too_large', () => fromPicture([note(['p1-l5'], at(0.47, 0.05, 0.5, 0.08))])],
+    ['side_overflow', () => fromPicture([note(['p1-l5'], at(0.5, 0.05, 0.22, 0.02))])],
+    ['covers_uncited_line', () => fromPicture([note(['p1-l1'], at(0.1, 0.1, 0.5, 0.04))])],
+    ['uncited_share', () => fromPicture([note(['p1-l1'], at(0.28, 0.1, 0.1, 0.06))], squeezed)],
+    ['not_anchored', () => fromPicture([note(['p1-l4'], at(0.175), 'Warfarin 10mg bd')])],
+  ];
+
+  it.each(cases)('counts %s', (code, run) => {
+    const result = run();
+    expect(result.items).toEqual([]);
+    expect(result.droppedUngrounded).toBe(1);
+    expect(result.droppedByReason).toEqual({ [code]: 1 });
+  });
+
+  it('covers every listed code, and the counts sum to droppedUngrounded with no text', () => {
+    expect(cases.map(([code]) => code).sort()).toEqual([...DROP_REASONS].sort());
+    const result = fromPicture([note(['p1-l1'], at(0.1)), note([]), note(['p1-l1']), note(['p1-l4'], at(0.175), 'Warfarin 10mg bd'),
+      note(['p1-l5'], at(0.5, 0.05, 0.22, 0.02))]);
+    expect(result.items).toHaveLength(1);
+    expect(result.droppedUngrounded).toBe(4);
+    expect(Object.values(result.droppedByReason).reduce((sum, count) => sum + count, 0)).toBe(result.droppedUngrounded);
+    expect(JSON.stringify(result.droppedByReason)).not.toMatch(/Warfarin|Review/);
+    expect(fromText([note(['p1-l4'], undefined, 'Hypertension')]).droppedByReason).toEqual({});
+  });
+});
+
+describe('a medicine whose status the paper does not give', () => {
+  const read = (status: string) => checkPage({ page: 1, lines: readPage(1, ['Amlodipine 5mg od']).lines,
+    sourceSha256Hex: SOURCE_SHA, readBy: 'first_pass', masker: createMasker(), answer: modelPage([modelItem({
+      kind: 'medicine', asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'], name: 'Amlodipine', strength: '5mg',
+      frequency: 'od', status: status as never })]) }).items[0]!;
+
+  it('says the paper does not say, not that it may not be current', () => {
+    const unknown = read('unknown');
+    expect(unknown.checkReasons).toContain('status_not_written');
+    expect(unknown.checkReasons).not.toContain('status_not_active');
+    expect(unknown.checkReason).toBe("The paper doesn't say whether this is current.");
+    for (const status of ['past', 'stopped']) {
+      expect(read(status).checkReasons).toContain('status_not_active');
+      expect(read(status).checkReasons).not.toContain('status_not_written');
+    }
+    expect(read('current').checkReasons).not.toContain('status_not_written');
+  });
+
+  it('keeps status_not_active for diagnoses that are suspected, ruled out, history or family history', () => {
+    for (const status of ['suspected', 'ruled_out', 'history', 'family_history']) {
+      const item = checkPage({ page: 1, lines: readPage(1, ['Dx: Malaria']).lines, sourceSha256Hex: SOURCE_SHA,
+        readBy: 'first_pass', masker: createMasker(), answer: modelPage([modelItem({ kind: 'diagnosis',
+          asWritten: 'Malaria', lineIds: ['p1-l1'], name: 'Malaria', status: status as never })]) }).items[0]!;
+      expect(item.checkReasons).toContain('status_not_active');
+      expect(item.checkReasons).not.toContain('status_not_written');
+    }
+  });
+
+  it('orders its sentence just below the not-current one', () => {
+    expect(checkReasonSentence(['status_not_written', 'status_unclear']))
+      .toBe('This may not be current (for example past, stopped or suspected).');
+    expect(checkReasonSentence(['status_not_written', 'status_cue_on_line', 'date_ambiguous']))
+      .toBe("The paper doesn't say whether this is current.");
+    expect(checkReasonSentence(['status_not_written', 'lines_not_together']))
+      .toBe('This was put together from separate parts of the page.');
   });
 });
