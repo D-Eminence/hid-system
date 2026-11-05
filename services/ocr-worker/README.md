@@ -486,7 +486,10 @@ Each claimed job runs, in order:
        are on, `off`; any other value fails startup). The text-only request
        (hash-pinned in `claude.client.spec.ts`) and the ordinary image re-read
        request are unchanged; with zoom off the hard-page request is as before
-       (the prompt text adds rule I only when zoom is on).
+       (the prompt text adds rule I only when zoom is on). A page whose
+       picture fails zoom's checks from its bytes (below, *Limits*) is not
+       offered the tool either: no tool, no rule I, and `-2` as its prompt
+       version.
      - *The tool loop* (`claude.client.ts`). Streamed, adaptive thinking,
        `inference_geo: "us"` unchanged. On `stop_reason: "tool_use"` every
        call of the turn is answered in one user turn, in order, after the
@@ -521,19 +524,40 @@ Each claimed job runs, in order:
        for a page already eligible for the image re-read (the same 10 MB
        base64, 8000 x 8000 px and upright-JPEG checks), on the first call,
        once per page for both reads, and is dropped with the reading. Zoom
-       decodes at most 24 MP (6000 x 4000; below the 64 MP the picture itself
-       may have, on purpose), and a PNG only at 8 bits or fewer per sample and
-       not interlaced; both are checked from the header before anything is
-       inflated or decoded, and a larger picture is still sent whole, with
-       zoom off. JPEG decoding is also held by jpeg-js to 24 MP and 640 MB of
-       its own count (`maxResolutionInMP`, `maxMemoryUsageInMB`; 24 MP needs
-       about 481 MB). Measured on fictional pages at 24 MP, one decode takes
-       about 3 s and about 1 GB at its peak for a JPEG, under 1 s and about
-       400 MB for a PNG; the RGB raster kept for the reading is 72 MB. The
+       decodes a picture only if it passes checks made from its bytes, before
+       anything is inflated or decoded (`zoomDecodable`); a picture that fails
+       them is still sent whole, with zoom off (not offered):
+       - a PNG of at most 24 MP (6000 x 4000; below the 64 MP the picture
+         itself may have, on purpose), at 8 bits or fewer per sample and not
+         interlaced;
+       - a JPEG of at most 12.5 MP (4000 x 3125; a 12 MP phone photo fits),
+         whose marker segments parse (`jpegStructure`: every length checked,
+         DQT, DHT, SOF, DRI and SOS exactly as long as their contents, the
+         entropy-coded data skipped with stuffed `0xFF 0x00` bytes and restart
+         markers handled, only APPn, COM, DQT, DHT, DRI, SOF0-SOF2, SOS and
+         EOI allowed), with exactly one 8-bit Huffman frame (baseline,
+         extended or progressive) of 1 or 3 components (CMYK and YCCK
+         refused), and at most 16 scans, counted both in the walk and as
+         `0xFF 0xDA` pairs anywhere in the bytes. jpeg-js walks every block in
+         every scan, so without a scan limit a small progressive file could
+         stall the process for minutes (measured: 5,000 near-empty scans in a
+         492 KB file took 17 s at 24 MP). 16 covers libjpeg's standard
+         progressive script (10 scans) and similar encoders with room for an
+         EXIF thumbnail.
+       JPEG decoding is also held by jpeg-js to 12.5 MP and 400 MB of its own
+       count (`maxResolutionInMP`, `maxMemoryUsageInMB`). Measured on
+       fictional pages at the limits (Node 22, one core): the worst JPEG
+       allowed (12.5 MP, 3 components at 4:4:4, 16 scans, noise up to the
+       10 MB base64 picture limit) took 2.7 to 3.0 s and about 570 MB peak
+       RSS, a flat 16-scan page about 1.5 s; the worst PNG (24 MP 8-bit RGBA)
+       about 1.3 s and 430 MB. The RGB raster kept for the reading is at most
+       72 MB. (At the earlier 24 MP JPEG limit, a baseline JPEG took 2.8 s and
+       970 MB, a progressive one up to 5 s, and a 4-component one 4.8 s and
+       1.25 GB.) The
        decoders run on the event loop (pure JS, synchronous), so one process
        decodes one page at a time and a decode stalls the process (the other
        job's reads and lease renewal included) for its whole length: the
-       pixel and bit-depth limits are what bound that stall and the memory,
+       limits above are what bound that stall and the memory,
        within the 2 GiB task. A decode over 5 s or a crop over 3 s (checked
        when it ends, so it does not cut the stall short), a decoded size other
        than the header's or any decoder error turns zoom off for that page

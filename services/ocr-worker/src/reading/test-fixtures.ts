@@ -112,3 +112,41 @@ export function syntheticPng(width: number, height: number): Uint8Array {
 export function syntheticJpeg(width: number, height: number, quality = 90): Uint8Array {
   return new Uint8Array(jpeg.encode({ width, height, data: Buffer.from(syntheticRgba(width, height)) }, quality).data);
 }
+
+/** A JPEG marker segment: 0xFF, the marker, the length (2 + body) and the body. */
+export function jpegSegment(marker: number, body: readonly number[]): number[] {
+  return [0xff, marker, (body.length + 2) >> 8 & 0xff, (body.length + 2) & 0xff, ...body];
+}
+
+/**
+ * A structural JPEG fixture (not decodable): SOI, the given segments, then EOI. `frame` and `scan` build an SOF
+ * segment and an SOS segment with its entropy-coded bytes. For the structure checks only.
+ */
+export function jpegFromParts(...parts: number[][]): Uint8Array {
+  return new Uint8Array([0xff, 0xd8, ...parts.flat(), 0xff, 0xd9]);
+}
+export function jpegFrame(width: number, height: number, components = 3, marker = 0xc0, precision = 8): number[] {
+  const body = [precision, height >> 8 & 0xff, height & 0xff, width >> 8 & 0xff, width & 0xff, components];
+  for (let id = 1; id <= components; id += 1) body.push(id, id === 1 ? 0x22 : 0x11, 0);
+  return jpegSegment(marker, body);
+}
+export function jpegScan(ids: readonly number[], entropy: readonly number[] = [0x12, 0x34, 0x56]): number[] {
+  return [...jpegSegment(0xda, [ids.length, ...ids.flatMap((id) => [id, 0x00]), 0, 0x3f, 0]), ...entropy];
+}
+
+/**
+ * A real JPEG with its (first) scan repeated so it has `scans` scans in all: jpeg-js decodes each again (a baseline
+ * scan overwrites the same blocks), so the result still decodes, as `scans` passes over every block.
+ */
+export function withRepeatedScan(bytes: Uint8Array, scans: number): Uint8Array {
+  let at = 2;
+  while (!(bytes[at] === 0xff && bytes[at + 1] === 0xda)) at += 2 + ((bytes[at + 2]! << 8) | bytes[at + 3]!);
+  const end = bytes.length - 2;
+  if (bytes[end] !== 0xff || bytes[end + 1] !== 0xd9) throw new Error('fixture JPEG must end with its scan and EOI');
+  const scan = bytes.subarray(at, end);
+  const out = new Uint8Array(at + scan.length * scans + 2);
+  out.set(bytes.subarray(0, at), 0);
+  for (let index = 0; index < scans; index += 1) out.set(scan, at + index * scan.length);
+  out.set([0xff, 0xd9], out.length - 2);
+  return out;
+}

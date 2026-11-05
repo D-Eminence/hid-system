@@ -312,7 +312,9 @@ export class PaperReadingService {
           height: decision.height }, resizedSize(decision.width, decision.height, tier), tier);
         zooms.set(state.page, zoom);
       }
-      return zoom;
+      // A picture over zoom's limits by its bytes (zoom.ts zoomDecodable: size, PNG bit depth and interlacing, JPEG
+      // structure, components and scans) is never offered the tool: no rule I, and prompt version 2 for the page.
+      return zoom.available() ? zoom : null;
     };
     /**
      * A hard page (owner decision 2026-11-05, about 18:40 UTC): the same best-guess request with the picture sent

@@ -460,7 +460,7 @@ describe('ClaudePageClient', () => {
     const CROP = Buffer.from('fictional-crop-bytes-'.repeat(40)).toString('base64');
     const crop = { mediaType: 'image/png' as const, base64: CROP, width: 64, height: 64,
       region: { x: 124, y: 175, w: 16, h: 16 }, scale: 4 };
-    const goodZoom: PageZoom = { crop: async () => ({ kind: 'crop', crop }) };
+    const goodZoom: PageZoom = { available: () => true, crop: async () => ({ kind: 'crop', crop }) };
     const zoomInput = { page: 1, box: { x: 124, y: 175, w: 16, h: 16 }, scale: 4 };
 
     type Block = { type: 'thinking'; thinking: string; signature: string } | { type: 'text'; text: string }
@@ -528,7 +528,7 @@ describe('ClaudePageClient', () => {
     it('answers 9 calls with 8 crops and the limit error, then reads the answer', async () => {
       const calls = Array.from({ length: 9 }, (_, index) => zoomCall(`toolu_${index}`));
       const { instance, fetch } = client([turn([thinking('sig-many'), ...calls], 'tool_use'), final()]);
-      const zoom = { crop: jest.fn(goodZoom.crop) };
+      const zoom = { available: () => true, crop: jest.fn(goodZoom.crop) };
       const session = createZoomSession(zoom, 1, 8, image.base64.length);
       await expect(instance.readPage({ ...hardRequest, zoom: session }, new AbortController().signal))
         .resolves.toMatchObject({ kind: 'answer', attempts: 2 });
@@ -544,7 +544,7 @@ describe('ClaudePageClient', () => {
       const { instance, fetch } = client([turn([zoomCall('toolu_bad', '{"page": 1, "box": "Test Patient"}')], 'tool_use'),
         turn([zoomCall('toolu_down')], 'tool_use'), final()]);
       let failing = false;
-      const zoom: PageZoom = { crop: async () => failing ? { kind: 'unavailable' } : { kind: 'crop', crop } };
+      const zoom: PageZoom = { available: () => true, crop: async () => failing ? { kind: 'unavailable' } : { kind: 'crop', crop } };
       failing = true;
       const session = createZoomSession(zoom, 1, 8, image.base64.length);
       await expect(instance.readPage({ ...hardRequest, zoom: session }, new AbortController().signal))
@@ -558,7 +558,7 @@ describe('ClaudePageClient', () => {
     });
 
     it('never runs a tool from a cut-off or refused turn', async () => {
-      const zoom = { crop: jest.fn(goodZoom.crop) };
+      const zoom = { available: () => true, crop: jest.fn(goodZoom.crop) };
       const { instance } = client([turn([zoomCall('toolu_cut', '{"page": 1, "box": {"x": 1')], 'max_tokens'),
         turn([zoomCall('toolu_refused')], 'refusal')]);
       const signal = new AbortController().signal;
@@ -585,7 +585,7 @@ describe('ClaudePageClient', () => {
       const controller = new AbortController();
       const { instance, fetch } = client([turn([zoomCall('toolu_a')], 'tool_use'), final()]);
       const reason = new Error('worker shutdown');
-      const zoom: PageZoom = { crop: async () => { controller.abort(reason); return { kind: 'crop', crop }; } };
+      const zoom: PageZoom = { available: () => true, crop: async () => { controller.abort(reason); return { kind: 'crop', crop }; } };
       const error = await instance.readPage({ ...hardRequest, zoom: createZoomSession(zoom, 1, 8, 0) }, controller.signal)
         .catch((caught: unknown) => caught);
       expect(error).toBeInstanceOf(AiInterruptedError);
@@ -608,7 +608,7 @@ describe('ClaudePageClient', () => {
         const limiter = { acquire: async () => { clock += 5_000_000; return () => undefined; } } as unknown as Semaphore;
         const instance = new ClaudePageClient({ ...config, OCR_AI_HARD_PAGE_TIMEOUT_MS: 900_000 },
           { fetch: fetch as unknown as typeof globalThis.fetch, now: () => clock, limiter });
-        const zoom: PageZoom = { crop: async () => { clock += 5_000_000; return { kind: 'crop', crop }; } };
+        const zoom: PageZoom = { available: () => true, crop: async () => { clock += 5_000_000; return { kind: 'crop', crop }; } };
         const error = await instance.readPage({ ...hardRequest, zoom: createZoomSession(zoom, 1, 8, 0) },
           new AbortController().signal).catch((caught: unknown) => caught);
         // OCR_AI_MAX_RETRIES 3: a budget of 4 x 900 seconds; each attempt at most one hard-page timeout.

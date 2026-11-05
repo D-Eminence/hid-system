@@ -2,7 +2,8 @@ import type { OcrWorkerConfig } from './config';
 import { AiInterruptedError, AiTransientError, type PageModelClient } from './reading/claude.client';
 import { paperReadingPayloadSchema, type PaperReadingPayload } from './reading/contract';
 import { PaperReadingService, type ReadingConfig } from './reading/reader';
-import { fixturePng, modelItem, modelPage, readPage, syntheticJpeg } from './reading/test-fixtures';
+import { fixturePng, modelItem, modelPage, readPage, syntheticJpeg, withRepeatedScan } from './reading/test-fixtures';
+import { ZOOM_JPEG_MAX_SCANS } from './reading/zoom';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure, type ClaimedOcrJob, type CompletedExtraction,
   type DocumentReader, type TextReading, type WorkerOcrProvider, type WorkerRepository } from './types';
 import { Semaphore } from './semaphore';
@@ -508,6 +509,28 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     for (const secret of ['Pyrimethamine', 'Fictionalmab', 'Ultramarine', 'rng']) expect(logs).not.toContain(secret);
     const everything = [JSON.stringify([result, repository.recordAiUsage.mock.calls]), ...written].join('\n');
     for (const chunk of chunks) expect(everything).not.toContain(chunk);
+  });
+
+  it('records the no-zoom hard-page prompt version when the picture fails zoom\'s header checks', async () => {
+    // A synthetic JPEG with more scans than zoom decodes: the hard page is read, but never offered the tool.
+    const synthetic = withRepeatedScan(syntheticJpeg(480, 640), ZOOM_JPEG_MAX_SCANS + 1);
+    const offered: boolean[] = [];
+    const client: PageModelClient = { readPage: jest.fn(async (request) => {
+      if (request.image && request.hardPage) {
+        offered.push(request.zoom !== undefined);
+        return { kind: 'answer' as const, answer: bestGuess, attempts: 1, servedInferenceGeo: 'us', usage: used };
+      }
+      return { kind: 'answer' as const, answer: firstPass, attempts: 1, servedInferenceGeo: 'us', usage: used };
+    }) };
+    const { repository, reader, provider } = mocks(client);
+    reader.readExact.mockResolvedValue({ ...document, mediaType: 'image/jpeg', bytes: synthetic });
+    provider.extract.mockResolvedValue(hardText);
+    const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on', OCR_AI_HARD_PAGE_READS: 'on',
+      OCR_AI_HARD_PAGE_ZOOM: 'on', OCR_AI_ZOOM_MAX_CALLS: 8 }, client);
+    await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+    expect(offered).toEqual([false, false]);
+    expect(completed(repository).provenance.reading).toMatchObject({ hardPages: [1],
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-2', hardPageZoomPages: [] });
   });
 
   it('zooms in a hard page and logs only the counts: no crop in a log, the payload, provenance or the usage records', async () => {

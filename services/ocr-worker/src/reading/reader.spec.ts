@@ -2,9 +2,10 @@ import { AiInterruptedError, AiRejectedError, AiTransientError, type PageAnswer,
 import { paperReadingPayloadSchema } from './contract';
 import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type ReadingConfig } from './reader';
 import { CLINIC_PAGE, fixtureExifSegment, fixtureJpeg, fixturePng, modelItem, modelPage, readPage, SOURCE_SHA,
-  syntheticPng } from './test-fixtures';
+  syntheticJpeg, syntheticPng, withRepeatedScan } from './test-fixtures';
 import { IMAGE_MAX_BASE64_LENGTH } from './page-image';
 import type { ModelPage } from './prompt';
+import { ZOOM_JPEG_MAX_SCANS } from './zoom';
 
 const FACILITY = '11111111-2222-4333-8444-555555555555';
 const config: ReadingConfig = { OCR_AI_MODE: 'claude', OCR_AI_FACILITY_IDS: undefined,
@@ -994,6 +995,33 @@ describe('PaperReadingService', () => {
         expect(crops).toHaveLength(0);
         expect(summary).toMatchObject({ zoomCalls: 0, zoomLimited: 0, zoomFailed: 4, hardPages: [1], imageRereadPages: [1] });
         expect(payload.items.some((item) => item.kind === 'medicine')).toBe(true);
+      });
+
+      it('offers no zoom (no tool, no rule I) for a picture that fails the header checks, and reads it as before', async () => {
+        const jpegPage = syntheticJpeg(400, 560);
+        const refused = [
+          // More scans than zoom lets jpeg-js decode (a small file that would stall the decoder).
+          { mediaType: 'image/jpeg', bytes: withRepeatedScan(jpegPage, ZOOM_JPEG_MAX_SCANS + 1) },
+          // Over the JPEG pixel limit by its header (the picture itself is still sent).
+          { mediaType: 'image/jpeg', bytes: fixtureJpeg(4_000, 3_200) },
+          // A 16-bit PNG.
+          { mediaType: 'image/png', bytes: (() => { const bytes = syntheticPng(40, 56); bytes[24] = 16; return bytes; })() },
+        ];
+        for (const picture of refused) {
+          const { client, seen, crops } = zoomingClient(1);
+          const { summary } = await read(zoomConfig, client, [hardPage], picture);
+          expect(seen.filter((call) => call.hardPage)).toEqual([{ hardPage: true, image: true, zoom: false, maxCalls: null },
+            { hardPage: true, image: true, zoom: false, maxCalls: null }]);
+          expect(crops).toHaveLength(0);
+          expect(summary).toMatchObject({ zoomCalls: 0, zoomLimited: 0, zoomFailed: 0, hardPages: [1], hardPageZoomPages: [] });
+        }
+        // The same JPEG at the scan limit is offered the tool and zoomed.
+        const { client, seen, crops } = zoomingClient(1);
+        const { summary } = await read(zoomConfig, client, [hardPage],
+          { mediaType: 'image/jpeg', bytes: withRepeatedScan(jpegPage, ZOOM_JPEG_MAX_SCANS) });
+        expect(seen.filter((call) => call.zoom)).toHaveLength(2);
+        expect(crops).toHaveLength(2);
+        expect(summary).toMatchObject({ zoomCalls: 2, hardPageZoomPages: [1] });
       });
 
       it('gives no zoom when it is off, at 0 calls, or to a page that is not a hard page', async () => {

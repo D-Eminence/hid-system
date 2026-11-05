@@ -16,11 +16,14 @@ import { base64Length, IMAGE_MAX_BASE64_LENGTH, pngDimensions, resizedSize, type
  * - Decoded only for a page already eligible for the image re-read (page-image.ts pageImageFor: one-page PNG or JPEG,
  *   10 MB base64, 8000 x 8000 px, an upright JPEG), and only on the first zoom call; once per page, shared by both
  *   reads of the page, and dropped with the reading.
- * - Decoded only up to ZOOM_MAX_DECODE_PIXELS (24 MP, below the 64 MP the picture itself may have), and a PNG only
- *   at 8 bits or fewer per sample and not interlaced; both are checked from the header before anything is inflated
- *   or decoded. The decoders are synchronous and in memory, so these limits are what bound the memory and the
- *   event-loop stall of one decode (measured on fictional pages at 24 MP: a JPEG about 3 s and about 1 GB at its
- *   peak, a PNG under 1 s and about 400 MB; the RGB raster kept is 72 MB). One process decodes one page at a time.
+ * - Decoded only within limits checked from the bytes before anything is inflated or decoded (zoomDecodable): a PNG
+ *   up to ZOOM_MAX_DECODE_PIXELS (24 MP), at 8 bits or fewer per sample and not interlaced; a JPEG up to
+ *   ZOOM_JPEG_MAX_DECODE_PIXELS (12.5 MP), whose marker segments parse (jpegStructure) with one 8-bit baseline,
+ *   extended or progressive Huffman frame of 1 or 3 components and at most ZOOM_JPEG_MAX_SCANS scans. The decoders are
+ *   synchronous and in memory, so these limits are what bound the memory and the event-loop stall of one decode
+ *   (measured on fictional pages at the limits: a JPEG at worst about 3 s and 570 MB peak RSS, a PNG at worst about
+ *   1.3 s and 430 MB; the RGB raster kept is at most 72 MB). One process decodes one page at a time. A page that fails
+ *   these checks is not offered the tool at all (reader.ts).
  * - A decode that fails, exceeds those limits or the decoders' own, gives a size other than the header's, or takes
  *   longer than ZOOM_DECODE_TIME_LIMIT_MS turns zoom off for the page ("zoom unavailable"), never the reading.
  * - The box is in the pixels of the picture AS THE MODEL SEES IT (resizedSize for the model's tier: the same frame as
@@ -38,21 +41,44 @@ export const ZOOM_MAX_CALLS = 8;
 export const ZOOM_MIN_BOX_PX = 8;
 /**
  * A decode slower than this turns zoom off for the page. It is checked once the synchronous decode has finished, so
- * it does not cut the stall short (the pixel and bit-depth limits bound that); it keeps a slow page from being
+ * it does not cut the stall short (the checks made before decoding bound that); it keeps a slow page from being
  * decoded again and stops zoom on a worker too slow for it.
  */
 export const ZOOM_DECODE_TIME_LIMIT_MS = 5_000;
 /** One crop's resample and encode slower than this turns zoom off for the page (checked after it, as above). */
 export const ZOOM_CROP_TIME_LIMIT_MS = 3_000;
 /**
- * The most pixels zoom decodes (a 24 MP photo, 6000 x 4000; A4 at about 400 dpi). A larger picture is still sent
- * whole for the re-read; only zoom is off for it. Kept below the 64 MP picture limit on purpose: jpeg-js needs about
- * 20 MB of its own count (about 40 MB of process memory) per megapixel, too much at 64 MP for the 2 GiB task.
+ * The most pixels zoom decodes from a PNG (a 24 MP page, 6000 x 4000; A4 at about 400 dpi). A larger picture is
+ * still sent whole for the re-read; only zoom is off for it. Kept below the 64 MP picture limit on purpose. Measured
+ * on fictional pages at 24 MP (8-bit RGBA, the heaviest PNG allowed): about 0.8 to 1.3 s and 350 to 430 MB peak RSS.
  */
 export const ZOOM_MAX_DECODE_PIXELS = 24_000_000;
-/** jpeg-js limits: never more pixels than ZOOM_MAX_DECODE_PIXELS, and memory to match (24 MP needs about 481 MB). */
-export const ZOOM_JPEG_MAX_RESOLUTION_MP = ZOOM_MAX_DECODE_PIXELS / 1_000_000;
-export const ZOOM_JPEG_MAX_MEMORY_MB = 640;
+/**
+ * The most pixels zoom decodes from a JPEG: 12.5 MP (4000 x 3125, or 4096 x 3051; a 12 MP phone photo, 4032 x 3024
+ * or 4000 x 3000, fits; A4 at about 350 dpi). Lower than the PNG limit because jpeg-js is slower and larger per pixel: measured on
+ * fictional pages (Node 22, one core), the worst case allowed at 12.5 MP (three components at 4:4:4, ZOOM_JPEG_MAX_SCANS
+ * scans, noise filling the 10 MB base64 picture limit) took 2.7 to 3.0 s and about 570 MB peak RSS; a flat page of 16
+ * scans 1.4 to 1.7 s. At the old 24 MP limit a baseline JPEG alone took 2.8 s and about 970 MB, a progressive one up to
+ * 5 s, and with no limit on scans a small file could take minutes (jpeg-js walks every block in every scan).
+ */
+export const ZOOM_JPEG_MAX_DECODE_PIXELS = 12_500_000;
+/** jpeg-js limits: never more pixels than ZOOM_JPEG_MAX_DECODE_PIXELS, and memory to match (its own count). */
+export const ZOOM_JPEG_MAX_RESOLUTION_MP = ZOOM_JPEG_MAX_DECODE_PIXELS / 1_000_000;
+export const ZOOM_JPEG_MAX_MEMORY_MB = 400;
+/**
+ * The most scans (SOS segments) zoom lets jpeg-js decode in one JPEG. jpeg-js walks every block of the scan's
+ * components in every scan, data or not, so the decode time grows with the scan count, not the file size. 16: a
+ * baseline JPEG has 1 scan (3 if not interleaved), libjpeg's standard progressive script 10 for colour and 6 for grey
+ * (as measured on its output); 16 leaves room for other encoders' scripts and for an EXIF thumbnail or two (counted
+ * too: see jpegStructure) and holds the worst case to the times measured above.
+ */
+export const ZOOM_JPEG_MAX_SCANS = 16;
+/**
+ * The most colour components zoom decodes in a JPEG: 1 (grey) or 3 (YCbCr or RGB). A 4-component (CMYK or Adobe
+ * YCCK) JPEG is refused: measured at 24 MP it peaked at about 1.25 GB RSS (680 MB at 12.5 MP), and paper photos are not
+ * CMYK. 2 components is not a JPEG colour model jpeg-js converts either.
+ */
+export const ZOOM_JPEG_ALLOWED_COMPONENTS: readonly number[] = [1, 3];
 /** pngjs: at most 8 bits per sample (16-bit is inflated and widened far beyond the pixel count's share). */
 export const ZOOM_PNG_MAX_BIT_DEPTH = 8;
 /** One crop's PNG, base64: well inside the API's 10 MB per-image limit. */
@@ -108,6 +134,11 @@ export type ZoomOutcome = { kind: 'crop'; crop: ZoomCrop } | { kind: 'invalid' }
 
 /** A page's zoom: crops of its picture, decoded once. */
 export interface PageZoom {
+  /**
+   * Whether the picture passes zoom's checks from its bytes (zoomDecodable, worked out once). A page that does not
+   * is never offered the tool.
+   */
+  available(): boolean;
   crop(box: ZoomBox, scale: number): Promise<ZoomOutcome>;
 }
 
@@ -123,14 +154,143 @@ export interface PageZoomOptions {
   decode?: (source: ZoomSource) => Raster;
 }
 
+/** A JPEG's frame and scan count, as jpegStructure reads them. */
+export interface JpegStructure {
+  /** The frame's SOF marker: 0xC0 baseline, 0xC1 extended, 0xC2 progressive (all Huffman coded). */
+  frameMarker: number;
+  precision: number;
+  width: number;
+  height: number;
+  components: number;
+  /** SOS segments in the marker walk, up to EOI. */
+  scans: number;
+  /** Every 0xFF 0xDA byte pair anywhere in the bytes (an upper bound on what any decoder could take as a scan). */
+  scanMarkersAnywhere: number;
+}
+
 /**
- * Whether zoom may decode this picture, from its header alone: at most ZOOM_MAX_DECODE_PIXELS, and a PNG whose IHDR
- * gives at most ZOOM_PNG_MAX_BIT_DEPTH bits per sample and no interlacing (pngjs inflates an interlaced PNG
- * without a size limit).
+ * Walks a JPEG's marker segments from SOI to EOI without decoding anything, or null when the structure is not one
+ * zoom trusts jpeg-js to follow the same way:
+ * - every segment's length is read and must fit the bytes; DQT, DHT, SOF, DRI and SOS must be exactly as long as
+ *   their contents (jpeg-js reads those by their contents, not their lengths, so a length that disagrees would put
+ *   it somewhere else in the file);
+ * - only APPn, COM, DQT, DHT, DRI, SOF0-SOF2 and SOS segments, fill bytes before a marker, and EOI; any other marker
+ *   (another SOF type, arithmetic coding, DNL, a stray SOI or RST) and anything that is not a marker where one must
+ *   be gives null;
+ * - exactly one frame, before the first scan, with 1 to 4 components of sampling factors 1 to 4 and distinct ids;
+ *   each scan names 1 to 4 of the frame's components;
+ * - after each SOS header the entropy-coded data is skipped to the next marker: 0xFF 0x00 is a stuffed byte and
+ *   0xFF 0xD0-0xD7 a restart marker, both inside the scan; the bytes must end with EOI.
+ * scanMarkersAnywhere also counts 0xFF 0xDA inside other segments (an EXIF thumbnail's scan, say) and after EOI, so a
+ * limit on it holds even were jpeg-js to resynchronise somewhere the walk did not.
+ */
+export function jpegStructure(bytes: Uint8Array): JpegStructure | null {
+  const length = bytes.length;
+  if (length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  const u16 = (at: number) => (bytes[at]! << 8) | bytes[at + 1]!;
+  let frame: Omit<JpegStructure, 'scans' | 'scanMarkersAnywhere'> | null = null;
+  const ids = new Set<number>();
+  let scans = 0;
+  let at = 2;
+  for (;;) {
+    if (at + 1 >= length || bytes[at] !== 0xff) return null;
+    // Fill bytes: any number of 0xFF before the marker.
+    while (at + 1 < length && bytes[at + 1] === 0xff) at += 1;
+    if (at + 1 >= length) return null;
+    const marker = bytes[at + 1]!;
+    at += 2;
+    if (marker === 0xd9) break;
+    const known = (marker >= 0xe0 && marker <= 0xef) || marker === 0xfe || marker === 0xdb || marker === 0xc4
+      || marker === 0xdd || marker === 0xda || (marker >= 0xc0 && marker <= 0xc2);
+    if (!known || at + 2 > length) return null;
+    const size = u16(at);
+    const start = at + 2;
+    const end = at + size;
+    if (size < 2 || end > length) return null;
+    if (marker === 0xdb) {
+      // DQT: tables of 1 + 64 bytes (8-bit) or 1 + 128 (16-bit), filling the segment exactly.
+      let p = start;
+      while (p < end) {
+        const precision = bytes[p]! >> 4;
+        if (precision > 1 || (bytes[p]! & 15) > 3) return null;
+        p += 1 + 64 * (precision + 1);
+      }
+      if (p !== end) return null;
+    } else if (marker === 0xc4) {
+      // DHT: tables of 1 + 16 counts + their values, filling the segment exactly.
+      let p = start;
+      while (p < end) {
+        if (p + 17 > end || bytes[p]! >> 4 > 1 || (bytes[p]! & 15) > 3) return null;
+        let values = 0;
+        for (let index = 1; index <= 16; index += 1) values += bytes[p + index]!;
+        p += 17 + values;
+      }
+      if (p !== end) return null;
+    } else if (marker === 0xdd) {
+      if (size !== 4) return null;
+    } else if (marker >= 0xc0 && marker <= 0xc2) {
+      if (frame !== null || size < 8) return null;
+      const components = bytes[start + 5]!;
+      if (components < 1 || components > 4 || size !== 8 + 3 * components) return null;
+      for (let index = 0; index < components; index += 1) {
+        const id = bytes[start + 6 + 3 * index]!;
+        const h = bytes[start + 7 + 3 * index]! >> 4;
+        const v = bytes[start + 7 + 3 * index]! & 15;
+        if (ids.has(id) || h < 1 || h > 4 || v < 1 || v > 4 || bytes[start + 8 + 3 * index]! > 3) return null;
+        ids.add(id);
+      }
+      frame = { frameMarker: marker, precision: bytes[start]!, height: u16(start + 1), width: u16(start + 3),
+        components };
+    } else if (marker === 0xda) {
+      if (frame === null || size < 3) return null;
+      const selectors = bytes[start]!;
+      if (selectors < 1 || selectors > 4 || size !== 6 + 2 * selectors) return null;
+      const seen = new Set<number>();
+      for (let index = 0; index < selectors; index += 1) {
+        const id = bytes[start + 1 + 2 * index]!;
+        if (!ids.has(id) || seen.has(id)) return null;
+        seen.add(id);
+      }
+      scans += 1;
+      // The entropy-coded data, to the next marker.
+      let p = end;
+      for (;;) {
+        if (p + 1 >= length) return null;
+        if (bytes[p] !== 0xff) { p += 1; continue; }
+        const next = bytes[p + 1]!;
+        if (next === 0x00 || (next >= 0xd0 && next <= 0xd7)) { p += 2; continue; }
+        break;
+      }
+      at = p;
+      continue;
+    }
+    at = end;
+  }
+  if (frame === null || scans === 0) return null;
+  let scanMarkersAnywhere = 0;
+  for (let index = 0; index + 1 < length; index += 1) {
+    if (bytes[index] === 0xff && bytes[index + 1] === 0xda) scanMarkersAnywhere += 1;
+  }
+  return { ...frame, scans, scanMarkersAnywhere };
+}
+
+/**
+ * Whether zoom may decode this picture, from its bytes alone and without inflating or decoding anything: a PNG of at
+ * most ZOOM_MAX_DECODE_PIXELS whose IHDR gives at most ZOOM_PNG_MAX_BIT_DEPTH bits per sample and no interlacing
+ * (pngjs inflates an interlaced PNG without a size limit); a JPEG of at most ZOOM_JPEG_MAX_DECODE_PIXELS whose
+ * structure parses (jpegStructure) with the picture's size, 8-bit samples, 1 or 3 components and at most
+ * ZOOM_JPEG_MAX_SCANS scans, counted both in the walk and anywhere in the bytes.
  */
 export function zoomDecodable(source: ZoomSource): boolean {
+  if (source.mediaType === 'image/jpeg') {
+    if (source.width * source.height > ZOOM_JPEG_MAX_DECODE_PIXELS) return false;
+    const structure = jpegStructure(source.bytes);
+    return structure !== null && structure.width === source.width && structure.height === source.height
+      && structure.width * structure.height <= ZOOM_JPEG_MAX_DECODE_PIXELS && structure.precision === 8
+      && ZOOM_JPEG_ALLOWED_COMPONENTS.includes(structure.components) && structure.scans <= ZOOM_JPEG_MAX_SCANS
+      && structure.scanMarkersAnywhere <= ZOOM_JPEG_MAX_SCANS;
+  }
   if (source.width * source.height > ZOOM_MAX_DECODE_PIXELS) return false;
-  if (source.mediaType !== 'image/png') return true;
   const size = pngDimensions(source.bytes);
   if (size === null || size.width * size.height > ZOOM_MAX_DECODE_PIXELS || source.bytes.length < 29) return false;
   // IHDR data from byte 16: width (4), height (4), bit depth, colour type, compression, filter, interlace.
@@ -275,10 +435,12 @@ export function createPageZoom(source: ZoomSource, seen: { width: number; height
   const decode = options.decode ?? decodeRaster;
   let raster: Raster | null | undefined;
   let off = false;
+  let decodable: boolean | undefined;
+  const available = () => (decodable ??= zoomDecodable(source));
   const load = (): Raster | null => {
     if (raster !== undefined) return raster;
     // Over zoom's limits by the header: never decoded at all.
-    if (!zoomDecodable(source)) { raster = null; return raster; }
+    if (!available()) { raster = null; return raster; }
     const started = now();
     try {
       const decoded = decode(source);
@@ -291,6 +453,7 @@ export function createPageZoom(source: ZoomSource, seen: { width: number; height
     return raster;
   };
   return {
+    available,
     async crop(box, scale) {
       if (off) return { kind: 'unavailable' };
       if (!Number.isFinite(scale) || scale < 1 || scale > ZOOM_MAX_SCALE) return { kind: 'invalid' };
