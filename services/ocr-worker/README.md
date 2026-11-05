@@ -365,7 +365,9 @@ Each claimed job runs, in order:
      filled text field whose basis is `context`, of any kind (a diagnosis
      name, an allergy substance or reaction, a lab value, a route), gets "?"
      in the field itself; enum fields (status, severity, measure) cannot
-     carry it and are marked by `field_from_context` instead. The
+     carry it and are marked by `field_from_context` instead, as are a date
+     or prescriber from context (`checkPage` keeps those only where written
+     exactly on the page, so they get no "?"). The
      reading is then held to the page by `checkPage` exactly as any picture
      reading (#194's placement rules, the row and line limits and the anchor
      rule, unchanged).

@@ -185,9 +185,22 @@ function fromContext(side: Side, field: string, value: unknown): boolean {
   return !isBlank(value) && side.extras?.basis[basisKey(side.item.kind, field)] === 'context';
 }
 
+/**
+ * The item's values held outside its fields: its date and, for a medicine, the prescriber and prescription date.
+ * They carry no "?" (checkPage keeps them only where written exactly on the page) and come under basis "other".
+ */
+function outsideFields(item: PaperItem): Array<[string, string | null]> {
+  return [['dateAsWritten', item.dateAsWritten], ['prescriberAsWritten', item.prescription?.prescriberAsWritten ?? null],
+    ['prescriptionDate', item.prescription?.dateAsWritten ?? null]];
+}
+
+const anyFromContextOutside = (side: Side) =>
+  outsideFields(side.item).some(([field, value]) => fromContext(side, field, value));
+
 function anyFromContext(side: Side): boolean {
   const fields = side.item.fields as Record<string, unknown>;
   if (Object.entries(fields).some(([field, value]) => fromContext(side, field, value))) return true;
+  if (anyFromContextOutside(side)) return true;
   // A medicine's dose and unit are kept apart in the extras; the unit's basis is "unit" (as in pair).
   return side.item.kind === 'medicine' && (fromContext(side, 'strength', side.extras?.dose)
     || fromContext(side, 'unit', side.extras?.doseUnit));
@@ -281,6 +294,8 @@ function pair(a: Side, b: Side, sourceSha256Hex: string, tally: HardPageAgreemen
     const unit = textField('unit', a.extras?.doseUnit ?? '', b.extras?.doseUnit ?? '', false) ?? '';
     fields.strength = strengthOf(dose, unit) || null;
   }
+  // A date or prescriber either reading filled from context is said by field_from_context (it carries no "?").
+  if (anyFromContextOutside(a) || anyFromContextOutside(b)) context = true;
   const mergeText = (x: string | null, y: string | null) => isBlank(x) && isBlank(y) ? x
     : bare(x) === bare(y) ? keepUnsure(x, y) : UNREADABLE;
   const prescriptionA = a.item.prescription;

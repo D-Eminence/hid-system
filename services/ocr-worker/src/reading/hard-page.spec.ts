@@ -200,6 +200,37 @@ describe('two readings of a hard page', () => {
     expect(JSON.stringify(fieldsOf(item))).not.toMatch(/200|400/);
   });
 
+  it('says field_from_context for a guessed date or prescriber, which carry no "?"', () => {
+    const page = readPage(1, [['5.2 mmol/L 03/04/2026', { handwritten: true, confidence: 0.45 }],
+      ['Metronidazole 400 mg tds Dr Test Prescriber', { handwritten: true, confidence: 0.45 }]]);
+    const held = (answer: ModelPage): HardReading => {
+      const prepared = prepareHardAnswer(answer);
+      return { answer: prepared, check: checkPage({ page: 1, lines: page.lines, answer: prepared,
+        sourceSha256Hex: SOURCE_SHA, readBy: 'reread', masker: createMasker(), fromImage: true }) };
+    };
+    // A result with no test named: its date is its only field under "other".
+    const lab = (other: FieldBasis): ModelItem => ({ ...modelItem({ kind: 'lab_result',
+      asWritten: '5.2 mmol/L 03/04/2026', lineIds: ['p1-l1'], value: '5.2', unit: 'mmol/L',
+      dateAsWritten: '03/04/2026' }), box: onLine(1), hard: { dose: '', doseUnit: '',
+      basis: letters({ name: 'empty', dose: 'empty', frequency: 'empty', value: 'letters', unit: 'letters', other }) } });
+    const prescribed = (other: FieldBasis): ModelItem => ({ ...medicine(2, 'Metronidazole', '400', 'mg', 'tds',
+      { asWritten: 'Metronidazole 400 mg tds Dr Test Prescriber', basis: { other } }),
+    prescriberAsWritten: 'Dr Test Prescriber' });
+    const dated = (item: PaperItem) => item.kind === 'lab_result';
+    for (const result of [mergeHardReadings([held(modelPage([lab('context'), prescribed('context')]))], SOURCE_SHA),
+      mergeHardReadings([held(modelPage([lab('context'), prescribed('context')])),
+        held(modelPage([lab('letters'), prescribed('letters')]))], SOURCE_SHA)]) {
+      const [date, medicineItem] = [result.check.items.find(dated)!, result.check.items.find((item) => !dated(item))!];
+      expect(date.dateAsWritten).toBe('03/04/2026');
+      expect(medicineItem.prescription?.prescriberAsWritten).toBe('Dr Test Prescriber');
+      expect(date.checkReasons).toContain('field_from_context');
+      expect(medicineItem.checkReasons).toContain('field_from_context');
+    }
+    // Read from the letters in both readings: no context reason.
+    const read = mergeHardReadings([held(modelPage([lab('letters')])), held(modelPage([lab('letters')]))], SOURCE_SHA);
+    expect(read.check.items[0]!.checkReasons).not.toContain('field_from_context');
+  });
+
   it('keeps the same medicine at one height in two columns as two orders, each found by one reading', () => {
     // Two columns: line 1 on the left, line 2 on the right, at the same height.
     const page = readPage(1, [['Metronidazole 400 mg tds', { handwritten: true, confidence: 0.45,
