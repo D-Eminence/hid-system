@@ -509,15 +509,17 @@ Each claimed job runs, in order:
      for the ICD-11 MMS 2026-01 release, `SimpleTabulation-ICD-11-MMS-en`
      (https://icdcdn.who.int/static/releasefiles/2026-01/SimpleTabulation-ICD-11-MMS-en.zip,
      linked from the browser at https://icd.who.int/browse/2026-01/mms/en);
-     only titles found there exactly are listed. (b) `DIAGNOSIS_SYNONYMS`: 122
+     only titles found there exactly are listed. (b) `DIAGNOSIS_SYNONYMS`: 120
      abbreviations and local names in our own words (HTN, DM, T2DM, PUD,
-     URTI, MP+, typhoid, SCD, BPH, CCF, CKD, UTI, PTB, RVD,
+     URTI, MP+, typhoid, SCD in crisis, BPH, CCF, CKD, UTI, RVD,
      PIH, PPH, ...), each mapped to one title of (a); no ICD-10 content.
      Abbreviations that stand for more than one thing on Nigerian notes are
      left out and never expanded (`UNGROUNDED_ABBREVIATIONS`): PID (pelvic
      inflammatory disease, or prolapsed intervertebral disc), PET (pre-eclamptic
      toxaemia, or a PET scan), AGE (acute gastroenteritis, or the word "age"),
-     SCA (sickle cell anaemia, spinocerebellar ataxia or sudden cardiac arrest);
+     SCA (sickle cell anaemia, spinocerebellar ataxia or sudden cardiac arrest),
+     SCD (sickle cell disease, or sudden cardiac death; "SCD in crisis" stays
+     listed), PTB (pulmonary tuberculosis, or preterm birth on antenatal notes);
      the spelled-out names stay listed. Real diagnoses that are not listed but
      are a letter or two from a listed name (`UNLISTED_DIAGNOSIS_LOOKALIKES`:
      nephritic syndrome, malacia) block a fuzzy match, as for drugs:

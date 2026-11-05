@@ -170,10 +170,11 @@ export const ICD11_TITLES: ReadonlyArray<readonly [title: string, code: string |
  * Left out on purpose, as they stand for more than one thing on Nigerian notes (UNGROUNDED_ABBREVIATIONS; never
  * expanded, tested in diagnosis-list.spec.ts): "PID" (pelvic inflammatory disease, or prolapsed intervertebral disc on
  * orthopaedic and back-pain notes), "PET" (pre-eclamptic toxaemia, or a PET scan), "AGE" (acute gastroenteritis, or
- * the word "age") and "SCA" (sickle cell anaemia, or spinocerebellar ataxia or sudden cardiac arrest). The spelled-out
- * names stay listed.
+ * the word "age") "SCA" (sickle cell anaemia, or spinocerebellar ataxia or sudden cardiac arrest), "SCD" (sickle cell disease,
+ * or sudden cardiac death; "SCD in crisis" stays listed as it is unambiguous) and "PTB" (pulmonary tuberculosis, or
+ * preterm birth on antenatal and labour-ward notes). The spelled-out names stay listed.
  */
-export const UNGROUNDED_ABBREVIATIONS: readonly string[] = ['pid', 'pet', 'age', 'sca'];
+export const UNGROUNDED_ABBREVIATIONS: readonly string[] = ['pid', 'pet', 'age', 'sca', 'scd', 'ptb'];
 
 export const DIAGNOSIS_SYNONYMS: Readonly<Record<string, string>> = {
   // Hypertension and the heart
@@ -218,7 +219,6 @@ export const DIAGNOSIS_SYNONYMS: Readonly<Record<string, string>> = {
   'acute gastroenteritis': 'Gastroenteritis or colitis without specification of infectious agent',
   'gastroenteritis': 'Gastroenteritis or colitis without specification of infectious agent',
   'tb': 'Tuberculosis',
-  'ptb': 'Tuberculosis of the respiratory system',
   'pulmonary tb': 'Tuberculosis of the respiratory system',
   'pulmonary tuberculosis': 'Tuberculosis of the respiratory system',
   'rvd': 'Human immunodeficiency virus disease',
@@ -248,7 +248,6 @@ export const DIAGNOSIS_SYNONYMS: Readonly<Record<string, string>> = {
   'nns': 'Sepsis of fetus or newborn',
   'neonatal sepsis': 'Sepsis of fetus or newborn',
   // Blood
-  'scd': 'Sickle cell disorders or other haemoglobinopathies',
   'sickle cell disease': 'Sickle cell disorders or other haemoglobinopathies',
   'sickle cell anaemia': 'Sickle cell disorders or other haemoglobinopathies',
   'hbss': 'Sickle cell disorders or other haemoglobinopathies',

@@ -53,7 +53,7 @@ describe('diagnosis list (hard pages only)', () => {
   it('never adds what an abbreviation does not say, and keeps a negative apart from a positive', () => {
     expect(matchDiagnosisName('HTN')?.title).not.toBe('Essential hypertension');
     expect(matchDiagnosisName('DM')?.title).toBe('Diabetes mellitus');
-    expect(matchDiagnosisName('SCD')?.title).toBe('Sickle cell disorders or other haemoglobinopathies');
+    expect(matchDiagnosisName('SCD in crisis')?.title).toBe('Sickle cell disease with crisis');
     expect(matchDiagnosisName('MP+')?.title).toBe('Malaria');
     expect(matchDiagnosisName('MP +ve')?.title).toBe('Malaria');
     for (const name of ['MP -ve', 'MP-ve', 'MP', 'Fictional syndrome', 'Tab 1 bd']) {
@@ -62,11 +62,12 @@ describe('diagnosis list (hard pages only)', () => {
   });
 
   it('never grounds an abbreviation that stands for more than one thing', () => {
-    for (const name of ['PID', 'pid', 'PET', 'AGE', 'SCA', 'P.I.D.']) {
+    for (const name of ['PID', 'pid', 'PET', 'AGE', 'SCA', 'SCD', 'PTB', 'ptb', 'P.I.D.']) {
       expect([name, matchDiagnosisName(name)]).toEqual([name, null]);
     }
     for (const name of UNGROUNDED_ABBREVIATIONS) expect(Object.keys(DIAGNOSIS_SYNONYMS)).not.toContain(name);
     // The spelled-out names stay listed.
+    expect(matchDiagnosisName('Pulmonary tuberculosis')?.title).toBe('Tuberculosis of the respiratory system');
     expect(matchDiagnosisName('Pelvic inflammatory disease')?.title).toBe('Female pelvic inflammatory diseases');
     expect(matchDiagnosisName('Sickle cell anaemia')?.title).toBe('Sickle cell disorders or other haemoglobinopathies');
     expect(matchDiagnosisName('Acute gastroenteritis')?.title)
