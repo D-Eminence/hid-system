@@ -2,7 +2,7 @@ import type { OcrWorkerConfig } from './config';
 import { AiInterruptedError, AiTransientError, type PageModelClient } from './reading/claude.client';
 import { paperReadingPayloadSchema, type PaperReadingPayload } from './reading/contract';
 import { PaperReadingService, type ReadingConfig } from './reading/reader';
-import { modelItem, modelPage, readPage } from './reading/test-fixtures';
+import { fixturePng, modelItem, modelPage, readPage } from './reading/test-fixtures';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure, type ClaimedOcrJob, type CompletedExtraction,
   type DocumentReader, type TextReading, type WorkerOcrProvider, type WorkerRepository } from './types';
 import { Semaphore } from './semaphore';
@@ -99,7 +99,7 @@ describe('OcrWorker processing', () => {
     expect(result.providerModel).toBe('amazon-textract-detect-document-text');
     expect(result.provenance).toMatchObject({ processingContract: 'hid-textract-v2', pageCount: 1,
       reading: { contract: 'hid-paper-reading-v2', firstPassModel: 'claude-sonnet-5-5', inferenceGeo: 'us',
-        promptVersion: 'hid-paper-reading-prompt-2', usage: { inputTokens: 2400, outputTokens: 800 } } });
+        promptVersion: 'hid-paper-reading-prompt-4', usage: { inputTokens: 2400, outputTokens: 800 } } });
     const provenance = JSON.stringify(result.provenance);
     for (const secret of [SECRET_NAME, SECRET_DRUG, SECRET_NOTE, 'Inventedcillin']) expect(provenance).not.toContain(secret);
     expect(JSON.stringify(result.structuredPayload)).not.toContain('Inventedcillin');
@@ -256,6 +256,22 @@ describe('OcrWorker processing', () => {
       expect(repository.recordAiUsage).toHaveBeenCalledWith(job, { ...sonnet, model: 'claude-opus-5-5' });
     });
 
+    it('logs the token counts per model with the pages sent, and nothing else', async () => {
+      const { repository, reader, provider, reading } = mocks();
+      await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+      const usage = logs().map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((line) => line.event === 'ocr.reading.usage');
+      expect(usage.map((line) => [line.pass, line.model])).toEqual([['first_pass', 'claude-sonnet-5-5'],
+        ['reread', 'claude-opus-5-5']]);
+      for (const line of usage) {
+        expect(line).toMatchObject({ jobId: job.jobId, correlationId: job.correlationId, attempt: job.attemptNo,
+          requests: 1, inputTokens: 1200, outputTokens: 400, cacheReadTokens: 3000, cacheWriteTokens: 0 });
+        expect(typeof line.pagesSent).toBe('number');
+        expect(Object.keys(line).sort()).toEqual(['attempt', 'cacheReadTokens', 'cacheWriteTokens', 'correlationId',
+          'event', 'inputTokens', 'jobId', 'level', 'model', 'outputTokens', 'pagesSent', 'pass', 'requests', 'timestamp'].sort());
+      }
+    });
+
     it('completes the job when recording the use fails, logging only a safe code', async () => {
       const { repository, reader, provider, reading } = mocks();
       repository.recordAiUsage.mockRejectedValue(Object.assign(new Error(`${SECRET_NAME} database detail`), { code: '42883' }));
@@ -369,5 +385,88 @@ describe('OcrWorker processing', () => {
         expect(repository.renew).toHaveBeenCalledTimes(renewals);
       } finally { jest.useRealTimers(); }
     });
+  });
+});
+
+describe('OcrWorker image re-read: the picture never reaches a log, an error or what is stored', () => {
+  const picture = fixturePng(1240, 1754, 6_000);
+  const base64 = Buffer.from(picture).toString('base64');
+  /** Every 24-character run of the picture's base64 (overlapping), so no fragment of it can hide. */
+  const chunks = Array.from({ length: Math.floor((base64.length - 24) / 8) }, (_, index) => base64.slice(index * 8, index * 8 + 24));
+  const hard = readPage(1, [['Fictionalmab 437rng od', { handwritten: true, confidence: 0.5 }], SECRET_NOTE]);
+  const hardText: TextReading = { ...textReading, pages: [hard] };
+  const firstPass = modelPage([modelItem({ kind: 'note', asWritten: 'Fictionalmab 437rng od', lineIds: ['p1-l1'] })]);
+  const fromPicture = modelPage([modelItem({ kind: 'medicine', asWritten: 'Fictionalmab 437mg od', lineIds: ['p1-l1'],
+    name: 'Fictionalmab', strength: '437mg', frequency: 'od', status: 'current',
+    box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 } })]);
+  const used = { inputTokens: 6000, outputTokens: 400, cacheReadInputTokens: 3000, cacheCreationInputTokens: 0 };
+
+  function setUp(rereadFails: boolean) {
+    const images: string[] = [];
+    const client: PageModelClient = { readPage: jest.fn(async (request) => {
+      if (request.image) {
+        images.push(request.image.base64);
+        if (rereadFails) throw new AiTransientError('AI_HTTP_529', 1);
+        return { kind: 'answer' as const, answer: fromPicture, attempts: 1, servedInferenceGeo: 'us', usage: used };
+      }
+      return { kind: 'answer' as const, answer: firstPass, attempts: 1, servedInferenceGeo: 'us', usage: used };
+    }) };
+    const parts = mocks(client);
+    parts.reader.readExact.mockResolvedValue({ ...document, bytes: picture });
+    parts.provider.extract.mockResolvedValue(hardText);
+    const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on' }, client);
+    return { ...parts, reading, images };
+  }
+
+  let written: string[];
+  let consoleSpies: jest.SpyInstance[];
+  beforeEach(() => {
+    written = [];
+    const capture = (chunk: unknown) => { written.push(String(chunk)); return true; };
+    consoleSpies = [jest.spyOn(process.stdout, 'write').mockImplementation(capture),
+      jest.spyOn(process.stderr, 'write').mockImplementation(capture),
+      ...(['log', 'info', 'warn', 'error', 'debug'] as const).map((method) => jest.spyOn(console, method)
+        .mockImplementation((...args: unknown[]) => { written.push(args.map(String).join(' ')); }))];
+  });
+  afterEach(() => { for (const spy of consoleSpies) spy.mockRestore(); });
+
+  it('sends the picture with the re-read, then keeps it out of logs, the payload, provenance and the usage records', async () => {
+    const { repository, reader, provider, reading, images } = setUp(false);
+    await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+    expect(images).toEqual([base64]);
+    expect(repository.fail).not.toHaveBeenCalled();
+    const result = completed(repository);
+    const payload = result.structuredPayload as PaperReadingPayload;
+    expect(payload.reading).toMatchObject({ imageRereadPages: [1], imageRereadSkipped: [] });
+    // The Textract text says "437rng": the item is held to what was read in the picture, so the sentence shown is
+    // the picture's, not a dose disagreement with the paper.
+    expect(payload.items[0]).toMatchObject({ readBy: 'reread', confidence: 'check_carefully',
+      checkReason: 'This was read from the picture of the page; check it against the paper.' });
+    expect(payload.items[0]!.checkReasons).toContain('read_from_image');
+    expect(payload.items[0]!.checkReasons).not.toContain('strength_mismatch');
+    expect(result.provenance.reading).toMatchObject({ imageRereadPages: [1], imageRereadSkipped: [],
+      imagePromptVersion: 'hid-paper-reading-image-prompt-4' });
+    // Picture tokens count in the usage records as any other input.
+    expect(repository.recordAiUsage).toHaveBeenCalledWith(job, expect.objectContaining({ model: 'claude-opus-5-5',
+      requests: 1, inputTokens: 6000 }));
+    const stored = JSON.stringify([result, repository.recordAiUsage.mock.calls, repository.recordPages.mock.calls]);
+    const everything = [stored, ...written].join('\n');
+    expect(written.length).toBeGreaterThan(0);
+    for (const chunk of chunks) expect(everything).not.toContain(chunk);
+    expect(written.join('\n')).toContain('"imageRereadPages":1');
+  });
+
+  it('keeps the picture out of logs and what is stored when the re-read with it fails', async () => {
+    const { repository, reader, provider, reading, images } = setUp(true);
+    await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+    expect(images).toEqual([base64]);
+    const result = completed(repository);
+    const everything = [JSON.stringify([result, repository.fail.mock.calls, repository.recordAiUsage.mock.calls]),
+      ...written].join('\n');
+    for (const chunk of chunks) expect(everything).not.toContain(chunk);
+    expect((result.structuredPayload as PaperReadingPayload).reading.imageRereadPages).toEqual([]);
+    expect((result.structuredPayload as PaperReadingPayload).reading.imageRereadFailedPages).toEqual([1]);
+    expect(result.provenance.reading).toMatchObject({ imageRereadFailedPages: [1] });
+    expect(written.join('\n')).toContain('"imageRereadFailedPages":1');
   });
 });

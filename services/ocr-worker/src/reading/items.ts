@@ -17,21 +17,36 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['strength_mismatch', 'strength_not_as_written'], "A dose on the paper doesn't match what was read."],
   [['nkda_not_on_paper', 'nkda_conflicts'], "The paper doesn't clearly say there are no known allergies."],
   [['value_mismatch', 'reading_number_mismatch', 'plain_mismatch'], "A number on the paper doesn't match what was read."],
+  [['number_not_in_text_read'], "A number read from the picture isn't in the text read from the page; check it against the paper."],
+  // After the dose and number disagreements, before the text-match ones (an item read from the picture is
+  // expected to differ from the text the service read).
+  // Just before read_from_image (which every picture item has), so it is shown where it applies.
+  [['not_matched_to_scanned_text'], 'Read from the picture; it could not be matched to the scanned text. Check it against the paper.'],
+  [['read_from_image'], 'This was read from the picture of the page; check it against the paper.'],
   [['measure_mismatch'], "What was measured doesn't match the label on the paper."],
   [['plain_contradicts'], "The plain reading says something the paper doesn't."],
   [['frequency_mismatch', 'duration_mismatch'], "How often or how long doesn't match the paper."],
   [['strength_missing', 'frequency_missing'], "The paper gives a dose or how often that wasn't read."],
-  [['route_missing', 'route_mismatch', 'route_not_on_paper'], "How it is taken doesn't match the paper."],
+  [['route_missing'], "The paper says how it is given, but that wasn't read."],
+  [['route_mismatch'], "How it is given doesn't match the paper."],
   [['unit_mismatch'], "The unit read isn't the one on the paper."],
-  [['text_corrected'], 'The words were read differently from how they look on the paper.'],
   [['lines_not_together'], 'This was put together from separate parts of the page.'],
   [['status_not_active', 'status_unclear'], 'This may not be current (for example past, stopped or suspected).'],
   [['status_cue_on_line'], 'The paper has words that may change whether this is current.'],
   [['date_ambiguous'], 'The date could be read two ways (day/month or month/day).'],
+  [['duplicate_source_span'], 'Another item was read from the same words; check nothing was missed.'],
+  // Below the disagreements and status warnings: a second reading that read the same words differently, then a
+  // first-pass item the second reading (from the picture, or from the text) did not find.
+  [['differs_from_second_reading'], 'The second reading differs from this one; compare both with the paper.'],
+  [['not_in_picture_reading'], 'The second reading, from the picture, did not find this; check it against the paper.'],
+  [['not_in_second_reading'], 'The second reading did not find this; check it against the paper.'],
+  // Hard-to-read handwriting explains the reasons below it (something read that is not found in the text
+  // read), so it is said before them only; every disagreement or warning above is said first.
+  [['low_ocr_confidence_handwritten'], 'The handwriting was hard to read.'],
+  [['route_not_on_paper'], "The route read (for example IV or by mouth) isn't on the paper."],
+  [['text_corrected'], 'The words were read differently from how they look on the paper.'],
   [['date_not_on_page', 'prescription_detail_not_on_page'], "A date or name that was read isn't on the paper."],
   [['field_not_on_paper'], "Part of what was read isn't on the paper."],
-  [['duplicate_source_span'], 'Another item was read from the same words; check nothing was missed.'],
-  [['low_ocr_confidence_handwritten'], 'The handwriting was hard to read.'],
   [['low_ocr_confidence'], 'Part of this was hard to read.'],
   [['name_missing', 'substance_missing', 'measure_unclear'], "Part of this item couldn't be read."],
   [['handwritten'], 'This is handwritten; check it against the paper.'],
@@ -74,6 +89,200 @@ export interface PageCheckInput {
   sourceSha256Hex: string;
   readBy: 'first_pass' | 'reread';
   masker: Masker;
+  /**
+   * The answer was read from the picture of the page (image re-read). Its items are held to the page by place
+   * (each cited line under the item's box, little of the box on lines it does not cite) and by a text anchor (a
+   * word or number shared with its cited lines), not by an exact text match; see imagePlace.
+   */
+  fromImage?: boolean;
+}
+
+/**
+ * An image-read item sits on a cited line when, on that line, it covers at least this share of the line's height
+ * and of the narrower of the two widths.
+ */
+export const IMAGE_PLACE_OVERLAP = 0.5;
+/** At most this share of the line area an image-read item's box covers may be on lines it does not cite. */
+export const IMAGE_UNCITED_SHARE = 0.5;
+/** The smallest image-read item box, as a share of the page's width and of its height. */
+export const IMAGE_MIN_BOX = 0.005;
+/** The most lines one image-read item may cite (a medicine or a result runs over a few lines, never the page). */
+export const IMAGE_MAX_CITED_LINES = 3;
+/** An image-read item's box may be at most this many times the area of the box around its cited lines. */
+export const IMAGE_MAX_AREA_RATIO = 2;
+/**
+ * A small absolute allowance, as a share of the page's area, on top of IMAGE_MAX_AREA_RATIO x the area of the box
+ * around the cited lines, so a box a little larger than a short, thin line is not dropped for that alone.
+ */
+export const IMAGE_AREA_ALLOWANCE = 0.002;
+/**
+ * How far an image-read item's box may run past the left and right edges of the box around its cited lines, in
+ * total, as a share of that box's width.
+ */
+export const IMAGE_MAX_SIDE_OVERFLOW = 0.25;
+/**
+ * Floors for short items, so a few pixels of padding around a short word are never a reason to drop it: the box may
+ * run past its lines' left edge and right edge by IMAGE_MIN_SIDE_OVERFLOW of the page width each (so 0.02 in all)
+ * even where a quarter of their width is less, and its area may always be that of its lines' box padded by
+ * IMAGE_MIN_PADDING of the page on every side.
+ */
+export const IMAGE_MIN_SIDE_OVERFLOW = 0.01;
+export const IMAGE_MIN_PADDING = 0.005;
+
+/** A model box clipped to the page ([0, 1] on both axes); null where nothing of it is on the page. */
+export function clipBox(box: { left: number; top: number; width: number; height: number }): Box | null {
+  const clamp = (value: number) => Math.max(0, Math.min(1, value));
+  const left = clamp(box.left);
+  const top = clamp(box.top);
+  const right = clamp(box.left + box.width);
+  const bottom = clamp(box.top + box.height);
+  if (!(right > left) || !(bottom > top)) return null;
+  return { left: round4(left), top: round4(top), width: round4(right - left), height: round4(bottom - top) };
+}
+
+const span = (aStart: number, aSize: number, bStart: number, bSize: number) =>
+  Math.max(0, Math.min(aStart + aSize, bStart + bSize) - Math.max(aStart, bStart));
+const area = (box: Box) => box.width * box.height;
+const intersection = (a: Box, b: Box) => span(a.left, a.width, b.left, b.width) * span(a.top, a.height, b.top, b.height);
+
+/** Whether the item's box lies on this line: over half the line's height, and over half the narrower width. */
+function onLine(box: Box, line: Box): boolean {
+  return span(box.top, box.height, line.top, line.height) >= IMAGE_PLACE_OVERLAP * line.height
+    && span(box.left, box.width, line.left, line.width) >= IMAGE_PLACE_OVERLAP * Math.min(box.width, line.width);
+}
+
+/**
+ * Whether the item read from the picture shares anything with the text read of its lines: a word of three letters
+ * or more, or a number. It need not match the text (the service may have misread it), but an item with nothing in
+ * common with its lines (a box copied from the prompt around a made-up item) is not kept.
+ */
+function anchored(asWritten: string, source: string): boolean {
+  const text = withoutPlaceholders(source);
+  const words = new Set(wordsIn(text).filter((word) => word.length >= 3));
+  const numbers = new Set(numbersIn(text));
+  const own = withoutPlaceholders(asWritten);
+  return wordsIn(own).some((word) => words.has(word)) || numbersIn(own).some((number) => numbers.has(number));
+}
+
+/** Two lines on one written row: they overlap vertically by at least half the smaller line's height. */
+function sameRow(a: Box, b: Box): boolean {
+  return span(a.top, a.height, b.top, b.height) >= 0.5 * Math.min(a.height, b.height);
+}
+
+/** A written row may be at most this many times as tall as its tallest line. */
+export const IMAGE_ROW_MAX_HEIGHT = 1.5;
+/**
+ * After same-row fragments are added, an image-read item may have at most this many lines on any one written row,
+ * and at most IMAGE_MAX_LINES_PER_ITEM lines in all (the lines it cites and those added); more drops the item, so
+ * a box cannot claim a whole row or block of cells, whether the model cited them or not.
+ */
+export const IMAGE_MAX_LINES_PER_ROW = 4;
+export const IMAGE_MAX_LINES_PER_ITEM = 6;
+
+/**
+ * Lines grouped into written rows, in reading order. A line joins a row only when it is on one row (sameRow) with
+ * every line already in it, never by a chain of neighbours (a slant), and the row stays at most
+ * IMAGE_ROW_MAX_HEIGHT times as tall as its tallest line; otherwise it starts a row of its own.
+ */
+function rowsOf(lines: readonly ReadLine[]): ReadLine[][] {
+  const rows: ReadLine[][] = [];
+  for (const line of lines) {
+    const fits = (row: ReadLine[]) => {
+      if (line.box === null || row.some((other) => other.box === null || !sameRow(other.box, line.box!))) return false;
+      const boxes = [...row, line].map((member) => member.box!);
+      const top = Math.min(...boxes.map((box) => box.top));
+      const bottom = Math.max(...boxes.map((box) => box.top + box.height));
+      return bottom - top <= IMAGE_ROW_MAX_HEIGHT * Math.max(...boxes.map((box) => box.height)) + 1e-9;
+    };
+    const row = rows.find(fits);
+    if (row) row.push(line);
+    else rows.push([line]);
+  }
+  return rows;
+}
+
+/**
+ * Whether rows of cited lines lie together (the lines_not_together test, applied to rows): each row stands for one
+ * line with the box around it, and two rows are next in reading order when no line outside the cited rows comes
+ * between them.
+ */
+function rowsTogether(rows: readonly ReadLine[][], all: readonly ReadLine[], order: ReadonlyMap<string, number>): boolean {
+  if (rows.length <= 1) return true;
+  const rowOf = new Map<string, number>();
+  rows.forEach((row, index) => { for (const line of row) rowOf.set(line.id, index); });
+  const sequence: string[] = [];
+  for (const line of [...all].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))) {
+    const key = rowOf.has(line.id) ? `r${rowOf.get(line.id)}` : `u${line.id}`;
+    if (sequence[sequence.length - 1] !== key) sequence.push(key);
+  }
+  const rank = new Map<string, number>();
+  rows.forEach((row, index) => rank.set(row[0]!.id, sequence.indexOf(`r${index}`)));
+  const placed = rows.map((row) => ({ id: row[0]!.id, box: unionBox(row.map((line) => line.box)) }));
+  return together(placed, rank);
+}
+
+/** A picture item held to its lines: its stored box, its cited lines (with row fragments added), and whether its
+ * asWritten could be matched to the scanned text of those lines. */
+interface ImagePlace { box: Box; cited: ReadLine[]; matched: boolean }
+
+/**
+ * Where an image-read item sits, or null where it is not held to its lines (it is then dropped).
+ *
+ * Row fragments first: an uncited hard line (below REVIEW_BELOW) the item's box lies on (onLine) that is on the
+ * same written row as a cited line is a fragment of the same writing that the text service split off, and is
+ * added to the cited lines in reading order. Then, cited and added together, at most IMAGE_MAX_LINES_PER_ROW lines
+ * on any one row and IMAGE_MAX_LINES_PER_ITEM in all, or the item is dropped (a box claiming a whole row of
+ * cells). Rows are cliques (rowsOf), never chains. Then: at most IMAGE_MAX_CITED_LINES rows (groups of cited lines on one row) that lie together (the
+ * lines_not_together test on rows, here a reason to drop); the box at least IMAGE_MIN_BOX on each side; its area at
+ * most IMAGE_MAX_AREA_RATIO times the area of the box around its cited lines plus IMAGE_AREA_ALLOWANCE of the page
+ * (or, if larger, that box padded by IMAGE_MIN_PADDING on every side); running past that box's left and right
+ * edges by at most IMAGE_MAX_SIDE_OVERFLOW of its width in total (or by at most IMAGE_MIN_SIDE_OVERFLOW of the page
+ * width on each side); on every cited line that has a box (each measured on its own, not as one box around them
+ * all); on no line it does not cite (so not on another row's line), with at most IMAGE_UNCITED_SHARE of the line
+ * area it covers on lines it does not cite. A box around the whole page that cites every line fails these.
+ *
+ * Text anchor: where any cited line is legible (confidence at least REVIEW_BELOW), the item's asWritten must share
+ * a word or number with the cited lines' text, so a box copied from a clean line around a made-up item is dropped.
+ * Where every cited line is below REVIEW_BELOW the scanned text may be nonsense, so the anchor is not required:
+ * `matched` is then false when it fails, and the item gets not_matched_to_scanned_text.
+ */
+function imagePlace(raw: ModelItem, citedAsGiven: readonly ReadLine[], all: readonly ReadLine[],
+  order: ReadonlyMap<string, number>): ImagePlace | null {
+  if (!raw.box) return null;
+  const box = clipBox(raw.box);
+  if (box === null || box.width < IMAGE_MIN_BOX || box.height < IMAGE_MIN_BOX) return null;
+  const givenIds = new Set(citedAsGiven.map((line) => line.id));
+  // Only a hard line (below REVIEW_BELOW) is taken for a fragment: a legible line on the row is its own writing,
+  // and a box over it still drops the item below.
+  const fragments = all.filter((line) => !givenIds.has(line.id) && line.confidence < REVIEW_BELOW
+    && line.box !== null && onLine(box, line.box)
+    && citedAsGiven.some((other) => other.box !== null && sameRow(other.box, line.box!)));
+  const cited = [...citedAsGiven, ...fragments].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  const rows = rowsOf(cited);
+  if (cited.length > IMAGE_MAX_LINES_PER_ITEM || rows.some((row) => row.length > IMAGE_MAX_LINES_PER_ROW)) return null;
+  if (rows.length > IMAGE_MAX_CITED_LINES || !rowsTogether(rows, all, order)) return null;
+  const citedBoxes = cited.map((line) => line.box).filter((line): line is Box => line !== null);
+  if (citedBoxes.length === 0 || !citedBoxes.every((line) => onLine(box, line))) return null;
+  const around = unionBox(citedBoxes)!;
+  const padded = (around.width + 2 * IMAGE_MIN_PADDING) * (around.height + 2 * IMAGE_MIN_PADDING);
+  if (area(box) > Math.max(IMAGE_MAX_AREA_RATIO * area(around) + IMAGE_AREA_ALLOWANCE, padded) + 1e-9) return null;
+  const leftOver = Math.max(0, around.left - box.left);
+  const rightOver = Math.max(0, box.left + box.width - (around.left + around.width));
+  const withinQuarter = leftOver + rightOver <= IMAGE_MAX_SIDE_OVERFLOW * around.width + 1e-9;
+  const withinFloor = leftOver <= IMAGE_MIN_SIDE_OVERFLOW + 1e-9 && rightOver <= IMAGE_MIN_SIDE_OVERFLOW + 1e-9;
+  if (!withinQuarter && !withinFloor) return null;
+  const citedIds = new Set(cited.map((line) => line.id));
+  // A box that also lies on a line it does not cite (by the same test as for its cited lines) is not this item's.
+  if (all.some((line) => !citedIds.has(line.id) && line.box !== null && onLine(box, line.box))) return null;
+  const coveredBy = (lines: readonly ReadLine[]) => lines.reduce((sum, line) => sum + (line.box ? intersection(box, line.box) : 0), 0);
+  const onCited = coveredBy(cited);
+  const onUncited = coveredBy(all.filter((line) => !citedIds.has(line.id)));
+  if (onUncited > IMAGE_UNCITED_SHARE * (onCited + onUncited)) return null;
+  if (!(area(box) > 0)) return null;
+  const matched = anchored(raw.asWritten, cited.map((line) => line.text).join(' '));
+  const trustworthy = cited.some((line) => line.confidence >= REVIEW_BELOW);
+  if (!matched && trustworthy) return null;
+  return { box, cited, matched };
 }
 
 export interface PageCheck {
@@ -81,7 +290,10 @@ export interface PageCheck {
   droppedUngrounded: number;
   identity: PaperIdentity;
   pageUnsure: boolean;
-  /** Whether the result should be re-read by the stronger model, and why. */
+  /**
+   * Why the first pass looks shaky, by code. The reader no longer routes on these (owner decision 2026-11-05: a
+   * page is re-read when it is flagged, i.e. flagReasons is not empty, which covers every one of them).
+   */
   rereadReasons: string[];
   flagReasons: FlagReason[];
 }
@@ -117,12 +329,34 @@ export function checkPage(input: PageCheckInput): PageCheck {
     const cited = lineIds.map((id) => byId.get(id));
     const source = cited.map((line) => line?.text ?? '').join(' ');
     if (lineIds.length === 0 || cited.some((line) => line === undefined) || !norm(raw.asWritten)
-        || !has(source, raw.asWritten)) {
+        || (!input.fromImage && !has(source, raw.asWritten))) {
       dropped += 1;
       continue;
     }
-    const lines = cited as ReadLine[];
-    const item = checkItem(raw, lines, lineIds, source, pageText, order, medicineNames, allergySubstances, input);
+    let lines = cited as ReadLine[];
+    let itemLineIds = lineIds;
+    let itemSource = source;
+    // Read from the picture: held to the page by place. Dropped items are only counted, as above.
+    const place = input.fromImage ? imagePlace(raw, lines, input.lines, order) : null;
+    if (input.fromImage && place === null) {
+      dropped += 1;
+      continue;
+    }
+    if (place !== null) {
+      // Row fragments the item's box covers are cited with it.
+      lines = place.cited;
+      itemLineIds = lines.map((line) => line.id);
+      itemSource = lines.map((line) => line.text).join(' ');
+    }
+    // An item read from the picture is meant to differ from the text the service read, so its fields are held
+    // to what the model read in the picture (its asWritten), not to the line text: a dose or word the service
+    // misread is not "on the paper doesn't match". How legible the lines were still counts, and a number the
+    // line text doesn't have is flagged in markReadFromImage.
+    const item = place === null
+      ? checkItem(raw, lines, itemLineIds, itemSource, pageText, order, medicineNames, allergySubstances, input)
+      : checkItem(raw, lines.map((line, index) => ({ ...line, text: index === 0 ? raw.asWritten : '' })), itemLineIds,
+        raw.asWritten, `${pageText}\n${raw.asWritten}`, order, medicineNames, allergySubstances, input);
+    if (place !== null) markReadFromImage(item, raw, itemSource, place.box, place.matched);
     const group = seen.get(item.id) ?? [];
     // An exact repeat (same kind, lines, asWritten and fields) collapses to one.
     if (group.some((kept) => JSON.stringify(kept.fields) === JSON.stringify(item.fields))) continue;
@@ -143,8 +377,10 @@ export function checkPage(input: PageCheckInput): PageCheck {
   // missed item is most likely. The cited-only view above decides only the re-read.
   const anyLowHandwritten = input.lines.some((line) => line.handwritten && line.confidence < REVIEW_BELOW);
   const anyLowPrinted = input.lines.some((line) => !line.handwritten && line.confidence < REVIEW_BELOW);
-  // Handwriting alone makes an item check_carefully, but it is not a sign the first pass was shaky.
-  const shaky = items.filter((item) => item.checkReasons.some((code) => code !== 'handwritten'));
+  // Handwriting alone makes an item check_carefully, but it is not a sign the first pass was shaky; nor is
+  // having been read from the picture (every such item is).
+  const shaky = items.filter((item) => item.checkReasons.some((code) => code !== 'handwritten'
+    && code !== 'read_from_image'));
   const shakyShare = items.length === 0 ? 0 : shaky.length / items.length;
   const rereadReasons = [
     ...(input.answer.pageUnsure ? ['page_unsure'] : []),
@@ -152,8 +388,10 @@ export function checkPage(input: PageCheckInput): PageCheck {
     ...(lowHandwritten ? ['low_confidence_handwriting'] : []),
     ...(shakyShare >= 0.3 ? ['many_check_carefully'] : []),
   ];
+  // An item read from the picture is not in the line text by design, so it cannot show what a line leaves over:
+  // such a page is checked for missed items by its uncited lines only.
   const missed = duplicateSpan || suspiciousUncited(input.lines, cited).length > 0
-    || partlyCovered(input.lines, items).length > 0;
+    || partlyCovered(input.lines, input.fromImage ? [] : items).length > 0;
   const flagReasons: FlagReason[] = [
     ...(anyLowPrinted || shakyShare >= 0.3 ? ['low_confidence' as const] : []),
     ...(anyLowHandwritten ? ['handwriting' as const] : []),
@@ -165,6 +403,175 @@ export function checkPage(input: PageCheckInput): PageCheck {
   for (const item of items) item.asWritten = input.masker.restore(item.asWritten);
   return { items: uniqueItemIds(items), droppedUngrounded: dropped, identity, pageUnsure: input.answer.pageUnsure,
     rereadReasons, flagReasons };
+}
+
+/**
+ * An item read from the picture always goes to a person: 'read_from_image', check_carefully, the stored box its
+ * own place on the page, and 'number_not_in_text_read' where it has a number the text read of its lines doesn't.
+ */
+function markReadFromImage(item: PaperItem, raw: ModelItem, source: string, place: Box, matched: boolean): void {
+  const textNumbers = new Set(numbersIn(withoutPlaceholders(source)));
+  const written = [raw.asWritten, raw.strength, raw.frequency, raw.duration, raw.value, raw.referenceRange,
+    raw.dateAsWritten, raw.prescriptionDate, raw.noteText];
+  if (written.some((text) => numbersIn(withoutPlaceholders(text)).some((number) => !textNumbers.has(number)))) {
+    if (!item.checkReasons.includes('number_not_in_text_read')) item.checkReasons.push('number_not_in_text_read');
+  }
+  // Kept on scanned text too poor to hold it to (see imagePlace): say so.
+  if (!matched && !item.checkReasons.includes('not_matched_to_scanned_text')) {
+    item.checkReasons.push('not_matched_to_scanned_text');
+  }
+  if (!item.checkReasons.includes('read_from_image')) item.checkReasons.push('read_from_image');
+  item.checkReasons = item.checkReasons.filter((code) => code !== 'no_position');
+  item.box = place;
+  item.confidence = 'check_carefully';
+  item.checkReason = checkReasonSentence(item.checkReasons);
+}
+
+/**
+ * A page's result after a re-read (from the picture or from the text) of a page whose first pass gave an answer,
+ * when the re-read kept at least one item. Fail-safe: a first-pass item is removed only when a kept second-reading
+ * item of the same kind on a shared cited line carries everything it says: its exact twin (every field the same,
+ * normalised), or else a superset (every field the first pass filled in the same, normalised, and only fields the
+ * first pass left empty added). Each second-reading item removes at most one first-pass item (one to one: exact
+ * twins first, then supersets, each in reading order). Every other first-pass item is kept as check_carefully with
+ * 'not_in_picture_reading' (image) or 'not_in_second_reading' (text); where it has a best match among the
+ * second-reading items (bestMatch: same kind, shared line, the same name, substance, test or measure, or for a note
+ * the most shared words), that one pair gets 'differs_from_second_reading' so the person checking compares them.
+ * Items are in reading order (page, first cited line; second-reading items first on the same line) and their ids
+ * are made unique again. Identity is merged field by field (mergeIdentity); a field the two readings give
+ * differently keeps the first pass's value and flags the page ai_unsure. possible_missed_item is worked out again
+ * from the lines every kept item and the identity cite (and any duplicate_source_span within a reading;
+ * differs_from_second_reading does not set it). droppedUngrounded stays the second reading's dropped count.
+ */
+export function mergeReread(first: PageCheck, second: PageCheck, lines: readonly ReadLine[],
+  from: 'image' | 'text'): PageCheck {
+  const firstLine = (item: PaperItem) => Math.min(...item.lineIds.map(lineNumber));
+  const inReadingOrder = (items: readonly PaperItem[]) => items.map((item, index) => ({ item, index }))
+    .sort((a, b) => a.item.page - b.item.page || firstLine(a.item) - firstLine(b.item) || a.index - b.index)
+    .map(({ item }) => item);
+  const copy = (item: PaperItem): PaperItem => ({ ...item, checkReasons: [...item.checkReasons] } as PaperItem);
+  const read = inReadingOrder(second.items).map(copy);
+  const earlier = inReadingOrder(first.items).map(copy);
+  const sharesLine = (a: PaperItem, b: PaperItem) => a.kind === b.kind && a.lineIds.some((id) => b.lineIds.includes(id));
+  const removed = new Set<PaperItem>();
+  const matched = new Set<PaperItem>();
+  for (const test of [(a: PaperItem, b: PaperItem) => carries(a, b, 'exact'), (a: PaperItem, b: PaperItem) => carries(a, b, 'superset')]) {
+    for (const item of read) {
+      if (matched.has(item)) continue;
+      const twin = earlier.find((candidate) => !removed.has(candidate) && sharesLine(item, candidate) && test(item, candidate));
+      if (twin) { removed.add(twin); matched.add(item); }
+    }
+  }
+  const missing = from === 'image' ? 'not_in_picture_reading' : 'not_in_second_reading';
+  const kept = earlier.filter((item) => !removed.has(item));
+  for (const item of kept) {
+    addReason(item, missing);
+    const best = bestMatch(item, read.filter((candidate) => sharesLine(candidate, item)), matched);
+    if (best) {
+      addReason(item, 'differs_from_second_reading');
+      addReason(best, 'differs_from_second_reading');
+    }
+  }
+  const merged = uniqueItemIds(inReadingOrder([...read, ...kept]));
+  const { identity, conflict } = mergeIdentity(first.identity, second.identity);
+  const cited = new Set([...merged.flatMap((item) => item.lineIds), ...identity.lineIds]);
+  const missed = merged.some((item) => item.checkReasons.includes('duplicate_source_span'))
+    || suspiciousUncited(lines, cited).length > 0;
+  const flagReasons: FlagReason[] = [...second.flagReasons.filter((reason) => reason !== 'possible_missed_item'
+    && !(conflict && reason === 'ai_unsure')), ...(conflict ? ['ai_unsure' as const] : []),
+  ...(missed ? ['possible_missed_item' as const] : [])];
+  return { ...second, items: merged, identity, flagReasons };
+}
+
+/** Add a check reason once; the item goes to a person, with the sentence of its first reason. */
+function addReason(item: PaperItem, code: string): void {
+  if (!item.checkReasons.includes(code)) item.checkReasons.push(code);
+  item.confidence = 'check_carefully';
+  item.checkReason = checkReasonSentence(item.checkReasons);
+}
+
+/** Normalised text for comparing two readings: compact (case, spacing, "5 mg" = "5mg"), placeholders blanked. */
+const comparable = (text: string) => compact(withoutPlaceholders(text));
+
+/**
+ * The one second-reading item (same kind, on a shared line: the candidates) that a kept first-pass item is to be
+ * compared with, or null: for a medicine or diagnosis the same name, for an allergy the same substance, for a lab
+ * result the same test, for a vital the same measure (normalised), and for a note the most shared words of four
+ * letters or more (at least one; so "the" alone never pairs two notes). Unmatched candidates go first, then reading
+ * order.
+ */
+function bestMatch(item: PaperItem, candidates: readonly PaperItem[], matched: ReadonlySet<PaperItem>): PaperItem | null {
+  const ordered = [...candidates.filter((other) => !matched.has(other)), ...candidates.filter((other) => matched.has(other))];
+  const key = (other: PaperItem): string | null => {
+    switch (other.kind) {
+      case 'medicine': case 'diagnosis': return other.fields.name === null ? null : comparable(other.fields.name);
+      case 'allergy': return other.fields.substance === null ? null : comparable(other.fields.substance);
+      case 'lab_result': return other.fields.test === null ? null : comparable(other.fields.test);
+      case 'vital': return other.fields.measure;
+      default: return null;
+    }
+  };
+  if (item.kind === 'note') {
+    const words = (other: PaperItem) => new Set(wordsIn(withoutPlaceholders(other.kind === 'note'
+      ? other.fields.text ?? other.asWritten : other.asWritten)).filter((word) => word.length >= 4));
+    const own = words(item);
+    let best: PaperItem | null = null;
+    let most = 0;
+    for (const other of ordered) {
+      const shared = [...words(other)].filter((word) => own.has(word)).length;
+      if (shared > most) { most = shared; best = other; }
+    }
+    return best;
+  }
+  const own = key(item);
+  return own === null || own === '' ? null : ordered.find((other) => key(other) === own) ?? null;
+}
+
+/**
+ * The identity after a re-read, field by field: each of the name, date of birth, folder number and sex as the
+ * second reading has it where only it has one, else as the first pass had it. Where both give a value and the
+ * values differ (normalised), the first pass's is kept and `conflict` is true (the page is then flagged ai_unsure):
+ * identity drives patient matching, so it is never changed silently. Lines are those of both readings and the box
+ * the one around both boxes.
+ */
+export function mergeIdentity(first: PaperIdentity, second: PaperIdentity): { identity: PaperIdentity; conflict: boolean } {
+  let conflict = false;
+  const pick = (a: string | null, b: string | null) => {
+    if (a === null) return b;
+    if (b !== null && comparable(a) !== comparable(b)) conflict = true;
+    return a;
+  };
+  const identity: PaperIdentity = {
+    nameAsWritten: pick(first.nameAsWritten, second.nameAsWritten),
+    dateOfBirthAsWritten: pick(first.dateOfBirthAsWritten, second.dateOfBirthAsWritten),
+    folderNumberAsWritten: pick(first.folderNumberAsWritten, second.folderNumberAsWritten),
+    sexAsWritten: pick(first.sexAsWritten, second.sexAsWritten),
+    lineIds: [...new Set([...second.lineIds, ...first.lineIds])].sort((a, b) => lineNumber(a) - lineNumber(b)),
+    box: unionBox([first.box, second.box]),
+  };
+  return { identity, conflict };
+}
+
+/**
+ * Whether a second-reading item carries everything a first-pass item of the same kind says. 'exact': every field
+ * the contract has for the kind, plus dateAsWritten and the prescription (prescriber and date), the same after
+ * normalising, a missing field equal only to a missing field. 'superset': every field the first pass filled in
+ * the same, normalised; a field the first pass left empty may be filled by the second reading.
+ */
+function carries(second: PaperItem, first: PaperItem, mode: 'exact' | 'superset'): boolean {
+  if (second.kind !== first.kind) return false;
+  const same = (x: unknown, y: unknown): boolean => {
+    if (y === null || y === undefined) return mode === 'superset' || x === null || x === undefined;
+    if (x === null || x === undefined) return false;
+    if (typeof x === 'string' && typeof y === 'string') return comparable(x) === comparable(y);
+    if (typeof x === 'object' && typeof y === 'object') {
+      const keys = new Set([...Object.keys(x), ...Object.keys(y)]);
+      return [...keys].every((key) => same((x as Record<string, unknown>)[key], (y as Record<string, unknown>)[key]));
+    }
+    return x === y;
+  };
+  return same(second.fields, first.fields) && same(second.dateAsWritten, first.dateAsWritten)
+    && same(second.prescription, first.prescription);
 }
 
 function markDuplicateSpan(item: PaperItem): void {

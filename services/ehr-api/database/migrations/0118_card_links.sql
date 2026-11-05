@@ -5,13 +5,15 @@
 -- after legal approval (NDPA, D13): identity-api, ehr-api and
 -- notification-api serve it unless CARD_LINKS_ENABLED=false, which switches
 -- a service off. The declaration is signed separately. Written on 0116
--- (claude/patient-entries-0116, on 0103 34d69557), then released on 0107 and
--- 0116 (0001-0107, then 0116, then this file): it uses nothing 0104-0115 or
+-- (claude/patient-entries-0116, on 0103 34d69557), then released on 0108 and
+-- 0116 (0001-0108, then 0116, then this file): it uses nothing 0104-0115 or
 -- 0117 add, and every object it reads is of 0001-0103 or 0116, unchanged by
--- 0104, 0105, 0106 and 0107 (the pins below were re-measured on a 0001-0107
--- and 0116 database; 0104 replaced identity.has_active_consent_grant, which
--- nothing here calls or pins; 0106 only seeds the OCR worker's account;
--- 0107 changes only objects in schema ocr).
+-- 0104-0108 (the pins below were re-measured on a 0001-0108 and 0116
+-- database; 0104 replaced identity.has_active_consent_grant, which nothing
+-- here calls or pins; 0106 only seeds the OCR worker's account; 0107 changes
+-- only objects in schema ocr; 0108 replaces only the body of
+-- identity.records_processing_direct_care_cover, which nothing here calls
+-- or pins).
 -- No migration number appears in a function body, so a renumber touches
 -- file names and ledgers only.
 --
@@ -32,7 +34,7 @@
 --    and nothing is applied): 0116 applied (ehr.create_my_patient_entry's
 --    body and the patient_entries_read policy are the marker); nothing of
 --    this file exists (else 55000 "0118: already applied"); the bodies the
---    new ones call or rely on are byte for byte those of 0001-0107 and 0116
+--    new ones call or rely on are byte for byte those of 0001-0108 and 0116
 --    (md5 of pg_proc.prosrc): identity.patient_self_session and
 --    identity.patient_account_deletion_due (0096),
 --    identity.current_patient_account (0096, which identity-api calls for the
@@ -146,7 +148,7 @@
 -- website drop unknown Activity kinds. The new images touch the new objects
 -- while CARD_LINKS_ENABLED is on, which is the default, so they run before
 -- this migration only with CARD_LINKS_ENABLED=false. Applied migrations
--- 0001-0107 and 0116 are immutable.
+-- 0001-0108 and 0116 are immutable.
 
 -- 0. Preconditions. Whether holder holds a privilege on an object by
 -- ownership, membership (direct or through other roles) or grant (also to
@@ -205,7 +207,7 @@ begin
      or to_regclass('auth.accounts') is null or to_regclass('audit.events') is null
      or to_regclass('notification.inbox_items') is null
      or to_regprocedure('identity.patient_self_access_log(text,uuid,integer,timestamptz,bigint)') is null then
-    raise exception using errcode = '55000', message = '0118: 0001-0107 and 0116 must be applied first';
+    raise exception using errcode = '55000', message = '0118: 0001-0108 and 0116 must be applied first';
   end if;
   -- b. Not applied yet.
   if to_regclass('identity.card_shares') is not null
@@ -224,7 +226,7 @@ begin
     raise exception using errcode = '55000', message = '0118: already applied';
   end if;
   -- c. The bodies the new ones call or rely on, and the one section 5
-  -- replaces, as 0001-0107 and 0116 left them.
+  -- replaces, as 0001-0108 and 0116 left them.
   select string_agg(format('%s md5 %s', expected.proc, coalesce(md5(proc.prosrc), 'none (missing)')), '; ')
     into mismatch
     from (values
@@ -328,7 +330,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0118: an object this migration relies on differs from 0001-0107 and 0116: %s', mismatch);
+      message = format('0118: an object this migration relies on differs from 0001-0108 and 0116: %s', mismatch);
   end if;
   -- g. Privileges, never through a superuser's bypass (production's
   -- migrator has none).

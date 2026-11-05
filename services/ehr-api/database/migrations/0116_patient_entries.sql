@@ -4,7 +4,7 @@
 -- removes is hidden everywhere and kept; the akos-plan README of
 -- 2026-11-03 gives this item the number 0116; the declaration is signed
 -- separately). Photos and files on these records are a later migration.
--- Written on 0103 (34d69557) and released on 0107: every lower number is
+-- Written on 0103 (34d69557) and released on 0108: every lower number is
 -- assumed applied, and only objects of 0001-0103 are read, with one body as
 -- 0104 left it (identity.has_active_consent_grant, pinned in section 0).
 --
@@ -22,7 +22,7 @@
 --    identity.organization_application_admin_account body is the marker);
 --    nothing of this file exists yet (else 55000 "0116: already applied");
 --    the bodies the new commands, the read policy and the no-delete trigger
---    rely on are byte for byte the ones measured on 0107, the chain head it
+--    rely on are byte for byte the ones measured on 0108, the chain head it
 --    is released on (md5 of pg_proc.prosrc; all as on 0103 except
 --    identity.has_active_consent_grant, which is 0104's body, so 0104 must be
 --    applied first): ehr.patient_self_context, ehr.imported_record_read_
@@ -121,7 +121,7 @@
 -- writes patient_entry chunks only while PATIENT_ENTRIES_ENABLED is on, which
 -- defaults to on since the owner's decision of 4 Nov 2026: that image runs
 -- before this migration only with PATIENT_ENTRIES_ENABLED=false. Applied
--- migrations 0001 through 0107 are immutable.
+-- migrations 0001 through 0108 are immutable.
 
 -- 0. Preconditions. Whether holder holds a privilege on an object by
 -- ownership, membership (direct or through other roles) or grant (also to
@@ -243,7 +243,7 @@ begin
   end if;
   if mismatch is not null then
     raise exception using errcode = '55000',
-      message = format('0116: an object this migration relies on differs from 0001-0107: %s', mismatch);
+      message = format('0116: an object this migration relies on differs from 0001-0108: %s', mismatch);
   end if;
   -- e. Privileges, never through a superuser's bypass (production's
   -- migrator has none).
