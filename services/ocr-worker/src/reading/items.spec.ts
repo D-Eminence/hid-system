@@ -652,13 +652,23 @@ describe('checkPage for a page read from its picture (image re-read)', () => {
     expect(result.items[0]!.checkReasons).not.toContain('number_not_in_text_read');
   });
 
-  it('keeps an item the service misread (no text match needed), but a dose disagreement still shows first', () => {
+  it('keeps an item the service misread (no text match needed), with the picture sentence, not a dose disagreement', () => {
     const result = fromImage(modelPage([modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'],
       name: 'Amlodipine', strength: '5mg', frequency: 'od', status: 'current', box: onLine(1) })]));
     expect(result.items).toHaveLength(1);
     expect(result.items[0]!.asWritten).toBe('Amlodipine 5mg od');
-    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(['read_from_image', 'strength_mismatch']));
-    expect(result.items[0]!.checkReason).toBe("A dose on the paper doesn't match what was read.");
+    // Held to what was read in the picture, not to the line text "Amlodipne 5rng od".
+    expect(result.items[0]!.checkReasons).toEqual(['low_ocr_confidence_handwritten', 'handwritten', 'read_from_image']);
+    expect(result.items[0]!.checkReason).toBe('This was read from the picture of the page; check it against the paper.');
+    expect(result.items[0]!.fields).toMatchObject({ name: 'Amlodipine', strength: '5mg', frequency: 'od' });
+    // The corrected item does not make its page look as if it left something out of its line (a one-line page,
+    // so no uncited line counts either).
+    const alone = checkPage({ page: 1, lines: page.lines.slice(0, 1), sourceSha256Hex: SOURCE_SHA, readBy: 'reread',
+      masker: createMasker(), fromImage: true, answer: modelPage([modelItem({ kind: 'medicine',
+        asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'], name: 'Amlodipine', strength: '5mg', frequency: 'od',
+        status: 'current', box: onLine(1) })]) });
+    expect(alone.items).toHaveLength(1);
+    expect(alone.flagReasons).not.toContain('possible_missed_item');
     // The same answer read from the text alone is not grounded and is dropped.
     const textOnly = checkPage({ page: 1, lines: page.lines, sourceSha256Hex: SOURCE_SHA, readBy: 'reread',
       masker: createMasker(), answer: modelPage([modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg od',
@@ -682,12 +692,45 @@ describe('checkPage for a page read from its picture (image re-read)', () => {
     expect(JSON.stringify(result)).not.toContain('Hypertension');
   });
 
-  it('uses intersection over the smaller box, at least 0.5, against the union of the cited lines', () => {
-    // Lines 1 and 3 together span top 0.05 to 0.17; a box over half inside that is kept, one mostly outside is not.
-    const item = (box: { left: number; top: number; width: number; height: number }) => modelItem({ kind: 'note',
-      asWritten: 'Amlodipine', noteText: 'Amlodipine', lineIds: ['p1-l1', 'p1-l3'], box });
-    expect(fromImage(modelPage([item({ left: 0.5, top: 0.1, width: 0.2, height: 0.04 })])).items).toHaveLength(1);
-    expect(fromImage(modelPage([item({ left: 0.55, top: 0.1, width: 0.2, height: 0.04 })])).items).toHaveLength(0);
+  it("still holds an item's own fields to what it read in the picture", () => {
+    const result = fromImage(modelPage([modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'],
+      name: 'Amlodipine', strength: '10mg', frequency: 'od', status: 'current', box: onLine(1) })]));
+    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(['strength_mismatch', 'read_from_image',
+      'number_not_in_text_read']));
+  });
+
+  describe('place: each cited line on its own, little on uncited lines, a real box, a text anchor', () => {
+    const note = (lineIds: string[], box: { left: number; top: number; width: number; height: number },
+      asWritten = 'Paracetamol tds') => modelItem({ kind: 'note', asWritten, noteText: asWritten, lineIds, box });
+
+    it('drops an item citing lines 1 and 4 whose box sits on the uncited line 3', () => {
+      const result = fromImage(modelPage([note(['p1-l1', 'p1-l4'], onLine(3), 'Amlodipne Hypertension')]));
+      expect(result.items).toEqual([]);
+      expect(result.droppedUngrounded).toBe(1);
+    });
+
+    it('drops a tiny box inside a cited line', () => {
+      expect(fromImage(modelPage([note(['p1-l2'], { left: 0.2, top: 0.105, width: 0.001, height: 0.001 },
+        'Metformin')])).items).toEqual([]);
+    });
+
+    it('drops a made-up item with a cited line box copied, when it shares no word or number with that line', () => {
+      const lineBox = page.lines[0]!.box!;
+      const result = fromImage(modelPage([modelItem({ kind: 'medicine', asWritten: 'Warfarin 10mg bd', lineIds: ['p1-l1'],
+        name: 'Warfarin', strength: '10mg', frequency: 'bd', status: 'current', box: lineBox })]));
+      expect(result.items).toEqual([]);
+      expect(result.droppedUngrounded).toBe(1);
+      expect(JSON.stringify(result)).not.toContain('Warfarin');
+    });
+
+    it('keeps an item over two cited lines, and drops one on a cited line that lies mostly on an uncited one', () => {
+      const both = fromImage(modelPage([note(['p1-l2', 'p1-l3'], { left: 0.12, top: 0.1, width: 0.3, height: 0.07 },
+        'Metformin Paracetamol')]));
+      expect(both.items).toHaveLength(1);
+      // Cites line 2 only, but most of the line area under the box is line 3's.
+      const spill = fromImage(modelPage([note(['p1-l2'], { left: 0.12, top: 0.11, width: 0.3, height: 0.06 }, 'Metformin')]));
+      expect(spill.items).toEqual([]);
+    });
   });
 
   it('stores the model box clipped to the page, and flags a number the text read does not have', () => {

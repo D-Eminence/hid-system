@@ -13,12 +13,14 @@ export const IMAGE_MAX_BASE64_LENGTH = 10_000_000;
 export const IMAGE_MAX_DIMENSION_PX = 8_000;
 
 export type PageImageMediaType = 'image/png' | 'image/jpeg';
-export interface PageImage { readonly mediaType: PageImageMediaType; readonly base64: string }
+/** The picture as sent: its media type, its base64 and its own size in pixels (from its header). */
+export interface PageImage { readonly mediaType: PageImageMediaType; readonly base64: string; readonly width: number;
+  readonly height: number }
 
 export interface SourceDocument { readonly mediaType: string; readonly bytes: Uint8Array }
 
 export type PageImageDecision =
-  | { kind: 'image'; mediaType: PageImageMediaType; bytes: Uint8Array }
+  | { kind: 'image'; mediaType: PageImageMediaType; bytes: Uint8Array; width: number; height: number }
   | { kind: 'skip'; reason: ImageRereadSkipReason };
 
 /** The base64 length of n bytes (padded). */
@@ -86,5 +88,60 @@ export function pageImageFor(document: SourceDocument | undefined, page: number,
   if (size.width > IMAGE_MAX_DIMENSION_PX || size.height > IMAGE_MAX_DIMENSION_PX) {
     return { kind: 'skip', reason: 'image_too_large' };
   }
-  return { kind: 'image', mediaType: document.mediaType, bytes: document.bytes };
+  return { kind: 'image', mediaType: document.mediaType, bytes: document.bytes, width: size.width, height: size.height };
+}
+
+/**
+ * Image limits by model tier (platform.claude.com/docs/en/build-with-claude/vision, "Resolution and token cost",
+ * read 2026-11-05): Claude 4.7 and later models are on the high-resolution tier (2,576 px long edge, 4,784 visual
+ * tokens); all other models on the standard tier (1,568 px, 1,568 tokens).
+ */
+export interface ImageTier { readonly maxEdge: number; readonly maxTokens: number }
+export const HIGH_RESOLUTION_TIER: ImageTier = { maxEdge: 2_576, maxTokens: 4_784 };
+export const STANDARD_TIER: ImageTier = { maxEdge: 1_568, maxTokens: 1_568 };
+
+/** The tier of a first-party model id: 4.7 and later is high resolution; anything not recognised is standard. */
+export function imageTierOf(model: string): ImageTier {
+  const version = /^claude-[a-z]+-(\d+)(?:-(\d{1,2}))?(?:-|$)/.exec(model);
+  if (!version) return STANDARD_TIER;
+  const major = Number(version[1]);
+  const minor = Number(version[2] ?? 0);
+  return major > 4 || (major === 4 && minor >= 7) ? HIGH_RESOLUTION_TIER : STANDARD_TIER;
+}
+
+/** Visual tokens of an image: one per 28x28 pixel patch. */
+export function imageTokens(width: number, height: number): number {
+  return Math.ceil(width / 28) * Math.ceil(height / 28);
+}
+
+/** Round half to even, as the API resolves exact .5 ties (Python's round()). */
+function roundTiesToEven(value: number): number {
+  const floor = Math.floor(value);
+  if (value - floor !== 0.5) return Math.round(value);
+  return floor % 2 === 0 ? floor : floor + 1;
+}
+
+/**
+ * The size the API resizes a picture to before it reads it (before padding to a multiple of 28 px, which holds
+ * nothing), by the documented reference implementation (platform.claude.com/docs/en/build-with-claude/
+ * vision-coordinates, "Resize your image before uploading", read 2026-11-05). The pixel coordinates the model
+ * returns are in this size, so boxes are normalised by it, never by the padded size.
+ */
+export function resizedSize(width: number, height: number, tier: ImageTier): { width: number; height: number } {
+  const fits = (w: number, h: number) => Math.ceil(w / 28) * 28 <= tier.maxEdge && Math.ceil(h / 28) * 28 <= tier.maxEdge
+    && imageTokens(w, h) <= tier.maxTokens;
+  if (fits(width, height)) return { width, height };
+  if (height > width) {
+    const turned = resizedSize(height, width, tier);
+    return { width: turned.height, height: turned.width };
+  }
+  const aspect = width / height;
+  let lo = 1;
+  let hi = width;
+  while (lo + 1 < hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (fits(mid, Math.max(roundTiesToEven(mid / aspect), 1))) lo = mid;
+    else hi = mid;
+  }
+  return { width: lo, height: Math.max(roundTiesToEven(lo / aspect), 1) };
 }

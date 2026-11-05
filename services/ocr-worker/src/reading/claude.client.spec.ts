@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient, retryAfterMs } from './claude.client';
 import { Semaphore } from '../semaphore';
+import { HIGH_RESOLUTION_TIER, resizedSize, STANDARD_TIER } from './page-image';
 import { MODEL_OUTPUT_IMAGE_JSON_SCHEMA, MODEL_OUTPUT_JSON_SCHEMA, SYSTEM_PROMPT } from './prompt';
 import { fixturePng, modelItem, modelPage } from './test-fixtures';
 
@@ -245,7 +246,8 @@ describe('ClaudePageClient', () => {
 
   describe('image re-read requests', () => {
     const pictureBytes = fixturePng(1240, 1754);
-    const image = { mediaType: 'image/png' as const, base64: Buffer.from(pictureBytes).toString('base64') };
+    const image = { mediaType: 'image/png' as const, base64: Buffer.from(pictureBytes).toString('base64'), width: 1240,
+      height: 1754 };
     const lines = [{ id: 'p1-l1', text: 'Dx: Hypertension', confidence: 0.987, handwritten: false,
       box: { left: 0.1, top: 0.1, width: 0.5, height: 0.02 } },
     { id: 'p1-l2', text: 'Amlodipine 5mg od', confidence: 0.61, handwritten: true, box: null }];
@@ -265,13 +267,19 @@ describe('ClaudePageClient', () => {
     });
 
     it('puts the picture before the page text, keeps the cached system prefix, US inference and the fixed endpoint', async () => {
-      const box = { left: 0.1, top: 0.1, width: 0.3, height: 0.02 };
+      // Pixels of the 1240 x 1754 picture (within the high-resolution tier, so not resized).
+      const box = { x1: 124, y1: 175.4, x2: 496, y2: 210.48 };
       const imageAnswer = { ...answer, items: answer.items.map((item) => ({ ...item, box })) };
       const text = client([sse(JSON.stringify(answer))]);
       await text.instance.readPage(pinned, new AbortController().signal);
       const { instance, fetch } = client([sse(JSON.stringify(imageAnswer))]);
       const result = await instance.readPage({ ...pinned, image }, new AbortController().signal);
-      expect(result.kind === 'answer' && result.answer.items[0]!.box).toEqual(box);
+      // Normalised in code: page fractions.
+      const read = result.kind === 'answer' ? result.answer.items[0]!.box! : null;
+      expect(read).not.toBeNull();
+      for (const [key, expected] of Object.entries({ left: 0.1, top: 0.1, width: 0.3, height: 0.02 })) {
+        expect(read![key as keyof typeof read]).toBeCloseTo(expected, 6);
+      }
       const [url] = fetch.mock.calls[0]!;
       expect(String(url)).toBe('https://api.anthropic.com/v1/messages');
       const body = JSON.parse(bodyOf(fetch)) as { inference_geo: string; system: unknown; messages: Array<{
@@ -285,14 +293,41 @@ describe('ClaudePageClient', () => {
       expect(first).toEqual({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: image.base64 } });
       expect(second).toMatchObject({ type: 'text' });
       expect(String(second!.text)).toContain('read the writing from the picture');
-      expect(String(second!.text)).toContain('"box":{"left":0.1,"top":0.1,"width":0.5,"height":0.02}');
+      expect(String(second!.text)).toContain('1240 pixels wide and 1754 pixels high');
+      expect(String(second!.text)).toContain('absolute pixel coordinates');
+      expect(String(second!.text)).not.toContain('fractions');
+      expect(String(second!.text)).toContain('"box":{"x1":124,"y1":175,"x2":744,"y2":210}');
       expect(String(second!.text)).toContain('"handwritten":true');
       expect(body.output_config.format.schema).toEqual(MODEL_OUTPUT_IMAGE_JSON_SCHEMA);
       expect(textBody.output_config.format.schema).toEqual(MODEL_OUTPUT_JSON_SCHEMA);
     });
 
+    it('works in the pixels of the picture as the API resizes it, by the model tier', async () => {
+      // A4 at 300 dpi: over the high-resolution token budget, so the API reads it smaller (resizedSize).
+      const big = { ...image, width: 2480, height: 3508 };
+      const seenSize = resizedSize(2480, 3508, HIGH_RESOLUTION_TIER);
+      expect(seenSize.width).toBeLessThan(2480);
+      const box = { x1: seenSize.width / 2, y1: seenSize.height / 4, x2: seenSize.width, y2: seenSize.height / 2 };
+      const { instance, fetch } = client([sse(JSON.stringify({ ...answer, items: answer.items.map((item) => ({ ...item, box })) }))]);
+      const result = await instance.readPage({ ...pinned, image: big }, new AbortController().signal);
+      const body = JSON.parse(bodyOf(fetch)) as { messages: Array<{ content: Array<{ text?: string }> }> };
+      expect(body.messages[0]!.content[1]!.text).toContain(`${seenSize.width} pixels wide and ${seenSize.height} pixels high`);
+      const read = result.kind === 'answer' ? result.answer.items[0]!.box! : null;
+      expect(read!.left).toBeCloseTo(0.5, 6);
+      expect(read!.top).toBeCloseTo(0.25, 6);
+      expect(read!.width).toBeCloseTo(0.5, 6);
+      expect(read!.height).toBeCloseTo(0.25, 6);
+      // A standard-tier model sees the same picture smaller still.
+      const standard = client([sse(JSON.stringify(answer))]);
+      await standard.instance.readPage({ ...pinned, model: 'claude-sonnet-4-5', image: big }, new AbortController().signal)
+        .catch(() => undefined);
+      const small = resizedSize(2480, 3508, STANDARD_TIER);
+      const standardBody = JSON.parse(bodyOf(standard.fetch)) as typeof body;
+      expect(standardBody.messages[0]!.content[1]!.text).toContain(`${small.width} pixels wide and ${small.height} pixels high`);
+    });
+
     it('treats an image answer without item boxes as malformed, and a text answer with boxes as malformed', async () => {
-      const box = { left: 0.1, top: 0.1, width: 0.3, height: 0.02 };
+      const box = { x1: 124, y1: 175, x2: 496, y2: 210 };
       const { instance } = client([sse(JSON.stringify(answer)),
         sse(JSON.stringify({ ...answer, items: answer.items.map((item) => ({ ...item, box })) }))]);
       const signal = new AbortController().signal;

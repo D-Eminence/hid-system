@@ -422,12 +422,14 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     const result = completed(repository);
     const payload = result.structuredPayload as PaperReadingPayload;
     expect(payload.reading).toMatchObject({ imageRereadPages: [1], imageRereadSkipped: [] });
-    // The Textract text says "437rng": the dose disagreement is the sentence shown, read_from_image is still a reason.
+    // The Textract text says "437rng": the item is held to what was read in the picture, so the sentence shown is
+    // the picture's, not a dose disagreement with the paper.
     expect(payload.items[0]).toMatchObject({ readBy: 'reread', confidence: 'check_carefully',
-      checkReason: "A dose on the paper doesn't match what was read." });
+      checkReason: 'This was read from the picture of the page; check it against the paper.' });
     expect(payload.items[0]!.checkReasons).toContain('read_from_image');
+    expect(payload.items[0]!.checkReasons).not.toContain('strength_mismatch');
     expect(result.provenance.reading).toMatchObject({ imageRereadPages: [1], imageRereadSkipped: [],
-      imagePromptVersion: 'hid-paper-reading-image-prompt-1' });
+      imagePromptVersion: 'hid-paper-reading-image-prompt-2' });
     // Picture tokens count in the usage records as any other input.
     expect(repository.recordAiUsage).toHaveBeenCalledWith(job, expect.objectContaining({ model: 'claude-opus-5-5',
       requests: 1, inputTokens: 6000 }));

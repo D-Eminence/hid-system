@@ -79,23 +79,22 @@ export interface PageCheckInput {
   readBy: 'first_pass' | 'reread';
   masker: Masker;
   /**
-   * The answer was read from the picture of the page (image re-read). Its items are held to the page by place,
-   * not by text: each must cite lines on this page and give a box that overlaps those lines' box.
+   * The answer was read from the picture of the page (image re-read). Its items are held to the page by place
+   * (each cited line under the item's box, little of the box on lines it does not cite) and by a text anchor (a
+   * word or number shared with its cited lines), not by an exact text match; see imagePlace.
    */
   fromImage?: boolean;
 }
 
-/** Intersection over the smaller box, as the accuracy kit's scorer places items: 1 when one lies inside the other. */
-export function boxOverlap(a: Box, b: Box): number {
-  const width = Math.min(a.left + a.width, b.left + b.width) - Math.max(a.left, b.left);
-  const height = Math.min(a.top + a.height, b.top + b.height) - Math.max(a.top, b.top);
-  if (width <= 0 || height <= 0) return 0;
-  const smaller = Math.min(a.width * a.height, b.width * b.height);
-  return smaller > 0 ? (width * height) / smaller : 0;
-}
-
-/** An image-read item sits where the writing is when its box and its cited lines' box overlap this much. */
+/**
+ * An image-read item sits on a cited line when, on that line, it covers at least this share of the line's height
+ * and of the narrower of the two widths.
+ */
 export const IMAGE_PLACE_OVERLAP = 0.5;
+/** At most this share of the line area an image-read item's box covers may be on lines it does not cite. */
+export const IMAGE_UNCITED_SHARE = 0.5;
+/** The smallest image-read item box, as a share of the page's width and of its height. */
+export const IMAGE_MIN_BOX = 0.005;
 
 /** A model box clipped to the page ([0, 1] on both axes); null where nothing of it is on the page. */
 export function clipBox(box: { left: number; top: number; width: number; height: number }): Box | null {
@@ -108,13 +107,48 @@ export function clipBox(box: { left: number; top: number; width: number; height:
   return { left: round4(left), top: round4(top), width: round4(right - left), height: round4(bottom - top) };
 }
 
-/** The stored box of an image-read item, or null where it does not sit on its cited lines (it is then dropped). */
-function imagePlace(raw: ModelItem, lines: readonly ReadLine[]): Box | null {
+const span = (aStart: number, aSize: number, bStart: number, bSize: number) =>
+  Math.max(0, Math.min(aStart + aSize, bStart + bSize) - Math.max(aStart, bStart));
+const area = (box: Box) => box.width * box.height;
+const intersection = (a: Box, b: Box) => span(a.left, a.width, b.left, b.width) * span(a.top, a.height, b.top, b.height);
+
+/** Whether the item's box lies on this line: over half the line's height, and over half the narrower width. */
+function onLine(box: Box, line: Box): boolean {
+  return span(box.top, box.height, line.top, line.height) >= IMAGE_PLACE_OVERLAP * line.height
+    && span(box.left, box.width, line.left, line.width) >= IMAGE_PLACE_OVERLAP * Math.min(box.width, line.width);
+}
+
+/**
+ * Whether the item read from the picture shares anything with the text read of its lines: a word of three letters
+ * or more, or a number. It need not match the text (the service may have misread it), but an item with nothing in
+ * common with its lines (a box copied from the prompt around a made-up item) is not kept.
+ */
+function anchored(asWritten: string, source: string): boolean {
+  const text = withoutPlaceholders(source);
+  const words = new Set(wordsIn(text).filter((word) => word.length >= 3));
+  const numbers = new Set(numbersIn(text));
+  const own = withoutPlaceholders(asWritten);
+  return wordsIn(own).some((word) => words.has(word)) || numbersIn(own).some((number) => numbers.has(number));
+}
+
+/**
+ * The stored box of an image-read item, or null where it is not held to its cited lines (it is then dropped):
+ * the box at least IMAGE_MIN_BOX on each side; on every cited line that has a box (each measured on its own, not
+ * as one box around them all); with at most IMAGE_UNCITED_SHARE of the line area it covers on lines it does not
+ * cite; and its asWritten anchored in the cited lines' text.
+ */
+function imagePlace(raw: ModelItem, cited: readonly ReadLine[], all: readonly ReadLine[], source: string): Box | null {
   if (!raw.box) return null;
   const box = clipBox(raw.box);
-  const cited = unionBox(lines.map((line) => line.box));
-  if (box === null || cited === null) return null;
-  return boxOverlap(box, cited) >= IMAGE_PLACE_OVERLAP ? box : null;
+  if (box === null || box.width < IMAGE_MIN_BOX || box.height < IMAGE_MIN_BOX) return null;
+  const citedBoxes = cited.map((line) => line.box).filter((line): line is Box => line !== null);
+  if (citedBoxes.length === 0 || !citedBoxes.every((line) => onLine(box, line))) return null;
+  const citedIds = new Set(cited.map((line) => line.id));
+  const coveredBy = (lines: readonly ReadLine[]) => lines.reduce((sum, line) => sum + (line.box ? intersection(box, line.box) : 0), 0);
+  const onCited = coveredBy(cited);
+  const onUncited = coveredBy(all.filter((line) => !citedIds.has(line.id)));
+  if (onUncited > IMAGE_UNCITED_SHARE * (onCited + onUncited)) return null;
+  return anchored(raw.asWritten, source) && area(box) > 0 ? box : null;
 }
 
 export interface PageCheck {
@@ -164,12 +198,19 @@ export function checkPage(input: PageCheckInput): PageCheck {
     }
     const lines = cited as ReadLine[];
     // Read from the picture: held to the page by place. Dropped items are only counted, as above.
-    const place = input.fromImage ? imagePlace(raw, lines) : null;
+    const place = input.fromImage ? imagePlace(raw, lines, input.lines, source) : null;
     if (input.fromImage && place === null) {
       dropped += 1;
       continue;
     }
-    const item = checkItem(raw, lines, lineIds, source, pageText, order, medicineNames, allergySubstances, input);
+    // An item read from the picture is meant to differ from the text the service read, so its fields are held
+    // to what the model read in the picture (its asWritten), not to the line text: a dose or word the service
+    // misread is not "on the paper doesn't match". How legible the lines were still counts, and a number the
+    // line text doesn't have is flagged in markReadFromImage.
+    const item = place === null
+      ? checkItem(raw, lines, lineIds, source, pageText, order, medicineNames, allergySubstances, input)
+      : checkItem(raw, lines.map((line, index) => ({ ...line, text: index === 0 ? raw.asWritten : '' })), lineIds,
+        raw.asWritten, `${pageText}\n${raw.asWritten}`, order, medicineNames, allergySubstances, input);
     if (place !== null) markReadFromImage(item, raw, source, place);
     const group = seen.get(item.id) ?? [];
     // An exact repeat (same kind, lines, asWritten and fields) collapses to one.
@@ -202,8 +243,10 @@ export function checkPage(input: PageCheckInput): PageCheck {
     ...(lowHandwritten ? ['low_confidence_handwriting'] : []),
     ...(shakyShare >= 0.3 ? ['many_check_carefully'] : []),
   ];
+  // An item read from the picture is not in the line text by design, so it cannot show what a line leaves over:
+  // such a page is checked for missed items by its uncited lines only.
   const missed = duplicateSpan || suspiciousUncited(input.lines, cited).length > 0
-    || partlyCovered(input.lines, items).length > 0;
+    || partlyCovered(input.lines, input.fromImage ? [] : items).length > 0;
   const flagReasons: FlagReason[] = [
     ...(anyLowPrinted || shakyShare >= 0.3 ? ['low_confidence' as const] : []),
     ...(anyLowHandwritten ? ['handwriting' as const] : []),

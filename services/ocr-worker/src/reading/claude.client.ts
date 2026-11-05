@@ -2,9 +2,9 @@ import Anthropic from '@anthropic-ai/sdk';
 import { abortableDelay, fullJitterDelayMs, type Sleep } from '../backoff';
 import type { OcrWorkerConfig } from '../config';
 import { Semaphore } from '../semaphore';
-import type { PageImage } from './page-image';
+import { imageTierOf, resizedSize, type PageImage } from './page-image';
 import { imagePageMessage, MODEL_OUTPUT_IMAGE_JSON_SCHEMA, MODEL_OUTPUT_JSON_SCHEMA, modelImagePageSchema,
-  modelPageSchema, pageMessage, SYSTEM_PROMPT, type ModelPage } from './prompt';
+  modelPageSchema, pageMessage, SYSTEM_PROMPT, toFractionBox, type ModelPage } from './prompt';
 
 /** The Claude API, always at its own endpoint: ANTHROPIC_BASE_URL is never read. */
 export const ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
@@ -114,6 +114,8 @@ export class ClaudePageClient implements PageModelClient {
 
   async readPage(request: PageRequest, signal: AbortSignal): Promise<PageAnswer> {
     const image = request.image;
+    // The picture as the model sees it: the model's pixel coordinates are in this size (resized, unpadded).
+    const seen = image ? resizedSize(image.width, image.height, imageTierOf(request.model)) : null;
     const params: Anthropic.MessageCreateParamsNonStreaming = {
       model: request.model,
       max_tokens: this.config.OCR_AI_MAX_TOKENS,
@@ -122,11 +124,14 @@ export class ClaudePageClient implements PageModelClient {
       output_config: { effort: request.effort, format: { type: 'json_schema',
         schema: { ...(image ? MODEL_OUTPUT_IMAGE_JSON_SCHEMA : MODEL_OUTPUT_JSON_SCHEMA) } } },
       // Frozen prefix: the same bytes for every page and document, cached. The image re-read's own
-      // instructions are in its user turn, so this system block is the same for both kinds of request.
+      // instructions are in its user turn, so this system block is the same for both kinds of request. Its
+      // answer schema (output_config.format) is not: a different structured-output format is a cache breaker,
+      // so image re-reads do not read the text requests' cache and keep their own, which is warm only when
+      // another image re-read came within the cache lifetime. Cost estimates count them without cache reads.
       system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: image
         ? [{ type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.base64 } },
-          { type: 'text', text: imagePageMessage(request.page, request.lines) }]
+          { type: 'text', text: imagePageMessage(request.page, request.lines, seen!) }]
         : pageMessage(request.page, request.lines) }],
     };
     const maxAttempts = this.config.OCR_AI_MAX_RETRIES + 1;
@@ -150,7 +155,7 @@ export class ClaudePageClient implements PageModelClient {
         stream = started;
         const message = await started.finalMessage();
         release();
-        return interpret(message, attempt, spent, image !== undefined);
+        return interpret(message, attempt, spent, seen ?? undefined);
       } catch (error) {
         release();
         sent = attempt;
@@ -196,7 +201,7 @@ function partialUsage(stream: { readonly currentMessage: Anthropic.Message | und
  * call's failed attempts before this one already used; it is added to the answer's usage.
  */
 export function interpret(message: Anthropic.Message, attempts: number, earlier: TokenUsage = noUsage(),
-  withImage = false): PageAnswer {
+  imageSize?: { width: number; height: number }): PageAnswer {
   const usage = usageOf(message);
   addTokens(usage, earlier);
   if (message.stop_reason === 'refusal') return { kind: 'refused', usage, attempts };
@@ -208,7 +213,15 @@ export function interpret(message: Anthropic.Message, attempts: number, earlier:
     .map((block) => block.text).join('');
   let parsed: unknown;
   try { parsed = JSON.parse(text); } catch { return { kind: 'failed', reason: 'malformed', usage, attempts }; }
-  const answer = (withImage ? modelImagePageSchema : modelPageSchema).safeParse(parsed);
+  if (imageSize) {
+    // Read from the picture: the model's pixel boxes become page fractions here, before any check sees them.
+    const read = modelImagePageSchema.safeParse(parsed);
+    if (!read.success) return { kind: 'failed', reason: 'malformed', usage, attempts };
+    const page: ModelPage = { ...read.data, items: read.data.items.map((item) => ({ ...item,
+      box: toFractionBox(item.box, imageSize) })) };
+    return { kind: 'answer', answer: page, usage, attempts, servedInferenceGeo: message.usage.inference_geo ?? null };
+  }
+  const answer = modelPageSchema.safeParse(parsed);
   if (!answer.success) return { kind: 'failed', reason: 'malformed', usage, attempts };
   return { kind: 'answer', answer: answer.data, usage, attempts,
     servedInferenceGeo: message.usage.inference_geo ?? null };

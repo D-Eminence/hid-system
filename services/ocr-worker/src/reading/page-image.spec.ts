@@ -1,4 +1,5 @@
-import { base64Length, IMAGE_MAX_BASE64_LENGTH, jpegDimensions, pageImageFor, pngDimensions } from './page-image';
+import { base64Length, HIGH_RESOLUTION_TIER, IMAGE_MAX_BASE64_LENGTH, imageTierOf, imageTokens, jpegDimensions,
+  pageImageFor, pngDimensions, resizedSize, STANDARD_TIER } from './page-image';
 import { fixtureJpeg, fixturePng } from './test-fixtures';
 
 describe('page picture for the image re-read', () => {
@@ -15,7 +16,7 @@ describe('page picture for the image re-read', () => {
 
   it('allows only a one-page PNG or JPEG by its detected type, within the Claude API image limits', () => {
     const png = { mediaType: 'image/png', bytes: fixturePng(1240, 1754) };
-    expect(pageImageFor(png, 1, 1)).toMatchObject({ kind: 'image', mediaType: 'image/png' });
+    expect(pageImageFor(png, 1, 1)).toMatchObject({ kind: 'image', mediaType: 'image/png', width: 1240, height: 1754 });
     expect(pageImageFor({ mediaType: 'image/jpeg', bytes: fixtureJpeg(1240, 1754) }, 1, 1))
       .toMatchObject({ kind: 'image', mediaType: 'image/jpeg' });
     expect(pageImageFor(undefined, 1, 1)).toEqual({ kind: 'skip', reason: 'image_not_given' });
@@ -46,5 +47,22 @@ describe('page picture for the image re-read', () => {
       .toMatchObject({ kind: 'image' });
     expect(pageImageFor({ mediaType: 'image/png', bytes: fixturePng(1000, 1000, limitBytes - 32) }, 1, 1))
       .toEqual({ kind: 'skip', reason: 'image_too_large' });
+  });
+
+  it('computes the size the API reads a picture at, as the vision coordinates guide does, by model tier', () => {
+    // The guide's own examples (standard tier): an A4 scan at 130 dpi, and a 1920 x 1080 screenshot.
+    expect(resizedSize(1075, 1520, STANDARD_TIER)).toEqual({ width: 924, height: 1307 });
+    expect(resizedSize(1920, 1080, STANDARD_TIER)).toEqual({ width: 1456, height: 819 });
+    // The high-resolution tier reads the same scan as it is.
+    expect(resizedSize(1075, 1520, HIGH_RESOLUTION_TIER)).toEqual({ width: 1075, height: 1520 });
+    const a4 = resizedSize(2480, 3508, HIGH_RESOLUTION_TIER);
+    expect(imageTokens(a4.width, a4.height)).toBeLessThanOrEqual(4_784);
+    expect(Math.abs(a4.width / a4.height - 2480 / 3508)).toBeLessThan(0.002);
+    expect(imageTierOf('claude-opus-5-5')).toBe(HIGH_RESOLUTION_TIER);
+    expect(imageTierOf('claude-sonnet-5-5')).toBe(HIGH_RESOLUTION_TIER);
+    expect(imageTierOf('claude-opus-4-7')).toBe(HIGH_RESOLUTION_TIER);
+    expect(imageTierOf('claude-sonnet-4-5')).toBe(STANDARD_TIER);
+    expect(imageTierOf('claude-opus-4-20250514')).toBe(STANDARD_TIER);
+    expect(imageTierOf('claude-3-5-sonnet-20241022')).toBe(STANDARD_TIER);
   });
 });

@@ -212,7 +212,7 @@ export class PaperReadingService {
     let encoded: PageImage | null = null;
     const pictureOf = (decision: Extract<PageImageDecision, { kind: 'image' }>): PageImage => {
       encoded ??= { mediaType: decision.mediaType, base64: Buffer.from(decision.bytes.buffer, decision.bytes.byteOffset,
-        decision.bytes.byteLength).toString('base64') };
+        decision.bytes.byteLength).toString('base64'), width: decision.width, height: decision.height };
       return encoded;
     };
     await forEachBounded(candidates, pageConcurrency, async (state) => {
@@ -226,8 +226,10 @@ export class PaperReadingService {
               pictureOf(decision));
             fromImage = true;
           } catch (error) {
-            // The API refused the request with the picture (too large after all, say): re-read the text instead.
-            if (signal.aborted || !(error instanceof AiRejectedError)) throw error;
+            // The API refused the request with the picture itself (a bad request or too large after all): re-read
+            // the text instead. Any other rejection (key, permission, model) would refuse the text request too,
+            // so it is not blamed on the picture and goes on as a failed re-read.
+            if (signal.aborted || !(error instanceof AiRejectedError) || !IMAGE_REJECTION_CODES.has(error.code)) throw error;
             skipped.push({ page: state.page, reason: 'image_rejected' });
             answer = await ask(state, this.config.OCR_AI_REREAD_MODEL, this.config.OCR_AI_REREAD_EFFORT);
           }
@@ -290,15 +292,14 @@ export class PaperReadingService {
   }
 
   /**
-   * Whether this re-read may carry the picture of the page: the setting on, the page hard to read (its flags or
-   * re-read reasons say handwriting or low confidence; from its lines where the first pass gave no answer), and
-   * the document a one-page PNG or JPEG within the image limits.
+   * Whether this re-read may carry the picture of the page: the setting on, the page hard to read by its lines'
+   * legibility alone (a line, handwritten or printed, below REVIEW_BELOW), and the document a one-page PNG or JPEG
+   * within the image limits. The first pass's own doubts (many check_carefully items, which also set the page
+   * flag 'low_confidence') do not make a legible page hard to read.
    */
   private imageDecision(state: PageState, input: ReadingInput): PageImageDecision {
     if (this.config.OCR_AI_IMAGE_REREAD !== 'on') return { kind: 'skip', reason: 'image_reread_off' };
-    const reasons: readonly string[] = state.firstCheck
-      ? [...state.firstCheck.flagReasons, ...state.firstCheck.rereadReasons] : lineFlags(state.lines);
-    if (!reasons.some((reason) => HARD_TO_READ.has(reason))) return { kind: 'skip', reason: 'not_hard_to_read' };
+    if (!hardToRead(state.lines)) return { kind: 'skip', reason: 'not_hard_to_read' };
     return pageImageFor(input.document, state.page, input.pages.length);
   }
 
@@ -342,8 +343,13 @@ export class PaperReadingService {
   }
 }
 
-/** Codes that make a page hard to read: the picture is sent for its re-read only for these. */
-const HARD_TO_READ = new Set(['handwriting', 'low_confidence', 'low_confidence_handwriting']);
+/** A page is hard to read when any of its lines, handwritten or printed, is below REVIEW_BELOW. */
+function hardToRead(lines: readonly ReadLine[]): boolean {
+  return lines.some((line) => line.confidence < REVIEW_BELOW);
+}
+
+/** Rejections of the request with the picture that the text-only request would not share. */
+const IMAGE_REJECTION_CODES = new Set(['AI_BAD_REQUEST', 'AI_HTTP_413']);
 
 /** First-pass items kept when the re-read did not work: each one goes to a person. */
 function markRereadFailed(check: PageCheck): PageCheck {

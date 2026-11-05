@@ -321,7 +321,7 @@ describe('PaperReadingService', () => {
         expect(seen.map((call) => [call.model, call.image !== undefined])).toEqual([['claude-sonnet-5-5', false],
           ['claude-opus-5-5', true]]);
         expect(seen[1]!.image).toEqual({ mediaType: document.mediaType,
-          base64: Buffer.from(document.bytes).toString('base64') });
+          base64: Buffer.from(document.bytes).toString('base64'), width: 1240, height: 1754 });
         expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
         expect(summary.imageRereadPages).toEqual([1]);
         expect(summary.imageRereadSkipped).toEqual([]);
@@ -355,6 +355,35 @@ describe('PaperReadingService', () => {
         expect(summary.imageRereadSkipped).toEqual([{ page: 1, reason: 'image_reread_off' }]);
         expect(payload.items.every((item) => !item.checkReasons.includes('read_from_image'))).toBe(true);
       }
+    });
+
+    it('keeps a legible printed page text-only although many first-pass items need checking (its low_confidence flag)', async () => {
+      const printed = readPage(1, ['Paracetamol 1g tds', 'Metformin 500mg bd']);
+      // Both items disagree with their lines (a dose), so the page is re-read and flagged low_confidence; every line
+      // is printed and above REVIEW_BELOW, so it is not hard to read.
+      const shaky = modelPage([
+        modelItem({ kind: 'medicine', asWritten: 'Paracetamol 1g tds', lineIds: ['p1-l1'], name: 'Paracetamol',
+          strength: '500mg', frequency: 'tds', status: 'current' }),
+        modelItem({ kind: 'medicine', asWritten: 'Metformin 500mg bd', lineIds: ['p1-l2'], name: 'Metformin',
+          strength: '850mg', frequency: 'bd', status: 'current' })]);
+      const seen: Seen[] = [];
+      const client: PageModelClient = { readPage: jest.fn(async (request) => {
+        seen.push({ model: request.model, page: request.page, image: request.image });
+        return ok(shaky);
+      }) };
+      const { summary } = await read(imageConfig, client, [printed], png);
+      expect(seen.map((call) => [call.model, call.image !== undefined])).toEqual([['claude-sonnet-5-5', false],
+        ['claude-opus-5-5', false]]);
+      expect(summary).toMatchObject({ rereadPages: [1], imageRereadPages: [],
+        imageRereadSkipped: [{ page: 1, reason: 'not_hard_to_read' }] });
+    });
+
+    it('sends the picture for a page with a printed line below REVIEW_BELOW', async () => {
+      const faint = readPage(1, [['Amlodipine 5mg od', { confidence: 0.6 }], 'Dx: Hypertension']);
+      const { client, seen } = pictureClient();
+      const { summary } = await read(imageConfig, client, [faint], png);
+      expect(seen.map((call) => call.image !== undefined)).toEqual([false, true]);
+      expect(summary.imageRereadPages).toEqual([1]);
     });
 
     it('never sends PDF or TIFF pages, a page of a many-page document, a missing document or a picture over the limit', async () => {
@@ -410,6 +439,31 @@ describe('PaperReadingService', () => {
       expect(summary).toMatchObject({ rereadPages: [1], imageRereadPages: [], requests: 3,
         imageRereadSkipped: [{ page: 1, reason: 'image_rejected' }] });
       expect(payload.items.every((item) => !item.checkReasons.includes('read_from_image'))).toBe(true);
+    });
+
+    it('re-reads the text for a request too large with the picture (413), but not after a key, permission or model rejection', async () => {
+      const rejecting = (code: string) => {
+        const seen: Seen[] = [];
+        const client: PageModelClient = { readPage: jest.fn(async (request) => {
+          seen.push({ model: request.model, page: request.page, image: request.image });
+          if (request.image) throw new AiRejectedError(code, 1);
+          return ok(textAnswer);
+        }) };
+        return { client, seen };
+      };
+      const large = rejecting('AI_HTTP_413');
+      const tooLarge = await read(imageConfig, large.client, [hardPage], png);
+      expect(large.seen.map((call) => call.image !== undefined)).toEqual([false, true, false]);
+      expect(tooLarge.summary.imageRereadSkipped).toEqual([{ page: 1, reason: 'image_rejected' }]);
+      for (const code of ['AI_NOT_AUTHENTICATED', 'AI_NOT_PERMITTED', 'AI_MODEL_NOT_FOUND']) {
+        const { client, seen } = rejecting(code);
+        const { summary, payload } = await read(imageConfig, client, [hardPage], png);
+        // One request with the picture, no second (doomed) text request, and the picture not blamed.
+        expect(seen.map((call) => call.image !== undefined)).toEqual([false, true]);
+        expect(summary).toMatchObject({ rereadPages: [], rereadFailedPages: 1, imageRereadPages: [],
+          imageRereadSkipped: [] });
+        expect(payload.items.every((item) => item.checkReasons.includes('reread_failed'))).toBe(true);
+      }
     });
 
     it('writes empty image fields when the AI step does not run, and old payloads without them still read', async () => {

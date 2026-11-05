@@ -15,7 +15,7 @@ export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
  * text-only page message, and with them PROMPT_VERSION and MODEL_SCHEMA_VERSION, are unchanged. Recorded in
  * provenance when a page was read from its picture.
  */
-export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-1';
+export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-2';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
@@ -129,11 +129,14 @@ export const MODEL_OUTPUT_JSON_SCHEMA: Readonly<Record<string, unknown>> = {
 
 const itemJsonSchema = (MODEL_OUTPUT_JSON_SCHEMA.properties as { items: { items: {
   required: readonly string[]; properties: Record<string, unknown> } } }).items.items;
-const fractionNumber = { type: 'number' } as const;
+const pixelNumber = { type: 'number' } as const;
 
 /**
  * The image re-read's output: the text schema with one more required field per item, "box", the item's own place
- * on the page as fractions of the page's width and height. Used only for requests that carry the picture.
+ * in the picture as absolute pixel coordinates {x1, y1, x2, y2} (top-left and bottom-right corners) of the picture
+ * as the model sees it. Claude works best with pixel coordinates and not with normalised ones
+ * (platform.claude.com/docs/en/build-with-claude/vision-coordinates, read 2026-11-05); the client turns them into
+ * page fractions. Used only for requests that carry the picture.
  */
 export const MODEL_OUTPUT_IMAGE_JSON_SCHEMA: Readonly<Record<string, unknown>> = {
   ...MODEL_OUTPUT_JSON_SCHEMA,
@@ -145,8 +148,8 @@ export const MODEL_OUTPUT_IMAGE_JSON_SCHEMA: Readonly<Record<string, unknown>> =
         ...itemJsonSchema,
         required: [...itemJsonSchema.required, 'box'],
         properties: { ...itemJsonSchema.properties, box: { type: 'object', additionalProperties: false,
-          required: ['left', 'top', 'width', 'height'],
-          properties: { left: fractionNumber, top: fractionNumber, width: fractionNumber, height: fractionNumber } } },
+          required: ['x1', 'y1', 'x2', 'y2'],
+          properties: { x1: pixelNumber, y1: pixelNumber, x2: pixelNumber, y2: pixelNumber } } },
       },
     },
   },
@@ -175,11 +178,18 @@ export const modelPageSchema = z.strictObject({
   items: z.array(modelItemSchema).max(300),
 });
 const finite = z.number().finite();
-export const modelBoxSchema = z.strictObject({ left: finite, top: finite, width: finite, height: finite });
-export const modelImageItemSchema = modelItemSchema.extend({ box: modelBoxSchema });
+/** The model's box: pixels of the picture as it sees it (after the API's resize). */
+export const modelPixelBoxSchema = z.strictObject({ x1: finite, y1: finite, x2: finite, y2: finite });
+export const modelImageItemSchema = modelItemSchema.extend({ box: modelPixelBoxSchema });
 export const modelImagePageSchema = modelPageSchema.extend({ items: z.array(modelImageItemSchema).max(300) });
-/** An item as the model answered it; "box" only in an answer read from the picture. */
-export type ModelItem = z.infer<typeof modelItemSchema> & { box?: z.infer<typeof modelBoxSchema> };
+export type ModelPixelBox = z.infer<typeof modelPixelBoxSchema>;
+/** A box as page fractions (left, top, width, height), measured from the top-left corner. */
+export interface ModelFractionBox { left: number; top: number; width: number; height: number }
+/**
+ * An item as the reader checks it; "box" only in an answer read from the picture, already turned from the model's
+ * pixels into page fractions by the client.
+ */
+export type ModelItem = z.infer<typeof modelItemSchema> & { box?: ModelFractionBox };
 export type ModelPage = Omit<z.infer<typeof modelPageSchema>, 'items'> & { items: ModelItem[] };
 
 /** The user turn for one page, text only: lines without their boxes. Unchanged by the image re-read. */
@@ -190,15 +200,29 @@ export function pageMessage(page: number, lines: readonly { id: string; text: st
   })))}`;
 }
 
-const fraction4 = (value: number) => Math.round(value * 10_000) / 10_000;
+/** A page-fraction box as whole pixels {x1, y1, x2, y2} of a picture of this size. */
+export function toPixelBox(box: ModelFractionBox, size: { width: number; height: number }): ModelPixelBox {
+  return { x1: Math.round(box.left * size.width), y1: Math.round(box.top * size.height),
+    x2: Math.round((box.left + box.width) * size.width), y2: Math.round((box.top + box.height) * size.height) };
+}
+
+/** The model's pixel box as page fractions of a picture of this size (corners in either order). */
+export function toFractionBox(box: ModelPixelBox, size: { width: number; height: number }): ModelFractionBox {
+  const left = Math.min(box.x1, box.x2) / size.width;
+  const top = Math.min(box.y1, box.y2) / size.height;
+  return { left, top, width: Math.max(box.x1, box.x2) / size.width - left,
+    height: Math.max(box.y1, box.y2) / size.height - top };
+}
 
 /**
- * The user turn's text for one page re-read WITH its picture (the picture is the block before this one). The
- * lines carry their boxes, and the instructions here take the place of rules 2 and 3 for this page only.
+ * The user turn's text for one page re-read WITH its picture (the picture is the block before this one). `size` is
+ * the picture as the model sees it (after the API's resize, before padding): the lines carry their boxes in its
+ * pixels, and the model answers in them. The instructions here take the place of rules 2 and 3 for this page only.
  */
 export function imagePageMessage(page: number, lines: readonly { id: string; text: string; confidence: number;
-  handwritten: boolean; box?: { left: number; top: number; width: number; height: number } | null }[]): string {
-  return `Page ${page} of a paper record. The picture above is this page. The text-recognition service found it \
+  handwritten: boolean; box?: ModelFractionBox | null }[], size: { width: number; height: number }): string {
+  return `Page ${page} of a paper record. The picture above is this page, ${size.width} pixels wide and \
+${size.height} pixels high. The text-recognition service found it \
 hard to read (handwriting or low confidence), so this time read the writing from the picture itself. Rules 2 and 3 \
 change for this page only, as follows; every other rule stays.
 
@@ -207,19 +231,19 @@ with its spelling and abbreviations; it may differ from the line text below wher
 
 B. Cite in "lineIds" the ids of the lines below that the item sits on in the picture. Cite only ids from this list.
 
-C. Give the item's own place on the page in "box": left, top, width and height as fractions of the picture's \
-width and height (0 to 1, measured from the top-left corner), around the writing of this item only.
+C. Give the item's own place in the picture in "box" as absolute pixel coordinates: x1 and y1 the top-left \
+corner, x2 and y2 the bottom-right corner, with x from the left edge and y from the top edge of the picture, \
+around the writing of this item only.
 
 D. Never invent anything. Where part of the writing cannot be read, write "[unreadable]" in its place and set \
 "unsure" to true; never guess a word, number or dose. A number is filled only where you can read it in the picture.
 
 E. Leave out writing that is not on one of the lines below.
 
-The lines the service found, as JSON (box as fractions of the page; confidence 0 to 1):
+The lines the service found, as JSON (box in pixels of the picture, as above; confidence 0 to 1):
 ${JSON.stringify(lines.map((line) => ({
     id: line.id, text: line.text,
-    box: line.box ? { left: fraction4(line.box.left), top: fraction4(line.box.top), width: fraction4(line.box.width),
-      height: fraction4(line.box.height) } : null,
+    box: line.box ? toPixelBox(line.box, size) : null,
     confidence: Math.round(line.confidence * 100) / 100, handwritten: line.handwritten,
   })))}`;
 }

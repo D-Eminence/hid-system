@@ -111,39 +111,55 @@ Each claimed job runs, in order:
    **Image re-read of hard pages** (owner decision "Yes, send image for hard
    pages", 2026-11-05; `OCR_AI_IMAGE_REREAD`, `on` or `off`, default `on` when
    `OCR_AI_MODE=claude`, any other value fails startup). A re-read also carries
-   the picture of the page when the page is hard to read (its flags or re-read
-   reasons say `handwriting`, `low_confidence` or `low_confidence_handwriting`;
-   for a page the first pass could not answer, its lines' legibility) and the
+   the picture of the page when the page is hard to read by its lines'
+   legibility alone (any line, handwritten or printed, below 0.80; the first
+   pass's own doubts, such as many `check_carefully` items, which also set the
+   `low_confidence` page flag, do not count) and the
    document is a one-page PNG or JPEG by its detected media type (the exact
    verified bytes, as stored; never resized or re-encoded). The request is the
-   same Claude API request (`inference_geo: "us"`, fixed endpoint, same cached
-   system prompt) with the user turn `[image, text]`: the text lists the lines
-   with their boxes and asks the model to read the writing from the picture,
-   cite the lines it sits on, give the item's own box as page fractions, write
-   `asWritten` as it reads it in the picture, never invent anything and write
-   `[unreadable]` rather than guess (`imagePageMessage`,
-   `hid-paper-reading-image-prompt-1`, recorded in provenance as
+   same Claude API request (`inference_geo: "us"`, fixed endpoint, same system
+   prompt) with the user turn `[image, text]`: the text gives the picture's size
+   as the model sees it (the API's resize for the re-read model's tier, computed
+   with the vision coordinates guide's reference `resizedSize`: 2,576 px and
+   4,784 visual tokens for Claude 4.7 and later, 1,568 and 1,568 otherwise;
+   never the padded size), lists the lines with their boxes in those pixels and
+   asks the model to read the writing from the picture, cite the lines it sits
+   on, give the item's own box as absolute pixel coordinates `{x1, y1, x2, y2}`
+   (Anthropic advises pixel, not normalised, coordinates), write `asWritten` as
+   it reads it in the picture, never invent anything and write `[unreadable]`
+   rather than guess (`imagePageMessage`,
+   `hid-paper-reading-image-prompt-2`, recorded in provenance as
    `imagePromptVersion`). Only these requests use the image answer schema
    (`MODEL_OUTPUT_IMAGE_JSON_SCHEMA`, a required `box` per item); text-only
    requests are byte for byte as before, so `PROMPT_VERSION` and
-   `MODEL_SCHEMA_VERSION` are unchanged. An item read from the picture is kept
-   only when it cites lines on its page and its box overlaps the box of those
-   lines (intersection over the smaller box at least 0.5, as the accuracy kit
-   places items); otherwise it is dropped and counted in `droppedUngrounded`.
-   It need not match the Textract text, but a number the text of its lines
-   does not have adds `number_not_in_text_read`. Every such item is
-   `check_carefully` with `read_from_image` ("This was read from the picture of
-   the page; check it against the paper.", shown unless a dose or number
-   disagreement comes first), `readBy: "reread"`, and its stored box is the
-   model's box clipped to the page.
+   `MODEL_SCHEMA_VERSION` are unchanged. The client turns the model's pixel
+   boxes into page fractions before any check. An item read from the picture
+   is kept only when it cites lines on its page and its box (clipped to the
+   page, at least 0.005 of the page on each side) lies on every cited line that
+   has a box, each line on its own (over half the line's height and half the
+   narrower width), with at most half of the line area it covers on lines it
+   does not cite, and its `asWritten` shares a word of three letters or more,
+   or a number, with the text of its cited lines; otherwise it is dropped and
+   counted in `droppedUngrounded`. It need not match the Textract text: its
+   fields are held to its own `asWritten` as read in the picture (so a word or
+   dose the service misread is not a "doesn't match the paper" reason, and the
+   page is not flagged `possible_missed_item` for the line text it corrected),
+   and a number the text of its lines does not have adds
+   `number_not_in_text_read`. Every such item is `check_carefully` with
+   `read_from_image` ("This was read from the picture of the page; check it
+   against the paper.", shown unless its own fields disagree with what it read
+   or a number is not in the text read), `readBy: "reread"`, and its stored box
+   is the model's box clipped to the page.
 
    Scope (v1): PNG and JPEG only. PDF and TIFF pages keep the text-only re-read
    (`image_not_available_pdf`, `image_not_available_tiff`). A picture over the
    Claude API image limits (10 MB base64-encoded, 8000 x 8000 px; the size is
    read from the PNG IHDR or JPEG frame header, never by decoding) stays text
    only (`image_too_large`; `image_size_unknown` when the header cannot be
-   read). If the API rejects the request with the picture, the page is re-read
-   from its text (`image_rejected`). The reading summary and the payload's
+   read). If the API rejects the request with the picture as a bad request or
+   too large (`AI_BAD_REQUEST`, `AI_HTTP_413`), the page is re-read from its
+   text (`image_rejected`); any other rejection (key, permission, model) is a
+   failed re-read, as for a text re-read, with no second request. The reading summary and the payload's
    `reading` carry `imageRereadPages` (re-reads answered from the picture) and
    `imageRereadSkipped` (`{page, reason}` for each re-read sent without it,
    including `image_reread_off` and `not_hard_to_read`). The picture and its
@@ -190,7 +206,14 @@ a document with no text as `no_text`.
   150 dpi (1240 x 1754) is about 2,800 tokens. At the re-read model's $4 per
   million input tokens with the 1.1x US-only price, that is about $0.012 to
   $0.021 more per image-read page, plus a few tokens per line for the boxes.
-  Only flagged PNG/JPEG pages on re-read pay it.
+  Only flagged PNG/JPEG pages on re-read pay it. Image re-reads send a
+  different answer schema (`output_config.format`), which is a prompt-cache
+  breaker, so they do not read the text requests' cached system prompt: count
+  the system prompt as ordinary input (or a cache write) for each image re-read
+  unless `cache_read_input_tokens` on live runs shows otherwise. The accuracy
+  kit does not yet measure image re-reads (its runs pass no document, so every
+  re-read is `image_not_given`, and its cost table has no picture tokens):
+  change and run it before relying on its numbers for PNG and JPEG pages.
 - **AI use recorded.** After the AI step and before completion the worker calls
   `ocr.record_worker_ai_usage` once per model used (requests, input, output,
   cache-read and cache-write tokens; counts only, no text), idempotent per job,
