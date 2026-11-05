@@ -81,6 +81,57 @@ describe('checkPage reasons', () => {
       .toContain('route_not_on_paper');
   });
 
+  it('says plainly which route problem it is', () => {
+    const page = readPage(1, ['Ceftriaxone 1g IV bd']);
+    const base = modelItem({ kind: 'medicine', asWritten: 'Ceftriaxone 1g IV bd', lineIds: ['p1-l1'],
+      status: 'new', name: 'Ceftriaxone', strength: '1g', frequency: 'bd' });
+    expect(check(page, modelPage([{ ...base, route: 'IM' }])).items[0]!.checkReason)
+      .toBe("How it is given doesn't match the paper.");
+    expect(check(page, modelPage([base])).items[0]!.checkReason)
+      .toBe("The paper says how it is given, but that wasn't read.");
+    const tab = readPage(1, ['Tab Amlodipine 5mg']);
+    expect(check(tab, modelPage([modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg', lineIds: ['p1-l1'],
+      status: 'new', name: 'Amlodipine', strength: '5mg', route: 'oral' })])).items[0]!.checkReason)
+      .toBe("The route read (for example IV or by mouth) isn't on the paper.");
+  });
+
+  it('says the handwriting was hard to read before a route the text read does not show', () => {
+    // Textract read the handwritten "IV" as "1v": the route is not in the text, and the handwriting is why.
+    const page = readPage(1, [['1v Ceftriaxone 1g daily', { handwritten: true, confidence: 0.4 }]]);
+    const result = check(page, modelPage([modelItem({ kind: 'medicine', asWritten: '1v Ceftriaxone 1g daily',
+      lineIds: ['p1-l1'], status: 'new', name: 'Ceftriaxone', strength: '1g', frequency: 'daily', route: 'IV' })]));
+    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(
+      ['route_not_on_paper', 'low_ocr_confidence_handwritten']));
+    expect(result.items[0]!.checkReason).toBe('The handwriting was hard to read.');
+  });
+
+  it('still says a stopped medicine may not be current, even on a hard-to-read handwritten line', () => {
+    const page = readPage(1, [['Warfarin 5mg od stopped', { handwritten: true, confidence: 0.5 }]]);
+    const result = check(page, modelPage([modelItem({ kind: 'medicine', asWritten: 'Warfarin 5mg od stopped',
+      lineIds: ['p1-l1'], name: 'Warfarin', strength: '5mg', frequency: 'od', status: 'stopped' })]));
+    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(
+      ['status_not_active', 'low_ocr_confidence_handwritten']));
+    expect(result.items[0]!.checkReason).toBe('This may not be current (for example past, stopped or suspected).');
+  });
+
+  it('still says a route that disagrees with the paper first, even on a hard-to-read handwritten line', () => {
+    const page = readPage(1, [['Ceftriaxone 1g IV daily', { handwritten: true, confidence: 0.5 }]]);
+    const result = check(page, modelPage([modelItem({ kind: 'medicine', asWritten: 'Ceftriaxone 1g IV daily',
+      lineIds: ['p1-l1'], name: 'Ceftriaxone', strength: '1g', frequency: 'daily', route: 'oral', status: 'new' })]));
+    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(
+      ['route_mismatch', 'low_ocr_confidence_handwritten']));
+    expect(result.items[0]!.checkReason).toBe("How it is given doesn't match the paper.");
+  });
+
+  it('still says a dose that disagrees with the paper first, even on a hard-to-read handwritten line', () => {
+    const page = readPage(1, [['Metronidazole 400mg tds', { handwritten: true, confidence: 0.5 }]]);
+    const result = check(page, modelPage([modelItem({ kind: 'medicine', asWritten: 'Metronidazole 400mg tds',
+      lineIds: ['p1-l1'], name: 'Metronidazole', strength: '200mg', frequency: 'tds', status: 'new' })]));
+    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(
+      ['strength_mismatch', 'low_ocr_confidence_handwritten']));
+    expect(result.items[0]!.checkReason).toBe("A dose on the paper doesn't match what was read.");
+  });
+
   it('flags a dose or frequency the line gives but the item left out', () => {
     const result = check(CLINIC_PAGE, modelPage([{ ...amlodipine, strength: '', frequency: '' }]));
     expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(['strength_missing', 'frequency_missing']));
