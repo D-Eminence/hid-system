@@ -445,7 +445,7 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(payload.items[0]!.checkReasons).toContain('read_from_image');
     expect(payload.items[0]!.checkReasons).not.toContain('strength_mismatch');
     expect(result.provenance.reading).toMatchObject({ imageRereadPages: [1], imageRereadSkipped: [],
-      imagePromptVersion: 'hid-paper-reading-image-prompt-3' });
+      imagePromptVersion: 'hid-paper-reading-image-prompt-4' });
     // Picture tokens count in the usage records as any other input.
     expect(repository.recordAiUsage).toHaveBeenCalledWith(job, expect.objectContaining({ model: 'claude-opus-5-5',
       requests: 1, inputTokens: 6000 }));

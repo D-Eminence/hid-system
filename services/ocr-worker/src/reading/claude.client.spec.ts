@@ -325,6 +325,8 @@ describe('ClaudePageClient', () => {
       expect(String(second!.text)).toContain('read the writing from the picture');
       expect(String(second!.text)).toContain('1240 pixels wide and 1754 pixels high');
       expect(String(second!.text)).toContain('absolute pixel coordinates');
+      expect(String(second!.text)).toContain('including small fragments of the same row');
+      expect(String(second!.text)).toContain('may be wrong or even nonsense');
       expect(String(second!.text)).not.toContain('fractions');
       expect(String(second!.text)).toContain('"box":{"x1":124,"y1":175,"x2":744,"y2":210}');
       expect(String(second!.text)).toContain('"handwritten":true');
