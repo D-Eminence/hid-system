@@ -3043,6 +3043,9 @@ screens, access history, the request inbox item and the PIN explainer). Under
 18: the patient's approval or PIN still grants direct care as today, but the
 words about paper records must not be shown for a patient under 18, who is not
 covered.
+Since 0108 this paragraph is replaced by "What the patient must be told
+(0108)" in section 36: the cover lasts as long as the access (no 24-hour
+limit), and the share screens must say it too.
 
 The grant never opens the chart. The services refuse the purpose everywhere
 else:
@@ -3409,13 +3412,53 @@ Everything else of 32.1 stays: the same membership at the same facility on
 the live account; `ocr.job.write` at each check; the patient 18 or over on
 the Africa/Lagos date with a date of birth on record; deny directives for
 records processing or direct care; break-glass, emergency and seeded or
-imported grants never cover; both codes active (kill switch).
+imported grants (`source_system` not `'hid'`) never cover; both codes active
+(kill switch).
+
+Which grants count as seeded or imported: a grant whose `source_system` is not
+`'hid'` (imported, or seeded by a migration as a legacy row) never covers. A
+grant a migration seeds with `source_system = 'hid'` in the shape of a share
+is a share for D-b: 0098's sealed demo share (granted by the demo patient, no
+request, no authorization method, with its `patient_consent_shares` row,
+`clinical_collaboration`) covers records processing at Demo Hospital under
+D-b's rules, the only migration-seeded grant that does.
+
+What the patient must be told (0108; website lane, health; this branch does
+not edit the website). This replaces 32.1's paragraph of the same name and
+keeps the owner's rule from decision 34(1), "said clearly to the patient":
+
+- D-a: the approval screen, the PIN screens, the request inbox item and the
+  PIN explainer must no longer say "for up to 24 hours". They must say that
+  approving the access (or giving the PIN) also lets that staff member bring
+  in (scan and read) the patient's paper records at that facility for as long
+  as the access lasts, and that ending the access stops it.
+- D-b (only if the owner approves D-b): the share screens must say, before
+  the patient confirms, that a share at any level, `view_only` included, also
+  lets that clinician bring in (scan and read, which creates OCR jobs from) the
+  patient's paper records at that facility for the share's whole duration (24
+  hours, 7 days, 30 days, or until revoked: up to 365 days), and that
+  revoking the share stops it. The places are the share search and its
+  confirmation (`POST /identity/me/shares`), the invitation confirmation
+  (`POST /identity/me/share-invitations/:invitationId/confirm`) and the
+  invitation creation (`POST /identity/me/share-invitations`), whose level and
+  duration are chosen then.
+- The access history shows each covering grant (approval, PIN or share) as
+  also covering records processing until `covered_until`, which is now the
+  grant's `expiresAt`.
+- Under 18 or with no date of birth: the words about paper records are not
+  shown, as in 32.1 (no cover).
+
+Until the website shows these words, a patient who approves an access, gives
+the PIN or creates a share is told less than the cover allows (with D-b, a
+`view_only` share is not described as allowing paper records to be brought
+in). The owner decides D-a and D-b knowing that this disclosure is not yet in
+place; the release notes for the website lane list it.
 
 Identity (`postgres-identity.provider.ts`) reads `covered_until` from the
 cover and answers it as `expiresAt`, so `POST /identity/authorization/check`
 and `POST /identity/consent-status` report the longer cover with no code
-change. The patient-facing words about paper records (32.1, "for up to 24
-hours") are the website lane's to update. Applying 0108 takes only ACCESS SHARE
+change. Applying 0108 takes only ACCESS SHARE
 on the tables the cover reads and SHARE UPDATE EXCLUSIVE on the cover itself.
 Suite: `services/ehr-api/test/database/records-processing.integration.sql`
-(sections 10l-10o and 10s).
+(sections 10l-10o, 10r2-10r3, 10s and 10za1-10za9: each condition of the
+cover changed one at a time).

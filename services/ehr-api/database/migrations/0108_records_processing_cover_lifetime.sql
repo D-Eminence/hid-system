@@ -62,7 +62,9 @@
 -- processing or direct care (or no purpose) for this facility, organization,
 -- staff member or all, for this action, read as 0012 reads directives (0104's
 -- reading, unchanged); break-glass and emergency grants never cover it;
--- seeded or imported grants (source_system other than 'hid') never cover it;
+-- imported or legacy-seeded grants (source_system other than 'hid') never
+-- cover it (0098's demo share, which a migration seeded with source_system
+-- 'hid' in a share's shape, is the one seeded grant that covers, under D-b);
 -- both purpose codes, healthcare-operations and direct-care, active (the kill
 -- switch, 0104 D1); a grant held by the cutover never covers it. The approval
 -- way and the PIN way are 0104's conditions, unchanged (now in an EXISTS on
@@ -147,9 +149,14 @@
 -- as not allowed (0104's header). The OCR API, EHR's documents and every
 -- policy that calls has_active_consent_grant honour the longer cover and the
 -- shares with no change. The website's words to the patient (0104 decision
--- 34(1): "said clearly to the patient") name 24 hours today and are the
--- website lane's to change. Applied migrations 0001 through 0107 are
--- immutable.
+-- 34(1): "said clearly to the patient") name 24 hours today and say nothing on
+-- the share screens; they are the website lane's to change and are not in
+-- place when this applies: the approval, PIN and inbox words must drop "for up
+-- to 24 hours" (D-a), and with D-b the share search, share confirmation and
+-- invitation screens must say that a share at any level, view_only included,
+-- also lets the clinician bring in the patient's paper records for the share's
+-- duration (docs/INTERFACE_CONTRACT.md section 36). Applied migrations 0001
+-- through 0107 are immutable.
 
 -- 0. Preconditions. Whether holder holds a privilege on an object by
 -- ownership, membership (direct or through other roles) or grant (also to
@@ -504,7 +511,7 @@ as $$
 $$;
 
 comment on function identity.records_processing_direct_care_cover(uuid, text, uuid, uuid, text, timestamptz) is
-  '0108 (owner decisions D-a and D-b of 2026-11-05, superseding the 24-hour bound of 0104''s decision 34(1)): the direct-care grant that covers records processing (healthcare-operations read or write) for this patient, membership and facility, and the end of the cover, the grant''s expires_at: a grant from the patient''s approval of a direct-care access request, from the Access PIN, or from an active patient share (0095, any level), active, for as long as it lasts; none for a patient under 18 or with no date of birth, a membership without ocr.job.write, an inactive purpose, a deny directive for records processing or direct care, break-glass, emergency, or a seeded or imported grant.';
+  '0108 (owner decisions D-a and D-b of 2026-11-05, superseding the 24-hour bound of 0104''s decision 34(1)): the direct-care grant that covers records processing (healthcare-operations read or write) for this patient, membership and facility, and the end of the cover, the grant''s expires_at: a grant from the patient''s approval of a direct-care access request, from the Access PIN, or from an active patient share (0095, any level), active, for as long as it lasts; none for a patient under 18 or with no date of birth, a membership without ocr.job.write, an inactive purpose, a deny directive for records processing or direct care, break-glass, emergency, or a grant whose source_system is not ''hid'' (imported or legacy-seeded). 0098''s seeded demo share (source_system ''hid'', granted by the demo patient, no request, with its share row) is a share and covers under D-b.';
 
 -- 2. Post-checks.
 do $$
