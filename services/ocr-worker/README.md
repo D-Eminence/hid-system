@@ -135,23 +135,31 @@ Each claimed job runs, in order:
    twin: the same kind, a shared cited line, and every field the contract has
    for the kind equal after normalising (case, spacing, and "5 mg" = "5mg"),
    plus `dateAsWritten` and the prescription (prescriber and date); a missing
-   field equals only a missing field. Each re-read item removes at most one
-   first-pass item, in reading order. Every other first-pass item is kept,
+   field equals only a missing field. A re-read item that carries every field
+   the first-pass item filled in (equal after normalising) and only adds
+   fields it left empty (a route, say) also replaces it: nothing is lost.
+   Each re-read item removes at most one first-pass item (exact twins first,
+   then such supersets, each in reading order). Every other first-pass item is kept,
    with `readBy: "first_pass"`, as `check_carefully` with
    `not_in_picture_reading` ("The second reading, from the picture, did not
    find this; check it against the paper.") after an image re-read or
    `not_in_second_reading` ("The second reading did not find this; check it
-   against the paper.") after a text re-read. Where a re-read item of its kind
-   shares one of its lines without being its twin (a second medicine on the
-   line, a field left out, or a name read differently, such as "Amlodipine"
-   for "Amlodipne"), both get `differs_from_second_reading` ("The second
-   reading differs from this one; compare both with the paper."), shown below
-   any real disagreement and above the not-found sentences; it does not set
-   `possible_missed_item`. Items are in reading order and their ids made
+   against the paper.") after a text re-read. Where it has a single best match
+   among the re-read items (same kind, a shared line, and the same normalised
+   name for a medicine or diagnosis, substance for an allergy, test for a lab
+   result or measure for a vital, or for a note the most shared words of four
+   letters or more), that one pair gets `differs_from_second_reading` ("The
+   second reading differs from this one; compare both with the paper."),
+   shown below any real disagreement and above the not-found sentences; it
+   does not set `possible_missed_item`. Other items on the line are not
+   marked, and a name read differently ("Amlodipine" for "Amlodipne") is not
+   a best match: both items are kept, the first-pass one marked not found. Items are in reading order and their ids made
    unique again with the usual suffixes. The identity is merged field by
-   field (the re-read's name, date of birth, folder number and sex where it
-   has them, else the first pass's; the lines of both, and the box around
-   both). `possible_missed_item` is worked out again from the lines all kept
+   field: a name, date of birth, folder number or sex only the re-read gives
+   is taken; where both readings give one and they differ, the first pass's
+   is kept and the page is flagged `ai_unsure` (identity drives patient
+   matching, so it never changes silently); the lines of both and the box
+   around both are kept. `possible_missed_item` is worked out again from the lines all kept
    items and the identity cite; `droppedUngrounded` for the page stays the
    count of the re-read's dropped items, including any whose content a kept
    first-pass item still carries. A page whose first pass failed or was

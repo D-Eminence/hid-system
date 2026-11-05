@@ -330,14 +330,17 @@ function markReadFromImage(item: PaperItem, raw: ModelItem, source: string, plac
 /**
  * A page's result after a re-read (from the picture or from the text) of a page whose first pass gave an answer,
  * when the re-read kept at least one item. Fail-safe: a first-pass item is removed only when a kept second-reading
- * item is its exact twin (exactTwin: the same kind, a shared cited line and every field the same, normalised), and
- * each second-reading item removes at most one first-pass item (one to one, in reading order). Every other
- * first-pass item is kept as check_carefully with 'not_in_picture_reading' (image) or 'not_in_second_reading'
- * (text); where a second-reading item of its kind shares one of its lines without being its twin (a correction,
- * such as "Amlodipine" for "Amlodipne"), both get 'differs_from_second_reading' so the person checking compares
- * them. Items are in reading order (page, first cited line; second-reading items first on the same line) and their
- * ids are made unique again. Identity is merged field by field (mergeIdentity). possible_missed_item is worked out
- * again from the lines every kept item and the identity cite (and any duplicate_source_span within a reading;
+ * item of the same kind on a shared cited line carries everything it says: its exact twin (every field the same,
+ * normalised), or else a superset (every field the first pass filled in the same, normalised, and only fields the
+ * first pass left empty added). Each second-reading item removes at most one first-pass item (one to one: exact
+ * twins first, then supersets, each in reading order). Every other first-pass item is kept as check_carefully with
+ * 'not_in_picture_reading' (image) or 'not_in_second_reading' (text); where it has a best match among the
+ * second-reading items (bestMatch: same kind, shared line, the same name, substance, test or measure, or for a note
+ * the most shared words), that one pair gets 'differs_from_second_reading' so the person checking compares them.
+ * Items are in reading order (page, first cited line; second-reading items first on the same line) and their ids
+ * are made unique again. Identity is merged field by field (mergeIdentity); a field the two readings give
+ * differently keeps the first pass's value and flags the page ai_unsure. possible_missed_item is worked out again
+ * from the lines every kept item and the identity cite (and any duplicate_source_span within a reading;
  * differs_from_second_reading does not set it). droppedUngrounded stays the second reading's dropped count.
  */
 export function mergeReread(first: PageCheck, second: PageCheck, lines: readonly ReadLine[],
@@ -351,27 +354,32 @@ export function mergeReread(first: PageCheck, second: PageCheck, lines: readonly
   const earlier = inReadingOrder(first.items).map(copy);
   const sharesLine = (a: PaperItem, b: PaperItem) => a.kind === b.kind && a.lineIds.some((id) => b.lineIds.includes(id));
   const removed = new Set<PaperItem>();
-  for (const item of read) {
-    const twin = earlier.find((candidate) => !removed.has(candidate) && sharesLine(item, candidate)
-      && exactTwin(item, candidate));
-    if (twin) removed.add(twin);
+  const matched = new Set<PaperItem>();
+  for (const test of [(a: PaperItem, b: PaperItem) => carries(a, b, 'exact'), (a: PaperItem, b: PaperItem) => carries(a, b, 'superset')]) {
+    for (const item of read) {
+      if (matched.has(item)) continue;
+      const twin = earlier.find((candidate) => !removed.has(candidate) && sharesLine(item, candidate) && test(item, candidate));
+      if (twin) { removed.add(twin); matched.add(item); }
+    }
   }
   const missing = from === 'image' ? 'not_in_picture_reading' : 'not_in_second_reading';
   const kept = earlier.filter((item) => !removed.has(item));
   for (const item of kept) {
     addReason(item, missing);
-    for (const other of read.filter((candidate) => sharesLine(candidate, item))) {
+    const best = bestMatch(item, read.filter((candidate) => sharesLine(candidate, item)), matched);
+    if (best) {
       addReason(item, 'differs_from_second_reading');
-      addReason(other, 'differs_from_second_reading');
+      addReason(best, 'differs_from_second_reading');
     }
   }
   const merged = uniqueItemIds(inReadingOrder([...read, ...kept]));
-  const identity = mergeIdentity(first.identity, second.identity);
+  const { identity, conflict } = mergeIdentity(first.identity, second.identity);
   const cited = new Set([...merged.flatMap((item) => item.lineIds), ...identity.lineIds]);
   const missed = merged.some((item) => item.checkReasons.includes('duplicate_source_span'))
     || suspiciousUncited(lines, cited).length > 0;
-  const flagReasons: FlagReason[] = [...second.flagReasons.filter((reason) => reason !== 'possible_missed_item'),
-    ...(missed ? ['possible_missed_item' as const] : [])];
+  const flagReasons: FlagReason[] = [...second.flagReasons.filter((reason) => reason !== 'possible_missed_item'
+    && !(conflict && reason === 'ai_unsure')), ...(conflict ? ['ai_unsure' as const] : []),
+  ...(missed ? ['possible_missed_item' as const] : [])];
   return { ...second, items: merged, identity, flagReasons };
 }
 
@@ -382,42 +390,88 @@ function addReason(item: PaperItem, code: string): void {
   item.checkReason = checkReasonSentence(item.checkReasons);
 }
 
+/** Normalised text for comparing two readings: compact (case, spacing, "5 mg" = "5mg"), placeholders blanked. */
+const comparable = (text: string) => compact(withoutPlaceholders(text));
+
 /**
- * The identity after a re-read, field by field: each of the name, date of birth, folder number and sex as the
- * second reading has it where it has one, else as the first pass had it; the cited lines of both, and the box
- * around both boxes.
+ * The one second-reading item (same kind, on a shared line: the candidates) that a kept first-pass item is to be
+ * compared with, or null: for a medicine or diagnosis the same name, for an allergy the same substance, for a lab
+ * result the same test, for a vital the same measure (normalised), and for a note the most shared words of four
+ * letters or more (at least one; so "the" alone never pairs two notes). Unmatched candidates go first, then reading
+ * order.
  */
-export function mergeIdentity(first: PaperIdentity, second: PaperIdentity): PaperIdentity {
-  const merged: PaperIdentity = {
-    nameAsWritten: second.nameAsWritten ?? first.nameAsWritten,
-    dateOfBirthAsWritten: second.dateOfBirthAsWritten ?? first.dateOfBirthAsWritten,
-    folderNumberAsWritten: second.folderNumberAsWritten ?? first.folderNumberAsWritten,
-    sexAsWritten: second.sexAsWritten ?? first.sexAsWritten,
-    lineIds: [...new Set([...second.lineIds, ...first.lineIds])].sort((a, b) => lineNumber(a) - lineNumber(b)),
-    box: unionBox([first.box, second.box]),
+function bestMatch(item: PaperItem, candidates: readonly PaperItem[], matched: ReadonlySet<PaperItem>): PaperItem | null {
+  const ordered = [...candidates.filter((other) => !matched.has(other)), ...candidates.filter((other) => matched.has(other))];
+  const key = (other: PaperItem): string | null => {
+    switch (other.kind) {
+      case 'medicine': case 'diagnosis': return other.fields.name === null ? null : comparable(other.fields.name);
+      case 'allergy': return other.fields.substance === null ? null : comparable(other.fields.substance);
+      case 'lab_result': return other.fields.test === null ? null : comparable(other.fields.test);
+      case 'vital': return other.fields.measure;
+      default: return null;
+    }
   };
-  return merged;
+  if (item.kind === 'note') {
+    const words = (other: PaperItem) => new Set(wordsIn(withoutPlaceholders(other.kind === 'note'
+      ? other.fields.text ?? other.asWritten : other.asWritten)).filter((word) => word.length >= 4));
+    const own = words(item);
+    let best: PaperItem | null = null;
+    let most = 0;
+    for (const other of ordered) {
+      const shared = [...words(other)].filter((word) => own.has(word)).length;
+      if (shared > most) { most = shared; best = other; }
+    }
+    return best;
+  }
+  const own = key(item);
+  return own === null || own === '' ? null : ordered.find((other) => key(other) === own) ?? null;
 }
 
 /**
- * Whether two items of the same kind say exactly the same thing: every field the contract has for the kind, plus
- * dateAsWritten and the prescription (prescriber and date), each normalised (compact: case and spacing, so "5 mg"
- * and "5mg" are equal, masked-number placeholders blanked). A missing field equals only a missing field.
+ * The identity after a re-read, field by field: each of the name, date of birth, folder number and sex as the
+ * second reading has it where only it has one, else as the first pass had it. Where both give a value and the
+ * values differ (normalised), the first pass's is kept and `conflict` is true (the page is then flagged ai_unsure):
+ * identity drives patient matching, so it is never changed silently. Lines are those of both readings and the box
+ * the one around both boxes.
  */
-function exactTwin(a: PaperItem, b: PaperItem): boolean {
-  if (a.kind !== b.kind) return false;
+export function mergeIdentity(first: PaperIdentity, second: PaperIdentity): { identity: PaperIdentity; conflict: boolean } {
+  let conflict = false;
+  const pick = (a: string | null, b: string | null) => {
+    if (a === null) return b;
+    if (b !== null && comparable(a) !== comparable(b)) conflict = true;
+    return a;
+  };
+  const identity: PaperIdentity = {
+    nameAsWritten: pick(first.nameAsWritten, second.nameAsWritten),
+    dateOfBirthAsWritten: pick(first.dateOfBirthAsWritten, second.dateOfBirthAsWritten),
+    folderNumberAsWritten: pick(first.folderNumberAsWritten, second.folderNumberAsWritten),
+    sexAsWritten: pick(first.sexAsWritten, second.sexAsWritten),
+    lineIds: [...new Set([...second.lineIds, ...first.lineIds])].sort((a, b) => lineNumber(a) - lineNumber(b)),
+    box: unionBox([first.box, second.box]),
+  };
+  return { identity, conflict };
+}
+
+/**
+ * Whether a second-reading item carries everything a first-pass item of the same kind says. 'exact': every field
+ * the contract has for the kind, plus dateAsWritten and the prescription (prescriber and date), the same after
+ * normalising, a missing field equal only to a missing field. 'superset': every field the first pass filled in
+ * the same, normalised; a field the first pass left empty may be filled by the second reading.
+ */
+function carries(second: PaperItem, first: PaperItem, mode: 'exact' | 'superset'): boolean {
+  if (second.kind !== first.kind) return false;
   const same = (x: unknown, y: unknown): boolean => {
-    if (x === null || y === null || x === undefined || y === undefined) return (x ?? null) === (y ?? null);
-    if (typeof x === 'string' && typeof y === 'string') {
-      return compact(withoutPlaceholders(x)) === compact(withoutPlaceholders(y));
-    }
+    if (y === null || y === undefined) return mode === 'superset' || x === null || x === undefined;
+    if (x === null || x === undefined) return false;
+    if (typeof x === 'string' && typeof y === 'string') return comparable(x) === comparable(y);
     if (typeof x === 'object' && typeof y === 'object') {
       const keys = new Set([...Object.keys(x), ...Object.keys(y)]);
       return [...keys].every((key) => same((x as Record<string, unknown>)[key], (y as Record<string, unknown>)[key]));
     }
     return x === y;
   };
-  return same(a.fields, b.fields) && same(a.dateAsWritten, b.dateAsWritten) && same(a.prescription, b.prescription);
+  return same(second.fields, first.fields) && same(second.dateAsWritten, first.dateAsWritten)
+    && same(second.prescription, first.prescription);
 }
 
 function markDuplicateSpan(item: PaperItem): void {

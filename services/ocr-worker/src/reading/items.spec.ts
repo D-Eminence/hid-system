@@ -903,12 +903,14 @@ describe('mergeReread keeps every first-pass item that is not an exact twin of a
 
   it.each(probes)('keeps the second item on "%s" when the picture reads only the first', (text, one, two) => {
     const merged = merge(text, [one, two], [one]);
-    // The exact twin is replaced by the picture's item; the second stays, and both on the line are to be compared.
+    // The exact twin is replaced by the picture's item; the second stays. Only a pair with the same name (here the
+    // two Paracetamol doses) is marked to compare; otherwise the second is only not found by the picture.
     expect(shape(merged.items)).toEqual([['reread', one.asWritten], ['first_pass', two.asWritten]]);
-    expect(merged.items[1]!.checkReasons).toEqual(expect.arrayContaining(['not_in_picture_reading',
-      'differs_from_second_reading']));
+    expect(merged.items[1]!.checkReasons).toContain('not_in_picture_reading');
     expect(merged.items[1]!.confidence).toBe('check_carefully');
-    expect(merged.items[0]!.checkReasons).toContain('differs_from_second_reading');
+    const pair = one.name === two.name && one.name !== undefined;
+    expect(merged.items[1]!.checkReasons.includes('differs_from_second_reading')).toBe(pair);
+    expect(merged.items[0]!.checkReasons.includes('differs_from_second_reading')).toBe(pair);
     for (const item of merged.items) expect(item.checkReasons).not.toContain('duplicate_source_span');
     // Two readings that differ are not a sign of a missed item.
     expect(merged.flagReasons).not.toContain('possible_missed_item');
@@ -949,15 +951,60 @@ describe('mergeReread keeps every first-pass item that is not an exact twin of a
     expect(merged.items).toHaveLength(2);
   });
 
-  it('keeps both a misread name and the picture reading of it, both marked to compare', () => {
+  it('keeps both a misread name and the picture reading of it (not the same name, so not paired)', () => {
     const merged = merge('Amlodipne 5mg od', [med('Amlodipne 5mg od', 'Amlodipne', '5mg', 'od')],
       [med('Amlodipine 5mg od', 'Amlodipine', '5mg', 'od')]);
     expect(shape(merged.items)).toEqual([['reread', 'Amlodipine 5mg od'], ['first_pass', 'Amlodipne 5mg od']]);
-    for (const item of merged.items) expect(item.checkReasons).toContain('differs_from_second_reading');
-    // Its sentence comes before the legibility and not-found ones.
-    expect(merged.items[1]!.checkReason).toBe('The second reading differs from this one; compare both with the paper.');
-    expect(merged.flagReasons).not.toContain('possible_missed_item');
     expect(merged.items[1]!.checkReasons).toContain('not_in_picture_reading');
+    for (const item of merged.items) expect(item.checkReasons).not.toContain('differs_from_second_reading');
+    expect(merged.flagReasons).not.toContain('possible_missed_item');
+  });
+
+  describe('three medicines on one line, re-read from the text', () => {
+    const text = 'Amlodipine 5mg od, Metformin 500mg bd oral, Aspirin 75mg od';
+    const amlodipine = med('Amlodipine 5mg od', 'Amlodipine', '5mg', 'od');
+    const metformin = med('Metformin 500mg bd', 'Metformin', '500mg', 'bd');
+    const aspirin = med('Aspirin 75mg od', 'Aspirin', '75mg', 'od');
+    function textMerge(second: Raw[]) {
+      const page = readPage(1, ['Name: Test Patient Adaeze Example', text]);
+      const base = { page: 1, lines: page.lines, sourceSha256Hex: SOURCE_SHA, masker: createMasker() };
+      const toPage = (items: Raw[], readBy: 'first_pass' | 'reread') => checkPage({ ...base, readBy,
+        answer: modelPage(items.map((item) => modelItem({ lineIds: ['p1-l2'], ...item }))) });
+      return mergeReread(toPage([amlodipine, metformin, aspirin], 'first_pass'), toPage(second, 'reread'), page.lines,
+        'text');
+    }
+
+    it('replaces each first-pass medicine by its twin, or by a reading that only adds a field it left empty', () => {
+      const merged = textMerge([amlodipine, { ...metformin, asWritten: 'Metformin 500mg bd oral', route: 'oral' }, aspirin]);
+      expect(shape(merged.items)).toEqual([['reread', 'Amlodipine 5mg od'], ['reread', 'Metformin 500mg bd oral'],
+        ['reread', 'Aspirin 75mg od']]);
+      expect(merged.items[1]!.fields).toMatchObject({ name: 'Metformin', route: 'oral' });
+      for (const item of [merged.items[0]!, merged.items[2]!]) expect(item.confidence).toBe('clear');
+      for (const item of merged.items) {
+        expect(item.checkReasons).not.toContain('differs_from_second_reading');
+        expect(item.checkReasons).not.toContain('not_in_second_reading');
+      }
+    });
+
+    it('marks only the Metformin pair when the second reading has another strength', () => {
+      const merged = textMerge([amlodipine, { ...metformin, strength: '850mg' }, aspirin]);
+      // On the same line the second reading's items come first, then the kept first-pass one.
+      expect(shape(merged.items)).toEqual([['reread', 'Amlodipine 5mg od'], ['reread', 'Metformin 500mg bd'],
+        ['reread', 'Aspirin 75mg od'], ['first_pass', 'Metformin 500mg bd']]);
+      const marked = merged.items.filter((item) => item.checkReasons.includes('differs_from_second_reading'));
+      expect(marked.map((item) => [item.readBy, item.fields])).toEqual([
+        ['reread', expect.objectContaining({ name: 'Metformin', strength: '850mg' })],
+        ['first_pass', expect.objectContaining({ name: 'Metformin', strength: '500mg' })]]);
+      // A real disagreement (the route on the line that this reading left out) still comes first.
+      expect(merged.items[3]!.checkReason).toBe("How it is taken doesn't match the paper.");
+      expect(merged.items[3]!.checkReasons).toContain('not_in_second_reading');
+      expect(merged.flagReasons).not.toContain('possible_missed_item');
+    });
+
+    it('never treats a reading with a field the first pass filled in left out as carrying it', () => {
+      const merged = textMerge([amlodipine, { ...metformin, frequency: '' }, aspirin]);
+      expect(merged.items.filter((item) => item.asWritten === 'Metformin 500mg bd')).toHaveLength(2);
+    });
   });
 
   it('lets one picture item remove at most one of two identical first-pass items, with unique, repeatable ids', () => {
@@ -1003,19 +1050,43 @@ describe('placement floors for a short item', () => {
 });
 
 describe('mergeIdentity', () => {
-  it('takes each field from the second reading where it has one, else from the first, with both lines and boxes', () => {
-    const first = { nameAsWritten: 'Test Patient Adaeze Example', dateOfBirthAsWritten: '01/01/1990',
-      folderNumberAsWritten: null, sexAsWritten: 'F', lineIds: ['p1-l1'],
-      box: { left: 0.1, top: 0.05, width: 0.5, height: 0.02 } };
-    const second = { nameAsWritten: 'Test Patient Adaeze Exampel', dateOfBirthAsWritten: null,
+  const first = { nameAsWritten: 'Test Patient Adaeze Example', dateOfBirthAsWritten: '01/01/1990',
+    folderNumberAsWritten: null, sexAsWritten: 'F', lineIds: ['p1-l1'],
+    box: { left: 0.1, top: 0.05, width: 0.5, height: 0.02 } };
+  const blank = { nameAsWritten: null, dateOfBirthAsWritten: null, folderNumberAsWritten: null, sexAsWritten: null,
+    lineIds: [], box: null };
+
+  it('fills a field only the second reading has, keeps the first pass where they agree, with both lines and boxes', () => {
+    const second = { nameAsWritten: 'test patient  adaeze example', dateOfBirthAsWritten: null,
       folderNumberAsWritten: 'TEST-0001', sexAsWritten: null, lineIds: ['p1-l3'],
       box: { left: 0.2, top: 0.15, width: 0.3, height: 0.02 } };
-    expect(mergeIdentity(first, second)).toEqual({ nameAsWritten: 'Test Patient Adaeze Exampel',
+    expect(mergeIdentity(first, second)).toEqual({ conflict: false, identity: { nameAsWritten: 'Test Patient Adaeze Example',
       dateOfBirthAsWritten: '01/01/1990', folderNumberAsWritten: 'TEST-0001', sexAsWritten: 'F',
-      lineIds: ['p1-l1', 'p1-l3'], box: { left: 0.1, top: 0.05, width: 0.5, height: 0.12 } });
-    const blank = { nameAsWritten: null, dateOfBirthAsWritten: null, folderNumberAsWritten: null, sexAsWritten: null,
-      lineIds: [], box: null };
-    expect(mergeIdentity(first, blank)).toEqual(first);
-    expect(mergeIdentity(blank, blank)).toEqual(blank);
+      lineIds: ['p1-l1', 'p1-l3'], box: { left: 0.1, top: 0.05, width: 0.5, height: 0.12 } } });
+    expect(mergeIdentity(first, blank)).toEqual({ conflict: false, identity: first });
+    expect(mergeIdentity(blank, blank)).toEqual({ conflict: false, identity: blank });
+  });
+
+  it('keeps the first-pass value where the readings disagree, and says so', () => {
+    const merged = mergeIdentity(first, { ...first, nameAsWritten: 'Test Patient Adaeze Exampel', sexAsWritten: 'M' });
+    expect(merged.conflict).toBe(true);
+    expect(merged.identity).toMatchObject({ nameAsWritten: 'Test Patient Adaeze Example', sexAsWritten: 'F' });
+  });
+
+  it('flags the page ai_unsure when the re-read gives a different identity', () => {
+    const page = readPage(1, ['Name: Test Patient Adaeze Example  Folder: TEST-0001', 'Folder: TEST-0002',
+      'Dx: Hypertension']);
+    const base = { page: 1, lines: page.lines, sourceSha256Hex: SOURCE_SHA, masker: createMasker() };
+    const dx = modelItem({ kind: 'diagnosis', asWritten: 'Hypertension', lineIds: ['p1-l3'], name: 'Hypertension',
+      status: 'confirmed' });
+    const reading = (folder: string, line: string, readBy: 'first_pass' | 'reread') => checkPage({ ...base, readBy,
+      answer: modelPage([dx], { identity: { name: '', dateOfBirth: '', folderNumber: folder, sex: '', lineIds: [line] } }) });
+    const merged = mergeReread(reading('TEST-0001', 'p1-l1', 'first_pass'), reading('TEST-0002', 'p1-l2', 'reread'),
+      page.lines, 'text');
+    expect(merged.identity.folderNumberAsWritten).toBe('TEST-0001');
+    expect(merged.flagReasons).toContain('ai_unsure');
+    const agreed = mergeReread(reading('TEST-0001', 'p1-l1', 'first_pass'), reading('TEST-0001', 'p1-l1', 'reread'),
+      page.lines, 'text');
+    expect(agreed.flagReasons).not.toContain('ai_unsure');
   });
 });
