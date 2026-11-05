@@ -38,7 +38,7 @@ describe('OCR worker configuration', () => {
     const config = readOcrWorkerConfig(base);
     expect(config).toMatchObject({ OCR_AI_MODE: 'off', OCR_AI_FIRST_PASS_MODEL: 'claude-opus-5-5',
       OCR_AI_FIRST_PASS_EFFORT: 'high', OCR_AI_REREAD_MODEL: 'claude-opus-5-5', OCR_AI_REREAD_EFFORT: 'high',
-      OCR_AI_MAX_TOKENS: 32_000, OCR_AI_MAX_REREAD_PAGES: 20, OCR_TEXTRACT_MAX_RETRIES: 3, OCR_TEXTRACT_MAX_PAGES: 20 });
+      OCR_AI_MAX_TOKENS: 64_000, OCR_AI_MAX_REREAD_PAGES: 20, OCR_TEXTRACT_MAX_RETRIES: 3, OCR_TEXTRACT_MAX_PAGES: 20 });
     expect(config.OCR_AI_FACILITY_IDS).toBeUndefined();
   });
 
@@ -77,6 +77,26 @@ describe('OCR worker configuration', () => {
     expect(readOcrWorkerConfig({ ...base, OCR_AI_IMAGE_REREAD: 'on' }).OCR_AI_IMAGE_REREAD).toBe('on');
     for (const value of ['yes', 'true', 'ON', '1', 'auto']) {
       expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_IMAGE_REREAD: value })).toThrow(/OCR_AI_IMAGE_REREAD/);
+    }
+  });
+
+  it('reads hard pages twice at max effort by default when AI reading is on, and fails closed on other values', () => {
+    const claude = { ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-test-0000000000000000000000',
+      OCR_AI_US_PROCESSING_APPROVED: 'true' };
+    expect(readOcrWorkerConfig(base)).toMatchObject({ OCR_AI_HARD_PAGE_READS: 'off', OCR_AI_HARD_PAGE_EFFORT: 'max',
+      OCR_AI_HARD_PAGE_TIMEOUT_MS: 900_000 });
+    expect(readOcrWorkerConfig(claude).OCR_AI_HARD_PAGE_READS).toBe('on');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_READS: ' ' }).OCR_AI_HARD_PAGE_READS).toBe('on');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_READS: 'off' }).OCR_AI_HARD_PAGE_READS).toBe('off');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_EFFORT: 'xhigh' }).OCR_AI_HARD_PAGE_EFFORT).toBe('xhigh');
+    for (const value of ['yes', 'ON', 'true']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_READS: value })).toThrow(/OCR_AI_HARD_PAGE_READS/);
+    }
+    for (const value of ['maximum', 'MAX', 'highest']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_EFFORT: value })).toThrow(/OCR_AI_HARD_PAGE_EFFORT/);
+    }
+    for (const value of ['9999', '1800001']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_HARD_PAGE_TIMEOUT_MS: value })).toThrow(/OCR_AI_HARD_PAGE_TIMEOUT_MS/);
     }
   });
 

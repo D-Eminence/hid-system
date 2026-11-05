@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { Box, FlagReason, ItemKind, PaperIdentity, PaperItem, VITAL_MEASURES } from './contract';
 import {
-  ambiguousDate, combinedStrengths, compact, DOSE, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes,
+  ambiguousDate, combinedStrengths, compact, DOSE, forMatching, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes,
   sameCombined, segment, STATUS_CUES, suspiciousUncited, together, unitAfter, withoutNumberedUnit, wordsIn,
 } from './grounding';
 import { withoutPlaceholders, type Masker } from './masking';
@@ -18,8 +18,16 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['nkda_not_on_paper', 'nkda_conflicts'], "The paper doesn't clearly say there are no known allergies."],
   [['value_mismatch', 'reading_number_mismatch', 'plain_mismatch'], "A number on the paper doesn't match what was read."],
   [['number_not_in_text_read'], "A number read from the picture isn't in the text read from the page; check it against the paper."],
+  // A hard page read twice from its picture: the two readings disagreed on part of this item (that part is shown
+  // as "[unreadable]", or for a drug name both listed names).
+  [['readings_disagree'], 'Two readings of the picture disagree on part of this; check it against the paper.'],
   // After the dose and number disagreements, before the text-match ones (an item read from the picture is
   // expected to differ from the text the service read).
+  // A hard page's best guesses (owner decision 2026-11-05 about 18:40 UTC): below the real disagreements above, and
+  // before read_from_image, which every such item also has, so they are said instead of it. Most specific first.
+  [['field_from_context'], 'Part of this was guessed from what is usual, not read from the writing; check it against the paper.'],
+  [['single_reading_only'], 'Only one of two readings of the picture found this; check it against the paper.'],
+  [['best_guess_from_picture'], 'This is a best guess from the picture; check every word against the paper.'],
   // Just before read_from_image (which every picture item has), so it is shown where it applies.
   [['not_matched_to_scanned_text'], 'Read from the picture; it could not be matched to the scanned text. Check it against the paper.'],
   [['read_from_image'], 'This was read from the picture of the page; check it against the paper.'],
@@ -334,6 +342,11 @@ export interface PageCheck {
    */
   rereadReasons: string[];
   flagReasons: FlagReason[];
+  /**
+   * For each kept item (same order as items), the index of the answer item it was read from. Set by checkPage;
+   * the hard-page merge uses it to find each kept item's dose, unit and basis. Never stored.
+   */
+  rawIndexes?: number[];
 }
 
 const blankIdentity = (): PaperIdentity => ({ nameAsWritten: null, dateOfBirthAsWritten: null,
@@ -353,10 +366,10 @@ export function checkPage(input: PageCheckInput): PageCheck {
   const order = new Map(input.lines.map((line, index) => [line.id, index]));
   const pageText = input.lines.map((line) => line.text).join('\n');
   const medicineNames = input.answer.items.filter((item) => item.kind === 'medicine' && norm(item.name))
-    .map((item) => item.name);
+    .map((item) => forMatching(item.name));
   const allergySubstances = input.answer.items
     .filter((item) => item.kind === 'allergy' && !item.noKnownAllergies && norm(item.substance))
-    .map((item) => item.substance);
+    .map((item) => forMatching(item.substance));
   const items: PaperItem[] = [];
   /** Kept items by base id: the same kind, cited lines and asWritten. */
   const seen = new Map<string, PaperItem[]>();
@@ -364,7 +377,8 @@ export function checkPage(input: PageCheckInput): PageCheck {
   let dropped = 0;
   const droppedByReason: Record<string, number> = {};
   const drop = (reason: DropReason) => { dropped += 1; droppedByReason[reason] = (droppedByReason[reason] ?? 0) + 1; };
-  for (const raw of input.answer.items) {
+  const rawIndexes: number[] = [];
+  for (const [rawIndex, raw] of input.answer.items.entries()) {
     const lineIds = [...new Set(raw.lineIds)].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
     const cited = lineIds.map((id) => byId.get(id));
     const source = cited.map((line) => line?.text ?? '').join(' ');
@@ -398,8 +412,9 @@ export function checkPage(input: PageCheckInput): PageCheck {
     // line text doesn't have is flagged in markReadFromImage.
     const item = place === null
       ? checkItem(raw, lines, itemLineIds, itemSource, pageText, order, medicineNames, allergySubstances, input)
-      : checkItem(raw, lines.map((line, index) => ({ ...line, text: index === 0 ? raw.asWritten : '' })), itemLineIds,
-        raw.asWritten, `${pageText}\n${raw.asWritten}`, order, medicineNames, allergySubstances, input);
+      : checkItem(raw, lines.map((line, index) => ({ ...line, text: index === 0 ? forMatching(raw.asWritten) : '' })),
+        itemLineIds, forMatching(raw.asWritten), `${pageText}\n${forMatching(raw.asWritten)}`, order, medicineNames,
+        allergySubstances, input);
     if (place !== null) markReadFromImage(item, raw, itemSource, place.box, place.matched);
     const group = seen.get(item.id) ?? [];
     // An exact repeat (same kind, lines, asWritten and fields) collapses to one.
@@ -412,6 +427,7 @@ export function checkPage(input: PageCheckInput): PageCheck {
     group.push(item);
     seen.set(item.id, group);
     items.push(item);
+    rawIndexes.push(rawIndex);
   }
   const identity = checkIdentity(input.answer.identity, byId, pageText, input.masker);
   const cited = new Set([...items.flatMap((item) => item.lineIds), ...identity.lineIds]);
@@ -447,7 +463,7 @@ export function checkPage(input: PageCheckInput): PageCheck {
   for (const item of items) item.asWritten = input.masker.restore(item.asWritten);
   return { items: uniqueItemIds(items), droppedUngrounded: dropped, droppedByReason, identity,
     pageUnsure: input.answer.pageUnsure,
-    rereadReasons, flagReasons };
+    rereadReasons, flagReasons, rawIndexes };
 }
 
 /**
@@ -535,8 +551,11 @@ function addReason(item: PaperItem, code: string): void {
   item.checkReason = checkReasonSentence(item.checkReasons);
 }
 
-/** Normalised text for comparing two readings: compact (case, spacing, "5 mg" = "5mg"), placeholders blanked. */
-const comparable = (text: string) => compact(withoutPlaceholders(text));
+/**
+ * Normalised text for comparing two readings: compact (case, spacing, "5 mg" = "5mg"), placeholders blanked, and
+ * guess marks off (forMatching), so "Toxoplasmosis?" and "Toxoplasmosis" are the same reading.
+ */
+const comparable = (text: string) => compact(withoutPlaceholders(forMatching(text)));
 
 /**
  * The one second-reading item (same kind, on a shared line: the candidates) that a kept first-pass item is to be
@@ -648,9 +667,22 @@ export function uniqueItemIds(items: readonly PaperItem[]): PaperItem[] {
   return items.map((item, index) => (item.id === ids[index] ? item : { ...item, id: ids[index]! }));
 }
 
-function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly string[], source: string,
+/** The item's text fields with their guess marks off (forMatching): what checkItem holds to the page. */
+function matchingItem(item: ModelItem): ModelItem {
+  return Object.fromEntries(Object.entries(item).map(([key, value]) => [key,
+    typeof value === 'string' ? forMatching(value) : value])) as ModelItem;
+}
+
+/**
+ * One kept item's checks. Every comparison with the page is made on the fields with their guess marks off
+ * (`raw`, matchingItem), so "Sulfa?" is found in "No sulfa allergy" and "Hb?" labels its value; the item stores
+ * and shows the fields as read (`shown`), marks and all. Dates and the prescriber are stored only where written
+ * exactly on the page, as read.
+ */
+function checkItem(shown: ModelItem, lines: readonly ReadLine[], lineIds: readonly string[], source: string,
   pageText: string, order: ReadonlyMap<string, number>, medicineNames: readonly string[],
   allergySubstances: readonly string[], input: PageCheckInput): PaperItem {
+  const raw = matchingItem(shown);
   const reasons: string[] = [];
   const add = (code: string) => { if (!reasons.includes(code)) reasons.push(code); };
   const restore = (text: string) => value(text, input.masker);
@@ -670,7 +702,7 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
   const sourceNumbers = new Set(numbers(source));
   if (numbers(raw.plain).some((number) => !sourceNumbers.has(number))) add('reading_number_mismatch');
 
-  let dateAsWritten = restoreIfPresent(raw.dateAsWritten, source, pageText, input.masker);
+  let dateAsWritten = restoreIfPresent(shown.dateAsWritten, source, pageText, input.masker);
   if (raw.dateAsWritten.trim() && dateAsWritten === null) add('date_not_on_page');
   if (dateAsWritten !== null && ambiguousDate(dateAsWritten)) add('date_ambiguous');
 
@@ -724,11 +756,11 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       const status = (['current', 'new', 'stopped', 'past', 'unknown'] as const)
         .find((candidate) => candidate === raw.status);
       if (!status) add('status_unclear');
-      fields = { name: restore(raw.name), strength: restore(raw.strength), form: restore(raw.form),
-        route: restore(raw.route), frequency: restore(raw.frequency), duration: restore(raw.duration),
+      fields = { name: restore(shown.name), strength: restore(shown.strength), form: restore(shown.form),
+        route: restore(shown.route), frequency: restore(shown.frequency), duration: restore(shown.duration),
         status: status ?? 'unknown' };
-      const prescriber = restoreIfPresent(raw.prescriberAsWritten, source, pageText, input.masker);
-      const prescribed = restoreIfPresent(raw.prescriptionDate, source, pageText, input.masker);
+      const prescriber = restoreIfPresent(shown.prescriberAsWritten, source, pageText, input.masker);
+      const prescribed = restoreIfPresent(shown.prescriptionDate, source, pageText, input.masker);
       if ((raw.prescriberAsWritten.trim() && prescriber === null) || (raw.prescriptionDate.trim() && prescribed === null)) {
         add('prescription_detail_not_on_page');
       }
@@ -742,7 +774,7 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       const status = (['confirmed', 'suspected', 'ruled_out', 'history', 'family_history'] as const)
         .find((candidate) => candidate === raw.status);
       if (!status) add('status_unclear');
-      fields = { name: restore(raw.name), status: status ?? 'history' };
+      fields = { name: restore(shown.name), status: status ?? 'history' };
       break;
     }
     case 'allergy': {
@@ -777,8 +809,8 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       const severity = raw.severity === 'none' ? null : raw.severity;
       if (severity === 'unknown' ? !SEVERITY_UNKNOWN.test(norm(withoutPlaceholders(own)))
         : severity !== null && !severityOnPaper(own, severity)) add('field_not_on_paper');
-      fields = { substance: raw.noKnownAllergies ? null : restore(raw.substance),
-        reaction: restore(raw.reaction), severity: raw.noKnownAllergies ? null : severity,
+      fields = { substance: raw.noKnownAllergies ? null : restore(shown.substance),
+        reaction: restore(shown.reaction), severity: raw.noKnownAllergies ? null : severity,
         noKnownAllergies: raw.noKnownAllergies };
       break;
     }
@@ -794,7 +826,7 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
         || (norm(raw.referenceRange) && !asWrittenIn(raw.asWritten, raw.referenceRange))) add('value_mismatch');
       // The value is the one written for this test: the first after its name, before another test's name.
       const otherTests = input.answer.items.filter((item) => item.kind === 'lab_result' && norm(item.test))
-        .map((item) => item.test).filter((other) => !has(other, raw.test) && !has(raw.test, other));
+        .map((item) => forMatching(item.test)).filter((other) => !has(other, raw.test) && !has(raw.test, other));
       if (norm(raw.value) && norm(raw.test)
         && !valueLeads(labelledParts(raw.asWritten, [pattern(raw.test)], otherTests.map(pattern)), raw.value)) {
         add('value_mismatch');
@@ -805,8 +837,8 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       if (opposite(resultSign(raw.plain), resultSign(norm(raw.value) ? raw.value : raw.asWritten))) {
         add('plain_contradicts');
       }
-      fields = { test: restore(raw.test), value: restore(raw.value), unit: restore(raw.unit),
-        referenceRange: restore(raw.referenceRange), flag: restore(raw.flag) };
+      fields = { test: restore(shown.test), value: restore(shown.value), unit: restore(shown.unit),
+        referenceRange: restore(shown.referenceRange), flag: restore(shown.flag) };
       break;
     }
     case 'vital': {
@@ -814,7 +846,7 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
         // A reading with no recognisable measure is kept for the reviewer as a note, never as a vital.
         add('measure_unclear');
         kind = 'note';
-        fields = { text: restore(raw.asWritten) };
+        fields = { text: restore(shown.asWritten) };
         break;
       }
       if (!norm(raw.value)) add('name_missing');
@@ -829,15 +861,15 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       if (labelled.length === 0 && labelledParts(raw.asWritten, otherLabels, []).length > 0) add('measure_mismatch');
       else if (labelled.length > 0 && norm(raw.value) && !valueLeads(labelled, raw.value)) add('value_mismatch');
       if (fieldWordsMissing(raw.unit) || !unitWritten(raw.asWritten, raw.value, raw.unit)) add('unit_mismatch');
-      fields = { measure: raw.measure, value: restore(raw.value), unit: restore(raw.unit) };
+      fields = { measure: raw.measure, value: restore(shown.value), unit: restore(shown.unit) };
       break;
     }
     case 'note':
     default:
       // A note's text is the paper's: noteText only where it is written in the cited lines, else asWritten.
       if (norm(raw.noteText) && !has(source, raw.noteText)) add('field_not_on_paper');
-      fields = { text: (norm(raw.noteText) && has(source, raw.noteText) ? restore(raw.noteText) : null)
-        ?? restore(raw.asWritten) };
+      fields = { text: (norm(raw.noteText) && has(source, raw.noteText) ? restore(shown.noteText) : null)
+        ?? restore(shown.asWritten) };
       break;
   }
   if (kind === 'medicine' || kind === 'diagnosis') {
@@ -852,9 +884,9 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
   let box = unionBox(lines.map((line) => line.box));
   if (box === null) { add('no_position'); box = { left: 0, top: 0, width: 1, height: 1 }; }
   if (dateAsWritten === '') dateAsWritten = null;
-  const id = itemId(input.sourceSha256Hex, kind, lineIds, input.masker.restore(raw.asWritten));
+  const id = itemId(input.sourceSha256Hex, kind, lineIds, input.masker.restore(shown.asWritten));
   return {
-    id, kind, asWritten: raw.asWritten, plain: input.masker.restore(raw.plain.trim()), dateAsWritten,
+    id, kind, asWritten: shown.asWritten, plain: input.masker.restore(shown.plain.trim()), dateAsWritten,
     page: input.page, lineIds: [...lineIds], box,
     confidence: reasons.length > 0 ? 'check_carefully' : 'clear',
     checkReasons: reasons, checkReason: checkReasonSentence(reasons),

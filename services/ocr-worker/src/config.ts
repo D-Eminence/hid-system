@@ -72,10 +72,23 @@ const schema = z.object({
   OCR_AI_FIRST_PASS_EFFORT: effort.default('high'),
   OCR_AI_REREAD_MODEL: claudeModel.default('claude-opus-5-5'),
   OCR_AI_REREAD_EFFORT: effort.default('high'),
-  // Room for a dense page (dozens of items) plus adaptive thinking at high effort; only tokens generated are billed.
-  OCR_AI_MAX_TOKENS: z.coerce.number().int().min(1_024).max(128_000).default(32_000),
+  // Room for a dense page (dozens of items) plus adaptive thinking; only tokens generated are billed. 64,000 (was
+  // 32,000) so a hard page read at max effort (long thinking, then every item with a basis per field) is not cut
+  // off: a cut-off answer is a failed reading. Claude Opus 5.5 allows up to 128,000 output tokens when streamed.
+  OCR_AI_MAX_TOKENS: z.coerce.number().int().min(1_024).max(128_000).default(64_000),
   // Per request, for the whole streamed answer: a full OCR_AI_MAX_TOKENS answer at high effort needs minutes.
   OCR_AI_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(600_000).default(300_000),
+  // Hard pages (flagged handwriting or low_confidence, re-read with the picture): best-guess readings, two reads per
+  // page (owner decision 2026-11-05 about 18:40 UTC). 'on' or 'off'; unset or empty means 'on' when
+  // OCR_AI_MODE=claude and 'off' otherwise ('off' sends such pages the ordinary image re-read). Any other value
+  // fails startup.
+  OCR_AI_HARD_PAGE_READS: z.preprocess(emptyToUndefined, z.enum(['on', 'off']).optional()),
+  // Effort for both hard-page reads, 'max' by default (the owner's best-result run); fail-closed like the others.
+  OCR_AI_HARD_PAGE_EFFORT: effort.default('max'),
+  // Per hard-page request, for the whole streamed answer: at max effort the model may think for many minutes before
+  // it answers (an OCR_AI_MAX_TOKENS answer can take over ten). 15 minutes by default; the job's lease is renewed
+  // meanwhile.
+  OCR_AI_HARD_PAGE_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(1_800_000).default(900_000),
   OCR_AI_MAX_RETRIES: z.coerce.number().int().min(0).max(8).default(4),
   OCR_AI_MAX_REREAD_PAGES: z.coerce.number().int().min(0).max(20).default(20),
   // Claude API requests in flight at once for the whole process (every claim loop shares the one limit).
@@ -130,7 +143,9 @@ const schema = z.object({
     }
   }
 }).transform((env) => ({ ...env,
-  OCR_AI_IMAGE_REREAD: env.OCR_AI_IMAGE_REREAD ?? (env.OCR_AI_MODE === 'claude' ? 'on' as const : 'off' as const) }));
+  OCR_AI_IMAGE_REREAD: env.OCR_AI_IMAGE_REREAD ?? (env.OCR_AI_MODE === 'claude' ? 'on' as const : 'off' as const),
+  OCR_AI_HARD_PAGE_READS: env.OCR_AI_HARD_PAGE_READS
+    ?? (env.OCR_AI_MODE === 'claude' ? 'on' as const : 'off' as const) }));
 
 export type OcrWorkerConfig = z.infer<typeof schema>;
 

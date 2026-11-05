@@ -7,6 +7,7 @@ import {
   PAPER_READING_CONTRACT, PAPER_READING_SCHEMA_VERSION, type FlagReason, type ImageRereadSkipReason, type PaperIdentity,
   type PaperItem, type PaperPage, type PaperReadingPayload, type ReadingStatus,
 } from './contract';
+import { mergeHardReadings, noAgreement, prepareHardAnswer, type HardPageAgreement } from './hard-page';
 import { blankIdentity, checkPage, mergeReread, REVIEW_BELOW, uniqueItemIds, type PageCheck } from './items';
 import { createMasker, type Masker } from './masking';
 import { imageTierOf, pageImageFor, type PageImage, type PageImageDecision, type SourceDocument } from './page-image';
@@ -16,7 +17,10 @@ export type ReadingConfig = Pick<OcrWorkerConfig, 'OCR_AI_MODE' | 'OCR_AI_FACILI
   | 'OCR_AI_FIRST_PASS_EFFORT' | 'OCR_AI_REREAD_MODEL' | 'OCR_AI_REREAD_EFFORT' | 'OCR_AI_MAX_REREAD_PAGES'>
   // Pages of one document read at once; one at a time when not given. The image re-read is off when not given,
   // and a page with a masked number is sent as a picture unless OCR_AI_IMAGE_MASKED_PAGES is 'text_only'.
-  & Partial<Pick<OcrWorkerConfig, 'OCR_AI_PAGE_CONCURRENCY' | 'OCR_AI_IMAGE_REREAD' | 'OCR_AI_IMAGE_MASKED_PAGES'>>;
+  & Partial<Pick<OcrWorkerConfig, 'OCR_AI_PAGE_CONCURRENCY' | 'OCR_AI_IMAGE_REREAD' | 'OCR_AI_IMAGE_MASKED_PAGES'>>
+  // Hard-page best-guess reads (two per hard page); off when not given, as the image re-read. Effort 'max' when not
+  // given.
+  & Partial<Pick<OcrWorkerConfig, 'OCR_AI_HARD_PAGE_READS' | 'OCR_AI_HARD_PAGE_EFFORT'>>;
 
 export interface ReadingInput {
   facilityId: string;
@@ -72,9 +76,19 @@ export interface ReadingSummary {
    * per-model records cannot show what the re-reads cost); not stored in provenance or the database.
    */
   passUsage: PassUsageRecord[];
+  /**
+   * Hard pages (flagged handwriting or low_confidence, re-read with the picture) sent for best-guess readings, the
+   * number of hard-page reads sent (two per page), pages where only one of the two gave an answer, and how far the
+   * two readings agreed. Codes and counts only.
+   */
+  hardPages: number[];
+  hardPageReads: number;
+  hardPageSingleReadPages: number[];
+  hardPageAgreement: HardPageAgreement;
 }
 
-export type ReadingPass = 'first_pass' | 'reread' | 'image_reread';
+/** 'hard_page_read': both best-guess reads of a hard page (owner decision 2026-11-05), so their cost shows apart. */
+export type ReadingPass = 'first_pass' | 'reread' | 'image_reread' | 'hard_page_read';
 export interface PassUsageRecord extends AiUsageRecord { pass: ReadingPass }
 
 export interface ReadingOutcome { payload: PaperReadingPayload; summary: ReadingSummary }
@@ -191,11 +205,11 @@ export class PaperReadingService {
         final: null, declined: false, failed: false, reread: 'none', fromImage: false };
     });
     const ask = async (state: PageState, model: string, effort: Effort, image?: PageImage,
-      pass: ReadingPass = image ? 'image_reread' : 'reread') => {
+      pass: ReadingPass = image ? 'image_reread' : 'reread', hardPage = false) => {
       let answer: PageAnswer;
       try {
         answer = await client.readPage({ model, effort, page: state.page, lines: state.lines,
-          ...(image ? { image } : {}) }, signal);
+          ...(image ? { image } : {}), ...(hardPage ? { hardPage: true } : {}) }, signal);
       } catch (error) {
         // A call that ended without an answer still made requests (and may have used tokens): count them.
         // A call stopped before its first request (waiting for a permit) made none and adds nothing.
@@ -257,13 +271,70 @@ export class PaperReadingService {
     };
     const rereadModel = this.config.OCR_AI_REREAD_MODEL;
     const rereadEffort = this.config.OCR_AI_REREAD_EFFORT;
+    const hardEffort: Effort = this.config.OCR_AI_HARD_PAGE_EFFORT ?? 'max';
+    const hardPages: number[] = [];
+    const hardSingle: number[] = [];
+    const agreement = noAgreement();
+    let hardReads = 0;
+    /**
+     * A hard page (owner decision 2026-11-05, about 18:40 UTC): the same best-guess request with the picture sent
+     * twice, at the hard-page effort, then the two readings compared (hard-page.ts). One reading failing or declining
+     * leaves the other alone (single_reading_only on every item). Both failing: as a failed image re-read, except
+     * that, as for the image re-read, each read refused as an invalid request or declined sends the page to a text
+     * re-read instead ('image_refused' when either declined, else 'image_rejected').
+     * Zoom (deferred): a later step could ask for a crop here, between the two reads and the merge (zoom.ts).
+     */
+    const readHard = async (state: PageState, picture: PageImage): Promise<{ kind: 'read'; check: PageCheck }
+      | { kind: 'fallback'; reason: 'image_rejected' | 'image_refused' } | { kind: 'failed' }> => {
+      hardPages.push(state.page);
+      hardReads += 2;
+      const settled = await Promise.allSettled([0, 1].map(() =>
+        ask(state, rereadModel, hardEffort, picture, 'hard_page_read', true)));
+      for (const result of settled) {
+        if (result.status === 'rejected' && (signal.aborted
+          || !(result.reason instanceof AiTransientError || result.reason instanceof AiRejectedError))) throw result.reason;
+      }
+      const answers = settled.flatMap((result) => result.status === 'fulfilled' && result.value.kind === 'answer'
+        ? [result.value.answer] : []);
+      if (answers.length === 0) {
+        const kinds = settled.map((result) => result.status === 'fulfilled' ? result.value.kind
+          : result.reason instanceof AiRejectedError && result.reason.code === 'AI_BAD_REQUEST' && result.reason.invalidRequest
+            ? 'invalid' : 'error');
+        // Each read either refused as an invalid request or declined: the picture is the likely cause either way.
+        if (kinds.every((kind) => kind === 'invalid' || kind === 'refused')) {
+          return { kind: 'fallback', reason: kinds.includes('refused') ? 'image_refused' : 'image_rejected' };
+        }
+        return { kind: 'failed' };
+      }
+      if (answers.length === 1) hardSingle.push(state.page);
+      const readings = answers.map((raw) => {
+        const prepared = prepareHardAnswer(raw);
+        return { answer: prepared, check: checkPage({ page: state.page, lines: state.lines, answer: prepared,
+          sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker, fromImage: true }) };
+      });
+      const merged = mergeHardReadings(readings, input.sourceSha256Hex);
+      for (const key of Object.keys(agreement) as (keyof HardPageAgreement)[]) agreement[key] += merged.agreement[key];
+      return { kind: 'read', check: merged.check };
+    };
     await forEachBounded(candidates, pageConcurrency, async (state) => {
       let answer: PageAnswer | null = null;
       let fromImage = false;
+      let hardCheck: PageCheck | null = null;
       // Only a flagged page (one the first pass answered) may go with its picture.
       const decision = state.firstCheck === null ? null : this.imageDecision(state, input);
       try {
-        if (decision?.kind === 'image') {
+        if (decision?.kind === 'image' && this.isHardPage(state)) {
+          const hard = await readHard(state, pictureOf(decision));
+          if (hard.kind === 'read') {
+            hardCheck = hard.check;
+            fromImage = true;
+          } else if (hard.kind === 'fallback') {
+            skipped.push({ page: state.page, reason: hard.reason });
+            answer = await ask(state, rereadModel, rereadEffort);
+          } else {
+            imageFailed.push(state.page);
+          }
+        } else if (decision?.kind === 'image') {
           try {
             answer = await ask(state, rereadModel, rereadEffort, pictureOf(decision));
             fromImage = true;
@@ -297,10 +368,12 @@ export class PaperReadingService {
         if (signal.aborted) throw error;
         if (!(error instanceof AiTransientError) && !(error instanceof AiRejectedError)) throw error;
       }
-      if (answer?.kind === 'answer' && state.firstCheck) {
+      if ((hardCheck !== null || answer?.kind === 'answer') && state.firstCheck) {
         // A flagged page the first pass answered, re-read from the picture or the text: merged, fail-safe, so no
-        // first-pass item without an exact twin in the second reading is lost.
-        const read = checkPage({ page: state.page, lines: state.lines, answer: answer.answer,
+        // first-pass item without an exact twin in the second reading is lost. A hard page's two readings were
+        // already merged into one (readHard).
+        const read = hardCheck ?? checkPage({ page: state.page, lines: state.lines,
+          answer: (answer as Extract<PageAnswer, { kind: 'answer' }>).answer,
           sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker, fromImage });
         if (read.items.length === 0 && state.firstCheck.items.length > 0) {
           // Nothing from the second reading held to the page while the first pass had items: not a usable reading.
@@ -364,6 +437,10 @@ export class PaperReadingService {
       imageRereadPages, [...skipped].sort((a, b) => a.page - b.page), [...imageFailed].sort((a, b) => a - b));
     summary.droppedByReason = sumReasons(states.map((state) => state.final?.droppedByReason));
     summary.droppedByReasonFirstPass = sumReasons(states.map((state) => state.firstCheck?.droppedByReason));
+    summary.hardPages = [...hardPages].sort((a, b) => a - b);
+    summary.hardPageReads = hardReads;
+    summary.hardPageSingleReadPages = [...hardSingle].sort((a, b) => a - b);
+    summary.hardPageAgreement = agreement;
     return { payload: this.payload(pages, status === 'read' ? identity : blankIdentity(), kept, summary), summary };
   }
 
@@ -385,6 +462,16 @@ export class PaperReadingService {
     return decision;
   }
 
+  /**
+   * A hard page: the first pass flagged it handwriting or low_confidence (owner decision 2026-11-05, about 18:40 UTC,
+   * "recommended with prompt that makes them do best result") and the hard-page reads are on. Called only for a page
+   * whose re-read goes with its picture; every other path keeps rule D ("[unreadable]", never a guess).
+   */
+  private isHardPage(state: PageState): boolean {
+    return this.config.OCR_AI_HARD_PAGE_READS === 'on' && state.firstCheck !== null
+      && state.firstCheck.flagReasons.some((reason) => reason === 'handwriting' || reason === 'low_confidence');
+  }
+
   private summary(status: ReadingStatus, pages: readonly PaperPage[], items: readonly PaperItem[], dropped: number,
     droppedFirst: number, rereadPages: number[], rereadFailed: number, aiUsed: boolean, usage: TokenUsage,
     requests: number, refusals: number, pagesSent: number, masked: number, servedGeo: string | null,
@@ -401,7 +488,8 @@ export class PaperReadingService {
       droppedUngrounded: dropped, droppedUngroundedFirstPass: droppedFirst, droppedByReason: {},
       droppedByReasonFirstPass: {}, itemCount: items.length,
       flaggedPages: pages.filter((page) => page.flagged).length, maskedNumbers: masked, failureCode, usage,
-      modelUsage, passUsage,
+      modelUsage, passUsage, hardPages: [], hardPageReads: 0, hardPageSingleReadPages: [],
+      hardPageAgreement: noAgreement(),
     };
   }
 

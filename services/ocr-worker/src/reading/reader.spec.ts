@@ -41,7 +41,7 @@ describe('PaperReadingService', () => {
     expect(calls.map((call) => call.model)).toEqual(['claude-sonnet-5-5']);
     expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
     expect(payload.reading).toMatchObject({ status: 'read', firstPassModel: 'claude-sonnet-5-5', rereadModel: null,
-      rereadPages: [], itemCount: 1, promptVersion: 'hid-paper-reading-prompt-4' });
+      rereadPages: [], itemCount: 1, promptVersion: 'hid-paper-reading-prompt-5' });
     expect(payload.identity).toMatchObject({ nameAsWritten: 'Test Patient Adaeze Example', folderNumberAsWritten: 'TEST-0001' });
     expect(payload.items[0]).toMatchObject({ kind: 'diagnosis', readBy: 'first_pass', confidence: 'clear' });
     expect(summary).toMatchObject({ requests: 1, inferenceGeo: 'us', servedInferenceGeo: 'us' });
@@ -793,6 +793,158 @@ describe('PaperReadingService', () => {
       expect(paperReadingPayloadSchema.safeParse({ ...off.payload, reading: older }).success).toBe(true);
       expect(paperReadingPayloadSchema.safeParse({ ...off.payload, reading: { ...older,
         imageRereadSkipped: [{ page: 1, reason: 'made_up' }] } }).success).toBe(false);
+    });
+  });
+
+  describe('hard pages: two best-guess readings from the picture (owner decision 2026-11-05)', () => {
+    const hardConfig: ReadingConfig = { ...config, OCR_AI_IMAGE_REREAD: 'on', OCR_AI_HARD_PAGE_READS: 'on' };
+    const png = { mediaType: 'image/png', bytes: fixturePng(1240, 1754) };
+    // Fictional: a handwritten line the text service could barely read (flags the page 'handwriting').
+    const hardPage = readPage(1, [['Pyrmthmn 25 rng od', { handwritten: true, confidence: 0.4 }], 'Dx: Hypertension']);
+    const firstPass = modelPage([modelItem({ kind: 'note', asWritten: 'Pyrmthmn 25 rng od', lineIds: ['p1-l1'] }),
+      modelItem({ kind: 'diagnosis', asWritten: 'Hypertension', lineIds: ['p1-l2'], name: 'Hypertension',
+        status: 'confirmed' })]);
+    const basis = { name: 'letters', dose: 'letters', unit: 'letters', route: 'empty', frequency: 'letters',
+      duration: 'empty', value: 'empty', other: 'empty' } as const;
+    const best = (name: string, dose = '25', nameBasis: 'letters' | 'context' = 'letters'): ModelPage => modelPage([
+      { ...modelItem({ kind: 'medicine', asWritten: `${name}? ${dose} mg od`, lineIds: ['p1-l1'], name,
+        strength: `${dose}mg`, frequency: 'od', status: 'new' }), box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 },
+      hard: { dose, doseUnit: 'mg', basis: { ...basis, name: nameBasis } } }]);
+    type Call = { model: string; effort: string; image: boolean; hardPage: boolean; texts: string[] };
+    function hardClient(answers: (call: number) => PageAnswer | Error, first: PageAnswer = ok(firstPass)) {
+      const calls: Call[] = [];
+      let hardCalls = 0;
+      const client: PageModelClient = { readPage: jest.fn(async (request) => {
+        calls.push({ model: request.model, effort: request.effort, image: request.image !== undefined,
+          hardPage: request.hardPage === true, texts: request.lines.map((line) => line.text) });
+        if (request.model === 'claude-sonnet-5-5') return first;
+        if (request.hardPage) {
+          const result = answers(hardCalls++);
+          if (result instanceof Error) throw result;
+          return result;
+        }
+        return ok(firstPass);
+      }) };
+      return { client, calls };
+    }
+    const read = (reading: ReadingConfig, client: PageModelClient, pages = [hardPage],
+      document: { mediaType: string; bytes: Uint8Array } | undefined = png) => new PaperReadingService(reading, client)
+      .read({ facilityId: FACILITY, sourceSha256Hex: SOURCE_SHA, pages, ...(document ? { document } : {}) }, signal());
+
+    it('sends a handwriting or low_confidence page the best-guess request twice, at max effort, with its picture', async () => {
+      const { client, calls } = hardClient(() => ok(best('Pyrimethamine')));
+      const { payload, summary } = await read(hardConfig, client);
+      expect(calls.map((call) => [call.model, call.effort, call.image, call.hardPage])).toEqual([
+        ['claude-sonnet-5-5', 'medium', false, false], ['claude-opus-5-5', 'max', true, true],
+        ['claude-opus-5-5', 'max', true, true]]);
+      expect(summary).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
+        hardPageAgreement: { itemsPaired: 1, itemsSingle: 0 }, imageRereadPages: [1], rereadPages: [1] });
+      expect(summary.passUsage.map((entry) => [entry.pass, entry.requests])).toEqual([['first_pass', 1],
+        ['hard_page_read', 2]]);
+      const medicine = payload.items.find((item) => item.kind === 'medicine')!;
+      expect(medicine).toMatchObject({ readBy: 'reread', confidence: 'check_carefully',
+        fields: { name: 'Pyrimethamine?', strength: '25 mg', frequency: 'od' } });
+      expect(medicine.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'read_from_image']));
+      // mergeReread keeps the first pass's items the hard reading did not carry.
+      expect(payload.items.filter((item) => item.readBy === 'first_pass').map((item) => item.asWritten))
+        .toEqual(['Pyrmthmn 25 rng od', 'Hypertension']);
+      expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+      expect(payload.reading.promptVersion).toBe('hid-paper-reading-prompt-5');
+      // The configured effort is used when given; a printed page below REVIEW_BELOW (low_confidence) is hard too.
+      const faint = readPage(1, [['Pyrmthmn 25 rng od', { confidence: 0.5 }], 'Dx: Hypertension']);
+      const xhigh = hardClient(() => ok(best('Pyrimethamine')));
+      await read({ ...hardConfig, OCR_AI_HARD_PAGE_EFFORT: 'xhigh' }, xhigh.client, [faint]);
+      expect(xhigh.calls.slice(1).map((call) => [call.effort, call.hardPage])).toEqual([['xhigh', true], ['xhigh', true]]);
+    });
+
+    it('keeps the earlier image re-read for a page flagged only for another reason, and rule D everywhere else', async () => {
+      // A legible printed page the first pass was unsure of: flagged ai_unsure only, not a hard page.
+      const unsure = modelPage([modelItem({ kind: 'diagnosis', asWritten: 'Hypertension', lineIds: ['p1-l1'],
+        name: 'Hypertension', status: 'confirmed' })], { pageUnsure: true });
+      const plain = hardClient(() => ok(best('Pyrimethamine')), ok(unsure));
+      const result = await read(hardConfig, plain.client, [readPage(1, ['Dx: Hypertension'])]);
+      expect(plain.calls.map((call) => [call.effort, call.image, call.hardPage])).toEqual([['medium', false, false],
+        ['high', true, false]]);
+      expect(result.summary).toMatchObject({ hardPages: [], hardPageReads: 0 });
+      // A hard page that cannot go with its picture (a PDF) gets the text re-read, never the best guess.
+      const pdf = hardClient(() => ok(best('Pyrimethamine')));
+      const text = await read(hardConfig, pdf.client, [hardPage], { mediaType: 'application/pdf', bytes: png.bytes });
+      expect(pdf.calls.map((call) => [call.image, call.hardPage])).toEqual([[false, false], [false, false]]);
+      expect(text.summary).toMatchObject({ hardPages: [], imageRereadSkipped: [{ page: 1, reason: 'image_not_available_pdf' }] });
+      // With the hard-page reads off (or not given), a hard page gets the earlier single image re-read.
+      for (const reading of [{ ...hardConfig, OCR_AI_HARD_PAGE_READS: 'off' as const },
+        { ...config, OCR_AI_IMAGE_REREAD: 'on' as const }]) {
+        const off = hardClient(() => ok(best('Pyrimethamine')));
+        const outcome = await read(reading, off.client);
+        expect(off.calls.map((call) => [call.effort, call.image, call.hardPage])).toEqual([['medium', false, false],
+          ['high', true, false]]);
+        expect(outcome.summary.hardPages).toEqual([]);
+      }
+    });
+
+    it('turns a disagreeing dose unreadable and offers two listed names as "A? / B?"', async () => {
+      const { client } = hardClient((call) => ok(call === 0 ? best('Pyrimethamine') : best('Primaquine', '15')));
+      const { payload, summary } = await read(hardConfig, client);
+      const medicine = payload.items.find((item) => item.kind === 'medicine')!;
+      // Primaquine is not on the list: a disagreement with an unlisted name is unreadable.
+      expect(medicine.fields).toMatchObject({ name: '[unreadable]', strength: '[unreadable] mg' });
+      expect(medicine.checkReasons).toContain('readings_disagree');
+      expect(JSON.stringify(payload.items)).not.toContain('15');
+      expect(summary.hardPageAgreement.fieldsAgreed).toBeLessThan(summary.hardPageAgreement.fieldsCompared);
+      const listed = hardClient((call) => ok(call === 0 ? best('Pyrimethamine') : best('Proguanil')));
+      const both = await read(hardConfig, listed.client);
+      expect(both.payload.items.find((item) => item.kind === 'medicine')!.fields)
+        .toMatchObject({ name: 'Pyrimethamine? / Proguanil?', strength: '25 mg' });
+    });
+
+    it('uses the other reading alone when one fails or declines, saying so on every item', async () => {
+      for (const failure of [new AiTransientError('AI_HTTP_529', 2), refused,
+        { kind: 'failed', reason: 'max_tokens', usage, attempts: 1 } as PageAnswer]) {
+        const { client } = hardClient((call) => call === 0 ? failure : ok(best('Pyrimethamine')));
+        const { payload, summary } = await read(hardConfig, client);
+        expect(summary).toMatchObject({ hardPages: [1], hardPageSingleReadPages: [1], imageRereadPages: [1],
+          imageRereadFailedPages: [] });
+        const medicine = payload.items.find((item) => item.kind === 'medicine')!;
+        expect(medicine.checkReasons).toEqual(expect.arrayContaining(['single_reading_only', 'best_guess_from_picture']));
+      }
+    });
+
+    it('treats two failed reads as a failed image re-read, and two refusals or invalid requests as before', async () => {
+      const failed = hardClient(() => new AiTransientError('AI_HTTP_529', 1));
+      const outcome = await read(hardConfig, failed.client);
+      expect(failed.calls.map((call) => call.hardPage)).toEqual([false, true, true]);
+      expect(outcome.summary).toMatchObject({ imageRereadFailedPages: [1], rereadFailedPages: 1, hardPages: [1] });
+      expect(outcome.payload.items.every((item) => item.readBy === 'first_pass'
+        && item.checkReasons.includes('reread_failed'))).toBe(true);
+      for (const [answer, reason] of [[refused, 'image_refused'],
+        [new AiRejectedError('AI_BAD_REQUEST', 1, undefined, true), 'image_rejected']] as const) {
+        const { client, calls } = hardClient(() => answer);
+        const { summary } = await read(hardConfig, client);
+        expect(calls.map((call) => [call.image, call.hardPage])).toEqual([[false, false], [true, true], [true, true],
+          [false, false]]);
+        expect(summary).toMatchObject({ imageRereadSkipped: [{ page: 1, reason }], rereadPages: [1] });
+      }
+      // One declined and the other refused as an invalid request: the picture is still the likely cause, so the
+      // page goes to the text re-read (image_refused, since one read declined), not to a failed image re-read.
+      const mixed = hardClient((call) => call === 0 ? refused : new AiRejectedError('AI_BAD_REQUEST', 1, undefined, true));
+      const fallback = await read(hardConfig, mixed.client);
+      expect(mixed.calls.map((call) => [call.image, call.hardPage])).toEqual([[false, false], [true, true], [true, true],
+        [false, false]]);
+      expect(fallback.summary).toMatchObject({ imageRereadSkipped: [{ page: 1, reason: 'image_refused' }],
+        imageRereadFailedPages: [], rereadPages: [1] });
+    });
+
+    it('keeps the text masked, and the picture out of the payload and summary', async () => {
+      const masked = readPage(1, [['Pyrmthmn 25 rng od', { handwritten: true, confidence: 0.4 }],
+        'Dx: Hypertension tel 08030000000']);
+      const { client, calls } = hardClient(() => ok(best('Pyrimethamine')));
+      const { payload, summary } = await read(hardConfig, client, [masked]);
+      expect(calls.flatMap((call) => call.texts).join('\n')).not.toContain('08030000000');
+      expect(calls.filter((call) => call.hardPage)).toHaveLength(2);
+      const base64 = Buffer.from(png.bytes).toString('base64');
+      const stored = JSON.stringify([payload, summary]);
+      for (let index = 0; index + 24 < base64.length; index += 64) expect(stored).not.toContain(base64.slice(index, index + 24));
+      expect(payload.pages[0]!.lines[1]!.text).toBe('Dx: Hypertension tel 08030000000');
     });
   });
 });

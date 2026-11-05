@@ -3,7 +3,7 @@ import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient
 import { readOcrWorkerConfig } from '../config';
 import { Semaphore } from '../semaphore';
 import { HIGH_RESOLUTION_TIER, resizedSize, STANDARD_TIER } from './page-image';
-import { MODEL_OUTPUT_IMAGE_JSON_SCHEMA, MODEL_OUTPUT_JSON_SCHEMA, SYSTEM_PROMPT } from './prompt';
+import { MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA, MODEL_OUTPUT_IMAGE_JSON_SCHEMA, MODEL_OUTPUT_JSON_SCHEMA, SYSTEM_PROMPT } from './prompt';
 import { fixturePng, modelItem, modelPage } from './test-fixtures';
 
 const FAKE_KEY = 'sk-ant-test-0000000000000000000000';
@@ -374,6 +374,65 @@ describe('ClaudePageClient', () => {
       const signal = new AbortController().signal;
       await expect(instance.readPage({ ...pinned, image }, signal)).resolves.toMatchObject({ kind: 'failed', reason: 'malformed' });
       await expect(instance.readPage(pinned, signal)).resolves.toMatchObject({ kind: 'failed', reason: 'malformed' });
+    });
+
+    it('sends a hard page the best-guess message and schema, and reads the dose, unit and basis beside each item', async () => {
+      const box = { x1: 124, y1: 175.4, x2: 496, y2: 210.48 };
+      const basis = { name: 'letters', dose: 'letters', unit: 'letters', route: 'empty', frequency: 'context',
+        duration: 'empty', value: 'empty', other: 'empty' };
+      const hardAnswer = { ...answer, items: [{ ...modelItem({ kind: 'medicine', asWritten: 'Pyrimethamine? 25 mg od',
+        lineIds: ['p1-l2'], name: 'Pyrimethamine?', strength: '25 mg', frequency: 'od', status: 'new' }), box,
+      dose: '25', doseUnit: 'mg', basis }] };
+      const { instance, fetch } = client([sse(JSON.stringify(hardAnswer))]);
+      const result = await instance.readPage({ ...pinned, effort: 'max', image, hardPage: true }, new AbortController().signal);
+      const body = JSON.parse(bodyOf(fetch)) as { model: string; inference_geo: string; thinking: unknown;
+        output_config: { effort: string; format: { schema: unknown } }; messages: Array<{ content: Array<{ text?: string }> }> };
+      expect(body).toMatchObject({ model: 'claude-opus-5-5', inference_geo: 'us', thinking: { type: 'adaptive' },
+        output_config: { effort: 'max' } });
+      expect(body.output_config.format.schema).toEqual(MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA);
+      const text = body.messages[0]!.content[1]!.text!;
+      for (const phrase of ['line by line', 'put "?"', '"letters"', '"context"', 'od, bd, tds, qds, 6hrly, 8hrly',
+        'set "frequency" to "[unreadable]"', 'shows through from the back', 'Never invent an item',
+        'absolute pixel coordinates', 'including small fragments of the same row']) expect(text).toContain(phrase);
+      expect(String(fetch.mock.calls[0]![0])).toBe('https://api.anthropic.com/v1/messages');
+      expect(result).toMatchObject({ kind: 'answer', answer: { items: [{ name: 'Pyrimethamine?',
+        hard: { dose: '25', doseUnit: 'mg', basis } }] } });
+      const item = result.kind === 'answer' ? result.answer.items[0]! : null;
+      expect(item).not.toHaveProperty('dose');
+      expect(item!.box!.left).toBeCloseTo(0.1, 6);
+      // An answer without the basis, or with a frequency outside the allowed set, is malformed.
+      const { basis: _basis, ...withoutBasis } = hardAnswer.items[0]!;
+      const bad = client([sse(JSON.stringify({ ...answer, items: [withoutBasis] })),
+        sse(JSON.stringify({ ...answer, items: [{ ...hardAnswer.items[0]!, frequency: 'three times a day' }] }))]);
+      for (let index = 0; index < 2; index += 1) {
+        await expect(bad.instance.readPage({ ...pinned, image, hardPage: true }, new AbortController().signal))
+          .resolves.toMatchObject({ kind: 'failed', reason: 'malformed' });
+      }
+      // Without hardPage, the image request is the earlier image re-read request; a text request ignores it.
+      const plain = client([sse(JSON.stringify({ ...answer, items: answer.items.map((entry) => ({ ...entry, box })) })),
+        sse(JSON.stringify(answer))]);
+      await plain.instance.readPage({ ...pinned, image }, new AbortController().signal);
+      expect((JSON.parse(bodyOf(plain.fetch)) as typeof body).output_config.format.schema).toEqual(MODEL_OUTPUT_IMAGE_JSON_SCHEMA);
+      await plain.instance.readPage({ ...pinned, hardPage: true }, new AbortController().signal);
+      const textBody = String((plain.fetch.mock.calls[1] as [unknown, RequestInit])[1].body);
+      expect(createHash('sha256').update(textBody).digest('hex'))
+        .toBe('cd03ba1ed24c0d36e6bb9b71f8c27582e2d0a30adc911838fcc0b00f50d6fb7f');
+    });
+
+    it('gives a hard-page request its own timeout', async () => {
+      const timeouts: number[] = [];
+      const spy = jest.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+        timeouts.push(ms); return new AbortController().signal;
+      });
+      try {
+        const fetch = jest.fn(async () => sse(JSON.stringify(answer)));
+        const instance = new ClaudePageClient({ ...config, OCR_AI_HARD_PAGE_TIMEOUT_MS: 900_000 },
+          { fetch: fetch as unknown as typeof globalThis.fetch });
+        await instance.readPage({ ...pinned, image, hardPage: true }, new AbortController().signal).catch(() => undefined);
+        await instance.readPage({ ...pinned, image }, new AbortController().signal).catch(() => undefined);
+        await instance.readPage(pinned, new AbortController().signal);
+        expect(timeouts).toEqual([900_000, 30_000, 30_000]);
+      } finally { spy.mockRestore(); }
     });
 
     it('never puts the picture in an error', async () => {
