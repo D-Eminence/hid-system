@@ -302,14 +302,17 @@ begin
     mismatch := 'the trigger audit_platform_authority';
   end if;
   -- e. The policy set of the eleven tables (27 policies, as 0030, 0061,
-  -- 0062, 0094 and 0116 left them).
+  -- 0062, 0094 and 0116 left them). Ordered by collate "C", the order the
+  -- pin was measured in, so the md5 does not follow the database's default
+  -- collation (en_US.utf8 ignores underscores and puts
+  -- imported_medical_records before imported_medical_record_versions).
   if mismatch is null
      and (select md5(string_agg(format('%s|%s|%s|%s|%s|%s', policy.polrelid::regclass, policy.polname, policy.polcmd,
             policy.polpermissive,
             regexp_replace(pg_get_expr(policy.polqual, policy.polrelid), '^\(CURRENT_USER = ''[^'']*''::name\)$', 'owner'),
             regexp_replace(coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), ''),
               '^\(CURRENT_USER = ''[^'']*''::name\)$', 'owner')), E'\n'
-            order by policy.polrelid::regclass::text, policy.polname))
+            order by policy.polrelid::regclass::text collate "C", policy.polname::text collate "C"))
            from pg_policy policy where policy.polrelid = any (pg_temp.card_links_tables()))
         is distinct from 'e7a425cab84af02c5d288224cdd65111' then
     mismatch := 'the read policies of the eleven EHR tables';
@@ -317,7 +320,7 @@ begin
   -- f. The two triggers on auth.accounts (0096's terminal guard, 0097's
   -- deletion clause, which section 4 copies).
   if mismatch is null
-     and (select string_agg(pg_get_triggerdef(trigger_row.oid), E'\n' order by trigger_row.tgname)
+     and (select string_agg(pg_get_triggerdef(trigger_row.oid), E'\n' order by trigger_row.tgname::text collate "C")
            from pg_trigger trigger_row
           where trigger_row.tgrelid = 'auth.accounts'::regclass and not trigger_row.tgisinternal)
         is distinct from
@@ -379,7 +382,7 @@ begin
     raise exception using errcode = '55000', message = '0118: the replaced function was not recorded';
   end if;
   raise notice '0118: owners checked: %', (
-    select string_agg(format('%s=%s', owned.what, owned.owner), ', ' order by owned.what)
+    select string_agg(format('%s=%s', owned.what, owned.owner), ', ' order by owned.what collate "C")
       from (select relation.oid::regclass::text as what, pg_get_userbyid(relation.relowner)::text as owner
               from pg_class relation
              where relation.oid in ('identity.patients'::regclass, 'auth.accounts'::regclass)
@@ -2083,7 +2086,7 @@ begin
             regexp_replace(pg_get_expr(policy.polqual, policy.polrelid), '^\(CURRENT_USER = ''[^'']*''::name\)$', 'owner'),
             regexp_replace(coalesce(pg_get_expr(policy.polwithcheck, policy.polrelid), ''),
               '^\(CURRENT_USER = ''[^'']*''::name\)$', 'owner')), E'\n'
-            order by policy.polrelid::regclass::text, policy.polname))
+            order by policy.polrelid::regclass::text collate "C", policy.polname::text collate "C"))
            from pg_policy policy
           where policy.polrelid = any (pg_temp.card_links_tables()) and policy.polname not like '%\_card\_share\_read')
         is distinct from 'e7a425cab84af02c5d288224cdd65111' then
