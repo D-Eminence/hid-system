@@ -124,6 +124,11 @@ run "ocr_worker_is_told_to_use_claude_on_text_only" {
     })
     error_message = "ocr-worker must run the Claude step, with the US processing approval, on Textract text detection only."
   }
+
+  assert {
+    condition     = module.application.anthropic_runtime_access.ocr_api_ai_mode == "claude"
+    error_message = "ocr-api must mirror the worker's reading mode so failed AI readings are handled as AI readings."
+  }
 }
 
 run "without_ocr_approval_only_ehr_keeps_the_key" {
@@ -141,7 +146,8 @@ run "without_ocr_approval_only_ehr_keeps_the_key" {
       !contains(module.application.anthropic_runtime_access.execution_kms_keys["ocr-worker"], var.anthropic_secret_kms_key_arn) &&
       contains(module.application.anthropic_runtime_access.execution_kms_keys["ehr-api"], var.anthropic_secret_kms_key_arn) &&
       module.application.anthropic_runtime_access.ocr_worker_ai_environment.OCR_AI_MODE == "off" &&
-      module.application.anthropic_runtime_access.ocr_worker_ai_environment.OCR_AI_US_PROCESSING_APPROVED == "false"
+      module.application.anthropic_runtime_access.ocr_worker_ai_environment.OCR_AI_US_PROCESSING_APPROVED == "false" &&
+      module.application.anthropic_runtime_access.ocr_api_ai_mode == "off"
     )
     error_message = "Without the OCR approval, ocr-worker gets no Claude key, no internet rule and AI mode off; ehr-api is unchanged."
   }
