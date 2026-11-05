@@ -76,12 +76,12 @@ variables {
     event-dispatcher    = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/production/hid/event-dispatcher@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     gateway             = "123456789012.dkr.ecr.eu-west-1.amazonaws.com/production/hid/gateway@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   }
-  enable_ai                         = true
-  ai_generation_provider            = "anthropic"
-  ai_allow_anthropic_us_processing  = true
-  anthropic_secret_arn              = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:/hid/production/anthropic-ABCDEF"
-  anthropic_secret_kms_key_arn      = "arn:aws:kms:eu-west-1:123456789012:key/33333333-3333-3333-3333-333333333333"
-  ocr_ai_global_processing_approved = true
+  enable_ai                        = true
+  ai_generation_provider           = "anthropic"
+  ai_allow_anthropic_us_processing = true
+  anthropic_secret_arn             = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:/hid/production/anthropic-ABCDEF"
+  anthropic_secret_kms_key_arn     = "arn:aws:kms:eu-west-1:123456789012:key/33333333-3333-3333-3333-333333333333"
+  ocr_ai_us_processing_approved    = true
 }
 
 run "ocr_worker_can_reach_and_unlock_the_claude_key" {
@@ -118,11 +118,11 @@ run "ocr_worker_is_told_to_use_claude_on_text_only" {
 
   assert {
     condition = jsonencode(module.application.anthropic_runtime_access.ocr_worker_ai_environment) == jsonencode({
-      OCR_AI_GLOBAL_PROCESSING_APPROVED = "true"
-      OCR_AI_MODE                       = "claude"
-      OCR_TEXTRACT_FEATURES             = "text"
+      OCR_AI_US_PROCESSING_APPROVED = "true"
+      OCR_AI_MODE                   = "claude"
+      OCR_TEXTRACT_FEATURES         = "text"
     })
-    error_message = "ocr-worker must run the Claude step, with the global processing approval, on Textract text detection only."
+    error_message = "ocr-worker must run the Claude step, with the US processing approval, on Textract text detection only."
   }
 }
 
@@ -130,7 +130,7 @@ run "without_ocr_approval_only_ehr_keeps_the_key" {
   command = plan
 
   variables {
-    ocr_ai_global_processing_approved = false
+    ocr_ai_us_processing_approved = false
   }
 
   assert {
@@ -141,7 +141,7 @@ run "without_ocr_approval_only_ehr_keeps_the_key" {
       !contains(module.application.anthropic_runtime_access.execution_kms_keys["ocr-worker"], var.anthropic_secret_kms_key_arn) &&
       contains(module.application.anthropic_runtime_access.execution_kms_keys["ehr-api"], var.anthropic_secret_kms_key_arn) &&
       module.application.anthropic_runtime_access.ocr_worker_ai_environment.OCR_AI_MODE == "off" &&
-      module.application.anthropic_runtime_access.ocr_worker_ai_environment.OCR_AI_GLOBAL_PROCESSING_APPROVED == "false"
+      module.application.anthropic_runtime_access.ocr_worker_ai_environment.OCR_AI_US_PROCESSING_APPROVED == "false"
     )
     error_message = "Without the OCR approval, ocr-worker gets no Claude key, no internet rule and AI mode off; ehr-api is unchanged."
   }

@@ -303,7 +303,7 @@ variable "ai_allow_anthropic_us_processing" {
   default = false
 }
 
-variable "ocr_ai_global_processing_approved" {
+variable "ocr_ai_us_processing_approved" {
   type    = bool
   default = false
 }

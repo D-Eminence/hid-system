@@ -55,9 +55,9 @@ run "reject_secret_selector_injection" {
 run "accept_direct_generation_keep_titan_only" {
   command = plan
   variables {
-    anthropic_secret_arn              = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:/hid/staging/anthropic-ABCDEF"
-    ai_allow_anthropic_us_processing  = true
-    ocr_ai_global_processing_approved = true
+    anthropic_secret_arn             = "arn:aws:secretsmanager:eu-west-1:123456789012:secret:/hid/staging/anthropic-ABCDEF"
+    ai_allow_anthropic_us_processing = true
+    ocr_ai_us_processing_approved    = true
   }
   assert {
     condition = (module.application.ai_generation_configuration.provider == "anthropic" &&

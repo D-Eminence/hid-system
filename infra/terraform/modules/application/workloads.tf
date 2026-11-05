@@ -76,10 +76,10 @@ locals {
   }
 
   # The direct Claude API key. ehr-api uses it for patient chat; ocr-worker uses
-  # it, once ocr_ai_global_processing_approved is set, to turn the text read
+  # it, once ocr_ai_us_processing_approved is set, to turn the text read
   # from paper records into typed items. No other workload receives it.
   anthropic_enabled       = var.enable_ai && var.ai_generation_provider == "anthropic"
-  anthropic_key_workloads = toset(concat(["ehr-api"], var.ocr_ai_global_processing_approved ? ["ocr-worker"] : []))
+  anthropic_key_workloads = toset(concat(["ehr-api"], var.ocr_ai_us_processing_approved ? ["ocr-worker"] : []))
   anthropic_secret_specs = local.anthropic_enabled ? [
     { name = "ANTHROPIC_API_KEY", arn = var.anthropic_secret_arn, key = var.anthropic_secret_json_key }
   ] : []
@@ -381,7 +381,7 @@ locals {
       S3_FORCE_PATH_STYLE                      = "false"
       OCR_TEXTRACT_FEATURES                    = "text"
       OCR_AI_MODE                              = local.anthropic_enabled && contains(local.anthropic_key_workloads, "ocr-worker") ? "claude" : "off"
-      OCR_AI_GLOBAL_PROCESSING_APPROVED        = tostring(local.anthropic_enabled && contains(local.anthropic_key_workloads, "ocr-worker"))
+      OCR_AI_US_PROCESSING_APPROVED            = tostring(local.anthropic_enabled && contains(local.anthropic_key_workloads, "ocr-worker"))
     }
 
     event-dispatcher = {
