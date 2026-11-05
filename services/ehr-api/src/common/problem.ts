@@ -73,6 +73,17 @@ export class ProblemDetailsFilter implements ExceptionFilter {
         method: request.method,
         route: request.route?.path ?? 'unresolved',
       });
+    } else if (status >= 400) {
+      // Only the problem code and the route template: never the detail text, URL, params, query,
+      // body, headers or any identifier, so a refusal can be counted without carrying patient data.
+      this.logger.warn({
+        message: 'Request refused',
+        correlationId: request.correlationId,
+        status,
+        code,
+        method: request.method,
+        route: request.route?.path ?? 'unresolved',
+      });
     }
 
     const problem: ProblemDetails = {

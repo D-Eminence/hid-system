@@ -1749,7 +1749,9 @@ insert into d18_pins values
   -- 0096 appended the due-deletion check to the patient session and added the check itself.
   ('identity.patient_account_deletion_due(uuid)', 'b032c1a385770e20e4930534a203863d'),
   ('identity.patient_self_session(text,uuid)', '378cd66a28347ef82a7faee8d2c65a15'),
-  ('identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamp with time zone)', 'f3216bee48827dfba8073199b56ded67'),
+  -- 0108 (owner decisions D-a and D-b) replaced the cover's body: no 24-hour
+  -- bound, and an active patient share covers too.
+  ('identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamp with time zone)', '6928763d3b69f0e4b4acf96a6a255736'),
   ('lab.context_allows(uuid,uuid,text)', '57e689661a6227e34d3bde9562468951'),
   ('lab.patient_self_context(uuid)', '39aeca12d2c59b69877800a9a3a7c50b'),
   ('notification.enqueue_patient_inbox_item(uuid,text,text,uuid,jsonb)', '0b5689f31a3ce00f9313fe1e55244fad'),
@@ -1766,7 +1768,7 @@ select pg_temp.assert('d18: the functions the new and replaced bodies reach are 
   (select array_agg(reached order by reached) from d18_reached)
   = (select array_agg(signature order by signature) from d18_pins),
   (select string_agg(reached, ', ' order by reached) from d18_reached));
-select pg_temp.assert('d18: each reached function still has the body 0091 pinned (the patient session as 0096 replaced it, the consent gate as 0104 did)',
+select pg_temp.assert('d18: each reached function still has the body 0091 pinned (the patient session as 0096 replaced it, the consent gate as 0104 did, the cover as 0108 did)',
   (select count(*) from d18_pins pinned
      join pg_proc proc on proc.oid = pinned.signature::regprocedure and md5(proc.prosrc) = pinned.digest) = 42);
 -- The three CHECKs 0091 changed: their definitions, validated while the

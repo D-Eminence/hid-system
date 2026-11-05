@@ -36,9 +36,9 @@ describe('OCR worker configuration', () => {
 
   it('keeps AI reading off by default with the agreed models and efforts', () => {
     const config = readOcrWorkerConfig(base);
-    expect(config).toMatchObject({ OCR_AI_MODE: 'off', OCR_AI_FIRST_PASS_MODEL: 'claude-sonnet-5-5',
-      OCR_AI_FIRST_PASS_EFFORT: 'medium', OCR_AI_REREAD_MODEL: 'claude-opus-5-5', OCR_AI_REREAD_EFFORT: 'high',
-      OCR_AI_MAX_TOKENS: 16_000, OCR_AI_MAX_REREAD_PAGES: 20, OCR_TEXTRACT_MAX_RETRIES: 3, OCR_TEXTRACT_MAX_PAGES: 20 });
+    expect(config).toMatchObject({ OCR_AI_MODE: 'off', OCR_AI_FIRST_PASS_MODEL: 'claude-opus-5-5',
+      OCR_AI_FIRST_PASS_EFFORT: 'high', OCR_AI_REREAD_MODEL: 'claude-opus-5-5', OCR_AI_REREAD_EFFORT: 'high',
+      OCR_AI_MAX_TOKENS: 32_000, OCR_AI_MAX_REREAD_PAGES: 20, OCR_TEXTRACT_MAX_RETRIES: 3, OCR_TEXTRACT_MAX_PAGES: 20 });
     expect(config.OCR_AI_FACILITY_IDS).toBeUndefined();
   });
 
@@ -65,6 +65,30 @@ describe('OCR worker configuration', () => {
     expect(() => readOcrWorkerConfig(retired)).toThrow(/OCR_AI_US_PROCESSING_APPROVED/);
     expect(readOcrWorkerConfig({ ...retired, OCR_AI_US_PROCESSING_APPROVED: 'true' }))
       .not.toHaveProperty('OCR_AI_GLOBAL_PROCESSING_APPROVED');
+  });
+
+  it('re-reads hard pages with the picture by default only when AI reading is on, and fails closed on other values', () => {
+    const claude = { ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-fake-key-000000000',
+      OCR_AI_US_PROCESSING_APPROVED: 'true' };
+    expect(readOcrWorkerConfig(base).OCR_AI_IMAGE_REREAD).toBe('off');
+    expect(readOcrWorkerConfig(claude).OCR_AI_IMAGE_REREAD).toBe('on');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_IMAGE_REREAD: '  ' }).OCR_AI_IMAGE_REREAD).toBe('on');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_IMAGE_REREAD: 'off' }).OCR_AI_IMAGE_REREAD).toBe('off');
+    expect(readOcrWorkerConfig({ ...base, OCR_AI_IMAGE_REREAD: 'on' }).OCR_AI_IMAGE_REREAD).toBe('on');
+    for (const value of ['yes', 'true', 'ON', '1', 'auto']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_IMAGE_REREAD: value })).toThrow(/OCR_AI_IMAGE_REREAD/);
+    }
+  });
+
+  it('sends pages with a masked number as pictures by default (owner decision), keeps them text-only when set to text_only, and fails closed', () => {
+    expect(readOcrWorkerConfig(base).OCR_AI_IMAGE_MASKED_PAGES).toBe('send');
+    expect(readOcrWorkerConfig({ ...base, OCR_AI_IMAGE_MASKED_PAGES: ' ' }).OCR_AI_IMAGE_MASKED_PAGES).toBe('send');
+    expect(readOcrWorkerConfig({ ...base, OCR_AI_IMAGE_MASKED_PAGES: 'text_only' }).OCR_AI_IMAGE_MASKED_PAGES)
+      .toBe('text_only');
+    expect(readOcrWorkerConfig({ ...base, OCR_AI_IMAGE_MASKED_PAGES: 'send' }).OCR_AI_IMAGE_MASKED_PAGES).toBe('send');
+    for (const value of ['yes', 'true', 'SEND', 'on', 'text-only']) {
+      expect(() => readOcrWorkerConfig({ ...base, OCR_AI_IMAGE_MASKED_PAGES: value })).toThrow(/OCR_AI_IMAGE_MASKED_PAGES/);
+    }
   });
 
   it('never echoes the key in a configuration error', () => {

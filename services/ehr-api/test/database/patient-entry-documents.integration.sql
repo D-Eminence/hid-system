@@ -505,7 +505,7 @@ begin
 end $$;
 reset role;
 -- Record A refused its 6th with none of its 5 confirmed: opened files count,
--- in any state (INTERFACE_CONTRACT.md §37).
+-- in any state (INTERFACE_CONTRACT.md §38).
 do $$
 begin
   if (select count(*) filter (where status = 'initiated') || '/' || count(*) from ehr.patient_entry_documents

@@ -388,7 +388,7 @@ export class DocumentService {
    * added (0117), each list asked for the limit and the two merged, oldest
    * first, to the limit. Each command audits what it returned to ehr-api, so
    * the two audit rows may name up to twice the limit of ids while the bridge
-   * gets the limit (INTERFACE_CONTRACT.md §37); asking the patient list for
+   * gets the limit (INTERFACE_CONTRACT.md §38); asking the patient list for
    * the remainder only would starve patient files behind a staff backlog.
    */
   async listScanTargets(query: ListScanTargetsDto, actor: WorkloadActor, correlationId: string) {

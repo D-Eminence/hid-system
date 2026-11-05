@@ -26,6 +26,11 @@ export class PharmacyApiService {
     return this.translate(this.client.createOcrImport(input, this.context(context), key));
   }
 
+  /** Several medicines from one review: Pharmacy stores all of them or none. */
+  createOcrImportBatch(context: DataAccessContext, input: unknown, key: string) {
+    return this.translate(this.client.createOcrImportBatch(input, this.context(context), key));
+  }
+
   private context(context: DataAccessContext) {
     if (!context.authorization && !context.userCookie) {
       throw new DomainProblem(
