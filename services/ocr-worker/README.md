@@ -211,13 +211,17 @@ Each claimed job runs, in order:
    `imagePromptVersion`). Only these requests use the image answer schema
    (`MODEL_OUTPUT_IMAGE_JSON_SCHEMA`, a required `box` per item); text-only
    requests are byte for byte as before (`MODEL_SCHEMA_VERSION` unchanged). The client turns the model's pixel
-   boxes into page fractions before any check. First, an uncited line that
-   the item's box lies on and that is on the same written row as one of its
-   cited lines (vertical overlap at least half the smaller line's height) is
-   a fragment of the same writing that Textract split off, and is added to
-   the item's cited lines in reading order. An item read from the picture is
-   then kept only when it cites lines on its page, on at most 3 written rows
-   (fragments of one row count once), the rows lying together (on one row,
+   boxes into page fractions before any check. First, an uncited hard line
+   (confidence below 0.80) that the item's box lies on and that is on the
+   same written row as one of its cited lines (vertical overlap at least half
+   the smaller line's height) is a fragment of the same writing that Textract
+   split off, and is added to the item's cited lines in reading order: at
+   most 2 such fragments per item, or the item is dropped. A legible line on
+   the row is never taken for a fragment (a box over it drops the item). An
+   item read from the picture is then kept only when it cites lines on its
+   page, on at most 3 written rows (fragments of one row count once; a row is
+   lines that are all on one row with each other, never a slanted chain, and
+   at most 1.5 times as tall as its tallest line), the rows lying together (on one row,
    or consecutive in reading order and vertically adjacent: the
    `lines_not_together` test applied to rows, here a reason to drop), and its box
    (clipped to the page, at least 0.005 of the page on each side, its area at

@@ -169,16 +169,29 @@ function sameRow(a: Box, b: Box): boolean {
   return span(a.top, a.height, b.top, b.height) >= 0.5 * Math.min(a.height, b.height);
 }
 
-/** Lines grouped into written rows (lines on one row by sameRow, joined transitively), in reading order. */
+/** A written row may be at most this many times as tall as its tallest line. */
+export const IMAGE_ROW_MAX_HEIGHT = 1.5;
+/** At most this many uncited same-row fragments are added to one image-read item; more drops the item. */
+export const IMAGE_MAX_ABSORBED_FRAGMENTS = 2;
+
+/**
+ * Lines grouped into written rows, in reading order. A line joins a row only when it is on one row (sameRow) with
+ * every line already in it, never by a chain of neighbours (a slant), and the row stays at most
+ * IMAGE_ROW_MAX_HEIGHT times as tall as its tallest line; otherwise it starts a row of its own.
+ */
 function rowsOf(lines: readonly ReadLine[]): ReadLine[][] {
   const rows: ReadLine[][] = [];
   for (const line of lines) {
-    const joined = rows.filter((row) => line.box !== null && row.some((other) => other.box !== null
-      && sameRow(other.box, line.box!)));
-    if (joined.length === 0) { rows.push([line]); continue; }
-    const [into, ...rest] = joined;
-    into!.push(line);
-    for (const row of rest) { into!.push(...row); rows.splice(rows.indexOf(row), 1); }
+    const fits = (row: ReadLine[]) => {
+      if (line.box === null || row.some((other) => other.box === null || !sameRow(other.box, line.box!))) return false;
+      const boxes = [...row, line].map((member) => member.box!);
+      const top = Math.min(...boxes.map((box) => box.top));
+      const bottom = Math.max(...boxes.map((box) => box.top + box.height));
+      return bottom - top <= IMAGE_ROW_MAX_HEIGHT * Math.max(...boxes.map((box) => box.height)) + 1e-9;
+    };
+    const row = rows.find(fits);
+    if (row) row.push(line);
+    else rows.push([line]);
   }
   return rows;
 }
@@ -210,9 +223,10 @@ interface ImagePlace { box: Box; cited: ReadLine[]; matched: boolean }
 /**
  * Where an image-read item sits, or null where it is not held to its lines (it is then dropped).
  *
- * Row fragments first: an uncited line the item's box lies on (onLine) that is on the same written row as a cited
- * line is a fragment of the same writing that the text service split off, and is added to the cited lines in
- * reading order. Then: at most IMAGE_MAX_CITED_LINES rows (groups of cited lines on one row) that lie together (the
+ * Row fragments first: an uncited hard line (below REVIEW_BELOW) the item's box lies on (onLine) that is on the
+ * same written row as a cited line is a fragment of the same writing that the text service split off, and is
+ * added to the cited lines in reading order; at most IMAGE_MAX_ABSORBED_FRAGMENTS of them, or the item is
+ * dropped (a box claiming a whole row of fragments). Rows are cliques (rowsOf), never chains. Then: at most IMAGE_MAX_CITED_LINES rows (groups of cited lines on one row) that lie together (the
  * lines_not_together test on rows, here a reason to drop); the box at least IMAGE_MIN_BOX on each side; its area at
  * most IMAGE_MAX_AREA_RATIO times the area of the box around its cited lines plus IMAGE_AREA_ALLOWANCE of the page
  * (or, if larger, that box padded by IMAGE_MIN_PADDING on every side); running past that box's left and right
@@ -232,8 +246,12 @@ function imagePlace(raw: ModelItem, citedAsGiven: readonly ReadLine[], all: read
   const box = clipBox(raw.box);
   if (box === null || box.width < IMAGE_MIN_BOX || box.height < IMAGE_MIN_BOX) return null;
   const givenIds = new Set(citedAsGiven.map((line) => line.id));
-  const fragments = all.filter((line) => !givenIds.has(line.id) && line.box !== null && onLine(box, line.box)
+  // Only a hard line (below REVIEW_BELOW) is taken for a fragment: a legible line on the row is its own writing,
+  // and a box over it still drops the item below.
+  const fragments = all.filter((line) => !givenIds.has(line.id) && line.confidence < REVIEW_BELOW
+    && line.box !== null && onLine(box, line.box)
     && citedAsGiven.some((other) => other.box !== null && sameRow(other.box, line.box!)));
+  if (fragments.length > IMAGE_MAX_ABSORBED_FRAGMENTS) return null;
   const cited = [...citedAsGiven, ...fragments].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
   const rows = rowsOf(cited);
   if (rows.length > IMAGE_MAX_CITED_LINES || !rowsTogether(rows, all, order)) return null;

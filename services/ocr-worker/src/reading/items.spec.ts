@@ -1227,14 +1227,54 @@ describe('picture reading on a page whose scanned handwriting is nonsense', () =
     });
     const note = (lineIds: string[], height: number) => check({ kind: 'note', asWritten: 'Review in clinic',
       noteText: 'Review in clinic', lineIds, box: { left: 0.2, top: 0.3, width: 0.4, height } }, rows);
-    // Three rows (six fragments): kept, every fragment cited.
-    const three = note(['p1-l1', 'p1-l3', 'p1-l5'], 0.1);
+    // Three rows (six fragments, two of them added from the box): kept, every fragment cited.
+    const three = note(['p1-l1', 'p1-l2', 'p1-l3', 'p1-l5'], 0.1);
     expect(three.items).toHaveLength(1);
     expect(three.items[0]!.lineIds).toEqual(['p1-l1', 'p1-l2', 'p1-l3', 'p1-l4', 'p1-l5', 'p1-l6']);
-    // Four rows: over the limit.
-    const four = note(['p1-l1', 'p1-l3', 'p1-l5', 'p1-l7'], 0.135);
+    // Four rows, every fragment cited: over the limit.
+    const four = note(rows.map((line) => line.id), 0.135);
     expect(four.items).toEqual([]);
     expect(four.droppedUngrounded).toBe(1);
+  });
+
+  it('never takes a legible line on the row for a fragment', () => {
+    const legible = (n: number, text: string, left: number) => ({ id: `p1-l${n}`, page: 1, text, confidence: 0.99,
+      handwritten: false, box: { left, top: 0.3, width: 0.3, height: 0.03 } });
+    const row = [legible(1, 'Amlodipine 5mg od', 0.1), legible(2, 'Metformin 500mg bd', 0.45)];
+    const amlodipine = { kind: 'medicine' as const, asWritten: 'Amlodipine 5mg od', name: 'Amlodipine', strength: '5mg',
+      frequency: 'od', status: 'current' as const, lineIds: ['p1-l1'] };
+    // A box over the whole row, citing Amlodipine's line: it lies on Metformin's line, which it does not cite.
+    const whole = check({ ...amlodipine, box: { left: 0.1, top: 0.3, width: 0.65, height: 0.03 } }, row);
+    expect(whole.items).toEqual([]);
+    expect(whole.droppedUngrounded).toBe(1);
+    // On Amlodipine's line only: kept with that line alone, and Metformin's uncited line still counts as missed.
+    const own = check({ ...amlodipine, box: { left: 0.1, top: 0.3, width: 0.3, height: 0.03 } }, row);
+    expect(own.items).toHaveLength(1);
+    expect(own.items[0]!.lineIds).toEqual(['p1-l1']);
+    expect(own.flagReasons).toContain('possible_missed_item');
+  });
+
+  it('builds rows only from lines that are all on one row, never from a slanted chain', () => {
+    // Five hard lines running downhill: each overlaps the next by two thirds, but not the one after.
+    const slant = [0, 1, 2, 3, 4].map((n) => hw(n + 1, 'Lis day', { left: 0.1 + 0.15 * n, top: 0.3 + 0.01 * n,
+      width: 0.12, height: 0.03 }));
+    const result = check({ kind: 'note', asWritten: 'Review in clinic', noteText: 'Review in clinic',
+      lineIds: slant.map((line) => line.id), box: { left: 0.1, top: 0.3, width: 0.72, height: 0.07 } }, slant);
+    expect(result.items).toEqual([]);
+    expect(result.droppedUngrounded).toBe(1);
+  });
+
+  it('drops an item whose box claims more than two fragments beyond the lines it cites', () => {
+    const cells = [0, 1, 2, 3, 4, 5].map((n) => hw(n + 1, 'n', { left: 0.1 + 0.1 * n, top: 0.4, width: 0.05,
+      height: 0.03 }));
+    const morphine = (lineIds: string[], width: number) => check({ kind: 'medicine', asWritten: 'Morphine 30mg',
+      name: 'Morphine', strength: '30mg', status: 'current', lineIds, box: { left: 0.1, top: 0.4, width, height: 0.03 } },
+    cells);
+    const across = morphine(['p1-l1'], 0.55);
+    expect(across.items).toEqual([]);
+    expect(across.droppedUngrounded).toBe(1);
+    // Two fragments beyond its own line (three cells): within the cap.
+    expect(morphine(['p1-l1'], 0.25).items[0]!.lineIds).toEqual(['p1-l1', 'p1-l2', 'p1-l3']);
   });
 
   it('shows its sentence below the real disagreements and above the general picture one', () => {
