@@ -1,4 +1,4 @@
-import { fuzzyListMatch, NOT_FOR_LISTS, type ListEntry } from './list-match';
+import { editDistance, fuzzyListMatch, LOOKALIKE_DISTANCE, NOT_FOR_LISTS, type ListEntry } from './list-match';
 
 /**
  * Diagnosis names a hard page's best-guess diagnosis may be grounded to (owner decision of 2026-11-05, about
@@ -14,7 +14,7 @@ import { fuzzyListMatch, NOT_FOR_LISTS, type ListEntry } from './list-match';
  *     are listed. A curated choice of common diagnoses on Nigerian outpatient and inpatient paper notes, not
  *     exhaustive, and not a coding of the record: the list codes nothing.
  * (b) DIAGNOSIS_SYNONYMS: our own words, not WHO's: abbreviations and local names written on Nigerian notes
- *     (HTN, DM, PUD, URTI, "MP+", typhoid, SCD, BPH, CCF, CKD, PID, UTI, AGE, ...), each mapped to one title of list
+ *     (HTN, DM, PUD, URTI, "MP+", typhoid, SCD, BPH, CCF, CKD, UTI, ...), each mapped to one title of list
  *     (a). No ICD-10 content. Where an abbreviation does not say which of several titles is meant, it maps to the
  *     broader title that is true of all of them (HTN to "Hypertensive diseases", DM to "Diabetes mellitus", SCD to
  *     "Sickle cell disorders or other haemoglobinopathies"), never to a narrower one that adds what is not written
@@ -166,7 +166,15 @@ export const ICD11_TITLES: ReadonlyArray<readonly [title: string, code: string |
 /**
  * Our own abbreviations and local names (list (b)), each mapped to an ICD-11 title of ICD11_TITLES. Lower case;
  * matched after normalisation (listKey).
+ *
+ * Left out on purpose, as they stand for more than one thing on Nigerian notes (UNGROUNDED_ABBREVIATIONS; never
+ * expanded, tested in diagnosis-list.spec.ts): "PID" (pelvic inflammatory disease, or prolapsed intervertebral disc on
+ * orthopaedic and back-pain notes), "PET" (pre-eclamptic toxaemia, or a PET scan), "AGE" (acute gastroenteritis, or
+ * the word "age") and "SCA" (sickle cell anaemia, or spinocerebellar ataxia or sudden cardiac arrest). The spelled-out
+ * names stay listed.
  */
+export const UNGROUNDED_ABBREVIATIONS: readonly string[] = ['pid', 'pet', 'age', 'sca'];
+
 export const DIAGNOSIS_SYNONYMS: Readonly<Record<string, string>> = {
   // Hypertension and the heart
   'htn': 'Hypertensive diseases',
@@ -207,7 +215,6 @@ export const DIAGNOSIS_SYNONYMS: Readonly<Record<string, string>> = {
   'enteric fever': 'Typhoid fever',
   'urti': 'Acute upper respiratory infection, site unspecified',
   'uti': 'Urinary tract infection, site not specified',
-  'age': 'Gastroenteritis or colitis without specification of infectious agent',
   'acute gastroenteritis': 'Gastroenteritis or colitis without specification of infectious agent',
   'gastroenteritis': 'Gastroenteritis or colitis without specification of infectious agent',
   'tb': 'Tuberculosis',
@@ -220,7 +227,6 @@ export const DIAGNOSIS_SYNONYMS: Readonly<Record<string, string>> = {
   'hiv disease': 'Human immunodeficiency virus disease',
   'chronic hep b': 'Chronic hepatitis B',
   'chronic hep c': 'Chronic hepatitis C',
-  'pid': 'Female pelvic inflammatory diseases',
   'pelvic inflammatory disease': 'Female pelvic inflammatory diseases',
   'gonorrhoea': 'Gonococcal infection',
   'gonorrhea': 'Gonococcal infection',
@@ -244,7 +250,6 @@ export const DIAGNOSIS_SYNONYMS: Readonly<Record<string, string>> = {
   // Blood
   'scd': 'Sickle cell disorders or other haemoglobinopathies',
   'sickle cell disease': 'Sickle cell disorders or other haemoglobinopathies',
-  'sca': 'Sickle cell disorders or other haemoglobinopathies',
   'sickle cell anaemia': 'Sickle cell disorders or other haemoglobinopathies',
   'hbss': 'Sickle cell disorders or other haemoglobinopathies',
   'scd in crisis': 'Sickle cell disease with crisis',
@@ -271,7 +276,6 @@ export const DIAGNOSIS_SYNONYMS: Readonly<Record<string, string>> = {
   'bronchial asthma': 'Asthma',
   // Pregnancy
   'pih': 'Gestational hypertension',
-  'pet': 'Pre-eclampsia',
   'pre-eclamptic toxaemia': 'Pre-eclampsia',
   'pph': 'Postpartum haemorrhage',
   'prom': 'Maternal care related to premature rupture of membranes',
@@ -336,11 +340,13 @@ export function listEntries(titles: readonly string[], synonyms: Readonly<Record
 /**
  * The listed name a proposed name stands for, or null (the shared lookup of diagnosis-list.ts and lab-list.ts).
  * Exact first, on the key and on the key without spaces; then the strict fuzzy match. A name holding
- * "[unreadable]", "[sign?]" or "(sign)", or with no letters, never matches. Where the name as read is the listed
+ * "[unreadable]", "[sign?]" or "(sign)", or with no letters, never matches; nor does a fuzzy match where the name is
+ * as near a real unlisted look-alike (unlistedLookalikes), since the name may well be that one. Where the name as read is the listed
  * name itself, the display is the name as read; otherwise "As read? (listed name)", so what was written stays in
  * front and the list's name is only added (never shown alone).
  */
-export function matchListName(proposed: string, entries: readonly ListEntry<string>[]): ListMatch | null {
+export function matchListName(proposed: string, entries: readonly ListEntry<string>[],
+  unlistedLookalikes: readonly string[] = []): ListMatch | null {
   const shown = proposed.trim();
   if (!shown || NOT_FOR_LISTS.test(shown)) return null;
   const key = listKey(shown);
@@ -350,8 +356,22 @@ export function matchListName(proposed: string, entries: readonly ListEntry<stri
     ?? entries.find((entry) => entry.key.replace(/ /g, '') === key.replace(/ /g, ''));
   if (exact) return { title: exact.target, display: display(exact.target), exact: true };
   const best = fuzzyListMatch([key], entries);
+  if (best !== null && unlistedLookalikes.some((other) => editDistance(key, listKey(other)) <= LOOKALIKE_DISTANCE)) {
+    return null;
+  }
   return best === null ? null : { title: best.entry.target, display: display(best.entry.target), exact: false };
 }
+
+/**
+ * Real diagnoses that are not on the list but are spelled within a letter or two of a listed name (curated, not
+ * exhaustive; the diagnosis counterpart of drug-list.ts UNLISTED_LOOKALIKES). A proposed name near one of these is
+ * never respelled into the listed one: "Nephritic syndrome" is a different disease from the listed "Nephrotic
+ * syndrome", not a slip of the pen. Each is within LOOKALIKE_DISTANCE of a listed key and would otherwise be
+ * fuzzy-matched to it (tested in diagnosis-list.spec.ts).
+ */
+export const UNLISTED_DIAGNOSIS_LOOKALIKES: readonly string[] = [
+  'nephritic syndrome', 'malacia',
+];
 
 /** Every diagnosis name and synonym, normalised, with the ICD-11 title it stands for. */
 export const DIAGNOSIS_ENTRIES: readonly ListEntry<string>[] = listEntries(ICD11_TITLES.map(([title]) => title),
@@ -359,5 +379,5 @@ export const DIAGNOSIS_ENTRIES: readonly ListEntry<string>[] = listEntries(ICD11
 
 /** The ICD-11 title a proposed diagnosis name stands for, or null (see matchListName). */
 export function matchDiagnosisName(proposed: string): ListMatch | null {
-  return matchListName(proposed, DIAGNOSIS_ENTRIES);
+  return matchListName(proposed, DIAGNOSIS_ENTRIES, UNLISTED_DIAGNOSIS_LOOKALIKES);
 }

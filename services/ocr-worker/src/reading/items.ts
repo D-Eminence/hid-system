@@ -27,10 +27,12 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   // A hard page's best guesses (owner decision 2026-11-05 about 18:40 UTC): below the real disagreements above, and
   // before read_from_image, which every such item also has, so they are said instead of it. Most specific first.
   [['field_from_context'], 'Part of this was guessed from what is usual, not read from the writing; check it against the paper.'],
+  // Found by only one of the two readings: said before a sign, so the person checking is told the item itself may
+  // not be on the paper.
   // A handwritten sign read as its meaning ("alternate (sign)") or not read ("[sign?]"): an interpretation of a mark,
-  // below a guess from what is usual and above the plainer hard-page sentences.
-  [['sign_read'], 'A handwritten sign was read as a word, marked "(sign)", or could not be read, marked "[sign?]"; check it against the paper.'],
+  // below a guess from what is usual and one reading only, above the plainer hard-page sentences.
   [['single_reading_only'], 'Only one of two readings of the picture found this; check it against the paper.'],
+  [['sign_read'], 'A handwritten sign was read as a word, marked "(sign)", or could not be read, marked "[sign?]"; check it against the paper.'],
   [['best_guess_from_picture'], 'This is a best guess from the picture; check every word against the paper.'],
   // Just before read_from_image (which every picture item has), so it is shown where it applies.
   [['not_matched_to_scanned_text'], 'Read from the picture; it could not be matched to the scanned text. Check it against the paper.'],

@@ -44,7 +44,7 @@ export const SIGN_TABLE: readonly SignEntry[] = [
  */
 export const ABBREVIATION_TABLE: ReadonlyArray<readonly [written: string, meaning: string]> = [
   ['Hx', 'history'], ['Rx', 'treatment (prescription)'], ['stat', 'at once'], ['prn', 'when needed'],
-  ['od', 'once a day'], ['bd', 'twice a day'], ['tds', 'three times a day'], ['qds', 'four times a day'],
+  ['od', 'once a day, or on eye drops the right eye'], ['bd', 'twice a day'], ['tds', 'three times a day'], ['qds', 'four times a day'],
   ['nocte', 'at night'], ['mane', 'in the morning'],
   ['n/7 (the 7 sometimes with a small circle, "°/7")', 'n days'], ['n/52', 'n weeks'], ['n/12', 'n months'],
 ];

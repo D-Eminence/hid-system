@@ -220,9 +220,13 @@ function anyFromContext(side: Side): boolean {
     || fromContext(side, 'unit', side.extras?.doseUnit));
 }
 
-/** What each hard-page frequency code means, for the plain reading. */
-export const FREQUENCY_WORDS: Readonly<Record<(typeof HARD_PAGE_FREQUENCIES)[number], string>> = {
-  od: 'once a day', bd: 'twice a day', tds: 'three times a day', qds: 'four times a day', '6hrly': 'every 6 hours',
+/**
+ * What each hard-page frequency code means, for the plain reading. "od" is not here: it is "once a day", but also
+ * "oculus dexter" (the right eye) on an eye-drop prescription, and normaliseFrequency lower-cases "OD", so it is
+ * kept as written, never put in words.
+ */
+export const FREQUENCY_WORDS: Readonly<Partial<Record<(typeof HARD_PAGE_FREQUENCIES)[number], string>>> = {
+  bd: 'twice a day', tds: 'three times a day', qds: 'four times a day', '6hrly': 'every 6 hours',
   '8hrly': 'every 8 hours', '12hrly': 'every 12 hours', nocte: 'at night', mane: 'in the morning', stat: 'at once',
   prn: 'when needed',
 };
@@ -230,7 +234,7 @@ const DURATION_UNITS: Readonly<Record<string, string>> = { 7: 'days', 52: 'weeks
 
 /**
  * Dose shorthand in words, only where the read is certain (the field carries no "?" and no "[unreadable]" or
- * "[sign?]"): a frequency code as "tds (three times a day)", a duration written "5/7" as "5/7 (5 days)" ("/52"
+ * "[sign?]"): a frequency code as "tds (three times a day)" ("od" kept as written: see FREQUENCY_WORDS), a duration written "5/7" as "5/7 (5 days)" ("/52"
  * weeks, "/12" months). Anything else is kept as written.
  */
 export function shorthandInWords(field: 'frequency' | 'duration', value: string): string {

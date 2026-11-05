@@ -1,7 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { compactKey, DIAGNOSIS_SYNONYMS, ICD11_TITLES, listKey, matchDiagnosisName } from './diagnosis-list';
-import { LAB_TESTS, matchLabTestName } from './lab-list';
+import { compactKey, DIAGNOSIS_ENTRIES, DIAGNOSIS_SYNONYMS, ICD11_TITLES, listKey, matchDiagnosisName, matchListName,
+  UNGROUNDED_ABBREVIATIONS, UNLISTED_DIAGNOSIS_LOOKALIKES } from './diagnosis-list';
+import { LAB_ENTRIES, LAB_TESTS, matchLabTestName, UNLISTED_LAB_LOOKALIKES } from './lab-list';
+import { fuzzyListMatch } from './list-match';
 
 const ATTRIBUTION = 'ICD-11, World Health Organization, licensed under CC BY-ND 3.0 IGO';
 
@@ -59,6 +61,40 @@ describe('diagnosis list (hard pages only)', () => {
     }
   });
 
+  it('never grounds an abbreviation that stands for more than one thing', () => {
+    for (const name of ['PID', 'pid', 'PET', 'AGE', 'SCA', 'P.I.D.']) {
+      expect([name, matchDiagnosisName(name)]).toEqual([name, null]);
+    }
+    for (const name of UNGROUNDED_ABBREVIATIONS) expect(Object.keys(DIAGNOSIS_SYNONYMS)).not.toContain(name);
+    // The spelled-out names stay listed.
+    expect(matchDiagnosisName('Pelvic inflammatory disease')?.title).toBe('Female pelvic inflammatory diseases');
+    expect(matchDiagnosisName('Sickle cell anaemia')?.title).toBe('Sickle cell disorders or other haemoglobinopathies');
+    expect(matchDiagnosisName('Acute gastroenteritis')?.title)
+      .toBe('Gastroenteritis or colitis without specification of infectious agent');
+  });
+
+  it('never respells a real unlisted disease into a listed one a letter away', () => {
+    expect(matchDiagnosisName('Nephritic syndrome')).toBeNull();
+    expect(matchDiagnosisName('Malacia')).toBeNull();
+    expect(matchDiagnosisName('Nephrotic syndrome')?.display).toBe('Nephrotic syndrome');
+    // A slip as near the unlisted look-alike as the listed name is no match either: it may be either disease.
+    expect(matchDiagnosisName('Nephrotic syndrom')).toBeNull();
+    // Each look-alike is really off the list, and without the guard it would be fuzzy-matched to a listed name.
+    for (const [lookalikes, entries] of [[UNLISTED_DIAGNOSIS_LOOKALIKES, DIAGNOSIS_ENTRIES],
+      [UNLISTED_LAB_LOOKALIKES, LAB_ENTRIES]] as const) {
+      for (const name of lookalikes) {
+        expect([name, entries.some((entry) => entry.key === listKey(name))]).toEqual([name, false]);
+        expect(matchListName(name, entries, lookalikes)).toBeNull();
+      }
+    }
+    for (const name of UNLISTED_DIAGNOSIS_LOOKALIKES) {
+      expect([name, fuzzyListMatch([listKey(name)], DIAGNOSIS_ENTRIES) === null]).toEqual([name, false]);
+    }
+    // A slip one letter from both a listed test and an unlisted look-alike is no match.
+    expect(matchLabTestName('Creatinne')).toBeNull();
+    expect(matchLabTestName('Creatinine')?.display).toBe('Creatinine');
+  });
+
   it('keeps a query on the paper, "[?]", in the name shown', () => {
     expect(matchDiagnosisName('[?]TB')?.display).toBe('[?]TB? (Tuberculosis)');
     expect(matchDiagnosisName('TB[?]')?.display).toBe('TB[?]? (Tuberculosis)');
@@ -83,7 +119,7 @@ describe('lab test list (hard pages only)', () => {
       ['MP', 'malaria parasite test'], ['Widal', 'widal test'], ['RBS', 'random blood sugar'], ['FBS', 'fasting blood sugar'],
       ['HbA1c', 'hba1c'], ['E/U/Cr', 'electrolytes, urea and creatinine'], ['EUCr', 'electrolytes, urea and creatinine'],
       ['U&E', 'electrolytes, urea and creatinine'], ['LFTs', 'liver function tests'], ['M/C/S', 'microscopy, culture and sensitivity'],
-      ['HBsAg', 'hepatitis b surface antigen'], ['HCV', 'hepatitis c antibody'], ['VDRL', 'vdrl'], ['PSA', 'prostate-specific antigen'],
+      ['HBsAg', 'hepatitis b surface antigen'], ['Anti-HCV', 'hepatitis c antibody'], ['VDRL', 'vdrl'], ['PSA', 'prostate-specific antigen'],
       ['TFT', 'thyroid function tests'], ['CRP', 'c-reactive protein'], ['Genotype', 'haemoglobin genotype'],
       ['UPT', 'pregnancy test'], ['Lipid profile', 'lipid profile'], ['Clotting profile', 'clotting profile']] as const) {
       expect([written, matchLabTestName(written)?.title]).toEqual([written, test]);
@@ -92,8 +128,16 @@ describe('lab test list (hard pages only)', () => {
     expect(matchLabTestName('HbA1c')?.display).toBe('HbA1c');
   });
 
+  it('never adds a specimen or an assay that is not written', () => {
+    expect(matchLabTestName('Cr')?.title).toBe('creatinine');
+    expect(matchLabTestName('AFB')?.title).toBe('acid-fast bacilli (afb)');
+    expect(matchLabTestName('Sputum for AFB')?.title).toBe('sputum afb');
+    expect(matchLabTestName('Stool mcs')?.title).toBe('stool microscopy, culture and sensitivity');
+    expect(matchLabTestName('Stool m/c/s')?.title).toBe('stool microscopy, culture and sensitivity');
+  });
+
   it('never expands a name that stands for more than one test', () => {
-    for (const name of ['PT', 'BG', 'GT', 'CS', 'Fictional assay']) {
+    for (const name of ['PT', 'BG', 'GT', 'CS', 'HCV', 'Stool analysis', 'Fictional assay']) {
       expect([name, matchLabTestName(name)]).toEqual([name, null]);
     }
   });

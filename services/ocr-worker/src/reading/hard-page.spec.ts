@@ -491,7 +491,7 @@ describe('handwritten signs on a hard page', () => {
     expect(SIGNS_RULE).toContain('write "[sign?]" in its place: never guess a word for a sign');
     expect(SIGNS_RULE).toContain('"#" before a number ("#30") is a count, not this sign');
     for (const sign of SIGN_TABLE) expect(SIGNS_RULE).toContain(`- ${sign.looks}: ${sign.meaning}`);
-    for (const written of ['Hx history', 'Rx treatment (prescription)', 'stat at once', 'prn when needed', 'od once a day',
+    for (const written of ['Hx history', 'Rx treatment (prescription)', 'stat at once', 'prn when needed', 'od once a day, or on eye drops the right eye',
       'bd twice a day', 'tds three times a day', 'qds four times a day', 'nocte at night', 'mane in the morning', 'n/52 n weeks',
       'n/12 n months']) expect(SIGNS_RULE).toContain(written);
     // The first pass and the image re-read of other flagged pages are unchanged: no sign table there.
@@ -517,7 +517,8 @@ describe('handwritten signs on a hard page', () => {
     expect(checkReasonSentence(['sign_read', 'readings_disagree'])).toContain('Two readings');
     expect(checkReasonSentence(['sign_read', 'field_from_context'])).toContain('guessed from what is usual');
     expect(checkReasonSentence(['sign_read', 'single_reading_only', 'best_guess_from_picture', 'read_from_image']))
-      .toContain('handwritten sign');
+      .toContain('Only one of two readings');
+    expect(checkReasonSentence(['sign_read', 'best_guess_from_picture', 'read_from_image'])).toContain('handwritten sign');
     // A sign in a field other than asWritten counts too.
     const fracture = merge(modelPage([hardItem({ kind: 'diagnosis', asWritten: 'Hx fracture (sign) femur',
       name: 'fracture (sign) femur', status: 'history' }, 2, { name: 'letters' })])).check.items[0]!;
@@ -558,6 +559,10 @@ describe('handwritten signs on a hard page', () => {
   it('puts dose shorthand in words only where the read is certain', () => {
     expect(shorthandInWords('frequency', 'tds')).toBe('tds (three times a day)');
     expect(shorthandInWords('frequency', 'mane')).toBe('mane (in the morning)');
+    // "od" is also the right eye on eye drops ("OD" is lower-cased by normaliseFrequency): never put in words.
+    for (const written of ['od', 'OD', 'Od', normaliseFrequency('o.d.'), normaliseFrequency('OD')]) {
+      expect([written, shorthandInWords('frequency', written)]).toEqual([written, written]);
+    }
     expect(shorthandInWords('frequency', 'tds?')).toBe('tds?');
     expect(shorthandInWords('frequency', '[unreadable]')).toBe('[unreadable]');
     expect(shorthandInWords('duration', '5/7')).toBe('5/7 (5 days)');

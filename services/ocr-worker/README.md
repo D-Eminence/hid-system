@@ -509,23 +509,36 @@ Each claimed job runs, in order:
      for the ICD-11 MMS 2026-01 release, `SimpleTabulation-ICD-11-MMS-en`
      (https://icdcdn.who.int/static/releasefiles/2026-01/SimpleTabulation-ICD-11-MMS-en.zip,
      linked from the browser at https://icd.who.int/browse/2026-01/mms/en);
-     only titles found there exactly are listed. (b) `DIAGNOSIS_SYNONYMS`: 126
+     only titles found there exactly are listed. (b) `DIAGNOSIS_SYNONYMS`: 122
      abbreviations and local names in our own words (HTN, DM, T2DM, PUD,
-     URTI, MP+, typhoid, SCD, BPH, CCF, CKD, PID, UTI, AGE, PTB, RVD,
-     PIH, PPH, ...), each mapped to one title of (a); no ICD-10 content. An
+     URTI, MP+, typhoid, SCD, BPH, CCF, CKD, UTI, PTB, RVD,
+     PIH, PPH, ...), each mapped to one title of (a); no ICD-10 content.
+     Abbreviations that stand for more than one thing on Nigerian notes are
+     left out and never expanded (`UNGROUNDED_ABBREVIATIONS`): PID (pelvic
+     inflammatory disease, or prolapsed intervertebral disc), PET (pre-eclamptic
+     toxaemia, or a PET scan), AGE (acute gastroenteritis, or the word "age"),
+     SCA (sickle cell anaemia, spinocerebellar ataxia or sudden cardiac arrest);
+     the spelled-out names stay listed. Real diagnoses that are not listed but
+     are a letter or two from a listed name (`UNLISTED_DIAGNOSIS_LOOKALIKES`:
+     nephritic syndrome, malacia) block a fuzzy match, as for drugs:
+     "Nephritic syndrome" is never respelled into "Nephrotic syndrome". An
      abbreviation that does not say which of several titles is meant maps to
      the broader title true of all of them (HTN to "Hypertensive diseases", DM
      to "Diabetes mellitus", SCD to "Sickle cell disorders or other
      haemoglobinopathies"), never to a narrower one that adds what is not
      written. Nothing is coded from the list; it only grounds the shown name.
-   - *Lab tests* (`src/reading/lab-list.ts`). 33 test names and 99
+   - *Lab tests* (`src/reading/lab-list.ts`). 34 test names and 96
      abbreviations in our own words (FBC, PCV, Hb, WBC, ESR, MP, Widal, RBS,
-     FBS, HbA1c, E/U/Cr, LFT, urinalysis, MCS, HIV screen, HBsAg, HCV, VDRL,
+     FBS, HbA1c, E/U/Cr, LFT, urinalysis, MCS, HIV screen, HBsAg, anti-HCV, VDRL,
      lipid profile, PSA, TFT, clotting profile, blood group, genotype,
      pregnancy test, CRP, ...). **No LOINC content**: no LOINC names or codes.
      Names that stand for more than one test are left out and never expanded:
      PT (prothrombin time or pregnancy test), BG (blood group or blood
-     glucose), GT, CS.
+     glucose), GT, CS, HCV (antibody or RNA), stool analysis. An abbreviation
+     never adds a specimen or assay that is not written: Cr is "creatinine",
+     AFB is "acid-fast bacilli (afb)", stool M/C/S keeps its culture and
+     sensitivity. An unlisted look-alike (`UNLISTED_LAB_LOOKALIKES`: creatine)
+     blocks a fuzzy match.
    - *How diagnosis and lab names are used.* On a hard page only, after the
      two readings are held to the page and compared (so every check, and the
      comparison, is made on the names as read, and a lab value is still bound
@@ -546,7 +559,8 @@ Each claimed job runs, in order:
      word. Code never expands a sign or `[sign?]`: an item holding either gets
      `sign_read` ("A handwritten sign was read as a word, marked "(sign)", or
      could not be read, marked "[sign?]"; check it against the paper.", said
-     after `field_from_context` and before `single_reading_only`); no list
+     after `field_from_context` and `single_reading_only`, so an item only one
+     reading found says so first); no list
      matches a name holding either; `forMatching` keeps `[sign?]` (like
      `[?]`), its "?" is not a status cue, and the marks never anchor an item
      to a line (the word "sign" is not on the paper). No picture of a sign is
@@ -568,7 +582,7 @@ Each claimed job runs, in order:
      copied as written (never with "(sign)"); the prompt gives their meaning
      only to help read hard letters: Hx history (Wikipedia, "List of medical
      abbreviations: H"), Rx treatment or prescription; stat at once, prn when
-     needed, od once a day, bd twice a day, tds three times a day, qds four
+     needed, od once a day (or, on eye drops, the right eye), bd twice a day, tds three times a day, qds four
      times a day, nocte at night, mane in the morning (each in Wikipedia,
      "List of abbreviations used in medical prescriptions", read 2026-11-05,
      which also notes "o.d." can mean right eye); n/7 days and n/52 weeks
@@ -579,7 +593,9 @@ Each claimed job runs, in order:
      frequencies. Dose shorthand is put in words only in a hard-page
      medicine's `plain`, and only where the read is certain (no "?",
      `[unreadable]` or `[sign?]` in the field): `tds (three times a day)`,
-     `5/7 (5 days)`; otherwise it is kept as written. Signs are in the
+     `5/7 (5 days)`; otherwise it is kept as written. `od` is always kept as
+     written, never put in words: on eye drops it is the right eye, and the
+     code is lower-cased before this step. Signs are in the
      hard-page prompt only: they are read from the picture, which the first
      pass never sees (its scanned text loses or garbles a sign), and the image
      re-read of a page that is not a hard page keeps rule D (never guess), so
