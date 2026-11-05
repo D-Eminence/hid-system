@@ -1,5 +1,5 @@
 import { DomainProblem } from '../common/problem';
-import { isStrictIsoDate, lagosToday, paperDateToIso } from './paper-date';
+import { isoDateFacts, isStrictIsoDate, lagosToday, paperDateToIso } from './paper-date';
 import { ITEM_ID } from './reading/paper-reading.contract';
 
 export type OcrTargetDomain = 'EHR' | 'LAB' | 'PHARMACY' | 'DOCUMENT_ONLY' | 'UNCLASSIFIED';
@@ -81,16 +81,22 @@ export function importedMedicationCandidate(fields: Record<string, unknown>): Im
 }
 
 export interface ImportedMedicationEntry extends ImportedMedicationFields {
-  /** Kept in ocr.validations.accepted_fields only; never sent to Pharmacy. */
-  itemId: string;
+  /**
+   * Kept in ocr.validations.accepted_fields only; never sent to Pharmacy.
+   * itemId is the reading item the entry was taken from; it is absent for a
+   * medicine the reviewer typed from the page (no AI reading, or one it missed).
+   */
+  itemId?: string;
   page: number;
 }
 
 /**
  * Every medicine a review keeps. With no `medications` key this is the legacy
  * single medicine, unchanged. Otherwise `medications` holds 1 to 50 entries in
- * reading order, each with its own itemId, page and as-written context, and
- * each becomes its own record: entries are never merged, even when identical.
+ * reading order, each with its own page and as-written context, and an itemId
+ * when it was taken from a reading item (a medicine typed from the page has
+ * none). Each becomes its own record: entries are never merged, even when
+ * identical.
  * `items` carries only what Pharmacy accepts; `entries` adds itemId and page.
  */
 export function importedMedicationCandidates(fields: Record<string, unknown>): {
@@ -118,6 +124,7 @@ export function importedMedicationCandidates(fields: Record<string, unknown>): {
       throw medicationProblem(`Imported medication field ${path}page is invalid`);
     }
     const itemId = value.itemId;
+    if (itemId === undefined || itemId === null) return { ...medicineFields(value, path, true), page };
     if (typeof itemId !== 'string' || !ITEM_ID.test(itemId)) {
       throw medicationProblem(`Imported medication field ${path}itemId is invalid`);
     }
@@ -133,12 +140,15 @@ function labProblem(code: string, detail: string): DomainProblem {
   return new DomainProblem(400, code, detail);
 }
 
+/** A date Lab receives, and whether it names a day only (no time of day). */
+interface LabDate { value: string; dayOnly: boolean }
+
 /**
  * The real date Lab receives for one date on the paper, or undefined. The
  * as-written text is kept in accepted_fields whatever happens here.
  */
 function labDate(fields: Record<string, unknown>, name: 'reportedAt' | 'collectedAt', path: string,
-  today: string): string | undefined {
+  today: string): LabDate | undefined {
   const asWrittenName = `${name}AsWritten`;
   const asWrittenValue = fields[asWrittenName];
   let asWritten: string | undefined;
@@ -160,24 +170,33 @@ function labDate(fields: Record<string, unknown>, name: 'reportedAt' | 'collecte
     const converted = paperDateToIso(asWritten, today);
     if (raw !== undefined) {
       // A reviewer cannot turn text the rule refuses into a precise date.
-      if (!isStrictIsoDate(raw) || converted.iso === null || raw.slice(0, 10) !== converted.iso.slice(0, 10)) {
+      if (!isStrictIsoDate(raw) || converted.iso === null || paperDateToIso(raw, '9999-12-31').iso === null
+        || raw.slice(0, 10) !== converted.iso.slice(0, 10)) {
         throw labProblem('OCR_LAB_DATE_CONFLICT',
           `Imported Lab field ${path}${name} does not match the date written on the paper`);
       }
+      // The reviewer's ISO value on the same day may add the time of day the
+      // paper shows; it is sent rather than midnight.
+      if (raw.includes('T')) return { value: raw, dayOnly: false };
     }
-    return converted.iso ?? undefined;
+    if (converted.iso === null) return undefined;
+    // Forms (a)-(c) give midnight UTC and an ISO day passes unchanged: both
+    // name a day only. An ISO value with a time (form (d)) passes unchanged.
+    return { value: converted.iso, dayOnly: !isStrictIsoDate(asWritten) || !converted.iso.includes('T') };
   }
   if (raw === undefined) return undefined;
   if (isStrictIsoDate(raw)) {
-    // As before, a reviewer's ISO date goes to Lab unchanged, if it is a real day.
+    // As before, a reviewer's ISO value goes to Lab unchanged (with or without
+    // a time or zone, as Lab's ISO 8601 check accepts), if it is a real day and time.
     const checked = paperDateToIso(raw, '9999-12-31');
     if (checked.iso === null) {
       throw labProblem('OCR_INVALID_LAB_EVIDENCE', `Imported Lab field ${path}${name} is not a real date`);
     }
-    return raw;
+    return { value: raw, dayOnly: !raw.includes('T') };
   }
   // Legacy text that is not ISO is a date as written: converted or left out.
-  return paperDateToIso(raw, today).iso ?? undefined;
+  const legacy = paperDateToIso(raw, today).iso;
+  return legacy === null ? undefined : { value: legacy, dayOnly: true };
 }
 
 /**
@@ -218,7 +237,7 @@ export function importedLabCandidate(fields: Record<string, unknown>, today: str
     }
     return { testName, value: resultValue, valueText, testCode: text('testCode', 120), unit: text('unit', 80),
       referenceRange: text('referenceRange', 240), abnormalFlag: text('abnormalFlag', 20),
-      reportedAt: labDate(value, 'reportedAt', `observations[${index}].`, today) };
+      reportedAt: labDate(value, 'reportedAt', `observations[${index}].`, today)?.value };
   });
   const optional = (name: string, maximum: number) => {
     const value = fields[name];
@@ -228,12 +247,27 @@ export function importedLabCandidate(fields: Record<string, unknown>, today: str
     }
     return value;
   };
-  const collectedAt = labDate(fields, 'collectedAt', '', today);
-  const reportedAt = labDate(fields, 'reportedAt', '', today);
-  // Mirrors lab.imported_evidence's reported_at >= collected_at (0017), which
-  // would otherwise refuse the publication after the review is stored.
-  if (collectedAt && reportedAt && Date.parse(reportedAt) < Date.parse(collectedAt)) {
-    throw labProblem('OCR_LAB_DATE_ORDER', 'The report date is before the collection date');
+  const collected = labDate(fields, 'collectedAt', '', today);
+  const reported = labDate(fields, 'reportedAt', '', today);
+  let collectedAt = collected?.value;
+  let reportedAt = reported?.value;
+  if (collected && reported) {
+    // lab.imported_evidence has CHECK (reported_at >= collected_at) (0017), which
+    // would refuse the publication after the review is stored, so the order is
+    // settled here, the same way at validation and at publication.
+    const collectedFacts = isoDateFacts(collected.value);
+    const reportedFacts = isoDateFacts(reported.value);
+    if (reportedFacts.day < collectedFacts.day) {
+      throw labProblem('OCR_LAB_DATE_ORDER', 'The report date is before the collection date');
+    }
+    if (reportedFacts.instant < collectedFacts.instant) {
+      // Same day. A date that names a day only (midnight UTC is not a time on
+      // the paper) cannot be ordered against a time on that day, so it is not
+      // sent; its as-written text stays in the review. No time is made up.
+      if (reported.dayOnly) reportedAt = undefined;
+      else if (collected.dayOnly) collectedAt = undefined;
+      else throw labProblem('OCR_LAB_DATE_ORDER', 'The report time is before the collection time');
+    }
   }
   return { observations, externalLabName: optional('externalLabName', 240),
     externalReference: optional('externalReference', 240), collectedAt, reportedAt };

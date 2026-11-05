@@ -9,7 +9,10 @@
  *       Nigeria (05/06/2024 is 5 June 2024);
  *   (b) day, month name, year ("1st April 2024", "12 Mar, 2025");
  *   (c) month name, day, year ("Mar 5, 2024", "March 5 2024");
- *   (d) an ISO date "2025-03-12", optionally with an ISO time and zone.
+ *   (d) an ISO date "2025-03-12", optionally with an ISO time ("T10:00",
+ *       "T10:00:00", optionally with a fraction) and optionally a zone ("Z",
+ *       "+01:00", "+0100"), the forms Lab's ISO 8601 check accepts. The time
+ *       must be a real time (hours 00-23, minutes and seconds 00-59).
  * - The year has 4 digits and is 1900 or later.
  * - The date exists on the calendar (29/02/2023 does not).
  * - The date is not later than today in Lagos (Africa/Lagos, UTC+1, no
@@ -29,7 +32,7 @@ const MONTHS: Readonly<Record<string, number>> = {
   oct: 10, october: 10, nov: 11, november: 11, dec: 12, december: 12,
 };
 
-const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})(T\d{2}:\d{2}(:\d{2}(\.\d{1,9})?)?(Z|[+-]\d{2}:?\d{2}))?$/;
+const ISO_DATE = /^(\d{4})-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2})(?::(\d{2})(\.\d{1,9})?)?(Z|[+-](\d{2}):?(\d{2}))?)?$/;
 const NUMERIC = /^(\d{1,2})([/.-])(\d{1,2})\2(\d+)$/;
 const DAY_MONTH_YEAR = /^(\d{1,2})(st|nd|rd|th)? ([a-z]+)\.?,? (\d+)$/;
 const MONTH_DAY_YEAR = /^([a-z]+)\.? (\d{1,2})(st|nd|rd|th)?,? (\d+)$/;
@@ -45,16 +48,39 @@ export function lagosToday(now: Date = new Date()): string {
   return new Date(now.getTime() + 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
-/** True for the ISO forms Lab accepts unchanged: YYYY-MM-DD, optionally with a time and zone. */
+/** True for the ISO forms Lab accepts unchanged: YYYY-MM-DD, optionally with a time and optionally a zone. */
 export function isStrictIsoDate(text: string): boolean {
   return ISO_DATE.test(text);
+}
+
+/**
+ * The instant and calendar day of an ISO value Lab receives. A value without a
+ * zone is read as UTC, as the HID database (TimeZone UTC) reads it into
+ * timestamptz. The day of a value with a zone is its day in Lagos; the day of a
+ * value without one is the day written in it.
+ */
+export function isoDateFacts(iso: string): { instant: number; day: string } {
+  const match = ISO_DATE.exec(iso);
+  if (!match) throw new Error('isoDateFacts needs an ISO date');
+  const [, year = '', month = '', day = '', hour, minute, second, fraction, zone] = match;
+  const written = `${year}-${month}-${day}`;
+  const time = hour === undefined ? '00:00:00.000'
+    : `${hour}:${minute}:${second ?? '00'}${(fraction ?? '.000').slice(0, 4).padEnd(4, '0')}`;
+  const offset = zone === undefined || zone === 'Z' ? 'Z'
+    : zone.length === 5 ? `${zone.slice(0, 3)}:${zone.slice(3)}` : zone;
+  const instant = Date.parse(`${written}T${time}${offset}`);
+  return { instant, day: zone === undefined ? written : lagosToday(new Date(instant)) };
 }
 
 export function paperDateToIso(text: string, today: string): PaperDateResult {
   const squeezed = text.trim().replace(/\s+/g, ' ');
   const iso = ISO_DATE.exec(squeezed);
   if (iso) {
-    const [, year = '', month = '', day = ''] = iso;
+    const [, year = '', month = '', day = '', hour, minute, second, , , zoneHour, zoneMinute] = iso;
+    if (Number(hour ?? 0) > 23 || Number(minute ?? 0) > 59 || Number(second ?? 0) > 59
+      || Number(zoneHour ?? 0) > 23 || Number(zoneMinute ?? 0) > 59) {
+      return { iso: null, reason: 'invalid_date' };
+    }
     return check(Number(year), Number(month), Number(day), year.length, today, squeezed);
   }
   const lower = squeezed.toLowerCase();

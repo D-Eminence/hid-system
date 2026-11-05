@@ -540,6 +540,19 @@ describe('OCR publication of several medicines from one paper', () => {
       .toEqual(['jobId', 'publicationId', 'targetResourceId', 'targetResourceType']);
   });
 
+  it('publishes medicines typed from the page (no item id) as separate records in one batch', async () => {
+    const medications = [keptMedicine(1, { itemId: undefined }), keptMedicine(2, { itemId: undefined, page: 1 }),
+      keptMedicine(3, { itemId: undefined, medicationText: 'Amlodipine' })];
+    const createOcrImportBatch = jest.fn().mockResolvedValue({ id: 'e0000000-0000-4000-8000-000000000001', count: 3,
+      items: [1, 2, 3].map((n) => ({ id: `e0000000-0000-4000-8000-00000000000${n}` })) });
+    const { service } = harness({ jobRow: validatedJob, validationRow: pharmacyValidation({ medications }),
+      publicationRow: pharmacyPublication, pharmacyApi: { createOcrImportBatch } });
+    await expect(publish(service)).resolves.toMatchObject({ status: 'published' });
+    const sent = createOcrImportBatch.mock.calls[0]?.[1] as { medications: unknown[] };
+    expect(sent.medications).toHaveLength(3);
+    expect(JSON.stringify(sent)).not.toMatch(/itemId|"page"/);
+  });
+
   it('stores a Pharmacy refusal of the batch as terminal, so nothing is published', async () => {
     const error = new DomainProblem(400, 'VALIDATION_FAILED', 'medications.1.medicationText is too long');
     const createOcrImportBatch = jest.fn().mockRejectedValue(error);
@@ -570,6 +583,53 @@ describe('OCR validation of several medicines', () => {
     expect(auditEvents(audit).map(([, event]) => event.action)).toEqual(['ocr.validation.accept']);
   });
 
+  // AI reading is off by default (OCR_AI_MODE 'off'): the reading has pages but no items.
+  const pagesOnly = (pages: number, status = 'ai_off') => ({ contract: 'hid-paper-reading-v2',
+    pages: Array.from({ length: pages }, (_v, index) => ({ page: index + 1, flagged: false, flagReasons: [],
+      lines: [] })), items: [], reading: { status, itemCount: 0 } });
+  const typed = (index: number, overrides: Record<string, unknown> = {}) =>
+    keptMedicine(index, { itemId: undefined, ...overrides });
+
+  it.each([['ai_off'], ['ai_declined'], ['ai_failed']])(
+    'stores a review of three medicines typed from a paper read with AI reading %s', async (status) => {
+      const { service, clients, audit } = harness({ extractionPayload: pagesOnly(2, status) });
+      await service.validate(jobId, body({ medications: [typed(1), typed(2, { page: 1 }), typed(3)] }),
+        'ocr-validate-key-000205', context);
+      expect(writes(clients)).toHaveLength(2);
+      expect(auditEvents(audit).map(([, event]) => event.action)).toEqual(['ocr.validation.accept']);
+    });
+
+  it('stores a typed medicine the AI reading missed, next to the ones it read', async () => {
+    const { service, clients } = harness({ extractionPayload: { ...readingOf(2), pages: [{ page: 1 }, { page: 2 }] } });
+    await service.validate(jobId, body({ medications: [keptMedicine(1), keptMedicine(2), typed(3)] }),
+      'ocr-validate-key-000206', context);
+    expect(writes(clients)).toHaveLength(2);
+  });
+
+  it('stores typed medicines from an older extraction (hid-textract-v1) that lists its pages', async () => {
+    const { service, clients } = harness({ extractionPayload: { pages: [{ page: 1, text: 'x', confidence: 0.9 },
+      { page: 2, text: 'y', confidence: 0.9 }] } });
+    await service.validate(jobId, body({ medications: [typed(1), typed(2)] }), 'ocr-validate-key-000207', context);
+    expect(writes(clients)).toHaveLength(2);
+  });
+
+  it.each([
+    ['a page the paper does not have', pagesOnly(1)],
+    ['an extraction that cannot be found', undefined],
+  ])('refuses a typed medicine on %s with 400 and writes nothing', async (_name, payload) => {
+    const { service, clients } = harness({ extractionPayload: payload });
+    await expect(service.validate(jobId, body({ medications: [typed(1, { page: 1 }), typed(2, { page: 2 })] }),
+      'ocr-validate-key-000208', context)).rejects.toMatchObject({ code: 'OCR_MEDICATION_PAGE_NOT_FOUND' });
+    expect(writes(clients)).toEqual([]);
+  });
+
+  it('still refuses an item id the reading did not find, even with AI reading off', async () => {
+    const { service, clients } = harness({ extractionPayload: pagesOnly(2) });
+    await expect(service.validate(jobId, body({ medications: [typed(1), keptMedicine(2)] }),
+      'ocr-validate-key-000209', context)).rejects.toMatchObject({ code: 'OCR_MEDICATION_NOT_READ' });
+    expect(writes(clients)).toEqual([]);
+  });
+
   it.each([
     ['a medicine the reading did not find', readingOf(1)],
     ['a medicine on another page', readingOf(2, { page: 3 })],
@@ -590,6 +650,13 @@ describe('OCR validation of several medicines', () => {
     const { service, clients } = harness({ extractionPayload: readingOf(51) });
     await expect(service.validate(jobId, body(fields), 'ocr-validate-key-000203', context))
       .rejects.toMatchObject({ code: 'OCR_INVALID_MEDICATION_EVIDENCE' });
+    expect(writes(clients)).toEqual([]);
+  });
+
+  it('refuses a view-only share of typed medicines before reading the candidate', async () => {
+    const { service, clients } = harness({ allowed: false, extractionPayload: pagesOnly(2) });
+    await expect(service.validate(jobId, body({ medications: [typed(1), typed(2)] }),
+      'ocr-validate-key-000210', context)).rejects.toMatchObject({ code: 'OCR_JOB_NOT_FOUND' });
     expect(writes(clients)).toEqual([]);
   });
 

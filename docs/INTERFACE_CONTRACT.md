@@ -1295,12 +1295,17 @@ reviewer, reason, and provenance. It requires `Idempotency-Key` and an expected
 OCR job version. The singular validation route remains a compatible alias.
 
 Several medicines from one paper (`PHARMACY`): `acceptedFields.medications` is a
-list of 1 to 50 entries in reading order, each `{ itemId, page, medicationText,
-strengthText?, doseText?, frequencyText?, historicalContext }`; `itemId` is the
-reading item id (`it-` and 16 hex characters, unique in the review), `page` an
-integer 1-10000, and `historicalContext` (the as-written text and page) is
-required. Each `itemId` must be a `medicine` item read on that `page` of the
-reviewed extraction, or validation answers 400 `OCR_MEDICATION_NOT_READ`. The
+list of 1 to 50 entries in reading order, each `{ itemId?, page, medicationText,
+strengthText?, doseText?, frequencyText?, historicalContext }`; `page` is an
+integer 1-10000 and `historicalContext` (the as-written text and page) is
+required. `itemId` is the reading item id (`it-` and 16 hex characters, unique
+in the review) when the entry was taken from a reading item; it must then be a
+`medicine` item read on that `page` of the reviewed extraction, or validation
+answers 400 `OCR_MEDICATION_NOT_READ`. An entry the reviewer typed from the
+page has no `itemId` (AI reading off, which is the default, declined, failed,
+or missed that medicine); its `page` must be a page of the reviewed extraction,
+or validation answers 400 `OCR_MEDICATION_PAGE_NOT_FOUND`. Read and typed
+entries may be mixed. Every entry stays its own record, even when identical. The
 legacy shape (the five text fields at the top of `acceptedFields`) is unchanged;
 sending both shapes, an empty list or more than 50 answers 400
 `OCR_INVALID_MEDICATION_EVIDENCE` and stores nothing. One medicine in either
@@ -1316,7 +1321,9 @@ Dates on paper lab results (`LAB`): the reviewer sends the text as written as
 per observation. The text is always kept in the stored review. Lab receives a
 real date only when the text is unambiguous: the whole text is day/month/year
 with `/`, `-` or `.` (day first, as used in Nigeria), day month-name year, or
-month-name day year (an ordinal suffix and a comma are allowed), or an ISO date;
+month-name day year (an ordinal suffix and a comma are allowed), or an ISO date
+(optionally with a time `THH:mm`, `THH:mm:ss` or `THH:mm:ss.fff`, with or
+without a zone, as Lab's ISO 8601 check accepts; the time must be real);
 the year has 4 digits and is 1900 or later; the day exists on the calendar; and
 it is not later than today in Lagos (for publication, the day the review was
 stored). Forms other than ISO become midnight UTC of that day; ISO passes
@@ -1324,9 +1331,19 @@ unchanged. Anything else (2-digit year, month and year only, a range, extra
 words) sends no date and is not an error. A legacy `reportedAt`/`collectedAt`
 that is not ISO is read as text written on paper by the same rule. An ISO value
 sent together with as-written text must be the same day, else 400
-`OCR_LAB_DATE_CONFLICT`; a converted report date before the collection date
-answers 400 `OCR_LAB_DATE_ORDER`. The as-written keys, `page` and `itemId` are
-never sent to Lab.
+`OCR_LAB_DATE_CONFLICT`; when it carries a time it is sent instead of midnight.
+A legacy ISO `reportedAt`/`collectedAt` (with or without a time or zone) passes
+unchanged, and one that is not a real day and time answers 400
+`OCR_INVALID_LAB_EVIDENCE`. Order of the top-level dates (Lab's
+`reported_at >= collected_at`): days are compared first (a value with a zone by
+its day in Lagos, otherwise the day written; a value without a zone is read as
+UTC, as the database reads it); a report day before the collection day answers
+400 `OCR_LAB_DATE_ORDER`. On the same day, when one side names a day only (a
+converted paper date or an ISO day without a time) and would fall before the
+other side's time, that day-only date is not sent (its as-written text stays in
+the stored review) rather than refusing or inventing a time; two times in the
+wrong order answer 400 `OCR_LAB_DATE_ORDER`. The as-written keys, `page` and
+`itemId` are never sent to Lab.
 
 Patient confirmation is a separate idempotent command bound to the canonical
 Identity patient already governing the source document. The server rechecks

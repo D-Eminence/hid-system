@@ -1,4 +1,4 @@
-import { isStrictIsoDate, lagosToday, paperDateToIso } from './paper-date';
+import { isoDateFacts, isStrictIsoDate, lagosToday, paperDateToIso } from './paper-date';
 
 const today = '2026-11-05';
 
@@ -62,5 +62,33 @@ describe('paper dates: converted only when the text is unambiguous', () => {
     expect(isStrictIsoDate('2025-03-12T09:30:00.000Z')).toBe(true);
     expect(isStrictIsoDate('12/03/2025')).toBe(false);
     expect(isStrictIsoDate('2025-03')).toBe(false);
+  });
+
+  it('accepts an ISO time without a zone, as Lab does, and passes it unchanged', () => {
+    expect(isStrictIsoDate('2025-03-12T10:00')).toBe(true);
+    expect(isStrictIsoDate('2025-03-12T10:00:00')).toBe(true);
+    expect(isStrictIsoDate('2025-03-12T10:00:00.123')).toBe(true);
+    expect(isStrictIsoDate('2025-03-12T10:00+0100')).toBe(true);
+    expect(isStrictIsoDate('2025-03-12T10')).toBe(false);
+    expect(paperDateToIso('2025-03-12T10:00', today).iso).toBe('2025-03-12T10:00');
+    expect(paperDateToIso('2025-03-12T10:00:00', today).iso).toBe('2025-03-12T10:00:00');
+  });
+
+  it.each(['2025-03-12T24:00', '2025-03-12T10:60', '2025-03-12T10:00:60', '2025-03-12T10:00+25:00',
+    '2025-02-30T10:00'])('refuses %s, which is not a real day and time', (text) => {
+    expect(paperDateToIso(text, today)).toEqual({ iso: null, reason: 'invalid_date' });
+  });
+
+  it('gives the instant and calendar day used to order two dates', () => {
+    expect(isoDateFacts('2025-03-12')).toEqual({ instant: Date.parse('2025-03-12T00:00:00Z'), day: '2025-03-12' });
+    expect(isoDateFacts('2025-03-12T00:00:00.000Z').day).toBe('2025-03-12');
+    // 00:30 in Lagos is 23:30 UTC the day before, but still 12 March on the paper.
+    expect(isoDateFacts('2025-03-12T00:30+01:00')).toEqual({ instant: Date.parse('2025-03-11T23:30:00Z'),
+      day: '2025-03-12' });
+    expect(isoDateFacts('2025-03-12T00:30+0100').instant).toBe(Date.parse('2025-03-11T23:30:00Z'));
+    // Without a zone the value is read as the database reads it (UTC); the day is the one written.
+    expect(isoDateFacts('2025-03-12T23:30')).toEqual({ instant: Date.parse('2025-03-12T23:30:00Z'),
+      day: '2025-03-12' });
+    expect(isoDateFacts('2025-03-12T09:00:00.123456789Z').instant).toBe(Date.parse('2025-03-12T09:00:00.123Z'));
   });
 });

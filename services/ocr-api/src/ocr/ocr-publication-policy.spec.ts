@@ -83,6 +83,19 @@ describe('several medicines in one review', () => {
     expect(importedMedicationCandidates({ medications: fifty }).items).toHaveLength(50);
   });
 
+  it('takes medicines typed from the page, without an item id, each its own record', () => {
+    // A paper read with AI reading off has no items: the reviewer types every medicine.
+    const typed = importedMedicationCandidates({ medications: [medicine(1, { itemId: undefined }),
+      medicine(2, { itemId: undefined, medicationText: 'Metformin' }), medicine(3, { itemId: null })] });
+    expect(typed.items.map((item) => item.medicationText)).toEqual(['Amlodipine', 'Metformin', 'Amlodipine']);
+    expect(typed.entries.map(({ itemId, page }) => ({ itemId, page })))
+      .toEqual([{ itemId: undefined, page: 2 }, { itemId: undefined, page: 3 }, { itemId: undefined, page: 1 }]);
+    // Read items and typed ones may be mixed (the reading missed one); identical typed lines stay separate.
+    const same = { itemId: undefined, medicationText: 'Metformin' };
+    expect(importedMedicationCandidates({ medications: [medicine(1), medicine(2, same), medicine(3, same)] }).items)
+      .toHaveLength(3);
+  });
+
   it('never merges identical lines', () => {
     const same = { medicationText: 'Metformin', strengthText: '500mg' };
     expect(importedMedicationCandidates({ medications: [medicine(1, same), medicine(2, same)] }).items)
@@ -106,6 +119,9 @@ describe('several medicines in one review', () => {
     ['a strength over 240 characters', { medications: [medicine(1), medicine(2, { strengthText: 'A'.repeat(241) })] }],
     ['a context over 2000 characters', { medications: [medicine(1), medicine(2, { historicalContext: 'A'.repeat(2001) })] }],
     ['an entry that is not an object', { medications: [medicine(1), 'Metformin'] }],
+    ['a typed medicine without as-written context', { medications: [medicine(1, { itemId: undefined }),
+      medicine(2, { itemId: undefined, historicalContext: undefined })] }],
+    ['a typed medicine without a page', { medications: [medicine(1, { itemId: undefined, page: undefined })] }],
   ])('refuses the whole review for %s', (_name, fields) => {
     expect(() => importedMedicationCandidates(fields as Record<string, unknown>)).toThrow(medicationRefusal);
     expect(() => assertPublishableCandidate('PHARMACY', fields as Record<string, unknown>)).toThrow(medicationRefusal);
@@ -177,6 +193,68 @@ describe('dates written on paper lab results', () => {
       observations: [observation()] })).toThrow(expect.objectContaining({ code: 'OCR_LAB_DATE_ORDER', status: 400 }));
     expect(() => lab({ collectedAtAsWritten: '12/03/2025', reportedAtAsWritten: 'Mar 2025',
       observations: [observation()] })).not.toThrow();
+  });
+
+  it('passes a legacy ISO date-time without a zone unchanged, as Lab accepts it, instead of dropping it', () => {
+    expect(lab({ collectedAt: '2025-03-12T10:00', reportedAt: '2025-03-12T15:00:00',
+      observations: [observation({ reportedAt: '2025-03-12T15:00:00.000' })] }))
+      .toMatchObject({ collectedAt: '2025-03-12T10:00', reportedAt: '2025-03-12T15:00:00',
+        observations: [expect.objectContaining({ reportedAt: '2025-03-12T15:00:00.000' })] });
+    expect(() => lab({ reportedAt: '2025-03-12T25:00', observations: [observation()] }))
+      .toThrow(expect.objectContaining({ code: 'OCR_INVALID_LAB_EVIDENCE' }));
+  });
+
+  it('accepts a slip collected at a time and reported the same day, without making up a time', () => {
+    // Collected 05/06/2024 09:00, reported 05/06/2024 (no time on the paper).
+    const sameDay = lab({ collectedAt: '2024-06-05T09:00:00+01:00', reportedAtAsWritten: '05/06/2024',
+      observations: [observation()] });
+    expect(sameDay.collectedAt).toBe('2024-06-05T09:00:00+01:00');
+    // The report day cannot be placed after 09:00 without inventing a time, so it is not sent;
+    // its as-written text stays in the stored review.
+    expect(sameDay.reportedAt).toBeUndefined();
+    // Collected on a day only, reported at 00:30 Lagos time the same day (23:30 UTC the day before).
+    const early = lab({ collectedAtAsWritten: '12/03/2025', reportedAt: '2025-03-12T00:30+01:00',
+      observations: [observation()] });
+    expect(early).toMatchObject({ collectedAt: undefined, reportedAt: '2025-03-12T00:30+01:00' });
+    // A later day keeps both dates.
+    expect(lab({ collectedAt: '2024-06-05T09:00:00+01:00', reportedAtAsWritten: '06/06/2024',
+      observations: [observation()] })).toMatchObject({ collectedAt: '2024-06-05T09:00:00+01:00',
+      reportedAt: '2024-06-06T00:00:00.000Z' });
+    // Midnight to midnight on the same day passes as before.
+    expect(lab({ collectedAtAsWritten: '12/03/2025', reportedAtAsWritten: '12/03/2025',
+      observations: [observation()] })).toMatchObject({ collectedAt: '2025-03-12T00:00:00.000Z',
+      reportedAt: '2025-03-12T00:00:00.000Z' });
+  });
+
+  it('every date sent satisfies Lab\'s reported_at >= collected_at', () => {
+    const cases: Record<string, unknown>[] = [
+      { collectedAt: '2024-06-05T09:00:00+01:00', reportedAtAsWritten: '05/06/2024' },
+      { collectedAtAsWritten: '12/03/2025', reportedAt: '2025-03-12T00:30+01:00' },
+      { collectedAt: '2025-03-12T10:00', reportedAt: '2025-03-12' },
+      { collectedAt: '2025-03-12', reportedAt: '2025-03-12T10:00+01:00' },
+      { collectedAtAsWritten: '2025-03-12T08:00Z', reportedAtAsWritten: '12/03/2025' },
+    ];
+    for (const fields of cases) {
+      const result = lab({ ...fields, observations: [observation()] });
+      if (result.collectedAt && result.reportedAt) {
+        const asUtc = (value: string) => Date.parse(/T.*(Z|[+-]\d{2}:?\d{2})$/.test(value) || !value.includes('T')
+          ? value : `${value}Z`);
+        expect(asUtc(result.reportedAt)).toBeGreaterThanOrEqual(asUtc(result.collectedAt));
+      }
+    }
+  });
+
+  it('sends the reviewer\'s time on the day written on paper rather than midnight', () => {
+    expect(lab({ collectedAt: '2025-03-12T09:00:00+01:00', reportedAtAsWritten: '12/03/2025',
+      reportedAt: '2025-03-12T15:00+01:00', observations: [observation()] }))
+      .toMatchObject({ collectedAt: '2025-03-12T09:00:00+01:00', reportedAt: '2025-03-12T15:00+01:00' });
+  });
+
+  it('still refuses a report day before the collection day, and a report time before the collection time', () => {
+    expect(() => lab({ collectedAt: '2024-06-05T09:00:00+01:00', reportedAtAsWritten: '04/06/2024',
+      observations: [observation()] })).toThrow(expect.objectContaining({ code: 'OCR_LAB_DATE_ORDER' }));
+    expect(() => lab({ collectedAt: '2024-06-05T09:00:00+01:00', reportedAt: '2024-06-05T08:00:00+01:00',
+      observations: [observation()] })).toThrow(expect.objectContaining({ code: 'OCR_LAB_DATE_ORDER' }));
   });
 
   it('refuses as-written text over 120 characters and a malformed page or item id', () => {

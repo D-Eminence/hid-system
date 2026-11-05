@@ -650,15 +650,18 @@ export class OcrService {
   }
 
   /**
-   * A review that lists medicines may list only medicines the reading found,
-   * each on the page it was read from, so no medicine is added that was not
-   * on the paper.
+   * Every listed medicine must be on this paper. An entry taken from a reading
+   * item (itemId) must be a medicine the reading found on that page. An entry
+   * the reviewer typed from the page (no itemId: AI reading off, declined,
+   * failed or missed it) must name a page of this extraction. Either way no
+   * medicine is added from a page that is not there.
    */
   private async assertMedicinesWereRead(client: PoolClient, jobId: string, extractionId: string,
     entries: readonly ImportedMedicationEntry[]) {
     const result = await client.query<{ structured_payload: unknown }>(
       `select structured_payload from ocr.extractions where id = $1 and job_id = $2`, [extractionId, jobId]);
-    const payload = result.rows[0]?.structured_payload as { contract?: unknown; items?: unknown } | undefined;
+    const payload = result.rows[0]?.structured_payload as { contract?: unknown; items?: unknown; pages?: unknown }
+      | undefined;
     const read = new Map<string, number>();
     if (payload?.contract === PAPER_READING_CONTRACT && Array.isArray(payload.items)) {
       for (const item of payload.items as { id?: unknown; kind?: unknown; page?: unknown }[]) {
@@ -667,8 +670,20 @@ export class OcrService {
         }
       }
     }
+    // Both contracts ('hid-paper-reading-v2' and the older 'hid-textract-v1') list pages as { page }.
+    const pages = new Set<number>();
+    if (payload && Array.isArray(payload.pages)) {
+      for (const page of payload.pages as { page?: unknown }[]) {
+        if (typeof page?.page === 'number') pages.add(page.page);
+      }
+    }
     entries.forEach((entry, index) => {
-      if (read.get(entry.itemId) !== entry.page) {
+      if (entry.itemId === undefined) {
+        if (!pages.has(entry.page)) {
+          throw new DomainProblem(400, 'OCR_MEDICATION_PAGE_NOT_FOUND',
+            `Medicine ${index + 1} names page ${entry.page}, which is not a page of this paper`);
+        }
+      } else if (read.get(entry.itemId) !== entry.page) {
         throw new DomainProblem(400, 'OCR_MEDICATION_NOT_READ',
           `Medicine ${index + 1} is not a medicine read from page ${entry.page} of this paper`);
       }
