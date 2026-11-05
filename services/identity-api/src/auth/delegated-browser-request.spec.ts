@@ -134,16 +134,17 @@ describe('delegated browser requests through the Identity guard', () => {
       authorizationCheck, IdentityController)))).code).toBe('ORIGIN_DENIED');
   });
 
-  it('marks only the patient authorization check and the Outreach authorization as delegated browser requests', () => {
+  it('marks only the patient authorization check, its precheck and the Outreach authorization as delegated browser requests', () => {
     const files = (directory: string): string[] => readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
       entry.isDirectory() ? files(join(directory, entry.name)) : entry.name.endsWith('.ts') ? [join(directory, entry.name)] : []);
     const marked = files(join(__dirname, '..')).filter((file) => !file.endsWith('.spec.ts'))
       .flatMap((file) => (readFileSync(file, 'utf8').match(/@DelegatedBrowserRequest\(\)/g) ?? []).map(() => file));
     expect(marked.map((file) => file.slice(file.indexOf('src/'))))
-      .toEqual(['src/identity/identity.controller.ts', 'src/identity/identity.controller.ts']);
+      .toEqual(['src/identity/identity.controller.ts', 'src/identity/identity.controller.ts',
+        'src/identity/identity.controller.ts']);
     const handlers = Object.getOwnPropertyNames(IdentityController.prototype).filter((name) =>
       Reflect.getMetadata(DELEGATED_BROWSER_REQUEST, (IdentityController.prototype as unknown as Record<string, object>)[name] as object) === true);
-    expect(handlers.sort()).toEqual(['authorizeOutreach', 'authorizeService']);
+    expect(handlers.sort()).toEqual(['authorizeOutreach', 'authorizeService', 'precheckService']);
   });
 
   it('leaves bearer delegation unchanged', async () => {
@@ -264,5 +265,48 @@ describe('IdentityController.authorizeService (A18)', () => {
     await expect(subject.authorizeService({ patientId, scope: 'write_records', purpose: 'direct-care' },
       handlerRequest())).resolves.toEqual({ allowed: true });
     expect(identity.authorize).toHaveBeenCalledWith(patientId, 'write_records', 'direct-care', expect.any(Object));
+  });
+});
+
+describe('IdentityController.precheckService (OCR create asks before it reads)', () => {
+  const patientId = '50000000-0000-4000-8000-00000000000a';
+  function controller(workloadRefuses = false) {
+    const identity = { precheck: jest.fn().mockResolvedValue({ allowed: true }), authorize: jest.fn() };
+    const workloadAuth = { authenticateService: jest.fn(async () => {
+      if (workloadRefuses) throw new Error('workload refused');
+      return { subject: 'local:ocr-api' };
+    }) };
+    return { identity, workloadAuth,
+      subject: new IdentityController(identity as never, workloadAuth as unknown as WorkloadAuthService) };
+  }
+  function handlerRequest(): HidRequest {
+    return { correlationId: 'service-precheck-test', actor: doctor, facilityId,
+      membershipId: '40000000-0000-4000-8000-00000000000a', purposeOfUse: 'healthcare-operations',
+      header: (name: string) => ({ 'x-hid-internal-caller': 'ocr-api', 'x-hid-service-token': 'token' } as
+        Record<string, string>)[name.toLowerCase()],
+    } as unknown as HidRequest;
+  }
+
+  it('prechecks a records read through IdentityService.precheck, never authorize', async () => {
+    const { subject, identity, workloadAuth } = controller();
+    await expect(subject.precheckService({ patientId, scope: 'read_records', purpose: 'healthcare-operations' },
+      handlerRequest())).resolves.toEqual({ allowed: true });
+    expect(workloadAuth.authenticateService).toHaveBeenCalledWith('ocr-api', undefined, 'token');
+    expect(identity.precheck).toHaveBeenCalledWith(patientId, 'read_records', 'healthcare-operations', expect.any(Object));
+    expect(identity.authorize).not.toHaveBeenCalled();
+  });
+
+  it('refuses a write scope', async () => {
+    const { subject, identity } = controller();
+    expect((await refusal(subject.precheckService({ patientId, scope: 'write_records', purpose: 'direct-care' },
+      handlerRequest()))).code).toBe('PRECHECK_READ_ONLY');
+    expect(identity.precheck).not.toHaveBeenCalled();
+  });
+
+  it('requires an authenticated workload', async () => {
+    const { subject, identity } = controller(true);
+    await expect(subject.precheckService({ patientId, scope: 'read_records', purpose: 'healthcare-operations' },
+      handlerRequest())).rejects.toThrow('workload refused');
+    expect(identity.precheck).not.toHaveBeenCalled();
   });
 });

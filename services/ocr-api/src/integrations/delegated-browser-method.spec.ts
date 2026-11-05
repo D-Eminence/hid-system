@@ -68,3 +68,34 @@ describe('OCR forwards the browser request method to Identity', () => {
       'x-csrf-token': 'csrf' });
   });
 });
+
+describe('OCR asks Identity for a records-read precheck without side effects', () => {
+  const precheck = (response: Response) => {
+    fetchMock.mockResolvedValue(response);
+    return new IdentityApiService(workloadIdentity as unknown as ServiceWorkloadIdentityService)
+      .precheckRecordsRead(patientId, 'direct-care', requireRequestContext(browserRequest('POST', {
+        origin: 'https://app.example', 'x-csrf-token': 'csrf' }) as unknown as HidRequest));
+  };
+
+  it('posts a read precheck to its own route and returns the answer without any grant', async () => {
+    const answer = await precheck(new Response(JSON.stringify({ ...decision, consentGrantId: 'grant-1', expiresAt: 'x' }),
+      { status: 200, headers: { 'content-type': 'application/json' } }));
+    expect(fetchMock).toHaveBeenCalledWith('https://identity.example/api/v1/identity/service/authorization/precheck',
+      expect.objectContaining({ method: 'POST' }));
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1].body))).toEqual({ patientId, scope: 'read_records',
+      purpose: 'direct-care' });
+    expect(answer).toEqual({ allowed: true, patientId, facilityId, membershipId: decision.membershipId,
+      scope: 'read_records', purpose: 'direct-care', breakGlass: false });
+  });
+
+  it('answers undefined when Identity does not have the route yet (404)', async () => {
+    await expect(precheck(new Response(JSON.stringify({ statusCode: 404 }),
+      { status: 404, headers: { 'content-type': 'application/json' } }))).resolves.toBeUndefined();
+  });
+
+  it('keeps any other Identity refusal as a problem', async () => {
+    await expect(precheck(new Response(JSON.stringify({ code: 'PERMISSION_DENIED', detail: 'Missing permission' }),
+      { status: 403, headers: { 'content-type': 'application/json' } }))).rejects.toMatchObject({
+      code: 'PERMISSION_DENIED' });
+  });
+});

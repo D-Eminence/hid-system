@@ -1,6 +1,7 @@
 import type { PoolClient } from 'pg';
 import type { AuditService } from '../audit/audit.service';
 import { DomainProblem } from '../common/problem';
+import { requestDigest } from '../common/idempotency';
 import type { DataAccessContext } from '../common/request-context';
 import type { DatabaseService } from '../database/database.service';
 import type { EhrApiService } from '../integrations/ehr-api.service';
@@ -35,13 +36,23 @@ interface Options {
   allowedPatients?: readonly string[];
   /** The EHR source read hides the document (row-level security answers 404). */
   sourceHidden?: boolean;
+  /** An earlier job under the same Idempotency-Key, with the digest it was stored with. */
+  replay?: { requestSha256: string };
+  /** Identity has no precheck route yet (an older Identity answers 404). */
+  noPrecheck?: boolean;
 }
 
 function harness(options: Options = {}) {
   const allowed = new Set(options.allowedPatients ?? [patientId]);
   const order: string[] = [];
+  const name = (id: string) => (id === patientId ? 'patient' : 'other');
   const route = (sql: string) => {
-    if (sql.includes("operation = 'ocr.extract' and idempotency_key = $3")) return { rows: [], rowCount: 0 };
+    if (sql.includes("operation = 'ocr.extract' and idempotency_key = $3")) {
+      return options.replay ? { rows: [job], rowCount: 1 } : { rows: [], rowCount: 0 };
+    }
+    if (sql.includes('select request_sha256 from ocr.jobs')) {
+      return { rows: [{ request_sha256: options.replay?.requestSha256 }], rowCount: 1 };
+    }
     if (sql.includes('ocr.extractions extraction')) return { rows: [], rowCount: 0 };
     if (sql.includes('insert into ocr.jobs')) { order.push('insert job'); return { rows: [job], rowCount: 1 }; }
     throw new Error('Unexpected SQL in test');
@@ -56,10 +67,18 @@ function harness(options: Options = {}) {
     if (options.sourceHidden) throw new DomainProblem(404, 'DOCUMENT_NOT_FOUND', 'Document was not found');
     return source;
   }) } as unknown as EhrApiService;
-  const identity = { authorize: jest.fn(async (id: string) => {
-    order.push(`authorize ${id === patientId ? 'patient' : 'other'}`);
-    return { allowed: allowed.has(id), breakGlass: false };
-  }) } as unknown as IdentityApiService;
+  // authorize is the call that notes ("Your records were opened") and audits a
+  // read in Identity; precheckRecordsRead has neither side effect.
+  const identity = {
+    precheckRecordsRead: jest.fn(async (id: string) => {
+      order.push(`precheck ${name(id)}`);
+      return options.noPrecheck ? undefined : { allowed: allowed.has(id), breakGlass: false };
+    }),
+    authorize: jest.fn(async (id: string) => {
+      order.push(`authorize ${name(id)}`);
+      return { allowed: allowed.has(id), breakGlass: false };
+    }),
+  } as unknown as IdentityApiService;
   const audit = { recordWithClient: jest.fn(async () => undefined) } as unknown as AuditService;
   const service = new OcrService(database, identity, audit, ehrApi, {} as LabApiService, {} as PharmacyApiService,
     { enabled: true } as OcrPublicationSwitch, { aiReadingOn: false } as OcrReadingSwitch);
@@ -70,18 +89,24 @@ const create = (service: OcrService, patient: string | undefined) => service.cre
   ...(patient ? { patientId: patient } : {}), provider: 'textract', purpose: 'healthcare-operations' },
 'ocr-create-consent-key-0001', context);
 
+/** The digest createJob stores for this test's request naming the given patient. */
+const digestFor = (patient: string) => requestDigest('ocr.job.create', { facilityId: context.facilityId,
+  documentId, patientId: patient, provider: 'textract', maxAttempts: 3 });
+
 describe('OCR job creation asks for records-processing consent before reading the document', () => {
-  it('creates the job as before when the named patient allows records processing', async () => {
+  it('creates the job with one authorize, on the source patient, after a precheck that notes nothing', async () => {
     const { service, identity, order } = harness();
 
     await expect(create(service, patientId)).resolves.toMatchObject({ id: jobId, status: 'queued' });
 
-    expect(order).toEqual(['authorize patient', 'source', 'authorize patient', 'insert job']);
-    expect(identity.authorize).toHaveBeenNthCalledWith(1, patientId, 'read_records', 'healthcare-operations', context);
+    expect(order).toEqual(['precheck patient', 'source', 'authorize patient', 'insert job']);
+    expect(identity.precheckRecordsRead).toHaveBeenCalledWith(patientId, 'healthcare-operations', context);
+    expect(identity.authorize).toHaveBeenCalledTimes(1);
+    expect(identity.authorize).toHaveBeenCalledWith(patientId, 'read_records', 'healthcare-operations', context);
   });
 
-  it('refuses with 403 OCR_RECORDS_PROCESSING_CONSENT_REQUIRED and makes no EHR call', async () => {
-    const { service, ehrApi, audit } = harness({ allowedPatients: [] });
+  it('refuses with 403 OCR_RECORDS_PROCESSING_CONSENT_REQUIRED and makes no EHR call or authorize', async () => {
+    const { service, ehrApi, identity, audit } = harness({ allowedPatients: [] });
 
     const refusal = await create(service, patientId).catch((error: unknown) => error);
 
@@ -89,6 +114,7 @@ describe('OCR job creation asks for records-processing consent before reading th
     expect(refusal).toMatchObject({ code: 'OCR_RECORDS_PROCESSING_CONSENT_REQUIRED' });
     expect((refusal as DomainProblem).getStatus()).toBe(403);
     expect(ehrApi.getOcrDocumentSource).not.toHaveBeenCalled();
+    expect(identity.authorize).not.toHaveBeenCalled();
     expect(audit.recordWithClient).not.toHaveBeenCalled();
   });
 
@@ -100,18 +126,20 @@ describe('OCR job creation asks for records-processing consent before reading th
     expect(ehrApi.getOcrDocumentSource).not.toHaveBeenCalled();
   });
 
-  it('keeps the patient-mismatch answer when the named patient allows processing but is not the source patient', async () => {
-    const { service, order } = harness({ allowedPatients: [patientId, otherPatientId] });
+  it('never authorizes (so never notes) a consenting wrong patient before the mismatch answer', async () => {
+    const { service, identity, order } = harness({ allowedPatients: [patientId, otherPatientId] });
 
     await expect(create(service, otherPatientId)).rejects.toMatchObject({ code: 'OCR_PATIENT_MISMATCH' });
-    expect(order).toEqual(['authorize other', 'source']);
+    expect(order).toEqual(['precheck other', 'source']);
+    expect(identity.authorize).not.toHaveBeenCalled();
   });
 
-  it('keeps the 404 when a named, consenting patient does not reach the hidden document', async () => {
-    const { service } = harness({ allowedPatients: [patientId, otherPatientId], sourceHidden: true });
+  it('keeps the 404 when a named, consenting patient does not reach the hidden document, authorizing nobody', async () => {
+    const { service, identity } = harness({ allowedPatients: [patientId, otherPatientId], sourceHidden: true });
 
     const refusal = await create(service, otherPatientId).catch((error: unknown) => error);
     expect((refusal as DomainProblem).getStatus()).toBe(404);
+    expect(identity.authorize).not.toHaveBeenCalled();
   });
 
   it('keeps the source 404 without a patientId and does not guess at consent', async () => {
@@ -120,6 +148,7 @@ describe('OCR job creation asks for records-processing consent before reading th
     const refusal = await create(service, undefined).catch((error: unknown) => error);
 
     expect((refusal as DomainProblem).getStatus()).toBe(404);
+    expect(identity.precheckRecordsRead).not.toHaveBeenCalled();
     expect(identity.authorize).not.toHaveBeenCalled();
   });
 
@@ -127,5 +156,48 @@ describe('OCR job creation asks for records-processing consent before reading th
     const { service } = harness({ allowedPatients: [] });
 
     await expect(create(service, undefined)).rejects.toMatchObject({ code: 'OCR_ACCESS_DENIED' });
+  });
+
+  it('goes on to the source read as before against an Identity without the precheck route', async () => {
+    const { service, order } = harness({ allowedPatients: [], noPrecheck: true, sourceHidden: true });
+
+    const refusal = await create(service, patientId).catch((error: unknown) => error);
+    expect((refusal as DomainProblem).getStatus()).toBe(404);
+    expect(order).toEqual(['precheck patient', 'source']);
+  });
+});
+
+describe('OCR job creation answers an Idempotency-Key replay before the consent precheck', () => {
+  it('answers 409 IDEMPOTENCY_CONFLICT for a key reused with a different patient who has no cover', async () => {
+    const { service, identity, ehrApi } = harness({ allowedPatients: [patientId],
+      replay: { requestSha256: digestFor(patientId) } });
+
+    const refusal = await create(service, otherPatientId).catch((error: unknown) => error);
+
+    expect(refusal).toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+    expect((refusal as DomainProblem).getStatus()).toBe(409);
+    expect(identity.precheckRecordsRead).not.toHaveBeenCalled();
+    expect(identity.authorize).not.toHaveBeenCalled();
+    expect(ehrApi.getOcrDocumentSource).not.toHaveBeenCalled();
+  });
+
+  it('answers 404 OCR_JOB_NOT_FOUND, not 403, for an exact replay after the cover has lapsed', async () => {
+    const { service, identity, order } = harness({ allowedPatients: [],
+      replay: { requestSha256: digestFor(patientId) } });
+
+    const refusal = await create(service, patientId).catch((error: unknown) => error);
+
+    expect(refusal).toMatchObject({ code: 'OCR_JOB_NOT_FOUND' });
+    expect((refusal as DomainProblem).getStatus()).toBe(404);
+    expect(identity.precheckRecordsRead).not.toHaveBeenCalled();
+    expect(order).toEqual(['source', 'authorize patient']);
+  });
+
+  it('returns the existing job for an exact replay while the cover holds', async () => {
+    const { service, identity, order } = harness({ replay: { requestSha256: digestFor(patientId) } });
+
+    await expect(create(service, patientId)).resolves.toMatchObject({ id: jobId });
+    expect(identity.precheckRecordsRead).not.toHaveBeenCalled();
+    expect(order).toEqual(['source', 'authorize patient']);
   });
 });

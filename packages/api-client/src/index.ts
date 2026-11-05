@@ -142,6 +142,7 @@ export { IdentityApiClient, IdentityApiProblem } from './identity';
 export type {
   IdentityActorContext,
   IdentityAuthorizationDecision,
+  IdentityAuthorizationPrecheck,
   IdentityClientOptions,
   IdentityDelegatedContext,
   IdentityFacilityAssignment,

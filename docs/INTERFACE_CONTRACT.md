@@ -473,8 +473,8 @@ key) every route below answers 404, as an Identity before 0095 does.
 
 "Your records were opened": after every allowed staff authorization that
 carries a non-emergency grant (`service/patients/:id/record-read-authorization`,
-`authorization/check`, `service/authorization/check`, `patient-lookup`),
-Identity notes the access once per patient, facility and Africa/Lagos day (at
+`authorization/check`, `service/authorization/check`, `patient-lookup`; never
+`service/authorization/precheck` or `consent-status`), Identity notes the access once per patient, facility and Africa/Lagos day (at
 most 10 a day), after the answer and never failing it: the inbox item
 `RECORDS_OPENED` (resource `record-access`, metadata `facilityName`,
 `accessKind` standard, share or pin) and, for a verified email with
@@ -812,7 +812,17 @@ caller subject; local per-caller secrets are development-only.
 
 Internal actor/session validation uses `GET /api/v1/auth/service-session`, or
 `POST` for cookie mutation revalidation. Patient decisions use
-`POST /api/v1/identity/service/authorization/check`. These return API DTOs,
+`POST /api/v1/identity/service/authorization/check`. A service that must refuse
+before it opens anything prechecks a records read with `POST
+/api/v1/identity/service/authorization/precheck` (body `{ patientId, scope:
+'read_records', purpose }`; 400 `PRECHECK_READ_ONLY` for any other scope): the
+same answer without `consentGrantId` or `expiresAt`, and without the check's
+side effects (no "Your records were opened" note, no
+`identity.authorization.check` row; Identity records only a neutral
+`identity.authorization.precheck` row, which the patient's access history does
+not list). The service still calls `service/authorization/check` before it
+opens the record. An Identity without the route answers 404, and the caller
+goes on without the precheck. These return API DTOs,
 never database rows. Problem Details status/code, correlation, bounded timeout,
 and safe JSON request bodies are preserved by the typed client.
 
@@ -2948,11 +2958,20 @@ What the grant opens, by step (permissions unchanged, 0013 and 0016):
 
 Without a records-processing grant or a cover, OCR's create answers 403
 `OCR_RECORDS_PROCESSING_CONSENT_REQUIRED` when the request names the patient
-(`patientId`): OCR API asks Identity about that patient (`read_records`,
-`healthcare-operations`) before it reads any document, so the answer says
-nothing about whether the document exists. A named patient who has given cover
-but is not the document's patient still ends in 409 `OCR_PATIENT_MISMATCH`, or
-404 when EHR's source read does not find the document. Without a `patientId`,
+(`patientId`): OCR API prechecks that patient with Identity (`read_records`,
+`healthcare-operations`, `service/authorization/precheck`) before it reads any
+document, so the answer says nothing about whether the document exists. The
+precheck notes nothing: the named patient gets no "Your records were opened"
+notice and Identity records no allowed read for them. The one authorization
+that notes and audits the read stays the check on the document's patient after
+the source read. A named patient who has given cover but is not the document's
+patient still ends in 409 `OCR_PATIENT_MISMATCH`, or 404 when EHR's source read
+does not find the document, with no authorization of anybody. An
+`Idempotency-Key` replay is answered before the precheck, as before it: the key
+reused for a different request (a different `patientId` included) answers 409
+`IDEMPOTENCY_CONFLICT`, and an exact replay is authorized as the existing job,
+so after the cover has lapsed it answers 404 `OCR_JOB_NOT_FOUND`. Against an
+Identity without the precheck route the source read decides, as before. Without a `patientId`,
 create answers 404 (EHR's source read does not find the document under that
 purpose, so nobody learns whether it exists), and 403 `OCR_ACCESS_DENIED` when
 the source is found but the source patient's check refuses. The other job routes
