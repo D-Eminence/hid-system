@@ -980,7 +980,7 @@ describe('PaperReadingService', () => {
           { hardPage: true, image: true, zoom: true, maxCalls: 2 }, { hardPage: true, image: true, zoom: true, maxCalls: 2 }]);
         // Two crops per read; the third call of each read is over the limit.
         expect(crops).toHaveLength(4);
-        expect(summary).toMatchObject({ zoomCalls: 4, zoomLimited: 2, zoomFailed: 0, hardPages: [1] });
+        expect(summary).toMatchObject({ zoomCalls: 4, zoomLimited: 2, zoomFailed: 0, hardPages: [1], hardPageZoomPages: [1] });
         expect(summary.passUsage.map((entry) => [entry.pass, entry.zoomCalls])).toEqual([['first_pass', undefined],
           ['hard_page_read', 4]]);
         // No crop anywhere in what is kept or logged.
@@ -1002,7 +1002,7 @@ describe('PaperReadingService', () => {
           const { client, seen } = zoomingClient(1);
           const { summary } = await read(reading, client, [hardPage], synthetic);
           expect(seen.every((call) => !call.zoom)).toBe(true);
-          expect(summary).toMatchObject({ zoomCalls: 0, zoomLimited: 0, zoomFailed: 0 });
+          expect(summary).toMatchObject({ zoomCalls: 0, zoomLimited: 0, zoomFailed: 0, hardPages: [1], hardPageZoomPages: [] });
         }
         // Flagged, but not handwriting or low_confidence (possible_missed_item): the ordinary image re-read, no zoom.
         const missed = readPage(1, ['Dx: Hypertension', 'Amlodipine 5mg od']);

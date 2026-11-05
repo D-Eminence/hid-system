@@ -491,7 +491,8 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(medicine.fields).toMatchObject({ name: 'Pyrimethamine?', strength: '437 mg' });
     expect(medicine.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'field_from_context']));
     expect(result.provenance.reading).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
-      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-3', imagePromptVersion: null,
+      // Zoom off: the reads sent the version 2 hard-page text, and provenance says so.
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-2', hardPageZoomPages: [], imagePromptVersion: null,
       promptVersion: 'hid-paper-reading-prompt-6' });
     const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
     const usageLines = lines.filter((line) => line.event === 'ocr.reading.usage');
@@ -535,7 +536,7 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(crops).toHaveLength(4);
     const result = completed(repository);
     expect(result.provenance.reading).toMatchObject({ hardPages: [1],
-      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-3' });
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-3', hardPageZoomPages: [1] });
     const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
     const hardUsage = lines.find((line) => line.event === 'ocr.reading.usage' && line.pass === 'hard_page_read')!;
     expect(hardUsage).toMatchObject({ requests: 4, zoomCalls: 4 });

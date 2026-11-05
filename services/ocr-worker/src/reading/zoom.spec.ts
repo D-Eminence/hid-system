@@ -2,11 +2,29 @@ import { PNG } from 'pngjs';
 import { HIGH_RESOLUTION_TIER, imageTokens, resizedSize, STANDARD_TIER } from './page-image';
 import { fixtureJpeg, fixturePng, syntheticJpeg, syntheticPng } from './test-fixtures';
 import { clampBox, createPageZoom, createZoomSession, decodeRaster, resample, toOriginalRect, ZOOM_LIMIT_MESSAGE,
-  ZOOM_MIN_BOX_PX, ZOOM_REQUEST_BASE64_BUDGET, ZOOM_TOOL, ZOOM_UNAVAILABLE_MESSAGE, zoomOutputSize, type PageZoom,
-  type Raster, type ZoomSource } from './zoom';
+  ZOOM_MAX_DECODE_PIXELS, ZOOM_MIN_BOX_PX, ZOOM_REQUEST_BASE64_BUDGET, ZOOM_TOOL, ZOOM_UNAVAILABLE_MESSAGE, zoomDecodable,
+  zoomOutputSize, type PageZoom, type Raster, type ZoomSource } from './zoom';
 
 const source = (mediaType: 'image/png' | 'image/jpeg', width: number, height: number): ZoomSource => ({ mediaType,
   width, height, bytes: mediaType === 'image/png' ? syntheticPng(width, height) : syntheticJpeg(width, height) });
+
+/**
+ * A PNG header (signature and IHDR) with a few bytes of IDAT that would inflate to almost nothing: enough for the
+ * header checks, which must refuse it before anything is inflated.
+ */
+function pngHeader(width: number, height: number, bitDepth: number, colourType: number, interlace = 0): Uint8Array {
+  const bytes = Buffer.alloc(8 + 25 + 12 + 12);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0);
+  bytes.writeUInt32BE(13, 8);
+  bytes.write('IHDR', 12, 'latin1');
+  bytes.writeUInt32BE(width, 16);
+  bytes.writeUInt32BE(height, 20);
+  bytes[24] = bitDepth; bytes[25] = colourType; bytes[26] = 0; bytes[27] = 0; bytes[28] = interlace;
+  bytes.writeUInt32BE(0, 33);
+  bytes.write('IDAT', 37, 'latin1');
+  bytes.write('IEND', 49, 'latin1');
+  return new Uint8Array(bytes);
+}
 
 function decodePng(base64: string) {
   return PNG.sync.read(Buffer.from(base64, 'base64'));
@@ -129,8 +147,11 @@ describe('page zoom over the stored bytes', () => {
   });
 
   it('holds JPEG decoding to its resolution and memory limits', () => {
-    // A header that claims more pixels than the picture limits allow is refused before any pixel is decoded.
+    // Over zoom's pixel limit by the header: refused before any pixel is decoded.
     expect(() => decodeRaster({ mediaType: 'image/jpeg', bytes: fixtureJpeg(9_000, 9_000), width: 9_000, height: 9_000 }))
+      .toThrow(/ZOOM_DECODE_LIMIT/);
+    // And jpeg-js's own resolution limit stays behind it, should the frame claim more than the header given.
+    expect(() => decodeRaster({ mediaType: 'image/jpeg', bytes: fixtureJpeg(9_000, 9_000), width: 640, height: 480 }))
       .toThrow(/maxResolutionInMP/);
     // An undecodable JPEG throws too (and its error carries no picture data).
     const bytes = fixtureJpeg(640, 480);
@@ -141,6 +162,50 @@ describe('page zoom over the stored bytes', () => {
     expect(message).not.toBe('');
     expect(message).not.toContain(Buffer.from(bytes).toString('base64').slice(40, 80));
   });
+
+  it('refuses, before inflating anything, a PNG over 8 bits per sample, interlaced, or over the pixel limit', async () => {
+    const read = jest.spyOn(PNG.sync, 'read');
+    try {
+      // A tiny, very compressible 16-bit RGBA page at the picture limit (about 1.5 GB to decode): never inflated.
+      const refused = [pngHeader(8_000, 8_000, 16, 6), pngHeader(3_000, 4_000, 16, 2), pngHeader(3_000, 4_000, 8, 2, 1),
+        pngHeader(5_000, 5_000, 8, 2), pngHeader(6_000, 4_001, 8, 0)];
+      for (const bytes of refused) {
+        const width = new DataView(bytes.buffer).getUint32(16);
+        const height = new DataView(bytes.buffer).getUint32(20);
+        const page: ZoomSource = { mediaType: 'image/png', bytes, width, height };
+        expect(zoomDecodable(page)).toBe(false);
+        expect(() => decodeRaster(page)).toThrow(/ZOOM_DECODE_LIMIT/);
+        const zoom = createPageZoom(page, resizedSize(width, height, HIGH_RESOLUTION_TIER), HIGH_RESOLUTION_TIER);
+        await expect(zoom.crop({ x: 0, y: 0, w: 200, h: 200 }, 2)).resolves.toEqual({ kind: 'unavailable' });
+      }
+      expect(read).not.toHaveBeenCalled();
+      // At the limits: allowed (8-bit or less, not interlaced, 24 MP).
+      for (const [depth, colour] of [[8, 6], [8, 2], [1, 0], [8, 3]] as const) {
+        expect(zoomDecodable({ mediaType: 'image/png', bytes: pngHeader(6_000, 4_000, depth, colour), width: 6_000,
+          height: 4_000 })).toBe(true);
+      }
+    } finally { read.mockRestore(); }
+  });
+
+  it('never decodes a JPEG over the pixel limit, though the picture itself may be sent', async () => {
+    const decode = jest.fn(decodeRaster);
+    const page: ZoomSource = { mediaType: 'image/jpeg', bytes: fixtureJpeg(8_000, 8_000), width: 8_000, height: 8_000 };
+    expect(8_000 * 8_000).toBeGreaterThan(ZOOM_MAX_DECODE_PIXELS);
+    const zoom = createPageZoom(page, resizedSize(8_000, 8_000, HIGH_RESOLUTION_TIER), HIGH_RESOLUTION_TIER, { decode });
+    await expect(zoom.crop({ x: 0, y: 0, w: 200, h: 200 }, 2)).resolves.toEqual({ kind: 'unavailable' });
+    expect(decode).not.toHaveBeenCalled();
+  });
+
+  it('decodes and crops a JPEG photo at the 24 MP limit (4000 x 6000), within jpeg-js\'s memory limit', async () => {
+    // A fictional synthetic page, not anyone's (the old 384 MB cap refused this size). Time limits wide here: this
+    // checks the memory cap, not the speed.
+    const page = source('image/jpeg', 4_000, 6_000);
+    expect(page.width * page.height).toBe(ZOOM_MAX_DECODE_PIXELS);
+    const seen = resizedSize(page.width, page.height, HIGH_RESOLUTION_TIER);
+    const zoom = createPageZoom(page, seen, HIGH_RESOLUTION_TIER, { decodeTimeLimitMs: 120_000, cropTimeLimitMs: 120_000 });
+    const outcome = await zoom.crop({ x: 100, y: 200, w: 300, h: 120 }, 2);
+    expect(outcome.kind).toBe('crop');
+  }, 120_000);
 
   it('turns zoom off for the page when decoding takes longer than the time limit, not the reading', async () => {
     let clock = 0;

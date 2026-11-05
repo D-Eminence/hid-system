@@ -339,8 +339,10 @@ Each claimed job runs, in order:
      thinking, `inference_geo: "us"`, fixed endpoint and the same cached system
      prompt, at `OCR_AI_HARD_PAGE_EFFORT` (default `max`, which Claude Opus 5.5
      accepts: `low` to `max`; any other value fails startup). Its user turn is
-     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-3`,
-     recorded in provenance as `hardPagePromptVersion` when used): read the
+     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-3` when
+     the reads are offered zoom, else the unchanged
+     `hid-paper-reading-hard-page-prompt-2` text; recorded in provenance as
+     `hardPagePromptVersion` when used): read the
      page line by line; give a best reading of every field with "?" after each
      uncertain word; a word not readable even as a guess is `[unreadable]`;
      a medicine as route, drug name, dose (a number), unit and frequency, the
@@ -434,9 +436,11 @@ Each claimed job runs, in order:
    - *Stored.* No new payload field: the per-field basis is carried only by
      the reason codes, so both contract copies are unchanged. The page is in
      `imageRereadPages`; provenance adds `hardPages`, `hardPageReads`,
-     `hardPageSingleReadPages` and `hardPagePromptVersion` (`imagePromptVersion`
-     is set only when a page that is not a hard page was read from its
-     picture).
+     `hardPageSingleReadPages`, `hardPagePromptVersion` and
+     `hardPageZoomPages` (the hard pages whose reads were offered zoom;
+     `hardPagePromptVersion` is `-3` only when there is one, else `-2`, the
+     text those reads were sent) (`imagePromptVersion` is set only when a page
+     that is not a hard page was read from its picture).
    - *Drug list* (`src/reading/drug-list.ts`). Generic names from the
      Federal Ministry of Health, Nigeria, "Nigeria Essential Medicines List",
      7th Edition, 2020 (the latest edition found on 2026-11-05; no 8th edition
@@ -499,9 +503,13 @@ Each claimed job runs, in order:
        error, a decoder limit, a time limit) gets `is_error` "zoom
        unavailable" and the read goes on. A read that keeps calling past its
        limit ends after three more turns as an incomplete (failed) reading.
-       The whole loop, every turn and retry, is held to
-       `OCR_AI_HARD_PAGE_TIMEOUT_MS` and stops on shutdown between turns as
-       within them; every request and the usage of every turn is counted.
+       Each attempt of each turn gets `OCR_AI_HARD_PAGE_TIMEOUT_MS`, as a read
+       without zoom does, and the loop's time in requests (every turn and
+       retry; not the waits for a request permit, the backoff sleeps or the
+       crops) is held to `OCR_AI_HARD_PAGE_TIMEOUT_MS` x
+       (`OCR_AI_MAX_RETRIES` + 1), what one request with all its retries could
+       take. The loop stops on shutdown between turns as within them; every
+       request and the usage of every turn is counted.
      - *Limits.* At most `OCR_AI_ZOOM_MAX_CALLS` (default 8, 0 to 8; 0
        declares no tool) calls per page per read; every later call gets
        `is_error` "zoom limit reached; finish your answer". Each crop at most
@@ -512,13 +520,24 @@ Each claimed job runs, in order:
        picture) or with non-finite numbers are refused. Decoding happens only
        for a page already eligible for the image re-read (the same 10 MB
        base64, 8000 x 8000 px and upright-JPEG checks), on the first call,
-       once per page for both reads, and is dropped with the reading. JPEG
-       decoding is held to 64 MP and 384 MB (jpeg-js `maxResolutionInMP`,
-       `maxMemoryUsageInMB`); a decode over 5 s, a crop over 3 s, a decoded
-       size other than the header's or any decoder error turns zoom off for
-       that page ("zoom unavailable"), never the reading. The decoders run on
-       the event loop (pure JS), so a decode stalls the process for up to
-       those limits; lease renewal waits that long at worst.
+       once per page for both reads, and is dropped with the reading. Zoom
+       decodes at most 24 MP (6000 x 4000; below the 64 MP the picture itself
+       may have, on purpose), and a PNG only at 8 bits or fewer per sample and
+       not interlaced; both are checked from the header before anything is
+       inflated or decoded, and a larger picture is still sent whole, with
+       zoom off. JPEG decoding is also held by jpeg-js to 24 MP and 640 MB of
+       its own count (`maxResolutionInMP`, `maxMemoryUsageInMB`; 24 MP needs
+       about 481 MB). Measured on fictional pages at 24 MP, one decode takes
+       about 3 s and about 1 GB at its peak for a JPEG, under 1 s and about
+       400 MB for a PNG; the RGB raster kept for the reading is 72 MB. The
+       decoders run on the event loop (pure JS, synchronous), so one process
+       decodes one page at a time and a decode stalls the process (the other
+       job's reads and lease renewal included) for its whole length: the
+       pixel and bit-depth limits are what bound that stall and the memory,
+       within the 2 GiB task. A decode over 5 s or a crop over 3 s (checked
+       when it ends, so it does not cut the stall short), a decoded size other
+       than the header's or any decoder error turns zoom off for that page
+       ("zoom unavailable"), never the reading.
      - *Libraries* (pure JavaScript, no native code, pinned exactly in
        `package.json`, integrity hashes in `package-lock.json`): `jpeg-js`
        0.4.4 (BSD-3-Clause; 2022-06-07; no dependencies; the fix for

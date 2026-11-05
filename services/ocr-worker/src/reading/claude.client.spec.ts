@@ -594,25 +594,28 @@ describe('ClaudePageClient', () => {
       expect(`${String(error)} ${JSON.stringify(error)} ${(error as Error).stack ?? ''}`).not.toContain(CROP.slice(20, 60));
     });
 
-    it('holds the whole loop to the hard-page timeout', async () => {
+    it('holds the loop\'s time in requests to the hard-page timeout times the attempts, not its waits', async () => {
       let clock = 1_000_000;
       const timeouts: number[] = [];
       const spy = jest.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
         timeouts.push(ms); return new AbortController().signal;
       });
       try {
-        const responses = [turn([zoomCall('toolu_a')], 'tool_use'), turn([zoomCall('toolu_b')], 'tool_use'), final()];
-        const fetch = jest.fn(async () => responses.shift()!);
+        const responses = Array.from({ length: 6 }, (_, index) => turn([zoomCall(`toolu_${index}`)], 'tool_use'));
+        // Each request "takes" 1,000 seconds.
+        const fetch = jest.fn(async () => { clock += 1_000_000; return responses.shift()!; });
+        // A permit wait and a crop "take" far longer, and count for nothing.
+        const limiter = { acquire: async () => { clock += 5_000_000; return () => undefined; } } as unknown as Semaphore;
         const instance = new ClaudePageClient({ ...config, OCR_AI_HARD_PAGE_TIMEOUT_MS: 900_000 },
-          { fetch: fetch as unknown as typeof globalThis.fetch, now: () => clock });
-        // Each crop "takes" 500 seconds of the read's time.
-        const zoom: PageZoom = { crop: async () => { clock += 500_000; return { kind: 'crop', crop }; } };
+          { fetch: fetch as unknown as typeof globalThis.fetch, now: () => clock, limiter });
+        const zoom: PageZoom = { crop: async () => { clock += 5_000_000; return { kind: 'crop', crop }; } };
         const error = await instance.readPage({ ...hardRequest, zoom: createZoomSession(zoom, 1, 8, 0) },
           new AbortController().signal).catch((caught: unknown) => caught);
-        expect(timeouts).toEqual([900_000, 400_000]);
+        // OCR_AI_MAX_RETRIES 3: a budget of 4 x 900 seconds; each attempt at most one hard-page timeout.
+        expect(timeouts).toEqual([900_000, 900_000, 900_000, 600_000]);
         expect(error).toBeInstanceOf(AiTransientError);
-        expect(error).toMatchObject({ code: 'AI_TIMEOUT', attempts: 2 });
-        expect(fetch).toHaveBeenCalledTimes(2);
+        expect(error).toMatchObject({ code: 'AI_TIMEOUT', attempts: 4 });
+        expect(fetch).toHaveBeenCalledTimes(4);
       } finally { spy.mockRestore(); }
     });
 

@@ -42,6 +42,11 @@ export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-5';
  * (zoom.ts); with zoom off it is the version 2 text.
  */
 export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-3';
+/**
+ * The version recorded for a hard page whose reads were not offered the zoom tool (zoom off, OCR_AI_ZOOM_MAX_CALLS
+ * 0, or a model of unknown image tier): hardPageMessage with no zoom calls is the version 2 text, byte for byte.
+ */
+export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-2';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \

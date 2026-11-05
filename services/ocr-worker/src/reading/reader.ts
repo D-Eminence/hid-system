@@ -97,6 +97,8 @@ export interface ReadingSummary {
   zoomCalls: number;
   zoomLimited: number;
   zoomFailed: number;
+  /** Hard pages whose reads were offered the zoom tool (their prompt carried rule I). */
+  hardPageZoomPages: number[];
 }
 
 /** 'hard_page_read': both best-guess reads of a hard page (owner decision 2026-11-05), so their cost shows apart. */
@@ -295,6 +297,7 @@ export class PaperReadingService {
     const hardSingle: number[] = [];
     const agreement = noAgreement();
     const zoomTotals = noZoomStats();
+    const zoomPages: number[] = [];
     let hardReads = 0;
     const zoomOn = this.config.OCR_AI_HARD_PAGE_ZOOM === 'on';
     const zoomMaxCalls = Math.min(ZOOM_MAX_CALLS, Math.max(0, this.config.OCR_AI_ZOOM_MAX_CALLS ?? ZOOM_MAX_CALLS));
@@ -326,6 +329,7 @@ export class PaperReadingService {
       hardPages.push(state.page);
       hardReads += 2;
       const zoom = zoomOf(state, decision);
+      if (zoom) zoomPages.push(state.page);
       const sessions = [0, 1].map(() => zoom ? createZoomSession(zoom, state.page, zoomMaxCalls, picture.base64.length)
         : undefined);
       const settled = await Promise.allSettled(sessions.map((session) =>
@@ -490,6 +494,7 @@ export class PaperReadingService {
     summary.zoomCalls = zoomTotals.calls;
     summary.zoomLimited = zoomTotals.limited;
     summary.zoomFailed = zoomTotals.failed;
+    summary.hardPageZoomPages = zoomPages;
     return { payload: this.payload(pages, status === 'read' ? identity : blankIdentity(), kept, summary), summary };
   }
 
@@ -538,7 +543,7 @@ export class PaperReadingService {
       droppedByReasonFirstPass: {}, itemCount: items.length,
       flaggedPages: pages.filter((page) => page.flagged).length, maskedNumbers: masked, failureCode, usage,
       modelUsage, passUsage, hardPages: [], hardPageReads: 0, hardPageSingleReadPages: [],
-      hardPageAgreement: noAgreement(), zoomCalls: 0, zoomLimited: 0, zoomFailed: 0,
+      hardPageAgreement: noAgreement(), zoomCalls: 0, zoomLimited: 0, zoomFailed: 0, hardPageZoomPages: [],
     };
   }
 

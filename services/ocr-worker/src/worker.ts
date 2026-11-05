@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { OcrWorkerConfig } from './config';
 import { paperReadingPayloadSchema } from './reading/contract';
-import { HARD_PAGE_PROMPT_VERSION, IMAGE_PROMPT_VERSION } from './reading/prompt';
+import { HARD_PAGE_PROMPT_VERSION, HARD_PAGE_PROMPT_VERSION_NO_ZOOM, IMAGE_PROMPT_VERSION } from './reading/prompt';
 import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type PassUsageRecord, type ReadingOutcome } from './reading/reader';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure, type AiUsageRecord, type ClaimedOcrJob, type CompletedExtraction,
   type DocumentReader, type TextReading, type VerifiedDocument, type WorkerOcrProvider, type WorkerRepository } from './types';
@@ -296,7 +296,10 @@ export function buildCompletion(text: TextReading, outcome: ReadingOutcome): Com
         hardPages: summary.hardPages,
         hardPageReads: summary.hardPageReads,
         hardPageSingleReadPages: summary.hardPageSingleReadPages,
-        hardPagePromptVersion: summary.hardPages.length > 0 ? HARD_PAGE_PROMPT_VERSION : null,
+        // Version 3 only where a hard page's reads were offered zoom; without it they sent the version 2 text.
+        hardPagePromptVersion: summary.hardPages.length === 0 ? null
+          : summary.hardPageZoomPages.length > 0 ? HARD_PAGE_PROMPT_VERSION : HARD_PAGE_PROMPT_VERSION_NO_ZOOM,
+        hardPageZoomPages: summary.hardPageZoomPages,
         droppedUngrounded: summary.droppedUngrounded,
         droppedUngroundedFirstPass: summary.droppedUngroundedFirstPass,
         itemCount: summary.itemCount,

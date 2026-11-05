@@ -99,12 +99,15 @@ export interface ClaudeClientOptions {
   random?: () => number;
   /** The process-wide request limit; by default one built from OCR_AI_MAX_CONCURRENT_REQUESTS (4). */
   limiter?: Semaphore;
-  /** Milliseconds, for the zoom loop's deadline; tests inject a clock. */
+  /** Milliseconds, for the zoom loop's request-time budget; tests inject a clock. */
   now?: () => number;
 }
 
-/** Requests a call made and what they used, for its answer or its error. */
-interface CallState { sent: number; spent: TokenUsage }
+/**
+ * Requests a call made and what they used, for its answer or its error; `requestMs` is the time spent in requests
+ * (from holding a permit to the answer or the failure), never in a permit wait, a backoff sleep or a zoom crop.
+ */
+interface CallState { sent: number; spent: TokenUsage; requestMs: number }
 
 /** Turns a zoom read may take beyond its zoom calls (the answer, and a turn or two of calls past the limit). */
 const ZOOM_EXTRA_TURNS = 3;
@@ -179,15 +182,17 @@ export class ClaudePageClient implements PageModelClient {
       ...(zoom ? { tools: [ZOOM_TOOL], tool_choice: { type: 'auto' as const },
         cache_control: { type: 'ephemeral' as const } } : {}),
     };
-    const state: CallState = { sent: 0, spent: noUsage() };
+    const state: CallState = { sent: 0, spent: noUsage(), requestMs: 0 };
     if (!zoom) {
       const message = await this.send(params, () => timeoutMs, signal, state);
       return interpret(message, state.sent, state.spent, seen ?? undefined, hard);
     }
-    // The tool loop. The whole loop, every turn and retry, is held to the hard-page timeout; the abort signal ends
-    // it between turns as within them. Each turn's usage is counted.
-    const deadline = this.now() + timeoutMs;
-    const remaining = () => deadline - this.now();
+    // The tool loop. Each attempt of each turn gets the hard-page timeout, as a read without zoom does, and the
+    // whole loop's time in requests (every turn and retry, not the permit waits, the backoff sleeps or the crops)
+    // is held to what one request with all its retries could take: the hard-page timeout times
+    // (OCR_AI_MAX_RETRIES + 1). The abort signal ends it between turns as within them. Each turn's usage is counted.
+    const budget = timeoutMs * (this.config.OCR_AI_MAX_RETRIES + 1);
+    const remaining = () => Math.min(timeoutMs, budget - state.requestMs);
     const messages: Anthropic.MessageParam[] = [...params.messages];
     for (let turn = 0; ; turn += 1) {
       const message = await this.send({ ...params, messages }, remaining, signal, state);
@@ -210,14 +215,15 @@ export class ClaudePageClient implements PageModelClient {
   }
 
   /**
-   * One request, with our retries. `timeoutFor` gives each attempt's timeout (the zoom loop's time left); none left
-   * is a timeout. Every attempt is counted in `state` (sent, and the tokens of any that failed after it started).
+   * One request, with our retries. `timeoutFor` gives each attempt's timeout, read once the permit is held (for the
+   * zoom loop, capped by its request-time budget left); none left is a timeout. Every attempt is counted in `state`
+   * (sent, its time in the request, and the tokens of any that failed after it started).
    */
   private async send(params: Anthropic.MessageCreateParamsNonStreaming, timeoutFor: () => number, signal: AbortSignal,
     state: CallState): Promise<Anthropic.Message> {
     const maxAttempts = this.config.OCR_AI_MAX_RETRIES + 1;
     for (let attempt = 1; ; attempt += 1) {
-      // The wait for a permit is not part of the request timeout; only shutdown ends it.
+      // The wait for a permit is not part of the request timeout or the zoom loop's budget; only shutdown ends it.
       let release: () => void;
       try {
         release = await this.limiter.acquire(signal);
@@ -230,18 +236,21 @@ export class ClaudePageClient implements PageModelClient {
         throw new AiTransientError('AI_TIMEOUT', state.sent, state.spent);
       }
       const timeout = AbortSignal.timeout(ms);
+      const started = this.now();
       let stream: { readonly currentMessage: Anthropic.Message | undefined } | undefined;
       try {
         // Streaming, so a long adaptive-thinking answer is never cut by an idle HTTP connection.
-        const started = this.client.messages.stream(params, { signal: AbortSignal.any([signal, timeout]) });
-        stream = started;
-        const message = await started.finalMessage();
+        const opened = this.client.messages.stream(params, { signal: AbortSignal.any([signal, timeout]) });
+        stream = opened;
+        const message = await opened.finalMessage();
         release();
         state.sent += 1;
+        state.requestMs += this.now() - started;
         return message;
       } catch (error) {
         release();
         state.sent += 1;
+        state.requestMs += this.now() - started;
         addTokens(state.spent, partialUsage(stream));
         if (signal.aborted) throw new AiInterruptedError(signal.reason, state.sent, state.spent);
         const decision = classify(error, timeout.aborted);

@@ -2,7 +2,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import * as jpeg from 'jpeg-js';
 import { PNG } from 'pngjs';
 import { z } from 'zod';
-import { base64Length, IMAGE_MAX_BASE64_LENGTH, IMAGE_MAX_DIMENSION_PX, resizedSize, type ImageTier,
+import { base64Length, IMAGE_MAX_BASE64_LENGTH, pngDimensions, resizedSize, type ImageTier,
   type PageImageMediaType } from './page-image';
 
 /**
@@ -16,8 +16,13 @@ import { base64Length, IMAGE_MAX_BASE64_LENGTH, IMAGE_MAX_DIMENSION_PX, resizedS
  * - Decoded only for a page already eligible for the image re-read (page-image.ts pageImageFor: one-page PNG or JPEG,
  *   10 MB base64, 8000 x 8000 px, an upright JPEG), and only on the first zoom call; once per page, shared by both
  *   reads of the page, and dropped with the reading.
- * - A decode that fails, exceeds the decoders' limits, gives a size other than the header's, or takes longer than
- *   ZOOM_DECODE_TIME_LIMIT_MS turns zoom off for the page ("zoom unavailable"), never the reading.
+ * - Decoded only up to ZOOM_MAX_DECODE_PIXELS (24 MP, below the 64 MP the picture itself may have), and a PNG only
+ *   at 8 bits or fewer per sample and not interlaced; both are checked from the header before anything is inflated
+ *   or decoded. The decoders are synchronous and in memory, so these limits are what bound the memory and the
+ *   event-loop stall of one decode (measured on fictional pages at 24 MP: a JPEG about 3 s and about 1 GB at its
+ *   peak, a PNG under 1 s and about 400 MB; the RGB raster kept is 72 MB). One process decodes one page at a time.
+ * - A decode that fails, exceeds those limits or the decoders' own, gives a size other than the header's, or takes
+ *   longer than ZOOM_DECODE_TIME_LIMIT_MS turns zoom off for the page ("zoom unavailable"), never the reading.
  * - The box is in the pixels of the picture AS THE MODEL SEES IT (resizedSize for the model's tier: the same frame as
  *   the line boxes and the answer boxes) and is mapped back to the original pixels before cutting.
  * - The crop is enlarged by `scale` (1-4, default 2) relative to the picture as the model sees it, with bilinear
@@ -31,13 +36,25 @@ export const ZOOM_MAX_SCALE = 4;
 export const ZOOM_MAX_CALLS = 8;
 /** The smallest box (after clamping to the picture), in the picture's pixels as the model sees it. */
 export const ZOOM_MIN_BOX_PX = 8;
-/** A decode slower than this turns zoom off for the page (the decoders are synchronous: this bounds the stall). */
+/**
+ * A decode slower than this turns zoom off for the page. It is checked once the synchronous decode has finished, so
+ * it does not cut the stall short (the pixel and bit-depth limits bound that); it keeps a slow page from being
+ * decoded again and stops zoom on a worker too slow for it.
+ */
 export const ZOOM_DECODE_TIME_LIMIT_MS = 5_000;
-/** One crop's resample and encode slower than this turns zoom off for the page. */
+/** One crop's resample and encode slower than this turns zoom off for the page (checked after it, as above). */
 export const ZOOM_CROP_TIME_LIMIT_MS = 3_000;
-/** jpeg-js limits: never more pixels than the picture limit allows, never more memory than this. */
-export const ZOOM_JPEG_MAX_RESOLUTION_MP = (IMAGE_MAX_DIMENSION_PX * IMAGE_MAX_DIMENSION_PX) / 1_000_000;
-export const ZOOM_JPEG_MAX_MEMORY_MB = 384;
+/**
+ * The most pixels zoom decodes (a 24 MP photo, 6000 x 4000; A4 at about 400 dpi). A larger picture is still sent
+ * whole for the re-read; only zoom is off for it. Kept below the 64 MP picture limit on purpose: jpeg-js needs about
+ * 20 MB of its own count (about 40 MB of process memory) per megapixel, too much at 64 MP for the 2 GiB task.
+ */
+export const ZOOM_MAX_DECODE_PIXELS = 24_000_000;
+/** jpeg-js limits: never more pixels than ZOOM_MAX_DECODE_PIXELS, and memory to match (24 MP needs about 481 MB). */
+export const ZOOM_JPEG_MAX_RESOLUTION_MP = ZOOM_MAX_DECODE_PIXELS / 1_000_000;
+export const ZOOM_JPEG_MAX_MEMORY_MB = 640;
+/** pngjs: at most 8 bits per sample (16-bit is inflated and widened far beyond the pixel count's share). */
+export const ZOOM_PNG_MAX_BIT_DEPTH = 8;
 /** One crop's PNG, base64: well inside the API's 10 MB per-image limit. */
 export const ZOOM_MAX_CROP_BASE64 = 4_000_000;
 /**
@@ -106,8 +123,28 @@ export interface PageZoomOptions {
   decode?: (source: ZoomSource) => Raster;
 }
 
-/** Decodes the exact stored bytes to RGB, within the decoders' limits. Throws on any problem (never with pixels). */
+/**
+ * Whether zoom may decode this picture, from its header alone: at most ZOOM_MAX_DECODE_PIXELS, and a PNG whose IHDR
+ * gives at most ZOOM_PNG_MAX_BIT_DEPTH bits per sample and no interlacing (pngjs inflates an interlaced PNG
+ * without a size limit).
+ */
+export function zoomDecodable(source: ZoomSource): boolean {
+  if (source.width * source.height > ZOOM_MAX_DECODE_PIXELS) return false;
+  if (source.mediaType !== 'image/png') return true;
+  const size = pngDimensions(source.bytes);
+  if (size === null || size.width * size.height > ZOOM_MAX_DECODE_PIXELS || source.bytes.length < 29) return false;
+  // IHDR data from byte 16: width (4), height (4), bit depth, colour type, compression, filter, interlace.
+  const bitDepth = source.bytes[24]!;
+  const interlace = source.bytes[28]!;
+  return bitDepth >= 1 && bitDepth <= ZOOM_PNG_MAX_BIT_DEPTH && interlace === 0;
+}
+
+/**
+ * Decodes the exact stored bytes to RGB, within zoom's limits (zoomDecodable, checked first) and the decoders'.
+ * Throws on any problem (never with pixels).
+ */
 export function decodeRaster(source: ZoomSource): Raster {
+  if (!zoomDecodable(source)) throw new Error('ZOOM_DECODE_LIMIT');
   if (source.mediaType === 'image/jpeg') {
     const image = jpeg.decode(source.bytes, { useTArray: true, formatAsRGBA: false, tolerantDecoding: false,
       maxResolutionInMP: ZOOM_JPEG_MAX_RESOLUTION_MP, maxMemoryUsageInMB: ZOOM_JPEG_MAX_MEMORY_MB });
@@ -240,6 +277,8 @@ export function createPageZoom(source: ZoomSource, seen: { width: number; height
   let off = false;
   const load = (): Raster | null => {
     if (raster !== undefined) return raster;
+    // Over zoom's limits by the header: never decoded at all.
+    if (!zoomDecodable(source)) { raster = null; return raster; }
     const started = now();
     try {
       const decoded = decode(source);
