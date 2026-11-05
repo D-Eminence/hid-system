@@ -540,28 +540,65 @@ Each claimed job runs, in order:
          refused), and at most 16 scans, counted both in the walk and as
          `0xFF 0xDA` pairs anywhere in the bytes. jpeg-js walks every block in
          every scan, so without a scan limit a small progressive file could
-         stall the process for minutes (measured: 5,000 near-empty scans in a
+         keep it busy for minutes (measured: 5,000 near-empty scans in a
          492 KB file took 17 s at 24 MP). 16 covers libjpeg's standard
          progressive script (10 scans) and similar encoders with room for an
-         EXIF thumbnail.
-       JPEG decoding is also held by jpeg-js to 12.5 MP and 400 MB of its own
-       count (`maxResolutionInMP`, `maxMemoryUsageInMB`). Measured on
-       fictional pages at the limits (Node 22, one core): the worst JPEG
-       allowed (12.5 MP, 3 components at 4:4:4, 16 scans, noise up to the
-       10 MB base64 picture limit) took 2.7 to 3.0 s and about 570 MB peak
-       RSS, a flat 16-scan page about 1.5 s; the worst PNG (24 MP 8-bit RGBA)
-       about 1.3 s and 430 MB. The RGB raster kept for the reading is at most
-       72 MB. (At the earlier 24 MP JPEG limit, a baseline JPEG took 2.8 s and
-       970 MB, a progressive one up to 5 s, and a 4-component one 4.8 s and
-       1.25 GB.) The
-       decoders run on the event loop (pure JS, synchronous), so one process
-       decodes one page at a time and a decode stalls the process (the other
-       job's reads and lease renewal included) for its whole length: the
-       limits above are what bound that stall and the memory,
-       within the 2 GiB task. A decode over 5 s or a crop over 3 s (checked
-       when it ends, so it does not cut the stall short), a decoded size other
-       than the header's or any decoder error turns zoom off for that page
-       ("zoom unavailable"), never the reading.
+         EXIF thumbnail. The walk also refuses the byte patterns in scan data
+         where jpeg-js 0.4.4 would read markers somewhere else (its parse loop
+         and `decodeScan`, enumerated in `zoom-raster.ts`): after a restart
+         marker, `0x00 0xE0`, `0x00 0xE1` (its "malformed APP" recovery jump),
+         `0xFF 0x00` or another restart marker; after a stuffed `0xFF 0x00`,
+         `0x00 0xE0`/`0x00 0xE1` whose recovery jump would land on `0xFF`. (A
+         reviewer showed that a restart marker after a scan's last MCU,
+         followed by `0x00 0xE0`, sent jpeg-js into a COM segment holding a
+         hidden second frame, which it allocated before refusing: a 16 x 16
+         checked file reached about 540 MB to 1 GB RSS.) Real photos hit
+         these by chance about once in 20,000 restart markers; only zoom is
+         off for them (20 fictional noise photos with 85,000 restart markers,
+         4:4:4, 4:2:2, 4:2:0, grey and progressive, all passed the walk; two
+         grey ones with restart markers jpeg-js itself cannot decode, as
+         before).
+       Not relying on the walk and jpeg-js agreeing, jpeg-js is given its own
+       limits from the frame the walk checked: `maxResolutionInMP` that
+       frame's pixels, and `maxMemoryUsageInMB` exactly what its own count
+       (`requestMemoryAllocation`) needs for that frame: its padded blocks
+       (256 bytes each, per component and sampling), its component lines, its
+       colour conversion and its RGB output, the tables in the walk, and 64
+       KiB (`jpegMemoryBudget`; a test checks the count is exact at 4:4:4,
+       4:2:2, 4:2:0, a 4 x 2 luma and grey). A frame jpeg-js finds anywhere
+       else is refused by that count before its blocks are made: on the
+       reviewer's layout with the walk bypassed, the 16 x 16 file is refused
+       in 1 ms at 52 MB RSS (before: 540 MB), and a hidden 4-component frame
+       as large as a 12.5 MP checked one is refused at about 665 MB (before:
+       890 MB; the real 12.5 MP decode itself peaks about 555 to 605 MB).
+       Every decode, and every crop's resample and PNG encode, runs in a
+       worker thread of its own (`zoom-jobs.ts`, `zoom-worker.ts`; built to
+       `dist/reading/zoom-worker.js`, which the image copies with the rest
+       of `dist`): the pixels come back as a transferred `ArrayBuffer`, and
+       the raster is moved to each crop's worker and back, never copied. A
+       decode not answered within 5 s or a crop within 3 s (from when the
+       worker is ready; starting it has its own 10 s limit) is ended with
+       `worker.terminate()`, which stops even a decoder stuck in a loop; an
+       abort (the worker's shutdown) terminates it at once. Each worker is
+       terminated when its job ends, answered or not, so none outlives a
+       job or a reading (tests check). The worker has V8 heap limits (512 MB
+       old generation, 64 MB young: a backstop four times the measured need,
+       since V8 can abort the whole process when a worker hits its heap
+       limit while allocating a buffer). One zoom worker runs at a time in
+       the process; another job's zoom waits for it (an abort ends the
+       wait). The main event loop no longer stalls: measured on fictional
+       pages at the limits, built (Node 22, one core), the worst JPEG
+       allowed (12.5 MP, 4:4:4, 6 to 7 MB of noise) took 2.0 to 2.2 s
+       (baseline) and 3.0 s (progressive) to decode and crop, and a
+       full-page crop 1.4 s, while a 10 ms timer on the main thread was
+       never more than 40 ms late; the worst PNG (24 MP RGBA) 1.7 s. Peak
+       memory of the process: one decode at a time, at most about 610 MB
+       RSS measured for the whole process during the worst JPEG (520 MB for
+       the PNG), plus the rasters kept for the readings in progress (RGB, at
+       most 72 MB per zoomed page, dropped with the reading), within the
+       2 GiB task. A decoded size other than the header's, any decoder
+       error, a heap limit, a worker crash or a time limit turns zoom off for
+       that page ("zoom unavailable"), never the reading.
      - *Libraries* (pure JavaScript, no native code, pinned exactly in
        `package.json`, integrity hashes in `package-lock.json`): `jpeg-js`
        0.4.4 (BSD-3-Clause; 2022-06-07; no dependencies; the fix for

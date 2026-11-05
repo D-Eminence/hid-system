@@ -1,10 +1,16 @@
+import * as jpeg from 'jpeg-js';
+import { Worker } from 'node:worker_threads';
 import { PNG } from 'pngjs';
 import { HIGH_RESOLUTION_TIER, imageTokens, resizedSize, STANDARD_TIER } from './page-image';
-import { fixtureJpeg, fixturePng, jpegFrame, jpegFromParts, jpegScan, jpegSegment, syntheticJpeg, syntheticPng,
-  withRepeatedScan } from './test-fixtures';
-import { clampBox, createPageZoom, createZoomSession, decodeRaster, jpegStructure, resample, toOriginalRect,
-  ZOOM_JPEG_MAX_DECODE_PIXELS, ZOOM_JPEG_MAX_SCANS, ZOOM_LIMIT_MESSAGE, ZOOM_MAX_DECODE_PIXELS, ZOOM_MIN_BOX_PX, ZOOM_REQUEST_BASE64_BUDGET, ZOOM_TOOL, ZOOM_UNAVAILABLE_MESSAGE, zoomDecodable,
-  zoomOutputSize, type PageZoom, type Raster, type ZoomSource } from './zoom';
+import { desyncJpeg, fixtureJpeg, fixturePng, jpegFrame, jpegFromParts, jpegScan, jpegSegment, syntheticJpeg,
+  syntheticPng, withRepeatedScan } from './test-fixtures';
+import { clampBox, createPageZoom, createZoomSession, decodeJpegWithin, decodeRaster, jpegMemoryBudget, jpegStructure,
+  resample, toOriginalRect, ZOOM_JPEG_MAX_DECODE_PIXELS, ZOOM_JPEG_MAX_SCANS, ZOOM_JPEG_MEMORY_SLACK_BYTES,
+  ZOOM_LIMIT_MESSAGE, ZOOM_MAX_DECODE_PIXELS, ZOOM_MIN_BOX_PX, ZOOM_REQUEST_BASE64_BUDGET, ZOOM_TOOL,
+  ZOOM_UNAVAILABLE_MESSAGE, zoomDecodable, zoomOutputSize, type JpegStructure, type PageZoom, type Raster,
+  type ZoomSource } from './zoom';
+import { createZoomWorkerRunner, liveZoomWorkers, spawnZoomWorker, ZOOM_WORKERS_AT_ONCE, zoomWorkerRunner,
+  type ZoomJobRunner } from './zoom-jobs';
 
 const source = (mediaType: 'image/png' | 'image/jpeg', width: number, height: number): ZoomSource => ({ mediaType,
   width, height, bytes: mediaType === 'image/png' ? syntheticPng(width, height) : syntheticJpeg(width, height) });
@@ -30,6 +36,24 @@ function pngHeader(width: number, height: number, bitDepth: number, colourType: 
 function decodePng(base64: string) {
   return PNG.sync.read(Buffer.from(base64, 'base64'));
 }
+
+/** The real worker runner, counting the jobs it runs by kind. */
+function countingRunner(inner: ZoomJobRunner = zoomWorkerRunner) {
+  const jobs: string[] = [];
+  const runner: ZoomJobRunner = (job, limit, signal) => { jobs.push(job.kind); return inner(job, limit, signal); };
+  return { runner, jobs, decodes: () => jobs.filter((kind) => kind === 'decode').length };
+}
+
+/** A worker that says it is ready, then never answers (a synchronous loop): only terminate() ends it. */
+const hangingWorker = () => new Worker(`const { parentPort } = require('node:worker_threads');
+  parentPort.on('message', () => { for (;;) { /* spin */ } }); parentPort.postMessage({ type: 'ready' });`, { eval: true });
+/** A worker that never even says it is ready. */
+const silentWorker = () => new Worker('for (;;) { /* spin */ }', { eval: true });
+
+afterEach(() => {
+  // No zoom worker outlives its job, answered, failed, timed out or aborted.
+  expect(liveZoomWorkers()).toBe(0);
+});
 
 describe('zoom geometry', () => {
   const seen = { width: 1000, height: 1400 };
@@ -91,9 +115,8 @@ describe('page zoom over the stored bytes', () => {
   for (const mediaType of ['image/png', 'image/jpeg'] as const) {
     it(`decodes a ${mediaType} once and returns an enlarged PNG crop of the box`, async () => {
       const page = source(mediaType, 640, 480);
-      let decodes = 0;
-      const zoom = createPageZoom(page, { width: 640, height: 480 }, HIGH_RESOLUTION_TIER,
-        { decode: (input) => { decodes += 1; return decodeRaster(input); } });
+      const counted = countingRunner();
+      const zoom = createPageZoom(page, { width: 640, height: 480 }, HIGH_RESOLUTION_TIER, { runner: counted.runner });
       // A box over the first dark bar (x 0-3) and white (x 4-15), above the grey band.
       const outcome = await zoom.crop({ x: 0, y: 0, w: 16, h: 16 }, 4);
       expect(outcome.kind).toBe('crop');
@@ -110,7 +133,7 @@ describe('page zoom over the stored bytes', () => {
       expect(band.kind === 'crop' && [band.crop.width, band.crop.height]).toEqual([80, 80]);
       const grey = decodePng((band as { crop: { base64: string } }).crop.base64);
       expect(Math.abs(grey.data[(40 * 80 + 70) * 4]! - 128)).toBeLessThan(12);
-      expect(decodes).toBe(1);
+      expect(counted.jobs).toEqual(['decode', 'crop', 'crop']);
     });
   }
 
@@ -131,16 +154,17 @@ describe('page zoom over the stored bytes', () => {
   });
 
   it('rejects a bad box or scale without decoding, and turns zoom off for the page on a decode problem', async () => {
-    let decodes = 0;
+    const counted = countingRunner();
+    const decodes = counted.decodes;
     const broken = createPageZoom({ mediaType: 'image/png', bytes: fixturePng(640, 480), width: 640, height: 480 },
-      { width: 640, height: 480 }, HIGH_RESOLUTION_TIER, { decode: (input) => { decodes += 1; return decodeRaster(input); } });
+      { width: 640, height: 480 }, HIGH_RESOLUTION_TIER, { runner: counted.runner });
     await expect(broken.crop({ x: 0, y: 0, w: 2, h: 2 }, 2)).resolves.toEqual({ kind: 'invalid' });
     await expect(broken.crop({ x: 0, y: 0, w: 20, h: 20 }, 5)).resolves.toEqual({ kind: 'invalid' });
     await expect(broken.crop({ x: 0, y: 0, w: 20, h: 20 }, 0.5)).resolves.toEqual({ kind: 'invalid' });
-    expect(decodes).toBe(0);
+    expect(decodes()).toBe(0);
     await expect(broken.crop({ x: 0, y: 0, w: 20, h: 20 }, 2)).resolves.toEqual({ kind: 'unavailable' });
     await expect(broken.crop({ x: 0, y: 0, w: 20, h: 20 }, 2)).resolves.toEqual({ kind: 'unavailable' });
-    expect(decodes).toBe(1);
+    expect(decodes()).toBe(1);
     // A decoded size other than the header's.
     const page = source('image/png', 64, 48);
     const mismatch = createPageZoom({ ...page, width: 65 }, { width: 65, height: 48 }, HIGH_RESOLUTION_TIER);
@@ -190,16 +214,17 @@ describe('page zoom over the stored bytes', () => {
   });
 
   it('never decodes a JPEG over the pixel limit, though the picture itself may be sent', async () => {
-    const decode = jest.fn(decodeRaster);
+    const counted = countingRunner();
     for (const [width, height] of [[8_000, 8_000], [4_096, 3_052], [6_000, 4_000]] as const) {
       expect(width * height).toBeGreaterThan(ZOOM_JPEG_MAX_DECODE_PIXELS);
       const page: ZoomSource = { mediaType: 'image/jpeg', bytes: fixtureJpeg(width, height), width, height };
       expect(zoomDecodable(page)).toBe(false);
-      const zoom = createPageZoom(page, resizedSize(width, height, HIGH_RESOLUTION_TIER), HIGH_RESOLUTION_TIER, { decode });
+      const zoom = createPageZoom(page, resizedSize(width, height, HIGH_RESOLUTION_TIER), HIGH_RESOLUTION_TIER,
+        { runner: counted.runner });
       expect(zoom.available()).toBe(false);
       await expect(zoom.crop({ x: 0, y: 0, w: 200, h: 200 }, 2)).resolves.toEqual({ kind: 'unavailable' });
     }
-    expect(decode).not.toHaveBeenCalled();
+    expect(counted.jobs).toEqual([]);
   });
 
   it('decodes and crops a JPEG photo at the 12.5 MP limit (4096 x 3051), within jpeg-js\'s memory limit', async () => {
@@ -220,22 +245,109 @@ describe('page zoom over the stored bytes', () => {
       .toBe(true);
   });
 
-  it('turns zoom off for the page when decoding takes longer than the time limit, not the reading', async () => {
-    let clock = 0;
-    let decodes = 0;
-    const zoom = createPageZoom(source('image/png', 64, 48), { width: 64, height: 48 }, HIGH_RESOLUTION_TIER, {
-      now: () => clock, decodeTimeLimitMs: 5_000,
-      decode: (input) => { decodes += 1; clock += 6_000; return decodeRaster(input); } });
+  it('terminates a decode that does not finish in its time limit, and zoom is off for the page, not the reading', async () => {
+    const counted = countingRunner(createZoomWorkerRunner({ spawn: hangingWorker }));
+    const zoom = createPageZoom(source('image/png', 64, 48), { width: 64, height: 48 }, HIGH_RESOLUTION_TIER,
+      { runner: counted.runner, decodeTimeLimitMs: 300 });
+    const started = performance.now();
+    await expect(zoom.crop({ x: 0, y: 0, w: 20, h: 20 }, 2)).resolves.toEqual({ kind: 'unavailable' });
+    // Ended by terminate() at the limit, not when the (never-ending) loop finishes.
+    expect(performance.now() - started).toBeLessThan(5_000);
+    expect(liveZoomWorkers()).toBe(0);
+    await expect(zoom.crop({ x: 0, y: 0, w: 20, h: 20 }, 2)).resolves.toEqual({ kind: 'unavailable' });
+    expect(counted.jobs).toEqual(['decode']);
+  }, 20_000);
+
+  it('terminates a crop that does not finish in its time limit, and zoom is off for the page from then on', async () => {
+    const hanging = createZoomWorkerRunner({ spawn: hangingWorker });
+    const counted = countingRunner((job, limit, signal) => (job.kind === 'crop' ? hanging : zoomWorkerRunner)(job, limit,
+      signal));
+    const zoom = createPageZoom(source('image/png', 64, 48), { width: 64, height: 48 }, HIGH_RESOLUTION_TIER,
+      { runner: counted.runner, cropTimeLimitMs: 300 });
     await expect(zoom.crop({ x: 0, y: 0, w: 20, h: 20 }, 2)).resolves.toEqual({ kind: 'unavailable' });
     await expect(zoom.crop({ x: 0, y: 0, w: 20, h: 20 }, 2)).resolves.toEqual({ kind: 'unavailable' });
-    expect(decodes).toBe(1);
-    // A crop slower than its limit does the same.
-    let tick = 0;
-    const slow = createPageZoom(source('image/png', 64, 48), { width: 64, height: 48 }, HIGH_RESOLUTION_TIER, {
-      now: () => (tick += 4_000), cropTimeLimitMs: 3_000, decodeTimeLimitMs: 60_000 });
-    await expect(slow.crop({ x: 0, y: 0, w: 20, h: 20 }, 2)).resolves.toEqual({ kind: 'unavailable' });
-    await expect(slow.crop({ x: 0, y: 0, w: 20, h: 20 }, 2)).resolves.toEqual({ kind: 'unavailable' });
-  });
+    expect(counted.jobs).toEqual(['decode', 'crop']);
+  }, 20_000);
+
+  it('terminates a worker that never starts, within its start limit', async () => {
+    const runner = createZoomWorkerRunner({ spawn: silentWorker, startLimitMs: 300 });
+    const zoom = createPageZoom(source('image/png', 64, 48), { width: 64, height: 48 }, HIGH_RESOLUTION_TIER, { runner });
+    await expect(zoom.crop({ x: 0, y: 0, w: 20, h: 20 }, 2)).resolves.toEqual({ kind: 'unavailable' });
+  }, 20_000);
+
+  it('ends a running decode at once on abort (shutdown), leaving no worker behind', async () => {
+    const runner = createZoomWorkerRunner({ spawn: hangingWorker });
+    const zoom = createPageZoom(source('image/png', 64, 48), { width: 64, height: 48 }, HIGH_RESOLUTION_TIER,
+      { runner, decodeTimeLimitMs: 60_000 });
+    const controller = new AbortController();
+    const started = performance.now();
+    const pending = zoom.crop({ x: 0, y: 0, w: 20, h: 20 }, 2, controller.signal);
+    // Abort once the worker is up and spinning.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    controller.abort(new Error('worker shutdown'));
+    await expect(pending).resolves.toEqual({ kind: 'unavailable' });
+    expect(performance.now() - started).toBeLessThan(10_000);
+    // An abort before the job starts never starts a worker.
+    const spawn = jest.fn(hangingWorker);
+    const never = createPageZoom(source('image/png', 64, 48), { width: 64, height: 48 }, HIGH_RESOLUTION_TIER,
+      { runner: createZoomWorkerRunner({ spawn }) });
+    await expect(never.crop({ x: 0, y: 0, w: 20, h: 20 }, 2, controller.signal)).resolves.toEqual({ kind: 'unavailable' });
+    expect(spawn).not.toHaveBeenCalled();
+  }, 20_000);
+
+  it(`runs at most ${ZOOM_WORKERS_AT_ONCE} zoom worker at a time in the process, however many pages zoom at once`, async () => {
+    expect(ZOOM_WORKERS_AT_ONCE).toBe(1);
+    let most = 0;
+    const watch = setInterval(() => { most = Math.max(most, liveZoomWorkers()); }, 5);
+    try {
+      const runner = createZoomWorkerRunner({ spawn: hangingWorker });
+      const pages = [0, 1, 2].map(() => createPageZoom(source('image/png', 64, 48), { width: 64, height: 48 },
+        HIGH_RESOLUTION_TIER, { runner, decodeTimeLimitMs: 250 }));
+      const outcomes = await Promise.all(pages.map((page) => page.crop({ x: 0, y: 0, w: 20, h: 20 }, 2)));
+      expect(outcomes.map((outcome) => outcome.kind)).toEqual(['unavailable', 'unavailable', 'unavailable']);
+    } finally { clearInterval(watch); }
+    expect(most).toBe(1);
+  }, 30_000);
+
+  it('does not block the event loop while a page decodes: timers keep firing (lease renewal goes on)', async () => {
+    // A fictional synthetic page large enough for a decode of several hundred milliseconds.
+    const page = source('image/jpeg', 2_400, 1_800);
+    const zoom = createPageZoom(page, resizedSize(2_400, 1_800, HIGH_RESOLUTION_TIER), HIGH_RESOLUTION_TIER,
+      { decodeTimeLimitMs: 60_000, cropTimeLimitMs: 60_000 });
+    let ticks = 0;
+    let last = performance.now();
+    let longest = 0;
+    const timer = setInterval(() => { const now = performance.now(); longest = Math.max(longest, now - last); last = now;
+      ticks += 1; }, 10);
+    const started = performance.now();
+    try {
+      await expect(zoom.crop({ x: 100, y: 100, w: 200, h: 100 }, 2)).resolves.toMatchObject({ kind: 'crop' });
+    } finally { clearInterval(timer); }
+    const elapsed = performance.now() - started;
+    // The decode in-process alone stalls the loop for its whole length; in the worker the timer keeps its pace.
+    const inProcess = performance.now();
+    decodeRaster(page);
+    const stall = performance.now() - inProcess;
+    expect(stall).toBeGreaterThan(100);
+    expect(ticks).toBeGreaterThan(elapsed / 10 / 3);
+    expect(longest).toBeLessThan(Math.max(150, stall / 2));
+  }, 60_000);
+
+  it('moves the raster to each crop\'s worker and back, so later crops still have it', async () => {
+    const zoom = createPageZoom(source('image/png', 640, 480), { width: 640, height: 480 }, HIGH_RESOLUTION_TIER);
+    // Both reads of a page may ask at once: their crops run one after another over the same raster.
+    const outcomes = await Promise.all([zoom.crop({ x: 0, y: 0, w: 16, h: 16 }, 4), zoom.crop({ x: 300, y: 200, w: 40,
+      h: 40 }, 2), zoom.crop({ x: 10, y: 10, w: 2, h: 2 }, 2), zoom.crop({ x: 0, y: 0, w: 600, h: 400 }, 1)]);
+    expect(outcomes.map((outcome) => outcome.kind)).toEqual(['crop', 'crop', 'invalid', 'crop']);
+  }, 30_000);
+
+  it('starts the real worker from the built JavaScript or, under ts-jest, the TypeScript', async () => {
+    const worker = spawnZoomWorker();
+    try {
+      const first = await new Promise((resolve, reject) => { worker.once('message', resolve); worker.once('error', reject); });
+      expect(first).toEqual({ type: 'ready' });
+    } finally { await worker.terminate(); }
+  }, 20_000);
 });
 
 describe('JPEG structure checks before any decode', () => {
@@ -246,7 +358,8 @@ describe('JPEG structure checks before any decode', () => {
 
   it('reads a real baseline JPEG\'s frame and its one scan', () => {
     expect(jpegStructure(syntheticJpeg(64, 48))).toEqual({ frameMarker: 0xc0, precision: 8, width: 64, height: 48,
-      components: 3, scans: 1, scanMarkersAnywhere: 1 });
+      components: 3, scans: 1, scanMarkersAnywhere: 1, sampling: [{ h: 1, v: 1 }, { h: 1, v: 1 }, { h: 1, v: 1 }],
+      tableBytes: 2 * 256 + 2 * (16 + 12) + 2 * (16 + 162) });
     expect(decodable(syntheticJpeg(64, 48))).toBe(true);
   });
 
@@ -306,13 +419,13 @@ describe('JPEG structure checks before any decode', () => {
     expect(allowed.available()).toBe(true);
     await expect(allowed.crop({ x: 0, y: 0, w: 16, h: 16 }, 2)).resolves.toMatchObject({ kind: 'crop' });
     // Over it: never decoded. A progressive frame is held to the same count.
-    const decode = jest.fn(decodeRaster);
+    const counted = countingRunner();
     const progressive = (scans: number) => jpegFromParts(jpegFrame(64, 48, 3, 0xc2),
       ...Array.from({ length: scans }, () => jpegScan([1])));
     expect(decodable(progressive(ZOOM_JPEG_MAX_SCANS))).toBe(true);
     for (const bytes of [overLimit, progressive(ZOOM_JPEG_MAX_SCANS + 1), progressive(5_000)]) {
       const zoom = createPageZoom({ mediaType: 'image/jpeg', bytes, width: 64, height: 48 }, { width: 64, height: 48 },
-        HIGH_RESOLUTION_TIER, { decode });
+        HIGH_RESOLUTION_TIER, { runner: counted.runner });
       expect(zoom.available()).toBe(false);
       await expect(zoom.crop({ x: 0, y: 0, w: 16, h: 16 }, 2)).resolves.toEqual({ kind: 'unavailable' });
       expect(() => decodeRaster({ mediaType: 'image/jpeg', bytes, width: 64, height: 48 })).toThrow(/ZOOM_DECODE_LIMIT/);
@@ -321,8 +434,8 @@ describe('JPEG structure checks before any decode', () => {
     const hidden = Array.from({ length: ZOOM_JPEG_MAX_SCANS }, () => [0xff, 0xda]).flat();
     expect(decodable(jpegFromParts(jpegSegment(0xfe, hidden), frame, jpegScan([1])))).toBe(false);
     expect(decodable(new Uint8Array([...jpegFromParts(frame, jpegScan([1])), ...hidden]))).toBe(false);
-    expect(decode).not.toHaveBeenCalled();
-  });
+    expect(counted.jobs).toEqual([]);
+  }, 30_000);
 
   it('refuses 12-bit samples and any component count but 1 or 3 (CMYK, YCCK, two)', () => {
     expect(decodable(jpegFromParts(jpegFrame(64, 48, 1), jpegScan([1])))).toBe(true);
@@ -333,6 +446,95 @@ describe('JPEG structure checks before any decode', () => {
       const bytes = jpegFromParts(jpegFrame(64, 48, components), jpegScan([1]));
       expect(jpegStructure(bytes)).toMatchObject({ components });
       expect(decodable(bytes)).toBe(false);
+    }
+  });
+});
+
+describe('where jpeg-js and the marker walk could disagree (defence in depth)', () => {
+  const frame = jpegFrame(64, 48);
+  const scanWith = (entropy: number[]) => jpegFromParts(frame, jpegScan([1, 2, 3], entropy), jpegSegment(0xfe, [1, 2]));
+
+  it('refuses, after a restart marker in scan data, 0x00 0xE0, 0x00 0xE1, 0xFF 0x00 and another restart marker', () => {
+    for (const after of [[0x00, 0xe0], [0x00, 0xe1], [0xff, 0x00], [0xff, 0xd0], [0xff, 0xd7]]) {
+      for (const rst of [0xd0, 0xd5]) {
+        expect([after, jpegStructure(scanWith([0x12, 0xff, rst, ...after, 0, 6, 0, 0]))]).toEqual([after, null]);
+      }
+    }
+    // Ordinary data after a restart marker, and those bytes elsewhere, are fine.
+    expect(jpegStructure(scanWith([0x12, 0xff, 0xd0, 0x00, 0xe2, 0x00, 0xe0, 0, 6]))).toMatchObject({ scans: 1 });
+    expect(jpegStructure(scanWith([0x12, 0xff, 0xd0, 0x34, 0xff, 0x00, 0xff, 0xd1, 0x56]))).toMatchObject({ scans: 1 });
+  });
+
+  it('refuses, after a stuffed 0xFF 0x00, a "malformed APP" recovery jump jpeg-js could take (its target is 0xFF)', () => {
+    // 0x00 0xE0, distance 6: jpeg-js would check the byte 6 on from the distance, here the COM's 0xFF.
+    expect(jpegStructure(jpegFromParts(frame, jpegScan([1, 2, 3], [0x12, 0xff, 0x00, 0x00, 0xe1, 0x00, 0x06, 0x01, 0x02,
+      0x03, 0x04]), jpegSegment(0xfe, [1, 2])))).toBeNull();
+    // The same bytes with a jump that would not land on 0xFF: jpeg-js would throw there, so the walk accepts them.
+    expect(jpegStructure(jpegFromParts(frame, jpegScan([1, 2, 3], [0x12, 0xff, 0x00, 0x00, 0xe1, 0x00, 0x04, 0x01, 0x02,
+      0x03, 0x04]), jpegSegment(0xfe, [1, 2])))).toMatchObject({ scans: 1 });
+  });
+
+  it('refuses the reviewer\'s layout (a second frame hidden behind a restart marker and 0x00 0xE0) before decoding', async () => {
+    const counted = countingRunner();
+    for (const [visible, hidden, components] of [[{ width: 16, height: 16 }, { width: 4_000, height: 3_125 }, 4],
+      [{ width: 16, height: 16 }, { width: 4_000, height: 3_125 }, 3], [{ width: 512, height: 512 }, { width: 512,
+        height: 512 }, 1]] as const) {
+      const bytes = desyncJpeg(visible, hidden, components);
+      expect(jpegStructure(bytes)).toBeNull();
+      const page: ZoomSource = { mediaType: 'image/jpeg', bytes, ...visible };
+      expect(zoomDecodable(page)).toBe(false);
+      expect(() => decodeRaster(page)).toThrow(/ZOOM_DECODE_LIMIT/);
+      const zoom = createPageZoom(page, visible, HIGH_RESOLUTION_TIER, { runner: counted.runner });
+      expect(zoom.available()).toBe(false);
+      await expect(zoom.crop({ x: 0, y: 0, w: 16, h: 16 }, 2)).resolves.toEqual({ kind: 'unavailable' });
+    }
+    expect(counted.jobs).toEqual([]);
+  });
+
+  it('and were the walk fooled, jpeg-js\'s own limits from the checked frame refuse the hidden frame before allocating it', () => {
+    // The checked frame as the walk reads it from the same layout without the desync (what it believed).
+    const checked = (visible: { width: number; height: number }): JpegStructure => ({ frameMarker: 0xc0, precision: 8,
+      ...visible, components: 3, scans: 1, scanMarkersAnywhere: 1, sampling: [{ h: 1, v: 1 }, { h: 1, v: 1 },
+        { h: 1, v: 1 }], tableBytes: 256 + 2 * 17 });
+    const rssBefore = process.memoryUsage().rss;
+    // A tiny checked frame and a 12.5 MP hidden one: over jpeg-js's pixel limit at once.
+    const tiny = desyncJpeg({ width: 16, height: 16 }, { width: 4_000, height: 3_125 }, 4);
+    expect(() => decodeJpegWithin(tiny, checked({ width: 16, height: 16 }))).toThrow(/maxResolutionInMP/);
+    // A hidden frame as large as the checked one, with more components: over jpeg-js's memory count.
+    const same = desyncJpeg({ width: 1_024, height: 1_024 }, { width: 1_024, height: 1_024 }, 4);
+    expect(() => decodeJpegWithin(same, checked({ width: 1_024, height: 1_024 }))).toThrow(/maxMemoryUsageInMB/);
+    // Refused by count before the blocks are made (the 12.5 MP 4-component frame alone would be 800 MB of them).
+    expect(process.memoryUsage().rss - rssBefore).toBeLessThan(100 * 1024 * 1024);
+  });
+
+  it('gives jpeg-js exactly the memory its own count needs for the checked frame, at every common sampling', () => {
+    // syntheticJpeg is 4:2:0 from jpeg-js's encoder; the others are hand-built frames over all-zero entropy data.
+    const zeroJpeg = (width: number, height: number, sampling: Array<[number, number]>) => {
+      const body = [8, height >> 8, height & 0xff, width >> 8, width & 0xff, sampling.length];
+      sampling.forEach(([h, v], index) => body.push(index + 1, h << 4 | v, 0));
+      const counts = [1, ...new Array<number>(15).fill(0)];
+      const maxH = Math.max(...sampling.map(([h]) => h));
+      const maxV = Math.max(...sampling.map(([, v]) => v));
+      const blocks = Math.ceil(width / 8 / maxH) * Math.ceil(height / 8 / maxV)
+        * sampling.reduce((sum, [h, v]) => sum + h * v, 0);
+      return jpegFromParts(jpegSegment(0xdb, [0, ...new Array<number>(64).fill(1)]),
+        jpegSegment(0xc4, [0x00, ...counts, 0, 0x10, ...counts, 0x00]), jpegSegment(0xc0, body),
+        jpegSegment(0xda, [sampling.length, ...sampling.flatMap((_, index) => [index + 1, 0]), 0, 63, 0]),
+        new Array<number>(Math.ceil(blocks * 2 / 8) + 4).fill(0));
+    };
+    const pages = [syntheticJpeg(333, 251), zeroJpeg(333, 251, [[1, 1], [1, 1], [1, 1]]),
+      zeroJpeg(333, 251, [[2, 2], [1, 1], [1, 1]]), zeroJpeg(333, 251, [[2, 1], [1, 1], [1, 1]]),
+      zeroJpeg(101, 77, [[1, 1]]), zeroJpeg(250, 250, [[4, 2], [1, 1], [1, 1]])];
+    for (const bytes of pages) {
+      const structure = jpegStructure(bytes)!;
+      expect(structure).not.toBeNull();
+      const budget = jpegMemoryBudget(structure);
+      const decodeWith = (bytesAllowed: number) => jpeg.decode(bytes, { useTArray: true, formatAsRGBA: false,
+        tolerantDecoding: false, maxMemoryUsageInMB: bytesAllowed / (1024 * 1024) });
+      // Without the slack it still fits (the count is exact); a little less does not.
+      expect(decodeWith(budget - ZOOM_JPEG_MEMORY_SLACK_BYTES + 1)).toMatchObject({ width: structure.width });
+      expect(() => decodeWith(budget - ZOOM_JPEG_MEMORY_SLACK_BYTES - 64)).toThrow(/maxMemoryUsageInMB/);
+      expect(decodeJpegWithin(bytes, structure)).toMatchObject({ width: structure.width, height: structure.height });
     }
   });
 });
@@ -357,7 +559,7 @@ describe('zoom tool session', () => {
     const zoom = fixed({ kind: 'crop', crop });
     const session = createZoomSession(zoom, 1, 8, 1_000);
     const result = await session.answer(call({ ...good, scale: undefined, box: good.box }));
-    expect(zoom.crop).toHaveBeenCalledWith(good.box, 2);
+    expect(zoom.crop).toHaveBeenCalledWith(good.box, 2, undefined);
     expect(result).toMatchObject({ type: 'tool_result', tool_use_id: 'toolu_1' });
     expect(result).not.toHaveProperty('is_error');
     const content = result.content as unknown as Array<Record<string, unknown>>;
@@ -365,6 +567,13 @@ describe('zoom tool session', () => {
     expect(String(content[0]!.text)).toContain('x 1, y 2, width 16, height 16');
     expect(content[1]).toEqual({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'Q1JPUA==' } });
     expect(session.stats).toEqual({ calls: 1, limited: 0, failed: 0 });
+  });
+
+  it('passes the read\'s abort signal to the crop, so a shutdown ends a running decode or crop', async () => {
+    const zoom = fixed({ kind: 'crop', crop });
+    const signal = new AbortController().signal;
+    await createZoomSession(zoom, 1, 8, 1_000).answer(call(good), signal);
+    expect(zoom.crop).toHaveBeenCalledWith(good.box, 4, signal);
   });
 
   it('answers at most the call limit; every later call is told the limit is reached', async () => {

@@ -205,7 +205,7 @@ export class ClaudePageClient implements PageModelClient {
       // Every call of the turn answered, in order, in one user turn. A malformed input or a failed zoom is an
       // is_error result (zoom.ts never throws): the read goes on.
       const results: Anthropic.ToolResultBlockParam[] = [];
-      for (const call of calls) results.push(await zoom.answer({ id: call.id, name: call.name, input: call.input }));
+      for (const call of calls) results.push(await zoom.answer({ id: call.id, name: call.name, input: call.input }, signal));
       if (signal.aborted) throw new AiInterruptedError(signal.reason, state.sent, { ...state.spent });
       // The assistant turn exactly as it came (thinking blocks with their signatures, text, tool calls), as tool use
       // with thinking requires; then the results.

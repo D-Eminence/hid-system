@@ -6,6 +6,7 @@ import { CLINIC_PAGE, fixtureExifSegment, fixtureJpeg, fixturePng, modelItem, mo
 import { IMAGE_MAX_BASE64_LENGTH } from './page-image';
 import type { ModelPage } from './prompt';
 import { ZOOM_JPEG_MAX_SCANS } from './zoom';
+import { liveZoomWorkers } from './zoom-jobs';
 
 const FACILITY = '11111111-2222-4333-8444-555555555555';
 const config: ReadingConfig = { OCR_AI_MODE: 'claude', OCR_AI_FACILITY_IDS: undefined,
@@ -951,6 +952,8 @@ describe('PaperReadingService', () => {
 
     describe('zoom in the hard-page reads (owner decision 2026-11-05, about 18:45 UTC)', () => {
       const zoomConfig: ReadingConfig = { ...hardConfig, OCR_AI_HARD_PAGE_ZOOM: 'on' };
+      // Every zoom decode and crop runs in a worker thread of its own, ended with its job: none outlives a reading.
+      afterEach(() => { expect(liveZoomWorkers()).toBe(0); });
       // A real, decodable, synthetic picture (no page of anyone's): the zoom decodes and crops it.
       const synthetic = { mediaType: 'image/png', bytes: syntheticPng(400, 560) };
       const zoomCall = (id: string) => ({ id, name: 'zoom', input: { page: 1, box: { x: 10, y: 10, w: 40, h: 20 }, scale: 2 } });

@@ -101,11 +101,14 @@ export function syntheticRgba(width: number, height: number): Uint8Array {
   return data;
 }
 
-/** syntheticRgba as a real PNG (8-bit RGBA). */
+/**
+ * syntheticRgba as a real PNG (8-bit RGBA). Filter type 0 only: pngjs's default (every filter tried on every row)
+ * is about a hundred times slower under jest.
+ */
 export function syntheticPng(width: number, height: number): Uint8Array {
   const png = new PNG({ width, height });
   png.data = Buffer.from(syntheticRgba(width, height));
-  return new Uint8Array(PNG.sync.write(png));
+  return new Uint8Array(PNG.sync.write(png, { filterType: 0 }));
 }
 
 /** syntheticRgba as a real baseline JPEG. */
@@ -149,4 +152,30 @@ export function withRepeatedScan(bytes: Uint8Array, scans: number): Uint8Array {
   for (let index = 0; index < scans; index += 1) out.set(scan, at + index * scan.length);
   out.set([0xff, 0xd9], out.length - 2);
   return out;
+}
+
+/**
+ * The reviewer's desync layout, synthetic: a checked baseline frame of `visible` pixels (3 components, all-zero
+ * entropy data), then after the scan a restart marker, 0x00 0xE0 and a distance that sends jpeg-js's "malformed APP"
+ * recovery into the contents of a later COM segment, which hold a second SOF of `hidden` pixels and
+ * `hiddenComponents` components. The marker walk sees one frame; jpeg-js, unguarded, parses and allocates both.
+ */
+export function desyncJpeg(visible: { width: number; height: number }, hidden: { width: number; height: number },
+  hiddenComponents: number): Uint8Array {
+  const sof = (width: number, height: number, components: number) => {
+    const body = [8, height >> 8 & 0xff, height & 0xff, width >> 8 & 0xff, width & 0xff, components];
+    for (let id = 1; id <= components; id += 1) body.push(id, 0x11, 0);
+    return jpegSegment(0xc0, body);
+  };
+  const dqt = jpegSegment(0xdb, [0, ...new Array<number>(64).fill(1)]);
+  const counts = [1, ...new Array<number>(15).fill(0)];
+  const dht = jpegSegment(0xc4, [0x00, ...counts, 0, 0x10, ...counts, 0x00]);
+  const sos = jpegSegment(0xda, [3, 1, 0, 2, 0, 3, 0, 0, 63, 0]);
+  const mcus = Math.ceil(visible.width / 8) * Math.ceil(visible.height / 8);
+  const entropy = new Array<number>(Math.ceil(mcus * 3 * 2 / 8) + 4).fill(0);
+  const pad = 10;
+  const distance = 2 + pad + 4;
+  return jpegFromParts(dqt, dht, sof(visible.width, visible.height, 3), sos, entropy,
+    [0xff, 0xd0, 0x00, 0xe0, distance >> 8, distance & 0xff, ...new Array<number>(pad).fill(0)],
+    jpegSegment(0xfe, sof(hidden.width, hidden.height, hiddenComponents)));
 }
