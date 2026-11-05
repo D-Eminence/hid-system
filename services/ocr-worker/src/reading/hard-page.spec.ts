@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { paperReadingPayloadSchema, type PaperItem } from './contract';
 import { forMatching, STATUS_CUES, withoutSignMarks } from './grounding';
 import { markGuess, mergeAsWritten, mergeHardReadings, normaliseDose, normaliseFrequency, prepareHardAnswer,
@@ -474,6 +475,30 @@ describe('diagnosis and lab test names on a hard page, grounded after the readin
     const { check } = mergeHardReadings([heldOn(page, modelPage([answer().items[0]!])), heldOn(page, other)], SOURCE_SHA);
     expect(fieldsOf(check.items[0]!).name).toBe('[unreadable]');
     expect(check.items[0]!.checkReasons).toContain('readings_disagree');
+  });
+});
+
+describe('hard-page prompt versions', () => {
+  const lines = [{ id: 'p1-l1', text: 'Amoxil 500mg', confidence: 0.4, handwritten: true,
+    box: { left: 0.1, top: 0.2, width: 0.4, height: 0.05 } }, { id: 'p1-l2', text: 'x', confidence: 0.4, handwritten: true, box: null }];
+  const size = { width: 800, height: 1000 };
+
+  it('sends the version 3 text, byte for byte, when zoom is not offered (HARD_PAGE_PROMPT_VERSION_NO_ZOOM)', () => {
+    // Pinned from the version 3 prompt as merged before zoom; a change here needs a new version.
+    expect(createHash('sha256').update(hardPageMessage(1, lines, size, 0)).digest('hex'))
+      .toBe('6e81de06de86089629e482c87d0afbbefe453d29ea21c166a48c07279bd8dbf1');
+    expect(hardPageMessage(1, lines, size)).toBe(hardPageMessage(1, lines, size, 0));
+    expect(hardPageMessage(1, lines, size, 0)).not.toContain('zoom');
+  });
+
+  it('adds rule J, the zoom tool, after the sign rule and before the lines, only when zoom is offered', () => {
+    const withZoom = hardPageMessage(1, lines, size, 8);
+    const plain = hardPageMessage(1, lines, size, 0);
+    const rule = withZoom.slice(withZoom.indexOf('\n\nJ. ') + 2, withZoom.indexOf('\n\nThe lines the service found'));
+    expect(rule.startsWith('J. You can use the zoom tool')).toBe(true);
+    expect(rule).toContain('at most 8 times for this page');
+    expect(withZoom.replace(`${rule}\n\n`, '')).toBe(plain);
+    expect(withZoom.indexOf(SIGNS_RULE)).toBeLessThan(withZoom.indexOf('J. You can use the zoom tool'));
   });
 });
 

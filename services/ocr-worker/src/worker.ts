@@ -296,7 +296,7 @@ export function buildCompletion(text: TextReading, outcome: ReadingOutcome): Com
         hardPages: summary.hardPages,
         hardPageReads: summary.hardPageReads,
         hardPageSingleReadPages: summary.hardPageSingleReadPages,
-        // Version 3 only where a hard page's reads were offered zoom; without it they sent the version 2 text.
+        // Version 4 only where a hard page's reads were offered zoom; without it they sent the version 3 text.
         hardPagePromptVersion: summary.hardPages.length === 0 ? null
           : summary.hardPageZoomPages.length > 0 ? HARD_PAGE_PROMPT_VERSION : HARD_PAGE_PROMPT_VERSION_NO_ZOOM,
         hardPageZoomPages: summary.hardPageZoomPages,
