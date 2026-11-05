@@ -3380,7 +3380,12 @@ migration. The suite is
 ## 36. Records processing cover: as long as the access, and patient shares (0108)
 
 Owner decisions (D-Eminence, 2026-11-05, about 12:00 UTC, relayed by the
-coordinator; 0108 is unsigned until the owner signs its declaration).
+coordinator). At about 12:03 UTC the owner typed "approve 0108" after
+reading: D-a no 24 h bound; D-b active patient shares count, view-only
+included -- a view-only share can start, read and check a reading but never
+publish into the chart, which needs the publisher's own direct-care write;
+all other 0104 rules kept. The declaration's `reviewed_by` stays empty until
+the owner signs it.
 Migration `0108_records_processing_cover_lifetime.sql` replaces the body of
 `identity.records_processing_direct_care_cover` (32.1) and nothing else:
 signature, result `(consent_grant_id, covered_until)`, owner, SECURITY
@@ -3389,24 +3394,36 @@ DEFINER, STABLE, search_path, ACL (`hid_identity_runtime` EXECUTE only) and
 `732d11892dd4e27e1ff9093ae3b7de5a`) are unchanged; the cover's body md5 is now
 `6928763d3b69f0e4b4acf96a6a255736`.
 
-- D-a (lifetime): a covering grant (the patient's approval of a direct-care
+- D-a (lifetime). The owner answered "recommended" to removing the 24-hour
+  bound. A covering grant (the patient's approval of a direct-care
   request, or the Access PIN) covers records processing (`read_records` and
   `write_records`) from its `starts_at` until its `expires_at`, and whenever it
   stops being active before that (revoked, PIN turned off, held by the
   cutover, membership or account ended). The 24-hour bound of decision 34(1)
   is gone; `covered_until` is the grant's `expires_at`.
-- D-b (shares): an active patient share (0095) covers it too: a grant with
+- D-b (shares). The owner's answer: "Yes, shares count (Recommended)", to
+  "Should a patient SHARE also let that staff member bring in the patient's
+  paper records (OCR)?", option text "Any active access the patient gave
+  (approval, Access PIN or share) lets that staff member at that facility
+  bring in paper records for as long as the access lasts. Under-18s, deny
+  choices and the OCR permission still apply. The share screen will tell
+  patients this." An active patient share (0095) covers it too: a grant with
   its `identity.patient_consent_shares` row (same patient and membership),
   direct care, `read_records` or `write_records`, not break-glass, active, not
   held by the cutover, `source_system = 'hid'`, no request, no authorization
-  method, granted by the patient. Any share level (`view_only`,
-  `clinical_review`, `clinical_collaboration`) covers records-processing read
-  AND write, as a PIN grant does; direct care is unchanged (a `view_only` or
+  method, granted by the patient. Any share level, `view_only` included
+  (`view_only`, `clinical_review`, `clinical_collaboration`), covers
+  records-processing read AND write, as a PIN grant does: under
+  `healthcare-operations`, creating an OCR job and getting or listing jobs
+  are `read_records`; retrying, validating, confirming the patient and
+  creating a publication are `write_records`. Publishing a reading into the
+  chart still needs the publisher's own direct-care `write_records` grant, so
+  a `view_only` or `clinical_review` share can start, read and check a
+  reading but never publish it. Direct care is unchanged (a `view_only` or
   `clinical_review` share still reads only). It ends when the patient revokes
   or replaces the share, or at its `expires_at` (24 hours, 7, 30 or 365 days).
-  D-b is a separate alternative in the body, so the owner may approve D-a
-  alone; without D-b the sealed demo doctor (whose only grant is 0098's seeded
-  share) still gets no cover.
+  D-b is a separate alternative in the body; without it the sealed demo
+  doctor (whose only grant is 0098's seeded share) would get no cover.
 
 Everything else of 32.1 stays: the same membership at the same facility on
 the live account; `ocr.job.write` at each check; the patient 18 or over on
@@ -3432,7 +3449,7 @@ keeps the owner's rule from decision 34(1), "said clearly to the patient":
   approving the access (or giving the PIN) also lets that staff member bring
   in (scan and read) the patient's paper records at that facility for as long
   as the access lasts, and that ending the access stops it.
-- D-b (only if the owner approves D-b): the share screens must say, before
+- D-b: the share screens must say, before
   the patient confirms, that a share at any level, `view_only` included, also
   lets that clinician bring in (scan and read, which creates OCR jobs from) the
   patient's paper records at that facility for the share's whole duration (24
@@ -3460,5 +3477,18 @@ and `POST /identity/consent-status` report the longer cover with no code
 change. Applying 0108 takes only ACCESS SHARE
 on the tables the cover reads and SHARE UPDATE EXCLUSIVE on the cover itself.
 Suite: `services/ehr-api/test/database/records-processing.integration.sql`
-(sections 10l-10o, 10r2-10r3, 10s and 10za1-10za9: each condition of the
-cover changed one at a time).
+(sections 10l-10o, 10r2-10r3, 10s, 10sk, 10za and 10zk change conditions of
+the cover one at a time, on a share and on the approval or PIN grant). A
+mutant run of the cover body (269 mutants, each one condition made true,
+false or negated, or one comparison, literal, time zone or age boundary
+changed; each on a fresh 0001-0108 database with the body-md5 case 1g2 set
+aside) shows 255 caught by behavioural cases and 14 that no row the tables
+allow can tell apart from the body: dropping `at_time is not null` or `dob is
+not null` (NULL already fails the comparison that follows), the account's
+subject or status test or the account join, the grant's facility test, the
+directive membership's facility (all implied by
+`auth.membership_has_permission` with the exact-membership foreign key), the
+grant's scope test alone or its `break_glass` test alone (a consent_grants
+CHECK ties them), the request's patient, membership, facility or purpose
+test (the exact-request foreign key), and `coalesce(..., true)` on the
+permission (it never answers null). The suite header lists them.

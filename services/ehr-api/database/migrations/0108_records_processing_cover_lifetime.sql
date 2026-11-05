@@ -4,54 +4,75 @@
 -- (D-b). Written on staging-novu-ci-20261005 at 605e971e (migrations
 -- 0001-0107 applied); it is the next migration after 0107 and replaces one
 -- function body of 0104's, identity.records_processing_direct_care_cover.
--- Owner decisions in chat (D-Eminence, 2026-11-05, about 12:00 UTC, relayed by
--- the coordinator; the declaration is signed separately, reviewed_by is empty
--- until the owner signs):
+-- Owner decisions in chat (D-Eminence, 2026-11-05, relayed by the
+-- coordinator). The owner approved this migration at about 12:03 UTC by
+-- typing "approve 0108" after reading: D-a no 24 h bound; D-b active patient
+-- shares count, view-only included -- a view-only share can start, read and
+-- check a reading but never publish into the chart, which needs the
+-- publisher's own direct-care write; all other 0104 rules kept. The
+-- declaration in config/production-schema-compatibility.json is signed
+-- separately: its reviewed_by stays empty until the owner signs it there.
 --
--- D-a (lifetime): staff whose direct-care access to the patient is active may
---    do records processing (purpose healthcare-operations, read_records or
---    write_records) for as long as that access lasts, not only for 24 hours
---    from its start. This supersedes the 24-hour bound of decision
---    34(1) (0104 D7). A grant that covers records processing under 0104 D6
---    (the patient's approval of the facility's direct-care access request, or
---    the patient's Access PIN) now covers it from its starts_at until its
---    expires_at, and whenever it stops being active before that: the patient
---    revokes it (0087's revoke_my_consent_grant, 0075's PIN revocation), it is
---    held by the cutover, the membership ends, the account is disabled or
---    ends. covered_until, the cover's end Identity reads, is the grant's
+-- D-a (lifetime). The owner's answer (about 12:00 UTC): "recommended", to
+--    removing the 24-hour bound. Staff whose direct-care access to the
+--    patient is active may do records processing (purpose
+--    healthcare-operations, read_records or write_records) for as long as
+--    that access lasts, not only for 24 hours from its start. This
+--    supersedes the 24-hour bound of decision 34(1) (0104 D7). A grant that
+--    covers records processing under 0104 D6 (the patient's approval of the
+--    facility's direct-care access request, or the patient's Access PIN) now
+--    covers it from its starts_at until its expires_at, and whenever it stops
+--    being active before that: the patient revokes it (0087's
+--    revoke_my_consent_grant, 0075's PIN revocation), it is held by the
+--    cutover, the membership ends, the account is disabled or ends.
+--    covered_until, the cover's end Identity reads, is the grant's
 --    expires_at. 0104's "at_time < starts_at + 24 hours" is dropped and
 --    least(expires_at, starts_at + 24 hours) becomes expires_at, in the result
 --    and in the ordering. Today requests last at most 24 hours and PIN grants
 --    at most 60 minutes, so for those two the cover's end does not move; the
 --    change matters for a longer grant (D-b's shares last up to 365 days).
 --
--- D-b (shares): an active 0095 patient share also covers it. A consent
---    grant that has its row in identity.patient_consent_shares (consent_grant_id
---    the grant's id, the same patient_id and membership_id as the grant) and
+-- D-b (shares). The owner's answer (2026-11-05, about 12:00 UTC, relayed by
+--    the coordinator; an AskUserQuestion answer): "Yes, shares count
+--    (Recommended)", to the question "Should a patient SHARE also let that
+--    staff member bring in the patient's paper records (OCR)?", whose option
+--    text was "Any active access the patient gave (approval, Access PIN or
+--    share) lets that staff member at that facility bring in paper records
+--    for as long as the access lasts. Under-18s, deny choices and the OCR
+--    permission still apply. The share screen will tell patients this."
+--    An active 0095 patient share also covers it. A consent grant that has
+--    its row in identity.patient_consent_shares (consent_grant_id the
+--    grant's id, the same patient_id and membership_id as the grant) and
 --    that is, like every covering grant, direct care (purpose direct-care),
 --    read_records or write_records, not break-glass, active, not held by the
 --    cutover (migration_hold_reason null) and written by this branch
---    (source_system 'hid'), and, as 0095's identity.write_patient_share writes
---    it, has no request (request_id null), no authorization method and was
---    granted by the patient (granted_by_patient_id = patient_id). Any share
---    level (view_only, clinical_review or clinical_collaboration) covers
---    records processing's read_records AND write_records, exactly as a PIN
---    grant, which is read only for direct care, does under 0104 D7: bringing
---    in paper records means creating, validating, confirming and retrying OCR
---    jobs. Direct care itself is unchanged: a view_only or clinical_review
---    share still opens the chart for reading only. The share's cover lasts as
---    D-a says (until its expires_at: 24 hours, 7 days, 30 days or 365 days
---    for until_revoked), and ends when the patient revokes the share or
---    replaces it with a new one (0095's D5 revokes the earlier grant). D-b is
---    one clearly delimited alternative in the body (marked "D-b" below), next
---    to 0104's two ways, so the owner may approve D-a alone: without D-b the
---    body is the same less that alternative, and then the sealed demo doctor
---    (whose only grant is 0098's seeded share) still gets no cover. With D-b
---    that seeded share (source_system 'hid', granted by the patient,
---    request_id null, clinical_collaboration) covers records processing at
---    Demo Hospital under the same rules as any share: the demo patient 18 or
---    over with a date of birth, the doctor's membership holding ocr.job.write
---    there, no deny directive.
+--    (source_system 'hid'), and, as 0095's identity.write_patient_share
+--    writes it, has no request (request_id null), no authorization method
+--    and was granted by the patient (granted_by_patient_id = patient_id).
+--    Any share level, view_only included (view_only, clinical_review or
+--    clinical_collaboration), covers records processing's read_records AND
+--    write_records, exactly as a PIN grant, which is read only for direct
+--    care, does under 0104 D7. Under the healthcare-operations purpose,
+--    creating an OCR job and getting or listing jobs are read_records;
+--    retrying, validating, confirming the patient and creating a publication
+--    are write_records. Publishing a reading into the chart is not records
+--    processing: it still needs the publisher's own direct-care write_records
+--    grant, so a view_only or clinical_review share (direct-care read only)
+--    can start, read and check a reading but never publish it. Direct care
+--    itself is unchanged: a view_only or clinical_review share still opens
+--    the chart for reading only. The share's cover lasts as D-a says (until
+--    its expires_at: 24 hours, 7 days, 30 days or 365 days for
+--    until_revoked), and ends when the patient revokes the share or replaces
+--    it with a new one (0095's D5 revokes the earlier grant). D-b is one
+--    clearly delimited alternative in the body (marked "D-b" below), next to
+--    0104's two ways; without it the body would be the same less that
+--    alternative, and the sealed demo doctor (whose only grant is 0098's
+--    seeded share) would get no cover. With D-b that seeded share
+--    (source_system 'hid', granted by the patient, request_id null,
+--    clinical_collaboration) covers records processing at Demo Hospital
+--    under the same rules as any share: the demo patient 18 or over with a
+--    date of birth, the doctor's membership holding ocr.job.write there, no
+--    deny directive.
 --
 -- Everything else of 0104 D6 and D8 stays exactly as it was: the same staff
 -- member's membership at the same facility and the live active account (the
