@@ -1418,6 +1418,37 @@ grant execute on function identity.records_processing_direct_care_cover(uuid,tex
 -- granted to hid_document_scanner above and to no other role.
 revoke all on function ehr.resolve_document_scan_target(text, text, text, text),
   ehr.list_documents_awaiting_scan(integer, integer, text) from public;
+
+-- OCR page allowance (0107; 0106 before it changes no grant): the three
+-- tables are granted to no runtime role (row-level security forced, the
+-- owner's policy only); the OCR worker reads, records and pauses through its
+-- three commands, claims through the fair claim and records AI usage; the OCR
+-- API (hid_ocr_runtime, inherited by hid_ocr_api_runtime) and the Identity API
+-- admin console read a facility's allowance and monthly usage; only the
+-- Identity API sets a limit (platform super admin only, checked in the
+-- command). The shared reckoning ocr.facility_page_allowance_state and the
+-- replaced trigger function ocr.validate_job_write are granted to no role.
+-- 0107 makes the same grants.
+grant usage on schema ocr to hid_ocr_worker, hid_ocr_runtime, hid_identity_runtime;
+grant execute on function ocr.worker_page_allowance(uuid,uuid),
+  ocr.record_worker_pages(uuid,uuid,integer,text),
+  ocr.pause_worker_job_for_allowance(uuid,uuid,text),
+  ocr.claim_worker_job_fair(text,integer,integer),
+  ocr.record_worker_ai_usage(uuid,uuid,text,integer,bigint,bigint,bigint,bigint,text) to hid_ocr_worker;
+grant execute on function ocr.facility_page_allowance(uuid), ocr.facility_ocr_usage(uuid,date)
+  to hid_ocr_runtime, hid_identity_runtime;
+grant execute on function ocr.set_facility_page_limit(uuid,integer,text) to hid_identity_runtime;
+revoke all on function ocr.facility_page_allowance_state(uuid),
+  ocr.worker_page_allowance(uuid,uuid),
+  ocr.record_worker_pages(uuid,uuid,integer,text),
+  ocr.pause_worker_job_for_allowance(uuid,uuid,text),
+  ocr.facility_page_allowance(uuid),
+  ocr.set_facility_page_limit(uuid,integer,text),
+  ocr.claim_worker_job_fair(text,integer,integer),
+  ocr.record_worker_ai_usage(uuid,uuid,text,integer,bigint,bigint,bigint,bigint,text),
+  ocr.facility_ocr_usage(uuid,date) from public;
+revoke all on ocr.facility_page_limits, ocr.page_usage, ocr.ai_usage from public;
+
 -- Records patients add themselves (0116), as that migration grants it (its
 -- section 4): SELECT on ehr.patient_entries (forced RLS: active entries in a
 -- patient-self or consented clinician read) and the patient's add and
@@ -1453,36 +1484,6 @@ revoke all on function ehr.create_my_patient_entry_document_intent(uuid,text,tex
   ehr.list_patient_entry_documents_awaiting_scan(integer,integer,text),
   ehr.append_patient_entry_document_scan_event(uuid,text,text,text,text,text,text,text,text,text),
   ehr.patient_entry_documents_guard() from public;
-
--- OCR page allowance (0107; 0106 before it changes no grant): the three
--- tables are granted to no runtime role (row-level security forced, the
--- owner's policy only); the OCR worker reads, records and pauses through its
--- three commands, claims through the fair claim and records AI usage; the OCR
--- API (hid_ocr_runtime, inherited by hid_ocr_api_runtime) and the Identity API
--- admin console read a facility's allowance and monthly usage; only the
--- Identity API sets a limit (platform super admin only, checked in the
--- command). The shared reckoning ocr.facility_page_allowance_state and the
--- replaced trigger function ocr.validate_job_write are granted to no role.
--- 0107 makes the same grants.
-grant usage on schema ocr to hid_ocr_worker, hid_ocr_runtime, hid_identity_runtime;
-grant execute on function ocr.worker_page_allowance(uuid,uuid),
-  ocr.record_worker_pages(uuid,uuid,integer,text),
-  ocr.pause_worker_job_for_allowance(uuid,uuid,text),
-  ocr.claim_worker_job_fair(text,integer,integer),
-  ocr.record_worker_ai_usage(uuid,uuid,text,integer,bigint,bigint,bigint,bigint,text) to hid_ocr_worker;
-grant execute on function ocr.facility_page_allowance(uuid), ocr.facility_ocr_usage(uuid,date)
-  to hid_ocr_runtime, hid_identity_runtime;
-grant execute on function ocr.set_facility_page_limit(uuid,integer,text) to hid_identity_runtime;
-revoke all on function ocr.facility_page_allowance_state(uuid),
-  ocr.worker_page_allowance(uuid,uuid),
-  ocr.record_worker_pages(uuid,uuid,integer,text),
-  ocr.pause_worker_job_for_allowance(uuid,uuid,text),
-  ocr.facility_page_allowance(uuid),
-  ocr.set_facility_page_limit(uuid,integer,text),
-  ocr.claim_worker_job_fair(text,integer,integer),
-  ocr.record_worker_ai_usage(uuid,uuid,text,integer,bigint,bigint,bigint,bigint,text),
-  ocr.facility_ocr_usage(uuid,date) from public;
-revoke all on ocr.facility_page_limits, ocr.page_usage, ocr.ai_usage from public;
 
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.

@@ -120,7 +120,7 @@ const acceptedMigrations = new Map([
   ['0105_document_scanner.sql', 'bf68aaaca9e773fce6022a5241f32f35a9937cd9b496e04445b75022a43788c8'],
   ['0106_ocr_worker_account.sql', 'a78f979774aed619c656990d0f0bc531c5eb00fd4998c5b7f00337ba156414d2'],
   ['0107_ocr_page_allowance.sql', '3379f5e388f83bd1179d7fbcbe886ed57717a933e40a51f58b23116e5d46cf60'],
-  ['0116_patient_entries.sql', '5495d6bb8e2d10ebb9f43b67a0166315be2507a482e91ccda858417dbe383b44'],
+  ['0116_patient_entries.sql', 'f3bfec5ebb63dd54e40bc64c934399faa8aba6197d49839edd1e067093e194c0'],
   ['0117_patient_entry_documents.sql', 'ebb2a01cb2f768882b303e6bcb3add6a21df129e7eb30a129bf65c4fe41cc5dc'],
 ])
 

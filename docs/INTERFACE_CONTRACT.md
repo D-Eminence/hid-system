@@ -3366,6 +3366,7 @@ no or another error code, the same or a later time, or any other column
 change is refused (23514). 0107 has no down
 migration. The suite is
 `services/ehr-api/test/database/ocr-page-allowance.integration.sql`.
+
 ## 36. Records patients add themselves (0116)
 
 Akos handover step 6 (owner decision 25 of 2026-11-01; D7: a record the
@@ -3528,9 +3529,10 @@ removed record's vectors (ehr-api's `withdrawnPatientEntryChunksSql`) relies
 on row-level security showing only active entries; the suite runs it in both
 chats' transactions. The suite is
 `services/ehr-api/test/database/patient-entries.integration.sql`. 0116 has no
-down migration. It is released on 0106 (0106, section 34, only seeds the OCR
-worker's account and changes none of these bodies): its preconditions pin the
-bodies it relies on as measured there, all as on 0103 except
+down migration. It is released on 0107 (0106, section 34, only seeds the OCR
+worker's account; 0107, section 35, changes only objects in schema `ocr`;
+neither changes these bodies): its preconditions pin the bodies it relies on
+as measured there, all as on 0103 except
 `identity.has_active_consent_grant`, which is 0104's body (md5
 `732d11892dd4e27e1ff9093ae3b7de5a`), so 0104 must be applied first. 0104's
 records-processing cover answers only for `healthcare-operations`; the
