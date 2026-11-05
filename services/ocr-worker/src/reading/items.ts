@@ -171,8 +171,13 @@ function sameRow(a: Box, b: Box): boolean {
 
 /** A written row may be at most this many times as tall as its tallest line. */
 export const IMAGE_ROW_MAX_HEIGHT = 1.5;
-/** At most this many uncited same-row fragments are added to one image-read item; more drops the item. */
-export const IMAGE_MAX_ABSORBED_FRAGMENTS = 2;
+/**
+ * After same-row fragments are added, an image-read item may have at most this many lines on any one written row,
+ * and at most IMAGE_MAX_LINES_PER_ITEM lines in all (the lines it cites and those added); more drops the item, so
+ * a box cannot claim a whole row or block of cells, whether the model cited them or not.
+ */
+export const IMAGE_MAX_LINES_PER_ROW = 4;
+export const IMAGE_MAX_LINES_PER_ITEM = 6;
 
 /**
  * Lines grouped into written rows, in reading order. A line joins a row only when it is on one row (sameRow) with
@@ -225,8 +230,9 @@ interface ImagePlace { box: Box; cited: ReadLine[]; matched: boolean }
  *
  * Row fragments first: an uncited hard line (below REVIEW_BELOW) the item's box lies on (onLine) that is on the
  * same written row as a cited line is a fragment of the same writing that the text service split off, and is
- * added to the cited lines in reading order; at most IMAGE_MAX_ABSORBED_FRAGMENTS of them, or the item is
- * dropped (a box claiming a whole row of fragments). Rows are cliques (rowsOf), never chains. Then: at most IMAGE_MAX_CITED_LINES rows (groups of cited lines on one row) that lie together (the
+ * added to the cited lines in reading order. Then, cited and added together, at most IMAGE_MAX_LINES_PER_ROW lines
+ * on any one row and IMAGE_MAX_LINES_PER_ITEM in all, or the item is dropped (a box claiming a whole row of
+ * cells). Rows are cliques (rowsOf), never chains. Then: at most IMAGE_MAX_CITED_LINES rows (groups of cited lines on one row) that lie together (the
  * lines_not_together test on rows, here a reason to drop); the box at least IMAGE_MIN_BOX on each side; its area at
  * most IMAGE_MAX_AREA_RATIO times the area of the box around its cited lines plus IMAGE_AREA_ALLOWANCE of the page
  * (or, if larger, that box padded by IMAGE_MIN_PADDING on every side); running past that box's left and right
@@ -251,9 +257,9 @@ function imagePlace(raw: ModelItem, citedAsGiven: readonly ReadLine[], all: read
   const fragments = all.filter((line) => !givenIds.has(line.id) && line.confidence < REVIEW_BELOW
     && line.box !== null && onLine(box, line.box)
     && citedAsGiven.some((other) => other.box !== null && sameRow(other.box, line.box!)));
-  if (fragments.length > IMAGE_MAX_ABSORBED_FRAGMENTS) return null;
   const cited = [...citedAsGiven, ...fragments].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
   const rows = rowsOf(cited);
+  if (cited.length > IMAGE_MAX_LINES_PER_ITEM || rows.some((row) => row.length > IMAGE_MAX_LINES_PER_ROW)) return null;
   if (rows.length > IMAGE_MAX_CITED_LINES || !rowsTogether(rows, all, order)) return null;
   const citedBoxes = cited.map((line) => line.box).filter((line): line is Box => line !== null);
   if (citedBoxes.length === 0 || !citedBoxes.every((line) => onLine(box, line))) return null;

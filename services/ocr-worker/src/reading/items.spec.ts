@@ -1227,10 +1227,13 @@ describe('picture reading on a page whose scanned handwriting is nonsense', () =
     });
     const note = (lineIds: string[], height: number) => check({ kind: 'note', asWritten: 'Review in clinic',
       noteText: 'Review in clinic', lineIds, box: { left: 0.2, top: 0.3, width: 0.4, height } }, rows);
-    // Three rows (six fragments, two of them added from the box): kept, every fragment cited.
-    const three = note(['p1-l1', 'p1-l2', 'p1-l3', 'p1-l5'], 0.1);
-    expect(three.items).toHaveLength(1);
-    expect(three.items[0]!.lineIds).toEqual(['p1-l1', 'p1-l2', 'p1-l3', 'p1-l4', 'p1-l5', 'p1-l6']);
+    // Three rows of two fragments (six lines in all): kept, every fragment cited, whether the model cited the
+    // first of each row or all six.
+    for (const lineIds of [['p1-l1', 'p1-l3', 'p1-l5'], ['p1-l1', 'p1-l2', 'p1-l3', 'p1-l4', 'p1-l5', 'p1-l6']]) {
+      const three = note(lineIds, 0.1);
+      expect(three.items).toHaveLength(1);
+      expect(three.items[0]!.lineIds).toEqual(['p1-l1', 'p1-l2', 'p1-l3', 'p1-l4', 'p1-l5', 'p1-l6']);
+    }
     // Four rows, every fragment cited: over the limit.
     const four = note(rows.map((line) => line.id), 0.135);
     expect(four.items).toEqual([]);
@@ -1264,17 +1267,43 @@ describe('picture reading on a page whose scanned handwriting is nonsense', () =
     expect(result.droppedUngrounded).toBe(1);
   });
 
-  it('drops an item whose box claims more than two fragments beyond the lines it cites', () => {
+  it('drops an item over more than four lines of one row, cited or added', () => {
     const cells = [0, 1, 2, 3, 4, 5].map((n) => hw(n + 1, 'n', { left: 0.1 + 0.1 * n, top: 0.4, width: 0.05,
       height: 0.03 }));
-    const morphine = (lineIds: string[], width: number) => check({ kind: 'medicine', asWritten: 'Morphine 30mg',
-      name: 'Morphine', strength: '30mg', status: 'current', lineIds, box: { left: 0.1, top: 0.4, width, height: 0.03 } },
-    cells);
-    const across = morphine(['p1-l1'], 0.55);
-    expect(across.items).toEqual([]);
-    expect(across.droppedUngrounded).toBe(1);
-    // Two fragments beyond its own line (three cells): within the cap.
-    expect(morphine(['p1-l1'], 0.25).items[0]!.lineIds).toEqual(['p1-l1', 'p1-l2', 'p1-l3']);
+    const morphine = (lineIds: string[]) => check({ kind: 'medicine', asWritten: 'Morphine 30mg', name: 'Morphine',
+      strength: '30mg', status: 'current', lineIds, box: { left: 0.1, top: 0.4, width: 0.55, height: 0.03 } }, cells);
+    // Six cells, whether the model cites one of them or all six.
+    for (const lineIds of [['p1-l1'], cells.map((cell) => cell.id)]) {
+      const result = morphine(lineIds);
+      expect(result.items).toEqual([]);
+      expect(result.droppedUngrounded).toBe(1);
+    }
+  });
+
+  it('keeps a correct reading on a line split into four hard fragments, however many it cites, and not five', () => {
+    const words = ['Lis', 'day', 'my', 'n', 'x'];
+    const fragments = words.map((text, n) => hw(n + 1, text, { left: 0.1 + 0.1 * n, top: 0.4, width: 0.08,
+      height: 0.03 }));
+    const read = (lineIds: string[], count: number) => check({ ...ceftriaxone, lineIds,
+      box: { left: 0.1, top: 0.4, width: 0.1 * count - 0.02, height: 0.03 } }, fragments);
+    for (const lineIds of [['p1-l1'], ['p1-l1', 'p1-l2'], ['p1-l1', 'p1-l2', 'p1-l3', 'p1-l4']]) {
+      const result = read(lineIds, 4);
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0]!.lineIds).toEqual(['p1-l1', 'p1-l2', 'p1-l3', 'p1-l4']);
+      expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(['read_from_image',
+        'not_matched_to_scanned_text']));
+    }
+    // Five fragments on the row: over the per-row limit.
+    for (const lineIds of [['p1-l1'], fragments.map((line) => line.id)]) expect(read(lineIds, 5).items).toEqual([]);
+  });
+
+  it('drops an item over more than six lines in all, though no row has more than four', () => {
+    const block = [0, 1].flatMap((row) => [0, 1, 2, 3].map((n) => hw(4 * row + n + 1, 'n',
+      { left: 0.1 + 0.1 * n, top: 0.4 + 0.035 * row, width: 0.08, height: 0.03 })));
+    const result = check({ kind: 'note', asWritten: 'Review in clinic', noteText: 'Review in clinic',
+      lineIds: block.map((line) => line.id), box: { left: 0.1, top: 0.4, width: 0.38, height: 0.065 } }, block);
+    expect(result.items).toEqual([]);
+    expect(result.droppedUngrounded).toBe(1);
   });
 
   it('shows its sentence below the real disagreements and above the general picture one', () => {

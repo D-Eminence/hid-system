@@ -215,8 +215,10 @@ Each claimed job runs, in order:
    (confidence below 0.80) that the item's box lies on and that is on the
    same written row as one of its cited lines (vertical overlap at least half
    the smaller line's height) is a fragment of the same writing that Textract
-   split off, and is added to the item's cited lines in reading order: at
-   most 2 such fragments per item, or the item is dropped. A legible line on
+   split off, and is added to the item's cited lines in reading order. With
+   the cited and added lines together, an item may have at most 4 lines on
+   any one row and 6 lines in all, or it is dropped (a box cannot claim a
+   whole row or block of cells, whether the model cited them or not). A legible line on
    the row is never taken for a fragment (a box over it drops the item). An
    item read from the picture is then kept only when it cites lines on its
    page, on at most 3 written rows (fragments of one row count once; a row is
