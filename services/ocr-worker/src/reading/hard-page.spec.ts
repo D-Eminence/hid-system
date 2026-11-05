@@ -63,6 +63,31 @@ describe('hard-page answers, before they are held to the page', () => {
     expect([markGuess('tds', 'letters'), markGuess('', 'context'), markGuess('tds?', 'context'),
       markGuess('[unreadable]', 'context')]).toEqual(['tds', '', 'tds?', '[unreadable]']);
   });
+
+  it('puts "?" on a diagnosis name and an allergy reaction from context, and says so for an enum from context', () => {
+    const page = readPage(1, [['Dx Toxoplasmosis', { handwritten: true, confidence: 0.45 }],
+      ['Allergy: Sulfa - rash', { handwritten: true, confidence: 0.4 }]]);
+    const extras = (basis: Partial<Record<BasisField, FieldBasis>>) => ({ dose: '', doseUnit: '',
+      basis: letters({ dose: 'empty', unit: 'empty', frequency: 'empty', ...basis }) });
+    const diagnosis: ModelItem = { ...modelItem({ kind: 'diagnosis', asWritten: 'Dx Toxoplasmosis', lineIds: ['p1-l1'],
+      name: 'Toxoplasmosis', status: 'confirmed' }), box: onLine(1), hard: extras({ name: 'context', other: 'letters' }) };
+    const allergy: ModelItem = { ...modelItem({ kind: 'allergy', asWritten: 'Allergy: Sulfa - rash', lineIds: ['p1-l2'],
+      substance: 'Sulfa', reaction: 'rash' }), box: onLine(2), hard: extras({ name: 'empty', other: 'context' }) };
+    // A diagnosis whose only context field is its status (an enum): no "?" can go on it, the reason says so.
+    const status: ModelItem = { ...diagnosis, hard: extras({ name: 'letters', other: 'context' }) };
+    const prepared = prepareHardAnswer(modelPage([diagnosis, allergy, status]));
+    expect(prepared.items.map((item) => [item.name, item.substance, item.reaction, item.status])).toEqual([
+      ['Toxoplasmosis?', '', '', 'confirmed'], ['', 'Sulfa?', 'rash?', 'none'], ['Toxoplasmosis', '', '', 'confirmed']]);
+    const check = checkPage({ page: 1, lines: page.lines, answer: prepared, sourceSha256Hex: SOURCE_SHA,
+      readBy: 'reread', masker: createMasker(), fromImage: true });
+    const { check: merged } = mergeHardReadings([{ answer: prepared, check }], SOURCE_SHA);
+    expect(merged.items.map((item) => [item.kind, fieldsOf(item)])).toEqual(expect.arrayContaining([
+      ['diagnosis', { name: 'Toxoplasmosis?', status: 'confirmed' }],
+      ['diagnosis', { name: 'Toxoplasmosis', status: 'confirmed' }],
+      ['allergy', { substance: 'Sulfa?', reaction: 'rash?', severity: null, noKnownAllergies: false }]]));
+    expect(merged.items).toHaveLength(3);
+    expect(merged.items.every((item) => item.checkReasons.includes('field_from_context'))).toBe(true);
+  });
 });
 
 describe('two readings of a hard page', () => {
@@ -173,6 +198,28 @@ describe('two readings of a hard page', () => {
     expect(item.lineIds).toEqual(['p1-l1', 'p1-l2']);
     expect(agreement).toMatchObject({ itemsPaired: 1, itemsSingle: 0 });
     expect(JSON.stringify(fieldsOf(item))).not.toMatch(/200|400/);
+  });
+
+  it('keeps the same medicine at one height in two columns as two orders, each found by one reading', () => {
+    // Two columns: line 1 on the left, line 2 on the right, at the same height.
+    const page = readPage(1, [['Metronidazole 400 mg tds', { handwritten: true, confidence: 0.45,
+      box: { left: 0.05, top: 0.05, width: 0.35, height: 0.02 } }],
+    ['Metronidazole 500 mg bd', { handwritten: true, confidence: 0.45,
+      box: { left: 0.55, top: 0.05, width: 0.35, height: 0.02 } }]]);
+    const held = (answer: ModelPage): HardReading => {
+      const prepared = prepareHardAnswer(answer);
+      return { answer: prepared, check: checkPage({ page: 1, lines: page.lines, answer: prepared,
+        sourceSha256Hex: SOURCE_SHA, readBy: 'reread', masker: createMasker(), fromImage: true }) };
+    };
+    const { check, agreement } = mergeHardReadings([
+      held(modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds',
+        { box: { left: 0.05, top: 0.05, width: 0.35, height: 0.02 } })])),
+      held(modelPage([medicine(2, 'Metronidazole', '500', 'mg', 'bd',
+        { box: { left: 0.55, top: 0.05, width: 0.35, height: 0.02 } })]))], SOURCE_SHA);
+    expect(check.items.map((item) => fieldsOf(item).strength)).toEqual(['400 mg', '500 mg']);
+    expect(check.items.every((item) => item.checkReasons.includes('single_reading_only'))).toBe(true);
+    expect(check.items.some((item) => item.checkReasons.includes('readings_disagree'))).toBe(false);
+    expect(agreement).toMatchObject({ itemsPaired: 0, itemsSingle: 2 });
   });
 
   it('marks every item single_reading_only when only one reading came back', () => {

@@ -14,8 +14,8 @@ import { HARD_PAGE_FREQUENCIES, UNREADABLE, type BasisField, type FieldBasis, ty
  *    name checked against the drug list (drug-list.ts): a listed name is shown in its list spelling with "?" (a brand
  *    as "Brand? (generic)"); an unlisted one becomes "[unreadable]". asWritten keeps what the model read, "?" marks
  *    and all: it is the transcription the clinician compares with the paper, while the drug name field is what may
- *    be taken into the record, so only the field is held to the list. A filled field whose basis is "context" gets
- *    "?" in the field itself (markGuess).
+ *    be taken into the record, so only the field is held to the list. Every filled text field whose basis is
+ *    "context" gets "?" in the field itself (markGuess, GUESSABLE_TEXT_FIELDS), whatever the item's kind.
  * 2. Each answer is held to the page by checkPage (items.ts), unchanged: #194's placement rules apply to every item.
  * 3. mergeHardReadings pairs the kept items of the two readings and keeps what they agree on (see there).
  * The result is then merged with the first pass by mergeReread, unchanged, so no first-pass item is lost.
@@ -67,21 +67,35 @@ export function markGuess(value: string, basis: FieldBasis | undefined): string 
   return `${value.trimEnd()}?`;
 }
 
+/**
+ * The free-text fields of an answer item that become an item's text fields, of any kind, and so carry "?" when
+ * their basis (basisKey) is "context". Not here: the enum fields (status, severity, measure, noKnownAllergies),
+ * which cannot carry a mark and raise field_from_context instead (anyFromContext, pair); a medicine's strength,
+ * rebuilt from its marked dose and unit; and the fields checkPage keeps only where they are written on the page
+ * exactly (noteText, dateAsWritten, prescriberAsWritten, prescriptionDate), where a "?" would make it discard what
+ * was read. A medicine's "unit" is not its dose unit (that is hard.doseUnit), so it is left to the dose.
+ */
+export const GUESSABLE_TEXT_FIELDS = ['name', 'form', 'route', 'frequency', 'duration', 'substance', 'reaction',
+  'test', 'value', 'unit', 'referenceRange', 'flag'] as const;
+
 /** Step 1 (see the header). Items without hard-page extras are left as they are. */
 export function prepareHardAnswer(answer: ModelPage): ModelPage {
   return { ...answer, items: answer.items.map((item): ModelItem => {
     if (!item.hard) return item;
     const { basis } = item.hard;
-    const frequency = markGuess(normaliseFrequency(item.frequency), basis.frequency);
-    const guessed = { frequency, route: markGuess(item.route, basis.route),
-      duration: markGuess(item.duration, basis.duration), value: markGuess(item.value, basis.value) };
-    if (item.kind !== 'medicine') return { ...item, ...guessed };
+    const proposed = item.name.trim();
+    const match = item.kind === 'medicine' && proposed ? matchDrugName(proposed) : null;
+    const prepared: ModelItem = { ...item, frequency: normaliseFrequency(item.frequency) };
+    // A medicine's name is the drug list's (already "?" when listed; markGuess leaves a marked name as it is).
+    if (item.kind === 'medicine') prepared.name = proposed ? match?.display ?? UNREADABLE : '';
+    for (const field of GUESSABLE_TEXT_FIELDS) {
+      if (item.kind === 'medicine' && field === 'unit') continue;
+      prepared[field] = markGuess(prepared[field], basis[basisKey(item.kind, field)]);
+    }
+    if (item.kind !== 'medicine') return prepared;
     const dose = markGuess(normaliseDose(item.hard.dose), basis.dose);
     const doseUnit = markGuess(item.hard.doseUnit.trim(), basis.unit);
-    const proposed = item.name.trim();
-    const match = proposed ? matchDrugName(proposed) : null;
-    return { ...item, ...guessed, strength: strengthOf(dose, doseUnit),
-      name: proposed ? match?.display ?? UNREADABLE : '',
+    return { ...prepared, strength: strengthOf(dose, doseUnit),
       hard: { ...item.hard, dose, doseUnit, generic: match?.generic ?? null, nameExact: match?.exact ?? false,
         proposedName: normaliseDrugName(proposed) } };
   }) };
@@ -252,6 +266,8 @@ function pair(a: Side, b: Side, sourceSha256Hex: string, tally: HardPageAgreemen
       continue;
     }
     if (field === 'status' || field === 'severity' || field === 'measure' || field === 'noKnownAllergies') {
+      // An enum carries no "?": a value either reading filled from context is said by field_from_context.
+      if (fromContext(a, field, x) || fromContext(b, field, y)) context = true;
       compare(x === y);
       fields[field] = x === y ? x : a.item.kind === 'medicine' && field === 'status' ? 'unknown'
         : field === 'severity' ? null : x;
@@ -296,14 +312,24 @@ function pairScore(a: PaperItem, b: PaperItem): number | null {
   return shared + overlap;
 }
 
+/** Two neighbouring medicines are in the same column when their boxes share this much of the narrower one's width. */
+export const NEIGHBOUR_COLUMN_OVERLAP = 0.5;
+
 /**
- * Two medicines left unpaired by place that are the same listed medicine on neighbouring rows: their cited lines are
- * at most one line apart, or their boxes share part of their height. The smaller the gap the better; null when not.
+ * Two medicines left unpaired by place that are the same listed medicine on neighbouring rows of one column: their
+ * boxes share at least NEIGHBOUR_COLUMN_OVERLAP of the narrower one's width, and their cited lines are at most one
+ * line apart or their boxes share part of their height. The same medicine written at one height in two columns is
+ * two orders, never paired. The smaller the gap the better; null when not neighbours.
  */
 function neighbourGap(a: Side, b: Side): number | null {
   if (a.item.kind !== 'medicine' || b.item.kind !== 'medicine') return null;
   const generic = a.extras?.generic ?? null;
   if (generic === null || generic !== (b.extras?.generic ?? null)) return null;
+  const narrower = Math.min(a.item.box.width, b.item.box.width);
+  if (!(narrower > 0)
+    || span(a.item.box.left, a.item.box.width, b.item.box.left, b.item.box.width) < NEIGHBOUR_COLUMN_OVERLAP * narrower) {
+    return null;
+  }
   const linesA = a.item.lineIds.map(lineNumber);
   const linesB = b.item.lineIds.map(lineNumber);
   const lineGap = Math.min(...linesA.flatMap((x) => linesB.map((y) => Math.abs(x - y))));
@@ -316,7 +342,7 @@ function neighbourGap(a: Side, b: Side): number | null {
  * The hard page's reading from its two readings (or from one, when the other failed or was declined: every item
  * then single_reading_only). Items are paired one to one by kind and place (a shared cited line, or boxes
  * overlapping by PAIR_BOX_OVERLAP of the smaller), best pairs first, then the same listed medicine on neighbouring
- * rows (neighbourGap); each pair is merged by `pair`, and an item only
+ * rows of one column (neighbourGap); each pair is merged by `pair`, and an item only
  * one reading found is kept with single_reading_only. Every item: check_carefully, readBy 'reread', read_from_image
  * and best_guess_from_picture, plus field_from_context where any field's basis was context. Identity is merged as in
  * mergeIdentity (a conflict flags the page ai_unsure); the page flags are both readings' flags; the dropped counts are

@@ -361,13 +361,21 @@ Each claimed job runs, in order:
      (metronidazole)`, an unlisted one as `[unreadable]`. `asWritten` keeps
      what the model read, "?" marks included: it is the transcription the
      clinician compares with the paper, while the drug name field is what may
-     be taken into the record, so only the field is held to the list. The
+     be taken into the record, so only the field is held to the list. Every
+     filled text field whose basis is `context`, of any kind (a diagnosis
+     name, an allergy substance or reaction, a lab value, a route), gets "?"
+     in the field itself; enum fields (status, severity, measure) cannot
+     carry it and are marked by `field_from_context` instead. The
      reading is then held to the page by `checkPage` exactly as any picture
      reading (#194's placement rules, the row and line limits and the anchor
      rule, unchanged).
    - *Two readings compared.* Items are paired one to one by kind and place
      (a shared cited line, or boxes overlapping by half the smaller box; a
-     vital also by measure), best pairs first. For each pair every field is
+     vital also by measure), best pairs first, then the same listed medicine
+     on neighbouring rows of one column (boxes sharing at least half the
+     narrower box's width, and cited lines at most one apart or boxes sharing
+     part of their height; the same medicine at one height in two columns is
+     two orders). For each pair every field is
      compared after normalisation ("?" marks, case, spacing aside): agreeing
      fields keep the best guess, with "?" where either reading was unsure and
      basis `context` where either said so; a disagreeing drug name becomes
