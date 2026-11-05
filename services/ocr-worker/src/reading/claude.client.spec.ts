@@ -138,6 +138,18 @@ describe('ClaudePageClient', () => {
       expect(fetch).toHaveBeenCalledTimes(1);
     });
 
+  it('marks only a 400 invalid_request_error as an invalid request (the one rejection a picture can cause)', async () => {
+    const cases: Array<[number, string, boolean]> = [[400, 'invalid_request_error', true], [400, 'api_error', false],
+      [401, 'authentication_error', false], [403, 'permission_error', false], [404, 'not_found_error', false],
+      [413, 'request_too_large', false]];
+    for (const [status, type, invalid] of cases) {
+      const { instance } = client([failure(status, type)]);
+      const error = await instance.readPage(request, new AbortController().signal).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(AiRejectedError);
+      expect((error as AiRejectedError).invalidRequest).toBe(invalid);
+    }
+  });
+
   it('retries an overloaded error event inside a stream that had already started', async () => {
     const broken = new Response('event: message_start\ndata: ' + JSON.stringify({ type: 'message_start', message: {
       id: 'msg_test', type: 'message', role: 'assistant', model: 'claude-sonnet-5-5', content: [], stop_reason: null,
@@ -258,7 +270,8 @@ describe('ClaudePageClient', () => {
       const { instance, fetch } = client([sse(JSON.stringify(answer))]);
       await instance.readPage(pinned, new AbortController().signal);
       const body = bodyOf(fetch);
-      // The request body this exact call produced on the parent commit (605e971e), before any image work.
+      // The request body this exact call produced on the parent commit (605e971e), before any image work. It is
+      // unchanged by PROMPT_VERSION 3 (the re-read routing): the version label is recorded in provenance, never sent.
       expect(createHash('sha256').update(body).digest('hex'))
         .toBe('cd03ba1ed24c0d36e6bb9b71f8c27582e2d0a30adc911838fcc0b00f50d6fb7f');
       expect(body).toHaveLength(7637);

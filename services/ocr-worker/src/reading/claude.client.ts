@@ -50,9 +50,14 @@ export class AiTransientError extends Error implements AiCallUse {
     super(code); this.name = 'AiTransientError';
   }
 }
-/** The API refused the request itself (bad request, key, permission, model): retrying will not help. */
+/**
+ * The API refused the request itself (bad request, key, permission, model): retrying will not help.
+ * `invalidRequest` is true only for a 400 whose error type is invalid_request_error: the one rejection a request
+ * with the picture can cause that the same request without it would not.
+ */
 export class AiRejectedError extends Error implements AiCallUse {
-  constructor(readonly code: string, readonly attempts = 0, readonly usage: TokenUsage = noUsage()) {
+  constructor(readonly code: string, readonly attempts = 0, readonly usage: TokenUsage = noUsage(),
+    readonly invalidRequest = false) {
     super(code); this.name = 'AiRejectedError';
   }
 }
@@ -162,7 +167,7 @@ export class ClaudePageClient implements PageModelClient {
         addTokens(spent, partialUsage(stream));
         if (signal.aborted) throw new AiInterruptedError(signal.reason, sent, spent);
         const decision = classify(error, timeout.aborted);
-        if (decision.kind === 'rejected') throw new AiRejectedError(decision.code, sent, spent);
+        if (decision.kind === 'rejected') throw new AiRejectedError(decision.code, sent, spent, decision.invalidRequest === true);
         if (attempt >= maxAttempts) throw new AiTransientError(decision.code, sent, spent);
         const jitter = fullJitterDelayMs(attempt - 1, { ...BACKOFF, random: this.random });
         try {
@@ -227,7 +232,8 @@ export function interpret(message: Anthropic.Message, attempts: number, earlier:
     servedInferenceGeo: message.usage.inference_geo ?? null };
 }
 
-type Decision = { kind: 'retry'; code: string; retryAfterMs: number | null } | { kind: 'rejected'; code: string };
+type Decision = { kind: 'retry'; code: string; retryAfterMs: number | null }
+  | { kind: 'rejected'; code: string; invalidRequest?: boolean };
 
 /** Typed SDK errors only; never the message text. */
 export function classify(error: unknown, timedOut: boolean): Decision {
@@ -240,7 +246,9 @@ export function classify(error: unknown, timedOut: boolean): Decision {
   if (error instanceof Anthropic.AuthenticationError) return { kind: 'rejected', code: 'AI_NOT_AUTHENTICATED' };
   if (error instanceof Anthropic.PermissionDeniedError) return { kind: 'rejected', code: 'AI_NOT_PERMITTED' };
   if (error instanceof Anthropic.NotFoundError) return { kind: 'rejected', code: 'AI_MODEL_NOT_FOUND' };
-  if (error instanceof Anthropic.BadRequestError) return { kind: 'rejected', code: 'AI_BAD_REQUEST' };
+  if (error instanceof Anthropic.BadRequestError) {
+    return { kind: 'rejected', code: 'AI_BAD_REQUEST', invalidRequest: error.type === 'invalid_request_error' };
+  }
   if (error instanceof Anthropic.APIError) {
     if (typeof error.status === 'number') {
       return RETRYABLE_STATUSES.has(error.status)

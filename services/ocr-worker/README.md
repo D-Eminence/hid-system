@@ -74,7 +74,7 @@ Each claimed job runs, in order:
    even with AI reading off (idempotent per job).
 5. **AI step** (`src/reading/`, only when `OCR_AI_MODE=claude` and the facility
    is in `OCR_AI_FACILITY_IDS` when that is set). One Claude API request per
-   page with the frozen, cached system prompt (`hid-paper-reading-prompt-2`,
+   page with the frozen, cached system prompt (`hid-paper-reading-prompt-3`,
    model schema `hid-paper-reading-model-schema-2`),
    structured JSON output, adaptive thinking, `inference_geo: "us"`, the
    page's lines without boxes, and 11-digit NIN-like numbers and Nigerian phone
@@ -101,22 +101,34 @@ Each claimed job runs, in order:
    both kept, the later ones (reading order: page, then first cited line)
    suffixed `-2`, `-3`, ..., each marked `check_carefully` with
    `duplicate_source_span`, and the page flagged `possible_missed_item`.
-7. **Re-read.** A page is re-read once by `OCR_AI_REREAD_MODEL` when the model
-   was unsure, an item was dropped, a cited handwritten line was below 0.80, or
-   at least 30% of its items need checking for a reason other than legible
-   handwriting (at most `OCR_AI_MAX_REREAD_PAGES` per document). If the re-read
-   fails, the first-pass items are kept as `check_carefully` with
-   `reread_failed`.
+7. **Re-read** (owner decision 2026-11-05). Each page gets at most one
+   re-read by `OCR_AI_REREAD_MODEL`, at most `OCR_AI_MAX_REREAD_PAGES` per
+   document: first the pages whose first pass failed (cut off or malformed) or
+   was declined, then the flagged pages in page order.
+   - A page whose first pass **failed or was declined** gets a **text**
+     re-read (never the picture).
+   - A page the first pass **flagged** (`low_confidence`, `handwriting`,
+     `many_dropped`, `ai_unsure` or `possible_missed_item`) gets the **image**
+     re-read, and no text re-read. Where the picture cannot go (setting off,
+     PDF, TIFF, not a one-page image, no document bytes, too large or size
+     unknown, EXIF orientation, a masked number, or the API rejecting the
+     picture), it gets the **text** re-read instead, so no flagged page is left
+     with one reading. This replaces the earlier rule that sent the picture
+     only when a line was below 0.80.
+   - An unflagged page the first pass read is not re-read.
 
-   **Image re-read of hard pages** (owner decision "Yes, send image for hard
-   pages", 2026-11-05; `OCR_AI_IMAGE_REREAD`, `on` or `off`, default `on` when
-   `OCR_AI_MODE=claude`, any other value fails startup). A re-read also carries
-   the picture of the page when the page is hard to read by its lines'
-   legibility alone (any line, handwritten or printed, below 0.80; the first
-   pass's own doubts, such as many `check_carefully` items, which also set the
-   `low_confidence` page flag, do not count) and the
-   document is a one-page PNG or JPEG by its detected media type (the exact
-   verified bytes, as stored; never resized or re-encoded). The request is the
+   If the re-read fails, the first-pass items are kept as `check_carefully`
+   with `reread_failed` and the page is flagged `ai_unsure`. `PROMPT_VERSION`
+   is `hid-paper-reading-prompt-3` for this routing (the prompt text and
+   request bodies are unchanged from version 2; the label is only recorded),
+   so `ocr-api` never reuses a reading made under the older routing.
+
+   **Image re-read of flagged pages** (owner decisions "Yes, send image for
+   hard pages" and the routing above, 2026-11-05; `OCR_AI_IMAGE_REREAD`, `on`
+   or `off`, default `on` when `OCR_AI_MODE=claude`, any other value fails
+   startup). The re-read of a flagged page carries the picture of the page
+   when the document is a one-page PNG or JPEG by its detected media type (the
+   exact verified bytes, as stored; never resized or re-encoded). The request is the
    same Claude API request (`inference_geo: "us"`, fixed endpoint, same system
    prompt) with the user turn `[image, text]`: the text gives the picture's size
    as the model sees it (the API's resize for the re-read model's tier, computed
@@ -131,11 +143,14 @@ Each claimed job runs, in order:
    `hid-paper-reading-image-prompt-2`, recorded in provenance as
    `imagePromptVersion`). Only these requests use the image answer schema
    (`MODEL_OUTPUT_IMAGE_JSON_SCHEMA`, a required `box` per item); text-only
-   requests are byte for byte as before, so `PROMPT_VERSION` and
-   `MODEL_SCHEMA_VERSION` are unchanged. The client turns the model's pixel
+   requests are byte for byte as before (`MODEL_SCHEMA_VERSION` unchanged). The client turns the model's pixel
    boxes into page fractions before any check. An item read from the picture
-   is kept only when it cites lines on its page and its box (clipped to the
-   page, at least 0.005 of the page on each side) lies on every cited line that
+   is kept only when it cites lines on its page, at most 3 of them, lying
+   together (on one row, or consecutive in reading order and vertically
+   adjacent: the `lines_not_together` test, here a reason to drop), and its box
+   (clipped to the page, at least 0.005 of the page on each side, and at most
+   2 times the area of the box around its cited lines, that box first widened
+   by 0.005 of the page on each side for a one-line item) lies on every cited line that
    has a box, each line on its own (over half the line's height and half the
    narrower width), with at most half of the line area it covers on lines it
    does not cite, and its `asWritten` shares a word of three letters or more,
@@ -151,18 +166,35 @@ Each claimed job runs, in order:
    or a number is not in the text read), `readBy: "reread"`, and its stored box
    is the model's box clipped to the page.
 
-   Scope (v1): PNG and JPEG only. PDF and TIFF pages keep the text-only re-read
-   (`image_not_available_pdf`, `image_not_available_tiff`). A picture over the
+   Scope (v1): PNG and JPEG only. PDF and TIFF pages get the text re-read
+   (`image_not_available_pdf`, `image_not_available_tiff`). A JPEG whose EXIF
+   Orientation (APP1 `Exif`, tag 0x0112, either byte order, read without a new
+   dependency) is not 1, or whose EXIF cannot be read, is not sent
+   (`image_orientation_unsupported`): the picture as the API shows it might be
+   turned relative to the line boxes. PNG `eXIf` orientation is not checked.
+
+   Masked numbers: the text sent hides 11-digit NIN-like and Nigerian phone
+   numbers, but the picture shows them. By default
+   (`OCR_AI_IMAGE_MASKED_PAGES=text_only`) a page whose text had any number
+   hidden is not sent as a picture and gets the text re-read
+   (`image_has_masked_number`). `OCR_AI_IMAGE_MASKED_PAGES=send` sends the
+   picture of such pages anyway, **which shows those NIN-like and phone
+   numbers to the Claude API**; any other value fails startup. A picture over the
    Claude API image limits (10 MB base64-encoded, 8000 x 8000 px; the size is
    read from the PNG IHDR or JPEG frame header, never by decoding) stays text
    only (`image_too_large`; `image_size_unknown` when the header cannot be
-   read). If the API rejects the request with the picture as a bad request or
-   too large (`AI_BAD_REQUEST`, `AI_HTTP_413`), the page is re-read from its
-   text (`image_rejected`); any other rejection (key, permission, model) is a
-   failed re-read, as for a text re-read, with no second request. The reading summary and the payload's
-   `reading` carry `imageRereadPages` (re-reads answered from the picture) and
-   `imageRereadSkipped` (`{page, reason}` for each re-read sent without it,
-   including `image_reread_off` and `not_hard_to_read`). The picture and its
+   read). Only if the API rejects the request with the picture as an invalid
+   request (HTTP 400 with error type `invalid_request_error`) is the page
+   re-read from its text (`image_rejected`); any other rejection (413, key,
+   permission, model), a refusal, a cut-off or malformed answer, or an
+   overload or timeout after the retries is a failed re-read, with no second
+   request. The reading summary and the payload's `reading` carry
+   `imageRereadPages` (re-reads answered from the picture),
+   `imageRereadSkipped` (`{page, reason}` for each flagged page re-read without
+   it, including `image_reread_off`, `image_has_masked_number` and
+   `image_orientation_unsupported`; `not_hard_to_read` is no longer written but
+   still reads in older payloads) and `imageRereadFailedPages` (pages sent with
+   the picture whose re-read gave no usable answer). The picture and its
    base64 are never logged, stored (beyond the original document, already in
    S3) or put in an error.
 8. **Completion.** `ocr.complete_worker_job` stores the `hid-paper-reading-v2`
@@ -205,8 +237,12 @@ a document with no text as `no_text`.
   `claude-opus-5-5` (larger pictures are downscaled by the API): an A4 scan at
   150 dpi (1240 x 1754) is about 2,800 tokens. At the re-read model's $4 per
   million input tokens with the 1.1x US-only price, that is about $0.012 to
-  $0.021 more per image-read page, plus a few tokens per line for the boxes.
-  Only flagged PNG/JPEG pages on re-read pay it. Image re-reads send a
+  $0.021 more per image-read page, plus a few tokens per line for the boxes
+  (and the system prompt uncached, below). Only flagged one-page PNG/JPEG
+  pages pay it. Under the 2026-11-05 routing every flagged page is re-read
+  (pages flagged only `possible_missed_item` or `low_confidence` by a printed
+  line were not before), so expect more re-reads than under version 2: one
+  re-read-model request per flagged page, with or without the picture. Image re-reads send a
   different answer schema (`output_config.format`), which is a prompt-cache
   breaker, so they do not read the text requests' cached system prompt: count
   the system prompt as ordinary input (or a cache write) for each image re-read

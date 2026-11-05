@@ -6,13 +6,21 @@ import { ALLERGY_SEVERITIES, DIAGNOSIS_STATUSES, ITEM_KINDS, MEDICINE_STATUSES, 
  * Any change to either is a new PROMPT_VERSION / MODEL_SCHEMA_VERSION: they
  * are recorded in provenance, and an unchanged prefix is what lets the prompt
  * cache hit across pages and documents. Nothing here may vary per request.
+ *
+ * PROMPT_VERSION also changes when how a document is read changes without the
+ * prompt text changing, so the OCR HTTP service, which reuses a reading only
+ * under the current version, never reuses one made the older way. Version 3:
+ * the re-read routing of the owner decision of 2026-11-05 (flagged pages get
+ * the image re-read, with the text re-read only for failed or declined pages
+ * and as a fallback). The prompt text, the answer schema and every request
+ * body are byte for byte as under version 2; the label is not sent.
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-2';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-3';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 /**
  * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
  * They are used only for a hard page re-read with its picture, so SYSTEM_PROMPT, MODEL_OUTPUT_JSON_SCHEMA and the
- * text-only page message, and with them PROMPT_VERSION and MODEL_SCHEMA_VERSION, are unchanged. Recorded in
+ * text-only page message, and with them MODEL_SCHEMA_VERSION, are unchanged by it. Recorded in
  * provenance when a page was read from its picture.
  */
 export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-2';

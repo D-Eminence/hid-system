@@ -99,7 +99,7 @@ describe('OcrWorker processing', () => {
     expect(result.providerModel).toBe('amazon-textract-detect-document-text');
     expect(result.provenance).toMatchObject({ processingContract: 'hid-textract-v2', pageCount: 1,
       reading: { contract: 'hid-paper-reading-v2', firstPassModel: 'claude-sonnet-5-5', inferenceGeo: 'us',
-        promptVersion: 'hid-paper-reading-prompt-2', usage: { inputTokens: 2400, outputTokens: 800 } } });
+        promptVersion: 'hid-paper-reading-prompt-3', usage: { inputTokens: 2400, outputTokens: 800 } } });
     const provenance = JSON.stringify(result.provenance);
     for (const secret of [SECRET_NAME, SECRET_DRUG, SECRET_NOTE, 'Inventedcillin']) expect(provenance).not.toContain(secret);
     expect(JSON.stringify(result.structuredPayload)).not.toContain('Inventedcillin');
@@ -449,5 +449,8 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
       ...written].join('\n');
     for (const chunk of chunks) expect(everything).not.toContain(chunk);
     expect((result.structuredPayload as PaperReadingPayload).reading.imageRereadPages).toEqual([]);
+    expect((result.structuredPayload as PaperReadingPayload).reading.imageRereadFailedPages).toEqual([1]);
+    expect(result.provenance.reading).toMatchObject({ imageRereadFailedPages: [1] });
+    expect(written.join('\n')).toContain('"imageRereadFailedPages":1');
   });
 });

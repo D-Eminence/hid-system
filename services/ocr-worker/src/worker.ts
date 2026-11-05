@@ -23,7 +23,7 @@ export class OcrWorker {
       acceptingClaims: true, concurrency: this.config.OCR_WORKER_CONCURRENCY,
       maxInFlightPerFacility: this.config.OCR_WORKER_MAX_INFLIGHT_PER_FACILITY,
       aiMaxConcurrentRequests: this.config.OCR_AI_MAX_CONCURRENT_REQUESTS,
-      aiImageReread: this.config.OCR_AI_IMAGE_REREAD,
+      aiImageReread: this.config.OCR_AI_IMAGE_REREAD, aiImageMaskedPages: this.config.OCR_AI_IMAGE_MASKED_PAGES,
       textractMaxConcurrent: this.config.OCR_TEXTRACT_MAX_CONCURRENT, remoteProviderCheck: false });
     await Promise.all(Array.from({ length: this.config.OCR_WORKER_CONCURRENCY }, (_, index) => this.claimLoop(index)));
     await this.repository.close();
@@ -81,6 +81,7 @@ export class OcrWorker {
         firstPassModel: summary.firstPassModel, rereadModel: summary.rereadModel, aiRequests: summary.requests,
         aiRefusals: summary.refusals, rereadPages: summary.rereadPages.length,
         imageRereadPages: summary.imageRereadPages.length, imageRereadSkippedPages: summary.imageRereadSkipped.length,
+        imageRereadFailedPages: summary.imageRereadFailedPages.length,
         rereadFailedPages: summary.rereadFailedPages, itemCount: summary.itemCount,
         droppedUngrounded: summary.droppedUngrounded, flaggedPages: summary.flaggedPages,
         inputTokens: summary.usage.inputTokens, outputTokens: summary.usage.outputTokens,
@@ -265,6 +266,7 @@ export function buildCompletion(text: TextReading, outcome: ReadingOutcome): Com
         rereadFailedPages: summary.rereadFailedPages,
         imageRereadPages: summary.imageRereadPages,
         imageRereadSkipped: summary.imageRereadSkipped,
+        imageRereadFailedPages: summary.imageRereadFailedPages,
         imagePromptVersion: summary.imageRereadPages.length > 0 ? IMAGE_PROMPT_VERSION : null,
         droppedUngrounded: summary.droppedUngrounded,
         droppedUngroundedFirstPass: summary.droppedUngroundedFirstPass,

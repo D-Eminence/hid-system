@@ -24,17 +24,21 @@ export const VITAL_MEASURES = ['blood_pressure', 'pulse', 'temperature', 'respir
 export const ALLERGY_SEVERITIES = ['mild', 'moderate', 'severe', 'unknown'] as const;
 export const READING_STATUSES = ['read', 'ai_off', 'ai_declined', 'ai_failed', 'no_text'] as const;
 /**
- * Why a page that was re-read was re-read from its text only, without the picture of the page:
- * 'image_reread_off' (OCR_AI_IMAGE_REREAD=off), 'not_hard_to_read' (no handwriting or low-confidence reason),
+ * Why a flagged page was re-read from its text only, without the picture of the page:
+ * 'image_reread_off' (OCR_AI_IMAGE_REREAD=off), 'image_has_masked_number' (the page's text had a NIN-like or phone
+ * number hidden, which the picture would show; OCR_AI_IMAGE_MASKED_PAGES=text_only),
  * 'image_not_available_pdf' / 'image_not_available_tiff' (v1 sends PNG and JPEG only),
  * 'image_not_available_type' (another detected type), 'image_not_given' (the caller passed no document bytes),
  * 'not_single_page' (not page 1 of a one-page image), 'image_too_large' (over the Claude API image limits),
- * 'image_size_unknown' (the picture's size could not be read from its header), 'image_rejected' (the API
- * refused the request with the picture, so the page was re-read from its text instead).
+ * 'image_size_unknown' (the picture's size could not be read from its header), 'image_orientation_unsupported'
+ * (a JPEG whose EXIF orientation is not 1, or unreadable, so the picture as seen would not match the line boxes),
+ * 'image_rejected' (the API refused the request with the picture as an invalid request, so the page was re-read
+ * from its text instead). 'not_hard_to_read' is no longer written (the page's flags now decide; owner decision
+ * 2026-11-05) and stays so payloads written before still read.
  */
 export const IMAGE_REREAD_SKIP_REASONS = ['image_reread_off', 'not_hard_to_read', 'image_not_available_pdf',
   'image_not_available_tiff', 'image_not_available_type', 'image_not_given', 'not_single_page', 'image_too_large',
-  'image_size_unknown', 'image_rejected'] as const;
+  'image_size_unknown', 'image_rejected', 'image_has_masked_number', 'image_orientation_unsupported'] as const;
 
 const fraction = z.number().min(0).max(1);
 export const boxSchema = z.strictObject({ left: fraction, top: fraction, width: fraction, height: fraction });
@@ -122,6 +126,12 @@ export const readingSchema = z.strictObject({
   /** Re-read pages that went without the picture, and why. */
   imageRereadSkipped: z.array(z.strictObject({ page: z.number().int().min(1),
     reason: z.enum(IMAGE_REREAD_SKIP_REASONS) })).optional(),
+  /**
+   * Pages sent with the picture whose image re-read gave no usable answer (declined, cut off or malformed, a
+   * rejection that is not the picture's, or unavailable after retries); their first-pass items stay, marked
+   * reread_failed. A picture rejected as an invalid request is in imageRereadSkipped ('image_rejected') instead.
+   */
+  imageRereadFailedPages: z.array(z.number().int().min(1)).optional(),
 });
 
 export const paperReadingPayloadSchema = z.strictObject({

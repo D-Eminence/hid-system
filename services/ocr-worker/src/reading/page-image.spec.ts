@@ -1,6 +1,6 @@
 import { base64Length, HIGH_RESOLUTION_TIER, IMAGE_MAX_BASE64_LENGTH, imageTierOf, imageTokens, jpegDimensions,
-  pageImageFor, pngDimensions, resizedSize, STANDARD_TIER } from './page-image';
-import { fixtureJpeg, fixturePng } from './test-fixtures';
+  jpegOrientation, pageImageFor, pngDimensions, resizedSize, STANDARD_TIER } from './page-image';
+import { fixtureExifSegment, fixtureJpeg, fixturePng } from './test-fixtures';
 
 describe('page picture for the image re-read', () => {
   it('reads the size from a PNG IHDR and a JPEG frame header, and nothing from other bytes', () => {
@@ -12,6 +12,33 @@ describe('page picture for the image re-read', () => {
     expect(jpegDimensions(new Uint8Array([0xff, 0xd8, 0xff, 0xda, 0, 2]))).toBeNull();
     // A segment length that runs off the end never reads past the bytes.
     expect(jpegDimensions(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0xff, 0xff]))).toBeNull();
+  });
+
+  it('reads the EXIF orientation of a JPEG in both byte orders, and none where there is no EXIF', () => {
+    for (const order of ['II', 'MM'] as const) {
+      expect(jpegOrientation(fixtureJpeg(1240, 1754, 100, fixtureExifSegment(6, order)))).toBe(6);
+      expect(jpegOrientation(fixtureJpeg(1240, 1754, 100, fixtureExifSegment(1, order)))).toBe(1);
+    }
+    expect(jpegOrientation(fixtureJpeg(1240, 1754))).toBeNull();
+    // The frame size is still read past the EXIF segment.
+    expect(jpegDimensions(fixtureJpeg(1240, 1754, 100, fixtureExifSegment(6)))).toEqual({ width: 1240, height: 1754 });
+    // An EXIF segment cut short, or an orientation out of range, is unreadable, never read past the bytes.
+    const cut = fixtureExifSegment(6).slice(0, 14);
+    expect(jpegOrientation(new Uint8Array([0xff, 0xd8, ...cut]))).toBe('unreadable');
+    expect(jpegOrientation(fixtureJpeg(10, 10, 10, fixtureExifSegment(9)))).toBe('unreadable');
+    expect(jpegOrientation(fixturePng(10, 10))).toBeNull();
+  });
+
+  it('sends a JPEG only when it is upright: EXIF orientation 1 or none', () => {
+    const jpeg = (exif: number[]) => ({ mediaType: 'image/jpeg', bytes: fixtureJpeg(1240, 1754, 100, exif) });
+    expect(pageImageFor(jpeg(fixtureExifSegment(6)), 1, 1)).toEqual({ kind: 'skip',
+      reason: 'image_orientation_unsupported' });
+    expect(pageImageFor(jpeg(fixtureExifSegment(3, 'II')), 1, 1)).toEqual({ kind: 'skip',
+      reason: 'image_orientation_unsupported' });
+    expect(pageImageFor(jpeg(fixtureExifSegment(9)), 1, 1)).toEqual({ kind: 'skip',
+      reason: 'image_orientation_unsupported' });
+    expect(pageImageFor(jpeg(fixtureExifSegment(1)), 1, 1)).toMatchObject({ kind: 'image', width: 1240, height: 1754 });
+    expect(pageImageFor(jpeg([]), 1, 1)).toMatchObject({ kind: 'image' });
   });
 
   it('allows only a one-page PNG or JPEG by its detected type, within the Claude API image limits', () => {

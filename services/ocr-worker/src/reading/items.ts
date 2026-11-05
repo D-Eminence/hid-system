@@ -95,6 +95,15 @@ export const IMAGE_PLACE_OVERLAP = 0.5;
 export const IMAGE_UNCITED_SHARE = 0.5;
 /** The smallest image-read item box, as a share of the page's width and of its height. */
 export const IMAGE_MIN_BOX = 0.005;
+/** The most lines one image-read item may cite (a medicine or a result runs over a few lines, never the page). */
+export const IMAGE_MAX_CITED_LINES = 3;
+/** An image-read item's box may be at most this many times the area of the box around its cited lines. */
+export const IMAGE_MAX_AREA_RATIO = 2;
+/**
+ * For a one-line item, the box around its line is first widened by this share of the page on each side, so a box a
+ * little taller or wider than a short, thin line (a few words) is not dropped for that alone.
+ */
+export const IMAGE_ONE_LINE_MARGIN = 0.005;
 
 /** A model box clipped to the page ([0, 1] on both axes); null where nothing of it is on the page. */
 export function clipBox(box: { left: number; top: number; width: number; height: number }): Box | null {
@@ -133,16 +142,26 @@ function anchored(asWritten: string, source: string): boolean {
 
 /**
  * The stored box of an image-read item, or null where it is not held to its cited lines (it is then dropped):
- * the box at least IMAGE_MIN_BOX on each side; on every cited line that has a box (each measured on its own, not
+ * at most IMAGE_MAX_CITED_LINES cited lines, which lie together (one row, or consecutive in reading order and
+ * vertically adjacent: the lines_not_together test, here a reason to drop); the box at least IMAGE_MIN_BOX on each
+ * side and at most IMAGE_MAX_AREA_RATIO times the area of the box around its cited lines (widened by
+ * IMAGE_ONE_LINE_MARGIN for a one-line item); on every cited line that has a box (each measured on its own, not
  * as one box around them all); with at most IMAGE_UNCITED_SHARE of the line area it covers on lines it does not
- * cite; and its asWritten anchored in the cited lines' text.
+ * cite; and its asWritten anchored in the cited lines' text. A box around the whole page that cites every line
+ * fails the first three.
  */
-function imagePlace(raw: ModelItem, cited: readonly ReadLine[], all: readonly ReadLine[], source: string): Box | null {
+function imagePlace(raw: ModelItem, cited: readonly ReadLine[], all: readonly ReadLine[], source: string,
+  order: ReadonlyMap<string, number>): Box | null {
   if (!raw.box) return null;
+  if (cited.length > IMAGE_MAX_CITED_LINES || (cited.length > 1 && !together(cited, order))) return null;
   const box = clipBox(raw.box);
   if (box === null || box.width < IMAGE_MIN_BOX || box.height < IMAGE_MIN_BOX) return null;
   const citedBoxes = cited.map((line) => line.box).filter((line): line is Box => line !== null);
   if (citedBoxes.length === 0 || !citedBoxes.every((line) => onLine(box, line))) return null;
+  const around = unionBox(citedBoxes)!;
+  const margin = cited.length === 1 ? IMAGE_ONE_LINE_MARGIN : 0;
+  const allowed = (around.width + 2 * margin) * (around.height + 2 * margin) * IMAGE_MAX_AREA_RATIO;
+  if (area(box) > allowed) return null;
   const citedIds = new Set(cited.map((line) => line.id));
   const coveredBy = (lines: readonly ReadLine[]) => lines.reduce((sum, line) => sum + (line.box ? intersection(box, line.box) : 0), 0);
   const onCited = coveredBy(cited);
@@ -156,7 +175,10 @@ export interface PageCheck {
   droppedUngrounded: number;
   identity: PaperIdentity;
   pageUnsure: boolean;
-  /** Whether the result should be re-read by the stronger model, and why. */
+  /**
+   * Why the first pass looks shaky, by code. The reader no longer routes on these (owner decision 2026-11-05: a
+   * page is re-read when it is flagged, i.e. flagReasons is not empty, which covers every one of them).
+   */
   rereadReasons: string[];
   flagReasons: FlagReason[];
 }
@@ -198,7 +220,7 @@ export function checkPage(input: PageCheckInput): PageCheck {
     }
     const lines = cited as ReadLine[];
     // Read from the picture: held to the page by place. Dropped items are only counted, as above.
-    const place = input.fromImage ? imagePlace(raw, lines, input.lines, source) : null;
+    const place = input.fromImage ? imagePlace(raw, lines, input.lines, source, order) : null;
     if (input.fromImage && place === null) {
       dropped += 1;
       continue;

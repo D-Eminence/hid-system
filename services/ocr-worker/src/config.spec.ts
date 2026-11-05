@@ -80,6 +80,17 @@ describe('OCR worker configuration', () => {
     }
   });
 
+  it('keeps pages with a masked number text-only by default, sends them only when set to send, and fails closed', () => {
+    expect(readOcrWorkerConfig(base).OCR_AI_IMAGE_MASKED_PAGES).toBe('text_only');
+    expect(readOcrWorkerConfig({ ...base, OCR_AI_IMAGE_MASKED_PAGES: ' ' }).OCR_AI_IMAGE_MASKED_PAGES).toBe('text_only');
+    expect(readOcrWorkerConfig({ ...base, OCR_AI_IMAGE_MASKED_PAGES: 'text_only' }).OCR_AI_IMAGE_MASKED_PAGES)
+      .toBe('text_only');
+    expect(readOcrWorkerConfig({ ...base, OCR_AI_IMAGE_MASKED_PAGES: 'send' }).OCR_AI_IMAGE_MASKED_PAGES).toBe('send');
+    for (const value of ['yes', 'true', 'SEND', 'on', 'text-only']) {
+      expect(() => readOcrWorkerConfig({ ...base, OCR_AI_IMAGE_MASKED_PAGES: value })).toThrow(/OCR_AI_IMAGE_MASKED_PAGES/);
+    }
+  });
+
   it('never echoes the key in a configuration error', () => {
     const key = 'sk-ant-fake key with spaces 0000';
     expect(() => readOcrWorkerConfig({ ...base, ANTHROPIC_API_KEY: key })).toThrow(/ANTHROPIC_API_KEY/);

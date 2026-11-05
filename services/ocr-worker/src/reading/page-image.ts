@@ -71,8 +71,64 @@ export function jpegDimensions(bytes: Uint8Array): { width: number; height: numb
 }
 
 /**
+ * The EXIF Orientation (tag 0x0112) of a JPEG, from its APP1 "Exif" segment, walking the segments from the start
+ * up to the scan; both TIFF byte orders ("II" little-endian, "MM" big-endian). null where the JPEG has no EXIF
+ * segment or its first IFD has no Orientation; 'unreadable' where an EXIF segment is there but cut short or not
+ * well formed, or the value is not 1-8. Nothing is decoded and no dependency is used.
+ */
+export function jpegOrientation(bytes: Uint8Array): number | null | 'unreadable' {
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8) return null;
+  let at = 2;
+  while (at + 3 < bytes.length) {
+    if (bytes[at] !== 0xff) return null;
+    let marker = bytes[at + 1]!;
+    while (marker === 0xff && at + 2 < bytes.length) { at += 1; marker = bytes[at + 1]!; }
+    if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) { at += 2; continue; }
+    if (marker === 0xd9 || marker === 0xda) return null;
+    if (at + 3 >= bytes.length) return null;
+    const length = (bytes[at + 2]! << 8) | bytes[at + 3]!;
+    if (length < 2) return null;
+    const end = Math.min(bytes.length, at + 2 + length);
+    if (marker === 0xe1 && end - (at + 4) >= 6 && EXIF_HEADER.every((byte, index) => bytes[at + 4 + index] === byte)) {
+      return exifOrientation(bytes, at + 10, end);
+    }
+    at += 2 + length;
+  }
+  return null;
+}
+
+/** "Exif" and two zero bytes: the start of an APP1 segment that holds EXIF (not XMP). */
+const EXIF_HEADER = [0x45, 0x78, 0x69, 0x66, 0x00, 0x00];
+const ORIENTATION_TAG = 0x0112;
+
+/** The Orientation in the TIFF structure that starts at `tiff` and ends before `end`. */
+function exifOrientation(bytes: Uint8Array, tiff: number, end: number): number | null | 'unreadable' {
+  if (tiff + 8 > end) return 'unreadable';
+  const little = bytes[tiff] === 0x49 && bytes[tiff + 1] === 0x49;
+  const big = bytes[tiff] === 0x4d && bytes[tiff + 1] === 0x4d;
+  if (!little && !big) return 'unreadable';
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const u16 = (at: number) => view.getUint16(at, little);
+  if (u16(tiff + 2) !== 42) return 'unreadable';
+  const ifd = tiff + view.getUint32(tiff + 4, little);
+  if (ifd < tiff + 8 || ifd + 2 > end) return 'unreadable';
+  const count = u16(ifd);
+  for (let index = 0; index < count; index += 1) {
+    const entry = ifd + 2 + index * 12;
+    if (entry + 12 > end) return 'unreadable';
+    if (u16(entry) !== ORIENTATION_TAG) continue;
+    // SHORT (type 3), one value, held in the first two bytes of the value field.
+    if (u16(entry + 2) !== 3 || view.getUint32(entry + 4, little) !== 1) return 'unreadable';
+    const orientation = u16(entry + 8);
+    return orientation >= 1 && orientation <= 8 ? orientation : 'unreadable';
+  }
+  return null;
+}
+
+/**
  * Whether this page's re-read may carry the picture, by the document alone (the page's own reasons are the
- * reader's): a one-page PNG or JPEG by its detected type, page 1, whose header gives a size within the limits.
+ * reader's): a one-page PNG or JPEG by its detected type, page 1, whose header gives a size within the limits,
+ * and, for a JPEG, no EXIF Orientation other than 1 (upright).
  */
 export function pageImageFor(document: SourceDocument | undefined, page: number, pageCount: number): PageImageDecision {
   if (document === undefined) return { kind: 'skip', reason: 'image_not_given' };
@@ -87,6 +143,12 @@ export function pageImageFor(document: SourceDocument | undefined, page: number,
   if (size === null) return { kind: 'skip', reason: 'image_size_unknown' };
   if (size.width > IMAGE_MAX_DIMENSION_PX || size.height > IMAGE_MAX_DIMENSION_PX) {
     return { kind: 'skip', reason: 'image_too_large' };
+  }
+  // A JPEG turned by its EXIF Orientation would be seen turned (or not) differently from the page the text service
+  // read, so the line boxes and the model's boxes would not match: v1 sends only an upright picture.
+  if (document.mediaType === 'image/jpeg') {
+    const orientation = jpegOrientation(document.bytes);
+    if (orientation !== null && orientation !== 1) return { kind: 'skip', reason: 'image_orientation_unsupported' };
   }
   return { kind: 'image', mediaType: document.mediaType, bytes: document.bytes, width: size.width, height: size.height };
 }

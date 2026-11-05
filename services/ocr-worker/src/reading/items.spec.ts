@@ -723,13 +723,57 @@ describe('checkPage for a page read from its picture (image re-read)', () => {
       expect(JSON.stringify(result)).not.toContain('Warfarin');
     });
 
-    it('keeps an item over two cited lines, and drops one on a cited line that lies mostly on an uncited one', () => {
-      const both = fromImage(modelPage([note(['p1-l2', 'p1-l3'], { left: 0.12, top: 0.1, width: 0.3, height: 0.07 },
+    it('drops an item over two cited lines that are not adjacent, and one on a cited line that lies mostly on an uncited one', () => {
+      // Lines 2 and 3 are a line and a half apart (gap 0.03, height 0.02): not together, so dropped.
+      const apart = fromImage(modelPage([note(['p1-l2', 'p1-l3'], { left: 0.12, top: 0.1, width: 0.3, height: 0.07 },
         'Metformin Paracetamol')]));
-      expect(both.items).toHaveLength(1);
+      expect(apart.items).toEqual([]);
       // Cites line 2 only, but most of the line area under the box is line 3's.
       const spill = fromImage(modelPage([note(['p1-l2'], { left: 0.12, top: 0.11, width: 0.3, height: 0.06 }, 'Metformin')]));
       expect(spill.items).toEqual([]);
+    });
+  });
+
+  describe('limits: at most three lines, lying together, and a box not much larger than its lines', () => {
+    // Lines 1-4 one under the other (gap 0.005, height 0.02); line 5 short and alone lower down.
+    const at = (top: number, width = 0.5) => ({ box: { left: 0.1, top, width, height: 0.02 } });
+    const dense = readPage(1, [['Amlodipne 5rng od', { ...hard, ...at(0.1) }],
+      ['Metformin 500mg bd', { ...hard, ...at(0.125) }], ['Paracetamol 1g tds', { ...hard, ...at(0.15) }],
+      ['Dx: Hypertension', at(0.175)], ['BP 140/90', { ...hard, ...at(0.5, 0.1) }]]);
+    const read = (lineIds: string[], box: { left: number; top: number; width: number; height: number },
+      asWritten = 'Metformin Paracetamol') => checkPage({ page: 1, lines: dense.lines, sourceSha256Hex: SOURCE_SHA,
+      readBy: 'reread', masker: createMasker(), fromImage: true,
+      answer: modelPage([modelItem({ kind: 'note', asWritten, noteText: asWritten, lineIds, box })]) });
+
+    it('drops a whole-page box that cites every line', () => {
+      const result = read(dense.lines.map((line) => line.id), { left: 0, top: 0, width: 1, height: 1 });
+      expect(result.items).toEqual([]);
+      expect(result.droppedUngrounded).toBe(1);
+    });
+
+    it('drops an item citing four lines, even with a box just around them', () => {
+      const result = read(['p1-l1', 'p1-l2', 'p1-l3', 'p1-l4'], { left: 0.1, top: 0.1, width: 0.5, height: 0.095 });
+      expect(result.items).toEqual([]);
+      expect(result.droppedUngrounded).toBe(1);
+      // The same box citing three of those lines is kept.
+      expect(read(['p1-l1', 'p1-l2', 'p1-l3'], { left: 0.1, top: 0.1, width: 0.5, height: 0.07 }).items).toHaveLength(1);
+    });
+
+    it('keeps an item over two adjacent lines, and drops one over two lines that are not together', () => {
+      const kept = read(['p1-l2', 'p1-l3'], { left: 0.1, top: 0.125, width: 0.5, height: 0.045 });
+      expect(kept.items).toHaveLength(1);
+      expect(kept.items[0]!.lineIds).toEqual(['p1-l2', 'p1-l3']);
+      expect(kept.droppedUngrounded).toBe(0);
+      // Lines 2 and 5: far apart, so a box over both (and the lines between) is dropped.
+      expect(read(['p1-l2', 'p1-l5'], { left: 0.1, top: 0.125, width: 0.5, height: 0.395 }, 'Metformin 140/90').items)
+        .toEqual([]);
+    });
+
+    it('drops a box much larger than its cited line, and keeps one a little larger than a short line', () => {
+      const large = read(['p1-l5'], { left: 0.05, top: 0.47, width: 0.5, height: 0.08 }, 'BP 140/90');
+      expect(large.items).toEqual([]);
+      expect(large.droppedUngrounded).toBe(1);
+      expect(read(['p1-l5'], { left: 0.095, top: 0.497, width: 0.11, height: 0.026 }, 'BP 140/90').items).toHaveLength(1);
     });
   });
 
