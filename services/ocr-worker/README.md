@@ -298,7 +298,8 @@ Each claimed job runs, in order:
    Claude API image limits (10 MB base64-encoded, 8000 x 8000 px; the size is
    read from the PNG IHDR or JPEG frame header, never by decoding) stays text
    only (`image_too_large`; `image_size_unknown` when the header cannot be
-   read). Only if the API rejects the request with the picture as an invalid
+   read, or, for a PNG, when its chunks do not walk cleanly to IEND with
+   correct CRCs and exactly one IHDR, first: see zoom below). Only if the API rejects the request with the picture as an invalid
    request (HTTP 400 with error type `invalid_request_error`) is the page
    re-read from its text (`image_rejected`); if the model declines the
    request with the picture, the page is likewise re-read from its text once
@@ -529,7 +530,28 @@ Each claimed job runs, in order:
        them is still sent whole, with zoom off (not offered):
        - a PNG of at most 24 MP (6000 x 4000; below the 64 MP the picture
          itself may have, on purpose), at 8 bits or fewer per sample and not
-         interlaced;
+         interlaced, whose chunks walk cleanly (`pngStructure`, on the walk
+         `pngChunks` in `page-image.ts`): the signature, every chunk's length
+         inside the bytes and its CRC correct (zlib's native `crc32`; pngjs
+         and libpng both refuse a bad CRC, and it costs about 6 ms for a
+         23 MB file), exactly one IHDR and it first (13 bytes; a later IHDR
+         anywhere is refused), a bit depth the colour type allows,
+         compression and filter method 0, only IHDR, PLTE, IDAT, IEND and
+         known ancillary chunks (PNG third edition's and Apple's `iDOT`; any
+         other chunk, critical or not, is refused), PLTE and tRNS where and
+         as long as the specification says, all IDATs in one run, and IEND
+         last with nothing after it. (A reviewer showed that pngjs 7.0.0
+         takes a second IHDR as the picture's new size, depth and
+         interlacing and inflates and allocates at that size, outside the
+         V8 heap the worker's limits bound: a 249 KB file whose first IHDR
+         said 100 x 100 reached about 995 MB RSS, its 16-bit variant
+         (498 KB) 1.43 GB, its interlaced one 577 MB. All three are now
+         refused by the walk in about 1 ms at 65 MB RSS for the process.)
+         The size the picture is sent at (`pngDimensions`) is read from the
+         same walk, so a PNG with a second IHDR, a bad CRC or no IEND is not
+         sent at all (`image_size_unknown`; the API's decoder might see
+         another size than the line boxes assume); the chunk type list is
+         zoom's only;
        - a JPEG of at most 12.5 MP (4000 x 3125; a 12 MP phone photo fits),
          whose marker segments parse (`jpegStructure`: every length checked,
          DQT, DHT, SOF, DRI and SOS exactly as long as their contents, the
@@ -571,6 +593,21 @@ Each claimed job runs, in order:
        in 1 ms at 52 MB RSS (before: 540 MB), and a hidden 4-component frame
        as large as a 12.5 MP checked one is refused at about 665 MB (before:
        890 MB; the real 12.5 MP decode itself peaks about 555 to 605 MB).
+       Likewise for a PNG, pngjs's chunk parser is not used at all: zoom
+       inflates the checked IDATs itself with zlib's `maxOutputLength` set to
+       exactly what the checked IHDR needs (`pngInflatedSize`: each row's
+       filter byte and packed samples), refuses any other inflated size, and
+       hands the rows to pngjs 7.0.0's own unfilter, unpack and palette code
+       (`lib/filter-parse-sync`, `lib/bitmapper`, `lib/format-normaliser`,
+       with PLTE and tRNS from the walk), so every buffer made is that
+       header's size (`decodePngWithin`). With the walk bypassed (the 100 x
+       100 header taken over the reviewer's IDAT), zlib stops at 30,100 bytes
+       and the decode is refused in 1 ms at 53 MB RSS (before: 995 MB to
+       1.43 GB); a clean walk whose IDAT inflates to more or less than its
+       header needs is refused the same way. A 24 MP RGBA page with light
+       noise (43 MB, over the picture limit, so heavier than any page sent)
+       decodes and crops in 1.7 s at about 480 MB peak RSS for the process
+       (before: 2.1 s, 550 MB).
        Every decode, and every crop's resample and PNG encode, runs in a
        worker thread of its own (`zoom-jobs.ts`, `zoom-worker.ts`; built to
        `dist/reading/zoom-worker.js`, which the image copies with the rest

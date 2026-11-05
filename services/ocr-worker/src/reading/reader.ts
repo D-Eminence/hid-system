@@ -312,8 +312,8 @@ export class PaperReadingService {
           height: decision.height }, resizedSize(decision.width, decision.height, tier), tier);
         zooms.set(state.page, zoom);
       }
-      // A picture over zoom's limits by its bytes (zoom.ts zoomDecodable: size, PNG bit depth and interlacing, JPEG
-      // structure, components and scans) is never offered the tool: no rule I, and prompt version 2 for the page.
+      // A picture over zoom's limits by its bytes (zoom.ts zoomDecodable: size, PNG chunks, bit depth and interlacing,
+      // JPEG structure, components and scans) is never offered the tool: no rule I, and prompt version 2 for the page.
       return zoom.available() ? zoom : null;
     };
     /**

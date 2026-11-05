@@ -1,6 +1,7 @@
 import * as jpeg from 'jpeg-js';
+import * as zlib from 'node:zlib';
 import { PNG } from 'pngjs';
-import { base64Length, IMAGE_MAX_BASE64_LENGTH, pngDimensions, type PageImageMediaType } from './page-image';
+import { base64Length, IMAGE_MAX_BASE64_LENGTH, pngChunks, type PageImageMediaType } from './page-image';
 
 /**
  * The most pixels zoom decodes from a PNG (a 24 MP page, 6000 x 4000; A4 at about 400 dpi). A larger picture is
@@ -37,7 +38,7 @@ export const ZOOM_JPEG_MAX_SCANS = 16;
  * CMYK. 2 components is not a JPEG colour model jpeg-js converts either.
  */
 export const ZOOM_JPEG_ALLOWED_COMPONENTS: readonly number[] = [1, 3];
-/** pngjs: at most 8 bits per sample (16-bit is inflated and widened far beyond the pixel count's share). */
+/** At most 8 bits per sample (16-bit is inflated and widened far beyond the pixel count's share). */
 export const ZOOM_PNG_MAX_BIT_DEPTH = 8;
 /** One crop's PNG, base64: well inside the API's 10 MB per-image limit. */
 export const ZOOM_MAX_CROP_BASE64 = 4_000_000;
@@ -253,9 +254,9 @@ export function jpegMemoryBudget(structure: JpegStructure): number {
 }
 
 /**
- * Whether zoom may decode this picture, from its bytes alone and without inflating or decoding anything: a PNG of at
- * most ZOOM_MAX_DECODE_PIXELS whose IHDR gives at most ZOOM_PNG_MAX_BIT_DEPTH bits per sample and no interlacing
- * (pngjs inflates an interlaced PNG without a size limit); a JPEG of at most ZOOM_JPEG_MAX_DECODE_PIXELS whose
+ * Whether zoom may decode this picture, from its bytes alone and without inflating or decoding anything: a PNG
+ * whose chunks pass pngStructure, of at most ZOOM_MAX_DECODE_PIXELS, with the picture's size, at most
+ * ZOOM_PNG_MAX_BIT_DEPTH bits per sample and no interlacing; a JPEG of at most ZOOM_JPEG_MAX_DECODE_PIXELS whose
  * structure parses (jpegStructure) with the picture's size, 8-bit samples, 1 or 3 components and at most
  * ZOOM_JPEG_MAX_SCANS scans, counted both in the walk and anywhere in the bytes.
  */
@@ -269,12 +270,153 @@ export function zoomDecodable(source: ZoomSource): boolean {
       && structure.scanMarkersAnywhere <= ZOOM_JPEG_MAX_SCANS;
   }
   if (source.width * source.height > ZOOM_MAX_DECODE_PIXELS) return false;
-  const size = pngDimensions(source.bytes);
-  if (size === null || size.width * size.height > ZOOM_MAX_DECODE_PIXELS || source.bytes.length < 29) return false;
-  // IHDR data from byte 16: width (4), height (4), bit depth, colour type, compression, filter, interlace.
-  const bitDepth = source.bytes[24]!;
-  const interlace = source.bytes[28]!;
-  return bitDepth >= 1 && bitDepth <= ZOOM_PNG_MAX_BIT_DEPTH && interlace === 0;
+  const structure = pngStructure(source.bytes);
+  return structure !== null && structure.width === source.width && structure.height === source.height
+    && structure.width * structure.height <= ZOOM_MAX_DECODE_PIXELS && structure.bitDepth <= ZOOM_PNG_MAX_BIT_DEPTH
+    && !structure.interlaced;
+}
+
+/** A PNG's header and the chunks zoom decodes from, as pngStructure reads them. */
+export interface PngStructure {
+  width: number;
+  height: number;
+  bitDepth: number;
+  /** 0 grey, 2 RGB, 3 palette, 4 grey and alpha, 6 RGBA. */
+  colourType: number;
+  interlaced: boolean;
+  /** PLTE's data (3 bytes an entry), or null. */
+  palette: Uint8Array | null;
+  /** tRNS's data, or null. */
+  transparency: Uint8Array | null;
+  /** Every IDAT's data, in order (views of the bytes, not copies). */
+  idat: Uint8Array[];
+}
+
+/** Bit depths the PNG specification allows for each colour type. */
+const PNG_BIT_DEPTHS: ReadonlyMap<number, readonly number[]> = new Map([
+  [0, [1, 2, 4, 8, 16]], [2, [8, 16]], [3, [1, 2, 4, 8]], [4, [8, 16]], [6, [8, 16]],
+]);
+/** Samples per pixel for each colour type. */
+const PNG_CHANNELS: ReadonlyMap<number, number> = new Map([[0, 1], [2, 3], [3, 1], [4, 2], [6, 4]]);
+/**
+ * The ancillary chunks zoom lets through (PNG third edition's, and Apple's iDOT, written in macOS screenshots). The
+ * decode reads none of them but tRNS; anything else, critical or ancillary, is refused (zoom off, picture still sent).
+ */
+const PNG_ANCILLARY_ALLOWED: ReadonlySet<string> = new Set(['tRNS', 'gAMA', 'cHRM', 'sRGB', 'iCCP', 'sBIT', 'cICP',
+  'mDCV', 'cLLI', 'bKGD', 'hIST', 'pHYs', 'sPLT', 'eXIf', 'tIME', 'tEXt', 'zTXt', 'iTXt', 'iDOT']);
+
+/**
+ * Zoom's checks of a PNG's chunks, without inflating or decoding anything, or null where it is not one zoom decodes
+ * the same way any reader would: the walk of pngChunks (signature, every length and CRC, exactly one IHDR and it
+ * first, IEND last; CRCs are checked, with zlib's native crc32, because pngjs and libpng both refuse a bad one, so a
+ * picture that passes here is one they read too, and it is cheap: about 6 ms for a 23 MB PNG, Node 22), then:
+ * - IHDR: a size of 1 to 2^31 - 1 each way; a bit depth the colour type allows (grey 1, 2, 4, 8, 16; RGB, grey and
+ *   alpha, RGBA 8 or 16; palette 1, 2, 4, 8); compression and filter method 0; interlace 0 or 1 (recorded; zoom
+ *   refuses 1);
+ * - only IHDR, PLTE, IDAT, IEND and the ancillary chunks in PNG_ANCILLARY_ALLOWED: any other critical chunk
+ *   (uppercase first letter) and any other ancillary chunk is refused;
+ * - at most one PLTE, before the first IDAT, required for a palette picture and refused for grey ones, 1 to 256
+ *   entries (and no more than the bit depth can index);
+ * - at most one tRNS, before the first IDAT, after PLTE, of the size the colour type gives (2 bytes grey, 6 RGB, at
+ *   most one per palette entry), refused with an alpha channel;
+ * - at least one IDAT, all of them in one run (no other chunk between two IDATs).
+ */
+export function pngStructure(bytes: Uint8Array): PngStructure | null {
+  const chunks = pngChunks(bytes);
+  if (chunks === null) return null;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const header = chunks[0]!.start;
+  const width = view.getUint32(header);
+  const height = view.getUint32(header + 4);
+  const bitDepth = bytes[header + 8]!;
+  const colourType = bytes[header + 9]!;
+  const interlace = bytes[header + 12]!;
+  if (width < 1 || height < 1 || width > 0x7fffffff || height > 0x7fffffff
+    || !(PNG_BIT_DEPTHS.get(colourType)?.includes(bitDepth) ?? false)
+    || bytes[header + 10] !== 0 || bytes[header + 11] !== 0 || interlace > 1) return null;
+  let palette: Uint8Array | null = null;
+  let transparency: Uint8Array | null = null;
+  const idat: Uint8Array[] = [];
+  let idatEnded = false;
+  for (const chunk of chunks.slice(1, -1)) {
+    const data = bytes.subarray(chunk.start, chunk.start + chunk.length);
+    if (idat.length > 0 && chunk.type !== 'IDAT') idatEnded = true;
+    if (chunk.type === 'IDAT') {
+      if (idatEnded) return null;
+      idat.push(data);
+    } else if (chunk.type === 'PLTE') {
+      const entries = chunk.length / 3;
+      if (palette !== null || transparency !== null || idat.length > 0 || colourType === 0 || colourType === 4
+        || !Number.isInteger(entries) || entries < 1 || entries > 256
+        || (colourType === 3 && entries > 2 ** bitDepth)) return null;
+      palette = data;
+    } else if (chunk.type === 'tRNS') {
+      if (transparency !== null || idat.length > 0) return null;
+      if (colourType === 0 ? chunk.length !== 2 : colourType === 2 ? chunk.length !== 6
+        : colourType === 3 ? palette === null || chunk.length < 1 || chunk.length > palette.length / 3 : true) {
+        return null;
+      }
+      transparency = data;
+    } else if (!PNG_ANCILLARY_ALLOWED.has(chunk.type)) {
+      return null;
+    }
+  }
+  if (idat.length === 0 || (colourType === 3 && palette === null)) return null;
+  return { width, height, bitDepth, colourType, interlaced: interlace === 1, palette, transparency, idat };
+}
+
+/** The size of a non-interlaced PNG's filtered data: a filter byte and the packed samples of each row. */
+export function pngInflatedSize(structure: PngStructure): number {
+  const channels = PNG_CHANNELS.get(structure.colourType)!;
+  return structure.height * (1 + Math.ceil(structure.width * channels * structure.bitDepth / 8));
+}
+
+/** pngjs 7.0.0's own row filter and bitmap code (lib/), pinned exactly in package.json; untyped, so typed here. */
+interface PngjsBitmapInfo {
+  width: number; height: number; depth: number; interlace: boolean; bpp: number; colorType: number;
+  palette?: number[][]; transColor?: number[];
+}
+const pngjsFilter = require('pngjs/lib/filter-parse-sync') as { process(data: Buffer, info: PngjsBitmapInfo): Buffer };
+const pngjsBitmapper = require('pngjs/lib/bitmapper') as { dataToBitMap(data: Buffer, info: PngjsBitmapInfo): Buffer };
+const pngjsNormalise = require('pngjs/lib/format-normaliser') as (data: Buffer, info: PngjsBitmapInfo) => Buffer;
+
+/**
+ * Decodes a non-interlaced PNG of at most 8 bits per sample from the checked structure alone, to RGBA: the
+ * structure's IDAT data is inflated with zlib's maxOutputLength set to exactly the size its header needs
+ * (pngInflatedSize), so zlib stops (and throws) before inflating a byte more, whatever the stream holds; anything
+ * but exactly that size is refused. Rows are unfiltered and unpacked by pngjs's own code from the same header, then
+ * PLTE and tRNS applied. pngjs's chunk parser is never used here, so no other IHDR, palette or IDAT it might take
+ * from the bytes can change the size: every buffer made (inflated rows, unfiltered rows, the RGBA bitmap) is that
+ * header's size. Buffers are outside the V8 heap, so the worker's heap limits would not bound them; this does.
+ */
+export function decodePngWithin(structure: PngStructure): { width: number; height: number; rgba: Uint8Array } {
+  const { width, height, bitDepth, colourType } = structure;
+  if (structure.interlaced || bitDepth > 8 || width * height > ZOOM_MAX_DECODE_PIXELS) {
+    throw new Error('ZOOM_DECODE_LIMIT');
+  }
+  const expected = pngInflatedSize(structure);
+  const inflated = zlib.inflateSync(Buffer.concat(structure.idat), { maxOutputLength: expected,
+    chunkSize: Math.max(64, Math.min(expected, 1024 * 1024)) });
+  if (inflated.length !== expected) throw new Error('ZOOM_DECODE_SHAPE');
+  const info: PngjsBitmapInfo = { width, height, depth: bitDepth, interlace: false,
+    bpp: PNG_CHANNELS.get(colourType)!, colorType: colourType };
+  if (structure.palette !== null && colourType === 3) {
+    const entries: number[][] = [];
+    for (let at = 0; at + 2 < structure.palette.length; at += 3) {
+      entries.push([structure.palette[at]!, structure.palette[at + 1]!, structure.palette[at + 2]!,
+        structure.transparency?.[at / 3] ?? 255]);
+    }
+    info.palette = entries;
+  } else if (structure.transparency !== null) {
+    const t = structure.transparency;
+    info.transColor = colourType === 0 ? [(t[0]! << 8) | t[1]!]
+      : [(t[0]! << 8) | t[1]!, (t[2]! << 8) | t[3]!, (t[4]! << 8) | t[5]!];
+  }
+  const rows = pngjsFilter.process(inflated, info);
+  if (rows.length !== expected - height) throw new Error('ZOOM_DECODE_SHAPE');
+  const rgba = pngjsNormalise(pngjsBitmapper.dataToBitMap(rows, info), info);
+  if (rgba.length !== width * height * 4) throw new Error('ZOOM_DECODE_SHAPE');
+  return { width, height, rgba };
 }
 
 /**
@@ -300,15 +442,14 @@ export function decodeRaster(source: ZoomSource): Raster {
   if (source.mediaType === 'image/jpeg') {
     return decodeJpegWithin(source.bytes, jpegStructure(source.bytes)!);
   }
-  const png = PNG.sync.read(Buffer.from(source.bytes.buffer, source.bytes.byteOffset, source.bytes.byteLength));
+  const png = decodePngWithin(pngStructure(source.bytes)!);
   const pixels = png.width * png.height;
-  if (png.data.length !== pixels * 4) throw new Error('ZOOM_DECODE_SHAPE');
   // RGBA to RGB, any transparency over white (paper).
   const rgb = new Uint8Array(pixels * 3);
   for (let index = 0; index < pixels; index += 1) {
-    const alpha = png.data[index * 4 + 3]!;
+    const alpha = png.rgba[index * 4 + 3]!;
     for (let channel = 0; channel < 3; channel += 1) {
-      const value = png.data[index * 4 + channel]!;
+      const value = png.rgba[index * 4 + channel]!;
       rgb[index * 3 + channel] = alpha === 255 ? value : Math.round((value * alpha + 255 * (255 - alpha)) / 255);
     }
   }

@@ -4,6 +4,7 @@
  * comes from a real patient. Used only by *.spec.ts files.
  */
 import * as jpeg from 'jpeg-js';
+import { crc32 } from 'node:zlib';
 import { PNG } from 'pngjs';
 import type { ReadLine, ReadPage } from '../types';
 import type { ModelItem, ModelPage } from './prompt';
@@ -54,11 +55,39 @@ function filler(length: number, seed: number): number[] {
   return bytes;
 }
 
-/** A fixture PNG: the signature and an IHDR chunk of the given size, then filler. Not a decodable picture. */
+/** One PNG chunk: length, type, data and its CRC (over type and data). */
+export function pngChunk(type: string, data: Uint8Array | readonly number[] = []): Buffer {
+  const body = Buffer.concat([Buffer.from(type, 'latin1'), Buffer.from(data)]);
+  const out = Buffer.alloc(8 + body.length);
+  out.writeUInt32BE(body.length - 4, 0);
+  body.copy(out, 4);
+  out.writeUInt32BE(crc32(body), 4 + body.length);
+  return out;
+}
+
+/** An IHDR chunk. */
+export function pngIhdr(width: number, height: number, bitDepth = 8, colourType = 2, interlace = 0): Buffer {
+  const data = Buffer.alloc(13);
+  data.writeUInt32BE(width, 0);
+  data.writeUInt32BE(height, 4);
+  data[8] = bitDepth; data[9] = colourType; data[12] = interlace;
+  return pngChunk('IHDR', data);
+}
+
+/** The PNG signature and these chunks, as they are (no checks: tests build bad ones on purpose). */
+export function pngFromChunks(...chunks: Uint8Array[]): Uint8Array {
+  return new Uint8Array(Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), ...chunks]));
+}
+
+/** The bytes a fixture PNG adds to its filler: signature, IHDR, the IDAT's length, type and CRC, and IEND. */
+export const FIXTURE_PNG_OVERHEAD = 8 + 25 + 12 + 12;
+
+/**
+ * A fixture PNG: the signature, an IHDR chunk of the given size (8-bit RGB), one IDAT chunk of filler and IEND,
+ * every CRC correct. Its chunks walk cleanly, but it is not a decodable picture (the IDAT is not a zlib stream).
+ */
 export function fixturePng(width: number, height: number, fillerBytes = 3_000): Uint8Array {
-  const u32 = (value: number) => [value >>> 24 & 0xff, value >>> 16 & 0xff, value >>> 8 & 0xff, value & 0xff];
-  return new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...u32(13), 0x49, 0x48, 0x44, 0x52,
-    ...u32(width), ...u32(height), 8, 2, 0, 0, 0, 0, 0, 0, 0, ...filler(fillerBytes, 7)]);
+  return pngFromChunks(pngIhdr(width, height), pngChunk('IDAT', filler(fillerBytes, 7)), pngChunk('IEND'));
 }
 
 /** A fixture EXIF APP1 segment holding one Orientation entry, in either TIFF byte order. */

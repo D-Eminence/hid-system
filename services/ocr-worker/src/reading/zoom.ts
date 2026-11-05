@@ -18,7 +18,9 @@ export * from './zoom-raster';
  *   10 MB base64, 8000 x 8000 px, an upright JPEG), and only on the first zoom call; once per page, shared by both
  *   reads of the page, and dropped with the reading.
  * - Decoded only within limits checked from the bytes before anything is inflated or decoded (zoomDecodable): a PNG
- *   up to ZOOM_MAX_DECODE_PIXELS (24 MP), at 8 bits or fewer per sample and not interlaced; a JPEG up to
+ *   whose chunks walk cleanly (pngStructure: CRCs, exactly one IHDR and it first, only known chunks, IDATs in one
+ *   run, IEND last), up to ZOOM_MAX_DECODE_PIXELS (24 MP), at 8 bits or fewer per sample and not interlaced, inflated
+ *   with zlib's output capped at exactly what that IHDR needs (decodePngWithin); a JPEG up to
  *   ZOOM_JPEG_MAX_DECODE_PIXELS (12.5 MP), whose marker segments parse (jpegStructure) with one 8-bit baseline,
  *   extended or progressive Huffman frame of 1 or 3 components and at most ZOOM_JPEG_MAX_SCANS scans, with none of
  *   the byte patterns where jpeg-js would find markers the walk did not (zoom-raster.ts). jpeg-js is also given its

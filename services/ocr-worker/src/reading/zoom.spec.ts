@@ -1,12 +1,13 @@
 import * as jpeg from 'jpeg-js';
 import { Worker } from 'node:worker_threads';
 import { PNG } from 'pngjs';
+import zlib = require('node:zlib');
 import { HIGH_RESOLUTION_TIER, imageTokens, resizedSize, STANDARD_TIER } from './page-image';
-import { desyncJpeg, fixtureJpeg, fixturePng, jpegFrame, jpegFromParts, jpegScan, jpegSegment, syntheticJpeg,
-  syntheticPng, withRepeatedScan } from './test-fixtures';
-import { clampBox, createPageZoom, createZoomSession, decodeJpegWithin, decodeRaster, jpegMemoryBudget, jpegStructure,
-  resample, toOriginalRect, ZOOM_JPEG_MAX_DECODE_PIXELS, ZOOM_JPEG_MAX_SCANS, ZOOM_JPEG_MEMORY_SLACK_BYTES,
-  ZOOM_LIMIT_MESSAGE, ZOOM_MAX_DECODE_PIXELS, ZOOM_MIN_BOX_PX, ZOOM_REQUEST_BASE64_BUDGET, ZOOM_TOOL,
+import { desyncJpeg, fixtureJpeg, fixturePng, jpegFrame, jpegFromParts, jpegScan, jpegSegment, pngChunk,
+  pngFromChunks, pngIhdr, syntheticJpeg, syntheticPng, withRepeatedScan } from './test-fixtures';
+import { clampBox, createPageZoom, createZoomSession, decodeJpegWithin, decodePngWithin, decodeRaster, jpegMemoryBudget,
+  jpegStructure, pngInflatedSize, pngStructure, resample, toOriginalRect, ZOOM_JPEG_MAX_DECODE_PIXELS,
+  ZOOM_JPEG_MAX_SCANS, ZOOM_JPEG_MEMORY_SLACK_BYTES, ZOOM_LIMIT_MESSAGE, ZOOM_MAX_DECODE_PIXELS, ZOOM_MIN_BOX_PX, ZOOM_REQUEST_BASE64_BUDGET, ZOOM_TOOL,
   ZOOM_UNAVAILABLE_MESSAGE, zoomDecodable, zoomOutputSize, type JpegStructure, type PageZoom, type Raster,
   type ZoomSource } from './zoom';
 import { createZoomWorkerRunner, liveZoomWorkers, spawnZoomWorker, ZOOM_WORKERS_AT_ONCE, zoomWorkerRunner,
@@ -16,21 +17,13 @@ const source = (mediaType: 'image/png' | 'image/jpeg', width: number, height: nu
   width, height, bytes: mediaType === 'image/png' ? syntheticPng(width, height) : syntheticJpeg(width, height) });
 
 /**
- * A PNG header (signature and IHDR) with a few bytes of IDAT that would inflate to almost nothing: enough for the
- * header checks, which must refuse it before anything is inflated.
+ * A PNG whose chunks walk cleanly (IHDR, a PLTE for a palette picture, one IDAT holding an empty zlib stream, IEND):
+ * enough for the header checks, which must refuse it before anything is inflated.
  */
 function pngHeader(width: number, height: number, bitDepth: number, colourType: number, interlace = 0): Uint8Array {
-  const bytes = Buffer.alloc(8 + 25 + 12 + 12);
-  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(bytes, 0);
-  bytes.writeUInt32BE(13, 8);
-  bytes.write('IHDR', 12, 'latin1');
-  bytes.writeUInt32BE(width, 16);
-  bytes.writeUInt32BE(height, 20);
-  bytes[24] = bitDepth; bytes[25] = colourType; bytes[26] = 0; bytes[27] = 0; bytes[28] = interlace;
-  bytes.writeUInt32BE(0, 33);
-  bytes.write('IDAT', 37, 'latin1');
-  bytes.write('IEND', 49, 'latin1');
-  return new Uint8Array(bytes);
+  return pngFromChunks(pngIhdr(width, height, bitDepth, colourType, interlace),
+    ...(colourType === 3 ? [pngChunk('PLTE', [0, 0, 0, 255, 255, 255])] : []),
+    pngChunk('IDAT', zlib.deflateSync(Buffer.alloc(0))), pngChunk('IEND'));
 }
 
 function decodePng(base64: string) {
@@ -190,7 +183,7 @@ describe('page zoom over the stored bytes', () => {
   });
 
   it('refuses, before inflating anything, a PNG over 8 bits per sample, interlaced, or over the pixel limit', async () => {
-    const read = jest.spyOn(PNG.sync, 'read');
+    const read = jest.spyOn(zlib, 'inflateSync');
     try {
       // A tiny, very compressible 16-bit RGBA page at the picture limit (about 1.5 GB to decode): never inflated.
       const refused = [pngHeader(8_000, 8_000, 16, 6), pngHeader(3_000, 4_000, 16, 2), pngHeader(3_000, 4_000, 8, 2, 1),
@@ -535,6 +528,175 @@ describe('where jpeg-js and the marker walk could disagree (defence in depth)', 
       expect(decodeWith(budget - ZOOM_JPEG_MEMORY_SLACK_BYTES + 1)).toMatchObject({ width: structure.width });
       expect(() => decodeWith(budget - ZOOM_JPEG_MEMORY_SLACK_BYTES - 64)).toThrow(/maxMemoryUsageInMB/);
       expect(decodeJpegWithin(bytes, structure)).toMatchObject({ width: structure.width, height: structure.height });
+    }
+  });
+});
+
+describe('PNG chunk checks before any inflate, and the inflate bounded by the checked header (defence in depth)', () => {
+  const iend = pngChunk('IEND');
+  /** Raw rows, filter byte 0 before each, deflated: an IDAT chunk. */
+  const idatOf = (rows: readonly number[][]) => pngChunk('IDAT',
+    zlib.deflateSync(Buffer.from(rows.flatMap((row) => [0, ...row]))));
+  /** Zeros for a width x height picture of `channels` 8-bit samples, deflated: a tiny IDAT that inflates large. */
+  const zerosIdat = (width: number, height: number, channels: number) =>
+    pngChunk('IDAT', zlib.deflateSync(Buffer.alloc((width * channels + 1) * height), { level: 9 }));
+  const page = (bytes: Uint8Array, width = 100, height = 100): ZoomSource =>
+    ({ mediaType: 'image/png', bytes, width, height });
+  /** pngjs's own full decode, composited over white the same way: the reference for decodeRaster. */
+  const reference = (bytes: Uint8Array) => {
+    const png = PNG.sync.read(Buffer.from(bytes));
+    const rgb: number[] = [];
+    for (let index = 0; index < png.width * png.height; index += 1) {
+      const alpha = png.data[index * 4 + 3]!;
+      for (let channel = 0; channel < 3; channel += 1) {
+        const value = png.data[index * 4 + channel]!;
+        rgb.push(alpha === 255 ? value : Math.round((value * alpha + 255 * (255 - alpha)) / 255));
+      }
+    }
+    return rgb;
+  };
+
+  it('refuses the reviewer\'s layout (a 100 x 100 IHDR, then a large second one) before inflating anything', async () => {
+    const inflate = jest.spyOn(zlib, 'inflateSync');
+    try {
+      for (const interlace of [0, 1]) {
+        const bytes = pngFromChunks(pngIhdr(100, 100), pngIhdr(2_000, 1_500, 8, 6, interlace), zerosIdat(2_000, 1_500, 4),
+          iend);
+        expect(pngStructure(bytes)).toBeNull();
+        expect(zoomDecodable(page(bytes))).toBe(false);
+        expect(() => decodeRaster(page(bytes))).toThrow(/ZOOM_DECODE_LIMIT/);
+        const zoom = createPageZoom(page(bytes), { width: 100, height: 100 }, HIGH_RESOLUTION_TIER);
+        expect(zoom.available()).toBe(false);
+        await expect(zoom.crop({ x: 0, y: 0, w: 50, h: 50 }, 2)).resolves.toEqual({ kind: 'unavailable' });
+      }
+      // A second IHDR after the IDAT, too.
+      expect(pngStructure(pngFromChunks(pngIhdr(100, 100), zerosIdat(100, 100, 3), pngIhdr(2_000, 1_500), iend)))
+        .toBeNull();
+      expect(inflate).not.toHaveBeenCalled();
+    } finally { inflate.mockRestore(); }
+  });
+
+  it('and were the walk bypassed, inflates no more than the checked header needs and refuses the rest', () => {
+    // The reviewer's layout, with the structure taken from the first IHDR as if the walk had passed it.
+    const big = zerosIdat(2_000, 1_500, 4);
+    const bytes = pngFromChunks(pngIhdr(100, 100), pngIhdr(2_000, 1_500, 8, 6), big, iend);
+    const idatData = bytes.subarray(bytes.length - 12 - (big.length - 12) - 4, bytes.length - 12 - 4);
+    expect(Buffer.from(idatData).equals(big.subarray(8, big.length - 4))).toBe(true);
+    const bypassed = { width: 100, height: 100, bitDepth: 8, colourType: 2, interlaced: false, palette: null,
+      transparency: null, idat: [idatData] };
+    expect(pngInflatedSize(bypassed)).toBe(100 * (1 + 300));
+    const inflate = jest.spyOn(zlib, 'inflateSync');
+    try {
+      expect(() => decodePngWithin(bypassed)).toThrow();
+      expect(inflate).toHaveBeenCalledTimes(1);
+      expect(inflate.mock.calls[0]![1]).toMatchObject({ maxOutputLength: 30_100 });
+    } finally { inflate.mockRestore(); }
+    // A clean walk whose IDAT inflates to more (or less) than its own IHDR needs: refused at the decode.
+    for (const idat of [zerosIdat(2_000, 1_500, 3), zerosIdat(100, 99, 3), zerosIdat(100, 101, 3)]) {
+      const lying = pngFromChunks(pngIhdr(100, 100), idat, iend);
+      expect(zoomDecodable(page(lying))).toBe(true);
+      expect(() => decodeRaster(page(lying))).toThrow();
+    }
+    // An interlaced or 16-bit structure is never decoded here, whatever the walk said.
+    expect(() => decodePngWithin({ ...bypassed, interlaced: true })).toThrow(/ZOOM_DECODE_LIMIT/);
+    expect(() => decodePngWithin({ ...bypassed, bitDepth: 16 })).toThrow(/ZOOM_DECODE_LIMIT/);
+  });
+
+  it('refuses unknown chunks, chunks out of place, cut short or with a bad CRC, and a missing IEND', () => {
+    const ok = [pngIhdr(2, 1), idatOf([[1, 2, 3, 4, 5, 6]]), iend] as const;
+    expect(pngStructure(pngFromChunks(...ok))).toMatchObject({ width: 2, height: 1, bitDepth: 8, colourType: 2 });
+    const refused: Uint8Array[][] = [
+      // An unknown critical chunk (uppercase first letter), Apple's CgBI, an unknown ancillary one, APNG's acTL.
+      [ok[0], pngChunk('ABCD', [1]), ok[1], iend],
+      [pngChunk('CgBI', [0, 0, 0, 0]), ...ok],
+      [ok[0], pngChunk('prVt', [1]), ok[1], iend],
+      [ok[0], pngChunk('acTL', [0, 0, 0, 1, 0, 0, 0, 0]), ok[1], iend],
+      // IHDR not first; no IEND; no IDAT; IDATs not in one run.
+      [pngChunk('tEXt', [0x61, 0, 0x62]), ...ok],
+      [ok[0], ok[1]],
+      [ok[0], iend],
+      [ok[0], ok[1], pngChunk('tEXt', [0x61, 0, 0x62]), pngChunk('IDAT', []), iend],
+      // PLTE for grey, PLTE after IDAT, two PLTEs, a palette picture without one, a palette not of whole entries.
+      [pngIhdr(2, 1, 8, 0), pngChunk('PLTE', [0, 0, 0]), idatOf([[1, 2]]), iend],
+      [pngIhdr(2, 1, 8, 3), idatOf([[0, 0]]), pngChunk('PLTE', [0, 0, 0]), iend],
+      [pngIhdr(2, 1, 8, 3), pngChunk('PLTE', [0, 0, 0]), pngChunk('PLTE', [0, 0, 0]), idatOf([[0, 0]]), iend],
+      [pngIhdr(2, 1, 8, 3), idatOf([[0, 0]]), iend],
+      [pngIhdr(2, 1, 8, 3), pngChunk('PLTE', [0, 0, 0, 1]), idatOf([[0, 0]]), iend],
+      [pngIhdr(2, 1, 1, 3), pngChunk('PLTE', [0, 0, 0, 1, 1, 1, 2, 2, 2]), idatOf([[0]]), iend],
+      // tRNS of the wrong size, with alpha, or before PLTE.
+      [pngIhdr(2, 1, 8, 0), pngChunk('tRNS', [0]), idatOf([[1, 2]]), iend],
+      [pngIhdr(2, 1, 8, 6), pngChunk('tRNS', [0, 0]), idatOf([[1, 2, 3, 4, 5, 6, 7, 8]]), iend],
+      [pngIhdr(2, 1, 8, 3), pngChunk('tRNS', [0]), pngChunk('PLTE', [0, 0, 0]), idatOf([[0, 0]]), iend],
+      // A bit depth the colour type does not allow; another compression or filter method; interlace 2.
+      [pngIhdr(2, 1, 4, 2), idatOf([[1, 2, 3]]), iend],
+      [pngIhdr(2, 1, 16, 3), pngChunk('PLTE', [0, 0, 0]), idatOf([[0, 0, 0, 0]]), iend],
+      [pngChunk('IHDR', [0, 0, 0, 2, 0, 0, 0, 1, 8, 2, 1, 0, 0]), ok[1], iend],
+      [pngChunk('IHDR', [0, 0, 0, 2, 0, 0, 0, 1, 8, 2, 0, 1, 0]), ok[1], iend],
+      [pngIhdr(2, 1, 8, 2, 2), ok[1], iend],
+    ];
+    for (const chunks of refused) {
+      const bytes = pngFromChunks(...chunks);
+      expect(pngStructure(bytes)).toBeNull();
+    }
+    // Cut short anywhere, or a CRC off by one bit.
+    const whole = pngFromChunks(...ok);
+    for (const cut of [8, 20, 33, whole.length - 20, whole.length - 1]) {
+      expect(pngStructure(whole.subarray(0, cut))).toBeNull();
+    }
+    const flipped = Buffer.from(whole);
+    flipped[40]! ^= 1;
+    expect(pngStructure(flipped)).toBeNull();
+    // Known ancillary chunks, in their places, pass.
+    expect(pngStructure(pngFromChunks(ok[0], pngChunk('gAMA', [0, 0, 0xb1, 0x8f]), pngChunk('pHYs', new Uint8Array(9)),
+      ok[1], pngChunk('tEXt', [0x61, 0, 0x62]), iend))).not.toBeNull();
+  });
+
+  it('still decodes normal PNGs (RGB, RGBA, grey, grey and alpha, palette, 1-bit, tRNS) exactly as pngjs does', () => {
+    const cases: Array<{ name: string; bytes: Uint8Array }> = [
+      { name: 'RGB', bytes: pngFromChunks(pngIhdr(3, 2, 8, 2), idatOf([[255, 0, 0, 0, 255, 0, 0, 0, 255],
+        [10, 20, 30, 40, 50, 60, 70, 80, 90]]), iend) },
+      { name: 'RGBA', bytes: pngFromChunks(pngIhdr(2, 2, 8, 6), idatOf([[255, 0, 0, 255, 0, 0, 0, 0],
+        [0, 0, 255, 128, 9, 9, 9, 255]]), iend) },
+      { name: 'grey', bytes: pngFromChunks(pngIhdr(3, 1, 8, 0), idatOf([[0, 128, 255]]), iend) },
+      { name: 'grey with tRNS', bytes: pngFromChunks(pngIhdr(3, 1, 8, 0), pngChunk('tRNS', [0, 128]),
+        idatOf([[0, 128, 255]]), iend) },
+      { name: 'grey and alpha', bytes: pngFromChunks(pngIhdr(2, 1, 8, 4), idatOf([[50, 255, 50, 0]]), iend) },
+      { name: '1-bit grey', bytes: pngFromChunks(pngIhdr(10, 2, 1, 0), idatOf([[0b10110000, 0b01000000],
+        [0b11111111, 0b11000000]]), iend) },
+      { name: '2-bit palette with tRNS', bytes: pngFromChunks(pngIhdr(4, 1, 2, 3),
+        pngChunk('PLTE', [255, 0, 0, 0, 255, 0, 0, 0, 255]), pngChunk('tRNS', [255, 0]), idatOf([[0b00011000]]), iend) },
+      { name: '8-bit palette', bytes: pngFromChunks(pngIhdr(2, 2, 8, 3), pngChunk('PLTE', [1, 2, 3, 4, 5, 6]),
+        idatOf([[0, 1], [1, 0]]), iend) },
+      { name: 'RGB with tRNS', bytes: pngFromChunks(pngIhdr(2, 1, 8, 2), pngChunk('tRNS', [0, 1, 0, 2, 0, 3]),
+        idatOf([[1, 2, 3, 4, 5, 6]]), iend) },
+      // pngjs's own encoder, every row filter (sub, up, average, Paeth) tried: real filtered data.
+      { name: 'pngjs RGBA, all filters', bytes: new Uint8Array(PNG.sync.write(Object.assign(new PNG({ width: 37, height: 23 }),
+        { data: Buffer.from(Array.from({ length: 37 * 23 * 4 }, (_, index) => (index * 37) % 251)) }))) },
+      { name: 'pngjs RGB', bytes: new Uint8Array(PNG.sync.write(Object.assign(new PNG({ width: 19, height: 11 }),
+        { data: Buffer.from(Array.from({ length: 19 * 11 * 4 }, (_, index) => index % 4 === 3 ? 255 : (index * 13) % 256)) }),
+        { colorType: 2 })) },
+      { name: 'synthetic page', bytes: syntheticPng(64, 48) },
+    ];
+    for (const { name, bytes } of cases) {
+      const structure = pngStructure(bytes);
+      expect({ name, structure: structure !== null }).toEqual({ name, structure: true });
+      const raster = decodeRaster(page(bytes, structure!.width, structure!.height));
+      expect({ name, rgb: Array.from(raster.rgb) }).toEqual({ name, rgb: reference(bytes) });
+    }
+    // Spot checks: the 2-bit palette's first pixel is red (index 0, opaque), the second blue over white is not.
+    const palette = decodeRaster(page(cases[6]!.bytes, 4, 1));
+    expect(Array.from(palette.rgb.subarray(0, 3))).toEqual([255, 0, 0]);
+    expect(Array.from(palette.rgb.subarray(3, 6))).toEqual([255, 255, 255]);
+  });
+
+  it('carries no picture data in its errors', () => {
+    const marker = [0x5a, 0x51, 0x5a, 0x51, 0x5a, 0x51];
+    const lying = pngFromChunks(pngIhdr(100, 100), pngChunk('IDAT', zlib.deflateSync(Buffer.from(
+      Array.from({ length: 40_000 }, (_, index) => marker[index % marker.length]!)))), iend);
+    try { decodeRaster(page(lying)); throw new Error('expected a refusal'); } catch (error) {
+      const text = String(error) + String((error as Error).stack);
+      expect(text).not.toContain('ZQZQ');
+      expect(text).not.toContain(Buffer.from(lying.subarray(40, 60)).toString('base64'));
     }
   });
 });

@@ -2,7 +2,7 @@ import { AiInterruptedError, AiRejectedError, AiTransientError, type PageAnswer,
 import { paperReadingPayloadSchema } from './contract';
 import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type ReadingConfig } from './reader';
 import { CLINIC_PAGE, fixtureExifSegment, fixtureJpeg, fixturePng, modelItem, modelPage, readPage, SOURCE_SHA,
-  syntheticJpeg, syntheticPng, withRepeatedScan } from './test-fixtures';
+  pngChunk, pngFromChunks, pngIhdr, syntheticJpeg, syntheticPng, withRepeatedScan } from './test-fixtures';
 import { IMAGE_MAX_BASE64_LENGTH } from './page-image';
 import type { ModelPage } from './prompt';
 import { ZOOM_JPEG_MAX_SCANS } from './zoom';
@@ -1007,8 +1007,11 @@ describe('PaperReadingService', () => {
           { mediaType: 'image/jpeg', bytes: withRepeatedScan(jpegPage, ZOOM_JPEG_MAX_SCANS + 1) },
           // Over the JPEG pixel limit by its header (the picture itself is still sent).
           { mediaType: 'image/jpeg', bytes: fixtureJpeg(4_000, 3_200) },
-          // A 16-bit PNG.
-          { mediaType: 'image/png', bytes: (() => { const bytes = syntheticPng(40, 56); bytes[24] = 16; return bytes; })() },
+          // A 16-bit PNG (its chunks walk cleanly, so the picture is still sent).
+          { mediaType: 'image/png', bytes: pngFromChunks(pngIhdr(40, 56, 16, 2), pngChunk('IDAT', [0]), pngChunk('IEND')) },
+          // A PNG with a chunk zoom does not know (sent whole: only zoom checks the chunk types).
+          { mediaType: 'image/png', bytes: pngFromChunks(pngIhdr(40, 56), pngChunk('prVt', [1]), pngChunk('IDAT', [0]),
+            pngChunk('IEND')) },
         ];
         for (const picture of refused) {
           const { client, seen, crops } = zoomingClient(1);
