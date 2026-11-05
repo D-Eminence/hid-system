@@ -101,7 +101,9 @@ export class StaffEvidenceService {
     // While the setting is off the records the patient added are not a kind
     // at all, so they never make the coverage incomplete.
     const withEntries = patientEntriesEnabled();
-    const kinds = (Object.keys(STAFF_SOURCE_PERMISSIONS) as SourceKind[]).filter(kind => withEntries || kind !== 'patient_entry');
+    // The files the patient added (0117) are the patient chat's alone: never a staff kind.
+    const kinds = (Object.keys(STAFF_SOURCE_PERMISSIONS) as SourceKind[])
+      .filter(kind => kind !== 'patient_entry_document' && (withEntries || kind !== 'patient_entry'));
     const allowed = kinds.filter(kind => scope.allows(kind));
     const query = staffEvidenceQuery(withEntries);
     const local = await scope.transaction(auth, request.correlationId, async client => {

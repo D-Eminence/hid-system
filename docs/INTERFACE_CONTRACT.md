@@ -3559,3 +3559,197 @@ image is released to production.
 4. On by default (the owner's decision of 4 Nov 2026, after legal approval).
    `PATIENT_ENTRIES_ENABLED=false` for ehr-api switches it off again, which
    hides the records everywhere and keeps them.
+
+## 37. Photos and files on the records patients add (0117)
+
+The website's contract: health main `BACKEND-NEEDS.md` section 1,
+"Patient-added records, with photos and files". Stacked on 0116 (section 36).
+0117 is unsigned until the owner signs its declaration.
+
+Switch: `PATIENT_ENTRY_FILES_ENABLED` (ehr-api, default `true`, the
+coordinator's decision of 4 Nov 2026; `false` switches it off). Files are
+served only while `PATIENT_ENTRIES_ENABLED` is on too. Text records (section
+36) are unaffected by it. While it is off:
+
+- the three routes below answer exactly as if not built: a plain 404
+  (`application/problem+json`, code `NOT_FOUND`) before authentication, CSRF,
+  validation or audit;
+- `GET /api/v1/ehr/me/records` carries no `patientEntryFiles` key and every
+  record's `documents` is `[]`; the patient's list and the staff list the same;
+- no chat and no scanner route reads the new objects, so the image may run
+  before 0117 is applied.
+
+While it is on, `GET /api/v1/ehr/me/records` carries `patientEntryFiles: true`
+next to `patientEntries`.
+
+### Ask for an upload link
+
+`POST /api/v1/ehr/me/patient-entries/:entryId/documents/upload-intents`
+(patient session only, no facility, CSRF for a cookie session, `no-store`).
+`Idempotency-Key` required, one per file (16 to 128 of `A-Z a-z 0-9 . _ : -`,
+starting with a letter or digit). Body, nothing else (any other member, such
+as a patient, a classification or a retention, answers 400):
+
+| Field | Rule |
+|---|---|
+| `fileName` | trimmed, 1 to 255 characters, no control character |
+| `mediaType` | `image/jpeg`, `image/png` or `application/pdf` |
+| `sizeBytes` | integer, 1 to 10485760 |
+| `sha256Hex` | 64 hexadecimal characters (stored in lower case) |
+
+The key's request is the record, the name, the type, the size and the SHA-256.
+
+- 201 `{ document: { id, status: 'initiated', scanStatus: 'pending' },
+  upload: { method: 'PUT', url, requiredHeaders, expiresInSeconds: 300 } }`,
+  the staff shape. The link is the staff uploads' (the same S3 provider; key
+  `clinical/objects/<uuid>`; signed size, `x-amz-checksum-sha256`,
+  `x-amz-meta-declared-sha256` and server-side encryption headers).
+- The same key and request before that file is confirmed: 201 again for the
+  same document, with a fresh link.
+- The same key and request once the file is confirmed: 409
+  `PATIENT_DOCUMENT_ALREADY_UPLOADED`, with `document: { id, status,
+  scanStatus }` beside the problem's keys, and no link.
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION_FAILED` | a field above, `errors[{field, messages}]` |
+| 400 | `IDEMPOTENCY_KEY_REQUIRED` | no key, or a malformed one |
+| 400 | `PATIENT_DOCUMENT_INVALID` | the database refused a value |
+| 403 | `PATIENT_SESSION_REQUIRED`, `PATIENT_ACCESS_DENIED` | as the other patient routes |
+| 404 | `PATIENT_ENTRY_NOT_FOUND` | the record is not the patient's, or was removed (also for a replayed key) |
+| 409 | `IDEMPOTENCY_KEY_REUSED` | the key was used for another file or another record |
+| 409 | `PATIENT_DOCUMENT_ENTRY_LIMIT` | the record already has 5 files (any state); not counted for the day |
+| 429 | `PATIENT_DOCUMENT_DAILY_LIMIT` | 10 files opened by this patient since midnight in Africa/Lagos, on any record, removed ones included; `Retry-After` is the seconds to the next Lagos midnight; no document is opened |
+
+What counts for the record: every file opened on it (each new key answered
+201), in any state: confirmed, never confirmed, or refused at the confirm
+(`PATIENT_DOCUMENT_UPLOAD_INCOMPLETE`, `PATIENT_DOCUMENT_TYPE_MISMATCH`).
+Files are never deleted, so a record with 5 opened files takes no
+replacement, even when fewer than 5 are confirmed; the patient adds the file
+to a new record. A replayed key on the record is never refused for it.
+
+What counts for the day: each new key answered 201, once, whether or not its
+file is then confirmed. A replayed key is never refused for the day. Staff
+document uploads (EHR, Lab, Pharmacy, Migrate and OCR) are untouched: no
+daily limit and never counted.
+
+### PUT the bytes
+
+`PUT upload.url` with exactly `upload.requiredHeaders` and the hashed bytes.
+S3 refuses other bytes (the size and checksum are signed). The Content-Type
+is not trusted: the confirm reads the object's first bytes.
+
+### Confirm
+
+`POST /api/v1/ehr/me/patient-entries/:entryId/documents/:documentId/complete`
+(patient session, no body, `no-store`). Only the account that asked for the
+link, on that record, while the record is active. ehr-api HEADs the stored
+object and reads the first 8 bytes of that exact version: the size and
+SHA-256 must be the declared ones, and the bytes the declared type's (JPEG
+`FF D8 FF`, PNG `89 50 4E 47 0D 0A 1A 0A`, PDF `25 50 44 46 2D`).
+
+- 200 `{ document: { id, status: 'uploaded', scanStatus: 'pending' } }`; a
+  repeat answers the document as it is now, without reading the object again.
+- 409 `PATIENT_DOCUMENT_UPLOAD_INCOMPLETE`: no object, or another size or
+  SHA-256. Nothing is written; Try again may send it again.
+- 409 `PATIENT_DOCUMENT_TYPE_MISMATCH`: the first bytes are not the declared
+  type's ("This file isn't a JPEG, PNG or PDF.").
+- 404 `PATIENT_DOCUMENT_NOT_FOUND`: not this account's file, not on that
+  record, or the record was removed.
+
+### Reads
+
+- `patientEntries[].documents` (the records answer, the patient's list and
+  the staff list): `[{ id, fileName, mediaType, sizeBytes, status, scanStatus,
+  createdAt }]`, oldest first, confirmed files only (status `uploaded`,
+  `available` once scanned clean, `rejected` once rejected), never a removed
+  record's. `scanStatus` is `pending` until the scanner's result, then `clean`
+  or `rejected`; any other scanner state reads `pending`.
+- `GET /api/v1/ehr/patients/:patientId/patient-entries/:entryId/documents/:documentId/download`
+  (staff; `ehr.note.read` and `ehr.document.read`, `X-Facility-ID`,
+  `X-Purpose-Of-Use: direct-care`, the patient's read access at that
+  facility, as the imported history: a share, an approved access request,
+  the desk PIN or emergency access; a deny overrides it; revoking or expiry
+  ends it): 200 `{ url, expiresInSeconds: 60 }`, a link to exactly the
+  confirmed version, served inline as the scanned type. 403
+  `CONSENT_REQUIRED`; 404 `CLINICAL_RESOURCE_NOT_FOUND` (not a confirmed file
+  of an active record the clinician may read); 409
+  `PATIENT_DOCUMENT_NOT_AVAILABLE` (not scanned clean). Audited
+  `ehr.document.download` on resource type `patient-entry-document`, which
+  the patient's activity shows as "Your records were opened". The facility
+  name the patient typed gives that facility nothing. Nobody but the patient
+  writes.
+- The patient's chat reads each live (record active), confirmed, scan-clean
+  file as it reads documents: source kind `patient_entry_document`, origin
+  `patient`, title "File you added" (never the file name), provenance
+  "Patient provided file; machine extracted, not clinician verified", field
+  `text` (identifiers removed). The staff chat does not read the files. A
+  removed record's file vectors are deleted at the chat's next search
+  (`withdrawnPatientEntryDocumentChunksSql`).
+
+### The virus scanner
+
+The bridge and its Terraform are unchanged. ehr-api's scanner routes
+(`POST /ehr/documents/scan-targets/resolve`, `GET /ehr/documents/scan-targets`,
+`POST /ehr/documents/scan-events`) look a key or id up in `ehr.documents`
+first and, when that answers `Document not found`, among the patient files,
+in a second transaction, with the same answers and refusal codes. The work
+list merges both lists oldest first to the limit. Each command is asked for
+the full limit and audits every id it returned (0105's `returned` and
+`document_ids`), so with limit N the two audit rows can name up to 2N ids
+while the bridge receives N: an id in the audit was read by ehr-api, not
+necessarily sent to the bridge. Asking the patient list for the remainder
+only would starve patient files behind a staff backlog. A clean result's detected
+type must be one of the three types.
+
+### Audit
+
+Written by the commands in the same transaction, actor `patient`, resource
+type `patient-entry-document`, purpose `patient-self`, numbers only (never a
+file name):
+
+| Action | Outcome | Details |
+|---|---|---|
+| `ehr.patient-entry.document.upload-intent` | `success` | `entryId`, `mediaType`, `sizeBytes` |
+| `ehr.patient-entry.document.upload-intent` | `denied` | `reason: daily_limit` or `entry_limit`, `limit` |
+| `ehr.patient-entry.document.upload-complete` | `success` | `entryId`, `mediaType`, `sizeBytes` |
+
+The scanner's commands audit as 0105 and 0009 do for staff documents
+(`ehr.document.scan-target.resolve`, `ehr.document.scan-target.list`,
+`ehr.document.scan.<event>`), resource type `patient-entry-document`.
+
+### Database (0117)
+
+`ehr.patient_entry_documents`, `ehr.patient_entry_document_scan_events`
+(append-only, bound to the confirmed version and SHA-256),
+`ehr.patient_entry_documents_effective` (security invoker) and
+`ehr.patient_entry_document_extractions`, all under forced row-level
+security: the applier's own policy and a read policy (a file where its record
+is read, once confirmed or by the patient; its scan events where it is read;
+its reading in the patient's own session, of an available file). Files are
+never deleted and change only from initiated to uploaded. Patient commands
+`ehr.create_my_patient_entry_document_intent` and
+`ehr.complete_my_patient_entry_document` (fresh patient-self transaction,
+0116's advisory lock); scanner commands
+`ehr.resolve_patient_entry_document_scan_target`,
+`ehr.list_patient_entry_documents_awaiting_scan` and
+`ehr.append_patient_entry_document_scan_event` (EXECUTE for
+`hid_document_scanner` alone). The only row lock the commands take is on
+`ehr.patient_entry_documents`, by its owner, whose FOR ALL policy admits it.
+The chunk tables' source-kind CHECK gains `patient_entry_document`. The suite
+is `services/ehr-api/test/database/patient-entry-documents.integration.sql`.
+0117 has no down migration.
+
+### Release order checks
+
+1. 0116 is signed and applied, then the owner signs the 0117 declaration and
+   it is applied.
+2. The health website release whose chat parser
+   (`packages/contracts/src/stagingChat.ts`) accepts the kind
+   `patient_entry_document` is live before this ehr-api image, as for
+   `patient_entry` (section 36). Today's parser rejects an unknown kind, so a
+   chat answer citing a patient's file would be unreadable. If the image must
+   ship first, production sets `PATIENT_ENTRY_FILES_ENABLED=false` for ehr-api
+   until the website is live.
+3. The documents bucket's CORS allows the PUT from the patient host (app.)
+   and its staging and development hosts (infrastructure, not this change).

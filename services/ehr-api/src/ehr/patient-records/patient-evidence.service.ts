@@ -101,7 +101,7 @@ export class PatientEvidenceService {
   }
   async assertCurrent(request:HidRequest,bindings:readonly EvidenceBinding[]) {
     if(!bindings.length){await this.records.authorizeSelf(request);return;}
-    const snapshot=await this.snapshot(request,undefined,bindings.filter(b=>b.kind==='document'||b.kind==='attachment').map(b=>b.id));
+    const snapshot=await this.snapshot(request,undefined,bindings.filter(b=>b.kind==='document'||b.kind==='attachment'||b.kind==='patient_entry_document').map(b=>b.id));
     const current=new Map(snapshot.records.map(r=>[evidenceKey(r),r]));
     for(const b of bindings) {
       const value=current.get(evidenceKey(b));

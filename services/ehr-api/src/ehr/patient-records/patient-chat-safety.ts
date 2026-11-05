@@ -46,7 +46,7 @@ export function givesResult(source: Cited): boolean {
   if (source.kind === 'lab_result') return !isCorrectionPending(source);
   if (source.kind === 'health_profile' && Object.entries(source.fields ?? {})
     .some(([key, value]) => RESULT_FIELDS.test(key) && value !== null && value !== undefined && String(value).trim() !== '')) return true;
-  if (['import','import_version','document','attachment','note','health_profile','patient_entry'].includes(source.kind)) {
+  if (['import','import_version','document','attachment','note','health_profile','patient_entry','patient_entry_document'].includes(source.kind)) {
     return RESULT_TEXT.test(source.content ?? JSON.stringify(source.fields ?? {}));
   }
   return false;
@@ -148,6 +148,7 @@ export const KIND_LABELS: Record<SourceKind,string> = {
   investigation: 'Test request', lab_result: 'Lab result', vital: 'Vital signs', document: 'Clinical document',
   attachment: 'Imported document', import: 'Imported history', import_version: 'Earlier version of imported history',
   health_profile: 'Imported health profile', profile: 'Age and sex', patient_entry: 'Record you added',
+  patient_entry_document: 'File you added',
 };
 const FIELD_LABELS: Record<string,string> = {
   noteType: 'Note type', text: 'Text', signedAt: 'Signed', type: 'Type', startedAt: 'Started', endedAt: 'Ended',

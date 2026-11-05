@@ -5,7 +5,7 @@ import {withPatientLines} from './patient-chat-safety';
 import {PatientChatService} from './patient-chat.service';
 import {evidence,binding,chunks,type Evidence} from './patient-evidence.types';
 import {patientEvidence} from './patient-evidence.policy';
-import {withdrawnPatientEntryChunksSql} from '../patient-entries/patient-entries.query';
+import {withdrawnPatientEntryChunksSql,withdrawnPatientEntryDocumentChunksSql} from '../patient-entries/patient-entries.query';
 jest.mock('../../config/environment',()=>({getEnvironment:()=>({AI_ENABLED:true,AI_EMBEDDING_MODEL_ID:'amazon.titan-embed-text-v2:0'})}));
 // PATIENT_ENTRIES_ENABLED (0116), off unless a test turns it on.
 let mockEntriesEnabled=false;
@@ -186,7 +186,8 @@ describe('Vectors of a record the patient removed (0116)',()=>{
   // The only statement that names the removed records' table; the patient chat's own purge (#167) runs too,
   // and counts patient_entry among the local kinds it may purge in full.
   expect(calls.filter(([sql])=>sql.includes('ehr.patient_entries')).length).toBe(1);
-  const purge=calls.find(([sql])=>sql.startsWith('delete from')&&!sql.includes('ehr.patient_entries'));
+  const purge=calls.find(([sql])=>sql.startsWith('delete from')&&!sql.includes('ehr.patient_entries')
+   &&!sql.includes('ehr.patient_entry_documents_effective'));
   expect(purge?.[1][2]).toContain('patient_entry');
   expect(cleanup).toBeLessThan(calls.findIndex(([sql])=>sql.includes('order by embedding<=>')));
  });
@@ -222,6 +223,32 @@ describe('Vectors of a record the patient removed (0116)',()=>{
    expect(withdrawnPatientEntryChunksSql(table)).toBe(`delete from ${table} chunk where chunk.patient_id = $1 and chunk.source_kind = 'patient_entry' and not exists (select 1 from ehr.patient_entries entry where entry.id = chunk.source_id and entry.patient_id = chunk.patient_id)`);
    expect(suite).toContain(withdrawnPatientEntryChunksSql(table));
   }
+ });
+});
+
+describe('Vectors of a removed record\'s photos and files (0117)',()=>{
+ const indexed=(records:Evidence[])=>async(sql:string)=>({rows:sql.includes('order by embedding<=>')?[]:
+  sql.includes('select source_kind,source_id,source_version,source_hash,chunk_no')?records.flatMap(r=>chunks(r).map((_,chunk_no)=>
+   ({source_kind:r.kind,source_id:r.id,source_version:r.version,source_hash:r.hash,chunk_no}))):[]});
+ const saved=process.env.PATIENT_ENTRY_FILES_ENABLED;
+ afterEach(()=>{if(saved===undefined)delete process.env.PATIENT_ENTRY_FILES_ENABLED;else process.env.PATIENT_ENTRY_FILES_ENABLED=saved;});
+ it('are deleted at the chat\'s next search while the files\' setting is on, and never named while it is off',async()=>{
+  for(const files of ['true','false']) {
+   mockEntriesEnabled=true;process.env.PATIENT_ENTRY_FILES_ENABLED=files;
+   const records=[item('patient_entry',5,{type:'test',place:null,date:'2026-10-20',notes:null})];
+   const s=setup(records);s.plan.mockResolvedValue({intent:'records',recordIntent:'search',query:'Malaria'});
+   s.query.mockImplementation(indexed(records));
+   await s.service.answer(request,'What did the test show?');
+   const calls=(s.query.mock.calls as unknown as Array<[string,unknown[]]>).map(([sql,args])=>[sql.trim(),args] as const);
+   const cleanup=calls.filter(([sql])=>sql===withdrawnPatientEntryDocumentChunksSql('ehr.patient_evidence_chunks'));
+   expect(cleanup).toEqual(files==='true'?[[withdrawnPatientEntryDocumentChunksSql('ehr.patient_evidence_chunks'),[patientId]]]:[]);
+   if(files==='false')expect(calls.some(([sql])=>sql.includes('patient_entry_document'))).toBe(false);
+  }
+ });
+ it('are deleted by the statement the database suite proves under row-level security',()=>{
+  const suite=readFileSync(resolve(__dirname,'../../../test/database/patient-entry-documents.integration.sql'),'utf8');
+  expect(withdrawnPatientEntryDocumentChunksSql('ehr.patient_evidence_chunks')).toBe(`delete from ehr.patient_evidence_chunks chunk where chunk.patient_id = $1 and chunk.source_kind = 'patient_entry_document' and not exists (select 1 from ehr.patient_entry_documents_effective file where file.id = chunk.source_id and file.patient_id = chunk.patient_id and file.status = 'available')`);
+  expect(suite).toContain(withdrawnPatientEntryDocumentChunksSql('ehr.patient_evidence_chunks'));
  });
 });
 

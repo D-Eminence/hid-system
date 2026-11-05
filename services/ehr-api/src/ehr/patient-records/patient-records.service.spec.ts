@@ -107,6 +107,52 @@ describe('Owning EHR patient and emergency read boundary', () => {
     expect(recordWithClient).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({
       action: 'ehr.patient.self.records.read', details: expect.objectContaining({ patientEntryCount: 50 }) }));
   });
+  describe('their photos and files (0117)', () => {
+    const saved = process.env.PATIENT_ENTRY_FILES_ENABLED;
+    afterEach(() => {
+      if (saved === undefined) delete process.env.PATIENT_ENTRY_FILES_ENABLED; else process.env.PATIENT_ENTRY_FILES_ENABLED = saved;
+    });
+    const entryId = '33333333-3333-4333-8333-000000000001';
+    const answers = async (sql: string) => ({ rows: sql.includes('from ehr.patient_entries\n') || sql.includes('from ehr.patient_entries ')
+      ? [{ id: entryId, kind: 'test', title: 'Malaria test', facility_name: null, occurred_on: '2026-10-20', notes: null,
+        created_at: new Date('2026-11-04T09:00:00.000Z'), cursor_at: '2026-11-04T09:00:00.000000Z' }]
+      : sql.includes('from ehr.patient_entry_documents_effective')
+        ? [{ id: 'document-1', entry_id: entryId, original_file_name: 'rdt.jpg', media_type: 'image/jpeg', size_bytes: '2048',
+          status: 'uploaded', scan_status: 'pending', created_at: new Date('2026-11-04T09:01:00.000Z') }] : [] });
+
+    it('lists each record\'s confirmed files and says uploads are served (patientEntryFiles: true) while on', async () => {
+      mockEntriesEnabled = true;
+      delete process.env.PATIENT_ENTRY_FILES_ENABLED;
+      const { service, query } = setup();
+      query.mockImplementation(answers);
+      const value = await service.self(request) as Record<string, unknown>;
+      expect(value.patientEntryFiles).toBe(true);
+      expect(Object.keys(value).indexOf('patientEntryFiles')).toBe(Object.keys(value).indexOf('patientEntries') + 1);
+      expect((value.patientEntries as Array<{ documents: unknown[] }>)[0]!.documents).toEqual([{ id: 'document-1',
+        fileName: 'rdt.jpg', mediaType: 'image/jpeg', sizeBytes: 2048, status: 'uploaded', scanStatus: 'pending',
+        createdAt: '2026-11-04T09:01:00.000Z' }]);
+    });
+
+    it('leaves the flag out, every documents list empty and the files unread while PATIENT_ENTRY_FILES_ENABLED is off', async () => {
+      mockEntriesEnabled = true;
+      process.env.PATIENT_ENTRY_FILES_ENABLED = 'false';
+      const { service, query } = setup();
+      query.mockImplementation(answers);
+      const value = await service.self(request) as Record<string, unknown>;
+      expect(value).not.toHaveProperty('patientEntryFiles');
+      expect(value.patientEntries).toEqual([expect.objectContaining({ id: entryId, documents: [] })]);
+      expect(query.mock.calls.some(([sql]) => String(sql).includes('patient_entry_documents'))).toBe(false);
+    });
+
+    it('leaves the flag out while the records patients add are off, whatever the files\' setting', async () => {
+      process.env.PATIENT_ENTRY_FILES_ENABLED = 'true';
+      const { service, query } = setup();
+      const value = await service.self(request) as Record<string, unknown>;
+      expect(value).not.toHaveProperty('patientEntryFiles');
+      expect(value).not.toHaveProperty('patientEntries');
+      expect(query.mock.calls.some(([sql]) => String(sql).includes('patient_entry'))).toBe(false);
+    });
+  });
   it('never adds them to the emergency read or the imported history read', async () => {
     mockEntriesEnabled = true;
     const { service, query } = setup();

@@ -11,6 +11,7 @@ import type { HidRequest } from '../../common/request-context';
 import { evidence,type Evidence } from './patient-evidence.types';
 import { DomainProblem } from '../../common/problem';
 import type { EvidenceAudience } from './patient-evidence.query';
+import { patientEntryFilesEnabled } from '../patient-entries/patient-entry-files.flag';
 
 const BASE_ATTACHMENT_TEXT_QUERY=`with files as (select 'attachment' kind,null::uuid facility_id,f.id,f.patient_id,f.source_created_at,
  f.source_payload->>'original_file_name' title,b.storage_bucket,b.storage_key,b.object_version_id,b.sha256_hex,b.size_bytes,
@@ -37,21 +38,44 @@ function replaceOnce(text:string,from:string,to:string):string {
   return text.slice(0,at)+to+text.slice(at+from.length);
 }
 const DOCUMENT_BRANCH="where d.patient_id=$1 and d.status='available'";
+const FILES_END=") select * from files where";
+/**
+ * The photos and files the patient added to their own records (0117), as one
+ * more branch of the patient's query, only while PATIENT_ENTRY_FILES_ENABLED
+ * is on (off, the query never names the new objects): confirmed, scanned
+ * clean on their bound object (status available), on a record the patient's
+ * row-level security still shows (a removed record's files are gone), read
+ * into the patient's own extraction table.
+ */
+const PATIENT_FILE_BRANCH=`
+ union all select 'patient_entry_document' kind,null::uuid facility_id,d.id,d.patient_id,d.created_at,d.original_file_name,
+ d.storage_bucket,d.storage_key,d.object_version_id,d.sha256_hex,d.size_bytes,
+ d.scan_status,d.detected_media_type,null::bigint,
+ x.status,x.job_id,x.next_token,x.extracted_text,x.minimum_confidence,x.unclear_lines,x.page_count,x.started_at,x.updated_at,x.updated_at::text
+ from ehr.patient_entry_documents_effective d left join ehr.patient_entry_document_extractions x on x.file_id=d.id and x.patient_id=d.patient_id
+ and x.object_version_id=d.object_version_id and x.sha256_hex=d.sha256_hex and x.extractor_version=1
+ where d.patient_id=$1 and d.status='available'`;
+/** How each kind's machine reading is labelled for the chat. */
+export const ATTACHMENT_PROVENANCE: Readonly<Record<string,string>> = {
+  document: 'Machine extracted clinical document; not clinician verified',
+  attachment: 'Machine extracted imported attachment; not clinician verified',
+  patient_entry_document: 'Patient provided file; machine extracted, not clinician verified',
+};
 /**
  * Staff: exactly the staff chat's document query (staff extraction tables,
  * documents from completed visits, every classification). Patient: the
  * patient's own extraction tables and only documents classified 'phi', so a
  * restricted or internal document is neither read nor sent for extraction.
  */
-export function attachmentTextQuery(audience:EvidenceAudience):string {
+export function attachmentTextQuery(audience:EvidenceAudience,includePatientFiles=false):string {
   if(audience==='staff')return replaceOnce(BASE_ATTACHMENT_TEXT_QUERY
     .replaceAll('ehr.patient_attachment_extractions','ehr.staff_attachment_extractions')
     .replaceAll('ehr.patient_document_extractions','ehr.staff_document_extractions'),
     DOCUMENT_BRANCH,DOCUMENT_BRANCH+" and exists(select 1 from ehr.encounters e where e.id=d.encounter_id and e.patient_id=d.patient_id and e.facility_id=d.facility_id and e.status='completed')");
   if(audience!=='patient')throw new Error('Unknown evidence audience');
-  return replaceOnce(BASE_ATTACHMENT_TEXT_QUERY,DOCUMENT_BRANCH,DOCUMENT_BRANCH+" and d.classification='phi'");
+  const query=replaceOnce(BASE_ATTACHMENT_TEXT_QUERY,DOCUMENT_BRANCH,DOCUMENT_BRANCH+" and d.classification='phi'");
+  return includePatientFiles?replaceOnce(query,FILES_END,PATIENT_FILE_BRANCH+FILES_END):query;
 }
-const PATIENT_ATTACHMENT_TEXT_QUERY=attachmentTextQuery('patient');
 
 export function readableLines(blocks:readonly Block[]) {
   let confidence=100,unclear=0,pages=0;const lines:string[]=[];
@@ -94,7 +118,7 @@ export class PatientAttachmentTextService {
     await access.authorize(request);
     return {records:ready.map(r=>evidence({kind:r.kind,id:r.id,version:createHash('sha256').update(`${r.object_version_id}:1:${r.updated_at_token}`).digest('hex'),
       title:r.title??'Imported attachment',recordedAt:new Date(r.source_created_at).toISOString(),effectiveAt:null,
-      provenance:r.kind==='document'?'Machine extracted clinical document; not clinician verified':'Machine extracted imported attachment; not clinician verified',quality:r.status==='partial'||r.unclear_lines?'uncertain or partial extraction':'machine extracted, unverified',
+      provenance:ATTACHMENT_PROVENANCE[r.kind]??ATTACHMENT_PROVENANCE.attachment!,quality:r.status==='partial'||r.unclear_lines?'uncertain or partial extraction':'machine extracted, unverified',
       fields:{text:r.extracted_text,extractionStatus:r.status,extractedAt:r.updated_at_token,unclearLines:r.unclear_lines,pages:r.page_count,minimumAcceptedLineConfidence:r.minimum_confidence}})),
       pending:rows.filter(r=>!ready.some(a=>a.id===r.id)).length,complete:rows.length<=200&&eligible.length<=limit};
   }
@@ -159,8 +183,10 @@ export class PatientAttachmentTextService {
     return {authorize:request=>this.records.authorizeSelf(request),
       transaction:(auth,correlationId,operation)=>this.database.withPatientTransaction(
         auth as Awaited<ReturnType<PatientRecordsService['authorizeSelf']>>,correlationId,operation),
-      query:PATIENT_ATTACHMENT_TEXT_QUERY,table:kind=>{
+      // The patient's files (0117) only while PATIENT_ENTRY_FILES_ENABLED is on.
+      query:attachmentTextQuery('patient',patientEntryFilesEnabled()),table:kind=>{
         if(kind==='document')return 'ehr.patient_document_extractions';
+        if(kind==='patient_entry_document')return 'ehr.patient_entry_document_extractions';
         if(kind==='attachment')return 'ehr.patient_attachment_extractions';
         throw new Error('Unknown extraction source');
       }};

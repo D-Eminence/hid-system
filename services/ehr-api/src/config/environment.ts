@@ -112,6 +112,10 @@ const environmentSchema = z
     // Records patients add themselves (0116): off (the default) answers a plain 404 on their routes and leaves them out
     // of the records answer and both chats; turned on only after 0116 is applied and the website reads them.
     PATIENT_ENTRIES_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
+    // Photos and files on those records (0117), their own switch (coordinator, 4 Nov 2026), on by default: off answers
+    // the upload routes' plain 404, leaves documents empty and the records answer's patientEntryFiles flag out, and no
+    // chat reads the files. Text entries are unaffected. Turned off before 0117 is applied.
+    PATIENT_ENTRY_FILES_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
   })
   .superRefine((environment, context) => {
     if (environment.AI_ENABLED) {

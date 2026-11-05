@@ -260,6 +260,13 @@ describe('DocumentService.complete: a replayed complete', () => {
 // the isolated workload pool, and what downstream serves after a clean scan
 // under the detected type (owner decision D3).
 describe('DocumentService: the document scanner', () => {
+  // Staff documents alone, as before 0117: the patient files' dispatch is below.
+  const savedFiles = process.env.PATIENT_ENTRY_FILES_ENABLED;
+  beforeEach(() => { process.env.PATIENT_ENTRY_FILES_ENABLED = 'false'; });
+  afterEach(() => {
+    if (savedFiles === undefined) delete process.env.PATIENT_ENTRY_FILES_ENABLED;
+    else process.env.PATIENT_ENTRY_FILES_ENABLED = savedFiles;
+  });
   const scanner = { subject: 'hid:staging:document-scanner', accountId: 'd0c5ca40-0105-4000-8000-000000000001' };
   const bucket = 'hid-staging-documents-a1b2c3';
   const storageKey = 'clinical/objects/0c9e8a7b-6d5c-4b3a-9f8e-7d6c5b4a3f2e';
@@ -397,6 +404,144 @@ describe('DocumentService: the document scanner', () => {
     expect(client.query.mock.calls[0]?.[1]).toEqual([900, 50, 'gdmp-correlation-0002']);
     expect(JSON.stringify(answer)).not.toMatch(/patient|facility/i);
   });
+});
+
+describe('DocumentService: the scanner reaches the files patients add (0117)', () => {
+  const scanner = { subject: 'hid:staging:document-scanner', accountId: 'd0c5ca40-0105-4000-8000-000000000001' };
+  const bucket = 'hid-staging-documents-a1b2c3';
+  const storageKey = 'clinical/objects/5d1e2f3a-4b5c-4d6e-8f70-819203a4b5c6';
+  const fileId = '5d1e2f3a-0000-4000-8000-000000000117';
+  const target = { storageBucket: bucket, storageKey, objectVersionId };
+  const notFound = () => Object.assign(new Error('Document not found'), { code: 'P0002' });
+  const savedEntries = process.env.PATIENT_ENTRIES_ENABLED;
+  const savedFiles = process.env.PATIENT_ENTRY_FILES_ENABLED;
+  afterEach(() => {
+    for (const [name, value] of [['PATIENT_ENTRIES_ENABLED', savedEntries], ['PATIENT_ENTRY_FILES_ENABLED', savedFiles]] as const) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  });
+
+  /** One scanner transaction per call; each SQL answered by the first matching handler. */
+  function dispatchHarness(handlers: Record<string, () => Record<string, unknown>[]>) {
+    const transactions: string[][] = [];
+    const database = {
+      withWorkloadTransaction: jest.fn(async (_subject: string, _correlation: string,
+        operation: (client: { query: jest.Mock }) => Promise<unknown>) => {
+        const issued: string[] = [];
+        transactions.push(issued);
+        return operation({ query: jest.fn(async (sql: string) => {
+          const name = /from (ehr\.[a-z_]+)\(|select (ehr\.[a-z_]+)\(/.exec(sql);
+          const command = name?.[1] ?? name?.[2] ?? 'unknown';
+          issued.push(command);
+          const rows = handlers[command]?.();
+          if (!rows) throw new Error(`unexpected ${command}`);
+          return { rows, rowCount: rows.length };
+        }) });
+      }),
+    };
+    const storage = {
+      bucket: jest.fn(() => bucket),
+      readPrefix: jest.fn(async () => Uint8Array.from([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31])),
+    };
+    const service = new DocumentService(database as never, {} as never, {} as never, storage as never);
+    return { service, database, storage, transactions };
+  }
+  const fileRow = { document_id: fileId, object_version_id: objectVersionId, sha256_hex: sha256Hex, status: 'uploaded',
+    declared_media_type: 'application/pdf', latest_event_type: null };
+  const event = {
+    documentId: fileId, objectVersionId, objectSha256Hex: sha256Hex, eventType: 'clean' as const,
+    detectedMediaType: 'application/pdf', scannerEngine: 'aws-guardduty-malware-protection-s3', scannerVersion: '1.0',
+    idempotencyKey: 'gdmp-0117-0123456789abcdef0123456789abcdef0123456789',
+  };
+
+  it('resolves a key no staff document holds to the patient\'s file, in a second transaction, then sniffs it', async () => {
+    const { service, transactions, storage } = dispatchHarness({
+      'ehr.resolve_document_scan_target': () => { throw notFound(); },
+      'ehr.resolve_patient_entry_document_scan_target': () => [fileRow],
+    });
+    await expect(service.resolveScanTarget(target, scanner, 'gdmp-correlation-0117')).resolves.toStrictEqual({
+      documentId: fileId, objectVersionId, sha256Hex, status: 'uploaded', declaredMediaType: 'application/pdf',
+      latestEventType: null, sniffResult: 'supported', sniffedMediaType: 'application/pdf',
+    });
+    expect(transactions).toEqual([['ehr.resolve_document_scan_target'], ['ehr.resolve_patient_entry_document_scan_target']]);
+    expect(storage.readPrefix).toHaveBeenCalledWith(storageKey, objectVersionId, 1024);
+  });
+
+  it('keeps a staff document\'s key with the staff command, never asking the patient files', async () => {
+    const { service, transactions } = dispatchHarness({
+      'ehr.resolve_document_scan_target': () => [{ ...fileRow, document_id: documentId }],
+    });
+    await expect(service.resolveScanTarget(target, scanner, 'gdmp-correlation-0117')).resolves
+      .toMatchObject({ documentId });
+    expect(transactions).toEqual([['ehr.resolve_document_scan_target']]);
+  });
+
+  it('answers 404 DOCUMENT_NOT_FOUND when neither holds the key', async () => {
+    const { service, transactions } = dispatchHarness({
+      'ehr.resolve_document_scan_target': () => { throw notFound(); },
+      'ehr.resolve_patient_entry_document_scan_target': () => { throw notFound(); },
+    });
+    await expect(service.resolveScanTarget(target, scanner, 'gdmp-correlation-0117')).rejects
+      .toMatchObject({ status: 404, code: 'DOCUMENT_NOT_FOUND' });
+    expect(transactions).toHaveLength(2);
+  });
+
+  it('passes the patient command\'s refusals on with the staff codes', async () => {
+    const { service } = dispatchHarness({
+      'ehr.append_document_scan_event': () => { throw notFound(); },
+      'ehr.append_patient_entry_document_scan_event': () => {
+        throw Object.assign(new Error('Document object scan has already reached a terminal result'), { code: '55000' });
+      },
+    });
+    await expect(service.recordScan(event, scanner, 'gdmp-correlation-0117')).rejects
+      .toMatchObject({ status: 409, code: 'SCAN_ALREADY_TERMINAL' });
+  });
+
+  it('records a patient file\'s scan event with the bridge\'s values', async () => {
+    const { service, transactions } = dispatchHarness({
+      'ehr.append_document_scan_event': () => { throw notFound(); },
+      'ehr.append_patient_entry_document_scan_event': () => [{ event_id: 'event-0117' }],
+    });
+    await expect(service.recordScan(event, scanner, 'gdmp-correlation-0117')).resolves.toEqual({ eventId: 'event-0117' });
+    expect(transactions).toEqual([['ehr.append_document_scan_event'], ['ehr.append_patient_entry_document_scan_event']]);
+  });
+
+  it('does not dispatch any other staff refusal', async () => {
+    const { service, transactions } = dispatchHarness({
+      'ehr.append_document_scan_event': () => {
+        throw Object.assign(new Error('Only an uploaded document can be scanned'), { code: '55000' });
+      },
+    });
+    await expect(service.recordScan(event, scanner, 'gdmp-correlation-0117')).rejects
+      .toMatchObject({ status: 409, code: 'DOCUMENT_NOT_UPLOADED' });
+    expect(transactions).toHaveLength(1);
+  });
+
+  it('merges both work lists oldest first to the limit', async () => {
+    const row = (id: string, at: string) => ({ document_id: id, storage_bucket: bucket, storage_key: storageKey,
+      object_version_id: objectVersionId, sha256_hex: sha256Hex, declared_media_type: 'image/png',
+      updated_at: new Date(at), latest_event_type: null, scan_started_count: 0, last_scan_started_at: null });
+    const { service, transactions } = dispatchHarness({
+      'ehr.list_documents_awaiting_scan': () => [row('a-staff-1', '2026-11-01T09:00:00Z'), row('a-staff-2', '2026-11-03T09:00:00Z')],
+      'ehr.list_patient_entry_documents_awaiting_scan': () => [row('b-file-1', '2026-11-02T09:00:00Z')],
+    });
+    const answer = await service.listScanTargets({ olderThanSeconds: 900, limit: 2 }, scanner, 'gdmp-correlation-0117');
+    expect(answer.items.map(item => item.documentId)).toEqual(['a-staff-1', 'b-file-1']);
+    expect(transactions).toEqual([['ehr.list_documents_awaiting_scan', 'ehr.list_patient_entry_documents_awaiting_scan']]);
+  });
+
+  it.each([['PATIENT_ENTRY_FILES_ENABLED'], ['PATIENT_ENTRIES_ENABLED']])(
+    'with %s off, asks only the staff commands (this image then runs before 0117)', async (setting) => {
+      process.env[setting] = 'false';
+      const { service, transactions } = dispatchHarness({
+        'ehr.resolve_document_scan_target': () => { throw notFound(); },
+        'ehr.list_documents_awaiting_scan': () => [],
+      });
+      await expect(service.resolveScanTarget(target, scanner, 'gdmp-correlation-0117')).rejects
+        .toMatchObject({ status: 404, code: 'DOCUMENT_NOT_FOUND' });
+      await service.listScanTargets({ olderThanSeconds: 900, limit: 2 }, scanner, 'gdmp-correlation-0117');
+      expect(transactions).toEqual([['ehr.resolve_document_scan_target'], ['ehr.list_documents_awaiting_scan']]);
+    });
 });
 
 describe('DocumentService: downstream uses the detected media type (owner decision D3)', () => {

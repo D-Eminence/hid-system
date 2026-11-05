@@ -11,6 +11,8 @@ const EXPECTED: Record<SourceKind, EvidenceOrigin> = {
   attachment: 'scanned_paper', document: 'scanned_paper', profile: 'health_id_profile',
   // Records the patient added themselves (0116): "You added this".
   patient_entry: 'patient',
+  // Photos and files the patient added to those records (0117).
+  patient_entry_document: 'patient',
 };
 const source = (kind: SourceKind, originHint?: string | null) => evidence({ kind, id: '22222222-2222-4222-8222-222222222222',
   version: '1', title: `Synthetic ${kind}`, recordedAt: '2026-10-01T00:00:00.000Z', effectiveAt: null,
