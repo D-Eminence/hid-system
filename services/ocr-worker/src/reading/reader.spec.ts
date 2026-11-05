@@ -330,15 +330,19 @@ describe('PaperReadingService', () => {
         expect(payload.reading).toMatchObject({ rereadPages: [1], imageRereadPages: [1], imageRereadSkipped: [] });
         // The item on its lines is kept, read from the picture; the one placed elsewhere is dropped and counted, and
         // the first pass's word-for-word "Hypertension", which no picture item covers, is kept for checking.
-        expect(payload.items).toHaveLength(2);
+        // The first pass's note on line 1 is another kind than the medicine read there from the picture, so it is
+        // not covered by it: both are kept.
+        expect(payload.items.map((item) => [item.kind, item.readBy])).toEqual([['medicine', 'reread'],
+          ['note', 'first_pass'], ['diagnosis', 'first_pass']]);
         expect(payload.items[0]).toMatchObject({ readBy: 'reread', confidence: 'check_carefully',
           asWritten: 'Amlodipine 5mg od', box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 } });
         expect(payload.items[0]!.checkReasons).toContain('read_from_image');
-        expect(payload.items[1]).toMatchObject({ readBy: 'first_pass', kind: 'diagnosis', asWritten: 'Hypertension',
-          confidence: 'check_carefully', checkReasons: ['not_in_picture_reading'],
+        expect(payload.items[2]).toMatchObject({ asWritten: 'Hypertension', confidence: 'check_carefully',
+          checkReasons: ['not_in_picture_reading'],
           checkReason: 'The second reading, from the picture, did not find this; check it against the paper.' });
-        // The first pass's note on line 1 is covered by the medicine read there from the picture, and replaced.
-        expect(payload.items.some((item) => item.kind === 'note')).toBe(false);
+        expect(payload.items[1]!.checkReasons).toContain('not_in_picture_reading');
+        // Every line is cited by a kept item, so the page is not flagged for a missed item.
+        expect(payload.pages[0]!.flagReasons).not.toContain('possible_missed_item');
         expect(payload.reading.droppedUngrounded).toBe(1);
       }
     });
@@ -596,40 +600,54 @@ describe('PaperReadingService', () => {
       expect(kept.payload.items).toEqual([]);
     });
 
-    it('merges a partial picture reading: covered first-pass items are replaced, uncovered ones kept for checking', async () => {
-      const page = readPage(1, [['Amlodipne 5rng od', { handwritten: true, confidence: 0.55 }], 'Dx: Hypertension',
-        ['Metformin 500mg bd', { handwritten: true, confidence: 0.6 }]]);
-      const first = modelPage([
-        modelItem({ kind: 'medicine', asWritten: 'Amlodipne 5rng od', lineIds: ['p1-l1'], name: 'Amlodipne',
-          strength: '5rng', frequency: 'od', status: 'current' }),
+    describe('merging a partial picture reading with the first pass', () => {
+      const page = readPage(1, [['Amlodipine 5mg od, Metformin 500mg bd', { handwritten: true, confidence: 0.55 }],
+        'Dx: Hypertension', ['Paracetamol 1g tds', { handwritten: true, confidence: 0.6 }]]);
+      const medicine = (asWritten: string, name: string, line: number,
+        box?: { left: number; top: number; width: number; height: number }) => modelItem({ kind: 'medicine',
+        asWritten, lineIds: [`p1-l${line}`], name, status: 'current', ...(box ? { box } : {}) });
+      const first = modelPage([medicine('Amlodipine 5mg od', 'Amlodipine', 1), medicine('Metformin 500mg bd', 'Metformin', 1),
         modelItem({ kind: 'diagnosis', asWritten: 'Hypertension', lineIds: ['p1-l2'], name: 'Hypertension',
-          status: 'confirmed' }),
-        modelItem({ kind: 'medicine', asWritten: 'Metformin 500mg bd', lineIds: ['p1-l3'], name: 'Metformin',
-          strength: '500mg', frequency: 'bd', status: 'current' })]);
-      const picture = modelPage([
-        // Same kind on line 1: replaces the first-pass medicine there.
-        modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'], name: 'Amlodipine',
-          strength: '5mg', frequency: 'od', status: 'current', box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 } }),
-        // A different kind on line 2 whose box lies on that line: covers the first-pass diagnosis too.
-        modelItem({ kind: 'note', asWritten: 'Dx: Hypertension', noteText: 'Dx: Hypertension', lineIds: ['p1-l2'],
-          box: { left: 0.1, top: 0.1, width: 0.4, height: 0.02 } }),
-        // Line 3's item is placed off its line and dropped, so the first-pass medicine there stays.
-        modelItem({ kind: 'medicine', asWritten: 'Metformin 500mg bd', lineIds: ['p1-l3'], name: 'Metformin',
-          strength: '500mg', frequency: 'bd', status: 'current', box: { left: 0.1, top: 0.8, width: 0.3, height: 0.02 } }),
-      ]);
-      const client: PageModelClient = { readPage: jest.fn(async (request) => ok(request.image ? picture : first)) };
-      const { summary, payload } = await read(imageConfig, client, [page], png);
-      expect(summary).toMatchObject({ rereadPages: [1], imageRereadPages: [1], imageRereadFailedPages: [],
-        droppedUngrounded: 1 });
-      expect(payload.items.map((item) => [item.lineIds[0], item.kind, item.readBy])).toEqual([
-        ['p1-l1', 'medicine', 'reread'], ['p1-l2', 'note', 'reread'], ['p1-l3', 'medicine', 'first_pass']]);
-      expect(payload.items[2]).toMatchObject({ asWritten: 'Metformin 500mg bd', confidence: 'check_carefully' });
-      expect(payload.items[2]!.checkReasons).toContain('not_in_picture_reading');
-      expect(new Set(payload.items.map((item) => item.id)).size).toBe(3);
-      expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
-      // The same answers give the same ids.
-      const again = await read(imageConfig, client, [page], png);
-      expect(again.payload.items.map((item) => item.id)).toEqual(payload.items.map((item) => item.id));
+          status: 'confirmed' }), medicine('Paracetamol 1g tds', 'Paracetamol', 3)]);
+      const onLine1 = { left: 0.1, top: 0.05, width: 0.2, height: 0.02 };
+      const run = async (picture: ModelPage) => {
+        const client: PageModelClient = { readPage: jest.fn(async (request) => ok(request.image ? picture : first)) };
+        return read(imageConfig, client, [page], png);
+      };
+      const shape = (items: readonly { lineIds: string[]; kind: string; readBy: string; asWritten: string }[]) =>
+        items.map((item) => [item.lineIds[0], item.kind, item.readBy, item.asWritten]);
+
+      it('keeps the medicine the picture did not read on a shared line, replaces same-name twins, keeps dropped ones', async () => {
+        const { summary, payload } = await run(modelPage([
+          medicine('Amlodipine 5mg od', 'Amlodipine', 1, onLine1),
+          modelItem({ kind: 'diagnosis', asWritten: 'Hypertension', lineIds: ['p1-l2'], name: 'Hypertension',
+            status: 'confirmed', box: { left: 0.1, top: 0.1, width: 0.3, height: 0.02 } }),
+          // Line 3's item is placed off its line and dropped, so the first-pass medicine there stays.
+          medicine('Paracetamol 1g tds', 'Paracetamol', 3, { left: 0.1, top: 0.8, width: 0.3, height: 0.02 })]));
+        expect(summary).toMatchObject({ rereadPages: [1], imageRereadPages: [1], imageRereadFailedPages: [],
+          droppedUngrounded: 1 });
+        expect(shape(payload.items)).toEqual([
+          ['p1-l1', 'medicine', 'reread', 'Amlodipine 5mg od'], ['p1-l1', 'medicine', 'first_pass', 'Metformin 500mg bd'],
+          ['p1-l2', 'diagnosis', 'reread', 'Hypertension'], ['p1-l3', 'medicine', 'first_pass', 'Paracetamol 1g tds']]);
+        for (const kept of [payload.items[1]!, payload.items[3]!]) {
+          expect(kept.confidence).toBe('check_carefully');
+          expect(kept.checkReasons).toContain('not_in_picture_reading');
+        }
+        expect(new Set(payload.items.map((item) => item.id)).size).toBe(4);
+        expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+        const again = await run(modelPage([medicine('Amlodipine 5mg od', 'Amlodipine', 1, onLine1)]));
+        expect(again.payload.items.filter((item) => item.readBy === 'first_pass').map((item) => item.asWritten))
+          .toEqual(['Metformin 500mg bd', 'Hypertension', 'Paracetamol 1g tds']);
+      });
+
+      it('keeps both medicines when the picture reads only a note on their line', async () => {
+        const { payload } = await run(modelPage([modelItem({ kind: 'note', asWritten: 'Amlodipine 5mg od',
+          noteText: 'Amlodipine 5mg od', lineIds: ['p1-l1'], box: onLine1 })]));
+        expect(shape(payload.items).slice(0, 3)).toEqual([['p1-l1', 'note', 'reread', 'Amlodipine 5mg od'],
+          ['p1-l1', 'medicine', 'first_pass', 'Amlodipine 5mg od'], ['p1-l1', 'medicine', 'first_pass', 'Metformin 500mg bd']]);
+        expect(payload.items).toHaveLength(5);
+        expect(new Set(payload.items.map((item) => item.id)).size).toBe(5);
+      });
     });
 
     it('re-reads the text, never the picture, when the re-read model has no known image tier', async () => {
@@ -656,6 +674,7 @@ describe('PaperReadingService', () => {
       expect(invalid.seen.map((call) => call.image !== undefined)).toEqual([false, true, false]);
       expect(fallback.summary.imageRereadSkipped).toEqual([{ page: 1, reason: 'image_rejected' }]);
       for (const error of [new AiRejectedError('AI_BAD_REQUEST', 1), new AiRejectedError('AI_HTTP_413', 1),
+        new AiRejectedError('IMAGE_TIER_UNKNOWN'),
         new AiRejectedError('AI_NOT_AUTHENTICATED', 1), new AiRejectedError('AI_NOT_PERMITTED', 1),
         new AiRejectedError('AI_MODEL_NOT_FOUND', 1)]) {
         const { client, seen } = rejecting(error);

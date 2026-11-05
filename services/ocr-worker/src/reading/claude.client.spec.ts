@@ -341,8 +341,10 @@ describe('ClaudePageClient', () => {
 
     it('never sends a picture to a model of unknown image tier', async () => {
       const { instance, fetch } = client([sse(JSON.stringify(answer))]);
-      await expect(instance.readPage({ ...pinned, model: 'claude-haiku-5-5', image }, new AbortController().signal))
-        .rejects.toThrow('IMAGE_TIER_UNKNOWN');
+      const error = await instance.readPage({ ...pinned, model: 'claude-haiku-5-5', image }, new AbortController().signal)
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(AiRejectedError);
+      expect(error).toMatchObject({ code: 'IMAGE_TIER_UNKNOWN', attempts: 0, invalidRequest: false });
       expect(fetch).not.toHaveBeenCalled();
     });
 

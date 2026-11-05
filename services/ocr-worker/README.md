@@ -147,7 +147,8 @@ Each claimed job runs, in order:
    standard tier; never the padded size). The tier comes from an explicit list
    of model ids in `page-image.ts` (high: `claude-opus-4-7`, `-4-8`, `-5`,
    `-5-5`, `claude-sonnet-5`, `-5-5`, `claude-fable-5`, `-5-1`,
-   `claude-mythos-5-1`; standard: `claude-opus-4-6`, `-4-5`,
+   `claude-mythos-5`, `-5-1`; Opus 5.5 and Sonnet 5.5 inferred from their
+   predecessors, the rest documented; standard: `claude-opus-4-6`, `-4-5`,
    `claude-sonnet-4-6`, `-4-5`, `claude-haiku-4-5`), never guessed from the
    id: with any other re-read model the page gets the text re-read
    (`image_tier_unknown`). The text lists the lines with their boxes in those pixels and
@@ -166,10 +167,10 @@ Each claimed job runs, in order:
    is kept only when it cites lines on its page, at most 3 of them, lying
    together (on one row, or consecutive in reading order and vertically
    adjacent: the `lines_not_together` test, here a reason to drop), and its box
-   (clipped to the page, at least 0.005 of the page on each side, and at most
-   2 times the area of the box around its cited lines, that box first made
-   taller by 0.005 of the page above and below for a one-line item, height
-   only) lies on every cited line that has a box, each line on its own (over
+   (clipped to the page, at least 0.005 of the page on each side, its area at
+   most 2 times the area of the box around its cited lines plus 0.002 of the
+   page, and running past that box's left and right edges by at most a
+   quarter of its width in total) lies on every cited line that has a box, each line on its own (over
    half the line's height and half the narrower width), lies on no line it
    does not cite by that same test, with at most half of the line area it
    covers on lines it does not cite, and its `asWritten` shares a word of three letters or more,
@@ -190,14 +191,23 @@ Each claimed job runs, in order:
    (`imageRereadFailedPages`) and the first-pass items stay, marked
    `reread_failed`; if the first pass had no items either, the picture's
    (empty) result stands. Otherwise the items read from the picture are kept,
-   together with every first-pass item none of them overlaps (the same kind
-   and a shared cited line, or a different kind and a shared cited line that
-   the picture item's box lies on). Such a first-pass item keeps
+   together with every first-pass item none of them covers. A picture item
+   covers a first-pass item only when it is of the same kind, shares a cited
+   line and reads the same thing: for a medicine or diagnosis the name, for
+   an allergy the substance, sharing a word of three letters or more; for
+   other kinds the first pass's `asWritten` sharing a word or number with the
+   picture item's. A picture item of another kind never covers one; both are
+   kept. (So a name the picture reads differently from a misread first pass,
+   such as "Amlodipine" for "Amlodipne", keeps both, for a person to decide.)
+   Such a first-pass item keeps
    `readBy: "first_pass"`, becomes `check_carefully` and gets
    `not_in_picture_reading` ("The second reading, from the picture, did not
    find this; check it against the paper.", shown below any disagreement or
    status warning). Items are in reading order and their ids made unique again
-   with the usual suffixes.
+   with the usual suffixes. `possible_missed_item` is worked out again from the
+   lines all kept items and the identity cite; `droppedUngrounded` for the page
+   stays the count of the picture reading's dropped items, including any whose
+   content a kept first-pass item still carries.
 
    Scope (v1): PNG and JPEG only. PDF and TIFF pages get the text re-read
    (`image_not_available_pdf`, `image_not_available_tiff`). A JPEG whose EXIF

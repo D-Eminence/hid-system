@@ -1,4 +1,4 @@
-import { checkPage, checkReasonSentence, itemId, uniqueItemIds } from './items';
+import { checkPage, checkReasonSentence, itemId, mergeImageReread, uniqueItemIds } from './items';
 import { createMasker } from './masking';
 import { CLINIC_PAGE, modelItem, modelPage, readPage, SOURCE_SHA } from './test-fixtures';
 import type { ModelPage } from './prompt';
@@ -739,7 +739,8 @@ describe('checkPage for a page read from its picture (image re-read)', () => {
     const at = (top: number, width = 0.5) => ({ box: { left: 0.1, top, width, height: 0.02 } });
     const dense = readPage(1, [['Amlodipne 5rng od', { ...hard, ...at(0.1) }],
       ['Metformin 500mg bd', { ...hard, ...at(0.125) }], ['Paracetamol 1g tds', { ...hard, ...at(0.15) }],
-      ['Dx: Hypertension', at(0.175)], ['BP 140/90', { ...hard, ...at(0.5, 0.1) }]]);
+      ['Dx: Hypertension', at(0.175)], ['BP 140/90', { ...hard, ...at(0.5, 0.1) }],
+      ['Weight 70kg', { ...hard, ...at(0.7) }]]);
     const read = (lineIds: string[], box: { left: number; top: number; width: number; height: number },
       asWritten = 'Metformin Paracetamol') => checkPage({ page: 1, lines: dense.lines, sourceSha256Hex: SOURCE_SHA,
       readBy: 'reread', masker: createMasker(), fromImage: true,
@@ -784,11 +785,22 @@ describe('checkPage for a page read from its picture (image re-read)', () => {
       expect(check({ left: 0.1, top: 0.5, width: 0.3, height: 0.02 }).items).toHaveLength(1);
     });
 
-    it('pads a one-line item only in height: at most 2 x the line widened by 0.005 above and below', () => {
-      // Line 5: width 0.1, height 0.02, so the allowed area is 2 x 0.1 x 0.03 = 0.006.
+    it('allows at most 2 x the line area plus 0.002 of the page', () => {
+      // Line 5: width 0.1, height 0.02 (area 0.002), so the allowed area is 2 x 0.002 + 0.002 = 0.006.
       expect(read(['p1-l5'], { left: 0.1, top: 0.48, width: 0.1, height: 0.059 }, 'BP 140/90').items).toHaveLength(1);
-      // 0.0062: over the limit (padding the width as well would have allowed 0.0066).
       expect(read(['p1-l5'], { left: 0.1, top: 0.48, width: 0.1, height: 0.062 }, 'BP 140/90').items).toEqual([]);
+      // Line 6: width 0.5, height 0.02 (area 0.01), allowed 0.022. A box three times the line's height (0.03) is
+      // dropped; one just inside the limit, and inside the side limit, is kept.
+      expect(read(['p1-l6'], { left: 0.1, top: 0.68, width: 0.5, height: 0.06 }, 'Weight 70kg').items).toEqual([]);
+      expect(read(['p1-l6'], { left: 0.04, top: 0.6925, width: 0.6, height: 0.035 }, 'Weight 70kg').items).toHaveLength(1);
+    });
+
+    it("lets a box run past its lines' left and right edges by at most a quarter of their width in total", () => {
+      // Line 5 runs 0.1-0.2. A box 2.2 times as wide (into blank space, within the area limit) is dropped.
+      expect(read(['p1-l5'], { left: 0.05, top: 0.5, width: 0.22, height: 0.02 }, 'BP 140/90').items).toEqual([]);
+      // 0.025 past its edges in total: kept; 0.03: dropped.
+      expect(read(['p1-l5'], { left: 0.09, top: 0.5, width: 0.125, height: 0.02 }, 'BP 140/90').items).toHaveLength(1);
+      expect(read(['p1-l5'], { left: 0.085, top: 0.5, width: 0.13, height: 0.02 }, 'BP 140/90').items).toEqual([]);
     });
 
     it('drops a box much larger than its cited line, and keeps one a little larger than a short line', () => {
@@ -827,5 +839,24 @@ describe('the not_in_picture_reading sentence', () => {
     expect(checkReasonSentence(['not_in_picture_reading', 'duplicate_source_span']))
       .toBe('Another item was read from the same words; check nothing was missed.');
     expect(checkReasonSentence(['handwritten', 'low_ocr_confidence_handwritten', 'not_in_picture_reading'])).toBe(sentence);
+  });
+});
+
+describe('mergeImageReread', () => {
+  it('works out possible_missed_item again from every kept item, so a line a kept first-pass item cites is not missed', () => {
+    const page = readPage(1, [['Amlodipne 5rng od', { handwritten: true, confidence: 0.55 }], 'Dx: Hypertension']);
+    const base = { page: 1, lines: page.lines, sourceSha256Hex: SOURCE_SHA, masker: createMasker() };
+    const first = checkPage({ ...base, readBy: 'first_pass', answer: modelPage([modelItem({ kind: 'diagnosis',
+      asWritten: 'Hypertension', lineIds: ['p1-l2'], name: 'Hypertension', status: 'confirmed' })]) });
+    const image = checkPage({ ...base, readBy: 'reread', fromImage: true, answer: modelPage([modelItem({
+      kind: 'medicine', asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'], name: 'Amlodipine', status: 'current',
+      box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 } })]) });
+    // The picture reading alone leaves "Dx: Hypertension" uncited.
+    expect(image.flagReasons).toContain('possible_missed_item');
+    const merged = mergeImageReread(first, image, page.lines);
+    expect(merged.items.map((item) => item.kind)).toEqual(['medicine', 'diagnosis']);
+    expect(merged.flagReasons).not.toContain('possible_missed_item');
+    expect(merged.flagReasons).toContain('handwriting');
+    expect(merged.droppedUngrounded).toBe(image.droppedUngrounded);
   });
 });

@@ -122,7 +122,8 @@ export class ClaudePageClient implements PageModelClient {
     // The picture as the model sees it: the model's pixel coordinates are in this size (resized, unpadded).
     const tier = image ? imageTierOf(request.model) : null;
     // The reader sends a picture only to a model of known tier ('image_tier_unknown' otherwise); never guess one.
-    if (image && tier === null) throw new Error('IMAGE_TIER_UNKNOWN');
+    // A rejection (no request made), so only this page's re-read fails, never the whole reading.
+    if (image && tier === null) throw new AiRejectedError('IMAGE_TIER_UNKNOWN');
     const seen = image && tier ? resizedSize(image.width, image.height, tier) : null;
     const params: Anthropic.MessageCreateParamsNonStreaming = {
       model: request.model,
