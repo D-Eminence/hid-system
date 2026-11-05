@@ -22,6 +22,28 @@ describe('extraction view for the check screen', () => {
     expect(view.confidence).toBe(0.93);
   });
 
+  it('reads a v2 payload with or without the image re-read fields, and rejects an unknown skip reason', () => {
+    const withImage = { ...v2Payload(), reading: { ...v2Payload().reading, imageRereadPages: [1],
+      imageRereadSkipped: [{ page: 2, reason: 'image_not_available_pdf' }] } };
+    expect(parseStructuredPayload(withImage).contract).toBe('hid-paper-reading-v2');
+    expect(readingView(parseStructuredPayload(withImage)).reading).toMatchObject({ imageRereadPages: [1],
+      imageRereadSkipped: [{ page: 2, reason: 'image_not_available_pdf' }] });
+    expect(parseStructuredPayload(v2Payload()).contract).toBe('hid-paper-reading-v2');
+    expect(parseStructuredPayload({ ...withImage, reading: { ...withImage.reading,
+      imageRereadSkipped: [{ page: 2, reason: 'guessed' }] } }).contract).toBeNull();
+  });
+
+  it('reads the masked-number and orientation skip reasons and the failed image re-read pages, which stay optional', () => {
+    const later = { ...v2Payload(), reading: { ...v2Payload().reading, imageRereadPages: [], imageRereadFailedPages: [1],
+      imageRereadSkipped: [{ page: 1, reason: 'image_has_masked_number' },
+        { page: 2, reason: 'image_orientation_unsupported' }, { page: 3, reason: 'image_tier_unknown' },
+        { page: 4, reason: 'image_refused' }] } };
+    expect(readingView(parseStructuredPayload(later)).reading).toMatchObject({ imageRereadFailedPages: [1],
+      imageRereadSkipped: later.reading.imageRereadSkipped });
+    expect(parseStructuredPayload({ ...later, reading: { ...later.reading, imageRereadFailedPages: [0] } }).contract)
+      .toBeNull();
+  });
+
   it('gives every item exactly the contract fields the check screen uses', () => {
     const [, medicine] = projectExtraction(extractionRow(v2Payload())).paperReading.items;
     expect(Object.keys(medicine!).sort()).toEqual(['asWritten', 'box', 'checkReason', 'checkReasons', 'confidence',
@@ -67,7 +89,7 @@ describe('extraction view for the check screen', () => {
   it('passes on only versions, models, status and counts from provenance', () => {
     expect(publicProvenance(v2Provenance())).toEqual({ processingContract: 'hid-textract-v2',
       adapter: 'amazon-textract', operation: 'analyze', pageCount: 2, lineCount: 4, sourceVersionBound: true,
-      reading: { contract: 'hid-paper-reading-v2', status: 'read', promptVersion: 'hid-paper-reading-prompt-2',
+      reading: { contract: 'hid-paper-reading-v2', status: 'read', promptVersion: 'hid-paper-reading-prompt-3',
         schemaVersion: 's', firstPassModel: 'claude-sonnet-5-5', rereadModel: 'claude-opus-5-5', itemCount: 3,
         flaggedPages: 1, droppedUngrounded: 1 } });
     expect(publicProvenance({ processingContract: { nested: 'x' }, reading: 'x' })).toEqual({});

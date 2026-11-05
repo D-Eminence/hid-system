@@ -110,6 +110,7 @@ export type {
   PharmacyDispensing,
   PharmacyDispensingReversal,
   PharmacyImportedMedicationEvidence,
+  PharmacyImportBatch,
   PharmacyClientOptions,
   PharmacyInternalCaller,
   PharmacyMedicationReference,
@@ -146,6 +147,7 @@ export { IdentityApiClient, IdentityApiProblem } from './identity';
 export type {
   IdentityActorContext,
   IdentityAuthorizationDecision,
+  IdentityAuthorizationPrecheck,
   IdentityClientOptions,
   IdentityDelegatedContext,
   IdentityFacilityAssignment,

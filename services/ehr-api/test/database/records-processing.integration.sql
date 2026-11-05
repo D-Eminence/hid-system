@@ -2,12 +2,38 @@
 -- Records processing, Stage 1 (0104): the healthcare-operations purpose, the
 -- access-request trigger (who may ask, the patient's age, scope and length),
 -- the purpose on the patient's request list, and (owner decision 34(1)) the
--- cover by the patient's direct-care approval or Access PIN (section 10). Requests, approvals,
+-- cover by the patient's direct-care approval or Access PIN (section 10), which
+-- since 0108 (owner decisions D-a and D-b of 2026-11-05) lasts as long as that
+-- grant and also comes from an active patient share. Requests, approvals,
 -- revocations, PINs, shares and break-glass go through this branch's own
 -- commands as the Identity API runtime; document reads go through the EHR API
 -- runtime with the context the EHR API sets. Each case is recorded and the
 -- suite fails at the end listing every case whose outcome differs from the
 -- expected one.
+-- What the cases show of 0108's cover body (a mutant run, 2026-11-05): 269
+-- mutants, each one condition of the body changed (every WHERE and ON
+-- conjunct, every alternative of an OR, and every sub-condition of the
+-- approval, PIN, share, age and deny-directive tests made true, false or
+-- negated; the time, age and disabled_until comparisons made strict or
+-- loose; 17 or 19 years, UTC or the session's time zone instead of
+-- Africa/Lagos, dob + 18 years; the read/write and purpose literals; the
+-- result, order and limit), each applied to a fresh 0001-0108 database and
+-- this suite run with 1g2 (the body's md5) set aside: 255 fail behavioural
+-- cases. The other 14 change no answer for any row the tables allow, so no
+-- case can catch them: dropping at_time is not null (a null at_time already
+-- fails starts_at <= at_time) or dob is not null (a null dob fails the age
+-- comparison); dropping the account's subject or status test or the account
+-- join (auth.membership_has_permission checks the request membership's
+-- account subject and status at each use, and the grant's account is its
+-- membership's by the exact-membership foreign key), the grant's facility
+-- test, or the directive membership's facility (the same foreign key gives
+-- the grant its membership's facility, which the permission check requires
+-- to be the request's); dropping the grant's scope test alone or its
+-- break_glass test alone (consent_grants' CHECK makes scope break_glass
+-- exactly when break_glass is set, for source_system 'hid': 10s46); dropping
+-- the request's patient, membership, facility or purpose test (the
+-- exact-request foreign key makes them the grant's: 10za10, 10za11); and
+-- coalesce(..., true) for the permission (it never answers null).
 -- Rollback-only. Synthetic values only; uuid prefix 100a.
 set plpgsql.variable_conflict = error;
 begin;
@@ -32,7 +58,7 @@ exception when others then
 end $$;
 grant execute on function pg_temp.expect(text, text, text), pg_temp.try(text) to public;
 
--- 1. What 0104 installs.
+-- 1. What 0104 installs (and 0108's cover body).
 select pg_temp.expect('1a the code', 'Records processing/t/hid',
   (select format('%s/%s/%s', display, active, source_system) from identity.purpose_of_use_codes
     where code = 'healthcare-operations'));
@@ -73,6 +99,9 @@ select pg_temp.expect('1g bodies', '732d11892dd4e27e1ff9093ae3b7de5a f88923a49a1
      (2, 'identity.create_access_request(text,text,text,integer)'), (3, 'identity.approve_access_request(uuid)'),
      (4, 'auth.membership_has_permission(text,uuid,uuid,text)')) wanted(ord, signature)
      join pg_proc p on p.oid = wanted.signature::regprocedure));
+select pg_temp.expect('1g2 the cover has 0108''s body (owner decisions D-a and D-b)', '6928763d3b69f0e4b4acf96a6a255736',
+  (select md5(prosrc) from pg_proc
+    where oid = 'identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz)'::regprocedure));
 select pg_temp.expect('1h the cover and the gate', 'cover: t/s/{"search_path=pg_catalog, pg_temp"}/t/hid_identity_runtime EXECUTE; '
   || 'gate: t/s/{"search_path=identity, auth, pg_temp"}/t',
   (select string_agg(format('%s: %s/%s/%s/%s%s', label, p.prosecdef, p.provolatile, p.proconfig,
@@ -355,8 +384,9 @@ select pg_temp.expect('4f the grant is the doctor''s membership only', 'clinicia
   format('clinician=%s nurse=%s pharmacist=%s', pg_temp.allowed(2, 1, 'read_records', 'healthcare-operations'),
     pg_temp.allowed(3, 1, 'read_records', 'healthcare-operations'), pg_temp.allowed(5, 1, 'read_records', 'healthcare-operations')));
 
--- 5. A direct-care share (the patient's own command) does not open records
--- processing, and is unchanged.
+-- 5. A direct-care share (the patient's own command) is unchanged for direct
+-- care and, since 0108 D-b, also covers records processing for that
+-- membership (section 10 has the details).
 set local role hid_identity_api_runtime;
 select pg_temp.as_patient();
 select pg_temp.expect('5a P1 shares with the nurse', 'write_records',
@@ -365,7 +395,7 @@ select pg_temp.expect('5a P1 shares with the nurse', 'write_records',
     'records-processing-share-0001', repeat('b', 64))$q$));
 reset role;
 select pg_temp.backdate();
-select pg_temp.expect('5b the share is direct care only', 'dc read=t dc write=t rp read=f rp write=f',
+select pg_temp.expect('5b the share is direct care and covers records processing (0108 D-b)', 'dc read=t dc write=t rp read=t rp write=t',
   format('dc read=%s dc write=%s rp read=%s rp write=%s',
     pg_temp.allowed(3, 1, 'read_records', 'direct-care'), pg_temp.allowed(3, 1, 'write_records', 'direct-care'),
     pg_temp.allowed(3, 1, 'read_records', 'healthcare-operations'), pg_temp.allowed(3, 1, 'write_records', 'healthcare-operations')));
@@ -380,7 +410,8 @@ select pg_temp.expect('6a doctor, records processing', 'clean/available rows=1',
 select pg_temp.expect('6b doctor, direct care (no direct-care grant)', 'hidden rows=0', pg_temp.document(1, 'direct-care'));
 select pg_temp.expect('6c clinician, records processing, not approved', 'hidden rows=0',
   pg_temp.document(2, 'healthcare-operations'));
-select pg_temp.expect('6d nurse, records processing (share only)', 'hidden rows=0', pg_temp.document(3, 'healthcare-operations'));
+select pg_temp.expect('6d nurse, records processing (the share covers it, 0108 D-b)', 'clean/available rows=1',
+  pg_temp.document(3, 'healthcare-operations'));
 select pg_temp.expect('6e nurse, direct care (share)', 'clean/available rows=1', pg_temp.document(3, 'direct-care'));
 select pg_temp.expect('6f pharmacist, records processing', 'hidden rows=0', pg_temp.document(5, 'healthcare-operations'));
 reset role;
@@ -458,10 +489,12 @@ reset role;
 
 -- 10. Decision 34(1) (owner, 2026-11-03): the patient's approval of a
 -- direct-care access request, or the patient's Access PIN, also covers
--- records processing for that staff member at that facility, for up to 24
--- hours from the grant's start and never past its end. Under-18s, another
--- facility, another staff member, break-glass, shares, a membership that may
--- not run OCR jobs, a deny directive and the kill switch are not covered.
+-- records processing for that staff member at that facility; since 0108
+-- (owner, 2026-11-05) for as long as the grant lasts (D-a, no 24-hour bound),
+-- and an active patient share covers it too, read and write at any level
+-- (D-b). Under-18s, another facility, another staff member, break-glass,
+-- emergency, seeded or imported grants, a membership that may not run OCR
+-- jobs, a deny directive and the kill switch are not covered.
 -- Fixtures: a second facility (B); a doctor with a membership at A (10) and at
 -- B (11), a nurse (12) and a pharmacist (13) at A; patients with a login and a
 -- live session aged 40 (P7), 17 (P8) and with no date of birth (P9); a clean
@@ -525,7 +558,8 @@ insert into ehr.document_scan_events (document_id, patient_id, facility_id, crea
 set local session_replication_role = origin;
 
 -- Who asks or checks: doctor (A), doctor-b (B's membership at B),
--- doctor-a-at-b (A's membership, B's facility), nurse, pharmacist.
+-- doctor-a-at-b (A's membership, B's facility), nurse, pharmacist, and
+-- nurse-second (a second membership of the nurse at A that only 10s42-10s43 add).
 create function pg_temp.cover_actor(who text) returns text[] language sql as $$
   select case who
     when 'doctor' then array['staff:records-processing-cover-doctor', '100a3000-0000-4000-8000-000000000010', '100a6000-0000-4000-8000-000000000002']
@@ -533,6 +567,7 @@ create function pg_temp.cover_actor(who text) returns text[] language sql as $$
     when 'doctor-a-at-b' then array['staff:records-processing-cover-doctor', '100a3000-0000-4000-8000-000000000010', '100a6000-0000-4000-8000-000000000003']
     when 'nurse' then array['staff:records-processing-cover-nurse', '100a3000-0000-4000-8000-000000000012', '100a6000-0000-4000-8000-000000000002']
     when 'pharmacist' then array['staff:records-processing-cover-pharmacist', '100a3000-0000-4000-8000-000000000013', '100a6000-0000-4000-8000-000000000002']
+    when 'nurse-second' then array['staff:records-processing-cover-nurse', '100a3000-0000-4000-8000-000000000014', '100a6000-0000-4000-8000-000000000002']
   end;
 $$;
 create function pg_temp.as_cover_staff(who text, purpose text) returns void language sql as $$
@@ -585,6 +620,49 @@ begin
     from ehr.documents_effective effective where effective.id = '100a8000-0000-4000-8000-000000000007';
   return coalesce(seen, 'hidden');
 end $$;
+-- The cover's answer for who and patient n at a time: the grant it names and its end.
+create function pg_temp.cover_row(who text, n integer, action text, at_time timestamptz) returns text
+language sql as $$
+  select coalesce((select cover.consent_grant_id::text || '|' || cover.covered_until::text
+     from identity.records_processing_direct_care_cover(('100a5000-0000-4000-8000-00000000000' || n)::uuid,
+            (pg_temp.cover_actor(who))[1], (pg_temp.cover_actor(who))[2]::uuid, (pg_temp.cover_actor(who))[3]::uuid,
+            action, at_time) cover), 'none');
+$$;
+-- The grant the cover names, by name (see 10s25).
+create function pg_temp.cover_named(answer text) returns text language sql as $$
+  select case when answer = 'none' then 'none' else coalesce(
+    (select case grant_row.id::text
+              when current_setting('records_processing.share_n2', true) then 'share'
+              when '100a9300-0000-4000-8000-000000000002' then 'copy'
+              when current_setting('records_processing.cover_g4', true) then 'approval'
+              when current_setting('records_processing.cover_pin', true) then 'pin'
+              else grant_row.id::text end
+            || case when split_part(answer, '|', 2)::timestamptz = grant_row.expires_at then ' until=expires_at'
+                    else ' until=' || split_part(answer, '|', 2) end
+       from identity.consent_grants grant_row where grant_row.id::text = split_part(answer, '|', 1)), answer) end;
+$$;
+-- One change as the owner, the probe's answer, and the change undone (a
+-- rolled-back subtransaction).
+create function pg_temp.after_change(change text, probe text) returns text language plpgsql as $$
+declare
+  answer text;
+begin
+  begin
+    execute change;
+    execute probe into answer;
+    raise exception using errcode = 'P0001', message = 'undo the change';
+  exception when sqlstate 'P0001' then
+    null;
+  end;
+  return answer;
+exception when others then
+  return sqlstate || ' ' || sqlerrm;
+end $$;
+create function pg_temp.cover_after(change text, who text, n integer, action text, at_time timestamptz) returns text
+language sql as $$
+  select pg_temp.after_change(change, format('select pg_temp.cover_named(pg_temp.cover_row(%L, %s, %L, %L))',
+    who, n, action, at_time));
+$$;
 grant execute on function pg_temp.cover_actor(text), pg_temp.as_cover_staff(text, text), pg_temp.as_cover_patient(integer),
   pg_temp.cover_approved(text, text, integer, text, integer), pg_temp.cover_allowed(text, integer, text, text, timestamptz),
   pg_temp.cover_answers(text, integer, timestamptz), pg_temp.cover_document(text, text) to public;
@@ -624,7 +702,8 @@ select set_config('records_processing.cover_answer',
 reset role;
 select pg_temp.expect('10i the cover names the approval grant and ends with it', 'grant=t until=expires_at',
   (select format('grant=%s until=%s', split_part(current_setting('records_processing.cover_answer'), '|', 1) = grant_row.id::text,
-            case when split_part(current_setting('records_processing.cover_answer'), '|', 2)::timestamptz = grant_row.expires_at
+            case when nullif(split_part(current_setting('records_processing.cover_answer'), '|', 2), 'none')::timestamptz
+                      = grant_row.expires_at
                  then 'expires_at' else split_part(current_setting('records_processing.cover_answer'), '|', 2) end)
      from identity.consent_grants grant_row where grant_row.id::text = current_setting('records_processing.cover_g1')));
 set local role hid_ehr_api_runtime;
@@ -641,28 +720,34 @@ select pg_temp.expect('10k who may execute the cover', 'identity=t ehr=f lab=f p
     has_function_privilege('hid_pharmacy_api_runtime', 'identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz)', 'EXECUTE'),
     has_function_privilege('hid_ocr_api_runtime', 'identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz)', 'EXECUTE')));
 
--- 10l-10o. Never past the grant's end, and at most 24 hours from its start.
+-- 10l-10o. Never past the grant's end; since 0108 D-a no longer bounded by
+-- 24 hours from its start.
 select pg_temp.expect('10l a second before the grant ends', 'rp read=t rp write=t dc read=t dc write=f',
   pg_temp.cover_answers('doctor', 7, (select expires_at - interval '1 second' from identity.consent_grants
     where id::text = current_setting('records_processing.cover_g1'))));
 select pg_temp.expect('10m when the grant ends', 'rp read=f rp write=f dc read=f dc write=f',
   pg_temp.cover_answers('doctor', 7, (select expires_at from identity.consent_grants
     where id::text = current_setting('records_processing.cover_g1'))));
--- Requests last at most 24 hours and PIN grants 60 minutes today, so the
--- grant's end comes first; a grant made to last three days (as the owner)
--- shows the 24-hour bound.
+-- Requests last at most 24 hours and PIN grants 60 minutes today; a grant
+-- made to last three days (as the owner) shows the cover lasting as long as
+-- the grant, past 24 hours from its start.
 update identity.consent_grants set starts_at = now() - interval '2 hours', expires_at = now() + interval '3 days'
  where id::text = current_setting('records_processing.cover_g1');
-select pg_temp.expect('10n a second before 24 hours from the start', 'rp read=t rp write=t dc read=t dc write=f',
-  pg_temp.cover_answers('doctor', 7, now() + interval '22 hours' - interval '1 second'));
-select pg_temp.expect('10o 24 hours from the start: direct care only', 'rp read=f rp write=f dc read=t dc write=f',
+select pg_temp.expect('10n 24 hours from the start, the grant still active: covered (D-a)',
+  'rp read=t rp write=t dc read=t dc write=f',
   pg_temp.cover_answers('doctor', 7, now() + interval '22 hours'));
+select pg_temp.expect('10n2 two days from the start: covered (D-a)', 'rp read=t rp write=t dc read=t dc write=f',
+  pg_temp.cover_answers('doctor', 7, now() + interval '2 days'));
+select pg_temp.expect('10n3 a second before the three-day grant ends', 'rp read=t rp write=t dc read=t dc write=f',
+  pg_temp.cover_answers('doctor', 7, now() + interval '3 days' - interval '1 second'));
+select pg_temp.expect('10o when the three-day grant ends: not covered', 'rp read=f rp write=f dc read=f dc write=f',
+  pg_temp.cover_answers('doctor', 7, now() + interval '3 days'));
 set local role hid_identity_api_runtime;
-select pg_temp.expect('10o2 the cover ends 24 hours from the start', 'until=starts+24h',
-  (select 'until=' || case when cover.covered_until = now() + interval '22 hours' then 'starts+24h' else cover.covered_until::text end
+select pg_temp.expect('10o2 the cover ends with the grant (covered_until = expires_at)', 'until=expires_at',
+  (select 'until=' || case when cover.covered_until = now() + interval '3 days' then 'expires_at' else cover.covered_until::text end
      from identity.records_processing_direct_care_cover('100a5000-0000-4000-8000-000000000007',
             'staff:records-processing-cover-doctor', '100a3000-0000-4000-8000-000000000010',
-            '100a6000-0000-4000-8000-000000000002', 'read_records', current_timestamp) cover));
+            '100a6000-0000-4000-8000-000000000002', 'read_records', now() + interval '30 hours') cover));
 reset role;
 
 -- 10p-10q. The patient ends it by revoking the direct-care grant.
@@ -692,6 +777,12 @@ select pg_temp.expect('10r the PIN grant', 'direct-care read_records patient_acc
     where grant_row.id::text = current_setting('records_processing.cover_pin')));
 select pg_temp.expect('10s covered by the PIN grant', 'rp read=t rp write=t dc read=t dc write=f',
   pg_temp.cover_answers('doctor', 7));
+select pg_temp.expect('10r2 the cover names the PIN grant and ends with it', 'pin until=expires_at',
+  pg_temp.cover_after('select 1', 'doctor', 7, 'write_records', now()));
+select pg_temp.expect('10r3 a PIN grant whose request is not by PIN: not covered', 'none',
+  pg_temp.cover_after($c$update identity.access_requests set authorization_method = null
+    where id = (select request_id from identity.consent_grants
+                 where id::text = current_setting('records_processing.cover_pin'))$c$, 'doctor', 7, 'write_records', now()));
 select pg_temp.expect('10t when the PIN grant ends', 'rp read=f rp write=f dc read=f dc write=f',
   pg_temp.cover_answers('doctor', 7, (select expires_at from identity.consent_grants
     where id::text = current_setting('records_processing.cover_pin'))));
@@ -715,7 +806,8 @@ select pg_temp.backdate();
 select pg_temp.expect('10w2 break-glass covers emergency reading only', 'emergency=true rp read=f rp write=f dc read=f dc write=f',
   'emergency=' || pg_temp.cover_allowed('doctor', 7, 'read_records', 'emergency') || ' ' || pg_temp.cover_answers('doctor', 7));
 
--- 10x-10z. A membership that may not run OCR jobs, and a share, are not covered.
+-- 10x-10z. A membership that may not run OCR jobs is not covered; a share is
+-- (0108 D-b).
 set local role hid_identity_api_runtime;
 select pg_temp.expect('10x the pharmacist''s approved direct-care request', 'true',
   (pg_temp.cover_approved('pharmacist', 'direct-care', 7, 'write_records', 60) ~ '^[0-9a-f-]{36}$')::text);
@@ -728,18 +820,562 @@ reset role;
 select pg_temp.backdate();
 select pg_temp.expect('10x2 pharmacist: direct care, no records processing', 'rp read=f rp write=f dc read=t dc write=t',
   pg_temp.cover_answers('pharmacist', 7));
-select pg_temp.expect('10z the nurse''s share: direct care, no records processing', 'rp read=f rp write=f dc read=t dc write=t',
+select pg_temp.expect('10z the nurse''s share covers records processing (D-b)', 'rp read=t rp write=t dc read=t dc write=t',
   pg_temp.cover_answers('nurse', 7));
 
--- 10za-10ze. The nurse's approved request (not a share) is covered; the
--- patient's deny directive and the kill switch end it; a separate
--- records-processing request still works.
+-- 10s. Patient shares (0108 D-b): any level covers records processing read
+-- and write for that membership, for as long as the share lasts; never for
+-- another membership or facility, an under-18 patient, under a deny
+-- directive, after revocation or replacement, for an imported or legacy-seeded grant,
+-- or for break-glass.
+-- The active share grant of patient n to a membership, read as the owner.
+create function pg_temp.share_grant(n integer, membership text) returns uuid language sql as $$
+  select share_row.consent_grant_id
+    from identity.patient_consent_shares share_row
+    join identity.consent_grants grant_row on grant_row.id = share_row.consent_grant_id
+   where share_row.patient_id = ('100a5000-0000-4000-8000-00000000000' || n)::uuid
+     and share_row.membership_id = membership::uuid and grant_row.status = 'active'
+   order by share_row.created_at desc
+   limit 1;
+$$;
+select set_config('records_processing.share_n1', pg_temp.share_grant(7, '100a3000-0000-4000-8000-000000000012')::text, true);
+select pg_temp.expect('10s1 the cover names the share and ends with it', 'share=t until=expires_at',
+  (select format('share=%s until=%s', split_part(pg_temp.cover_row('nurse', 7, 'write_records', now()), '|', 1) = grant_row.id::text,
+            case when nullif(split_part(pg_temp.cover_row('nurse', 7, 'write_records', now()), '|', 2), '')::timestamptz = grant_row.expires_at
+                 then 'expires_at' else pg_temp.cover_row('nurse', 7, 'write_records', now()) end)
+     from identity.consent_grants grant_row where grant_row.id::text = current_setting('records_processing.share_n1')));
+-- P7 replaces it with a view_only share for 7 days (0095 D5 revokes the first).
+set local role hid_identity_api_runtime;
+select pg_temp.as_cover_patient(7);
+select pg_temp.expect('10s2 P7 replaces the share with a view_only share for 7 days', 'read_records replaced=true',
+  pg_temp.try($q$select scope || ' replaced=' || (replaced_consent_grant_id is not null)::text
+    from identity.create_my_consent_share('synthetic:records-processing:p7',
+    '100a7000-0000-4000-8000-000000000007', '100a3000-0000-4000-8000-000000000012', 'view_only', '7d',
+    'records-processing-cover-share-2', repeat('f', 64))$q$));
+reset role;
+select pg_temp.backdate();
+select set_config('records_processing.share_n2', pg_temp.share_grant(7, '100a3000-0000-4000-8000-000000000012')::text, true);
+select pg_temp.expect('10s3 the replaced share no longer covers; the new one does', 'old=revoked named=new',
+  (select format('old=%s named=%s', old_grant.status,
+            case split_part(pg_temp.cover_row('nurse', 7, 'read_records', now()), '|', 1)
+              when current_setting('records_processing.share_n2') then 'new'
+              when current_setting('records_processing.share_n1') then 'old'
+              else pg_temp.cover_row('nurse', 7, 'read_records', now()) end)
+     from identity.consent_grants old_grant where old_grant.id::text = current_setting('records_processing.share_n1')));
+select pg_temp.expect('10s4 a view_only share covers records processing read and write (D-b); direct care reads only',
+  'rp read=t rp write=t dc read=t dc write=f', pg_temp.cover_answers('nurse', 7));
+select pg_temp.expect('10s5 two days on, the 7-day share still covers (D-a)', 'rp read=t rp write=t dc read=t dc write=f',
+  pg_temp.cover_answers('nurse', 7, now() + interval '2 days'));
+select pg_temp.expect('10s6 the share''s cover ends with it', 'until=expires_at end=none',
+  (select format('until=%s end=%s',
+            case when nullif(split_part(pg_temp.cover_row('nurse', 7, 'write_records', now() + interval '2 days'), '|', 2), '')::timestamptz
+                      = grant_row.expires_at then 'expires_at'
+                 else pg_temp.cover_row('nurse', 7, 'write_records', now() + interval '2 days') end,
+            pg_temp.cover_row('nurse', 7, 'write_records', grant_row.expires_at))
+     from identity.consent_grants grant_row where grant_row.id::text = current_setting('records_processing.share_n2')));
+-- An imported or legacy-seeded grant (source_system other than 'hid') never covers,
+-- share row or not (as the owner, put back after).
+update identity.consent_grants set source_system = 'legacy_identity'
+ where id::text = current_setting('records_processing.share_n2');
+select pg_temp.expect('10s7 the share as a seeded grant: direct care only', 'rp read=f rp write=f dc read=t dc write=f',
+  pg_temp.cover_answers('nurse', 7));
+update identity.consent_grants set source_system = 'hid' where id::text = current_setting('records_processing.share_n2');
+-- A share to the doctor's membership at B covers B's membership at B only.
+set local role hid_identity_api_runtime;
+select pg_temp.as_cover_patient(7);
+select pg_temp.expect('10s8 P7 shares with the doctor''s membership at B', 'read_records',
+  pg_temp.try($q$select scope from identity.create_my_consent_share('synthetic:records-processing:p7',
+    '100a7000-0000-4000-8000-000000000007', '100a3000-0000-4000-8000-000000000011', 'clinical_review', '30d',
+    'records-processing-cover-share-3', repeat('9', 64))$q$));
+reset role;
+select pg_temp.backdate();
+select pg_temp.expect('10s9 B''s membership at B: covered', 'rp read=t rp write=t dc read=t dc write=f',
+  pg_temp.cover_answers('doctor-b', 7));
+select pg_temp.expect('10s10 the same doctor''s membership at A: not covered by B''s share',
+  'rp read=f rp write=f dc read=f dc write=f', pg_temp.cover_answers('doctor', 7));
+select pg_temp.expect('10s11 A''s membership asked for at B: not covered', 'rp read=f rp write=f dc read=f dc write=f',
+  pg_temp.cover_answers('doctor-a-at-b', 7));
+select pg_temp.expect('10s12 the nurse at A is covered by her own share, never by the doctor''s at B', 'own',
+  case split_part(pg_temp.cover_row('nurse', 7, 'read_records', now()), '|', 1)
+    when current_setting('records_processing.share_n2') then 'own'
+    when (select grant_row.id::text from identity.consent_grants grant_row
+           where grant_row.patient_id = '100a5000-0000-4000-8000-000000000007'
+             and grant_row.membership_id = '100a3000-0000-4000-8000-000000000011' and grant_row.status = 'active')
+      then 'the doctor''s'
+    else pg_temp.cover_row('nurse', 7, 'read_records', now()) end);
+-- A deny directive for records processing at B ends the share's cover there.
+insert into identity.consent_directives (id, patient_id, current_version) values
+  ('100a9200-0000-4000-8000-000000000001', '100a5000-0000-4000-8000-000000000007', 1);
+insert into identity.consent_directive_versions (id, directive_id, patient_id, version_no, status, provision_type,
+  grantee_type, grantee_id, facility_id, purposes, actions, starts_at, source_reference, reason, content_sha256) values
+  ('100a9200-0000-4000-8000-000000000002', '100a9200-0000-4000-8000-000000000001', '100a5000-0000-4000-8000-000000000007',
+   1, 'active', 'deny', 'facility', '100a6000-0000-4000-8000-000000000003', null, array['healthcare-operations'], '{}',
+   now() - interval '1 hour', 'records-processing-cover-test', 'No paper records at B', repeat('e', 64));
+select pg_temp.expect('10s13 a deny directive for records processing at B: the share covers nothing there',
+  'rp read=f rp write=f dc read=t dc write=f', pg_temp.cover_answers('doctor-b', 7));
+insert into identity.consent_directive_versions (id, directive_id, patient_id, version_no, status, provision_type,
+  grantee_type, grantee_id, facility_id, purposes, actions, starts_at, source_reference, reason, content_sha256,
+  supersedes_version) values
+  ('100a9200-0000-4000-8000-000000000003', '100a9200-0000-4000-8000-000000000001', '100a5000-0000-4000-8000-000000000007',
+   2, 'inactive', 'deny', 'facility', '100a6000-0000-4000-8000-000000000003', null, array['healthcare-operations'], '{}',
+   now() - interval '1 hour', 'records-processing-cover-test', 'No paper records at B', repeat('e', 64), 1);
+update identity.consent_directives set current_version = 2 where id = '100a9200-0000-4000-8000-000000000001';
+select pg_temp.expect('10s14 the directive withdrawn: covered again', 'rp read=t rp write=t dc read=t dc write=f',
+  pg_temp.cover_answers('doctor-b', 7));
+-- The patient revokes B's share: the cover ends at the next check.
+select set_config('records_processing.share_b', pg_temp.share_grant(7, '100a3000-0000-4000-8000-000000000011')::text, true);
+set local role hid_identity_api_runtime;
+select pg_temp.as_cover_patient(7);
+select pg_temp.expect('10s15 P7 revokes B''s share', 'revoked',
+  pg_temp.try(format($q$select grant_status from identity.revoke_my_consent_grant('synthetic:records-processing:p7',
+    '100a7000-0000-4000-8000-000000000007', %L, 'Not at B')$q$, current_setting('records_processing.share_b'))));
+reset role;
+select pg_temp.expect('10s16 after the revocation', 'rp read=f rp write=f dc read=f dc write=f',
+  pg_temp.cover_answers('doctor-b', 7));
+-- Under 18 (P8) and no date of birth (P9): a share to the doctor at A is
+-- direct care only.
+set local role hid_identity_api_runtime;
+select pg_temp.as_cover_patient(8);
+select pg_temp.expect('10s17 P8 (17) shares with the doctor at A', 'write_records',
+  pg_temp.try($q$select scope from identity.create_my_consent_share('synthetic:records-processing:p8',
+    '100a7000-0000-4000-8000-000000000008', '100a3000-0000-4000-8000-000000000010', 'clinical_collaboration', '30d',
+    'records-processing-cover-share-4', repeat('8', 64))$q$));
+select pg_temp.as_cover_patient(9);
+select pg_temp.expect('10s18 P9 (no date of birth) shares with the doctor at A', 'write_records',
+  pg_temp.try($q$select scope from identity.create_my_consent_share('synthetic:records-processing:p9',
+    '100a7000-0000-4000-8000-000000000009', '100a3000-0000-4000-8000-000000000010', 'clinical_collaboration', '30d',
+    'records-processing-cover-share-5', repeat('7', 64))$q$));
+reset role;
+select pg_temp.backdate();
+select pg_temp.expect('10s19 under 18 with a share: not covered', 'rp read=f rp write=f dc read=t dc write=t',
+  pg_temp.cover_answers('doctor', 8));
+select pg_temp.expect('10s20 no date of birth with a share: not covered', 'rp read=f rp write=f dc read=t dc write=t',
+  pg_temp.cover_answers('doctor', 9));
+-- A share row next to the doctor's break-glass grant (10w; as the owner, as
+-- no command writes one): break-glass and emergency never cover.
+insert into identity.patient_consent_shares (consent_grant_id, patient_id, membership_id, level, duration_preset,
+  created_via, idempotency_key, request_sha256)
+select grant_row.id, grant_row.patient_id, grant_row.membership_id, 'clinical_collaboration', '24h', 'search',
+  'records-processing-cover-share-bg', repeat('6', 64)
+  from identity.consent_grants grant_row
+ where grant_row.patient_id = '100a5000-0000-4000-8000-000000000007'
+   and grant_row.membership_id = '100a3000-0000-4000-8000-000000000010' and grant_row.break_glass
+   and grant_row.status = 'active';
+select pg_temp.expect('10s21 break-glass with a share row: emergency reading only',
+  'emergency=true rp read=f rp write=f dc read=f dc write=f',
+  'emergency=' || pg_temp.cover_allowed('doctor', 7, 'read_records', 'emergency') || ' ' || pg_temp.cover_answers('doctor', 7));
+-- A direct-care grant with no request and no share row (as the owner, as
+-- no command of this branch writes one): neither 0104's ways nor D-b.
+insert into identity.consent_grants (id, request_id, patient_id, staff_id, account_id, membership_id, facility_id,
+  scope, status, granted_by_patient_id, reason, starts_at, expires_at, break_glass, correlation_id, purpose_of_use)
+values ('100a9300-0000-4000-8000-000000000001', null, '100a5000-0000-4000-8000-000000000007',
+  '100a2000-0000-4000-8000-000000000010', '100a1000-0000-4000-8000-000000000010', '100a3000-0000-4000-8000-000000000011',
+  '100a6000-0000-4000-8000-000000000003', 'write_records', 'active', '100a5000-0000-4000-8000-000000000007',
+  'No request and no share', now() - interval '1 hour', now() + interval '1 day', false, 'records-processing-cover-bare',
+  'direct-care');
+select pg_temp.expect('10s21b a grant with no request and no share row: direct care only',
+  'rp read=f rp write=f dc read=t dc write=t', pg_temp.cover_answers('doctor-b', 7));
+update identity.consent_grants set status = 'revoked', revoked_at = now(), revoked_reason = 'Suite cleanup'
+ where id = '100a9300-0000-4000-8000-000000000001';
+-- 10s25-10s46. Conditions of the cover, one at a time, on the nurse's
+-- view_only share (share_n2, in force until 10s23) and, in 10r2-10r3 and
+-- 10za1-10za11, on the PIN and approval grants; 10sk and 10zk add the
+-- directive, account, age and grant conditions on both ways. Each case makes one change as
+-- the owner, asks the cover, and undoes the change (a rolled-back
+-- subtransaction), so every case starts from the same rows. The answer is
+-- the grant the cover names ('share', 'copy', 'approval', 'pin' or its id),
+-- with 'until=expires_at' when covered_until is that grant's expires_at, or
+-- 'none'.
+-- A copy of the nurse's share grant (id ...9300-...02, expires_at moved by
+-- shift) with its own share row for patient share_patient and membership
+-- share_membership; the copy keeps every other column of the share grant.
+create function pg_temp.copy_share(shift interval, share_patient integer, share_membership text) returns void
+language sql as $$
+  insert into identity.consent_grants (id, request_id, patient_id, staff_id, account_id, membership_id, facility_id,
+    scope, status, granted_by_patient_id, reason, starts_at, expires_at, break_glass, correlation_id, purpose_of_use)
+  select '100a9300-0000-4000-8000-000000000002', null, patient_id, staff_id, account_id, membership_id, facility_id,
+    scope, 'active', granted_by_patient_id, 'Suite copy of the share', starts_at, expires_at + shift, false,
+    'records-processing-cover-copy', purpose_of_use
+    from identity.consent_grants where id::text = current_setting('records_processing.share_n2');
+  insert into identity.patient_consent_shares (consent_grant_id, patient_id, membership_id, level, duration_preset,
+    created_via, idempotency_key, request_sha256)
+  values ('100a9300-0000-4000-8000-000000000002', ('100a5000-0000-4000-8000-00000000000' || share_patient)::uuid,
+    share_membership::uuid, 'view_only', '7d', 'search', 'records-processing-cover-copy', repeat('5', 64));
+$$;
+create function pg_temp.end_share() returns void language sql as $$
+  update identity.consent_grants set status = 'revoked', revoked_at = now(), revoked_reason = 'Suite case'
+   where id::text = current_setting('records_processing.share_n2');
+$$;
+select pg_temp.expect('10s25 the share unchanged (the cases below start here)', 'share until=expires_at',
+  pg_temp.cover_after('select 1', 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10s26 D-b: the share grant not granted by the patient', 'none',
+  pg_temp.cover_after($c$update identity.consent_grants set granted_by_patient_id = null
+    where id::text = current_setting('records_processing.share_n2')$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10s27 D-b: the share grant with the PIN method and no request', 'none',
+  pg_temp.cover_after($c$update identity.consent_grants set authorization_method = 'patient_access_pin'
+    where id::text = current_setting('records_processing.share_n2')$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10s28 D-b: the share grant with a request (pending, so not 0104''s way either)', 'none',
+  pg_temp.cover_after($c$insert into identity.access_requests (id, patient_id, staff_id, membership_id, facility_id,
+      scope, purpose_of_use, reason, status, requested_duration_minutes, break_glass, correlation_id)
+    values ('100a9000-0000-4000-8000-000000000020', '100a5000-0000-4000-8000-000000000007',
+      '100a2000-0000-4000-8000-000000000011', '100a3000-0000-4000-8000-000000000012',
+      '100a6000-0000-4000-8000-000000000002', 'read_records', 'direct-care', 'Pending request for the case', 'pending',
+      60, false, 'records-processing-cover-pending');
+    update identity.consent_grants set request_id = '100a9000-0000-4000-8000-000000000020'
+     where id::text = current_setting('records_processing.share_n2')$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10s29 D-b: a copy of the share with its own share row covers (the share ended)',
+  'copy until=expires_at',
+  pg_temp.cover_after($c$select pg_temp.end_share();
+    select pg_temp.copy_share(interval '0', 7, '100a3000-0000-4000-8000-000000000012')$c$,
+    'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10s30 D-b: the copy''s share row is for another patient', 'none',
+  pg_temp.cover_after($c$select pg_temp.end_share();
+    select pg_temp.copy_share(interval '0', 8, '100a3000-0000-4000-8000-000000000012')$c$,
+    'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10s31 D-b: the copy''s share row is for another membership', 'none',
+  pg_temp.cover_after($c$select pg_temp.end_share();
+    select pg_temp.copy_share(interval '0', 7, '100a3000-0000-4000-8000-000000000010')$c$,
+    'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10s32 the share grant held by the cutover', 'none',
+  pg_temp.cover_after($c$update identity.consent_grants set migration_hold_reason = 'Suite cutover hold'
+    where id::text = current_setting('records_processing.share_n2')$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10s33 the share grant starting in an hour: not yet', 'none',
+  pg_temp.cover_after($c$update identity.consent_grants set starts_at = now() + interval '1 hour'
+    where id::text = current_setting('records_processing.share_n2')$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10s34 the share grant for another purpose (emergency, no break-glass)', 'none',
+  pg_temp.cover_after($c$update identity.consent_grants set purpose_of_use = 'emergency'
+    where id::text = current_setting('records_processing.share_n2')$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10s35 two covering grants: the later expires_at is named, ending with it (a shorter copy)',
+  'share until=expires_at',
+  pg_temp.cover_after($c$select pg_temp.copy_share(interval '-1 day', 7, '100a3000-0000-4000-8000-000000000012')$c$,
+    'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10s36 two covering grants: the later expires_at is named, ending with it (a longer copy)',
+  'copy until=expires_at',
+  pg_temp.cover_after($c$select pg_temp.copy_share(interval '1 day', 7, '100a3000-0000-4000-8000-000000000012')$c$,
+    'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10s37 an action other than read_records or write_records', 'none',
+  pg_temp.cover_after('select 1', 'nurse', 7, 'break_glass', now()));
+-- The account's disabled_until is read at the check's time (at_time), not at
+-- the transaction's: half an hour ago the account was disabled until ten
+-- minutes ago.
+select pg_temp.expect('10s38 half an hour ago, the share unchanged', 'share until=expires_at',
+  pg_temp.cover_after('select 1', 'nurse', 7, 'write_records', now() - interval '30 minutes'));
+select pg_temp.expect('10s39 half an hour ago, the account disabled until ten minutes ago', 'none',
+  pg_temp.cover_after($c$update auth.accounts set disabled_until = now() - interval '10 minutes'
+    where subject = 'staff:records-processing-cover-nurse'$c$, 'nurse', 7, 'write_records', now() - interval '30 minutes'));
+select pg_temp.expect('10s40 the account disabled until tomorrow', 'none',
+  pg_temp.cover_after($c$update auth.accounts set disabled_until = now() + interval '1 day'
+    where subject = 'staff:records-processing-cover-nurse'$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10s41 the account no longer active', 'none',
+  pg_temp.cover_after($c$update auth.accounts set status = 'disabled'
+    where subject = 'staff:records-processing-cover-nurse'$c$, 'nurse', 7, 'write_records', now()));
+-- A second membership of the same nurse at the same facility (as a
+-- clinician, with ocr.job.write) is not covered by the first one's share.
+create function pg_temp.second_membership() returns void language sql as $$
+  insert into identity.staff_facility_memberships (id, staff_id, account_id, organization_id, facility_id,
+    membership_role, app_role, is_primary, active)
+  values ('100a3000-0000-4000-8000-000000000014', '100a2000-0000-4000-8000-000000000011',
+    '100a1000-0000-4000-8000-000000000011', '100a6000-0000-4000-8000-000000000001',
+    '100a6000-0000-4000-8000-000000000002', 'clinician', 'clinician', false, true);
+  insert into auth.account_roles (id, account_id, role_code, scope_type, membership_id, facility_id, grant_reason)
+  values ('100a4000-0000-4000-8000-000000000014', '100a1000-0000-4000-8000-000000000011', 'clinician', 'facility',
+    '100a3000-0000-4000-8000-000000000014', '100a6000-0000-4000-8000-000000000002', 'Second membership for the case');
+$$;
+select pg_temp.expect('10s42 the nurse''s second membership at A may run OCR jobs', 'true',
+  pg_temp.after_change('select pg_temp.second_membership()', $p$select auth.membership_has_permission(
+    'staff:records-processing-cover-nurse', '100a3000-0000-4000-8000-000000000014',
+    '100a6000-0000-4000-8000-000000000002', 'ocr.job.write')::text$p$));
+select pg_temp.expect('10s43 the nurse''s second membership at A: not covered by the first one''s share', 'none',
+  pg_temp.cover_after('select pg_temp.second_membership()', 'nurse-second', 7, 'write_records', now()));
+-- Conditions no row can break on its own, so no case above changes them
+-- alone: the tables refuse such a row (each change below fails and is
+-- undone). The grant's facility and account are its membership's (the
+-- exact-membership foreign key), and auth.membership_has_permission checks the
+-- membership's facility, account subject and account status at each check; the
+-- scope is break_glass exactly when break_glass is set (a CHECK).
+select pg_temp.expect('10s44 the share grant at another facility than its membership: refused', '23503',
+  left(pg_temp.cover_after($c$update identity.consent_grants set facility_id = '100a6000-0000-4000-8000-000000000003'
+    where id::text = current_setting('records_processing.share_n2')$c$, 'nurse', 7, 'write_records', now()), 5));
+select pg_temp.expect('10s45 the share grant for another account than its membership''s: refused', '23503',
+  left(pg_temp.cover_after($c$update identity.consent_grants set account_id = '100a1000-0000-4000-8000-000000000010'
+    where id::text = current_setting('records_processing.share_n2')$c$, 'nurse', 7, 'write_records', now()), 5));
+select pg_temp.expect('10s46 the share grant marked break-glass with a read scope: refused', '23514',
+  left(pg_temp.cover_after($c$update identity.consent_grants set break_glass = true
+    where id::text = current_setting('records_processing.share_n2')$c$, 'nurse', 7, 'write_records', now()), 5));
+-- 10sk01-10sk55 (on the share) and 10zk01-10zk55 (on the approval grant):
+-- the deny directive, the account's disabled_until and the patient's age,
+-- one condition at a time, asked of the cover directly. Each case is one
+-- change as the owner (undone after, as 10s25), so the condition named
+-- alone decides between the grant named ('covered') and no cover ('none').
+-- The directive cases each add one directive of patient 7 (or 8) with one
+-- version (or 'current' versions, all but 'active_version' inactive); unless
+-- the case says otherwise it is active, deny, for 'all', every facility,
+-- every purpose and action, from an hour ago, no end.
+create function pg_temp.case_directive(settings jsonb) returns void language sql as $$
+  insert into identity.consent_directives (id, patient_id, current_version)
+  values ('100a9400-0000-4000-8000-000000000001',
+    ('100a5000-0000-4000-8000-00000000000' || coalesce(settings->>'patient', '7'))::uuid,
+    coalesce((settings->>'current')::integer, 1));
+  insert into identity.consent_directive_versions (id, directive_id, patient_id, version_no, status, provision_type,
+    grantee_type, grantee_id, facility_id, purposes, actions, starts_at, expires_at, source_reference, reason,
+    content_sha256, supersedes_version)
+  select ('100a9400-0000-4000-8000-00000000001' || version_no)::uuid, '100a9400-0000-4000-8000-000000000001',
+    ('100a5000-0000-4000-8000-00000000000' || coalesce(settings->>'patient', '7'))::uuid, version_no,
+    case when version_no = coalesce((settings->>'active_version')::integer, 1) then coalesce(settings->>'status', 'active')
+         else 'inactive' end,
+    coalesce(settings->>'provision', 'deny'), coalesce(settings->>'grantee_type', 'all'), (settings->>'grantee_id')::uuid,
+    (settings->>'facility')::uuid, array(select jsonb_array_elements_text(coalesce(settings->'purposes', '[]'))),
+    array(select jsonb_array_elements_text(coalesce(settings->'actions', '[]'))),
+    coalesce((settings->>'starts')::timestamptz, now() - interval '1 hour'), (settings->>'expires')::timestamptz,
+    'records-processing-condition-case', 'Condition case', repeat('e', 64), nullif(version_no - 1, 0)
+    from generate_series(1, coalesce((settings->>'current')::integer, 1)) version_no;
+$$;
+create function pg_temp.at(expression text) returns timestamptz language plpgsql as $$
+declare
+  answer timestamptz;
+begin
+  execute 'select (' || expression || ')::timestamptz' into answer;
+  return answer;
+end $$;
+-- {grant} in a change is the grant the block is about.
+create temporary table records_processing_condition_cases (
+  ord integer primary key, label text not null, change text not null, action text not null, at_time text not null,
+  covered boolean not null, branch text not null default 'both', who text not null default 'nurse',
+  patient integer not null default 7
+) on commit drop;
+insert into records_processing_condition_cases (ord, label, change, action, at_time, covered) values
+  (1, 'a deny directive for everyone, every purpose and action', $c$select pg_temp.case_directive('{}')$c$, 'write_records', 'now()', false),
+  (2, 'the directive''s version inactive', $c$select pg_temp.case_directive('{"status": "inactive"}')$c$, 'write_records', 'now()', true),
+  (3, 'the directive''s version a draft', $c$select pg_temp.case_directive('{"status": "draft"}')$c$, 'write_records', 'now()', true),
+  (4, 'a permit directive', $c$select pg_temp.case_directive('{"provision": "permit"}')$c$, 'write_records', 'now()', true),
+  (5, 'another patient''s directive (P8)', $c$select pg_temp.case_directive('{"patient": "8"}')$c$, 'write_records', 'now()', true),
+  (6, 'version 1 an active deny, the current version 2 inactive', $c$select pg_temp.case_directive('{"current": 2}')$c$,
+   'write_records', 'now()', true),
+  (7, 'the directive starting in an hour', $c$select pg_temp.case_directive(jsonb_build_object('starts', now() + interval '1 hour'))$c$,
+   'write_records', 'now()', true),
+  (8, 'the directive starting at the check''s time', $c$select pg_temp.case_directive(jsonb_build_object('starts', now()))$c$,
+   'write_records', 'now()', false),
+  (9, 'the directive ended a minute ago', $c$select pg_temp.case_directive(jsonb_build_object('expires', now() - interval '1 minute'))$c$,
+   'write_records', 'now()', true),
+  (10, 'the directive ending at the check''s time', $c$select pg_temp.case_directive(jsonb_build_object('expires', now()))$c$,
+   'write_records', 'now()', true),
+  (11, 'the directive ending in an hour', $c$select pg_temp.case_directive(jsonb_build_object('expires', now() + interval '1 hour'))$c$,
+   'write_records', 'now()', false),
+  (12, 'the directive for this facility (facility_id)',
+   $c$select pg_temp.case_directive('{"facility": "100a6000-0000-4000-8000-000000000002"}')$c$, 'write_records', 'now()', false),
+  (13, 'the directive for another facility (facility_id)',
+   $c$select pg_temp.case_directive('{"facility": "100a6000-0000-4000-8000-000000000003"}')$c$, 'write_records', 'now()', true),
+  (14, 'the directive for write_records, asked for write_records',
+   $c$select pg_temp.case_directive('{"actions": ["write_records"]}')$c$, 'write_records', 'now()', false),
+  (15, 'the directive for read_records only, asked for write_records',
+   $c$select pg_temp.case_directive('{"actions": ["read_records"]}')$c$, 'write_records', 'now()', true),
+  (16, 'the directive for healthcare-operations only',
+   $c$select pg_temp.case_directive('{"purposes": ["healthcare-operations"]}')$c$, 'write_records', 'now()', false),
+  (17, 'the directive for direct-care only', $c$select pg_temp.case_directive('{"purposes": ["direct-care"]}')$c$,
+   'write_records', 'now()', false),
+  (18, 'the directive for emergency only', $c$select pg_temp.case_directive('{"purposes": ["emergency"]}')$c$,
+   'write_records', 'now()', true),
+  (19, 'the directive''s grantee this facility',
+   $c$select pg_temp.case_directive('{"grantee_type": "facility", "grantee_id": "100a6000-0000-4000-8000-000000000002"}')$c$,
+   'write_records', 'now()', false),
+  (20, 'the directive''s grantee another facility',
+   $c$select pg_temp.case_directive('{"grantee_type": "facility", "grantee_id": "100a6000-0000-4000-8000-000000000003"}')$c$,
+   'write_records', 'now()', true),
+  (21, 'the directive''s grantee this organization',
+   $c$select pg_temp.case_directive('{"grantee_type": "organization", "grantee_id": "100a6000-0000-4000-8000-000000000001"}')$c$,
+   'write_records', 'now()', false),
+  (22, 'the directive''s grantee another organization',
+   $c$select pg_temp.case_directive('{"grantee_type": "organization", "grantee_id": "100a6000-0000-4000-8000-000000000009"}')$c$,
+   'write_records', 'now()', true),
+  (23, 'the directive''s grantee this staff member (the nurse)',
+   $c$select pg_temp.case_directive('{"grantee_type": "staff", "grantee_id": "100a2000-0000-4000-8000-000000000011"}')$c$,
+   'write_records', 'now()', false),
+  (24, 'the directive''s grantee another staff member with a membership here (the doctor)',
+   $c$select pg_temp.case_directive('{"grantee_type": "staff", "grantee_id": "100a2000-0000-4000-8000-000000000010"}')$c$,
+   'write_records', 'now()', true),
+  (25, 'the directive''s grantee a patient delegate (the nurse''s staff id)',
+   $c$select pg_temp.case_directive('{"grantee_type": "patient_delegate", "grantee_id": "100a2000-0000-4000-8000-000000000011"}')$c$,
+   'write_records', 'now()', true),
+  (26, 'the directive''s grantee type staff, its id this facility''s',
+   $c$select pg_temp.case_directive('{"grantee_type": "staff", "grantee_id": "100a6000-0000-4000-8000-000000000002"}')$c$,
+   'write_records', 'now()', true),
+  (27, 'the directive''s grantee type staff, its id this organization''s',
+   $c$select pg_temp.case_directive('{"grantee_type": "staff", "grantee_id": "100a6000-0000-4000-8000-000000000001"}')$c$,
+   'write_records', 'now()', true),
+  (28, 'the directive''s grantee type facility, its id the nurse''s staff id',
+   $c$select pg_temp.case_directive('{"grantee_type": "facility", "grantee_id": "100a2000-0000-4000-8000-000000000011"}')$c$,
+   'write_records', 'now()', true),
+  (29, 'the account disabled until an hour ago', $c$update auth.accounts set disabled_until = now() - interval '1 hour'
+    where subject = 'staff:records-processing-cover-nurse'$c$, 'write_records', 'now()', true),
+  (30, 'the account disabled until the check''s time', $c$update auth.accounts set disabled_until = now()
+    where subject = 'staff:records-processing-cover-nurse'$c$, 'write_records', 'now()', true),
+  (31, 'the patient 18 today on the Africa/Lagos date', $c$update identity.patients
+    set dob = ((now() at time zone 'Africa/Lagos')::date - interval '18 years')::date
+    where id = '100a5000-0000-4000-8000-000000000007'$c$, 'write_records', 'now()', true),
+  (32, 'the patient 18 tomorrow on the Africa/Lagos date', $c$update identity.patients
+    set dob = ((now() at time zone 'Africa/Lagos')::date - interval '18 years' + interval '1 day')::date
+    where id = '100a5000-0000-4000-8000-000000000007'$c$, 'write_records', 'now()', false),
+  (33, 'the patient''s date of birth tomorrow (in the future)', $c$update identity.patients
+    set dob = (now() at time zone 'Africa/Lagos')::date + 1
+    where id = '100a5000-0000-4000-8000-000000000007'$c$, 'write_records', 'now()', false),
+  (34, 'no date of birth', $c$update identity.patients set dob = null
+    where id = '100a5000-0000-4000-8000-000000000007'$c$, 'write_records', 'now()', false),
+  (35, 'at 00:30 in Lagos on the 18th birthday (23:30 UTC the day before)', $c$update identity.patients
+    set dob = ((now() at time zone 'Africa/Lagos')::date - interval '18 years')::date
+    where id = '100a5000-0000-4000-8000-000000000007';
+    update identity.consent_grants
+       set starts_at = (((now() at time zone 'Africa/Lagos')::date::timestamp + interval '30 minutes') at time zone 'Africa/Lagos') - interval '1 hour'
+     where id::text = current_setting('records_processing.case_grant')$c$, 'write_records',
+   $t$((now() at time zone 'Africa/Lagos')::date::timestamp + interval '30 minutes') at time zone 'Africa/Lagos'$t$, true),
+  (36, 'born 29 February 2008, on 28 February 2026 in Lagos', $c$update identity.patients set dob = '2008-02-29'
+    where id = '100a5000-0000-4000-8000-000000000007';
+    update identity.consent_grants set starts_at = '2026-02-27 00:00:00+01'
+     where id::text = current_setting('records_processing.case_grant')$c$, 'write_records', $t$'2026-02-28 12:00:00+01'$t$, false),
+  (37, 'born 29 February 2008, on 1 March 2026 in Lagos', $c$update identity.patients set dob = '2008-02-29'
+    where id = '100a5000-0000-4000-8000-000000000007';
+    update identity.consent_grants set starts_at = '2026-02-27 00:00:00+01'
+     where id::text = current_setting('records_processing.case_grant')$c$, 'write_records', $t$'2026-03-01 12:00:00+01'$t$, true),
+  (38, 'the account disabled until a minute after the check, asked half an hour ago', $c$update auth.accounts
+    set disabled_until = now() - interval '29 minutes' where subject = 'staff:records-processing-cover-nurse'$c$,
+   'write_records', $t$now() - interval '30 minutes'$t$, false),
+  (40, 'another patient''s directive whose current version 2 is an active deny (P7''s own directive is at version 2 too)',
+   $c$select pg_temp.case_directive('{"patient": "8", "current": 2, "active_version": 2}')$c$, 'write_records', 'now()', true);
+-- Approval only: a direct-care grant with no request and no share row, next
+-- to the nurse's approved request (its own grant revoked).
+insert into records_processing_condition_cases (ord, label, change, action, at_time, covered, branch) values
+  (39, 'a grant with no request and no share row next to an approved request', $c$update identity.consent_grants
+       set status = 'revoked', revoked_at = now(), revoked_reason = 'Suite case'
+     where id::text = current_setting('records_processing.case_grant');
+    insert into identity.consent_grants (id, request_id, patient_id, staff_id, account_id, membership_id, facility_id,
+      scope, status, granted_by_patient_id, reason, starts_at, expires_at, break_glass, correlation_id, purpose_of_use)
+    values ('100a9300-0000-4000-8000-000000000003', null, '100a5000-0000-4000-8000-000000000007',
+      '100a2000-0000-4000-8000-000000000011', '100a1000-0000-4000-8000-000000000011', '100a3000-0000-4000-8000-000000000012',
+      '100a6000-0000-4000-8000-000000000002', 'read_records', 'active', '100a5000-0000-4000-8000-000000000007',
+      'No request and no share', now() - interval '1 hour', now() + interval '1 day', false, 'records-processing-cover-bare',
+      'direct-care')$c$, 'write_records', 'now()', false, 'approval');
+-- The grant's own conditions, on either way.
+insert into records_processing_condition_cases (ord, label, change, action, at_time, covered, who, patient) values
+  (41, 'the grant starting in an hour', $c$update identity.consent_grants set starts_at = now() + interval '1 hour'
+     where id::text = current_setting('records_processing.case_grant')$c$, 'write_records', 'now()', false, 'nurse', 7),
+  (42, 'the grant starting at the check''s time', $c$update identity.consent_grants set starts_at = now()
+     where id::text = current_setting('records_processing.case_grant')$c$, 'write_records', 'now()', true, 'nurse', 7),
+  (43, 'at the grant''s expires_at', 'select 1', 'write_records', $t$(select expires_at from identity.consent_grants
+     where id::text = current_setting('records_processing.case_grant'))$t$, false, 'nurse', 7),
+  (44, 'two days after the grant''s start (it lasts three)', $c$update identity.consent_grants
+       set starts_at = now() - interval '2 days', expires_at = now() + interval '1 day'
+     where id::text = current_setting('records_processing.case_grant')$c$, 'write_records', 'now()', true, 'nurse', 7),
+  (45, 'the grant imported (source_system legacy_identity)', $c$update identity.consent_grants
+       set source_system = 'legacy_identity' where id::text = current_setting('records_processing.case_grant')$c$,
+   'write_records', 'now()', false, 'nurse', 7),
+  (46, 'the grant revoked', $c$update identity.consent_grants set status = 'revoked', revoked_at = now(),
+       revoked_reason = 'Suite case' where id::text = current_setting('records_processing.case_grant')$c$,
+   'write_records', 'now()', false, 'nurse', 7),
+  (47, 'the grant held by the cutover', $c$update identity.consent_grants set migration_hold_reason = 'Suite cutover hold'
+     where id::text = current_setting('records_processing.case_grant')$c$, 'write_records', 'now()', false, 'nurse', 7),
+  (48, 'asked for another patient (P1)', 'select 1', 'write_records', 'now()', false, 'nurse', 1),
+  (49, 'asked for the nurse''s second membership at this facility', 'select pg_temp.second_membership()',
+   'write_records', 'now()', false, 'nurse-second', 7),
+  (50, 'asked for the break_glass action', 'select 1', 'break_glass', 'now()', false, 'nurse', 7),
+  (51, 'the healthcare-operations code switched off', $c$update identity.purpose_of_use_codes set active = false
+     where code = 'healthcare-operations'$c$, 'write_records', 'now()', false, 'nurse', 7),
+  (52, 'the direct-care code switched off', $c$update identity.purpose_of_use_codes set active = false
+     where code = 'direct-care'$c$, 'write_records', 'now()', false, 'nurse', 7),
+  (53, 'the membership''s role revoked (no ocr.job.write)', $c$update auth.account_roles
+       set revoked_at = granted_at, revoked_by = account_id, revocation_reason = 'Suite case: no OCR'
+     where membership_id = '100a3000-0000-4000-8000-000000000012'$c$, 'write_records', 'now()', false, 'nurse', 7),
+  (55, 'the grant (and its request, if any) for write_records', $c$with request_row as (
+      update identity.access_requests set scope = 'write_records'
+       where id = (select request_id from identity.consent_grants
+                    where id::text = current_setting('records_processing.case_grant'))
+      returning id)
+    update identity.consent_grants set scope = 'write_records'
+     where id::text = current_setting('records_processing.case_grant')$c$, 'write_records', 'now()', true, 'nurse', 7);
+-- Share only (the approval grant's purpose is its request's, 10za11).
+insert into records_processing_condition_cases (ord, label, change, action, at_time, covered, branch) values
+  (54, 'the grant for another purpose (emergency, no break-glass)', $c$update identity.consent_grants
+       set purpose_of_use = 'emergency' where id::text = current_setting('records_processing.case_grant')$c$,
+   'write_records', 'now()', false, 'share');
+create function pg_temp.condition_cases(prefix text, named text) returns void language sql as $$
+  select pg_temp.expect(format('%s%s %s: %s', prefix, lpad(ord::text, 2, '0'), named, label),
+    case when covered then named || ' until=expires_at' else 'none' end,
+    pg_temp.cover_after(change, who, patient, action, pg_temp.at(at_time)))
+    from records_processing_condition_cases
+   where branch in ('both', named)
+   order by ord;
+$$;
+select set_config('records_processing.case_grant', current_setting('records_processing.share_n2'), true);
+select pg_temp.condition_cases('10sk', 'share');
+-- The kill switch ends a share's cover as any other.
+update identity.purpose_of_use_codes set active = false where code = 'healthcare-operations';
+select pg_temp.expect('10s22 the kill switch ends the share''s cover', 'rp read=f rp write=f dc read=t dc write=f',
+  pg_temp.cover_answers('nurse', 7));
+update identity.purpose_of_use_codes set active = true where code = 'healthcare-operations';
+-- The nurse's share ends here, so 10za-10ze read her approval grant alone.
+set local role hid_identity_api_runtime;
+select pg_temp.as_cover_patient(7);
+select pg_temp.expect('10s23 P7 revokes the nurse''s share', 'revoked',
+  pg_temp.try(format($q$select grant_status from identity.revoke_my_consent_grant('synthetic:records-processing:p7',
+    '100a7000-0000-4000-8000-000000000007', %L, 'Not today')$q$, current_setting('records_processing.share_n2'))));
+reset role;
+select pg_temp.expect('10s24 after the nurse''s share is revoked', 'rp read=f rp write=f dc read=f dc write=f',
+  pg_temp.cover_answers('nurse', 7));
+
+-- 10za-10ze. The nurse's approved request (read; her share ended in 10s23)
+-- is covered; the patient's deny directive and the kill switch end it; a
+-- separate records-processing request still works.
 set local role hid_identity_api_runtime;
 select set_config('records_processing.cover_g4', pg_temp.cover_approved('nurse', 'direct-care', 7, 'read_records', 120), true);
 reset role;
 select pg_temp.backdate();
-select pg_temp.expect('10za the nurse''s approval grant is covered', 'rp read=t rp write=t dc read=t dc write=t',
+select pg_temp.expect('10za the nurse''s approval grant is covered', 'rp read=t rp write=t dc read=t dc write=f',
   pg_temp.cover_answers('nurse', 7));
+-- 10za1-10za11. 0104's approval way, one condition at a time (as 10s25).
+select pg_temp.expect('10za1 the cover names the approval grant and ends with it', 'approval until=expires_at',
+  pg_temp.cover_after($c$select 1$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10za2 the request no longer approved (expired)', 'none',
+  pg_temp.cover_after($c$update identity.access_requests set status = 'expired', approved_at = null
+    where id = (select request_id from identity.consent_grants
+                 where id::text = current_setting('records_processing.cover_g4'))$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10za3 the request held by the cutover', 'none',
+  pg_temp.cover_after($c$update identity.access_requests set migration_hold_reason = 'Suite cutover hold'
+    where id = (select request_id from identity.consent_grants
+                 where id::text = current_setting('records_processing.cover_g4'))$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10za4 the request not approved by the patient', 'none',
+  pg_temp.cover_after($c$update identity.access_requests set approved_by_patient_id = null
+    where id = (select request_id from identity.consent_grants
+                 where id::text = current_setting('records_processing.cover_g4'))$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10za5 the request marked break-glass', 'none',
+  pg_temp.cover_after($c$update identity.access_requests set break_glass = true
+    where id = (select request_id from identity.consent_grants
+                 where id::text = current_setting('records_processing.cover_g4'))$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10za6 the request by PIN, the grant not', 'none',
+  pg_temp.cover_after($c$update identity.access_requests set authorization_method = 'patient_access_pin'
+    where id = (select request_id from identity.consent_grants
+                 where id::text = current_setting('records_processing.cover_g4'))$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10za7 the grant by PIN, the request not', 'none',
+  pg_temp.cover_after($c$update identity.consent_grants set authorization_method = 'patient_access_pin'
+    where id::text = current_setting('records_processing.cover_g4')$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10za8 the approval grant not granted by the patient', 'none',
+  pg_temp.cover_after($c$update identity.consent_grants set granted_by_patient_id = null
+    where id::text = current_setting('records_processing.cover_g4')$c$, 'nurse', 7, 'write_records', now()));
+select pg_temp.expect('10za9 the approval grant held by the cutover', 'none',
+  pg_temp.cover_after($c$update identity.consent_grants set migration_hold_reason = 'Suite cutover hold'
+    where id::text = current_setting('records_processing.cover_g4')$c$, 'nurse', 7, 'write_records', now()));
+-- The request's patient, membership, facility, scope and purpose are the
+-- grant's (the exact-request foreign key): no request can differ from its
+-- grant in them.
+select pg_temp.expect('10za10 the approval grant''s request moved to another membership: refused', '23503',
+  left(pg_temp.cover_after($c$update identity.access_requests set membership_id = '100a3000-0000-4000-8000-000000000010',
+      staff_id = '100a2000-0000-4000-8000-000000000010'
+    where id = (select request_id from identity.consent_grants
+                 where id::text = current_setting('records_processing.cover_g4'))$c$, 'nurse', 7, 'write_records', now()), 5));
+select pg_temp.expect('10za11 the approval grant''s request for another purpose: refused', '23503',
+  left(pg_temp.cover_after($c$update identity.access_requests set purpose_of_use = 'emergency'
+    where id = (select request_id from identity.consent_grants
+                 where id::text = current_setting('records_processing.cover_g4'))$c$, 'nurse', 7, 'write_records', now()), 5));
+-- 10zk01-10zk55: the cases of 10sk on the approval grant (but 10sk54), and 10zk39 (approval only).
+select set_config('records_processing.case_grant', current_setting('records_processing.cover_g4'), true);
+select pg_temp.condition_cases('10zk', 'approval');
 insert into identity.consent_directives (id, patient_id, current_version) values
   ('100a9100-0000-4000-8000-000000000001', '100a5000-0000-4000-8000-000000000007', 1);
 insert into identity.consent_directive_versions (id, directive_id, patient_id, version_no, status, provision_type,
@@ -747,7 +1383,7 @@ insert into identity.consent_directive_versions (id, directive_id, patient_id, v
   ('100a9100-0000-4000-8000-000000000002', '100a9100-0000-4000-8000-000000000001', '100a5000-0000-4000-8000-000000000007',
    1, 'active', 'deny', 'facility', '100a6000-0000-4000-8000-000000000002', null, array['healthcare-operations'], '{}',
    now() - interval '1 hour', 'records-processing-cover-test', 'No paper records here', repeat('e', 64));
-select pg_temp.expect('10zb a deny directive for records processing at A', 'rp read=f rp write=f dc read=t dc write=t',
+select pg_temp.expect('10zb a deny directive for records processing at A', 'rp read=f rp write=f dc read=t dc write=f',
   pg_temp.cover_answers('nurse', 7));
 -- Directive versions are append-only: each change is a new current version.
 create function pg_temp.cover_directive(version integer, status text, purposes text[]) returns void language sql as $$
@@ -764,17 +1400,17 @@ select pg_temp.cover_directive(2, 'active', array['direct-care']);
 select pg_temp.expect('10zc a deny directive for direct care at A', 'rp read=f rp write=f dc read=f dc write=f',
   pg_temp.cover_answers('nurse', 7));
 select pg_temp.cover_directive(3, 'inactive', array['direct-care']);
-select pg_temp.expect('10zd the directive withdrawn', 'rp read=t rp write=t dc read=t dc write=t',
+select pg_temp.expect('10zd the directive withdrawn', 'rp read=t rp write=t dc read=t dc write=f',
   pg_temp.cover_answers('nurse', 7));
 update identity.purpose_of_use_codes set active = false where code = 'healthcare-operations';
-select pg_temp.expect('10ze the kill switch ends the cover', 'rp read=f rp write=f dc read=t dc write=t',
+select pg_temp.expect('10ze the kill switch ends the cover', 'rp read=f rp write=f dc read=t dc write=f',
   pg_temp.cover_answers('nurse', 7));
 update identity.purpose_of_use_codes set active = true where code = 'healthcare-operations';
 update identity.purpose_of_use_codes set active = false where code = 'direct-care';
 select pg_temp.expect('10ze2 the direct-care code switched off ends the cover too', 'rp read=f rp write=f dc read=f dc write=f',
   pg_temp.cover_answers('nurse', 7));
 update identity.purpose_of_use_codes set active = true where code = 'direct-care';
-select pg_temp.expect('10ze3 both codes on again: covered again', 'rp read=t rp write=t dc read=t dc write=t',
+select pg_temp.expect('10ze3 both codes on again: covered again', 'rp read=t rp write=t dc read=t dc write=f',
   pg_temp.cover_answers('nurse', 7));
 set local role hid_identity_api_runtime;
 select pg_temp.as_cover_staff('nurse', 'healthcare-operations');

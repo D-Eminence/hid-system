@@ -15,7 +15,8 @@ import type { RetryOcrJobDto } from './dto/retry-ocr-job.dto';
 import type { ValidateOcrJobDto } from './dto/validate-ocr-job.dto';
 import { assertCandidateClassification, assertPublishableCandidate, clinicalNoteCandidate,
   expectedPublicationOperation, importedLabCandidate,
-  importedMedicationCandidate } from './ocr-publication-policy';
+  importedMedicationCandidates, type ImportedMedicationEntry } from './ocr-publication-policy';
+import { lagosToday } from './paper-date';
 import { LabApiService } from '../integrations/lab-api.service';
 import { OcrPublicationSwitch } from './ocr-publication-switch';
 import { PharmacyApiService } from '../integrations/pharmacy-api.service';
@@ -121,6 +122,11 @@ export class OcrService {
           and operation = 'ocr.extract' and idempotency_key = $3 for update`,
         [context.facilityId, context.actor.accountId, idempotencyKey],
       );
+      // A replay is answered first, as before the consent precheck: a key
+      // reused for a different request (another patientId included) is 409
+      // IDEMPOTENCY_CONFLICT, and an exact replay is authorized as the
+      // existing job it names, so a lapsed cover answers 404
+      // OCR_JOB_NOT_FOUND and never reveals the job with a 403.
       const replay = existing.rows[0];
       if (replay) {
         const hash = await client.query<{ request_sha256: string }>(
@@ -131,6 +137,27 @@ export class OcrService {
         }
         await this.authorizeJob(replay, context, 'read_records');
         return this.project(replay);
+      }
+
+      // A new job that names the patient: ask Identity about that patient
+      // before any document is read. Under healthcare-operations the EHR
+      // row-level security hides a document whose patient has not allowed
+      // records processing, so the source read alone would answer 404 and the
+      // staff member could not tell a missing document from a missing
+      // consent. This is a precheck, not authorize: it opens nothing, so the
+      // named patient gets no "Your records were opened" notice and Identity
+      // records no allowed read for them; a wrong patientId with cover still
+      // ends in the mismatch or not-found answers below, having touched
+      // nobody. The authorize on the source patient after the mismatch check
+      // stays the one call that notes and audits the read. Without a
+      // patientId, or against an Identity without the precheck, the source
+      // read decides and a 404 there stays a 404.
+      if (input.patientId) {
+        const precheck = await this.identity.precheckRecordsRead(input.patientId, context.purposeOfUse, context);
+        if (precheck && !precheck.allowed) {
+          throw new DomainProblem(403, 'OCR_RECORDS_PROCESSING_CONSENT_REQUIRED',
+            'The patient has not allowed records processing for this staff member');
+        }
       }
 
       const source = await this.ehrApi.getOcrDocumentSource(input.documentId, context);
@@ -294,7 +321,13 @@ export class OcrService {
       // cannot leave 'validated', so a validation it would refuse is refused
       // here, before anything is written. After the replay, which answers what
       // was stored.
-      if (input.disposition === 'validated') assertPublishableCandidate(input.targetDomain, input.acceptedFields);
+      if (input.disposition === 'validated') {
+        assertPublishableCandidate(input.targetDomain, input.acceptedFields, lagosToday());
+        if (input.targetDomain === 'PHARMACY') {
+          const { entries } = importedMedicationCandidates(input.acceptedFields);
+          if (entries.length > 0) await this.assertMedicinesWereRead(client, jobId, input.extractionId, entries);
+        }
+      }
       if (job.status !== 'awaiting_validation' || Number(job.row_version) !== input.expectedVersion) {
         throw new DomainProblem(412, 'OCR_VERSION_CONFLICT', 'OCR job is not awaiting validation at the expected version');
       }
@@ -512,6 +545,7 @@ export class OcrService {
       });
       let resourceType: string;
       let resourceId: string;
+      let auditDetails: Record<string, unknown> = {};
       if (claimed.target_domain === 'EHR' && claimed.target_operation === 'create_imported_clinical_note') {
         const note = clinicalNoteCandidate(evidence.validation.accepted_fields);
         const created = await this.ehrApi.createOcrClinicalNote(claimed.patient_id, {
@@ -523,7 +557,10 @@ export class OcrService {
         resourceType = 'clinical-note'; resourceId = created.id;
       } else if (claimed.target_domain === 'LAB'
         && claimed.target_operation === 'create_imported_lab_evidence') {
-        const candidate = importedLabCandidate(evidence.validation.accepted_fields);
+        // "Today" for the paper-date rule is the day the review was stored, so
+        // every attempt sends the same dates and Lab's replay digest matches.
+        const candidate = importedLabCandidate(evidence.validation.accepted_fields,
+          lagosToday(new Date(evidence.validation.created_at)));
         const created = await this.labApi.createOcrImport(context, {
           ...candidate, patientId: claimed.patient_id, sourceDocumentId: evidence.validation.document_id,
           ocrJobId: evidence.validation.job_id, extractionId: evidence.validation.extraction_id,
@@ -533,19 +570,32 @@ export class OcrService {
         resourceType = 'lab-imported-evidence'; resourceId = created.id;
       } else if (claimed.target_domain === 'PHARMACY'
         && claimed.target_operation === 'create_imported_medication_evidence') {
-        const candidate = importedMedicationCandidate(evidence.validation.accepted_fields);
-        const created = await this.pharmacyApi.createOcrImport(context, {
-          ...candidate, patientId: claimed.patient_id,
+        const { items } = importedMedicationCandidates(evidence.validation.accepted_fields);
+        const provenance = { patientId: claimed.patient_id,
           sourceDocumentId: evidence.validation.document_id,
           ocrJobId: evidence.validation.job_id,
           extractionId: evidence.validation.extraction_id,
           validationId: evidence.validation.id,
           validationVersion: evidence.validation.validation_version,
           publicationId: claimed.id,
-          reviewedBy: evidence.validation.validated_by,
-        }, `ocr-publication:${claimed.id}`);
+          reviewedBy: evidence.validation.validated_by };
         resourceType = 'pharmacy-imported-medication-evidence';
-        resourceId = created.id;
+        if (items.length === 1) {
+          // One medicine, in either shape, takes the single route exactly as before.
+          const created = await this.pharmacyApi.createOcrImport(context, {
+            ...items[0], ...provenance,
+          }, `ocr-publication:${claimed.id}`);
+          resourceId = created.id;
+        } else {
+          // Several medicines: one call, and Pharmacy stores every one as its own
+          // record in one transaction, or none.
+          const created = await this.pharmacyApi.createOcrImportBatch(context, {
+            ...provenance, medications: items,
+          }, `ocr-publication:${claimed.id}`);
+          resourceId = created.id;
+          auditDetails = { targetResourceIds: created.items.map((item) => item.id),
+            medicationCount: created.count };
+        }
       } else if (claimed.target_domain === 'DOCUMENT_ONLY'
         && claimed.target_operation === 'retain_validated_document') {
         resourceType = 'document'; resourceId = evidence.validation.document_id;
@@ -564,7 +614,8 @@ export class OcrService {
         if (!published) throw new DomainProblem(409, 'OCR_PUBLICATION_CLAIM_LOST', 'Publication ownership expired before completion');
         await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.publication.succeed', evidence.job,
           evidence.patientId,
-          { publicationId: published.id, targetResourceType: resourceType, targetResourceId: resourceId }));
+          { publicationId: published.id, targetResourceType: resourceType, targetResourceId: resourceId,
+            ...auditDetails }));
         await this.appendOutbox(client, evidence.job, 'OcrPublicationSucceeded', Number(published.row_version),
           { publicationId: published.id, targetResourceType: resourceType, targetResourceId: resourceId });
         return this.projectPublication(published);
@@ -622,6 +673,47 @@ export class OcrService {
 
   private terminalPublication() {
     return new DomainProblem(409, 'OCR_PUBLICATION_TERMINAL', 'Publication failed terminally and requires corrected validation evidence');
+  }
+
+  /**
+   * Every listed medicine must be on this paper. An entry taken from a reading
+   * item (itemId) must be a medicine the reading found on that page. An entry
+   * the reviewer typed from the page (no itemId: AI reading off, declined,
+   * failed or missed it) must name a page of this extraction. Either way no
+   * medicine is added from a page that is not there.
+   */
+  private async assertMedicinesWereRead(client: PoolClient, jobId: string, extractionId: string,
+    entries: readonly ImportedMedicationEntry[]) {
+    const result = await client.query<{ structured_payload: unknown }>(
+      `select structured_payload from ocr.extractions where id = $1 and job_id = $2`, [extractionId, jobId]);
+    const payload = result.rows[0]?.structured_payload as { contract?: unknown; items?: unknown; pages?: unknown }
+      | undefined;
+    const read = new Map<string, number>();
+    if (payload?.contract === PAPER_READING_CONTRACT && Array.isArray(payload.items)) {
+      for (const item of payload.items as { id?: unknown; kind?: unknown; page?: unknown }[]) {
+        if (item?.kind === 'medicine' && typeof item.id === 'string' && typeof item.page === 'number') {
+          read.set(item.id, item.page);
+        }
+      }
+    }
+    // Both contracts ('hid-paper-reading-v2' and the older 'hid-textract-v1') list pages as { page }.
+    const pages = new Set<number>();
+    if (payload && Array.isArray(payload.pages)) {
+      for (const page of payload.pages as { page?: unknown }[]) {
+        if (typeof page?.page === 'number') pages.add(page.page);
+      }
+    }
+    entries.forEach((entry, index) => {
+      if (entry.itemId === undefined) {
+        if (!pages.has(entry.page)) {
+          throw new DomainProblem(400, 'OCR_MEDICATION_PAGE_NOT_FOUND',
+            `Medicine ${index + 1} names page ${entry.page}, which is not a page of this paper`);
+        }
+      } else if (read.get(entry.itemId) !== entry.page) {
+        throw new DomainProblem(400, 'OCR_MEDICATION_NOT_READ',
+          `Medicine ${index + 1} is not a medicine read from page ${entry.page} of this paper`);
+      }
+    });
   }
 
   private async findValidation(client: PoolClient, validationId: string): Promise<ValidationRow> {

@@ -51,6 +51,35 @@ export class IdentityApiService {
     }));
   }
 
+  /**
+   * Whether a records read of the patient would be allowed, asked without the
+   * side effects of authorize: Identity notes no access ("Your records were
+   * opened") and records no authorization check. The caller must still call
+   * authorize before it opens anything. Undefined when this Identity does not
+   * have the precheck route yet (404): the caller then goes on without it.
+   */
+  async precheckRecordsRead(
+    patientId: string,
+    purpose: 'direct-care' | 'emergency' | 'healthcare-operations',
+    context: DataAccessContext,
+  ) {
+    try {
+      return await this.client.precheckPatientRead(patientId, purpose, {
+        correlationId: context.correlationId,
+        facilityId: context.facilityId,
+        purposeOfUse: purpose,
+        authorization: context.authorization,
+        cookie: context.userCookie,
+        csrfToken: context.csrfToken,
+        origin: context.origin,
+        requestMethod: context.requestMethod,
+      });
+    } catch (error) {
+      if (error instanceof IdentityApiProblem && error.status === 404) return undefined;
+      return this.translate(Promise.reject(error));
+    }
+  }
+
   private async translate<Value>(operation: Promise<Value>): Promise<Value> {
     try {
       return await operation;
