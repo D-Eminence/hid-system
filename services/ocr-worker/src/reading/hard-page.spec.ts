@@ -1,10 +1,12 @@
 import { paperReadingPayloadSchema, type PaperItem } from './contract';
-import { forMatching } from './grounding';
-import { markGuess, mergeAsWritten, mergeHardReadings, normaliseDose, normaliseFrequency, prepareHardAnswer, strengthOf,
-  type HardReading } from './hard-page';
+import { forMatching, STATUS_CUES, withoutSignMarks } from './grounding';
+import { markGuess, mergeAsWritten, mergeHardReadings, normaliseDose, normaliseFrequency, prepareHardAnswer,
+  shorthandInWords, strengthOf, type HardReading } from './hard-page';
 import { checkPage, checkReasonSentence, mergeReread } from './items';
 import { createMasker } from './masking';
-import type { BasisField, FieldBasis, ModelItem, ModelPage } from './prompt';
+import { hardPageMessage, imagePageMessage, pageMessage, SIGNS_RULE, SYSTEM_PROMPT, type BasisField, type FieldBasis,
+  type ModelItem, type ModelPage } from './prompt';
+import { SIGN_TABLE } from './signs';
 import { modelItem, modelPage, readPage, SOURCE_SHA } from './test-fixtures';
 import type { ReadLine, ReadPage } from '../types';
 
@@ -34,9 +36,10 @@ const fieldsOf = (item: PaperItem) => item.fields as Record<string, unknown>;
 
 describe('hard-page answers, before they are held to the page', () => {
   it('keeps frequency only from the allowed set, a dose only as a number, and rebuilds the strength', () => {
-    expect(['od', 'BD', 'tds?', 'q.d.s', '6 hrly', '8-hourly', 'nocte', 'stat', 'prn', '12hrly'].map(normaliseFrequency))
-      .toEqual(['od', 'bd', 'tds?', 'qds', '6hrly', '8hrly', 'nocte', 'stat', 'prn', '12hrly']);
-    expect(['three times', 'mane', 'weekly', '[unreadable]'].map(normaliseFrequency)).toEqual(Array(4).fill('[unreadable]'));
+    expect(['od', 'BD', 'tds?', 'q.d.s', '6 hrly', '8-hourly', 'nocte', 'mane', 'stat', 'prn', '12hrly'].map(normaliseFrequency))
+      .toEqual(['od', 'bd', 'tds?', 'qds', '6hrly', '8hrly', 'nocte', 'mane', 'stat', 'prn', '12hrly']);
+    expect(['three times', 'alternate days', 'weekly', '[unreadable]', 'alternate (sign) days', '[sign?]']
+      .map(normaliseFrequency)).toEqual(Array(6).fill('[unreadable]'));
     expect(normaliseFrequency('')).toBe('');
     expect(['400', '0.5', '400?', ' 25 '].map(normaliseDose)).toEqual(['400', '0.5', '400?', '25']);
     expect(['4OO', 'one', '1/2', '[unreadable]'].map(normaliseDose)).toEqual(Array(4).fill('[unreadable]'));
@@ -182,7 +185,7 @@ describe('two readings of a hard page', () => {
     expect(check.items).toHaveLength(1);
     const item = check.items[0]!;
     expect(fieldsOf(item)).toMatchObject({ name: 'Metronidazole?', strength: '400? mg', frequency: 'tds', status: 'new' });
-    expect(item).toMatchObject({ readBy: 'reread', confidence: 'check_carefully', plain: 'Metronidazole? 400? mg tds' });
+    expect(item).toMatchObject({ readBy: 'reread', confidence: 'check_carefully', plain: 'Metronidazole? 400? mg tds (three times a day)' });
     expect(item.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'read_from_image']));
     expect(item.checkReasons).not.toContain('readings_disagree');
     expect(item.checkReasons).not.toContain('single_reading_only');
@@ -435,3 +438,135 @@ describe('two readings of a hard page', () => {
       'This is a best guess from the picture; check every word against the paper.');
   });
 });
+
+describe('diagnosis and lab test names on a hard page, grounded after the readings are compared', () => {
+  const page = readPage(1, [['Dx HTN', { handwritten: true, confidence: 0.45 }],
+    ['FBC 11.2', { handwritten: true, confidence: 0.45 }], ['Dx Fictionalitis', { handwritten: true, confidence: 0.45 }]]);
+  const answer = () => modelPage([
+    hardItem({ kind: 'diagnosis', asWritten: 'Dx HTN', name: 'HTN', status: 'confirmed' }, 1, { name: 'letters' }),
+    hardItem({ kind: 'lab_result', asWritten: 'FBC 11.2', test: 'FBC', value: '11.2' }, 2, { name: 'letters', value: 'letters' }),
+    hardItem({ kind: 'diagnosis', asWritten: 'Dx Fictionalitis', name: 'Fictionalitis', status: 'confirmed' }, 3,
+      { name: 'letters' })]);
+
+  it('shows a listed name as read with the listed name after it, and leaves an unlisted one as read', () => {
+    const { check } = mergeHardReadings([heldOn(page, answer()), heldOn(page, answer())], SOURCE_SHA);
+    expect(check.items.map((item) => fieldsOf(item).name ?? fieldsOf(item).test))
+      .toEqual(['HTN? (Hypertensive diseases)', 'FBC? (full blood count)', 'Fictionalitis']);
+    expect(check.items.every((item) => item.confidence === 'check_carefully')).toBe(true);
+    // The checks were made on the names as read: no text_corrected, and the value is still bound to its test.
+    for (const item of check.items) expect(item.checkReasons).not.toContain('text_corrected');
+    expect(check.items[1]!.checkReasons).not.toContain('value_mismatch');
+    // asWritten is the paper's, untouched.
+    expect(check.items.map((item) => item.asWritten)).toEqual(['Dx HTN', 'FBC 11.2', 'Dx Fictionalitis']);
+  });
+
+  it('grounds nothing on the first pass or another re-read: only hard pages use the lists', () => {
+    const text = readPage(1, ['Dx HTN']);
+    const read = checkPage({ page: 1, lines: text.lines, sourceSha256Hex: SOURCE_SHA, readBy: 'first_pass',
+      masker: createMasker(), fromImage: false, answer: modelPage([modelItem({ kind: 'diagnosis', asWritten: 'Dx HTN',
+        name: 'HTN', status: 'confirmed', lineIds: ['p1-l1'] })]) });
+    expect(fieldsOf(read.items[0]!).name).toBe('HTN');
+  });
+
+  it('makes two different names for one diagnosis unreadable, never picking one', () => {
+    const other = modelPage([hardItem({ kind: 'diagnosis', asWritten: 'Dx HTN', name: 'Hypertension', status: 'confirmed' },
+      1, { name: 'letters' })]);
+    const { check } = mergeHardReadings([heldOn(page, modelPage([answer().items[0]!])), heldOn(page, other)], SOURCE_SHA);
+    expect(fieldsOf(check.items[0]!).name).toBe('[unreadable]');
+    expect(check.items[0]!.checkReasons).toContain('readings_disagree');
+  });
+});
+
+describe('handwritten signs on a hard page', () => {
+  const page = readPage(1, [['Amoxil 500mg Z days', { handwritten: true, confidence: 0.4 }],
+    ['Hx # femur', { handwritten: true, confidence: 0.4 }], ['Dx Malaria', { handwritten: true, confidence: 0.4 }]]);
+  const signed = (asWritten: string, frequency = '[unreadable]') => medicine(1, 'Amoxil', '500', 'mg', frequency, { asWritten });
+  const merge = (...answers: ModelPage[]) => mergeHardReadings(answers.map((answer) => heldOn(page, answer)), SOURCE_SHA);
+
+  it('gives the sign table in the hard-page prompt only, with every sign described in words', () => {
+    const lines = [{ id: 'p1-l1', text: 'x', confidence: 0.4, handwritten: true, box: null }];
+    const hard = hardPageMessage(1, lines, { width: 800, height: 1000 });
+    expect(hard).toContain(SIGNS_RULE);
+    expect(SIGNS_RULE).toContain('"alternate" (as in alternate days)');
+    expect(SIGNS_RULE).toContain('write "[sign?]" in its place: never guess a word for a sign');
+    expect(SIGNS_RULE).toContain('"#" before a number ("#30") is a count, not this sign');
+    for (const sign of SIGN_TABLE) expect(SIGNS_RULE).toContain(`- ${sign.looks}: ${sign.meaning}`);
+    for (const written of ['Hx history', 'Rx treatment (prescription)', 'stat at once', 'prn when needed', 'od once a day',
+      'bd twice a day', 'tds three times a day', 'qds four times a day', 'nocte at night', 'mane in the morning', 'n/52 n weeks',
+      'n/12 n months']) expect(SIGNS_RULE).toContain(written);
+    // The first pass and the image re-read of other flagged pages are unchanged: no sign table there.
+    for (const other of [SYSTEM_PROMPT, imagePageMessage(1, lines, { width: 800, height: 1000 }), pageMessage(1, lines)]) {
+      expect(other).not.toContain('(sign)');
+      expect(other).not.toContain('[sign?]');
+    }
+  });
+
+  it('marks an item with a sign read or not read sign_read, and says so', () => {
+    const { check } = merge(modelPage([signed('Amoxil 500 mg alternate (sign) days')]),
+      modelPage([signed('Amoxil 500 mg alternate (sign) days')]));
+    const item = check.items[0]!;
+    expect(item.asWritten).toBe('Amoxil 500 mg alternate (sign) days');
+    expect(item.checkReasons).toEqual(expect.arrayContaining(['sign_read', 'best_guess_from_picture']));
+    expect(item.checkReason).toBe(
+      'A handwritten sign was read as a word, marked "(sign)", or could not be read, marked "[sign?]"; check it against the paper.');
+    const unsure = merge(modelPage([signed('Amoxil 500 mg [sign?] days')])).check.items[0]!;
+    expect(unsure.checkReasons).toContain('sign_read');
+    const plain = merge(modelPage([signed('Amoxil 500 mg tds', 'tds')])).check.items[0]!;
+    expect(plain.checkReasons).not.toContain('sign_read');
+    // Below the real disagreements and a guess from context, above the plainer best-guess sentences.
+    expect(checkReasonSentence(['sign_read', 'readings_disagree'])).toContain('Two readings');
+    expect(checkReasonSentence(['sign_read', 'field_from_context'])).toContain('guessed from what is usual');
+    expect(checkReasonSentence(['sign_read', 'single_reading_only', 'best_guess_from_picture', 'read_from_image']))
+      .toContain('handwritten sign');
+    // A sign in a field other than asWritten counts too.
+    const fracture = merge(modelPage([hardItem({ kind: 'diagnosis', asWritten: 'Hx fracture (sign) femur',
+      name: 'fracture (sign) femur', status: 'history' }, 2, { name: 'letters' })])).check.items[0]!;
+    expect(fracture.checkReasons).toContain('sign_read');
+    expect(fieldsOf(fracture).name).toBe('fracture (sign) femur');
+  });
+
+  it('never expands "[sign?]": not into a frequency, a drug, a diagnosis or a lab test, and not by forMatching', () => {
+    expect(normaliseFrequency('[sign?]')).toBe('[unreadable]');
+    expect(forMatching('Amoxil 500? mg [sign?] days')).toBe('Amoxil 500 mg [sign?] days');
+    expect(forMatching('[?] and [sign?]')).toBe('[?] and [sign?]');
+    const { check } = merge(modelPage([medicine(1, '[sign?]', '500', 'mg', '[unreadable]', { asWritten: 'Amoxil 500 mg [sign?]' }),
+      hardItem({ kind: 'diagnosis', asWritten: 'Dx [sign?]', name: '[sign?]', status: 'confirmed' }, 3, { name: 'letters' })]));
+    expect(check.items.map((item) => fieldsOf(item).name)).toEqual(['[unreadable]', '[sign?]']);
+    expect(check.items.every((item) => item.checkReasons.includes('sign_read'))).toBe(true);
+  });
+
+  it('leaves grounding unaffected: "[sign?]" is no query, and the marks never anchor an item', () => {
+    // The "?" of "[sign?]" is not a status cue; "[?]" still is.
+    expect('dx [sign?] malaria'.match(STATUS_CUES)).toBeNull();
+    expect('dx [?] malaria'.match(STATUS_CUES)).toEqual(['?']);
+    expect(withoutSignMarks('alternate (sign) days [sign?]').trim().split(/\s+/)).toEqual(['alternate', 'days']);
+    const asRead = (asWritten: string) => merge(modelPage([hardItem({ kind: 'diagnosis', asWritten, name: 'Malaria',
+      status: 'confirmed' }, 3, { name: 'letters' })])).check.items[0]!;
+    const withSign = asRead('Dx Malaria [sign?]');
+    const withQuery = asRead('Dx Malaria [?]');
+    expect(withSign.checkReasons).not.toContain('status_cue_on_line');
+    expect(withQuery.checkReasons).toContain('status_cue_on_line');
+    expect(fieldsOf(withSign).name).toBe('Malaria');
+    // On a legible line the anchor rule still holds: "sign" in a mark does not tie an item to a line that says "sign".
+    const legible = readPage(1, ['Sign: Dr Fictional']);
+    const made = heldOn(legible, modelPage([hardItem({ kind: 'note', asWritten: 'increased (sign)', noteText: 'increased (sign)' },
+      1, { other: 'letters' })]));
+    expect(made.check.items).toHaveLength(0);
+    expect(made.check.droppedByReason).toEqual({ not_anchored: 1 });
+  });
+
+  it('puts dose shorthand in words only where the read is certain', () => {
+    expect(shorthandInWords('frequency', 'tds')).toBe('tds (three times a day)');
+    expect(shorthandInWords('frequency', 'mane')).toBe('mane (in the morning)');
+    expect(shorthandInWords('frequency', 'tds?')).toBe('tds?');
+    expect(shorthandInWords('frequency', '[unreadable]')).toBe('[unreadable]');
+    expect(shorthandInWords('duration', '5/7')).toBe('5/7 (5 days)');
+    expect(shorthandInWords('duration', '1/52')).toBe('1/52 (1 week)');
+    expect(shorthandInWords('duration', '3/12')).toBe('3/12 (3 months)');
+    expect(shorthandInWords('duration', '5?/7')).toBe('5?/7');
+    expect(shorthandInWords('duration', '[sign?] 5/7')).toBe('[sign?] 5/7');
+    const { check } = merge(modelPage([medicine(1, 'Amoxicillin', '500', 'mg', 'tds?')]));
+    expect(check.items[0]!.plain).toBe('Amoxicillin? 500 mg tds?');
+  });
+});
+

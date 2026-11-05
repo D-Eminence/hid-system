@@ -1,8 +1,11 @@
 import type { Box, FlagReason, PaperItem } from './contract';
+import { matchDiagnosisName } from './diagnosis-list';
 import { matchDrugName, normaliseDrugName } from './drug-list';
 import { checkReasonSentence, itemId, mergeIdentity, unionBox, uniqueItemIds, type PageCheck } from './items';
+import { matchLabTestName } from './lab-list';
 import { HARD_PAGE_FREQUENCIES, UNREADABLE, type BasisField, type FieldBasis, type HardItemExtras, type ModelItem,
   type ModelPage } from './prompt';
+import { hasSign } from './signs';
 
 /**
  * Hard pages (owner decision of 2026-11-05, about 18:40 UTC): a page flagged handwriting or low_confidence that goes
@@ -18,6 +21,12 @@ import { HARD_PAGE_FREQUENCIES, UNREADABLE, type BasisField, type FieldBasis, ty
  *    "context" gets "?" in the field itself (markGuess, GUESSABLE_TEXT_FIELDS), whatever the item's kind.
  * 2. Each answer is held to the page by checkPage (items.ts), unchanged: #194's placement rules apply to every item.
  * 3. mergeHardReadings pairs the kept items of the two readings and keeps what they agree on (see there).
+ * 4. Each kept item (finish): a diagnosis name and a lab test name are grounded to their lists (diagnosis-list.ts:
+ *    ICD-11 titles and our own synonyms; lab-list.ts: our own test names): a listed one is shown as read with the
+ *    listed name after it ("HTN? (Hypertensive diseases)"), or as read where it is the listed name; an unlisted one
+ *    is left as read. This comes after the checks and the comparison of the two readings, so both are made on the
+ *    names as read (a lab value is still bound to its test as written), and only the shown field changes. An item
+ *    holding a handwritten sign mark gets sign_read.
  * The result is then merged with the first pass by mergeReread, unchanged, so no first-pass item is lost.
  */
 
@@ -26,6 +35,8 @@ export const BEST_GUESS = 'best_guess_from_picture';
 export const FROM_CONTEXT = 'field_from_context';
 export const SINGLE_READING = 'single_reading_only';
 export const READINGS_DISAGREE = 'readings_disagree';
+/** A handwritten sign read as its meaning ("(sign)") or not read ("[sign?]") anywhere in the item (signs.ts). */
+export const SIGN_READ = 'sign_read';
 
 const ALLOWED_FREQUENCIES = new Set<string>(HARD_PAGE_FREQUENCIES);
 /** "[?]" is a question mark written on the paper (a query), not the reading's own uncertainty. */
@@ -209,16 +220,73 @@ function anyFromContext(side: Side): boolean {
     || fromContext(side, 'unit', side.extras?.doseUnit));
 }
 
-/** The plain reading of a hard-page medicine, built only from its final fields (never the model's own guesses). */
+/** What each hard-page frequency code means, for the plain reading. */
+export const FREQUENCY_WORDS: Readonly<Record<(typeof HARD_PAGE_FREQUENCIES)[number], string>> = {
+  od: 'once a day', bd: 'twice a day', tds: 'three times a day', qds: 'four times a day', '6hrly': 'every 6 hours',
+  '8hrly': 'every 8 hours', '12hrly': 'every 12 hours', nocte: 'at night', mane: 'in the morning', stat: 'at once',
+  prn: 'when needed',
+};
+const DURATION_UNITS: Readonly<Record<string, string>> = { 7: 'days', 52: 'weeks', 12: 'months' };
+
+/**
+ * Dose shorthand in words, only where the read is certain (the field carries no "?" and no "[unreadable]" or
+ * "[sign?]"): a frequency code as "tds (three times a day)", a duration written "5/7" as "5/7 (5 days)" ("/52"
+ * weeks, "/12" months). Anything else is kept as written.
+ */
+export function shorthandInWords(field: 'frequency' | 'duration', value: string): string {
+  const text = value.trim();
+  if (!text || /\?|\[/.test(text)) return value;
+  if (field === 'frequency') {
+    const words = FREQUENCY_WORDS[text.toLowerCase() as keyof typeof FREQUENCY_WORDS];
+    return words ? `${text} (${words})` : value;
+  }
+  const fraction = /^(\d+) ?\/ ?(7|52|12)$/.exec(text);
+  if (!fraction) return value;
+  const count = Number(fraction[1]);
+  const unit = DURATION_UNITS[fraction[2]!]!;
+  return `${text} (${count} ${count === 1 ? unit.slice(0, -1) : unit})`;
+}
+
+/**
+ * The plain reading of a hard-page medicine, built only from its final fields (never the model's own guesses), with
+ * a certain frequency or duration shorthand in words (shorthandInWords).
+ */
 function medicinePlain(fields: Record<string, unknown>): string {
-  return ['name', 'strength', 'route', 'frequency', 'duration'].map((key) => fields[key])
-    .filter((value): value is string => typeof value === 'string' && value.trim() !== '').join(' ');
+  return ['name', 'strength', 'route', 'frequency', 'duration'].map((key) => {
+    const value = fields[key];
+    if (typeof value !== 'string' || value.trim() === '') return null;
+    return key === 'frequency' || key === 'duration' ? shorthandInWords(key, value) : value;
+  }).filter((value): value is string => value !== null).join(' ');
+}
+
+/**
+ * A hard-page item's fields with a diagnosis name or a lab test name grounded to its list (step 4 of the header):
+ * "As read? (listed name)" where listed and changed, as read otherwise. "[unreadable]" and sign marks never match.
+ */
+function groundedFields(item: PaperItem): PaperItem['fields'] {
+  if (item.kind === 'diagnosis' && item.fields.name) {
+    return { ...item.fields, name: matchDiagnosisName(item.fields.name)?.display ?? item.fields.name };
+  }
+  if (item.kind === 'lab_result' && item.fields.test) {
+    return { ...item.fields, test: matchLabTestName(item.fields.test)?.display ?? item.fields.test };
+  }
+  return item.fields;
+}
+
+/** Whether the item holds a handwritten sign mark (signs.ts) in its asWritten or in any text field. */
+function holdsSign(item: PaperItem): boolean {
+  return hasSign(item.asWritten) || Object.values(item.fields as Record<string, unknown>)
+    .some((value) => typeof value === 'string' && hasSign(value));
 }
 
 function finish(item: PaperItem, codes: readonly string[], sourceSha256Hex: string): PaperItem {
   const checkReasons = [...item.checkReasons];
-  for (const code of [...codes, BEST_GUESS, 'read_from_image']) if (!checkReasons.includes(code)) checkReasons.push(code);
-  return { ...item, id: itemId(sourceSha256Hex, item.kind, item.lineIds, item.asWritten), readBy: 'reread',
+  const signs = holdsSign(item) ? [SIGN_READ] : [];
+  const fields = groundedFields(item);
+  for (const code of [...codes, ...signs, BEST_GUESS, 'read_from_image']) {
+    if (!checkReasons.includes(code)) checkReasons.push(code);
+  }
+  return { ...item, fields, id: itemId(sourceSha256Hex, item.kind, item.lineIds, item.asWritten), readBy: 'reread',
     confidence: 'check_carefully', checkReasons, checkReason: checkReasonSentence(checkReasons) } as PaperItem;
 }
 
@@ -369,7 +437,8 @@ function neighbourGap(a: Side, b: Side): number | null {
  * one reading found is kept with single_reading_only. Every item: check_carefully, readBy 'reread', read_from_image
  * and best_guess_from_picture, plus field_from_context where any field's basis was context. Identity is merged as in
  * mergeIdentity (a conflict flags the page ai_unsure); the page flags are both readings' flags; the dropped counts are
- * the first reading's (the one the page is held to first), or the only reading's.
+ * the first reading's (the one the page is held to first), or the only reading's. An item holding a handwritten
+ * sign mark ("(sign)" or "[sign?]", signs.ts) in its asWritten or any field also gets sign_read.
  */
 export function mergeHardReadings(readings: readonly HardReading[], sourceSha256Hex: string):
   { check: PageCheck; agreement: HardPageAgreement } {

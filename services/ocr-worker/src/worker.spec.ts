@@ -99,7 +99,7 @@ describe('OcrWorker processing', () => {
     expect(result.providerModel).toBe('amazon-textract-detect-document-text');
     expect(result.provenance).toMatchObject({ processingContract: 'hid-textract-v2', pageCount: 1,
       reading: { contract: 'hid-paper-reading-v2', firstPassModel: 'claude-sonnet-5-5', inferenceGeo: 'us',
-        promptVersion: 'hid-paper-reading-prompt-5', usage: { inputTokens: 2400, outputTokens: 800 } } });
+        promptVersion: 'hid-paper-reading-prompt-6', usage: { inputTokens: 2400, outputTokens: 800 } } });
     const provenance = JSON.stringify(result.provenance);
     for (const secret of [SECRET_NAME, SECRET_DRUG, SECRET_NOTE, 'Inventedcillin']) expect(provenance).not.toContain(secret);
     expect(JSON.stringify(result.structuredPayload)).not.toContain('Inventedcillin');
@@ -491,8 +491,8 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(medicine.fields).toMatchObject({ name: 'Pyrimethamine?', strength: '437 mg' });
     expect(medicine.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'field_from_context']));
     expect(result.provenance.reading).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
-      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-2', imagePromptVersion: null,
-      promptVersion: 'hid-paper-reading-prompt-5' });
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-3', imagePromptVersion: null,
+      promptVersion: 'hid-paper-reading-prompt-6' });
     const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
     const usageLines = lines.filter((line) => line.event === 'ocr.reading.usage');
     expect(usageLines.map((line) => [line.pass, line.requests])).toEqual([['first_pass', 1], ['hard_page_read', 2]]);

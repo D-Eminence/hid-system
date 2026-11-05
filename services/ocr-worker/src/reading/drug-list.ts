@@ -1,3 +1,7 @@
+import { BRAND_ROWS, isActiveBrandRow } from './brand-names';
+import { editDistance, fuzzyListMatch, letterCount, LOOKALIKE_DISTANCE, MAX_EDIT_DISTANCE, MIN_FUZZY_LETTERS,
+  MIN_SIMILARITY, NOT_FOR_LISTS, type ListEntry } from './list-match';
+
 /**
  * The medicine names a hard page's best-guess drug name may be shown as (owner decision of 2026-11-05, about
  * 18:40 UTC: "Yes, use a drug list"). Used only on hard pages (see reader.ts, hard-page reads): a drug name the
@@ -27,11 +31,12 @@
  * chlorphenamine, trihexyphenidyl, hydroxyurea, aspirin, co-trimoxazole, valproic acid, cyclosporin, busulphan),
  * plus a few British, US and older names still written on Nigerian charts, marked as added here.
  *
- * BRAND NAMES (BRAND_NAMES, below and kept apart): curated, not exhaustive; review before relying on it. A small
- * conservative list of brand names commonly written on Nigerian prescriptions, each mapped to its generic name on
- * the list above or, for a combination brand the list does not have as a combination (Ampiclox: ampicillin +
- * cloxacillin), to the generics it combines, each of which is on the list. A brand is shown as "Brand? (generic)". Only true brand names; a manufacturer's name alone
- * (such as a company that makes paracetamol) is never a brand here.
+ * BRAND NAMES (BRAND_NAMES, kept apart): the active rows of the data table in brand-names.ts, each with its source
+ * (a NAFDAC Greenbook listing, registration number and address, or for the brands curated before the table
+ * 'coordinator-curated 2026-11') and reviewed_by. Each maps to its generic name on the list above or, for a
+ * combination brand the list does not have as a combination (Ampiclox: ampicillin + cloxacillin), to the generics
+ * it combines, each of which is on the list. A brand is shown as "Brand? (generic)". Only true brand names; a
+ * manufacturer's name alone (such as a company that makes paracetamol) is never a brand here.
  */
 
 /** Generic medicine names from the Nigeria Essential Medicines List, 7th Edition (2020); see the header. */
@@ -195,51 +200,18 @@ export const SYNONYMS: Readonly<Record<string, string>> = {
   'acyclovir': 'aciclovir',
 };
 
-/**
- * Brand names: curated, not exhaustive; review before relying on it. Each maps to its generic name on
- * NEML_GENERICS (or, for a combination brand, the generics it combines, each on the list). Conservative on
- * purpose: only brand names long and widely written on Nigerian prescriptions.
- */
-export const BRAND_NAMES: Readonly<Record<string, string>> = {
-  'plasil': 'metoclopramide',
-  'flagyl': 'metronidazole',
-  'augmentin': 'amoxicillin + clavulanic acid',
-  'rocephin': 'ceftriaxone',
-  'zinnat': 'cefuroxime',
-  'amoxil': 'amoxicillin',
-  'ampiclox': 'ampicillin + cloxacillin',
-  'septrin': 'sulfamethoxazole + trimethoprim',
-  'panadol': 'paracetamol',
-  'coartem': 'artemether + lumefantrine',
-  'fansidar': 'sulfadoxine + pyrimethamine',
-  'daraprim': 'pyrimethamine',
-  'lasix': 'furosemide',
-  'voltaren': 'diclofenac',
-  'glucophage': 'metformin',
-  'norvasc': 'amlodipine',
-  'adalat': 'nifedipine',
-  'buscopan': 'hyoscine butylbromide',
-  'valium': 'diazepam',
-  'phenergan': 'promethazine',
-  'piriton': 'chlorpheniramine',
-  'ventolin': 'salbutamol',
-  'postinor': 'levonorgestrel',
-};
+/** Brand names: the active rows of brand-names.ts (see there), brand to generic. */
+export const BRAND_NAMES: Readonly<Record<string, string>> = Object.fromEntries(
+  BRAND_ROWS.filter(isActiveBrandRow).map((row) => [row.brand, row.generic]));
 
 /**
- * Fuzzy match thresholds (tested in drug-list.spec.ts). A fuzzy match corrects one slip of the pen or of the
- * reading, never a different medicine: a name of MIN_FUZZY_LETTERS letters or more matches a listed name at an edit
- * distance of at most MAX_EDIT_DISTANCE (one letter added, dropped or changed), a similarity ratio (1 - distance /
- * longer length) of at least MIN_SIMILARITY, and the same first letter (most look-alike medicines differ at the
- * start: pefloxacin / ofloxacin, esomeprazole / omeprazole); a shorter name must match exactly. Two different
- * medicines matching equally well is no match (ambiguous): the screen never picks one of two lookalikes. A name
- * within LOOKALIKE_DISTANCE of a real medicine that is not on the list (UNLISTED_LOOKALIKES) is no match either,
- * since the proposal may well be that medicine.
+ * Fuzzy match thresholds: the shared strict rules of list-match.ts (one edit, similarity 0.85, same first letter,
+ * same short words and digits, names of six letters or more, ambiguous is no match). Most look-alike medicines
+ * differ at the start (pefloxacin / ofloxacin, esomeprazole / omeprazole). A name within LOOKALIKE_DISTANCE of a
+ * real medicine that is not on the list (UNLISTED_LOOKALIKES) is no match either, since the proposal may well be
+ * that medicine.
  */
-export const MIN_FUZZY_LETTERS = 6;
-export const MAX_EDIT_DISTANCE = 1;
-export const MIN_SIMILARITY = 0.85;
-export const LOOKALIKE_DISTANCE = 2;
+export { editDistance, LOOKALIKE_DISTANCE, MAX_EDIT_DISTANCE, MIN_FUZZY_LETTERS, MIN_SIMILARITY };
 
 /**
  * Real medicines that are not on the list but are spelled within a letter or two of one that is (curated, not
@@ -268,20 +240,6 @@ export function normaliseDrugName(text: string): string {
 
 const withoutSalts = (name: string) => name.split(' ').filter((word) => !SALT_WORDS.has(word)).join(' ').trim();
 
-export function editDistance(a: string, b: string): number {
-  const previous = Array.from({ length: b.length + 1 }, (_, index) => index);
-  for (let i = 1; i <= a.length; i += 1) {
-    let diagonal = previous[0]!;
-    previous[0] = i;
-    for (let j = 1; j <= b.length; j += 1) {
-      const above = previous[j]!;
-      previous[j] = Math.min(above + 1, previous[j - 1]! + 1, diagonal + (a[i - 1] === b[j - 1] ? 0 : 1));
-      diagonal = above;
-    }
-  }
-  return previous[b.length]!;
-}
-
 export interface DrugMatch {
   /** The generic name(s) the proposed name stands for, as on the list. */
   generic: string;
@@ -293,15 +251,17 @@ export interface DrugMatch {
   exact: boolean;
 }
 
-interface Entry { key: string; generic: string; brand: string | null }
-const ENTRIES: readonly Entry[] = [
-  ...NEML_GENERICS.map((name) => ({ key: normaliseDrugName(name), generic: name, brand: null })),
-  ...Object.entries(SYNONYMS).map(([name, generic]) => ({ key: normaliseDrugName(name), generic, brand: null })),
-  ...Object.entries(BRAND_NAMES).map(([name, generic]) => ({ key: normaliseDrugName(name), generic, brand: name })),
+type Entry = ListEntry<{ generic: string; brand: string | null }>;
+const entry = (name: string, generic: string, brand: string | null): Entry =>
+  ({ key: normaliseDrugName(name), target: generic, value: { generic, brand } });
+/** Every name the drug list knows, normalised, with the generic it stands for (list-match.spec.ts checks them all). */
+export const DRUG_ENTRIES: readonly Entry[] = [
+  ...NEML_GENERICS.map((name) => entry(name, name, null)),
+  ...Object.entries(SYNONYMS).map(([name, generic]) => entry(name, generic, null)),
+  ...Object.entries(BRAND_NAMES).map(([name, generic]) => entry(name, generic, name)),
 ];
 
 const capitalise = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
-const letters = (text: string) => text.replace(/[^a-z]/g, '').length;
 
 const LOOKALIKE_KEYS = UNLISTED_LOOKALIKES.map(normaliseDrugName);
 
@@ -311,30 +271,18 @@ const LOOKALIKE_KEYS = UNLISTED_LOOKALIKES.map(normaliseDrugName);
  * the same letter, and no unlisted look-alike is as near. "[unreadable]" or a name with no letters never matches.
  */
 export function matchDrugName(proposed: string): DrugMatch | null {
-  if (/\[unreadable\]/i.test(proposed)) return null;
+  if (NOT_FOR_LISTS.test(proposed)) return null;
   const whole = normaliseDrugName(proposed);
-  if (letters(whole) === 0) return null;
+  if (letterCount(whole) === 0) return null;
   const candidates = [...new Set([whole, withoutSalts(whole)].filter((name) => name.length > 0))];
-  const found = (entry: Entry, exact: boolean): DrugMatch => ({ generic: entry.generic, brand: entry.brand, exact,
-    display: entry.brand === null ? `${capitalise(entry.generic)}?` : `${capitalise(entry.brand)}? (${entry.generic})` });
+  const found = ({ value: { generic, brand } }: Entry, exact: boolean): DrugMatch => ({ generic, brand, exact,
+    display: brand === null ? `${capitalise(generic)}?` : `${capitalise(brand)}? (${generic})` });
   for (const name of candidates) {
-    const exact = ENTRIES.find((entry) => entry.key === name);
+    const exact = DRUG_ENTRIES.find((candidate) => candidate.key === name);
     if (exact) return found(exact, true);
   }
-  let best: { entry: Entry; distance: number; name: string } | null = null;
-  let ambiguous = false;
-  for (const name of candidates) {
-    if (letters(name) < MIN_FUZZY_LETTERS) continue;
-    for (const entry of ENTRIES) {
-      if (letters(entry.key) < MIN_FUZZY_LETTERS) continue;
-      const distance = editDistance(name, entry.key);
-      const similarity = 1 - distance / Math.max(name.length, entry.key.length);
-      if (distance > MAX_EDIT_DISTANCE || similarity < MIN_SIMILARITY) continue;
-      if (best === null || distance < best.distance) { best = { entry, distance, name }; ambiguous = false; }
-      else if (distance === best.distance && entry.generic !== best.entry.generic) ambiguous = true;
-    }
-  }
-  if (best === null || ambiguous || best.name.charAt(0) !== best.entry.key.charAt(0)) return null;
+  const best = fuzzyListMatch(candidates, DRUG_ENTRIES);
+  if (best === null) return null;
   const nearUnlisted = candidates.some((name) =>
     LOOKALIKE_KEYS.some((key) => editDistance(name, key) <= LOOKALIKE_DISTANCE));
   return nearUnlisted ? null : found(best.entry, false);
