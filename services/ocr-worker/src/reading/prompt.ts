@@ -15,16 +15,18 @@ import { ALLERGY_SEVERITIES, DIAGNOSIS_STATUSES, ITEM_KINDS, MEDICINE_STATUSES, 
  * and as a fallback). The prompt text, the answer schema and every request
  * body are byte for byte as under version 2; the label is not sent.
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-3';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-4';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 /**
  * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
  * They are used only for a flagged page re-read with its picture, so SYSTEM_PROMPT, MODEL_OUTPUT_JSON_SCHEMA and
  * the text-only page message, and with them MODEL_SCHEMA_VERSION, are unchanged by it. Recorded in provenance
  * when a page was read from its picture. Version 3: the message no longer says the page was hard to read; it says
- * the first reading needs checking, for any page flag.
+ * the first reading needs checking, for any page flag. Version 4: cite every scanned line the item's box covers
+ * (fragments on the same row included), and read from the picture where the scanned text of hard handwriting is
+ * wrong or nonsense.
  */
-export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-3';
+export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-4';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
@@ -237,9 +239,13 @@ So this time read the writing from the picture itself. Rules 2 and 3 change for 
 other rule stays.
 
 A. Read each item from the picture. "asWritten" is the item as you read it in the picture, letter for letter, \
-with its spelling and abbreviations; it may differ from the line text below where the service misread the writing.
+with its spelling and abbreviations; it may differ from the line text below where the service misread the writing. \
+On hard handwriting the line text below may be wrong or even nonsense: read the item from the picture, not from \
+that text.
 
-B. Cite in "lineIds" the ids of the lines below that the item sits on in the picture. Cite only ids from this list.
+B. Cite in "lineIds" the ids of the lines below that the item sits on in the picture: every line whose box your \
+item's box covers, including small fragments of the same row that the service split off. Cite only ids from this \
+list.
 
 C. Give the item's own place in the picture in "box" as absolute pixel coordinates: x1 and y1 the top-left \
 corner, x2 and y2 the bottom-right corner, with x from the left edge and y from the top edge of the picture, \

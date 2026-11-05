@@ -74,7 +74,7 @@ Each claimed job runs, in order:
    even with AI reading off (idempotent per job).
 5. **AI step** (`src/reading/`, only when `OCR_AI_MODE=claude` and the facility
    is in `OCR_AI_FACILITY_IDS` when that is set). One Claude API request per
-   page with the frozen, cached system prompt (`hid-paper-reading-prompt-3`,
+   page with the frozen, cached system prompt (`hid-paper-reading-prompt-4`,
    model schema `hid-paper-reading-model-schema-2`),
    structured JSON output, adaptive thinking, `inference_geo: "us"`, the
    page's lines without boxes, and 11-digit NIN-like numbers and Nigerian phone
@@ -165,9 +165,10 @@ Each claimed job runs, in order:
    count of the re-read's dropped items, including any whose content a kept
    first-pass item still carries. A page whose first pass failed or was
    declined has nothing to merge: its re-read stands. `PROMPT_VERSION`
-   is `hid-paper-reading-prompt-3` for this routing (the prompt text and
-   request bodies are unchanged from version 2; the label is only recorded),
-   so `ocr-api` never reuses a reading made under the older routing.
+   is `hid-paper-reading-prompt-4` (version 3 for this routing, 4 since picture
+   items on hard lines whose scanned text is nonsense are kept; the text prompt
+   and request bodies are unchanged from version 2, and the label is only
+   recorded), so `ocr-api` never reuses a reading made under older rules.
 
    Reuse keys on `PROMPT_VERSION` only (with the processing and payload
    contracts and the reading status): `OCR_AI_IMAGE_REREAD` and
@@ -202,16 +203,30 @@ Each claimed job runs, in order:
    (Anthropic advises pixel, not normalised, coordinates), write `asWritten` as
    it reads it in the picture, never invent anything and write `[unreadable]`
    rather than guess (`imagePageMessage`,
-   `hid-paper-reading-image-prompt-3`: it says the first reading needs
+   `hid-paper-reading-image-prompt-4`: it asks the model to cite every
+   scanned line its item's box covers, small fragments on the same row
+   included, and to read from the picture where the scanned text of hard
+   handwriting is wrong or nonsense; since version 3 it says the first reading needs
    checking, for any page flag, no longer that the page was hard to read;
    recorded in provenance as
    `imagePromptVersion`). Only these requests use the image answer schema
    (`MODEL_OUTPUT_IMAGE_JSON_SCHEMA`, a required `box` per item); text-only
    requests are byte for byte as before (`MODEL_SCHEMA_VERSION` unchanged). The client turns the model's pixel
-   boxes into page fractions before any check. An item read from the picture
-   is kept only when it cites lines on its page, at most 3 of them, lying
-   together (on one row, or consecutive in reading order and vertically
-   adjacent: the `lines_not_together` test, here a reason to drop), and its box
+   boxes into page fractions before any check. First, an uncited hard line
+   (confidence below 0.80) that the item's box lies on and that is on the
+   same written row as one of its cited lines (vertical overlap at least half
+   the smaller line's height) is a fragment of the same writing that Textract
+   split off, and is added to the item's cited lines in reading order. With
+   the cited and added lines together, an item may have at most 4 lines on
+   any one row and 6 lines in all, or it is dropped (a box cannot claim a
+   whole row or block of cells, whether the model cited them or not). A legible line on
+   the row is never taken for a fragment (a box over it drops the item). An
+   item read from the picture is then kept only when it cites lines on its
+   page, on at most 3 written rows (fragments of one row count once; a row is
+   lines that are all on one row with each other, never a slanted chain, and
+   at most 1.5 times as tall as its tallest line), the rows lying together (on one row,
+   or consecutive in reading order and vertically adjacent: the
+   `lines_not_together` test applied to rows, here a reason to drop), and its box
    (clipped to the page, at least 0.005 of the page on each side, its area at
    most 2 times the area of the box around its cited lines plus 0.002 of the
    page, or that box padded by 0.005 of the page on every side if larger, and
@@ -220,9 +235,20 @@ Each claimed job runs, in order:
    all), so a few pixels of padding around a short word are allowed) lies on every cited line that has a box, each line on its own (over
    half the line's height and half the narrower width), lies on no line it
    does not cite by that same test, with at most half of the line area it
-   covers on lines it does not cite, and its `asWritten` shares a word of three letters or more,
-   or a number, with the text of its cited lines; otherwise it is dropped and
-   counted in `droppedUngrounded`. It need not match the Textract text: its
+   covers on lines it does not cite (so never a line on another row), and,
+   where any cited line is legible (confidence 0.80 or more), its `asWritten`
+   shares a word of three letters or more, or a number, with the text of its
+   cited lines (so a box copied from a clean line around a made-up item is
+   dropped); otherwise it is dropped and counted in `droppedUngrounded`.
+   Where every cited line is below 0.80 (hard handwriting or faint print),
+   the scanned text may be nonsense ("Lis day my" for "IV Ceftriaxone 1g
+   daily"), so that text test is not required: an item that passes every
+   placement rule but shares nothing with the scanned text is kept, with
+   `not_matched_to_scanned_text` ("Read from the picture; it could not be
+   matched to the scanned text. Check it against the paper.", shown below
+   any real disagreement and above the general picture sentence). Known
+   limit: writing on which Textract found no line at all cannot be cited
+   (every item needs at least one line), so it is still dropped. It need not match the Textract text: its
    fields are held to its own `asWritten` as read in the picture (so a word or
    dose the service misread is not a "doesn't match the paper" reason, and the
    page is not flagged `possible_missed_item` for the line text it corrected),

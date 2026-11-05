@@ -20,6 +20,8 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['number_not_in_text_read'], "A number read from the picture isn't in the text read from the page; check it against the paper."],
   // After the dose and number disagreements, before the text-match ones (an item read from the picture is
   // expected to differ from the text the service read).
+  // Just before read_from_image (which every picture item has), so it is shown where it applies.
+  [['not_matched_to_scanned_text'], 'Read from the picture; it could not be matched to the scanned text. Check it against the paper.'],
   [['read_from_image'], 'This was read from the picture of the page; check it against the paper.'],
   [['measure_mismatch'], "What was measured doesn't match the label on the paper."],
   [['plain_contradicts'], "The plain reading says something the paper doesn't."],
@@ -162,25 +164,103 @@ function anchored(asWritten: string, source: string): boolean {
   return wordsIn(own).some((word) => words.has(word)) || numbersIn(own).some((number) => numbers.has(number));
 }
 
+/** Two lines on one written row: they overlap vertically by at least half the smaller line's height. */
+function sameRow(a: Box, b: Box): boolean {
+  return span(a.top, a.height, b.top, b.height) >= 0.5 * Math.min(a.height, b.height);
+}
+
+/** A written row may be at most this many times as tall as its tallest line. */
+export const IMAGE_ROW_MAX_HEIGHT = 1.5;
 /**
- * The stored box of an image-read item, or null where it is not held to its cited lines (it is then dropped):
- * at most IMAGE_MAX_CITED_LINES cited lines, which lie together (one row, or consecutive in reading order and
- * vertically adjacent: the lines_not_together test, here a reason to drop); the box at least IMAGE_MIN_BOX on each
- * side; its area at most IMAGE_MAX_AREA_RATIO times the area of the box around its cited lines plus
- * IMAGE_AREA_ALLOWANCE of the page (or, if larger, that box padded by IMAGE_MIN_PADDING on every side); running
- * past that box's left and right edges by at most IMAGE_MAX_SIDE_OVERFLOW of its width in total (or by at most
- * IMAGE_MIN_SIDE_OVERFLOW of the page width on each side); on every cited line that has a box (each measured on its own, not
- * as one box around them all); on no line it does not cite (by the same onLine test), with at most
- * IMAGE_UNCITED_SHARE of the line area it covers on lines it does not cite; and its asWritten anchored in the
- * cited lines' text. A box around the whole page that cites every line
- * fails the first three.
+ * After same-row fragments are added, an image-read item may have at most this many lines on any one written row,
+ * and at most IMAGE_MAX_LINES_PER_ITEM lines in all (the lines it cites and those added); more drops the item, so
+ * a box cannot claim a whole row or block of cells, whether the model cited them or not.
  */
-function imagePlace(raw: ModelItem, cited: readonly ReadLine[], all: readonly ReadLine[], source: string,
-  order: ReadonlyMap<string, number>): Box | null {
+export const IMAGE_MAX_LINES_PER_ROW = 4;
+export const IMAGE_MAX_LINES_PER_ITEM = 6;
+
+/**
+ * Lines grouped into written rows, in reading order. A line joins a row only when it is on one row (sameRow) with
+ * every line already in it, never by a chain of neighbours (a slant), and the row stays at most
+ * IMAGE_ROW_MAX_HEIGHT times as tall as its tallest line; otherwise it starts a row of its own.
+ */
+function rowsOf(lines: readonly ReadLine[]): ReadLine[][] {
+  const rows: ReadLine[][] = [];
+  for (const line of lines) {
+    const fits = (row: ReadLine[]) => {
+      if (line.box === null || row.some((other) => other.box === null || !sameRow(other.box, line.box!))) return false;
+      const boxes = [...row, line].map((member) => member.box!);
+      const top = Math.min(...boxes.map((box) => box.top));
+      const bottom = Math.max(...boxes.map((box) => box.top + box.height));
+      return bottom - top <= IMAGE_ROW_MAX_HEIGHT * Math.max(...boxes.map((box) => box.height)) + 1e-9;
+    };
+    const row = rows.find(fits);
+    if (row) row.push(line);
+    else rows.push([line]);
+  }
+  return rows;
+}
+
+/**
+ * Whether rows of cited lines lie together (the lines_not_together test, applied to rows): each row stands for one
+ * line with the box around it, and two rows are next in reading order when no line outside the cited rows comes
+ * between them.
+ */
+function rowsTogether(rows: readonly ReadLine[][], all: readonly ReadLine[], order: ReadonlyMap<string, number>): boolean {
+  if (rows.length <= 1) return true;
+  const rowOf = new Map<string, number>();
+  rows.forEach((row, index) => { for (const line of row) rowOf.set(line.id, index); });
+  const sequence: string[] = [];
+  for (const line of [...all].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))) {
+    const key = rowOf.has(line.id) ? `r${rowOf.get(line.id)}` : `u${line.id}`;
+    if (sequence[sequence.length - 1] !== key) sequence.push(key);
+  }
+  const rank = new Map<string, number>();
+  rows.forEach((row, index) => rank.set(row[0]!.id, sequence.indexOf(`r${index}`)));
+  const placed = rows.map((row) => ({ id: row[0]!.id, box: unionBox(row.map((line) => line.box)) }));
+  return together(placed, rank);
+}
+
+/** A picture item held to its lines: its stored box, its cited lines (with row fragments added), and whether its
+ * asWritten could be matched to the scanned text of those lines. */
+interface ImagePlace { box: Box; cited: ReadLine[]; matched: boolean }
+
+/**
+ * Where an image-read item sits, or null where it is not held to its lines (it is then dropped).
+ *
+ * Row fragments first: an uncited hard line (below REVIEW_BELOW) the item's box lies on (onLine) that is on the
+ * same written row as a cited line is a fragment of the same writing that the text service split off, and is
+ * added to the cited lines in reading order. Then, cited and added together, at most IMAGE_MAX_LINES_PER_ROW lines
+ * on any one row and IMAGE_MAX_LINES_PER_ITEM in all, or the item is dropped (a box claiming a whole row of
+ * cells). Rows are cliques (rowsOf), never chains. Then: at most IMAGE_MAX_CITED_LINES rows (groups of cited lines on one row) that lie together (the
+ * lines_not_together test on rows, here a reason to drop); the box at least IMAGE_MIN_BOX on each side; its area at
+ * most IMAGE_MAX_AREA_RATIO times the area of the box around its cited lines plus IMAGE_AREA_ALLOWANCE of the page
+ * (or, if larger, that box padded by IMAGE_MIN_PADDING on every side); running past that box's left and right
+ * edges by at most IMAGE_MAX_SIDE_OVERFLOW of its width in total (or by at most IMAGE_MIN_SIDE_OVERFLOW of the page
+ * width on each side); on every cited line that has a box (each measured on its own, not as one box around them
+ * all); on no line it does not cite (so not on another row's line), with at most IMAGE_UNCITED_SHARE of the line
+ * area it covers on lines it does not cite. A box around the whole page that cites every line fails these.
+ *
+ * Text anchor: where any cited line is legible (confidence at least REVIEW_BELOW), the item's asWritten must share
+ * a word or number with the cited lines' text, so a box copied from a clean line around a made-up item is dropped.
+ * Where every cited line is below REVIEW_BELOW the scanned text may be nonsense, so the anchor is not required:
+ * `matched` is then false when it fails, and the item gets not_matched_to_scanned_text.
+ */
+function imagePlace(raw: ModelItem, citedAsGiven: readonly ReadLine[], all: readonly ReadLine[],
+  order: ReadonlyMap<string, number>): ImagePlace | null {
   if (!raw.box) return null;
-  if (cited.length > IMAGE_MAX_CITED_LINES || (cited.length > 1 && !together(cited, order))) return null;
   const box = clipBox(raw.box);
   if (box === null || box.width < IMAGE_MIN_BOX || box.height < IMAGE_MIN_BOX) return null;
+  const givenIds = new Set(citedAsGiven.map((line) => line.id));
+  // Only a hard line (below REVIEW_BELOW) is taken for a fragment: a legible line on the row is its own writing,
+  // and a box over it still drops the item below.
+  const fragments = all.filter((line) => !givenIds.has(line.id) && line.confidence < REVIEW_BELOW
+    && line.box !== null && onLine(box, line.box)
+    && citedAsGiven.some((other) => other.box !== null && sameRow(other.box, line.box!)));
+  const cited = [...citedAsGiven, ...fragments].sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0));
+  const rows = rowsOf(cited);
+  if (cited.length > IMAGE_MAX_LINES_PER_ITEM || rows.some((row) => row.length > IMAGE_MAX_LINES_PER_ROW)) return null;
+  if (rows.length > IMAGE_MAX_CITED_LINES || !rowsTogether(rows, all, order)) return null;
   const citedBoxes = cited.map((line) => line.box).filter((line): line is Box => line !== null);
   if (citedBoxes.length === 0 || !citedBoxes.every((line) => onLine(box, line))) return null;
   const around = unionBox(citedBoxes)!;
@@ -198,7 +278,11 @@ function imagePlace(raw: ModelItem, cited: readonly ReadLine[], all: readonly Re
   const onCited = coveredBy(cited);
   const onUncited = coveredBy(all.filter((line) => !citedIds.has(line.id)));
   if (onUncited > IMAGE_UNCITED_SHARE * (onCited + onUncited)) return null;
-  return anchored(raw.asWritten, source) && area(box) > 0 ? box : null;
+  if (!(area(box) > 0)) return null;
+  const matched = anchored(raw.asWritten, cited.map((line) => line.text).join(' '));
+  const trustworthy = cited.some((line) => line.confidence >= REVIEW_BELOW);
+  if (!matched && trustworthy) return null;
+  return { box, cited, matched };
 }
 
 export interface PageCheck {
@@ -249,22 +333,30 @@ export function checkPage(input: PageCheckInput): PageCheck {
       dropped += 1;
       continue;
     }
-    const lines = cited as ReadLine[];
+    let lines = cited as ReadLine[];
+    let itemLineIds = lineIds;
+    let itemSource = source;
     // Read from the picture: held to the page by place. Dropped items are only counted, as above.
-    const place = input.fromImage ? imagePlace(raw, lines, input.lines, source, order) : null;
+    const place = input.fromImage ? imagePlace(raw, lines, input.lines, order) : null;
     if (input.fromImage && place === null) {
       dropped += 1;
       continue;
+    }
+    if (place !== null) {
+      // Row fragments the item's box covers are cited with it.
+      lines = place.cited;
+      itemLineIds = lines.map((line) => line.id);
+      itemSource = lines.map((line) => line.text).join(' ');
     }
     // An item read from the picture is meant to differ from the text the service read, so its fields are held
     // to what the model read in the picture (its asWritten), not to the line text: a dose or word the service
     // misread is not "on the paper doesn't match". How legible the lines were still counts, and a number the
     // line text doesn't have is flagged in markReadFromImage.
     const item = place === null
-      ? checkItem(raw, lines, lineIds, source, pageText, order, medicineNames, allergySubstances, input)
-      : checkItem(raw, lines.map((line, index) => ({ ...line, text: index === 0 ? raw.asWritten : '' })), lineIds,
+      ? checkItem(raw, lines, itemLineIds, itemSource, pageText, order, medicineNames, allergySubstances, input)
+      : checkItem(raw, lines.map((line, index) => ({ ...line, text: index === 0 ? raw.asWritten : '' })), itemLineIds,
         raw.asWritten, `${pageText}\n${raw.asWritten}`, order, medicineNames, allergySubstances, input);
-    if (place !== null) markReadFromImage(item, raw, source, place);
+    if (place !== null) markReadFromImage(item, raw, itemSource, place.box, place.matched);
     const group = seen.get(item.id) ?? [];
     // An exact repeat (same kind, lines, asWritten and fields) collapses to one.
     if (group.some((kept) => JSON.stringify(kept.fields) === JSON.stringify(item.fields))) continue;
@@ -317,12 +409,16 @@ export function checkPage(input: PageCheckInput): PageCheck {
  * An item read from the picture always goes to a person: 'read_from_image', check_carefully, the stored box its
  * own place on the page, and 'number_not_in_text_read' where it has a number the text read of its lines doesn't.
  */
-function markReadFromImage(item: PaperItem, raw: ModelItem, source: string, place: Box): void {
+function markReadFromImage(item: PaperItem, raw: ModelItem, source: string, place: Box, matched: boolean): void {
   const textNumbers = new Set(numbersIn(withoutPlaceholders(source)));
   const written = [raw.asWritten, raw.strength, raw.frequency, raw.duration, raw.value, raw.referenceRange,
     raw.dateAsWritten, raw.prescriptionDate, raw.noteText];
   if (written.some((text) => numbersIn(withoutPlaceholders(text)).some((number) => !textNumbers.has(number)))) {
     if (!item.checkReasons.includes('number_not_in_text_read')) item.checkReasons.push('number_not_in_text_read');
+  }
+  // Kept on scanned text too poor to hold it to (see imagePlace): say so.
+  if (!matched && !item.checkReasons.includes('not_matched_to_scanned_text')) {
+    item.checkReasons.push('not_matched_to_scanned_text');
   }
   if (!item.checkReasons.includes('read_from_image')) item.checkReasons.push('read_from_image');
   item.checkReasons = item.checkReasons.filter((code) => code !== 'no_position');

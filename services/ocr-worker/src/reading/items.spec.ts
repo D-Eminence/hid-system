@@ -765,13 +765,22 @@ describe('checkPage for a page read from its picture (image re-read)', () => {
         'Metformin')])).items).toEqual([]);
     });
 
-    it('drops a made-up item with a cited line box copied, when it shares no word or number with that line', () => {
-      const lineBox = page.lines[0]!.box!;
-      const result = fromImage(modelPage([modelItem({ kind: 'medicine', asWritten: 'Warfarin 10mg bd', lineIds: ['p1-l1'],
+    it('drops a made-up item with a legible (printed, 0.99) line box copied, when it shares no word or number with it', () => {
+      // Line 4 "Dx: Hypertension" is printed at 0.99: its scanned text is trusted, so the anchor holds.
+      const lineBox = page.lines[3]!.box!;
+      const result = fromImage(modelPage([modelItem({ kind: 'medicine', asWritten: 'Warfarin 10mg bd', lineIds: ['p1-l4'],
         name: 'Warfarin', strength: '10mg', frequency: 'bd', status: 'current', box: lineBox })]));
       expect(result.items).toEqual([]);
       expect(result.droppedUngrounded).toBe(1);
       expect(JSON.stringify(result)).not.toContain('Warfarin');
+    });
+
+    it('keeps an item on a hard line (below 0.80) that shares nothing with its scanned text, saying so', () => {
+      const result = fromImage(modelPage([modelItem({ kind: 'medicine', asWritten: 'Warfarin 10mg bd', lineIds: ['p1-l1'],
+        name: 'Warfarin', strength: '10mg', frequency: 'bd', status: 'current', box: page.lines[0]!.box! })]));
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(['read_from_image',
+        'not_matched_to_scanned_text', 'number_not_in_text_read']));
     });
 
     it('drops an item over two cited lines that are not adjacent, and one on a cited line that lies mostly on an uncited one', () => {
@@ -1139,5 +1148,170 @@ describe('mergeIdentity', () => {
     const agreed = mergeReread(reading('TEST-0001', 'p1-l1', 'first_pass'), reading('TEST-0001', 'p1-l1', 'reread'),
       page.lines, 'text');
     expect(agreed.flagReasons).not.toContain('ai_unsure');
+  });
+});
+
+describe('picture reading on a page whose scanned handwriting is nonsense', () => {
+  const hw = (n: number, text: string, box: { left: number; top: number; width: number; height: number }) =>
+    ({ id: `p1-l${n}`, page: 1, text, confidence: 0.3, handwritten: true, box });
+  // Fictional page: the text service misread the handwriting into nonsense and split one written line in two.
+  const lines = [
+    hw(1, 'Lis day my', { left: 0.2, top: 0.3, width: 0.35, height: 0.03 }),
+    hw(2, 'n', { left: 0.58, top: 0.3, width: 0.03, height: 0.03 }),
+    hw(3, 'IN my', { left: 0.2, top: 0.36, width: 0.2, height: 0.03 }),
+  ];
+  const check = (item: Parameters<typeof modelItem>[0], on = lines) => checkPage({ page: 1, lines: on,
+    sourceSha256Hex: SOURCE_SHA, readBy: 'reread', masker: createMasker(), fromImage: true,
+    answer: modelPage([modelItem(item)]) });
+  const ceftriaxone = { kind: 'medicine' as const, asWritten: 'IV Ceftriaxone 1g daily', name: 'Ceftriaxone',
+    strength: '1g', frequency: 'daily', route: 'IV', status: 'current' as const };
+  const sentence = 'Read from the picture; it could not be matched to the scanned text. Check it against the paper.';
+
+  it('keeps a correct reading on its line that shares nothing with the nonsense text, for checking', () => {
+    const result = check({ ...ceftriaxone, lineIds: ['p1-l1'], box: { left: 0.2, top: 0.3, width: 0.35, height: 0.03 } });
+    expect(result.droppedUngrounded).toBe(0);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({ confidence: 'check_carefully', lineIds: ['p1-l1'], readBy: 'reread' });
+    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(['read_from_image',
+      'not_matched_to_scanned_text']));
+  });
+
+  it('cites a fragment of the same written row that the box covers, whether the model cited it or not', () => {
+    const box = { left: 0.2, top: 0.3, width: 0.41, height: 0.03 };
+    for (const lineIds of [['p1-l1'], ['p1-l1', 'p1-l2'], ['p1-l2', 'p1-l1']]) {
+      const result = check({ ...ceftriaxone, lineIds, box });
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0]).toMatchObject({ confidence: 'check_carefully', lineIds: ['p1-l1', 'p1-l2'], box });
+      expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(['read_from_image',
+        'not_matched_to_scanned_text']));
+    }
+  });
+
+  it('does not add the reason where the reading happens to share a word with the scanned text', () => {
+    const result = check({ kind: 'note', asWritten: 'twice a day', noteText: 'twice a day', lineIds: ['p1-l1'],
+      box: { left: 0.2, top: 0.3, width: 0.35, height: 0.03 } });
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]!.checkReasons).toContain('read_from_image');
+    expect(result.items[0]!.checkReasons).not.toContain('not_matched_to_scanned_text');
+  });
+
+  it('still drops writing on no scanned line (an item must cite a line)', () => {
+    const result = check({ kind: 'medicine', asWritten: 'Flagyl 500mg tds', name: 'Flagyl', strength: '500mg',
+      frequency: 'tds', status: 'current', lineIds: [], box: { left: 0.2, top: 0.5, width: 0.3, height: 0.03 } });
+    expect(result.items).toEqual([]);
+    expect(result.droppedUngrounded).toBe(1);
+  });
+
+  it('still drops the same reading on a clean printed line (0.99) that shares nothing with it', () => {
+    const clean = [{ ...lines[0]!, text: 'Review next week', confidence: 0.99, handwritten: false }, ...lines.slice(1)];
+    const result = check({ ...ceftriaxone, lineIds: ['p1-l1'], box: { left: 0.2, top: 0.3, width: 0.35, height: 0.03 } },
+      clean);
+    expect(result.items).toEqual([]);
+    expect(result.droppedUngrounded).toBe(1);
+  });
+
+  it('still drops an item whose box covers a fragment on another row', () => {
+    const below = [lines[0]!, hw(2, 'n', { left: 0.5, top: 0.335, width: 0.05, height: 0.03 })];
+    const result = check({ ...ceftriaxone, lineIds: ['p1-l1'], box: { left: 0.2, top: 0.3, width: 0.35, height: 0.055 } },
+      below);
+    expect(result.items).toEqual([]);
+    expect(result.droppedUngrounded).toBe(1);
+  });
+
+  it('counts the cited-line limit in rows, so a row split in fragments counts once', () => {
+    // Four written rows, each split by the text service into two fragments.
+    const rows = [0, 1, 2, 3].flatMap((row) => {
+      const top = 0.3 + 0.035 * row;
+      return [hw(2 * row + 1, 'Lis day', { left: 0.2, top, width: 0.25, height: 0.03 }),
+        hw(2 * row + 2, 'n', { left: 0.5, top, width: 0.1, height: 0.03 })];
+    });
+    const note = (lineIds: string[], height: number) => check({ kind: 'note', asWritten: 'Review in clinic',
+      noteText: 'Review in clinic', lineIds, box: { left: 0.2, top: 0.3, width: 0.4, height } }, rows);
+    // Three rows of two fragments (six lines in all): kept, every fragment cited, whether the model cited the
+    // first of each row or all six.
+    for (const lineIds of [['p1-l1', 'p1-l3', 'p1-l5'], ['p1-l1', 'p1-l2', 'p1-l3', 'p1-l4', 'p1-l5', 'p1-l6']]) {
+      const three = note(lineIds, 0.1);
+      expect(three.items).toHaveLength(1);
+      expect(three.items[0]!.lineIds).toEqual(['p1-l1', 'p1-l2', 'p1-l3', 'p1-l4', 'p1-l5', 'p1-l6']);
+    }
+    // Four rows, every fragment cited: over the limit.
+    const four = note(rows.map((line) => line.id), 0.135);
+    expect(four.items).toEqual([]);
+    expect(four.droppedUngrounded).toBe(1);
+  });
+
+  it('never takes a legible line on the row for a fragment', () => {
+    const legible = (n: number, text: string, left: number) => ({ id: `p1-l${n}`, page: 1, text, confidence: 0.99,
+      handwritten: false, box: { left, top: 0.3, width: 0.3, height: 0.03 } });
+    const row = [legible(1, 'Amlodipine 5mg od', 0.1), legible(2, 'Metformin 500mg bd', 0.45)];
+    const amlodipine = { kind: 'medicine' as const, asWritten: 'Amlodipine 5mg od', name: 'Amlodipine', strength: '5mg',
+      frequency: 'od', status: 'current' as const, lineIds: ['p1-l1'] };
+    // A box over the whole row, citing Amlodipine's line: it lies on Metformin's line, which it does not cite.
+    const whole = check({ ...amlodipine, box: { left: 0.1, top: 0.3, width: 0.65, height: 0.03 } }, row);
+    expect(whole.items).toEqual([]);
+    expect(whole.droppedUngrounded).toBe(1);
+    // On Amlodipine's line only: kept with that line alone, and Metformin's uncited line still counts as missed.
+    const own = check({ ...amlodipine, box: { left: 0.1, top: 0.3, width: 0.3, height: 0.03 } }, row);
+    expect(own.items).toHaveLength(1);
+    expect(own.items[0]!.lineIds).toEqual(['p1-l1']);
+    expect(own.flagReasons).toContain('possible_missed_item');
+  });
+
+  it('builds rows only from lines that are all on one row, never from a slanted chain', () => {
+    // Five hard lines running downhill: each overlaps the next by two thirds, but not the one after.
+    const slant = [0, 1, 2, 3, 4].map((n) => hw(n + 1, 'Lis day', { left: 0.1 + 0.15 * n, top: 0.3 + 0.01 * n,
+      width: 0.12, height: 0.03 }));
+    const result = check({ kind: 'note', asWritten: 'Review in clinic', noteText: 'Review in clinic',
+      lineIds: slant.map((line) => line.id), box: { left: 0.1, top: 0.3, width: 0.72, height: 0.07 } }, slant);
+    expect(result.items).toEqual([]);
+    expect(result.droppedUngrounded).toBe(1);
+  });
+
+  it('drops an item over more than four lines of one row, cited or added', () => {
+    const cells = [0, 1, 2, 3, 4, 5].map((n) => hw(n + 1, 'n', { left: 0.1 + 0.1 * n, top: 0.4, width: 0.05,
+      height: 0.03 }));
+    const morphine = (lineIds: string[]) => check({ kind: 'medicine', asWritten: 'Morphine 30mg', name: 'Morphine',
+      strength: '30mg', status: 'current', lineIds, box: { left: 0.1, top: 0.4, width: 0.55, height: 0.03 } }, cells);
+    // Six cells, whether the model cites one of them or all six.
+    for (const lineIds of [['p1-l1'], cells.map((cell) => cell.id)]) {
+      const result = morphine(lineIds);
+      expect(result.items).toEqual([]);
+      expect(result.droppedUngrounded).toBe(1);
+    }
+  });
+
+  it('keeps a correct reading on a line split into four hard fragments, however many it cites, and not five', () => {
+    const words = ['Lis', 'day', 'my', 'n', 'x'];
+    const fragments = words.map((text, n) => hw(n + 1, text, { left: 0.1 + 0.1 * n, top: 0.4, width: 0.08,
+      height: 0.03 }));
+    const read = (lineIds: string[], count: number) => check({ ...ceftriaxone, lineIds,
+      box: { left: 0.1, top: 0.4, width: 0.1 * count - 0.02, height: 0.03 } }, fragments);
+    for (const lineIds of [['p1-l1'], ['p1-l1', 'p1-l2'], ['p1-l1', 'p1-l2', 'p1-l3', 'p1-l4']]) {
+      const result = read(lineIds, 4);
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0]!.lineIds).toEqual(['p1-l1', 'p1-l2', 'p1-l3', 'p1-l4']);
+      expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(['read_from_image',
+        'not_matched_to_scanned_text']));
+    }
+    // Five fragments on the row: over the per-row limit.
+    for (const lineIds of [['p1-l1'], fragments.map((line) => line.id)]) expect(read(lineIds, 5).items).toEqual([]);
+  });
+
+  it('drops an item over more than six lines in all, though no row has more than four', () => {
+    const block = [0, 1].flatMap((row) => [0, 1, 2, 3].map((n) => hw(4 * row + n + 1, 'n',
+      { left: 0.1 + 0.1 * n, top: 0.4 + 0.035 * row, width: 0.08, height: 0.03 })));
+    const result = check({ kind: 'note', asWritten: 'Review in clinic', noteText: 'Review in clinic',
+      lineIds: block.map((line) => line.id), box: { left: 0.1, top: 0.4, width: 0.38, height: 0.065 } }, block);
+    expect(result.items).toEqual([]);
+    expect(result.droppedUngrounded).toBe(1);
+  });
+
+  it('shows its sentence below the real disagreements and above the general picture one', () => {
+    expect(checkReasonSentence(['read_from_image', 'not_matched_to_scanned_text'])).toBe(sentence);
+    expect(checkReasonSentence(['not_matched_to_scanned_text', 'read_from_image', 'handwritten'])).toBe(sentence);
+    expect(checkReasonSentence(['not_matched_to_scanned_text', 'strength_mismatch']))
+      .toBe("A dose on the paper doesn't match what was read.");
+    expect(checkReasonSentence(['not_matched_to_scanned_text', 'number_not_in_text_read']))
+      .toBe("A number read from the picture isn't in the text read from the page; check it against the paper.");
   });
 });
