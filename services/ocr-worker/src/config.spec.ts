@@ -38,7 +38,7 @@ describe('OCR worker configuration', () => {
     const config = readOcrWorkerConfig(base);
     expect(config).toMatchObject({ OCR_AI_MODE: 'off', OCR_AI_FIRST_PASS_MODEL: 'claude-opus-5-5',
       OCR_AI_FIRST_PASS_EFFORT: 'high', OCR_AI_REREAD_MODEL: 'claude-opus-5-5', OCR_AI_REREAD_EFFORT: 'high',
-      OCR_AI_MAX_TOKENS: 16_000, OCR_AI_MAX_REREAD_PAGES: 20, OCR_TEXTRACT_MAX_RETRIES: 3, OCR_TEXTRACT_MAX_PAGES: 20 });
+      OCR_AI_MAX_TOKENS: 32_000, OCR_AI_MAX_REREAD_PAGES: 20, OCR_TEXTRACT_MAX_RETRIES: 3, OCR_TEXTRACT_MAX_PAGES: 20 });
     expect(config.OCR_AI_FACILITY_IDS).toBeUndefined();
   });
 

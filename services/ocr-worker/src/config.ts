@@ -72,7 +72,8 @@ const schema = z.object({
   OCR_AI_FIRST_PASS_EFFORT: effort.default('high'),
   OCR_AI_REREAD_MODEL: claudeModel.default('claude-opus-5-5'),
   OCR_AI_REREAD_EFFORT: effort.default('high'),
-  OCR_AI_MAX_TOKENS: z.coerce.number().int().min(1_024).max(128_000).default(16_000),
+  // Room for a dense page (dozens of items) plus adaptive thinking at high effort; only tokens generated are billed.
+  OCR_AI_MAX_TOKENS: z.coerce.number().int().min(1_024).max(128_000).default(32_000),
   // Per request, for the whole streamed answer: a full OCR_AI_MAX_TOKENS answer at high effort needs minutes.
   OCR_AI_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(600_000).default(300_000),
   OCR_AI_MAX_RETRIES: z.coerce.number().int().min(0).max(8).default(4),
