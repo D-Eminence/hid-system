@@ -6,7 +6,7 @@ import { OcrPageLimitCommandDto, OcrUsageQueryDto } from './dto/ocr-usage.dto';
 import { AdminOcrUsageService } from './ocr-usage.service';
 
 /**
- * A facility's OCR page allowance and monthly use (migration 0110) in the admin console. The same guards as
+ * A facility's OCR page allowance and monthly use (migration 0107) in the admin console. The same guards as
  * AdminOrganizationApplicationsController (0103): facility optional (a standalone platform administrator holds
  * no membership), failures audited here and successes by the database. Any platform administrator may read;
  * only a platform super admin may change the limit (a cost decision), which the database enforces too.

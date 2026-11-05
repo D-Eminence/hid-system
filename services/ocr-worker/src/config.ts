@@ -42,7 +42,7 @@ const schema = z.object({
   OCR_WORKER_DATABASE_SSL_ROOT_CERT_BASE64: optionalString,
   OCR_WORKER_POOL_MAX: z.coerce.number().int().min(1).max(20).default(4),
   OCR_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(2),
-  // Fair claiming (migration 0110, ocr.claim_worker_job_fair): a facility with this many jobs processing under
+  // Fair claiming (migration 0107, ocr.claim_worker_job_fair): a facility with this many jobs processing under
   // a live lease gets no more until one finishes, and the facility with the fewest processing goes first.
   OCR_WORKER_MAX_INFLIGHT_PER_FACILITY: z.coerce.number().int().min(1).max(16).default(2),
   OCR_WORKER_POLL_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),

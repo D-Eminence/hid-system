@@ -1419,15 +1419,16 @@ grant execute on function identity.records_processing_direct_care_cover(uuid,tex
 revoke all on function ehr.resolve_document_scan_target(text, text, text, text),
   ehr.list_documents_awaiting_scan(integer, integer, text) from public;
 
--- OCR page allowance (0110): the three tables are granted to no runtime role
--- (row-level security forced, the owner's policy only); the OCR worker reads,
--- records and pauses through its three commands, claims through the fair claim
--- and records AI usage; the OCR API (hid_ocr_runtime, inherited by
--- hid_ocr_api_runtime) and the Identity API admin console read a facility's
--- allowance and monthly usage; only the Identity API sets a limit (platform
--- super admin only, checked in the command). The shared reckoning
--- ocr.facility_page_allowance_state and the replaced trigger function
--- ocr.validate_job_write are granted to no role. 0110 makes the same grants.
+-- OCR page allowance (0107; 0106 before it changes no grant): the three
+-- tables are granted to no runtime role (row-level security forced, the
+-- owner's policy only); the OCR worker reads, records and pauses through its
+-- three commands, claims through the fair claim and records AI usage; the OCR
+-- API (hid_ocr_runtime, inherited by hid_ocr_api_runtime) and the Identity API
+-- admin console read a facility's allowance and monthly usage; only the
+-- Identity API sets a limit (platform super admin only, checked in the
+-- command). The shared reckoning ocr.facility_page_allowance_state and the
+-- replaced trigger function ocr.validate_job_write are granted to no role.
+-- 0107 makes the same grants.
 grant usage on schema ocr to hid_ocr_worker, hid_ocr_runtime, hid_identity_runtime;
 grant execute on function ocr.worker_page_allowance(uuid,uuid),
   ocr.record_worker_pages(uuid,uuid,integer,text),

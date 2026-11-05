@@ -152,7 +152,7 @@ describe('OcrWorker processing', () => {
   });
 
   it('does not park a retry whose own recorded pages used up the allowance', async () => {
-    // A fake of the 0110 rule: paused only when used >= limit and this job has no recorded pages.
+    // A fake of the 0107 rule: paused only when used >= limit and this job has no recorded pages.
     const recorded = new Map<string, number>();
     const state = () => {
       const used = 495 + [...recorded.values()].reduce((sum, pages) => sum + pages, 0);

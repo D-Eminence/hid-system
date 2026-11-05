@@ -39,7 +39,7 @@ Each claimed job runs, in order:
 
 1. **Exact source.** The S3 object version is read and its size and SHA-256
    verified before anything is charged.
-2. **Page allowance** (migration 0110). `ocr.worker_page_allowance` is checked
+2. **Page allowance** (migration 0107). `ocr.worker_page_allowance` is checked
    first. When the facility has used this Africa/Lagos month's pages (default
    500, Textract and AI counted together), `ocr.pause_worker_job_for_allowance`
    requeues the job until the allowance resets without using an attempt, and
@@ -123,7 +123,7 @@ a document with no text as `no_text`.
 
 ## Fair claiming and call limits
 
-- **Fair claim** (migration 0110). Claim loops call `ocr.claim_worker_job_fair`
+- **Fair claim** (migration 0107). Claim loops call `ocr.claim_worker_job_fair`
   (same authorization, validation, lease recovery and eligibility as
   `ocr.claim_worker_job`, which stays as it was) with
   `OCR_WORKER_MAX_INFLIGHT_PER_FACILITY` (default 2, 1-16): a facility that

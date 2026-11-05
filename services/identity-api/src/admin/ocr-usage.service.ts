@@ -56,7 +56,7 @@ export function lagosMonth(instant: Date): string {
 }
 
 /**
- * A facility's OCR page allowance and its month's use (migration 0110), for platform administrators. Every
+ * A facility's OCR page allowance and its month's use (migration 0107), for platform administrators. Every
  * read and the one command run in a platform transaction with no facility or membership, and the database
  * decides: ocr.facility_page_allowance and ocr.facility_ocr_usage take platform.admin.access, and
  * ocr.set_facility_page_limit only a platform super admin (a cost decision). The command writes its own
@@ -116,7 +116,7 @@ export class AdminOcrUsageService {
   }
 }
 
-/** The 0110 commands want a platform-scoped session: no facility and no membership. */
+/** The 0107 commands want a platform-scoped session: no facility and no membership. */
 function platformScoped(context: PlatformAdminContext): PlatformAdminContext {
   const { facilityId: _facility, membershipId: _membership, ...platform } = context;
   return platform;

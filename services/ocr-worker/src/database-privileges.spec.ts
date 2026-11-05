@@ -66,14 +66,14 @@ function workerSource() {
 }
 
 /**
- * The page-allowance commands come from migration 0110, built in parallel to
+ * The page-allowance commands come from migration 0107, built in parallel to
  * the agreed contract. Until that migration is in this tree they may be called
- * without a definition here; as soon as a 0110 migration exists, they are held
+ * without a definition here; as soon as 0107_ocr_page_allowance.sql exists, they are held
  * to the same defined-and-granted rule as every other worker command.
  */
 const ALLOWANCE_COMMANDS = ['ocr.claim_worker_job_fair', 'ocr.pause_worker_job_for_allowance',
   'ocr.record_worker_ai_usage', 'ocr.record_worker_pages', 'ocr.worker_page_allowance'];
-const allowanceMigrationPresent = readdirSync(join(database, 'migrations')).some((name) => /^0110_.*\.sql$/.test(name));
+const allowanceMigrationPresent = readdirSync(join(database, 'migrations')).some((name) => /^0107_ocr_page_allowance\.sql$/.test(name));
 
 describe('OCR worker database privileges', () => {
   const { defined, executable } = executableFunctions();
@@ -90,7 +90,7 @@ describe('OCR worker database privileges', () => {
     const called = new Set(source.flatMap(({ text }) => [...text.matchAll(
       new RegExp(`\\b(${SCHEMAS})\\.([a-z_][a-z0-9_]*)\\s*\\(`, 'g'))]
       .map(([, schema, name]) => `${schema}.${name}`)));
-    // Claims go only through the fair claim (0110); the unfair ocr.claim_worker_job stays granted but unused.
+    // Claims go only through the fair claim (0107); the unfair ocr.claim_worker_job stays granted but unused.
     expect([...called].sort()).toEqual(['ocr.claim_worker_job_fair', 'ocr.complete_worker_job',
       'ocr.fail_worker_job', 'ocr.pause_worker_job_for_allowance', 'ocr.record_worker_ai_usage',
       'ocr.record_worker_pages', 'ocr.renew_worker_claim', 'ocr.worker_page_allowance', 'ocr.worker_queue_metrics']);

@@ -144,7 +144,7 @@ describe('AdminOcrUsageService', () => {
     const answer = await service.usage({ ...context(), facilityId: 'f', membershipId: 'm' }, facilityId, undefined, NOW);
     expect(withPlatformTransaction).toHaveBeenCalledTimes(1);
     const [scoped, , options] = withPlatformTransaction.mock.calls[0] as unknown as [PlatformAdminContext, unknown, unknown];
-    // The 0110 reads want a platform-scoped session.
+    // The 0107 reads want a platform-scoped session.
     expect(scoped.facilityId).toBeUndefined();
     expect(scoped.membershipId).toBeUndefined();
     expect(options).toEqual({ readOnly: true });

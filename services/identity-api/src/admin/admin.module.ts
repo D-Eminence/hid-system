@@ -21,7 +21,7 @@ import { AdminOcrUsageService } from './ocr-usage.service';
   controllers: [AdminController, PublicPricingController, IntegrationAdminController,
     // Orders between facilities (P4c): support's summary, listing, lookup and close.
     AdminOrderRouteReadsController, AdminOrderRouteCommandsController,
-    // OCR page allowance and monthly use per facility (migration 0110).
+    // OCR page allowance and monthly use per facility (migration 0107).
     AdminOcrUsageController],
   providers: [AdminService, AdminOperationsService, PricingService, IntegrationAdminService, AdminOrderRoutesService,
     AdminOcrUsageService],
