@@ -630,3 +630,80 @@ describe('checkPage holds each reading to its own label, dose and wording', () =
       reaction: 'rash', plain: 'Allergic to penicillin (rash)' }).checkReasons).toEqual([]);
   });
 });
+
+describe('checkPage for a page read from its picture (image re-read)', () => {
+  const hard = { handwritten: true, confidence: 0.55 };
+  // Line boxes (fixtures): left 0.1, width 0.5, height 0.02, top 0.05 x line number.
+  const page = readPage(1, [['Amlodipne 5rng od', hard], ['Metformin 500mg bd', { handwritten: true, confidence: 0.9 }],
+    ['Paracetamol 1g tds', hard], 'Dx: Hypertension']);
+  const fromImage = (answer: ModelPage) => checkPage({ page: 1, lines: page.lines, answer, sourceSha256Hex: SOURCE_SHA,
+    readBy: 'reread', masker: createMasker(), fromImage: true });
+  const onLine = (n: number) => ({ left: 0.12, top: 0.05 * n, width: 0.3, height: 0.02 });
+
+  it('keeps an item whose box sits on its cited lines, check_carefully, with its own box and the picture reason', () => {
+    const result = fromImage(modelPage([modelItem({ kind: 'medicine', asWritten: 'Metformin 500mg bd', lineIds: ['p1-l2'],
+      name: 'Metformin', strength: '500mg', frequency: 'bd', status: 'current', plain: 'Metformin 500 mg twice a day',
+      box: onLine(2) })]));
+    expect(result.droppedUngrounded).toBe(0);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({ readBy: 'reread', confidence: 'check_carefully', box: onLine(2),
+      checkReason: 'This was read from the picture of the page; check it against the paper.' });
+    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(['read_from_image', 'handwritten']));
+    expect(result.items[0]!.checkReasons).not.toContain('number_not_in_text_read');
+  });
+
+  it('keeps an item the service misread (no text match needed), but a dose disagreement still shows first', () => {
+    const result = fromImage(modelPage([modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'],
+      name: 'Amlodipine', strength: '5mg', frequency: 'od', status: 'current', box: onLine(1) })]));
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]!.asWritten).toBe('Amlodipine 5mg od');
+    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(['read_from_image', 'strength_mismatch']));
+    expect(result.items[0]!.checkReason).toBe("A dose on the paper doesn't match what was read.");
+    // The same answer read from the text alone is not grounded and is dropped.
+    const textOnly = checkPage({ page: 1, lines: page.lines, sourceSha256Hex: SOURCE_SHA, readBy: 'reread',
+      masker: createMasker(), answer: modelPage([modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg od',
+        lineIds: ['p1-l1'], name: 'Amlodipine', strength: '5mg', frequency: 'od', status: 'current' })]) });
+    expect(textOnly.items).toEqual([]);
+    expect(textOnly.droppedUngrounded).toBe(1);
+  });
+
+  it('drops an item placed away from its cited lines, citing an unknown line or one on another page, or with no box', () => {
+    const base = { kind: 'note' as const, asWritten: 'Hypertension', noteText: 'Hypertension' };
+    const result = fromImage(modelPage([
+      modelItem({ ...base, lineIds: ['p1-l4'], box: { left: 0.1, top: 0.8, width: 0.3, height: 0.05 } }),
+      modelItem({ ...base, lineIds: ['p1-l4', 'p1-l9'], box: onLine(4) }),
+      modelItem({ ...base, lineIds: ['p2-l4'], box: onLine(4) }),
+      modelItem({ ...base, lineIds: ['p1-l4'] }),
+      modelItem({ ...base, lineIds: [], box: onLine(4) }),
+      modelItem({ ...base, lineIds: ['p1-l4'], box: { left: 1.2, top: 0.2, width: 0.3, height: 0.02 } }),
+    ]));
+    expect(result.items).toEqual([]);
+    expect(result.droppedUngrounded).toBe(6);
+    expect(JSON.stringify(result)).not.toContain('Hypertension');
+  });
+
+  it('uses intersection over the smaller box, at least 0.5, against the union of the cited lines', () => {
+    // Lines 1 and 3 together span top 0.05 to 0.17; a box over half inside that is kept, one mostly outside is not.
+    const item = (box: { left: number; top: number; width: number; height: number }) => modelItem({ kind: 'note',
+      asWritten: 'Amlodipine', noteText: 'Amlodipine', lineIds: ['p1-l1', 'p1-l3'], box });
+    expect(fromImage(modelPage([item({ left: 0.5, top: 0.1, width: 0.2, height: 0.04 })])).items).toHaveLength(1);
+    expect(fromImage(modelPage([item({ left: 0.55, top: 0.1, width: 0.2, height: 0.04 })])).items).toHaveLength(0);
+  });
+
+  it('stores the model box clipped to the page, and flags a number the text read does not have', () => {
+    const result = fromImage(modelPage([modelItem({ kind: 'medicine', asWritten: 'Paracetamol 1g qds 5/7', lineIds: ['p1-l3'],
+      name: 'Paracetamol', strength: '1g', frequency: 'qds', duration: '5/7', status: 'new',
+      box: { left: -0.05, top: 0.14, width: 0.5, height: 0.04 } })]));
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]!.box).toEqual({ left: 0, top: 0.14, width: 0.45, height: 0.04 });
+    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(['read_from_image', 'number_not_in_text_read']));
+    expect(result.items[0]!.confidence).toBe('check_carefully');
+  });
+
+  it('does not count read_from_image as a shaky first pass on its own', () => {
+    const result = fromImage(modelPage([modelItem({ kind: 'note', asWritten: 'Hypertension', noteText: 'Hypertension',
+      lineIds: ['p1-l4'], box: { left: 0.1, top: 0.2, width: 0.3, height: 0.02 } })]));
+    expect(result.items[0]!.checkReasons).toEqual(['read_from_image']);
+    expect(result.rereadReasons).not.toContain('many_check_carefully');
+  });
+});

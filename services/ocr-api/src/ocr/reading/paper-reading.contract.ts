@@ -23,6 +23,18 @@ export const VITAL_MEASURES = ['blood_pressure', 'pulse', 'temperature', 'respir
  */
 export const ALLERGY_SEVERITIES = ['mild', 'moderate', 'severe', 'unknown'] as const;
 export const READING_STATUSES = ['read', 'ai_off', 'ai_declined', 'ai_failed', 'no_text'] as const;
+/**
+ * Why a page that was re-read was re-read from its text only, without the picture of the page:
+ * 'image_reread_off' (OCR_AI_IMAGE_REREAD=off), 'not_hard_to_read' (no handwriting or low-confidence reason),
+ * 'image_not_available_pdf' / 'image_not_available_tiff' (v1 sends PNG and JPEG only),
+ * 'image_not_available_type' (another detected type), 'image_not_given' (the caller passed no document bytes),
+ * 'not_single_page' (not page 1 of a one-page image), 'image_too_large' (over the Claude API image limits),
+ * 'image_size_unknown' (the picture's size could not be read from its header), 'image_rejected' (the API
+ * refused the request with the picture, so the page was re-read from its text instead).
+ */
+export const IMAGE_REREAD_SKIP_REASONS = ['image_reread_off', 'not_hard_to_read', 'image_not_available_pdf',
+  'image_not_available_tiff', 'image_not_available_type', 'image_not_given', 'not_single_page', 'image_too_large',
+  'image_size_unknown', 'image_rejected'] as const;
 
 const fraction = z.number().min(0).max(1);
 export const boxSchema = z.strictObject({ left: fraction, top: fraction, width: fraction, height: fraction });
@@ -104,6 +116,12 @@ export const readingSchema = z.strictObject({
   itemCount: z.number().int().min(0),
   promptVersion: z.string().min(1),
   schemaVersion: z.string().min(1),
+  // Added with the image re-read: optional, so payloads written before it still read. The worker always writes them.
+  /** Pages whose re-read was answered from the picture of the page (their items are read_from_image). */
+  imageRereadPages: z.array(z.number().int().min(1)).optional(),
+  /** Re-read pages that went without the picture, and why. */
+  imageRereadSkipped: z.array(z.strictObject({ page: z.number().int().min(1),
+    reason: z.enum(IMAGE_REREAD_SKIP_REASONS) })).optional(),
 });
 
 export const paperReadingPayloadSchema = z.strictObject({
@@ -158,5 +176,6 @@ export type PaperPage = z.infer<typeof pageSchema>;
 export type PaperIdentity = z.infer<typeof identitySchema>;
 export type PaperItem = z.infer<typeof itemSchema>;
 export type ReadingStatus = (typeof READING_STATUSES)[number];
+export type ImageRereadSkipReason = (typeof IMAGE_REREAD_SKIP_REASONS)[number];
 export type PaperReading = z.infer<typeof readingSchema>;
 export type PaperReadingPayload = z.infer<typeof paperReadingPayloadSchema>;

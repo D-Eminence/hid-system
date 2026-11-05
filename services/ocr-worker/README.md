@@ -107,6 +107,48 @@ Each claimed job runs, in order:
    handwriting (at most `OCR_AI_MAX_REREAD_PAGES` per document). If the re-read
    fails, the first-pass items are kept as `check_carefully` with
    `reread_failed`.
+
+   **Image re-read of hard pages** (owner decision "Yes, send image for hard
+   pages", 2026-11-05; `OCR_AI_IMAGE_REREAD`, `on` or `off`, default `on` when
+   `OCR_AI_MODE=claude`, any other value fails startup). A re-read also carries
+   the picture of the page when the page is hard to read (its flags or re-read
+   reasons say `handwriting`, `low_confidence` or `low_confidence_handwriting`;
+   for a page the first pass could not answer, its lines' legibility) and the
+   document is a one-page PNG or JPEG by its detected media type (the exact
+   verified bytes, as stored; never resized or re-encoded). The request is the
+   same Claude API request (`inference_geo: "us"`, fixed endpoint, same cached
+   system prompt) with the user turn `[image, text]`: the text lists the lines
+   with their boxes and asks the model to read the writing from the picture,
+   cite the lines it sits on, give the item's own box as page fractions, write
+   `asWritten` as it reads it in the picture, never invent anything and write
+   `[unreadable]` rather than guess (`imagePageMessage`,
+   `hid-paper-reading-image-prompt-1`, recorded in provenance as
+   `imagePromptVersion`). Only these requests use the image answer schema
+   (`MODEL_OUTPUT_IMAGE_JSON_SCHEMA`, a required `box` per item); text-only
+   requests are byte for byte as before, so `PROMPT_VERSION` and
+   `MODEL_SCHEMA_VERSION` are unchanged. An item read from the picture is kept
+   only when it cites lines on its page and its box overlaps the box of those
+   lines (intersection over the smaller box at least 0.5, as the accuracy kit
+   places items); otherwise it is dropped and counted in `droppedUngrounded`.
+   It need not match the Textract text, but a number the text of its lines
+   does not have adds `number_not_in_text_read`. Every such item is
+   `check_carefully` with `read_from_image` ("This was read from the picture of
+   the page; check it against the paper.", shown unless a dose or number
+   disagreement comes first), `readBy: "reread"`, and its stored box is the
+   model's box clipped to the page.
+
+   Scope (v1): PNG and JPEG only. PDF and TIFF pages keep the text-only re-read
+   (`image_not_available_pdf`, `image_not_available_tiff`). A picture over the
+   Claude API image limits (10 MB base64-encoded, 8000 x 8000 px; the size is
+   read from the PNG IHDR or JPEG frame header, never by decoding) stays text
+   only (`image_too_large`; `image_size_unknown` when the header cannot be
+   read). If the API rejects the request with the picture, the page is re-read
+   from its text (`image_rejected`). The reading summary and the payload's
+   `reading` carry `imageRereadPages` (re-reads answered from the picture) and
+   `imageRereadSkipped` (`{page, reason}` for each re-read sent without it,
+   including `image_reread_off` and `not_hard_to_read`). The picture and its
+   base64 are never logged, stored (beyond the original document, already in
+   S3) or put in an error.
 8. **Completion.** `ocr.complete_worker_job` stores the `hid-paper-reading-v2`
    payload (schema `hid-paper-reading-schema-2`: `src/reading/contract.ts`), `raw_text` (every line in
    reading order) and the mean line confidence. Provenance holds models,
@@ -141,6 +183,14 @@ a document with no text as `no_text`.
   the lease renewal (every third of `OCR_WORKER_LEASE_SECONDS`), and shutdown
   ends the wait without a call. Keep `OCR_WORKER_LEASE_SECONDS` long enough for
   a document's pages to wait their turn.
+- **Image re-read cost.** The picture's tokens are ordinary input tokens and
+  count in the same usage records (`ocr.record_worker_ai_usage`). An image costs
+  about `ceil(width/28) x ceil(height/28)` tokens, at most 4,784 on
+  `claude-opus-5-5` (larger pictures are downscaled by the API): an A4 scan at
+  150 dpi (1240 x 1754) is about 2,800 tokens. At the re-read model's $4 per
+  million input tokens with the 1.1x US-only price, that is about $0.012 to
+  $0.021 more per image-read page, plus a few tokens per line for the boxes.
+  Only flagged PNG/JPEG pages on re-read pay it.
 - **AI use recorded.** After the AI step and before completion the worker calls
   `ocr.record_worker_ai_usage` once per model used (requests, input, output,
   cache-read and cache-write tokens; counts only, no text), idempotent per job,

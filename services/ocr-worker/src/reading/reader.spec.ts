@@ -1,7 +1,8 @@
 import { AiInterruptedError, AiRejectedError, AiTransientError, type PageAnswer, type PageModelClient } from './claude.client';
 import { paperReadingPayloadSchema } from './contract';
 import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type ReadingConfig } from './reader';
-import { CLINIC_PAGE, modelItem, modelPage, readPage, SOURCE_SHA } from './test-fixtures';
+import { CLINIC_PAGE, fixtureJpeg, fixturePng, modelItem, modelPage, readPage, SOURCE_SHA } from './test-fixtures';
+import { IMAGE_MAX_BASE64_LENGTH } from './page-image';
 import type { ModelPage } from './prompt';
 
 const FACILITY = '11111111-2222-4333-8444-555555555555';
@@ -281,6 +282,144 @@ describe('PaperReadingService', () => {
       const { client } = fakeClient(() => ok(clearPage));
       const { summary } = await new PaperReadingService({ ...config, OCR_AI_MODE: 'off' }, client).read(input(), signal());
       expect(summary.modelUsage).toEqual([]);
+    });
+  });
+
+  describe('image re-read of hard pages', () => {
+    const imageConfig: ReadingConfig = { ...config, OCR_AI_IMAGE_REREAD: 'on' };
+    const hardPage = readPage(1, [['Amlodipne 5rng od', { handwritten: true, confidence: 0.55 }], 'Dx: Hypertension']);
+    // The first pass cites the hard handwritten line, so the page is re-read as today (low_confidence_handwriting).
+    const textAnswer = modelPage([modelItem({ kind: 'note', asWritten: 'Amlodipne 5rng od', lineIds: ['p1-l1'] }),
+      modelItem({ kind: 'diagnosis', asWritten: 'Hypertension', lineIds: ['p1-l2'], name: 'Hypertension',
+        status: 'confirmed' })]);
+    const pictureAnswer = modelPage([
+      modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'], name: 'Amlodipine',
+        strength: '5mg', frequency: 'od', status: 'current', box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 } }),
+      modelItem({ kind: 'diagnosis', asWritten: 'Hypertension', lineIds: ['p1-l2'], name: 'Hypertension',
+        status: 'confirmed', box: { left: 0.1, top: 0.6, width: 0.3, height: 0.02 } }),
+    ]);
+    const png = { mediaType: 'image/png', bytes: fixturePng(1240, 1754) };
+    type Seen = { model: string; page: number; image: { mediaType: string; base64: string } | undefined };
+    function pictureClient(rejectImage = false) {
+      const seen: Seen[] = [];
+      const client: PageModelClient = { readPage: jest.fn(async (request) => {
+        seen.push({ model: request.model, page: request.page, image: request.image });
+        if (request.image && rejectImage) throw new AiRejectedError('AI_BAD_REQUEST', 1);
+        if (request.model === 'claude-sonnet-5-5') return ok(textAnswer);
+        return ok(request.image ? pictureAnswer : textAnswer);
+      }) };
+      return { client, seen };
+    }
+    const read = (reading: ReadingConfig, client: PageModelClient, pages: ReturnType<typeof readPage>[],
+      document?: { mediaType: string; bytes: Uint8Array }) => new PaperReadingService(reading, client)
+      .read({ facilityId: FACILITY, sourceSha256Hex: SOURCE_SHA, pages, ...(document ? { document } : {}) }, signal());
+
+    it('sends the picture only with the re-read of a hard PNG or JPEG page, never with the first pass', async () => {
+      for (const document of [png, { mediaType: 'image/jpeg', bytes: fixtureJpeg(1240, 1754) }]) {
+        const { client, seen } = pictureClient();
+        const { payload, summary } = await read(imageConfig, client, [hardPage], document);
+        expect(seen.map((call) => [call.model, call.image !== undefined])).toEqual([['claude-sonnet-5-5', false],
+          ['claude-opus-5-5', true]]);
+        expect(seen[1]!.image).toEqual({ mediaType: document.mediaType,
+          base64: Buffer.from(document.bytes).toString('base64') });
+        expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+        expect(summary.imageRereadPages).toEqual([1]);
+        expect(summary.imageRereadSkipped).toEqual([]);
+        expect(payload.reading).toMatchObject({ rereadPages: [1], imageRereadPages: [1], imageRereadSkipped: [] });
+        // The item on its lines is kept, read from the picture; the one placed elsewhere is dropped and counted.
+        expect(payload.items).toHaveLength(1);
+        expect(payload.items[0]).toMatchObject({ readBy: 'reread', confidence: 'check_carefully',
+          asWritten: 'Amlodipine 5mg od', box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 } });
+        expect(payload.items[0]!.checkReasons).toContain('read_from_image');
+        expect(payload.reading.droppedUngrounded).toBe(1);
+      }
+    });
+
+    it('re-reads from the text alone, saying why, when the page is not hard to read or the setting is off', async () => {
+      const easy = { ...pictureClient() };
+      // An unsure page with clear printed lines is re-read, but without the picture.
+      const unsure = modelPage(textAnswer.items.slice(1), { pageUnsure: true });
+      const easyClient: PageModelClient = { readPage: jest.fn(async (request) => {
+        easy.seen.push({ model: request.model, page: request.page, image: request.image });
+        return ok(request.model === 'claude-sonnet-5-5' ? unsure : modelPage(textAnswer.items.slice(1)));
+      }) };
+      const result = await read(imageConfig, easyClient, [readPage(1, ['Dx: Hypertension'])], png);
+      expect(easy.seen.every((call) => call.image === undefined)).toBe(true);
+      expect(result.summary).toMatchObject({ rereadPages: [1], imageRereadPages: [],
+        imageRereadSkipped: [{ page: 1, reason: 'not_hard_to_read' }] });
+
+      for (const reading of [{ ...config, OCR_AI_IMAGE_REREAD: 'off' as const }, config]) {
+        const { client, seen } = pictureClient();
+        const { summary, payload } = await read(reading, client, [hardPage], png);
+        expect(seen.map((call) => call.image)).toEqual([undefined, undefined]);
+        expect(summary.imageRereadSkipped).toEqual([{ page: 1, reason: 'image_reread_off' }]);
+        expect(payload.items.every((item) => !item.checkReasons.includes('read_from_image'))).toBe(true);
+      }
+    });
+
+    it('never sends PDF or TIFF pages, a page of a many-page document, a missing document or a picture over the limit', async () => {
+      const cases: Array<[{ mediaType: string; bytes: Uint8Array } | undefined, string]> = [
+        [{ mediaType: 'application/pdf', bytes: png.bytes }, 'image_not_available_pdf'],
+        [{ mediaType: 'image/tiff', bytes: png.bytes }, 'image_not_available_tiff'],
+        [undefined, 'image_not_given'],
+        [{ mediaType: 'image/png', bytes: fixturePng(9000, 1200) }, 'image_too_large'],
+        [{ mediaType: 'image/png', bytes: fixturePng(1000, 1000, IMAGE_MAX_BASE64_LENGTH) }, 'image_too_large'],
+      ];
+      for (const [document, reason] of cases) {
+        const { client, seen } = pictureClient();
+        const { summary, payload } = await read(imageConfig, client, [hardPage], document);
+        expect(seen.map((call) => call.image)).toEqual([undefined, undefined]);
+        expect(summary.imageRereadSkipped).toEqual([{ page: 1, reason }]);
+        expect(paperReadingPayloadSchema.safeParse(payload).success).toBe(true);
+      }
+      const page2 = readPage(2, [['Metfornin 500rng bd', { handwritten: true, confidence: 0.5 }]]);
+      const { client, seen } = pictureClient();
+      const { summary } = await read(imageConfig, client, [hardPage, page2], { mediaType: 'application/pdf',
+        bytes: png.bytes });
+      expect(seen.filter((call) => call.image !== undefined)).toEqual([]);
+      expect(summary.imageRereadSkipped).toEqual([{ page: 1, reason: 'image_not_available_pdf' },
+        { page: 2, reason: 'image_not_available_pdf' }]);
+    });
+
+    it('does not send the picture for an unflagged page, and sends it for a page the first model declined', async () => {
+      const seen: Seen[] = [];
+      const clear: PageModelClient = { readPage: jest.fn(async (request) => {
+        seen.push({ model: request.model, page: request.page, image: request.image });
+        return ok(modelPage([modelItem({ kind: 'diagnosis', asWritten: 'Hypertension', lineIds: ['p1-l1'],
+          name: 'Hypertension', status: 'confirmed' })]));
+      }) };
+      const unflagged = await read(imageConfig, clear, [readPage(1, ['Dx: Hypertension'])], png);
+      expect(seen.map((call) => [call.model, call.image])).toEqual([['claude-sonnet-5-5', undefined]]);
+      expect(unflagged.summary).toMatchObject({ rereadPages: [], imageRereadPages: [], imageRereadSkipped: [] });
+
+      const declined: PageModelClient = { readPage: jest.fn(async (request) => {
+        seen.push({ model: request.model, page: request.page, image: request.image });
+        return request.model === 'claude-sonnet-5-5' ? refused : ok(request.image ? pictureAnswer : textAnswer);
+      }) };
+      seen.length = 0;
+      const { summary } = await read(imageConfig, declined, [hardPage], png);
+      expect(seen.map((call) => call.image !== undefined)).toEqual([false, true]);
+      expect(summary.imageRereadPages).toEqual([1]);
+    });
+
+    it('re-reads the text instead when the API refuses the request with the picture', async () => {
+      const { client, seen } = pictureClient(true);
+      const { summary, payload } = await read(imageConfig, client, [hardPage], png);
+      expect(seen.map((call) => [call.model, call.image !== undefined])).toEqual([['claude-sonnet-5-5', false],
+        ['claude-opus-5-5', true], ['claude-opus-5-5', false]]);
+      expect(summary).toMatchObject({ rereadPages: [1], imageRereadPages: [], requests: 3,
+        imageRereadSkipped: [{ page: 1, reason: 'image_rejected' }] });
+      expect(payload.items.every((item) => !item.checkReasons.includes('read_from_image'))).toBe(true);
+    });
+
+    it('writes empty image fields when the AI step does not run, and old payloads without them still read', async () => {
+      const { client } = pictureClient();
+      const off = await read({ ...imageConfig, OCR_AI_MODE: 'off' }, client, [hardPage], png);
+      expect(off.payload.reading).toMatchObject({ imageRereadPages: [], imageRereadSkipped: [] });
+      const { imageRereadPages: _pages, imageRereadSkipped: _skipped, ...older } = off.payload.reading;
+      expect(paperReadingPayloadSchema.safeParse({ ...off.payload, reading: older }).success).toBe(true);
+      expect(paperReadingPayloadSchema.safeParse({ ...off.payload, reading: { ...older,
+        imageRereadSkipped: [{ page: 1, reason: 'made_up' }] } }).success).toBe(false);
     });
   });
 });

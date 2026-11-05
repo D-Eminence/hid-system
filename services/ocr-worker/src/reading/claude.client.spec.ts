@@ -1,7 +1,8 @@
+import { createHash } from 'node:crypto';
 import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient, retryAfterMs } from './claude.client';
 import { Semaphore } from '../semaphore';
-import { SYSTEM_PROMPT } from './prompt';
-import { modelItem, modelPage } from './test-fixtures';
+import { MODEL_OUTPUT_IMAGE_JSON_SCHEMA, MODEL_OUTPUT_JSON_SCHEMA, SYSTEM_PROMPT } from './prompt';
+import { fixturePng, modelItem, modelPage } from './test-fixtures';
 
 const FAKE_KEY = 'sk-ant-test-0000000000000000000000';
 const config = { ANTHROPIC_API_KEY: FAKE_KEY, OCR_AI_MAX_TOKENS: 16_000, OCR_AI_TIMEOUT_MS: 30_000,
@@ -240,5 +241,71 @@ describe('ClaudePageClient', () => {
     await expect(pending).rejects.toMatchObject({ reason, attempts: 0 });
     expect(fetch).not.toHaveBeenCalled();
     release();
+  });
+
+  describe('image re-read requests', () => {
+    const pictureBytes = fixturePng(1240, 1754);
+    const image = { mediaType: 'image/png' as const, base64: Buffer.from(pictureBytes).toString('base64') };
+    const lines = [{ id: 'p1-l1', text: 'Dx: Hypertension', confidence: 0.987, handwritten: false,
+      box: { left: 0.1, top: 0.1, width: 0.5, height: 0.02 } },
+    { id: 'p1-l2', text: 'Amlodipine 5mg od', confidence: 0.61, handwritten: true, box: null }];
+    const pinned = { model: 'claude-opus-5-5', effort: 'high' as const, page: 1, lines };
+    const bodyOf = (fetch: jest.Mock) => String((fetch.mock.calls[0] as [unknown, RequestInit])[1].body);
+
+    it('sends a text-only page byte for byte as before the image re-read existed, boxes and all left out', async () => {
+      const { instance, fetch } = client([sse(JSON.stringify(answer))]);
+      await instance.readPage(pinned, new AbortController().signal);
+      const body = bodyOf(fetch);
+      // The request body this exact call produced on the parent commit (605e971e), before any image work.
+      expect(createHash('sha256').update(body).digest('hex'))
+        .toBe('cd03ba1ed24c0d36e6bb9b71f8c27582e2d0a30adc911838fcc0b00f50d6fb7f');
+      expect(body).toHaveLength(7637);
+      expect(body).not.toContain('"image"');
+      expect(body).not.toContain('box');
+    });
+
+    it('puts the picture before the page text, keeps the cached system prefix, US inference and the fixed endpoint', async () => {
+      const box = { left: 0.1, top: 0.1, width: 0.3, height: 0.02 };
+      const imageAnswer = { ...answer, items: answer.items.map((item) => ({ ...item, box })) };
+      const text = client([sse(JSON.stringify(answer))]);
+      await text.instance.readPage(pinned, new AbortController().signal);
+      const { instance, fetch } = client([sse(JSON.stringify(imageAnswer))]);
+      const result = await instance.readPage({ ...pinned, image }, new AbortController().signal);
+      expect(result.kind === 'answer' && result.answer.items[0]!.box).toEqual(box);
+      const [url] = fetch.mock.calls[0]!;
+      expect(String(url)).toBe('https://api.anthropic.com/v1/messages');
+      const body = JSON.parse(bodyOf(fetch)) as { inference_geo: string; system: unknown; messages: Array<{
+        role: string; content: Array<Record<string, unknown>> }>; output_config: { format: { schema: unknown } } };
+      const textBody = JSON.parse(bodyOf(text.fetch)) as typeof body;
+      expect(body.inference_geo).toBe('us');
+      // The cached prefix is the same bytes for both kinds of request.
+      expect(JSON.stringify(body.system)).toBe(JSON.stringify(textBody.system));
+      expect(body.messages).toHaveLength(1);
+      const [first, second] = body.messages[0]!.content;
+      expect(first).toEqual({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: image.base64 } });
+      expect(second).toMatchObject({ type: 'text' });
+      expect(String(second!.text)).toContain('read the writing from the picture');
+      expect(String(second!.text)).toContain('"box":{"left":0.1,"top":0.1,"width":0.5,"height":0.02}');
+      expect(String(second!.text)).toContain('"handwritten":true');
+      expect(body.output_config.format.schema).toEqual(MODEL_OUTPUT_IMAGE_JSON_SCHEMA);
+      expect(textBody.output_config.format.schema).toEqual(MODEL_OUTPUT_JSON_SCHEMA);
+    });
+
+    it('treats an image answer without item boxes as malformed, and a text answer with boxes as malformed', async () => {
+      const box = { left: 0.1, top: 0.1, width: 0.3, height: 0.02 };
+      const { instance } = client([sse(JSON.stringify(answer)),
+        sse(JSON.stringify({ ...answer, items: answer.items.map((item) => ({ ...item, box })) }))]);
+      const signal = new AbortController().signal;
+      await expect(instance.readPage({ ...pinned, image }, signal)).resolves.toMatchObject({ kind: 'failed', reason: 'malformed' });
+      await expect(instance.readPage(pinned, signal)).resolves.toMatchObject({ kind: 'failed', reason: 'malformed' });
+    });
+
+    it('never puts the picture in an error', async () => {
+      const { instance } = client([failure(400, 'invalid_request_error')]);
+      const error = await instance.readPage({ ...pinned, image }, new AbortController().signal).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(AiRejectedError);
+      const shown = `${String(error)} ${JSON.stringify(error)} ${(error as Error).stack ?? ''}`;
+      expect(shown).not.toContain(image.base64.slice(100, 140));
+    });
   });
 });

@@ -9,6 +9,13 @@ import { ALLERGY_SEVERITIES, DIAGNOSIS_STATUSES, ITEM_KINDS, MEDICINE_STATUSES, 
  */
 export const PROMPT_VERSION = 'hid-paper-reading-prompt-2';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
+/**
+ * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
+ * They are used only for a hard page re-read with its picture, so SYSTEM_PROMPT, MODEL_OUTPUT_JSON_SCHEMA and the
+ * text-only page message, and with them PROMPT_VERSION and MODEL_SCHEMA_VERSION, are unchanged. Recorded in
+ * provenance when a page was read from its picture.
+ */
+export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-1';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
@@ -120,6 +127,31 @@ export const MODEL_OUTPUT_JSON_SCHEMA: Readonly<Record<string, unknown>> = {
   },
 };
 
+const itemJsonSchema = (MODEL_OUTPUT_JSON_SCHEMA.properties as { items: { items: {
+  required: readonly string[]; properties: Record<string, unknown> } } }).items.items;
+const fractionNumber = { type: 'number' } as const;
+
+/**
+ * The image re-read's output: the text schema with one more required field per item, "box", the item's own place
+ * on the page as fractions of the page's width and height. Used only for requests that carry the picture.
+ */
+export const MODEL_OUTPUT_IMAGE_JSON_SCHEMA: Readonly<Record<string, unknown>> = {
+  ...MODEL_OUTPUT_JSON_SCHEMA,
+  properties: {
+    ...(MODEL_OUTPUT_JSON_SCHEMA.properties as Record<string, unknown>),
+    items: {
+      type: 'array',
+      items: {
+        ...itemJsonSchema,
+        required: [...itemJsonSchema.required, 'box'],
+        properties: { ...itemJsonSchema.properties, box: { type: 'object', additionalProperties: false,
+          required: ['left', 'top', 'width', 'height'],
+          properties: { left: fractionNumber, top: fractionNumber, width: fractionNumber, height: fractionNumber } } },
+      },
+    },
+  },
+};
+
 const field = z.string().max(2_000);
 export const modelItemSchema = z.strictObject({
   kind: z.enum(ITEM_KINDS),
@@ -142,13 +174,52 @@ export const modelPageSchema = z.strictObject({
     lineIds: z.array(z.string().max(40)).max(60) }),
   items: z.array(modelItemSchema).max(300),
 });
-export type ModelItem = z.infer<typeof modelItemSchema>;
-export type ModelPage = z.infer<typeof modelPageSchema>;
+const finite = z.number().finite();
+export const modelBoxSchema = z.strictObject({ left: finite, top: finite, width: finite, height: finite });
+export const modelImageItemSchema = modelItemSchema.extend({ box: modelBoxSchema });
+export const modelImagePageSchema = modelPageSchema.extend({ items: z.array(modelImageItemSchema).max(300) });
+/** An item as the model answered it; "box" only in an answer read from the picture. */
+export type ModelItem = z.infer<typeof modelItemSchema> & { box?: z.infer<typeof modelBoxSchema> };
+export type ModelPage = Omit<z.infer<typeof modelPageSchema>, 'items'> & { items: ModelItem[] };
 
-/** The user turn for one page: lines without their boxes. */
+/** The user turn for one page, text only: lines without their boxes. Unchanged by the image re-read. */
 export function pageMessage(page: number, lines: readonly { id: string; text: string; confidence: number;
   handwritten: boolean }[]): string {
   return `Page ${page} of a paper record. Its lines, as JSON:\n${JSON.stringify(lines.map((line) => ({
     id: line.id, text: line.text, confidence: Math.round(line.confidence * 100) / 100, handwritten: line.handwritten,
+  })))}`;
+}
+
+const fraction4 = (value: number) => Math.round(value * 10_000) / 10_000;
+
+/**
+ * The user turn's text for one page re-read WITH its picture (the picture is the block before this one). The
+ * lines carry their boxes, and the instructions here take the place of rules 2 and 3 for this page only.
+ */
+export function imagePageMessage(page: number, lines: readonly { id: string; text: string; confidence: number;
+  handwritten: boolean; box?: { left: number; top: number; width: number; height: number } | null }[]): string {
+  return `Page ${page} of a paper record. The picture above is this page. The text-recognition service found it \
+hard to read (handwriting or low confidence), so this time read the writing from the picture itself. Rules 2 and 3 \
+change for this page only, as follows; every other rule stays.
+
+A. Read each item from the picture. "asWritten" is the item as you read it in the picture, letter for letter, \
+with its spelling and abbreviations; it may differ from the line text below where the service misread the writing.
+
+B. Cite in "lineIds" the ids of the lines below that the item sits on in the picture. Cite only ids from this list.
+
+C. Give the item's own place on the page in "box": left, top, width and height as fractions of the picture's \
+width and height (0 to 1, measured from the top-left corner), around the writing of this item only.
+
+D. Never invent anything. Where part of the writing cannot be read, write "[unreadable]" in its place and set \
+"unsure" to true; never guess a word, number or dose. A number is filled only where you can read it in the picture.
+
+E. Leave out writing that is not on one of the lines below.
+
+The lines the service found, as JSON (box as fractions of the page; confidence 0 to 1):
+${JSON.stringify(lines.map((line) => ({
+    id: line.id, text: line.text,
+    box: line.box ? { left: fraction4(line.box.left), top: fraction4(line.box.top), width: fraction4(line.box.width),
+      height: fraction4(line.box.height) } : null,
+    confidence: Math.round(line.confidence * 100) / 100, handwritten: line.handwritten,
   })))}`;
 }

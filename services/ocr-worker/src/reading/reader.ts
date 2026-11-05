@@ -4,23 +4,31 @@ import type { AiUsageRecord, ReadLine, ReadPage } from '../types';
 import { AiInterruptedError, AiRejectedError, AiTransientError, INFERENCE_GEO, type AiCallUse, type Effort,
   type PageAnswer, type PageModelClient, type TokenUsage } from './claude.client';
 import {
-  PAPER_READING_CONTRACT, PAPER_READING_SCHEMA_VERSION, type FlagReason, type PaperIdentity, type PaperItem,
-  type PaperPage, type PaperReadingPayload, type ReadingStatus,
+  PAPER_READING_CONTRACT, PAPER_READING_SCHEMA_VERSION, type FlagReason, type ImageRereadSkipReason, type PaperIdentity,
+  type PaperItem, type PaperPage, type PaperReadingPayload, type ReadingStatus,
 } from './contract';
 import { blankIdentity, checkPage, REVIEW_BELOW, uniqueItemIds, type PageCheck } from './items';
 import { createMasker, type Masker } from './masking';
+import { pageImageFor, type PageImage, type PageImageDecision, type SourceDocument } from './page-image';
 import { MODEL_SCHEMA_VERSION, PROMPT_VERSION } from './prompt';
 
 export type ReadingConfig = Pick<OcrWorkerConfig, 'OCR_AI_MODE' | 'OCR_AI_FACILITY_IDS' | 'OCR_AI_FIRST_PASS_MODEL'
   | 'OCR_AI_FIRST_PASS_EFFORT' | 'OCR_AI_REREAD_MODEL' | 'OCR_AI_REREAD_EFFORT' | 'OCR_AI_MAX_REREAD_PAGES'>
-  // Pages of one document read at once; one at a time when not given.
-  & Partial<Pick<OcrWorkerConfig, 'OCR_AI_PAGE_CONCURRENCY'>>;
+  // Pages of one document read at once; one at a time when not given. The image re-read is off when not given.
+  & Partial<Pick<OcrWorkerConfig, 'OCR_AI_PAGE_CONCURRENCY' | 'OCR_AI_IMAGE_REREAD'>>;
 
 export interface ReadingInput {
   facilityId: string;
   sourceSha256Hex: string;
   pages: readonly ReadPage[];
+  /**
+   * The exact document the pages were read from (the verified bytes and their detected media type), for the
+   * image re-read of a hard page. Without it every re-read is text only ('image_not_given').
+   */
+  document?: SourceDocument;
 }
+
+export interface ImageRereadSkip { page: number; reason: ImageRereadSkipReason }
 
 /** Counts and codes only: safe to log and to keep in provenance. */
 export interface ReadingSummary {
@@ -34,6 +42,10 @@ export interface ReadingSummary {
   pagesSent: number;
   rereadPages: number[];
   rereadFailedPages: number;
+  /** Re-read pages answered from the picture of the page. */
+  imageRereadPages: number[];
+  /** Re-read pages that went without the picture, and why. */
+  imageRereadSkipped: ImageRereadSkip[];
   droppedUngrounded: number;
   droppedUngroundedFirstPass: number;
   itemCount: number;
@@ -92,6 +104,8 @@ interface PageState {
   declined: boolean;
   failed: boolean;
   reread: 'none' | 'done' | 'failed';
+  /** The re-read's answer came from a request with the picture of the page. */
+  fromImage: boolean;
 }
 
 const zeroUsage = (): TokenUsage => ({ inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 });
@@ -119,7 +133,7 @@ export class PaperReadingService {
     const pages = input.pages.map((page) => lineOnlyPage(page));
     const aiUsed = status === 'ai_failed';
     const summary = this.summary(status, pages, [], 0, 0, [], 0, aiUsed, usage, 0, 0, 0, 0, null, failureCode,
-      false, modelUsage.map((entry) => ({ ...entry })));
+      false, modelUsage.map((entry) => ({ ...entry })), [], []);
     return { payload: this.payload(pages, blankIdentity(), [], summary), summary };
   }
 
@@ -140,12 +154,13 @@ export class PaperReadingService {
     const states: PageState[] = input.pages.filter((page) => page.lines.length > 0).map((page) => {
       const masker = createMasker();
       return { page: page.page, masker, lines: page.lines.map((line) => ({ ...line, text: masker.mask(line.text) })),
-        first: null, firstCheck: null, final: null, declined: false, failed: false, reread: 'none' };
+        first: null, firstCheck: null, final: null, declined: false, failed: false, reread: 'none', fromImage: false };
     });
-    const ask = async (state: PageState, model: string, effort: Effort) => {
+    const ask = async (state: PageState, model: string, effort: Effort, image?: PageImage) => {
       let answer: PageAnswer;
       try {
-        answer = await client.readPage({ model, effort, page: state.page, lines: state.lines }, signal);
+        answer = await client.readPage({ model, effort, page: state.page, lines: state.lines,
+          ...(image ? { image } : {}) }, signal);
       } catch (error) {
         // A call that ended without an answer still made requests (and may have used tokens): count them.
         // A call stopped before its first request (waiting for a permit) made none and adds nothing.
@@ -192,18 +207,43 @@ export class PaperReadingService {
       ...states.filter((state) => state.firstCheck !== null && state.firstCheck.rereadReasons.length > 0),
     ].slice(0, this.config.OCR_AI_MAX_REREAD_PAGES);
     const rereadAttempted = candidates.length > 0;
+    const skipped: ImageRereadSkip[] = [];
+    // The picture, encoded once for the document and only when a page is sent with it; never logged or stored.
+    let encoded: PageImage | null = null;
+    const pictureOf = (decision: Extract<PageImageDecision, { kind: 'image' }>): PageImage => {
+      encoded ??= { mediaType: decision.mediaType, base64: Buffer.from(decision.bytes.buffer, decision.bytes.byteOffset,
+        decision.bytes.byteLength).toString('base64') };
+      return encoded;
+    };
     await forEachBounded(candidates, pageConcurrency, async (state) => {
       let answer: PageAnswer | null = null;
+      let fromImage = false;
+      const decision = this.imageDecision(state, input);
       try {
-        answer = await ask(state, this.config.OCR_AI_REREAD_MODEL, this.config.OCR_AI_REREAD_EFFORT);
+        if (decision.kind === 'image') {
+          try {
+            answer = await ask(state, this.config.OCR_AI_REREAD_MODEL, this.config.OCR_AI_REREAD_EFFORT,
+              pictureOf(decision));
+            fromImage = true;
+          } catch (error) {
+            // The API refused the request with the picture (too large after all, say): re-read the text instead.
+            if (signal.aborted || !(error instanceof AiRejectedError)) throw error;
+            skipped.push({ page: state.page, reason: 'image_rejected' });
+            answer = await ask(state, this.config.OCR_AI_REREAD_MODEL, this.config.OCR_AI_REREAD_EFFORT);
+          }
+        } else {
+          skipped.push({ page: state.page, reason: decision.reason });
+          answer = await ask(state, this.config.OCR_AI_REREAD_MODEL, this.config.OCR_AI_REREAD_EFFORT);
+        }
       } catch (error) {
         if (signal.aborted) throw error;
         if (!(error instanceof AiTransientError) && !(error instanceof AiRejectedError)) throw error;
       }
       if (answer?.kind === 'answer') {
         state.final = checkPage({ page: state.page, lines: state.lines, answer: answer.answer,
-          sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker });
+          sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker, fromImage });
         state.reread = 'done';
+        state.fromImage = fromImage;
         return;
       }
       state.reread = 'failed';
@@ -240,23 +280,40 @@ export class PaperReadingService {
     const dropped = states.reduce((sum, state) => sum + (state.final?.droppedUngrounded ?? 0), 0);
     const droppedFirst = states.reduce((sum, state) => sum + (state.firstCheck?.droppedUngrounded ?? 0), 0);
     const rereadPages = states.filter((state) => state.reread === 'done').map((state) => state.page);
+    const imageRereadPages = states.filter((state) => state.reread === 'done' && state.fromImage)
+      .map((state) => state.page);
     const summary = this.summary(status, pages, kept, dropped, droppedFirst, rereadPages,
       states.filter((state) => state.reread === 'failed').length, true, usage, requests, refusals, states.length,
-      states.reduce((sum, state) => sum + state.masker.count, 0), servedGeo, null, rereadAttempted, tally.list());
+      states.reduce((sum, state) => sum + state.masker.count, 0), servedGeo, null, rereadAttempted, tally.list(),
+      imageRereadPages, [...skipped].sort((a, b) => a.page - b.page));
     return { payload: this.payload(pages, status === 'read' ? identity : blankIdentity(), kept, summary), summary };
+  }
+
+  /**
+   * Whether this re-read may carry the picture of the page: the setting on, the page hard to read (its flags or
+   * re-read reasons say handwriting or low confidence; from its lines where the first pass gave no answer), and
+   * the document a one-page PNG or JPEG within the image limits.
+   */
+  private imageDecision(state: PageState, input: ReadingInput): PageImageDecision {
+    if (this.config.OCR_AI_IMAGE_REREAD !== 'on') return { kind: 'skip', reason: 'image_reread_off' };
+    const reasons: readonly string[] = state.firstCheck
+      ? [...state.firstCheck.flagReasons, ...state.firstCheck.rereadReasons] : lineFlags(state.lines);
+    if (!reasons.some((reason) => HARD_TO_READ.has(reason))) return { kind: 'skip', reason: 'not_hard_to_read' };
+    return pageImageFor(input.document, state.page, input.pages.length);
   }
 
   private summary(status: ReadingStatus, pages: readonly PaperPage[], items: readonly PaperItem[], dropped: number,
     droppedFirst: number, rereadPages: number[], rereadFailed: number, aiUsed: boolean, usage: TokenUsage,
     requests: number, refusals: number, pagesSent: number, masked: number, servedGeo: string | null,
-    failureCode: string | null, rereadAttempted = false, modelUsage: AiUsageRecord[] = []): ReadingSummary {
+    failureCode: string | null, rereadAttempted: boolean, modelUsage: AiUsageRecord[],
+    imageRereadPages: number[], imageRereadSkipped: ImageRereadSkip[]): ReadingSummary {
     return {
       status,
       firstPassModel: aiUsed ? this.config.OCR_AI_FIRST_PASS_MODEL : null,
       rereadModel: aiUsed && rereadAttempted ? this.config.OCR_AI_REREAD_MODEL : null,
       inferenceGeo: aiUsed ? INFERENCE_GEO : null,
       servedInferenceGeo: servedGeo,
-      requests, refusals, pagesSent, rereadPages, rereadFailedPages: rereadFailed,
+      requests, refusals, pagesSent, rereadPages, rereadFailedPages: rereadFailed, imageRereadPages, imageRereadSkipped,
       droppedUngrounded: dropped, droppedUngroundedFirstPass: droppedFirst, itemCount: items.length,
       flaggedPages: pages.filter((page) => page.flagged).length, maskedNumbers: masked, failureCode, usage,
       modelUsage,
@@ -278,10 +335,15 @@ export class PaperReadingService {
         itemCount: items.length,
         promptVersion: PROMPT_VERSION,
         schemaVersion: `${PAPER_READING_SCHEMA_VERSION}+${MODEL_SCHEMA_VERSION}`,
+        imageRereadPages: summary.imageRereadPages,
+        imageRereadSkipped: summary.imageRereadSkipped.map((skip) => ({ ...skip })),
       },
     };
   }
 }
+
+/** Codes that make a page hard to read: the picture is sent for its re-read only for these. */
+const HARD_TO_READ = new Set(['handwriting', 'low_confidence', 'low_confidence_handwriting']);
 
 /** First-pass items kept when the re-read did not work: each one goes to a person. */
 function markRereadFailed(check: PageCheck): PageCheck {

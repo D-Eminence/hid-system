@@ -67,6 +67,19 @@ describe('OCR worker configuration', () => {
       .not.toHaveProperty('OCR_AI_GLOBAL_PROCESSING_APPROVED');
   });
 
+  it('re-reads hard pages with the picture by default only when AI reading is on, and fails closed on other values', () => {
+    const claude = { ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-fake-key-000000000',
+      OCR_AI_US_PROCESSING_APPROVED: 'true' };
+    expect(readOcrWorkerConfig(base).OCR_AI_IMAGE_REREAD).toBe('off');
+    expect(readOcrWorkerConfig(claude).OCR_AI_IMAGE_REREAD).toBe('on');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_IMAGE_REREAD: '  ' }).OCR_AI_IMAGE_REREAD).toBe('on');
+    expect(readOcrWorkerConfig({ ...claude, OCR_AI_IMAGE_REREAD: 'off' }).OCR_AI_IMAGE_REREAD).toBe('off');
+    expect(readOcrWorkerConfig({ ...base, OCR_AI_IMAGE_REREAD: 'on' }).OCR_AI_IMAGE_REREAD).toBe('on');
+    for (const value of ['yes', 'true', 'ON', '1', 'auto']) {
+      expect(() => readOcrWorkerConfig({ ...claude, OCR_AI_IMAGE_REREAD: value })).toThrow(/OCR_AI_IMAGE_REREAD/);
+    }
+  });
+
   it('never echoes the key in a configuration error', () => {
     const key = 'sk-ant-fake key with spaces 0000';
     expect(() => readOcrWorkerConfig({ ...base, ANTHROPIC_API_KEY: key })).toThrow(/ANTHROPIC_API_KEY/);

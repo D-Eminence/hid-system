@@ -2,7 +2,9 @@ import Anthropic from '@anthropic-ai/sdk';
 import { abortableDelay, fullJitterDelayMs, type Sleep } from '../backoff';
 import type { OcrWorkerConfig } from '../config';
 import { Semaphore } from '../semaphore';
-import { MODEL_OUTPUT_JSON_SCHEMA, modelPageSchema, pageMessage, SYSTEM_PROMPT, type ModelPage } from './prompt';
+import type { PageImage } from './page-image';
+import { imagePageMessage, MODEL_OUTPUT_IMAGE_JSON_SCHEMA, MODEL_OUTPUT_JSON_SCHEMA, modelImagePageSchema,
+  modelPageSchema, pageMessage, SYSTEM_PROMPT, type ModelPage } from './prompt';
 
 /** The Claude API, always at its own endpoint: ANTHROPIC_BASE_URL is never read. */
 export const ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
@@ -10,7 +12,17 @@ export const INFERENCE_GEO = 'us';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
-export interface PageLinesForModel { id: string; text: string; confidence: number; handwritten: boolean }
+/** A line as the model is given it. The box is sent only with the picture (image re-read). */
+export interface PageLinesForModel { id: string; text: string; confidence: number; handwritten: boolean;
+  box?: { left: number; top: number; width: number; height: number } | null }
+
+/**
+ * One page for the model. `image` (a hard page's re-read only) adds the picture of the page: the user turn is then
+ * [image, text], the text lists the lines with their boxes and the answer schema gives each item a box. Without it
+ * the request is exactly the text-only request. The picture is never logged, stored or put in an error.
+ */
+export interface PageRequest { model: string; effort: Effort; page: number; lines: readonly PageLinesForModel[];
+  image?: PageImage }
 
 export interface TokenUsage {
   inputTokens: number;
@@ -55,8 +67,7 @@ export class AiInterruptedError extends Error implements AiCallUse {
 }
 
 export interface PageModelClient {
-  readPage(request: { model: string; effort: Effort; page: number; lines: readonly PageLinesForModel[] },
-    signal: AbortSignal): Promise<PageAnswer>;
+  readPage(request: PageRequest, signal: AbortSignal): Promise<PageAnswer>;
 }
 
 const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504, 529]);
@@ -101,17 +112,22 @@ export class ClaudePageClient implements PageModelClient {
     this.limiter = options.limiter ?? new Semaphore(config.OCR_AI_MAX_CONCURRENT_REQUESTS ?? 4);
   }
 
-  async readPage(request: { model: string; effort: Effort; page: number; lines: readonly PageLinesForModel[] },
-    signal: AbortSignal): Promise<PageAnswer> {
+  async readPage(request: PageRequest, signal: AbortSignal): Promise<PageAnswer> {
+    const image = request.image;
     const params: Anthropic.MessageCreateParamsNonStreaming = {
       model: request.model,
       max_tokens: this.config.OCR_AI_MAX_TOKENS,
       inference_geo: INFERENCE_GEO,
       thinking: { type: 'adaptive' },
-      output_config: { effort: request.effort, format: { type: 'json_schema', schema: { ...MODEL_OUTPUT_JSON_SCHEMA } } },
-      // Frozen prefix: the same bytes for every page and document, cached.
+      output_config: { effort: request.effort, format: { type: 'json_schema',
+        schema: { ...(image ? MODEL_OUTPUT_IMAGE_JSON_SCHEMA : MODEL_OUTPUT_JSON_SCHEMA) } } },
+      // Frozen prefix: the same bytes for every page and document, cached. The image re-read's own
+      // instructions are in its user turn, so this system block is the same for both kinds of request.
       system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
-      messages: [{ role: 'user', content: pageMessage(request.page, request.lines) }],
+      messages: [{ role: 'user', content: image
+        ? [{ type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.base64 } },
+          { type: 'text', text: imagePageMessage(request.page, request.lines) }]
+        : pageMessage(request.page, request.lines) }],
     };
     const maxAttempts = this.config.OCR_AI_MAX_RETRIES + 1;
     // Attempts that reached the API without an answer, and the tokens they were reported to use: counted in
@@ -134,7 +150,7 @@ export class ClaudePageClient implements PageModelClient {
         stream = started;
         const message = await started.finalMessage();
         release();
-        return interpret(message, attempt, spent);
+        return interpret(message, attempt, spent, image !== undefined);
       } catch (error) {
         release();
         sent = attempt;
@@ -179,7 +195,8 @@ function partialUsage(stream: { readonly currentMessage: Anthropic.Message | und
  * stop_reason first, content after: a refusal or a cut-off answer is never parsed as one. `earlier` is what the
  * call's failed attempts before this one already used; it is added to the answer's usage.
  */
-export function interpret(message: Anthropic.Message, attempts: number, earlier: TokenUsage = noUsage()): PageAnswer {
+export function interpret(message: Anthropic.Message, attempts: number, earlier: TokenUsage = noUsage(),
+  withImage = false): PageAnswer {
   const usage = usageOf(message);
   addTokens(usage, earlier);
   if (message.stop_reason === 'refusal') return { kind: 'refused', usage, attempts };
@@ -191,7 +208,7 @@ export function interpret(message: Anthropic.Message, attempts: number, earlier:
     .map((block) => block.text).join('');
   let parsed: unknown;
   try { parsed = JSON.parse(text); } catch { return { kind: 'failed', reason: 'malformed', usage, attempts }; }
-  const answer = modelPageSchema.safeParse(parsed);
+  const answer = (withImage ? modelImagePageSchema : modelPageSchema).safeParse(parsed);
   if (!answer.success) return { kind: 'failed', reason: 'malformed', usage, attempts };
   return { kind: 'answer', answer: answer.data, usage, attempts,
     servedInferenceGeo: message.usage.inference_geo ?? null };

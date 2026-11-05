@@ -1,0 +1,50 @@
+import { base64Length, IMAGE_MAX_BASE64_LENGTH, jpegDimensions, pageImageFor, pngDimensions } from './page-image';
+import { fixtureJpeg, fixturePng } from './test-fixtures';
+
+describe('page picture for the image re-read', () => {
+  it('reads the size from a PNG IHDR and a JPEG frame header, and nothing from other bytes', () => {
+    expect(pngDimensions(fixturePng(1240, 1754))).toEqual({ width: 1240, height: 1754 });
+    expect(jpegDimensions(fixtureJpeg(2480, 3508))).toEqual({ width: 2480, height: 3508 });
+    expect(pngDimensions(fixtureJpeg(10, 10))).toBeNull();
+    expect(jpegDimensions(fixturePng(10, 10))).toBeNull();
+    expect(pngDimensions(new Uint8Array([0x89, 0x50, 0x4e, 0x47]))).toBeNull();
+    expect(jpegDimensions(new Uint8Array([0xff, 0xd8, 0xff, 0xda, 0, 2]))).toBeNull();
+    // A segment length that runs off the end never reads past the bytes.
+    expect(jpegDimensions(new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0xff, 0xff]))).toBeNull();
+  });
+
+  it('allows only a one-page PNG or JPEG by its detected type, within the Claude API image limits', () => {
+    const png = { mediaType: 'image/png', bytes: fixturePng(1240, 1754) };
+    expect(pageImageFor(png, 1, 1)).toMatchObject({ kind: 'image', mediaType: 'image/png' });
+    expect(pageImageFor({ mediaType: 'image/jpeg', bytes: fixtureJpeg(1240, 1754) }, 1, 1))
+      .toMatchObject({ kind: 'image', mediaType: 'image/jpeg' });
+    expect(pageImageFor(undefined, 1, 1)).toEqual({ kind: 'skip', reason: 'image_not_given' });
+    expect(pageImageFor({ mediaType: 'application/pdf', bytes: png.bytes }, 1, 1))
+      .toEqual({ kind: 'skip', reason: 'image_not_available_pdf' });
+    expect(pageImageFor({ mediaType: 'image/tiff', bytes: png.bytes }, 1, 1))
+      .toEqual({ kind: 'skip', reason: 'image_not_available_tiff' });
+    expect(pageImageFor({ mediaType: 'image/gif', bytes: png.bytes }, 1, 1))
+      .toEqual({ kind: 'skip', reason: 'image_not_available_type' });
+    expect(pageImageFor(png, 2, 2)).toEqual({ kind: 'skip', reason: 'not_single_page' });
+    expect(pageImageFor(png, 1, 2)).toEqual({ kind: 'skip', reason: 'not_single_page' });
+    expect(pageImageFor({ mediaType: 'image/png', bytes: fixturePng(8001, 1000) }, 1, 1))
+      .toEqual({ kind: 'skip', reason: 'image_too_large' });
+    expect(pageImageFor({ mediaType: 'image/jpeg', bytes: fixtureJpeg(1000, 8001) }, 1, 1))
+      .toEqual({ kind: 'skip', reason: 'image_too_large' });
+    expect(pageImageFor({ mediaType: 'image/png', bytes: fixturePng(8000, 8000) }, 1, 1)).toMatchObject({ kind: 'image' });
+    // A declared PNG whose bytes are not one: its size is unknown, so it is not sent.
+    expect(pageImageFor({ mediaType: 'image/png', bytes: fixtureJpeg(100, 100) }, 1, 1))
+      .toEqual({ kind: 'skip', reason: 'image_size_unknown' });
+  });
+
+  it('holds the base64 size to 10 MB without encoding the picture', () => {
+    expect(base64Length(3)).toBe(4);
+    expect(base64Length(4)).toBe(8);
+    const limitBytes = IMAGE_MAX_BASE64_LENGTH / 4 * 3;
+    expect(base64Length(limitBytes)).toBe(IMAGE_MAX_BASE64_LENGTH);
+    expect(pageImageFor({ mediaType: 'image/png', bytes: fixturePng(1000, 1000, limitBytes - 33) }, 1, 1))
+      .toMatchObject({ kind: 'image' });
+    expect(pageImageFor({ mediaType: 'image/png', bytes: fixturePng(1000, 1000, limitBytes - 32) }, 1, 1))
+      .toEqual({ kind: 'skip', reason: 'image_too_large' });
+  });
+});

@@ -22,6 +22,17 @@ describe('extraction view for the check screen', () => {
     expect(view.confidence).toBe(0.93);
   });
 
+  it('reads a v2 payload with or without the image re-read fields, and rejects an unknown skip reason', () => {
+    const withImage = { ...v2Payload(), reading: { ...v2Payload().reading, imageRereadPages: [1],
+      imageRereadSkipped: [{ page: 2, reason: 'image_not_available_pdf' }] } };
+    expect(parseStructuredPayload(withImage).contract).toBe('hid-paper-reading-v2');
+    expect(readingView(parseStructuredPayload(withImage)).reading).toMatchObject({ imageRereadPages: [1],
+      imageRereadSkipped: [{ page: 2, reason: 'image_not_available_pdf' }] });
+    expect(parseStructuredPayload(v2Payload()).contract).toBe('hid-paper-reading-v2');
+    expect(parseStructuredPayload({ ...withImage, reading: { ...withImage.reading,
+      imageRereadSkipped: [{ page: 2, reason: 'guessed' }] } }).contract).toBeNull();
+  });
+
   it('gives every item exactly the contract fields the check screen uses', () => {
     const [, medicine] = projectExtraction(extractionRow(v2Payload())).paperReading.items;
     expect(Object.keys(medicine!).sort()).toEqual(['asWritten', 'box', 'checkReason', 'checkReasons', 'confidence',

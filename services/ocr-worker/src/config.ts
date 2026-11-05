@@ -81,6 +81,10 @@ const schema = z.object({
   // take every request slot.
   OCR_AI_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
   OCR_AI_FACILITY_IDS: facilityIds,
+  // Re-read hard pages (handwriting or low confidence) WITH the page picture: PNG and JPEG single-page images only,
+  // on the re-read only (owner decision "Yes, send image for hard pages", 2026-11-05). 'on' or 'off'; unset or
+  // empty means 'on' when OCR_AI_MODE=claude and 'off' otherwise. Any other value fails startup.
+  OCR_AI_IMAGE_REREAD: z.preprocess(emptyToUndefined, z.enum(['on', 'off']).optional()),
 }).superRefine((env, context) => {
   if (env.OCR_PROVIDER === 'test' && env.NODE_ENV !== 'test') {
     context.addIssue({ code: 'custom', path: ['OCR_PROVIDER'], message: 'The test OCR provider is restricted to NODE_ENV=test' });
@@ -115,7 +119,8 @@ const schema = z.object({
         message: 'AI reading requires approved US processing on the Claude API (inference_geo "us")' });
     }
   }
-});
+}).transform((env) => ({ ...env,
+  OCR_AI_IMAGE_REREAD: env.OCR_AI_IMAGE_REREAD ?? (env.OCR_AI_MODE === 'claude' ? 'on' as const : 'off' as const) }));
 
 export type OcrWorkerConfig = z.infer<typeof schema>;
 

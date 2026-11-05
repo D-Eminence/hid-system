@@ -17,6 +17,10 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['strength_mismatch', 'strength_not_as_written'], "A dose on the paper doesn't match what was read."],
   [['nkda_not_on_paper', 'nkda_conflicts'], "The paper doesn't clearly say there are no known allergies."],
   [['value_mismatch', 'reading_number_mismatch', 'plain_mismatch'], "A number on the paper doesn't match what was read."],
+  [['number_not_in_text_read'], "A number read from the picture isn't in the text read from the page; check it against the paper."],
+  // After the dose and number disagreements, before the text-match ones (an item read from the picture is
+  // expected to differ from the text the service read).
+  [['read_from_image'], 'This was read from the picture of the page; check it against the paper.'],
   [['measure_mismatch'], "What was measured doesn't match the label on the paper."],
   [['plain_contradicts'], "The plain reading says something the paper doesn't."],
   [['frequency_mismatch', 'duration_mismatch'], "How often or how long doesn't match the paper."],
@@ -74,6 +78,43 @@ export interface PageCheckInput {
   sourceSha256Hex: string;
   readBy: 'first_pass' | 'reread';
   masker: Masker;
+  /**
+   * The answer was read from the picture of the page (image re-read). Its items are held to the page by place,
+   * not by text: each must cite lines on this page and give a box that overlaps those lines' box.
+   */
+  fromImage?: boolean;
+}
+
+/** Intersection over the smaller box, as the accuracy kit's scorer places items: 1 when one lies inside the other. */
+export function boxOverlap(a: Box, b: Box): number {
+  const width = Math.min(a.left + a.width, b.left + b.width) - Math.max(a.left, b.left);
+  const height = Math.min(a.top + a.height, b.top + b.height) - Math.max(a.top, b.top);
+  if (width <= 0 || height <= 0) return 0;
+  const smaller = Math.min(a.width * a.height, b.width * b.height);
+  return smaller > 0 ? (width * height) / smaller : 0;
+}
+
+/** An image-read item sits where the writing is when its box and its cited lines' box overlap this much. */
+export const IMAGE_PLACE_OVERLAP = 0.5;
+
+/** A model box clipped to the page ([0, 1] on both axes); null where nothing of it is on the page. */
+export function clipBox(box: { left: number; top: number; width: number; height: number }): Box | null {
+  const clamp = (value: number) => Math.max(0, Math.min(1, value));
+  const left = clamp(box.left);
+  const top = clamp(box.top);
+  const right = clamp(box.left + box.width);
+  const bottom = clamp(box.top + box.height);
+  if (!(right > left) || !(bottom > top)) return null;
+  return { left: round4(left), top: round4(top), width: round4(right - left), height: round4(bottom - top) };
+}
+
+/** The stored box of an image-read item, or null where it does not sit on its cited lines (it is then dropped). */
+function imagePlace(raw: ModelItem, lines: readonly ReadLine[]): Box | null {
+  if (!raw.box) return null;
+  const box = clipBox(raw.box);
+  const cited = unionBox(lines.map((line) => line.box));
+  if (box === null || cited === null) return null;
+  return boxOverlap(box, cited) >= IMAGE_PLACE_OVERLAP ? box : null;
 }
 
 export interface PageCheck {
@@ -117,12 +158,19 @@ export function checkPage(input: PageCheckInput): PageCheck {
     const cited = lineIds.map((id) => byId.get(id));
     const source = cited.map((line) => line?.text ?? '').join(' ');
     if (lineIds.length === 0 || cited.some((line) => line === undefined) || !norm(raw.asWritten)
-        || !has(source, raw.asWritten)) {
+        || (!input.fromImage && !has(source, raw.asWritten))) {
       dropped += 1;
       continue;
     }
     const lines = cited as ReadLine[];
+    // Read from the picture: held to the page by place. Dropped items are only counted, as above.
+    const place = input.fromImage ? imagePlace(raw, lines) : null;
+    if (input.fromImage && place === null) {
+      dropped += 1;
+      continue;
+    }
     const item = checkItem(raw, lines, lineIds, source, pageText, order, medicineNames, allergySubstances, input);
+    if (place !== null) markReadFromImage(item, raw, source, place);
     const group = seen.get(item.id) ?? [];
     // An exact repeat (same kind, lines, asWritten and fields) collapses to one.
     if (group.some((kept) => JSON.stringify(kept.fields) === JSON.stringify(item.fields))) continue;
@@ -143,8 +191,10 @@ export function checkPage(input: PageCheckInput): PageCheck {
   // missed item is most likely. The cited-only view above decides only the re-read.
   const anyLowHandwritten = input.lines.some((line) => line.handwritten && line.confidence < REVIEW_BELOW);
   const anyLowPrinted = input.lines.some((line) => !line.handwritten && line.confidence < REVIEW_BELOW);
-  // Handwriting alone makes an item check_carefully, but it is not a sign the first pass was shaky.
-  const shaky = items.filter((item) => item.checkReasons.some((code) => code !== 'handwritten'));
+  // Handwriting alone makes an item check_carefully, but it is not a sign the first pass was shaky; nor is
+  // having been read from the picture (every such item is).
+  const shaky = items.filter((item) => item.checkReasons.some((code) => code !== 'handwritten'
+    && code !== 'read_from_image'));
   const shakyShare = items.length === 0 ? 0 : shaky.length / items.length;
   const rereadReasons = [
     ...(input.answer.pageUnsure ? ['page_unsure'] : []),
@@ -165,6 +215,24 @@ export function checkPage(input: PageCheckInput): PageCheck {
   for (const item of items) item.asWritten = input.masker.restore(item.asWritten);
   return { items: uniqueItemIds(items), droppedUngrounded: dropped, identity, pageUnsure: input.answer.pageUnsure,
     rereadReasons, flagReasons };
+}
+
+/**
+ * An item read from the picture always goes to a person: 'read_from_image', check_carefully, the stored box its
+ * own place on the page, and 'number_not_in_text_read' where it has a number the text read of its lines doesn't.
+ */
+function markReadFromImage(item: PaperItem, raw: ModelItem, source: string, place: Box): void {
+  const textNumbers = new Set(numbersIn(withoutPlaceholders(source)));
+  const written = [raw.asWritten, raw.strength, raw.frequency, raw.duration, raw.value, raw.referenceRange,
+    raw.dateAsWritten, raw.prescriptionDate, raw.noteText];
+  if (written.some((text) => numbersIn(withoutPlaceholders(text)).some((number) => !textNumbers.has(number)))) {
+    if (!item.checkReasons.includes('number_not_in_text_read')) item.checkReasons.push('number_not_in_text_read');
+  }
+  if (!item.checkReasons.includes('read_from_image')) item.checkReasons.push('read_from_image');
+  item.checkReasons = item.checkReasons.filter((code) => code !== 'no_position');
+  item.box = place;
+  item.confidence = 'check_carefully';
+  item.checkReason = checkReasonSentence(item.checkReasons);
 }
 
 function markDuplicateSpan(item: PaperItem): void {
