@@ -18,15 +18,16 @@ describe('patientEntriesEnabled', () => {
     resetEnvironmentForTests();
     delete process.env.PATIENT_ENTRIES_ENABLED;
     expect(() => patientEntriesEnabled()).not.toThrow();
-    expect(patientEntriesEnabled()).toBe(false);
-    process.env.PATIENT_ENTRIES_ENABLED = 'true';
+    // On unless switched off (the owner's decision of 4 Nov 2026, as PATIENT_SHARES_ENABLED: production sets no key).
     expect(patientEntriesEnabled()).toBe(true);
+    process.env.PATIENT_ENTRIES_ENABLED = 'false';
+    expect(patientEntriesEnabled()).toBe(false);
   });
 
-  it('is off for anything but exactly true', () => {
-    for (const value of ['false', 'TRUE', 'yes', '1', '']) {
-      process.env.PATIENT_ENTRIES_ENABLED = value;
-      expect(patientEntriesEnabled()).toBe(false);
-    }
+  it('is on for true, off only for exactly false', () => {
+    process.env.PATIENT_ENTRIES_ENABLED = 'true';
+    expect(patientEntriesEnabled()).toBe(true);
+    process.env.PATIENT_ENTRIES_ENABLED = 'false';
+    expect(patientEntriesEnabled()).toBe(false);
   });
 });

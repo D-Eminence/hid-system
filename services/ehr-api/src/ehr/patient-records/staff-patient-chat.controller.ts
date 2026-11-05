@@ -16,7 +16,8 @@ export class StaffPatientChatController {
   @Post() @Header('Cache-Control', 'no-store')
   async answer(@Param('patientId', new ParseUUIDPipe()) id: string, @Body() body: PatientChatDto, @Req() request: HidRequest) {
     const scope = await this.scopes.open(request, id);
-    return this.chat.answer(request, body.question, { ...scope, chunksTable: 'ehr.staff_evidence_chunks',
+    // Staff audience: full access to this one patient, no patient-chat safeguards.
+    return this.chat.answer(request, body.question, { ...scope, audience: 'staff', chunksTable: 'ehr.staff_evidence_chunks',
       audit: this.evidence.auditScope(scope), evidence: this.evidence.bind(scope), history: this.history.bind(scope) });
   }
   @Get('history') @Header('Cache-Control', 'no-store')

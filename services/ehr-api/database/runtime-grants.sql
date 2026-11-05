@@ -445,6 +445,11 @@ grant usage on schema ehr to hid_document_scanner;
 grant execute on function ehr.append_document_scan_event(
   uuid, text, text, text, text, text, text, text, text, text
 ) to hid_document_scanner;
+-- 0105: the bridge's two read commands (an S3 object to its document, and the
+-- reconcile work list), as 0105 grants them: the scanner only, never PUBLIC
+-- (revoked below). Each rechecks the scanner role and correlation ID itself.
+grant execute on function ehr.resolve_document_scan_target(text, text, text, text),
+  ehr.list_documents_awaiting_scan(integer, integer, text) to hid_document_scanner;
 
 grant usage on schema platform, ocr to hid_ocr_runtime;
 grant select, insert, update on ocr.jobs to hid_ocr_runtime;
@@ -1399,6 +1404,20 @@ revoke all on function identity.demo_story_context(text,uuid,uuid,text),
 -- commands, which keep the Identity grants above. No grant changes.
 revoke all on function identity.organization_application_admin_account(text) from public;
 
+-- Records processing (0104): the patient's request list, recreated with its
+-- purpose column, keeps the same signature and its grant to the Identity
+-- runtime above. The access-request trigger function is granted to no role.
+-- has_active_consent_grant keeps its grants above (0104 replaces its body);
+-- the cover it calls (owner decision 34(1)) is read by Identity alone, to name
+-- the direct-care grant that covered a records-processing check.
+revoke all on function identity.access_requests_records_processing() from public;
+revoke all on function identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz) from public;
+grant execute on function identity.records_processing_direct_care_cover(uuid,text,uuid,uuid,text,timestamptz)
+  to hid_identity_runtime;
+-- Document scanning (0105): the scanner's resolve and work-list commands are
+-- granted to hid_document_scanner above and to no other role.
+revoke all on function ehr.resolve_document_scan_target(text, text, text, text),
+  ehr.list_documents_awaiting_scan(integer, integer, text) from public;
 -- Records patients add themselves (0116), as that migration grants it (its
 -- section 4): SELECT on ehr.patient_entries (forced RLS: active entries in a
 -- patient-self or consented clinician read) and the patient's add and

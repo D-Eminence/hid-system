@@ -22,7 +22,10 @@
 -- superuser nor BYPASSRLS (release checklist P8). The worker commands then
 -- cannot see ocr.jobs under row-level security, and every case must be
 -- refused: the suite expects that when the commands' owner cannot see the
--- fixture job.
+-- fixture job. The claim is the exception since 0105 replaced it in the form
+-- RDS runs (#variable_conflict in its body, not a superuser-only setting): it
+-- then runs, sees no job and claims or recovers nothing, which the last block
+-- checks.
 begin;
 
 -- Security properties that CREATE OR REPLACE must keep.
@@ -410,7 +413,8 @@ begin
     into mismatches
     from ocr_lease_cases
    where case when owner_sees_jobs then actual is distinct from expected
-              else actual is not distinct from 'ok' end;
+              else actual is not distinct from 'ok'
+                   and name <> 'claim that recovers a job whose document was withdrawn' end;
   if mismatches is not null then
     raise exception E'OCR worker lease cases failed (owner sees jobs: %):\n%', owner_sees_jobs, mismatches;
   end if;
@@ -425,6 +429,13 @@ declare
   job record;
 begin
   if not owner_sees_jobs then
+    -- The claim ran blind: J7 keeps its expired lease and nothing was claimed.
+    select * into job from ocr.jobs where id = 'e8a60000-0000-4000-8000-000000000007';
+    if job.status <> 'processing' or job.claim_token is null
+       or exists (select 1 from audit.events where action in ('ocr.worker.claim', 'ocr.worker.lease_recovered')
+                   and resource_id like 'e8a60000-%') then
+      raise exception 'a claim that cannot see ocr.jobs changed a job: %', row_to_json(job);
+    end if;
     return;
   end if;
   select * into job from ocr.jobs where id = 'e8a60000-0000-4000-8000-000000000002';

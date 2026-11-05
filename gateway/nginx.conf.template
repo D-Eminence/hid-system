@@ -137,6 +137,11 @@ server {
     # Express also accepts mixed case and a trailing slash. The canonical exact
     # location above wins; reject aliases here before the ordinary EHR proxy.
     if ($uri ~* "^/api/v1/ehr/me/chat/?$") { return 404; }
+    # The document scanner's routes (scan-events, scan-targets, scan-targets/
+    # resolve) are for the GuardDuty bridge on the internal load balancer only.
+    # $uri is decoded and its slashes merged, so encoded or doubled variants
+    # are refused too.
+    if ($uri ~* "^/api/v1/ehr/documents/scan-(events|targets)") { return 404; }
     include /etc/nginx/hid-proxy-headers.conf;
     proxy_pass $hid_ehr_upstream;
   }

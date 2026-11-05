@@ -1,5 +1,8 @@
-// Every relation is protected by patient-self RLS. No source payload or clinical
-// identifiers are interpolated. Stable keyset pages prevent the old 50-row cutoff.
+import { LOINC_SYSTEM_SQL_PATTERN, SENSITIVE_LOINC_SQL_LIST, SENSITIVE_TEST_SQL_PATTERN } from './patient-evidence.policy';
+
+// Every relation is protected by patient-self RLS (patient chat) or facility and
+// consent RLS (staff chat). No source payload or clinical identifiers are
+// interpolated. Stable keyset pages prevent the old 50-row cutoff.
 // origin_hint tells where a row came from beyond its kind (evidenceOrigin): an
 // imported record's recorded origin, or 'scanned_paper' for a clinical note
 // read from a scanned paper record. A note is known to be one by its OCR
@@ -9,7 +12,7 @@
 // (ClinicalNotesService.createImportedFromOcr). A later amendment hides the
 // first revision from the patient's session, so such a note then reads as a
 // health worker's until the patient may read the provenance row.
-export const LOCAL_EVIDENCE_QUERY = `with sources as (
+const BASE_EVIDENCE_QUERY = `with sources as (
  select 'note' kind,n.id,n.patient_id,n.current_revision_no::text version,coalesce(n.title,'Clinical note') title,
  r.created_at recorded_at,n.signed_at effective_at,'Signed clinical note' provenance,'released' quality,
  jsonb_build_object('_encounterId',n.encounter_id,'noteType',n.note_type,'text',r.content,'signedAt',n.signed_at,'revisionRecordedAt',r.created_at) fields,
@@ -53,20 +56,81 @@ export const LOCAL_EVIDENCE_QUERY = `with sources as (
 select kind,id,version,title,recorded_at,effective_at,provenance,quality,fields,origin_hint from sources
 where patient_id=$1 and (kind,id::text)>($2::text,$3::text) order by kind,id::text limit 201`;
 
+export type EvidenceAudience = 'patient' | 'staff';
+
+/** Replaces exactly one occurrence, so a missed or repeated anchor fails loudly instead of silently. */
+function replaceOnce(text: string, from: string, to: string): string {
+  const at = text.indexOf(from);
+  if (at < 0 || text.indexOf(from, at + 1) >= 0) throw new Error(`Evidence query anchor must occur exactly once: ${from.slice(0, 60)}`);
+  return text.slice(0, at) + to + text.slice(at + from.length);
+}
+const SELECT = 'select kind,id,version,title,recorded_at,effective_at,provenance,quality,fields,origin_hint from sources';
+const SELECT_WITH_PATIENT = 'select kind,id,version,title,recorded_at,effective_at,provenance,quality,fields,origin_hint,patient_id from sources';
 // The records the patient added themselves (0116), as one more branch, only
-// while PATIENT_ENTRIES_ENABLED is on: while off the query is exactly
-// LOCAL_EVIDENCE_QUERY and never names ehr.patient_entries, so this image
-// also runs before 0116. Active entries only (0116's read policy says the
-// same); a withdrawn one leaves the evidence, so saved answers citing it stop
-// showing and its vectors are never ranked.
+// while PATIENT_ENTRIES_ENABLED is on: while off the query is exactly what it
+// was before 0116 and never names ehr.patient_entries, so this image also runs
+// before 0116. Active entries only (0116's read policy says the same); a
+// withdrawn one leaves the evidence, so saved answers citing it stop showing
+// and its vectors are never ranked. Both audiences read the same fields; the
+// staff permission filter ($4) and the patient-chat policy apply to it as to
+// every other kind.
 const PATIENT_ENTRY_SOURCES = `
  union all select 'patient_entry',pe.id,pe.patient_id,pe.row_version::text,pe.title,pe.created_at,(pe.occurred_on::timestamp at time zone 'UTC'),
  'Record added by the patient, not checked by a health worker','patient reported',
  jsonb_build_object('type',pe.kind,'place',pe.facility_name,'date',pe.occurred_on,'notes',pe.notes),null
  from ehr.patient_entries pe where pe.status='active'`;
-const SOURCES_END = '\n)\nselect kind,id,version,title,recorded_at,effective_at,provenance,quality,fields,origin_hint from sources';
-export function localEvidenceQuery(includePatientEntries: boolean): string {
-  if (!includePatientEntries) return LOCAL_EVIDENCE_QUERY;
-  if (LOCAL_EVIDENCE_QUERY.split(SOURCES_END).length !== 2) throw new Error('The evidence query lost its sources block');
-  return LOCAL_EVIDENCE_QUERY.replace(SOURCES_END, () => PATIENT_ENTRY_SOURCES + SOURCES_END);
+const completedEncounter = (alias: string) =>
+  `join ehr.encounters e on e.id=${alias}.encounter_id and e.patient_id=${alias}.patient_id and e.facility_id=${alias}.facility_id and e.status='completed'`;
+const VITAL_FIELDS_SQL = "jsonb_build_object('recorded_at',v.recorded_at,'height_cm',v.height_cm,'weight_kg',v.weight_kg,"
+  + "'temperature_c',v.temperature_c,'pulse_bpm',v.pulse_bpm,'respiratory_rate',v.respiratory_rate,'systolic_mmhg',v.systolic_mmhg,"
+  + "'diastolic_mmhg',v.diastolic_mmhg,'oxygen_saturation_percent',v.oxygen_saturation_percent,'source',v.source)";
+
+/**
+ * Staff: exactly the query the staff chat has always used (its source
+ * permission filter $4, completed-encounter diagnoses and vitals), with the
+ * row's patient_id so the caller can check every row is its one patient.
+ * Nothing the patient chat leaves out is removed here: staff keeps refuted
+ * diagnoses with their notes, request reasons and cancelled items, each
+ * labelled by its status.
+ *
+ * Patient: the patient-self rows the patient chat may use (patient-evidence.policy.ts
+ * re-checks every rule): notes, prescriptions and test requests only from a
+ * completed visit; confirmed diagnoses without the clinician's notes; active,
+ * on-hold or completed prescriptions without free-text instructions; active,
+ * on-hold or completed test requests without the clinical reason or priority,
+ * and never a sensitive test; vitals as an explicit list of measures.
+ */
+export function evidenceQuery(audience: EvidenceAudience, includePatientEntries = false): string {
+  let q = BASE_EVIDENCE_QUERY;
+  if (includePatientEntries) q = replaceOnce(q, `\n)\n${SELECT}`, `${PATIENT_ENTRY_SOURCES}\n)\n${SELECT}`);
+  if (audience === 'staff') {
+    q = replaceOnce(q, 'where patient_id=$1 and (kind', 'where patient_id=$1 and kind=any($4::text[]) and (kind');
+    q = replaceOnce(q, "from ehr.diagnoses d where d.verification_status<>'entered_in_error'", "from ehr.diagnoses d where d.verification_status<>'entered_in_error' and exists(select 1 from ehr.encounters e where e.id=d.encounter_id and e.patient_id=d.patient_id and e.facility_id=d.facility_id and e.status='completed')");
+    q = replaceOnce(q, 'from ehr.vitals v left join', "from ehr.vitals v join ehr.encounters e on e.id=v.encounter_id and e.patient_id=v.patient_id and e.facility_id=v.facility_id and e.status='completed' left join");
+    return replaceOnce(q, SELECT, SELECT_WITH_PATIENT);
+  }
+  if (audience !== 'patient') throw new Error('Unknown evidence audience');
+  // Notes: only from a completed visit (withdrawn and unfinished visits are left out).
+  q = replaceOnce(q, "jsonb_build_object('_encounterId',n.encounter_id,'noteType'", "jsonb_build_object('_encounterId',n.encounter_id,'_encounterStatus',e.status,'noteType'");
+  q = replaceOnce(q, 'from ehr.clinical_notes n join ehr.clinical_note_revisions r', `from ehr.clinical_notes n ${completedEncounter('n')} join ehr.clinical_note_revisions r`);
+  // Diagnoses: confirmed only, and never the clinician's notes.
+  q = replaceOnce(q, ",'onsetAt',d.onset_at,'abatementAt',d.abatement_at,'notes',d.notes)", ",'onsetAt',d.onset_at,'abatementAt',d.abatement_at)");
+  q = replaceOnce(q, "from ehr.diagnoses d where d.verification_status<>'entered_in_error'", "from ehr.diagnoses d where d.verification_status='confirmed'");
+  // Prescriptions: current or finished ones from a completed visit, without free-text instructions.
+  q = replaceOnce(q, "jsonb_build_object('_encounterId',p.encounter_id,", "jsonb_build_object('_encounterId',p.encounter_id,'_encounterStatus',e.status,");
+  q = replaceOnce(q, ",'frequency',p.frequency,'instructions',p.instructions,", ",'frequency',p.frequency,");
+  q = replaceOnce(q, "from ehr.prescriptions p where p.status not in ('draft','entered_in_error')", `from ehr.prescriptions p ${completedEncounter('p')} where p.status in ('active','on_hold','completed')`);
+  // Test requests: current or finished ones from a completed visit, without the reason or priority; no sensitive test.
+  q = replaceOnce(q, "jsonb_build_object('_encounterId',l.encounter_id,", "jsonb_build_object('_encounterId',l.encounter_id,'_encounterStatus',e.status,");
+  q = replaceOnce(q, ",'status',l.status,'priority',l.priority,'information',l.clinical_information)", ",'status',l.status)");
+  q = replaceOnce(q, "from ehr.lab_requests l where l.status not in ('draft','entered_in_error')",
+    `from ehr.lab_requests l ${completedEncounter('l')} where l.status in ('active','on_hold','completed') and coalesce(l.test_display,'') !~* '${SENSITIVE_TEST_SQL_PATTERN}'`
+    + ` and not (btrim(coalesce(l.test_code_system,'')) ~* '${LOINC_SYSTEM_SQL_PATTERN}' and btrim(coalesce(l.test_code,'')) in (${SENSITIVE_LOINC_SQL_LIST}))`);
+  // Vitals: an explicit list of measures, so a future column cannot leak.
+  q = replaceOnce(q, "(to_jsonb(v)-array['id','encounter_id','patient_id','facility_id','created_by','created_by_membership_id','created_at','updated_at','row_version','current_correction_no'])", VITAL_FIELDS_SQL);
+  return replaceOnce(q, SELECT, SELECT_WITH_PATIENT);
 }
+/** Params $1 patient id, $2/$3 keyset cursor. Without the records the patient added (0116). */
+export const PATIENT_EVIDENCE_QUERY = evidenceQuery('patient');
+/** Params $1 patient id, $2/$3 keyset cursor, $4 the source kinds the staff member may read. */
+export const STAFF_EVIDENCE_QUERY = evidenceQuery('staff');

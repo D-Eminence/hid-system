@@ -111,7 +111,7 @@ const environmentSchema = z
     OFFLINE_ESCROW_KEYS: optionalString,
     // Records patients add themselves (0116): off (the default) answers a plain 404 on their routes and leaves them out
     // of the records answer and both chats; turned on only after 0116 is applied and the website reads them.
-    PATIENT_ENTRIES_ENABLED: booleanString,
+    PATIENT_ENTRIES_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),
     // Card links (0118): a code default, on since the owner's decision of 4 Nov 2026 after legal approval (NDPA,
     // D13). false switches it off: GET card-share/records answers a plain 404.
     CARD_LINKS_ENABLED: z.enum(['true', 'false']).default('true').transform((value) => value === 'true'),

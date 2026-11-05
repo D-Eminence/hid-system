@@ -96,7 +96,7 @@
   "migration": {
     "first": "0001",
     "last": "0118",
-    "count": 106,
+    "count": 108,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -515,12 +515,20 @@
         "sha256": "24d9ccd4dfa18aad5cf1c3d9268ff043bd001c4d5b41660b00af01c4aadfca8f"
       },
       {
+        "name": "0104_records_processing_purpose.sql",
+        "sha256": "44bd0ca33b4554071c380851726deb547f71942e660fc234d61e380041d11571"
+      },
+      {
+        "name": "0105_document_scanner.sql",
+        "sha256": "bf68aaaca9e773fce6022a5241f32f35a9937cd9b496e04445b75022a43788c8"
+      },
+      {
         "name": "0116_patient_entries.sql",
-        "sha256": "57bf41f60b64fb51a807916fbec68af64aec189bfa476d704892d0bc4a76884d"
+        "sha256": "21a2832e6aeb88621e9a6e2527e6e93721b745de011932e409246afa269420b7"
       },
       {
         "name": "0118_card_links.sql",
-        "sha256": "7d465601815348a70d53b06bed7dda0f290ee581673f850b54e017aa0b6c17d3"
+        "sha256": "c390c911ec584c3ab62503db0747cd31ef991eba5e9def06664c11dd43bc3a93"
       }
     ]
   },

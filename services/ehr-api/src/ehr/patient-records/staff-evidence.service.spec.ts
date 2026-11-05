@@ -1,4 +1,7 @@
-import { StaffEvidenceService } from './staff-evidence.service';
+import { createHash } from 'node:crypto';
+import { STAFF_ATTACHMENT_TEXT_QUERY, STAFF_EVIDENCE_QUERY, StaffEvidenceService } from './staff-evidence.service';
+import { PATIENT_EVIDENCE_QUERY } from './patient-evidence.query';
+import { attachmentTextQuery } from './patient-attachment-text.service';
 import { STAFF_SOURCE_PERMISSIONS, type StaffChatScope } from './staff-chat-scope.service';
 import { binding, type SourceKind } from './patient-evidence.types';
 import { DomainProblem } from '../../common/problem';
@@ -9,7 +12,7 @@ afterEach(()=>{mockEntriesEnabled=false;});
 const patientId='11111111-1111-4111-8111-111111111111',sourceId='22222222-2222-4222-8222-222222222222';
 function setup() {
   const row={kind:'note',id:sourceId,version:'1',title:'Synthetic note',recorded_at:new Date(),effective_at:null,
-    provenance:'Signed note',quality:'released',fields:{text:'Synthetic A evidence'}};
+    provenance:'Signed note',quality:'released',fields:{text:'Synthetic A evidence'},patient_id:patientId};
   const query=jest.fn().mockResolvedValue({rows:[row]}),authorize=jest.fn().mockResolvedValue({patientId});
   const permissions=['ehr.note.read'];
   const scope={patientId,context:{actor:{accountId:'staff-a'},membershipId:'member-a',facilityId:'facility-a'},permissions,
@@ -95,4 +98,84 @@ it('leaves the records patients add out of the kinds and the coverage while the 
   const narrowSnapshot=await narrow.service.bind(narrow.scope).snapshot(narrow.request);
   expect(narrow.query.mock.calls[0]![1][3]).not.toContain('patient_entry');
   expect(narrowSnapshot.coverage.unavailable).toContain('Some record categories are outside your current read permissions.');
+  // One patient per chat: a record the patient added for anyone else refuses the read, as any row does.
+  const foreign=setup();foreign.permissions.push(...every);mockEntriesEnabled=true;
+  foreign.query.mockResolvedValue({rows:[foreign.row,{...foreign.row,kind:'patient_entry',id:'22222222-2222-4222-8222-222222222296',origin_hint:null,
+    patient_id:'99999999-9999-4999-8999-999999999999',fields:{type:'visit',place:null,date:'2026-10-01',notes:null}}]});
+  await expect(foreign.service.bind(foreign.scope).snapshot(foreign.request)).rejects.toMatchObject({code:'CHAT_ACCESS_DENIED'});
+});
+
+const sha=(text:string)=>createHash('sha256').update(text).digest('hex');
+describe('staff queries are pinned (golden)',()=>{
+  // Measured at 34d69557: today's staff evidence query (LOCAL_EVIDENCE_QUERY with the
+  // $4 permission filter and completed-visit diagnoses and vitals) with only
+  // ",patient_id" added to the final select, and today's staff document query.
+  it('keeps the staff evidence query exactly as it was, plus patient_id in the final select',()=>{
+    expect(sha(STAFF_EVIDENCE_QUERY.replace(',origin_hint,patient_id from sources',',origin_hint from sources')))
+      .toBe('fd73cd5d42d12fb4f1faa20cc4f22851aed5eda132c87d614cfb1a02c48b250f');
+    expect(sha(STAFF_EVIDENCE_QUERY)).toBe('0621ed428f74b62604eb2566a1654a19cf41bdee0d33330a8ad5eb52e1d53bd5');
+    expect(STAFF_EVIDENCE_QUERY).toContain('where patient_id=$1 and kind=any($4::text[]) and (kind');
+    expect(STAFF_EVIDENCE_QUERY).not.toBe(PATIENT_EVIDENCE_QUERY);
+  });
+  it('keeps the staff document query byte-identical, with every classification and file names',()=>{
+    expect(STAFF_ATTACHMENT_TEXT_QUERY).toBe(attachmentTextQuery('staff'));
+    expect(sha(STAFF_ATTACHMENT_TEXT_QUERY)).toBe('fc695715139604a243b48813cac51bc7f33d91b1b03d0a029c659ebd8c743dab');
+    expect(STAFF_ATTACHMENT_TEXT_QUERY).not.toContain('classification');
+  });
+});
+it('sends the staff document query and the staff evidence query to the database',async()=>{
+  const s=setup();s.permissions.push('ehr.document.read');
+  await s.service.bind(s.scope).snapshot(s.request);
+  expect(s.query.mock.calls[0]![0]).toBe(STAFF_EVIDENCE_QUERY);
+  expect((s.documents.read.mock.calls[0]![3] as {query:string}).query).toBe(STAFF_ATTACHMENT_TEXT_QUERY);
+});
+describe('one patient per chat',()=>{
+  const other='99999999-9999-4999-8999-999999999999';
+  it('refuses the snapshot with 403 when any row is for another patient, or names no patient',async()=>{
+    for(const patient_id of [other,undefined,null,'']) {
+      const s=setup();s.query.mockResolvedValue({rows:[s.row,{...s.row,id:'22222222-2222-4222-8222-222222222223',patient_id}]});
+      await expect(s.service.bind(s.scope).snapshot(s.request)).rejects.toMatchObject({code:'CHAT_ACCESS_DENIED'});
+    }
+  });
+  it('refuses the source viewer and the currentness check the same way',async()=>{
+    const s=setup(),evidence=s.service.bind(s.scope),snapshot=await evidence.snapshot(s.request);
+    s.query.mockResolvedValue({rows:[{...s.row,patient_id:other}]});
+    await expect(s.service.source(s.scope,s.request,'note',sourceId)).rejects.toMatchObject({code:'CHAT_ACCESS_DENIED'});
+    await expect(evidence.assertCurrent(s.request,snapshot.records.map(binding))).rejects.toMatchObject({code:'CHAT_ACCESS_DENIED'});
+  });
+  it('refuses when the scope authorizes a different patient than the chat was opened for',async()=>{
+    const s=setup();s.authorize.mockResolvedValue({patientId:other});
+    await expect(s.service.bind(s.scope).snapshot(s.request)).rejects.toMatchObject({code:'CHAT_ACCESS_DENIED'});
+    expect(s.query).not.toHaveBeenCalled();
+  });
+  it('checks every document row the document reader receives, and passes other client calls through',async()=>{
+    const s=setup();s.permissions.push('ehr.document.read');
+    await s.service.bind(s.scope).snapshot(s.request);
+    const access=s.documents.read.mock.calls[0]![3] as {transaction:(a:unknown,c:string,w:(client:{query:(sql:string)=>Promise<{rows:unknown[]}>})=>Promise<unknown>)=>Promise<unknown>};
+    s.query.mockResolvedValueOnce({rows:[{id:'doc',patient_id:patientId}]});
+    await expect(access.transaction({patientId},'c',client=>client.query('select'))).resolves.toEqual({rows:[{id:'doc',patient_id:patientId}]});
+    s.query.mockResolvedValueOnce({rows:[]});
+    await expect(access.transaction({patientId},'c',client=>client.query('insert'))).resolves.toEqual({rows:[]});
+    s.query.mockResolvedValueOnce({rows:[{id:'doc',patient_id:other}]});
+    await expect(access.transaction({patientId},'c',client=>client.query('select'))).rejects.toMatchObject({code:'CHAT_ACCESS_DENIED'});
+  });
+});
+it('applies no patient-chat policy: staff keeps refuted diagnoses with notes, cancelled items, reasons and the full profile',async()=>{
+  const s=setup();s.permissions.push('ehr.diagnosis.read','ehr.prescription.read','ehr.lab-request.read','identity.patient.read');
+  s.identity.staffPatientProfile.mockResolvedValue({patientId,version:2,firstName:'Ngozi',lastName:'Eze',fullName:'Ngozi Eze',dateOfBirth:'1990-04-12',gender:'female'});
+  const at=new Date('2026-10-01T10:00:00Z');
+  s.query.mockResolvedValue({rows:[
+    {...s.row,kind:'diagnosis',id:'22222222-2222-4222-8222-222222222231',quality:'refuted',recorded_at:at,
+      fields:{condition:'Essential hypertension',verificationStatus:'refuted',notes:'Synthetic clinician note'}},
+    {...s.row,kind:'prescription',id:'22222222-2222-4222-8222-222222222232',quality:'cancelled',recorded_at:at,
+      fields:{medication:'Amlodipine 5 mg',status:'cancelled',instructions:'Synthetic instructions'}},
+    {...s.row,kind:'investigation',id:'22222222-2222-4222-8222-222222222233',quality:'cancelled',recorded_at:at,
+      fields:{test:'Full blood count',status:'cancelled',information:'Synthetic request reason',priority:'urgent'}},
+  ]});
+  const snapshot=await s.service.bind(s.scope).snapshot(s.request);
+  const by=(kind:string)=>snapshot.records.find(r=>r.kind===kind)!;
+  expect(by('diagnosis').fields).toEqual({condition:'Essential hypertension',verificationStatus:'refuted',notes:'Synthetic clinician note'});
+  expect(by('prescription')).toMatchObject({quality:'cancelled',fields:{status:'cancelled',instructions:'Synthetic instructions'}});
+  expect(by('investigation').fields).toMatchObject({information:'Synthetic request reason',priority:'urgent'});
+  expect(by('profile')).toMatchObject({title:'Patient profile',fields:{firstName:'Ngozi',lastName:'Eze',fullName:'Ngozi Eze',dateOfBirth:'1990-04-12',gender:'female'}});
 });

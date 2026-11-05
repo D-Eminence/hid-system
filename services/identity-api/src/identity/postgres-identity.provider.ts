@@ -97,7 +97,29 @@ export class PostgresIdentityProvider implements IdentityProvider {
           request.purpose,
         ],
       );
-      const grant = allowed ? grants.rows[0] : undefined;
+      let grant = allowed ? grants.rows[0] : undefined;
+      if (allowed && !grant && request.purpose === 'healthcare-operations') {
+        // 0104 (owner decision 34(1)): records processing may be covered by
+        // the patient's approval of a direct-care access request or by the
+        // Access PIN, for up to 24 hours from that grant's start and never
+        // past its end. The decision names that direct-care grant and the
+        // cover's end; has_active_consent_grant above already allowed it.
+        const cover = await client.query<{ id: string; covered_until: Date }>(
+          `select cover.consent_grant_id::text as id, cover.covered_until
+             from identity.records_processing_direct_care_cover($1, $2, $3, $4, $5, clock_timestamp()) cover`,
+          [
+            request.patientId,
+            request.context.actor.subject,
+            request.context.membershipId,
+            request.context.facilityId,
+            request.scope,
+          ],
+        );
+        const covering = cover.rows[0];
+        if (covering) {
+          grant = { id: covering.id, scope: request.scope, expires_at: covering.covered_until, break_glass: false };
+        }
+      }
       const effectiveAllowed = allowed && Boolean(grant);
       return {
         allowed: effectiveAllowed,
