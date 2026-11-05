@@ -1154,6 +1154,7 @@ POST /api/v1/pharmacy/work-items/:workItemId/dispensings
 GET  /api/v1/pharmacy/dispensings/:dispensingId
 POST /api/v1/pharmacy/dispensings/:dispensingId/reversals
 POST /api/v1/pharmacy/imports/from-ocr                  # internal OCR caller
+POST /api/v1/pharmacy/imports/from-ocr/batch            # internal OCR caller, 2-50 medicines
 GET  /api/v1/pharmacy/imports/:importId
 ```
 
@@ -1177,6 +1178,24 @@ validation/version/publication provenance and bounded medication text. Its
 response is always `IMPORTED_MEDICATION_EVIDENCE` with activity status
 `unknown`; no request can supply `active`, `dispensed`, stock, or administration
 state. No direct EHR- or OCR-to-Pharmacy database access exists.
+
+The batch command takes the same provenance once plus `medications`, 2 to 50
+entries of the same bounded text (`medicationText`, `strengthText`, `doseText`,
+`frequencyText`, `historicalContext`), and stores each entry as its own record
+in one SERIALIZABLE transaction: every record is written, or none is. It has
+the same guards as the single route (`InternalCaller('ocr-api')`,
+`pharmacy.import.write`, `write_records` with view-only shares and break-glass
+refused). Entries are never merged. Each record gets the idempotency key
+`<Idempotency-Key>:mNN` (NN = 01-50 in array order; the batch key may be at most
+120 characters) and a per-medicine `publicationId`: the UUID version 5 of
+`<publicationId>:NN` in a fixed namespace (`batchPublicationId` in
+pharmacy.service.ts). For batch records, `publicationId` is therefore not the
+OCR publication id; `validationId`, one-to-one with the OCR publication, links
+every record of the batch. A replay with the same body answers the stored
+records; a partial or different replay, or a publication already stored through
+the single route, answers 409 `IDEMPOTENCY_CONFLICT`. The answer is
+`{ id, count, items }`, where `items` are the records in array order and `id`
+is the first.
 
 ## 14. OCR
 
@@ -1274,6 +1293,40 @@ Validation records an explicit `validated` or `rejected` disposition, confirmed
 target domain, HID-owned candidate type, accepted/rejected fields, corrections,
 reviewer, reason, and provenance. It requires `Idempotency-Key` and an expected
 OCR job version. The singular validation route remains a compatible alias.
+
+Several medicines from one paper (`PHARMACY`): `acceptedFields.medications` is a
+list of 1 to 50 entries in reading order, each `{ itemId, page, medicationText,
+strengthText?, doseText?, frequencyText?, historicalContext }`; `itemId` is the
+reading item id (`it-` and 16 hex characters, unique in the review), `page` an
+integer 1-10000, and `historicalContext` (the as-written text and page) is
+required. Each `itemId` must be a `medicine` item read on that `page` of the
+reviewed extraction, or validation answers 400 `OCR_MEDICATION_NOT_READ`. The
+legacy shape (the five text fields at the top of `acceptedFields`) is unchanged;
+sending both shapes, an empty list or more than 50 answers 400
+`OCR_INVALID_MEDICATION_EVIDENCE` and stores nothing. One medicine in either
+shape publishes through `POST /api/v1/pharmacy/imports/from-ocr` exactly as
+before; two or more publish through one call to `.../from-ocr/batch`, all or
+none, and the publication's `targetResourceId` is the first record (the audit
+`ocr.publication.succeed` lists every id and the count). `itemId` and `page`
+stay in the stored review and are not sent to Pharmacy.
+
+Dates on paper lab results (`LAB`): the reviewer sends the text as written as
+`collectedAtAsWritten`, `reportedAtAsWritten` and, per observation,
+`reportedAtAsWritten` (1-120 characters), optionally with `page` and `itemId`
+per observation. The text is always kept in the stored review. Lab receives a
+real date only when the text is unambiguous: the whole text is day/month/year
+with `/`, `-` or `.` (day first, as used in Nigeria), day month-name year, or
+month-name day year (an ordinal suffix and a comma are allowed), or an ISO date;
+the year has 4 digits and is 1900 or later; the day exists on the calendar; and
+it is not later than today in Lagos (for publication, the day the review was
+stored). Forms other than ISO become midnight UTC of that day; ISO passes
+unchanged. Anything else (2-digit year, month and year only, a range, extra
+words) sends no date and is not an error. A legacy `reportedAt`/`collectedAt`
+that is not ISO is read as text written on paper by the same rule. An ISO value
+sent together with as-written text must be the same day, else 400
+`OCR_LAB_DATE_CONFLICT`; a converted report date before the collection date
+answers 400 `OCR_LAB_DATE_ORDER`. The as-written keys, `page` and `itemId` are
+never sent to Lab.
 
 Patient confirmation is a separate idempotent command bound to the canonical
 Identity patient already governing the source document. The server rechecks
