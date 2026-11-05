@@ -167,11 +167,14 @@ export const STANDARD_TIER: ImageTier = { maxEdge: 1_568, maxTokens: 1_568 };
  * line boxes and the model's pixel coordinates are in the size the API resizes the picture to, which depends on
  * the tier. From Anthropic's model documentation (claude-api reference, models and migration guides, cached
  * 2026-10-06; checked 2026-11-05):
- * - documented high resolution: Claude Opus 4.7 (the first), Opus 4.8 and Opus 5, Claude Sonnet 5, Claude Fable 5
- *   and 5.1 ("high-resolution vision, as on Opus 4.7+"), and Claude Mythos 5 and 5.1 (the same model surface as
- *   Fable 5 and 5.1);
- * - inferred high resolution: Claude Opus 5.5 and Claude Sonnet 5.5, whose guides say vision carries over from
- *   Opus 5 and Sonnet 5 without stating the tier;
+ * - documented high resolution: Claude Opus 4.7 (the first), Opus 4.8 and Opus 5, Claude Sonnet 5, Claude Fable 5.1
+ *   ("high-resolution vision (no downscaling cap, as on Opus 4.7+)") and Claude Mythos 5.1 (documented as the same
+ *   capabilities and API surface as Fable 5.1);
+ * - inferred high resolution: Claude Opus 5.5 and Claude Sonnet 5.5 (their guides say vision carries over from
+ *   Opus 5 and Sonnet 5 without stating the tier), and Claude Fable 5 and Claude Mythos 5 (from their successors,
+ *   which keep the same surface);
+ * Note: Fable 5.1's "no downscaling cap" wording does not match the 2,576 px / 4,784-token tier the worker assumes;
+ * check it against the vision documentation before a Fable model is ever used as the re-read model.
  * - documented standard: Claude Opus 4.6 and earlier (Opus 4.5), Claude Sonnet 4.6 and 4.5, Claude Haiku 4.5.
  * Any other model (Claude Haiku 5.5 included, whose tier the guides do not state) has no known tier: no picture
  * goes to it.

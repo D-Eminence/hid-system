@@ -860,3 +860,99 @@ describe('mergeImageReread', () => {
     expect(merged.droppedUngrounded).toBe(image.droppedUngrounded);
   });
 });
+
+describe('mergeImageReread keeps every first-pass item that is not an exact twin of a picture item', () => {
+  const onLine2 = { left: 0.12, top: 0.1, width: 0.3, height: 0.02 };
+  type Raw = Parameters<typeof modelItem>[0];
+  function merge(text: string, firstItems: Raw[], pictureItems: Raw[]) {
+    const page = readPage(1, ['Name: Test Patient Adaeze Example', [text, { handwritten: true, confidence: 0.6 }]]);
+    const base = { page: 1, lines: page.lines, sourceSha256Hex: SOURCE_SHA, masker: createMasker() };
+    const first = checkPage({ ...base, readBy: 'first_pass', answer: modelPage(firstItems.map((item) =>
+      modelItem({ lineIds: ['p1-l2'], ...item }))) });
+    const image = checkPage({ ...base, readBy: 'reread', fromImage: true, answer: modelPage(pictureItems.map((item) =>
+      modelItem({ lineIds: ['p1-l2'], box: onLine2, ...item }))) });
+    expect(first.items).toHaveLength(new Set(firstItems.map((item) => item.asWritten)).size);
+    expect(image.items).toHaveLength(pictureItems.length);
+    return mergeImageReread(first, image, page.lines);
+  }
+  const shape = (items: readonly { kind: string; readBy: string; asWritten: string }[]) =>
+    items.map((item) => [item.readBy, item.asWritten]);
+
+  const med = (asWritten: string, name: string, strength: string, frequency: string): Raw =>
+    ({ kind: 'medicine', asWritten, name, strength, frequency, status: 'current' });
+  const lab = (asWritten: string, test: string, value: string, unit: string): Raw =>
+    ({ kind: 'lab_result', asWritten, test, value, unit });
+  const note = (asWritten: string): Raw => ({ kind: 'note', asWritten, noteText: asWritten });
+  const probes: Array<[string, Raw, Raw]> = [
+    ['Vitamin C 100mg od, Vitamin B complex 1 tab od', med('Vitamin C 100mg od', 'Vitamin C', '100mg', 'od'),
+      med('Vitamin B complex 1 tab od', 'Vitamin B complex', '1 tab', 'od')],
+    ['Paracetamol 1g stat then Paracetamol 500mg tds', med('Paracetamol 1g stat', 'Paracetamol', '1g', 'stat'),
+      med('Paracetamol 500mg tds', 'Paracetamol', '500mg', 'tds')],
+    ['Insulin glargine 10 units nocte, Insulin soluble 4 units tds',
+      med('Insulin glargine 10 units nocte', 'Insulin glargine', '10 units', 'nocte'),
+      med('Insulin soluble 4 units tds', 'Insulin soluble', '4 units', 'tds')],
+    ['WBC 5.0 x10^9/L Plt 250 x10^9/L', lab('WBC 5.0 x10^9/L', 'WBC', '5.0', 'x10^9/L'),
+      lab('Plt 250 x10^9/L', 'Plt', '250', 'x10^9/L')],
+    ['Review in the clinic. Refer to the eye unit', note('Review in the clinic.'), note('Refer to the eye unit')],
+  ];
+
+  it.each(probes)('keeps the second item on "%s" when the picture reads only the first', (text, one, two) => {
+    const merged = merge(text, [one, two], [one]);
+    // The exact twin is replaced by the picture's item; the second stays, and both on the line are to be compared.
+    expect(shape(merged.items)).toEqual([['reread', one.asWritten], ['first_pass', two.asWritten]]);
+    expect(merged.items[1]!.checkReasons).toEqual(expect.arrayContaining(['not_in_picture_reading', 'duplicate_source_span']));
+    expect(merged.items[1]!.confidence).toBe('check_carefully');
+    expect(merged.items[0]!.checkReasons).toContain('duplicate_source_span');
+    expect(merged.flagReasons).toContain('possible_missed_item');
+  });
+
+  it('replaces an exact twin, amounts and spacing normalised, and keeps a near one', () => {
+    const exact = merge('Amlodipine 5mg od', [med('Amlodipine 5mg od', 'Amlodipine', '5mg', 'od')],
+      [med('Amlodipine 5mg od', 'AMLODIPINE', '5 mg', 'od')]);
+    expect(shape(exact.items)).toEqual([['reread', 'Amlodipine 5mg od']]);
+    expect(exact.items[0]!.checkReasons).not.toContain('duplicate_source_span');
+    // The first probe's first item read with another strength is not a twin: both stay.
+    const [text, one, two] = probes[0]!;
+    const near = merge(text, [one, two], [{ ...one, strength: '1000mg' }]);
+    expect(shape(near.items)).toEqual([['reread', one.asWritten], ['first_pass', one.asWritten],
+      ['first_pass', two.asWritten]]);
+  });
+
+  it('keeps both a misread name and the picture reading of it, both marked to compare', () => {
+    const merged = merge('Amlodipne 5mg od', [med('Amlodipne 5mg od', 'Amlodipne', '5mg', 'od')],
+      [med('Amlodipine 5mg od', 'Amlodipine', '5mg', 'od')]);
+    expect(shape(merged.items)).toEqual([['reread', 'Amlodipine 5mg od'], ['first_pass', 'Amlodipne 5mg od']]);
+    for (const item of merged.items) expect(item.checkReasons).toContain('duplicate_source_span');
+    expect(merged.items[1]!.checkReasons).toContain('not_in_picture_reading');
+  });
+
+  it('lets one picture item remove at most one of two identical first-pass items, with unique, repeatable ids', () => {
+    const text = 'Paracetamol 1g tds; repeat Paracetamol 1g tds';
+    const items = [med('Paracetamol 1g tds', 'Paracetamol', '1g', 'tds'),
+      med('repeat Paracetamol 1g tds', 'Paracetamol', '1g', 'tds')];
+    const merged = merge(text, items, [items[0]!]);
+    expect(shape(merged.items)).toEqual([['reread', 'Paracetamol 1g tds'], ['first_pass', 'repeat Paracetamol 1g tds']]);
+    expect(new Set(merged.items.map((item) => item.id)).size).toBe(merged.items.length);
+    expect(merge(text, items, [items[0]!]).items.map((item) => item.id)).toEqual(merged.items.map((item) => item.id));
+  });
+});
+
+describe('placement floors for a short item', () => {
+  // A 1240 x 1754 page: 1 px is about 0.0008 of its width and 0.0006 of its height.
+  const page = readPage(1, [['Fe 200mg', { handwritten: true, confidence: 0.6,
+    box: { left: 0.1, top: 0.3, width: 0.03, height: 0.012 } }]]);
+  const read = (box: { left: number; top: number; width: number; height: number }) => checkPage({ page: 1,
+    lines: page.lines, sourceSha256Hex: SOURCE_SHA, readBy: 'reread', masker: createMasker(), fromImage: true,
+    answer: modelPage([modelItem({ kind: 'medicine', asWritten: 'Fe 200mg', name: 'Fe', strength: '200mg',
+      status: 'current', lineIds: ['p1-l1'], box })]) });
+
+  it('keeps a short line read with about 5 px of padding on each side (10 px in all)', () => {
+    expect(read({ left: 0.096, top: 0.29715, width: 0.038, height: 0.0177 }).items).toHaveLength(1);
+  });
+
+  it('still drops a box twice as wide as the short line', () => {
+    const result = read({ left: 0.085, top: 0.3, width: 0.06, height: 0.012 });
+    expect(result.items).toEqual([]);
+    expect(result.droppedUngrounded).toBe(1);
+  });
+});
