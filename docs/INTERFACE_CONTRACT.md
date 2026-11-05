@@ -2758,7 +2758,7 @@ What the screens show after the seed (every row demo, written once):
   FOR SHARE, which forced row-level security refuses an owner without
   BYPASSRLS (`outreach.campaign_members` has no UPDATE policy). The same check
   runs for outreach-api, so a live registration into a campaign may meet the
-  same refusal; 0102 reports it and changes nothing. 0120 fixes it (§34); the demo
+  same refusal; 0102 reports it and changes nothing. 0120 fixes it (§36); the demo
   registrations stay unlinked.
 
 Nothing is sent: the order commands' inbox notices are marked read in the same
@@ -3282,12 +3282,99 @@ and its hash in the declaration is measured again). 0105's prerequisite is
 0103's admin gate body and it reads nothing 0104 adds, so it applies the same
 way after 0104 as on 0103 alone.
 
-## 34. Outreach: registering a person into a campaign (0120)
+## 34. The OCR worker's account (0106)
+
+Migration 0106 (`0106_ocr_worker_account.sql`, unsigned until the owner signs)
+gives the OCR worker the database identity its commands have always required.
+`ocr.claim_worker_job` and the worker's other commands (0014, 0077, 0105) refuse
+with 42501 `Authorized OCR workload context is required` unless
+`app.actor_subject` is the subject of an active `auth.accounts` row holding the
+platform `ocr_worker` role. Before 0106 no such row existed, so every claim in
+production was refused and no OCR job was ever claimed.
+
+- 0106 seeds the account `0c4e0106-0106-4000-8000-000000000001` (subject
+  `hid:staging:ocr-worker`, display name `OCR worker`, no email, no password,
+  `source_system` `hid-workload`) and its role row
+  `0c4e0106-0106-4000-8000-000000000002` (platform `ocr_worker`, which grants
+  only `ocr.job.process`). `auth.admin_change_platform_role` refuses this role,
+  so the seed bypasses the governed admin command, as 0105 does for the
+  scanner; the owner signs that in the declaration. A different row already
+  holding the subject stops the migration with nothing applied. No function,
+  policy or grant changes; `runtime-grants.sql` is unchanged.
+- The worker sets `app.actor_subject` from `OCR_WORKER_SUBJECT`
+  (`services/ocr-worker/src/repository.ts`) and uses no workload token. Its own
+  subject keeps the OCR API's service identity (`hid:staging:ocr-api`) free of
+  worker authority and tells the two apart in audit rows. Terraform on `dev`
+  must set `OCR_WORKER_SUBJECT = "hid:${local.workload_identity_environment}:ocr-worker"`
+  (`infra/terraform/modules/application/workloads.tf`); until then the worker
+  keeps answering 42501 exactly as before 0106.
+- A claim still takes only a job whose document's latest scan event is clean
+  (0105), so claims return no job until the document scanner is live.
+- Kill switch, no release: revoke the role row (`revoked_at`, `revoked_by`, an
+  8-500 character `revocation_reason`) or set the account's status to
+  `disabled`; the next claim answers 42501 again.
+
+`test/database/ocr-worker-account.integration.sql` pins the seed and checks, as
+`hid_ocr_worker`, that the seeded subject claims while `hid:staging:ocr-api`, a
+random subject, an empty subject, the scanner's subject, a near-miss subject and
+the seeded subject with its role revoked or its account disabled are refused
+with 42501.
+
+## 35. OCR page allowance (0107)
+
+Owner decision (D-Eminence, 2026-11-02/03, Migrate item 7): 500 pages per
+facility per month, Textract and the AI reading counted together; only a
+super admin raises it; at 100% reading pauses but review and manual entry keep
+working. 0107 is unsigned until the owner signs its declaration. Drafted as
+0110 on 0103 and renumbered 0107, the next free number after 0106 (numbers
+follow release order). It applies after 0106; it needs `ocr.claim_worker_job`
+exactly as 0105 left it (the fair claim copies that body, md5 pinned) and uses
+nothing 0104 or 0106 add.
+
+Month: the Africa/Lagos calendar month. `resets_on` is the first day of the
+next month; a parked job becomes due at 00:00 Africa/Lagos that day.
+`paused` is `pages_used >= pages_limit`; `pages_used` is the sum of the
+facility's job counts first recorded this month; `pages_limit` is 500 unless
+a super admin set another (1-100000).
+
+Database commands (every one returns `(pages_used integer, pages_limit
+integer, resets_on date, paused boolean)` unless noted):
+
+| Command | Caller (role) | Notes |
+| --- | --- | --- |
+| `ocr.worker_page_allowance(job_id, claim_token)` | OCR worker (`hid_ocr_worker`) | The facility of the job it holds; the same claim checks as `ocr.fail_worker_job` (42501 not a worker, 55000 claim not active). `paused` is false for a job whose pages are already recorded, so a retry is never parked by its own pages. |
+| `ocr.record_worker_pages(job_id, claim_token, page_count, correlation_id)` | OCR worker | 1-200 pages (22023 otherwise). Once per job: a replay or a smaller count changes nothing; a larger count is kept. Audit `ocr.worker.pages_recorded` (`details.pages` only) when stored or raised. |
+| `ocr.pause_worker_job_for_allowance(job_id, claim_token, correlation_id)` returns `timestamptz` | OCR worker | NULL, changing nothing, unless the allowance is used up and the job's pages are not yet recorded (a limit raised since the read, or a retry); the worker then reads the job. Otherwise the job goes processing -> failed -> queued, `attempt_count` back by one (a pause never uses an attempt), `last_error_code = OCR_PAGE_ALLOWANCE_USED_UP`, `last_error_summary = Reading is paused because this facility has used this month's page allowance`, `next_attempt_at` = the returned resume time. Job events `OcrFailed` and `OcrJobQueued` carry the reason code. Audit `ocr.worker.paused_for_allowance`. Takes the facility's page-limit lock (the transaction advisory lock `ocr.set_facility_page_limit` takes) before it reads the allowance, so a raise above use racing a pause never leaves the job parked: either the pause sees the new limit and answers NULL, or the raise waits and then resumes the job. |
+| `ocr.facility_page_allowance(facility_id)` | OCR API (`hid_ocr_runtime`) and Identity API (`hid_identity_runtime`) | A session naming that facility and an active membership there with `ocr.job.read`, or a platform session (no facility, no membership) whose account has `platform.admin.access`; 42501 otherwise; P0002 for an unknown facility. |
+| `ocr.set_facility_page_limit(facility_id, pages_limit, reason)` returns `void` | Identity API (`hid_identity_runtime`) | Platform session, `platform.admin.access` and an active platform `platform_super_admin` role (only: a limit is a cost decision; `platform_admin`, support admins and facility staff read the allowance and usage but cannot set it), a correlation id and purpose `healthcare-operations` (42501 otherwise); limit 1-100000 and reason 1-240 characters (22023); P0002 unknown facility. Audit `admin.ocr.page-limit.set` (`actor_type = 'platform'`, resource the facility, details: new and previous limit, use, resumed and skipped jobs). When the new limit is above this month's use, the facility's queued jobs parked with `OCR_PAGE_ALLOWANCE_USED_UP` become due now (same attempt count, next version). |
+| `ocr.claim_worker_job_fair(provider, lease_seconds, max_in_flight_per_facility)` returns the row of `ocr.claim_worker_job` (`job_id, facility_id, document_id, patient_id, storage_bucket, storage_key, object_version_id, source_sha256_hex, size_bytes, media_type, provider, attempt_no, max_attempts, claim_token, claim_expires_at, correlation_id`; no row when nothing is claimable) | OCR worker (`hid_ocr_worker`) | The authorization (42501), validation (22023: provider 1-120 characters, lease 30-3600 seconds, cap 1-16), lease recovery, eligibility and result of `ocr.claim_worker_job` as 0105 left it (`media_type` is the detected type of the clean scan bound to the job's source, not the declared type), plus: a facility that already has `max_in_flight_per_facility` jobs `processing` under an unexpired lease (any provider) is skipped, and among the rest the job of the facility with the fewest such jobs is taken first, then `next_attempt_at`, `queued_at`, `id`. `FOR UPDATE SKIP LOCKED`; the candidate's facility is taken with `pg_try_advisory_xact_lock` (never waits) and counted again, so the cap is exact among fair claimers; claims through the unchanged `ocr.claim_worker_job` (an old worker image) are counted but not bounded. Audit `ocr.worker.claim` adds `maxInFlightPerFacility` and `inFlightBefore`. |
+| `ocr.record_worker_ai_usage(job_id, claim_token, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, correlation_id)` returns `void` | OCR worker | The claim checks of `ocr.fail_worker_job` (42501, 55000). `model` matches `^claude-[a-z0-9-]+$` (at most 100 characters) and every count is a non-NULL number >= 0 (22023). One row per (job, the job's current attempt, model): the totals given replace the stored ones, so a replay changes nothing. Audit `ocr.worker.ai_usage_recorded` (attempt, model and the counts only) when something changed. |
+| `ocr.facility_ocr_usage(facility_id, month date)` returns `(model text, requests bigint, input_tokens bigint, output_tokens bigint, cache_read_tokens bigint, cache_write_tokens bigint, pages bigint)` | OCR API (`hid_ocr_runtime`) and Identity API (`hid_identity_runtime`) | The callers and errors of `ocr.facility_page_allowance`. The Africa/Lagos month containing `month` (NULL: this month). One row per Claude model with its summed requests and tokens (`pages` 0), then one row `model = 'textract'` with the month's pages from the page count (requests and tokens 0; present even when 0), ordered by model. |
+
+Nothing else changes: job, extraction, validation, publication and manual
+entry paths do not read the allowance. Tables `ocr.facility_page_limits`,
+`ocr.page_usage` and `ocr.ai_usage` (key `(job_id, attempt_no, model)`;
+facility, Lagos month, requests and the four token counts) hold ids, counts,
+dates, the model name and the limit's reason only, have no runtime grant, no
+foreign key to `ocr.jobs` (the 24-hour deletion of a job's working data never
+waits on them or removes them) and are read only through these commands.
+`ocr.claim_worker_job` keeps the body 0105 gave it. The only change to an existing function
+is one more allowed transition in `ocr.validate_job_write`: a queued job whose
+`last_error_code` is exactly `OCR_PAGE_ALLOWANCE_USED_UP` may move
+`next_attempt_at` earlier, not before now minus one minute (with the next
+version and optionally a new correlation id), nothing else; a queued job with
+no or another error code, the same or a later time, or any other column
+change is refused (23514). 0107 has no down
+migration. The suite is
+`services/ehr-api/test/database/ocr-page-allowance.integration.sql`.
+
+## 36. Outreach: registering a person into a campaign (0120)
 
 Migration 0120 (`0120_outreach_campaign_registration_lock.sql`; coordinator of
 2026-11-04, "0120 first (prove it, then fix)", the number assigned by the
 coordinator; unsigned until the owner signs) is written on 0105 and uses
-nothing 0106-0119 add.
+nothing 0106-0119 add. It applies after staging's 0106 and 0107 unchanged:
+neither touches an object 0120 reads, pins or replaces.
 
 The gap: every registration into a campaign was refused in production. The
 campaign trigger `outreach.validate_registration_campaign_write` (0045,
