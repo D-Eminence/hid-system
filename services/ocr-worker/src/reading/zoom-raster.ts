@@ -6,7 +6,8 @@ import { base64Length, IMAGE_MAX_BASE64_LENGTH, pngChunks, type PageImageMediaTy
 /**
  * The most pixels zoom decodes from a PNG (a 24 MP page, 6000 x 4000; A4 at about 400 dpi). A larger picture is
  * still sent whole for the re-read; only zoom is off for it. Kept below the 64 MP picture limit on purpose. Measured
- * on fictional pages at 24 MP (8-bit RGBA, the heaviest PNG allowed): about 0.8 to 1.3 s and 350 to 430 MB peak RSS.
+ * on fictional pages at 24 MP: 8-bit RGBA is the memory worst case (about 1.4 s, 350 to 440 MB peak RSS); 1- and 2-bit
+ * grey or palette is the time worst case (about 2.0 to 2.4 s decode, about 250 MB), as pngjs unpacks each pixel in JS.
  */
 export const ZOOM_MAX_DECODE_PIXELS = 24_000_000;
 /**

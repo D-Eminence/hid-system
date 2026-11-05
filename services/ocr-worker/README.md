@@ -628,7 +628,8 @@ Each claimed job runs, in order:
        allowed (12.5 MP, 4:4:4, 6 to 7 MB of noise) took 2.0 to 2.2 s
        (baseline) and 3.0 s (progressive) to decode and crop, and a
        full-page crop 1.4 s, while a 10 ms timer on the main thread was
-       never more than 40 ms late; the worst PNG (24 MP RGBA) 1.7 s. Peak
+       never more than 40 ms late; the worst PNG for time (24 MP, 1- or 2-bit grey or
+       palette) about 2.4 s to decode, and for memory (24 MP RGBA) 1.7 s. Peak
        memory of the process: one decode at a time, at most about 610 MB
        RSS measured for the whole process during the worst JPEG (520 MB for
        the PNG), plus the rasters kept for the readings in progress (RGB, at
