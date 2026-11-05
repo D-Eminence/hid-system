@@ -2946,10 +2946,21 @@ What the grant opens, by step (permissions unchanged, 0013 and 0016):
 | EHR documents (`/ehr/documents` upload intent, list, complete, download) and OCR's source read (`/ehr/internal/ocr/documents/:documentId/source`) | `ehr.document.*`, `ocr.job.read` | any purpose, the grant of that purpose |
 | Publish into the chart | `ocr.publication.write` (doctor, clinician, nurse) | `direct-care` write, the publisher's own |
 
-Without a records-processing grant or a cover, OCR's create answers 404 (EHR's
-source read does not find the document under that purpose, so nobody learns
-whether it exists) and the other job routes 404 `OCR_JOB_NOT_FOUND`; the website
-explains that the patient has not given records-processing access yet.
+Without a records-processing grant or a cover, OCR's create answers 403
+`OCR_RECORDS_PROCESSING_CONSENT_REQUIRED` when the request names the patient
+(`patientId`): OCR API asks Identity about that patient (`read_records`,
+`healthcare-operations`) before it reads any document, so the answer says
+nothing about whether the document exists. A named patient who has given cover
+but is not the document's patient still ends in 409 `OCR_PATIENT_MISMATCH`, or
+404 when EHR's source read does not find the document. Without a `patientId`,
+create answers 404 (EHR's source read does not find the document under that
+purpose, so nobody learns whether it exists), and 403 `OCR_ACCESS_DENIED` when
+the source is found but the source patient's check refuses. The other job routes
+(read, retry, extractions, validations) answer 404 `OCR_JOB_NOT_FOUND` for every
+refusal: they act on an existing job, and a 403 there would reveal that a job
+exists for the patient. Each 4xx answer is logged by OCR API and EHR API as one
+`Request refused` warning carrying only the problem code, status, method, route
+template and correlation id.
 
 ### 32.1 The patient's approval or Access PIN covers records processing for 24 hours (decision 34(1))
 

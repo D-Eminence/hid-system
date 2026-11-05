@@ -115,6 +115,23 @@ export class OcrService {
       provider: input.provider,
       maxAttempts: input.maxAttempts ?? 3,
     });
+    // When the caller names the patient, ask identity-api first, before any
+    // document is read. Under healthcare-operations the EHR row-level security
+    // hides a document whose patient has not allowed records processing, so the
+    // source read alone would answer 404 and the staff member could not tell a
+    // missing document from a missing consent. Asking about the named patient
+    // reveals nothing about the document: a wrong patientId with consent still
+    // ends in the mismatch or not-found answers below. Without a patientId the
+    // source read decides, and a 404 there stays a 404.
+    if (input.patientId) {
+      const consent = await this.identity.authorize(
+        input.patientId, 'read_records', context.purposeOfUse, context,
+      );
+      if (!consent.allowed) {
+        throw new DomainProblem(403, 'OCR_RECORDS_PROCESSING_CONSENT_REQUIRED',
+          'The patient has not allowed records processing for this staff member');
+      }
+    }
     return this.database.withTransaction(context, async (client) => {
       const existing = await client.query<OcrJobRow>(
         `${JOB_SELECT} where facility_id = $1 and created_by = $2
