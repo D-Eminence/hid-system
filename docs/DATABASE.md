@@ -333,7 +333,10 @@ tables; EHR, Lab, Pharmacy, Outreach, and OCR cannot. Environment-specific
 LOGIN creation remains deployment-owned and is not committed to source.
 The EHR and OCR API login roles must inherit only `hid_ehr_api_runtime` and
 `hid_ocr_api_runtime`, respectively. The OCR worker login remains separate and
-inherits only `hid_ocr_worker`. Runtime provisioning is maintained outside the
+inherits only `hid_ocr_worker`; the subject it sets as `app.actor_subject`
+(`OCR_WORKER_SUBJECT`, `hid:staging:ocr-worker` in production) is the workload
+account migration `0106` seeds with the platform `ocr_worker` role, without
+which every worker command answers 42501. Runtime provisioning is maintained outside the
 applied migration ledger in idempotent `database/runtime-grants.sql`; migrations
 `0001` through `0025` remain immutable, and event delivery is the additive
 `0026` migration rather than a rewrite of that history.

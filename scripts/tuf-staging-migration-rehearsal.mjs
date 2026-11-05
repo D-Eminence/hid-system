@@ -241,7 +241,7 @@ try {
     values ('synthetic-history','Historical synthetic purpose',false,'synthetic')`));
   const upgradePurposesBefore = await withClient('hid_upgrade', async client =>
     (await client.query('select to_jsonb(p) as value from identity.purpose_of_use_codes p order by code')).rows);
-  assert(!upgradePurposesBefore.some(row => ['direct-care', 'emergency'].includes(row.value.code)));
+  assert(!upgradePurposesBefore.some(row => ['direct-care', 'emergency', 'healthcare-operations'].includes(row.value.code)));
   const upgradeBefore = await snapshot('hid_upgrade');
   const upgradeBackup = join(evidenceDirectory, 'pre-schema-upgrade.dump');
   command('backup synthetic schema 0028 before upgrade', join(pgBindir, 'pg_dump'),
@@ -282,7 +282,7 @@ try {
   const upgradeAfter = await snapshot('hid_upgrade');
   await withClient('hid_upgrade', async client => {
     assert.deepEqual((await client.query(`select to_jsonb(p) as value from identity.purpose_of_use_codes p
-      where code not in ('direct-care','emergency') order by code`)).rows, upgradePurposesBefore,
+      where code not in ('direct-care','emergency','healthcare-operations') order by code`)).rows, upgradePurposesBefore,
     'Upgrade must preserve every historical purpose registry row');
     assert.deepEqual((await client.query(`select code,display,active,source_system
       from identity.purpose_of_use_codes where code='direct-care'`)).rows,
@@ -292,6 +292,10 @@ try {
       from identity.purpose_of_use_codes where code='emergency'`)).rows,
     [{code:'emergency',display:'Emergency treatment',active:true,source_system:'hid'}],
     'Migration 0085 must add exactly its declared emergency purpose');
+    assert.deepEqual((await client.query(`select code,display,active,source_system
+      from identity.purpose_of_use_codes where code='healthcare-operations'`)).rows,
+    [{code:'healthcare-operations',display:'Records processing',active:true,source_system:'hid'}],
+    'Migration 0104 must add exactly its declared records-processing purpose');
   });
   // Migration 0086 (P4b) adds exactly one role, org_admin_awaiting_review (a
   // self-signed-up facility's administrator until support reviews it); every
@@ -307,9 +311,45 @@ try {
       order by code`, [declaredRoles])).rows, declaredRoles.map(code => ({ code, active: true })),
     'Migration 0086 must add exactly its declared role');
   });
+  // Migrations 0105 (document scanning) and 0106 (the OCR worker) each seed
+  // exactly one workload account and its platform role; every other row of
+  // those two tables is unchanged.
+  const scannerSeed = { account: 'd0c5ca40-0105-4000-8000-000000000001', role: 'd0c5ca40-0105-4000-8000-000000000002' };
+  const ocrWorkerSeed = { account: '0c4e0106-0106-4000-8000-000000000001', role: '0c4e0106-0106-4000-8000-000000000002' };
+  await withClient('hid_upgrade', async client => {
+    await client.query("set timezone = 'UTC'");
+    for (const [table, where, parameters] of [
+      ['auth.accounts', 'id <> all($1::uuid[])', [scannerSeed.account, ocrWorkerSeed.account]],
+      ['auth.account_roles', 'id <> all($1::uuid[])', [scannerSeed.role, ocrWorkerSeed.role]],
+    ]) {
+      const kept = (await client.query(`select to_jsonb(t)::text as value from ${table} t where ${where}
+        order by to_jsonb(t)::text collate "C"`, [parameters])).rows;
+      assert.deepEqual({ rows: kept.length, sha256: sha256(kept.map(row => row.value).join('\n')) },
+        upgradeBefore[table], `Upgrade changed a historical ${table} row`);
+    }
+    assert.deepEqual((await client.query(`select id, subject, email, display_name, status, password_hash, source_system
+      from auth.accounts where id = $1 or subject = 'hid:staging:document-scanner'`, [scannerSeed.account])).rows,
+    [{ id: scannerSeed.account, subject: 'hid:staging:document-scanner', email: null,
+      display_name: 'GuardDuty document scan bridge', status: 'active', password_hash: null, source_system: 'hid-workload' }],
+    'Migration 0105 must add exactly its declared scanner account');
+    assert.deepEqual((await client.query(`select id, role_code, scope_type, membership_id, facility_id, granted_by, revoked_at
+      from auth.account_roles where account_id = $1`, [scannerSeed.account])).rows,
+    [{ id: scannerSeed.role, role_code: 'document_scanner', scope_type: 'platform', membership_id: null, facility_id: null,
+      granted_by: null, revoked_at: null }], 'Migration 0105 must add exactly its declared scanner role');
+    assert.deepEqual((await client.query(`select id, subject, email, display_name, status, password_hash, source_system
+      from auth.accounts where id = $1 or subject = 'hid:staging:ocr-worker'`, [ocrWorkerSeed.account])).rows,
+    [{ id: ocrWorkerSeed.account, subject: 'hid:staging:ocr-worker', email: null,
+      display_name: 'OCR worker', status: 'active', password_hash: null, source_system: 'hid-workload' }],
+    'Migration 0106 must add exactly its declared OCR worker account');
+    assert.deepEqual((await client.query(`select id, role_code, scope_type, membership_id, facility_id, granted_by, revoked_at
+      from auth.account_roles where account_id = $1`, [ocrWorkerSeed.account])).rows,
+    [{ id: ocrWorkerSeed.role, role_code: 'ocr_worker', scope_type: 'platform', membership_id: null, facility_id: null,
+      granted_by: null, revoked_at: null }], 'Migration 0106 must add exactly its declared OCR worker role');
+  });
   const expectedChanged = new Set([
     'migration.schema_migrations', 'auth.sessions', 'auth.otp_challenges', 'identity.outbox_events',
     'auth.permissions', 'auth.role_permissions', 'identity.purpose_of_use_codes', 'auth.roles',
+    'auth.accounts', 'auth.account_roles',
   ]);
   for (const [name, value] of Object.entries(upgradeBefore)) {
     if (!expectedChanged.has(name)) assert.deepEqual(upgradeAfter[name], value, `Upgrade changed historical ${name}`);
@@ -318,7 +358,7 @@ try {
   assert.deepEqual(await snapshot('hid_upgrade_restored'), upgradeBefore, 'Pre-schema backup must restore the exact 0028 state');
   evidence.checks.existing_schema_upgrade = {from:'0028',to:latestSchema,dry_run_unchanged:true,
     historical_tables_preserved:true,historical_purposes_preserved:true,direct_care_seed_verified:true,
-    emergency_seed_verified:true,declared_roles_added:declaredRoles,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
+    emergency_seed_verified:true,records_processing_seed_verified:true,document_scanner_seed_verified:true,ocr_worker_seed_verified:true,declared_roles_added:declaredRoles,old_sessions_remain_staff:true,unbound_old_otp_denied:true,
     registration_outbox_reference_preserved:true,pre_schema_backup_restore_equal:true,
     integrity:await integrity('hid_upgrade')};
   command('create synthetic database', join(pgBindir, 'createdb'), [database]);
@@ -355,6 +395,9 @@ try {
   // P4c: Identity, EHR, Lab and Pharmacy booted from their own code, each as its exact runtime role.
   evidence.checks.order_routes_runtime = JSON.parse(command('exact-role cross-facility lab requests and prescriptions',
     process.execPath, [join(repository, 'services/ehr-api/scripts/verify-order-routes-runtime.mjs')], workflowEnvironment));
+  // 0104: records processing asked for, approved, used by OCR, fenced from the chart, Lab and Pharmacy, and revoked.
+  evidence.checks.records_processing_runtime = JSON.parse(command('exact-role records processing for OCR',
+    process.execPath, [join(repository, 'services/ehr-api/scripts/verify-records-processing-runtime.mjs')], workflowEnvironment));
   await withClient(database, (client) => client.query(baselineSql));
   evidence.checks.schema = { dry_run_rolled_back: true, applied: files.length, rerun_pending: 0, schema_rls_suite: 'passed' };
   const before = await snapshot(database);
@@ -641,8 +684,10 @@ try {
   migration('promote NIN-deferred fixture', 'promote-legacy-identity.mjs', deferredDatabase, deferredEnvironment);
   migration('reconcile NIN-deferred fixture', 'reconcile-legacy-identity.mjs', deferredDatabase, deferredEnvironment);
   evidence.checks.nin_deferred_fixture = await withClient(deferredDatabase, async client => {
+    // 0105's scanner and 0106's OCR worker workload accounts are not part of the fixture.
     const accounts = (await client.query(`select id, status, password_hash, password_algorithm,
-      email_verified_at from auth.accounts order by id`)).rows;
+      email_verified_at from auth.accounts where id not in ('d0c5ca40-0105-4000-8000-000000000001',
+      '0c4e0106-0106-4000-8000-000000000001') order by id`)).rows;
     assert.equal(accounts.length, 2);
     assert.deepEqual(accounts.map(row => row.id), [deferredIds.account, deferredIds.staffAccount].sort());
     for (const account of accounts) {
@@ -661,7 +706,8 @@ try {
       assert.equal((await client.query(`select count(*)::integer as n from ${table}`)).rows[0].n, 0, `${table} must remain empty`);
     }
     const roles = (await client.query(`select account_id, role_code, scope_type, facility_id,
-      membership_id, revoked_at from auth.account_roles`)).rows;
+      membership_id, revoked_at from auth.account_roles where account_id not in ('d0c5ca40-0105-4000-8000-000000000001',
+      '0c4e0106-0106-4000-8000-000000000001')`)).rows;
     assert.deepEqual(roles, [{ account_id: deferredIds.staffAccount, role_code: 'doctor',
       scope_type: 'facility', facility_id: deferredIds.facility,
       membership_id: deferredIds.membership, revoked_at: null }]);

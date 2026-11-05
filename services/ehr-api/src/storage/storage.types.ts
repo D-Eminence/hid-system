@@ -20,13 +20,26 @@ export interface StoredObjectMetadata {
   sha256Hex: string;
 }
 
+/**
+ * What a signed download is served as. Without it S3 answers with the object's
+ * stored Content-Type (the type declared at upload). disposition defaults to
+ * attachment.
+ */
+export interface DownloadPresentation {
+  fileName: string;
+  mediaType: string;
+  disposition?: 'attachment' | 'inline';
+}
+
 export interface StorageProvider {
   bucket(): string;
   checkReadiness(): Promise<void>;
   createUpload(intent: UploadIntent): Promise<PresignedUpload>;
   inspect(key: string): Promise<StoredObjectMetadata>;
   inspectVersion(key: string, versionId: string,signal?:AbortSignal): Promise<StoredObjectMetadata>;
-  createDownload(key: string, versionId: string, attachment?: { fileName: string; mediaType: string }): Promise<{ url: string; expiresInSeconds: number }>;
+  /** The first maxBytes bytes of exactly that version (a ranged GET pinned to its VersionId). */
+  readPrefix(key: string, versionId: string, maxBytes: number, signal?: AbortSignal): Promise<Uint8Array>;
+  createDownload(key: string, versionId: string, presentation?: DownloadPresentation): Promise<{ url: string; expiresInSeconds: number }>;
 }
 
 export const STORAGE_PROVIDER = Symbol('STORAGE_PROVIDER');
