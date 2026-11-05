@@ -82,6 +82,9 @@ export interface IdentityAuthorizationDecision {
   breakGlass: boolean;
 }
 
+/** A precheck answer: whether a records read would be allowed, never the grant behind it. */
+export type IdentityAuthorizationPrecheck = Omit<IdentityAuthorizationDecision, 'consentGrantId' | 'expiresAt'>;
+
 export interface IdentityClientOptions {
   baseUrl: string;
   caller: IdentityInternalCaller;
@@ -173,6 +176,26 @@ export class IdentityApiClient {
       throw new IdentityApiProblem(502, payload);
     }
     return payload;
+  }
+
+  /**
+   * The answer authorizePatient would give for a records read, without its
+   * side effects: Identity notes no access and records no authorization
+   * check. The caller must still call authorizePatient before it opens
+   * anything. An Identity without the route answers 404 (IdentityApiProblem).
+   */
+  async precheckPatientRead(
+    patientId: string,
+    purpose: 'direct-care' | 'emergency' | 'healthcare-operations',
+    context: IdentityDelegatedContext,
+  ): Promise<IdentityAuthorizationPrecheck> {
+    const payload = await this.request('/api/v1/identity/service/authorization/precheck', 'POST',
+      { patientId, scope: 'read_records', purpose }, { ...context, purposeOfUse: purpose });
+    if (!validDecision(payload, patientId, 'read_records', purpose, context.facilityId)) {
+      throw new IdentityApiProblem(502, payload);
+    }
+    const { allowed, facilityId, membershipId, breakGlass } = payload;
+    return { allowed, patientId, facilityId, membershipId, scope: 'read_records', purpose, breakGlass };
   }
 
   async authorizeOutreachPermission(

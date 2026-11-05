@@ -122,6 +122,11 @@ export class OcrService {
           and operation = 'ocr.extract' and idempotency_key = $3 for update`,
         [context.facilityId, context.actor.accountId, idempotencyKey],
       );
+      // A replay is answered first, as before the consent precheck: a key
+      // reused for a different request (another patientId included) is 409
+      // IDEMPOTENCY_CONFLICT, and an exact replay is authorized as the
+      // existing job it names, so a lapsed cover answers 404
+      // OCR_JOB_NOT_FOUND and never reveals the job with a 403.
       const replay = existing.rows[0];
       if (replay) {
         const hash = await client.query<{ request_sha256: string }>(
@@ -132,6 +137,27 @@ export class OcrService {
         }
         await this.authorizeJob(replay, context, 'read_records');
         return this.project(replay);
+      }
+
+      // A new job that names the patient: ask Identity about that patient
+      // before any document is read. Under healthcare-operations the EHR
+      // row-level security hides a document whose patient has not allowed
+      // records processing, so the source read alone would answer 404 and the
+      // staff member could not tell a missing document from a missing
+      // consent. This is a precheck, not authorize: it opens nothing, so the
+      // named patient gets no "Your records were opened" notice and Identity
+      // records no allowed read for them; a wrong patientId with cover still
+      // ends in the mismatch or not-found answers below, having touched
+      // nobody. The authorize on the source patient after the mismatch check
+      // stays the one call that notes and audits the read. Without a
+      // patientId, or against an Identity without the precheck, the source
+      // read decides and a 404 there stays a 404.
+      if (input.patientId) {
+        const precheck = await this.identity.precheckRecordsRead(input.patientId, context.purposeOfUse, context);
+        if (precheck && !precheck.allowed) {
+          throw new DomainProblem(403, 'OCR_RECORDS_PROCESSING_CONSENT_REQUIRED',
+            'The patient has not allowed records processing for this staff member');
+        }
       }
 
       const source = await this.ehrApi.getOcrDocumentSource(input.documentId, context);

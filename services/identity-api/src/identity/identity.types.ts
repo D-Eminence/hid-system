@@ -32,6 +32,9 @@ export interface AuthorizationDecision {
   breakGlass: boolean;
 }
 
+/** A precheck answer: whether the authorization would be allowed, never the grant behind it. */
+export type AuthorizationPrecheck = Omit<AuthorizationDecision, 'consentGrantId' | 'expiresAt'>;
+
 export interface ConsentStatus {
   patientId: string;
   facilityId: string;
