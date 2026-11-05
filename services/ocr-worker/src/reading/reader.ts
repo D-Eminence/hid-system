@@ -10,8 +10,11 @@ import {
 import { mergeHardReadings, noAgreement, prepareHardAnswer, type HardPageAgreement } from './hard-page';
 import { blankIdentity, checkPage, mergeReread, REVIEW_BELOW, uniqueItemIds, type PageCheck } from './items';
 import { createMasker, type Masker } from './masking';
-import { imageTierOf, pageImageFor, type PageImage, type PageImageDecision, type SourceDocument } from './page-image';
+import { imageTierOf, pageImageFor, resizedSize, type PageImage, type PageImageDecision,
+  type SourceDocument } from './page-image';
 import { MODEL_SCHEMA_VERSION, PROMPT_VERSION } from './prompt';
+import { createPageZoom, createZoomSession, noZoomStats, ZOOM_MAX_CALLS, type PageZoom, type ZoomStats,
+  type ZoomToolSession } from './zoom';
 
 export type ReadingConfig = Pick<OcrWorkerConfig, 'OCR_AI_MODE' | 'OCR_AI_FACILITY_IDS' | 'OCR_AI_FIRST_PASS_MODEL'
   | 'OCR_AI_FIRST_PASS_EFFORT' | 'OCR_AI_REREAD_MODEL' | 'OCR_AI_REREAD_EFFORT' | 'OCR_AI_MAX_REREAD_PAGES'>
@@ -20,7 +23,9 @@ export type ReadingConfig = Pick<OcrWorkerConfig, 'OCR_AI_MODE' | 'OCR_AI_FACILI
   & Partial<Pick<OcrWorkerConfig, 'OCR_AI_PAGE_CONCURRENCY' | 'OCR_AI_IMAGE_REREAD' | 'OCR_AI_IMAGE_MASKED_PAGES'>>
   // Hard-page best-guess reads (two per hard page); off when not given, as the image re-read. Effort 'max' when not
   // given.
-  & Partial<Pick<OcrWorkerConfig, 'OCR_AI_HARD_PAGE_READS' | 'OCR_AI_HARD_PAGE_EFFORT'>>;
+  & Partial<Pick<OcrWorkerConfig, 'OCR_AI_HARD_PAGE_READS' | 'OCR_AI_HARD_PAGE_EFFORT'>>
+  // Zoom in the hard-page reads (zoom.ts); off when not given. At most OCR_AI_ZOOM_MAX_CALLS (8 when not given) per read.
+  & Partial<Pick<OcrWorkerConfig, 'OCR_AI_HARD_PAGE_ZOOM' | 'OCR_AI_ZOOM_MAX_CALLS'>>;
 
 export interface ReadingInput {
   facilityId: string;
@@ -85,11 +90,20 @@ export interface ReadingSummary {
   hardPageReads: number;
   hardPageSingleReadPages: number[];
   hardPageAgreement: HardPageAgreement;
+  /**
+   * Zoom in the hard-page reads (zoom.ts), over every read: crops returned, calls refused at the call limit or the
+   * request size budget, and calls answered "zoom unavailable" or refused as malformed. Counts only.
+   */
+  zoomCalls: number;
+  zoomLimited: number;
+  zoomFailed: number;
 }
 
 /** 'hard_page_read': both best-guess reads of a hard page (owner decision 2026-11-05), so their cost shows apart. */
 export type ReadingPass = 'first_pass' | 'reread' | 'image_reread' | 'hard_page_read';
-export interface PassUsageRecord extends AiUsageRecord { pass: ReadingPass }
+export interface PassUsageRecord extends AiUsageRecord { pass: ReadingPass;
+  /** hard_page_read only: zoom crops returned in this pass (counts only). */
+  zoomCalls?: number }
 
 export interface ReadingOutcome { payload: PaperReadingPayload; summary: ReadingSummary }
 
@@ -133,6 +147,11 @@ class ModelUsageTally {
       cacheReadTokens: 0, cacheWriteTokens: 0 };
     addRecord(perPass, attempts, usage);
     this.byPass.set(key, perPass);
+  }
+  /** Zoom crops returned in a pass, on that pass's record. */
+  addZoomCalls(model: string, pass: ReadingPass, calls: number): void {
+    const perPass = this.byPass.get(`${pass}\u0000${model}`);
+    if (perPass) perPass.zoomCalls = (perPass.zoomCalls ?? 0) + calls;
   }
   list(): AiUsageRecord[] { return [...this.byModel.values()].map((entry) => ({ ...entry })); }
   listByPass(): PassUsageRecord[] { return [...this.byPass.values()].map((entry) => ({ ...entry })); }
@@ -205,11 +224,11 @@ export class PaperReadingService {
         final: null, declined: false, failed: false, reread: 'none', fromImage: false };
     });
     const ask = async (state: PageState, model: string, effort: Effort, image?: PageImage,
-      pass: ReadingPass = image ? 'image_reread' : 'reread', hardPage = false) => {
+      pass: ReadingPass = image ? 'image_reread' : 'reread', hardPage = false, zoom?: ZoomToolSession) => {
       let answer: PageAnswer;
       try {
         answer = await client.readPage({ model, effort, page: state.page, lines: state.lines,
-          ...(image ? { image } : {}), ...(hardPage ? { hardPage: true } : {}) }, signal);
+          ...(image ? { image } : {}), ...(hardPage ? { hardPage: true } : {}), ...(zoom ? { zoom } : {}) }, signal);
       } catch (error) {
         // A call that ended without an answer still made requests (and may have used tokens): count them.
         // A call stopped before its first request (waiting for a permit) made none and adds nothing.
@@ -275,21 +294,48 @@ export class PaperReadingService {
     const hardPages: number[] = [];
     const hardSingle: number[] = [];
     const agreement = noAgreement();
+    const zoomTotals = noZoomStats();
     let hardReads = 0;
+    const zoomOn = this.config.OCR_AI_HARD_PAGE_ZOOM === 'on';
+    const zoomMaxCalls = Math.min(ZOOM_MAX_CALLS, Math.max(0, this.config.OCR_AI_ZOOM_MAX_CALLS ?? ZOOM_MAX_CALLS));
+    // One zoom per page (decoded at most once, on its first call, and shared by both reads); dropped with the reading.
+    const zooms = new Map<number, PageZoom>();
+    const zoomOf = (state: PageState, decision: Extract<PageImageDecision, { kind: 'image' }>): PageZoom | null => {
+      const tier = imageTierOf(rereadModel);
+      if (!zoomOn || zoomMaxCalls === 0 || tier === null) return null;
+      let zoom = zooms.get(state.page);
+      if (!zoom) {
+        zoom = createPageZoom({ mediaType: decision.mediaType, bytes: decision.bytes, width: decision.width,
+          height: decision.height }, resizedSize(decision.width, decision.height, tier), tier);
+        zooms.set(state.page, zoom);
+      }
+      return zoom;
+    };
     /**
      * A hard page (owner decision 2026-11-05, about 18:40 UTC): the same best-guess request with the picture sent
      * twice, at the hard-page effort, then the two readings compared (hard-page.ts). One reading failing or declining
      * leaves the other alone (single_reading_only on every item). Both failing: as a failed image re-read, except
      * that, as for the image re-read, each read refused as an invalid request or declined sends the page to a text
      * re-read instead ('image_refused' when either declined, else 'image_rejected').
-     * Zoom (deferred): a later step could ask for a crop here, between the two reads and the merge (zoom.ts).
+     * Zoom (owner decision 2026-11-05, about 18:45 UTC): with OCR_AI_HARD_PAGE_ZOOM on, each read may ask for up to
+     * OCR_AI_ZOOM_MAX_CALLS enlarged crops of the picture (zoom.ts), each read with its own count.
      */
-    const readHard = async (state: PageState, picture: PageImage): Promise<{ kind: 'read'; check: PageCheck }
+    const readHard = async (state: PageState, picture: PageImage,
+      decision: Extract<PageImageDecision, { kind: 'image' }>): Promise<{ kind: 'read'; check: PageCheck }
       | { kind: 'fallback'; reason: 'image_rejected' | 'image_refused' } | { kind: 'failed' }> => {
       hardPages.push(state.page);
       hardReads += 2;
-      const settled = await Promise.allSettled([0, 1].map(() =>
-        ask(state, rereadModel, hardEffort, picture, 'hard_page_read', true)));
+      const zoom = zoomOf(state, decision);
+      const sessions = [0, 1].map(() => zoom ? createZoomSession(zoom, state.page, zoomMaxCalls, picture.base64.length)
+        : undefined);
+      const settled = await Promise.allSettled(sessions.map((session) =>
+        ask(state, rereadModel, hardEffort, picture, 'hard_page_read', true, session)));
+      // Counted however the reads ended (a failed read's crops were still sent).
+      for (const session of sessions) {
+        if (!session) continue;
+        addZoomStats(zoomTotals, session.stats);
+        tally.addZoomCalls(rereadModel, 'hard_page_read', session.stats.calls);
+      }
       for (const result of settled) {
         if (result.status === 'rejected' && (signal.aborted
           || !(result.reason instanceof AiTransientError || result.reason instanceof AiRejectedError))) throw result.reason;
@@ -324,7 +370,7 @@ export class PaperReadingService {
       const decision = state.firstCheck === null ? null : this.imageDecision(state, input);
       try {
         if (decision?.kind === 'image' && this.isHardPage(state)) {
-          const hard = await readHard(state, pictureOf(decision));
+          const hard = await readHard(state, pictureOf(decision), decision);
           if (hard.kind === 'read') {
             hardCheck = hard.check;
             fromImage = true;
@@ -441,6 +487,9 @@ export class PaperReadingService {
     summary.hardPageReads = hardReads;
     summary.hardPageSingleReadPages = [...hardSingle].sort((a, b) => a - b);
     summary.hardPageAgreement = agreement;
+    summary.zoomCalls = zoomTotals.calls;
+    summary.zoomLimited = zoomTotals.limited;
+    summary.zoomFailed = zoomTotals.failed;
     return { payload: this.payload(pages, status === 'read' ? identity : blankIdentity(), kept, summary), summary };
   }
 
@@ -489,7 +538,7 @@ export class PaperReadingService {
       droppedByReasonFirstPass: {}, itemCount: items.length,
       flaggedPages: pages.filter((page) => page.flagged).length, maskedNumbers: masked, failureCode, usage,
       modelUsage, passUsage, hardPages: [], hardPageReads: 0, hardPageSingleReadPages: [],
-      hardPageAgreement: noAgreement(),
+      hardPageAgreement: noAgreement(), zoomCalls: 0, zoomLimited: 0, zoomFailed: 0,
     };
   }
 
@@ -514,6 +563,12 @@ export class PaperReadingService {
       },
     };
   }
+}
+
+function addZoomStats(total: ZoomStats, more: ZoomStats): void {
+  total.calls += more.calls;
+  total.limited += more.limited;
+  total.failed += more.failed;
 }
 
 /** Drop counts by reason summed over pages, with the codes in a stable (sorted) order. */

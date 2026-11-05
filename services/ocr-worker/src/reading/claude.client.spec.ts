@@ -5,6 +5,7 @@ import { Semaphore } from '../semaphore';
 import { HIGH_RESOLUTION_TIER, resizedSize, STANDARD_TIER } from './page-image';
 import { MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA, MODEL_OUTPUT_IMAGE_JSON_SCHEMA, MODEL_OUTPUT_JSON_SCHEMA, SYSTEM_PROMPT } from './prompt';
 import { fixturePng, modelItem, modelPage } from './test-fixtures';
+import { createZoomSession, ZOOM_LIMIT_MESSAGE, ZOOM_TOOL, ZOOM_UNAVAILABLE_MESSAGE, type PageZoom } from './zoom';
 
 const FAKE_KEY = 'sk-ant-test-0000000000000000000000';
 const config = { ANTHROPIC_API_KEY: FAKE_KEY, OCR_AI_MAX_TOKENS: 16_000, OCR_AI_TIMEOUT_MS: 30_000,
@@ -441,6 +442,201 @@ describe('ClaudePageClient', () => {
       expect(error).toBeInstanceOf(AiRejectedError);
       const shown = `${String(error)} ${JSON.stringify(error)} ${(error as Error).stack ?? ''}`;
       expect(shown).not.toContain(image.base64.slice(100, 140));
+    });
+  });
+
+  describe('the zoom tool loop (hard-page reads only)', () => {
+    const image = { mediaType: 'image/png' as const, base64: Buffer.from(fixturePng(1240, 1754)).toString('base64'),
+      width: 1240, height: 1754 };
+    const lines = [{ id: 'p1-l1', text: 'Pyrmthmn 25 rng od', confidence: 0.4, handwritten: true,
+      box: { left: 0.1, top: 0.1, width: 0.5, height: 0.02 } }];
+    const hardRequest = { model: 'claude-opus-5-5', effort: 'max' as const, page: 1, lines, image, hardPage: true };
+    const basis = { name: 'letters', dose: 'letters', unit: 'letters', route: 'empty', frequency: 'letters',
+      duration: 'empty', value: 'empty', other: 'empty' };
+    const hardAnswer = { ...answer, items: [{ ...modelItem({ kind: 'medicine', asWritten: 'Pyrimethamine? 25 mg od',
+      lineIds: ['p1-l1'], name: 'Pyrimethamine?', strength: '25 mg', frequency: 'od', status: 'new' }),
+    box: { x1: 124, y1: 175, x2: 744, y2: 210 }, dose: '25', doseUnit: 'mg', basis }] };
+    /** A distinctive fictional "crop" (not an image): it must never appear anywhere but the request body. */
+    const CROP = Buffer.from('fictional-crop-bytes-'.repeat(40)).toString('base64');
+    const crop = { mediaType: 'image/png' as const, base64: CROP, width: 64, height: 64,
+      region: { x: 124, y: 175, w: 16, h: 16 }, scale: 4 };
+    const goodZoom: PageZoom = { crop: async () => ({ kind: 'crop', crop }) };
+    const zoomInput = { page: 1, box: { x: 124, y: 175, w: 16, h: 16 }, scale: 4 };
+
+    type Block = { type: 'thinking'; thinking: string; signature: string } | { type: 'text'; text: string }
+      | { type: 'tool_use'; id: string; name: string; json: string };
+    /** A streamed turn of content blocks, with its usage. */
+    function turn(blocks: Block[], stopReason: string, inputTokens = 5_000, outputTokens = 700): Response {
+      const events: Array<[string, unknown]> = [['message_start', { type: 'message_start', message: { id: 'msg_zoom',
+        type: 'message', role: 'assistant', model: 'claude-opus-5-5', content: [], stop_reason: null, stop_sequence: null,
+        stop_details: null, usage: { input_tokens: inputTokens, output_tokens: 1, cache_read_input_tokens: 100,
+          cache_creation_input_tokens: 10, inference_geo: 'us' } } }]];
+      blocks.forEach((block, index) => {
+        if (block.type === 'thinking') {
+          events.push(['content_block_start', { type: 'content_block_start', index, content_block: { type: 'thinking',
+            thinking: '', signature: '' } }],
+          ['content_block_delta', { type: 'content_block_delta', index, delta: { type: 'thinking_delta', thinking: block.thinking } }],
+          ['content_block_delta', { type: 'content_block_delta', index, delta: { type: 'signature_delta', signature: block.signature } }]);
+        } else if (block.type === 'text') {
+          events.push(['content_block_start', { type: 'content_block_start', index, content_block: { type: 'text', text: '' } }],
+            ['content_block_delta', { type: 'content_block_delta', index, delta: { type: 'text_delta', text: block.text } }]);
+        } else {
+          events.push(['content_block_start', { type: 'content_block_start', index, content_block: { type: 'tool_use',
+            id: block.id, name: block.name, input: {} } }],
+          ['content_block_delta', { type: 'content_block_delta', index, delta: { type: 'input_json_delta', partial_json: block.json } }]);
+        }
+        events.push(['content_block_stop', { type: 'content_block_stop', index }]);
+      });
+      events.push(['message_delta', { type: 'message_delta', delta: { stop_reason: stopReason, stop_sequence: null,
+        stop_details: null }, usage: { output_tokens: outputTokens } }], ['message_stop', { type: 'message_stop' }]);
+      return new Response(events.map(([event, data]) => `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`).join(''),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    }
+    const zoomCall = (id: string, json = JSON.stringify(zoomInput)): Block => ({ type: 'tool_use', id, name: 'zoom', json });
+    const thinking = (signature: string): Block => ({ type: 'thinking', thinking: '', signature });
+    const final = () => turn([thinking('sig-final'), { type: 'text', text: JSON.stringify(hardAnswer) }], 'end_turn');
+    type Body = { tools?: unknown[]; tool_choice?: unknown; cache_control?: unknown; output_config: { format: unknown };
+      messages: Array<{ role: string; content: Array<Record<string, unknown>> | string }> };
+    const bodies = (fetch: jest.Mock) => fetch.mock.calls.map((call) => JSON.parse(String((call as [unknown, RequestInit])[1].body)) as Body);
+
+    it('runs one zoom, then reads the answer; the thinking blocks go back exactly, the usage of every turn counts', async () => {
+      const { instance, fetch } = client([turn([thinking('sig-one'), { type: 'text', text: 'Looking closer.' },
+        zoomCall('toolu_a')], 'tool_use'), final()]);
+      const session = createZoomSession(goodZoom, 1, 8, image.base64.length);
+      const result = await instance.readPage({ ...hardRequest, zoom: session }, new AbortController().signal);
+      expect(result).toMatchObject({ kind: 'answer', attempts: 2, usage: { inputTokens: 10_000, outputTokens: 1_400,
+        cacheReadInputTokens: 200, cacheCreationInputTokens: 20 }, answer: { items: [{ name: 'Pyrimethamine?' }] } });
+      expect(session.stats).toEqual({ calls: 1, limited: 0, failed: 0 });
+      const [first, second] = bodies(fetch);
+      expect(first!.tools).toEqual([ZOOM_TOOL]);
+      expect(first!.tool_choice).toEqual({ type: 'auto' });
+      expect(first!.cache_control).toEqual({ type: 'ephemeral' });
+      // Structured output stays on with the tool: the final turn is the JSON answer.
+      expect(second!.output_config.format).toEqual(first!.output_config.format);
+      expect(first!.messages).toHaveLength(1);
+      expect(String((first!.messages[0]!.content as Array<{ text?: string }>)[1]!.text)).toContain('You can use the zoom tool');
+      expect(String((first!.messages[0]!.content as Array<{ text?: string }>)[1]!.text)).toContain('at most 8 times');
+      // Append-only: the first turn's user message, then the assistant turn as it came, then the results.
+      expect(second!.messages[0]).toEqual(first!.messages[0]);
+      expect(second!.messages[1]).toEqual({ role: 'assistant', content: [
+        { type: 'thinking', thinking: '', signature: 'sig-one' }, { type: 'text', text: 'Looking closer.' },
+        { type: 'tool_use', id: 'toolu_a', name: 'zoom', input: zoomInput }] });
+      expect(second!.messages[2]).toMatchObject({ role: 'user', content: [{ type: 'tool_result', tool_use_id: 'toolu_a',
+        content: [{ type: 'text' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: CROP } }] }] });
+    });
+
+    it('answers 9 calls with 8 crops and the limit error, then reads the answer', async () => {
+      const calls = Array.from({ length: 9 }, (_, index) => zoomCall(`toolu_${index}`));
+      const { instance, fetch } = client([turn([thinking('sig-many'), ...calls], 'tool_use'), final()]);
+      const zoom = { crop: jest.fn(goodZoom.crop) };
+      const session = createZoomSession(zoom, 1, 8, image.base64.length);
+      await expect(instance.readPage({ ...hardRequest, zoom: session }, new AbortController().signal))
+        .resolves.toMatchObject({ kind: 'answer', attempts: 2 });
+      expect(zoom.crop).toHaveBeenCalledTimes(8);
+      const results = bodies(fetch)[1]!.messages[2]!.content as Array<Record<string, unknown>>;
+      // All results in one user turn, in the order of the calls.
+      expect(results.map((entry) => entry.tool_use_id)).toEqual(calls.map((entry) => (entry as { id: string }).id));
+      expect(results[8]).toEqual({ type: 'tool_result', tool_use_id: 'toolu_8', is_error: true, content: ZOOM_LIMIT_MESSAGE });
+      expect(session.stats).toEqual({ calls: 8, limited: 1, failed: 0 });
+    });
+
+    it('answers a malformed input and a failed zoom with errors, and the read goes on', async () => {
+      const { instance, fetch } = client([turn([zoomCall('toolu_bad', '{"page": 1, "box": "Test Patient"}')], 'tool_use'),
+        turn([zoomCall('toolu_down')], 'tool_use'), final()]);
+      let failing = false;
+      const zoom: PageZoom = { crop: async () => failing ? { kind: 'unavailable' } : { kind: 'crop', crop } };
+      failing = true;
+      const session = createZoomSession(zoom, 1, 8, image.base64.length);
+      await expect(instance.readPage({ ...hardRequest, zoom: session }, new AbortController().signal))
+        .resolves.toMatchObject({ kind: 'answer', attempts: 3 });
+      const sent = bodies(fetch);
+      expect(sent[1]!.messages[2]!.content).toEqual([expect.objectContaining({ tool_use_id: 'toolu_bad', is_error: true })]);
+      expect(JSON.stringify(sent[1]!.messages[2])).not.toContain('Test Patient');
+      expect(sent[2]!.messages[4]!.content).toEqual([{ type: 'tool_result', tool_use_id: 'toolu_down', is_error: true,
+        content: ZOOM_UNAVAILABLE_MESSAGE }]);
+      expect(session.stats).toEqual({ calls: 0, limited: 0, failed: 2 });
+    });
+
+    it('never runs a tool from a cut-off or refused turn', async () => {
+      const zoom = { crop: jest.fn(goodZoom.crop) };
+      const { instance } = client([turn([zoomCall('toolu_cut', '{"page": 1, "box": {"x": 1')], 'max_tokens'),
+        turn([zoomCall('toolu_refused')], 'refusal')]);
+      const signal = new AbortController().signal;
+      await expect(instance.readPage({ ...hardRequest, zoom: createZoomSession(zoom, 1, 8, 0) }, signal))
+        .resolves.toMatchObject({ kind: 'failed', reason: 'max_tokens', attempts: 1 });
+      await expect(instance.readPage({ ...hardRequest, zoom: createZoomSession(zoom, 1, 8, 0) }, signal))
+        .resolves.toMatchObject({ kind: 'refused', attempts: 1 });
+      expect(zoom.crop).not.toHaveBeenCalled();
+    });
+
+    it('ends a read that keeps calling past its limit as incomplete, with every turn counted', async () => {
+      const responses = Array.from({ length: 12 }, (_, index) => turn([zoomCall(`toolu_${index}`)], 'tool_use', 10, 10));
+      const { instance, fetch } = client(responses);
+      const session = createZoomSession(goodZoom, 1, 2, 0);
+      const result = await instance.readPage({ ...hardRequest, zoom: session }, new AbortController().signal);
+      // 2 calls + 3 turns past them: 6 requests.
+      expect(result).toMatchObject({ kind: 'failed', reason: 'incomplete', attempts: 6,
+        usage: { inputTokens: 60, outputTokens: 60 } });
+      expect(fetch).toHaveBeenCalledTimes(6);
+      expect(session.stats).toEqual({ calls: 2, limited: 3, failed: 0 });
+    });
+
+    it('stops on shutdown between turns, counting the requests already made', async () => {
+      const controller = new AbortController();
+      const { instance, fetch } = client([turn([zoomCall('toolu_a')], 'tool_use'), final()]);
+      const reason = new Error('worker shutdown');
+      const zoom: PageZoom = { crop: async () => { controller.abort(reason); return { kind: 'crop', crop }; } };
+      const error = await instance.readPage({ ...hardRequest, zoom: createZoomSession(zoom, 1, 8, 0) }, controller.signal)
+        .catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(AiInterruptedError);
+      expect(error).toMatchObject({ reason, attempts: 1, usage: { inputTokens: 5_000, outputTokens: 700 } });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(`${String(error)} ${JSON.stringify(error)} ${(error as Error).stack ?? ''}`).not.toContain(CROP.slice(20, 60));
+    });
+
+    it('holds the whole loop to the hard-page timeout', async () => {
+      let clock = 1_000_000;
+      const timeouts: number[] = [];
+      const spy = jest.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+        timeouts.push(ms); return new AbortController().signal;
+      });
+      try {
+        const responses = [turn([zoomCall('toolu_a')], 'tool_use'), turn([zoomCall('toolu_b')], 'tool_use'), final()];
+        const fetch = jest.fn(async () => responses.shift()!);
+        const instance = new ClaudePageClient({ ...config, OCR_AI_HARD_PAGE_TIMEOUT_MS: 900_000 },
+          { fetch: fetch as unknown as typeof globalThis.fetch, now: () => clock });
+        // Each crop "takes" 500 seconds of the read's time.
+        const zoom: PageZoom = { crop: async () => { clock += 500_000; return { kind: 'crop', crop }; } };
+        const error = await instance.readPage({ ...hardRequest, zoom: createZoomSession(zoom, 1, 8, 0) },
+          new AbortController().signal).catch((caught: unknown) => caught);
+        expect(timeouts).toEqual([900_000, 400_000]);
+        expect(error).toBeInstanceOf(AiTransientError);
+        expect(error).toMatchObject({ code: 'AI_TIMEOUT', attempts: 2 });
+        expect(fetch).toHaveBeenCalledTimes(2);
+      } finally { spy.mockRestore(); }
+    });
+
+    it('keeps the crops out of errors, and gives no tool to other requests', async () => {
+      const { instance } = client([turn([zoomCall('toolu_a')], 'tool_use'), failure(400, 'invalid_request_error')]);
+      const error = await instance.readPage({ ...hardRequest, zoom: createZoomSession(goodZoom, 1, 8, 0) },
+        new AbortController().signal).catch((caught: unknown) => caught);
+      expect(error).toBeInstanceOf(AiRejectedError);
+      expect(error).toMatchObject({ attempts: 2 });
+      expect(`${String(error)} ${JSON.stringify(error)} ${(error as Error).stack ?? ''}`).not.toContain(CROP.slice(20, 60));
+      // A zoom given to a request that is not a hard page, or a hard page with zoom at 0 calls: no tool, one request.
+      const box = { x1: 124, y1: 175, x2: 496, y2: 210 };
+      const imageAnswer = { ...answer, items: answer.items.map((item) => ({ ...item, box })) };
+      const other = client([sse(JSON.stringify(imageAnswer)), sse(JSON.stringify(hardAnswer)), sse(JSON.stringify(answer))]);
+      const signal = new AbortController().signal;
+      const session = createZoomSession(goodZoom, 1, 8, 0);
+      await other.instance.readPage({ ...hardRequest, hardPage: false, zoom: session }, signal);
+      await other.instance.readPage({ ...hardRequest, zoom: createZoomSession(goodZoom, 1, 0, 0) }, signal);
+      await other.instance.readPage({ model: 'claude-opus-5-5', effort: 'high', page: 1, lines, zoom: session }, signal);
+      for (const body of bodies(other.fetch)) {
+        expect(body).not.toHaveProperty('tools');
+        expect(body).not.toHaveProperty('cache_control');
+        expect(JSON.stringify(body)).not.toContain('zoom');
+      }
     });
   });
 });

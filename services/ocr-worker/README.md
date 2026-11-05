@@ -98,8 +98,9 @@ Each claimed job runs, in order:
    the reading each page ended with) go in the `ocr.job.completed` log only,
    never in the payload or provenance. The same log carries, codes and counts only,
    `hardPages` (hard pages sent for best-guess readings), `hardPageReads`
-   (best-guess requests sent, two per page) and `hardPageAgreement`
-   (`fieldsCompared`, `fieldsAgreed`, `itemsPaired`, `itemsSingle`). Every kept item gets check reasons
+   (best-guess requests sent, two per page), `hardPageAgreement`
+   (`fieldsCompared`, `fieldsAgreed`, `itemsPaired`, `itemsSingle`) and the
+   hard-page zoom counts `zoomCalls`, `zoomLimited` and `zoomFailed`. Every kept item gets check reasons
    (dose, frequency, route, value or unit not as written, corrected wording,
    lines not together, inactive status (`status_not_active`: past, stopped,
    suspected, ruled out, history, family history), a medicine whose status
@@ -182,9 +183,10 @@ Each claimed job runs, in order:
    count of the re-read's dropped items, including any whose content a kept
    first-pass item still carries. A page whose first pass failed or was
    declined has nothing to merge: its re-read stands. `PROMPT_VERSION`
-   is `hid-paper-reading-prompt-5` (version 3 for this routing, 4 since picture
+   is `hid-paper-reading-prompt-6` (version 3 for this routing, 4 since picture
    items on hard lines whose scanned text is nonsense are kept, 5 since hard
-   pages get two best-guess readings, below; the text prompt
+   pages get two best-guess readings, 6 since those reads may zoom, below;
+   the text prompt
    and request bodies are unchanged from version 2, and the label is only
    recorded), so `ocr-api` never reuses a reading made under older rules.
 
@@ -321,7 +323,8 @@ Each claimed job runs, in order:
    readings, names marked "?", with two runs disagreeing on several names):
    (1) "recommended with prompt that makes them do best result": tentative
    best-guess readings, only for hard pages; (2) "Yes, use a drug list";
-   (3) zoom deferred, a documented seam only.
+   (3) zoom deferred, a documented seam only, since replaced by zoom in our
+   reader (below).
 
    - *Which pages.* A hard page is a page the first pass flagged
      `handwriting` or `low_confidence` whose re-read goes with its picture
@@ -336,7 +339,7 @@ Each claimed job runs, in order:
      thinking, `inference_geo: "us"`, fixed endpoint and the same cached system
      prompt, at `OCR_AI_HARD_PAGE_EFFORT` (default `max`, which Claude Opus 5.5
      accepts: `low` to `max`; any other value fails startup). Its user turn is
-     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-2`,
+     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-3`,
      recorded in provenance as `hardPagePromptVersion` when used): read the
      page line by line; give a best reading of every field with "?" after each
      uncertain word; a word not readable even as a guess is `[unreadable]`;
@@ -461,10 +464,86 @@ Each claimed job runs, in order:
      brands) is always shown as `[unreadable]` on a hard page, and a misreading
      that happens to be within two letters of another listed medicine would
      be shown as that medicine, with "?", for the clinician to check.
-   - *Zoom* (deferred, owner decision 3): `src/reading/zoom.ts` documents the
-     seam, a `PageZoom.crop(page, box, padding)` interface that a later step
-     could call in `readHard`, between the two readings and the merge, to read
-     a disputed item again from a closer crop. Nothing implements or calls it.
+   - *Zoom* (owner decision of 2026-11-05, about 18:45 UTC, relayed by the
+     coordinator: "Zoom in our reader (Recommended)"; Anthropic's
+     code-execution sandbox was declined because it keeps page photos for up
+     to 30 days). During each of the two hard-page reads the model may call a
+     client tool, `zoom(page, box {x, y, w, h}, scale)` (`src/reading/zoom.ts`):
+     the box is in the picture's pixels as the model sees it (the same frame
+     as the line boxes and the answer boxes: the size `resizedSize` gives for
+     the model's tier), `scale` 1 to 4 (default 2). The worker cuts the box
+     from the same verified bytes the picture came from (mapped back to the
+     original pixels), enlarges it (bilinear; area averaging where the view
+     is in fact smaller), caps it to the tier so the API does not resize it
+     again, encodes it as PNG and returns it as an image `tool_result` with a
+     line saying where it is in the picture. How it works:
+     - *Only here.* The tool is declared only on hard-page requests with zoom
+       on (`OCR_AI_HARD_PAGE_ZOOM`, `on` by default when the hard-page reads
+       are on, `off`; any other value fails startup). The text-only request
+       (hash-pinned in `claude.client.spec.ts`) and the ordinary image re-read
+       request are unchanged; with zoom off the hard-page request is as before
+       (the prompt text adds rule I only when zoom is on).
+     - *The tool loop* (`claude.client.ts`). Streamed, adaptive thinking,
+       `inference_geo: "us"` unchanged. On `stop_reason: "tool_use"` every
+       call of the turn is answered in one user turn, in order, after the
+       assistant turn exactly as it came (thinking blocks and signatures
+       included, as tool use with thinking requires; the conversation only
+       grows, so top-level automatic caching lets later turns read the
+       picture and earlier crops from cache). The answer stays structured
+       output (`output_config.format`, which combines with tools: a turn ends
+       either in tool calls or in the JSON answer); `tool_choice` is `auto`
+       (Claude Opus 5.5 refuses forced tool use); the tool is `strict` and its
+       input is checked again in code. A cut-off (`max_tokens`) or refused
+       turn never runs its tools. Malformed input, another page or an
+       unknown tool get an `is_error` result; a zoom that fails (decode
+       error, a decoder limit, a time limit) gets `is_error` "zoom
+       unavailable" and the read goes on. A read that keeps calling past its
+       limit ends after three more turns as an incomplete (failed) reading.
+       The whole loop, every turn and retry, is held to
+       `OCR_AI_HARD_PAGE_TIMEOUT_MS` and stops on shutdown between turns as
+       within them; every request and the usage of every turn is counted.
+     - *Limits.* At most `OCR_AI_ZOOM_MAX_CALLS` (default 8, 0 to 8; 0
+       declares no tool) calls per page per read; every later call gets
+       `is_error` "zoom limit reached; finish your answer". Each crop at most
+       4,000,000 base64 characters (made smaller until it fits) and all crops
+       of one read at most 30,000,000 less the picture (the API takes 32 MB
+       per request, and every crop is sent again on each later turn); past
+       that, the limit message. Boxes under 8 px (after clamping to the
+       picture) or with non-finite numbers are refused. Decoding happens only
+       for a page already eligible for the image re-read (the same 10 MB
+       base64, 8000 x 8000 px and upright-JPEG checks), on the first call,
+       once per page for both reads, and is dropped with the reading. JPEG
+       decoding is held to 64 MP and 384 MB (jpeg-js `maxResolutionInMP`,
+       `maxMemoryUsageInMB`); a decode over 5 s, a crop over 3 s, a decoded
+       size other than the header's or any decoder error turns zoom off for
+       that page ("zoom unavailable"), never the reading. The decoders run on
+       the event loop (pure JS), so a decode stalls the process for up to
+       those limits; lease renewal waits that long at worst.
+     - *Libraries* (pure JavaScript, no native code, pinned exactly in
+       `package.json`, integrity hashes in `package-lock.json`): `jpeg-js`
+       0.4.4 (BSD-3-Clause; 2022-06-07; no dependencies; the fix for
+       GHSA-xvf7-4v9q-58w6, which affected earlier versions), `pngjs` 7.0.0
+       (MIT; 2023-02-20; no dependencies), and `@types/pngjs` 6.0.5 (MIT,
+       development only; jpeg-js ships its own types). Each is the latest
+       release, over 14 days old; `npm audit` reports no advisory for any of
+       them (the audit's findings are the existing ones in the jest
+       toolchain, development only; `npm audit --omit=dev` finds none).
+     - *Logs.* `ocr.reading.usage` for `pass: "hard_page_read"` carries
+       `zoomCalls` (crops returned in that pass); `ocr.job.completed` carries
+       `zoomCalls`, `zoomLimited` (calls refused at the limit) and
+       `zoomFailed` (calls answered "zoom unavailable" or refused as
+       malformed). Numbers only.
+     - *Privacy.* No crop is stored, logged or put in an error: crops are
+       made in memory from the same picture, sent only in the same US-only
+       Claude API request as the picture, and dropped with the reading.
+     - *Cost.* Each zoom adds an image of up to the tier's tokens (4,784 on
+       the high-resolution tier, about $0.021 at $4.40 per million input
+       tokens), and every later turn of the read sends the picture, the
+       earlier crops and the turn's thinking again (cached after the first
+       turn, read at $0.22 per million), plus the turn's own output. Eight
+       zooms in one read can add roughly 40,000 input tokens and a few
+       thousand output tokens; the `zoomCalls` and `hard_page_read` usage
+       lines give the real figures.
    - *Cost and time.* Each hard page costs two requests at `max` effort where
      the earlier image re-read was one at `high`. Estimate per A4 photo page
      at list price x1.1 for US-only ($4.40 / $22 per million input / output

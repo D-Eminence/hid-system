@@ -88,6 +88,8 @@ export class OcrWorker {
         // Hard pages' best-guess reads (two per page): codes and counts only.
         hardPages: summary.hardPages.length, hardPageReads: summary.hardPageReads,
         hardPageAgreement: { ...summary.hardPageAgreement },
+        // Zoom in the hard-page reads: crops returned, calls refused at the limit, calls failed. Numbers only.
+        zoomCalls: summary.zoomCalls, zoomLimited: summary.zoomLimited, zoomFailed: summary.zoomFailed,
         inputTokens: summary.usage.inputTokens, outputTokens: summary.usage.outputTokens,
         cacheReadInputTokens: summary.usage.cacheReadInputTokens,
         cacheCreationInputTokens: summary.usage.cacheCreationInputTokens,
@@ -163,14 +165,16 @@ export class OcrWorker {
   private async recordAiUsage(job: ClaimedOcrJob, usage: readonly AiUsageRecord[], pagesSent?: number,
     passUsage?: readonly PassUsageRecord[]): Promise<void> {
     // Counts only, never text: lets the cost per page, and per pass, be seen in the logs.
-    const logLines: ReadonlyArray<AiUsageRecord & { pass?: string }> = passUsage ?? usage;
+    const logLines: ReadonlyArray<AiUsageRecord & { pass?: string; zoomCalls?: number }> = passUsage ?? usage;
     for (const entry of logLines) {
       if (entry.requests <= 0) continue;
       this.log('info', 'ocr.reading.usage', { jobId: job.jobId, correlationId: job.correlationId,
         attempt: job.attemptNo, model: entry.model, ...(entry.pass === undefined ? {} : { pass: entry.pass }),
         requests: entry.requests, inputTokens: entry.inputTokens,
         outputTokens: entry.outputTokens, cacheReadTokens: entry.cacheReadTokens,
-        cacheWriteTokens: entry.cacheWriteTokens, ...(pagesSent === undefined ? {} : { pagesSent }) });
+        cacheWriteTokens: entry.cacheWriteTokens, ...(pagesSent === undefined ? {} : { pagesSent }),
+        // The hard-page reads' zoom crops (a count only; no crop is ever logged).
+        ...(entry.pass === 'hard_page_read' ? { zoomCalls: entry.zoomCalls ?? 0 } : {}) });
     }
     for (const entry of usage) {
       if (entry.requests <= 0) continue;

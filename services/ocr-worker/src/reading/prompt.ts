@@ -17,9 +17,12 @@ import { ALLERGY_SEVERITIES, DIAGNOSIS_STATUSES, ITEM_KINDS, MEDICINE_STATUSES, 
  * hard pages (flagged handwriting or low_confidence, re-read with the picture)
  * get two best-guess readings (HARD_PAGE_PROMPT_VERSION; owner decision of
  * 2026-11-05 about 18:40 UTC). The text-only request is still byte for byte
- * as under version 2.
+ * as under version 2. Version 6: hard pages' best-guess reads may zoom into
+ * the picture (zoom.ts; owner decision of 2026-11-05 about 18:45 UTC), so a
+ * reading made before cannot be reused; the text-only request and the
+ * ordinary image re-read request are unchanged.
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-5';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-6';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 /**
  * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
@@ -35,8 +38,10 @@ export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-5';
 /**
  * The hard-page prompt (hardPageMessage) and its output schema (MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA): best-guess
  * readings for a hard page only (owner decision of 2026-11-05, about 18:40 UTC). Recorded in provenance when used.
+ * Version 3: with zoom on (OCR_AI_HARD_PAGE_ZOOM, the default), the message adds rule I, which offers the zoom tool
+ * (zoom.ts); with zoom off it is the version 2 text.
  */
-export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-2';
+export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-3';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
@@ -342,11 +347,12 @@ export interface HardItemExtras {
  * for alternatives. Rule 1 (never fill a gap from what is usual) is relaxed only where a field is marked basis
  * "context"; never inventing an item, citing lines and giving the box stay. Nothing here varies but the page.
  *
- * Zoom (deferred, owner decision 3): a later step could let the model ask for a closer crop of a box before it
- * answers; see zoom.ts for the seam. This message does not offer it.
+ * Zoom (owner decision of 2026-11-05, about 18:45 UTC): with `zoomCalls` over 0 the message adds rule I, which
+ * offers the zoom tool (zoom.ts) for at most that many calls; without it the message is the version 2 text.
  */
 export function hardPageMessage(page: number, lines: readonly { id: string; text: string; confidence: number;
-  handwritten: boolean; box?: ModelFractionBox | null }[], size: { width: number; height: number }): string {
+  handwritten: boolean; box?: ModelFractionBox | null }[], size: { width: number; height: number },
+  zoomCalls = 0): string {
   return `Page ${page} of a paper record. The picture above is this page, ${size.width} pixels wide and \
 ${size.height} pixels high. It is hard to read: hard handwriting or writing the text service could not read with \
 confidence. A clinician will check every word you give against the paper. For this page only, give your best \
@@ -389,7 +395,13 @@ item's box covers, including small fragments of the same row that the service sp
 list. Give the item's own place in the picture in "box" as absolute pixel coordinates: x1 and y1 the top-left \
 corner, x2 and y2 the bottom-right corner, with x from the left edge and y from the top edge of the picture, \
 around the writing of this item only. Leave out writing that is not on one of the lines below.
-
+${zoomCalls > 0 ? `
+I. You can use the zoom tool to look closer at hard-to-read writing before you answer: give page ${page}, a box \
+around the writing in this picture's pixels (the same pixels as the line boxes and the boxes in your answer) and a \
+scale from 1 to 4. It returns that part of the picture enlarged. You may zoom at most ${zoomCalls} times for this \
+page; use it where a closer look can settle a word or number, not for every line. Every box in your answer stays \
+in the full picture's pixels.
+` : ''}
 The lines the service found, as JSON (box in pixels of the picture, as above; confidence 0 to 1):
 ${JSON.stringify(lines.map((line) => ({
     id: line.id, text: line.text,

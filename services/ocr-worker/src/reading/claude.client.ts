@@ -6,6 +6,7 @@ import { imageTierOf, resizedSize, type PageImage } from './page-image';
 import { hardPageMessage, imagePageMessage, MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA, MODEL_OUTPUT_IMAGE_JSON_SCHEMA,
   MODEL_OUTPUT_JSON_SCHEMA, modelHardPageSchema, modelImagePageSchema, modelPageSchema, pageMessage, SYSTEM_PROMPT,
   toFractionBox, type ModelPage } from './prompt';
+import { ZOOM_TOOL, type ZoomToolSession } from './zoom';
 
 /** The Claude API, always at its own endpoint: ANTHROPIC_BASE_URL is never read. */
 export const ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
@@ -28,7 +29,12 @@ export interface PageRequest { model: string; effort: Effort; page: number; line
    * A hard page's best-guess reading (with `image` only): the hard-page message and answer schema, and the
    * hard-page timeout. Without it an image request is exactly the image re-read request.
    */
-  hardPage?: boolean }
+  hardPage?: boolean;
+  /**
+   * A hard page's zoom tool for this read (with `hardPage` only; zoom.ts): the request declares the zoom tool, the
+   * message offers it, and the client runs the tool loop. Without it a hard-page request is exactly as before zoom.
+   */
+  zoom?: ZoomToolSession }
 
 export interface TokenUsage {
   inputTokens: number;
@@ -93,7 +99,15 @@ export interface ClaudeClientOptions {
   random?: () => number;
   /** The process-wide request limit; by default one built from OCR_AI_MAX_CONCURRENT_REQUESTS (4). */
   limiter?: Semaphore;
+  /** Milliseconds, for the zoom loop's deadline; tests inject a clock. */
+  now?: () => number;
 }
+
+/** Requests a call made and what they used, for its answer or its error. */
+interface CallState { sent: number; spent: TokenUsage }
+
+/** Turns a zoom read may take beyond its zoom calls (the answer, and a turn or two of calls past the limit). */
+const ZOOM_EXTRA_TURNS = 3;
 
 const silentLogger = { error: () => undefined, warn: () => undefined, info: () => undefined, debug: () => undefined };
 
@@ -101,6 +115,7 @@ export class ClaudePageClient implements PageModelClient {
   private readonly client: Anthropic;
   private readonly sleep: Sleep;
   private readonly random: () => number;
+  private readonly now: () => number;
   /**
    * Claude API requests in flight for the whole process. main.ts builds one client, so every claim loop and
    * every page of every document shares this limit. A permit is held for one HTTP attempt only, never across
@@ -121,6 +136,7 @@ export class ClaudePageClient implements PageModelClient {
       ...(options.fetch ? { fetch: options.fetch } : {}) });
     this.sleep = options.sleep ?? abortableDelay;
     this.random = options.random ?? Math.random;
+    this.now = options.now ?? Date.now;
     this.limiter = options.limiter ?? new Semaphore(config.OCR_AI_MAX_CONCURRENT_REQUESTS ?? 4);
   }
 
@@ -133,6 +149,7 @@ export class ClaudePageClient implements PageModelClient {
     if (image && tier === null) throw new AiRejectedError('IMAGE_TIER_UNKNOWN');
     const seen = image && tier ? resizedSize(image.width, image.height, tier) : null;
     const hard = image !== undefined && request.hardPage === true;
+    const zoom = hard && request.zoom !== undefined && request.zoom.maxCalls > 0 ? request.zoom : undefined;
     // A hard page at max effort may think for many minutes: its own (longer) per-request timeout.
     const timeoutMs = hard ? this.config.OCR_AI_HARD_PAGE_TIMEOUT_MS ?? this.config.OCR_AI_TIMEOUT_MS
       : this.config.OCR_AI_TIMEOUT_MS;
@@ -152,24 +169,67 @@ export class ClaudePageClient implements PageModelClient {
       system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: image
         ? [{ type: 'image', source: { type: 'base64', media_type: image.mediaType, data: image.base64 } },
-          { type: 'text', text: hard ? hardPageMessage(request.page, request.lines, seen!)
+          { type: 'text', text: hard ? hardPageMessage(request.page, request.lines, seen!, zoom?.maxCalls ?? 0)
             : imagePageMessage(request.page, request.lines, seen!) }]
         : pageMessage(request.page, request.lines) }],
+      // Zoom (hard-page reads only): the client tool, with the JSON answer still given by output_config.format
+      // (structured outputs and tools combine: a turn ends either in tool calls or in the JSON answer). The
+      // conversation grows by whole turns only (append-only), so top-level automatic caching lets each later turn
+      // read the picture, the earlier crops and the thinking from the cache.
+      ...(zoom ? { tools: [ZOOM_TOOL], tool_choice: { type: 'auto' as const },
+        cache_control: { type: 'ephemeral' as const } } : {}),
     };
+    const state: CallState = { sent: 0, spent: noUsage() };
+    if (!zoom) {
+      const message = await this.send(params, () => timeoutMs, signal, state);
+      return interpret(message, state.sent, state.spent, seen ?? undefined, hard);
+    }
+    // The tool loop. The whole loop, every turn and retry, is held to the hard-page timeout; the abort signal ends
+    // it between turns as within them. Each turn's usage is counted.
+    const deadline = this.now() + timeoutMs;
+    const remaining = () => deadline - this.now();
+    const messages: Anthropic.MessageParam[] = [...params.messages];
+    for (let turn = 0; ; turn += 1) {
+      const message = await this.send({ ...params, messages }, remaining, signal, state);
+      if (message.stop_reason !== 'tool_use') return interpret(message, state.sent, state.spent, seen ?? undefined, hard);
+      addTokens(state.spent, usageOf(message));
+      const calls = message.content.filter((block): block is Anthropic.ToolUseBlock => block.type === 'tool_use');
+      if (calls.length === 0 || turn >= zoom.maxCalls + ZOOM_EXTRA_TURNS) {
+        return { kind: 'failed', reason: 'incomplete', usage: { ...state.spent }, attempts: state.sent };
+      }
+      // Every call of the turn answered, in order, in one user turn. A malformed input or a failed zoom is an
+      // is_error result (zoom.ts never throws): the read goes on.
+      const results: Anthropic.ToolResultBlockParam[] = [];
+      for (const call of calls) results.push(await zoom.answer({ id: call.id, name: call.name, input: call.input }));
+      if (signal.aborted) throw new AiInterruptedError(signal.reason, state.sent, { ...state.spent });
+      // The assistant turn exactly as it came (thinking blocks with their signatures, text, tool calls), as tool use
+      // with thinking requires; then the results.
+      messages.push({ role: 'assistant', content: message.content as Anthropic.ContentBlockParam[] },
+        { role: 'user', content: results });
+    }
+  }
+
+  /**
+   * One request, with our retries. `timeoutFor` gives each attempt's timeout (the zoom loop's time left); none left
+   * is a timeout. Every attempt is counted in `state` (sent, and the tokens of any that failed after it started).
+   */
+  private async send(params: Anthropic.MessageCreateParamsNonStreaming, timeoutFor: () => number, signal: AbortSignal,
+    state: CallState): Promise<Anthropic.Message> {
     const maxAttempts = this.config.OCR_AI_MAX_RETRIES + 1;
-    // Attempts that reached the API without an answer, and the tokens they were reported to use: counted in
-    // every error this call throws, so a failed or interrupted call's requests still count towards the usage totals.
-    let sent = 0;
-    const spent = noUsage();
     for (let attempt = 1; ; attempt += 1) {
       // The wait for a permit is not part of the request timeout; only shutdown ends it.
       let release: () => void;
       try {
         release = await this.limiter.acquire(signal);
       } catch (error) {
-        throw signal.aborted ? new AiInterruptedError(signal.reason, sent, spent) : error;
+        throw signal.aborted ? new AiInterruptedError(signal.reason, state.sent, state.spent) : error;
       }
-      const timeout = AbortSignal.timeout(timeoutMs);
+      const ms = timeoutFor();
+      if (ms <= 0) {
+        release();
+        throw new AiTransientError('AI_TIMEOUT', state.sent, state.spent);
+      }
+      const timeout = AbortSignal.timeout(ms);
       let stream: { readonly currentMessage: Anthropic.Message | undefined } | undefined;
       try {
         // Streaming, so a long adaptive-thinking answer is never cut by an idle HTTP connection.
@@ -177,20 +237,23 @@ export class ClaudePageClient implements PageModelClient {
         stream = started;
         const message = await started.finalMessage();
         release();
-        return interpret(message, attempt, spent, seen ?? undefined, hard);
+        state.sent += 1;
+        return message;
       } catch (error) {
         release();
-        sent = attempt;
-        addTokens(spent, partialUsage(stream));
-        if (signal.aborted) throw new AiInterruptedError(signal.reason, sent, spent);
+        state.sent += 1;
+        addTokens(state.spent, partialUsage(stream));
+        if (signal.aborted) throw new AiInterruptedError(signal.reason, state.sent, state.spent);
         const decision = classify(error, timeout.aborted);
-        if (decision.kind === 'rejected') throw new AiRejectedError(decision.code, sent, spent, decision.invalidRequest === true);
-        if (attempt >= maxAttempts) throw new AiTransientError(decision.code, sent, spent);
+        if (decision.kind === 'rejected') {
+          throw new AiRejectedError(decision.code, state.sent, state.spent, decision.invalidRequest === true);
+        }
+        if (attempt >= maxAttempts) throw new AiTransientError(decision.code, state.sent, state.spent);
         const jitter = fullJitterDelayMs(attempt - 1, { ...BACKOFF, random: this.random });
         try {
           await this.sleep(decision.retryAfterMs === null ? jitter : Math.max(decision.retryAfterMs, jitter), signal);
         } catch (sleepError) {
-          throw signal.aborted ? new AiInterruptedError(signal.reason, sent, spent) : sleepError;
+          throw signal.aborted ? new AiInterruptedError(signal.reason, state.sent, state.spent) : sleepError;
         }
       }
     }

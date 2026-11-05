@@ -3,6 +3,8 @@
  * here is invented ("Test Patient Adaeze Example", folder TEST-0001); none
  * comes from a real patient. Used only by *.spec.ts files.
  */
+import * as jpeg from 'jpeg-js';
+import { PNG } from 'pngjs';
 import type { ReadLine, ReadPage } from '../types';
 import type { ModelItem, ModelPage } from './prompt';
 
@@ -81,4 +83,32 @@ export function fixtureJpeg(width: number, height: number, fillerBytes = 3_000, 
     ...exif,
     0xff, 0xc0, ...u16(17), 8, ...u16(height), ...u16(width), 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1,
     0xff, 0xda, ...u16(12), 3, 1, 0, 2, 0x11, 3, 0x11, 0, 0x3f, 0, ...filler(fillerBytes, 11), 0xff, 0xd9]);
+}
+
+/**
+ * A decodable synthetic picture (no real page): a white sheet with dark vertical bars every 16 px and a grey band
+ * in the middle third, as RGBA. Generated in the test; no file is read.
+ */
+export function syntheticRgba(width: number, height: number): Uint8Array {
+  const data = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const at = (y * width + x) * 4;
+      const value = x % 16 < 4 ? 20 : y > height / 3 && y < (2 * height) / 3 ? 128 : 250;
+      data[at] = value; data[at + 1] = value; data[at + 2] = value; data[at + 3] = 255;
+    }
+  }
+  return data;
+}
+
+/** syntheticRgba as a real PNG (8-bit RGBA). */
+export function syntheticPng(width: number, height: number): Uint8Array {
+  const png = new PNG({ width, height });
+  png.data = Buffer.from(syntheticRgba(width, height));
+  return new Uint8Array(PNG.sync.write(png));
+}
+
+/** syntheticRgba as a real baseline JPEG. */
+export function syntheticJpeg(width: number, height: number, quality = 90): Uint8Array {
+  return new Uint8Array(jpeg.encode({ width, height, data: Buffer.from(syntheticRgba(width, height)) }, quality).data);
 }
