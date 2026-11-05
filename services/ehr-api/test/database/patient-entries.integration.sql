@@ -414,7 +414,9 @@ begin
        withdrawn_at = clock_timestamp() where id = %L$q$,
        (select id from e6_ids where name = 'medicine'))) not like '55000%'
      or pg_temp.sqlstate_of(format($q$delete from ehr.patient_entries where id = %L$q$, first_id)) not like '55000%'
-     or pg_temp.sqlstate_of($q$truncate ehr.patient_entries$q$) not like '55000%' then
+     -- Refused by its trigger, or (since 0117's files reference the records) before it.
+     or pg_temp.sqlstate_of($q$truncate ehr.patient_entries$q$) !~ '^(55000|0A000) '
+     or pg_temp.sqlstate_of($q$truncate ehr.patient_entries cascade$q$) not like '55000%' then
     raise exception 'A withdrawn entry came back, an entry was rewritten, or one was deleted';
   end if;
   -- 6 (cont.) The table's own CHECK holds notes to 1000 characters, even for its owner.
@@ -552,7 +554,9 @@ begin
     from pg_constraint
    where conname = 'patient_evidence_chunks_source_kind_check'
      and conrelid in ('ehr.patient_evidence_chunks'::regclass, 'ehr.staff_evidence_chunks'::regclass)
-     and not (convalidated and md5(pg_get_constraintdef(oid)) = '392152e0fd4834262de048c7b9027151');
+     -- 0116's 14 kinds, or 0117's 15 (patient_entry_document) once that is applied.
+     and not (convalidated and md5(pg_get_constraintdef(oid)) in ('392152e0fd4834262de048c7b9027151',
+       'bfbe0af8c372b45fc68a39cd3a4e4d28'));
   if mismatch is not null
      or (select count(*) from pg_constraint where conname = 'patient_evidence_chunks_source_kind_check'
            and conrelid in ('ehr.patient_evidence_chunks'::regclass, 'ehr.staff_evidence_chunks'::regclass)) <> 2 then

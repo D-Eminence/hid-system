@@ -66,4 +66,20 @@ describe('EHR production database transport', () => {
       expect(() => getEnvironment()).toThrow();
     }
   });
+
+  it('keeps photos and files on the records patients add on unless PATIENT_ENTRY_FILES_ENABLED is exactly false', () => {
+    Object.assign(process.env, { NODE_ENV: 'test', DATABASE_URL: 'postgresql://synthetic:test@localhost/hid',
+      CORS_ORIGINS: 'https://app.example', STORAGE_MODE: 'disabled' });
+    delete process.env.PATIENT_ENTRIES_ENABLED;
+    delete process.env.PATIENT_ENTRY_FILES_ENABLED; resetEnvironmentForTests();
+    expect(getEnvironment().PATIENT_ENTRY_FILES_ENABLED).toBe(true);
+    process.env.PATIENT_ENTRY_FILES_ENABLED = 'false'; resetEnvironmentForTests();
+    expect(getEnvironment().PATIENT_ENTRY_FILES_ENABLED).toBe(false);
+    // Text entries keep their own switch.
+    expect(getEnvironment().PATIENT_ENTRIES_ENABLED).toBe(true);
+    for (const value of ['yes', '1', 'TRUE']) {
+      process.env.PATIENT_ENTRY_FILES_ENABLED = value; resetEnvironmentForTests();
+      expect(() => getEnvironment()).toThrow();
+    }
+  });
 });

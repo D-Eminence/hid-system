@@ -1460,6 +1460,30 @@ grant execute on function ehr.create_my_patient_entry(text,text,text,date,text,t
   ehr.withdraw_my_patient_entry(uuid) to hid_ehr_runtime, hid_schema_test_runtime;
 revoke all on function ehr.create_my_patient_entry(text,text,text,date,text,text,text),
   ehr.withdraw_my_patient_entry(uuid), ehr.patient_entries_guard() from public;
+-- Photos and files on the records patients add (0117), as that migration
+-- grants it (its section 5): SELECT on the files, their scan events and the
+-- effective view (forced RLS: a readable record's confirmed files, and the
+-- patient's own) and the patient's intent and confirm commands to the EHR
+-- runtime and the schema test runtime; SELECT, INSERT and UPDATE on the
+-- chat's extractions to the EHR runtime, as 0069 grants
+-- ehr.patient_document_extractions; the scanner's resolve, work-list and
+-- append commands to hid_document_scanner alone; no write grant on the files
+-- or the scan events. The one-way guard is granted to no role.
+grant select on ehr.patient_entry_documents, ehr.patient_entry_document_scan_events,
+  ehr.patient_entry_documents_effective to hid_ehr_runtime, hid_schema_test_runtime;
+grant execute on function ehr.create_my_patient_entry_document_intent(uuid,text,text,bigint,text,text,text,text,text),
+  ehr.complete_my_patient_entry_document(uuid,uuid,text,bigint,text) to hid_ehr_runtime, hid_schema_test_runtime;
+grant select, insert, update on ehr.patient_entry_document_extractions to hid_ehr_runtime;
+grant execute on function ehr.resolve_patient_entry_document_scan_target(text,text,text,text),
+  ehr.list_patient_entry_documents_awaiting_scan(integer,integer,text),
+  ehr.append_patient_entry_document_scan_event(uuid,text,text,text,text,text,text,text,text,text)
+  to hid_document_scanner;
+revoke all on function ehr.create_my_patient_entry_document_intent(uuid,text,text,bigint,text,text,text,text,text),
+  ehr.complete_my_patient_entry_document(uuid,uuid,text,bigint,text),
+  ehr.resolve_patient_entry_document_scan_target(text,text,text,text),
+  ehr.list_patient_entry_documents_awaiting_scan(integer,integer,text),
+  ehr.append_patient_entry_document_scan_event(uuid,text,text,text,text,text,text,text,text,text),
+  ehr.patient_entry_documents_guard() from public;
 
 -- Google onboarding capabilities are accountless and only the Identity API
 -- may use their narrow commands. Runtime roles never read provider subjects.

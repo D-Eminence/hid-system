@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-export const SOURCE_KINDS = ['note','encounter','diagnosis','prescription','investigation','vital','import','import_version','health_profile','lab_result','attachment','document','profile','patient_entry'] as const;
+export const SOURCE_KINDS = ['note','encounter','diagnosis','prescription','investigation','vital','import','import_version','health_profile','lab_result','attachment','document','profile','patient_entry','patient_entry_document'] as const;
 export type SourceKind = typeof SOURCE_KINDS[number];
 export type RecordIntent = 'summary' | 'medications' | 'condition' | 'labs' | 'search';
 
@@ -44,6 +44,8 @@ export function evidenceOrigin(kind: SourceKind, hint?: OriginHint): EvidenceOri
     case 'import': case 'import_version': return hint === 'provider-authored' ? 'health_worker' : 'patient';
     // A record the patient added themselves (0116); no hint makes it anyone else's.
     case 'health_profile': case 'patient_entry': return 'patient';
+    // A photo or file the patient added to such a record (0117), read by machine.
+    case 'patient_entry_document': return 'patient';
     case 'attachment': case 'document': return 'scanned_paper';
     case 'profile': return 'health_id_profile';
     default: { const unknown: never = kind; throw new Error(`Unknown evidence kind ${String(unknown)}`); }

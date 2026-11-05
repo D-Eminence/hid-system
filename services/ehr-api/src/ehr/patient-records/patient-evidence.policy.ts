@@ -46,7 +46,7 @@ export const PATIENT_FIELDS: Partial<Record<SourceKind, readonly string[]>> = {
  * Codes, test and medicine names, units and dates are never rewritten.
  */
 const FREE_TEXT_FIELDS: Partial<Record<SourceKind, readonly string[]>> = {
-  note: ['text'], document: ['text'], attachment: ['text'],
+  note: ['text'], document: ['text'], attachment: ['text'], patient_entry_document: ['text'],
   import: ['record', 'notes', 'structuredData', 'transcriptionText'],
   import_version: ['record', 'notes', 'structuredData', 'transcriptionText'],
   health_profile: ['medical_notes', 'medicalNotes'],
@@ -315,6 +315,8 @@ export function patientEvidence(records: Evidence[], profile: PatientProfileInpu
     if (record.kind === 'lab_result' && fields.correctionPending !== true) { delete fields.correctionPending; delete fields.status; }
     if (record.kind === 'document') title = 'Clinical document';
     if (record.kind === 'attachment') title = 'Imported document';
+    // A file the patient added (0117): its name never reaches the chat.
+    if (record.kind === 'patient_entry_document') title = 'File you added';
     for (const key of FREE_TEXT_FIELDS[record.kind] ?? []) if (Object.hasOwn(fields, key)) fields[key] = redactIdentifiers(fields[key], profile);
     if (FREE_TEXT_TITLES.has(record.kind)) title = redactIdentifiers(title, profile);
     const rebuilt = evidence({ kind: record.kind, id: record.id, version: record.version, title, recordedAt: record.recordedAt,

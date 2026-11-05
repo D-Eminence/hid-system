@@ -40,7 +40,7 @@ export class PatientChatHistoryService {
     return this.database.withPatientTransaction(auth,request.correlationId,async client=>{
       const rows=(await client.query(`select source_bindings as bindings from ehr.patient_chat_messages where patient_id=$1
        and created_at>statement_timestamp()-interval '30 days' order by created_at desc,id desc limit 10`,[auth.patientId])).rows;
-      return [...new Set(rows.flatMap(r=>(r.bindings as ContextBinding[]).filter(b=>'kind' in b&&['document','attachment'].includes(b.kind)).map(b=>(b as EvidenceBinding).id)))];
+      return [...new Set(rows.flatMap(r=>(r.bindings as ContextBinding[]).filter(b=>'kind' in b&&['document','attachment','patient_entry_document'].includes(b.kind)).map(b=>(b as EvidenceBinding).id)))];
     });
   }
   async start(request: HidRequest, authorization: Authorization): Promise<string> {
@@ -54,8 +54,8 @@ export class PatientChatHistoryService {
     }
     await this.records.authorizeSelf(request);
     const snapshot=await this.evidence.snapshot(request,undefined,[...new Set([...await this.documentBindings(request),
-      ...contextBindings.filter(b=>'kind' in b&&['document','attachment'].includes(b.kind)).map(b=>(b as EvidenceBinding).id),
-      ...reply.sources.filter(s=>'kind' in s&&['document','attachment'].includes(s.kind)).map(s=>(s as EvidenceBinding).id)])]);
+      ...contextBindings.filter(b=>'kind' in b&&['document','attachment','patient_entry_document'].includes(b.kind)).map(b=>(b as EvidenceBinding).id),
+      ...reply.sources.filter(s=>'kind' in s&&['document','attachment','patient_entry_document'].includes(s.kind)).map(s=>(s as EvidenceBinding).id)])]);
     const auth=await this.records.authorizeSelf(request);
     const current=new Map(snapshot.records.map(r=>[evidenceKey(r),r]));
     await this.database.withPatientTransaction(auth, request.correlationId, async client => {

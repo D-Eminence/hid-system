@@ -8,7 +8,8 @@ import { IdentityApiService } from '../../integrations/identity-api.service';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { readImportedRecords, readImportedHealthProfile } from './imported-records.query';
 import { patientEntriesEnabled } from '../patient-entries/patient-entries.flag';
-import { readPatientEntries } from '../patient-entries/patient-entries.query';
+import { attachPatientEntryDocuments, readPatientEntries } from '../patient-entries/patient-entries.query';
+import { patientEntryFilesEnabled } from '../patient-entries/patient-entry-files.flag';
 
 @Injectable()
 export class PatientRecordsService {
@@ -35,9 +36,14 @@ export class PatientRecordsService {
     // is on: while off, nothing reads ehr.patient_entries and the answer keeps
     // exactly today's keys (the website reads the key as "served").
     const withEntries = patientEntriesEnabled();
+    // Their photos and files (0117) only while PATIENT_ENTRY_FILES_ENABLED is on too: then each record's
+    // documents lists its confirmed files and patientEntryFiles: true says uploads are served; while off the
+    // documents stay empty, the flag is absent and nothing reads the files.
+    const withFiles = withEntries && patientEntryFilesEnabled();
     return this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
       const value = await this.read(client, authorization.patientId);
       const entries = withEntries ? await readPatientEntries(client, authorization.patientId) : undefined;
+      if (entries && withFiles) entries.items = await attachPatientEntryDocuments(client, authorization.patientId, entries.items);
       await this.audit.recordWithClient(client, {
         correlationId: request.correlationId, actorType: 'patient', actorSubject: actor.subject,
         actorAccountId: actor.accountId, patientId: authorization.patientId,
@@ -46,8 +52,8 @@ export class PatientRecordsService {
           importedRecordCount: value.importedRecords.length, ...(entries ? { patientEntryCount: entries.items.length } : {}) },
       });
       // The rest of the list pages on with GET ehr/me/patient-entries?before=patientEntriesNextBefore.
-      return entries ? { ...value, patientEntries: entries.items, patientEntriesMore: entries.more,
-        patientEntriesNextBefore: entries.nextBefore } : value;
+      return entries ? { ...value, patientEntries: entries.items, ...(withFiles ? { patientEntryFiles: true as const } : {}),
+        patientEntriesMore: entries.more, patientEntriesNextBefore: entries.nextBefore } : value;
     });
   }
 

@@ -8,8 +8,9 @@ import { DatabaseService } from '../../database/database.service';
 import { IdentityApiService } from '../../integrations/identity-api.service';
 import { ClinicalRepository } from '../shared/clinical.repository';
 import { PATIENT_ENTRY_KINDS, PATIENT_ENTRY_MESSAGES, type CreatePatientEntryDto, type PatientEntryKind } from './patient-entries.dto';
-import { decodePatientEntryCursor, patientEntryItem, readPatientEntries, realDate, type PatientEntryItem,
-  type PatientEntryPage } from './patient-entries.query';
+import { attachPatientEntryDocuments, decodePatientEntryCursor, patientEntryItem, readPatientEntries, realDate,
+  type PatientEntryItem, type PatientEntryPage } from './patient-entries.query';
+import { patientEntryFilesEnabled } from './patient-entry-files.flag';
 
 /** A record as it is saved: trimmed, a blank place or note none, the date as entered. */
 export interface NormalizedPatientEntry {
@@ -216,8 +217,11 @@ export class PatientEntriesService {
     const authorization = await this.authorizeSelf(request);
     const position = decodePatientEntryCursor(before, authorization.patientId);
     const actor = request.actor!;
+    const withFiles = patientEntryFilesEnabled();
     return this.database.withPatientTransaction(authorization, request.correlationId, async (client) => {
       const page = await readPatientEntries(client, authorization.patientId, position);
+      // Each record's confirmed files (0117), only while PATIENT_ENTRY_FILES_ENABLED is on.
+      if (withFiles) page.items = await attachPatientEntryDocuments(client, authorization.patientId, page.items);
       await this.audit.recordWithClient(client, {
         correlationId: request.correlationId, actorType: 'patient', actorSubject: actor.subject,
         actorAccountId: actor.accountId, patientId: authorization.patientId, action: 'ehr.patient.self.records.read',
@@ -231,10 +235,14 @@ export class PatientEntriesService {
   /** A clinician's read, 50 at a time from `before`, with the patient's access currently granted (403 CONSENT_REQUIRED otherwise). */
   async staffList(patientId: string, context: DataAccessContext, before: string | undefined): Promise<PatientEntryPage> {
     const position = decodePatientEntryCursor(before, patientId);
+    const withFiles = patientEntryFilesEnabled();
     return this.clinical.run(context, patientId, 'read_records', {
       action: 'ehr.record.read', resourceType: 'patient-entries', resourceId: patientId,
     }, async (client: PoolClient) => {
       const page = await readPatientEntries(client, patientId, position);
+      // The files' names, types and sizes (0117) under the same consent and audit row; their bytes only through
+      // the logged download (PatientEntryDocumentsService.staffDownload).
+      if (withFiles) page.items = await attachPatientEntryDocuments(client, patientId, page.items);
       return { value: page, details: { entryCount: page.items.length, more: page.more } };
     });
   }

@@ -101,7 +101,11 @@ begin
    where privilege.grantee = 'hid_document_scanner'::regrole
      and p.oid not in ('ehr.resolve_document_scan_target(text,text,text,text)'::regprocedure,
                        'ehr.list_documents_awaiting_scan(integer,integer,text)'::regprocedure,
-                       'ehr.append_document_scan_event(uuid,text,text,text,text,text,text,text,text,text)'::regprocedure);
+                       'ehr.append_document_scan_event(uuid,text,text,text,text,text,text,text,text,text)'::regprocedure,
+                       -- The same three for the files patients add (0117), dispatched to from the same routes.
+                       'ehr.resolve_patient_entry_document_scan_target(text,text,text,text)'::regprocedure,
+                       'ehr.list_patient_entry_documents_awaiting_scan(integer,integer,text)'::regprocedure,
+                       'ehr.append_patient_entry_document_scan_event(uuid,text,text,text,text,text,text,text,text,text)'::regprocedure);
   if mismatch is not null then
     raise exception 'hid_document_scanner may execute other functions: %', mismatch;
   end if;

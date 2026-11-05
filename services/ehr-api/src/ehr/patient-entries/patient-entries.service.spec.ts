@@ -320,6 +320,13 @@ describe('Records patients add: removing', () => {
 });
 
 describe('Records patients add: reading', () => {
+  // The records alone, as 0116 serves them; their files (0117) are read in patient-entry-documents.service.spec.ts.
+  const savedFiles = process.env.PATIENT_ENTRY_FILES_ENABLED;
+  beforeEach(() => { process.env.PATIENT_ENTRY_FILES_ENABLED = 'false'; });
+  afterEach(() => {
+    if (savedFiles === undefined) delete process.env.PATIENT_ENTRY_FILES_ENABLED;
+    else process.env.PATIENT_ENTRY_FILES_ENABLED = savedFiles;
+  });
   const PATIENT = '60000000-0000-4000-8000-000000000001';
   const stored = (n: number) => ({ id: `33333333-3333-4333-8333-${String(n).padStart(12, '0')}`, kind: 'test',
     title: `Synthetic test ${n}`, facility_name: null, occurred_on: '2026-10-01', notes: null,

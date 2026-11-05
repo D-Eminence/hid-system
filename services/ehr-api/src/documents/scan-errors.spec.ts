@@ -6,6 +6,7 @@ import { SCAN_REFUSALS, scanRefusalProblem } from './scan-errors';
 const migrations = join(__dirname, '../../database/migrations');
 const append = readFileSync(join(migrations, '0009_document_scan_object_binding.sql'), 'utf8');
 const scanner = readFileSync(join(migrations, '0105_document_scanner.sql'), 'utf8');
+const patientFiles = readFileSync(join(migrations, '0117_patient_entry_documents.sql'), 'utf8');
 
 // The body of one function in a migration file, from its CREATE to the next $$;.
 function functionBody(sql: string, name: string): string {
@@ -19,6 +20,12 @@ const bodies = {
   'ehr.append_document_scan_event': functionBody(append, 'ehr.append_document_scan_event'),
   'ehr.resolve_document_scan_target': functionBody(scanner, 'ehr.resolve_document_scan_target'),
   'ehr.list_documents_awaiting_scan': functionBody(scanner, 'ehr.list_documents_awaiting_scan'),
+  // The same three for the files patients add (0117), which the EHR API dispatches to.
+  'ehr.append_patient_entry_document_scan_event': functionBody(patientFiles, 'ehr.append_patient_entry_document_scan_event'),
+  'ehr.resolve_patient_entry_document_scan_target':
+    functionBody(patientFiles, 'ehr.resolve_patient_entry_document_scan_target'),
+  'ehr.list_patient_entry_documents_awaiting_scan':
+    functionBody(patientFiles, 'ehr.list_patient_entry_documents_awaiting_scan'),
 };
 const raised = (body: string) => [...body.matchAll(/raise exception using errcode = '([0-9A-Z]{5})', message = '([^']+)'/g)]
   .map(match => `${match[1]} ${match[2]}`);

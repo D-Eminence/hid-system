@@ -27,7 +27,7 @@ export class PatientChatSourceService {
     const key = evidenceKey({ kind: kind as SourceKind, id });
     const first = await this.records.authorizeSelf(request);
     // One snapshot serves both the cited check and the lookup.
-    const history = await this.history.citedBindings(request, kind === 'document' || kind === 'attachment' ? [id] : []);
+    const history = await this.history.citedBindings(request, kind === 'document' || kind === 'attachment' || kind === 'patient_entry_document' ? [id] : []);
     const cited = history.cited.get(key);
     if (!cited) {
       // A source whose saved answer cannot be checked while a service (Lab) is down.

@@ -17,6 +17,9 @@ export const STAFF_SOURCE_PERMISSIONS: Record<SourceKind, readonly string[]> = {
   lab_result: ['lab.result.released.read'], profile: ['identity.patient.read'],
   // Records the patient added themselves (0116), read as the chart's notes are.
   patient_entry: ['ehr.note.read'],
+  // Photos and files the patient added (0117): only the patient's own chat reads them (StaffEvidenceService leaves
+  // the kind out); a clinician opens one through the logged download, with these permissions.
+  patient_entry_document: ['ehr.note.read', 'ehr.document.read'],
 };
 export interface StaffChatScope extends EvidenceAccess {
   patientId: string;

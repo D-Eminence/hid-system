@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0116",
-    "count": 109,
+    "last": "0117",
+    "count": 111,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -531,8 +531,16 @@
         "sha256": "3379f5e388f83bd1179d7fbcbe886ed57717a933e40a51f58b23116e5d46cf60"
       },
       {
+        "name": "0108_records_processing_cover_lifetime.sql",
+        "sha256": "1562c606256f18555054423b4e632bb863cf3aae6b0776bee87c30e660983ed6"
+      },
+      {
         "name": "0116_patient_entries.sql",
         "sha256": "f3bfec5ebb63dd54e40bc64c934399faa8aba6197d49839edd1e067093e194c0"
+      },
+      {
+        "name": "0117_patient_entry_documents.sql",
+        "sha256": "ebb2a01cb2f768882b303e6bcb3add6a21df129e7eb30a129bf65c4fe41cc5dc"
       }
     ]
   },

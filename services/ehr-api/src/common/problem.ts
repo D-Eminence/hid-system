@@ -20,16 +20,30 @@ export interface ProblemDetails {
   errors?: readonly { field: string; messages: readonly string[] }[];
 }
 
+/**
+ * What a few answers carry beside the problem's own keys: members of the body
+ * (409 PATIENT_DOCUMENT_ALREADY_UPLOADED's document) and response headers
+ * (429 PATIENT_DOCUMENT_DAILY_LIMIT's Retry-After). A member never replaces
+ * one of the problem's own keys.
+ */
+export interface ProblemExtensions {
+  members?: Readonly<Record<string, unknown>>;
+  headers?: Readonly<Record<string, string>>;
+}
+
 export class DomainProblem extends HttpException {
   constructor(
     status: number,
     public readonly code: string,
     detail: string,
     public readonly errors?: ProblemDetails['errors'],
+    public readonly extensions?: ProblemExtensions,
   ) {
     super(detail, status);
   }
 }
+
+const PROBLEM_KEYS = new Set(['type', 'title', 'status', 'detail', 'instance', 'correlationId', 'code', 'errors']);
 
 @Catch()
 export class ProblemDetailsFilter implements ExceptionFilter {
@@ -59,6 +73,17 @@ export class ProblemDetailsFilter implements ExceptionFilter {
         method: request.method,
         route: request.route?.path ?? 'unresolved',
       });
+    } else if (status >= 400) {
+      // Only the problem code and the route template: never the detail text, URL, params, query,
+      // body, headers or any identifier, so a refusal can be counted without carrying patient data.
+      this.logger.warn({
+        message: 'Request refused',
+        correlationId: request.correlationId,
+        status,
+        code,
+        method: request.method,
+        route: request.route?.path ?? 'unresolved',
+      });
     }
 
     const problem: ProblemDetails = {
@@ -71,8 +96,11 @@ export class ProblemDetailsFilter implements ExceptionFilter {
       code,
       ...(domainProblem?.errors ? { errors: domainProblem.errors } : {}),
     };
+    const members = Object.fromEntries(Object.entries(domainProblem?.extensions?.members ?? {})
+      .filter(([key]) => !PROBLEM_KEYS.has(key)));
+    for (const [name, value] of Object.entries(domainProblem?.extensions?.headers ?? {})) response.setHeader(name, value);
 
-    response.status(status).type('application/problem+json').json(problem);
+    response.status(status).type('application/problem+json').json({ ...problem, ...members });
   }
 
   private safeMessage(exception: unknown): string {

@@ -15,7 +15,8 @@ import { PatientChatHistoryService, type ChatReply } from './patient-chat-histor
 import { citedNumbers,conversationLines,patientLines,withPatientLines } from './patient-chat-safety';
 import { redactIdentifiers } from './patient-evidence.policy';
 import { patientEntriesEnabled } from '../patient-entries/patient-entries.flag';
-import { withdrawnPatientEntryChunksSql } from '../patient-entries/patient-entries.query';
+import { withdrawnPatientEntryChunksSql, withdrawnPatientEntryDocumentChunksSql } from '../patient-entries/patient-entries.query';
+import { patientEntryFilesEnabled } from '../patient-entries/patient-entry-files.flag';
 
 const NO_GROUNDED_ANSWER = 'I could not verify an answer from the available records.';
 const unavailable = () => new DomainProblem(503, 'PATIENT_CHAT_UNAVAILABLE', 'Patient chat is temporarily unavailable');
@@ -186,6 +187,8 @@ export class PatientChatService {
       // refreshed: the staff chat's, which the removal cannot reach, and any a search that overlapped
       // the removal wrote. Only while the setting is on: off, nothing names ehr.patient_entries.
       if(patientEntriesEnabled())await client.query(withdrawnPatientEntryChunksSql(access.chunksTable),[auth.patientId]);
+      // And of the files on such a record (0117), only while their own setting is on.
+      if(patientEntryFilesEnabled())await client.query(withdrawnPatientEntryDocumentChunksSql(access.chunksTable),[auth.patientId]);
       return (await client.query(
       `select source_kind,source_id,source_version,source_hash,chunk_no from ${access.chunksTable}
        where patient_id=$1 and model_id=$2 and normalizer_version=1

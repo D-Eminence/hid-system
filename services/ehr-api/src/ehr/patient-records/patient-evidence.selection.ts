@@ -1,9 +1,9 @@
 import type { Evidence,RecordIntent,Coverage } from './patient-evidence.types';
 const time=(r:Evidence)=>Date.parse(r.effectiveAt??r.recordedAt??'')||0;
-const medication=(r:Evidence)=>r.kind==='prescription'||r.kind==='health_profile'||r.kind==='note'||r.kind==='document'||r.kind==='attachment'||r.kind==='import_version'
+const medication=(r:Evidence)=>r.kind==='prescription'||r.kind==='health_profile'||r.kind==='note'||r.kind==='document'||r.kind==='attachment'||r.kind==='patient_entry_document'||r.kind==='import_version'
   ||(r.kind==='import'&&/medication|prescription|drug/.test(JSON.stringify(r.fields).toLowerCase()))
   ||(r.kind==='patient_entry'&&r.fields.type==='medicine');
-const labs=(r:Evidence)=>['lab_result','investigation','document','attachment','import_version'].includes(r.kind)
+const labs=(r:Evidence)=>['lab_result','investigation','document','attachment','patient_entry_document','import_version'].includes(r.kind)
   ||(r.kind==='patient_entry'&&r.fields.type==='test')
   ||(r.kind==='note'&&/lab|laboratory|result|investigation/.test(r.content.toLowerCase()))
   ||(r.kind==='import'&&/lab|laboratory|test_result/.test(JSON.stringify(r.fields).toLowerCase()));

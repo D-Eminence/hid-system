@@ -14,6 +14,7 @@ import type { ListScanTargetsDto } from './dto/list-scan-targets.dto';
 import type { ResolveScanTargetDto } from './dto/resolve-scan-target.dto';
 import { downloadFileName, isSupportedDocumentMediaType, SNIFF_PREFIX_BYTES, sniffMediaType } from './media-sniff';
 import { scanRefusalProblem } from './scan-errors';
+import { patientEntryFilesEnabled } from '../ehr/patient-entries/patient-entry-files.flag';
 
 interface WorkloadActor {
   subject: string;
@@ -298,29 +299,41 @@ export class DocumentService {
     return download;
   }
 
+  /**
+   * A scan result for a staff document, or (0117) for a file a patient added
+   * to a record: ehr.documents first, then, when no staff document has that
+   * id and PATIENT_ENTRY_FILES_ENABLED is on, the patient's file, each in its
+   * own scanner transaction, with the same refusals.
+   */
   async recordScan(input: DocumentScanEventDto, actor: WorkloadActor, correlationId: string) {
-    return this.scannerTransaction(actor, correlationId, async (client) => {
-      const result = await client.query<{ event_id: string }>(
-        `select ehr.append_document_scan_event(
-           $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
-         )::text as event_id`,
-        [
-          input.documentId,
-          input.objectVersionId,
-          input.objectSha256Hex,
-          input.eventType,
-          input.detectedMediaType ?? null,
-          input.scannerEngine,
-          input.scannerVersion,
-          input.reasonCode ?? null,
-          input.idempotencyKey,
-          correlationId,
-        ],
-      );
-      const event = result.rows[0];
-      if (!event) throw new Error('Document scan event insert did not return a row');
-      return { eventId: event.event_id };
-    });
+    return this.dispatchScanner(actor, correlationId,
+      (client) => this.appendScanEvent(client, 'ehr.append_document_scan_event', input, correlationId),
+      (client) => this.appendScanEvent(client, 'ehr.append_patient_entry_document_scan_event', input, correlationId));
+  }
+
+  private async appendScanEvent(client: PoolClient,
+    command: 'ehr.append_document_scan_event' | 'ehr.append_patient_entry_document_scan_event',
+    input: DocumentScanEventDto, correlationId: string) {
+    const result = await client.query<{ event_id: string }>(
+      `select ${command}(
+         $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+       )::text as event_id`,
+      [
+        input.documentId,
+        input.objectVersionId,
+        input.objectSha256Hex,
+        input.eventType,
+        input.detectedMediaType ?? null,
+        input.scannerEngine,
+        input.scannerVersion,
+        input.reasonCode ?? null,
+        input.idempotencyKey,
+        correlationId,
+      ],
+    );
+    const event = result.rows[0];
+    if (!event) throw new Error('Document scan event insert did not return a row');
+    return { eventId: event.event_id };
   }
 
   /**
@@ -333,17 +346,20 @@ export class DocumentService {
     if (input.storageBucket !== this.storage.bucket()) {
       throw new DomainProblem(404, 'DOCUMENT_NOT_FOUND', 'No document holds this object');
     }
-    const target = await this.scannerTransaction(actor, correlationId, async (client) => {
+    // The key in ehr.documents first, then (0117) among the files patients added: both use clinical/objects/<uuid>.
+    const resolve = (command: string) => async (client: PoolClient) => {
       const result = await client.query<ScanTargetRow>(
         `select document_id::text as document_id, object_version_id, sha256_hex, status, declared_media_type,
                 latest_event_type
-           from ehr.resolve_document_scan_target($1, $2, $3, $4)`,
+           from ${command}($1, $2, $3, $4)`,
         [input.storageBucket, input.storageKey, input.objectVersionId, correlationId],
       );
       const row = result.rows[0];
       if (!row) throw new Error('Document scan target resolution did not return a row');
       return row;
-    });
+    };
+    const target = await this.dispatchScanner(actor, correlationId, resolve('ehr.resolve_document_scan_target'),
+      resolve('ehr.resolve_patient_entry_document_scan_target'));
     let sniffedMediaType: string | null = null;
     let sniffResult: SniffResult;
     try {
@@ -366,17 +382,31 @@ export class DocumentService {
     };
   }
 
-  /** The reconcile and backfill work list (0105), oldest first. */
+  /**
+   * The reconcile and backfill work list (0105), oldest first: staff
+   * documents and, while PATIENT_ENTRY_FILES_ENABLED is on, the files patients
+   * added (0117), each list asked for the limit and the two merged, oldest
+   * first, to the limit. Each command audits what it returned to ehr-api, so
+   * the two audit rows may name up to twice the limit of ids while the bridge
+   * gets the limit (INTERFACE_CONTRACT.md §38); asking the patient list for
+   * the remainder only would starve patient files behind a staff backlog.
+   */
   async listScanTargets(query: ListScanTargetsDto, actor: WorkloadActor, correlationId: string) {
+    const withPatientFiles = patientEntryFilesEnabled();
     return this.scannerTransaction(actor, correlationId, async (client) => {
-      const result = await client.query<AwaitingScanRow>(
+      const list = async (command: string) => (await client.query<AwaitingScanRow>(
         `select document_id::text as document_id, storage_bucket, storage_key, object_version_id, sha256_hex,
                 declared_media_type, updated_at, latest_event_type, scan_started_count, last_scan_started_at
-           from ehr.list_documents_awaiting_scan($1, $2, $3)`,
+           from ${command}($1, $2, $3)`,
         [query.olderThanSeconds, query.limit, correlationId],
-      );
+      )).rows;
+      const rows = [...await list('ehr.list_documents_awaiting_scan'),
+        ...(withPatientFiles ? await list('ehr.list_patient_entry_documents_awaiting_scan') : [])]
+        .sort((left, right) => new Date(left.updated_at).getTime() - new Date(right.updated_at).getTime()
+          || (left.document_id < right.document_id ? -1 : left.document_id > right.document_id ? 1 : 0))
+        .slice(0, query.limit);
       return {
-        items: result.rows.map(row => ({
+        items: rows.map(row => ({
           documentId: row.document_id,
           storageBucket: row.storage_bucket,
           storageKey: row.storage_key,
@@ -390,6 +420,26 @@ export class DocumentService {
         })),
       };
     });
+  }
+
+  /**
+   * A scanner command for a staff document, then, when it answers Document
+   * not found and PATIENT_ENTRY_FILES_ENABLED is on, the same command for the
+   * files patients added (0117), in a second transaction. Object keys and ids
+   * are UUIDs, so at most one of the two holds them.
+   */
+  private async dispatchScanner<Result>(
+    actor: WorkloadActor,
+    correlationId: string,
+    staff: (client: PoolClient) => Promise<Result>,
+    patient: (client: PoolClient) => Promise<Result>,
+  ): Promise<Result> {
+    try {
+      return await this.database.withWorkloadTransaction(actor.subject, correlationId, staff);
+    } catch (error) {
+      if (!patientEntryFilesEnabled() || !isDocumentNotFound(error)) throw scanRefusalProblem(error);
+    }
+    return this.scannerTransaction(actor, correlationId, patient);
   }
 
   /** The isolated scanner pool, with the scanner commands' refusals mapped to 4xx. */
@@ -519,6 +569,11 @@ export class DocumentService {
   private hash(value: string): string {
     return createHash('sha256').update(value, 'utf8').digest('hex');
   }
+}
+
+/** The staff scanner commands' refusal for an id or key no staff document holds. */
+function isDocumentNotFound(error: unknown): boolean {
+  return isDatabaseError(error) && error.code === 'P0002' && error.message === 'Document not found';
 }
 
 function isDatabaseError(value: unknown): value is { code: string; message?: string } {
