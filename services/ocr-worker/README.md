@@ -74,7 +74,7 @@ Each claimed job runs, in order:
    even with AI reading off (idempotent per job).
 5. **AI step** (`src/reading/`, only when `OCR_AI_MODE=claude` and the facility
    is in `OCR_AI_FACILITY_IDS` when that is set). One Claude API request per
-   page with the frozen, cached system prompt (`hid-paper-reading-prompt-2`,
+   page with the frozen, cached system prompt (`hid-paper-reading-prompt-3`,
    model schema `hid-paper-reading-model-schema-2`),
    structured JSON output, adaptive thinking, `inference_geo: "us"`, the
    page's lines without boxes, and 11-digit NIN-like numbers and Nigerian phone
@@ -102,12 +102,173 @@ Each claimed job runs, in order:
    both kept, the later ones (reading order: page, then first cited line)
    suffixed `-2`, `-3`, ..., each marked `check_carefully` with
    `duplicate_source_span`, and the page flagged `possible_missed_item`.
-7. **Re-read.** A page is re-read once by `OCR_AI_REREAD_MODEL` when the model
-   was unsure, an item was dropped, a cited handwritten line was below 0.80, or
-   at least 30% of its items need checking for a reason other than legible
-   handwriting (at most `OCR_AI_MAX_REREAD_PAGES` per document). If the re-read
-   fails, the first-pass items are kept as `check_carefully` with
-   `reread_failed`.
+7. **Re-read** (owner decision 2026-11-05). Each page gets at most one
+   re-read by `OCR_AI_REREAD_MODEL`, at most `OCR_AI_MAX_REREAD_PAGES` per
+   document: first the pages whose first pass failed (cut off or malformed) or
+   was declined, then the flagged pages in page order.
+   - A page whose first pass **failed or was declined** gets a **text**
+     re-read (never the picture).
+   - A page the first pass **flagged** (`low_confidence`, `handwriting`,
+     `many_dropped`, `ai_unsure` or `possible_missed_item`) gets the **image**
+     re-read, and no text re-read. Where the picture cannot go (setting off,
+     PDF, TIFF, not a one-page image, no document bytes, too large or size
+     unknown, EXIF orientation, a masked number, a re-read model of unknown
+     image tier, or the API rejecting or the model declining the picture), it
+     gets the **text** re-read instead. Every flagged page within the cap thus
+     has a second reading requested; the exceptions are flagged pages past
+     `OCR_AI_MAX_REREAD_PAGES`, which are not re-read, and a re-read that
+     itself fails, after which the page keeps its first reading. This replaces
+     the earlier rule that sent the picture only when a line was below 0.80.
+   - An unflagged page the first pass read is not re-read.
+
+   If the re-read fails, the first-pass items are kept as `check_carefully`
+   with `reread_failed` and the page is flagged `ai_unsure`.
+
+   **Merge with the first pass.** For every re-read (from the picture or
+   from the text) of a page whose first pass gave an answer, the result is
+   merged with the first pass, fail-safe, never replacing it wholesale. If
+   the re-read keeps no item while the first pass had items, it counts as a
+   failed re-read (in `rereadFailedPages`, and for an image re-read also in
+   `imageRereadFailedPages`) and the first-pass items stay, marked
+   `reread_failed`; if the first pass had no items either, the re-read's
+   (empty) result stands. Otherwise the re-read's items are kept, and a
+   first-pass item is removed only when a kept re-read item is its exact
+   twin: the same kind, a shared cited line, and every field the contract has
+   for the kind equal after normalising (case, spacing, and "5 mg" = "5mg"),
+   plus `dateAsWritten` and the prescription (prescriber and date); a missing
+   field equals only a missing field. A re-read item that carries every field
+   the first-pass item filled in (equal after normalising) and only adds
+   fields it left empty (a route, say) also replaces it: nothing is lost.
+   Each re-read item removes at most one first-pass item (exact twins first,
+   then such supersets, each in reading order). Every other first-pass item is kept,
+   with `readBy: "first_pass"`, as `check_carefully` with
+   `not_in_picture_reading` ("The second reading, from the picture, did not
+   find this; check it against the paper.") after an image re-read or
+   `not_in_second_reading` ("The second reading did not find this; check it
+   against the paper.") after a text re-read. Where it has a single best match
+   among the re-read items (same kind, a shared line, and the same normalised
+   name for a medicine or diagnosis, substance for an allergy, test for a lab
+   result or measure for a vital, or for a note the most shared words of four
+   letters or more), that one pair gets `differs_from_second_reading` ("The
+   second reading differs from this one; compare both with the paper."),
+   shown below any real disagreement and above the not-found sentences; it
+   does not set `possible_missed_item`. Other items on the line are not
+   marked, and a name read differently ("Amlodipine" for "Amlodipne") is not
+   a best match: both items are kept, the first-pass one marked not found. Items are in reading order and their ids made
+   unique again with the usual suffixes. The identity is merged field by
+   field: a name, date of birth, folder number or sex only the re-read gives
+   is taken; where both readings give one and they differ, the first pass's
+   is kept and the page is flagged `ai_unsure` (identity drives patient
+   matching, so it never changes silently); the lines of both and the box
+   around both are kept. `possible_missed_item` is worked out again from the lines all kept
+   items and the identity cite; `droppedUngrounded` for the page stays the
+   count of the re-read's dropped items, including any whose content a kept
+   first-pass item still carries. A page whose first pass failed or was
+   declined has nothing to merge: its re-read stands. `PROMPT_VERSION`
+   is `hid-paper-reading-prompt-3` for this routing (the prompt text and
+   request bodies are unchanged from version 2; the label is only recorded),
+   so `ocr-api` never reuses a reading made under the older routing.
+
+   Reuse keys on `PROMPT_VERSION` only (with the processing and payload
+   contracts and the reading status): `OCR_AI_IMAGE_REREAD` and
+   `OCR_AI_IMAGE_MASKED_PAGES` are not part of it. A reading made with
+   `OCR_AI_IMAGE_REREAD=off`, or with `OCR_AI_IMAGE_MASKED_PAGES=send`, is
+   still reused for the same document after those settings change (and one
+   made with the picture is reused after the picture is turned off).
+
+   **Image re-read of flagged pages** (owner decisions "Yes, send image for
+   hard pages" and the routing above, 2026-11-05; `OCR_AI_IMAGE_REREAD`, `on`
+   or `off`, default `on` when `OCR_AI_MODE=claude`, any other value fails
+   startup). The re-read of a flagged page carries the picture of the page
+   when the document is a one-page PNG or JPEG by its detected media type (the
+   exact verified bytes, as stored; never resized or re-encoded). The request is the
+   same Claude API request (`inference_geo: "us"`, fixed endpoint, same system
+   prompt) with the user turn `[image, text]`: the text gives the picture's size
+   as the model sees it (the API's resize for the re-read model's tier, computed
+   with the vision coordinates guide's reference `resizedSize`: 2,576 px and
+   4,784 visual tokens on the high-resolution tier, 1,568 and 1,568 on the
+   standard tier; never the padded size). The tier comes from an explicit list
+   of model ids in `page-image.ts` (high: `claude-opus-4-7`, `-4-8`, `-5`,
+   `-5-5`, `claude-sonnet-5`, `-5-5`, `claude-fable-5`, `-5-1`,
+   `claude-mythos-5`, `-5-1`; Opus 5.5, Sonnet 5.5, Fable 5 and Mythos 5
+   inferred, the rest documented; Fable 5.1's "no downscaling cap" wording is
+   to be checked against the vision docs before a Fable model is used for
+   re-reads; standard: `claude-opus-4-6`, `-4-5`,
+   `claude-sonnet-4-6`, `-4-5`, `claude-haiku-4-5`), never guessed from the
+   id: with any other re-read model the page gets the text re-read
+   (`image_tier_unknown`). The text lists the lines with their boxes in those pixels and
+   asks the model to read the writing from the picture, cite the lines it sits
+   on, give the item's own box as absolute pixel coordinates `{x1, y1, x2, y2}`
+   (Anthropic advises pixel, not normalised, coordinates), write `asWritten` as
+   it reads it in the picture, never invent anything and write `[unreadable]`
+   rather than guess (`imagePageMessage`,
+   `hid-paper-reading-image-prompt-3`: it says the first reading needs
+   checking, for any page flag, no longer that the page was hard to read;
+   recorded in provenance as
+   `imagePromptVersion`). Only these requests use the image answer schema
+   (`MODEL_OUTPUT_IMAGE_JSON_SCHEMA`, a required `box` per item); text-only
+   requests are byte for byte as before (`MODEL_SCHEMA_VERSION` unchanged). The client turns the model's pixel
+   boxes into page fractions before any check. An item read from the picture
+   is kept only when it cites lines on its page, at most 3 of them, lying
+   together (on one row, or consecutive in reading order and vertically
+   adjacent: the `lines_not_together` test, here a reason to drop), and its box
+   (clipped to the page, at least 0.005 of the page on each side, its area at
+   most 2 times the area of the box around its cited lines plus 0.002 of the
+   page, or that box padded by 0.005 of the page on every side if larger, and
+   running past that box's left and right edges by at most a quarter of its
+   width in total, or by up to 0.01 of the page width on each side (0.02 in
+   all), so a few pixels of padding around a short word are allowed) lies on every cited line that has a box, each line on its own (over
+   half the line's height and half the narrower width), lies on no line it
+   does not cite by that same test, with at most half of the line area it
+   covers on lines it does not cite, and its `asWritten` shares a word of three letters or more,
+   or a number, with the text of its cited lines; otherwise it is dropped and
+   counted in `droppedUngrounded`. It need not match the Textract text: its
+   fields are held to its own `asWritten` as read in the picture (so a word or
+   dose the service misread is not a "doesn't match the paper" reason, and the
+   page is not flagged `possible_missed_item` for the line text it corrected),
+   and a number the text of its lines does not have adds
+   `number_not_in_text_read`. Every such item is `check_carefully` with
+   `read_from_image` ("This was read from the picture of the page; check it
+   against the paper.", shown unless its own fields disagree with what it read
+   or a number is not in the text read), `readBy: "reread"`, and its stored box
+   is the model's box clipped to the page.
+
+   Scope (v1): PNG and JPEG only. PDF and TIFF pages get the text re-read
+   (`image_not_available_pdf`, `image_not_available_tiff`). A JPEG whose EXIF
+   Orientation (APP1 `Exif`, tag 0x0112, either byte order, read without a new
+   dependency) is not 1, or whose EXIF cannot be read, is not sent
+   (`image_orientation_unsupported`): the picture as the API shows it might be
+   turned relative to the line boxes. PNG `eXIf` orientation is not checked.
+
+   Masked numbers: the text sent hides 11-digit NIN-like and Nigerian phone
+   numbers, but the picture shows them. By default
+   (`OCR_AI_IMAGE_MASKED_PAGES=send`; owner decision 2026-11-05, about 14:06
+   UTC: "send images with numbers") the picture of such a page is sent anyway,
+   **which shows those NIN-like and phone numbers to the Claude API** (US-only
+   processing; the text sent stays masked). `OCR_AI_IMAGE_MASKED_PAGES=text_only`
+   keeps such a page text-only and gives it the text re-read
+   (`image_has_masked_number`); any other value fails startup. A picture over the
+   Claude API image limits (10 MB base64-encoded, 8000 x 8000 px; the size is
+   read from the PNG IHDR or JPEG frame header, never by decoding) stays text
+   only (`image_too_large`; `image_size_unknown` when the header cannot be
+   read). Only if the API rejects the request with the picture as an invalid
+   request (HTTP 400 with error type `invalid_request_error`) is the page
+   re-read from its text (`image_rejected`); if the model declines the
+   request with the picture, the page is likewise re-read from its text once
+   (`image_refused`: the decline may be about the picture). Any other
+   rejection (413, key, permission, model), a cut-off or malformed answer, or
+   an overload or timeout after the retries is a failed re-read, with no
+   second request. The reading summary and the payload's `reading` carry
+   `imageRereadPages` (re-reads answered from the picture),
+   `imageRereadSkipped` (`{page, reason}` for each flagged page re-read without
+   it, including `image_reread_off`, `image_has_masked_number`,
+   `image_orientation_unsupported`, `image_tier_unknown`, `image_rejected` and
+   `image_refused`; `not_hard_to_read` is no longer written but still reads in
+   older payloads) and `imageRereadFailedPages` (pages sent with the picture
+   whose re-read gave no usable answer or kept no item where the first pass
+   had some). The picture and its
+   base64 are never logged, stored (beyond the original document, already in
+   S3) or put in an error.
 8. **Completion.** `ocr.complete_worker_job` stores the `hid-paper-reading-v2`
    payload (schema `hid-paper-reading-schema-2`: `src/reading/contract.ts`), `raw_text` (every line in
    reading order) and the mean line confidence. Provenance holds models,
@@ -142,6 +303,25 @@ a document with no text as `no_text`.
   the lease renewal (every third of `OCR_WORKER_LEASE_SECONDS`), and shutdown
   ends the wait without a call. Keep `OCR_WORKER_LEASE_SECONDS` long enough for
   a document's pages to wait their turn.
+- **Image re-read cost.** The picture's tokens are ordinary input tokens and
+  count in the same usage records (`ocr.record_worker_ai_usage`). An image costs
+  about `ceil(width/28) x ceil(height/28)` tokens, at most 4,784 on
+  `claude-opus-5-5` (larger pictures are downscaled by the API): an A4 scan at
+  150 dpi (1240 x 1754) is about 2,800 tokens. At the re-read model's $4 per
+  million input tokens with the 1.1x US-only price, that is about $0.012 to
+  $0.021 more per image-read page, plus a few tokens per line for the boxes
+  (and the system prompt uncached, below). Only flagged one-page PNG/JPEG
+  pages pay it. Under the 2026-11-05 routing every flagged page is re-read
+  (pages flagged only `possible_missed_item` or `low_confidence` by a printed
+  line were not before), so expect more re-reads than under version 2: one
+  re-read-model request per flagged page, with or without the picture. Image re-reads send a
+  different answer schema (`output_config.format`), which is a prompt-cache
+  breaker, so they do not read the text requests' cached system prompt: count
+  the system prompt as ordinary input (or a cache write) for each image re-read
+  unless `cache_read_input_tokens` on live runs shows otherwise. The accuracy
+  kit does not yet measure image re-reads (its runs pass no document, so every
+  re-read is `image_not_given`, and its cost table has no picture tokens):
+  change and run it before relying on its numbers for PNG and JPEG pages.
 - **AI use recorded.** After the AI step and before completion the worker calls
   `ocr.record_worker_ai_usage` once per model used (requests, input, output,
   cache-read and cache-write tokens; counts only, no text), idempotent per job,
@@ -177,9 +357,12 @@ explicitly on every request with adaptive thinking; a Fable model is not used
 list price $4 / $20 per million input / output tokens; US-only x1.1 = $4.40 / $22
 (cache reads $0.22, 5-minute cache writes $5.50). Per page that is more than
 twice the earlier Sonnet first pass at medium effort, since high effort also
-writes more thinking and output. Each job logs `ocr.reading.usage` per model
-(requests and token counts, never text, with `pagesSent`), so the cost per page
-can be seen. The reference lists `inference_geo` as supported
+writes more thinking and output. Each job logs `ocr.reading.usage` once per
+model and pass (`pass`: `first_pass`, `reread` or `image_reread`; requests and
+token counts, never text, with `pagesSent`), so the cost per page, and what the
+re-reads and the pictures add, can be seen even though both passes use one model.
+A reading stopped before it finished logs one line per model, without `pass`.
+The database keeps one usage record per model, as before. The reference lists `inference_geo` as supported
 on the Claude API with no per-model exclusion for these models; a model that
 did not support geographic pinning would answer 400, which the client does not
 retry, so the reading would end `ai_failed` (Textract text only, no items)

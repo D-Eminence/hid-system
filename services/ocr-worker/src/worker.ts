@@ -1,9 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import type { OcrWorkerConfig } from './config';
 import { paperReadingPayloadSchema } from './reading/contract';
-import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type ReadingOutcome } from './reading/reader';
+import { IMAGE_PROMPT_VERSION } from './reading/prompt';
+import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type PassUsageRecord, type ReadingOutcome } from './reading/reader';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure, type AiUsageRecord, type ClaimedOcrJob, type CompletedExtraction,
-  type DocumentReader, type TextReading, type WorkerOcrProvider, type WorkerRepository } from './types';
+  type DocumentReader, type TextReading, type VerifiedDocument, type WorkerOcrProvider, type WorkerRepository } from './types';
 
 const MAX_RECORDED_PAGES = 200;
 
@@ -22,6 +23,7 @@ export class OcrWorker {
       acceptingClaims: true, concurrency: this.config.OCR_WORKER_CONCURRENCY,
       maxInFlightPerFacility: this.config.OCR_WORKER_MAX_INFLIGHT_PER_FACILITY,
       aiMaxConcurrentRequests: this.config.OCR_AI_MAX_CONCURRENT_REQUESTS,
+      aiImageReread: this.config.OCR_AI_IMAGE_REREAD, aiImageMaskedPages: this.config.OCR_AI_IMAGE_MASKED_PAGES,
       textractMaxConcurrent: this.config.OCR_TEXTRACT_MAX_CONCURRENT, remoteProviderCheck: false });
     await Promise.all(Array.from({ length: this.config.OCR_WORKER_CONCURRENCY }, (_, index) => this.claimLoop(index)));
     await this.repository.close();
@@ -61,9 +63,9 @@ export class OcrWorker {
       const text = await this.extractText(job, document);
       // Every read is counted, even with AI reading off; a document reads as at least one page.
       const after = await this.repository.recordPages(job, Math.max(1, text.pageCount));
-      const outcome = await this.readItems(job, text);
+      const outcome = await this.readItems(job, text, document);
       // Before completion, so the job is still held; a failure to record never fails the job.
-      await this.recordAiUsage(job, outcome.summary.modelUsage, outcome.summary.pagesSent);
+      await this.recordAiUsage(job, outcome.summary.modelUsage, outcome.summary.pagesSent, outcome.summary.passUsage);
       const completion = buildCompletion(text, outcome);
       const checked = paperReadingPayloadSchema.safeParse(completion.structuredPayload);
       if (!checked.success) {
@@ -78,6 +80,8 @@ export class OcrWorker {
         retryCount: Math.max(0, job.attemptNo - 1), readingStatus: summary.status,
         firstPassModel: summary.firstPassModel, rereadModel: summary.rereadModel, aiRequests: summary.requests,
         aiRefusals: summary.refusals, rereadPages: summary.rereadPages.length,
+        imageRereadPages: summary.imageRereadPages.length, imageRereadSkippedPages: summary.imageRereadSkipped.length,
+        imageRereadFailedPages: summary.imageRereadFailedPages.length,
         rereadFailedPages: summary.rereadFailedPages, itemCount: summary.itemCount,
         droppedUngrounded: summary.droppedUngrounded, flaggedPages: summary.flaggedPages,
         inputTokens: summary.usage.inputTokens, outputTokens: summary.usage.outputTokens,
@@ -116,8 +120,10 @@ export class OcrWorker {
   }
 
   /** The AI step. A transient failure retries the job, except on its last attempt, which completes without items. */
-  private async readItems(job: ClaimedOcrJob, text: TextReading): Promise<ReadingOutcome> {
-    const input = { facilityId: job.facilityId, sourceSha256Hex: job.sourceSha256Hex, pages: text.pages };
+  private async readItems(job: ClaimedOcrJob, text: TextReading, document: VerifiedDocument): Promise<ReadingOutcome> {
+    // The verified bytes and their detected media type, for the image re-read of a flagged page (never logged).
+    const input = { facilityId: job.facilityId, sourceSha256Hex: job.sourceSha256Hex, pages: text.pages,
+      document: { mediaType: document.mediaType, bytes: document.bytes } };
     let outcome: ReadingOutcome;
     try {
       outcome = await this.reading.read(input, this.shutdown.signal);
@@ -145,15 +151,25 @@ export class OcrWorker {
     return outcome;
   }
 
-  /** One ocr.record_worker_ai_usage per model used; counts only. A failure is logged with a safe code. */
-  private async recordAiUsage(job: ClaimedOcrJob, usage: readonly AiUsageRecord[], pagesSent?: number): Promise<void> {
-    for (const entry of usage) {
+  /**
+   * One ocr.record_worker_ai_usage per model used; counts only. A failure is logged with a safe code. The
+   * ocr.reading.usage log has one line per model and pass (first_pass, reread, image_reread) when the reading
+   * gives that split, and one per model otherwise (a reading stopped before it finished).
+   */
+  private async recordAiUsage(job: ClaimedOcrJob, usage: readonly AiUsageRecord[], pagesSent?: number,
+    passUsage?: readonly PassUsageRecord[]): Promise<void> {
+    // Counts only, never text: lets the cost per page, and per pass, be seen in the logs.
+    const logLines: ReadonlyArray<AiUsageRecord & { pass?: string }> = passUsage ?? usage;
+    for (const entry of logLines) {
       if (entry.requests <= 0) continue;
-      // Counts only, never text: lets the cost per page be seen in the logs.
       this.log('info', 'ocr.reading.usage', { jobId: job.jobId, correlationId: job.correlationId,
-        attempt: job.attemptNo, model: entry.model, requests: entry.requests, inputTokens: entry.inputTokens,
+        attempt: job.attemptNo, model: entry.model, ...(entry.pass === undefined ? {} : { pass: entry.pass }),
+        requests: entry.requests, inputTokens: entry.inputTokens,
         outputTokens: entry.outputTokens, cacheReadTokens: entry.cacheReadTokens,
         cacheWriteTokens: entry.cacheWriteTokens, ...(pagesSent === undefined ? {} : { pagesSent }) });
+    }
+    for (const entry of usage) {
+      if (entry.requests <= 0) continue;
       try {
         await this.repository.recordAiUsage(job, entry);
       } catch (error) {
@@ -263,6 +279,10 @@ export function buildCompletion(text: TextReading, outcome: ReadingOutcome): Com
         pagesSent: summary.pagesSent,
         rereadPages: summary.rereadPages,
         rereadFailedPages: summary.rereadFailedPages,
+        imageRereadPages: summary.imageRereadPages,
+        imageRereadSkipped: summary.imageRereadSkipped,
+        imageRereadFailedPages: summary.imageRereadFailedPages,
+        imagePromptVersion: summary.imageRereadPages.length > 0 ? IMAGE_PROMPT_VERSION : null,
         droppedUngrounded: summary.droppedUngrounded,
         droppedUngroundedFirstPass: summary.droppedUngroundedFirstPass,
         itemCount: summary.itemCount,

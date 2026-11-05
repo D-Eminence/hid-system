@@ -84,6 +84,17 @@ const schema = z.object({
   // take every request slot.
   OCR_AI_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
   OCR_AI_FACILITY_IDS: facilityIds,
+  // Re-read flagged pages (any first-pass page flag: low_confidence, handwriting, many_dropped, ai_unsure,
+  // possible_missed_item) WITH the page picture instead of from their text: one-page PNG and JPEG images only, on the
+  // re-read only (owner decisions of 2026-11-05). 'on' or 'off'; unset or empty means 'on' when OCR_AI_MODE=claude
+  // and 'off' otherwise. Any other value fails startup.
+  OCR_AI_IMAGE_REREAD: z.preprocess(emptyToUndefined, z.enum(['on', 'off']).optional()),
+  // A page whose text had a number hidden by the masker (an 11-digit NIN-like or a Nigerian phone number): the
+  // text sent hides it, but the picture shows it. 'send' (default; unset or empty; owner decision 2026-11-05 about
+  // 14:06 UTC, "send images with numbers"): the picture is sent anyway, and with it those numbers reach the Claude
+  // API (US only). 'text_only': such a page is re-read from its text only ('image_has_masked_number'). Any other
+  // value fails startup. The text sent stays masked either way.
+  OCR_AI_IMAGE_MASKED_PAGES: z.preprocess(emptyToUndefined, z.enum(['text_only', 'send']).default('send')),
 }).superRefine((env, context) => {
   if (env.OCR_PROVIDER === 'test' && env.NODE_ENV !== 'test') {
     context.addIssue({ code: 'custom', path: ['OCR_PROVIDER'], message: 'The test OCR provider is restricted to NODE_ENV=test' });
@@ -118,7 +129,8 @@ const schema = z.object({
         message: 'AI reading requires approved US processing on the Claude API (inference_geo "us")' });
     }
   }
-});
+}).transform((env) => ({ ...env,
+  OCR_AI_IMAGE_REREAD: env.OCR_AI_IMAGE_REREAD ?? (env.OCR_AI_MODE === 'claude' ? 'on' as const : 'off' as const) }));
 
 export type OcrWorkerConfig = z.infer<typeof schema>;
 

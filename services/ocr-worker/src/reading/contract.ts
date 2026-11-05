@@ -23,6 +23,25 @@ export const VITAL_MEASURES = ['blood_pressure', 'pulse', 'temperature', 'respir
  */
 export const ALLERGY_SEVERITIES = ['mild', 'moderate', 'severe', 'unknown'] as const;
 export const READING_STATUSES = ['read', 'ai_off', 'ai_declined', 'ai_failed', 'no_text'] as const;
+/**
+ * Why a flagged page was re-read from its text only, without the picture of the page:
+ * 'image_reread_off' (OCR_AI_IMAGE_REREAD=off), 'image_has_masked_number' (the page's text had a NIN-like or phone
+ * number hidden, which the picture would show; OCR_AI_IMAGE_MASKED_PAGES=text_only),
+ * 'image_not_available_pdf' / 'image_not_available_tiff' (v1 sends PNG and JPEG only),
+ * 'image_not_available_type' (another detected type), 'image_not_given' (the caller passed no document bytes),
+ * 'not_single_page' (not page 1 of a one-page image), 'image_too_large' (over the Claude API image limits),
+ * 'image_size_unknown' (the picture's size could not be read from its header), 'image_orientation_unsupported'
+ * (a JPEG whose EXIF orientation is not 1, or unreadable, so the picture as seen would not match the line boxes),
+ * 'image_tier_unknown' (the re-read model is not on the worker's list of models with a known image tier, so the
+ * size the model would see the picture at is not known), 'image_rejected' (the API refused the request with the
+ * picture as an invalid request), 'image_refused' (the model declined the request with the picture, which may be
+ * about the picture); after those two the page was re-read from its text instead. 'not_hard_to_read' is no longer written (the page's flags now decide; owner decision
+ * 2026-11-05) and stays so payloads written before still read.
+ */
+export const IMAGE_REREAD_SKIP_REASONS = ['image_reread_off', 'not_hard_to_read', 'image_not_available_pdf',
+  'image_not_available_tiff', 'image_not_available_type', 'image_not_given', 'not_single_page', 'image_too_large',
+  'image_size_unknown', 'image_rejected', 'image_has_masked_number', 'image_orientation_unsupported',
+  'image_tier_unknown', 'image_refused'] as const;
 
 const fraction = z.number().min(0).max(1);
 export const boxSchema = z.strictObject({ left: fraction, top: fraction, width: fraction, height: fraction });
@@ -100,10 +119,28 @@ export const readingSchema = z.strictObject({
   firstPassModel: nullableText,
   rereadModel: nullableText,
   rereadPages: z.array(z.number().int().min(1)),
+  /**
+   * Items dropped because they did not hold to the page, summed over pages, from each page's final reading. For a
+   * re-read page this counts the re-read's dropped items, including any whose content a kept first-pass item still
+   * carries (not_in_picture_reading or not_in_second_reading).
+   */
   droppedUngrounded: z.number().int().min(0),
   itemCount: z.number().int().min(0),
   promptVersion: z.string().min(1),
   schemaVersion: z.string().min(1),
+  // Added with the image re-read: optional, so payloads written before it still read. The worker always writes them.
+  /** Pages whose re-read was answered from the picture of the page (their items are read_from_image). */
+  imageRereadPages: z.array(z.number().int().min(1)).optional(),
+  /** Re-read pages that went without the picture, and why. */
+  imageRereadSkipped: z.array(z.strictObject({ page: z.number().int().min(1),
+    reason: z.enum(IMAGE_REREAD_SKIP_REASONS) })).optional(),
+  /**
+   * Pages sent with the picture whose image re-read gave no usable answer (cut off or malformed, a rejection that
+   * is not the picture's, unavailable after retries, or no item kept where the first pass had items); their
+   * first-pass items stay, marked reread_failed. A picture rejected as an invalid request or declined is in
+   * imageRereadSkipped ('image_rejected', 'image_refused') instead, and the page was re-read from its text.
+   */
+  imageRereadFailedPages: z.array(z.number().int().min(1)).optional(),
 });
 
 export const paperReadingPayloadSchema = z.strictObject({
@@ -158,5 +195,6 @@ export type PaperPage = z.infer<typeof pageSchema>;
 export type PaperIdentity = z.infer<typeof identitySchema>;
 export type PaperItem = z.infer<typeof itemSchema>;
 export type ReadingStatus = (typeof READING_STATUSES)[number];
+export type ImageRereadSkipReason = (typeof IMAGE_REREAD_SKIP_REASONS)[number];
 export type PaperReading = z.infer<typeof readingSchema>;
 export type PaperReadingPayload = z.infer<typeof paperReadingPayloadSchema>;

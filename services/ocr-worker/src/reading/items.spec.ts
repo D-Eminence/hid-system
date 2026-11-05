@@ -1,4 +1,4 @@
-import { checkPage, itemId, uniqueItemIds } from './items';
+import { checkPage, checkReasonSentence, itemId, mergeIdentity, mergeReread, uniqueItemIds } from './items';
 import { createMasker } from './masking';
 import { CLINIC_PAGE, modelItem, modelPage, readPage, SOURCE_SHA } from './test-fixtures';
 import type { ModelPage } from './prompt';
@@ -679,5 +679,465 @@ describe('checkPage holds each reading to its own label, dose and wording', () =
     expect(allergy.checkReason).toBe("The plain reading says something the paper doesn't.");
     expect(one('Allergy: penicillin - rash', { kind: 'allergy', asWritten: 'penicillin - rash', substance: 'penicillin',
       reaction: 'rash', plain: 'Allergic to penicillin (rash)' }).checkReasons).toEqual([]);
+  });
+});
+
+describe('checkPage for a page read from its picture (image re-read)', () => {
+  const hard = { handwritten: true, confidence: 0.55 };
+  // Line boxes (fixtures): left 0.1, width 0.5, height 0.02, top 0.05 x line number.
+  const page = readPage(1, [['Amlodipne 5rng od', hard], ['Metformin 500mg bd', { handwritten: true, confidence: 0.9 }],
+    ['Paracetamol 1g tds', hard], 'Dx: Hypertension']);
+  const fromImage = (answer: ModelPage) => checkPage({ page: 1, lines: page.lines, answer, sourceSha256Hex: SOURCE_SHA,
+    readBy: 'reread', masker: createMasker(), fromImage: true });
+  const onLine = (n: number) => ({ left: 0.12, top: 0.05 * n, width: 0.3, height: 0.02 });
+
+  it('keeps an item whose box sits on its cited lines, check_carefully, with its own box and the picture reason', () => {
+    const result = fromImage(modelPage([modelItem({ kind: 'medicine', asWritten: 'Metformin 500mg bd', lineIds: ['p1-l2'],
+      name: 'Metformin', strength: '500mg', frequency: 'bd', status: 'current', plain: 'Metformin 500 mg twice a day',
+      box: onLine(2) })]));
+    expect(result.droppedUngrounded).toBe(0);
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]).toMatchObject({ readBy: 'reread', confidence: 'check_carefully', box: onLine(2),
+      checkReason: 'This was read from the picture of the page; check it against the paper.' });
+    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(['read_from_image', 'handwritten']));
+    expect(result.items[0]!.checkReasons).not.toContain('number_not_in_text_read');
+  });
+
+  it('keeps an item the service misread (no text match needed), with the picture sentence, not a dose disagreement', () => {
+    const result = fromImage(modelPage([modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'],
+      name: 'Amlodipine', strength: '5mg', frequency: 'od', status: 'current', box: onLine(1) })]));
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]!.asWritten).toBe('Amlodipine 5mg od');
+    // Held to what was read in the picture, not to the line text "Amlodipne 5rng od".
+    expect(result.items[0]!.checkReasons).toEqual(['low_ocr_confidence_handwritten', 'handwritten', 'read_from_image']);
+    expect(result.items[0]!.checkReason).toBe('This was read from the picture of the page; check it against the paper.');
+    expect(result.items[0]!.fields).toMatchObject({ name: 'Amlodipine', strength: '5mg', frequency: 'od' });
+    // The corrected item does not make its page look as if it left something out of its line (a one-line page,
+    // so no uncited line counts either).
+    const alone = checkPage({ page: 1, lines: page.lines.slice(0, 1), sourceSha256Hex: SOURCE_SHA, readBy: 'reread',
+      masker: createMasker(), fromImage: true, answer: modelPage([modelItem({ kind: 'medicine',
+        asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'], name: 'Amlodipine', strength: '5mg', frequency: 'od',
+        status: 'current', box: onLine(1) })]) });
+    expect(alone.items).toHaveLength(1);
+    expect(alone.flagReasons).not.toContain('possible_missed_item');
+    // The same answer read from the text alone is not grounded and is dropped.
+    const textOnly = checkPage({ page: 1, lines: page.lines, sourceSha256Hex: SOURCE_SHA, readBy: 'reread',
+      masker: createMasker(), answer: modelPage([modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg od',
+        lineIds: ['p1-l1'], name: 'Amlodipine', strength: '5mg', frequency: 'od', status: 'current' })]) });
+    expect(textOnly.items).toEqual([]);
+    expect(textOnly.droppedUngrounded).toBe(1);
+  });
+
+  it('drops an item placed away from its cited lines, citing an unknown line or one on another page, or with no box', () => {
+    const base = { kind: 'note' as const, asWritten: 'Hypertension', noteText: 'Hypertension' };
+    const result = fromImage(modelPage([
+      modelItem({ ...base, lineIds: ['p1-l4'], box: { left: 0.1, top: 0.8, width: 0.3, height: 0.05 } }),
+      modelItem({ ...base, lineIds: ['p1-l4', 'p1-l9'], box: onLine(4) }),
+      modelItem({ ...base, lineIds: ['p2-l4'], box: onLine(4) }),
+      modelItem({ ...base, lineIds: ['p1-l4'] }),
+      modelItem({ ...base, lineIds: [], box: onLine(4) }),
+      modelItem({ ...base, lineIds: ['p1-l4'], box: { left: 1.2, top: 0.2, width: 0.3, height: 0.02 } }),
+    ]));
+    expect(result.items).toEqual([]);
+    expect(result.droppedUngrounded).toBe(6);
+    expect(JSON.stringify(result)).not.toContain('Hypertension');
+  });
+
+  it("still holds an item's own fields to what it read in the picture", () => {
+    const result = fromImage(modelPage([modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'],
+      name: 'Amlodipine', strength: '10mg', frequency: 'od', status: 'current', box: onLine(1) })]));
+    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(['strength_mismatch', 'read_from_image',
+      'number_not_in_text_read']));
+  });
+
+  describe('place: each cited line on its own, little on uncited lines, a real box, a text anchor', () => {
+    const note = (lineIds: string[], box: { left: number; top: number; width: number; height: number },
+      asWritten = 'Paracetamol tds') => modelItem({ kind: 'note', asWritten, noteText: asWritten, lineIds, box });
+
+    it('drops an item citing lines 1 and 4 whose box sits on the uncited line 3', () => {
+      const result = fromImage(modelPage([note(['p1-l1', 'p1-l4'], onLine(3), 'Amlodipne Hypertension')]));
+      expect(result.items).toEqual([]);
+      expect(result.droppedUngrounded).toBe(1);
+    });
+
+    it('drops a tiny box inside a cited line', () => {
+      expect(fromImage(modelPage([note(['p1-l2'], { left: 0.2, top: 0.105, width: 0.001, height: 0.001 },
+        'Metformin')])).items).toEqual([]);
+    });
+
+    it('drops a made-up item with a cited line box copied, when it shares no word or number with that line', () => {
+      const lineBox = page.lines[0]!.box!;
+      const result = fromImage(modelPage([modelItem({ kind: 'medicine', asWritten: 'Warfarin 10mg bd', lineIds: ['p1-l1'],
+        name: 'Warfarin', strength: '10mg', frequency: 'bd', status: 'current', box: lineBox })]));
+      expect(result.items).toEqual([]);
+      expect(result.droppedUngrounded).toBe(1);
+      expect(JSON.stringify(result)).not.toContain('Warfarin');
+    });
+
+    it('drops an item over two cited lines that are not adjacent, and one on a cited line that lies mostly on an uncited one', () => {
+      // Lines 2 and 3 are a line and a half apart (gap 0.03, height 0.02): not together, so dropped.
+      const apart = fromImage(modelPage([note(['p1-l2', 'p1-l3'], { left: 0.12, top: 0.1, width: 0.3, height: 0.07 },
+        'Metformin Paracetamol')]));
+      expect(apart.items).toEqual([]);
+      // Cites line 2 only, but most of the line area under the box is line 3's.
+      const spill = fromImage(modelPage([note(['p1-l2'], { left: 0.12, top: 0.11, width: 0.3, height: 0.06 }, 'Metformin')]));
+      expect(spill.items).toEqual([]);
+    });
+  });
+
+  describe('limits: at most three lines, lying together, and a box not much larger than its lines', () => {
+    // Lines 1-4 one under the other (gap 0.005, height 0.02); line 5 short and alone lower down.
+    const at = (top: number, width = 0.5) => ({ box: { left: 0.1, top, width, height: 0.02 } });
+    const dense = readPage(1, [['Amlodipne 5rng od', { ...hard, ...at(0.1) }],
+      ['Metformin 500mg bd', { ...hard, ...at(0.125) }], ['Paracetamol 1g tds', { ...hard, ...at(0.15) }],
+      ['Dx: Hypertension', at(0.175)], ['BP 140/90', { ...hard, ...at(0.5, 0.1) }],
+      ['Weight 70kg', { ...hard, ...at(0.7) }]]);
+    const read = (lineIds: string[], box: { left: number; top: number; width: number; height: number },
+      asWritten = 'Metformin Paracetamol') => checkPage({ page: 1, lines: dense.lines, sourceSha256Hex: SOURCE_SHA,
+      readBy: 'reread', masker: createMasker(), fromImage: true,
+      answer: modelPage([modelItem({ kind: 'note', asWritten, noteText: asWritten, lineIds, box })]) });
+
+    it('drops a whole-page box that cites every line', () => {
+      const result = read(dense.lines.map((line) => line.id), { left: 0, top: 0, width: 1, height: 1 });
+      expect(result.items).toEqual([]);
+      expect(result.droppedUngrounded).toBe(1);
+    });
+
+    it('drops an item citing four lines, even with a box just around them', () => {
+      const result = read(['p1-l1', 'p1-l2', 'p1-l3', 'p1-l4'], { left: 0.1, top: 0.1, width: 0.5, height: 0.095 });
+      expect(result.items).toEqual([]);
+      expect(result.droppedUngrounded).toBe(1);
+      // The same box citing three of those lines is kept.
+      expect(read(['p1-l1', 'p1-l2', 'p1-l3'], { left: 0.1, top: 0.1, width: 0.5, height: 0.07 }).items).toHaveLength(1);
+    });
+
+    it('keeps an item over two adjacent lines, and drops one over two lines that are not together', () => {
+      const kept = read(['p1-l2', 'p1-l3'], { left: 0.1, top: 0.125, width: 0.5, height: 0.045 });
+      expect(kept.items).toHaveLength(1);
+      expect(kept.items[0]!.lineIds).toEqual(['p1-l2', 'p1-l3']);
+      expect(kept.droppedUngrounded).toBe(0);
+      // Lines 2 and 5: far apart, so a box over both (and the lines between) is dropped.
+      expect(read(['p1-l2', 'p1-l5'], { left: 0.1, top: 0.125, width: 0.5, height: 0.395 }, 'Metformin 140/90').items)
+        .toEqual([]);
+    });
+
+    it('drops an item citing one line whose box also lies on an uncited neighbour line', () => {
+      const vitals = readPage(1, [['BP 120/80', { box: { left: 0.1, top: 0.5, width: 0.3, height: 0.02 } }],
+        ['Pulse 72', { box: { left: 0.1, top: 0.525, width: 0.3, height: 0.02 } }]]);
+      const check = (box: { left: number; top: number; width: number; height: number }) => checkPage({ page: 1,
+        lines: vitals.lines, sourceSha256Hex: SOURCE_SHA, readBy: 'reread', masker: createMasker(), fromImage: true,
+        answer: modelPage([modelItem({ kind: 'note', asWritten: 'BP 120/80 Pulse 72', noteText: 'BP 120/80 Pulse 72',
+          lineIds: ['p1-l1'], box })]) });
+      // Over both lines (within the area limit): dropped, because it covers "Pulse 72", which it does not cite.
+      const both = check({ left: 0.1, top: 0.5, width: 0.3, height: 0.045 });
+      expect(both.items).toEqual([]);
+      expect(both.droppedUngrounded).toBe(1);
+      // On its own line only: kept.
+      expect(check({ left: 0.1, top: 0.5, width: 0.3, height: 0.02 }).items).toHaveLength(1);
+    });
+
+    it('allows at most 2 x the line area plus 0.002 of the page', () => {
+      // Line 5: width 0.1, height 0.02 (area 0.002), so the allowed area is 2 x 0.002 + 0.002 = 0.006.
+      expect(read(['p1-l5'], { left: 0.1, top: 0.48, width: 0.1, height: 0.059 }, 'BP 140/90').items).toHaveLength(1);
+      expect(read(['p1-l5'], { left: 0.1, top: 0.48, width: 0.1, height: 0.062 }, 'BP 140/90').items).toEqual([]);
+      // Line 6: width 0.5, height 0.02 (area 0.01), allowed 0.022. A box three times the line's height (0.03) is
+      // dropped; one just inside the limit, and inside the side limit, is kept.
+      expect(read(['p1-l6'], { left: 0.1, top: 0.68, width: 0.5, height: 0.06 }, 'Weight 70kg').items).toEqual([]);
+      expect(read(['p1-l6'], { left: 0.04, top: 0.6925, width: 0.6, height: 0.035 }, 'Weight 70kg').items).toHaveLength(1);
+    });
+
+    it("lets a box run past its lines' left and right edges by at most a quarter of their width in total", () => {
+      // Line 5 runs 0.1-0.2. A box 2.2 times as wide (into blank space, within the area limit) is dropped.
+      expect(read(['p1-l5'], { left: 0.05, top: 0.5, width: 0.22, height: 0.02 }, 'BP 140/90').items).toEqual([]);
+      // 0.025 past its edges in total: kept; 0.03: dropped.
+      expect(read(['p1-l5'], { left: 0.09, top: 0.5, width: 0.125, height: 0.02 }, 'BP 140/90').items).toHaveLength(1);
+      expect(read(['p1-l5'], { left: 0.085, top: 0.5, width: 0.13, height: 0.02 }, 'BP 140/90').items).toEqual([]);
+    });
+
+    it('drops a box much larger than its cited line, and keeps one a little larger than a short line', () => {
+      const large = read(['p1-l5'], { left: 0.05, top: 0.47, width: 0.5, height: 0.08 }, 'BP 140/90');
+      expect(large.items).toEqual([]);
+      expect(large.droppedUngrounded).toBe(1);
+      expect(read(['p1-l5'], { left: 0.095, top: 0.497, width: 0.11, height: 0.026 }, 'BP 140/90').items).toHaveLength(1);
+    });
+  });
+
+  it('stores the model box clipped to the page, and flags a number the text read does not have', () => {
+    const result = fromImage(modelPage([modelItem({ kind: 'medicine', asWritten: 'Paracetamol 1g qds 5/7', lineIds: ['p1-l3'],
+      name: 'Paracetamol', strength: '1g', frequency: 'qds', duration: '5/7', status: 'new',
+      box: { left: -0.05, top: 0.14, width: 0.5, height: 0.04 } })]));
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]!.box).toEqual({ left: 0, top: 0.14, width: 0.45, height: 0.04 });
+    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(['read_from_image', 'number_not_in_text_read']));
+    expect(result.items[0]!.confidence).toBe('check_carefully');
+  });
+
+  it('does not count read_from_image as a shaky first pass on its own', () => {
+    const result = fromImage(modelPage([modelItem({ kind: 'note', asWritten: 'Hypertension', noteText: 'Hypertension',
+      lineIds: ['p1-l4'], box: { left: 0.1, top: 0.2, width: 0.3, height: 0.02 } })]));
+    expect(result.items[0]!.checkReasons).toEqual(['read_from_image']);
+    expect(result.rereadReasons).not.toContain('many_check_carefully');
+  });
+});
+
+describe('the not_in_picture_reading sentence', () => {
+  const sentence = 'The second reading, from the picture, did not find this; check it against the paper.';
+  it('comes after disagreements and status warnings, and before legibility and handwriting', () => {
+    expect(checkReasonSentence(['not_in_picture_reading'])).toBe(sentence);
+    expect(checkReasonSentence(['not_in_picture_reading', 'strength_mismatch'])).toBe("A dose on the paper doesn't match what was read.");
+    expect(checkReasonSentence(['not_in_picture_reading', 'status_not_active']))
+      .toBe('This may not be current (for example past, stopped or suspected).');
+    expect(checkReasonSentence(['not_in_picture_reading', 'duplicate_source_span']))
+      .toBe('Another item was read from the same words; check nothing was missed.');
+    expect(checkReasonSentence(['handwritten', 'low_ocr_confidence_handwritten', 'not_in_picture_reading'])).toBe(sentence);
+    expect(checkReasonSentence(['not_in_second_reading'])).toBe('The second reading did not find this; check it against the paper.');
+    expect(checkReasonSentence(['not_in_second_reading', 'differs_from_second_reading', 'handwritten']))
+      .toBe('The second reading differs from this one; compare both with the paper.');
+    expect(checkReasonSentence(['differs_from_second_reading', 'strength_mismatch']))
+      .toBe("A dose on the paper doesn't match what was read.");
+  });
+});
+
+describe('mergeReread', () => {
+  it('works out possible_missed_item again from every kept item, so a line a kept first-pass item cites is not missed', () => {
+    const page = readPage(1, [['Amlodipne 5rng od', { handwritten: true, confidence: 0.55 }], 'Dx: Hypertension']);
+    const base = { page: 1, lines: page.lines, sourceSha256Hex: SOURCE_SHA, masker: createMasker() };
+    const first = checkPage({ ...base, readBy: 'first_pass', answer: modelPage([modelItem({ kind: 'diagnosis',
+      asWritten: 'Hypertension', lineIds: ['p1-l2'], name: 'Hypertension', status: 'confirmed' })]) });
+    const image = checkPage({ ...base, readBy: 'reread', fromImage: true, answer: modelPage([modelItem({
+      kind: 'medicine', asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'], name: 'Amlodipine', status: 'current',
+      box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 } })]) });
+    // The picture reading alone leaves "Dx: Hypertension" uncited.
+    expect(image.flagReasons).toContain('possible_missed_item');
+    const merged = mergeReread(first, image, page.lines, 'image');
+    expect(merged.items.map((item) => item.kind)).toEqual(['medicine', 'diagnosis']);
+    expect(merged.flagReasons).not.toContain('possible_missed_item');
+    expect(merged.flagReasons).toContain('handwriting');
+    expect(merged.droppedUngrounded).toBe(image.droppedUngrounded);
+  });
+});
+
+describe('mergeReread keeps every first-pass item that is not an exact twin of a picture item', () => {
+  const onLine2 = { left: 0.12, top: 0.1, width: 0.3, height: 0.02 };
+  type Raw = Parameters<typeof modelItem>[0];
+  function merge(text: string, firstItems: Raw[], pictureItems: Raw[]) {
+    const page = readPage(1, ['Name: Test Patient Adaeze Example', [text, { handwritten: true, confidence: 0.6 }]]);
+    const base = { page: 1, lines: page.lines, sourceSha256Hex: SOURCE_SHA, masker: createMasker() };
+    const first = checkPage({ ...base, readBy: 'first_pass', answer: modelPage(firstItems.map((item) =>
+      modelItem({ lineIds: ['p1-l2'], ...item }))) });
+    const image = checkPage({ ...base, readBy: 'reread', fromImage: true, answer: modelPage(pictureItems.map((item) =>
+      modelItem({ lineIds: ['p1-l2'], box: onLine2, ...item }))) });
+    expect(first.items).toHaveLength(new Set(firstItems.map((item) => item.asWritten)).size);
+    expect(image.items).toHaveLength(pictureItems.length);
+    return mergeReread(first, image, page.lines, 'image');
+  }
+  const shape = (items: readonly { kind: string; readBy: string; asWritten: string }[]) =>
+    items.map((item) => [item.readBy, item.asWritten]);
+
+  const med = (asWritten: string, name: string, strength: string, frequency: string): Raw =>
+    ({ kind: 'medicine', asWritten, name, strength, frequency, status: 'current' });
+  const lab = (asWritten: string, test: string, value: string, unit: string): Raw =>
+    ({ kind: 'lab_result', asWritten, test, value, unit });
+  const note = (asWritten: string): Raw => ({ kind: 'note', asWritten, noteText: asWritten });
+  const probes: Array<[string, Raw, Raw]> = [
+    ['Vitamin C 100mg od, Vitamin B complex 1 tab od', med('Vitamin C 100mg od', 'Vitamin C', '100mg', 'od'),
+      med('Vitamin B complex 1 tab od', 'Vitamin B complex', '1 tab', 'od')],
+    ['Paracetamol 1g stat then Paracetamol 500mg tds', med('Paracetamol 1g stat', 'Paracetamol', '1g', 'stat'),
+      med('Paracetamol 500mg tds', 'Paracetamol', '500mg', 'tds')],
+    ['Insulin glargine 10 units nocte, Insulin soluble 4 units tds',
+      med('Insulin glargine 10 units nocte', 'Insulin glargine', '10 units', 'nocte'),
+      med('Insulin soluble 4 units tds', 'Insulin soluble', '4 units', 'tds')],
+    ['WBC 5.0 x10^9/L Plt 250 x10^9/L', lab('WBC 5.0 x10^9/L', 'WBC', '5.0', 'x10^9/L'),
+      lab('Plt 250 x10^9/L', 'Plt', '250', 'x10^9/L')],
+    ['Review in the clinic. Refer to the eye unit', note('Review in the clinic.'), note('Refer to the eye unit')],
+  ];
+
+  it.each(probes)('keeps the second item on "%s" when the picture reads only the first', (text, one, two) => {
+    const merged = merge(text, [one, two], [one]);
+    // The exact twin is replaced by the picture's item; the second stays. Only a pair with the same name (here the
+    // two Paracetamol doses) is marked to compare; otherwise the second is only not found by the picture.
+    expect(shape(merged.items)).toEqual([['reread', one.asWritten], ['first_pass', two.asWritten]]);
+    expect(merged.items[1]!.checkReasons).toContain('not_in_picture_reading');
+    expect(merged.items[1]!.confidence).toBe('check_carefully');
+    const pair = one.name === two.name && one.name !== undefined;
+    expect(merged.items[1]!.checkReasons.includes('differs_from_second_reading')).toBe(pair);
+    expect(merged.items[0]!.checkReasons.includes('differs_from_second_reading')).toBe(pair);
+    for (const item of merged.items) expect(item.checkReasons).not.toContain('duplicate_source_span');
+    // Two readings that differ are not a sign of a missed item.
+    expect(merged.flagReasons).not.toContain('possible_missed_item');
+  });
+
+  it('replaces an exact twin, amounts and spacing normalised, and keeps a near one', () => {
+    const exact = merge('Amlodipine 5mg od', [med('Amlodipine 5mg od', 'Amlodipine', '5mg', 'od')],
+      [med('Amlodipine 5mg od', 'AMLODIPINE', '5 mg', 'od')]);
+    expect(shape(exact.items)).toEqual([['reread', 'Amlodipine 5mg od']]);
+    expect(exact.items[0]!.checkReasons).not.toContain('differs_from_second_reading');
+    // The first probe's first item read with another strength is not a twin: both stay.
+    const [text, one, two] = probes[0]!;
+    const near = merge(text, [one, two], [{ ...one, strength: '1000mg' }]);
+    expect(shape(near.items)).toEqual([['reread', one.asWritten], ['first_pass', one.asWritten],
+      ['first_pass', two.asWritten]]);
+  });
+
+  it.each<[string, Raw, Raw]>([
+    ['Amoxicillin 500mg tds x 5/7', med('Amoxicillin 500mg tds x 5/7', 'Amoxicillin', '500mg', 'tds'),
+      med('Amoxicillin 500mg tds', 'Amoxicillin', '500mg', 'tds')],
+    ['Penicillin - anaphylaxis', { kind: 'allergy', asWritten: 'Penicillin - anaphylaxis', substance: 'Penicillin',
+      reaction: 'anaphylaxis', severity: 'severe' }, { kind: 'allergy', asWritten: 'Penicillin', substance: 'Penicillin' }],
+    ['Hb 7.2 g/dl L (12-16)', { ...lab('Hb 7.2 g/dl L (12-16)', 'Hb', '7.2', 'g/dl'), flag: 'L', referenceRange: '12-16' },
+      lab('Hb 7.2 g/dl', 'Hb', '7.2', 'g/dl')],
+  ])('keeps the fuller first-pass item on "%s" when the picture item leaves fields out', (text, full, less) => {
+    const merged = merge(text, [text.startsWith('Amoxicillin') ? { ...full, duration: '5/7' } : full], [less]);
+    expect(shape(merged.items)).toEqual([['reread', less.asWritten], ['first_pass', full.asWritten]]);
+    const kept = merged.items[1]!;
+    if (kept.kind === 'medicine') expect(kept.fields.duration).toBe('5/7');
+    if (kept.kind === 'allergy') expect(kept.fields).toMatchObject({ reaction: 'anaphylaxis', severity: 'severe' });
+    if (kept.kind === 'lab_result') expect(kept.fields).toMatchObject({ flag: 'L', referenceRange: '12-16' });
+    expect(kept.checkReasons).toEqual(expect.arrayContaining(['differs_from_second_reading', 'not_in_picture_reading']));
+  });
+
+  it('compares the date and the prescription too', () => {
+    const one = { ...med('Amlodipine 5mg od 03/04/2026', 'Amlodipine', '5mg', 'od'), dateAsWritten: '03/04/2026' };
+    const merged = merge('Amlodipine 5mg od 03/04/2026', [one], [{ ...one, dateAsWritten: '' }]);
+    expect(merged.items).toHaveLength(2);
+  });
+
+  it('keeps both a misread name and the picture reading of it (not the same name, so not paired)', () => {
+    const merged = merge('Amlodipne 5mg od', [med('Amlodipne 5mg od', 'Amlodipne', '5mg', 'od')],
+      [med('Amlodipine 5mg od', 'Amlodipine', '5mg', 'od')]);
+    expect(shape(merged.items)).toEqual([['reread', 'Amlodipine 5mg od'], ['first_pass', 'Amlodipne 5mg od']]);
+    expect(merged.items[1]!.checkReasons).toContain('not_in_picture_reading');
+    for (const item of merged.items) expect(item.checkReasons).not.toContain('differs_from_second_reading');
+    expect(merged.flagReasons).not.toContain('possible_missed_item');
+  });
+
+  describe('three medicines on one line, re-read from the text', () => {
+    const text = 'Amlodipine 5mg od, Metformin 500mg bd oral, Aspirin 75mg od';
+    const amlodipine = med('Amlodipine 5mg od', 'Amlodipine', '5mg', 'od');
+    const metformin = med('Metformin 500mg bd', 'Metformin', '500mg', 'bd');
+    const aspirin = med('Aspirin 75mg od', 'Aspirin', '75mg', 'od');
+    function textMerge(second: Raw[]) {
+      const page = readPage(1, ['Name: Test Patient Adaeze Example', text]);
+      const base = { page: 1, lines: page.lines, sourceSha256Hex: SOURCE_SHA, masker: createMasker() };
+      const toPage = (items: Raw[], readBy: 'first_pass' | 'reread') => checkPage({ ...base, readBy,
+        answer: modelPage(items.map((item) => modelItem({ lineIds: ['p1-l2'], ...item }))) });
+      return mergeReread(toPage([amlodipine, metformin, aspirin], 'first_pass'), toPage(second, 'reread'), page.lines,
+        'text');
+    }
+
+    it('replaces each first-pass medicine by its twin, or by a reading that only adds a field it left empty', () => {
+      const merged = textMerge([amlodipine, { ...metformin, asWritten: 'Metformin 500mg bd oral', route: 'oral' }, aspirin]);
+      expect(shape(merged.items)).toEqual([['reread', 'Amlodipine 5mg od'], ['reread', 'Metformin 500mg bd oral'],
+        ['reread', 'Aspirin 75mg od']]);
+      expect(merged.items[1]!.fields).toMatchObject({ name: 'Metformin', route: 'oral' });
+      for (const item of [merged.items[0]!, merged.items[2]!]) expect(item.confidence).toBe('clear');
+      for (const item of merged.items) {
+        expect(item.checkReasons).not.toContain('differs_from_second_reading');
+        expect(item.checkReasons).not.toContain('not_in_second_reading');
+      }
+    });
+
+    it('marks only the Metformin pair when the second reading has another strength', () => {
+      const merged = textMerge([amlodipine, { ...metformin, strength: '850mg' }, aspirin]);
+      // On the same line the second reading's items come first, then the kept first-pass one.
+      expect(shape(merged.items)).toEqual([['reread', 'Amlodipine 5mg od'], ['reread', 'Metformin 500mg bd'],
+        ['reread', 'Aspirin 75mg od'], ['first_pass', 'Metformin 500mg bd']]);
+      const marked = merged.items.filter((item) => item.checkReasons.includes('differs_from_second_reading'));
+      expect(marked.map((item) => [item.readBy, item.fields])).toEqual([
+        ['reread', expect.objectContaining({ name: 'Metformin', strength: '850mg' })],
+        ['first_pass', expect.objectContaining({ name: 'Metformin', strength: '500mg' })]]);
+      // A real disagreement (the route on the line that this reading left out) still comes first.
+      expect(merged.items[3]!.checkReason).toBe("The paper says how it is given, but that wasn't read.");
+      expect(merged.items[3]!.checkReasons).toContain('not_in_second_reading');
+      expect(merged.flagReasons).not.toContain('possible_missed_item');
+    });
+
+    it('never treats a reading with a field the first pass filled in left out as carrying it', () => {
+      const merged = textMerge([amlodipine, { ...metformin, frequency: '' }, aspirin]);
+      expect(merged.items.filter((item) => item.asWritten === 'Metformin 500mg bd')).toHaveLength(2);
+    });
+  });
+
+  it('lets one picture item remove at most one of two identical first-pass items, with unique, repeatable ids', () => {
+    const text = 'Paracetamol 1g tds; repeat Paracetamol 1g tds';
+    const items = [med('Paracetamol 1g tds', 'Paracetamol', '1g', 'tds'),
+      med('repeat Paracetamol 1g tds', 'Paracetamol', '1g', 'tds')];
+    const merged = merge(text, items, [items[0]!]);
+    expect(shape(merged.items)).toEqual([['reread', 'Paracetamol 1g tds'], ['first_pass', 'repeat Paracetamol 1g tds']]);
+    expect(new Set(merged.items.map((item) => item.id)).size).toBe(merged.items.length);
+    expect(merge(text, items, [items[0]!]).items.map((item) => item.id)).toEqual(merged.items.map((item) => item.id));
+  });
+});
+
+describe('placement floors for a short item', () => {
+  // A 1240 x 1754 page: 1 px is about 0.0008 of its width and 0.0006 of its height.
+  const page = readPage(1, [['Fe 200mg', { handwritten: true, confidence: 0.6,
+    box: { left: 0.1, top: 0.3, width: 0.03, height: 0.012 } }]]);
+  const read = (box: { left: number; top: number; width: number; height: number }) => checkPage({ page: 1,
+    lines: page.lines, sourceSha256Hex: SOURCE_SHA, readBy: 'reread', masker: createMasker(), fromImage: true,
+    answer: modelPage([modelItem({ kind: 'medicine', asWritten: 'Fe 200mg', name: 'Fe', strength: '200mg',
+      status: 'current', lineIds: ['p1-l1'], box })]) });
+
+  it('keeps a short line read with about 5 px of padding on each side (10 px in all)', () => {
+    expect(read({ left: 0.096, top: 0.29715, width: 0.038, height: 0.0177 }).items).toHaveLength(1);
+  });
+
+  it('keeps a 0.02-wide line read with 8 px of padding on each side (0.01 of the page width allowed per side)', () => {
+    const narrow = readPage(1, [['Fe 200mg', { handwritten: true, confidence: 0.6,
+      box: { left: 0.1, top: 0.3, width: 0.02, height: 0.012 } }]]);
+    const pad = 8 / 1240;
+    const result = checkPage({ page: 1, lines: narrow.lines, sourceSha256Hex: SOURCE_SHA, readBy: 'reread',
+      masker: createMasker(), fromImage: true, answer: modelPage([modelItem({ kind: 'note', asWritten: 'Fe 200mg',
+        noteText: 'Fe 200mg', lineIds: ['p1-l1'], box: { left: 0.1 - pad, top: 0.3 - 5 / 1754, width: 0.02 + 2 * pad,
+          height: 0.012 + 10 / 1754 } })]) });
+    expect(result.items).toHaveLength(1);
+  });
+
+  it('still drops a box twice as wide as the short line', () => {
+    const result = read({ left: 0.085, top: 0.3, width: 0.06, height: 0.012 });
+    expect(result.items).toEqual([]);
+    expect(result.droppedUngrounded).toBe(1);
+  });
+});
+
+describe('mergeIdentity', () => {
+  const first = { nameAsWritten: 'Test Patient Adaeze Example', dateOfBirthAsWritten: '01/01/1990',
+    folderNumberAsWritten: null, sexAsWritten: 'F', lineIds: ['p1-l1'],
+    box: { left: 0.1, top: 0.05, width: 0.5, height: 0.02 } };
+  const blank = { nameAsWritten: null, dateOfBirthAsWritten: null, folderNumberAsWritten: null, sexAsWritten: null,
+    lineIds: [], box: null };
+
+  it('fills a field only the second reading has, keeps the first pass where they agree, with both lines and boxes', () => {
+    const second = { nameAsWritten: 'test patient  adaeze example', dateOfBirthAsWritten: null,
+      folderNumberAsWritten: 'TEST-0001', sexAsWritten: null, lineIds: ['p1-l3'],
+      box: { left: 0.2, top: 0.15, width: 0.3, height: 0.02 } };
+    expect(mergeIdentity(first, second)).toEqual({ conflict: false, identity: { nameAsWritten: 'Test Patient Adaeze Example',
+      dateOfBirthAsWritten: '01/01/1990', folderNumberAsWritten: 'TEST-0001', sexAsWritten: 'F',
+      lineIds: ['p1-l1', 'p1-l3'], box: { left: 0.1, top: 0.05, width: 0.5, height: 0.12 } } });
+    expect(mergeIdentity(first, blank)).toEqual({ conflict: false, identity: first });
+    expect(mergeIdentity(blank, blank)).toEqual({ conflict: false, identity: blank });
+  });
+
+  it('keeps the first-pass value where the readings disagree, and says so', () => {
+    const merged = mergeIdentity(first, { ...first, nameAsWritten: 'Test Patient Adaeze Exampel', sexAsWritten: 'M' });
+    expect(merged.conflict).toBe(true);
+    expect(merged.identity).toMatchObject({ nameAsWritten: 'Test Patient Adaeze Example', sexAsWritten: 'F' });
+  });
+
+  it('flags the page ai_unsure when the re-read gives a different identity', () => {
+    const page = readPage(1, ['Name: Test Patient Adaeze Example  Folder: TEST-0001', 'Folder: TEST-0002',
+      'Dx: Hypertension']);
+    const base = { page: 1, lines: page.lines, sourceSha256Hex: SOURCE_SHA, masker: createMasker() };
+    const dx = modelItem({ kind: 'diagnosis', asWritten: 'Hypertension', lineIds: ['p1-l3'], name: 'Hypertension',
+      status: 'confirmed' });
+    const reading = (folder: string, line: string, readBy: 'first_pass' | 'reread') => checkPage({ ...base, readBy,
+      answer: modelPage([dx], { identity: { name: '', dateOfBirth: '', folderNumber: folder, sex: '', lineIds: [line] } }) });
+    const merged = mergeReread(reading('TEST-0001', 'p1-l1', 'first_pass'), reading('TEST-0002', 'p1-l2', 'reread'),
+      page.lines, 'text');
+    expect(merged.identity.folderNumberAsWritten).toBe('TEST-0001');
+    expect(merged.flagReasons).toContain('ai_unsure');
+    const agreed = mergeReread(reading('TEST-0001', 'p1-l1', 'first_pass'), reading('TEST-0001', 'p1-l1', 'reread'),
+      page.lines, 'text');
+    expect(agreed.flagReasons).not.toContain('ai_unsure');
   });
 });
