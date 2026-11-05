@@ -41,7 +41,7 @@ output "anthropic_runtime_access" {
     }
     ocr_worker_ai_environment = {
       for key, value in local.workload_environment["ocr-worker"] : key => value
-      if contains(["OCR_AI_MODE", "OCR_AI_GLOBAL_PROCESSING_APPROVED", "OCR_TEXTRACT_FEATURES"], key)
+      if contains(["OCR_AI_MODE", "OCR_AI_US_PROCESSING_APPROVED", "OCR_TEXTRACT_FEATURES"], key)
     }
   }
 }

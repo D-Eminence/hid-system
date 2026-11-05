@@ -137,7 +137,7 @@ module "application" {
   anthropic_secret_json_key           = var.anthropic_secret_json_key
   anthropic_secret_kms_key_arn        = var.anthropic_secret_kms_key_arn
   ai_allow_anthropic_us_processing    = var.ai_allow_anthropic_us_processing
-  ocr_ai_global_processing_approved   = var.ocr_ai_global_processing_approved
+  ocr_ai_us_processing_approved       = var.ocr_ai_us_processing_approved
   enable_support_bot                  = var.enable_support_bot
   support_bot_id                      = var.enable_support_bot ? module.support_bot[0].bot_id : ""
   support_bot_alias_id                = var.enable_support_bot ? module.support_bot[0].alias_id : ""

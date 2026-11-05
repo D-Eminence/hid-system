@@ -221,8 +221,8 @@ variable "anthropic_secret_kms_key_arn" {
   default = ""
 }
 
-variable "ocr_ai_global_processing_approved" {
-  description = "Explicit HID approval for ocr-worker to send text read from paper records to the direct Claude API (global processing). Needs the direct Claude API to be on."
+variable "ocr_ai_us_processing_approved" {
+  description = "Explicit HID approval for ocr-worker to send text read from paper records to the direct Claude API, processed in the United States only (inference_geo us). Sets OCR_AI_US_PROCESSING_APPROVED; the worker refuses Claude without it. Needs the direct Claude API to be on."
   type        = bool
   default     = false
 }
