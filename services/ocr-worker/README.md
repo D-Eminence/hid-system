@@ -82,8 +82,9 @@ Each claimed job runs, in order:
    inherited `ANTHROPIC_BASE_URL` is ignored) and owns its retries: 429, 5xx,
    529 and connection errors back off with full jitter honouring
    `retry-after`; 400/401/403/404 are not retried. A refusal on the first pass
-   is retried on the re-read model; a page both models decline is flagged
-   `ai_declined`.
+   is asked again on the re-read (by default the same model and effort as the
+   first pass, so a second refusal is likely); a page declined both times is
+   flagged `ai_declined`.
 6. **Grounding** (`src/reading/grounding.ts`, `items.ts`, pure functions). An
    item citing no line, a line not on its page, or whose `asWritten` is not in
    its cited lines (whole words and whole numbers) is dropped and only
@@ -168,8 +169,17 @@ Claude ids (`^claude-[a-z0-9-]+$`).
 
 Cost note: on the Claude API, US-only inference (`inference_geo: "us"`) is
 billed at 1.1x the standard per-token price (claude-api reference,
-platform availability), for both the first pass (`claude-sonnet-5-5`) and the
-re-read (`claude-opus-5-5`). The reference lists `inference_geo` as supported
+platform availability). Since the owner's decision of 2026-11-05 both the first
+pass and the re-read default to `claude-opus-5-5` at effort `high`
+(`OCR_AI_FIRST_PASS_MODEL` / `_EFFORT`, `OCR_AI_REREAD_MODEL` / `_EFFORT`), sent
+explicitly on every request with adaptive thinking; a Fable model is not used
+(it needs 30-day data retention, which the owner declined). Planning price:
+list price $4 / $20 per million input / output tokens; US-only x1.1 = $4.40 / $22
+(cache reads $0.22, 5-minute cache writes $5.50). Per page that is more than
+twice the earlier Sonnet first pass at medium effort, since high effort also
+writes more thinking and output. Each job logs `ocr.reading.usage` per model
+(requests and token counts, never text, with `pagesSent`), so the cost per page
+can be seen. The reference lists `inference_geo` as supported
 on the Claude API with no per-model exclusion for these models; a model that
 did not support geographic pinning would answer 400, which the client does not
 retry, so the reading would end `ai_failed` (Textract text only, no items)

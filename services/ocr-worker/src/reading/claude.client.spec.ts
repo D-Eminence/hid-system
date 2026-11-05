@@ -1,4 +1,5 @@
 import { AiInterruptedError, AiRejectedError, AiTransientError, ClaudePageClient, retryAfterMs } from './claude.client';
+import { readOcrWorkerConfig } from '../config';
 import { Semaphore } from '../semaphore';
 import { SYSTEM_PROMPT } from './prompt';
 import { modelItem, modelPage } from './test-fixtures';
@@ -63,6 +64,22 @@ describe('ClaudePageClient', () => {
   const originalBase = process.env.ANTHROPIC_BASE_URL;
   beforeAll(() => { process.env.ANTHROPIC_BASE_URL = 'https://elsewhere.example.invalid'; });
   afterAll(() => { if (originalBase === undefined) delete process.env.ANTHROPIC_BASE_URL; else process.env.ANTHROPIC_BASE_URL = originalBase; });
+
+  it('sends the configured defaults: the most capable model at high effort, US only, for both passes', async () => {
+    const defaults = readOcrWorkerConfig({ NODE_ENV: 'test', OCR_PROVIDER: 'test',
+      OCR_WORKER_DATABASE_URL: 'postgresql://worker:secret@localhost:5432/hid', OCR_WORKER_SUBJECT: 'workload:ocr:test',
+      OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: FAKE_KEY, OCR_AI_US_PROCESSING_APPROVED: 'true' });
+    expect(defaults).toMatchObject({ OCR_AI_FIRST_PASS_MODEL: 'claude-opus-5-5', OCR_AI_FIRST_PASS_EFFORT: 'high',
+      OCR_AI_REREAD_MODEL: 'claude-opus-5-5', OCR_AI_REREAD_EFFORT: 'high' });
+    for (const [model, effort] of [[defaults.OCR_AI_FIRST_PASS_MODEL, defaults.OCR_AI_FIRST_PASS_EFFORT],
+      [defaults.OCR_AI_REREAD_MODEL, defaults.OCR_AI_REREAD_EFFORT]] as const) {
+      const { instance, fetch } = client([sse(JSON.stringify(answer))]);
+      await instance.readPage({ ...request, model, effort }, new AbortController().signal);
+      const body = JSON.parse(String(fetch.mock.calls[0]![1]!.body)) as Record<string, unknown>;
+      expect(body).toMatchObject({ model: 'claude-opus-5-5', inference_geo: 'us', thinking: { type: 'adaptive' },
+        output_config: { effort: 'high' } });
+    }
+  });
 
   it('sends one page to the fixed Claude API endpoint with US-only inference, adaptive thinking and a JSON schema', async () => {
     const { instance, fetch } = client([sse(JSON.stringify(answer))]);
