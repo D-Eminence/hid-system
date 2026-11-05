@@ -31,6 +31,11 @@ export const ITEM_LABELS = new RegExp('^a ?:|(?<![\\p{L}\\p{N}_])(?:dx|ddx|imp|i
   + '|treated for|history of|rx|tabs?|tablets?|caps?|capsules?|inj|syr|syrup|susp|inh|inhaler|cream|oint\\p{L}*|nebs?'
   + '|supp|bp|temp|pulse|spo2|wt|weight|allerg\\p{L}*|nkda)(?![\\p{L}\\p{N}_])', 'u');
 /** Words on an item's own line that put an active status in doubt (also a plain "no", "negative" or "stop"). */
+/**
+ * Words on a line that may change an item's status. A "?" is a query ("?TB", "TB?": suspected); on a hard page a
+ * question mark written on the paper is transcribed "[?]" (prompt.ts hardPageMessage), which this counts too, while
+ * the reading's own "?" marks are taken off before (forMatching), so they never look like a query.
+ */
 export const STATUS_CUES = new RegExp('(?<![\\p{L}\\p{N}_])(?:no evidence of|negative for|ruled? out|r/o|query|possible'
   + '|suspected|fhx|family history|stopped|discontinued|d/c|allerg(?:y|ies)|allergic to|h/o|history of|pmh'
   + '|past history|no|not|non|nil|negative|neg|stop|withheld|withhold|held|hold|omit(?:ted)?|denies|denied)'
@@ -58,11 +63,12 @@ const ROUTES = Object.entries(ROUTE_WORDS)
  * Text for matching against the page, with its guess marks taken off: a "?" straight after a word or number
  * ("Sulfa?", "400?", "Flagyl? (metronidazole)") is how a reading says it is unsure (the model's own marks, and
  * those hard-page.ts markGuess adds), not writing on the paper, so the field "Sulfa?" is held to the page as
- * "Sulfa". A "?" that starts a word ("?TB", a query on the paper) is kept. Only for comparing: the stored and shown
- * field keeps its marks.
+ * "Sulfa". A "?" that starts a word ("?TB", a query on the paper) is kept, and so is "[?]", a question mark the
+ * hard-page prompt has the model transcribe from the paper (a clinical query, counted by STATUS_CUES). Only for
+ * comparing: the stored and shown field keeps its marks.
  */
 export function forMatching(text: string): string {
-  return text.replace(/(?<=[^\s?])\?+/gu, '');
+  return text.replace(/(?<=[^\s?[])\?+/gu, '');
 }
 
 export function norm(text: string): string {

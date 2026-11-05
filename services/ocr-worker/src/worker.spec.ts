@@ -491,7 +491,7 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(medicine.fields).toMatchObject({ name: 'Pyrimethamine?', strength: '437 mg' });
     expect(medicine.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'field_from_context']));
     expect(result.provenance.reading).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
-      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-1', imagePromptVersion: null,
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-2', imagePromptVersion: null,
       promptVersion: 'hid-paper-reading-prompt-5' });
     const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
     const usageLines = lines.filter((line) => line.event === 'ocr.reading.usage');

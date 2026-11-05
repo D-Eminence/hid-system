@@ -36,7 +36,7 @@ export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-5';
  * The hard-page prompt (hardPageMessage) and its output schema (MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA): best-guess
  * readings for a hard page only (owner decision of 2026-11-05, about 18:40 UTC). Recorded in provenance when used.
  */
-export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-1';
+export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-2';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
@@ -358,7 +358,9 @@ from the picture itself, not from the line text below: on hard handwriting that 
 
 B. "asWritten" is the item as you read it in the picture, letter for letter, with its spelling and abbreviations. \
 After every word or number you are not sure of, put "?" (for example "Metronidazole? 400? mg tds"). Where a word \
-cannot be read at all, even as a guess, write "[unreadable]" in its place.
+cannot be read at all, even as a guess, write "[unreadable]" in its place. A question mark written on the paper \
+itself (a clinical query, such as "?TB" or "TB?" for a suspected diagnosis) is written "[?]" in "asWritten" and in \
+the field (for example "Dx [?]TB" or "TB[?]"); a plain "?" is only ever your own uncertainty, never the paper's.
 
 C. Give a best reading of every field of the item, with "?" after each uncertain word or number. Use "" only for a \
 field the item does not have, and "[unreadable]" for one it has but you cannot read even as a guess.

@@ -336,7 +336,7 @@ Each claimed job runs, in order:
      thinking, `inference_geo: "us"`, fixed endpoint and the same cached system
      prompt, at `OCR_AI_HARD_PAGE_EFFORT` (default `max`, which Claude Opus 5.5
      accepts: `low` to `max`; any other value fails startup). Its user turn is
-     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-1`,
+     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-2`,
      recorded in provenance as `hardPagePromptVersion` when used): read the
      page line by line; give a best reading of every field with "?" after each
      uncertain word; a word not readable even as a guess is `[unreadable]`;
@@ -376,7 +376,11 @@ Each claimed job runs, in order:
      re-read merge's comparison with the first pass) is made with the "?"
      after a word or number taken off (`forMatching` in `grounding.ts`), so
      `Sulfa?` is still found in "No sulfa allergy" and `Hb?` still labels
-     its value. The
+     its value. A question mark written on the paper itself (a clinical
+     query, "?TB" or "TB?") is transcribed `[?]` by the hard-page prompt and
+     never taken off, so it still counts as a status cue
+     (`status_cue_on_line`: a queried diagnosis is never shown as confirmed
+     without it), while the reading's own "?" never looks like a query. The
      reading is then held to the page by `checkPage` exactly as any picture
      reading (#194's placement rules, the row and line limits and the anchor
      rule, unchanged).
@@ -388,7 +392,9 @@ Each claimed job runs, in order:
      part of their height; the same medicine at one height in two columns is
      two orders far apart), or two fragments of one written line side by
      side (boxes sharing at least half the smaller height and at most 3% of
-     the page width apart). For each pair every field is
+     the page width apart, and complementary: never both with a dose, both
+     with a frequency, or both with a dose in their text as written, so two
+     full orders side by side stay two). For each pair every field is
      compared after normalisation ("?" marks, case, spacing aside): agreeing
      fields keep the best guess, with "?" where either reading was unsure and
      basis `context` where either said so; a disagreeing drug name becomes

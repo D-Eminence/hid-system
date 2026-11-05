@@ -1,5 +1,6 @@
 import type { Box, FlagReason, PaperItem } from './contract';
 import { matchDrugName, normaliseDrugName } from './drug-list';
+import { DOSE } from './grounding';
 import { checkReasonSentence, itemId, mergeIdentity, unionBox, uniqueItemIds, type PageCheck } from './items';
 import { HARD_PAGE_FREQUENCIES, UNREADABLE, type BasisField, type FieldBasis, type HardItemExtras, type ModelItem,
   type ModelPage } from './prompt';
@@ -28,7 +29,10 @@ export const SINGLE_READING = 'single_reading_only';
 export const READINGS_DISAGREE = 'readings_disagree';
 
 const ALLOWED_FREQUENCIES = new Set<string>(HARD_PAGE_FREQUENCIES);
-const unsure = (text: string) => text.includes('?');
+/** "[?]" is a question mark written on the paper (a query), not the reading's own uncertainty. */
+const PAPER_QUERY = /\[\?\]/g;
+const guessMarks = (text: string) => text.replace(PAPER_QUERY, ' ').match(/\?/g)?.length ?? 0;
+const unsure = (text: string) => guessMarks(text) > 0;
 /** A reading's text without its "?" marks, normalised (case, spacing, "5 mg" = "5mg"), for comparing two readings. */
 export const bare = (text: string | null | undefined) => (text ?? '').replace(/\?/g, ' ').replace(/\s+/g, ' ').trim()
   .toLowerCase().replace(/(\d)\s+(?=\p{L})/gu, '$1');
@@ -135,7 +139,7 @@ const isBlank = (value: unknown) => value === null || value === undefined || (ty
 function keepUnsure(a: string | null, b: string | null): string | null {
   if (isBlank(a)) return b;
   if (isBlank(b)) return a;
-  return (b!.match(/\?/g)?.length ?? 0) > (a!.match(/\?/g)?.length ?? 0) ? b : a;
+  return guessMarks(b!) > guessMarks(a!) ? b : a;
 }
 
 /**
@@ -333,6 +337,21 @@ export const NEIGHBOUR_COLUMN_OVERLAP = 0.5;
 export const NEIGHBOUR_ROW_OVERLAP = 0.5;
 /** and side by side when the gap between them is at most this share of the page width. */
 export const NEIGHBOUR_ROW_GAP = 0.03;
+/** Slack for comparing box fractions, so a gap of exactly NEIGHBOUR_ROW_GAP counts whatever the rounding. */
+const BOX_EPSILON = 1e-9;
+
+const filled = (text: string | null | undefined) => !isBlank(text) && text !== UNREADABLE;
+/**
+ * Whether two leftovers on one row can be two fragments of one written line ("Metronidazole" | "400 mg tds"),
+ * not two orders side by side: never when both carry a dose or both a frequency, nor when both texts as written
+ * hold a dose; one may be the name alone while the other holds the dose or frequency.
+ */
+function complementary(a: Side, b: Side): boolean {
+  const dose = (side: Side) => filled(side.extras?.dose);
+  const frequency = (side: Side) => filled((side.item.fields as Record<string, string | null>).frequency);
+  if ((dose(a) && dose(b)) || (frequency(a) && frequency(b))) return false;
+  return !(DOSE.test(a.item.asWritten) && DOSE.test(b.item.asWritten));
+}
 
 /**
  * Two medicines left unpaired by place that are the same listed medicine and neighbours, or null when not; the
@@ -341,7 +360,8 @@ export const NEIGHBOUR_ROW_GAP = 0.03;
  *   cited lines are at most one line apart or the boxes share part of their height (gap: the lines apart, 0 when
  *   they share height); or
  * - two fragments of one written line ("Metronidazole" | "400 mg tds"): the boxes share at least
- *   NEIGHBOUR_ROW_OVERLAP of the smaller height and are at most NEIGHBOUR_ROW_GAP of the page width apart (gap 0).
+ *   NEIGHBOUR_ROW_OVERLAP of the smaller height, are at most NEIGHBOUR_ROW_GAP of the page width apart, and are
+ *   complementary (gap 0); two full orders side by side are never fragments.
  * The same medicine at one height in two columns far apart is two orders, never paired.
  */
 function neighbourGap(a: Side, b: Side): number | null {
@@ -354,9 +374,10 @@ function neighbourGap(a: Side, b: Side): number | null {
   const down = span(boxA.top, boxA.height, boxB.top, boxB.height);
   const lower = Math.min(boxA.height, boxB.height);
   const apart = Math.max(boxA.left, boxB.left) - Math.min(boxA.left + boxA.width, boxB.left + boxB.width);
-  if (lower > 0 && down >= NEIGHBOUR_ROW_OVERLAP * lower && apart <= NEIGHBOUR_ROW_GAP) return 0;
+  if (lower > 0 && down + BOX_EPSILON >= NEIGHBOUR_ROW_OVERLAP * lower && apart <= NEIGHBOUR_ROW_GAP + BOX_EPSILON
+    && complementary(a, b)) return 0;
   const narrower = Math.min(boxA.width, boxB.width);
-  if (!(narrower > 0) || across < NEIGHBOUR_COLUMN_OVERLAP * narrower) return null;
+  if (!(narrower > 0) || across + BOX_EPSILON < NEIGHBOUR_COLUMN_OVERLAP * narrower) return null;
   const linesA = a.item.lineIds.map(lineNumber);
   const linesB = b.item.lineIds.map(lineNumber);
   const lineGap = Math.min(...linesA.flatMap((x) => linesB.map((y) => Math.abs(x - y))));
