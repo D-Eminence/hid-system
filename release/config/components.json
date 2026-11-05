@@ -95,8 +95,8 @@
   ],
   "migration": {
     "first": "0001",
-    "last": "0107",
-    "count": 108,
+    "last": "0108",
+    "count": 109,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -529,6 +529,10 @@
       {
         "name": "0107_ocr_page_allowance.sql",
         "sha256": "3379f5e388f83bd1179d7fbcbe886ed57717a933e40a51f58b23116e5d46cf60"
+      },
+      {
+        "name": "0108_records_processing_cover_lifetime.sql",
+        "sha256": "aa10475e3dab4de10685594b260554f65fb2132c869a571634ed336a5b10dffe"
       }
     ]
   },

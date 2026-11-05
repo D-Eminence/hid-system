@@ -2953,6 +2953,10 @@ explains that the patient has not given records-processing access yet.
 
 ### 32.1 The patient's approval or Access PIN covers records processing for 24 hours (decision 34(1))
 
+Since 0108 (section 36) the cover lasts as long as the grant (no 24-hour
+bound) and an active patient share covers too; the rules below are 0104's,
+with those two changes.
+
 A records-processing check (`healthcare-operations`, `read_records` or
 `write_records`) for a patient, staff member (membership) and facility is also
 allowed while that membership holds a covering direct-care grant. A grant
@@ -2971,11 +2975,13 @@ covers when all of these hold, and only then:
   0072's approval), or the patient's Access PIN was used (grant and request
   both `authorization_method = 'patient_access_pin'`: 0075's and 0098's PIN
   command). A patient share (0095), a seeded or imported grant, an emergency
-  grant and break-glass never cover it.
+  grant and break-glass never cover it. (0108 D-b: an active patient share
+  is a third way, section 36.)
 - The check's time is from the grant's `starts_at`, before `least(expires_at,
   starts_at + 24 hours)`: never past the grant's end, and never more than 24
   hours from its start (requests last at most 24 hours and PIN grants at most
-  60 minutes today, so today the grant's end comes first).
+  60 minutes today, so today the grant's end comes first). (0108 D-a: from
+  `starts_at` before `expires_at`, with no 24-hour bound.)
 - The patient is 18 or over on that day's Africa/Lagos date and has a date of
   birth on record (the request trigger's rule, at each check, since no request
   is made). The membership's roles hold `ocr.job.write` at the facility, at
@@ -2998,7 +3004,8 @@ grant from the access history (`POST /identity/me/consent-grants/:id/revoke`),
 turning the Access PIN off (`DELETE /identity/me/access-pin`, which ends its
 grants) or a deny directive each end the cover at the next check; ending the
 direct-care grant ends this too. A separate records-processing request (above)
-still works as before and is the way past 24 hours.
+still works as before and was the way past 24 hours (since 0108 the cover
+itself lasts as long as the grant).
 
 Where it lives: `identity.records_processing_direct_care_cover(patient,
 subject, membership, facility, action, at_time)` returns `(consent_grant_id,
@@ -3075,7 +3082,7 @@ function body but `has_active_consent_grant`'s (32.1; their md5 pins stay
 true), policy, role, permission and grant; break-glass (emergency only), the
 PIN command (direct care, read only; its grant covers records processing as
 32.1 says) and patient shares (direct care, never covering records
-processing). A pending request is
+processing; since 0108 an active share covers it, section 36). A pending request is
 not checked again on approval, so a requester whose role changes afterwards
 keeps a request the patient may still approve.
 
@@ -3366,3 +3373,49 @@ no or another error code, the same or a later time, or any other column
 change is refused (23514). 0107 has no down
 migration. The suite is
 `services/ehr-api/test/database/ocr-page-allowance.integration.sql`.
+
+## 36. Records processing cover: as long as the access, and patient shares (0108)
+
+Owner decisions (D-Eminence, 2026-11-05, about 12:00 UTC, relayed by the
+coordinator; 0108 is unsigned until the owner signs its declaration).
+Migration `0108_records_processing_cover_lifetime.sql` replaces the body of
+`identity.records_processing_direct_care_cover` (32.1) and nothing else:
+signature, result `(consent_grant_id, covered_until)`, owner, SECURITY
+DEFINER, STABLE, search_path, ACL (`hid_identity_runtime` EXECUTE only) and
+`identity.has_active_consent_grant` (body md5
+`732d11892dd4e27e1ff9093ae3b7de5a`) are unchanged; the cover's body md5 is now
+`6928763d3b69f0e4b4acf96a6a255736`.
+
+- D-a (lifetime): a covering grant (the patient's approval of a direct-care
+  request, or the Access PIN) covers records processing (`read_records` and
+  `write_records`) from its `starts_at` until its `expires_at`, and whenever it
+  stops being active before that (revoked, PIN turned off, held by the
+  cutover, membership or account ended). The 24-hour bound of decision 34(1)
+  is gone; `covered_until` is the grant's `expires_at`.
+- D-b (shares): an active patient share (0095) covers it too: a grant with
+  its `identity.patient_consent_shares` row (same patient and membership),
+  direct care, `read_records` or `write_records`, not break-glass, active, not
+  held by the cutover, `source_system = 'hid'`, no request, no authorization
+  method, granted by the patient. Any share level (`view_only`,
+  `clinical_review`, `clinical_collaboration`) covers records-processing read
+  AND write, as a PIN grant does; direct care is unchanged (a `view_only` or
+  `clinical_review` share still reads only). It ends when the patient revokes
+  or replaces the share, or at its `expires_at` (24 hours, 7, 30 or 365 days).
+  D-b is a separate alternative in the body, so the owner may approve D-a
+  alone; without D-b the sealed demo doctor (whose only grant is 0098's seeded
+  share) still gets no cover.
+
+Everything else of 32.1 stays: the same membership at the same facility on
+the live account; `ocr.job.write` at each check; the patient 18 or over on
+the Africa/Lagos date with a date of birth on record; deny directives for
+records processing or direct care; break-glass, emergency and seeded or
+imported grants never cover; both codes active (kill switch).
+
+Identity (`postgres-identity.provider.ts`) reads `covered_until` from the
+cover and answers it as `expiresAt`, so `POST /identity/authorization/check`
+and `POST /identity/consent-status` report the longer cover with no code
+change. The patient-facing words about paper records (32.1, "for up to 24
+hours") are the website lane's to update. Applying 0108 takes only ACCESS SHARE
+on the tables the cover reads and SHARE UPDATE EXCLUSIVE on the cover itself.
+Suite: `services/ehr-api/test/database/records-processing.integration.sql`
+(sections 10l-10o and 10s).
