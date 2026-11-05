@@ -99,7 +99,7 @@ describe('OcrWorker processing', () => {
     expect(result.providerModel).toBe('amazon-textract-detect-document-text');
     expect(result.provenance).toMatchObject({ processingContract: 'hid-textract-v2', pageCount: 1,
       reading: { contract: 'hid-paper-reading-v2', firstPassModel: 'claude-sonnet-5-5', inferenceGeo: 'us',
-        promptVersion: 'hid-paper-reading-prompt-4', usage: { inputTokens: 2400, outputTokens: 800 } } });
+        promptVersion: 'hid-paper-reading-prompt-5', usage: { inputTokens: 2400, outputTokens: 800 } } });
     const provenance = JSON.stringify(result.provenance);
     for (const secret of [SECRET_NAME, SECRET_DRUG, SECRET_NOTE, 'Inventedcillin']) expect(provenance).not.toContain(secret);
     expect(JSON.stringify(result.structuredPayload)).not.toContain('Inventedcillin');
@@ -414,9 +414,19 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 } })]);
   const used = { inputTokens: 6000, outputTokens: 400, cacheReadInputTokens: 3000, cacheCreationInputTokens: 0 };
 
-  function setUp(rereadFails: boolean) {
+  const basis = { name: 'letters', dose: 'letters', unit: 'letters', route: 'empty', frequency: 'context',
+    duration: 'empty', value: 'empty', other: 'empty' } as const;
+  const bestGuess = modelPage([{ ...modelItem({ kind: 'medicine', asWritten: 'Pyrimethamine? 437 mg od', lineIds: ['p1-l1'],
+    name: 'Pyrimethamine', strength: '437mg', frequency: 'od', status: 'new' }),
+  box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 }, hard: { dose: '437', doseUnit: 'mg', basis } }]);
+
+  function setUp(rereadFails: boolean, hardPages = false) {
     const images: string[] = [];
     const client: PageModelClient = { readPage: jest.fn(async (request) => {
+      if (request.image && request.hardPage) {
+        images.push(request.image.base64);
+        return { kind: 'answer' as const, answer: bestGuess, attempts: 1, servedInferenceGeo: 'us', usage: used };
+      }
       if (request.image) {
         images.push(request.image.base64);
         if (rereadFails) throw new AiTransientError('AI_HTTP_529', 1);
@@ -427,7 +437,8 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     const parts = mocks(client);
     parts.reader.readExact.mockResolvedValue({ ...document, bytes: picture });
     parts.provider.extract.mockResolvedValue(hardText);
-    const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on' }, client);
+    const reading = new PaperReadingService({ ...readingConfig, OCR_AI_IMAGE_REREAD: 'on',
+      OCR_AI_HARD_PAGE_READS: hardPages ? 'on' : 'off' }, client);
     return { ...parts, reading, images };
   }
 
@@ -458,7 +469,7 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(payload.items[0]!.checkReasons).toContain('read_from_image');
     expect(payload.items[0]!.checkReasons).not.toContain('strength_mismatch');
     expect(result.provenance.reading).toMatchObject({ imageRereadPages: [1], imageRereadSkipped: [],
-      imagePromptVersion: 'hid-paper-reading-image-prompt-4' });
+      imagePromptVersion: 'hid-paper-reading-image-prompt-5' });
     // Picture tokens count in the usage records as any other input.
     expect(repository.recordAiUsage).toHaveBeenCalledWith(job, expect.objectContaining({ model: 'claude-opus-5-5',
       requests: 1, inputTokens: 6000 }));
@@ -467,6 +478,32 @@ describe('OcrWorker image re-read: the picture never reaches a log, an error or 
     expect(written.length).toBeGreaterThan(0);
     for (const chunk of chunks) expect(everything).not.toContain(chunk);
     expect(written.join('\n')).toContain('"imageRereadPages":1');
+  });
+
+  it('reads a hard page twice and logs only codes and counts: hard-page use, reads and agreement', async () => {
+    const { repository, reader, provider, reading, images } = setUp(false, true);
+    await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+    expect(images).toEqual([base64, base64]);
+    const result = completed(repository);
+    const payload = result.structuredPayload as PaperReadingPayload;
+    expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+    const medicine = payload.items.find((item) => item.kind === 'medicine')!;
+    expect(medicine.fields).toMatchObject({ name: 'Pyrimethamine?', strength: '437 mg' });
+    expect(medicine.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'field_from_context']));
+    expect(result.provenance.reading).toMatchObject({ hardPages: [1], hardPageReads: 2, hardPageSingleReadPages: [],
+      hardPagePromptVersion: 'hid-paper-reading-hard-page-prompt-1', imagePromptVersion: null,
+      promptVersion: 'hid-paper-reading-prompt-5' });
+    const lines = written.flatMap((line) => line.split('\n')).filter(Boolean).map((line) => JSON.parse(line) as Record<string, unknown>);
+    const usageLines = lines.filter((line) => line.event === 'ocr.reading.usage');
+    expect(usageLines.map((line) => [line.pass, line.requests])).toEqual([['first_pass', 1], ['hard_page_read', 2]]);
+    const done = lines.find((line) => line.event === 'ocr.job.completed')!;
+    expect(done).toMatchObject({ hardPages: 1, hardPageReads: 2,
+      hardPageAgreement: { itemsPaired: 1, itemsSingle: 0, fieldsCompared: expect.any(Number), fieldsAgreed: expect.any(Number) } });
+    expect(Object.values(done.hardPageAgreement as Record<string, unknown>).every((value) => typeof value === 'number')).toBe(true);
+    const logs = written.join('\n');
+    for (const secret of ['Pyrimethamine', 'Fictionalmab', 'Ultramarine', 'rng']) expect(logs).not.toContain(secret);
+    const everything = [JSON.stringify([result, repository.recordAiUsage.mock.calls]), ...written].join('\n');
+    for (const chunk of chunks) expect(everything).not.toContain(chunk);
   });
 
   it('keeps the picture out of logs and what is stored when the re-read with it fails', async () => {

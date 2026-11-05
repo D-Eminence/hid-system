@@ -13,9 +13,13 @@ import { ALLERGY_SEVERITIES, DIAGNOSIS_STATUSES, ITEM_KINDS, MEDICINE_STATUSES, 
  * the re-read routing of the owner decision of 2026-11-05 (flagged pages get
  * the image re-read, with the text re-read only for failed or declined pages
  * and as a fallback). The prompt text, the answer schema and every request
- * body are byte for byte as under version 2; the label is not sent.
+ * body are byte for byte as under version 2; the label is not sent. Version 5:
+ * hard pages (flagged handwriting or low_confidence, re-read with the picture)
+ * get two best-guess readings (HARD_PAGE_PROMPT_VERSION; owner decision of
+ * 2026-11-05 about 18:40 UTC). The text-only request is still byte for byte
+ * as under version 2.
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-4';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-5';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 /**
  * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
@@ -24,9 +28,15 @@ export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
  * when a page was read from its picture. Version 3: the message no longer says the page was hard to read; it says
  * the first reading needs checking, for any page flag. Version 4: cite every scanned line the item's box covers
  * (fragments on the same row included), and read from the picture where the scanned text of hard handwriting is
- * wrong or nonsense.
+ * wrong or nonsense. Version 5: the same instructions and schema, now used only for flagged pages that are not hard
+ * pages (a hard page, flagged handwriting or low_confidence, gets the hard-page prompt instead, when that is on).
  */
-export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-4';
+export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-5';
+/**
+ * The hard-page prompt (hardPageMessage) and its output schema (MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA): best-guess
+ * readings for a hard page only (owner decision of 2026-11-05, about 18:40 UTC). Recorded in provenance when used.
+ */
+export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-1';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
@@ -200,7 +210,7 @@ export interface ModelFractionBox { left: number; top: number; width: number; he
  * An item as the reader checks it; "box" only in an answer read from the picture, already turned from the model's
  * pixels into page fractions by the client.
  */
-export type ModelItem = z.infer<typeof modelItemSchema> & { box?: ModelFractionBox };
+export type ModelItem = z.infer<typeof modelItemSchema> & { box?: ModelFractionBox; hard?: HardItemExtras };
 export type ModelPage = Omit<z.infer<typeof modelPageSchema>, 'items'> & { items: ModelItem[] };
 
 /** The user turn for one page, text only: lines without their boxes. Unchanged by the image re-read. */
@@ -255,6 +265,124 @@ D. Never invent anything. Where part of the writing cannot be read, write "[unre
 "unsure" to true; never guess a word, number or dose. A number is filled only where you can read it in the picture.
 
 E. Leave out writing that is not on one of the lines below.
+
+The lines the service found, as JSON (box in pixels of the picture, as above; confidence 0 to 1):
+${JSON.stringify(lines.map((line) => ({
+    id: line.id, text: line.text,
+    box: line.box ? toPixelBox(line.box, size) : null,
+    confidence: Math.round(line.confidence * 100) / 100, handwritten: line.handwritten,
+  })))}`;
+}
+
+/**
+ * How often, on a hard page: the only frequencies a best-guess medicine may carry. Anything else is left
+ * "[unreadable]" (its words stay in asWritten). A "?" after one marks it uncertain.
+ */
+export const HARD_PAGE_FREQUENCIES = ['od', 'bd', 'tds', 'qds', '6hrly', '8hrly', '12hrly', 'nocte', 'stat',
+  'prn'] as const;
+export const UNREADABLE = '[unreadable]';
+/** Where a field of a hard-page item came from: the letter shapes, what is usual on such a sheet, or nothing. */
+export const FIELD_BASES = ['letters', 'context', 'empty'] as const;
+/** The fields of a hard-page item that carry a basis; "other" covers every remaining field of the item. */
+export const BASIS_FIELDS = ['name', 'dose', 'unit', 'route', 'frequency', 'duration', 'value', 'other'] as const;
+export type FieldBasis = (typeof FIELD_BASES)[number];
+export type BasisField = (typeof BASIS_FIELDS)[number];
+const hardFrequency = ['', UNREADABLE, ...HARD_PAGE_FREQUENCIES, ...HARD_PAGE_FREQUENCIES.map((value) => `${value}?`)];
+const imageItemJsonSchema = (MODEL_OUTPUT_IMAGE_JSON_SCHEMA.properties as { items: { items: {
+  required: readonly string[]; properties: Record<string, unknown> } } }).items.items;
+
+/**
+ * The hard-page answer: the image schema with, per item, the medicine dose as a number ("dose") and its unit
+ * ("doseUnit"), frequency restricted to HARD_PAGE_FREQUENCIES (or "[unreadable]" or ""), and "basis": for each of
+ * BASIS_FIELDS whether it was read from the letters, filled from context, or left empty. Used only for hard-page
+ * requests; the text-only and the image request schemas are unchanged.
+ */
+export const MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA: Readonly<Record<string, unknown>> = {
+  ...MODEL_OUTPUT_IMAGE_JSON_SCHEMA,
+  properties: {
+    ...(MODEL_OUTPUT_IMAGE_JSON_SCHEMA.properties as Record<string, unknown>),
+    items: {
+      type: 'array',
+      items: {
+        ...imageItemJsonSchema,
+        required: [...imageItemJsonSchema.required, 'dose', 'doseUnit', 'basis'],
+        properties: { ...imageItemJsonSchema.properties,
+          frequency: { type: 'string', enum: hardFrequency },
+          dose: text, doseUnit: text,
+          basis: { type: 'object', additionalProperties: false, required: [...BASIS_FIELDS],
+            properties: Object.fromEntries(BASIS_FIELDS.map((key) => [key, { type: 'string', enum: [...FIELD_BASES] }])) } },
+      },
+    },
+  },
+};
+
+const basisOf = z.enum(FIELD_BASES);
+const basisSchema = z.strictObject({ name: basisOf, dose: basisOf, unit: basisOf, route: basisOf, frequency: basisOf,
+  duration: basisOf, value: basisOf, other: basisOf });
+export const modelHardItemSchema = modelImageItemSchema.extend({
+  frequency: z.string().refine((value) => hardFrequency.includes(value)),
+  dose: field, doseUnit: field, basis: basisSchema,
+});
+export const modelHardPageSchema = modelPageSchema.extend({ items: z.array(modelHardItemSchema).max(300) });
+/** What a hard-page answer adds to an item, kept beside it (never stored as such; see reader.ts). */
+export interface HardItemExtras {
+  dose: string; doseUnit: string; basis: Record<BasisField, FieldBasis>;
+  /** For a medicine, after the drug list (hard-page.ts): the listed generic its name matched, or null. */
+  generic?: string | null;
+}
+
+/**
+ * The user turn's text for a HARD page re-read with its picture (flagged handwriting or low_confidence): the owner
+ * decision of 2026-11-05 (about 18:40 UTC) allows tentative best-guess readings here only. The same request is sent
+ * twice and the two answers are compared in code (hard-page.ts), so this asks for the single best reading, not
+ * for alternatives. Rule 1 (never fill a gap from what is usual) is relaxed only where a field is marked basis
+ * "context"; never inventing an item, citing lines and giving the box stay. Nothing here varies but the page.
+ *
+ * Zoom (deferred, owner decision 3): a later step could let the model ask for a closer crop of a box before it
+ * answers; see zoom.ts for the seam. This message does not offer it.
+ */
+export function hardPageMessage(page: number, lines: readonly { id: string; text: string; confidence: number;
+  handwritten: boolean; box?: ModelFractionBox | null }[], size: { width: number; height: number }): string {
+  return `Page ${page} of a paper record. The picture above is this page, ${size.width} pixels wide and \
+${size.height} pixels high. It is hard to read: hard handwriting or writing the text service could not read with \
+confidence. A clinician will check every word you give against the paper. For this page only, give your best \
+reading, marked as a guess, instead of leaving hard words out. Rules 2 and 3 change for this page as follows, and \
+rule 1 changes only where rule F says so; every other rule stays.
+
+A. Read the page line by line from the picture, top to bottom, and list every item written on it. Read each item \
+from the picture itself, not from the line text below: on hard handwriting that text may be wrong or nonsense.
+
+B. "asWritten" is the item as you read it in the picture, letter for letter, with its spelling and abbreviations. \
+After every word or number you are not sure of, put "?" (for example "Metronidazole? 400? mg tds"). Where a word \
+cannot be read at all, even as a guess, write "[unreadable]" in its place.
+
+C. Give a best reading of every field of the item, with "?" after each uncertain word or number. Use "" only for a \
+field the item does not have, and "[unreadable]" for one it has but you cannot read even as a guess.
+
+D. A medicine is read as: route (such as po, iv, im, pr, sc, or "" where none is written), drug name, dose, unit, \
+how often. "dose" is the number only (such as "400" or "0.5"); "doseUnit" is its unit (such as mg, g, mcg, ml, iu, \
+tab); "strength" is the dose and unit together as written. "frequency" is one of: od, bd, tds, qds, 6hrly, 8hrly, \
+12hrly, nocte, stat, prn, with "?" after it if you are not sure. If what is written for how often is anything \
+else, set "frequency" to "[unreadable]" and keep its words in "asWritten". For any item that is not a medicine, \
+"dose", "doseUnit" and "frequency" are "".
+
+E. For every item, "basis" says where each field came from: "letters" where you read it from the shapes of the \
+letters or digits on the page, "context" where you inferred it from what is usual on such a sheet rather than \
+from the writing, "empty" where the field is "" for this item. "name", "dose", "unit", "route", "frequency", \
+"duration" and "value" are those fields ("unit" is "doseUnit" for a medicine and "unit" otherwise); "other" is \
+the item's remaining fields together ("context" if any of them came from context).
+
+F. You may fill a field from context only when its basis says "context". Never invent an item that is not written \
+on the page: every item is writing you can see. A common medicine is not more likely just because it is common; \
+if the letters point to a rarer medicine, read the letters.
+
+G. Ignore writing that shows through from the back of the sheet, and text cut off at the edges of the picture.
+
+H. Cite in "lineIds" the ids of the lines below that the item sits on in the picture: every line whose box your \
+item's box covers, including small fragments of the same row that the service split off. Cite only ids from this \
+list. Give the item's own place in the picture in "box" as absolute pixel coordinates: x1 and y1 the top-left \
+corner, x2 and y2 the bottom-right corner, with x from the left edge and y from the top edge of the picture, \
+around the writing of this item only. Leave out writing that is not on one of the lines below.
 
 The lines the service found, as JSON (box in pixels of the picture, as above; confidence 0 to 1):
 ${JSON.stringify(lines.map((line) => ({

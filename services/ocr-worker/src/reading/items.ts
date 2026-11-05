@@ -18,8 +18,16 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['nkda_not_on_paper', 'nkda_conflicts'], "The paper doesn't clearly say there are no known allergies."],
   [['value_mismatch', 'reading_number_mismatch', 'plain_mismatch'], "A number on the paper doesn't match what was read."],
   [['number_not_in_text_read'], "A number read from the picture isn't in the text read from the page; check it against the paper."],
+  // A hard page read twice from its picture: the two readings disagreed on part of this item (that part is shown
+  // as "[unreadable]", or for a drug name both listed names).
+  [['readings_disagree'], 'Two readings of the picture disagree on part of this; check it against the paper.'],
   // After the dose and number disagreements, before the text-match ones (an item read from the picture is
   // expected to differ from the text the service read).
+  // A hard page's best guesses (owner decision 2026-11-05 about 18:40 UTC): below the real disagreements above, and
+  // before read_from_image, which every such item also has, so they are said instead of it. Most specific first.
+  [['field_from_context'], 'Part of this was guessed from what is usual, not read from the writing; check it against the paper.'],
+  [['single_reading_only'], 'Only one of two readings of the picture found this; check it against the paper.'],
+  [['best_guess_from_picture'], 'This is a best guess from the picture; check every word against the paper.'],
   // Just before read_from_image (which every picture item has), so it is shown where it applies.
   [['not_matched_to_scanned_text'], 'Read from the picture; it could not be matched to the scanned text. Check it against the paper.'],
   [['read_from_image'], 'This was read from the picture of the page; check it against the paper.'],
@@ -334,6 +342,11 @@ export interface PageCheck {
    */
   rereadReasons: string[];
   flagReasons: FlagReason[];
+  /**
+   * For each kept item (same order as items), the index of the answer item it was read from. Set by checkPage;
+   * the hard-page merge uses it to find each kept item's dose, unit and basis. Never stored.
+   */
+  rawIndexes?: number[];
 }
 
 const blankIdentity = (): PaperIdentity => ({ nameAsWritten: null, dateOfBirthAsWritten: null,
@@ -364,7 +377,8 @@ export function checkPage(input: PageCheckInput): PageCheck {
   let dropped = 0;
   const droppedByReason: Record<string, number> = {};
   const drop = (reason: DropReason) => { dropped += 1; droppedByReason[reason] = (droppedByReason[reason] ?? 0) + 1; };
-  for (const raw of input.answer.items) {
+  const rawIndexes: number[] = [];
+  for (const [rawIndex, raw] of input.answer.items.entries()) {
     const lineIds = [...new Set(raw.lineIds)].sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
     const cited = lineIds.map((id) => byId.get(id));
     const source = cited.map((line) => line?.text ?? '').join(' ');
@@ -412,6 +426,7 @@ export function checkPage(input: PageCheckInput): PageCheck {
     group.push(item);
     seen.set(item.id, group);
     items.push(item);
+    rawIndexes.push(rawIndex);
   }
   const identity = checkIdentity(input.answer.identity, byId, pageText, input.masker);
   const cited = new Set([...items.flatMap((item) => item.lineIds), ...identity.lineIds]);
@@ -447,7 +462,7 @@ export function checkPage(input: PageCheckInput): PageCheck {
   for (const item of items) item.asWritten = input.masker.restore(item.asWritten);
   return { items: uniqueItemIds(items), droppedUngrounded: dropped, droppedByReason, identity,
     pageUnsure: input.answer.pageUnsure,
-    rereadReasons, flagReasons };
+    rereadReasons, flagReasons, rawIndexes };
 }
 
 /**

@@ -96,7 +96,10 @@ Each claimed job runs, in order:
    `side_overflow`, `covers_uncited_line`, `uncited_share`, `not_anchored`).
    The counts per code (`droppedByReason`, summing to `droppedUngrounded`, for
    the reading each page ended with) go in the `ocr.job.completed` log only,
-   never in the payload or provenance. Every kept item gets check reasons
+   never in the payload or provenance. The same log carries, codes and counts only,
+   `hardPages` (hard pages sent for best-guess readings), `hardPageReads`
+   (best-guess requests sent, two per page) and `hardPageAgreement`
+   (`fieldsCompared`, `fieldsAgreed`, `itemsPaired`, `itemsSingle`). Every kept item gets check reasons
    (dose, frequency, route, value or unit not as written, corrected wording,
    lines not together, inactive status (`status_not_active`: past, stopped,
    suspected, ruled out, history, family history), a medicine whose status
@@ -179,8 +182,9 @@ Each claimed job runs, in order:
    count of the re-read's dropped items, including any whose content a kept
    first-pass item still carries. A page whose first pass failed or was
    declined has nothing to merge: its re-read stands. `PROMPT_VERSION`
-   is `hid-paper-reading-prompt-4` (version 3 for this routing, 4 since picture
-   items on hard lines whose scanned text is nonsense are kept; the text prompt
+   is `hid-paper-reading-prompt-5` (version 3 for this routing, 4 since picture
+   items on hard lines whose scanned text is nonsense are kept, 5 since hard
+   pages get two best-guess readings, below; the text prompt
    and request bodies are unchanged from version 2, and the label is only
    recorded), so `ocr-api` never reuses a reading made under older rules.
 
@@ -217,7 +221,8 @@ Each claimed job runs, in order:
    (Anthropic advises pixel, not normalised, coordinates), write `asWritten` as
    it reads it in the picture, never invent anything and write `[unreadable]`
    rather than guess (`imagePageMessage`,
-   `hid-paper-reading-image-prompt-4`: it asks the model to cite every
+   `hid-paper-reading-image-prompt-5`, the same text as version 4, now used
+   only for flagged pages that are not hard pages: it asks the model to cite every
    scanned line its item's box covers, small fragments on the same row
    included, and to read from the picture where the scanned text of hard
    handwriting is wrong or nonsense; since version 3 it says the first reading needs
@@ -309,6 +314,147 @@ Each claimed job runs, in order:
    had some). The picture and its
    base64 are never logged, stored (beyond the original document, already in
    S3) or put in an error.
+
+   **Hard pages: best-guess readings** (owner decisions of 2026-11-05, about
+   18:40 UTC, relayed by the coordinator, after the owner ran Opus 5.5 at max
+   effort on a handwritten test photo in claude.ai and got useful best-guess
+   readings, names marked "?", with two runs disagreeing on several names):
+   (1) "recommended with prompt that makes them do best result": tentative
+   best-guess readings, only for hard pages; (2) "Yes, use a drug list";
+   (3) zoom deferred, a documented seam only.
+
+   - *Which pages.* A hard page is a page the first pass flagged
+     `handwriting` or `low_confidence` whose re-read goes with its picture
+     (`OCR_AI_HARD_PAGE_READS`, `on` or `off`, default `on` when
+     `OCR_AI_MODE=claude`; any other value fails startup; `off` gives such a
+     page the image re-read above). Every other path keeps rule D
+     (`[unreadable]`, never a guess): the first pass, every text re-read
+     (including a hard page that cannot go with its picture, such as a PDF),
+     and the image re-read of a page flagged only for other reasons.
+   - *Request.* The same request twice (`Promise.allSettled`, both inside the
+     process-wide request limit), same model (`OCR_AI_REREAD_MODEL`), adaptive
+     thinking, `inference_geo: "us"`, fixed endpoint and the same cached system
+     prompt, at `OCR_AI_HARD_PAGE_EFFORT` (default `max`, which Claude Opus 5.5
+     accepts: `low` to `max`; any other value fails startup). Its user turn is
+     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-1`,
+     recorded in provenance as `hardPagePromptVersion` when used): read the
+     page line by line; give a best reading of every field with "?" after each
+     uncertain word; a word not readable even as a guess is `[unreadable]`;
+     a medicine as route, drug name, dose (a number), unit and frequency, the
+     frequency only one of `od bd tds qds 6hrly 8hrly 12hrly nocte stat prn`
+     (anything else: `[unreadable]`, its words kept in `asWritten`); for each
+     field a basis, `letters` (read from the letter shapes) or `context`
+     (inferred from what is usual), a field filled from context only with
+     basis `context`, and a common medicine not to be preferred over what the
+     letters show; ignore show-through from the back of the sheet and text cut
+     off at the edges; never invent an item; cite the scanned lines its box
+     covers and give its pixel box. Its answer schema
+     (`MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA`) is the image schema plus `dose`,
+     `doseUnit`, a restricted `frequency` and a per-item `basis` object
+     (`name`, `dose`, `unit`, `route`, `frequency`, `duration`, `value`,
+     `other`). The text-only request is byte for byte unchanged (body-hash
+     test), and so is the image request for other flagged pages.
+   - *Each reading* (`hard-page.ts`): frequency and dose normalised as above,
+     the strength rebuilt as dose and unit (`400? mg`), and the drug name
+     checked against the drug list (below): a listed name is shown in its
+     list spelling with "?" (`Metronidazole?`), a brand as `Flagyl?
+     (metronidazole)`, an unlisted one as `[unreadable]`. `asWritten` keeps
+     what the model read, "?" marks included: it is the transcription the
+     clinician compares with the paper, while the drug name field is what may
+     be taken into the record, so only the field is held to the list. The
+     reading is then held to the page by `checkPage` exactly as any picture
+     reading (#194's placement rules, the row and line limits and the anchor
+     rule, unchanged).
+   - *Two readings compared.* Items are paired one to one by kind and place
+     (a shared cited line, or boxes overlapping by half the smaller box; a
+     vital also by measure), best pairs first. For each pair every field is
+     compared after normalisation ("?" marks, case, spacing aside): agreeing
+     fields keep the best guess, with "?" where either reading was unsure and
+     basis `context` where either said so; a disagreeing drug name becomes
+     `A? / B?` when both names are on the list and both were read from the
+     letters, else `[unreadable]` (a name filled from context is never offered
+     as an alternative: on an unusual prescription that is the guess most
+     likely to be wrong); a disagreeing dose, unit, route, frequency or other
+     text becomes `[unreadable]` (two doses are never shown; `asWritten` keeps
+     the words both read and writes each differing stretch once as
+     `[unreadable]`); a disagreeing medicine status becomes `unknown`. The pair
+     gets `readings_disagree` ("Two readings of the picture disagree on part
+     of this; check it against the paper.", said just after the dose and
+     number disagreements). An item only one reading found is kept (it has
+     passed every placement rule) with `single_reading_only` ("Only one of two
+     readings of the picture found this; check it against the paper."). Every
+     hard-page item is `check_carefully`, `readBy: "reread"`, with
+     `read_from_image` and `best_guess_from_picture` ("This is a best guess
+     from the picture; check every word against the paper."), and
+     `field_from_context` ("Part of this was guessed from what is usual, not
+     read from the writing; check it against the paper.") when any filled
+     field's basis is context. These three sentences come below the real
+     disagreements and in place of the general picture sentence, most specific
+     first; each code is listed once. A medicine's `plain` is built from its
+     final fields only, never the model's own wording.
+   - *Failures.* If one reading fails or is declined, the other is used alone,
+     with `single_reading_only` on every item (the page is in
+     `hardPageSingleReadPages`). If both fail, the page is a failed image
+     re-read as before (`imageRereadFailedPages`, first pass kept with
+     `reread_failed`); if both were refused as invalid requests or both
+     declined, the page is re-read from its text (`image_rejected`,
+     `image_refused`). The merged hard reading then goes through
+     `mergeReread` with the first pass unchanged, so no first-pass item is
+     lost.
+   - *Stored.* No new payload field: the per-field basis is carried only by
+     the reason codes, so both contract copies are unchanged. The page is in
+     `imageRereadPages`; provenance adds `hardPages`, `hardPageReads`,
+     `hardPageSingleReadPages` and `hardPagePromptVersion` (`imagePromptVersion`
+     is set only when a page that is not a hard page was read from its
+     picture).
+   - *Drug list* (`src/reading/drug-list.ts`). Generic names from the
+     Federal Ministry of Health, Nigeria, "Nigeria Essential Medicines List",
+     7th Edition, 2020 (the latest edition found on 2026-11-05; no 8th edition
+     was found), read from
+     https://extranet.who.int/cpcd/sites/default/files/public_file_repository/NGA_Nigeria-Essential-Medicine-List_2020.pdf
+     (WHO country planning cycle database entry
+     https://extranet.who.int/cpcd/health-legislation/nigeria-essential-medicine-list-7th-edition):
+     the main list, the primary health care lists, the patent and proprietary
+     medicine vendors list, the vitamin appendix, the restricted list and the
+     index; vaccines, sera, diagnostics, devices and disinfectants left out;
+     the list's misprints given in their standard spelling (listed in the file
+     header). Plus the list's own bracketed other names, a few marked British
+     names (frusemide, lignocaine, co-amoxiclav), and a small, separate brand
+     list, **curated, not exhaustive; review before relying on it** (23 brands
+     such as Plasil, Flagyl, Augmentin, Rocephin, Zinnat, Septrin, Coartem,
+     Fansidar, Daraprim; only true brand names, never a manufacturer's name).
+     Matching: lower case, "?" and punctuation removed, salt and form words
+     (hydrochloride, tab, inj, ...) ignored; exact first, else the closest
+     name by edit distance, only for names of 6 letters or more, at distance
+     2 or less and similarity (1 - distance / longer length) 0.8 or more, and
+     only when one medicine is closest (two lookalikes equally close: no
+     match). The list never creates a drug: it only checks, and respells, a
+     name the model proposed. Applied only on hard pages. Limits: a medicine
+     not on the essential medicines list (a newer or non-essential drug, most
+     brands) is always shown as `[unreadable]` on a hard page, and a misreading
+     that happens to be within two letters of another listed medicine would
+     be shown as that medicine, with "?", for the clinician to check.
+   - *Zoom* (deferred, owner decision 3): `src/reading/zoom.ts` documents the
+     seam, a `PageZoom.crop(page, box, padding)` interface that a later step
+     could call in `readHard`, between the two readings and the merge, to read
+     a disputed item again from a closer crop. Nothing implements or calls it.
+   - *Cost and time.* Each hard page costs two requests at `max` effort where
+     the earlier image re-read was one at `high`. Estimate per A4 photo page
+     at list price x1.1 for US-only ($4.40 / $22 per million input / output
+     tokens): about 6,000 input tokens (system prompt, lines with boxes and up
+     to about 4,800 picture tokens; the picture is in the user turn, not
+     cached), and about 5,000 output tokens at `high` versus roughly 7,000 to
+     9,000 at `max` (thinking grows most): about $0.14 for the earlier image
+     re-read and about $0.37 to $0.46 for the two hard-page reads, so roughly
+     3x. The `ocr.reading.usage` lines with `pass: "hard_page_read"` give the
+     real figures to check this against. The two reads run at once, so a hard
+     page takes about as long as one read at `max` effort; such a read may
+     think for many minutes, so it has its own timeout,
+     `OCR_AI_HARD_PAGE_TIMEOUT_MS` (default 900,000 ms, 10,000 to 1,800,000;
+     other requests keep `OCR_AI_TIMEOUT_MS`), and `OCR_AI_MAX_TOKENS` now
+     defaults to 64,000 (was 32,000; at most 128,000) so a long answer at `max`
+     is not cut off (a cut-off answer is a failed reading; only tokens
+     generated are billed). The job's lease is renewed meanwhile.
 8. **Completion.** `ocr.complete_worker_job` stores the `hid-paper-reading-v2`
    payload (schema `hid-paper-reading-schema-2`: `src/reading/contract.ts`), `raw_text` (every line in
    reading order) and the mean line confidence. Provenance holds models,
@@ -398,7 +544,8 @@ list price $4 / $20 per million input / output tokens; US-only x1.1 = $4.40 / $2
 (cache reads $0.22, 5-minute cache writes $5.50). Per page that is more than
 twice the earlier Sonnet first pass at medium effort, since high effort also
 writes more thinking and output. Each job logs `ocr.reading.usage` once per
-model and pass (`pass`: `first_pass`, `reread` or `image_reread`; requests and
+model and pass (`pass`: `first_pass`, `reread`, `image_reread` or
+`hard_page_read`, both reads of each hard page; requests and
 token counts, never text, with `pagesSent`), so the cost per page, and what the
 re-reads and the pictures add, can be seen even though both passes use one model.
 A reading stopped before it finished logs one line per model, without `pass`.

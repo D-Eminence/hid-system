@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { OcrWorkerConfig } from './config';
 import { paperReadingPayloadSchema } from './reading/contract';
-import { IMAGE_PROMPT_VERSION } from './reading/prompt';
+import { HARD_PAGE_PROMPT_VERSION, IMAGE_PROMPT_VERSION } from './reading/prompt';
 import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type PassUsageRecord, type ReadingOutcome } from './reading/reader';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure, type AiUsageRecord, type ClaimedOcrJob, type CompletedExtraction,
   type DocumentReader, type TextReading, type VerifiedDocument, type WorkerOcrProvider, type WorkerRepository } from './types';
@@ -85,6 +85,9 @@ export class OcrWorker {
         rereadFailedPages: summary.rereadFailedPages, itemCount: summary.itemCount,
         droppedUngrounded: summary.droppedUngrounded, droppedByReason: summary.droppedByReason,
         flaggedPages: summary.flaggedPages,
+        // Hard pages' best-guess reads (two per page): codes and counts only.
+        hardPages: summary.hardPages.length, hardPageReads: summary.hardPageReads,
+        hardPageAgreement: { ...summary.hardPageAgreement },
         inputTokens: summary.usage.inputTokens, outputTokens: summary.usage.outputTokens,
         cacheReadInputTokens: summary.usage.cacheReadInputTokens,
         cacheCreationInputTokens: summary.usage.cacheCreationInputTokens,
@@ -154,7 +157,7 @@ export class OcrWorker {
 
   /**
    * One ocr.record_worker_ai_usage per model used; counts only. A failure is logged with a safe code. The
-   * ocr.reading.usage log has one line per model and pass (first_pass, reread, image_reread) when the reading
+   * ocr.reading.usage log has one line per model and pass (first_pass, reread, image_reread, hard_page_read) when the reading
    * gives that split, and one per model otherwise (a reading stopped before it finished).
    */
   private async recordAiUsage(job: ClaimedOcrJob, usage: readonly AiUsageRecord[], pagesSent?: number,
@@ -283,7 +286,13 @@ export function buildCompletion(text: TextReading, outcome: ReadingOutcome): Com
         imageRereadPages: summary.imageRereadPages,
         imageRereadSkipped: summary.imageRereadSkipped,
         imageRereadFailedPages: summary.imageRereadFailedPages,
-        imagePromptVersion: summary.imageRereadPages.length > 0 ? IMAGE_PROMPT_VERSION : null,
+        // The image re-read prompt only where a page read from its picture was not a hard page.
+        imagePromptVersion: summary.imageRereadPages.some((page) => !summary.hardPages.includes(page))
+          ? IMAGE_PROMPT_VERSION : null,
+        hardPages: summary.hardPages,
+        hardPageReads: summary.hardPageReads,
+        hardPageSingleReadPages: summary.hardPageSingleReadPages,
+        hardPagePromptVersion: summary.hardPages.length > 0 ? HARD_PAGE_PROMPT_VERSION : null,
         droppedUngrounded: summary.droppedUngrounded,
         droppedUngroundedFirstPass: summary.droppedUngroundedFirstPass,
         itemCount: summary.itemCount,
