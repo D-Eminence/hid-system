@@ -50,7 +50,7 @@ function mocks(client?: PageModelClient) {
   const provider: jest.Mocked<WorkerOcrProvider> = { name: 'test', checkReadiness: jest.fn(),
     extract: jest.fn().mockResolvedValue(textReading) };
   const pageClient: PageModelClient = client ?? { readPage: jest.fn().mockResolvedValue({ kind: 'answer', answer,
-    attempts: 1, servedInferenceGeo: 'global',
+    attempts: 1, servedInferenceGeo: 'us',
     usage: { inputTokens: 1200, outputTokens: 400, cacheReadInputTokens: 3000, cacheCreationInputTokens: 0 } }) };
   const reading = new PaperReadingService(readingConfig, pageClient);
   return { repository, reader, provider, reading, pageClient };
@@ -98,7 +98,7 @@ describe('OcrWorker processing', () => {
     expect(result.confidence).toBeCloseTo(0.99);
     expect(result.providerModel).toBe('amazon-textract-detect-document-text');
     expect(result.provenance).toMatchObject({ processingContract: 'hid-textract-v2', pageCount: 1,
-      reading: { contract: 'hid-paper-reading-v2', firstPassModel: 'claude-sonnet-5-5', inferenceGeo: 'global',
+      reading: { contract: 'hid-paper-reading-v2', firstPassModel: 'claude-sonnet-5-5', inferenceGeo: 'us',
         promptVersion: 'hid-paper-reading-prompt-2', usage: { inputTokens: 2400, outputTokens: 800 } } });
     const provenance = JSON.stringify(result.provenance);
     for (const secret of [SECRET_NAME, SECRET_DRUG, SECRET_NOTE, 'Inventedcillin']) expect(provenance).not.toContain(secret);
@@ -160,7 +160,7 @@ describe('OcrWorker processing', () => {
     };
     const pageClient = { readPage: jest.fn()
       .mockRejectedValueOnce(new AiTransientError('AI_HTTP_529'))
-      .mockResolvedValue({ kind: 'answer', answer, attempts: 1, servedInferenceGeo: 'global',
+      .mockResolvedValue({ kind: 'answer', answer, attempts: 1, servedInferenceGeo: 'us',
         usage: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } }) };
     const { repository, reader, provider, reading } = mocks(pageClient);
     provider.extract.mockResolvedValue({ ...textReading, pageCount: 6 });
@@ -273,7 +273,7 @@ describe('OcrWorker processing', () => {
 
     it('records what an attempt used before retrying it with AI_UNAVAILABLE, and nothing with AI off', async () => {
       const pageClient = { readPage: jest.fn()
-        .mockResolvedValueOnce({ kind: 'answer', answer, attempts: 1, servedInferenceGeo: 'global',
+        .mockResolvedValueOnce({ kind: 'answer', answer, attempts: 1, servedInferenceGeo: 'us',
           usage: { inputTokens: 1200, outputTokens: 400, cacheReadInputTokens: 3000, cacheCreationInputTokens: 0 } })
         .mockRejectedValue(new AiTransientError('AI_HTTP_529')) };
       const { repository, reader, provider, reading } = mocks(pageClient);
@@ -303,7 +303,7 @@ describe('OcrWorker processing', () => {
       const usage = { inputTokens: 1200, outputTokens: 400, cacheReadInputTokens: 3000, cacheCreationInputTokens: 0 };
       let worker: OcrWorker | undefined;
       const pageClient: PageModelClient = { readPage: jest.fn(async (request, signal) => {
-        if (request.page === 1) return { kind: 'answer' as const, answer, attempts: 1, servedInferenceGeo: 'global', usage };
+        if (request.page === 1) return { kind: 'answer' as const, answer, attempts: 1, servedInferenceGeo: 'us', usage };
         worker!.stop(); // SIGTERM while page 2 is being read
         throw new AiInterruptedError(signal.reason, 1, { inputTokens: 50, outputTokens: 0, cacheReadInputTokens: 0,
           cacheCreationInputTokens: 0 });
@@ -325,7 +325,7 @@ describe('OcrWorker processing', () => {
 
     it('records the use and keeps the safe failure when reading throws an unexpected error after asking the AI', async () => {
       const pageClient: PageModelClient = { readPage: jest.fn()
-        .mockResolvedValueOnce({ kind: 'answer', answer, attempts: 1, servedInferenceGeo: 'global',
+        .mockResolvedValueOnce({ kind: 'answer', answer, attempts: 1, servedInferenceGeo: 'us',
           usage: { inputTokens: 1200, outputTokens: 400, cacheReadInputTokens: 3000, cacheCreationInputTokens: 0 } })
         .mockRejectedValue(new Error(`${SECRET_NAME} unexpected`)) };
       const { repository, reader, provider, reading } = mocks(pageClient);
@@ -350,7 +350,7 @@ describe('OcrWorker processing', () => {
       try {
         const limiter = new Semaphore(1);
         const pageClient: PageModelClient = { readPage: jest.fn((_request, signal) => limiter.run(async () => ({
-          kind: 'answer' as const, answer, attempts: 1, servedInferenceGeo: 'global',
+          kind: 'answer' as const, answer, attempts: 1, servedInferenceGeo: 'us',
           usage: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } }), signal)) };
         const { repository, reader, provider, reading } = mocks(pageClient);
         repository.renew.mockResolvedValue(undefined);

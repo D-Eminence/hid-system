@@ -16,7 +16,7 @@ function sse(text: string, stopReason = 'end_turn'): Response {
     ['message_start', { type: 'message_start', message: { id: 'msg_test', type: 'message', role: 'assistant',
       model: 'claude-sonnet-5-5', content: [], stop_reason: null, stop_sequence: null, stop_details: null,
       usage: { input_tokens: 120, output_tokens: 1, cache_read_input_tokens: 900, cache_creation_input_tokens: 0,
-        inference_geo: 'global' } } }],
+        inference_geo: 'us' } } }],
     ...(text ? [
       ['content_block_start', { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } }],
       ['content_block_delta', { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text } }],
@@ -64,10 +64,10 @@ describe('ClaudePageClient', () => {
   beforeAll(() => { process.env.ANTHROPIC_BASE_URL = 'https://elsewhere.example.invalid'; });
   afterAll(() => { if (originalBase === undefined) delete process.env.ANTHROPIC_BASE_URL; else process.env.ANTHROPIC_BASE_URL = originalBase; });
 
-  it('sends one page to the fixed Claude API endpoint with global inference, adaptive thinking and a JSON schema', async () => {
+  it('sends one page to the fixed Claude API endpoint with US-only inference, adaptive thinking and a JSON schema', async () => {
     const { instance, fetch } = client([sse(JSON.stringify(answer))]);
     const result = await instance.readPage(request, new AbortController().signal);
-    expect(result).toMatchObject({ kind: 'answer', attempts: 1, servedInferenceGeo: 'global',
+    expect(result).toMatchObject({ kind: 'answer', attempts: 1, servedInferenceGeo: 'us',
       usage: { inputTokens: 120, outputTokens: 300, cacheReadInputTokens: 900 } });
     expect(result.kind === 'answer' && result.answer.items[0]!.asWritten).toBe('Hypertension');
     const [url, init] = fetch.mock.calls[0]!;
@@ -75,7 +75,7 @@ describe('ClaudePageClient', () => {
     const headers = new Headers(init!.headers);
     expect(headers.get('authorization')).toBe(`Bearer ${FAKE_KEY}`);
     const body = JSON.parse(String(init!.body)) as Record<string, unknown>;
-    expect(body).toMatchObject({ model: 'claude-sonnet-5-5', max_tokens: 16_000, inference_geo: 'global',
+    expect(body).toMatchObject({ model: 'claude-sonnet-5-5', max_tokens: 16_000, inference_geo: 'us',
       stream: true, thinking: { type: 'adaptive' },
       output_config: { effort: 'medium', format: { type: 'json_schema' } },
       system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } }] });

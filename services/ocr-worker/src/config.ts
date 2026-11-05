@@ -62,11 +62,11 @@ const schema = z.object({
   OCR_TEXTRACT_MAX_CONCURRENT: z.coerce.number().int().min(1).max(16).default(2),
   // 'text' (default): text detection only. 'layout': document analysis with LAYOUT only (reading order, higher cost).
   OCR_TEXTRACT_FEATURES: z.preprocess(emptyToUndefined, z.enum(['text', 'layout']).default('text')),
-  // AI reading (Anthropic Claude API, global processing; owner decision 6/29/33).
+  // AI reading (Anthropic Claude API, US-only processing: inference_geo "us"; owner decision "Lift hold, US only", 2026-11-04).
   OCR_AI_MODE: z.enum(['off', 'claude']).default('off'),
   // Same validation as the EHR service's ANTHROPIC_API_KEY. Never logged.
   ANTHROPIC_API_KEY: z.preprocess(emptyToUndefined, z.string().min(20).regex(/^\S+$/).optional()),
-  OCR_AI_GLOBAL_PROCESSING_APPROVED: booleanString,
+  OCR_AI_US_PROCESSING_APPROVED: booleanString,
   OCR_AI_FIRST_PASS_MODEL: claudeModel.default('claude-sonnet-5-5'),
   OCR_AI_FIRST_PASS_EFFORT: effort.default('medium'),
   OCR_AI_REREAD_MODEL: claudeModel.default('claude-opus-5-5'),
@@ -110,9 +110,9 @@ const schema = z.object({
     if (!env.ANTHROPIC_API_KEY) {
       context.addIssue({ code: 'custom', path: ['ANTHROPIC_API_KEY'], message: 'AI reading requires a server-side Anthropic API key' });
     }
-    if (!env.OCR_AI_GLOBAL_PROCESSING_APPROVED) {
-      context.addIssue({ code: 'custom', path: ['OCR_AI_GLOBAL_PROCESSING_APPROVED'],
-        message: 'AI reading requires approved global processing on the Claude API' });
+    if (!env.OCR_AI_US_PROCESSING_APPROVED) {
+      context.addIssue({ code: 'custom', path: ['OCR_AI_US_PROCESSING_APPROVED'],
+        message: 'AI reading requires approved US processing on the Claude API (inference_geo "us")' });
     }
   }
 });

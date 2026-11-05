@@ -9,7 +9,7 @@ const config: ReadingConfig = { OCR_AI_MODE: 'claude', OCR_AI_FACILITY_IDS: unde
   OCR_AI_FIRST_PASS_MODEL: 'claude-sonnet-5-5', OCR_AI_FIRST_PASS_EFFORT: 'medium',
   OCR_AI_REREAD_MODEL: 'claude-opus-5-5', OCR_AI_REREAD_EFFORT: 'high', OCR_AI_MAX_REREAD_PAGES: 20 };
 const usage = { inputTokens: 100, outputTokens: 50, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
-const ok = (answer: ModelPage): PageAnswer => ({ kind: 'answer', answer, usage, attempts: 1, servedInferenceGeo: 'global' });
+const ok = (answer: ModelPage): PageAnswer => ({ kind: 'answer', answer, usage, attempts: 1, servedInferenceGeo: 'us' });
 const refused: PageAnswer = { kind: 'refused', usage, attempts: 1 };
 
 const clearPage = modelPage([modelItem({ kind: 'diagnosis', asWritten: 'Hypertension', lineIds: ['p1-l2'],
@@ -41,7 +41,7 @@ describe('PaperReadingService', () => {
       rereadPages: [], itemCount: 1, promptVersion: 'hid-paper-reading-prompt-2' });
     expect(payload.identity).toMatchObject({ nameAsWritten: 'Test Patient Adaeze Example', folderNumberAsWritten: 'TEST-0001' });
     expect(payload.items[0]).toMatchObject({ kind: 'diagnosis', readBy: 'first_pass', confidence: 'clear' });
-    expect(summary).toMatchObject({ requests: 1, inferenceGeo: 'global', servedInferenceGeo: 'global' });
+    expect(summary).toMatchObject({ requests: 1, inferenceGeo: 'us', servedInferenceGeo: 'us' });
   });
 
   it('keeps two different items read from the same words under unique ids in a valid payload', async () => {
@@ -202,7 +202,7 @@ describe('PaperReadingService', () => {
     it('totals requests and tokens per model, first pass and re-read apart', async () => {
       const { client } = fakeClient((request) => request.model === 'claude-sonnet-5-5'
         ? ok(modelPage([modelItem({ kind: 'diagnosis', asWritten: 'Not on this page', lineIds: ['p1-l2'] })]))
-        : { kind: 'answer', answer: clearPage, attempts: 2, servedInferenceGeo: 'global',
+        : { kind: 'answer', answer: clearPage, attempts: 2, servedInferenceGeo: 'us',
           usage: { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 7, cacheCreationInputTokens: 3 } });
       const { summary } = await new PaperReadingService(config, client).read(input(), signal());
       expect(summary.modelUsage).toEqual([

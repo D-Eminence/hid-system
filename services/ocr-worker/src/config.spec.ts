@@ -42,14 +42,29 @@ describe('OCR worker configuration', () => {
     expect(config.OCR_AI_FACILITY_IDS).toBeUndefined();
   });
 
-  it('requires a key and approved global processing for Claude reading', () => {
+  it('requires a key and approved US processing for Claude reading', () => {
     expect(() => readOcrWorkerConfig({ ...base, OCR_AI_MODE: 'claude' })).toThrow(/ANTHROPIC_API_KEY/);
     expect(() => readOcrWorkerConfig({ ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-fake-key-000000000' }))
-      .toThrow(/OCR_AI_GLOBAL_PROCESSING_APPROVED/);
+      .toThrow(/OCR_AI_US_PROCESSING_APPROVED/);
     expect(() => readOcrWorkerConfig({ ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'short',
-      OCR_AI_GLOBAL_PROCESSING_APPROVED: 'true' })).toThrow(/ANTHROPIC_API_KEY/);
+      OCR_AI_US_PROCESSING_APPROVED: 'true' })).toThrow(/ANTHROPIC_API_KEY/);
     expect(readOcrWorkerConfig({ ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-fake-key-000000000',
-      OCR_AI_GLOBAL_PROCESSING_APPROVED: 'true' }).OCR_AI_MODE).toBe('claude');
+      OCR_AI_US_PROCESSING_APPROVED: 'true' }).OCR_AI_MODE).toBe('claude');
+  });
+
+  it('says US processing when approval is missing', () => {
+    expect(() => readOcrWorkerConfig({ ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-fake-key-000000000' }))
+      .toThrow(/approved US processing/);
+    expect(() => readOcrWorkerConfig({ ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-fake-key-000000000',
+      OCR_AI_US_PROCESSING_APPROVED: 'false' })).toThrow(/OCR_AI_US_PROCESSING_APPROVED/);
+  });
+
+  it('does not accept the retired global-processing switch as approval', () => {
+    const retired = { ...base, OCR_AI_MODE: 'claude', ANTHROPIC_API_KEY: 'sk-ant-fake-key-000000000',
+      OCR_AI_GLOBAL_PROCESSING_APPROVED: 'true' };
+    expect(() => readOcrWorkerConfig(retired)).toThrow(/OCR_AI_US_PROCESSING_APPROVED/);
+    expect(readOcrWorkerConfig({ ...retired, OCR_AI_US_PROCESSING_APPROVED: 'true' }))
+      .not.toHaveProperty('OCR_AI_GLOBAL_PROCESSING_APPROVED');
   });
 
   it('never echoes the key in a configuration error', () => {

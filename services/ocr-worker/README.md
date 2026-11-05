@@ -73,7 +73,7 @@ Each claimed job runs, in order:
    is in `OCR_AI_FACILITY_IDS` when that is set). One Claude API request per
    page with the frozen, cached system prompt (`hid-paper-reading-prompt-2`,
    model schema `hid-paper-reading-model-schema-2`),
-   structured JSON output, adaptive thinking, `inference_geo: "global"`, the
+   structured JSON output, adaptive thinking, `inference_geo: "us"`, the
    page's lines without boxes, and 11-digit NIN-like numbers and Nigerian phone
    numbers masked. The client always calls `https://api.anthropic.com` (an
    inherited `ANTHROPIC_BASE_URL` is ignored) and owns its retries: 429, 5xx,
@@ -155,9 +155,22 @@ Logs carry only ids, counts, codes, model names, token usage and durations:
 never line text, items, SDK error messages or SDK error objects.
 
 `OCR_AI_MODE=claude` requires `ANTHROPIC_API_KEY` (injected at run time, never
-committed) and `OCR_AI_GLOBAL_PROCESSING_APPROVED=true`, the owner's approval of
-global processing on the Claude API. Models must be first-party Claude ids
-(`^claude-[a-z0-9-]+$`).
+committed) and `OCR_AI_US_PROCESSING_APPROVED=true`, the owner's approval of
+US-only processing on the Claude API (owner decision "Lift hold, US only",
+2026-11-04): every request sends `inference_geo: "us"`, never `"global"`, and
+the served geo from `usage.inference_geo` is reported as `servedInferenceGeo`. The
+retired `OCR_AI_GLOBAL_PROCESSING_APPROVED` is ignored and approves nothing;
+without the new switch the worker refuses to start. Models must be first-party
+Claude ids (`^claude-[a-z0-9-]+$`).
+
+Cost note: on the Claude API, US-only inference (`inference_geo: "us"`) is
+billed at 1.1x the standard per-token price (claude-api reference,
+platform availability), for both the first pass (`claude-sonnet-5-5`) and the
+re-read (`claude-opus-5-5`). The reference lists `inference_geo` as supported
+on the Claude API with no per-model exclusion for these models; a model that
+did not support geographic pinning would answer 400, which the client does not
+retry, so the reading would end `ai_failed` (Textract text only, no items)
+rather than be read outside the US.
 
 `OCR_AI_FACILITY_IDS` is an emergency off-switch only, not a rollout list:
 comma-separated facility UUIDs, whitespace around each trimmed and compared

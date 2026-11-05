@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { Box, FlagReason, ItemKind, PaperIdentity, PaperItem } from './contract';
+import type { Box, FlagReason, ItemKind, PaperIdentity, PaperItem, VITAL_MEASURES } from './contract';
 import {
   ambiguousDate, combinedStrengths, compact, DOSE, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes,
   sameCombined, segment, STATUS_CUES, suspiciousUncited, together, unitAfter, withoutNumberedUnit, wordsIn,
@@ -17,6 +17,8 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['strength_mismatch', 'strength_not_as_written'], "A dose on the paper doesn't match what was read."],
   [['nkda_not_on_paper', 'nkda_conflicts'], "The paper doesn't clearly say there are no known allergies."],
   [['value_mismatch', 'reading_number_mismatch', 'plain_mismatch'], "A number on the paper doesn't match what was read."],
+  [['measure_mismatch'], "What was measured doesn't match the label on the paper."],
+  [['plain_contradicts'], "The plain reading says something the paper doesn't."],
   [['frequency_mismatch', 'duration_mismatch'], "How often or how long doesn't match the paper."],
   [['strength_missing', 'frequency_missing'], "The paper gives a dose or how often that wasn't read."],
   [['route_missing', 'route_mismatch', 'route_not_on_paper'], "How it is taken doesn't match the paper."],
@@ -234,7 +236,8 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
   switch (raw.kind) {
     case 'medicine': {
       const others = medicineNames.filter((other) => !has(other, raw.name) && !has(raw.name, other));
-      const own = segment(source, raw.name, others);
+      // Lines are kept apart here (not joined with spaces) so that each cited line can be its own part.
+      const own = segment(lines.map((line) => line.text).join('\n'), raw.name, others);
       const ownNumbers = new Set(numbers(own));
       const ownWords = new Set(words(own));
       if (!norm(raw.name)) add('name_missing');
@@ -245,6 +248,10 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
         if (fieldNumbersMissing(written, ownNumbers) || words(written).some((word) => !ownWords.has(word))) add(code);
       }
       if (norm(raw.strength) && !asWrittenIn(own, raw.strength)) add('strength_not_as_written');
+      // The strength is also the item's own asWritten's, and the dose written for this medicine, not the next one's.
+      if (norm(raw.strength) && (!asWrittenIn(segment(raw.asWritten, raw.name, others), raw.strength)
+        || !doseLeads(own, raw.name, raw.strength))) add('strength_not_as_written');
+      if (norm(raw.frequency) && !frequencyLeads(own, raw.name, raw.frequency)) add('frequency_mismatch');
       // How often and how long are held to the item's own text as written, not as a set of numbers ("5/7" is not "7/7").
       if (norm(raw.frequency) && !asWrittenIn(own, raw.frequency)) add('frequency_mismatch');
       if (norm(raw.duration) && !asWrittenIn(own, raw.duration)) add('duration_mismatch');
@@ -301,6 +308,14 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       const own = raw.noKnownAllergies ? norm(source) : allergySegment(source, raw.substance, others);
       const ownWords = new Set(words(own));
       const ownNumbers = new Set(numbers(own));
+      // "No penicillin allergy", "Penicillin -ve": the paper may say there is no such allergy.
+      if (!raw.noKnownAllergies && norm(raw.substance) && allergyNegated(source, raw.substance, others)) {
+        add('status_cue_on_line');
+      }
+      // A plain reading that gives a severity the item's own text doesn't write.
+      if (ALLERGY_SEVERITY_WORDS.some((word) => severityOnPaper(raw.plain, word) && !severityOnPaper(own, word))) {
+        add('plain_contradicts');
+      }
       if (notOnPaper(raw.reaction) || (norm(raw.reaction) && !has(own, raw.reaction)
         && (words(raw.reaction).some((word) => !ownWords.has(word)) || fieldNumbersMissing(raw.reaction, ownNumbers)))) {
         add('field_not_on_paper');
@@ -325,8 +340,19 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       // The value and range are the item's own, as written: not "+ve" for "-ve", nor the next test's number.
       if ((norm(raw.value) && !asWrittenIn(raw.asWritten, raw.value))
         || (norm(raw.referenceRange) && !asWrittenIn(raw.asWritten, raw.referenceRange))) add('value_mismatch');
+      // The value is the one written for this test: the first after its name, before another test's name.
+      const otherTests = input.answer.items.filter((item) => item.kind === 'lab_result' && norm(item.test))
+        .map((item) => item.test).filter((other) => !has(other, raw.test) && !has(raw.test, other));
+      if (norm(raw.value) && norm(raw.test)
+        && !valueLeads(labelledParts(raw.asWritten, [pattern(raw.test)], otherTests.map(pattern)), raw.value)) {
+        add('value_mismatch');
+      }
       if (fieldWordsMissing(raw.unit) || !unitWritten(raw.asWritten, raw.value, raw.unit)) add('unit_mismatch');
       if (norm(raw.flag) && !has(source, raw.flag)) add('field_not_on_paper');
+      // A plain reading that turns a negative result positive, or the other way round.
+      if (opposite(resultSign(raw.plain), resultSign(norm(raw.value) ? raw.value : raw.asWritten))) {
+        add('plain_contradicts');
+      }
       fields = { test: restore(raw.test), value: restore(raw.value), unit: restore(raw.unit),
         referenceRange: restore(raw.referenceRange), flag: restore(raw.flag) };
       break;
@@ -342,6 +368,14 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
       if (!norm(raw.value)) add('name_missing');
       if (fieldNumbersMissing(raw.value, sourceNumbers)) add('value_mismatch');
       if (norm(raw.value) && !asWrittenIn(raw.asWritten, raw.value)) add('value_mismatch');
+      // Where asWritten labels its readings ("Temp 38.5 Pulse 110"), the measure is one written there, and the
+      // value is the one written after that label, before the next.
+      const ownLabel = VITAL_LABELS[raw.measure];
+      const otherLabels = Object.entries(VITAL_LABELS).filter(([measure]) => measure !== raw.measure)
+        .map(([, label]) => label);
+      const labelled = labelledParts(raw.asWritten, [ownLabel], otherLabels);
+      if (labelled.length === 0 && labelledParts(raw.asWritten, otherLabels, []).length > 0) add('measure_mismatch');
+      else if (labelled.length > 0 && norm(raw.value) && !valueLeads(labelled, raw.value)) add('value_mismatch');
       if (fieldWordsMissing(raw.unit) || !unitWritten(raw.asWritten, raw.value, raw.unit)) add('unit_mismatch');
       fields = { measure: raw.measure, value: restore(raw.value), unit: restore(raw.unit) };
       break;
@@ -433,6 +467,133 @@ function asWrittenIn(text: string, part: string): boolean {
     || sameCombined(text, part);
 }
 
+const BOUND_START = '(?<![\\p{L}\\p{N}_])';
+const BOUND_END = '(?![\\p{L}\\p{N}_])';
+/** How each vital is labelled on paper, as a pattern on normalised text. */
+const VITAL_LABELS: Readonly<Record<(typeof VITAL_MEASURES)[number], string>> = Object.fromEntries(Object.entries({
+  blood_pressure: 'blood pressure|bp|b/p',
+  pulse: 'pulse rate|pulse|heart rate|hr|pr|p',
+  temperature: 'temperature|temp|tmp|t',
+  respiratory_rate: 'respiratory rate|resp rate|resp|rr',
+  oxygen_saturation: 'oxygen saturation|o2 sats?|spo2|sao2|sats?',
+  weight: 'weight|wt|w',
+  height: 'height|ht|h',
+  blood_glucose: 'blood glucose|blood sugar|glucose|gluc|sugar|rbs|fbs|rbg|fbg|cbg|bg|bs',
+}).map(([measure, words]) => [measure, `${BOUND_START}(?:${words})${BOUND_END}`])) as never;
+
+/**
+ * The parts of text written after each of its own labels (patterns on normalised text), each up to where the
+ * next label, its own or another's, starts. Empty where none of its own labels is written.
+ */
+function labelledParts(text: string, own: readonly string[], others: readonly string[]): string[] {
+  const whole = norm(text);
+  const find = (sources: readonly string[]) => sources.flatMap((source) => [...whole.matchAll(new RegExp(source, 'gu'))]
+    .filter((match) => match[0].length > 0).map((match) => ({ start: match.index, end: match.index + match[0].length })));
+  const mine = find(own);
+  const all = [...mine, ...find(others)];
+  return mine.map((label) => whole.slice(label.end,
+    Math.min(whole.length, ...all.filter((other) => other.start >= label.end).map((other) => other.start))));
+}
+
+/**
+ * Whether the value is written in one of the parts, as its first number where it has one ("Hb 9.8" is not 12.4),
+ * or else as its first result where it gives one ("HIV -ve HBsAg +ve" is not "+ve" for HIV).
+ */
+function valueLeads(parts: readonly string[], value: string): boolean {
+  if (parts.length === 0) return true;
+  const first = numbersIn(withoutPlaceholders(value))[0];
+  const sign = first === undefined ? resultSign(value) : null;
+  return parts.some((part) => asWrittenIn(part, value)
+    && (first === undefined || numbersIn(withoutPlaceholders(part))[0] === first)
+    && (sign === null || firstResultSign(part) === sign));
+}
+
+/** The medicine's own text after its name, normalised; null where the name isn't written in it. */
+function afterName(own: string, name: string): string | null {
+  if (!norm(name)) return null;
+  const at = new RegExp(pattern(name), 'u').exec(norm(own));
+  return at ? norm(norm(own).slice(at.index + at[0].length)) : null;
+}
+
+/**
+ * Whether the strength is a dose written for this medicine: one written after its name and before its first
+ * frequency, or the first dose after its name where no frequency follows. Not "400mg" in
+ * "Paracetamol 1g tds Ibuprofen 400mg bd". A combined strength ("80/480mg") counts as one dose.
+ */
+function doseLeads(own: string, name: string, strength: string): boolean {
+  const after = afterName(own, name);
+  if (after === null) return true;
+  const combined = combinedStrengths(after);
+  const doses = [...combined.map((found) => ({ start: found.start, text: after.slice(found.start, found.end) })),
+    ...[...after.matchAll(DOSES)].filter((match) => !combined.some((found) => match.index >= found.start
+      && match.index < found.end)).map((match) => ({ start: match.index, text: match[0] }))]
+    .sort((a, b) => a.start - b.start);
+  if (doses.length === 0) return true;
+  const frequency = FREQUENCY.exec(after);
+  const leading = frequency ? doses.filter((dose) => dose.start < frequency.index) : [];
+  return (leading.length > 0 ? leading : [doses[0]!]).some((dose) => asWrittenIn(dose.text, strength));
+}
+
+/** Whether the frequency gives the first frequency written after the medicine's name ("tds", not the next "bd"). */
+function frequencyLeads(own: string, name: string, frequency: string): boolean {
+  const after = afterName(own, name);
+  const first = after === null ? null : FREQUENCY.exec(after);
+  return first === null || has(frequency, first[0]);
+}
+
+const NEGATIVE_RESULT = new RegExp(`${BOUND_START}(?:negative|neg|non[- ]?reactive|not (?:detected|seen|found)`
+  + `|no (?:\\p{L}+ ){0,3}seen|nil seen|none seen|absent)${BOUND_END}|-ve${BOUND_END}`, 'gu');
+const POSITIVE_RESULT = new RegExp(`${BOUND_START}(?:positive|pos|reactive|detected|seen|present|found)${BOUND_END}`
+  + `|\\+ve${BOUND_END}|(?<![\\p{L}\\p{N}_+])\\+{1,4}(?![\\p{L}\\p{N}_+])`, 'u');
+
+/** Whether a text gives a result as negative or positive; null where it says neither, or both. */
+function resultSign(text: string): 'negative' | 'positive' | null {
+  const normalised = norm(withoutPlaceholders(text));
+  const negative = new RegExp(NEGATIVE_RESULT.source, 'u').test(normalised);
+  const positive = POSITIVE_RESULT.test(normalised.replace(NEGATIVE_RESULT, ' '));
+  if (negative === positive) return null;
+  return negative ? 'negative' : 'positive';
+}
+
+/** The first result a text gives, negative or positive; null where it gives none. */
+function firstResultSign(text: string): 'negative' | 'positive' | null {
+  const normalised = norm(withoutPlaceholders(text));
+  const negative = new RegExp(NEGATIVE_RESULT.source, 'u').exec(normalised);
+  const positive = new RegExp(POSITIVE_RESULT.source, 'u').exec(normalised.replace(NEGATIVE_RESULT,
+    (found) => ' '.repeat(found.length)));
+  if (negative === null) return positive === null ? null : 'positive';
+  return positive === null || negative.index < positive.index ? 'negative' : 'positive';
+}
+
+function opposite(a: 'negative' | 'positive' | null, b: 'negative' | 'positive' | null): boolean {
+  return a !== null && b !== null && a !== b;
+}
+
+const ALLERGY_SEVERITY_WORDS = ['mild', 'moderate', 'severe'] as const;
+const NEGATED_BEFORE = new RegExp(`${BOUND_START}(?:no|not|nil|none|non|denies|denied|without|never|negative)${BOUND_END}`,
+  'u');
+const NEGATED_AFTER = new RegExp(`${BOUND_START}(?:not allergic|no allerg\\p{L}*|negative|neg|tolerat\\p{L}*|denie[sd]`
+  + `|ruled? out)${BOUND_END}|-ve${BOUND_END}`, 'u');
+
+/**
+ * Whether the paper negates this allergy: a negation in its own clause before the substance ("no penicillin
+ * allergy", "denies penicillin") or after it, before another listed substance ("penicillin -ve").
+ */
+function allergyNegated(source: string, substance: string, others: readonly string[]): boolean {
+  const whole = norm(withoutPlaceholders(source));
+  const otherSpans = others.filter((other) => norm(other)).flatMap((other) =>
+    [...whole.matchAll(new RegExp(pattern(other), 'gu'))].map((match) => ({ start: match.index,
+      end: match.index + match[0].length })));
+  return [...whole.matchAll(new RegExp(pattern(substance), 'gu'))].some((match) => {
+    const start = match.index;
+    const end = start + match[0].length;
+    const clauseStart = Math.max(0, ...[...whole.slice(0, start).matchAll(/[,;.\n]/gu)].map((found) => found.index + 1),
+      ...otherSpans.filter((span) => span.end <= start).map((span) => span.end));
+    const next = Math.min(whole.length, ...otherSpans.filter((span) => span.start >= end).map((span) => span.start));
+    return NEGATED_BEFORE.test(whole.slice(clauseStart, start)) || NEGATED_AFTER.test(whole.slice(end, next));
+  });
+}
+
 /**
  * Whether a reading's unit is the one written for it: straight after its value ("97%", "97 %", "36.1°C"), or on
  * its own ("SpO2 (%): 97"), but never one written after another number ("%" of "PCV 32%" is not 97's).
@@ -461,7 +622,7 @@ const DOSES = new RegExp(DOSE.source, 'gu');
  * phrase for another code, or a duration number the duration doesn't have.
  */
 function plainDisagrees(plain: string, own: string, strength: string, frequency: string, duration: string): boolean {
-  let text = norm(withoutPlaceholders(plain));
+  let text = spelledUnits(norm(withoutPlaceholders(plain)));
   // A combined strength ("80/480 mg", "80 mg/480 mg") is held to the item as a whole, then its parts are taken out
   // so that "480 mg" is not read as a dose of its own; a different one ("20/120 mg") disagrees.
   const combined = combinedStrengths(text);
@@ -469,19 +630,42 @@ function plainDisagrees(plain: string, own: string, strength: string, frequency:
   if (combined.some((found) => !known.has(found.canonical))) return true;
   for (const found of [...combined].reverse()) text = `${text.slice(0, found.start)} ${text.slice(found.end)}`;
   for (const dose of text.matchAll(DOSES)) {
-    if (compact(dose[0]) !== compact(strength) && !asWrittenIn(own, dose[0])) return true;
+    if (micrograms(dose[0]) !== micrograms(strength) && !asWrittenIn(micrograms(own), micrograms(dose[0]))) return true;
   }
   const code = FREQUENCY_ALIASES[norm(frequency)];
   if (code) {
     const said = FREQUENCY_CODES.filter(([, phrase]) => phrase.test(text)).map(([name]) => name);
     if (said.length > 0 && !said.includes(code)) return true;
   }
-  const lasting = [...text.matchAll(/\bfor (\d+(?:[.,]\d+)?) (?:days?|weeks?|months?)\b/gu)].map((match) => match[1]!);
+  const lasting = [...text.matchAll(/\bfor (\d+(?:[.,]\d+)?) (day|week|month)s?\b/gu)];
   if (lasting.length > 0) {
-    const given = new Set(numbersIn(duration));
-    if (given.size === 0 || lasting.some((number) => !given.has(number))) return true;
+    // "5/7" is 5 days, "2/52" 2 weeks, "3/12" 3 months: its second number is not a duration.
+    const fractions = [...norm(duration).matchAll(/(?<![\d.,])(\d+) ?\/ ?(7|52|12)(?!\d)/gu)]
+      .map((match) => `${match[1]} ${FRACTION_UNITS[match[2]!]}`);
+    if (fractions.length > 0) {
+      if (lasting.some((match) => !fractions.includes(`${match[1]} ${match[2]}`))) return true;
+    } else {
+      const given = new Set(numbersIn(duration));
+      if (given.size === 0 || lasting.some((match) => !given.has(match[1]!))) return true;
+    }
   }
   return false;
+}
+
+const FRACTION_UNITS: Readonly<Record<string, string>> = { 7: 'day', 52: 'week', 12: 'month' };
+
+/** A unit written as a word after a number, as its abbreviation: "500 micrograms" is "500 mcg". */
+function spelledUnits(text: string): string {
+  return text.replace(/(\d) ?(?:micrograms?|mcgs)(?![\p{L}\p{N}_])/gu, '$1 mcg')
+    .replace(/(\d) ?(?:milligrams?|milligrammes?|mgs)(?![\p{L}\p{N}_])/gu, '$1 mg')
+    .replace(/(\d) ?(?:grams?|grammes?|gms?)(?![\p{L}\p{N}_])/gu, '$1 g')
+    .replace(/(\d) ?(?:millilit(?:re|er)s?|mls)(?![\p{L}\p{N}_])/gu, '$1 ml')
+    .replace(/(\d) ?international units?(?![\p{L}\p{N}_])/gu, '$1 iu');
+}
+
+/** Compact, with "µg" and "ug" written as "mcg". */
+function micrograms(text: string): string {
+  return compact(text).replace(/(\d)(?:µg|ug)(?![\p{L}\p{N}_])/gu, '$1mcg');
 }
 
 /** A value kept only when it is written in the cited lines or elsewhere on the page; null otherwise. */

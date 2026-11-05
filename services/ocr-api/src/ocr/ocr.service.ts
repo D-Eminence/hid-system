@@ -19,6 +19,10 @@ import { assertCandidateClassification, assertPublishableCandidate, clinicalNote
 import { LabApiService } from '../integrations/lab-api.service';
 import { OcrPublicationSwitch } from './ocr-publication-switch';
 import { PharmacyApiService } from '../integrations/pharmacy-api.service';
+import { OcrReadingSwitch } from './ocr-reading-switch';
+import { projectExtraction, type ExtractionRow } from './reading/extraction-view';
+import { PAPER_READING_CONTRACT } from './reading/paper-reading.contract';
+import { OCR_PROCESSING_CONTRACT, PROMPT_VERSION, READINGS_REDONE_WHEN_AI_ON } from './reading/reading-versions';
 
 interface OcrJobRow extends QueryResultRow {
   id: string;
@@ -79,8 +83,6 @@ const JOB_SELECT = `
              where confirmation.job_id=ocr.jobs.id order by confirmation.confirmation_version desc limit 1) as confirmed_at
     from ocr.jobs`;
 
-const OCR_PROCESSING_CONTRACT = 'hid-textract-v1';
-
 /** Publication failure codes a later request may retry; any other failure is terminal. */
 const RETRYABLE_PUBLICATION_FAILURES = ['OWNING_SERVICE_UNAVAILABLE', 'REQUEST_IN_PROGRESS'];
 
@@ -101,6 +103,7 @@ export class OcrService {
     private readonly labApi: LabApiService,
     private readonly pharmacyApi: PharmacyApiService,
     private readonly publicationSwitch: OcrPublicationSwitch,
+    private readonly readingSwitch: OcrReadingSwitch,
   ) {}
 
   async createJob(input: CreateOcrJobDto, idempotencyHeader: string | undefined, context: DataAccessContext) {
@@ -145,7 +148,10 @@ export class OcrService {
 
       // A different HTTP idempotency key must not buy the same extraction
       // twice. Reuse is limited to exact immutable source evidence, provider,
-      // and the versioned processing contract stored in extraction provenance.
+      // the versioned processing contract stored in extraction provenance, a
+      // 'hid-paper-reading-v2' payload and the current prompt version. While AI
+      // reading is on, a reading made with AI off or whose AI step failed is
+      // never reused: a new job reads the paper again.
       const reusable = await client.query<OcrJobRow>(
         `${JOB_SELECT} where facility_id = $1 and document_id = $2
            and source_object_version_id = $3 and source_sha256_hex = $4 and provider = $5
@@ -153,10 +159,14 @@ export class OcrService {
              select 1 from ocr.extractions extraction
               where extraction.job_id = ocr.jobs.id
                 and extraction.provenance ->> 'processingContract' = $6
+                and extraction.structured_payload ->> 'contract' = $7
+                and extraction.provenance #>> '{reading,promptVersion}' = $8
+                and not (coalesce(extraction.provenance #>> '{reading,status}', '') = any($9::text[]))
            )
          order by created_at desc, id desc limit 1`,
         [context.facilityId, source.id, source.objectVersionId, source.sha256Hex,
-          input.provider, OCR_PROCESSING_CONTRACT],
+          input.provider, OCR_PROCESSING_CONTRACT, PAPER_READING_CONTRACT, PROMPT_VERSION,
+          this.readingSwitch.aiReadingOn ? [...READINGS_REDONE_WHEN_AI_ON] : []],
       );
       const reusableJob = reusable.rows[0];
       if (reusableJob) {
@@ -164,7 +174,7 @@ export class OcrService {
           this.auditEvent(context, 'ocr.job.reuse', reusableJob, source.patientId));
         this.logger.log(JSON.stringify({ event: 'ocr.job.duplicate_avoided', duplicateAvoided: 1,
           jobId: reusableJob.id, correlationId: context.correlationId,
-          provider: input.provider, processingContract: OCR_PROCESSING_CONTRACT }));
+          provider: input.provider, processingContract: OCR_PROCESSING_CONTRACT, promptVersion: PROMPT_VERSION }));
         return this.project(reusableJob);
       }
 
@@ -218,7 +228,7 @@ export class OcrService {
     return this.database.withTransaction(context, async (client) => {
       const job = await this.findJob(client, jobId);
       const source = await this.authorizeJob(job, context, 'read_records');
-      const result = await client.query(
+      const result = await client.query<ExtractionRow>(
         `select id::text as "id", extraction_version as "version", attempt_no as "attempt",
                 provider, provider_model as "providerModel", raw_text as "rawText",
                 structured_payload as "structuredPayload", confidence, provenance, created_at as "createdAt"
@@ -226,7 +236,8 @@ export class OcrService {
         [jobId],
       );
       await this.audit.recordWithClient(client, this.auditEvent(context, 'ocr.extraction.list', job, source.patientId));
-      return { items: result.rows };
+      // Each extraction is re-read through the contract: no stored key outside it, no raw model output.
+      return { items: result.rows.map(projectExtraction) };
     });
   }
 

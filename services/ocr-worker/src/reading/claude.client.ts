@@ -6,7 +6,7 @@ import { MODEL_OUTPUT_JSON_SCHEMA, modelPageSchema, pageMessage, SYSTEM_PROMPT, 
 
 /** The Claude API, always at its own endpoint: ANTHROPIC_BASE_URL is never read. */
 export const ANTHROPIC_BASE_URL = 'https://api.anthropic.com';
-export const INFERENCE_GEO = 'global';
+export const INFERENCE_GEO = 'us';
 
 export type Effort = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 

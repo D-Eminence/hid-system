@@ -519,3 +519,114 @@ describe('checkPage review fixes: fields held to the paper', () => {
     });
   });
 });
+
+describe('checkPage holds each reading to its own label, dose and wording', () => {
+  const one = (line: string | string[], item: Parameters<typeof modelItem>[0]) => {
+    const lines = typeof line === 'string' ? [line] : line;
+    const result = check(readPage(1, lines), modelPage([modelItem({ lineIds: lines.map((_, n) => `p1-l${n + 1}`),
+      ...item })]));
+    return result.items[0]!;
+  };
+
+  it('flags a vital with another reading\'s number or a measure the paper does not label', () => {
+    const line = 'Temp 38.5 Pulse 110';
+    const temp = one(line, { kind: 'vital', asWritten: line, measure: 'temperature', value: '110' });
+    expect(temp.confidence).toBe('check_carefully');
+    expect(temp.checkReasons).toContain('value_mismatch');
+    expect(one('T 37 P 88', { kind: 'vital', asWritten: 'T 37 P 88', measure: 'pulse', value: '37' }).checkReasons)
+      .toContain('value_mismatch');
+    const height = one('Wt 70', { kind: 'vital', asWritten: 'Wt 70', measure: 'height', value: '70' });
+    expect(height.checkReasons).toContain('measure_mismatch');
+    expect(height.checkReason).toBe("What was measured doesn't match the label on the paper.");
+    // Each reading under its own label stays clear.
+    expect(one(line, { kind: 'vital', asWritten: line, measure: 'temperature', value: '38.5' }).checkReasons).toEqual([]);
+    expect(one(line, { kind: 'vital', asWritten: line, measure: 'pulse', value: '110' }).checkReasons).toEqual([]);
+    expect(one('T 37 P 88', { kind: 'vital', asWritten: 'T 37 P 88', measure: 'pulse', value: '88' }).checkReasons)
+      .toEqual([]);
+    expect(one('BP 120/80 mmHg', { kind: 'vital', asWritten: 'BP 120/80 mmHg', measure: 'blood_pressure',
+      value: '120/80', unit: 'mmHg' }).checkReasons).toEqual([]);
+  });
+
+  it('flags a lab value that belongs to another test on the same words', () => {
+    const line = 'Hb 9.8 WBC 12.4';
+    const hb = one(line, { kind: 'lab_result', asWritten: line, test: 'Hb', value: '12.4' });
+    expect(hb.confidence).toBe('check_carefully');
+    expect(hb.checkReasons).toContain('value_mismatch');
+    expect(one(line, { kind: 'lab_result', asWritten: line, test: 'Hb', value: '9.8' }).checkReasons).toEqual([]);
+    expect(one(line, { kind: 'lab_result', asWritten: line, test: 'WBC', value: '12.4' }).checkReasons).toEqual([]);
+    expect(one('HIV -ve HBsAg +ve', { kind: 'lab_result', asWritten: 'HIV -ve HBsAg +ve', test: 'HIV', value: '+ve' })
+      .checkReasons).toContain('value_mismatch');
+  });
+
+  it('puts a ruled-out diagnosis, a stopped or withheld medicine and a negated allergy in doubt', () => {
+    const cases: [string, Parameters<typeof modelItem>[0]][] = [
+      ['No malaria', { kind: 'diagnosis', asWritten: 'malaria', name: 'malaria', status: 'confirmed' }],
+      ['Malaria RDT negative', { kind: 'diagnosis', asWritten: 'Malaria', name: 'Malaria', status: 'confirmed' }],
+      ['Not hypertensive', { kind: 'diagnosis', asWritten: 'hypertensive', name: 'hypertensive', status: 'confirmed' }],
+      ['Stop Metformin 500mg bd', { kind: 'medicine', asWritten: 'Metformin 500mg bd', name: 'Metformin',
+        strength: '500mg', frequency: 'bd', status: 'current' }],
+      ['Metformin 500mg bd - withheld', { kind: 'medicine', asWritten: 'Metformin 500mg bd', name: 'Metformin',
+        strength: '500mg', frequency: 'bd', status: 'current' }],
+      ['Allergies: no penicillin allergy', { kind: 'allergy', asWritten: 'penicillin', substance: 'penicillin' }],
+      ['Penicillin -ve', { kind: 'allergy', asWritten: 'Penicillin', substance: 'Penicillin' }],
+    ];
+    for (const [line, item] of cases) {
+      const read = one(line, item);
+      expect([line, read.confidence, read.checkReasons]).toEqual([line, 'check_carefully', ['status_cue_on_line']]);
+    }
+    // An allergy the paper states plainly, and one beside a negated severity, stay clear.
+    expect(one('Allergies: Penicillin - rash', { kind: 'allergy', asWritten: 'Penicillin - rash',
+      substance: 'Penicillin', reaction: 'rash' }).checkReasons).toEqual([]);
+    expect(one('Allergies: Penicillin - rash, not severe', { kind: 'allergy', asWritten: 'Penicillin - rash',
+      substance: 'Penicillin', reaction: 'rash' }).checkReasons).toEqual([]);
+  });
+
+  it('holds a medicine\'s dose and frequency to its own line and its own place on a line', () => {
+    const lines = ['Amlodipine 5mg od', 'Lisinopril 10mg od'];
+    const twoLines = check(readPage(1, lines), modelPage([modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg od',
+      lineIds: ['p1-l1', 'p1-l2'], name: 'Amlodipine', strength: '10mg', frequency: 'od', status: 'current' })]));
+    expect(twoLines.items[0]!.confidence).toBe('check_carefully');
+    expect(twoLines.items[0]!.checkReasons).toEqual(expect.arrayContaining(['strength_mismatch',
+      'strength_not_as_written']));
+    const line = 'Paracetamol 1g tds Ibuprofen 400mg bd';
+    const wrong = one(line, { kind: 'medicine', asWritten: line, name: 'Paracetamol', strength: '400mg', frequency: 'bd',
+      status: 'current' });
+    expect(wrong.confidence).toBe('check_carefully');
+    expect(wrong.checkReasons).toEqual(expect.arrayContaining(['strength_not_as_written', 'frequency_mismatch']));
+    expect(one(line, { kind: 'medicine', asWritten: 'Paracetamol 1g tds', name: 'Paracetamol', strength: '400mg',
+      frequency: 'tds', status: 'current' }).checkReasons).toContain('strength_not_as_written');
+    expect(one(line, { kind: 'medicine', asWritten: line, name: 'Paracetamol', strength: '1g', frequency: 'tds',
+      status: 'current' }).checkReasons).toEqual([]);
+    expect(one('Paracetamol 500mg 2 tabs tds', { kind: 'medicine', asWritten: 'Paracetamol 500mg 2 tabs tds',
+      name: 'Paracetamol', strength: '500mg', frequency: 'tds', status: 'current' }).checkReasons).toEqual([]);
+  });
+
+  it('reads "5/7" in a duration as 5 days, and a unit spelled out in plain as its abbreviation', () => {
+    const line = 'Amoxicillin 500mg tds x 5/7';
+    const base = { kind: 'medicine' as const, asWritten: line, name: 'Amoxicillin', strength: '500mg', frequency: 'tds',
+      duration: '5/7', status: 'new' as const };
+    expect(one(line, { ...base, plain: 'Amoxicillin 500 mg three times a day for 7 days' }).checkReasons)
+      .toContain('plain_mismatch');
+    expect(one(line, { ...base, plain: 'Amoxicillin 500 mg three times a day for 5 days' }).checkReasons).toEqual([]);
+    const tds = { ...base, asWritten: 'Amoxicillin 500mg tds', duration: '' };
+    expect(one('Amoxicillin 500mg tds', { ...tds, plain: 'Amoxicillin 500 micrograms three times a day' }).checkReasons)
+      .toContain('plain_mismatch');
+    expect(one('Amoxicillin 500mg tds', { ...tds, plain: 'Amoxicillin 500 milligrams three times a day' }).checkReasons)
+      .toEqual([]);
+  });
+
+  it('flags a plain reading that reverses a result or adds a severity the paper does not give', () => {
+    expect(one('MP -ve', { kind: 'lab_result', asWritten: 'MP -ve', test: 'MP', value: '-ve',
+      plain: 'Malaria parasite positive' }).checkReasons).toEqual(['plain_contradicts']);
+    expect(one('MP: negative', { kind: 'lab_result', asWritten: 'MP: negative', test: 'MP', value: 'negative',
+      plain: 'Malaria parasite test positive' }).checkReasons).toEqual(['plain_contradicts']);
+    expect(one('MP -ve', { kind: 'lab_result', asWritten: 'MP -ve', test: 'MP', value: '-ve',
+      plain: 'Malaria parasite test negative (not seen)' }).checkReasons).toEqual([]);
+    const allergy = one('Allergy: penicillin - rash', { kind: 'allergy', asWritten: 'penicillin - rash',
+      substance: 'penicillin', reaction: 'rash', plain: 'Allergic to penicillin, severe' });
+    expect(allergy.checkReasons).toEqual(['plain_contradicts']);
+    expect(allergy.checkReason).toBe("The plain reading says something the paper doesn't.");
+    expect(one('Allergy: penicillin - rash', { kind: 'allergy', asWritten: 'penicillin - rash', substance: 'penicillin',
+      reaction: 'rash', plain: 'Allergic to penicillin (rash)' }).checkReasons).toEqual([]);
+  });
+});

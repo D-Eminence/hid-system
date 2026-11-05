@@ -30,10 +30,11 @@ export const ITEM_HINTS = new RegExp(`${DOSE.source}|${FREQUENCY.source}|${CONDI
 export const ITEM_LABELS = new RegExp('^a ?:|(?<![\\p{L}\\p{N}_])(?:dx|ddx|imp|impression|diagnos\\p{L}*|assessment|pmh|hx'
   + '|treated for|history of|rx|tabs?|tablets?|caps?|capsules?|inj|syr|syrup|susp|inh|inhaler|cream|oint\\p{L}*|nebs?'
   + '|supp|bp|temp|pulse|spo2|wt|weight|allerg\\p{L}*|nkda)(?![\\p{L}\\p{N}_])', 'u');
-/** Words on an item's own line that put an active status in doubt. */
+/** Words on an item's own line that put an active status in doubt (also a plain "no", "negative" or "stop"). */
 export const STATUS_CUES = new RegExp('(?<![\\p{L}\\p{N}_])(?:no evidence of|negative for|ruled? out|r/o|query|possible'
   + '|suspected|fhx|family history|stopped|discontinued|d/c|allerg(?:y|ies)|allergic to|h/o|history of|pmh'
-  + '|past history)(?![\\p{L}\\p{N}_])|\\?', 'gu');
+  + '|past history|no|not|non|nil|negative|neg|stop|withheld|withhold|held|hold|omit(?:ted)?|denies|denied)'
+  + '(?![\\p{L}\\p{N}_])|-ve(?![\\p{L}\\p{N}_])|\\?', 'gu');
 
 const ROUTE_WORDS: Readonly<Record<string, string>> = {
   intravenous: 'iv|i\\.v\\.?|intravenous(?:ly)?',
