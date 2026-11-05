@@ -110,6 +110,7 @@ export type {
   PharmacyDispensing,
   PharmacyDispensingReversal,
   PharmacyImportedMedicationEvidence,
+  PharmacyImportBatch,
   PharmacyClientOptions,
   PharmacyInternalCaller,
   PharmacyMedicationReference,

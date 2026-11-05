@@ -6,9 +6,25 @@ import { ALLERGY_SEVERITIES, DIAGNOSIS_STATUSES, ITEM_KINDS, MEDICINE_STATUSES, 
  * Any change to either is a new PROMPT_VERSION / MODEL_SCHEMA_VERSION: they
  * are recorded in provenance, and an unchanged prefix is what lets the prompt
  * cache hit across pages and documents. Nothing here may vary per request.
+ *
+ * PROMPT_VERSION also changes when how a document is read changes without the
+ * prompt text changing, so the OCR HTTP service, which reuses a reading only
+ * under the current version, never reuses one made the older way. Version 3:
+ * the re-read routing of the owner decision of 2026-11-05 (flagged pages get
+ * the image re-read, with the text re-read only for failed or declined pages
+ * and as a fallback). The prompt text, the answer schema and every request
+ * body are byte for byte as under version 2; the label is not sent.
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-2';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-3';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
+/**
+ * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
+ * They are used only for a flagged page re-read with its picture, so SYSTEM_PROMPT, MODEL_OUTPUT_JSON_SCHEMA and
+ * the text-only page message, and with them MODEL_SCHEMA_VERSION, are unchanged by it. Recorded in provenance
+ * when a page was read from its picture. Version 3: the message no longer says the page was hard to read; it says
+ * the first reading needs checking, for any page flag.
+ */
+export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-3';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
@@ -120,6 +136,34 @@ export const MODEL_OUTPUT_JSON_SCHEMA: Readonly<Record<string, unknown>> = {
   },
 };
 
+const itemJsonSchema = (MODEL_OUTPUT_JSON_SCHEMA.properties as { items: { items: {
+  required: readonly string[]; properties: Record<string, unknown> } } }).items.items;
+const pixelNumber = { type: 'number' } as const;
+
+/**
+ * The image re-read's output: the text schema with one more required field per item, "box", the item's own place
+ * in the picture as absolute pixel coordinates {x1, y1, x2, y2} (top-left and bottom-right corners) of the picture
+ * as the model sees it. Claude works best with pixel coordinates and not with normalised ones
+ * (platform.claude.com/docs/en/build-with-claude/vision-coordinates, read 2026-11-05); the client turns them into
+ * page fractions. Used only for requests that carry the picture.
+ */
+export const MODEL_OUTPUT_IMAGE_JSON_SCHEMA: Readonly<Record<string, unknown>> = {
+  ...MODEL_OUTPUT_JSON_SCHEMA,
+  properties: {
+    ...(MODEL_OUTPUT_JSON_SCHEMA.properties as Record<string, unknown>),
+    items: {
+      type: 'array',
+      items: {
+        ...itemJsonSchema,
+        required: [...itemJsonSchema.required, 'box'],
+        properties: { ...itemJsonSchema.properties, box: { type: 'object', additionalProperties: false,
+          required: ['x1', 'y1', 'x2', 'y2'],
+          properties: { x1: pixelNumber, y1: pixelNumber, x2: pixelNumber, y2: pixelNumber } } },
+      },
+    },
+  },
+};
+
 const field = z.string().max(2_000);
 export const modelItemSchema = z.strictObject({
   kind: z.enum(ITEM_KINDS),
@@ -142,13 +186,74 @@ export const modelPageSchema = z.strictObject({
     lineIds: z.array(z.string().max(40)).max(60) }),
   items: z.array(modelItemSchema).max(300),
 });
-export type ModelItem = z.infer<typeof modelItemSchema>;
-export type ModelPage = z.infer<typeof modelPageSchema>;
+const finite = z.number().finite();
+/** The model's box: pixels of the picture as it sees it (after the API's resize). */
+export const modelPixelBoxSchema = z.strictObject({ x1: finite, y1: finite, x2: finite, y2: finite });
+export const modelImageItemSchema = modelItemSchema.extend({ box: modelPixelBoxSchema });
+export const modelImagePageSchema = modelPageSchema.extend({ items: z.array(modelImageItemSchema).max(300) });
+export type ModelPixelBox = z.infer<typeof modelPixelBoxSchema>;
+/** A box as page fractions (left, top, width, height), measured from the top-left corner. */
+export interface ModelFractionBox { left: number; top: number; width: number; height: number }
+/**
+ * An item as the reader checks it; "box" only in an answer read from the picture, already turned from the model's
+ * pixels into page fractions by the client.
+ */
+export type ModelItem = z.infer<typeof modelItemSchema> & { box?: ModelFractionBox };
+export type ModelPage = Omit<z.infer<typeof modelPageSchema>, 'items'> & { items: ModelItem[] };
 
-/** The user turn for one page: lines without their boxes. */
+/** The user turn for one page, text only: lines without their boxes. Unchanged by the image re-read. */
 export function pageMessage(page: number, lines: readonly { id: string; text: string; confidence: number;
   handwritten: boolean }[]): string {
   return `Page ${page} of a paper record. Its lines, as JSON:\n${JSON.stringify(lines.map((line) => ({
     id: line.id, text: line.text, confidence: Math.round(line.confidence * 100) / 100, handwritten: line.handwritten,
+  })))}`;
+}
+
+/** A page-fraction box as whole pixels {x1, y1, x2, y2} of a picture of this size. */
+export function toPixelBox(box: ModelFractionBox, size: { width: number; height: number }): ModelPixelBox {
+  return { x1: Math.round(box.left * size.width), y1: Math.round(box.top * size.height),
+    x2: Math.round((box.left + box.width) * size.width), y2: Math.round((box.top + box.height) * size.height) };
+}
+
+/** The model's pixel box as page fractions of a picture of this size (corners in either order). */
+export function toFractionBox(box: ModelPixelBox, size: { width: number; height: number }): ModelFractionBox {
+  const left = Math.min(box.x1, box.x2) / size.width;
+  const top = Math.min(box.y1, box.y2) / size.height;
+  return { left, top, width: Math.max(box.x1, box.x2) / size.width - left,
+    height: Math.max(box.y1, box.y2) / size.height - top };
+}
+
+/**
+ * The user turn's text for one page re-read WITH its picture (the picture is the block before this one). `size` is
+ * the picture as the model sees it (after the API's resize, before padding): the lines carry their boxes in its
+ * pixels, and the model answers in them. The instructions here take the place of rules 2 and 3 for this page only.
+ */
+export function imagePageMessage(page: number, lines: readonly { id: string; text: string; confidence: number;
+  handwritten: boolean; box?: ModelFractionBox | null }[], size: { width: number; height: number }): string {
+  return `Page ${page} of a paper record. The picture above is this page, ${size.width} pixels wide and \
+${size.height} pixels high. The first reading of this page, from its text alone, needs checking: the text may be \
+misread (handwriting or low confidence), an item may have been missed or left out, or the reading was unsure. \
+So this time read the writing from the picture itself. Rules 2 and 3 change for this page only, as follows; every \
+other rule stays.
+
+A. Read each item from the picture. "asWritten" is the item as you read it in the picture, letter for letter, \
+with its spelling and abbreviations; it may differ from the line text below where the service misread the writing.
+
+B. Cite in "lineIds" the ids of the lines below that the item sits on in the picture. Cite only ids from this list.
+
+C. Give the item's own place in the picture in "box" as absolute pixel coordinates: x1 and y1 the top-left \
+corner, x2 and y2 the bottom-right corner, with x from the left edge and y from the top edge of the picture, \
+around the writing of this item only.
+
+D. Never invent anything. Where part of the writing cannot be read, write "[unreadable]" in its place and set \
+"unsure" to true; never guess a word, number or dose. A number is filled only where you can read it in the picture.
+
+E. Leave out writing that is not on one of the lines below.
+
+The lines the service found, as JSON (box in pixels of the picture, as above; confidence 0 to 1):
+${JSON.stringify(lines.map((line) => ({
+    id: line.id, text: line.text,
+    box: line.box ? toPixelBox(line.box, size) : null,
+    confidence: Math.round(line.confidence * 100) / 100, handwritten: line.handwritten,
   })))}`;
 }

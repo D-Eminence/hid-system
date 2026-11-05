@@ -4,23 +4,32 @@ import type { AiUsageRecord, ReadLine, ReadPage } from '../types';
 import { AiInterruptedError, AiRejectedError, AiTransientError, INFERENCE_GEO, type AiCallUse, type Effort,
   type PageAnswer, type PageModelClient, type TokenUsage } from './claude.client';
 import {
-  PAPER_READING_CONTRACT, PAPER_READING_SCHEMA_VERSION, type FlagReason, type PaperIdentity, type PaperItem,
-  type PaperPage, type PaperReadingPayload, type ReadingStatus,
+  PAPER_READING_CONTRACT, PAPER_READING_SCHEMA_VERSION, type FlagReason, type ImageRereadSkipReason, type PaperIdentity,
+  type PaperItem, type PaperPage, type PaperReadingPayload, type ReadingStatus,
 } from './contract';
-import { blankIdentity, checkPage, REVIEW_BELOW, uniqueItemIds, type PageCheck } from './items';
+import { blankIdentity, checkPage, mergeReread, REVIEW_BELOW, uniqueItemIds, type PageCheck } from './items';
 import { createMasker, type Masker } from './masking';
+import { imageTierOf, pageImageFor, type PageImage, type PageImageDecision, type SourceDocument } from './page-image';
 import { MODEL_SCHEMA_VERSION, PROMPT_VERSION } from './prompt';
 
 export type ReadingConfig = Pick<OcrWorkerConfig, 'OCR_AI_MODE' | 'OCR_AI_FACILITY_IDS' | 'OCR_AI_FIRST_PASS_MODEL'
   | 'OCR_AI_FIRST_PASS_EFFORT' | 'OCR_AI_REREAD_MODEL' | 'OCR_AI_REREAD_EFFORT' | 'OCR_AI_MAX_REREAD_PAGES'>
-  // Pages of one document read at once; one at a time when not given.
-  & Partial<Pick<OcrWorkerConfig, 'OCR_AI_PAGE_CONCURRENCY'>>;
+  // Pages of one document read at once; one at a time when not given. The image re-read is off when not given,
+  // and a page with a masked number is sent as a picture unless OCR_AI_IMAGE_MASKED_PAGES is 'text_only'.
+  & Partial<Pick<OcrWorkerConfig, 'OCR_AI_PAGE_CONCURRENCY' | 'OCR_AI_IMAGE_REREAD' | 'OCR_AI_IMAGE_MASKED_PAGES'>>;
 
 export interface ReadingInput {
   facilityId: string;
   sourceSha256Hex: string;
   pages: readonly ReadPage[];
+  /**
+   * The exact document the pages were read from (the verified bytes and their detected media type), for the
+   * image re-read of a flagged page. Without it every re-read is text only ('image_not_given').
+   */
+  document?: SourceDocument;
 }
+
+export interface ImageRereadSkip { page: number; reason: ImageRereadSkipReason }
 
 /** Counts and codes only: safe to log and to keep in provenance. */
 export interface ReadingSummary {
@@ -34,6 +43,15 @@ export interface ReadingSummary {
   pagesSent: number;
   rereadPages: number[];
   rereadFailedPages: number;
+  /** Re-read pages answered from the picture of the page. */
+  imageRereadPages: number[];
+  /** Flagged pages that were re-read without the picture, and why. */
+  imageRereadSkipped: ImageRereadSkip[];
+  /**
+   * Pages sent with the picture whose image re-read gave no usable answer, or kept no item where the first pass had
+   * some (first-pass items kept, reread_failed).
+   */
+  imageRereadFailedPages: number[];
   droppedUngrounded: number;
   droppedUngroundedFirstPass: number;
   itemCount: number;
@@ -43,7 +61,15 @@ export interface ReadingSummary {
   usage: TokenUsage;
   /** The same use per model (requests and tokens), for ocr.record_worker_ai_usage; not stored in provenance. */
   modelUsage: AiUsageRecord[];
+  /**
+   * The same use per model and pass, for the ocr.reading.usage log only (both passes may use one model, so the
+   * per-model records cannot show what the re-reads cost); not stored in provenance or the database.
+   */
+  passUsage: PassUsageRecord[];
 }
+
+export type ReadingPass = 'first_pass' | 'reread' | 'image_reread';
+export interface PassUsageRecord extends AiUsageRecord { pass: ReadingPass }
 
 export interface ReadingOutcome { payload: PaperReadingPayload; summary: ReadingSummary }
 
@@ -66,19 +92,30 @@ export class ReadingInterruptedError extends Error {
 }
 
 /** Per-model totals of what the AI step used, in the order the models were first asked. */
+function addRecord(entry: AiUsageRecord, attempts: number, usage: TokenUsage): void {
+  entry.requests += attempts;
+  entry.inputTokens += usage.inputTokens;
+  entry.outputTokens += usage.outputTokens;
+  entry.cacheReadTokens += usage.cacheReadInputTokens;
+  entry.cacheWriteTokens += usage.cacheCreationInputTokens;
+}
+
 class ModelUsageTally {
   private readonly byModel = new Map<string, AiUsageRecord>();
-  add(model: string, attempts: number, usage: TokenUsage): void {
+  private readonly byPass = new Map<string, PassUsageRecord>();
+  add(model: string, pass: ReadingPass, attempts: number, usage: TokenUsage): void {
     const entry = this.byModel.get(model) ?? { model, requests: 0, inputTokens: 0, outputTokens: 0,
       cacheReadTokens: 0, cacheWriteTokens: 0 };
-    entry.requests += attempts;
-    entry.inputTokens += usage.inputTokens;
-    entry.outputTokens += usage.outputTokens;
-    entry.cacheReadTokens += usage.cacheReadInputTokens;
-    entry.cacheWriteTokens += usage.cacheCreationInputTokens;
+    addRecord(entry, attempts, usage);
     this.byModel.set(model, entry);
+    const key = `${pass}\u0000${model}`;
+    const perPass = this.byPass.get(key) ?? { model, pass, requests: 0, inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0 };
+    addRecord(perPass, attempts, usage);
+    this.byPass.set(key, perPass);
   }
   list(): AiUsageRecord[] { return [...this.byModel.values()].map((entry) => ({ ...entry })); }
+  listByPass(): PassUsageRecord[] { return [...this.byPass.values()].map((entry) => ({ ...entry })); }
 }
 
 interface PageState {
@@ -86,12 +123,16 @@ interface PageState {
   /** Masked lines: what the model sees and what grounding checks against. */
   lines: ReadLine[];
   masker: Masker;
+  /** The masker hid a number in this page's text: the picture would show it. */
+  hasMaskedNumber: boolean;
   first: PageAnswer | null;
   firstCheck: PageCheck | null;
   final: PageCheck | null;
   declined: boolean;
   failed: boolean;
   reread: 'none' | 'done' | 'failed';
+  /** The re-read's answer came from a request with the picture of the page. */
+  fromImage: boolean;
 }
 
 const zeroUsage = (): TokenUsage => ({ inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 });
@@ -119,7 +160,7 @@ export class PaperReadingService {
     const pages = input.pages.map((page) => lineOnlyPage(page));
     const aiUsed = status === 'ai_failed';
     const summary = this.summary(status, pages, [], 0, 0, [], 0, aiUsed, usage, 0, 0, 0, 0, null, failureCode,
-      false, modelUsage.map((entry) => ({ ...entry })));
+      false, modelUsage.map((entry) => ({ ...entry })), [], [], [], []);
     return { payload: this.payload(pages, blankIdentity(), [], summary), summary };
   }
 
@@ -139,13 +180,16 @@ export class PaperReadingService {
     let servedGeo: string | null = null;
     const states: PageState[] = input.pages.filter((page) => page.lines.length > 0).map((page) => {
       const masker = createMasker();
-      return { page: page.page, masker, lines: page.lines.map((line) => ({ ...line, text: masker.mask(line.text) })),
-        first: null, firstCheck: null, final: null, declined: false, failed: false, reread: 'none' };
+      const lines = page.lines.map((line) => ({ ...line, text: masker.mask(line.text) }));
+      return { page: page.page, masker, lines, hasMaskedNumber: masker.count > 0, first: null, firstCheck: null,
+        final: null, declined: false, failed: false, reread: 'none', fromImage: false };
     });
-    const ask = async (state: PageState, model: string, effort: Effort) => {
+    const ask = async (state: PageState, model: string, effort: Effort, image?: PageImage,
+      pass: ReadingPass = image ? 'image_reread' : 'reread') => {
       let answer: PageAnswer;
       try {
-        answer = await client.readPage({ model, effort, page: state.page, lines: state.lines }, signal);
+        answer = await client.readPage({ model, effort, page: state.page, lines: state.lines,
+          ...(image ? { image } : {}) }, signal);
       } catch (error) {
         // A call that ended without an answer still made requests (and may have used tokens): count them.
         // A call stopped before its first request (waiting for a permit) made none and adds nothing.
@@ -154,13 +198,13 @@ export class PaperReadingService {
           const spent: AiCallUse = error;
           requests += spent.attempts;
           addUsage(usage, spent.usage);
-          tally.add(model, spent.attempts, spent.usage);
+          tally.add(model, pass, spent.attempts, spent.usage);
         }
         throw error;
       }
       requests += answer.attempts;
       addUsage(usage, answer.usage);
-      tally.add(model, answer.attempts, answer.usage);
+      tally.add(model, pass, answer.attempts, answer.usage);
       if (answer.kind === 'refused') refusals += 1;
       if (answer.kind === 'answer' && answer.servedInferenceGeo) servedGeo = answer.servedInferenceGeo;
       return answer;
@@ -171,7 +215,8 @@ export class PaperReadingService {
     // after a failure no further page starts, and the pages already asked are awaited so their use counts.
     try {
       await forEachBounded(states, pageConcurrency, async (state) => {
-        state.first = await ask(state, this.config.OCR_AI_FIRST_PASS_MODEL, this.config.OCR_AI_FIRST_PASS_EFFORT);
+        state.first = await ask(state, this.config.OCR_AI_FIRST_PASS_MODEL, this.config.OCR_AI_FIRST_PASS_EFFORT,
+          undefined, 'first_pass');
         if (state.first.kind === 'answer') {
           state.firstCheck = checkPage({ page: state.page, lines: state.lines, answer: state.first.answer,
             sourceSha256Hex: input.sourceSha256Hex, readBy: 'first_pass', masker: state.masker });
@@ -186,20 +231,84 @@ export class PaperReadingService {
       throw interrupted(error);
     }
 
-    // Re-read: refused or failed pages first, then flagged pages in page order, up to the cap.
-    const candidates = [
-      ...states.filter((state) => state.first?.kind !== 'answer'),
-      ...states.filter((state) => state.firstCheck !== null && state.firstCheck.rereadReasons.length > 0),
-    ].slice(0, this.config.OCR_AI_MAX_REREAD_PAGES);
+    // Re-read (owner decision 2026-11-05): pages the first pass failed on or declined get a text re-read; pages it
+    // flagged get the image re-read, or, where the picture cannot go (or the API rejects or the model declines
+    // it), a text re-read instead. Failed or declined pages first, then flagged pages in page order, up to
+    // OCR_AI_MAX_REREAD_PAGES: a flagged page past the cap is not re-read, and a re-read that itself fails leaves
+    // the page with its first reading (marked reread_failed).
+    const failedFirst = states.filter((state) => state.first?.kind !== 'answer');
+    const flagged = states.filter((state) => state.firstCheck !== null && state.firstCheck.flagReasons.length > 0);
+    const candidates = [...failedFirst, ...flagged].slice(0, this.config.OCR_AI_MAX_REREAD_PAGES);
     const rereadAttempted = candidates.length > 0;
+    const skipped: ImageRereadSkip[] = [];
+    const imageFailed: number[] = [];
+    // The picture, encoded once for the document and only when a page is sent with it; never logged or stored.
+    let encoded: PageImage | null = null;
+    const pictureOf = (decision: Extract<PageImageDecision, { kind: 'image' }>): PageImage => {
+      encoded ??= { mediaType: decision.mediaType, base64: Buffer.from(decision.bytes.buffer, decision.bytes.byteOffset,
+        decision.bytes.byteLength).toString('base64'), width: decision.width, height: decision.height };
+      return encoded;
+    };
+    const rereadModel = this.config.OCR_AI_REREAD_MODEL;
+    const rereadEffort = this.config.OCR_AI_REREAD_EFFORT;
     await forEachBounded(candidates, pageConcurrency, async (state) => {
       let answer: PageAnswer | null = null;
+      let fromImage = false;
+      // Only a flagged page (one the first pass answered) may go with its picture.
+      const decision = state.firstCheck === null ? null : this.imageDecision(state, input);
       try {
-        answer = await ask(state, this.config.OCR_AI_REREAD_MODEL, this.config.OCR_AI_REREAD_EFFORT);
+        if (decision?.kind === 'image') {
+          try {
+            answer = await ask(state, rereadModel, rereadEffort, pictureOf(decision));
+            fromImage = true;
+          } catch (error) {
+            if (signal.aborted) throw error;
+            // The API refused the request with the picture as an invalid request (400 invalid_request_error): the
+            // picture is the likely cause, so re-read the text instead. Any other rejection (key, permission,
+            // model) would refuse the text request too, and a transient failure has had its retries: neither is
+            // blamed on the picture, and the page goes on as a failed re-read.
+            if (error instanceof AiRejectedError && error.code === 'AI_BAD_REQUEST' && error.invalidRequest) {
+              skipped.push({ page: state.page, reason: 'image_rejected' });
+              answer = await ask(state, rereadModel, rereadEffort);
+            } else {
+              if (error instanceof AiTransientError || error instanceof AiRejectedError) imageFailed.push(state.page);
+              throw error;
+            }
+          }
+          if (fromImage && answer.kind === 'refused') {
+            // The decline may be about the picture: re-read the text instead, once.
+            skipped.push({ page: state.page, reason: 'image_refused' });
+            fromImage = false;
+            answer = await ask(state, rereadModel, rereadEffort);
+          } else if (fromImage && answer.kind !== 'answer') {
+            imageFailed.push(state.page);
+          }
+        } else {
+          if (decision !== null) skipped.push({ page: state.page, reason: decision.reason });
+          answer = await ask(state, rereadModel, rereadEffort);
+        }
       } catch (error) {
         if (signal.aborted) throw error;
         if (!(error instanceof AiTransientError) && !(error instanceof AiRejectedError)) throw error;
       }
+      if (answer?.kind === 'answer' && state.firstCheck) {
+        // A flagged page the first pass answered, re-read from the picture or the text: merged, fail-safe, so no
+        // first-pass item without an exact twin in the second reading is lost.
+        const read = checkPage({ page: state.page, lines: state.lines, answer: answer.answer,
+          sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker, fromImage });
+        if (read.items.length === 0 && state.firstCheck.items.length > 0) {
+          // Nothing from the second reading held to the page while the first pass had items: not a usable reading.
+          if (fromImage) imageFailed.push(state.page);
+          state.reread = 'failed';
+          state.final = markRereadFailed(state.firstCheck);
+          return;
+        }
+        state.final = mergeReread(state.firstCheck, read, state.lines, fromImage ? 'image' : 'text');
+        state.reread = 'done';
+        state.fromImage = fromImage;
+        return;
+      }
+      // A page whose first pass failed or was declined: nothing to merge, the re-read stands.
       if (answer?.kind === 'answer') {
         state.final = checkPage({ page: state.page, lines: state.lines, answer: answer.answer,
           sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker });
@@ -240,26 +349,50 @@ export class PaperReadingService {
     const dropped = states.reduce((sum, state) => sum + (state.final?.droppedUngrounded ?? 0), 0);
     const droppedFirst = states.reduce((sum, state) => sum + (state.firstCheck?.droppedUngrounded ?? 0), 0);
     const rereadPages = states.filter((state) => state.reread === 'done').map((state) => state.page);
+    const imageRereadPages = states.filter((state) => state.reread === 'done' && state.fromImage)
+      .map((state) => state.page);
     const summary = this.summary(status, pages, kept, dropped, droppedFirst, rereadPages,
       states.filter((state) => state.reread === 'failed').length, true, usage, requests, refusals, states.length,
-      states.reduce((sum, state) => sum + state.masker.count, 0), servedGeo, null, rereadAttempted, tally.list());
+      states.reduce((sum, state) => sum + state.masker.count, 0), servedGeo, null, rereadAttempted, tally.list(),
+      tally.listByPass(),
+      imageRereadPages, [...skipped].sort((a, b) => a.page - b.page), [...imageFailed].sort((a, b) => a - b));
     return { payload: this.payload(pages, status === 'read' ? identity : blankIdentity(), kept, summary), summary };
+  }
+
+  /**
+   * Whether a flagged page's re-read may carry the picture of the page: the setting on; the document a one-page PNG
+   * or JPEG within the image limits and upright (pageImageFor); the re-read model on the list of known image tiers;
+   * and, when OCR_AI_IMAGE_MASKED_PAGES is 'text_only', no number hidden in the page's text (the picture would
+   * show it; the default 'send' allows it).
+   */
+  private imageDecision(state: PageState, input: ReadingInput): PageImageDecision {
+    if (this.config.OCR_AI_IMAGE_REREAD !== 'on') return { kind: 'skip', reason: 'image_reread_off' };
+    const decision = pageImageFor(input.document, state.page, input.pages.length);
+    if (decision.kind === 'image' && imageTierOf(this.config.OCR_AI_REREAD_MODEL) === null) {
+      return { kind: 'skip', reason: 'image_tier_unknown' };
+    }
+    if (decision.kind === 'image' && state.hasMaskedNumber && this.config.OCR_AI_IMAGE_MASKED_PAGES === 'text_only') {
+      return { kind: 'skip', reason: 'image_has_masked_number' };
+    }
+    return decision;
   }
 
   private summary(status: ReadingStatus, pages: readonly PaperPage[], items: readonly PaperItem[], dropped: number,
     droppedFirst: number, rereadPages: number[], rereadFailed: number, aiUsed: boolean, usage: TokenUsage,
     requests: number, refusals: number, pagesSent: number, masked: number, servedGeo: string | null,
-    failureCode: string | null, rereadAttempted = false, modelUsage: AiUsageRecord[] = []): ReadingSummary {
+    failureCode: string | null, rereadAttempted: boolean, modelUsage: AiUsageRecord[], passUsage: PassUsageRecord[],
+    imageRereadPages: number[], imageRereadSkipped: ImageRereadSkip[], imageRereadFailedPages: number[]): ReadingSummary {
     return {
       status,
       firstPassModel: aiUsed ? this.config.OCR_AI_FIRST_PASS_MODEL : null,
       rereadModel: aiUsed && rereadAttempted ? this.config.OCR_AI_REREAD_MODEL : null,
       inferenceGeo: aiUsed ? INFERENCE_GEO : null,
       servedInferenceGeo: servedGeo,
-      requests, refusals, pagesSent, rereadPages, rereadFailedPages: rereadFailed,
+      requests, refusals, pagesSent, rereadPages, rereadFailedPages: rereadFailed, imageRereadPages, imageRereadSkipped,
+      imageRereadFailedPages,
       droppedUngrounded: dropped, droppedUngroundedFirstPass: droppedFirst, itemCount: items.length,
       flaggedPages: pages.filter((page) => page.flagged).length, maskedNumbers: masked, failureCode, usage,
-      modelUsage,
+      modelUsage, passUsage,
     };
   }
 
@@ -278,6 +411,9 @@ export class PaperReadingService {
         itemCount: items.length,
         promptVersion: PROMPT_VERSION,
         schemaVersion: `${PAPER_READING_SCHEMA_VERSION}+${MODEL_SCHEMA_VERSION}`,
+        imageRereadPages: summary.imageRereadPages,
+        imageRereadSkipped: summary.imageRereadSkipped.map((skip) => ({ ...skip })),
+        imageRereadFailedPages: [...summary.imageRereadFailedPages],
       },
     };
   }
