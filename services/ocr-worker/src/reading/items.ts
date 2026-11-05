@@ -32,8 +32,8 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['unit_mismatch'], "The unit read isn't the one on the paper."],
   [['lines_not_together'], 'This was put together from separate parts of the page.'],
   [['status_not_active', 'status_unclear'], 'This may not be current (for example past, stopped or suspected).'],
-  [['status_not_written'], "The paper doesn't say whether this is current."],
   [['status_cue_on_line'], 'The paper has words that may change whether this is current.'],
+  [['status_not_written'], "The paper doesn't say whether this is current."],
   [['date_ambiguous'], 'The date could be read two ways (day/month or month/day).'],
   [['duplicate_source_span'], 'Another item was read from the same words; check nothing was missed.'],
   // Below the disagreements and status warnings: a second reading that read the same words differently, then a
@@ -842,10 +842,12 @@ function checkItem(raw: ModelItem, lines: readonly ReadLine[], lineIds: readonly
   }
   if (kind === 'medicine' || kind === 'diagnosis') {
     const status = (fields as { status: string }).status;
-    // A medicine whose status the paper doesn't give ('unknown') is not "not current": say the paper doesn't say.
-    if (kind === 'medicine' && status === 'unknown') add('status_not_written');
+    const cue = [...norm(source).matchAll(STATUS_CUES)].length > 0;
+    // A medicine read with no status ('unknown'): words on the line that may change whether it is current (such as
+    // "stopped" or "d/c") come first; only where there are none does the paper not say.
+    if (kind === 'medicine' && status === 'unknown') add(cue ? 'status_cue_on_line' : 'status_not_written');
     else if (!ACTIVE_STATUSES.has(status)) add('status_not_active');
-    else if ([...norm(source).matchAll(STATUS_CUES)].length > 0) add('status_cue_on_line');
+    else if (cue) add('status_cue_on_line');
   }
   let box = unionBox(lines.map((line) => line.box));
   if (box === null) { add('no_position'); box = { left: 0, top: 0, width: 1, height: 1 }; }

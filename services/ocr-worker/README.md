@@ -101,7 +101,9 @@ Each claimed job runs, in order:
    lines not together, inactive status (`status_not_active`: past, stopped,
    suspected, ruled out, history, family history), a medicine whose status
    the paper doesn't give (`status_not_written`: "The paper doesn't say
-   whether this is current."), status words, date not on the page or
+   whether this is current.", only where the line has no status words such
+   as "stopped" or "d/c", which give `status_cue_on_line` instead), status
+   words, date not on the page or
    ambiguous, low OCR confidence, handwriting) and one plain sentence for the
    check screen. An
    allergy's `severity` (`mild`, `moderate`, `severe`, `unknown` or `null`)

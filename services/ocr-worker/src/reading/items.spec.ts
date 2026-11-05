@@ -1395,6 +1395,22 @@ describe('a medicine whose status the paper does not give', () => {
     expect(read('current').checkReasons).not.toContain('status_not_written');
   });
 
+  it.each([['Amlodipine 5mg od - stopped'], ['Amlodipine 5mg od (d/c)']])(
+    'says the paper has status words, not that it says nothing, for an unknown status on "%s"', (text) => {
+      const item = checkPage({ page: 1, lines: readPage(1, [text]).lines, sourceSha256Hex: SOURCE_SHA,
+        readBy: 'first_pass', masker: createMasker(), answer: modelPage([modelItem({ kind: 'medicine', asWritten: text,
+          lineIds: ['p1-l1'], name: 'Amlodipine', strength: '5mg', frequency: 'od', status: 'unknown' })]) }).items[0]!;
+      expect(item.checkReasons).toContain('status_cue_on_line');
+      expect(item.checkReasons).not.toContain('status_not_written');
+      expect(item.checkReasons).not.toContain('status_not_active');
+      expect(item.checkReason).toBe('The paper has words that may change whether this is current.');
+    });
+
+  it('says the paper does not say on a cue-free line', () => {
+    const item = read('unknown');
+    expect(item.checkReasons).toEqual(['status_not_written']);
+  });
+
   it('keeps status_not_active for diagnoses that are suspected, ruled out, history or family history', () => {
     for (const status of ['suspected', 'ruled_out', 'history', 'family_history']) {
       const item = checkPage({ page: 1, lines: readPage(1, ['Dx: Malaria']).lines, sourceSha256Hex: SOURCE_SHA,
@@ -1408,7 +1424,9 @@ describe('a medicine whose status the paper does not give', () => {
   it('orders its sentence just below the not-current one', () => {
     expect(checkReasonSentence(['status_not_written', 'status_unclear']))
       .toBe('This may not be current (for example past, stopped or suspected).');
-    expect(checkReasonSentence(['status_not_written', 'status_cue_on_line', 'date_ambiguous']))
+    expect(checkReasonSentence(['status_not_written', 'status_cue_on_line']))
+      .toBe('The paper has words that may change whether this is current.');
+    expect(checkReasonSentence(['status_not_written', 'date_ambiguous']))
       .toBe("The paper doesn't say whether this is current.");
     expect(checkReasonSentence(['status_not_written', 'lines_not_together']))
       .toBe('This was put together from separate parts of the page.');
