@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { OcrWorkerConfig } from './config';
 import { paperReadingPayloadSchema } from './reading/contract';
 import { IMAGE_PROMPT_VERSION } from './reading/prompt';
-import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type ReadingOutcome } from './reading/reader';
+import { PaperReadingService, ReadingInterruptedError, ReadingUnavailableError, type PassUsageRecord, type ReadingOutcome } from './reading/reader';
 import { DocumentTooManyPagesFailure, SafeWorkerFailure, type AiUsageRecord, type ClaimedOcrJob, type CompletedExtraction,
   type DocumentReader, type TextReading, type VerifiedDocument, type WorkerOcrProvider, type WorkerRepository } from './types';
 
@@ -65,7 +65,7 @@ export class OcrWorker {
       const after = await this.repository.recordPages(job, Math.max(1, text.pageCount));
       const outcome = await this.readItems(job, text, document);
       // Before completion, so the job is still held; a failure to record never fails the job.
-      await this.recordAiUsage(job, outcome.summary.modelUsage);
+      await this.recordAiUsage(job, outcome.summary.modelUsage, outcome.summary.pagesSent, outcome.summary.passUsage);
       const completion = buildCompletion(text, outcome);
       const checked = paperReadingPayloadSchema.safeParse(completion.structuredPayload);
       if (!checked.success) {
@@ -151,8 +151,23 @@ export class OcrWorker {
     return outcome;
   }
 
-  /** One ocr.record_worker_ai_usage per model used; counts only. A failure is logged with a safe code. */
-  private async recordAiUsage(job: ClaimedOcrJob, usage: readonly AiUsageRecord[]): Promise<void> {
+  /**
+   * One ocr.record_worker_ai_usage per model used; counts only. A failure is logged with a safe code. The
+   * ocr.reading.usage log has one line per model and pass (first_pass, reread, image_reread) when the reading
+   * gives that split, and one per model otherwise (a reading stopped before it finished).
+   */
+  private async recordAiUsage(job: ClaimedOcrJob, usage: readonly AiUsageRecord[], pagesSent?: number,
+    passUsage?: readonly PassUsageRecord[]): Promise<void> {
+    // Counts only, never text: lets the cost per page, and per pass, be seen in the logs.
+    const logLines: ReadonlyArray<AiUsageRecord & { pass?: string }> = passUsage ?? usage;
+    for (const entry of logLines) {
+      if (entry.requests <= 0) continue;
+      this.log('info', 'ocr.reading.usage', { jobId: job.jobId, correlationId: job.correlationId,
+        attempt: job.attemptNo, model: entry.model, ...(entry.pass === undefined ? {} : { pass: entry.pass }),
+        requests: entry.requests, inputTokens: entry.inputTokens,
+        outputTokens: entry.outputTokens, cacheReadTokens: entry.cacheReadTokens,
+        cacheWriteTokens: entry.cacheWriteTokens, ...(pagesSent === undefined ? {} : { pagesSent }) });
+    }
     for (const entry of usage) {
       if (entry.requests <= 0) continue;
       try {

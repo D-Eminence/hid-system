@@ -256,6 +256,22 @@ describe('OcrWorker processing', () => {
       expect(repository.recordAiUsage).toHaveBeenCalledWith(job, { ...sonnet, model: 'claude-opus-5-5' });
     });
 
+    it('logs the token counts per model with the pages sent, and nothing else', async () => {
+      const { repository, reader, provider, reading } = mocks();
+      await new OcrWorker(config, repository, reader, provider, reading).processOne(job);
+      const usage = logs().map((line) => JSON.parse(line) as Record<string, unknown>)
+        .filter((line) => line.event === 'ocr.reading.usage');
+      expect(usage.map((line) => [line.pass, line.model])).toEqual([['first_pass', 'claude-sonnet-5-5'],
+        ['reread', 'claude-opus-5-5']]);
+      for (const line of usage) {
+        expect(line).toMatchObject({ jobId: job.jobId, correlationId: job.correlationId, attempt: job.attemptNo,
+          requests: 1, inputTokens: 1200, outputTokens: 400, cacheReadTokens: 3000, cacheWriteTokens: 0 });
+        expect(typeof line.pagesSent).toBe('number');
+        expect(Object.keys(line).sort()).toEqual(['attempt', 'cacheReadTokens', 'cacheWriteTokens', 'correlationId',
+          'event', 'inputTokens', 'jobId', 'level', 'model', 'outputTokens', 'pagesSent', 'pass', 'requests', 'timestamp'].sort());
+      }
+    });
+
     it('completes the job when recording the use fails, logging only a safe code', async () => {
       const { repository, reader, provider, reading } = mocks();
       repository.recordAiUsage.mockRejectedValue(Object.assign(new Error(`${SECRET_NAME} database detail`), { code: '42883' }));

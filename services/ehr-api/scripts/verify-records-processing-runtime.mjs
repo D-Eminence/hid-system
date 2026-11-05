@@ -579,8 +579,9 @@ try {
     step('with the grant OCR created and read the job and EHR passed the document; the chart, Lab and Pharmacy refused it');
 
     // ── Decision 34(1): the patient's approval of a direct-care request, or the Access PIN, also covers
-    // records processing for that staff member at that facility, for up to 24 hours from the grant's start
-    // and never past its end; the patient ends it by revoking the grant or turning the PIN off ──
+    // records processing for that staff member at that facility; since 0108 (D-a) for as long as the grant
+    // lasts, so the cover ends at the grant's expires_at; the patient ends it by revoking the grant or
+    // turning the PIN off ──
     const careAsked = expectStatus(await call(identity, doctor, 'POST', '/identity/access-requests',
       { hid: carePatient.hid, scope: 'read_records', reason: 'Synthetic consultation for the verifier', durationMinutes: 60 }),
     201, 'a direct-care request');
@@ -588,7 +589,7 @@ try {
       200, 'care approval');
     assert.equal((await listed(careCall)).find(item => item.accessRequestId === careAsked.accessRequestId).purpose,
       stage === 'old-identity' ? undefined : 'direct-care');
-    const coverEnd = async grantId => (await one(`select least(expires_at, starts_at + interval '24 hours') as until
+    const coverEnd = async grantId => (await one(`select expires_at as until
       from identity.consent_grants where id = $1`, [grantId])).until.toISOString();
     if (stage === 'old-identity') {
       // An Identity from before 0104 looks for a records-processing grant of its own, so it answers the cover as not

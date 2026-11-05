@@ -376,6 +376,24 @@ describe('PaperReadingService', () => {
       document?: { mediaType: string; bytes: Uint8Array }) => new PaperReadingService(reading, client)
       .read({ facilityId: FACILITY, sourceSha256Hex: SOURCE_SHA, pages, ...(document ? { document } : {}) }, signal());
 
+    it('splits the use by pass for the log, while the database records stay one per model', async () => {
+      const sameModel: ReadingConfig = { ...imageConfig, OCR_AI_FIRST_PASS_MODEL: 'claude-opus-5-5' };
+      const textClient = (): PageModelClient => ({ readPage: jest.fn(async (request) =>
+        ok(request.image ? pictureAnswer : textAnswer)) });
+      const pictured = await read(sameModel, textClient(), [hardPage], png);
+      expect(pictured.summary.modelUsage.map((entry) => [entry.model, entry.requests])).toEqual([['claude-opus-5-5', 2]]);
+      expect(pictured.summary.passUsage.map((entry) => [entry.pass, entry.model, entry.requests])).toEqual([
+        ['first_pass', 'claude-opus-5-5', 1], ['image_reread', 'claude-opus-5-5', 1]]);
+      const pdf = await read(sameModel, textClient(), [hardPage], { mediaType: 'application/pdf', bytes: png.bytes });
+      expect(pdf.summary.passUsage.map((entry) => [entry.pass, entry.requests])).toEqual([['first_pass', 1],
+        ['reread', 1]]);
+      // Each per-pass token sum adds up to the per-model record.
+      const total = (key: 'inputTokens' | 'outputTokens') =>
+        pictured.summary.passUsage.reduce((sum, entry) => sum + entry[key], 0);
+      expect(total('inputTokens')).toBe(pictured.summary.modelUsage[0]!.inputTokens);
+      expect(total('outputTokens')).toBe(pictured.summary.modelUsage[0]!.outputTokens);
+    });
+
     it('sends a flagged PNG or JPEG page with its picture: one re-read request only, with an image block, never on the first pass', async () => {
       for (const document of [png, { mediaType: 'image/jpeg', bytes: fixtureJpeg(1240, 1754) }]) {
         const { client, seen } = pictureClient();

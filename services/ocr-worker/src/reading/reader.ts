@@ -61,7 +61,15 @@ export interface ReadingSummary {
   usage: TokenUsage;
   /** The same use per model (requests and tokens), for ocr.record_worker_ai_usage; not stored in provenance. */
   modelUsage: AiUsageRecord[];
+  /**
+   * The same use per model and pass, for the ocr.reading.usage log only (both passes may use one model, so the
+   * per-model records cannot show what the re-reads cost); not stored in provenance or the database.
+   */
+  passUsage: PassUsageRecord[];
 }
+
+export type ReadingPass = 'first_pass' | 'reread' | 'image_reread';
+export interface PassUsageRecord extends AiUsageRecord { pass: ReadingPass }
 
 export interface ReadingOutcome { payload: PaperReadingPayload; summary: ReadingSummary }
 
@@ -84,19 +92,30 @@ export class ReadingInterruptedError extends Error {
 }
 
 /** Per-model totals of what the AI step used, in the order the models were first asked. */
+function addRecord(entry: AiUsageRecord, attempts: number, usage: TokenUsage): void {
+  entry.requests += attempts;
+  entry.inputTokens += usage.inputTokens;
+  entry.outputTokens += usage.outputTokens;
+  entry.cacheReadTokens += usage.cacheReadInputTokens;
+  entry.cacheWriteTokens += usage.cacheCreationInputTokens;
+}
+
 class ModelUsageTally {
   private readonly byModel = new Map<string, AiUsageRecord>();
-  add(model: string, attempts: number, usage: TokenUsage): void {
+  private readonly byPass = new Map<string, PassUsageRecord>();
+  add(model: string, pass: ReadingPass, attempts: number, usage: TokenUsage): void {
     const entry = this.byModel.get(model) ?? { model, requests: 0, inputTokens: 0, outputTokens: 0,
       cacheReadTokens: 0, cacheWriteTokens: 0 };
-    entry.requests += attempts;
-    entry.inputTokens += usage.inputTokens;
-    entry.outputTokens += usage.outputTokens;
-    entry.cacheReadTokens += usage.cacheReadInputTokens;
-    entry.cacheWriteTokens += usage.cacheCreationInputTokens;
+    addRecord(entry, attempts, usage);
     this.byModel.set(model, entry);
+    const key = `${pass}\u0000${model}`;
+    const perPass = this.byPass.get(key) ?? { model, pass, requests: 0, inputTokens: 0, outputTokens: 0,
+      cacheReadTokens: 0, cacheWriteTokens: 0 };
+    addRecord(perPass, attempts, usage);
+    this.byPass.set(key, perPass);
   }
   list(): AiUsageRecord[] { return [...this.byModel.values()].map((entry) => ({ ...entry })); }
+  listByPass(): PassUsageRecord[] { return [...this.byPass.values()].map((entry) => ({ ...entry })); }
 }
 
 interface PageState {
@@ -141,7 +160,7 @@ export class PaperReadingService {
     const pages = input.pages.map((page) => lineOnlyPage(page));
     const aiUsed = status === 'ai_failed';
     const summary = this.summary(status, pages, [], 0, 0, [], 0, aiUsed, usage, 0, 0, 0, 0, null, failureCode,
-      false, modelUsage.map((entry) => ({ ...entry })), [], [], []);
+      false, modelUsage.map((entry) => ({ ...entry })), [], [], [], []);
     return { payload: this.payload(pages, blankIdentity(), [], summary), summary };
   }
 
@@ -165,7 +184,8 @@ export class PaperReadingService {
       return { page: page.page, masker, lines, hasMaskedNumber: masker.count > 0, first: null, firstCheck: null,
         final: null, declined: false, failed: false, reread: 'none', fromImage: false };
     });
-    const ask = async (state: PageState, model: string, effort: Effort, image?: PageImage) => {
+    const ask = async (state: PageState, model: string, effort: Effort, image?: PageImage,
+      pass: ReadingPass = image ? 'image_reread' : 'reread') => {
       let answer: PageAnswer;
       try {
         answer = await client.readPage({ model, effort, page: state.page, lines: state.lines,
@@ -178,13 +198,13 @@ export class PaperReadingService {
           const spent: AiCallUse = error;
           requests += spent.attempts;
           addUsage(usage, spent.usage);
-          tally.add(model, spent.attempts, spent.usage);
+          tally.add(model, pass, spent.attempts, spent.usage);
         }
         throw error;
       }
       requests += answer.attempts;
       addUsage(usage, answer.usage);
-      tally.add(model, answer.attempts, answer.usage);
+      tally.add(model, pass, answer.attempts, answer.usage);
       if (answer.kind === 'refused') refusals += 1;
       if (answer.kind === 'answer' && answer.servedInferenceGeo) servedGeo = answer.servedInferenceGeo;
       return answer;
@@ -195,7 +215,8 @@ export class PaperReadingService {
     // after a failure no further page starts, and the pages already asked are awaited so their use counts.
     try {
       await forEachBounded(states, pageConcurrency, async (state) => {
-        state.first = await ask(state, this.config.OCR_AI_FIRST_PASS_MODEL, this.config.OCR_AI_FIRST_PASS_EFFORT);
+        state.first = await ask(state, this.config.OCR_AI_FIRST_PASS_MODEL, this.config.OCR_AI_FIRST_PASS_EFFORT,
+          undefined, 'first_pass');
         if (state.first.kind === 'answer') {
           state.firstCheck = checkPage({ page: state.page, lines: state.lines, answer: state.first.answer,
             sourceSha256Hex: input.sourceSha256Hex, readBy: 'first_pass', masker: state.masker });
@@ -333,6 +354,7 @@ export class PaperReadingService {
     const summary = this.summary(status, pages, kept, dropped, droppedFirst, rereadPages,
       states.filter((state) => state.reread === 'failed').length, true, usage, requests, refusals, states.length,
       states.reduce((sum, state) => sum + state.masker.count, 0), servedGeo, null, rereadAttempted, tally.list(),
+      tally.listByPass(),
       imageRereadPages, [...skipped].sort((a, b) => a.page - b.page), [...imageFailed].sort((a, b) => a - b));
     return { payload: this.payload(pages, status === 'read' ? identity : blankIdentity(), kept, summary), summary };
   }
@@ -358,7 +380,7 @@ export class PaperReadingService {
   private summary(status: ReadingStatus, pages: readonly PaperPage[], items: readonly PaperItem[], dropped: number,
     droppedFirst: number, rereadPages: number[], rereadFailed: number, aiUsed: boolean, usage: TokenUsage,
     requests: number, refusals: number, pagesSent: number, masked: number, servedGeo: string | null,
-    failureCode: string | null, rereadAttempted: boolean, modelUsage: AiUsageRecord[],
+    failureCode: string | null, rereadAttempted: boolean, modelUsage: AiUsageRecord[], passUsage: PassUsageRecord[],
     imageRereadPages: number[], imageRereadSkipped: ImageRereadSkip[], imageRereadFailedPages: number[]): ReadingSummary {
     return {
       status,
@@ -370,7 +392,7 @@ export class PaperReadingService {
       imageRereadFailedPages,
       droppedUngrounded: dropped, droppedUngroundedFirstPass: droppedFirst, itemCount: items.length,
       flaggedPages: pages.filter((page) => page.flagged).length, maskedNumbers: masked, failureCode, usage,
-      modelUsage,
+      modelUsage, passUsage,
     };
   }
 
