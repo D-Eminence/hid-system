@@ -92,7 +92,7 @@ describe('checkPage reasons', () => {
     const tab = readPage(1, ['Tab Amlodipine 5mg']);
     expect(check(tab, modelPage([modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg', lineIds: ['p1-l1'],
       status: 'new', name: 'Amlodipine', strength: '5mg', route: 'oral' })])).items[0]!.checkReason)
-      .toBe("How it is given (for example IV or by mouth) isn't clearly written on the paper.");
+      .toBe("The route read (for example IV or by mouth) isn't on the paper.");
   });
 
   it('says the handwriting was hard to read before a route the text read does not show', () => {
@@ -103,6 +103,24 @@ describe('checkPage reasons', () => {
     expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(
       ['route_not_on_paper', 'low_ocr_confidence_handwritten']));
     expect(result.items[0]!.checkReason).toBe('The handwriting was hard to read.');
+  });
+
+  it('still says a stopped medicine may not be current, even on a hard-to-read handwritten line', () => {
+    const page = readPage(1, [['Warfarin 5mg od stopped', { handwritten: true, confidence: 0.5 }]]);
+    const result = check(page, modelPage([modelItem({ kind: 'medicine', asWritten: 'Warfarin 5mg od stopped',
+      lineIds: ['p1-l1'], name: 'Warfarin', strength: '5mg', frequency: 'od', status: 'stopped' })]));
+    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(
+      ['status_not_active', 'low_ocr_confidence_handwritten']));
+    expect(result.items[0]!.checkReason).toBe('This may not be current (for example past, stopped or suspected).');
+  });
+
+  it('still says a route that disagrees with the paper first, even on a hard-to-read handwritten line', () => {
+    const page = readPage(1, [['Ceftriaxone 1g IV daily', { handwritten: true, confidence: 0.5 }]]);
+    const result = check(page, modelPage([modelItem({ kind: 'medicine', asWritten: 'Ceftriaxone 1g IV daily',
+      lineIds: ['p1-l1'], name: 'Ceftriaxone', strength: '1g', frequency: 'daily', route: 'oral', status: 'new' })]));
+    expect(result.items[0]!.checkReasons).toEqual(expect.arrayContaining(
+      ['route_mismatch', 'low_ocr_confidence_handwritten']));
+    expect(result.items[0]!.checkReason).toBe("How it is given doesn't match the paper.");
   });
 
   it('still says a dose that disagrees with the paper first, even on a hard-to-read handwritten line', () => {
