@@ -7,7 +7,7 @@ import {
   PAPER_READING_CONTRACT, PAPER_READING_SCHEMA_VERSION, type FlagReason, type ImageRereadSkipReason, type PaperIdentity,
   type PaperItem, type PaperPage, type PaperReadingPayload, type ReadingStatus,
 } from './contract';
-import { blankIdentity, checkPage, mergeImageReread, REVIEW_BELOW, uniqueItemIds, type PageCheck } from './items';
+import { blankIdentity, checkPage, mergeReread, REVIEW_BELOW, uniqueItemIds, type PageCheck } from './items';
 import { createMasker, type Masker } from './masking';
 import { imageTierOf, pageImageFor, type PageImage, type PageImageDecision, type SourceDocument } from './page-image';
 import { MODEL_SCHEMA_VERSION, PROMPT_VERSION } from './prompt';
@@ -270,22 +270,24 @@ export class PaperReadingService {
         if (signal.aborted) throw error;
         if (!(error instanceof AiTransientError) && !(error instanceof AiRejectedError)) throw error;
       }
-      if (answer?.kind === 'answer' && fromImage && state.firstCheck) {
+      if (answer?.kind === 'answer' && state.firstCheck) {
+        // A flagged page the first pass answered, re-read from the picture or the text: merged, fail-safe, so no
+        // first-pass item without an exact twin in the second reading is lost.
         const read = checkPage({ page: state.page, lines: state.lines, answer: answer.answer,
-          sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker, fromImage: true });
+          sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker, fromImage });
         if (read.items.length === 0 && state.firstCheck.items.length > 0) {
-          // Nothing from the picture held to the page while the first pass had items: not a usable reading.
-          imageFailed.push(state.page);
+          // Nothing from the second reading held to the page while the first pass had items: not a usable reading.
+          if (fromImage) imageFailed.push(state.page);
           state.reread = 'failed';
           state.final = markRereadFailed(state.firstCheck);
           return;
         }
-        // The picture's items, and every first-pass item they do not cover (not_in_picture_reading).
-        state.final = mergeImageReread(state.firstCheck, read, state.lines);
+        state.final = mergeReread(state.firstCheck, read, state.lines, fromImage ? 'image' : 'text');
         state.reread = 'done';
-        state.fromImage = true;
+        state.fromImage = fromImage;
         return;
       }
+      // A page whose first pass failed or was declined: nothing to merge, the re-read stands.
       if (answer?.kind === 'answer') {
         state.final = checkPage({ page: state.page, lines: state.lines, answer: answer.answer,
           sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker });

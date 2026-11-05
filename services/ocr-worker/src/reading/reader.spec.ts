@@ -80,7 +80,7 @@ describe('PaperReadingService', () => {
     expect(paperReadingPayloadSchema.safeParse(payload).success).toBe(true);
   });
 
-  it('re-reads flagged pages only, and the re-read replaces that page\'s items', async () => {
+  it('re-reads flagged pages only, and merges the re-read with that page\'s first pass', async () => {
     const unsure = modelPage([modelItem({ kind: 'diagnosis', asWritten: 'Malaria', lineIds: ['p2-l1'],
       name: 'Malaria', status: 'confirmed' })], { pageUnsure: true });
     const reread = modelPage([modelItem({ kind: 'diagnosis', asWritten: 'Malaria', lineIds: ['p2-l1'],
@@ -92,9 +92,68 @@ describe('PaperReadingService', () => {
     expect(calls.map((call) => [call.page, call.model])).toEqual([[1, 'claude-sonnet-5-5'], [2, 'claude-sonnet-5-5'],
       [2, 'claude-opus-5-5']]);
     expect(payload.reading.rereadPages).toEqual([2]);
+    // The re-read reads Malaria as suspected where the first pass read it as confirmed: not an exact twin, so both
+    // are kept, each marked for comparison, and the first pass's also as not found by the second reading.
     expect(payload.items.map((item) => [item.page, item.readBy, item.fields])).toEqual([
       [1, 'first_pass', { name: 'Hypertension', status: 'confirmed' }],
-      [2, 'reread', { name: 'Malaria', status: 'suspected' }]]);
+      [2, 'reread', { name: 'Malaria', status: 'suspected' }],
+      [2, 'first_pass', { name: 'Malaria', status: 'confirmed' }]]);
+    expect(payload.items[1]!.checkReasons).toContain('differs_from_second_reading');
+    expect(payload.items[2]!.checkReasons).toEqual(expect.arrayContaining(['differs_from_second_reading',
+      'not_in_second_reading']));
+    // A re-read that reads the same item exactly replaces it.
+    const same = fakeClient((request) => request.page === 1 ? ok(clearPage)
+      : request.model === 'claude-opus-5-5' ? ok(modelPage(unsure.items)) : ok(unsure));
+    const replaced = await new PaperReadingService(config, same.client).read(input([CLEAN_PAGE, page2]), signal());
+    expect(replaced.payload.items.map((item) => [item.page, item.readBy])).toEqual([[1, 'first_pass'], [2, 'reread']]);
+  });
+
+  describe('a text re-read of a flagged page is merged with its first pass, never replacing it wholesale', () => {
+    const page = readPage(1, [['Amlodipine 5mg od', { handwritten: true, confidence: 0.6 }], 'Dx: Hypertension']);
+    const amlodipine = modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'],
+      name: 'Amlodipine', strength: '5mg', frequency: 'od', status: 'current' });
+    const hypertension = modelItem({ kind: 'diagnosis', asWritten: 'Hypertension', lineIds: ['p1-l2'],
+      name: 'Hypertension', status: 'confirmed' });
+    const run = async (second: ModelPage, document?: { mediaType: string; bytes: Uint8Array },
+      pages = [page]) => {
+      const { client, calls } = fakeClient((request) => request.model === 'claude-sonnet-5-5'
+        ? ok(modelPage([amlodipine, hypertension])) : ok(second));
+      const outcome = await new PaperReadingService({ ...config, OCR_AI_IMAGE_REREAD: 'on' }, client).read({
+        facilityId: FACILITY, sourceSha256Hex: SOURCE_SHA, pages, ...(document ? { document } : {}) }, signal());
+      return { ...outcome, calls };
+    };
+
+    it('keeps the item a PDF page\'s text re-read left out', async () => {
+      const { payload, summary } = await run(modelPage([hypertension]),
+        { mediaType: 'application/pdf', bytes: fixturePng(10, 10) });
+      expect(summary).toMatchObject({ rereadPages: [1], imageRereadSkipped: [{ page: 1, reason: 'image_not_available_pdf' }] });
+      expect(payload.items.map((item) => [item.readBy, item.asWritten])).toEqual([['first_pass', 'Amlodipine 5mg od'],
+        ['reread', 'Hypertension']]);
+      expect(payload.items[0]).toMatchObject({ confidence: 'check_carefully',
+        checkReasons: expect.arrayContaining(['not_in_second_reading']) });
+      expect(payload.items[0]!.checkReasons).not.toContain('not_in_picture_reading');
+      expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+    });
+
+    it('keeps it on the masked-number text fallback too', async () => {
+      const masked = readPage(1, [['Amlodipine 5mg od', { handwritten: true, confidence: 0.6 }],
+        'Dx: Hypertension tel 08030000000']);
+      const { payload, summary } = await run(modelPage([hypertension]), { mediaType: 'image/png',
+        bytes: fixturePng(1240, 1754) }, [masked]);
+      expect(summary.imageRereadSkipped).toEqual([{ page: 1, reason: 'image_has_masked_number' }]);
+      expect(payload.items.map((item) => item.asWritten)).toEqual(['Amlodipine 5mg od', 'Hypertension']);
+      expect(payload.items[0]!.checkReasons).toContain('not_in_second_reading');
+    });
+
+    it('counts a text re-read that keeps nothing as a failed re-read, and keeps the first pass', async () => {
+      const { payload, summary } = await run(modelPage([modelItem({ kind: 'medicine', asWritten: 'Not on this page',
+        lineIds: ['p1-l1'], name: 'Invented' })]));
+      expect(summary).toMatchObject({ rereadPages: [], rereadFailedPages: 1, imageRereadFailedPages: [] });
+      expect(payload.items.map((item) => [item.readBy, item.asWritten])).toEqual([['first_pass', 'Amlodipine 5mg od'],
+        ['first_pass', 'Hypertension']]);
+      expect(payload.items.every((item) => item.checkReasons.includes('reread_failed'))).toBe(true);
+      expect(payload.pages[0]!.flagReasons).toContain('ai_unsure');
+    });
   });
 
   it('keeps first-pass items as check_carefully with reread_failed when the re-read fails', async () => {

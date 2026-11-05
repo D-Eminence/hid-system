@@ -35,8 +35,11 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['date_not_on_page', 'prescription_detail_not_on_page'], "A date or name that was read isn't on the paper."],
   [['field_not_on_paper'], "Part of what was read isn't on the paper."],
   [['duplicate_source_span'], 'Another item was read from the same words; check nothing was missed.'],
-  // Below the disagreements and status warnings: a first-pass item the picture's reading did not find.
+  // Below the disagreements and status warnings: a second reading that read the same words differently, then a
+  // first-pass item the second reading (from the picture, or from the text) did not find.
+  [['differs_from_second_reading'], 'The second reading differs from this one; compare both with the paper.'],
   [['not_in_picture_reading'], 'The second reading, from the picture, did not find this; check it against the paper.'],
+  [['not_in_second_reading'], 'The second reading did not find this; check it against the paper.'],
   [['low_ocr_confidence_handwritten'], 'The handwriting was hard to read.'],
   [['low_ocr_confidence'], 'Part of this was hard to read.'],
   [['name_missing', 'substance_missing', 'measure_unclear'], "Part of this item couldn't be read."],
@@ -113,8 +116,9 @@ export const IMAGE_AREA_ALLOWANCE = 0.002;
 export const IMAGE_MAX_SIDE_OVERFLOW = 0.25;
 /**
  * Floors for short items, so a few pixels of padding around a short word are never a reason to drop it: the box may
- * run past its lines' edges by IMAGE_MIN_SIDE_OVERFLOW of the page width in total even where a quarter of their width
- * is less, and its area may always be that of its lines' box padded by IMAGE_MIN_PADDING of the page on every side.
+ * run past its lines' left edge and right edge by IMAGE_MIN_SIDE_OVERFLOW of the page width each (so 0.02 in all)
+ * even where a quarter of their width is less, and its area may always be that of its lines' box padded by
+ * IMAGE_MIN_PADDING of the page on every side.
  */
 export const IMAGE_MIN_SIDE_OVERFLOW = 0.01;
 export const IMAGE_MIN_PADDING = 0.005;
@@ -160,8 +164,8 @@ function anchored(asWritten: string, source: string): boolean {
  * vertically adjacent: the lines_not_together test, here a reason to drop); the box at least IMAGE_MIN_BOX on each
  * side; its area at most IMAGE_MAX_AREA_RATIO times the area of the box around its cited lines plus
  * IMAGE_AREA_ALLOWANCE of the page (or, if larger, that box padded by IMAGE_MIN_PADDING on every side); running
- * past that box's left and right edges by at most IMAGE_MAX_SIDE_OVERFLOW of its width in total (or, if larger,
- * IMAGE_MIN_SIDE_OVERFLOW of the page width); on every cited line that has a box (each measured on its own, not
+ * past that box's left and right edges by at most IMAGE_MAX_SIDE_OVERFLOW of its width in total (or by at most
+ * IMAGE_MIN_SIDE_OVERFLOW of the page width on each side); on every cited line that has a box (each measured on its own, not
  * as one box around them all); on no line it does not cite (by the same onLine test), with at most
  * IMAGE_UNCITED_SHARE of the line area it covers on lines it does not cite; and its asWritten anchored in the
  * cited lines' text. A box around the whole page that cites every line
@@ -178,8 +182,11 @@ function imagePlace(raw: ModelItem, cited: readonly ReadLine[], all: readonly Re
   const around = unionBox(citedBoxes)!;
   const padded = (around.width + 2 * IMAGE_MIN_PADDING) * (around.height + 2 * IMAGE_MIN_PADDING);
   if (area(box) > Math.max(IMAGE_MAX_AREA_RATIO * area(around) + IMAGE_AREA_ALLOWANCE, padded) + 1e-9) return null;
-  const overflow = Math.max(0, around.left - box.left) + Math.max(0, box.left + box.width - (around.left + around.width));
-  if (overflow > Math.max(IMAGE_MAX_SIDE_OVERFLOW * around.width, IMAGE_MIN_SIDE_OVERFLOW) + 1e-9) return null;
+  const leftOver = Math.max(0, around.left - box.left);
+  const rightOver = Math.max(0, box.left + box.width - (around.left + around.width));
+  const withinQuarter = leftOver + rightOver <= IMAGE_MAX_SIDE_OVERFLOW * around.width + 1e-9;
+  const withinFloor = leftOver <= IMAGE_MIN_SIDE_OVERFLOW + 1e-9 && rightOver <= IMAGE_MIN_SIDE_OVERFLOW + 1e-9;
+  if (!withinQuarter && !withinFloor) return null;
   const citedIds = new Set(cited.map((line) => line.id));
   // A box that also lies on a line it does not cite (by the same test as for its cited lines) is not this item's.
   if (all.some((line) => !citedIds.has(line.id) && line.box !== null && onLine(box, line.box))) return null;
@@ -321,23 +328,26 @@ function markReadFromImage(item: PaperItem, raw: ModelItem, source: string, plac
 }
 
 /**
- * The page's result after an image re-read that kept at least one item. Fail-safe: a first-pass item is removed only
- * when a kept image item is its exact twin (exactTwin: the same kind, a shared cited line and the same normalised
- * content), and each image item removes at most one first-pass item (one to one, in reading order). Every other
- * first-pass item is kept as check_carefully with 'not_in_picture_reading'; where an image item of its kind shares
- * one of its lines without being its twin, both get 'duplicate_source_span' so the person checking compares them.
- * Items are in reading order (page, first cited line; image items first on the same line) and their ids are made
- * unique again. Identity is the picture reading's where it cites a line, else the first pass's.
- * possible_missed_item is worked out again from the lines every kept item and the identity cite (and any
- * duplicate_source_span). droppedUngrounded stays the count of the picture reading's dropped items.
+ * A page's result after a re-read (from the picture or from the text) of a page whose first pass gave an answer,
+ * when the re-read kept at least one item. Fail-safe: a first-pass item is removed only when a kept second-reading
+ * item is its exact twin (exactTwin: the same kind, a shared cited line and every field the same, normalised), and
+ * each second-reading item removes at most one first-pass item (one to one, in reading order). Every other
+ * first-pass item is kept as check_carefully with 'not_in_picture_reading' (image) or 'not_in_second_reading'
+ * (text); where a second-reading item of its kind shares one of its lines without being its twin (a correction,
+ * such as "Amlodipine" for "Amlodipne"), both get 'differs_from_second_reading' so the person checking compares
+ * them. Items are in reading order (page, first cited line; second-reading items first on the same line) and their
+ * ids are made unique again. Identity is merged field by field (mergeIdentity). possible_missed_item is worked out
+ * again from the lines every kept item and the identity cite (and any duplicate_source_span within a reading;
+ * differs_from_second_reading does not set it). droppedUngrounded stays the second reading's dropped count.
  */
-export function mergeImageReread(first: PageCheck, image: PageCheck, lines: readonly ReadLine[]): PageCheck {
+export function mergeReread(first: PageCheck, second: PageCheck, lines: readonly ReadLine[],
+  from: 'image' | 'text'): PageCheck {
   const firstLine = (item: PaperItem) => Math.min(...item.lineIds.map(lineNumber));
   const inReadingOrder = (items: readonly PaperItem[]) => items.map((item, index) => ({ item, index }))
     .sort((a, b) => a.item.page - b.item.page || firstLine(a.item) - firstLine(b.item) || a.index - b.index)
     .map(({ item }) => item);
   const copy = (item: PaperItem): PaperItem => ({ ...item, checkReasons: [...item.checkReasons] } as PaperItem);
-  const read = inReadingOrder(image.items).map(copy);
+  const read = inReadingOrder(second.items).map(copy);
   const earlier = inReadingOrder(first.items).map(copy);
   const sharesLine = (a: PaperItem, b: PaperItem) => a.kind === b.kind && a.lineIds.some((id) => b.lineIds.includes(id));
   const removed = new Set<PaperItem>();
@@ -346,55 +356,68 @@ export function mergeImageReread(first: PageCheck, image: PageCheck, lines: read
       && exactTwin(item, candidate));
     if (twin) removed.add(twin);
   }
+  const missing = from === 'image' ? 'not_in_picture_reading' : 'not_in_second_reading';
   const kept = earlier.filter((item) => !removed.has(item));
   for (const item of kept) {
-    if (!item.checkReasons.includes('not_in_picture_reading')) item.checkReasons.push('not_in_picture_reading');
-    item.confidence = 'check_carefully';
-    item.checkReason = checkReasonSentence(item.checkReasons);
+    addReason(item, missing);
     for (const other of read.filter((candidate) => sharesLine(candidate, item))) {
-      markDuplicateSpan(item);
-      markDuplicateSpan(other);
+      addReason(item, 'differs_from_second_reading');
+      addReason(other, 'differs_from_second_reading');
     }
   }
   const merged = uniqueItemIds(inReadingOrder([...read, ...kept]));
-  const identity = image.identity.lineIds.length > 0 ? image.identity : first.identity;
+  const identity = mergeIdentity(first.identity, second.identity);
   const cited = new Set([...merged.flatMap((item) => item.lineIds), ...identity.lineIds]);
   const missed = merged.some((item) => item.checkReasons.includes('duplicate_source_span'))
     || suspiciousUncited(lines, cited).length > 0;
-  const flagReasons: FlagReason[] = [...image.flagReasons.filter((reason) => reason !== 'possible_missed_item'),
+  const flagReasons: FlagReason[] = [...second.flagReasons.filter((reason) => reason !== 'possible_missed_item'),
     ...(missed ? ['possible_missed_item' as const] : [])];
-  return { ...image, items: merged, identity, flagReasons };
+  return { ...second, items: merged, identity, flagReasons };
+}
+
+/** Add a check reason once; the item goes to a person, with the sentence of its first reason. */
+function addReason(item: PaperItem, code: string): void {
+  if (!item.checkReasons.includes(code)) item.checkReasons.push(code);
+  item.confidence = 'check_carefully';
+  item.checkReason = checkReasonSentence(item.checkReasons);
 }
 
 /**
- * Whether two items of the same kind say exactly the same thing, field by field after normalising (norm for words,
- * compact for amounts, so "5 mg" and "5mg" are equal; a missing field equals only a missing field): a medicine's
- * name, strength, frequency, route and status; a diagnosis's name and status; an allergy's substance and
- * noKnownAllergies; a lab result's test, value and unit; a vital's measure and value; a note's text.
+ * The identity after a re-read, field by field: each of the name, date of birth, folder number and sex as the
+ * second reading has it where it has one, else as the first pass had it; the cited lines of both, and the box
+ * around both boxes.
+ */
+export function mergeIdentity(first: PaperIdentity, second: PaperIdentity): PaperIdentity {
+  const merged: PaperIdentity = {
+    nameAsWritten: second.nameAsWritten ?? first.nameAsWritten,
+    dateOfBirthAsWritten: second.dateOfBirthAsWritten ?? first.dateOfBirthAsWritten,
+    folderNumberAsWritten: second.folderNumberAsWritten ?? first.folderNumberAsWritten,
+    sexAsWritten: second.sexAsWritten ?? first.sexAsWritten,
+    lineIds: [...new Set([...second.lineIds, ...first.lineIds])].sort((a, b) => lineNumber(a) - lineNumber(b)),
+    box: unionBox([first.box, second.box]),
+  };
+  return merged;
+}
+
+/**
+ * Whether two items of the same kind say exactly the same thing: every field the contract has for the kind, plus
+ * dateAsWritten and the prescription (prescriber and date), each normalised (compact: case and spacing, so "5 mg"
+ * and "5mg" are equal, masked-number placeholders blanked). A missing field equals only a missing field.
  */
 function exactTwin(a: PaperItem, b: PaperItem): boolean {
-  const word = (text: string | null) => (text === null ? '' : norm(withoutPlaceholders(text)));
-  const amount = (text: string | null) => (text === null ? '' : compact(withoutPlaceholders(text)));
-  if (a.kind === 'medicine' && b.kind === 'medicine') {
-    return word(a.fields.name) === word(b.fields.name) && amount(a.fields.strength) === amount(b.fields.strength)
-      && word(a.fields.frequency) === word(b.fields.frequency) && word(a.fields.route) === word(b.fields.route)
-      && a.fields.status === b.fields.status;
-  }
-  if (a.kind === 'diagnosis' && b.kind === 'diagnosis') {
-    return word(a.fields.name) === word(b.fields.name) && a.fields.status === b.fields.status;
-  }
-  if (a.kind === 'allergy' && b.kind === 'allergy') {
-    return word(a.fields.substance) === word(b.fields.substance) && a.fields.noKnownAllergies === b.fields.noKnownAllergies;
-  }
-  if (a.kind === 'lab_result' && b.kind === 'lab_result') {
-    return word(a.fields.test) === word(b.fields.test) && amount(a.fields.value) === amount(b.fields.value)
-      && amount(a.fields.unit) === amount(b.fields.unit);
-  }
-  if (a.kind === 'vital' && b.kind === 'vital') {
-    return a.fields.measure === b.fields.measure && amount(a.fields.value) === amount(b.fields.value);
-  }
-  if (a.kind === 'note' && b.kind === 'note') return word(a.fields.text) === word(b.fields.text);
-  return false;
+  if (a.kind !== b.kind) return false;
+  const same = (x: unknown, y: unknown): boolean => {
+    if (x === null || y === null || x === undefined || y === undefined) return (x ?? null) === (y ?? null);
+    if (typeof x === 'string' && typeof y === 'string') {
+      return compact(withoutPlaceholders(x)) === compact(withoutPlaceholders(y));
+    }
+    if (typeof x === 'object' && typeof y === 'object') {
+      const keys = new Set([...Object.keys(x), ...Object.keys(y)]);
+      return [...keys].every((key) => same((x as Record<string, unknown>)[key], (y as Record<string, unknown>)[key]));
+    }
+    return x === y;
+  };
+  return same(a.fields, b.fields) && same(a.dateAsWritten, b.dateAsWritten) && same(a.prescription, b.prescription);
 }
 
 function markDuplicateSpan(item: PaperItem): void {

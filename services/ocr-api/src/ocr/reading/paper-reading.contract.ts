@@ -121,8 +121,8 @@ export const readingSchema = z.strictObject({
   rereadPages: z.array(z.number().int().min(1)),
   /**
    * Items dropped because they did not hold to the page, summed over pages, from each page's final reading. For a
-   * page re-read from its picture this counts the picture reading's dropped items, including any whose content a
-   * kept first-pass item still carries (not_in_picture_reading).
+   * re-read page this counts the re-read's dropped items, including any whose content a kept first-pass item still
+   * carries (not_in_picture_reading or not_in_second_reading).
    */
   droppedUngrounded: z.number().int().min(0),
   itemCount: z.number().int().min(0),

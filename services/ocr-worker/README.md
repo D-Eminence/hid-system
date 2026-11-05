@@ -121,7 +121,41 @@ Each claimed job runs, in order:
    - An unflagged page the first pass read is not re-read.
 
    If the re-read fails, the first-pass items are kept as `check_carefully`
-   with `reread_failed` and the page is flagged `ai_unsure`. `PROMPT_VERSION`
+   with `reread_failed` and the page is flagged `ai_unsure`.
+
+   **Merge with the first pass.** For every re-read (from the picture or
+   from the text) of a page whose first pass gave an answer, the result is
+   merged with the first pass, fail-safe, never replacing it wholesale. If
+   the re-read keeps no item while the first pass had items, it counts as a
+   failed re-read (in `rereadFailedPages`, and for an image re-read also in
+   `imageRereadFailedPages`) and the first-pass items stay, marked
+   `reread_failed`; if the first pass had no items either, the re-read's
+   (empty) result stands. Otherwise the re-read's items are kept, and a
+   first-pass item is removed only when a kept re-read item is its exact
+   twin: the same kind, a shared cited line, and every field the contract has
+   for the kind equal after normalising (case, spacing, and "5 mg" = "5mg"),
+   plus `dateAsWritten` and the prescription (prescriber and date); a missing
+   field equals only a missing field. Each re-read item removes at most one
+   first-pass item, in reading order. Every other first-pass item is kept,
+   with `readBy: "first_pass"`, as `check_carefully` with
+   `not_in_picture_reading` ("The second reading, from the picture, did not
+   find this; check it against the paper.") after an image re-read or
+   `not_in_second_reading` ("The second reading did not find this; check it
+   against the paper.") after a text re-read. Where a re-read item of its kind
+   shares one of its lines without being its twin (a second medicine on the
+   line, a field left out, or a name read differently, such as "Amlodipine"
+   for "Amlodipne"), both get `differs_from_second_reading` ("The second
+   reading differs from this one; compare both with the paper."), shown below
+   any real disagreement and above the not-found sentences; it does not set
+   `possible_missed_item`. Items are in reading order and their ids made
+   unique again with the usual suffixes. The identity is merged field by
+   field (the re-read's name, date of birth, folder number and sex where it
+   has them, else the first pass's; the lines of both, and the box around
+   both). `possible_missed_item` is worked out again from the lines all kept
+   items and the identity cite; `droppedUngrounded` for the page stays the
+   count of the re-read's dropped items, including any whose content a kept
+   first-pass item still carries. A page whose first pass failed or was
+   declined has nothing to merge: its re-read stands. `PROMPT_VERSION`
    is `hid-paper-reading-prompt-3` for this routing (the prompt text and
    request bodies are unchanged from version 2; the label is only recorded),
    so `ocr-api` never reuses a reading made under the older routing.
@@ -173,8 +207,8 @@ Each claimed job runs, in order:
    most 2 times the area of the box around its cited lines plus 0.002 of the
    page, or that box padded by 0.005 of the page on every side if larger, and
    running past that box's left and right edges by at most a quarter of its
-   width in total, or 0.01 of the page width if larger, so a few pixels of
-   padding around a short word are allowed) lies on every cited line that has a box, each line on its own (over
+   width in total, or by up to 0.01 of the page width on each side (0.02 in
+   all), so a few pixels of padding around a short word are allowed) lies on every cited line that has a box, each line on its own (over
    half the line's height and half the narrower width), lies on no line it
    does not cite by that same test, with at most half of the line area it
    covers on lines it does not cite, and its `asWritten` shares a word of three letters or more,
@@ -189,31 +223,6 @@ Each claimed job runs, in order:
    against the paper.", shown unless its own fields disagree with what it read
    or a number is not in the text read), `readBy: "reread"`, and its stored box
    is the model's box clipped to the page.
-
-   The page's result after an image re-read: if no item read from the picture
-   is kept while the first pass had items, the image re-read counts as failed
-   (`imageRereadFailedPages`) and the first-pass items stay, marked
-   `reread_failed`; if the first pass had no items either, the picture's
-   (empty) result stands. Otherwise the items read from the picture are kept,
-   and a first-pass item is removed only when a kept picture item is its
-   exact twin: the same kind, a shared cited line and the same normalised
-   content (medicine: name, strength, frequency, route and status; diagnosis:
-   name and status; allergy: substance and no-known-allergies; lab result:
-   test, value and unit; vital: measure and value; note: text), each picture
-   item removing at most one first-pass item, in reading order. Every other
-   first-pass item is kept; where a picture item of its kind shares one of
-   its lines without being its twin (a second medicine on the line, or a name
-   the picture reads differently, such as "Amlodipine" for "Amlodipne"), both
-   get `duplicate_source_span` so the person checking compares them. A kept
-   first-pass item keeps
-   `readBy: "first_pass"`, becomes `check_carefully` and gets
-   `not_in_picture_reading` ("The second reading, from the picture, did not
-   find this; check it against the paper.", shown below any disagreement or
-   status warning). Items are in reading order and their ids made unique again
-   with the usual suffixes. `possible_missed_item` is worked out again from the
-   lines all kept items and the identity cite; `droppedUngrounded` for the page
-   stays the count of the picture reading's dropped items, including any whose
-   content a kept first-pass item still carries.
 
    Scope (v1): PNG and JPEG only. PDF and TIFF pages get the text re-read
    (`image_not_available_pdf`, `image_not_available_tiff`). A JPEG whose EXIF

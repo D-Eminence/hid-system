@@ -1,4 +1,4 @@
-import { checkPage, checkReasonSentence, itemId, mergeImageReread, uniqueItemIds } from './items';
+import { checkPage, checkReasonSentence, itemId, mergeIdentity, mergeReread, uniqueItemIds } from './items';
 import { createMasker } from './masking';
 import { CLINIC_PAGE, modelItem, modelPage, readPage, SOURCE_SHA } from './test-fixtures';
 import type { ModelPage } from './prompt';
@@ -839,10 +839,15 @@ describe('the not_in_picture_reading sentence', () => {
     expect(checkReasonSentence(['not_in_picture_reading', 'duplicate_source_span']))
       .toBe('Another item was read from the same words; check nothing was missed.');
     expect(checkReasonSentence(['handwritten', 'low_ocr_confidence_handwritten', 'not_in_picture_reading'])).toBe(sentence);
+    expect(checkReasonSentence(['not_in_second_reading'])).toBe('The second reading did not find this; check it against the paper.');
+    expect(checkReasonSentence(['not_in_second_reading', 'differs_from_second_reading', 'handwritten']))
+      .toBe('The second reading differs from this one; compare both with the paper.');
+    expect(checkReasonSentence(['differs_from_second_reading', 'strength_mismatch']))
+      .toBe("A dose on the paper doesn't match what was read.");
   });
 });
 
-describe('mergeImageReread', () => {
+describe('mergeReread', () => {
   it('works out possible_missed_item again from every kept item, so a line a kept first-pass item cites is not missed', () => {
     const page = readPage(1, [['Amlodipne 5rng od', { handwritten: true, confidence: 0.55 }], 'Dx: Hypertension']);
     const base = { page: 1, lines: page.lines, sourceSha256Hex: SOURCE_SHA, masker: createMasker() };
@@ -853,7 +858,7 @@ describe('mergeImageReread', () => {
       box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 } })]) });
     // The picture reading alone leaves "Dx: Hypertension" uncited.
     expect(image.flagReasons).toContain('possible_missed_item');
-    const merged = mergeImageReread(first, image, page.lines);
+    const merged = mergeReread(first, image, page.lines, 'image');
     expect(merged.items.map((item) => item.kind)).toEqual(['medicine', 'diagnosis']);
     expect(merged.flagReasons).not.toContain('possible_missed_item');
     expect(merged.flagReasons).toContain('handwriting');
@@ -861,7 +866,7 @@ describe('mergeImageReread', () => {
   });
 });
 
-describe('mergeImageReread keeps every first-pass item that is not an exact twin of a picture item', () => {
+describe('mergeReread keeps every first-pass item that is not an exact twin of a picture item', () => {
   const onLine2 = { left: 0.12, top: 0.1, width: 0.3, height: 0.02 };
   type Raw = Parameters<typeof modelItem>[0];
   function merge(text: string, firstItems: Raw[], pictureItems: Raw[]) {
@@ -873,7 +878,7 @@ describe('mergeImageReread keeps every first-pass item that is not an exact twin
       modelItem({ lineIds: ['p1-l2'], box: onLine2, ...item }))) });
     expect(first.items).toHaveLength(new Set(firstItems.map((item) => item.asWritten)).size);
     expect(image.items).toHaveLength(pictureItems.length);
-    return mergeImageReread(first, image, page.lines);
+    return mergeReread(first, image, page.lines, 'image');
   }
   const shape = (items: readonly { kind: string; readBy: string; asWritten: string }[]) =>
     items.map((item) => [item.readBy, item.asWritten]);
@@ -900,17 +905,20 @@ describe('mergeImageReread keeps every first-pass item that is not an exact twin
     const merged = merge(text, [one, two], [one]);
     // The exact twin is replaced by the picture's item; the second stays, and both on the line are to be compared.
     expect(shape(merged.items)).toEqual([['reread', one.asWritten], ['first_pass', two.asWritten]]);
-    expect(merged.items[1]!.checkReasons).toEqual(expect.arrayContaining(['not_in_picture_reading', 'duplicate_source_span']));
+    expect(merged.items[1]!.checkReasons).toEqual(expect.arrayContaining(['not_in_picture_reading',
+      'differs_from_second_reading']));
     expect(merged.items[1]!.confidence).toBe('check_carefully');
-    expect(merged.items[0]!.checkReasons).toContain('duplicate_source_span');
-    expect(merged.flagReasons).toContain('possible_missed_item');
+    expect(merged.items[0]!.checkReasons).toContain('differs_from_second_reading');
+    for (const item of merged.items) expect(item.checkReasons).not.toContain('duplicate_source_span');
+    // Two readings that differ are not a sign of a missed item.
+    expect(merged.flagReasons).not.toContain('possible_missed_item');
   });
 
   it('replaces an exact twin, amounts and spacing normalised, and keeps a near one', () => {
     const exact = merge('Amlodipine 5mg od', [med('Amlodipine 5mg od', 'Amlodipine', '5mg', 'od')],
       [med('Amlodipine 5mg od', 'AMLODIPINE', '5 mg', 'od')]);
     expect(shape(exact.items)).toEqual([['reread', 'Amlodipine 5mg od']]);
-    expect(exact.items[0]!.checkReasons).not.toContain('duplicate_source_span');
+    expect(exact.items[0]!.checkReasons).not.toContain('differs_from_second_reading');
     // The first probe's first item read with another strength is not a twin: both stay.
     const [text, one, two] = probes[0]!;
     const near = merge(text, [one, two], [{ ...one, strength: '1000mg' }]);
@@ -918,11 +926,37 @@ describe('mergeImageReread keeps every first-pass item that is not an exact twin
       ['first_pass', two.asWritten]]);
   });
 
+  it.each<[string, Raw, Raw]>([
+    ['Amoxicillin 500mg tds x 5/7', med('Amoxicillin 500mg tds x 5/7', 'Amoxicillin', '500mg', 'tds'),
+      med('Amoxicillin 500mg tds', 'Amoxicillin', '500mg', 'tds')],
+    ['Penicillin - anaphylaxis', { kind: 'allergy', asWritten: 'Penicillin - anaphylaxis', substance: 'Penicillin',
+      reaction: 'anaphylaxis', severity: 'severe' }, { kind: 'allergy', asWritten: 'Penicillin', substance: 'Penicillin' }],
+    ['Hb 7.2 g/dl L (12-16)', { ...lab('Hb 7.2 g/dl L (12-16)', 'Hb', '7.2', 'g/dl'), flag: 'L', referenceRange: '12-16' },
+      lab('Hb 7.2 g/dl', 'Hb', '7.2', 'g/dl')],
+  ])('keeps the fuller first-pass item on "%s" when the picture item leaves fields out', (text, full, less) => {
+    const merged = merge(text, [text.startsWith('Amoxicillin') ? { ...full, duration: '5/7' } : full], [less]);
+    expect(shape(merged.items)).toEqual([['reread', less.asWritten], ['first_pass', full.asWritten]]);
+    const kept = merged.items[1]!;
+    if (kept.kind === 'medicine') expect(kept.fields.duration).toBe('5/7');
+    if (kept.kind === 'allergy') expect(kept.fields).toMatchObject({ reaction: 'anaphylaxis', severity: 'severe' });
+    if (kept.kind === 'lab_result') expect(kept.fields).toMatchObject({ flag: 'L', referenceRange: '12-16' });
+    expect(kept.checkReasons).toEqual(expect.arrayContaining(['differs_from_second_reading', 'not_in_picture_reading']));
+  });
+
+  it('compares the date and the prescription too', () => {
+    const one = { ...med('Amlodipine 5mg od 03/04/2026', 'Amlodipine', '5mg', 'od'), dateAsWritten: '03/04/2026' };
+    const merged = merge('Amlodipine 5mg od 03/04/2026', [one], [{ ...one, dateAsWritten: '' }]);
+    expect(merged.items).toHaveLength(2);
+  });
+
   it('keeps both a misread name and the picture reading of it, both marked to compare', () => {
     const merged = merge('Amlodipne 5mg od', [med('Amlodipne 5mg od', 'Amlodipne', '5mg', 'od')],
       [med('Amlodipine 5mg od', 'Amlodipine', '5mg', 'od')]);
     expect(shape(merged.items)).toEqual([['reread', 'Amlodipine 5mg od'], ['first_pass', 'Amlodipne 5mg od']]);
-    for (const item of merged.items) expect(item.checkReasons).toContain('duplicate_source_span');
+    for (const item of merged.items) expect(item.checkReasons).toContain('differs_from_second_reading');
+    // Its sentence comes before the legibility and not-found ones.
+    expect(merged.items[1]!.checkReason).toBe('The second reading differs from this one; compare both with the paper.');
+    expect(merged.flagReasons).not.toContain('possible_missed_item');
     expect(merged.items[1]!.checkReasons).toContain('not_in_picture_reading');
   });
 
@@ -950,9 +984,38 @@ describe('placement floors for a short item', () => {
     expect(read({ left: 0.096, top: 0.29715, width: 0.038, height: 0.0177 }).items).toHaveLength(1);
   });
 
+  it('keeps a 0.02-wide line read with 8 px of padding on each side (0.01 of the page width allowed per side)', () => {
+    const narrow = readPage(1, [['Fe 200mg', { handwritten: true, confidence: 0.6,
+      box: { left: 0.1, top: 0.3, width: 0.02, height: 0.012 } }]]);
+    const pad = 8 / 1240;
+    const result = checkPage({ page: 1, lines: narrow.lines, sourceSha256Hex: SOURCE_SHA, readBy: 'reread',
+      masker: createMasker(), fromImage: true, answer: modelPage([modelItem({ kind: 'note', asWritten: 'Fe 200mg',
+        noteText: 'Fe 200mg', lineIds: ['p1-l1'], box: { left: 0.1 - pad, top: 0.3 - 5 / 1754, width: 0.02 + 2 * pad,
+          height: 0.012 + 10 / 1754 } })]) });
+    expect(result.items).toHaveLength(1);
+  });
+
   it('still drops a box twice as wide as the short line', () => {
     const result = read({ left: 0.085, top: 0.3, width: 0.06, height: 0.012 });
     expect(result.items).toEqual([]);
     expect(result.droppedUngrounded).toBe(1);
+  });
+});
+
+describe('mergeIdentity', () => {
+  it('takes each field from the second reading where it has one, else from the first, with both lines and boxes', () => {
+    const first = { nameAsWritten: 'Test Patient Adaeze Example', dateOfBirthAsWritten: '01/01/1990',
+      folderNumberAsWritten: null, sexAsWritten: 'F', lineIds: ['p1-l1'],
+      box: { left: 0.1, top: 0.05, width: 0.5, height: 0.02 } };
+    const second = { nameAsWritten: 'Test Patient Adaeze Exampel', dateOfBirthAsWritten: null,
+      folderNumberAsWritten: 'TEST-0001', sexAsWritten: null, lineIds: ['p1-l3'],
+      box: { left: 0.2, top: 0.15, width: 0.3, height: 0.02 } };
+    expect(mergeIdentity(first, second)).toEqual({ nameAsWritten: 'Test Patient Adaeze Exampel',
+      dateOfBirthAsWritten: '01/01/1990', folderNumberAsWritten: 'TEST-0001', sexAsWritten: 'F',
+      lineIds: ['p1-l1', 'p1-l3'], box: { left: 0.1, top: 0.05, width: 0.5, height: 0.12 } });
+    const blank = { nameAsWritten: null, dateOfBirthAsWritten: null, folderNumberAsWritten: null, sexAsWritten: null,
+      lineIds: [], box: null };
+    expect(mergeIdentity(first, blank)).toEqual(first);
+    expect(mergeIdentity(blank, blank)).toEqual(blank);
   });
 });
