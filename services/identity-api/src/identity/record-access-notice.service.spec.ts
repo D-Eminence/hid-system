@@ -80,4 +80,24 @@ describe('RecordAccessNoticeService (0095, D9)', () => {
     await expect(new IdentityService(provider as unknown as IdentityProvider, audit as unknown as AuditService)
       .authorize(patientId, 'read_records', 'direct-care', context)).resolves.toBe(allowed);
   });
+
+  it('IdentityService.precheck answers the decision without the grant, notes nothing and records only a precheck', async () => {
+    const provider = { authorize: jest.fn().mockResolvedValue(allowed), consentStatus: jest.fn() };
+    const audit = { record: jest.fn().mockResolvedValue(undefined) };
+    const hook = { afterAuthorization: jest.fn() };
+    const identity = new IdentityService(provider as unknown as IdentityProvider, audit as unknown as AuditService,
+      hook as unknown as RecordAccessNoticeService);
+    await expect(identity.precheck(patientId, 'read_records', 'direct-care', context)).resolves.toEqual({
+      allowed: true, patientId, facilityId: 'f1', membershipId: 'm1', scope: 'read_records', purpose: 'direct-care',
+      breakGlass: false });
+    expect(hook.afterAuthorization).not.toHaveBeenCalled();
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    expect(audit.record).toHaveBeenCalledWith(expect.objectContaining({ action: 'identity.authorization.precheck',
+      outcome: 'success', patientId, details: { scope: 'read_records', allowed: true } }));
+    expect(JSON.stringify(audit.record.mock.calls)).not.toContain('g1');
+    provider.authorize.mockResolvedValueOnce({ ...allowed, allowed: false, consentGrantId: undefined });
+    await expect(identity.precheck(patientId, 'read_records', 'direct-care', context)).resolves.toMatchObject({
+      allowed: false });
+    expect(hook.afterAuthorization).not.toHaveBeenCalled();
+  });
 });
