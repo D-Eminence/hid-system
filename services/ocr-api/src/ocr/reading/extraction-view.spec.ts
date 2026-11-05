@@ -36,9 +36,10 @@ describe('extraction view for the check screen', () => {
   it('reads the masked-number and orientation skip reasons and the failed image re-read pages, which stay optional', () => {
     const later = { ...v2Payload(), reading: { ...v2Payload().reading, imageRereadPages: [], imageRereadFailedPages: [1],
       imageRereadSkipped: [{ page: 1, reason: 'image_has_masked_number' },
-        { page: 2, reason: 'image_orientation_unsupported' }] } };
+        { page: 2, reason: 'image_orientation_unsupported' }, { page: 3, reason: 'image_tier_unknown' },
+        { page: 4, reason: 'image_refused' }] } };
     expect(readingView(parseStructuredPayload(later)).reading).toMatchObject({ imageRereadFailedPages: [1],
-      imageRereadSkipped: [{ page: 1, reason: 'image_has_masked_number' }, { page: 2, reason: 'image_orientation_unsupported' }] });
+      imageRereadSkipped: later.reading.imageRereadSkipped });
     expect(parseStructuredPayload({ ...later, reading: { ...later.reading, imageRereadFailedPages: [0] } }).contract)
       .toBeNull();
   });

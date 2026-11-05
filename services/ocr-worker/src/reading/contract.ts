@@ -32,13 +32,16 @@ export const READING_STATUSES = ['read', 'ai_off', 'ai_declined', 'ai_failed', '
  * 'not_single_page' (not page 1 of a one-page image), 'image_too_large' (over the Claude API image limits),
  * 'image_size_unknown' (the picture's size could not be read from its header), 'image_orientation_unsupported'
  * (a JPEG whose EXIF orientation is not 1, or unreadable, so the picture as seen would not match the line boxes),
- * 'image_rejected' (the API refused the request with the picture as an invalid request, so the page was re-read
- * from its text instead). 'not_hard_to_read' is no longer written (the page's flags now decide; owner decision
+ * 'image_tier_unknown' (the re-read model is not on the worker's list of models with a known image tier, so the
+ * size the model would see the picture at is not known), 'image_rejected' (the API refused the request with the
+ * picture as an invalid request), 'image_refused' (the model declined the request with the picture, which may be
+ * about the picture); after those two the page was re-read from its text instead. 'not_hard_to_read' is no longer written (the page's flags now decide; owner decision
  * 2026-11-05) and stays so payloads written before still read.
  */
 export const IMAGE_REREAD_SKIP_REASONS = ['image_reread_off', 'not_hard_to_read', 'image_not_available_pdf',
   'image_not_available_tiff', 'image_not_available_type', 'image_not_given', 'not_single_page', 'image_too_large',
-  'image_size_unknown', 'image_rejected', 'image_has_masked_number', 'image_orientation_unsupported'] as const;
+  'image_size_unknown', 'image_rejected', 'image_has_masked_number', 'image_orientation_unsupported',
+  'image_tier_unknown', 'image_refused'] as const;
 
 const fraction = z.number().min(0).max(1);
 export const boxSchema = z.strictObject({ left: fraction, top: fraction, width: fraction, height: fraction });
@@ -127,9 +130,10 @@ export const readingSchema = z.strictObject({
   imageRereadSkipped: z.array(z.strictObject({ page: z.number().int().min(1),
     reason: z.enum(IMAGE_REREAD_SKIP_REASONS) })).optional(),
   /**
-   * Pages sent with the picture whose image re-read gave no usable answer (declined, cut off or malformed, a
-   * rejection that is not the picture's, or unavailable after retries); their first-pass items stay, marked
-   * reread_failed. A picture rejected as an invalid request is in imageRereadSkipped ('image_rejected') instead.
+   * Pages sent with the picture whose image re-read gave no usable answer (cut off or malformed, a rejection that
+   * is not the picture's, unavailable after retries, or no item kept where the first pass had items); their
+   * first-pass items stay, marked reread_failed. A picture rejected as an invalid request or declined is in
+   * imageRereadSkipped ('image_rejected', 'image_refused') instead, and the page was re-read from its text.
    */
   imageRereadFailedPages: z.array(z.number().int().min(1)).optional(),
 });

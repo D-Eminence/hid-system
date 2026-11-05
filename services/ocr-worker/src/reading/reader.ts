@@ -7,9 +7,9 @@ import {
   PAPER_READING_CONTRACT, PAPER_READING_SCHEMA_VERSION, type FlagReason, type ImageRereadSkipReason, type PaperIdentity,
   type PaperItem, type PaperPage, type PaperReadingPayload, type ReadingStatus,
 } from './contract';
-import { blankIdentity, checkPage, REVIEW_BELOW, uniqueItemIds, type PageCheck } from './items';
+import { blankIdentity, checkPage, mergeImageReread, REVIEW_BELOW, uniqueItemIds, type PageCheck } from './items';
 import { createMasker, type Masker } from './masking';
-import { pageImageFor, type PageImage, type PageImageDecision, type SourceDocument } from './page-image';
+import { imageTierOf, pageImageFor, type PageImage, type PageImageDecision, type SourceDocument } from './page-image';
 import { MODEL_SCHEMA_VERSION, PROMPT_VERSION } from './prompt';
 
 export type ReadingConfig = Pick<OcrWorkerConfig, 'OCR_AI_MODE' | 'OCR_AI_FACILITY_IDS' | 'OCR_AI_FIRST_PASS_MODEL'
@@ -47,7 +47,10 @@ export interface ReadingSummary {
   imageRereadPages: number[];
   /** Flagged pages that were re-read without the picture, and why. */
   imageRereadSkipped: ImageRereadSkip[];
-  /** Pages sent with the picture whose image re-read gave no usable answer (first-pass items kept, reread_failed). */
+  /**
+   * Pages sent with the picture whose image re-read gave no usable answer, or kept no item where the first pass had
+   * some (first-pass items kept, reread_failed).
+   */
   imageRereadFailedPages: number[];
   droppedUngrounded: number;
   droppedUngroundedFirstPass: number;
@@ -208,8 +211,10 @@ export class PaperReadingService {
     }
 
     // Re-read (owner decision 2026-11-05): pages the first pass failed on or declined get a text re-read; pages it
-    // flagged get the image re-read, or, where the picture cannot go, a text re-read, so no flagged page is left
-    // with one reading. Failed or declined pages first, then flagged pages in page order, up to the cap.
+    // flagged get the image re-read, or, where the picture cannot go (or the API rejects or the model declines
+    // it), a text re-read instead. Failed or declined pages first, then flagged pages in page order, up to
+    // OCR_AI_MAX_REREAD_PAGES: a flagged page past the cap is not re-read, and a re-read that itself fails leaves
+    // the page with its first reading (marked reread_failed).
     const failedFirst = states.filter((state) => state.first?.kind !== 'answer');
     const flagged = states.filter((state) => state.firstCheck !== null && state.firstCheck.flagReasons.length > 0);
     const candidates = [...failedFirst, ...flagged].slice(0, this.config.OCR_AI_MAX_REREAD_PAGES);
@@ -249,7 +254,14 @@ export class PaperReadingService {
               throw error;
             }
           }
-          if (fromImage && answer.kind !== 'answer') imageFailed.push(state.page);
+          if (fromImage && answer.kind === 'refused') {
+            // The decline may be about the picture: re-read the text instead, once.
+            skipped.push({ page: state.page, reason: 'image_refused' });
+            fromImage = false;
+            answer = await ask(state, rereadModel, rereadEffort);
+          } else if (fromImage && answer.kind !== 'answer') {
+            imageFailed.push(state.page);
+          }
         } else {
           if (decision !== null) skipped.push({ page: state.page, reason: decision.reason });
           answer = await ask(state, rereadModel, rereadEffort);
@@ -258,11 +270,26 @@ export class PaperReadingService {
         if (signal.aborted) throw error;
         if (!(error instanceof AiTransientError) && !(error instanceof AiRejectedError)) throw error;
       }
+      if (answer?.kind === 'answer' && fromImage && state.firstCheck) {
+        const read = checkPage({ page: state.page, lines: state.lines, answer: answer.answer,
+          sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker, fromImage: true });
+        if (read.items.length === 0 && state.firstCheck.items.length > 0) {
+          // Nothing from the picture held to the page while the first pass had items: not a usable reading.
+          imageFailed.push(state.page);
+          state.reread = 'failed';
+          state.final = markRereadFailed(state.firstCheck);
+          return;
+        }
+        // The picture's items, and every first-pass item they do not cover (not_in_picture_reading).
+        state.final = mergeImageReread(state.firstCheck, read, state.lines);
+        state.reread = 'done';
+        state.fromImage = true;
+        return;
+      }
       if (answer?.kind === 'answer') {
         state.final = checkPage({ page: state.page, lines: state.lines, answer: answer.answer,
-          sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker, fromImage });
+          sourceSha256Hex: input.sourceSha256Hex, readBy: 'reread', masker: state.masker });
         state.reread = 'done';
-        state.fromImage = fromImage;
         return;
       }
       state.reread = 'failed';
@@ -310,12 +337,16 @@ export class PaperReadingService {
 
   /**
    * Whether a flagged page's re-read may carry the picture of the page: the setting on; the document a one-page PNG
-   * or JPEG within the image limits and upright (pageImageFor); and no number hidden in the page's text, which the
-   * picture would show, unless OCR_AI_IMAGE_MASKED_PAGES is 'send'.
+   * or JPEG within the image limits and upright (pageImageFor); the re-read model on the list of known image tiers;
+   * and no number hidden in the page's text, which the picture would show, unless OCR_AI_IMAGE_MASKED_PAGES is
+   * 'send'.
    */
   private imageDecision(state: PageState, input: ReadingInput): PageImageDecision {
     if (this.config.OCR_AI_IMAGE_REREAD !== 'on') return { kind: 'skip', reason: 'image_reread_off' };
     const decision = pageImageFor(input.document, state.page, input.pages.length);
+    if (decision.kind === 'image' && imageTierOf(this.config.OCR_AI_REREAD_MODEL) === null) {
+      return { kind: 'skip', reason: 'image_tier_unknown' };
+    }
     if (decision.kind === 'image' && state.hasMaskedNumber && this.config.OCR_AI_IMAGE_MASKED_PAGES !== 'send') {
       return { kind: 'skip', reason: 'image_has_masked_number' };
     }

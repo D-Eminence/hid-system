@@ -17,7 +17,7 @@ export interface PageLinesForModel { id: string; text: string; confidence: numbe
   box?: { left: number; top: number; width: number; height: number } | null }
 
 /**
- * One page for the model. `image` (a hard page's re-read only) adds the picture of the page: the user turn is then
+ * One page for the model. `image` (a flagged page's re-read only) adds the picture of the page: the user turn is then
  * [image, text], the text lists the lines with their boxes and the answer schema gives each item a box. Without it
  * the request is exactly the text-only request. The picture is never logged, stored or put in an error.
  */
@@ -120,7 +120,10 @@ export class ClaudePageClient implements PageModelClient {
   async readPage(request: PageRequest, signal: AbortSignal): Promise<PageAnswer> {
     const image = request.image;
     // The picture as the model sees it: the model's pixel coordinates are in this size (resized, unpadded).
-    const seen = image ? resizedSize(image.width, image.height, imageTierOf(request.model)) : null;
+    const tier = image ? imageTierOf(request.model) : null;
+    // The reader sends a picture only to a model of known tier ('image_tier_unknown' otherwise); never guess one.
+    if (image && tier === null) throw new Error('IMAGE_TIER_UNKNOWN');
+    const seen = image && tier ? resizedSize(image.width, image.height, tier) : null;
     const params: Anthropic.MessageCreateParamsNonStreaming = {
       model: request.model,
       max_tokens: this.config.OCR_AI_MAX_TOKENS,

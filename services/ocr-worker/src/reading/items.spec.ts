@@ -1,4 +1,4 @@
-import { checkPage, itemId, uniqueItemIds } from './items';
+import { checkPage, checkReasonSentence, itemId, uniqueItemIds } from './items';
 import { createMasker } from './masking';
 import { CLINIC_PAGE, modelItem, modelPage, readPage, SOURCE_SHA } from './test-fixtures';
 import type { ModelPage } from './prompt';
@@ -769,6 +769,28 @@ describe('checkPage for a page read from its picture (image re-read)', () => {
         .toEqual([]);
     });
 
+    it('drops an item citing one line whose box also lies on an uncited neighbour line', () => {
+      const vitals = readPage(1, [['BP 120/80', { box: { left: 0.1, top: 0.5, width: 0.3, height: 0.02 } }],
+        ['Pulse 72', { box: { left: 0.1, top: 0.525, width: 0.3, height: 0.02 } }]]);
+      const check = (box: { left: number; top: number; width: number; height: number }) => checkPage({ page: 1,
+        lines: vitals.lines, sourceSha256Hex: SOURCE_SHA, readBy: 'reread', masker: createMasker(), fromImage: true,
+        answer: modelPage([modelItem({ kind: 'note', asWritten: 'BP 120/80 Pulse 72', noteText: 'BP 120/80 Pulse 72',
+          lineIds: ['p1-l1'], box })]) });
+      // Over both lines (within the area limit): dropped, because it covers "Pulse 72", which it does not cite.
+      const both = check({ left: 0.1, top: 0.5, width: 0.3, height: 0.045 });
+      expect(both.items).toEqual([]);
+      expect(both.droppedUngrounded).toBe(1);
+      // On its own line only: kept.
+      expect(check({ left: 0.1, top: 0.5, width: 0.3, height: 0.02 }).items).toHaveLength(1);
+    });
+
+    it('pads a one-line item only in height: at most 2 x the line widened by 0.005 above and below', () => {
+      // Line 5: width 0.1, height 0.02, so the allowed area is 2 x 0.1 x 0.03 = 0.006.
+      expect(read(['p1-l5'], { left: 0.1, top: 0.48, width: 0.1, height: 0.059 }, 'BP 140/90').items).toHaveLength(1);
+      // 0.0062: over the limit (padding the width as well would have allowed 0.0066).
+      expect(read(['p1-l5'], { left: 0.1, top: 0.48, width: 0.1, height: 0.062 }, 'BP 140/90').items).toEqual([]);
+    });
+
     it('drops a box much larger than its cited line, and keeps one a little larger than a short line', () => {
       const large = read(['p1-l5'], { left: 0.05, top: 0.47, width: 0.5, height: 0.08 }, 'BP 140/90');
       expect(large.items).toEqual([]);
@@ -792,5 +814,18 @@ describe('checkPage for a page read from its picture (image re-read)', () => {
       lineIds: ['p1-l4'], box: { left: 0.1, top: 0.2, width: 0.3, height: 0.02 } })]));
     expect(result.items[0]!.checkReasons).toEqual(['read_from_image']);
     expect(result.rereadReasons).not.toContain('many_check_carefully');
+  });
+});
+
+describe('the not_in_picture_reading sentence', () => {
+  const sentence = 'The second reading, from the picture, did not find this; check it against the paper.';
+  it('comes after disagreements and status warnings, and before legibility and handwriting', () => {
+    expect(checkReasonSentence(['not_in_picture_reading'])).toBe(sentence);
+    expect(checkReasonSentence(['not_in_picture_reading', 'strength_mismatch'])).toBe("A dose on the paper doesn't match what was read.");
+    expect(checkReasonSentence(['not_in_picture_reading', 'status_not_active']))
+      .toBe('This may not be current (for example past, stopped or suspected).');
+    expect(checkReasonSentence(['not_in_picture_reading', 'duplicate_source_span']))
+      .toBe('Another item was read from the same words; check nothing was missed.');
+    expect(checkReasonSentence(['handwritten', 'low_ocr_confidence_handwritten', 'not_in_picture_reading'])).toBe(sentence);
   });
 });

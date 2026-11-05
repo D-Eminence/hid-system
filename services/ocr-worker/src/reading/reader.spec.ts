@@ -328,11 +328,17 @@ describe('PaperReadingService', () => {
         expect(summary.imageRereadPages).toEqual([1]);
         expect(summary.imageRereadSkipped).toEqual([]);
         expect(payload.reading).toMatchObject({ rereadPages: [1], imageRereadPages: [1], imageRereadSkipped: [] });
-        // The item on its lines is kept, read from the picture; the one placed elsewhere is dropped and counted.
-        expect(payload.items).toHaveLength(1);
+        // The item on its lines is kept, read from the picture; the one placed elsewhere is dropped and counted, and
+        // the first pass's word-for-word "Hypertension", which no picture item covers, is kept for checking.
+        expect(payload.items).toHaveLength(2);
         expect(payload.items[0]).toMatchObject({ readBy: 'reread', confidence: 'check_carefully',
           asWritten: 'Amlodipine 5mg od', box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 } });
         expect(payload.items[0]!.checkReasons).toContain('read_from_image');
+        expect(payload.items[1]).toMatchObject({ readBy: 'first_pass', kind: 'diagnosis', asWritten: 'Hypertension',
+          confidence: 'check_carefully', checkReasons: ['not_in_picture_reading'],
+          checkReason: 'The second reading, from the picture, did not find this; check it against the paper.' });
+        // The first pass's note on line 1 is covered by the medicine read there from the picture, and replaced.
+        expect(payload.items.some((item) => item.kind === 'note')).toBe(false);
         expect(payload.reading.droppedUngrounded).toBe(1);
       }
     });
@@ -366,8 +372,8 @@ describe('PaperReadingService', () => {
     it('sends the picture, and no text re-read, for a legible printed page flagged low_confidence by many items to check', async () => {
       const printed = readPage(1, ['Paracetamol 1g tds', 'Metformin 500mg bd']);
       // Both items disagree with their lines (a dose), so the page is flagged low_confidence although every line is
-      // printed and above REVIEW_BELOW: a flagged page, so it goes with its picture (the answer has no boxes, so the
-      // picture's items are dropped; what matters here is the routing).
+      // printed and above REVIEW_BELOW: a flagged page, so it goes with its picture. The answer has no boxes, so
+      // nothing from the picture is kept: the image re-read is recorded as failed and the first pass stays.
       const shaky = modelPage([
         modelItem({ kind: 'medicine', asWritten: 'Paracetamol 1g tds', lineIds: ['p1-l1'], name: 'Paracetamol',
           strength: '500mg', frequency: 'tds', status: 'current' }),
@@ -381,7 +387,8 @@ describe('PaperReadingService', () => {
       const { summary } = await read(imageConfig, client, [printed], png);
       expect(seen.map((call) => [call.model, call.image !== undefined])).toEqual([['claude-sonnet-5-5', false],
         ['claude-opus-5-5', true]]);
-      expect(summary).toMatchObject({ rereadPages: [1], imageRereadPages: [1], imageRereadSkipped: [] });
+      expect(summary).toMatchObject({ rereadPages: [], imageRereadPages: [], imageRereadSkipped: [],
+        imageRereadFailedPages: [1], rereadFailedPages: 1 });
     });
 
     it('sends the picture for a page with a printed line below REVIEW_BELOW', async () => {
@@ -507,7 +514,7 @@ describe('PaperReadingService', () => {
     });
 
     it('records an image re-read that gave no usable answer, keeps the first pass marked reread_failed, and sends no text re-read', async () => {
-      const outcomes: Array<PageAnswer | Error> = [refused, { kind: 'failed', reason: 'max_tokens', usage, attempts: 1 },
+      const outcomes: Array<PageAnswer | Error> = [{ kind: 'failed', reason: 'max_tokens', usage, attempts: 1 },
         new AiTransientError('AI_HTTP_529', 5), new AiRejectedError('AI_NOT_PERMITTED', 1)];
       for (const outcome of outcomes) {
         const seen: Seen[] = [];
@@ -537,6 +544,101 @@ describe('PaperReadingService', () => {
       expect(summary).toMatchObject({ rereadPages: [1], imageRereadPages: [], requests: 3,
         imageRereadSkipped: [{ page: 1, reason: 'image_rejected' }], imageRereadFailedPages: [] });
       expect(payload.items.every((item) => !item.checkReasons.includes('read_from_image'))).toBe(true);
+    });
+
+    it('re-reads the text once when the model declines the request with the picture (image_refused)', async () => {
+      for (const textAfter of [ok(textAnswer), refused]) {
+        const seen: Seen[] = [];
+        const client: PageModelClient = { readPage: jest.fn(async (request) => {
+          seen.push({ model: request.model, page: request.page, image: request.image });
+          if (request.model === 'claude-sonnet-5-5') return ok(textAnswer);
+          return request.image ? refused : textAfter;
+        }) };
+        const { summary, payload } = await read(imageConfig, client, [hardPage], png);
+        expect(seen.map((call) => [call.model, call.image !== undefined])).toEqual([['claude-sonnet-5-5', false],
+          ['claude-opus-5-5', true], ['claude-opus-5-5', false]]);
+        expect(summary).toMatchObject({ imageRereadPages: [], imageRereadFailedPages: [],
+          imageRereadSkipped: [{ page: 1, reason: 'image_refused' }] });
+        if (textAfter.kind === 'answer') {
+          expect(summary.rereadPages).toEqual([1]);
+          expect(payload.items.every((item) => item.readBy === 'reread')).toBe(true);
+        } else {
+          expect(summary).toMatchObject({ rereadPages: [], rereadFailedPages: 1 });
+          expect(payload.items.every((item) => item.checkReasons.includes('reread_failed'))).toBe(true);
+        }
+        expect(paperReadingPayloadSchema.safeParse(payload).success).toBe(true);
+      }
+    });
+
+    it('falls back to the first pass, recorded, when nothing read from the picture holds to the page', async () => {
+      const offPage = modelPage([modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'],
+        name: 'Amlodipine', strength: '5mg', status: 'current', box: { left: 0.1, top: 0.8, width: 0.3, height: 0.02 } })]);
+      const { client, seen } = ((): { client: PageModelClient; seen: Seen[] } => {
+        const calls: Seen[] = [];
+        return { seen: calls, client: { readPage: jest.fn(async (request) => {
+          calls.push({ model: request.model, page: request.page, image: request.image });
+          return ok(request.image ? offPage : textAnswer);
+        }) } };
+      })();
+      const { summary, payload } = await read(imageConfig, client, [hardPage], png);
+      expect(seen.map((call) => call.image !== undefined)).toEqual([false, true]);
+      expect(summary).toMatchObject({ rereadPages: [], rereadFailedPages: 1, imageRereadPages: [],
+        imageRereadFailedPages: [1], droppedUngrounded: 0 });
+      expect(payload.items.map((item) => [item.readBy, item.asWritten])).toEqual([['first_pass', 'Amlodipne 5rng od'],
+        ['first_pass', 'Hypertension']]);
+      expect(payload.items.every((item) => item.checkReasons.includes('reread_failed'))).toBe(true);
+      // A page whose first pass had no items keeps the picture's result as it is, even with nothing kept.
+      const empty = modelPage([], { pageUnsure: true });
+      const none: PageModelClient = { readPage: jest.fn(async (request) => ok(request.image ? offPage : empty)) };
+      const kept = await read(imageConfig, none, [hardPage], png);
+      expect(kept.summary).toMatchObject({ rereadPages: [1], imageRereadPages: [1], imageRereadFailedPages: [],
+        droppedUngrounded: 1 });
+      expect(kept.payload.items).toEqual([]);
+    });
+
+    it('merges a partial picture reading: covered first-pass items are replaced, uncovered ones kept for checking', async () => {
+      const page = readPage(1, [['Amlodipne 5rng od', { handwritten: true, confidence: 0.55 }], 'Dx: Hypertension',
+        ['Metformin 500mg bd', { handwritten: true, confidence: 0.6 }]]);
+      const first = modelPage([
+        modelItem({ kind: 'medicine', asWritten: 'Amlodipne 5rng od', lineIds: ['p1-l1'], name: 'Amlodipne',
+          strength: '5rng', frequency: 'od', status: 'current' }),
+        modelItem({ kind: 'diagnosis', asWritten: 'Hypertension', lineIds: ['p1-l2'], name: 'Hypertension',
+          status: 'confirmed' }),
+        modelItem({ kind: 'medicine', asWritten: 'Metformin 500mg bd', lineIds: ['p1-l3'], name: 'Metformin',
+          strength: '500mg', frequency: 'bd', status: 'current' })]);
+      const picture = modelPage([
+        // Same kind on line 1: replaces the first-pass medicine there.
+        modelItem({ kind: 'medicine', asWritten: 'Amlodipine 5mg od', lineIds: ['p1-l1'], name: 'Amlodipine',
+          strength: '5mg', frequency: 'od', status: 'current', box: { left: 0.12, top: 0.05, width: 0.3, height: 0.02 } }),
+        // A different kind on line 2 whose box lies on that line: covers the first-pass diagnosis too.
+        modelItem({ kind: 'note', asWritten: 'Dx: Hypertension', noteText: 'Dx: Hypertension', lineIds: ['p1-l2'],
+          box: { left: 0.1, top: 0.1, width: 0.4, height: 0.02 } }),
+        // Line 3's item is placed off its line and dropped, so the first-pass medicine there stays.
+        modelItem({ kind: 'medicine', asWritten: 'Metformin 500mg bd', lineIds: ['p1-l3'], name: 'Metformin',
+          strength: '500mg', frequency: 'bd', status: 'current', box: { left: 0.1, top: 0.8, width: 0.3, height: 0.02 } }),
+      ]);
+      const client: PageModelClient = { readPage: jest.fn(async (request) => ok(request.image ? picture : first)) };
+      const { summary, payload } = await read(imageConfig, client, [page], png);
+      expect(summary).toMatchObject({ rereadPages: [1], imageRereadPages: [1], imageRereadFailedPages: [],
+        droppedUngrounded: 1 });
+      expect(payload.items.map((item) => [item.lineIds[0], item.kind, item.readBy])).toEqual([
+        ['p1-l1', 'medicine', 'reread'], ['p1-l2', 'note', 'reread'], ['p1-l3', 'medicine', 'first_pass']]);
+      expect(payload.items[2]).toMatchObject({ asWritten: 'Metformin 500mg bd', confidence: 'check_carefully' });
+      expect(payload.items[2]!.checkReasons).toContain('not_in_picture_reading');
+      expect(new Set(payload.items.map((item) => item.id)).size).toBe(3);
+      expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
+      // The same answers give the same ids.
+      const again = await read(imageConfig, client, [page], png);
+      expect(again.payload.items.map((item) => item.id)).toEqual(payload.items.map((item) => item.id));
+    });
+
+    it('re-reads the text, never the picture, when the re-read model has no known image tier', async () => {
+      const { client, seen } = pictureClient();
+      const { summary } = await read({ ...imageConfig, OCR_AI_REREAD_MODEL: 'claude-haiku-5-5' }, client, [hardPage], png);
+      expect(seen.map((call) => [call.model, call.image !== undefined])).toEqual([['claude-sonnet-5-5', false],
+        ['claude-haiku-5-5', false]]);
+      expect(summary).toMatchObject({ rereadPages: [1], imageRereadPages: [],
+        imageRereadSkipped: [{ page: 1, reason: 'image_tier_unknown' }] });
     });
 
     it('falls back to the text only for a 400 invalid_request_error, never after a 413, key, permission or model rejection', async () => {

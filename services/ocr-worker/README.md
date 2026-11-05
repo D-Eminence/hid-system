@@ -111,10 +111,13 @@ Each claimed job runs, in order:
      `many_dropped`, `ai_unsure` or `possible_missed_item`) gets the **image**
      re-read, and no text re-read. Where the picture cannot go (setting off,
      PDF, TIFF, not a one-page image, no document bytes, too large or size
-     unknown, EXIF orientation, a masked number, or the API rejecting the
-     picture), it gets the **text** re-read instead, so no flagged page is left
-     with one reading. This replaces the earlier rule that sent the picture
-     only when a line was below 0.80.
+     unknown, EXIF orientation, a masked number, a re-read model of unknown
+     image tier, or the API rejecting or the model declining the picture), it
+     gets the **text** re-read instead. Every flagged page within the cap thus
+     has a second reading requested; the exceptions are flagged pages past
+     `OCR_AI_MAX_REREAD_PAGES`, which are not re-read, and a re-read that
+     itself fails, after which the page keeps its first reading. This replaces
+     the earlier rule that sent the picture only when a line was below 0.80.
    - An unflagged page the first pass read is not re-read.
 
    If the re-read fails, the first-pass items are kept as `check_carefully`
@@ -122,6 +125,13 @@ Each claimed job runs, in order:
    is `hid-paper-reading-prompt-3` for this routing (the prompt text and
    request bodies are unchanged from version 2; the label is only recorded),
    so `ocr-api` never reuses a reading made under the older routing.
+
+   Reuse keys on `PROMPT_VERSION` only (with the processing and payload
+   contracts and the reading status): `OCR_AI_IMAGE_REREAD` and
+   `OCR_AI_IMAGE_MASKED_PAGES` are not part of it. A reading made with
+   `OCR_AI_IMAGE_REREAD=off`, or with `OCR_AI_IMAGE_MASKED_PAGES=send`, is
+   still reused for the same document after those settings change (and one
+   made with the picture is reused after the picture is turned off).
 
    **Image re-read of flagged pages** (owner decisions "Yes, send image for
    hard pages" and the routing above, 2026-11-05; `OCR_AI_IMAGE_REREAD`, `on`
@@ -133,14 +143,22 @@ Each claimed job runs, in order:
    prompt) with the user turn `[image, text]`: the text gives the picture's size
    as the model sees it (the API's resize for the re-read model's tier, computed
    with the vision coordinates guide's reference `resizedSize`: 2,576 px and
-   4,784 visual tokens for Claude 4.7 and later, 1,568 and 1,568 otherwise;
-   never the padded size), lists the lines with their boxes in those pixels and
+   4,784 visual tokens on the high-resolution tier, 1,568 and 1,568 on the
+   standard tier; never the padded size). The tier comes from an explicit list
+   of model ids in `page-image.ts` (high: `claude-opus-4-7`, `-4-8`, `-5`,
+   `-5-5`, `claude-sonnet-5`, `-5-5`, `claude-fable-5`, `-5-1`,
+   `claude-mythos-5-1`; standard: `claude-opus-4-6`, `-4-5`,
+   `claude-sonnet-4-6`, `-4-5`, `claude-haiku-4-5`), never guessed from the
+   id: with any other re-read model the page gets the text re-read
+   (`image_tier_unknown`). The text lists the lines with their boxes in those pixels and
    asks the model to read the writing from the picture, cite the lines it sits
    on, give the item's own box as absolute pixel coordinates `{x1, y1, x2, y2}`
    (Anthropic advises pixel, not normalised, coordinates), write `asWritten` as
    it reads it in the picture, never invent anything and write `[unreadable]`
    rather than guess (`imagePageMessage`,
-   `hid-paper-reading-image-prompt-2`, recorded in provenance as
+   `hid-paper-reading-image-prompt-3`: it says the first reading needs
+   checking, for any page flag, no longer that the page was hard to read;
+   recorded in provenance as
    `imagePromptVersion`). Only these requests use the image answer schema
    (`MODEL_OUTPUT_IMAGE_JSON_SCHEMA`, a required `box` per item); text-only
    requests are byte for byte as before (`MODEL_SCHEMA_VERSION` unchanged). The client turns the model's pixel
@@ -149,11 +167,12 @@ Each claimed job runs, in order:
    together (on one row, or consecutive in reading order and vertically
    adjacent: the `lines_not_together` test, here a reason to drop), and its box
    (clipped to the page, at least 0.005 of the page on each side, and at most
-   2 times the area of the box around its cited lines, that box first widened
-   by 0.005 of the page on each side for a one-line item) lies on every cited line that
-   has a box, each line on its own (over half the line's height and half the
-   narrower width), with at most half of the line area it covers on lines it
-   does not cite, and its `asWritten` shares a word of three letters or more,
+   2 times the area of the box around its cited lines, that box first made
+   taller by 0.005 of the page above and below for a one-line item, height
+   only) lies on every cited line that has a box, each line on its own (over
+   half the line's height and half the narrower width), lies on no line it
+   does not cite by that same test, with at most half of the line area it
+   covers on lines it does not cite, and its `asWritten` shares a word of three letters or more,
    or a number, with the text of its cited lines; otherwise it is dropped and
    counted in `droppedUngrounded`. It need not match the Textract text: its
    fields are held to its own `asWritten` as read in the picture (so a word or
@@ -165,6 +184,20 @@ Each claimed job runs, in order:
    against the paper.", shown unless its own fields disagree with what it read
    or a number is not in the text read), `readBy: "reread"`, and its stored box
    is the model's box clipped to the page.
+
+   The page's result after an image re-read: if no item read from the picture
+   is kept while the first pass had items, the image re-read counts as failed
+   (`imageRereadFailedPages`) and the first-pass items stay, marked
+   `reread_failed`; if the first pass had no items either, the picture's
+   (empty) result stands. Otherwise the items read from the picture are kept,
+   together with every first-pass item none of them overlaps (the same kind
+   and a shared cited line, or a different kind and a shared cited line that
+   the picture item's box lies on). Such a first-pass item keeps
+   `readBy: "first_pass"`, becomes `check_carefully` and gets
+   `not_in_picture_reading` ("The second reading, from the picture, did not
+   find this; check it against the paper.", shown below any disagreement or
+   status warning). Items are in reading order and their ids made unique again
+   with the usual suffixes.
 
    Scope (v1): PNG and JPEG only. PDF and TIFF pages get the text re-read
    (`image_not_available_pdf`, `image_not_available_tiff`). A JPEG whose EXIF
@@ -185,16 +218,20 @@ Each claimed job runs, in order:
    only (`image_too_large`; `image_size_unknown` when the header cannot be
    read). Only if the API rejects the request with the picture as an invalid
    request (HTTP 400 with error type `invalid_request_error`) is the page
-   re-read from its text (`image_rejected`); any other rejection (413, key,
-   permission, model), a refusal, a cut-off or malformed answer, or an
-   overload or timeout after the retries is a failed re-read, with no second
-   request. The reading summary and the payload's `reading` carry
+   re-read from its text (`image_rejected`); if the model declines the
+   request with the picture, the page is likewise re-read from its text once
+   (`image_refused`: the decline may be about the picture). Any other
+   rejection (413, key, permission, model), a cut-off or malformed answer, or
+   an overload or timeout after the retries is a failed re-read, with no
+   second request. The reading summary and the payload's `reading` carry
    `imageRereadPages` (re-reads answered from the picture),
    `imageRereadSkipped` (`{page, reason}` for each flagged page re-read without
-   it, including `image_reread_off`, `image_has_masked_number` and
-   `image_orientation_unsupported`; `not_hard_to_read` is no longer written but
-   still reads in older payloads) and `imageRereadFailedPages` (pages sent with
-   the picture whose re-read gave no usable answer). The picture and its
+   it, including `image_reread_off`, `image_has_masked_number`,
+   `image_orientation_unsupported`, `image_tier_unknown`, `image_rejected` and
+   `image_refused`; `not_hard_to_read` is no longer written but still reads in
+   older payloads) and `imageRereadFailedPages` (pages sent with the picture
+   whose re-read gave no usable answer or kept no item where the first pass
+   had some). The picture and its
    base64 are never logged, stored (beyond the original document, already in
    S3) or put in an error.
 8. **Completion.** `ocr.complete_worker_job` stores the `hid-paper-reading-v2`

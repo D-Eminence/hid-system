@@ -81,9 +81,10 @@ const schema = z.object({
   // take every request slot.
   OCR_AI_PAGE_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(2),
   OCR_AI_FACILITY_IDS: facilityIds,
-  // Re-read hard pages (handwriting or low confidence) WITH the page picture: PNG and JPEG single-page images only,
-  // on the re-read only (owner decision "Yes, send image for hard pages", 2026-11-05). 'on' or 'off'; unset or
-  // empty means 'on' when OCR_AI_MODE=claude and 'off' otherwise. Any other value fails startup.
+  // Re-read flagged pages (any first-pass page flag: low_confidence, handwriting, many_dropped, ai_unsure,
+  // possible_missed_item) WITH the page picture instead of from their text: one-page PNG and JPEG images only, on the
+  // re-read only (owner decisions of 2026-11-05). 'on' or 'off'; unset or empty means 'on' when OCR_AI_MODE=claude
+  // and 'off' otherwise. Any other value fails startup.
   OCR_AI_IMAGE_REREAD: z.preprocess(emptyToUndefined, z.enum(['on', 'off']).optional()),
   // A page whose text had a number hidden by the masker (an 11-digit NIN-like or a Nigerian phone number): the
   // text sent hides it, but the picture would show it. 'text_only' (default; unset or empty): such a page is

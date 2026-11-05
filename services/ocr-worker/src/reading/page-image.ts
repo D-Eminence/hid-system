@@ -1,8 +1,8 @@
 import type { ImageRereadSkipReason } from './contract';
 
 /**
- * The picture of a page, for the re-read of a hard page (owner decision "Yes, send image for hard pages",
- * 2026-11-05). v1 sends only a single-page PNG or JPEG, as stored (the exact bytes the worker verified, with
+ * The picture of a page, for the re-read of a flagged page (owner decisions "Yes, send image for hard pages" and the
+ * flag-based routing, both 2026-11-05). v1 sends only a single-page PNG or JPEG, as stored (the exact bytes the worker verified, with
  * their detected media type): nothing is resized or re-encoded, and nothing here is ever logged or stored.
  *
  * Claude API image limits (platform.claude.com/docs/en/build-with-claude/vision, read 2026-11-05): at most
@@ -155,20 +155,32 @@ export function pageImageFor(document: SourceDocument | undefined, page: number,
 
 /**
  * Image limits by model tier (platform.claude.com/docs/en/build-with-claude/vision, "Resolution and token cost",
- * read 2026-11-05): Claude 4.7 and later models are on the high-resolution tier (2,576 px long edge, 4,784 visual
- * tokens); all other models on the standard tier (1,568 px, 1,568 tokens).
+ * read 2026-11-05): the high-resolution tier reads up to 2,576 px on the long edge and 4,784 visual tokens; the
+ * standard tier up to 1,568 px and 1,568 tokens.
  */
 export interface ImageTier { readonly maxEdge: number; readonly maxTokens: number }
 export const HIGH_RESOLUTION_TIER: ImageTier = { maxEdge: 2_576, maxTokens: 4_784 };
 export const STANDARD_TIER: ImageTier = { maxEdge: 1_568, maxTokens: 1_568 };
 
-/** The tier of a first-party model id: 4.7 and later is high resolution; anything not recognised is standard. */
-export function imageTierOf(model: string): ImageTier {
-  const version = /^claude-[a-z]+-(\d+)(?:-(\d{1,2}))?(?:-|$)/.exec(model);
-  if (!version) return STANDARD_TIER;
-  const major = Number(version[1]);
-  const minor = Number(version[2] ?? 0);
-  return major > 4 || (major === 4 && minor >= 7) ? HIGH_RESOLUTION_TIER : STANDARD_TIER;
+/**
+ * The tier of each model id the worker may send a picture to, written out (never guessed from the id): the
+ * line boxes and the model's pixel coordinates are in the size the API resizes the picture to, which depends on
+ * the tier. From Anthropic's model documentation (claude-api reference, models and migration guides, cached
+ * 2026-10-06; checked 2026-11-05): high resolution on Claude Opus 4.7, 4.8, 5 and 5.5, Claude Sonnet 5 and 5.5,
+ * Claude Fable 5 and 5.1 and Claude Mythos 5.1 (Sonnet 5.5 and Opus 5.5 carry over their predecessors' vision);
+ * standard on Claude Opus 4.6 and 4.5, Claude Sonnet 4.6 and 4.5 and Claude Haiku 4.5. Any other model (Claude
+ * Haiku 5.5 included, whose tier the guides do not state) has no known tier: no picture goes to it.
+ */
+const IMAGE_TIERS: ReadonlyMap<string, ImageTier> = new Map([
+  ...['claude-opus-4-7', 'claude-opus-4-8', 'claude-opus-5', 'claude-opus-5-5', 'claude-sonnet-5', 'claude-sonnet-5-5',
+    'claude-fable-5', 'claude-fable-5-1', 'claude-mythos-5-1'].map((model) => [model, HIGH_RESOLUTION_TIER] as const),
+  ...['claude-opus-4-6', 'claude-opus-4-5', 'claude-sonnet-4-6', 'claude-sonnet-4-5', 'claude-haiku-4-5']
+    .map((model) => [model, STANDARD_TIER] as const),
+]);
+
+/** The image tier of a model id from the list above, or null where it is not listed. */
+export function imageTierOf(model: string): ImageTier | null {
+  return IMAGE_TIERS.get(model) ?? null;
 }
 
 /** Visual tokens of an image: one per 28x28 pixel patch. */

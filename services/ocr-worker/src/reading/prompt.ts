@@ -19,11 +19,12 @@ export const PROMPT_VERSION = 'hid-paper-reading-prompt-3';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 /**
  * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
- * They are used only for a hard page re-read with its picture, so SYSTEM_PROMPT, MODEL_OUTPUT_JSON_SCHEMA and the
- * text-only page message, and with them MODEL_SCHEMA_VERSION, are unchanged by it. Recorded in
- * provenance when a page was read from its picture.
+ * They are used only for a flagged page re-read with its picture, so SYSTEM_PROMPT, MODEL_OUTPUT_JSON_SCHEMA and
+ * the text-only page message, and with them MODEL_SCHEMA_VERSION, are unchanged by it. Recorded in provenance
+ * when a page was read from its picture. Version 3: the message no longer says the page was hard to read; it says
+ * the first reading needs checking, for any page flag.
  */
-export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-2';
+export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-3';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
@@ -230,9 +231,10 @@ export function toFractionBox(box: ModelPixelBox, size: { width: number; height:
 export function imagePageMessage(page: number, lines: readonly { id: string; text: string; confidence: number;
   handwritten: boolean; box?: ModelFractionBox | null }[], size: { width: number; height: number }): string {
   return `Page ${page} of a paper record. The picture above is this page, ${size.width} pixels wide and \
-${size.height} pixels high. The text-recognition service found it \
-hard to read (handwriting or low confidence), so this time read the writing from the picture itself. Rules 2 and 3 \
-change for this page only, as follows; every other rule stays.
+${size.height} pixels high. The first reading of this page, from its text alone, needs checking: the text may be \
+misread (handwriting or low confidence), an item may have been missed or left out, or the reading was unsure. \
+So this time read the writing from the picture itself. Rules 2 and 3 change for this page only, as follows; every \
+other rule stays.
 
 A. Read each item from the picture. "asWritten" is the item as you read it in the picture, letter for letter, \
 with its spelling and abbreviations; it may differ from the line text below where the service misread the writing.

@@ -121,7 +121,7 @@ export class OcrWorker {
 
   /** The AI step. A transient failure retries the job, except on its last attempt, which completes without items. */
   private async readItems(job: ClaimedOcrJob, text: TextReading, document: VerifiedDocument): Promise<ReadingOutcome> {
-    // The verified bytes and their detected media type, for the image re-read of a hard page (never logged).
+    // The verified bytes and their detected media type, for the image re-read of a flagged page (never logged).
     const input = { facilityId: job.facilityId, sourceSha256Hex: job.sourceSha256Hex, pages: text.pages,
       document: { mediaType: document.mediaType, bytes: document.bytes } };
     let outcome: ReadingOutcome;

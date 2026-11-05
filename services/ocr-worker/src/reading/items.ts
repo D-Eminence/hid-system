@@ -35,6 +35,8 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['date_not_on_page', 'prescription_detail_not_on_page'], "A date or name that was read isn't on the paper."],
   [['field_not_on_paper'], "Part of what was read isn't on the paper."],
   [['duplicate_source_span'], 'Another item was read from the same words; check nothing was missed.'],
+  // Below the disagreements and status warnings: a first-pass item the picture's reading did not find.
+  [['not_in_picture_reading'], 'The second reading, from the picture, did not find this; check it against the paper.'],
   [['low_ocr_confidence_handwritten'], 'The handwriting was hard to read.'],
   [['low_ocr_confidence'], 'Part of this was hard to read.'],
   [['name_missing', 'substance_missing', 'measure_unclear'], "Part of this item couldn't be read."],
@@ -100,8 +102,9 @@ export const IMAGE_MAX_CITED_LINES = 3;
 /** An image-read item's box may be at most this many times the area of the box around its cited lines. */
 export const IMAGE_MAX_AREA_RATIO = 2;
 /**
- * For a one-line item, the box around its line is first widened by this share of the page on each side, so a box a
- * little taller or wider than a short, thin line (a few words) is not dropped for that alone.
+ * For a one-line item, the box around its line is first made taller by this share of the page above and below
+ * (height only), so a box a little taller than a thin line is not dropped for that alone. The allowed area is then
+ * at most 2 x the line's area plus 4 x IMAGE_ONE_LINE_MARGIN x the line's width (never more than 0.02 of the page).
  */
 export const IMAGE_ONE_LINE_MARGIN = 0.005;
 
@@ -144,10 +147,11 @@ function anchored(asWritten: string, source: string): boolean {
  * The stored box of an image-read item, or null where it is not held to its cited lines (it is then dropped):
  * at most IMAGE_MAX_CITED_LINES cited lines, which lie together (one row, or consecutive in reading order and
  * vertically adjacent: the lines_not_together test, here a reason to drop); the box at least IMAGE_MIN_BOX on each
- * side and at most IMAGE_MAX_AREA_RATIO times the area of the box around its cited lines (widened by
+ * side and at most IMAGE_MAX_AREA_RATIO times the area of the box around its cited lines (made taller by
  * IMAGE_ONE_LINE_MARGIN for a one-line item); on every cited line that has a box (each measured on its own, not
- * as one box around them all); with at most IMAGE_UNCITED_SHARE of the line area it covers on lines it does not
- * cite; and its asWritten anchored in the cited lines' text. A box around the whole page that cites every line
+ * as one box around them all); on no line it does not cite (by the same onLine test), with at most
+ * IMAGE_UNCITED_SHARE of the line area it covers on lines it does not cite; and its asWritten anchored in the
+ * cited lines' text. A box around the whole page that cites every line
  * fails the first three.
  */
 function imagePlace(raw: ModelItem, cited: readonly ReadLine[], all: readonly ReadLine[], source: string,
@@ -160,9 +164,11 @@ function imagePlace(raw: ModelItem, cited: readonly ReadLine[], all: readonly Re
   if (citedBoxes.length === 0 || !citedBoxes.every((line) => onLine(box, line))) return null;
   const around = unionBox(citedBoxes)!;
   const margin = cited.length === 1 ? IMAGE_ONE_LINE_MARGIN : 0;
-  const allowed = (around.width + 2 * margin) * (around.height + 2 * margin) * IMAGE_MAX_AREA_RATIO;
+  const allowed = around.width * (around.height + 2 * margin) * IMAGE_MAX_AREA_RATIO;
   if (area(box) > allowed) return null;
   const citedIds = new Set(cited.map((line) => line.id));
+  // A box that also lies on a line it does not cite (by the same test as for its cited lines) is not this item's.
+  if (all.some((line) => !citedIds.has(line.id) && line.box !== null && onLine(box, line.box))) return null;
   const coveredBy = (lines: readonly ReadLine[]) => lines.reduce((sum, line) => sum + (line.box ? intersection(box, line.box) : 0), 0);
   const onCited = coveredBy(cited);
   const onUncited = coveredBy(all.filter((line) => !citedIds.has(line.id)));
@@ -298,6 +304,35 @@ function markReadFromImage(item: PaperItem, raw: ModelItem, source: string, plac
   item.box = place;
   item.confidence = 'check_carefully';
   item.checkReason = checkReasonSentence(item.checkReasons);
+}
+
+/**
+ * The page's result after an image re-read that kept at least one item: the items read from the picture, and every
+ * first-pass item none of them overlaps, kept as check_carefully with 'not_in_picture_reading' (so an item the
+ * picture's reading missed, or whose box missed its lines, is not lost). An image item overlaps a first-pass item
+ * when both are the same kind and share a cited line, or, of different kinds, share a cited line that the image
+ * item's box lies on. Items are in reading order (page, first cited line; image items first on the same line) and
+ * their ids are made unique again. Identity is the picture reading's where it cites a line, else the first pass's.
+ */
+export function mergeImageReread(first: PageCheck, image: PageCheck, lines: readonly ReadLine[]): PageCheck {
+  const boxes = new Map(lines.map((line) => [line.id, line.box]));
+  const covers = (read: PaperItem, id: string) => {
+    const line = boxes.get(id);
+    return line !== undefined && line !== null && onLine(read.box, line);
+  };
+  const overlaps = (read: PaperItem, earlier: PaperItem) => earlier.lineIds.some((id) => read.lineIds.includes(id)
+    && (read.kind === earlier.kind || covers(read, id)));
+  const kept = first.items.filter((earlier) => !image.items.some((read) => overlaps(read, earlier))).map((earlier) => {
+    const checkReasons = earlier.checkReasons.includes('not_in_picture_reading') ? [...earlier.checkReasons]
+      : [...earlier.checkReasons, 'not_in_picture_reading'];
+    return { ...earlier, confidence: 'check_carefully' as const, checkReasons, checkReason: checkReasonSentence(checkReasons) };
+  });
+  const firstLine = (item: PaperItem) => Math.min(...item.lineIds.map(lineNumber));
+  const merged = [...image.items, ...kept].map((item, index) => ({ item, index }))
+    .sort((a, b) => a.item.page - b.item.page || firstLine(a.item) - firstLine(b.item) || a.index - b.index)
+    .map(({ item }) => item);
+  return { ...image, items: uniqueItemIds(merged),
+    identity: image.identity.lineIds.length > 0 ? image.identity : first.identity };
 }
 
 function markDuplicateSpan(item: PaperItem): void {

@@ -339,6 +339,13 @@ describe('ClaudePageClient', () => {
       expect(standardBody.messages[0]!.content[1]!.text).toContain(`${small.width} pixels wide and ${small.height} pixels high`);
     });
 
+    it('never sends a picture to a model of unknown image tier', async () => {
+      const { instance, fetch } = client([sse(JSON.stringify(answer))]);
+      await expect(instance.readPage({ ...pinned, model: 'claude-haiku-5-5', image }, new AbortController().signal))
+        .rejects.toThrow('IMAGE_TIER_UNKNOWN');
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
     it('treats an image answer without item boxes as malformed, and a text answer with boxes as malformed', async () => {
       const box = { x1: 124, y1: 175, x2: 496, y2: 210 };
       const { instance } = client([sse(JSON.stringify(answer)),
