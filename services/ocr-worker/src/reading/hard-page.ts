@@ -1,6 +1,5 @@
 import type { Box, FlagReason, PaperItem } from './contract';
 import { matchDrugName, normaliseDrugName } from './drug-list';
-import { DOSE } from './grounding';
 import { checkReasonSentence, itemId, mergeIdentity, unionBox, uniqueItemIds, type PageCheck } from './items';
 import { HARD_PAGE_FREQUENCIES, UNREADABLE, type BasisField, type FieldBasis, type HardItemExtras, type ModelItem,
   type ModelPage } from './prompt';
@@ -333,36 +332,17 @@ function pairScore(a: PaperItem, b: PaperItem): number | null {
 
 /** Two neighbouring medicines are in the same column when their boxes share this much of the narrower one's width. */
 export const NEIGHBOUR_COLUMN_OVERLAP = 0.5;
-/** Two fragments of one written line are on the same row when their boxes share this much of the smaller height, */
-export const NEIGHBOUR_ROW_OVERLAP = 0.5;
-/** and side by side when the gap between them is at most this share of the page width. */
-export const NEIGHBOUR_ROW_GAP = 0.03;
-/** Slack for comparing box fractions, so a gap of exactly NEIGHBOUR_ROW_GAP counts whatever the rounding. */
+/** Slack for comparing box fractions, so a share of exactly NEIGHBOUR_COLUMN_OVERLAP counts whatever the rounding. */
 const BOX_EPSILON = 1e-9;
 
-const filled = (text: string | null | undefined) => !isBlank(text) && text !== UNREADABLE;
 /**
- * Whether two leftovers on one row can be two fragments of one written line ("Metronidazole" | "400 mg tds"),
- * not two orders side by side: never when both carry a dose or both a frequency, nor when both texts as written
- * hold a dose; one may be the name alone while the other holds the dose or frequency.
- */
-function complementary(a: Side, b: Side): boolean {
-  const dose = (side: Side) => filled(side.extras?.dose);
-  const frequency = (side: Side) => filled((side.item.fields as Record<string, string | null>).frequency);
-  if ((dose(a) && dose(b)) || (frequency(a) && frequency(b))) return false;
-  return !(DOSE.test(a.item.asWritten) && DOSE.test(b.item.asWritten));
-}
-
-/**
- * Two medicines left unpaired by place that are the same listed medicine and neighbours, or null when not; the
- * smaller the gap the better. Neighbours are either
- * - rows of one column: the boxes share at least NEIGHBOUR_COLUMN_OVERLAP of the narrower one's width, and their
- *   cited lines are at most one line apart or the boxes share part of their height (gap: the lines apart, 0 when
- *   they share height); or
- * - two fragments of one written line ("Metronidazole" | "400 mg tds"): the boxes share at least
- *   NEIGHBOUR_ROW_OVERLAP of the smaller height, are at most NEIGHBOUR_ROW_GAP of the page width apart, and are
- *   complementary (gap 0); two full orders side by side are never fragments.
- * The same medicine at one height in two columns far apart is two orders, never paired.
+ * Two medicines left unpaired by place that are the same listed medicine on neighbouring rows of one column: their
+ * boxes share at least NEIGHBOUR_COLUMN_OVERLAP of the narrower one's width, and their cited lines are at most one
+ * line apart or their boxes share part of their height. The smaller the gap the better; null when not neighbours.
+ * Nothing pairs across columns or along one row: the same medicine at one height in two columns is two orders, and
+ * two halves of one written line ("Metronidazole" | "400 mg tds"), each found by one reading, stay two
+ * single_reading_only items (a safe duplicate: merging them would make every field the other half fills
+ * "[unreadable]", and a lone name beside a full order would swallow that order).
  */
 function neighbourGap(a: Side, b: Side): number | null {
   if (a.item.kind !== 'medicine' || b.item.kind !== 'medicine') return null;
@@ -370,14 +350,10 @@ function neighbourGap(a: Side, b: Side): number | null {
   if (generic === null || generic !== (b.extras?.generic ?? null)) return null;
   const boxA = a.item.box;
   const boxB = b.item.box;
-  const across = span(boxA.left, boxA.width, boxB.left, boxB.width);
-  const down = span(boxA.top, boxA.height, boxB.top, boxB.height);
-  const lower = Math.min(boxA.height, boxB.height);
-  const apart = Math.max(boxA.left, boxB.left) - Math.min(boxA.left + boxA.width, boxB.left + boxB.width);
-  if (lower > 0 && down + BOX_EPSILON >= NEIGHBOUR_ROW_OVERLAP * lower && apart <= NEIGHBOUR_ROW_GAP + BOX_EPSILON
-    && complementary(a, b)) return 0;
   const narrower = Math.min(boxA.width, boxB.width);
+  const across = span(boxA.left, boxA.width, boxB.left, boxB.width);
   if (!(narrower > 0) || across + BOX_EPSILON < NEIGHBOUR_COLUMN_OVERLAP * narrower) return null;
+  const down = span(boxA.top, boxA.height, boxB.top, boxB.height);
   const linesA = a.item.lineIds.map(lineNumber);
   const linesB = b.item.lineIds.map(lineNumber);
   const lineGap = Math.min(...linesA.flatMap((x) => linesB.map((y) => Math.abs(x - y))));
@@ -389,7 +365,7 @@ function neighbourGap(a: Side, b: Side): number | null {
  * The hard page's reading from its two readings (or from one, when the other failed or was declined: every item
  * then single_reading_only). Items are paired one to one by kind and place (a shared cited line, or boxes
  * overlapping by PAIR_BOX_OVERLAP of the smaller), best pairs first, then the same listed medicine on neighbouring
- * rows of one column or fragments of one line (neighbourGap); each pair is merged by `pair`, and an item only
+ * rows of one column (neighbourGap); each pair is merged by `pair`, and an item only
  * one reading found is kept with single_reading_only. Every item: check_carefully, readBy 'reread', read_from_image
  * and best_guess_from_picture, plus field_from_context where any field's basis was context. Identity is merged as in
  * mergeIdentity (a conflict flags the page ai_unsure); the page flags are both readings' flags; the dropped counts are

@@ -390,11 +390,11 @@ Each claimed job runs, in order:
      on neighbouring rows of one column (boxes sharing at least half the
      narrower box's width, and cited lines at most one apart or boxes sharing
      part of their height; the same medicine at one height in two columns is
-     two orders far apart), or two fragments of one written line side by
-     side (boxes sharing at least half the smaller height and at most 3% of
-     the page width apart, and complementary: never both with a dose, both
-     with a frequency, or both with a dose in their text as written, so two
-     full orders side by side stay two). For each pair every field is
+     two orders). Nothing pairs along one row: two halves of one written
+     line ("Metronidazole" | "400 mg tds"), each found by one reading, stay
+     two `single_reading_only` items. That is a safe duplicate: merging them
+     would turn every field only one half fills into `[unreadable]`, and a
+     lone name beside a full order would swallow that order. For each pair every field is
      compared after normalisation ("?" marks, case, spacing aside): agreeing
      fields keep the best guess, with "?" where either reading was unsure and
      basis `context` where either said so; a disagreeing drug name becomes

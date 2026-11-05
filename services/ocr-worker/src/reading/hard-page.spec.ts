@@ -6,7 +6,7 @@ import { checkPage, checkReasonSentence, mergeReread } from './items';
 import { createMasker } from './masking';
 import type { BasisField, FieldBasis, ModelItem, ModelPage } from './prompt';
 import { modelItem, modelPage, readPage, SOURCE_SHA } from './test-fixtures';
-import type { ReadPage } from '../types';
+import type { ReadLine, ReadPage } from '../types';
 
 /** A fictional hard page: two handwritten lines the text service could barely read. */
 const PAGE = readPage(1, [['Metrnidazle 400 rng tds', { handwritten: true, confidence: 0.45 }],
@@ -316,48 +316,34 @@ describe('two readings of a hard page', () => {
     expect(read.check.items[0]!.checkReasons).not.toContain('field_from_context');
   });
 
-  it('pairs two fragments of one written line side by side, each found by one reading', () => {
-    const page = readPage(1, [['Metronidazole', { handwritten: true, confidence: 0.45,
-      box: { left: 0.1, top: 0.05, width: 0.2, height: 0.02 } }],
-    ['400 mg tds', { handwritten: true, confidence: 0.45, box: { left: 0.32, top: 0.05, width: 0.2, height: 0.02 } }]]);
-    const { check, agreement } = mergeHardReadings([
-      heldOn(page, modelPage([medicine(1, 'Metronidazole', '', '', '', { asWritten: 'Metronidazole',
-        box: { left: 0.1, top: 0.05, width: 0.2, height: 0.02 } })])),
-      heldOn(page, modelPage([medicine(2, 'Metronidazole', '400', 'mg', 'tds', { asWritten: '400 mg tds',
-        box: { left: 0.32, top: 0.05, width: 0.2, height: 0.02 } })]))], SOURCE_SHA);
-    expect(check.items).toHaveLength(1);
-    expect(check.items[0]!.lineIds).toEqual(['p1-l1', 'p1-l2']);
-    expect(agreement).toMatchObject({ itemsPaired: 1, itemsSingle: 0 });
-  });
-
-  it('never pairs two full orders side by side as fragments of one line, and holds the gap at exactly 0.03', () => {
-    const rowPage = (secondLeft: number) => readPage(1, [['Metronidazole 400 mg tds', { handwritten: true,
-      confidence: 0.45, box: { left: 0.1, top: 0.05, width: 0.2, height: 0.02 } }],
-    ['Metronidazole 500 mg bd', { handwritten: true, confidence: 0.45,
-      box: { left: secondLeft, top: 0.05, width: 0.2, height: 0.02 } }]]);
-    const page = rowPage(0.32);
-    const { check, agreement } = mergeHardReadings([
-      heldOn(page, modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds',
-        { box: { left: 0.1, top: 0.05, width: 0.2, height: 0.02 } })])),
-      heldOn(page, modelPage([medicine(2, 'Metronidazole', '500', 'mg', 'bd',
-        { box: { left: 0.32, top: 0.05, width: 0.2, height: 0.02 } })]))], SOURCE_SHA);
-    expect(check.items.map((item) => fieldsOf(item).strength)).toEqual(['400 mg', '500 mg']);
-    expect(agreement).toMatchObject({ itemsPaired: 0, itemsSingle: 2 });
-    // Name and dose fragments: paired at a gap of exactly 0.03 (0.35 to 0.38, which is 0.030000000000000027 in
-    // floating point), not at 0.031.
-    const fragments = (secondLeft: number) => {
-      const fragmentPage = readPage(1, [['Metronidazole', { handwritten: true, confidence: 0.45,
-        box: { left: 0.1, top: 0.05, width: 0.25, height: 0.02 } }],
-      ['400 mg tds', { handwritten: true, confidence: 0.45, box: { left: secondLeft, top: 0.05, width: 0.2,
-        height: 0.02 } }]]);
-      return mergeHardReadings([
-        heldOn(fragmentPage, modelPage([medicine(1, 'Metronidazole', '', '', '', { asWritten: 'Metronidazole',
-          box: { left: 0.1, top: 0.05, width: 0.25, height: 0.02 } })])),
-        heldOn(fragmentPage, modelPage([medicine(2, 'Metronidazole', '400', 'mg', 'tds', { asWritten: '400 mg tds',
-          box: { left: secondLeft, top: 0.05, width: 0.2, height: 0.02 } })]))], SOURCE_SHA);
+  it('never pairs two medicines along one row: halves of a line, a lone name beside an order, two orders', () => {
+    const box = (left: number) => ({ left, top: 0.05, width: 0.2, height: 0.02 });
+    const line = (text: string, left: number): [string, Partial<ReadLine>] => [text,
+      { handwritten: true, confidence: 0.45, box: box(left) }];
+    const rowOf = (left: ModelItem, right: ModelItem, texts: [string, string]) => {
+      const page = readPage(1, [line(texts[0], 0.1), line(texts[1], 0.32)]);
+      return mergeHardReadings([heldOn(page, modelPage([left])), heldOn(page, modelPage([right]))], SOURCE_SHA);
     };
-    expect(fragments(0.38).check.items).toHaveLength(1);
-    expect(fragments(0.381).check.items).toHaveLength(2);
+    // Two halves of one written line, each found by one reading: two single-reading items (a safe duplicate).
+    const halves = rowOf(medicine(1, 'Metronidazole', '', '', '', { asWritten: 'Metronidazole', box: box(0.1) }),
+      medicine(2, 'Metronidazole', '400', 'mg', 'tds', { asWritten: '400 mg tds', box: box(0.32) }),
+      ['Metronidazole', '400 mg tds']);
+    // A lone name beside a full order: the order stays whole and visible.
+    const lone = rowOf(medicine(1, 'Metronidazole', '', '', '', { asWritten: 'Metronidazole', box: box(0.1) }),
+      medicine(2, 'Metronidazole', '500', 'mg', 'bd', { asWritten: 'Metronidazole 500 mg bd', box: box(0.32) }),
+      ['Metronidazole', 'Metronidazole 500 mg bd']);
+    // Two full orders side by side.
+    const orders = rowOf(medicine(1, 'Metronidazole', '400', 'mg', 'tds', { box: box(0.1) }),
+      medicine(2, 'Metronidazole', '500', 'mg', 'bd', { box: box(0.32) }),
+      ['Metronidazole 400 mg tds', 'Metronidazole 500 mg bd']);
+    for (const { check, agreement } of [halves, lone, orders]) {
+      expect(check.items).toHaveLength(2);
+      expect(check.items.every((item) => item.checkReasons.includes('single_reading_only'))).toBe(true);
+      expect(agreement).toMatchObject({ itemsPaired: 0, itemsSingle: 2 });
+    }
+    expect(fieldsOf(halves.check.items[1]!)).toMatchObject({ strength: '400 mg', frequency: 'tds' });
+    expect(fieldsOf(lone.check.items[1]!)).toMatchObject({ name: 'Metronidazole?', strength: '500 mg', frequency: 'bd' });
+    expect(orders.check.items.map((item) => fieldsOf(item).strength)).toEqual(['400 mg', '500 mg']);
   });
 
   it('keeps the same medicine at one height in two columns as two orders, each found by one reading', () => {
