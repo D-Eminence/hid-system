@@ -367,7 +367,16 @@ Each claimed job runs, in order:
      in the field itself; enum fields (status, severity, measure) cannot
      carry it and are marked by `field_from_context` instead, as are a date
      or prescriber from context (`checkPage` keeps those only where written
-     exactly on the page, so they get no "?"). The
+     exactly on the page, so they get no "?"). The answer schema gives one
+     basis, `other`, for all of an item's remaining fields together, so
+     when it is `context` every filled one of them gets "?" (an allergy's
+     substance and reaction, a lab test, range and flag, a medicine's form),
+     even one read from the letters: more marks than guesses, never fewer.
+     The marks are only for showing: every check against the page (and the
+     re-read merge's comparison with the first pass) is made with the "?"
+     after a word or number taken off (`forMatching` in `grounding.ts`), so
+     `Sulfa?` is still found in "No sulfa allergy" and `Hb?` still labels
+     its value. The
      reading is then held to the page by `checkPage` exactly as any picture
      reading (#194's placement rules, the row and line limits and the anchor
      rule, unchanged).
@@ -377,7 +386,9 @@ Each claimed job runs, in order:
      on neighbouring rows of one column (boxes sharing at least half the
      narrower box's width, and cited lines at most one apart or boxes sharing
      part of their height; the same medicine at one height in two columns is
-     two orders). For each pair every field is
+     two orders far apart), or two fragments of one written line side by
+     side (boxes sharing at least half the smaller height and at most 3% of
+     the page width apart). For each pair every field is
      compared after normalisation ("?" marks, case, spacing aside): agreeing
      fields keep the best guess, with "?" where either reading was unsure and
      basis `context` where either said so; a disagreeing drug name becomes

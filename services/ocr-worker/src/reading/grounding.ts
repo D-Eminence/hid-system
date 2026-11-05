@@ -54,6 +54,17 @@ const ROUTE_WORDS: Readonly<Record<string, string>> = {
 const ROUTES = Object.entries(ROUTE_WORDS)
   .map(([route, words]) => [route, new RegExp(`(?<!${W})(?:${words})(?!${W})`, 'u')] as const);
 
+/**
+ * Text for matching against the page, with its guess marks taken off: a "?" straight after a word or number
+ * ("Sulfa?", "400?", "Flagyl? (metronidazole)") is how a reading says it is unsure (the model's own marks, and
+ * those hard-page.ts markGuess adds), not writing on the paper, so the field "Sulfa?" is held to the page as
+ * "Sulfa". A "?" that starts a word ("?TB", a query on the paper) is kept. Only for comparing: the stored and shown
+ * field keeps its marks.
+ */
+export function forMatching(text: string): string {
+  return text.replace(/(?<=[^\s?])\?+/gu, '');
+}
+
 export function norm(text: string): string {
   return text.replace(/\s+/g, ' ').trim().toLowerCase();
 }

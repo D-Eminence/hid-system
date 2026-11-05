@@ -1,10 +1,12 @@
 import { paperReadingPayloadSchema, type PaperItem } from './contract';
+import { forMatching } from './grounding';
 import { markGuess, mergeAsWritten, mergeHardReadings, normaliseDose, normaliseFrequency, prepareHardAnswer, strengthOf,
   type HardReading } from './hard-page';
-import { checkPage, checkReasonSentence } from './items';
+import { checkPage, checkReasonSentence, mergeReread } from './items';
 import { createMasker } from './masking';
 import type { BasisField, FieldBasis, ModelItem, ModelPage } from './prompt';
 import { modelItem, modelPage, readPage, SOURCE_SHA } from './test-fixtures';
+import type { ReadPage } from '../types';
 
 /** A fictional hard page: two handwritten lines the text service could barely read. */
 const PAGE = readPage(1, [['Metrnidazle 400 rng tds', { handwritten: true, confidence: 0.45 }],
@@ -87,6 +89,65 @@ describe('hard-page answers, before they are held to the page', () => {
       ['allergy', { substance: 'Sulfa?', reaction: 'rash?', severity: null, noKnownAllergies: false }]]));
     expect(merged.items).toHaveLength(3);
     expect(merged.items.every((item) => item.checkReasons.includes('field_from_context'))).toBe(true);
+  });
+});
+
+/** One hard-page reading of a page, prepared and held to it. */
+function heldOn(page: ReadPage, answer: ModelPage): HardReading {
+  const prepared = prepareHardAnswer(answer);
+  return { answer: prepared, check: checkPage({ page: 1, lines: page.lines, answer: prepared, sourceSha256Hex: SOURCE_SHA,
+    readBy: 'reread', masker: createMasker(), fromImage: true }) };
+}
+const hardItem = (overrides: Partial<ModelItem>, line: number, basis: Partial<Record<BasisField, FieldBasis>>): ModelItem => ({
+  ...modelItem({ lineIds: [`p1-l${line}`], ...overrides }), box: onLine(line),
+  hard: { dose: '', doseUnit: '', basis: letters({ name: 'empty', dose: 'empty', unit: 'empty', frequency: 'empty',
+    ...basis }) } });
+
+describe('guess marks are kept in the field but taken off for every check against the page', () => {
+  it('takes off a "?" after a word or number only', () => {
+    expect(['Sulfa?', '400? mg', 'Flagyl? (metronidazole)', 'A? / B?', '?TB', '[unreadable]'].map(forMatching))
+      .toEqual(['Sulfa', '400 mg', 'Flagyl (metronidazole)', 'A / B', '?TB', '[unreadable]']);
+  });
+
+  it('still finds "No sulfa allergy" for a substance "Sulfa?" from context', () => {
+    const page = readPage(1, [['No sulfa allergy', { handwritten: true, confidence: 0.45 }]]);
+    const { check } = heldOn(page, modelPage([hardItem({ kind: 'allergy', asWritten: 'No sulfa allergy',
+      substance: 'Sulfa' }, 1, { other: 'context' })]));
+    expect(fieldsOf(check.items[0]!).substance).toBe('Sulfa?');
+    expect(check.items[0]!.checkReasons).toContain('status_cue_on_line');
+    expect(check.items[0]!.checkReasons).not.toContain('text_corrected');
+  });
+
+  it('binds the value of an "Hb?" test to it, without noise from the mark alone', () => {
+    const page = readPage(1, [['Hb 11.2 g/dL WBC 6.1', { handwritten: true, confidence: 0.45 }]]);
+    const lab = (value: string) => hardItem({ kind: 'lab_result', asWritten: 'Hb 11.2 g/dL WBC 6.1', test: 'Hb', value,
+      unit: 'g/dL' }, 1, { other: 'context', value: 'letters', unit: 'letters' });
+    const right = heldOn(page, modelPage([lab('11.2')])).check.items[0]!;
+    expect(fieldsOf(right)).toMatchObject({ test: 'Hb?', value: '11.2', unit: 'g/dL' });
+    for (const code of ['text_corrected', 'value_mismatch', 'unit_mismatch', 'field_not_on_paper']) {
+      expect(right.checkReasons).not.toContain(code);
+    }
+    // The next test's number is not Hb's: the value check still works on a marked test.
+    expect(heldOn(page, modelPage([lab('6.1')])).check.items[0]!.checkReasons).toContain('value_mismatch');
+  });
+
+  it('pairs a diagnosis "Toxoplasmosis?" with the first pass\'s "Toxoplasmosis" as twins in the re-read merge', () => {
+    const page = readPage(1, [['Dx Toxoplasmosis', { handwritten: true, confidence: 0.45 }]]);
+    const diagnosis = (status: 'confirmed' | 'suspected') => ({ kind: 'diagnosis' as const, asWritten: 'Dx Toxoplasmosis',
+      name: 'Toxoplasmosis', status });
+    const first = checkPage({ page: 1, lines: page.lines, sourceSha256Hex: SOURCE_SHA, readBy: 'first_pass',
+      masker: createMasker(), fromImage: false,
+      answer: modelPage([modelItem({ ...diagnosis('confirmed'), lineIds: ['p1-l1'] })]) });
+    const hard = (status: 'confirmed' | 'suspected') => mergeHardReadings([heldOn(page,
+      modelPage([hardItem(diagnosis(status), 1, { name: 'context' })]))], SOURCE_SHA).check;
+    const twin = mergeReread(first, hard('confirmed'), page.lines, 'image');
+    expect(twin.items).toHaveLength(1);
+    expect(fieldsOf(twin.items[0]!).name).toBe('Toxoplasmosis?');
+    expect(twin.items[0]!.checkReasons).not.toContain('differs_from_second_reading');
+    // Another field differs: both kept, compared as the same diagnosis.
+    const differs = mergeReread(first, hard('suspected'), page.lines, 'image');
+    expect(differs.items).toHaveLength(2);
+    expect(differs.items.every((item) => item.checkReasons.includes('differs_from_second_reading'))).toBe(true);
   });
 });
 
@@ -229,6 +290,20 @@ describe('two readings of a hard page', () => {
     // Read from the letters in both readings: no context reason.
     const read = mergeHardReadings([held(modelPage([lab('letters')])), held(modelPage([lab('letters')]))], SOURCE_SHA);
     expect(read.check.items[0]!.checkReasons).not.toContain('field_from_context');
+  });
+
+  it('pairs two fragments of one written line side by side, each found by one reading', () => {
+    const page = readPage(1, [['Metronidazole', { handwritten: true, confidence: 0.45,
+      box: { left: 0.1, top: 0.05, width: 0.2, height: 0.02 } }],
+    ['400 mg tds', { handwritten: true, confidence: 0.45, box: { left: 0.32, top: 0.05, width: 0.2, height: 0.02 } }]]);
+    const { check, agreement } = mergeHardReadings([
+      heldOn(page, modelPage([medicine(1, 'Metronidazole', '', '', '', { asWritten: 'Metronidazole',
+        box: { left: 0.1, top: 0.05, width: 0.2, height: 0.02 } })])),
+      heldOn(page, modelPage([medicine(2, 'Metronidazole', '400', 'mg', 'tds', { asWritten: '400 mg tds',
+        box: { left: 0.32, top: 0.05, width: 0.2, height: 0.02 } })]))], SOURCE_SHA);
+    expect(check.items).toHaveLength(1);
+    expect(check.items[0]!.lineIds).toEqual(['p1-l1', 'p1-l2']);
+    expect(agreement).toMatchObject({ itemsPaired: 1, itemsSingle: 0 });
   });
 
   it('keeps the same medicine at one height in two columns as two orders, each found by one reading', () => {

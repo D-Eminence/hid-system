@@ -329,35 +329,46 @@ function pairScore(a: PaperItem, b: PaperItem): number | null {
 
 /** Two neighbouring medicines are in the same column when their boxes share this much of the narrower one's width. */
 export const NEIGHBOUR_COLUMN_OVERLAP = 0.5;
+/** Two fragments of one written line are on the same row when their boxes share this much of the smaller height, */
+export const NEIGHBOUR_ROW_OVERLAP = 0.5;
+/** and side by side when the gap between them is at most this share of the page width. */
+export const NEIGHBOUR_ROW_GAP = 0.03;
 
 /**
- * Two medicines left unpaired by place that are the same listed medicine on neighbouring rows of one column: their
- * boxes share at least NEIGHBOUR_COLUMN_OVERLAP of the narrower one's width, and their cited lines are at most one
- * line apart or their boxes share part of their height. The same medicine written at one height in two columns is
- * two orders, never paired. The smaller the gap the better; null when not neighbours.
+ * Two medicines left unpaired by place that are the same listed medicine and neighbours, or null when not; the
+ * smaller the gap the better. Neighbours are either
+ * - rows of one column: the boxes share at least NEIGHBOUR_COLUMN_OVERLAP of the narrower one's width, and their
+ *   cited lines are at most one line apart or the boxes share part of their height (gap: the lines apart, 0 when
+ *   they share height); or
+ * - two fragments of one written line ("Metronidazole" | "400 mg tds"): the boxes share at least
+ *   NEIGHBOUR_ROW_OVERLAP of the smaller height and are at most NEIGHBOUR_ROW_GAP of the page width apart (gap 0).
+ * The same medicine at one height in two columns far apart is two orders, never paired.
  */
 function neighbourGap(a: Side, b: Side): number | null {
   if (a.item.kind !== 'medicine' || b.item.kind !== 'medicine') return null;
   const generic = a.extras?.generic ?? null;
   if (generic === null || generic !== (b.extras?.generic ?? null)) return null;
-  const narrower = Math.min(a.item.box.width, b.item.box.width);
-  if (!(narrower > 0)
-    || span(a.item.box.left, a.item.box.width, b.item.box.left, b.item.box.width) < NEIGHBOUR_COLUMN_OVERLAP * narrower) {
-    return null;
-  }
+  const boxA = a.item.box;
+  const boxB = b.item.box;
+  const across = span(boxA.left, boxA.width, boxB.left, boxB.width);
+  const down = span(boxA.top, boxA.height, boxB.top, boxB.height);
+  const lower = Math.min(boxA.height, boxB.height);
+  const apart = Math.max(boxA.left, boxB.left) - Math.min(boxA.left + boxA.width, boxB.left + boxB.width);
+  if (lower > 0 && down >= NEIGHBOUR_ROW_OVERLAP * lower && apart <= NEIGHBOUR_ROW_GAP) return 0;
+  const narrower = Math.min(boxA.width, boxB.width);
+  if (!(narrower > 0) || across < NEIGHBOUR_COLUMN_OVERLAP * narrower) return null;
   const linesA = a.item.lineIds.map(lineNumber);
   const linesB = b.item.lineIds.map(lineNumber);
   const lineGap = Math.min(...linesA.flatMap((x) => linesB.map((y) => Math.abs(x - y))));
-  const vertical = span(a.item.box.top, a.item.box.height, b.item.box.top, b.item.box.height) > 0;
-  if (lineGap > 1 && !vertical) return null;
-  return vertical ? 0 : lineGap;
+  if (lineGap > 1 && down <= 0) return null;
+  return down > 0 ? 0 : lineGap;
 }
 
 /**
  * The hard page's reading from its two readings (or from one, when the other failed or was declined: every item
  * then single_reading_only). Items are paired one to one by kind and place (a shared cited line, or boxes
  * overlapping by PAIR_BOX_OVERLAP of the smaller), best pairs first, then the same listed medicine on neighbouring
- * rows of one column (neighbourGap); each pair is merged by `pair`, and an item only
+ * rows of one column or fragments of one line (neighbourGap); each pair is merged by `pair`, and an item only
  * one reading found is kept with single_reading_only. Every item: check_carefully, readBy 'reread', read_from_image
  * and best_guess_from_picture, plus field_from_context where any field's basis was context. Identity is merged as in
  * mergeIdentity (a conflict flags the page ai_unsure); the page flags are both readings' flags; the dropped counts are
