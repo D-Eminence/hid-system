@@ -118,7 +118,8 @@ const acceptedMigrations = new Map([
   ['0103_platform_organization_applications.sql', '24d9ccd4dfa18aad5cf1c3d9268ff043bd001c4d5b41660b00af01c4aadfca8f'],
   ['0104_records_processing_purpose.sql', '44bd0ca33b4554071c380851726deb547f71942e660fc234d61e380041d11571'],
   ['0105_document_scanner.sql', 'bf68aaaca9e773fce6022a5241f32f35a9937cd9b496e04445b75022a43788c8'],
-  ['0116_patient_entries.sql', '21a2832e6aeb88621e9a6e2527e6e93721b745de011932e409246afa269420b7'],
+  ['0106_ocr_worker_account.sql', 'a78f979774aed619c656990d0f0bc531c5eb00fd4998c5b7f00337ba156414d2'],
+  ['0116_patient_entries.sql', '5495d6bb8e2d10ebb9f43b67a0166315be2507a482e91ccda858417dbe383b44'],
 ])
 
 const migrationFiles = (await readdir(migrationDirectory))

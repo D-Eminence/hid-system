@@ -96,7 +96,7 @@
   "migration": {
     "first": "0001",
     "last": "0116",
-    "count": 107,
+    "count": 108,
     "files": [
       {
         "name": "0001_platform_and_migration_control.sql",
@@ -523,8 +523,12 @@
         "sha256": "bf68aaaca9e773fce6022a5241f32f35a9937cd9b496e04445b75022a43788c8"
       },
       {
+        "name": "0106_ocr_worker_account.sql",
+        "sha256": "a78f979774aed619c656990d0f0bc531c5eb00fd4998c5b7f00337ba156414d2"
+      },
+      {
         "name": "0116_patient_entries.sql",
-        "sha256": "21a2832e6aeb88621e9a6e2527e6e93721b745de011932e409246afa269420b7"
+        "sha256": "5495d6bb8e2d10ebb9f43b67a0166315be2507a482e91ccda858417dbe383b44"
       }
     ]
   },

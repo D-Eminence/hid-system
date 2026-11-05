@@ -4,7 +4,10 @@ Independent non-HTTP worker for lease-bound OCR extraction. It has no EHR API
 or OCR API application imports and can run while both HTTP services are
 stopped. It claims work only through the exact `ocr` security-definer command
 surface using a login that inherits `hid_ocr_worker`; that role has no table
-privileges. Queue depth and the oldest queued age, logged with each claim, come
+privileges. Every command also requires `OCR_WORKER_SUBJECT` (set as
+`app.actor_subject`) to be an active account holding the platform `ocr_worker`
+role, or it answers 42501; in production that is `hid:staging:ocr-worker`,
+seeded by migration 0106. Queue depth and the oldest queued age, logged with each claim, come
 from the aggregate-only `ocr.worker_queue_metrics()` (migration 0082).
 
 The worker preserves `SKIP LOCKED` claims, expiring and renewable leases,
