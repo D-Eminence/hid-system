@@ -67,12 +67,14 @@ const schema = z.object({
   // Same validation as the EHR service's ANTHROPIC_API_KEY. Never logged.
   ANTHROPIC_API_KEY: z.preprocess(emptyToUndefined, z.string().min(20).regex(/^\S+$/).optional()),
   OCR_AI_US_PROCESSING_APPROVED: booleanString,
-  OCR_AI_FIRST_PASS_MODEL: claudeModel.default('claude-sonnet-5-5'),
-  OCR_AI_FIRST_PASS_EFFORT: effort.default('medium'),
+  // Owner decision 2026-11-05: every reading call uses the most capable model at high effort, US only.
+  OCR_AI_FIRST_PASS_MODEL: claudeModel.default('claude-opus-5-5'),
+  OCR_AI_FIRST_PASS_EFFORT: effort.default('high'),
   OCR_AI_REREAD_MODEL: claudeModel.default('claude-opus-5-5'),
   OCR_AI_REREAD_EFFORT: effort.default('high'),
   OCR_AI_MAX_TOKENS: z.coerce.number().int().min(1_024).max(128_000).default(16_000),
-  OCR_AI_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(600_000).default(180_000),
+  // Per request, for the whole streamed answer: a full OCR_AI_MAX_TOKENS answer at high effort needs minutes.
+  OCR_AI_TIMEOUT_MS: z.coerce.number().int().min(10_000).max(600_000).default(300_000),
   OCR_AI_MAX_RETRIES: z.coerce.number().int().min(0).max(8).default(4),
   OCR_AI_MAX_REREAD_PAGES: z.coerce.number().int().min(0).max(20).default(20),
   // Claude API requests in flight at once for the whole process (every claim loop shares the one limit).

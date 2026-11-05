@@ -63,7 +63,7 @@ export class OcrWorker {
       const after = await this.repository.recordPages(job, Math.max(1, text.pageCount));
       const outcome = await this.readItems(job, text);
       // Before completion, so the job is still held; a failure to record never fails the job.
-      await this.recordAiUsage(job, outcome.summary.modelUsage);
+      await this.recordAiUsage(job, outcome.summary.modelUsage, outcome.summary.pagesSent);
       const completion = buildCompletion(text, outcome);
       const checked = paperReadingPayloadSchema.safeParse(completion.structuredPayload);
       if (!checked.success) {
@@ -146,9 +146,14 @@ export class OcrWorker {
   }
 
   /** One ocr.record_worker_ai_usage per model used; counts only. A failure is logged with a safe code. */
-  private async recordAiUsage(job: ClaimedOcrJob, usage: readonly AiUsageRecord[]): Promise<void> {
+  private async recordAiUsage(job: ClaimedOcrJob, usage: readonly AiUsageRecord[], pagesSent?: number): Promise<void> {
     for (const entry of usage) {
       if (entry.requests <= 0) continue;
+      // Counts only, never text: lets the cost per page be seen in the logs.
+      this.log('info', 'ocr.reading.usage', { jobId: job.jobId, correlationId: job.correlationId,
+        attempt: job.attemptNo, model: entry.model, requests: entry.requests, inputTokens: entry.inputTokens,
+        outputTokens: entry.outputTokens, cacheReadTokens: entry.cacheReadTokens,
+        cacheWriteTokens: entry.cacheWriteTokens, ...(pagesSent === undefined ? {} : { pagesSent }) });
       try {
         await this.repository.recordAiUsage(job, entry);
       } catch (error) {
