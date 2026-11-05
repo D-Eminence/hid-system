@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { ALLERGY_SEVERITIES, DIAGNOSIS_STATUSES, ITEM_KINDS, MEDICINE_STATUSES, VITAL_MEASURES } from './contract';
+import { ABBREVIATION_TABLE, SIGN_READ_MARK, SIGN_TABLE, SIGN_UNSURE } from './signs';
 
 /**
  * The frozen system prompt and output schema for one page of a paper record.
@@ -17,12 +18,18 @@ import { ALLERGY_SEVERITIES, DIAGNOSIS_STATUSES, ITEM_KINDS, MEDICINE_STATUSES, 
  * hard pages (flagged handwriting or low_confidence, re-read with the picture)
  * get two best-guess readings (HARD_PAGE_PROMPT_VERSION; owner decision of
  * 2026-11-05 about 18:40 UTC). The text-only request is still byte for byte
- * as under version 2. Version 6: hard pages' best-guess reads may zoom into
- * the picture (zoom.ts; owner decision of 2026-11-05 about 18:45 UTC), so a
- * reading made before cannot be reused; the text-only request and the
- * ordinary image re-read request are unchanged.
+ * as under version 2. Version 6: a hard page's best-guess reading grounds
+ * diagnosis and lab test names to lists (ICD-11 titles and our own synonyms,
+ * our own lab test names), uses the NAFDAC-sourced brand table, and reads
+ * handwritten signs (HARD_PAGE_PROMPT_VERSION 3; owner decision of
+ * 2026-11-05 about 21:00 UTC). SYSTEM_PROMPT, the text-only request and the
+ * image request are byte for byte unchanged. Version 7: hard pages' best-guess
+ * reads may zoom into the picture (zoom.ts; owner decision of 2026-11-05 about
+ * 18:45 UTC; HARD_PAGE_PROMPT_VERSION 4), so a reading made before cannot be
+ * reused; the text-only request and the ordinary image re-read request are
+ * unchanged.
  */
-export const PROMPT_VERSION = 'hid-paper-reading-prompt-6';
+export const PROMPT_VERSION = 'hid-paper-reading-prompt-7';
 export const MODEL_SCHEMA_VERSION = 'hid-paper-reading-model-schema-2';
 /**
  * The image re-read's own instructions (imagePageMessage) and output schema (MODEL_OUTPUT_IMAGE_JSON_SCHEMA).
@@ -38,15 +45,18 @@ export const IMAGE_PROMPT_VERSION = 'hid-paper-reading-image-prompt-5';
 /**
  * The hard-page prompt (hardPageMessage) and its output schema (MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA): best-guess
  * readings for a hard page only (owner decision of 2026-11-05, about 18:40 UTC). Recorded in provenance when used.
- * Version 3: with zoom on (OCR_AI_HARD_PAGE_ZOOM, the default), the message adds rule I, which offers the zoom tool
- * (zoom.ts); with zoom off it is the version 2 text.
+ * Version 3: rule I, handwritten signs (signs.ts: a sign read is written as its meaning and "(sign)", any other
+ * "[sign?]"), and "mane" among the frequencies (owner decision of 2026-11-05, about 21:00 UTC). Version 4: with zoom
+ * on (OCR_AI_HARD_PAGE_ZOOM, the default), the message adds rule J, which offers the zoom tool (zoom.ts); with zoom
+ * off it is the version 3 text.
  */
-export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-3';
+export const HARD_PAGE_PROMPT_VERSION = 'hid-paper-reading-hard-page-prompt-4';
 /**
  * The version recorded for a hard page whose reads were not offered the zoom tool (zoom off, OCR_AI_ZOOM_MAX_CALLS
- * 0, or a model of unknown image tier): hardPageMessage with no zoom calls is the version 2 text, byte for byte.
+ * 0, a model of unknown image tier, or a picture that fails zoom's header checks): hardPageMessage with no zoom
+ * calls is the version 3 text, byte for byte.
  */
-export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-2';
+export const HARD_PAGE_PROMPT_VERSION_NO_ZOOM = 'hid-paper-reading-hard-page-prompt-3';
 
 export const SYSTEM_PROMPT = `You read one page of a scanned paper medical record from a clinic or hospital \
 in Nigeria: clinic notes, prescriptions, drug charts, lab results, vital-sign charts, referral and discharge \
@@ -288,7 +298,7 @@ ${JSON.stringify(lines.map((line) => ({
  * How often, on a hard page: the only frequencies a best-guess medicine may carry. Anything else is left
  * "[unreadable]" (its words stay in asWritten). A "?" after one marks it uncertain.
  */
-export const HARD_PAGE_FREQUENCIES = ['od', 'bd', 'tds', 'qds', '6hrly', '8hrly', '12hrly', 'nocte', 'stat',
+export const HARD_PAGE_FREQUENCIES = ['od', 'bd', 'tds', 'qds', '6hrly', '8hrly', '12hrly', 'nocte', 'mane', 'stat',
   'prn'] as const;
 export const UNREADABLE = '[unreadable]';
 /** Where a field of a hard-page item came from: the letter shapes, what is usual on such a sheet, or nothing. */
@@ -346,14 +356,29 @@ export interface HardItemExtras {
 }
 
 /**
+ * Rule I of the hard-page message: the sign table (signs.ts). Built once from the table, so it is the same for every
+ * page. Signs go in the hard-page prompt only: they are read from the picture, which only the image re-reads see;
+ * the first pass reads the text service's lines, where a sign is lost or garbled, and the image re-read of a page
+ * that is not a hard page keeps rule D (never guess), so SYSTEM_PROMPT and that message are unchanged.
+ */
+export const SIGNS_RULE = `I. Signs. Doctors write some signs that stand for words. Read a mark as a sign only when it \
+is one of these, and write it as its meaning followed by "${SIGN_READ_MARK}", in "asWritten" and in the field, for \
+example "alternate ${SIGN_READ_MARK} days", "with ${SIGN_READ_MARK} food" or "diagnosis ${SIGN_READ_MARK}: malaria":
+${SIGN_TABLE.map((sign) => `- ${sign.looks}: ${sign.meaning}`).join('\n')}
+Where a mark may be a sign but is not one of these, or you are not sure which sign it is or what it means here, \
+write "${SIGN_UNSURE}" in its place: never guess a word for a sign. Abbreviations written in letters and numbers \
+are not signs: copy them as written (rule B), never with "${SIGN_READ_MARK}". What they mean, to help you read them: \
+${ABBREVIATION_TABLE.map(([written, meaning]) => `${written} ${meaning}`).join('; ')}.`;
+
+/**
  * The user turn's text for a HARD page re-read with its picture (flagged handwriting or low_confidence): the owner
  * decision of 2026-11-05 (about 18:40 UTC) allows tentative best-guess readings here only. The same request is sent
  * twice and the two answers are compared in code (hard-page.ts), so this asks for the single best reading, not
  * for alternatives. Rule 1 (never fill a gap from what is usual) is relaxed only where a field is marked basis
  * "context"; never inventing an item, citing lines and giving the box stay. Nothing here varies but the page.
  *
- * Zoom (owner decision of 2026-11-05, about 18:45 UTC): with `zoomCalls` over 0 the message adds rule I, which
- * offers the zoom tool (zoom.ts) for at most that many calls; without it the message is the version 2 text.
+ * Zoom (owner decision of 2026-11-05, about 18:45 UTC): with `zoomCalls` over 0 the message adds rule J, which
+ * offers the zoom tool (zoom.ts) for at most that many calls; without it the message is the version 3 text.
  */
 export function hardPageMessage(page: number, lines: readonly { id: string; text: string; confidence: number;
   handwritten: boolean; box?: ModelFractionBox | null }[], size: { width: number; height: number },
@@ -379,7 +404,7 @@ field the item does not have, and "[unreadable]" for one it has but you cannot r
 D. A medicine is read as: route (such as po, iv, im, pr, sc, or "" where none is written), drug name, dose, unit, \
 how often. "dose" is the number only (such as "400" or "0.5"); "doseUnit" is its unit (such as mg, g, mcg, ml, iu, \
 tab); "strength" is the dose and unit together as written. "frequency" is one of: od, bd, tds, qds, 6hrly, 8hrly, \
-12hrly, nocte, stat, prn, with "?" after it if you are not sure. If what is written for how often is anything \
+12hrly, nocte, mane, stat, prn, with "?" after it if you are not sure. If what is written for how often is anything \
 else, set "frequency" to "[unreadable]" and keep its words in "asWritten". For any item that is not a medicine, \
 "dose", "doseUnit" and "frequency" are "".
 
@@ -400,14 +425,16 @@ item's box covers, including small fragments of the same row that the service sp
 list. Give the item's own place in the picture in "box" as absolute pixel coordinates: x1 and y1 the top-left \
 corner, x2 and y2 the bottom-right corner, with x from the left edge and y from the top edge of the picture, \
 around the writing of this item only. Leave out writing that is not on one of the lines below.
-${zoomCalls > 0 ? `
-I. You can use the zoom tool to look closer at hard-to-read writing before you answer: give page ${page}, a box \
+
+${SIGNS_RULE}
+
+${zoomCalls > 0 ? `J. You can use the zoom tool to look closer at hard-to-read writing before you answer: give page ${page}, a box \
 around the writing in this picture's pixels (the same pixels as the line boxes and the boxes in your answer) and a \
 scale from 1 to 4. It returns that part of the picture enlarged. You may zoom at most ${zoomCalls} times for this \
 page; use it where a closer look can settle a word or number, not for every line. Every box in your answer stays \
 in the full picture's pixels.
-` : ''}
-The lines the service found, as JSON (box in pixels of the picture, as above; confidence 0 to 1):
+
+` : ''}The lines the service found, as JSON (box in pixels of the picture, as above; confidence 0 to 1):
 ${JSON.stringify(lines.map((line) => ({
     id: line.id, text: line.text,
     box: line.box ? toPixelBox(line.box, size) : null,

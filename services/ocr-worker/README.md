@@ -183,12 +183,13 @@ Each claimed job runs, in order:
    count of the re-read's dropped items, including any whose content a kept
    first-pass item still carries. A page whose first pass failed or was
    declined has nothing to merge: its re-read stands. `PROMPT_VERSION`
-   is `hid-paper-reading-prompt-6` (version 3 for this routing, 4 since picture
+   is `hid-paper-reading-prompt-7` (version 3 for this routing, 4 since picture
    items on hard lines whose scanned text is nonsense are kept, 5 since hard
-   pages get two best-guess readings, 6 since those reads may zoom, below;
-   the text prompt
-   and request bodies are unchanged from version 2, and the label is only
-   recorded), so `ocr-api` never reuses a reading made under older rules.
+   pages get two best-guess readings, 6 since hard pages use the brand,
+   diagnosis and lab test lists and read handwritten signs, 7 since those
+   reads may zoom, below; the text prompt and request bodies are unchanged
+   from version 2, and the label is only recorded), so `ocr-api` never reuses
+   a reading made under older rules.
 
    Reuse keys on `PROMPT_VERSION` only (with the processing and payload
    contracts and the reading status): `OCR_AI_IMAGE_REREAD` and
@@ -340,21 +341,22 @@ Each claimed job runs, in order:
      thinking, `inference_geo: "us"`, fixed endpoint and the same cached system
      prompt, at `OCR_AI_HARD_PAGE_EFFORT` (default `max`, which Claude Opus 5.5
      accepts: `low` to `max`; any other value fails startup). Its user turn is
-     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-3` when
+     `[image, hardPageMessage]` (`hid-paper-reading-hard-page-prompt-4` when
      the reads are offered zoom, else the unchanged
-     `hid-paper-reading-hard-page-prompt-2` text; recorded in provenance as
+     `hid-paper-reading-hard-page-prompt-3` text; recorded in provenance as
      `hardPagePromptVersion` when used): read the
      page line by line; give a best reading of every field with "?" after each
      uncertain word; a word not readable even as a guess is `[unreadable]`;
      a medicine as route, drug name, dose (a number), unit and frequency, the
-     frequency only one of `od bd tds qds 6hrly 8hrly 12hrly nocte stat prn`
+     frequency only one of `od bd tds qds 6hrly 8hrly 12hrly nocte mane stat prn`
      (anything else: `[unreadable]`, its words kept in `asWritten`); for each
      field a basis, `letters` (read from the letter shapes) or `context`
      (inferred from what is usual), a field filled from context only with
      basis `context`, and a common medicine not to be preferred over what the
      letters show; ignore show-through from the back of the sheet and text cut
      off at the edges; never invent an item; cite the scanned lines its box
-     covers and give its pixel box. Its answer schema
+     covers and give its pixel box; rule I, handwritten signs (below); and, with
+     zoom on, rule J, the zoom tool (below). Its answer schema
      (`MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA`) is the image schema plus `dose`,
      `doseUnit`, a restricted `frequency` and a per-item `basis` object
      (`name`, `dose`, `unit`, `route`, `frequency`, `duration`, `value`,
@@ -439,7 +441,7 @@ Each claimed job runs, in order:
      `imageRereadPages`; provenance adds `hardPages`, `hardPageReads`,
      `hardPageSingleReadPages`, `hardPagePromptVersion` and
      `hardPageZoomPages` (the hard pages whose reads were offered zoom;
-     `hardPagePromptVersion` is `-3` only when there is one, else `-2`, the
+     `hardPagePromptVersion` is `-4` only when there is one, else `-3`, the
      text those reads were sent) (`imagePromptVersion` is set only when a page
      that is not a hard page was read from its picture).
    - *Drug list* (`src/reading/drug-list.ts`). Generic names from the
@@ -454,21 +456,167 @@ Each claimed job runs, in order:
      index; vaccines, sera, diagnostics, devices and disinfectants left out;
      the list's misprints given in their standard spelling (listed in the file
      header). Plus the list's own bracketed other names, a few marked British
-     names (frusemide, lignocaine, co-amoxiclav), and a small, separate brand
-     list, **curated, not exhaustive; review before relying on it** (23 brands
-     such as Plasil, Flagyl, Augmentin, Rocephin, Zinnat, Septrin, Coartem,
-     Fansidar, Daraprim; only true brand names, never a manufacturer's name).
-     Matching: lower case, "?" and punctuation removed, salt and form words
-     (hydrochloride, tab, inj, ...) ignored; exact first, else the closest
-     name by edit distance, only for names of 6 letters or more, at distance
-     2 or less and similarity (1 - distance / longer length) 0.8 or more, and
-     only when one medicine is closest (two lookalikes equally close: no
-     match). The list never creates a drug: it only checks, and respells, a
-     name the model proposed. Applied only on hard pages. Limits: a medicine
-     not on the essential medicines list (a newer or non-essential drug, most
-     brands) is always shown as `[unreadable]` on a hard page, and a misreading
-     that happens to be within two letters of another listed medicine would
-     be shown as that medicine, with "?", for the clinician to check.
+     names (frusemide, lignocaine, co-amoxiclav), and the brand table below.
+     Applied only on hard pages. The list never creates a drug: it only
+     checks, and respells, a name the model proposed. A medicine not on the
+     list (a newer or non-essential drug, an unlisted brand) is always shown as
+     `[unreadable]` on a hard page.
+   - *Strict matching* (`src/reading/list-match.ts`, shared by the drug,
+     diagnosis and lab test lists). Exact first (each list normalises case,
+     spacing, the reading's "?" marks and punctuation; the drug list also
+     ignores salt and form words such as hydrochloride, tab, inj). Otherwise a
+     fuzzy match corrects one slip only: names of 6 letters or more, edit
+     distance 1, similarity (1 - distance / longer length) 0.85 or more, the
+     same first letter, and the same short words (under 4 letters) and digits,
+     so "vitamin c" is never respelled "vitamin e", "type 1" never "type 2",
+     "hepatitis b" never "hepatitis c". Two different entries equally near is
+     no match (ambiguous). A drug name within 2 letters of a real medicine that
+     is not on the list (`UNLISTED_LOOKALIKES`: arteether, pefloxacin,
+     esomeprazole, ...) is no match either. `list-match.spec.ts` enumerates
+     every pair of entries within each list (generics, synonyms and brands
+     together; diagnoses with their synonyms; lab tests with their
+     abbreviations) and proves no two entries standing for different things
+     are within this threshold of each other; the handled-pairs list is empty.
+     No new unlisted look-alike was found within 2 letters of a new brand, so
+     `UNLISTED_LOOKALIKES` is unchanged; products sold under a listed brand
+     name with other ingredients (Panadol Extra, Lofnac Plus, Piriton
+     Expectorant, Ciprotab-TN, Galvusmet, Co-Micardis, Gvither Plus, NovoMix
+     30) are too far from the brand to match and are tested as no match.
+   - *Brands* (`src/reading/brand-names.ts`, a data table with columns
+     `brand`, `generic`, `strength_forms`, `source`, `reviewed_by`). A row is
+     active only when its `source` cites a public NAFDAC listing: "NAFDAC
+     Greenbook, NRN <registration number>,
+     https://greenbook.nafdac.gov.ng/products/details/<id> (...), retrieved
+     2026-11-05". Each such listing was retrieved from the Greenbook on
+     2026-11-05 (its search and the listing's own page) and checked: brand
+     name at the start of the product name, active ingredients matching the
+     generic(s), nothing else active. Registration numbers were never written
+     from memory, and a brand with no such listing found was not added. The
+     listing status (Active or Inactive that day) is recorded in the source;
+     an inactive (lapsed) registration still names the brand and its
+     ingredients. `reviewed_by`: `coordinator-curated` for the 23 brands
+     curated with the coordinator before the table (kept active; 11 of them
+     now cite a Greenbook listing, the other 12, Plasil, Flagyl, Amoxil,
+     Septrin, Panadol, Fansidar, Daraprim, Lasix, Norvasc, Buscopan, Valium
+     and Phenergan, had no single-ingredient listing under that name on the
+     Greenbook that day and keep source `coordinator-curated 2026-11`), and
+     `pending-pharmacist` for the 63 brands added from the Greenbook. A
+     pharmacist's review is pending but does not gate use: every brand is
+     shown `Brand? (generic)` (for example `Lonart? (artemether +
+     lumefantrine)`) on a hard-page item, which is always `check_carefully`.
+     Only true brand names, never a manufacturer's name.
+   - *Diagnoses* (`src/reading/diagnosis-list.ts`). Two lists. (a)
+     `ICD11_TITLES`: 134 titles of the ICD-11 for Mortality and Morbidity
+     Statistics, reproduced verbatim, with their codes where they have one
+     (a block has none). **ICD-11, World Health Organization, licensed under
+     CC BY-ND 3.0 IGO** (https://creativecommons.org/licenses/by-nd/3.0/igo/).
+     The titles are not modified (not shortened, respelled, re-cased or
+     translated), and the same attribution is in the data file's header. Each
+     title and code was checked on 2026-11-05 against WHO's own release file
+     for the ICD-11 MMS 2026-01 release, `SimpleTabulation-ICD-11-MMS-en`
+     (https://icdcdn.who.int/static/releasefiles/2026-01/SimpleTabulation-ICD-11-MMS-en.zip,
+     linked from the browser at https://icd.who.int/browse/2026-01/mms/en);
+     only titles found there exactly are listed. (b) `DIAGNOSIS_SYNONYMS`: 120
+     abbreviations and local names in our own words (HTN, DM, T2DM, PUD,
+     URTI, MP+, typhoid, SCD in crisis, BPH, CCF, CKD, UTI, RVD,
+     PIH, PPH, ...), each mapped to one title of (a); no ICD-10 content.
+     Abbreviations that stand for more than one thing on Nigerian notes are
+     left out and never expanded (`UNGROUNDED_ABBREVIATIONS`): PID (pelvic
+     inflammatory disease, or prolapsed intervertebral disc), PET (pre-eclamptic
+     toxaemia, or a PET scan), AGE (acute gastroenteritis, or the word "age"),
+     SCA (sickle cell anaemia, spinocerebellar ataxia or sudden cardiac arrest),
+     SCD (sickle cell disease, or sudden cardiac death; "SCD in crisis" stays
+     listed), PTB (pulmonary tuberculosis, or preterm birth on antenatal notes);
+     the spelled-out names stay listed. Real diagnoses that are not listed but
+     are a letter or two from a listed name (`UNLISTED_DIAGNOSIS_LOOKALIKES`:
+     nephritic syndrome, malacia) block a fuzzy match, as for drugs:
+     "Nephritic syndrome" is never respelled into "Nephrotic syndrome". An
+     abbreviation that does not say which of several titles is meant maps to
+     the broader title true of all of them (HTN to "Hypertensive diseases", DM
+     to "Diabetes mellitus", SCD to "Sickle cell disorders or other
+     haemoglobinopathies"), never to a narrower one that adds what is not
+     written. Nothing is coded from the list; it only grounds the shown name.
+   - *Lab tests* (`src/reading/lab-list.ts`). 34 test names and 96
+     abbreviations in our own words (FBC, PCV, Hb, WBC, ESR, MP, Widal, RBS,
+     FBS, HbA1c, E/U/Cr, LFT, urinalysis, MCS, HIV screen, HBsAg, anti-HCV, VDRL,
+     lipid profile, PSA, TFT, clotting profile, blood group, genotype,
+     pregnancy test, CRP, ...). **No LOINC content**: no LOINC names or codes.
+     Names that stand for more than one test are left out and never expanded:
+     PT (prothrombin time or pregnancy test), BG (blood group or blood
+     glucose), GT, CS, HCV (antibody or RNA), stool analysis. An abbreviation
+     never adds a specimen or assay that is not written: Cr is "creatinine",
+     AFB is "acid-fast bacilli (afb)", stool M/C/S keeps its culture and
+     sensitivity. An unlisted look-alike (`UNLISTED_LAB_LOOKALIKES`: creatine)
+     blocks a fuzzy match.
+   - *How diagnosis and lab names are used.* On a hard page only, after the
+     two readings are held to the page and compared (so every check, and the
+     comparison, is made on the names as read, and a lab value is still bound
+     to its test as written), a diagnosis name and a lab test name are
+     grounded: a listed one that the list changes is shown as read with the
+     listed name after it, `HTN? (Hypertensive diseases)`, `FBC? (full blood
+     count)`, `[?]TB? (Tuberculosis)` (a query on the paper stays); a name that
+     is the listed name as written is left as read; an unlisted one is left
+     as read (unlike a drug name, it is not made `[unreadable]`). `asWritten`
+     is never changed. Two readings giving different names for one diagnosis
+     ("HTN" and "Hypertension") disagree, and the name is `[unreadable]`, as
+     before. Every hard-page item is `check_carefully`.
+   - *Handwritten signs* (`src/reading/signs.ts`; rule I of the hard-page
+     prompt). Doctors write signs that stand for words. A sign from the table
+     is written as its meaning followed by "(sign)", in `asWritten` and in the
+     field ("alternate (sign) days"); any other mark that may be a sign, or a
+     sign the model is not sure of, is written `[sign?]`, never a guessed
+     word. Code never expands a sign or `[sign?]`: an item holding either gets
+     `sign_read` ("A handwritten sign was read as a word, marked "(sign)", or
+     could not be read, marked "[sign?]"; check it against the paper.", said
+     after `field_from_context` and `single_reading_only`, so an item only one
+     reading found says so first); no list
+     matches a name holding either; `forMatching` keeps `[sign?]` (like
+     `[?]`), its "?" is not a status cue, and the marks never anchor an item
+     to a line (the word "sign" is not on the paper). No picture of a sign is
+     kept anywhere; each is described in words. The table:
+
+     | Sign (described) | Written as | Source |
+     |---|---|---|
+     | two strokes or arrows pointing opposite ways, one above the other, like a zigzag or ⇌ | alternate (as in alternate days) | owner, 2026-11-05 (doctors' usage); "alternate days" as a prescription direction: Wikipedia, "List of abbreviations used in medical prescriptions" (alt. d., *alternis diebus*), read 2026-11-05 |
+     | c with a bar over it (c̄) | with | Wikipedia, "List of abbreviations used in medical prescriptions" (c̄, *cum*), read 2026-11-05 |
+     | s with a bar over it (s̄) | without | same (s̄, *sine*) |
+     | arrow up (↑) | increased (raised) | Wikipedia, "List of medical abbreviations", orthographic styling: arrows for elevation, read 2026-11-05 |
+     | arrow down (↓) | decreased (low) | same (diminution) |
+     | triangle (Δ) | diagnosis | common clinical usage |
+     | # before a bone or a part of the body | fracture (# before a number is a count, copied as written) | common clinical usage |
+     | tick (✓) | done (for something done or given) or present (for a finding), by its printed heading; else `[sign?]` | common clinical usage |
+     | cross (✗) alone in a box or after a label | not done or absent, by its heading; else `[sign?]`; a cross through writing is a crossing-out | common clinical usage |
+
+     Abbreviations written in letters and numbers are not signs: they are
+     copied as written (never with "(sign)"); the prompt gives their meaning
+     only to help read hard letters: Hx history (Wikipedia, "List of medical
+     abbreviations: H"), Rx treatment or prescription; stat at once, prn when
+     needed, od once a day (or, on eye drops, the right eye), bd twice a day, tds three times a day, qds four
+     times a day, nocte at night, mane in the morning (each in Wikipedia,
+     "List of abbreviations used in medical prescriptions", read 2026-11-05,
+     which also notes "o.d." can mean right eye); n/7 days and n/52 weeks
+     (common clinical usage), n/12 months (Wikipedia, "List of medical
+     abbreviations": "/12" used in some regions). The BNF and ISMP pages were
+     tried and could not be read from here (BNF: HTTP 403; ISMP's list is a
+     gated download), so neither is cited. `mane` is now one of the hard-page
+     frequencies. Dose shorthand is put in words only in a hard-page
+     medicine's `plain`, and only where the read is certain (no "?",
+     `[unreadable]` or `[sign?]` in the field): `tds (three times a day)`,
+     `5/7 (5 days)`; otherwise it is kept as written. `od` is always kept as
+     written, never put in words: on eye drops it is the right eye, and the
+     code is lower-cased before this step. Signs are in the
+     hard-page prompt only: they are read from the picture, which the first
+     pass never sees (its scanned text loses or garbles a sign), and the image
+     re-read of a page that is not a hard page keeps rule D (never guess), so
+     the system prompt and the other requests are byte for byte unchanged.
+   - *Decisions* (owner, relayed by the coordinator): 2026-11-05 about 18:40
+     UTC, "Yes, use a drug list"; about 20:25 UTC, the licences (ICD-11 titles
+     verbatim under CC BY-ND 3.0 IGO with attribution; our own lab names, no
+     LOINC; brands each sourced to a NAFDAC listing); about 21:00 UTC, "add
+     all those list now" (brands with NAFDAC sources and `reviewed_by`,
+     ICD-11 diagnoses with our own synonyms, lab tests), and that doctors
+     write signs that mean words (the example: two strokes pointing opposite
+     ways, like a zigzag or ⇌, meaning "alternate"; no photo kept).
    - *Zoom* (owner decision of 2026-11-05, about 18:45 UTC, relayed by the
      coordinator: "Zoom in our reader (Recommended)"; Anthropic's
      code-execution sandbox was declined because it keeps page photos for up
@@ -487,9 +635,9 @@ Each claimed job runs, in order:
        are on, `off`; any other value fails startup). The text-only request
        (hash-pinned in `claude.client.spec.ts`) and the ordinary image re-read
        request are unchanged; with zoom off the hard-page request is as before
-       (the prompt text adds rule I only when zoom is on). A page whose
+       (the prompt text adds rule J only when zoom is on). A page whose
        picture fails zoom's checks from its bytes (below, *Limits*) is not
-       offered the tool either: no tool, no rule I, and `-2` as its prompt
+       offered the tool either: no tool, no rule J, and `-3` as its prompt
        version.
      - *The tool loop* (`claude.client.ts`). Streamed, adaptive thinking,
        `inference_geo: "us"` unchanged. On `stop_reason: "tool_use"` every

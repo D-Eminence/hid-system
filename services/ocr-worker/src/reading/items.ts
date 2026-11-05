@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import type { Box, FlagReason, ItemKind, PaperIdentity, PaperItem, VITAL_MEASURES } from './contract';
 import {
   ambiguousDate, combinedStrengths, compact, DOSE, forMatching, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes,
-  sameCombined, segment, STATUS_CUES, suspiciousUncited, together, unitAfter, withoutNumberedUnit, wordsIn,
+  sameCombined, segment, STATUS_CUES, suspiciousUncited, together, unitAfter, withoutNumberedUnit, withoutSignMarks,
+  wordsIn,
 } from './grounding';
 import { withoutPlaceholders, type Masker } from './masking';
 import type { ModelItem, ModelPage } from './prompt';
@@ -26,7 +27,12 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   // A hard page's best guesses (owner decision 2026-11-05 about 18:40 UTC): below the real disagreements above, and
   // before read_from_image, which every such item also has, so they are said instead of it. Most specific first.
   [['field_from_context'], 'Part of this was guessed from what is usual, not read from the writing; check it against the paper.'],
+  // Found by only one of the two readings: said before a sign, so the person checking is told the item itself may
+  // not be on the paper.
+  // A handwritten sign read as its meaning ("alternate (sign)") or not read ("[sign?]"): an interpretation of a mark,
+  // below a guess from what is usual and one reading only, above the plainer hard-page sentences.
   [['single_reading_only'], 'Only one of two readings of the picture found this; check it against the paper.'],
+  [['sign_read'], 'A handwritten sign was read as a word, marked "(sign)", or could not be read, marked "[sign?]"; check it against the paper.'],
   [['best_guess_from_picture'], 'This is a best guess from the picture; check every word against the paper.'],
   // Just before read_from_image (which every picture item has), so it is shown where it applies.
   [['not_matched_to_scanned_text'], 'Read from the picture; it could not be matched to the scanned text. Check it against the paper.'],
@@ -163,13 +169,14 @@ function onLine(box: Box, line: Box): boolean {
 /**
  * Whether the item read from the picture shares anything with the text read of its lines: a word of three letters
  * or more, or a number. It need not match the text (the service may have misread it), but an item with nothing in
- * common with its lines (a box copied from the prompt around a made-up item) is not kept.
+ * common with its lines (a box copied from the prompt around a made-up item) is not kept. The hard-page sign marks
+ * ("(sign)", "[sign?]") are not words of the item (withoutSignMarks).
  */
 function anchored(asWritten: string, source: string): boolean {
   const text = withoutPlaceholders(source);
   const words = new Set(wordsIn(text).filter((word) => word.length >= 3));
   const numbers = new Set(numbersIn(text));
-  const own = withoutPlaceholders(asWritten);
+  const own = withoutSignMarks(withoutPlaceholders(asWritten));
   return wordsIn(own).some((word) => words.has(word)) || numbersIn(own).some((number) => numbers.has(number));
 }
 

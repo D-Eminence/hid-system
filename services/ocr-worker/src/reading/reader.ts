@@ -97,7 +97,7 @@ export interface ReadingSummary {
   zoomCalls: number;
   zoomLimited: number;
   zoomFailed: number;
-  /** Hard pages whose reads were offered the zoom tool (their prompt carried rule I). */
+  /** Hard pages whose reads were offered the zoom tool (their prompt carried rule J). */
   hardPageZoomPages: number[];
 }
 
@@ -313,7 +313,7 @@ export class PaperReadingService {
         zooms.set(state.page, zoom);
       }
       // A picture over zoom's limits by its bytes (zoom.ts zoomDecodable: size, PNG chunks, bit depth and interlacing,
-      // JPEG structure, components and scans) is never offered the tool: no rule I, and prompt version 2 for the page.
+      // JPEG structure, components and scans) is never offered the tool: no rule J, and prompt version 3 for the page.
       return zoom.available() ? zoom : null;
     };
     /**

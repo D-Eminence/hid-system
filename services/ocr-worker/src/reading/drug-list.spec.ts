@@ -1,3 +1,4 @@
+import { BRAND_ROWS, COORDINATOR_SOURCE, isActiveBrandRow, NAFDAC_SOURCE } from './brand-names';
 import { BRAND_NAMES, editDistance, LOOKALIKE_DISTANCE, matchDrugName, MAX_EDIT_DISTANCE, MIN_FUZZY_LETTERS,
   MIN_SIMILARITY, NEML_GENERICS, normaliseDrugName, SYNONYMS, UNLISTED_LOOKALIKES } from './drug-list';
 
@@ -106,4 +107,48 @@ describe('drug list (hard pages only)', () => {
       for (const part of generic.split(' + ')) expect(generics.has(part) || generics.has(generic)).toBe(true);
     }
   });
+
+  it('keeps brands in a data table: active only with a NAFDAC Greenbook source or as one of the 23 curated before', () => {
+    const columns = ['brand', 'generic', 'strength_forms', 'source', 'reviewed_by'];
+    for (const row of BRAND_ROWS) {
+      expect(Object.keys(row)).toEqual(columns);
+      expect(['coordinator-curated', 'pending-pharmacist']).toContain(row.reviewed_by);
+      expect(normaliseDrugName(row.brand)).toBe(row.brand);
+      // A row is either NAFDAC-sourced (registration number and listing address) or one of the curated 23.
+      expect([row.brand, NAFDAC_SOURCE.test(row.source) || row.source === COORDINATOR_SOURCE]).toEqual([row.brand, true]);
+      if (row.reviewed_by === 'pending-pharmacist') expect(NAFDAC_SOURCE.test(row.source)).toBe(true);
+      expect(isActiveBrandRow(row)).toBe(true);
+    }
+    const curated = BRAND_ROWS.filter((row) => row.reviewed_by === 'coordinator-curated');
+    expect(curated).toHaveLength(23);
+    expect(new Set(BRAND_ROWS.map((row) => row.brand)).size).toBe(BRAND_ROWS.length);
+    expect(Object.keys(BRAND_NAMES)).toHaveLength(BRAND_ROWS.length);
+    // An unsourced new row, or a NAFDAC-looking source without a listing address, is not used.
+    expect(isActiveBrandRow({ brand: 'fictionalbrand', generic: 'paracetamol', strength_forms: '', source: 'recalled',
+      reviewed_by: 'pending-pharmacist' })).toBe(false);
+    expect(isActiveBrandRow({ brand: 'fictionalbrand', generic: 'paracetamol', strength_forms: '',
+      source: 'NAFDAC Greenbook, NRN 04-0000', reviewed_by: 'pending-pharmacist' })).toBe(false);
+    expect(isActiveBrandRow({ brand: 'fictionalbrand', generic: 'paracetamol', strength_forms: '',
+      source: COORDINATOR_SOURCE, reviewed_by: 'pending-pharmacist' })).toBe(false);
+  });
+
+  it('shows a NAFDAC-sourced brand as "Brand? (generic)", like the curated ones', () => {
+    expect(matchDrugName('Lonart')).toEqual({ generic: 'artemether + lumefantrine', brand: 'lonart',
+      display: 'Lonart? (artemether + lumefantrine)', exact: true });
+    expect(matchDrugName('P-Alaxin')?.display).toBe('P-alaxin? (dihydroartemisinin + piperaquine)');
+    expect(matchDrugName('Camosunate')?.generic).toBe('artesunate + amodiaquine');
+    expect(matchDrugName('Mixtard')?.generic).toBe('soluble insulin + isophane insulin');
+    expect(matchDrugName('Tegretol')?.display).toBe('Tegretol? (carbamazepine)');
+    expect(matchDrugName('Lpitr')).toBeNull();
+    expect(matchDrugName('Lipittor')?.display).toBe('Lipitor? (atorvastatin)');
+  });
+
+  it('never takes a product sold under a brand name with other ingredients for that brand', () => {
+    // On the Greenbook under these brand names with other active ingredients: never the single-generic brand.
+    for (const name of ['Panadol Extra', 'Lofnac Plus', 'Piriton Expectorant', 'Ciprotab-TN', 'Galvusmet',
+      'Co-Micardis', 'Gvither Plus', 'NovoMix 30']) {
+      expect([name, matchDrugName(name)]).toEqual([name, null]);
+    }
+  });
 });
+
