@@ -1,0 +1,3 @@
+# Generator dependencies (Python 3.11 or newer). Pinned: byte-identical output depends on these exact versions.
+pillow==12.3.0
+reportlab==5.0.1
