@@ -115,10 +115,11 @@ describe('PaperReadingService', () => {
     const hypertension = modelItem({ kind: 'diagnosis', asWritten: 'Hypertension', lineIds: ['p1-l2'],
       name: 'Hypertension', status: 'confirmed' });
     const run = async (second: ModelPage, document?: { mediaType: string; bytes: Uint8Array },
-      pages = [page]) => {
+      pages = [page], masked: 'send' | 'text_only' = 'send') => {
       const { client, calls } = fakeClient((request) => request.model === 'claude-sonnet-5-5'
         ? ok(modelPage([amlodipine, hypertension])) : ok(second));
-      const outcome = await new PaperReadingService({ ...config, OCR_AI_IMAGE_REREAD: 'on' }, client).read({
+      const outcome = await new PaperReadingService({ ...config, OCR_AI_IMAGE_REREAD: 'on',
+        OCR_AI_IMAGE_MASKED_PAGES: masked }, client).read({
         facilityId: FACILITY, sourceSha256Hex: SOURCE_SHA, pages, ...(document ? { document } : {}) }, signal());
       return { ...outcome, calls };
     };
@@ -139,7 +140,7 @@ describe('PaperReadingService', () => {
       const masked = readPage(1, [['Amlodipine 5mg od', { handwritten: true, confidence: 0.6 }],
         'Dx: Hypertension tel 08030000000']);
       const { payload, summary } = await run(modelPage([hypertension]), { mediaType: 'image/png',
-        bytes: fixturePng(1240, 1754) }, [masked]);
+        bytes: fixturePng(1240, 1754) }, [masked], 'text_only');
       expect(summary.imageRereadSkipped).toEqual([{ page: 1, reason: 'image_has_masked_number' }]);
       expect(payload.items.map((item) => item.asWritten)).toEqual(['Amlodipine 5mg od', 'Hypertension']);
       expect(payload.items[0]!.checkReasons).toContain('not_in_second_reading');
@@ -536,7 +537,7 @@ describe('PaperReadingService', () => {
       expect(summary.rereadPages).toEqual([3, 4]);
     });
 
-    it('keeps a page whose text had a masked number text-only by default, and sends it only when set to send', async () => {
+    it('sends a page whose text had a masked number as a picture by default (owner decision), and keeps it text-only when set to text_only', async () => {
       const masked = readPage(1, [['Amlodipne 5rng od', { handwritten: true, confidence: 0.55 }],
         'Dx: Hypertension tel 08030000000']);
       const answerFor = (image: boolean) => modelPage([
@@ -546,13 +547,15 @@ describe('PaperReadingService', () => {
           status: 'confirmed', ...(image ? { box: { left: 0.1, top: 0.1, width: 0.3, height: 0.02 } } : {}) })]);
       const run = async (reading: ReadingConfig) => {
         const seen: Seen[] = [];
+        const sentLines: string[] = [];
         const client: PageModelClient = { readPage: jest.fn(async (request) => {
           seen.push({ model: request.model, page: request.page, image: request.image });
+          sentLines.push(...request.lines.map((line) => line.text));
           return ok(answerFor(request.image !== undefined));
         }) };
-        return { seen, ...(await read(reading, client, [masked], png)) };
+        return { seen, sentLines, ...(await read(reading, client, [masked], png)) };
       };
-      for (const reading of [imageConfig, { ...imageConfig, OCR_AI_IMAGE_MASKED_PAGES: 'text_only' as const }]) {
+      for (const reading of [{ ...imageConfig, OCR_AI_IMAGE_MASKED_PAGES: 'text_only' as const }]) {
         const kept = await run(reading);
         expect(kept.seen.map((call) => call.image !== undefined)).toEqual([false, false]);
         expect(kept.summary).toMatchObject({ rereadPages: [1], imageRereadPages: [],
@@ -560,9 +563,14 @@ describe('PaperReadingService', () => {
         expect(paperReadingPayloadSchema.parse(kept.payload).reading.imageRereadSkipped)
           .toEqual([{ page: 1, reason: 'image_has_masked_number' }]);
       }
-      const sent = await run({ ...imageConfig, OCR_AI_IMAGE_MASKED_PAGES: 'send' });
-      expect(sent.seen.map((call) => call.image !== undefined)).toEqual([false, true]);
-      expect(sent.summary).toMatchObject({ imageRereadPages: [1], imageRereadSkipped: [] });
+      for (const reading of [imageConfig, { ...imageConfig, OCR_AI_IMAGE_MASKED_PAGES: 'send' as const }]) {
+        const sent = await run(reading);
+        expect(sent.seen.map((call) => call.image !== undefined)).toEqual([false, true]);
+        expect(sent.summary).toMatchObject({ imageRereadPages: [1], imageRereadSkipped: [] });
+        // The text sent to the API stays masked: no request's lines carry the phone number.
+        expect(sent.sentLines.length).toBeGreaterThan(0);
+        expect(sent.sentLines.join('\n')).not.toContain('08030000000');
+      }
     });
 
     it('does not send a JPEG turned by its EXIF orientation, and re-reads its text instead', async () => {

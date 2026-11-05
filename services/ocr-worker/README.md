@@ -241,11 +241,12 @@ Each claimed job runs, in order:
 
    Masked numbers: the text sent hides 11-digit NIN-like and Nigerian phone
    numbers, but the picture shows them. By default
-   (`OCR_AI_IMAGE_MASKED_PAGES=text_only`) a page whose text had any number
-   hidden is not sent as a picture and gets the text re-read
-   (`image_has_masked_number`). `OCR_AI_IMAGE_MASKED_PAGES=send` sends the
-   picture of such pages anyway, **which shows those NIN-like and phone
-   numbers to the Claude API**; any other value fails startup. A picture over the
+   (`OCR_AI_IMAGE_MASKED_PAGES=send`; owner decision 2026-11-05, about 14:06
+   UTC: "send images with numbers") the picture of such a page is sent anyway,
+   **which shows those NIN-like and phone numbers to the Claude API** (US-only
+   processing; the text sent stays masked). `OCR_AI_IMAGE_MASKED_PAGES=text_only`
+   keeps such a page text-only and gives it the text re-read
+   (`image_has_masked_number`); any other value fails startup. A picture over the
    Claude API image limits (10 MB base64-encoded, 8000 x 8000 px; the size is
    read from the PNG IHDR or JPEG frame header, never by decoding) stays text
    only (`image_too_large`; `image_size_unknown` when the header cannot be

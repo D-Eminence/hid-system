@@ -15,7 +15,7 @@ import { MODEL_SCHEMA_VERSION, PROMPT_VERSION } from './prompt';
 export type ReadingConfig = Pick<OcrWorkerConfig, 'OCR_AI_MODE' | 'OCR_AI_FACILITY_IDS' | 'OCR_AI_FIRST_PASS_MODEL'
   | 'OCR_AI_FIRST_PASS_EFFORT' | 'OCR_AI_REREAD_MODEL' | 'OCR_AI_REREAD_EFFORT' | 'OCR_AI_MAX_REREAD_PAGES'>
   // Pages of one document read at once; one at a time when not given. The image re-read is off when not given,
-  // and a page with a masked number is not sent as a picture unless OCR_AI_IMAGE_MASKED_PAGES is 'send'.
+  // and a page with a masked number is sent as a picture unless OCR_AI_IMAGE_MASKED_PAGES is 'text_only'.
   & Partial<Pick<OcrWorkerConfig, 'OCR_AI_PAGE_CONCURRENCY' | 'OCR_AI_IMAGE_REREAD' | 'OCR_AI_IMAGE_MASKED_PAGES'>>;
 
 export interface ReadingInput {
@@ -340,8 +340,8 @@ export class PaperReadingService {
   /**
    * Whether a flagged page's re-read may carry the picture of the page: the setting on; the document a one-page PNG
    * or JPEG within the image limits and upright (pageImageFor); the re-read model on the list of known image tiers;
-   * and no number hidden in the page's text, which the picture would show, unless OCR_AI_IMAGE_MASKED_PAGES is
-   * 'send'.
+   * and, when OCR_AI_IMAGE_MASKED_PAGES is 'text_only', no number hidden in the page's text (the picture would
+   * show it; the default 'send' allows it).
    */
   private imageDecision(state: PageState, input: ReadingInput): PageImageDecision {
     if (this.config.OCR_AI_IMAGE_REREAD !== 'on') return { kind: 'skip', reason: 'image_reread_off' };
@@ -349,7 +349,7 @@ export class PaperReadingService {
     if (decision.kind === 'image' && imageTierOf(this.config.OCR_AI_REREAD_MODEL) === null) {
       return { kind: 'skip', reason: 'image_tier_unknown' };
     }
-    if (decision.kind === 'image' && state.hasMaskedNumber && this.config.OCR_AI_IMAGE_MASKED_PAGES !== 'send') {
+    if (decision.kind === 'image' && state.hasMaskedNumber && this.config.OCR_AI_IMAGE_MASKED_PAGES === 'text_only') {
       return { kind: 'skip', reason: 'image_has_masked_number' };
     }
     return decision;

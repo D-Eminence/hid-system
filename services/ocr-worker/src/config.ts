@@ -87,10 +87,11 @@ const schema = z.object({
   // and 'off' otherwise. Any other value fails startup.
   OCR_AI_IMAGE_REREAD: z.preprocess(emptyToUndefined, z.enum(['on', 'off']).optional()),
   // A page whose text had a number hidden by the masker (an 11-digit NIN-like or a Nigerian phone number): the
-  // text sent hides it, but the picture would show it. 'text_only' (default; unset or empty): such a page is
-  // re-read from its text only ('image_has_masked_number'). 'send': the picture is sent anyway, and with it those
-  // numbers reach the Claude API. Any other value fails startup.
-  OCR_AI_IMAGE_MASKED_PAGES: z.preprocess(emptyToUndefined, z.enum(['text_only', 'send']).default('text_only')),
+  // text sent hides it, but the picture shows it. 'send' (default; unset or empty; owner decision 2026-11-05 about
+  // 14:06 UTC, "send images with numbers"): the picture is sent anyway, and with it those numbers reach the Claude
+  // API (US only). 'text_only': such a page is re-read from its text only ('image_has_masked_number'). Any other
+  // value fails startup. The text sent stays masked either way.
+  OCR_AI_IMAGE_MASKED_PAGES: z.preprocess(emptyToUndefined, z.enum(['text_only', 'send']).default('send')),
 }).superRefine((env, context) => {
   if (env.OCR_PROVIDER === 'test' && env.NODE_ENV !== 'test') {
     context.addIssue({ code: 'custom', path: ['OCR_PROVIDER'], message: 'The test OCR provider is restricted to NODE_ENV=test' });
