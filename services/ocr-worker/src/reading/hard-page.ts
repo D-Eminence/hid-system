@@ -1,7 +1,7 @@
 import type { FlagReason, PaperItem } from './contract';
 import { diagnosisLookalike, matchDiagnosisName, type ListMatch } from './diagnosis-list';
 import { drugLookalike, matchDrugName, normaliseDrugName, type DrugMatch } from './drug-list';
-import { crossedOutParts, withoutCrossedOut } from './grounding';
+import { CROSSED_OUT_START, crossedOutParts, withoutCrossedOut } from './grounding';
 import { checkReasonSentence, crossedOutOnPlace, itemId, markCrossedOut, mergeIdentity, overlapShare, PAIR_BOX_OVERLAP,
   unionBox, uniqueItemIds, type PageCheck } from './items';
 import { labTestLookalike, matchLabTestName } from './lab-list';
@@ -118,11 +118,13 @@ const hasLetters = (text: string) => /[\p{L}\p{N}]/u.test(text.replace(NOT_GUESS
 export const bare = (text: string | null | undefined) => (text ?? '').replace(/\?/g, ' ').replace(/\s+/g, ' ')
   .replace(/\s+([)\]])/g, '$1').trim().toLowerCase().replace(/(\d)\s+(?=\p{L})/gu, '$1');
 /**
- * The old "[unreadable]" (hard-page prompt 2 to 4) as the clean token "[?]"; "[frequency?]" as "[freq?]"; a word cut
+ * The old "[unreadable]" (hard-page prompt 2 to 4) as the clean token "[?]"; a crossed-out group in any case or
+ * spacing ("(Crossed out:X)") as CROSSED_OUT_OPEN, so every check sees one form; "[frequency?]" as "[freq?]"; a word cut
  * short written with ASCII dots ("Amox...", "Amox..") as the partial-word mark ("Amox…"), so it is never marked
  * "Amox?..." or matched to a list.
  */
 const cleanTokens = (text: string) => text.replace(/\[unreadable\]/gi, NO_LETTERS)
+  .replace(new RegExp(`${CROSSED_OUT_START.source}\\s*`, 'gi'), CROSSED_OUT_OPEN)
   .replace(/\[frequency\?\]/gi, FIELD_UNREAD.frequency)
   .replace(/(\p{L})\.{2,3}(?=[\s)\]]|$)/gu, `$1${PARTIAL_WORD}`);
 /** A reading mark that is one word on its own: "[?]", "[sign?]", "(? on paper)", "(sign)" or a field placeholder. */
@@ -362,9 +364,9 @@ export function carryMarks(value: string, keys: readonly string[], carried: Set<
 
 /**
  * Whether an item is crossed out as a whole (rule G): nothing is written outside its crossed-out writing; or its
- * crossedOut holds all of asWritten where asWritten does not say "(crossed out: X)"; or (a medicine) its drug name is
- * written only in the crossed-out writing, so no live drug name stands outside it ("IV (crossed out: Flagyl 500mg
- * tds)"). Only the item's own writing is looked at.
+ * crossedOut holds all of asWritten where asWritten does not say "(crossed out: X)"; or (a medicine whose asWritten
+ * shows the group) its drug name is written only in the crossed-out writing, so no live drug name stands outside it
+ * ("IV (crossed out: Flagyl 500mg tds)"). Only the item's own writing is looked at.
  */
 function wholeCrossedOut(item: ModelItem): boolean {
   const crossed = allCrossedOut(item.asWritten, item.hard?.crossedOut);
@@ -372,7 +374,11 @@ function wholeCrossedOut(item: ModelItem): boolean {
   const live = withoutCrossedOut(item.asWritten);
   if (!hasLetters(live)) return true;
   if (!item.asWritten.includes(CROSSED_OUT_OPEN) && bare(crossed).includes(bare(live))) return true;
-  return item.kind === 'medicine' && nameCrossedOut(item.name, crossed) && !nameCrossedOut(item.name, live);
+  // The drug name struck: only where asWritten itself shows the group, so the note keeps asWritten word for word.
+  // Otherwise asWritten would be replaced by the crossed-out writing, losing live words ("IV 500mg tds" with
+  // crossedOut "Flagyl"): the item stays a medicine and the line rule makes it unknown and crossed_out.
+  return item.kind === 'medicine' && item.asWritten.includes(CROSSED_OUT_OPEN)
+    && nameCrossedOut(item.name, crossed) && !nameCrossedOut(item.name, live);
 }
 
 /** Step 1 (see the header). Items without hard-page extras are left as they are. */
@@ -651,8 +657,7 @@ function nameCrossedOut(name: string | null | undefined, crossed: string): boole
 /** The crossed-out writing an item shows: the reading's crossedOut, else what asWritten writes as "(crossed out: X)". */
 function crossedOutOf(asWritten: string, given: string | undefined): string {
   if (!isBlank(given)) return given!.trim();
-  return words(asWritten).filter((word) => word.startsWith(CROSSED_OUT_OPEN))
-    .map((word) => word.slice(CROSSED_OUT_OPEN.length, -1).trim()).filter(Boolean).join('; ');
+  return crossedOutParts(asWritten).join('; ');
 }
 
 /**
@@ -1233,8 +1238,8 @@ function neighbourGap(a: Side, b: Side): number | null {
  * Crossed out, line by line (no name matching, any kind of item): any crossed-out writing a reading shows (a
  * "(crossed out: X)" group in its asWritten, or its crossedOut) makes every medicine kept on one of its lines or over
  * its box (crossedOutOnPlace) status unknown (unless stopped or past) and crossed_out, whatever was read there; where
- * only the other reading shows it (one reading read the line live, the other struck), readings_disagree too. `from`
- * says which readings each item came from.
+ * a reading the item came from shows no strike there (one reading read the line live, the other struck),
+ * readings_disagree too. `from` says which readings each item came from.
  */
 function markStruckLines(items: PaperItem[], from: ReadonlyArray<ReadonlySet<'left' | 'right'>>,
   sides: ReadonlyArray<{ side: Side; read: 'left' | 'right' }>): void {
@@ -1244,7 +1249,10 @@ function markStruckLines(items: PaperItem[], from: ReadonlyArray<ReadonlySet<'le
     const hits = item.kind === 'medicine' ? marks.filter((mark) => crossedOutOnPlace(item, mark)) : [];
     if (hits.length === 0) return;
     markCrossedOut(item);
-    if (hits.every((mark) => !from[index]!.has(mark.read)) && !item.checkReasons.includes(READINGS_DISAGREE)) {
+    // The readings disagree where any reading the item was built from shows no strike there (a pair where only one
+    // reading saw it, or an item only the other reading saw struck).
+    const struckBy = new Set(hits.map((mark) => mark.read));
+    if ([...from[index]!].some((read) => !struckBy.has(read)) && !item.checkReasons.includes(READINGS_DISAGREE)) {
       item.checkReasons.push(READINGS_DISAGREE);
       item.checkReason = checkReasonSentence(item.checkReasons);
     }

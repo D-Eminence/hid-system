@@ -679,6 +679,53 @@ describe('crossed out, line by line (third review): no name matching, never acti
     expect(kept.checkReasons).toEqual(expect.arrayContaining(['crossed_out', 'readings_disagree', 'not_in_picture_reading']));
   });
 
+  it('never replaces live writing when only crossedOut names the drug: the order stays, every word shown, unknown', () => {
+    for (const [asWritten, name] of [['IV 500mg tds', 'Flagyl'], ['Ceftriaxone 1g bd', 'Flagyl']] as const) {
+      const [item] = mergeHardReadings([read([order(asWritten, { route: asWritten.startsWith('IV') ? 'IV' : '', name,
+        frequency: asWritten.endsWith('bd') ? 'bd' : 'tds' }, '', '', { crossedOut: 'Flagyl' })])], SOURCE_SHA).check.items;
+      expect(item).toMatchObject({ kind: 'medicine', asWritten, fields: { status: 'unknown' } });
+      for (const word of asWritten.split(' ')) expect(item!.plain).toContain(word);
+      expect(item!.checkReasons).toContain('crossed_out');
+    }
+  });
+
+  it('reads a crossed-out group in any case or spacing as crossed out, in the hard reads and after the re-read merge', () => {
+    for (const asWritten of ['(Crossed out: Flagyl) Ceftriaxone 1g bd', '(crossed out:Flagyl) Ceftriaxone 1g bd',
+      '( CROSSED OUT : Flagyl) Ceftriaxone 1g bd']) {
+      const hard = mergeHardReadings([read([order(asWritten, { name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g')])],
+        SOURCE_SHA).check;
+      const [item] = hard.items;
+      expect(item).toMatchObject({ kind: 'medicine', fields: { status: 'unknown' } });
+      expect(item!.asWritten).toBe('(crossed out: Flagyl) Ceftriaxone 1g bd');
+      expect(item!.checkReasons).toContain('crossed_out');
+      const first = checkPage({ page: 1, lines: page.lines, sourceSha256Hex: SOURCE_SHA, readBy: 'first_pass',
+        masker: createMasker(), answer: modelPage([modelItem({ kind: 'note', asWritten: 'IV Flgyl 500mg tds',
+          lineIds: ['p1-l1'], noteText: 'IV Flgyl 500mg tds' })]) });
+      const merged = mergeReread(first, hard, page.lines, 'image').items.filter((one) => one.kind === 'medicine');
+      for (const one of merged) {
+        expect(one.fields).toMatchObject({ status: 'unknown' });
+        expect(one.checkReasons).toContain('crossed_out');
+      }
+    }
+  });
+
+  it('says the readings disagree where only one of a paired order\'s readings shows its line struck', () => {
+    const order1g = order('Ceftriaxone 1g bd', { name: 'Ceftriaxone', frequency: 'bd' }, '1', 'g');
+    const note: CleanReadingAnswer = { item: { kind: 'note', asWritten: '(crossed out: Ceftriaxone 1g bd)',
+      noteText: '(crossed out: Ceftriaxone 1g bd)' }, crossedOut: 'Ceftriaxone 1g bd', basis: { other: 'letters' } };
+    for (const [a, b] of [[[order1g, note], [order1g]], [[order1g], [order1g, note]]] as const) {
+      const medicine = mergeHardReadings([read([...a]), read([...b])], SOURCE_SHA).check.items
+        .find((item) => item.kind === 'medicine')!;
+      expect(medicine.fields).toMatchObject({ status: 'unknown' });
+      expect(medicine.checkReasons).toEqual(expect.arrayContaining(['crossed_out', 'readings_disagree']));
+    }
+    // Both readings show the strike: crossed out, but no disagreement.
+    const both = mergeHardReadings([read([order1g, note]), read([order1g, note])], SOURCE_SHA).check.items
+      .find((item) => item.kind === 'medicine')!;
+    expect(both.checkReasons).toContain('crossed_out');
+    expect(both.checkReasons).not.toContain('readings_disagree');
+  });
+
   it('leaves a stopped order stopped and an order on another line alone', () => {
     const two = readPage(1, [['IV Flgyl 500mg tds', { handwritten: true, confidence: 0.4, box: lineBox(1) }],
       ['PO Prctml 1g qds', { handwritten: true, confidence: 0.4, box: lineBox(2) }]]);

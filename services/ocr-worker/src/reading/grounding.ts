@@ -85,42 +85,49 @@ export function forMatching(text: string): string {
 export const FIELD_UNREAD = { route: '[route?]', name: '[drug?]', dose: '[dose?]', frequency: '[freq?]' } as const;
 export const FIELD_UNREAD_MARKS = /\[(?:route|drug|dose|freq)\?\]/g;
 
-/** Text without its "(crossed out: X)" parts (hard-page prompt rule G); nested brackets inside X are allowed. */
-export function withoutCrossedOut(text: string): string {
-  if (!text.includes('(crossed out:')) return text;
-  let out = '';
-  let index = 0;
-  while (index < text.length) {
-    const start = text.indexOf('(crossed out:', index);
-    if (start < 0) { out += text.slice(index); break; }
-    out += text.slice(index, start);
+/**
+ * The start of a "(crossed out: X)" group, in any case and spacing ("(Crossed out: X)", "(crossed out:X)"): the model
+ * does not always write the label exactly, and a group missed here is a struck line left active (review of
+ * 2026-11-06). prepareHardAnswer also rewrites every form to CROSSED_OUT_OPEN.
+ */
+export const CROSSED_OUT_START = /\(\s*crossed\s*out\s*:/gi;
+
+/** Each "(crossed out: X)" group of a text: where it starts and ends (its closing bracket), and X as written. */
+function crossedOutGroups(text: string): Array<{ start: number; end: number; inside: string }> {
+  const groups: Array<{ start: number; end: number; inside: string }> = [];
+  const pattern = new RegExp(CROSSED_OUT_START.source, 'gi');
+  let found: RegExpExecArray | null;
+  while ((found = pattern.exec(text)) !== null) {
+    const start = found.index;
     let depth = 0;
     let end = start;
     for (; end < text.length; end += 1) {
       if (text[end] === '(') depth += 1;
       else if (text[end] === ')') { depth -= 1; if (depth === 0) break; }
     }
+    groups.push({ start, end, inside: text.slice(start + found[0].length, end).trim() });
+    pattern.lastIndex = end + 1;
+  }
+  return groups;
+}
+
+/** Text without its "(crossed out: X)" parts (hard-page prompt rule G); nested brackets inside X are allowed. */
+export function withoutCrossedOut(text: string): string {
+  const groups = crossedOutGroups(text);
+  if (groups.length === 0) return text;
+  let out = '';
+  let index = 0;
+  for (const { start, end } of groups) {
+    out += text.slice(index, start);
     index = end + 1;
   }
+  out += text.slice(index);
   return out.replace(/\s+/g, ' ').trim();
 }
 
 /** The "(crossed out: X)" parts of a text, each X as written (nested brackets inside X kept). */
 export function crossedOutParts(text: string): string[] {
-  const parts: string[] = [];
-  let index = text.indexOf('(crossed out:');
-  while (index >= 0) {
-    let depth = 0;
-    let end = index;
-    for (; end < text.length; end += 1) {
-      if (text[end] === '(') depth += 1;
-      else if (text[end] === ')') { depth -= 1; if (depth === 0) break; }
-    }
-    const inside = text.slice(index + '(crossed out:'.length, end).trim();
-    if (inside) parts.push(inside);
-    index = text.indexOf('(crossed out:', end + 1);
-  }
-  return parts;
+  return crossedOutGroups(text).map(({ inside }) => inside).filter(Boolean);
 }
 
 /**
@@ -137,7 +144,7 @@ export function withoutSignMarks(text: string): string {
  * "[?]" and the label of "(crossed out: X)" (X itself is writing on the paper and stays). For the anchor rule.
  */
 export function withoutReadingMarks(text: string): string {
-  return withoutSignMarks(text).replace(FIELD_UNREAD_MARKS, ' ').replace(/\(\? on paper\)|\[\?\]/g, ' ').replace(/\(crossed out:/g, ' (');
+  return withoutSignMarks(text).replace(FIELD_UNREAD_MARKS, ' ').replace(/\(\? on paper\)|\[\?\]/g, ' ').replace(new RegExp(CROSSED_OUT_START.source, 'gi'), ' (');
 }
 
 export function norm(text: string): string {
