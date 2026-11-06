@@ -1,4 +1,4 @@
-import { listEntries, matchListName, type ListMatch } from './diagnosis-list';
+import { listEntries, lookalikeListName, matchListName, type ListMatch } from './diagnosis-list';
 import type { ListEntry } from './list-match';
 
 /**
@@ -67,4 +67,9 @@ export const LAB_ENTRIES: readonly ListEntry<string>[] = listEntries(Object.keys
 /** The listed test a proposed lab test name stands for, or null (see diagnosis-list.ts matchListName). */
 export function matchLabTestName(proposed: string): ListMatch | null {
   return matchListName(proposed, LAB_ENTRIES, UNLISTED_LAB_LOOKALIKES);
+}
+
+/** The listed test a name near an unlisted look-alike would have been respelled into (diagnosis-list.ts lookalikeListName). */
+export function labTestLookalike(proposed: string): string | null {
+  return lookalikeListName(proposed, LAB_ENTRIES, UNLISTED_LAB_LOOKALIKES);
 }

@@ -309,11 +309,11 @@ export const DIAGNOSIS_SYNONYMS: Readonly<Record<string, string>> = {
 };
 
 /**
- * A name as a list key: lower case, accents off, the reading's "?" marks and a paper query "[?]" taken off, "+"
+ * A name as a list key: lower case, accents off, the reading's "?" marks and a paper query "(? on paper)" taken off, "+"
  * kept (so "MP+" is not "MP -ve"), a hyphen kept only in "-ve", every other mark a space. compactKey also takes the spaces out, for an exact match that ignores spacing and slashes.
  */
 export function listKey(text: string): string {
-  return text.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/\[\?\]/g, ' ')
+  return text.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/\(\? on paper\)/g, ' ')
     .replace(/\?/g, ' ').replace(/-(?=ve\b)/g, '\u0001').replace(/'/g, '').replace(/[^a-z0-9+\u0001 ]/g, ' ')
     .replace(/\u0001/g, '-').replace(/\s*\+\s*/g, '+ ').replace(/\s+/g, ' ').trim();
 }
@@ -339,7 +339,7 @@ export function listEntries(titles: readonly string[], synonyms: Readonly<Record
 /**
  * The listed name a proposed name stands for, or null (the shared lookup of diagnosis-list.ts and lab-list.ts).
  * Exact first, on the key and on the key without spaces; then the strict fuzzy match. A name holding
- * "[unreadable]", "[sign?]" or "(sign)", or with no letters, never matches; nor does a fuzzy match where the name is
+ * "[unreadable]", "[?]", "[sign?]" or "(sign)", or with no letters, never matches; nor does a fuzzy match where the name is
  * as near a real unlisted look-alike (unlistedLookalikes), since the name may well be that one. Where the name as read is the listed
  * name itself, the display is the name as read; otherwise "As read? (listed name)", so what was written stays in
  * front and the list's name is only added (never shown alone).
@@ -362,6 +362,25 @@ export function matchListName(proposed: string, entries: readonly ListEntry<stri
 }
 
 /**
+ * The listed name a proposed name would have been respelled into, where the strict fuzzy match found one but a real
+ * unlisted look-alike (unlistedLookalikes) is as near, so matchListName refused it; else null. Never used to pick a
+ * name: hard-page.ts shows the name as read with this one as the other option, "As read? (or Listed?)", so a look-alike
+ * pair is never resolved silently either way.
+ */
+export function lookalikeListName(proposed: string, entries: readonly ListEntry<string>[],
+  unlistedLookalikes: readonly string[]): string | null {
+  const shown = proposed.trim();
+  if (!shown || NOT_FOR_LISTS.test(shown)) return null;
+  const key = listKey(shown);
+  if (!/[a-z]/.test(key) || entries.some((entry) => entry.key === key || entry.key.replace(/ /g, '') === key.replace(/ /g, ''))) {
+    return null;
+  }
+  const best = fuzzyListMatch([key], entries);
+  if (best === null) return null;
+  return unlistedLookalikes.some((other) => editDistance(key, listKey(other)) <= LOOKALIKE_DISTANCE) ? best.entry.target : null;
+}
+
+/**
  * Real diagnoses that are not on the list but are spelled within a letter or two of a listed name (curated, not
  * exhaustive; the diagnosis counterpart of drug-list.ts UNLISTED_LOOKALIKES). A proposed name near one of these is
  * never respelled into the listed one: "Nephritic syndrome" is a different disease from the listed "Nephrotic
@@ -379,4 +398,9 @@ export const DIAGNOSIS_ENTRIES: readonly ListEntry<string>[] = listEntries(ICD11
 /** The ICD-11 title a proposed diagnosis name stands for, or null (see matchListName). */
 export function matchDiagnosisName(proposed: string): ListMatch | null {
   return matchListName(proposed, DIAGNOSIS_ENTRIES, UNLISTED_DIAGNOSIS_LOOKALIKES);
+}
+
+/** The ICD-11 title a diagnosis name near an unlisted look-alike would have been respelled into (lookalikeListName). */
+export function diagnosisLookalike(proposed: string): string | null {
+  return lookalikeListName(proposed, DIAGNOSIS_ENTRIES, UNLISTED_DIAGNOSIS_LOOKALIKES);
 }

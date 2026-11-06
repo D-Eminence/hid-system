@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import type { Box, FlagReason, ItemKind, PaperIdentity, PaperItem, VITAL_MEASURES } from './contract';
 import {
-  ambiguousDate, combinedStrengths, compact, DOSE, forMatching, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes,
-  sameCombined, segment, STATUS_CUES, suspiciousUncited, together, unitAfter, withoutNumberedUnit, withoutSignMarks,
-  wordsIn,
+  ambiguousDate, combinedStrengths, compact, crossedOutParts, DOSE, forMatching, FREQUENCY, has, norm, numbersIn, partlyCovered, pattern, routes,
+  sameCombined, segment, STATUS_CUES, suspiciousUncited, together, unitAfter, withoutNumberedUnit,
+  withoutReadingMarks, wordsIn,
 } from './grounding';
 import { withoutPlaceholders, type Masker } from './masking';
 import type { ModelItem, ModelPage } from './prompt';
@@ -20,8 +20,12 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   [['value_mismatch', 'reading_number_mismatch', 'plain_mismatch'], "A number on the paper doesn't match what was read."],
   [['number_not_in_text_read'], "A number read from the picture isn't in the text read from the page; check it against the paper."],
   // A hard page read twice from its picture: the two readings disagreed on part of this item (that part is shown
-  // as "[unreadable]", or for a drug name both listed names).
+  // as "A? (or B?)", hard-page prompt 5/6).
   [['readings_disagree'], 'Two readings of the picture disagree on part of this; check it against the paper.'],
+  // A hard-page item with writing crossed out on the paper, shown "(crossed out: X)" on the item.
+  [['crossed_out'], 'Part of this is crossed out on the paper; check it against the paper.'],
+  // Some text of this item looks like a description of the writing, not a reading of it (shown as read).
+  [['description_suspected'], 'This may describe the writing instead of reading it; check it against the paper.'],
   // After the dose and number disagreements, before the text-match ones (an item read from the picture is
   // expected to differ from the text the service read).
   // A hard page's best guesses (owner decision 2026-11-05 about 18:40 UTC): below the real disagreements above, and
@@ -33,6 +37,9 @@ const REASON_SENTENCES: ReadonlyArray<readonly [readonly string[], string]> = [
   // below a guess from what is usual and one reading only, above the plainer hard-page sentences.
   [['single_reading_only'], 'Only one of two readings of the picture found this; check it against the paper.'],
   [['sign_read'], 'A handwritten sign was read as a word, marked "(sign)", or could not be read, marked "[sign?]"; check it against the paper.'],
+  // A hard-page item with words marked "?" because their letters were hard to make out (kept apart from
+  // field_from_context, which is said first; the website shows both as "?").
+  [['unsure_from_letters'], 'Words marked "?" were hard to make out; check them against the paper.'],
   [['best_guess_from_picture'], 'This is a best guess from the picture; check every word against the paper.'],
   // Just before read_from_image (which every picture item has), so it is shown where it applies.
   [['not_matched_to_scanned_text'], 'Read from the picture; it could not be matched to the scanned text. Check it against the paper.'],
@@ -170,13 +177,14 @@ function onLine(box: Box, line: Box): boolean {
  * Whether the item read from the picture shares anything with the text read of its lines: a word of three letters
  * or more, or a number. It need not match the text (the service may have misread it), but an item with nothing in
  * common with its lines (a box copied from the prompt around a made-up item) is not kept. The hard-page sign marks
- * ("(sign)", "[sign?]") are not words of the item (withoutSignMarks).
+ * ("(sign)", "[sign?]") and the other reading marks ("(? on paper)", "[?]", the "crossed out" label) are not words
+ * of the item (withoutReadingMarks).
  */
 function anchored(asWritten: string, source: string): boolean {
   const text = withoutPlaceholders(source);
   const words = new Set(wordsIn(text).filter((word) => word.length >= 3));
   const numbers = new Set(numbersIn(text));
-  const own = withoutSignMarks(withoutPlaceholders(asWritten));
+  const own = withoutReadingMarks(withoutPlaceholders(asWritten));
   return wordsIn(own).some((word) => words.has(word)) || numbersIn(own).some((number) => numbers.has(number));
 }
 
@@ -505,6 +513,10 @@ function markReadFromImage(item: PaperItem, raw: ModelItem, source: string, plac
  * 'not_in_picture_reading' (image) or 'not_in_second_reading' (text); where it has a best match among the
  * second-reading items (bestMatch: same kind, shared line, the same name, substance, test or measure, or for a note
  * the most shared words), that one pair gets 'differs_from_second_reading' so the person checking compares them.
+ * Crossed out, line by line: where any item of either reading shows crossed-out writing ("(crossed out: X)" in its
+ * asWritten or plain), every medicine of either reading on one of its lines or over its box (crossedOutOnPlace) has
+ * status 'unknown' (unless stopped or past) and 'crossed_out', and 'readings_disagree' where only the other reading
+ * shows that writing. No name is matched: a struck drug before its replacement makes the replacement unknown too.
  * Items are in reading order (page, first cited line; second-reading items first on the same line) and their ids
  * are made unique again. Identity is merged field by field (mergeIdentity); a field the two readings give
  * differently keeps the first pass's value and flags the page ai_unsure. possible_missed_item is worked out again
@@ -532,6 +544,19 @@ export function mergeReread(first: PageCheck, second: PageCheck, lines: readonly
   }
   const missing = from === 'image' ? 'not_in_picture_reading' : 'not_in_second_reading';
   const kept = earlier.filter((item) => !removed.has(item));
+  // Crossed out, line by line (crossedOutOnPlace): any crossed-out writing either reading shows makes every medicine
+  // on its line or over its place status unknown and crossed_out; where only the other reading shows it,
+  // readings_disagree too.
+  const marks = [...read.map((item) => ({ item, from: 'second' })), ...earlier.map((item) => ({ item, from: 'first' }))]
+    .filter(({ item }) => showsCrossedOut(item)).map(({ item, from }) => ({ lineIds: item.lineIds, box: item.box, from }));
+  for (const [items, from] of [[read, 'second'], [kept, 'first']] as const) {
+    for (const item of items) {
+      const hits = item.kind === 'medicine' ? marks.filter((mark) => crossedOutOnPlace(item, mark)) : [];
+      if (hits.length === 0) continue;
+      markCrossedOut(item);
+      if (item.kind === 'medicine' && hits.every((mark) => mark.from !== from)) addReason(item, 'readings_disagree');
+    }
+  }
   for (const item of kept) {
     addReason(item, missing);
     const best = bestMatch(item, read.filter((candidate) => sharesLine(candidate, item)), matched);
@@ -549,6 +574,39 @@ export function mergeReread(first: PageCheck, second: PageCheck, lines: readonly
     && !(conflict && reason === 'ai_unsure')), ...(conflict ? ['ai_unsure' as const] : []),
   ...(missed ? ['possible_missed_item' as const] : [])];
   return { ...second, items: merged, identity, flagReasons };
+}
+
+/** Two items are on the same place when they share a cited line or their boxes overlap by half the smaller box. */
+export const PAIR_BOX_OVERLAP = 0.5;
+
+/** How much of the smaller of two boxes the other covers (0 to 1). */
+export function overlapShare(a: Box, b: Box): number {
+  const smaller = Math.min(a.width * a.height, b.width * b.height);
+  if (!(smaller > 0)) return 0;
+  return intersection(a, b) / smaller;
+}
+
+/** Whether an item shows crossed-out writing: a "(crossed out: X)" group in what was read or in what is shown. */
+export const showsCrossedOut = (item: Pick<PaperItem, 'asWritten' | 'plain'>) =>
+  [item.asWritten, item.plain].some((text) => typeof text === 'string' && crossedOutParts(text).length > 0);
+
+/**
+ * The crossed-out rule (line by line, of any kind, no name matching): an item stands where crossed-out writing is
+ * when it shares a cited line with it or their boxes overlap by PAIR_BOX_OVERLAP of the smaller.
+ */
+export function crossedOutOnPlace(item: Pick<PaperItem, 'lineIds' | 'box'>,
+  struck: { lineIds: readonly string[]; box: Box }): boolean {
+  return item.lineIds.some((id) => struck.lineIds.includes(id)) || overlapShare(item.box, struck.box) >= PAIR_BOX_OVERLAP;
+}
+
+/**
+ * A medicine standing where crossed-out writing is: whether it is active is not known (status unknown, unless it is
+ * already stopped or past), crossed_out, check_carefully. Any other kind is left as it is.
+ */
+export function markCrossedOut(item: PaperItem): void {
+  if (item.kind !== 'medicine') return;
+  if (item.fields.status !== 'stopped' && item.fields.status !== 'past') item.fields = { ...item.fields, status: 'unknown' };
+  addReason(item, 'crossed_out');
 }
 
 /** Add a check reason once; the item goes to a person, with the sentence of its first reason. */

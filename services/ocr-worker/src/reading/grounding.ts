@@ -30,17 +30,18 @@ export const ITEM_HINTS = new RegExp(`${DOSE.source}|${FREQUENCY.source}|${CONDI
 export const ITEM_LABELS = new RegExp('^a ?:|(?<![\\p{L}\\p{N}_])(?:dx|ddx|imp|impression|diagnos\\p{L}*|assessment|pmh|hx'
   + '|treated for|history of|rx|tabs?|tablets?|caps?|capsules?|inj|syr|syrup|susp|inh|inhaler|cream|oint\\p{L}*|nebs?'
   + '|supp|bp|temp|pulse|spo2|wt|weight|allerg\\p{L}*|nkda)(?![\\p{L}\\p{N}_])', 'u');
-/** Words on an item's own line that put an active status in doubt (also a plain "no", "negative" or "stop"). */
 /**
  * Words on a line that may change an item's status. A "?" is a query ("?TB", "TB?": suspected); on a hard page a
- * question mark written on the paper is transcribed "[?]" (prompt.ts hardPageMessage), which this counts too, while
- * the reading's own "?" marks are taken off before (forMatching), so they never look like a query. The "?" of
- * "[sign?]" (a handwritten sign the hard-page reading could not read, signs.ts) is not a query and is not counted.
+ * question mark written on the paper is transcribed "(? on paper)" (prompt.ts PAPER_QUERY, hard-page prompt 5/6),
+ * which this counts too, while the reading's own "?" marks are taken off before (forMatching), so they never look
+ * like a query. The "?" of "[sign?]" (a handwritten sign the hard-page reading could not read, signs.ts) and of "[?]"
+ * (writing with no letter shapes, prompt.ts NO_LETTERS), and of a field placeholder ("[dose?]", FIELD_UNREAD), is
+ * not a query and is not counted (no "?" straight before "]" is).
  */
 export const STATUS_CUES = new RegExp('(?<![\\p{L}\\p{N}_])(?:no evidence of|negative for|ruled? out|r/o|query|possible'
   + '|suspected|fhx|family history|stopped|discontinued|d/c|allerg(?:y|ies)|allergic to|h/o|history of|pmh'
   + '|past history|no|not|non|nil|negative|neg|stop|withheld|withhold|held|hold|omit(?:ted)?|denies|denied)'
-  + '(?![\\p{L}\\p{N}_])|-ve(?![\\p{L}\\p{N}_])|(?<!\\[sign)\\?', 'gu');
+  + '(?![\\p{L}\\p{N}_])|-ve(?![\\p{L}\\p{N}_])|(?<!\\[sign)(?<!\\[)\\?(?!\\])', 'gu');
 
 const ROUTE_WORDS: Readonly<Record<string, string>> = {
   intravenous: 'iv|i\\.v\\.?|intravenous(?:ly)?',
@@ -63,14 +64,77 @@ const ROUTES = Object.entries(ROUTE_WORDS)
 /**
  * Text for matching against the page, with its guess marks taken off: a "?" straight after a word or number
  * ("Sulfa?", "400?", "Flagyl? (metronidazole)") is how a reading says it is unsure (the model's own marks, and
- * those hard-page.ts markGuess adds), not writing on the paper, so the field "Sulfa?" is held to the page as
- * "Sulfa". A "?" that starts a word ("?TB", a query on the paper) is kept, and so is "[?]", a question mark the
- * hard-page prompt has the model transcribe from the paper (a clinical query, counted by STATUS_CUES), and so is
- * "[sign?]", a handwritten sign the hard-page reading could not read (signs.ts), which is never a word. Only for
- * comparing: the stored and shown field keeps its marks.
+ * those hard-page.ts adds), not writing on the paper, so the field "Sulfa?" is held to the page as "Sulfa". A "?"
+ * that starts a word ("?TB", a query on the paper) is kept, and so is "(? on paper)", a question mark the hard-page
+ * prompt has the model transcribe from the paper (a clinical query, counted by STATUS_CUES), "[?]", writing with no
+ * letter shapes, and "[sign?]", a handwritten sign the hard-page reading could not read (signs.ts), which is never a
+ * word. Writing crossed out on the paper, "(crossed out: X)" (hard-page prompt rule G), is taken out: it is not what
+ * the item says, so a struck-out dose is never held to be the item's dose. Only for comparing: the stored and shown
+ * field keeps its marks.
  */
 export function forMatching(text: string): string {
-  return text.replace(/(?<=[^\s?[])(?<!\[sign)\?+/gu, '');
+  return withoutCrossedOut(text).replace(FIELD_UNREAD_MARKS, '[?]').replace(/(?<=[^\s?[(])(?<!\[sign)\?+/gu, '');
+}
+
+/**
+ * A field of an otherwise readable hard-page item that is written but shows no letter shapes (hard-page prompt 7/8),
+ * by field: like "[?]" (NO_LETTERS), but saying which part of the order it stands for, so the rest of the line is
+ * kept ("IV Cefuroxime? [dose?] 8hrly?"). Not a guess mark, not a query, never a word for a list or the checks:
+ * forMatching reads each as "[?]".
+ */
+export const FIELD_UNREAD = { route: '[route?]', name: '[drug?]', dose: '[dose?]', frequency: '[freq?]' } as const;
+export const FIELD_UNREAD_MARKS = /\[(?:route|drug|dose|freq)\?\]/g;
+
+/**
+ * The start of a "(crossed out: X)" group, in any case, spacing and common spelling: "(Crossed out: X)",
+ * "(crossed out:X)", "(crossed-out: X)", "(crossed out X)", "(Crossed Out - X)", and, with a colon or dash only,
+ * "(struck out: X)", "(struck through - X)", "(scratched out: X)". The model does not always write the label exactly,
+ * and a group missed here is a struck line left active (reviews of 2026-11-06). "struck"/"scratched" need the
+ * separator so clinical brackets ("(struck out at staff)", "(scratched off scab)", "(struck by a car)") stay as
+ * written; "off" is not a label (a bracketed "crossed off" stays as written and is a stop word). A label with nothing
+ * inside ("(crossed out)") is crossed-out writing too, read as "[?]". prepareHardAnswer rewrites every form to
+ * CROSSED_OUT_OPEN.
+ */
+export const CROSSED_OUT_START =
+  /\(\s*(?:crossed[\s-]*out\b\s*[:\-\u2013\u2014]?|(?:struck|scratched)[\s-]*(?:out|through)\b\s*[:\-\u2013\u2014])/gi;
+
+/** Each "(crossed out: X)" group of a text: where it starts and ends (its closing bracket), and X as written. */
+function crossedOutGroups(text: string): Array<{ start: number; end: number; inside: string }> {
+  const groups: Array<{ start: number; end: number; inside: string }> = [];
+  const pattern = new RegExp(CROSSED_OUT_START.source, 'gi');
+  let found: RegExpExecArray | null;
+  while ((found = pattern.exec(text)) !== null) {
+    const start = found.index;
+    let depth = 0;
+    let end = start;
+    for (; end < text.length; end += 1) {
+      if (text[end] === '(') depth += 1;
+      else if (text[end] === ')') { depth -= 1; if (depth === 0) break; }
+    }
+    groups.push({ start, end, inside: text.slice(start + found[0].length, end).trim() });
+    pattern.lastIndex = end + 1;
+  }
+  return groups;
+}
+
+/** Text without its "(crossed out: X)" parts (hard-page prompt rule G); nested brackets inside X are allowed. */
+export function withoutCrossedOut(text: string): string {
+  const groups = crossedOutGroups(text);
+  if (groups.length === 0) return text;
+  let out = '';
+  let index = 0;
+  for (const { start, end } of groups) {
+    out += text.slice(index, start);
+    index = end + 1;
+  }
+  out += text.slice(index);
+  return out.replace(/\s+/g, ' ').trim();
+}
+
+/** The "(crossed out: X)" parts of a text, each X as written (nested brackets inside X kept). */
+export function crossedOutParts(text: string): string[] {
+  // A label with nothing inside ("(crossed out)") is still crossed-out writing: its words were not read, "[?]".
+  return crossedOutGroups(text).map(({ inside }) => inside || '[?]');
 }
 
 /**
@@ -80,6 +144,14 @@ export function forMatching(text: string): string {
  */
 export function withoutSignMarks(text: string): string {
   return text.replace(/\(sign\)|\[sign\?\]/g, ' ');
+}
+
+/**
+ * Text without any mark a hard-page reading adds that is not writing on the paper: the sign marks, "(? on paper)",
+ * "[?]" and the label of "(crossed out: X)" (X itself is writing on the paper and stays). For the anchor rule.
+ */
+export function withoutReadingMarks(text: string): string {
+  return withoutSignMarks(text).replace(FIELD_UNREAD_MARKS, ' ').replace(/\(\? on paper\)|\[\?\]/g, ' ').replace(new RegExp(CROSSED_OUT_START.source, 'gi'), ' (');
 }
 
 export function norm(text: string): string {

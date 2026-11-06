@@ -44,7 +44,7 @@ describe('PaperReadingService', () => {
     expect(calls.map((call) => call.model)).toEqual(['claude-sonnet-5-5']);
     expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
     expect(payload.reading).toMatchObject({ status: 'read', firstPassModel: 'claude-sonnet-5-5', rereadModel: null,
-      rereadPages: [], itemCount: 1, promptVersion: 'hid-paper-reading-prompt-7' });
+      rereadPages: [], itemCount: 1, promptVersion: 'hid-paper-reading-prompt-8' });
     expect(payload.identity).toMatchObject({ nameAsWritten: 'Test Patient Adaeze Example', folderNumberAsWritten: 'TEST-0001' });
     expect(payload.items[0]).toMatchObject({ kind: 'diagnosis', readBy: 'first_pass', confidence: 'clear' });
     expect(summary).toMatchObject({ requests: 1, inferenceGeo: 'us', servedInferenceGeo: 'us' });
@@ -846,13 +846,14 @@ describe('PaperReadingService', () => {
         ['hard_page_read', 2]]);
       const medicine = payload.items.find((item) => item.kind === 'medicine')!;
       expect(medicine).toMatchObject({ readBy: 'reread', confidence: 'check_carefully',
-        fields: { name: 'Pyrimethamine?', strength: '25 mg', frequency: 'od' } });
+        // asWritten "Pyrimethamine? 25 mg od": the model's "?" on the name is carried into the name, and so shown.
+        fields: { name: 'Pyrimethamine?', strength: '25mg', frequency: 'od' }, plain: 'Pyrimethamine? 25 mg od' });
       expect(medicine.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'read_from_image']));
       // mergeReread keeps the first pass's items the hard reading did not carry.
       expect(payload.items.filter((item) => item.readBy === 'first_pass').map((item) => item.asWritten))
         .toEqual(['Pyrmthmn 25 rng od', 'Hypertension']);
       expect(paperReadingPayloadSchema.parse(payload)).toBeTruthy();
-      expect(payload.reading.promptVersion).toBe('hid-paper-reading-prompt-7');
+      expect(payload.reading.promptVersion).toBe('hid-paper-reading-prompt-8');
       // The configured effort is used when given; a printed page below REVIEW_BELOW (low_confidence) is hard too.
       const faint = readPage(1, [['Pyrmthmn 25 rng od', { confidence: 0.5 }], 'Dx: Hypertension']);
       const xhigh = hardClient(() => ok(best('Pyrimethamine')));
@@ -885,19 +886,20 @@ describe('PaperReadingService', () => {
       }
     });
 
-    it('turns a disagreeing dose unreadable and offers two listed names as "A? / B?"', async () => {
+    it('shows a disagreeing name and dose as "A? (or B?)", listed or not (owner decision 2026-11-06)', async () => {
       const { client } = hardClient((call) => ok(call === 0 ? best('Pyrimethamine') : best('Primaquine', '15')));
       const { payload, summary } = await read(hardConfig, client);
       const medicine = payload.items.find((item) => item.kind === 'medicine')!;
-      // Primaquine is not on the list: a disagreement with an unlisted name is unreadable.
-      expect(medicine.fields).toMatchObject({ name: '[unreadable]', strength: '[unreadable] mg' });
+      // Primaquine is not on the list: shown as read, as the second option; nothing becomes "[?]" for disagreeing.
+      expect(medicine.fields).toMatchObject({ name: 'Pyrimethamine? (or Primaquine?)', strength: '25mg? (or 15mg?)' });
+      expect(medicine.plain).toBe('Pyrimethamine? (or Primaquine?) 25mg? (or 15mg?) od');
+      expect(medicine).toMatchObject({ confidence: 'check_carefully' });
       expect(medicine.checkReasons).toContain('readings_disagree');
-      expect(JSON.stringify(payload.items)).not.toContain('15');
       expect(summary.hardPageAgreement.fieldsAgreed).toBeLessThan(summary.hardPageAgreement.fieldsCompared);
       const listed = hardClient((call) => ok(call === 0 ? best('Pyrimethamine') : best('Proguanil')));
       const both = await read(hardConfig, listed.client);
       expect(both.payload.items.find((item) => item.kind === 'medicine')!.fields)
-        .toMatchObject({ name: 'Pyrimethamine? / Proguanil?', strength: '25 mg' });
+        .toMatchObject({ name: 'Pyrimethamine? (or Proguanil?)', strength: '25mg' });
     });
 
     it('uses the other reading alone when one fails or declines, saying so on every item', async () => {

@@ -383,7 +383,7 @@ describe('ClaudePageClient', () => {
         duration: 'empty', value: 'empty', other: 'empty' };
       const hardAnswer = { ...answer, items: [{ ...modelItem({ kind: 'medicine', asWritten: 'Pyrimethamine? 25 mg od',
         lineIds: ['p1-l2'], name: 'Pyrimethamine?', strength: '25 mg', frequency: 'od', status: 'new' }), box,
-      dose: '25', doseUnit: 'mg', basis }] };
+      dose: '25', doseUnit: 'mg', crossedOut: '', basis }] };
       const { instance, fetch } = client([sse(JSON.stringify(hardAnswer))]);
       const result = await instance.readPage({ ...pinned, effort: 'max', image, hardPage: true }, new AbortController().signal);
       const body = JSON.parse(bodyOf(fetch)) as { model: string; inference_geo: string; thinking: unknown;
@@ -392,23 +392,32 @@ describe('ClaudePageClient', () => {
         output_config: { effort: 'max' } });
       expect(body.output_config.format.schema).toEqual(MODEL_OUTPUT_HARD_PAGE_JSON_SCHEMA);
       const text = body.messages[0]!.content[1]!.text!;
-      for (const phrase of ['line by line', 'put "?"', '"letters"', '"context"', 'od, bd, tds, qds, 6hrly, 8hrly',
-        'set "frequency" to "[unreadable]"', 'shows through from the back', 'Never invent an item',
-        'absolute pixel coordinates', 'including small fragments of the same row']) expect(text).toContain(phrase);
+      for (const phrase of ['line by line', 'put "?" straight after', '"letters"', '"context"',
+        'od, bd, tds, qds, 6hrly, 8hrly', 'Write "[?]" only where', '"(? on paper)"', 'never a description of it',
+        '"(crossed out: X)"', 'Transfer to the ward', 'Leave "plain" as ""', 'shows through from the back',
+        'Never invent an item', 'absolute pixel coordinates', 'including small fragments of the same row'])
+        expect(text).toContain(phrase);
       expect(String(fetch.mock.calls[0]![0])).toBe('https://api.anthropic.com/v1/messages');
       expect(result).toMatchObject({ kind: 'answer', answer: { items: [{ name: 'Pyrimethamine?',
-        hard: { dose: '25', doseUnit: 'mg', basis } }] } });
+        hard: { dose: '25', doseUnit: 'mg', crossedOut: '', basis } }] } });
       const item = result.kind === 'answer' ? result.answer.items[0]! : null;
       expect(item).not.toHaveProperty('dose');
       expect(item!.box!.left).toBeCloseTo(0.1, 6);
-      // An answer without the basis, or with a frequency outside the allowed set, is malformed.
+      // An answer without the basis, or without crossedOut, is malformed. A frequency is free text since hard-page
+      // prompt 5/6 (hard-page.ts normalises the usual codes).
       const { basis: _basis, ...withoutBasis } = hardAnswer.items[0]!;
+      const { crossedOut: _crossed, ...withoutCrossedOut } = hardAnswer.items[0]!;
       const bad = client([sse(JSON.stringify({ ...answer, items: [withoutBasis] })),
-        sse(JSON.stringify({ ...answer, items: [{ ...hardAnswer.items[0]!, frequency: 'three times a day' }] }))]);
+        sse(JSON.stringify({ ...answer, items: [withoutCrossedOut] }))]);
       for (let index = 0; index < 2; index += 1) {
         await expect(bad.instance.readPage({ ...pinned, image, hardPage: true }, new AbortController().signal))
           .resolves.toMatchObject({ kind: 'failed', reason: 'malformed' });
       }
+      const free = client([sse(JSON.stringify({ ...answer, items: [{ ...hardAnswer.items[0]!, frequency: 'alternate days',
+        crossedOut: '400mg?' }] }))]);
+      await expect(free.instance.readPage({ ...pinned, image, hardPage: true }, new AbortController().signal))
+        .resolves.toMatchObject({ kind: 'answer', answer: { items: [{ frequency: 'alternate days',
+          hard: { crossedOut: '400mg?' } }] } });
       // Without hardPage, the image request is the earlier image re-read request; a text request ignores it.
       const plain = client([sse(JSON.stringify({ ...answer, items: answer.items.map((entry) => ({ ...entry, box })) })),
         sse(JSON.stringify(answer))]);
@@ -455,7 +464,7 @@ describe('ClaudePageClient', () => {
       duration: 'empty', value: 'empty', other: 'empty' };
     const hardAnswer = { ...answer, items: [{ ...modelItem({ kind: 'medicine', asWritten: 'Pyrimethamine? 25 mg od',
       lineIds: ['p1-l1'], name: 'Pyrimethamine?', strength: '25 mg', frequency: 'od', status: 'new' }),
-    box: { x1: 124, y1: 175, x2: 744, y2: 210 }, dose: '25', doseUnit: 'mg', basis }] };
+    box: { x1: 124, y1: 175, x2: 744, y2: 210 }, dose: '25', doseUnit: 'mg', crossedOut: '', basis }] };
     /** A distinctive fictional "crop" (not an image): it must never appear anywhere but the request body. */
     const CROP = Buffer.from('fictional-crop-bytes-'.repeat(40)).toString('base64');
     const crop = { mediaType: 'image/png' as const, base64: CROP, width: 64, height: 64,

@@ -5,7 +5,8 @@ import { editDistance, fuzzyListMatch, letterCount, LOOKALIKE_DISTANCE, MAX_EDIT
 /**
  * The medicine names a hard page's best-guess drug name may be shown as (owner decision of 2026-11-05, about
  * 18:40 UTC: "Yes, use a drug list"). Used only on hard pages (see reader.ts, hard-page reads): a drug name the
- * model proposes is shown only when it matches a name here; otherwise the drug name field is "[unreadable]".
+ * model proposes is shown in the list's spelling when it matches a name here; otherwise (since the owner decision of
+ * 2026-11-06, about 10:13 UTC) it is shown as read with "?" (hard-page.ts); before, it was "[unreadable]".
  * The list never adds a drug: it only checks, and respells, a name the model itself proposed.
  *
  * SOURCE (generic names): Federal Ministry of Health, Nigeria. "Nigeria Essential Medicines List", 7th Edition,
@@ -215,8 +216,8 @@ export { editDistance, LOOKALIKE_DISTANCE, MAX_EDIT_DISTANCE, MIN_FUZZY_LETTERS,
 
 /**
  * Real medicines that are not on the list but are spelled within a letter or two of one that is (curated, not
- * exhaustive). A proposed name near one of these is never respelled into the listed medicine: it is shown as
- * "[unreadable]". Each is within LOOKALIKE_DISTANCE of a listed name. The edit-distance and first-letter rules above
+ * exhaustive). A proposed name near one of these is never respelled into the listed medicine: on a hard page it is
+ * shown as read with the listed one as the other option, "Arteether? (or Artemether?)" (drugLookalike). Each is within LOOKALIKE_DISTANCE of a listed name. The edit-distance and first-letter rules above
  * already keep most of them apart; this keeps apart a misreading of one of them as well (arteether is one letter
  * from artemether, which the distance rule alone would let through).
  */
@@ -268,7 +269,8 @@ const LOOKALIKE_KEYS = UNLISTED_LOOKALIKES.map(normaliseDrugName);
 /**
  * The listed medicine a proposed drug name stands for, or null. Exact (normalised, salt and form words taken off)
  * first; then the closest by edit distance within the thresholds, only when one medicine is closest, it starts with
- * the same letter, and no unlisted look-alike is as near. "[unreadable]" or a name with no letters never matches.
+ * the same letter, and no unlisted look-alike is as near. "[unreadable]", "[?]" or a name with no letters never
+ * matches.
  */
 export function matchDrugName(proposed: string): DrugMatch | null {
   if (NOT_FOR_LISTS.test(proposed)) return null;
@@ -286,4 +288,22 @@ export function matchDrugName(proposed: string): DrugMatch | null {
   const nearUnlisted = candidates.some((name) =>
     LOOKALIKE_KEYS.some((key) => editDistance(name, key) <= LOOKALIKE_DISTANCE));
   return nearUnlisted ? null : found(best.entry, false);
+}
+
+/**
+ * The listed medicine a proposed name would have been respelled into, where the strict fuzzy match found one but a
+ * real unlisted look-alike (UNLISTED_LOOKALIKES) is as near, so matchDrugName refused it; else null ("Arteether" is
+ * a letter from the listed artemether). Never used to pick a name: hard-page.ts shows the name as read with this one
+ * as the other option, "Arteether? (or Artemether?)", so a look-alike pair is never resolved silently.
+ */
+export function drugLookalike(proposed: string): DrugMatch | null {
+  if (NOT_FOR_LISTS.test(proposed) || matchDrugName(proposed) !== null) return null;
+  const whole = normaliseDrugName(proposed);
+  if (letterCount(whole) === 0) return null;
+  const candidates = [...new Set([whole, withoutSalts(whole)].filter((name) => name.length > 0))];
+  const best = fuzzyListMatch(candidates, DRUG_ENTRIES);
+  if (best === null) return null;
+  const { generic, brand } = best.entry.value;
+  return { generic, brand, exact: false,
+    display: brand === null ? `${capitalise(generic)}?` : `${capitalise(brand)}? (${generic})` };
 }

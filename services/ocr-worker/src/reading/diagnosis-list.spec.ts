@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { compactKey, DIAGNOSIS_ENTRIES, DIAGNOSIS_SYNONYMS, ICD11_TITLES, listKey, matchDiagnosisName, matchListName,
+import { compactKey, diagnosisLookalike, DIAGNOSIS_ENTRIES, DIAGNOSIS_SYNONYMS, ICD11_TITLES, listKey, matchDiagnosisName, matchListName,
   UNGROUNDED_ABBREVIATIONS, UNLISTED_DIAGNOSIS_LOOKALIKES } from './diagnosis-list';
-import { LAB_ENTRIES, LAB_TESTS, matchLabTestName, UNLISTED_LAB_LOOKALIKES } from './lab-list';
+import { LAB_ENTRIES, LAB_TESTS, labTestLookalike, matchLabTestName, UNLISTED_LAB_LOOKALIKES } from './lab-list';
 import { fuzzyListMatch } from './list-match';
 
 const ATTRIBUTION = 'ICD-11, World Health Organization, licensed under CC BY-ND 3.0 IGO';
@@ -96,10 +96,26 @@ describe('diagnosis list (hard pages only)', () => {
     expect(matchLabTestName('Creatinine')?.display).toBe('Creatinine');
   });
 
-  it('keeps a query on the paper, "[?]", in the name shown', () => {
-    expect(matchDiagnosisName('[?]TB')?.display).toBe('[?]TB? (Tuberculosis)');
-    expect(matchDiagnosisName('TB[?]')?.display).toBe('TB[?]? (Tuberculosis)');
-    expect(listKey('[?]TB')).toBe('tb');
+  it('keeps a query on the paper, "(? on paper)", in the name shown, and never matches "[?]" (no letter shapes)', () => {
+    expect(matchDiagnosisName('(? on paper) TB')?.display).toBe('(? on paper) TB? (Tuberculosis)');
+    expect(matchDiagnosisName('TB (? on paper)')?.display).toBe('TB (? on paper)? (Tuberculosis)');
+    expect(listKey('(? on paper) TB')).toBe('tb');
+    // Since hard-page prompt 5/6 "[?]" is writing with no letter shapes: a name holding it is never grounded.
+    expect(matchDiagnosisName('[?]TB')).toBeNull();
+    expect(matchDiagnosisName('Hypert[?]')).toBeNull();
+  });
+
+  it('gives the listed name a look-alike would have been respelled into, for showing both, never picking one', () => {
+    expect(matchDiagnosisName('Nephritic syndrome')).toBeNull();
+    expect(diagnosisLookalike('Nephritic syndrome')).toBe('Nephrotic syndrome');
+    // A listed name, an unlisted name with no near listed one, an ambiguous abbreviation: nothing to offer.
+    expect(diagnosisLookalike('Nephrotic syndrome')).toBeNull();
+    expect(diagnosisLookalike('Fictionalitis')).toBeNull();
+    for (const abbreviation of UNGROUNDED_ABBREVIATIONS) {
+      expect(matchDiagnosisName(abbreviation)).toBeNull();
+      expect(diagnosisLookalike(abbreviation)).toBeNull();
+    }
+    expect(labTestLookalike('Creatine')).toBeNull();
   });
 });
 

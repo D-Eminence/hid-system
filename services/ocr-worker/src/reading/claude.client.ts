@@ -308,11 +308,12 @@ export function interpret(message: Anthropic.Message, attempts: number, earlier:
   let parsed: unknown;
   try { parsed = JSON.parse(text); } catch { return { kind: 'failed', reason: 'malformed', usage, attempts }; }
   if (imageSize && hardPage) {
-    // A hard page's best guess: boxes to page fractions, and the dose, unit and basis kept beside each item.
+    // A hard page's best guess: boxes to page fractions, and the dose, unit, crossed-out writing and basis kept beside
+    // each item.
     const read = modelHardPageSchema.safeParse(parsed);
     if (!read.success) return { kind: 'failed', reason: 'malformed', usage, attempts };
-    const page: ModelPage = { ...read.data, items: read.data.items.map(({ dose, doseUnit, basis, box, ...item }) => ({
-      ...item, box: toFractionBox(box, imageSize), hard: { dose, doseUnit, basis } })) };
+    const page: ModelPage = { ...read.data, items: read.data.items.map(({ dose, doseUnit, crossedOut, basis, box, ...item }) => ({
+      ...item, box: toFractionBox(box, imageSize), hard: { dose, doseUnit, crossedOut, basis } })) };
     return { kind: 'answer', answer: page, usage, attempts, servedInferenceGeo: message.usage.inference_geo ?? null };
   }
   if (imageSize) {

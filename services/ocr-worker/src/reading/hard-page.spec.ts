@@ -5,8 +5,8 @@ import { markGuess, mergeAsWritten, mergeHardReadings, normaliseDose, normaliseF
   shorthandInWords, strengthOf, type HardReading } from './hard-page';
 import { checkPage, checkReasonSentence, mergeReread } from './items';
 import { createMasker } from './masking';
-import { hardPageMessage, imagePageMessage, pageMessage, SIGNS_RULE, SYSTEM_PROMPT, type BasisField, type FieldBasis,
-  type ModelItem, type ModelPage } from './prompt';
+import { HARD_PAGE_PROMPT_VERSION, HARD_PAGE_PROMPT_VERSION_NO_ZOOM, hardPageMessage, imagePageMessage, pageMessage,
+  SIGNS_RULE, SYSTEM_PROMPT, type BasisField, type FieldBasis, type ModelItem, type ModelPage } from './prompt';
 import { SIGN_TABLE } from './signs';
 import { modelItem, modelPage, readPage, SOURCE_SHA } from './test-fixtures';
 import type { ReadLine, ReadPage } from '../types';
@@ -36,38 +36,63 @@ const merge = (...answers: ModelPage[]) => mergeHardReadings(answers.map(reading
 const fieldsOf = (item: PaperItem) => item.fields as Record<string, unknown>;
 
 describe('hard-page answers, before they are held to the page', () => {
-  it('keeps frequency only from the allowed set, a dose only as a number, and rebuilds the strength', () => {
+  it('normalises the usual frequency codes and a numeric dose, keeps anything else as read, and rebuilds the strength', () => {
     expect(['od', 'BD', 'tds?', 'q.d.s', '6 hrly', '8-hourly', 'nocte', 'mane', 'stat', 'prn', '12hrly'].map(normaliseFrequency))
       .toEqual(['od', 'bd', 'tds?', 'qds', '6hrly', '8hrly', 'nocte', 'mane', 'stat', 'prn', '12hrly']);
-    expect(['three times', 'alternate days', 'weekly', '[unreadable]', 'alternate (sign) days', '[sign?]']
-      .map(normaliseFrequency)).toEqual(Array(6).fill('[unreadable]'));
+    // Owner decision 2026-11-06: a best guess for every word; nothing written is hidden behind a token.
+    expect(['three times', 'alternate days?', 'weekly', '[unreadable]', 'alternate (sign) days', '[sign?]', '[?]']
+      .map(normaliseFrequency)).toEqual(['three times', 'alternate days?', 'weekly', '[?]', 'alternate (sign) days',
+      '[sign?]', '[?]']);
     expect(normaliseFrequency('')).toBe('');
     expect(['400', '0.5', '400?', ' 25 '].map(normaliseDose)).toEqual(['400', '0.5', '400?', '25']);
-    expect(['4OO', 'one', '1/2', '[unreadable]'].map(normaliseDose)).toEqual(Array(4).fill('[unreadable]'));
-    expect(strengthOf('400?', 'mg')).toBe('400? mg');
-    expect(strengthOf('', 'mg')).toBe('[unreadable] mg');
+    expect(['4OO', 'one?', '1/2', '[unreadable]'].map(normaliseDose)).toEqual(['4OO', 'one?', '1/2', '[?]']);
+    expect(strengthOf('400?', 'mg')).toBe('400mg?');
+    expect(strengthOf('500', 'mg')).toBe('500mg');
+    expect(strengthOf('1', 'g?')).toBe('1g?');
+    expect(strengthOf('2', 'tab')).toBe('2 tab');
+    expect(strengthOf('[?]', 'mg')).toBe('[?] mg');
+    expect(strengthOf('', 'mg')).toBe('[?] mg');
     expect(strengthOf('', '')).toBe('');
   });
 
-  it('shows a listed drug name in its list spelling with "?", a brand with its generic, an unlisted one as unreadable', () => {
+  it('shows a listed drug in its list spelling, "?" only where it is a guess; an unlisted one as read with "?"', () => {
     const prepared = prepareHardAnswer(modelPage([medicine(1, 'Metronidazol', '400', 'mg', 'tds'),
-      medicine(1, 'Flagyl', '400', 'mg', 'tds'), medicine(1, 'Fictionalmab', '400', 'mg', 'three times daily')]));
+      medicine(1, 'Flagyl', '400', 'mg', 'tds'), medicine(1, 'Flagyl?', '400', 'mg', 'tds'),
+      medicine(1, 'Ceftriaxone', '1', 'g', 'tds', { basis: { name: 'context' } }),
+      medicine(1, 'Fictionalmab', '400', 'mg', 'three times daily'), medicine(1, 'Fictional mab?', '400', 'mg', 'tds')]));
     expect(prepared.items.map((item) => [item.name, item.frequency, item.hard?.generic])).toEqual([
-      ['Metronidazole?', 'tds', 'metronidazole'], ['Flagyl? (metronidazole)', 'tds', 'metronidazole'],
-      ['[unreadable]', '[unreadable]', null]]);
+      // Respelled by the list: a guess.
+      ['Metronidazole?', 'tds', 'metronidazole'],
+      // A listed brand read with certainty, and with "?".
+      ['Flagyl (metronidazole)', 'tds', 'metronidazole'], ['Flagyl? (metronidazole)', 'tds', 'metronidazole'],
+      // From context: a guess.
+      ['Ceftriaxone?', 'tds', 'ceftriaxone'],
+      // Not on the list (owner decision 2026-11-06): shown as read, every word marked; no longer "[unreadable]". A
+      // frequency that is none of the codes is marked the same way.
+      ['Fictionalmab?', 'three? times? daily?', null], ['Fictional? mab?', 'tds', null]]);
     // asWritten keeps what the model read: the transcription the clinician compares with the paper.
-    expect(prepared.items[2]!.asWritten).toBe('Fictionalmab 400 mg three times daily');
+    expect(prepared.items[4]!.asWritten).toBe('Fictionalmab 400 mg three times daily');
+  });
+
+  it('never resolves a deny-listed look-alike silently: the name as read, with the listed one as the other option', () => {
+    const prepared = prepareHardAnswer(modelPage([medicine(1, 'Arteether', '150', 'mg', 'od'),
+      medicine(1, 'Pefloxacin', '400', 'mg', 'bd'), medicine(1, 'Artemether', '80', 'mg', 'bd')]));
+    expect(prepared.items.map((item) => [item.name, item.hard?.generic])).toEqual([
+      ['Arteether? (or Artemether?)', null],
+      // Too far from any listed name to be respelled (the first letters differ): as read, marked.
+      ['Pefloxacin?', null],
+      ['Artemether', 'artemether']]);
   });
 
   it('puts "?" on every filled field whose basis is context, so a guess shows in the field itself', () => {
     const [guessed] = prepareHardAnswer(modelPage([{ ...medicine(1, 'Metronidazole', '1', 'g', 'tds',
       { basis: { dose: 'context', unit: 'context', frequency: 'context', route: 'context', duration: 'context' } }),
     route: 'oral', duration: '5 days' }])).items;
-    expect(guessed).toMatchObject({ strength: '1? g?', frequency: 'tds?', route: 'oral?', duration: '5 days?',
+    expect(guessed).toMatchObject({ strength: '1g?', frequency: 'tds?', route: 'oral?', duration: '5 days?',
       hard: { dose: '1?', doseUnit: 'g?' } });
-    // Read from the letters, empty, already unsure or unreadable: left as it is.
+    // Read from the letters, empty, already unsure or with no letter shapes: left as it is.
     expect([markGuess('tds', 'letters'), markGuess('', 'context'), markGuess('tds?', 'context'),
-      markGuess('[unreadable]', 'context')]).toEqual(['tds', '', 'tds?', '[unreadable]']);
+      markGuess('[?]', 'context'), markGuess('[sign?]', 'context')]).toEqual(['tds', '', 'tds?', '[?]', '[sign?]']);
   });
 
   it('puts "?" on a diagnosis name and an allergy reaction from context, and says so for an enum from context', () => {
@@ -108,22 +133,24 @@ const hardItem = (overrides: Partial<ModelItem>, line: number, basis: Partial<Re
     ...basis }) } });
 
 describe('guess marks are kept in the field but taken off for every check against the page', () => {
-  it('takes off a "?" after a word or number only', () => {
-    expect(['Sulfa?', '400? mg', 'Flagyl? (metronidazole)', 'A? / B?', '?TB', '[unreadable]'].map(forMatching))
-      .toEqual(['Sulfa', '400 mg', 'Flagyl (metronidazole)', 'A / B', '?TB', '[unreadable]']);
+  it('takes off a "?" after a word or number only, and crossed-out writing', () => {
+    expect(['Sulfa?', '400? mg', 'Flagyl? (metronidazole)', 'A? (or B?)', '?TB', '[?]', '(? on paper) TB?']
+      .map(forMatching)).toEqual(['Sulfa', '400 mg', 'Flagyl (metronidazole)', 'A (or B)', '?TB', '[?]', '(? on paper) TB']);
+    expect(forMatching('IV Flagyl 500mg (crossed out: 400mg?) 8hrly?')).toBe('IV Flagyl 500mg 8hrly');
   });
 
-  it('keeps a query written on the paper, "[?]", apart from the reading\'s own "?"', () => {
-    expect(['TB[?]', '[?]TB', 'Dx [?]TB?'].map(forMatching)).toEqual(['TB[?]', '[?]TB', 'Dx [?]TB']);
+  it('keeps a query written on the paper, "(? on paper)", apart from the reading\'s own "?" and from "[?]"', () => {
     const page = readPage(1, [['Dx TB?', { handwritten: true, confidence: 0.45 }]]);
     const diagnosis = (asWritten: string, name: string) => heldOn(page, modelPage([hardItem({ kind: 'diagnosis',
       asWritten, name, status: 'confirmed' }, 1, { name: 'letters' })])).check.items[0]!;
     // A query on the paper: the confirmed status is never shown without the cue.
-    for (const [asWritten, name] of [['Dx TB[?]', 'TB[?]'], ['Dx [?]TB', '[?]TB']] as const) {
+    for (const [asWritten, name] of [['Dx TB (? on paper)', 'TB (? on paper)'], ['Dx (? on paper) TB', '(? on paper) TB']] as const) {
       const queried = diagnosis(asWritten, name);
       expect(fieldsOf(queried)).toMatchObject({ name, status: 'confirmed' });
       expect(queried.checkReasons).toContain('status_cue_on_line');
     }
+    // "[?]" is writing with no letter shapes, not a query.
+    expect(diagnosis('Dx [?]', '[?]').checkReasons).not.toContain('status_cue_on_line');
     // The reading's own "?": a best guess, not a query.
     const { check } = mergeHardReadings([heldOn(page, modelPage([hardItem({ kind: 'diagnosis', asWritten: 'Dx TB?',
       name: 'TB?', status: 'confirmed' }, 1, { name: 'letters' })]))], SOURCE_SHA);
@@ -185,12 +212,14 @@ describe('two readings of a hard page', () => {
       modelPage([medicine(1, 'Metronidazole', '400?', 'mg', 'tds')]));
     expect(check.items).toHaveLength(1);
     const item = check.items[0]!;
-    expect(fieldsOf(item)).toMatchObject({ name: 'Metronidazole?', strength: '400? mg', frequency: 'tds', status: 'new' });
-    expect(item).toMatchObject({ readBy: 'reread', confidence: 'check_carefully', plain: 'Metronidazole? 400? mg tds (three times a day)' });
+    expect(fieldsOf(item)).toMatchObject({ name: 'Metronidazole', strength: '400mg?', frequency: 'tds', status: 'new' });
+    expect(item).toMatchObject({ readBy: 'reread', confidence: 'check_carefully', plain: 'Metronidazole 400? mg tds (three times a day)' });
     expect(item.checkReasons).toEqual(expect.arrayContaining(['best_guess_from_picture', 'read_from_image']));
     expect(item.checkReasons).not.toContain('readings_disagree');
     expect(item.checkReasons).not.toContain('single_reading_only');
-    expect(item.checkReason).toBe('This is a best guess from the picture; check every word against the paper.');
+    // The "?" on the dose is from its letters (unsure_from_letters), said before the general best-guess sentence.
+    expect(item.checkReasons).toContain('unsure_from_letters');
+    expect(item.checkReason).toBe('Words marked "?" were hard to make out; check them against the paper.');
     expect(agreement).toMatchObject({ itemsPaired: 1, itemsSingle: 0 });
     expect(agreement.fieldsCompared).toBeGreaterThan(0);
     expect(agreement.fieldsAgreed).toBe(agreement.fieldsCompared);
@@ -199,39 +228,57 @@ describe('two readings of a hard page', () => {
   it('treats a brand and its generic as the same medicine', () => {
     const { check } = merge(modelPage([medicine(1, 'Flagyl', '400', 'mg', 'tds')]),
       modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds')]));
-    expect(fieldsOf(check.items[0]!).name).toBe('Flagyl? (metronidazole)');
-    expect(check.items[0]!.checkReasons).not.toContain('readings_disagree');
-  });
-
-  it('shows "A? / B?" for a drug name the two readings disagree on when both are listed and read from the letters', () => {
-    const { check, agreement } = merge(modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds')]),
-      modelPage([medicine(1, 'Tinidazole', '400', 'mg', 'tds')]));
-    const item = check.items[0]!;
-    expect(fieldsOf(item).name).toBe('Metronidazole? / Tinidazole?');
-    expect(item.checkReasons).toContain('readings_disagree');
-    expect(item.checkReason).toBe('Two readings of the picture disagree on part of this; check it against the paper.');
-    expect(item.asWritten).toBe('[unreadable] 400 mg tds');
-    expect(agreement.fieldsAgreed).toBe(agreement.fieldsCompared - 1);
-  });
-
-  it('makes a disagreeing drug name unreadable when one side is not on the list', () => {
-    const { check } = merge(modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds')]),
-      modelPage([medicine(1, 'Metrofictional', '400', 'mg', 'tds')]));
-    expect(fieldsOf(check.items[0]!).name).toBe('[unreadable]');
+    expect(fieldsOf(check.items[0]!).name).toBe('Flagyl (metronidazole)');
+    // The same medicine, but the readings read different words on the paper: both shown, and said to disagree.
+    expect(check.items[0]!.plain).toBe('Flagyl? (metronidazole) (or Metronidazole?) 400 mg tds (three times a day)');
     expect(check.items[0]!.checkReasons).toContain('readings_disagree');
   });
 
-  it('never shows two doses: a disagreeing dose, unit, route or frequency becomes unreadable', () => {
-    const { check } = merge(modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds')]),
-      modelPage([medicine(1, 'Metronidazole', '200', 'mg', 'bd')]));
+  it('shows "A? (or B?)" for a drug name the two readings disagree on', () => {
+    const { check, agreement } = merge(modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds')]),
+      modelPage([medicine(1, 'Tinidazole', '400', 'mg', 'tds')]));
     const item = check.items[0]!;
-    expect(fieldsOf(item)).toMatchObject({ name: 'Metronidazole?', strength: '[unreadable] mg', frequency: '[unreadable]' });
-    expect(JSON.stringify(item)).not.toMatch(/200/);
-    expect(item.asWritten).toBe('Metronidazole [unreadable] mg [unreadable]');
-    expect(item.plain).toBe('Metronidazole? [unreadable] mg [unreadable]');
+    expect(fieldsOf(item).name).toBe('Metronidazole? (or Tinidazole?)');
+    expect(item.checkReasons).toContain('readings_disagree');
+    expect(item.checkReason).toBe('Two readings of the picture disagree on part of this; check it against the paper.');
+    expect(item.asWritten).toBe('Metronidazole? (or Tinidazole?) 400 mg tds');
+    expect(item.plain).toBe('Metronidazole? (or Tinidazole?) 400 mg tds (three times a day)');
+    expect(agreement.fieldsAgreed).toBe(agreement.fieldsCompared - 1);
+  });
+
+  it('shows an unlisted name the other reading gave as the other option, never "[?]" for disagreeing', () => {
+    const { check } = merge(modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds')]),
+      modelPage([medicine(1, 'Metrofictional', '400', 'mg', 'tds')]));
+    expect(fieldsOf(check.items[0]!).name).toBe('Metronidazole? (or Metrofictional?)');
+    expect(check.items[0]!.checkReasons).toContain('readings_disagree');
+  });
+
+  it('shows two doses, units, routes or frequencies as "A? (or B?)" (owner decision 2026-11-06)', () => {
+    const { check } = merge(modelPage([medicine(1, 'Metronidazole', '500', 'mg', 'tds')]),
+      modelPage([medicine(1, 'Metronidazole', '250', 'mg', 'bd')]));
+    const item = check.items[0]!;
+    expect(fieldsOf(item)).toMatchObject({ name: 'Metronidazole', strength: '500mg? (or 250mg?)', frequency: 'tds? (or bd?)' });
+    expect(item.asWritten).toBe('Metronidazole 500? (or 250?) mg tds? (or bd?)');
+    expect(item.plain).toBe('Metronidazole 500mg? (or 250mg?) tds? (or bd?)');
+    expect(item).toMatchObject({ confidence: 'check_carefully' });
+    expect(item.checkReasons).toContain('readings_disagree');
     const unit = merge(modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds')]),
       modelPage([medicine(1, 'Metronidazole', '400', 'g', 'tds')]));
-    expect(fieldsOf(unit.check.items[0]!).strength).toBe('400 [unreadable]');
+    expect(fieldsOf(unit.check.items[0]!).strength).toBe('400mg? (or 400g?)');
+  });
+
+  it('chooses read A deterministically: the reading whose basis for the field is letters, else the first', () => {
+    const letters = medicine(1, 'Metronidazole', '500', 'mg', 'tds');
+    const guessed = medicine(1, 'Tinidazole', '250', 'mg', 'tds', { basis: { name: 'context', dose: 'context' } });
+    for (const order of [[letters, guessed], [guessed, letters]]) {
+      const { check } = merge(...order.map((item) => modelPage([item])));
+      // The guess from what is usual is only ever the second option, whichever reading it came from.
+      expect(fieldsOf(check.items[0]!)).toMatchObject({ name: 'Metronidazole? (or Tinidazole?)',
+        strength: '500mg? (or 250mg?)' });
+    }
+    // Both from the letters: the first reading leads.
+    const { check } = merge(modelPage([medicine(1, 'Tinidazole', '250', 'mg', 'tds')]), modelPage([letters]));
+    expect(fieldsOf(check.items[0]!)).toMatchObject({ name: 'Tinidazole? (or Metronidazole?)', strength: '250mg? (or 500mg?)' });
   });
 
   it('keeps an item only one reading found, when it holds to the page, saying so', () => {
@@ -240,7 +287,7 @@ describe('two readings of a hard page', () => {
       modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds'),
         // Placed on no line of the page: dropped by the placement rules, as any picture item.
         medicine(2, 'Paracetamol', '1', 'g', 'tds', { box: { left: 0.1, top: 0.8, width: 0.3, height: 0.02 } })]));
-    expect(check.items.map((item) => fieldsOf(item).name)).toEqual(['Metronidazole?', 'Pyrimethamine?']);
+    expect(check.items.map((item) => fieldsOf(item).name)).toEqual(['Metronidazole', 'Pyrimethamine']);
     const only = check.items[1]!;
     expect(only.checkReasons).toEqual(expect.arrayContaining(['single_reading_only', 'best_guess_from_picture']));
     expect(only.checkReason).toBe('Only one of two readings of the picture found this; check it against the paper.');
@@ -255,10 +302,10 @@ describe('two readings of a hard page', () => {
     }
   });
 
-  it('treats two different spellings respelled to one listed medicine as disagreement', () => {
+  it('treats two different spellings respelled to one listed medicine as disagreement, shown once with "?"', () => {
     const { check } = merge(modelPage([medicine(1, 'Metronidazol', '400', 'mg', 'tds')]),
       modelPage([medicine(1, 'Metronidazole', '400', 'mg', 'tds')]));
-    expect(fieldsOf(check.items[0]!).name).toBe('[unreadable]');
+    expect(fieldsOf(check.items[0]!).name).toBe('Metronidazole?');
     expect(check.items[0]!.checkReasons).toContain('readings_disagree');
     // The same spelling in both readings is agreement.
     const same = merge(modelPage([medicine(1, 'Metronidazol', '400', 'mg', 'tds')]),
@@ -282,11 +329,10 @@ describe('two readings of a hard page', () => {
         box: { left: 0.2, top: 0.1, width: 0.3, height: 0.02 } })]))], SOURCE_SHA);
     expect(check.items.filter((item) => item.kind === 'medicine')).toHaveLength(1);
     const item = check.items[0]!;
-    expect(fieldsOf(item)).toMatchObject({ name: 'Metronidazole?', strength: '[unreadable] mg' });
+    expect(fieldsOf(item)).toMatchObject({ name: 'Metronidazole', strength: '200mg? (or 400mg?)' });
     expect(item.checkReasons).toContain('readings_disagree');
     expect(item.lineIds).toEqual(['p1-l1', 'p1-l2']);
     expect(agreement).toMatchObject({ itemsPaired: 1, itemsSingle: 0 });
-    expect(JSON.stringify(fieldsOf(item))).not.toMatch(/200|400/);
   });
 
   it('says field_from_context for a guessed date or prescriber, which carry no "?"', () => {
@@ -345,9 +391,9 @@ describe('two readings of a hard page', () => {
       expect(check.items.every((item) => item.checkReasons.includes('single_reading_only'))).toBe(true);
       expect(agreement).toMatchObject({ itemsPaired: 0, itemsSingle: 2 });
     }
-    expect(fieldsOf(halves.check.items[1]!)).toMatchObject({ strength: '400 mg', frequency: 'tds' });
-    expect(fieldsOf(lone.check.items[1]!)).toMatchObject({ name: 'Metronidazole?', strength: '500 mg', frequency: 'bd' });
-    expect(orders.check.items.map((item) => fieldsOf(item).strength)).toEqual(['400 mg', '500 mg']);
+    expect(fieldsOf(halves.check.items[1]!)).toMatchObject({ strength: '400mg', frequency: 'tds' });
+    expect(fieldsOf(lone.check.items[1]!)).toMatchObject({ name: 'Metronidazole', strength: '500mg', frequency: 'bd' });
+    expect(orders.check.items.map((item) => fieldsOf(item).strength)).toEqual(['400mg', '500mg']);
   });
 
   it('keeps the same medicine at one height in two columns as two orders, each found by one reading', () => {
@@ -366,7 +412,7 @@ describe('two readings of a hard page', () => {
         { box: { left: 0.05, top: 0.05, width: 0.35, height: 0.02 } })])),
       held(modelPage([medicine(2, 'Metronidazole', '500', 'mg', 'bd',
         { box: { left: 0.55, top: 0.05, width: 0.35, height: 0.02 } })]))], SOURCE_SHA);
-    expect(check.items.map((item) => fieldsOf(item).strength)).toEqual(['400 mg', '500 mg']);
+    expect(check.items.map((item) => fieldsOf(item).strength)).toEqual(['400mg', '500mg']);
     expect(check.items.every((item) => item.checkReasons.includes('single_reading_only'))).toBe(true);
     expect(check.items.some((item) => item.checkReasons.includes('readings_disagree'))).toBe(false);
     expect(agreement).toMatchObject({ itemsPaired: 0, itemsSingle: 2 });
@@ -391,14 +437,16 @@ describe('two readings of a hard page', () => {
     expect(empty.check.items[0]!.checkReasons).not.toContain('field_from_context');
   });
 
-  it('on an atypical prescription, marks a context guess and turns the disagreement unreadable, never offering the usual drug', () => {
+  it('on an atypical prescription, leads with the letters and offers the usual drug only second, marked a context guess', () => {
     // The letters say pyrimethamine (rarely prescribed); one reading fell back on what is usual (paracetamol).
     const read = medicine(2, 'Pyrimethamine', '25', 'mg', 'od');
     const usual = medicine(2, 'Paracetamol', '25', 'mg', 'od', { basis: { name: 'context' } });
+    for (const answers of [[read, usual], [usual, read]]) {
+      const { check } = merge(...answers.map((item) => modelPage([item])));
+      expect(fieldsOf(check.items[0]!).name).toBe('Pyrimethamine? (or Paracetamol?)');
+    }
     const { check } = merge(modelPage([read]), modelPage([usual]));
     const item = check.items[0]!;
-    expect(fieldsOf(item).name).toBe('[unreadable]');
-    expect(JSON.stringify(fieldsOf(item))).not.toContain('Paracetamol');
     expect(item.checkReasons).toEqual(expect.arrayContaining(['readings_disagree', 'field_from_context',
       'best_guess_from_picture']));
     // The real disagreement is said first.
@@ -422,9 +470,13 @@ describe('two readings of a hard page', () => {
     expect(new Set(check.items.map((item) => item.id)).size).toBe(4);
   });
 
-  it('merges asWritten word by word, writing each differing stretch once as unreadable', () => {
-    expect(mergeAsWritten('Tab Metronidazole 400 mg tds', 'Tab Metronidazole? 200 mg tds')).toBe('Tab Metronidazole? [unreadable] mg tds');
-    expect(mergeAsWritten('a b c', 'x y z')).toBe('[unreadable]');
+  it('merges asWritten word by word, writing each differing stretch as "A? (or B?)"', () => {
+    expect(mergeAsWritten('Tab Metronidazole 400 mg tds', 'Tab Metronidazole? 200 mg tds'))
+      .toBe('Tab Metronidazole? 400? (or 200?) mg tds');
+    expect(mergeAsWritten('a b c', 'x y z')).toBe('a? (or x?) b? (or y?) c? (or z?)');
+    expect(mergeAsWritten('a b c', 'x y')).toBe('a? b? c? (or x? y?)');
+    expect(mergeAsWritten('IV Flagyl 500mg', 'Flagyl 500mg')).toBe('IV? Flagyl 500mg');
+    expect(mergeAsWritten('Flagyl 500mg', 'IV Flagyl 500mg')).toBe('IV? Flagyl 500mg');
   });
 
   it('builds items that meet the contract', () => {
@@ -453,6 +505,8 @@ describe('diagnosis and lab test names on a hard page, grounded after the readin
     const { check } = mergeHardReadings([heldOn(page, answer()), heldOn(page, answer())], SOURCE_SHA);
     expect(check.items.map((item) => fieldsOf(item).name ?? fieldsOf(item).test))
       .toEqual(['HTN? (Hypertensive diseases)', 'FBC? (full blood count)', 'Fictionalitis']);
+    expect(check.items.map((item) => item.plain))
+      .toEqual(['Dx HTN? (Hypertensive diseases)', 'FBC? (full blood count) 11.2', 'Dx Fictionalitis']);
     expect(check.items.every((item) => item.confidence === 'check_carefully')).toBe(true);
     // The checks were made on the names as read: no text_corrected, and the value is still bound to its test.
     for (const item of check.items) expect(item.checkReasons).not.toContain('text_corrected');
@@ -469,12 +523,29 @@ describe('diagnosis and lab test names on a hard page, grounded after the readin
     expect(fieldsOf(read.items[0]!).name).toBe('HTN');
   });
 
-  it('makes two different names for one diagnosis unreadable, never picking one', () => {
+  it('shows two different names for one diagnosis as both, never picking one, and grounds each', () => {
     const other = modelPage([hardItem({ kind: 'diagnosis', asWritten: 'Dx HTN', name: 'Hypertension', status: 'confirmed' },
       1, { name: 'letters' })]);
     const { check } = mergeHardReadings([heldOn(page, modelPage([answer().items[0]!])), heldOn(page, other)], SOURCE_SHA);
-    expect(fieldsOf(check.items[0]!).name).toBe('[unreadable]');
+    // Both stand for one listed title: said once, after both.
+    expect(fieldsOf(check.items[0]!).name).toBe('HTN? (or Hypertension?) (Hypertensive diseases)');
     expect(check.items[0]!.checkReasons).toContain('readings_disagree');
+    // Two names standing for different titles (or none): each grounded on its own.
+    const malaria = modelPage([hardItem({ kind: 'diagnosis', asWritten: 'Dx HTN', name: 'Malaria', status: 'confirmed' },
+      1, { name: 'letters' })]);
+    const apart = mergeHardReadings([heldOn(page, modelPage([answer().items[0]!])), heldOn(page, malaria)], SOURCE_SHA);
+    expect(fieldsOf(apart.check.items[0]!).name).toBe('HTN? (Hypertensive diseases) (or Malaria?)');
+  });
+
+  it('shows a deny-listed diagnosis look-alike with the listed name as the other option, and never grounds "PID"', () => {
+    const lines = readPage(1, [['Dx Nephritic syndrome', { handwritten: true, confidence: 0.45 }],
+      ['Dx PID', { handwritten: true, confidence: 0.45 }]]);
+    const { check } = mergeHardReadings([heldOn(lines, modelPage([
+      hardItem({ kind: 'diagnosis', asWritten: 'Dx Nephritic syndrome', name: 'Nephritic syndrome', status: 'confirmed' },
+        1, { name: 'letters' }),
+      hardItem({ kind: 'diagnosis', asWritten: 'Dx PID', name: 'PID', status: 'confirmed' }, 2, { name: 'letters' })]))],
+    SOURCE_SHA);
+    expect(check.items.map((item) => fieldsOf(item).name)).toEqual(['Nephritic? syndrome? (or Nephrotic? syndrome?)', 'PID']);
   });
 });
 
@@ -483,10 +554,12 @@ describe('hard-page prompt versions', () => {
     box: { left: 0.1, top: 0.2, width: 0.4, height: 0.05 } }, { id: 'p1-l2', text: 'x', confidence: 0.4, handwritten: true, box: null }];
   const size = { width: 800, height: 1000 };
 
-  it('sends the version 3 text, byte for byte, when zoom is not offered (HARD_PAGE_PROMPT_VERSION_NO_ZOOM)', () => {
-    // Pinned from the version 3 prompt as merged before zoom; a change here needs a new version.
+  it('sends the version 7 text, byte for byte, when zoom is not offered (HARD_PAGE_PROMPT_VERSION_NO_ZOOM)', () => {
+    // Pinned from the version 7 prompt (the clean reading of 2026-11-06, with partial words and placeholders); a change here needs a new version.
+    expect(HARD_PAGE_PROMPT_VERSION_NO_ZOOM).toBe('hid-paper-reading-hard-page-prompt-7');
+    expect(HARD_PAGE_PROMPT_VERSION).toBe('hid-paper-reading-hard-page-prompt-8');
     expect(createHash('sha256').update(hardPageMessage(1, lines, size, 0)).digest('hex'))
-      .toBe('6e81de06de86089629e482c87d0afbbefe453d29ea21c166a48c07279bd8dbf1');
+      .toBe('7feb2c96cc86bf7d67c5394249ed21269f0bb9803b7fd7f9d5a45f035c77ce07');
     expect(hardPageMessage(1, lines, size)).toBe(hardPageMessage(1, lines, size, 0));
     expect(hardPageMessage(1, lines, size, 0)).not.toContain('zoom');
   });
@@ -552,24 +625,25 @@ describe('handwritten signs on a hard page', () => {
   });
 
   it('never expands "[sign?]": not into a frequency, a drug, a diagnosis or a lab test, and not by forMatching', () => {
-    expect(normaliseFrequency('[sign?]')).toBe('[unreadable]');
+    expect(normaliseFrequency('[sign?]')).toBe('[sign?]');
     expect(forMatching('Amoxil 500? mg [sign?] days')).toBe('Amoxil 500 mg [sign?] days');
     expect(forMatching('[?] and [sign?]')).toBe('[?] and [sign?]');
     const { check } = merge(modelPage([medicine(1, '[sign?]', '500', 'mg', '[unreadable]', { asWritten: 'Amoxil 500 mg [sign?]' }),
       hardItem({ kind: 'diagnosis', asWritten: 'Dx [sign?]', name: '[sign?]', status: 'confirmed' }, 3, { name: 'letters' })]));
-    expect(check.items.map((item) => fieldsOf(item).name)).toEqual(['[unreadable]', '[sign?]']);
+    expect(check.items.map((item) => fieldsOf(item).name)).toEqual(['[sign?]', '[sign?]']);
     expect(check.items.every((item) => item.checkReasons.includes('sign_read'))).toBe(true);
   });
 
   it('leaves grounding unaffected: "[sign?]" is no query, and the marks never anchor an item', () => {
-    // The "?" of "[sign?]" is not a status cue; "[?]" still is.
+    // The "?" of "[sign?]" and of "[?]" (no letter shapes) is not a status cue; "(? on paper)" is.
     expect('dx [sign?] malaria'.match(STATUS_CUES)).toBeNull();
-    expect('dx [?] malaria'.match(STATUS_CUES)).toEqual(['?']);
+    expect('dx [?] malaria'.match(STATUS_CUES)).toBeNull();
+    expect('dx (? on paper) malaria'.match(STATUS_CUES)).toEqual(['?']);
     expect(withoutSignMarks('alternate (sign) days [sign?]').trim().split(/\s+/)).toEqual(['alternate', 'days']);
     const asRead = (asWritten: string) => merge(modelPage([hardItem({ kind: 'diagnosis', asWritten, name: 'Malaria',
       status: 'confirmed' }, 3, { name: 'letters' })])).check.items[0]!;
     const withSign = asRead('Dx Malaria [sign?]');
-    const withQuery = asRead('Dx Malaria [?]');
+    const withQuery = asRead('Dx Malaria (? on paper)');
     expect(withSign.checkReasons).not.toContain('status_cue_on_line');
     expect(withQuery.checkReasons).toContain('status_cue_on_line');
     expect(fieldsOf(withSign).name).toBe('Malaria');
@@ -589,14 +663,14 @@ describe('handwritten signs on a hard page', () => {
       expect([written, shorthandInWords('frequency', written)]).toEqual([written, written]);
     }
     expect(shorthandInWords('frequency', 'tds?')).toBe('tds?');
-    expect(shorthandInWords('frequency', '[unreadable]')).toBe('[unreadable]');
+    expect(shorthandInWords('frequency', '[?]')).toBe('[?]');
     expect(shorthandInWords('duration', '5/7')).toBe('5/7 (5 days)');
     expect(shorthandInWords('duration', '1/52')).toBe('1/52 (1 week)');
     expect(shorthandInWords('duration', '3/12')).toBe('3/12 (3 months)');
     expect(shorthandInWords('duration', '5?/7')).toBe('5?/7');
     expect(shorthandInWords('duration', '[sign?] 5/7')).toBe('[sign?] 5/7');
     const { check } = merge(modelPage([medicine(1, 'Amoxicillin', '500', 'mg', 'tds?')]));
-    expect(check.items[0]!.plain).toBe('Amoxicillin? 500 mg tds?');
+    expect(check.items[0]!.plain).toBe('Amoxicillin 500 mg tds?');
   });
 });
 
